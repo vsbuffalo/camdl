@@ -48,6 +48,7 @@ type unresolved = {
 
 type env = {
   ctx       : Expander.context;
+  source    : Source_cache.t;  (* the text of every unit of this compile *)
   comps     : string list;   (* declared compartment names, pre-lowering *)
   quantities : string list;  (* declared quantity names *)
   streams   : string list;   (* declared observation stream names *)
@@ -66,6 +67,16 @@ let noted env (name : string) (loc : Ast.loc) (kind : D.name_kind) : D.name_kind
     env.unresolved :=
       { u_site = !(env.site); u_name = name; u_loc = loc } :: !(env.unresolved);
   kind
+
+(* A declaration's text as written: the bytes its span covers, read back from
+   the source the parser was given. A declaration with no span (none is
+   parsed without one) or a span outside the cached text has no text; it is
+   never approximated. *)
+let text env (l : Ast.loc) : D.source_text =
+  if l = dummy_loc then None
+  else
+    Source_cache.slice env.source ~file:l.file ~line:l.line ~col:l.col
+      ~end_line:l.end_line ~end_col:l.end_col
 
 (* Where an expression sits. The classifiers depend on two pieces of use-site
    context (the binder set and a likelihood's data columns); the rest selects
@@ -309,7 +320,8 @@ let dimension env (de : dimensions_entry) : D.dimension_decl =
     dd_source = (match de.desrc with
       | DInline _ -> DsInline
       | DRead { path; col; _ } -> DsRead { ds_path = path; ds_column = col });
-    dd_levels = Expander.dim_levels_or_empty env.ctx de.dename }
+    dd_levels = Expander.dim_levels_or_empty env.ctx de.dename;
+    dd_text = text env de.despan }
 
 (* Dimensions the compiler invents (a `via` stage dimension) begin `__`. *)
 let invented name = String.length name >= 2 && String.sub name 0 2 = "__"
@@ -319,7 +331,8 @@ let compartment env (c : Ast.compartment_decl) : D.compartment_decl =
     cd_kind = (match c.ckind with Integer -> CkInteger | Real -> CkReal);
     cd_dims = List.filter (fun d -> not (invented d))
         (Expander.comp_dims env.ctx c.cname);
-    cd_expands_to = None }
+    cd_expands_to = None;
+    cd_text = text env c.cspan }
 
 let prior env pos (p : prior_spec) : D.prior_decl =
   { pr_family = p.ps_name; pr_args = args env pos p.ps_args;
@@ -329,23 +342,26 @@ let bounds env pos ((lo, hi) : expr * expr) : D.bounds =
   { b_lo = dexpr env pos lo; b_hi = dexpr env pos hi }
 
 let parameter env : param_decl -> D.parameter_decl = function
-  | PScalar { pname; pkind; pdim; pbounds; pprior; _ } ->
+  | PScalar { pname; pkind; pdim; pbounds; pprior; pspan; _ } ->
     { pd_name = pname; pd_dims = []; pd_kind = param_kind pkind;
       pd_dim = Option.map dim_annotation pdim;
       pd_bounds = Option.map (bounds env top) pbounds;
-      pd_prior = Option.map (prior env top) pprior }
-  | PIndexed { pname; pdims; pkind; pdim; pbounds; pprior; _ } ->
+      pd_prior = Option.map (prior env top) pprior;
+      pd_text = text env pspan }
+  | PIndexed { pname; pdims; pkind; pdim; pbounds; pprior; pspan; _ } ->
     { pd_name = pname; pd_dims = pdims; pd_kind = param_kind pkind;
       pd_dim = Option.map dim_annotation pdim;
       pd_bounds = Option.map (bounds env top) pbounds;
-      pd_prior = Option.map (prior env top) pprior }
+      pd_prior = Option.map (prior env top) pprior;
+      pd_text = text env pspan }
 
 let definition env (lb : let_binding) : D.definition_decl =
   let pos = with_binders top lb.lindices in
   { df_name = lb.lname; df_indices = bindings lb.lindices;
     df_shape = lb.lshape; df_kind = Option.map param_kind lb.lkind;
     df_dim = Option.map dim_annotation lb.ldim;
-    df_body = dexpr env pos lb.lbody }
+    df_body = dexpr env pos lb.lbody;
+    df_text = text env lb.lspan }
 
 let table env (t : Ast.table_decl) : D.table_decl =
   { tb_names = t.tnames;
@@ -353,7 +369,8 @@ let table env (t : Ast.table_decl) : D.table_decl =
       | TDim d -> { D.td_dim = d; td_unit = None }
       | TDimUnit (d, u) -> { D.td_dim = d; td_unit = Some (unit_lit u) }) t.tdims;
     tb_cell_kind = Option.map param_kind t.tcell_kind;
-    tb_value = dexpr env top t.tvalue }
+    tb_value = dexpr env top t.tvalue;
+    tb_text = text env t.tspan }
 
 (* A forcing argument that is a single bare word naming nothing declared is a
    selection from a closed set (`method = linear`). The compiler reads it as
@@ -374,7 +391,8 @@ let time_input env (f : func_decl) : D.time_input_decl =
   let pos = with_binders top f.findices in
   { ti_name = f.fname; ti_indices = bindings f.findices; ti_kind = f.fkind;
     ti_unit = unit_lit f.funit;
-    ti_args = List.map (forcing_arg env pos) f.fargs }
+    ti_args = List.map (forcing_arg env pos) f.fargs;
+    ti_text = text env f.fspan }
 
 let transition env (t : Ast.transition_decl) : D.transition_decl =
   let pos = with_binders top t.trindices in
@@ -390,7 +408,8 @@ let transition env (t : Ast.transition_decl) : D.transition_decl =
       | Via (law, kvs) -> DynVia (law, args env pos kvs));
     tn_guard = Option.map guard t.trguard;
     tn_lineage = t.trlineage;
-    tn_expands_to = None }
+    tn_expands_to = None;
+    tn_text = text env t.trspan }
 
 let initial env (i : init_entry) : D.initial_decl =
   let pos = with_binders top i.ibindings in
@@ -398,7 +417,8 @@ let initial env (i : init_entry) : D.initial_decl =
     in_bindings = bindings i.ibindings;
     in_value = (match i.ivalue with
       | IVExpr e -> IvExpr (dexpr env pos e)
-      | IVLaw (l, _) -> IvLaw (distribution env pos l)) }
+      | IVLaw (l, _) -> IvLaw (distribution env pos l));
+    in_text = text env i.ispan }
 
 (* A compile that succeeded has every stream's columns, measurement and
    projection: a missing one is a diagnostic, and no section is built. *)
@@ -441,7 +461,8 @@ let observation env (o : obs_decl) : D.observation_decl =
         c.oc_name) columns } in
       { D.cv_form = c.ocv_form; cv_column = c.ocv_col;
         cv_span = Option.map (dexpr env span_pos) c.ocv_span }) o.ocovers;
-    ob_expands_to = None }
+    ob_expands_to = None;
+    ob_text = text env o.ospan }
 
 let action env pos : action_decl -> D.action = function
   | ATransfer kvs -> AcTransfer (args env pos kvs)
@@ -465,7 +486,8 @@ let intervention env (iv : Ast.intervention_decl) : D.intervention_decl =
       | SEveryAtDay (period, at_day) ->
         ShEveryAtDay { sh_period = dexpr env pos period;
                        sh_at_day = dexpr env pos at_day });
-    iv_guard = Option.map guard iv.ivguard }
+    iv_guard = Option.map guard iv.ivguard;
+    iv_text = text env iv.ivspan }
 
 let rec trigger env pos : trig_pred -> D.trigger_pred = function
   | TgAtom e -> D.TgAtom (dexpr env pos e)
@@ -490,7 +512,8 @@ let reactive env (r : Ast.reactive_decl) : D.reactive_decl =
     rc_once = Option.map (once env pos) r.rxonce;
     rc_cooldown = Option.map (dexpr env pos) r.rxcooldown;
     rc_action = action env pos r.rxaction;
-    rc_guard = Option.map guard r.rxguard }
+    rc_guard = Option.map guard r.rxguard;
+    rc_text = text env r.rxspan }
 
 let scenario env (s : Ast.scenario_decl) : D.scenario_decl =
   let assigns = List.map (fun (n, e) ->
@@ -504,28 +527,33 @@ let scenario env (s : Ast.scenario_decl) : D.scenario_decl =
       | ScScale kvs -> SfScale (assigns kvs)
       | ScCompose ns -> SfCompose ns
       | ScTEnd e -> SfTEnd (dexpr env top e)
-      | ScExtends p -> SfExtends p) s.scfields }
+      | ScExtends p -> SfExtends p) s.scfields;
+    sn_text = text env s.scspan }
 
 let simulation env (s : simulate_decl) : D.simulation_decl =
   { sm_from = dexpr env top s.sim_from; sm_to = dexpr env top s.sim_to;
     sm_dt = Option.map (dexpr env top) s.sim_dt;
     sm_integrator = Option.map fst s.sim_integrator;
     sm_atol = Option.map (fun (e, _) -> dexpr env top e) s.sim_atol;
-    sm_rtol = Option.map (fun (e, _) -> dexpr env top e) s.sim_rtol }
+    sm_rtol = Option.map (fun (e, _) -> dexpr env top e) s.sim_rtol;
+    sm_text = text env s.sim_span }
 
 let output env (o : Ast.output_decl) : D.output_decl =
   { ou_trajectories = Option.map (fun (t : output_traj_decl) ->
       { D.to_schedule = schedule_core env top t.otschedule;
-        to_format = t.otformat }) o.out_trajectories }
+        to_format = t.otformat }) o.out_trajectories;
+    ou_text = text env o.out_span }
 
 let quantity env (q : Ast.quantity_decl) : D.quantity_decl =
   let pos = { (with_binders top q.qd_indices) with reporting = true } in
   { qd_name = q.qd_name; qd_indices = bindings q.qd_indices;
-    qd_body = dexpr env pos q.qd_body }
+    qd_body = dexpr env pos q.qd_body;
+    qd_text = text env q.qd_span }
 
 let contrast env (c : Ast.contrast_decl) : D.contrast_decl =
   { ct_name = c.cd_name;
-    ct_body = dexpr env { top with reporting = true } c.cd_body }
+    ct_body = dexpr env { top with reporting = true } c.cd_body;
+    ct_text = text env c.cd_span }
 
 (* ── The files a compile read ────────────────────────────────────────────── *)
 
@@ -570,10 +598,13 @@ let files (ctx : Expander.context) : D.file_input list =
 
 (** Build the declared-model section, and list every name in it that could not
     be classified (in source order). [ctx] is the context a successful
-    [Expander.expand_detail] returned for [decls]. [set_values] and
+    [Expander.expand_detail] returned for [decls].
+    [source] holds the text the declarations were parsed from, and is where
+    each declaration's text as written is read back. [set_values] and
     [extra_files] are empty here; `camdlc` adds its `--set` overrides and a
     `--quantities` vocabulary file with [with_compile_inputs]. *)
-let build_detail (ctx : Expander.context) (decls : declaration list)
+let build_detail ~(source : Source_cache.t) (ctx : Expander.context)
+    (decls : declaration list)
     : D.declared_model * unresolved list =
   Latex.populate_overrides decls;
   let each f = List.concat_map f decls in
@@ -587,7 +618,7 @@ let build_detail (ctx : Expander.context) (decls : declaration list)
     List.iter (fun l -> Hashtbl.replace levels l ())
       (Expander.dim_levels_or_empty ctx d)) dims;
   let env = {
-    ctx; comps; dims; levels;
+    ctx; source; comps; dims; levels;
     site = ref ""; unresolved = ref [];
     quantities = each (function
       | DQuantities qs -> List.map (fun (q : Ast.quantity_decl) -> q.qd_name) qs
@@ -615,7 +646,9 @@ let build_detail (ctx : Expander.context) (decls : declaration list)
     dm_compartments = each (function
       | DCompartments cs -> List.map (compartment env) cs | _ -> []);
     dm_stratify = each (function
-      | DStratify s -> [ { D.st_dim = s.sdim; st_only = s.sonly } ] | _ -> []);
+      | DStratify s ->
+        [ { D.st_dim = s.sdim; st_only = s.sonly; st_text = text env s.sspan } ]
+      | _ -> []);
     dm_parameters = each (function
       | DParameters ps ->
         List.map (fun p ->
@@ -638,7 +671,8 @@ let build_detail (ctx : Expander.context) (decls : declaration list)
       | DTimepoints tps ->
         List.map (fun (tp : Ast.timepoint_decl) ->
           at "timepoint" tp.tpname (fun env (tp : Ast.timepoint_decl) ->
-            { D.tp_name = tp.tpname; tp_time = dexpr env top tp.tptime }) tp) tps
+            { D.tp_name = tp.tpname; tp_time = dexpr env top tp.tptime;
+              tp_text = text env tp.tpspan }) tp) tps
       | _ -> []);
     dm_transitions = each (function
       | DTransitions ts ->
@@ -650,12 +684,14 @@ let build_detail (ctx : Expander.context) (decls : declaration list)
         List.map (fun (o : Ast.ode_decl) ->
           at "ODE equation for" o.ocomp (fun env (o : Ast.ode_decl) ->
             { D.od_compartment = o.ocomp;
-              od_derivative = dexpr env top o.oderiv }) o) os
+              od_derivative = dexpr env top o.oderiv;
+              od_text = text env o.odspan }) o) os
       | _ -> []);
     dm_balance = each (function
       | DBalance b ->
         [ at "balance for" b.bcomp (fun env (b : Ast.balance_decl) ->
-            { D.bl_compartment = b.bcomp; bl_expr = dexpr env top b.bexpr }) b ]
+            { D.bl_compartment = b.bcomp; bl_expr = dexpr env top b.bexpr;
+              bl_text = text env b.bspan }) b ]
       | _ -> []);
     dm_initial = each (function
       | DInit is ->
@@ -705,7 +741,8 @@ let build_detail (ctx : Expander.context) (decls : declaration list)
   (section, List.rev !(env.unresolved))
 
 (** The declared-model section alone. *)
-let build ctx decls : D.declared_model = fst (build_detail ctx decls)
+let build ~source ctx decls : D.declared_model =
+  fst (build_detail ~source ctx decls)
 
 (** Add what only the compiler's command line knows: the `--set` overrides, in
     the order given, and a `--quantities` vocabulary file. [model_dir] is the

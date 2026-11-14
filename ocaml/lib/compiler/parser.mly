@@ -166,7 +166,8 @@
       osource = src; ocolumns = !cols;
       omeasurement = !meas; oprojection = !proj;
       oschedule = !sched; ocovers = !covers; odoc = doc;
-      oloc = Parser_errors.ast_loc_of ~sp ~ep }
+      oloc = Parser_errors.ast_loc_of ~sp ~ep;
+      ospan = Parser_errors.ast_loc_of ~sp ~ep }
 
   (* A doc line whose first non-space character is `@` is a tag line; split it
      into the tag word and the rest. `@ref` with nothing after it yields "". *)
@@ -423,30 +424,33 @@ declaration:
   | ODE LBRACE odes = ode_list RBRACE
       { DODE odes }
   | OUTPUT LBRACE od = output_body RBRACE
-      { DOutput od }
+      { DOutput { od with out_span = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   | SIMULATE LBRACE sd = simulate_body RBRACE
-      { DSimulate sd }
+      { DSimulate { sd with sim_span = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   | INIT LBRACE ies = init_list RBRACE
       { DInit ies }
   | TIMEPOINTS LBRACE tps = timepoint_list RBRACE
       { DTimepoints tps }
   | STRATIFY LPAREN sa = stratify_args RPAREN
-      { DStratify sa }
+      { DStratify { sa with sspan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   (* A typed `let` takes the parameter type grammar, `dim` clause included:
      `let b : positive dim P^-1*T^-1 = 0.0001` (2026-11-06 dimension checking
      §5.2, decision 2). *)
   | d = doc_opt LET name = IDENT ibs = index_bindings_opt COLON ka = param_type_ann EQ body = expr
       { DLet { lname = name; lindices = ibs; lshape = None; lkind = Some (fst ka);
                ldim = snd ka; lbody = body; ldoc = d;
-               lloc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
+               lloc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos;
+          lspan = Parser_errors.ast_loc_of ~sp:$startpos($2) ~ep:$endpos } }
   | d = doc_opt LET name = IDENT ibs = index_bindings_opt shape = let_shape_opt EQ body = expr
       { DLet { lname = name; lindices = ibs; lshape = shape; lkind = None; ldim = None;
                lbody = body; ldoc = d;
-               lloc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
+               lloc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos;
+          lspan = Parser_errors.ast_loc_of ~sp:$startpos($2) ~ep:$endpos } }
   | SCENARIOS LBRACE ss = list(scenario_block) RBRACE
       { DScenarios ss }
   | BALANCE LBRACE target = IDENT EQ e = expr RBRACE
-      { DBalance { bcomp = target; bexpr = e } }
+      { DBalance { bcomp = target; bexpr = e;
+                   bspan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
 
 (* ── Unit literals ──────────────────────────────────────────────────────── *)
 
@@ -498,7 +502,8 @@ compartment_tail:
 compartment_decl:
   | d = doc_opt name = IDENT kind = compartment_kind_opt
       { { cname = name; ckind = kind; cdoc = d;
-          cloc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
+          cloc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos;
+          cspan = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
 
 compartment_kind_opt:
   | (* empty *)  { Integer }
@@ -522,35 +527,43 @@ param_decl:
   (* scalar, no bounds, no prior *)
   | d = doc_opt name = IDENT COLON ka = param_type_ann
       { PScalar { pname = name; pkind = fst ka; pdim = snd ka; pbounds = None; pprior = None; pdoc = d;
-                  ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
+                  ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos;
+          pspan = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* scalar, no bounds, with prior *)
   | d = doc_opt name = IDENT COLON ka = param_type_ann TILDE pr = prior_clause
       { PScalar { pname = name; pkind = fst ka; pdim = snd ka; pbounds = None; pprior = Some pr; pdoc = d;
-                  ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
+                  ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos;
+          pspan = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* scalar, with bounds, no prior *)
   | d = doc_opt name = IDENT COLON ka = param_type_ann IN LBRACKET lo = expr COMMA hi = expr RBRACKET
       { PScalar { pname = name; pkind = fst ka; pdim = snd ka; pbounds = Some (lo, hi); pprior = None; pdoc = d;
-                  ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
+                  ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos;
+          pspan = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* scalar, with bounds, with prior *)
   | d = doc_opt name = IDENT COLON ka = param_type_ann IN LBRACKET lo = expr COMMA hi = expr RBRACKET TILDE pr = prior_clause
       { PScalar { pname = name; pkind = fst ka; pdim = snd ka; pbounds = Some (lo, hi); pprior = Some pr; pdoc = d;
-                  ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
+                  ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos;
+          pspan = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* indexed, no bounds, no prior *)
   | d = doc_opt name = IDENT LBRACKET dims = separated_nonempty_list(COMMA, IDENT) RBRACKET COLON ka = param_type_ann
       { PIndexed { pname = name; pdims = dims; pkind = fst ka; pdim = snd ka; pbounds = None; pprior = None; pdoc = d;
-                   ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
+                   ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos;
+          pspan = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* indexed, no bounds, with prior *)
   | d = doc_opt name = IDENT LBRACKET dims = separated_nonempty_list(COMMA, IDENT) RBRACKET COLON ka = param_type_ann TILDE pr = prior_clause
       { PIndexed { pname = name; pdims = dims; pkind = fst ka; pdim = snd ka; pbounds = None; pprior = Some pr; pdoc = d;
-                   ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
+                   ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos;
+          pspan = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* indexed, with bounds, no prior *)
   | d = doc_opt name = IDENT LBRACKET dims = separated_nonempty_list(COMMA, IDENT) RBRACKET COLON ka = param_type_ann IN LBRACKET lo = expr COMMA hi = expr RBRACKET
       { PIndexed { pname = name; pdims = dims; pkind = fst ka; pdim = snd ka; pbounds = Some (lo, hi); pprior = None; pdoc = d;
-                   ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
+                   ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos;
+          pspan = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* indexed, with bounds, with prior *)
   | d = doc_opt name = IDENT LBRACKET dims = separated_nonempty_list(COMMA, IDENT) RBRACKET COLON ka = param_type_ann IN LBRACKET lo = expr COMMA hi = expr RBRACKET TILDE pr = prior_clause
       { PIndexed { pname = name; pdims = dims; pkind = fst ka; pdim = snd ka; pbounds = Some (lo, hi); pprior = Some pr; pdoc = d;
-                   ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
+                   ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos;
+          pspan = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
 
 prior_clause:
   (* plain prior: ~ normal(mu = 0, sigma = 1) *)
@@ -626,13 +639,16 @@ table_decl_sep:
 table_decl:
   | names = separated_nonempty_list(COMMA, IDENT) COLON dims = table_dims_nonempty COLON kind = param_kind EQ v = expr
       { { tnames = names; tdims = dims; tcell_kind = Some kind; tvalue = v;
-          tloc = Parser_errors.ast_loc_of ~sp:$startpos(dims) ~ep:$endpos(dims) } }
+          tloc = Parser_errors.ast_loc_of ~sp:$startpos(dims) ~ep:$endpos(dims);
+          tspan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   | names = separated_nonempty_list(COMMA, IDENT) COLON dims = table_dims_nonempty EQ v = expr
       { { tnames = names; tdims = dims; tcell_kind = None; tvalue = v;
-          tloc = Parser_errors.ast_loc_of ~sp:$startpos(dims) ~ep:$endpos(dims) } }
+          tloc = Parser_errors.ast_loc_of ~sp:$startpos(dims) ~ep:$endpos(dims);
+          tspan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   | name = IDENT EQ v = expr
       { { tnames = [name]; tdims = []; tcell_kind = None; tvalue = v;
-          tloc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos(name) } }
+          tloc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos(name);
+          tspan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
 
 (* Dimension-product separator. The canonical form is the Unicode `×` (CROSS);
    the ASCII `*` (STAR) is accepted as a hand-typeable alias so a model can be
@@ -666,7 +682,8 @@ func_decl:
      dim 'unit = ... }`. The dim-checker uses the declared dim
      authoritatively; no value-based inference fallback (GH #8). *)
   | name = IDENT ibs = index_bindings_opt COLON kind = IDENT u = unit_lit LBRACE args = func_args RBRACE
-      { { fname = name; findices = ibs; fkind = kind; funit = u; fargs = args } }
+      { { fname = name; findices = ibs; fkind = kind; funit = u; fargs = args;
+          fspan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
 
 func_args:
   | kvs = list(func_arg) { kvs }
@@ -712,7 +729,8 @@ transition_decl:
       { { trname = name; trindices = ibs;
           trsrc = srcs; trdst = DstSum dsts;
           trdyn = Rate rate; trguard = guard; trlineage = lin; trdoc = d;
-          trloc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
+          trloc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos;
+          trspan = Parser_errors.ast_loc_of ~sp:(if lin then $startpos(lin) else $startpos(name)) ~ep:$endpos } }
   (* inline staged residence: [#[lineage]] name[...] : srcs --> dst via LAW(args)
      where guard.  `via` REPLACES the `@ rate` clause — a transition is `@ rate`
      XOR `via law`, never both (staged-residence proposal §3). The dwell law is
@@ -721,7 +739,8 @@ transition_decl:
       { { trname = name; trindices = ibs;
           trsrc = srcs; trdst = DstSum dsts;
           trdyn = Via law; trguard = guard; trlineage = lin; trdoc = d;
-          trloc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
+          trloc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos;
+          trspan = Parser_errors.ast_loc_of ~sp:(if lin then $startpos(lin) else $startpos(name)) ~ep:$endpos } }
   (* no-arrow staged residence: [#[lineage]] name[...] : srcs via LAW(args)
      where guard.  A `via` law whose branches carry their own `to =` (the
      per-destination `hyper_erlang`) needs no arrow target — each branch decides
@@ -733,7 +752,8 @@ transition_decl:
       { { trname = name; trindices = ibs;
           trsrc = srcs; trdst = DstSum [];
           trdyn = Via law; trguard = guard; trlineage = lin; trdoc = d;
-          trloc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
+          trloc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos;
+          trspan = Parser_errors.ast_loc_of ~sp:(if lin then $startpos(lin) else $startpos(name)) ~ep:$endpos } }
   (* block form: [#[lineage]] name[...] : srcs --> dsts { rate = ... | via = ...; where ... } *)
   | d = doc_opt lin = lineage_attr_opt name = IDENT ibs = index_bindings_opt COLON srcs = stoich_ref_list ARROW dsts = stoich_ref_list LBRACE tbody = transition_body RBRACE
       { let (rate_opt, via_opt, guard) = tbody in
@@ -767,13 +787,15 @@ transition_decl:
         { trname = name; trindices = ibs;
           trsrc = srcs; trdst = DstSum dsts;
           trdyn; trguard = guard; trlineage = lin; trdoc = d;
-          trloc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
+          trloc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos;
+          trspan = Parser_errors.ast_loc_of ~sp:(if lin then $startpos(lin) else $startpos(name)) ~ep:$endpos } }
   (* branching: [#'][#[lineage]] name[...] : srcs --> { D1 : w1, ... } @ rate where guard *)
   | d = doc_opt lin = lineage_attr_opt name = IDENT ibs = index_bindings_opt COLON srcs = stoich_ref_list ARROW LBRACE branches = separated_nonempty_list(COMMA, branch_entry) RBRACE AT rate = expr guard = where_clause_opt
       { { trname = name; trindices = ibs;
           trsrc = srcs; trdst = DstBranch branches;
           trdyn = Rate rate; trguard = guard; trlineage = lin; trdoc = d;
-          trloc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
+          trloc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos;
+          trspan = Parser_errors.ast_loc_of ~sp:(if lin then $startpos(lin) else $startpos(name)) ~ep:$endpos } }
 
 (* A dwell-law call: `LAW(k1 = e1, k2 = e2, …)`. Reuses the same parenthesised
    keyword-argument machinery as distribution / function calls (`kw_expr`),
@@ -1055,26 +1077,32 @@ intervention_decl:
         let sched = List.fold_left (fun acc -> function `Schedule s -> s | `Action _ -> acc)
                       (SAtTimes []) iv_kvs in
         { ivname = name; ivindices = ibs; ivaction = actions; ivschedule = sched; ivguard = guard;
-          ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+          ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos;
+          ivspan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   | name = IDENT ibs = index_bindings_opt COLON TRANSFER LPAREN kwargs = separated_list(COMMA, transfer_kwarg) RPAREN AT_KW LBRACKET ts = separated_list(COMMA, expr) RBRACKET guard = where_clause_opt
       { { ivname = name; ivindices = ibs; ivaction = [ATransfer kwargs]; ivschedule = SAtTimes ts; ivguard = guard;
-          ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+          ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos;
+          ivspan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   (* transfer(...) { every = T, from = T0, to = T1 } — recurring schedule *)
   | name = IDENT ibs = index_bindings_opt COLON TRANSFER LPAREN kwargs = separated_list(COMMA, transfer_kwarg) RPAREN LBRACE sched = recurring_body RBRACE guard = where_clause_opt
       { { ivname = name; ivindices = ibs; ivaction = [ATransfer kwargs]; ivschedule = sched; ivguard = guard;
-          ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+          ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos;
+          ivspan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   (* add(COMP, EXPR) at [...] *)
   | name = IDENT ibs = index_bindings_opt COLON ADD LPAREN comp = IDENT idxs = index_items_opt COMMA count = expr RPAREN AT_KW LBRACKET ts = separated_list(COMMA, expr) RBRACKET guard = where_clause_opt
       { { ivname = name; ivindices = ibs; ivaction = [AAdd (comp, idxs, count)]; ivschedule = SAtTimes ts; ivguard = guard;
-          ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+          ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos;
+          ivspan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   (* add(COMP, EXPR) { every = T, from = T0, to = T1 } — recurring schedule *)
   | name = IDENT ibs = index_bindings_opt COLON ADD LPAREN comp = IDENT idxs = index_items_opt COMMA count = expr RPAREN LBRACE sched = recurring_body RBRACE guard = where_clause_opt
       { { ivname = name; ivindices = ibs; ivaction = [AAdd (comp, idxs, count)]; ivschedule = sched; ivguard = guard;
-          ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+          ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos;
+          ivspan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   (* add(COMP, EXPR) every PERIOD at_day DAY *)
   | name = IDENT ibs = index_bindings_opt COLON ADD LPAREN comp = IDENT idxs = index_items_opt COMMA count = expr RPAREN EVERY period = expr AT_DAY day = expr guard = where_clause_opt
       { { ivname = name; ivindices = ibs; ivaction = [AAdd (comp, idxs, count)]; ivschedule = SEveryAtDay (period, day); ivguard = guard;
-          ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+          ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos;
+          ivspan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
 
 (* ── Reactive interventions (gh#204) ─────────────────────────────────────────
    `name[idx]? : when <predicate> { action = .., after = .., once = .., ... }`.
@@ -1108,7 +1136,8 @@ reactive_decl:
         { rxname = name; rxindices = ibs; rxwhen = pred;
           rxafter = !after; rxonce = !once; rxcooldown = !cooldown;
           rxaction = act; rxguard = guard;
-          rxloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+          rxloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos;
+          rxspan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
 
 (* Boolean predicate. and/or/not over comparison atoms; the atom is a plain expr
    (a comparison like `observed(a) >= k`) validated/destructured in the expander.
@@ -1226,7 +1255,8 @@ ode_decl_sep:
 
 ode_decl:
   | comp = IDENT EQ e = expr
-      { { ocomp = comp; oderiv = e } }
+      { { ocomp = comp; oderiv = e;
+          odspan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
 
 (* ── Quantities block (proposal 2026-06-25) ──────────────────────────────────
    A decl is `IDENT index_bindings_opt EQ expr` — the same shape as an ODE
@@ -1244,7 +1274,8 @@ quantity_decl_sep:
 quantity_decl:
   | d = doc_opt name = IDENT ibs = index_bindings_opt EQ body = expr
       { { qd_name = name; qd_indices = ibs; qd_body = body; qd_doc = d;
-          qd_loc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
+          qd_loc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos;
+          qd_span = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
 
 (* ── Contrasts block (counterfactual contrasts, proposal 2026-06-25) ──────────
    Each entry is just `name = <body>`. The body reuses the shared `expr`
@@ -1262,7 +1293,8 @@ contrast_decl_sep:
 contrast_decl:
   | d = doc_opt name = IDENT EQ body = expr
       { { cd_name = name; cd_body = body; cd_doc = d;
-          cd_loc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
+          cd_loc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos;
+          cd_span = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
 
 (* ── Output block ────────────────────────────────────────────────────────── *)
 
@@ -1272,7 +1304,7 @@ output_body:
         List.iter (function
           | `Traj t  -> traj  := Some t
         ) kvs;
-        { out_trajectories = !traj } }
+        { out_trajectories = !traj; out_span = dummy_loc } }
 
 output_kv:
   | name = IDENT LBRACE fields = list(traj_field) RBRACE
@@ -1336,7 +1368,8 @@ simulate_body:
           | `UnknownKey _ -> ()  (* already diagnosed in simulate_kv *)
         ) kvs;
         { sim_from = !sim_from; sim_to = !sim_to; sim_to_loc = !sim_to_loc; sim_dt = !sim_dt;
-          sim_integrator = !sim_integrator; sim_atol = !sim_atol; sim_rtol = !sim_rtol } }
+          sim_integrator = !sim_integrator; sim_atol = !sim_atol; sim_rtol = !sim_rtol;
+          sim_span = dummy_loc } }
 
 (* `dt` is the discretization step (gh#161). It is a model knob — models are
    sensitive to it (discretization error; Richardson-extrapolation diagnostics
@@ -1415,18 +1448,22 @@ init_entry_sep:
 init_entry:
   | comp = IDENT LBRACKET ibs = separated_nonempty_list(COMMA, index_binding) RBRACKET EQ v = expr
       { { icomp = comp; iindices = []; ibindings = ibs; ivalue = IVExpr v;
-          iloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+          iloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos;
+          ispan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   | comp = IDENT idxs = index_items_opt EQ v = expr
       { { icomp = comp; iindices = idxs; ibindings = []; ivalue = IVExpr v;
-          iloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+          iloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos;
+          ispan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   | comp = IDENT LBRACKET ibs = separated_nonempty_list(COMMA, index_binding) RBRACKET TILDE l = obs_likelihood
       { { icomp = comp; iindices = []; ibindings = ibs;
           ivalue = IVLaw (l, Parser_errors.ast_loc_of ~sp:$startpos(l) ~ep:$endpos(l));
-          iloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+          iloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos;
+          ispan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   | comp = IDENT idxs = index_items_opt TILDE l = obs_likelihood
       { { icomp = comp; iindices = idxs; ibindings = [];
           ivalue = IVLaw (l, Parser_errors.ast_loc_of ~sp:$startpos(l) ~ep:$endpos(l));
-          iloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+          iloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos;
+          ispan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
 
 (* ── Timepoints block ────────────────────────────────────────────────────── *)
 
@@ -1438,7 +1475,9 @@ timepoint_decl_sep:
   | t = timepoint_decl COMMA { comma_sep_error ~sp:$startpos ~ep:$endpos "timepoints"; t }
 
 timepoint_decl:
-  | name = IDENT EQ t = expr { { tpname = name; tptime = t } }
+  | name = IDENT EQ t = expr 
+      { { tpname = name; tptime = t;
+          tpspan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
 
 (* ── Dimensions ─────────────────────────────────────────────────────────── *)
 
@@ -1447,7 +1486,9 @@ dim_entry_sep:
   | e = dim_entry COMMA { comma_sep_error ~sp:$startpos ~ep:$endpos "dimensions"; e }
 
 dim_entry:
-  | d = doc_opt name = IDENT EQ src = dim_source_expr { { dename = name; desrc = src; dedoc = d } }
+  | d = doc_opt name = IDENT EQ src = dim_source_expr 
+      { { dename = name; desrc = src; dedoc = d;
+          despan = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
 
 dim_source_expr:
   | LBRACKET vs = separated_list(COMMA, IDENT) RBRACKET
@@ -1465,7 +1506,7 @@ stratify_args:
           | `By d    -> dim := d
           | `Only cs -> only := Some cs
         ) kvs;
-        { sdim = !dim; sonly = !only } }
+        { sdim = !dim; sonly = !only; sspan = dummy_loc } }
 
 stratify_kv:
   | BY EQ d = IDENT { `By d }
@@ -1601,7 +1642,8 @@ kw_expr:
 
 scenario_block:
   | name = IDENT LBRACE fields = list(scenario_field) RBRACE
-      { { Ast.scname = name; scfields = fields } }
+      { { Ast.scname = name; scfields = fields;
+          scspan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
 
 scenario_field:
   | SIMULATE LBRACE kvs = list(simulate_kv) RBRACE

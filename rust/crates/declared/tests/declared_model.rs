@@ -63,27 +63,27 @@ fn small_model() -> DeclaredModel {
         time_unit: Some(UnitLit::Days),
         description: None,
         origin: Some("2024-01-01".into()),
-        dimensions: vec![DimensionDecl {
+        dimensions: vec![DimensionDecl { source_text: None,
             name: "age".into(),
             source: DimSource::Read { path: "ages.tsv".into(), column: "age".into() },
             levels: vec!["child".into(), "adult".into()],
         }],
         compartments: vec![
-            CompartmentDecl {
+            CompartmentDecl { source_text: None,
                 name: "S".into(),
                 kind: CompartmentKind::Integer,
                 dims: vec!["age".into()],
                 expands_to: Some(vec!["S_child".into(), "S_adult".into()]),
             },
-            CompartmentDecl {
+            CompartmentDecl { source_text: None,
                 name: "I".into(),
                 kind: CompartmentKind::Integer,
                 dims: vec!["age".into()],
                 expands_to: Some(vec!["I_child".into(), "I_adult".into()]),
             },
         ],
-        stratify: vec![StratifyDecl { dim: "age".into(), only: None }],
-        parameters: vec![ParameterDecl {
+        stratify: vec![StratifyDecl { source_text: None, dim: "age".into(), only: None }],
+        parameters: vec![ParameterDecl { source_text: None,
             name: "beta".into(),
             dims: vec![],
             kind: ParamKind::Rate,
@@ -98,7 +98,7 @@ fn small_model() -> DeclaredModel {
                 pool_over: None,
             }),
         }],
-        definitions: vec![DefinitionDecl {
+        definitions: vec![DefinitionDecl { source_text: None,
             name: "N".into(),
             indices: vec![],
             shape: None,
@@ -109,7 +109,7 @@ fn small_model() -> DeclaredModel {
         tables: vec![],
         time_inputs: vec![],
         timepoints: vec![],
-        transitions: vec![TransitionDecl {
+        transitions: vec![TransitionDecl { source_text: Some("infection : S --> I @ beta * S".to_string()),
             name: "infection".into(),
             indices: vec![IndexBinding::In { var: "a".into(), dim: "age".into() }],
             from: vec![StoichRef {
@@ -129,7 +129,7 @@ fn small_model() -> DeclaredModel {
         }],
         ode_equations: vec![],
         balance: vec![],
-        initial: vec![InitialDecl {
+        initial: vec![InitialDecl { source_text: None,
             compartment: "I".into(),
             indices: vec![],
             bindings: vec![IndexBinding::In { var: "a".into(), dim: "age".into() }],
@@ -140,7 +140,7 @@ fn small_model() -> DeclaredModel {
                 },
             },
         }],
-        observations: vec![ObservationDecl {
+        observations: vec![ObservationDecl { source_text: None,
             name: "cases".into(),
             indices: vec![],
             source: None,
@@ -163,13 +163,13 @@ fn small_model() -> DeclaredModel {
         interventions: vec![],
         events: vec![],
         reactive_interventions: vec![],
-        scenarios: vec![ScenarioDecl {
+        scenarios: vec![ScenarioDecl { source_text: None,
             name: "low".into(),
             fields: vec![ScenarioField::Scale {
                 values: vec![Assign { name: "beta".into(), value: lit(0.5) }],
             }],
         }],
-        simulation: Some(SimulationDecl {
+        simulation: Some(SimulationDecl { source_text: None,
             from: days(0.0),
             to: days(80.0),
             dt: None,

@@ -102,6 +102,14 @@ type index_binding =
   | BConsecutive  of string * string * string   (* var, var_next, dim *)
   | BCompartments of string
 
+(* A declaration's text exactly as its author wrote it, from the first token
+   of the declaration to its last (a `#'` doc block above it is not part of
+   it). For display only: two declarations are compared on their parsed
+   trees, never on this text, because the parser reads different spellings as
+   one tree (`×` and `*`). [None] when the compiler had no source text for the
+   declaration; a reader shows that as "not recorded". *)
+type source_text = string option
+
 (* A declaration's top-level expression. *)
 type declared_expr = {
   de_tree  : expr_tree;
@@ -126,6 +134,7 @@ type dimension_decl = {
   dd_name   : string;
   dd_source : dim_source;
   dd_levels : string list;
+  dd_text : source_text;
 }
 
 type compartment_kind = CkInteger | CkReal
@@ -135,9 +144,11 @@ type compartment_decl = {
   cd_kind       : compartment_kind;
   cd_dims       : string list;
   cd_expands_to : string list option;
+  cd_text : source_text;
 }
 
-type stratify_decl = { st_dim : string; st_only : string list option }
+type stratify_decl = { st_dim : string; st_only : string list option;
+  st_text : source_text }
 
 type dim_annotation = { da_population : int; da_time : int }
 
@@ -156,6 +167,7 @@ type parameter_decl = {
   pd_dim    : dim_annotation option;
   pd_bounds : bounds option;
   pd_prior  : prior_decl option;
+  pd_text : source_text;
 }
 
 type definition_decl = {
@@ -165,6 +177,7 @@ type definition_decl = {
   df_kind    : Ir.param_kind option;
   df_dim     : dim_annotation option;
   df_body    : declared_expr;
+  df_text : source_text;
 }
 
 type table_dim = { td_dim : string; td_unit : unit_lit option }
@@ -174,6 +187,7 @@ type table_decl = {
   tb_dims      : table_dim list;
   tb_cell_kind : Ir.param_kind option;
   tb_value     : declared_expr;
+  tb_text : source_text;
 }
 
 type time_input_value =
@@ -188,9 +202,11 @@ type time_input_decl = {
   ti_kind    : string;
   ti_unit    : unit_lit;
   ti_args    : time_input_arg list;
+  ti_text : source_text;
 }
 
-type timepoint_decl = { tp_name : string; tp_time : declared_expr }
+type timepoint_decl = { tp_name : string; tp_time : declared_expr;
+  tp_text : source_text }
 
 type stoich_ref = { sr_compartment : string; sr_indices : index_item list }
 
@@ -213,10 +229,13 @@ type transition_decl = {
   tn_guard      : guard option;
   tn_lineage    : bool;
   tn_expands_to : string list option;
+  tn_text : source_text;
 }
 
-type ode_decl     = { od_compartment : string; od_derivative : declared_expr }
-type balance_decl = { bl_compartment : string; bl_expr : declared_expr }
+type ode_decl     = { od_compartment : string; od_derivative : declared_expr;
+  od_text : source_text }
+type balance_decl = { bl_compartment : string; bl_expr : declared_expr;
+  bl_text : source_text }
 
 type family =
   | FNegBinomial | FPoisson | FNormal | FBinomial | FBetaBinomial | FBeta
@@ -233,6 +252,7 @@ type initial_decl = {
   in_indices     : index_item list;
   in_bindings    : index_binding list;
   in_value       : initial_value;
+  in_text : source_text;
 }
 
 type column_role =
@@ -270,6 +290,7 @@ type observation_decl = {
   ob_emit_schedule : schedule_core option;
   ob_covers        : covers option;
   ob_expands_to    : string list option;
+  ob_text : source_text;
 }
 
 type action =
@@ -291,6 +312,7 @@ type intervention_decl = {
   iv_actions  : action list;
   iv_schedule : schedule;
   iv_guard    : guard option;
+  iv_text : source_text;
 }
 
 type trigger_pred =
@@ -308,6 +330,7 @@ type reactive_decl = {
   rc_cooldown : declared_expr option;
   rc_action   : action;
   rc_guard    : guard option;
+  rc_text : source_text;
 }
 
 type assign = { an_name : string; an_value : declared_expr }
@@ -322,7 +345,8 @@ type scenario_field =
   | SfTEnd    of declared_expr
   | SfExtends of string
 
-type scenario_decl = { sn_name : string; sn_fields : scenario_field list }
+type scenario_decl = { sn_name : string; sn_fields : scenario_field list;
+  sn_text : source_text }
 
 type simulation_decl = {
   sm_from       : declared_expr;
@@ -331,19 +355,23 @@ type simulation_decl = {
   sm_integrator : string option;
   sm_atol       : declared_expr option;
   sm_rtol       : declared_expr option;
+  sm_text : source_text;
 }
 
 type trajectory_output = { to_schedule : schedule_core; to_format : string }
 
-type output_decl = { ou_trajectories : trajectory_output option }
+type output_decl = { ou_trajectories : trajectory_output option;
+  ou_text : source_text }
 
 type quantity_decl = {
   qd_name    : string;
   qd_indices : index_binding list;
   qd_body    : declared_expr;
+  qd_text : source_text;
 }
 
-type contrast_decl = { ct_name : string; ct_body : declared_expr }
+type contrast_decl = { ct_name : string; ct_body : declared_expr;
+  ct_text : source_text }
 
 (* One model, as declared. Every list is in declaration order. *)
 type declared_model = {
@@ -518,6 +546,9 @@ let param_kind_of_json j =
   | None -> fail "parameter kind: unknown value '%s'" s
 
 (* ── Expressions ─────────────────────────────────────────────────────────── *)
+
+let source_text_to_json : source_text -> json = opt str
+let source_text_of_json : json -> source_text = of_opt as_str
 
 let name_ref_to_json r =
   obj [ ("name", str r.nr_name); ("kind", name_kind_to_json r.nr_kind) ]
@@ -758,29 +789,35 @@ let dim_source_of_json j =
 let dimension_to_json d =
   obj
     [ ("name", str d.dd_name); ("source", dim_source_to_json d.dd_source);
-      ("levels", strs d.dd_levels) ]
+      ("levels", strs d.dd_levels);
+      ("source_text", source_text_to_json d.dd_text) ]
 
 let dimension_of_json j =
-  let g = record "dimension" [ "name"; "source"; "levels" ] j in
+  let g = record "dimension" [ "name"; "source"; "levels"; "source_text" ] j in
   { dd_name = as_str (g "name"); dd_source = dim_source_of_json (g "source");
-    dd_levels = of_strs (g "levels") }
+    dd_levels = of_strs (g "levels");
+    dd_text = source_text_of_json (g "source_text") }
 
 let compartment_to_json c =
   obj
     [ ("name", str c.cd_name); ("kind", compartment_kind_to_json c.cd_kind);
-      ("dims", strs c.cd_dims); ("expands_to", opt strs c.cd_expands_to) ]
+      ("dims", strs c.cd_dims); ("expands_to", opt strs c.cd_expands_to);
+      ("source_text", source_text_to_json c.cd_text) ]
 
 let compartment_of_json j =
-  let g = record "compartment" [ "name"; "kind"; "dims"; "expands_to" ] j in
+  let g = record "compartment" [ "name"; "kind"; "dims"; "expands_to"; "source_text" ] j in
   { cd_name = as_str (g "name"); cd_kind = compartment_kind_of_json (g "kind");
-    cd_dims = of_strs (g "dims"); cd_expands_to = of_opt of_strs (g "expands_to") }
+    cd_dims = of_strs (g "dims"); cd_expands_to = of_opt of_strs (g "expands_to");
+    cd_text = source_text_of_json (g "source_text") }
 
 let stratify_to_json s =
-  obj [ ("dim", str s.st_dim); ("only", opt strs s.st_only) ]
+  obj [ ("dim", str s.st_dim); ("only", opt strs s.st_only);
+      ("source_text", source_text_to_json s.st_text) ]
 
 let stratify_of_json j =
-  let g = record "stratify" [ "dim"; "only" ] j in
-  { st_dim = as_str (g "dim"); st_only = of_opt of_strs (g "only") }
+  let g = record "stratify" [ "dim"; "only"; "source_text" ] j in
+  { st_dim = as_str (g "dim"); st_only = of_opt of_strs (g "only");
+    st_text = source_text_of_json (g "source_text") }
 
 let dim_annotation_to_json d =
   obj [ ("population", int d.da_population); ("time", int d.da_time) ]
@@ -802,11 +839,12 @@ let parameter_to_json p =
            obj
              [ ("family", str r.pr_family); ("args", args r.pr_args);
                ("pool_over", opt str r.pr_pool_over) ])
-         p.pd_prior) ]
+         p.pd_prior);
+      ("source_text", source_text_to_json p.pd_text) ]
 
 let parameter_of_json j =
   let g =
-    record "parameter" [ "name"; "dims"; "kind"; "dim"; "bounds"; "prior" ] j
+    record "parameter" [ "name"; "dims"; "kind"; "dim"; "bounds"; "prior"; "source_text" ] j
   in
   { pd_name = as_str (g "name"); pd_dims = of_strs (g "dims");
     pd_kind = param_kind_of_json (g "kind");
@@ -823,22 +861,25 @@ let parameter_of_json j =
           let g = record "prior" [ "family"; "args"; "pool_over" ] j in
           { pr_family = as_str (g "family"); pr_args = of_args (g "args");
             pr_pool_over = of_opt as_str (g "pool_over") })
-        (g "prior") }
+        (g "prior");
+    pd_text = source_text_of_json (g "source_text") }
 
 let definition_to_json d =
   obj
     [ ("name", str d.df_name); ("indices", bindings d.df_indices);
       ("shape", opt strs d.df_shape); ("kind", opt param_kind_to_json d.df_kind);
-      ("dim", opt dim_annotation_to_json d.df_dim); ("body", dx d.df_body) ]
+      ("dim", opt dim_annotation_to_json d.df_dim); ("body", dx d.df_body);
+      ("source_text", source_text_to_json d.df_text) ]
 
 let definition_of_json j =
   let g =
-    record "definition" [ "name"; "indices"; "shape"; "kind"; "dim"; "body" ] j
+    record "definition" [ "name"; "indices"; "shape"; "kind"; "dim"; "body"; "source_text" ] j
   in
   { df_name = as_str (g "name"); df_indices = of_bindings (g "indices");
     df_shape = of_opt of_strs (g "shape");
     df_kind = of_opt param_kind_of_json (g "kind");
-    df_dim = of_opt dim_annotation_of_json (g "dim"); df_body = xd (g "body") }
+    df_dim = of_opt dim_annotation_of_json (g "dim"); df_body = xd (g "body");
+    df_text = source_text_of_json (g "source_text") }
 
 let table_to_json t =
   obj
@@ -849,10 +890,11 @@ let table_to_json t =
            obj [ ("dim", str d.td_dim); ("unit", opt unit_lit_to_json d.td_unit) ])
          t.tb_dims);
       ("cell_kind", opt param_kind_to_json t.tb_cell_kind);
-      ("value", dx t.tb_value) ]
+      ("value", dx t.tb_value);
+      ("source_text", source_text_to_json t.tb_text) ]
 
 let table_of_json j =
-  let g = record "table" [ "names"; "dims"; "cell_kind"; "value" ] j in
+  let g = record "table" [ "names"; "dims"; "cell_kind"; "value"; "source_text" ] j in
   { tb_names = of_strs (g "names");
     tb_dims =
       of_list
@@ -862,7 +904,8 @@ let table_of_json j =
             td_unit = of_opt unit_lit_of_json (g "unit") })
         (g "dims");
     tb_cell_kind = of_opt param_kind_of_json (g "cell_kind");
-    tb_value = xd (g "value") }
+    tb_value = xd (g "value");
+    tb_text = source_text_of_json (g "source_text") }
 
 let time_input_value_to_json = function
   | TvStr s  -> variant "str" [ ("value", str s) ]
@@ -884,10 +927,11 @@ let time_input_to_json t =
            obj
              [ ("name", str a.ta_name);
                ("value", time_input_value_to_json a.ta_value) ])
-         t.ti_args) ]
+         t.ti_args);
+      ("source_text", source_text_to_json t.ti_text) ]
 
 let time_input_of_json j =
-  let g = record "time input" [ "name"; "indices"; "kind"; "unit"; "args" ] j in
+  let g = record "time input" [ "name"; "indices"; "kind"; "unit"; "args"; "source_text" ] j in
   { ti_name = as_str (g "name"); ti_indices = of_bindings (g "indices");
     ti_kind = as_str (g "kind"); ti_unit = unit_lit_of_json (g "unit");
     ti_args =
@@ -896,13 +940,16 @@ let time_input_of_json j =
           let g = record "time input argument" [ "name"; "value" ] j in
           { ta_name = as_str (g "name");
             ta_value = time_input_value_of_json (g "value") })
-        (g "args") }
+        (g "args");
+    ti_text = source_text_of_json (g "source_text") }
 
-let timepoint_to_json t = obj [ ("name", str t.tp_name); ("time", dx t.tp_time) ]
+let timepoint_to_json t = obj [ ("name", str t.tp_name); ("time", dx t.tp_time);
+      ("source_text", source_text_to_json t.tp_text) ]
 
 let timepoint_of_json j =
-  let g = record "timepoint" [ "name"; "time" ] j in
-  { tp_name = as_str (g "name"); tp_time = xd (g "time") }
+  let g = record "timepoint" [ "name"; "time"; "source_text" ] j in
+  { tp_name = as_str (g "name"); tp_time = xd (g "time");
+    tp_text = source_text_of_json (g "source_text") }
 
 let stoich_ref_to_json s =
   obj [ ("compartment", str s.sr_compartment); ("indices", items s.sr_indices) ]
@@ -955,13 +1002,14 @@ let transition_to_json t =
       ("to", destination_to_json t.tn_to);
       ("dynamics", dynamics_to_json t.tn_dynamics);
       ("guard", opt guard_to_json t.tn_guard); ("lineage", bool t.tn_lineage);
-      ("expands_to", opt strs t.tn_expands_to) ]
+      ("expands_to", opt strs t.tn_expands_to);
+      ("source_text", source_text_to_json t.tn_text) ]
 
 let transition_of_json j =
   let g =
     record "transition"
       [ "name"; "indices"; "from"; "to"; "dynamics"; "guard"; "lineage";
-        "expands_to" ]
+        "expands_to"; "source_text" ]
       j
   in
   { tn_name = as_str (g "name"); tn_indices = of_bindings (g "indices");
@@ -970,22 +1018,27 @@ let transition_of_json j =
     tn_dynamics = dynamics_of_json (g "dynamics");
     tn_guard = of_opt guard_of_json (g "guard");
     tn_lineage = as_bool (g "lineage");
-    tn_expands_to = of_opt of_strs (g "expands_to") }
+    tn_expands_to = of_opt of_strs (g "expands_to");
+    tn_text = source_text_of_json (g "source_text") }
 
 let ode_to_json o =
-  obj [ ("compartment", str o.od_compartment); ("derivative", dx o.od_derivative) ]
+  obj [ ("compartment", str o.od_compartment); ("derivative", dx o.od_derivative);
+      ("source_text", source_text_to_json o.od_text) ]
 
 let ode_of_json j =
-  let g = record "ode equation" [ "compartment"; "derivative" ] j in
+  let g = record "ode equation" [ "compartment"; "derivative"; "source_text" ] j in
   { od_compartment = as_str (g "compartment");
-    od_derivative = xd (g "derivative") }
+    od_derivative = xd (g "derivative");
+    od_text = source_text_of_json (g "source_text") }
 
 let balance_to_json b =
-  obj [ ("compartment", str b.bl_compartment); ("expr", dx b.bl_expr) ]
+  obj [ ("compartment", str b.bl_compartment); ("expr", dx b.bl_expr);
+      ("source_text", source_text_to_json b.bl_text) ]
 
 let balance_of_json j =
-  let g = record "balance" [ "compartment"; "expr" ] j in
-  { bl_compartment = as_str (g "compartment"); bl_expr = xd (g "expr") }
+  let g = record "balance" [ "compartment"; "expr"; "source_text" ] j in
+  { bl_compartment = as_str (g "compartment"); bl_expr = xd (g "expr");
+    bl_text = source_text_of_json (g "source_text") }
 
 let distribution_to_json d =
   obj [ ("family", family_to_json d.di_family); ("args", args d.di_args) ]
@@ -1008,16 +1061,18 @@ let initial_to_json i =
   obj
     [ ("compartment", str i.in_compartment); ("indices", items i.in_indices);
       ("bindings", bindings i.in_bindings);
-      ("value", initial_value_to_json i.in_value) ]
+      ("value", initial_value_to_json i.in_value);
+      ("source_text", source_text_to_json i.in_text) ]
 
 let initial_of_json j =
   let g =
-    record "initial condition" [ "compartment"; "indices"; "bindings"; "value" ] j
+    record "initial condition" [ "compartment"; "indices"; "bindings"; "value"; "source_text" ] j
   in
   { in_compartment = as_str (g "compartment");
     in_indices = of_items (g "indices");
     in_bindings = of_bindings (g "bindings");
-    in_value = initial_value_of_json (g "value") }
+    in_value = initial_value_of_json (g "value");
+    in_text = source_text_of_json (g "source_text") }
 
 let column_role_to_json = function
   | CrTime        -> str "time"
@@ -1080,13 +1135,14 @@ let observation_to_json o =
              [ ("form", str c.cv_form); ("column", str c.cv_column);
                ("span", opt dx c.cv_span) ])
          o.ob_covers);
-      ("expands_to", opt strs o.ob_expands_to) ]
+      ("expands_to", opt strs o.ob_expands_to);
+      ("source_text", source_text_to_json o.ob_text) ]
 
 let observation_of_json j =
   let g =
     record "observation"
       [ "name"; "indices"; "source"; "columns"; "measurement"; "projection";
-        "emit_schedule"; "covers"; "expands_to" ]
+        "emit_schedule"; "covers"; "expands_to"; "source_text" ]
       j
   in
   { ob_name = as_str (g "name"); ob_indices = of_bindings (g "indices");
@@ -1110,7 +1166,8 @@ let observation_of_json j =
           { cv_form = as_str (g "form"); cv_column = as_str (g "column");
             cv_span = of_opt xd (g "span") })
         (g "covers");
-    ob_expands_to = of_opt of_strs (g "expands_to") }
+    ob_expands_to = of_opt of_strs (g "expands_to");
+    ob_text = source_text_of_json (g "source_text") }
 
 let action_to_json = function
   | AcTransfer a -> variant "transfer" [ ("args", args a) ]
@@ -1167,16 +1224,18 @@ let intervention_to_json i =
     [ ("name", str i.iv_name); ("indices", bindings i.iv_indices);
       ("actions", list action_to_json i.iv_actions);
       ("schedule", schedule_to_json i.iv_schedule);
-      ("guard", opt guard_to_json i.iv_guard) ]
+      ("guard", opt guard_to_json i.iv_guard);
+      ("source_text", source_text_to_json i.iv_text) ]
 
 let intervention_of_json j =
   let g =
-    record "intervention" [ "name"; "indices"; "actions"; "schedule"; "guard" ] j
+    record "intervention" [ "name"; "indices"; "actions"; "schedule"; "guard"; "source_text" ] j
   in
   { iv_name = as_str (g "name"); iv_indices = of_bindings (g "indices");
     iv_actions = of_list action_of_json (g "actions");
     iv_schedule = schedule_of_json (g "schedule");
-    iv_guard = of_opt guard_of_json (g "guard") }
+    iv_guard = of_opt guard_of_json (g "guard");
+    iv_text = source_text_of_json (g "source_text") }
 
 let rec trigger_pred_to_json = function
   | TgAtom e -> variant "atom" [ ("value", dx e) ]
@@ -1206,19 +1265,21 @@ let reactive_to_json r =
       ("when", trigger_pred_to_json r.rc_when); ("after", opt dx r.rc_after);
       ("once", opt dx r.rc_once); ("cooldown", opt dx r.rc_cooldown);
       ("action", action_to_json r.rc_action);
-      ("guard", opt guard_to_json r.rc_guard) ]
+      ("guard", opt guard_to_json r.rc_guard);
+      ("source_text", source_text_to_json r.rc_text) ]
 
 let reactive_of_json j =
   let g =
     record "reactive intervention"
-      [ "name"; "indices"; "when"; "after"; "once"; "cooldown"; "action"; "guard" ]
+      [ "name"; "indices"; "when"; "after"; "once"; "cooldown"; "action"; "guard"; "source_text" ]
       j
   in
   { rc_name = as_str (g "name"); rc_indices = of_bindings (g "indices");
     rc_when = trigger_pred_of_json (g "when"); rc_after = of_opt xd (g "after");
     rc_once = of_opt xd (g "once"); rc_cooldown = of_opt xd (g "cooldown");
     rc_action = action_of_json (g "action");
-    rc_guard = of_opt guard_of_json (g "guard") }
+    rc_guard = of_opt guard_of_json (g "guard");
+    rc_text = source_text_of_json (g "source_text") }
 
 let assign_to_json a = obj [ ("name", str a.an_name); ("value", dx a.an_value) ]
 
@@ -1252,26 +1313,30 @@ let scenario_field_of_json j =
 let scenario_to_json s =
   obj
     [ ("name", str s.sn_name);
-      ("fields", list scenario_field_to_json s.sn_fields) ]
+      ("fields", list scenario_field_to_json s.sn_fields);
+      ("source_text", source_text_to_json s.sn_text) ]
 
 let scenario_of_json j =
-  let g = record "scenario" [ "name"; "fields" ] j in
+  let g = record "scenario" [ "name"; "fields"; "source_text" ] j in
   { sn_name = as_str (g "name");
-    sn_fields = of_list scenario_field_of_json (g "fields") }
+    sn_fields = of_list scenario_field_of_json (g "fields");
+    sn_text = source_text_of_json (g "source_text") }
 
 let simulation_to_json s =
   obj
     [ ("from", dx s.sm_from); ("to", dx s.sm_to); ("dt", opt dx s.sm_dt);
       ("integrator", opt str s.sm_integrator); ("atol", opt dx s.sm_atol);
-      ("rtol", opt dx s.sm_rtol) ]
+      ("rtol", opt dx s.sm_rtol);
+      ("source_text", source_text_to_json s.sm_text) ]
 
 let simulation_of_json j =
   let g =
-    record "simulation" [ "from"; "to"; "dt"; "integrator"; "atol"; "rtol" ] j
+    record "simulation" [ "from"; "to"; "dt"; "integrator"; "atol"; "rtol"; "source_text" ] j
   in
   { sm_from = xd (g "from"); sm_to = xd (g "to"); sm_dt = of_opt xd (g "dt");
     sm_integrator = of_opt as_str (g "integrator");
-    sm_atol = of_opt xd (g "atol"); sm_rtol = of_opt xd (g "rtol") }
+    sm_atol = of_opt xd (g "atol"); sm_rtol = of_opt xd (g "rtol");
+    sm_text = source_text_of_json (g "source_text") }
 
 let output_to_json o =
   obj
@@ -1281,33 +1346,39 @@ let output_to_json o =
            obj
              [ ("schedule", schedule_core_to_json t.to_schedule);
                ("format", str t.to_format) ])
-         o.ou_trajectories) ]
+         o.ou_trajectories);
+      ("source_text", source_text_to_json o.ou_text) ]
 
 let output_of_json j =
-  let g = record "output" [ "trajectories" ] j in
+  let g = record "output" [ "trajectories"; "source_text" ] j in
   { ou_trajectories =
       of_opt
         (fun j ->
           let g = record "trajectories" [ "schedule"; "format" ] j in
           { to_schedule = schedule_core_of_json (g "schedule");
             to_format = as_str (g "format") })
-        (g "trajectories") }
+        (g "trajectories");
+    ou_text = source_text_of_json (g "source_text") }
 
 let quantity_to_json q =
   obj
     [ ("name", str q.qd_name); ("indices", bindings q.qd_indices);
-      ("body", dx q.qd_body) ]
+      ("body", dx q.qd_body);
+      ("source_text", source_text_to_json q.qd_text) ]
 
 let quantity_of_json j =
-  let g = record "quantity" [ "name"; "indices"; "body" ] j in
+  let g = record "quantity" [ "name"; "indices"; "body"; "source_text" ] j in
   { qd_name = as_str (g "name"); qd_indices = of_bindings (g "indices");
-    qd_body = xd (g "body") }
+    qd_body = xd (g "body");
+    qd_text = source_text_of_json (g "source_text") }
 
-let contrast_to_json c = obj [ ("name", str c.ct_name); ("body", dx c.ct_body) ]
+let contrast_to_json c = obj [ ("name", str c.ct_name); ("body", dx c.ct_body);
+      ("source_text", source_text_to_json c.ct_text) ]
 
 let contrast_of_json j =
-  let g = record "contrast" [ "name"; "body" ] j in
-  { ct_name = as_str (g "name"); ct_body = xd (g "body") }
+  let g = record "contrast" [ "name"; "body"; "source_text" ] j in
+  { ct_name = as_str (g "name"); ct_body = xd (g "body");
+    ct_text = source_text_of_json (g "source_text") }
 
 (* ── The document ────────────────────────────────────────────────────────── *)
 

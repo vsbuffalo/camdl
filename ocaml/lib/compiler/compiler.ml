@@ -306,7 +306,7 @@ let front_end_collect ?(name = "model") ?(filename = "<input>")
        ) (List.rev !Parser_errors.pending_errors);
        Parser_errors.pending_errors := [];
        (Some { model; ctx; summary; source; decls;
-               declared = lazy (Declared_emit.build_detail ctx decls) },
+               declared = lazy (Declared_emit.build_detail ~source ctx decls) },
         ctx.diags, source))
 
 (** Production front end: run [front_end_collect], and on any front-end

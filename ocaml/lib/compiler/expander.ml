@@ -1725,11 +1725,12 @@ let lower_via_transitions ctx =
 
         (* 1. Register the stage dimension (picked up by resolve_dimensions). *)
         ctx.dim_decls <- ctx.dim_decls @ [
-          { dename = dim_name; desrc = DInline stage_levels; dedoc = None } ];
+          { dename = dim_name; desrc = DInline stage_levels; dedoc = None;
+            despan = dummy_loc } ];
         (* 2. Stratify the source compartment by the stage dimension. This
               COMPOSES with any existing stratification of [src] (age × stage),
               since [comp_dims] reads every applicable stratify decl in order. *)
-        ctx.stratifies <- ctx.stratifies @ [ { sdim = dim_name; sonly = Some [ src ] } ];
+        ctx.stratifies <- ctx.stratifies @ [ { sdim = dim_name; sonly = Some [ src ]; sspan = dummy_loc } ];
 
         (* 3. The consecutive chain and the exit. Both INHERIT the via
               transition's existing index bindings and source-stoich indices and
@@ -1747,6 +1748,7 @@ let lower_via_transitions ctx =
           trlineage = false;
           trdoc     = None;
           trloc     = tr.trloc;
+          trspan    = dummy_loc;
         } in
         let last_item = IPosn (EIdent (stage_last, dummy_loc)) in
         let exit_tr = {
@@ -1877,7 +1879,8 @@ let lower_via_transitions ctx =
           in
           let cell_decls =
             List.map (fun name ->
-              { cname = name; ckind = src_kind; cdoc = None; cloc = tr.trloc })
+              { cname = name; ckind = src_kind; cdoc = None; cloc = tr.trloc;
+                cspan = dummy_loc })
               all_cells
           in
           ctx.comp_decls <- ctx.comp_decls @ cell_decls;
@@ -1906,7 +1909,8 @@ let lower_via_transitions ctx =
                   trguard   = tr.trguard;
                   trlineage = false;
                   trdoc     = None;
-                  trloc     = tr.trloc })
+                  trloc     = tr.trloc;
+                  trspan    = dummy_loc })
             in
             (* The exit `cell_{k-1} --> dest`. *)
             let dest = dest_of_branch b in
@@ -1919,7 +1923,8 @@ let lower_via_transitions ctx =
                 trguard   = tr.trguard;
                 trlineage = false;
                 trdoc     = None;
-                trloc     = tr.trloc }
+                trloc     = tr.trloc;
+                trspan    = dummy_loc }
             in
             chain @ [ exit_tr ]
           in

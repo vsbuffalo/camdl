@@ -47,7 +47,7 @@ fn minimal_has_every_optional_absent() {
     let m = read("minimal");
     assert!(m.time_unit.is_none() && m.description.is_none() && m.origin.is_none());
     assert!(m.simulation.is_none());
-    assert_eq!(m.output, Some(OutputDecl { trajectories: None }));
+    assert_eq!(m.output, Some(OutputDecl { trajectories: None, source_text: None }));
     assert!(m.dimensions.is_empty() && m.transitions.is_empty() && m.contrasts.is_empty());
 }
 
@@ -222,4 +222,23 @@ fn all_variants_uses_every_declaration_level_variant() {
     assert!(fields().any(|f| matches!(f, ScenarioField::Compose { .. })));
     assert!(fields().any(|f| matches!(f, ScenarioField::TEnd { .. })));
     assert!(fields().any(|f| matches!(f, ScenarioField::Extends { .. })));
+}
+
+/// A declaration's text as written crosses the two codecs byte for byte: a line
+/// break, a tab, a quoted string, a backslash and a non-ASCII character are
+/// each read back as the one character the OCaml side wrote. `None` is the
+/// "not recorded" case, and it is `null` on the wire, never an empty string.
+#[test]
+fn source_text_is_read_back_exactly() {
+    let m = read("all_variants");
+    assert_eq!(
+        m.transitions[0].source_text.as_deref(),
+        Some(
+            "#[lineage] infection[a in age] : S[a] --> I[a] + R[age = adult]\n\
+             \t  @ beta × S[a]   # per \"capita\" \\ rate\n\
+             \t  where a != b"
+        )
+    );
+    assert_eq!(m.compartments[1].source_text, None);
+    assert_eq!(document("all_variants")["compartments"][1]["source_text"], Value::Null);
 }

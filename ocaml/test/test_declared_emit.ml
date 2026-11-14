@@ -456,6 +456,22 @@ let test_every_kind_has_a_golden () =
   Alcotest.(check bool) "no golden holds an unresolved name" false
     (Hashtbl.mem seen "unresolved")
 
+(* Every path at which two JSON values differ, as "a.b[2].c". *)
+let rec json_diff (path : string) (a : json) (b : json) : string list =
+  match a, b with
+  | `Assoc xs, `Assoc ys
+    when List.map fst xs = List.map fst ys ->
+    List.concat (List.map2 (fun (k, x) (_, y) ->
+      json_diff (if path = "" then k else path ^ "." ^ k) x y) xs ys)
+  | `List xs, `List ys when List.length xs = List.length ys ->
+    List.concat (List.mapi (fun i (x, y) ->
+      json_diff (Printf.sprintf "%s[%d]" path i) x y) (List.combine xs ys))
+  | _ -> if a = b then [] else [ path ]
+
+let ends_with ~suffix s =
+  let n = String.length suffix and h = String.length s in
+  h >= n && String.sub s (h - n) n = suffix
+
 (* ── Parse facts ─────────────────────────────────────────────────────────── *)
 
 let sir rate =
@@ -507,8 +523,9 @@ let test_units () =
   differ (m "7 'days") (m "1 'weeks")
 
 (* Comments, a doc comment, layout, and where a `let` sits change no declared
-   tree and no declaration: the whole section is equal apart from the order of
-   nothing (a `let` is in `definitions` wherever it is written). *)
+   tree: the section is equal apart from the text as written of the one
+   declaration whose spacing differs (a `let` is in `definitions` wherever it
+   is written, and a comment or a doc block is outside a declaration's text). *)
 let test_layout_and_let_position () =
   let base = sir "beta * S * I / N" in
   let _, d0 = compile "m" base in
@@ -533,7 +550,112 @@ simulate { from = 0 'days
            to = 80 'days }
 |} in
   let _, d1 = compile "m" commented in
-  Alcotest.(check bool) "the declared sections are equal" true (d0 = d1)
+  Alcotest.(check (list string))
+    "only the text of the declaration that is spaced differently"
+    [ "transitions[0].source_text" ]
+    (json_diff "" (D.to_json d0) (D.to_json d1))
+
+(* ── The text as written ─────────────────────────────────────────────────── *)
+
+let text_of what = function
+  | Some s -> s
+  | None -> Alcotest.failf "%s has no text as written" what
+
+(* Each declaration carries its own bytes, from its first token to its last:
+   the keyword of a `let` and of a block-level declaration, a `#[lineage]`
+   attribute, and interior line breaks are part of it; a doc block above it, a
+   trailing comment and the surrounding block are not. *)
+let test_source_text () =
+  let src = {|
+time_unit = 'days
+compartments { S, I : integer, R }
+let N = S + I + R
+parameters {
+  #' transmission rate
+  beta  : rate in [0.001, 2.0]   # trailing
+  gamma : rate in [0.001, 1.0]
+  N0    : count in [100, 100000]
+}
+transitions {
+  #' a doc block
+  #[lineage]
+  infection : S --> I
+     @ beta × S * I / N      # the rate
+  recovery  : I --> R  @ gamma * I
+}
+init { S = N0 - 1
+       I = 1 }
+simulate { from = 0 'days
+           to = 80 'days }
+|} in
+  let _, d = compile "m" src in
+  let check what expected actual =
+    Alcotest.(check string) what expected (text_of what actual) in
+  check "compartment I" "I : integer" (List.nth d.dm_compartments 1).cd_text;
+  check "let N" "let N = S + I + R" (List.hd d.dm_definitions).df_text;
+  check "parameter beta" "beta  : rate in [0.001, 2.0]"
+    (List.hd d.dm_parameters).pd_text;
+  check "transition infection"
+    "#[lineage]\n  infection : S --> I\n     @ beta × S * I / N"
+    (List.hd d.dm_transitions).tn_text;
+  check "transition recovery" "recovery  : I --> R  @ gamma * I"
+    (List.nth d.dm_transitions 1).tn_text;
+  check "initial S" "S = N0 - 1" (List.hd d.dm_initial).in_text;
+  check "simulate" "simulate { from = 0 'days\n           to = 80 'days }"
+    (match d.dm_simulation with
+     | Some s -> s.sm_text
+     | None -> Alcotest.fail "no simulate block")
+
+(* A quantity declared in a separate vocabulary file (`--quantities`) takes
+   its text from that file. The entry sits on line 3 of the vocabulary, which
+   in the model is the `compartments` line: reading the wrong file would
+   return model text. *)
+let test_source_text_second_file () =
+  let vocab = "quantities {\n  # peak prevalence\n  peak   =   max(I)\n}\n" in
+  match Compiler.compile_with_declared ~name:"m" ~filename:"m.camdl"
+          ~quantities:("vocab.camdl", vocab) (sir "beta * S * I / N") with
+  | Error e -> Alcotest.failf "does not compile: %s" e
+  | Ok (_, _, d) ->
+    Alcotest.(check (list (option string))) "the vocabulary file's own bytes"
+      [ Some "peak   =   max(I)" ]
+      (List.map (fun (q : D.quantity_decl) -> q.qd_text) d.dm_quantities)
+
+(* On every golden, every declaration has its text, and a declaration with a
+   name begins with that name, with `let`, or with an attribute. This reads
+   the serialized section, so a declaration kind added without a text fails
+   here rather than being recorded as absent. *)
+let starts_with ~prefix s =
+  String.length s >= String.length prefix
+  && String.sub s 0 (String.length prefix) = prefix
+
+let test_golden_source_text path () =
+  let file = relative path in
+  let n = ref 0 in
+  let rec go (j : json) =
+    match j with
+    | `Assoc kvs ->
+      (match List.assoc_opt "source_text" kvs with
+       | None -> ()
+       | Some (`String text) ->
+         incr n;
+         if text = "" then Alcotest.failf "%s: an empty text as written" file;
+         (match List.assoc_opt "name" kvs with
+          | Some (`String name)
+            when not (starts_with ~prefix:name text
+                      || starts_with ~prefix:"let" text
+                      || starts_with ~prefix:"#[" text) ->
+            Alcotest.failf "%s: the text of '%s' does not begin with it: %S"
+              file name text
+          | _ -> ())
+       | Some _ ->
+         Alcotest.failf "%s: a declaration without its text as written: %s" file
+           (Yojson.Safe.to_string j));
+      List.iter (fun (_, v) -> go v) kvs
+    | `List xs -> List.iter go xs
+    | _ -> ()
+  in
+  go (D.to_json (section_of path));
+  if !n = 0 then Alcotest.failf "%s: no declaration carries a text" file
 
 (* A quoted string is a string, not a name, and is not read. *)
 let test_string_literal () =
@@ -555,22 +677,6 @@ simulate { from = date("2020-01-01")
   | _ -> Alcotest.fail "date(\"…\") should hold a string literal and read no name"
 
 (* ── A doc comment is not a model difference ─────────────────────────────── *)
-
-(* Every path at which two JSON values differ, as "a.b[2].c". *)
-let rec json_diff (path : string) (a : json) (b : json) : string list =
-  match a, b with
-  | `Assoc xs, `Assoc ys
-    when List.map fst xs = List.map fst ys ->
-    List.concat (List.map2 (fun (k, x) (_, y) ->
-      json_diff (if path = "" then k else path ^ "." ^ k) x y) xs ys)
-  | `List xs, `List ys when List.length xs = List.length ys ->
-    List.concat (List.mapi (fun i (x, y) ->
-      json_diff (Printf.sprintf "%s[%d]" path i) x y) (List.combine xs ys))
-  | _ -> if a = b then [] else [ path ]
-
-let ends_with ~suffix s =
-  let n = String.length suffix and h = String.length s in
-  h >= n && String.sub s (h - n) n = suffix
 
 let documented ~beta_doc ~model_doc =
   Printf.sprintf {|%s
@@ -695,6 +801,15 @@ let () =
          Alcotest.test_case "comments, layout and let position" `Quick
            test_layout_and_let_position;
          Alcotest.test_case "a quoted string is not a name" `Quick test_string_literal ]);
+      ("text as written",
+       Alcotest.test_case "each declaration carries its own bytes" `Quick
+         test_source_text
+       :: Alcotest.test_case "a second file's declaration carries that file's bytes"
+            `Quick test_source_text_second_file
+       :: List.map (fun path ->
+           Alcotest.test_case (relative path) `Quick
+             (test_golden_source_text path))
+         (golden_models ()));
       ("doc comments",
        [ Alcotest.test_case "a doc comment changes renderings only, and no model"
            `Quick test_doc_comment_is_not_a_model_difference ]);

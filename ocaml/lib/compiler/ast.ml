@@ -127,7 +127,7 @@ type doc = {
   d_ref    : string option;   (* `@ref`: citation for the definition *)
 }
 
-type compartment_decl = { cname: string; ckind: compartment_kind; cdoc: doc option; cloc: loc }
+type compartment_decl = { cname: string; ckind: compartment_kind; cdoc: doc option; cloc: loc; cspan: loc }
 
 (* Parameter kinds. The two time kinds (PInstant, PDuration) both carry
    dimension [T] for dimcheck (2026-05-22 calendar-time §6.7): an instant is
@@ -151,8 +151,8 @@ type prior_spec = {
    accepted only on `positive` and `real`; every other kind fixes its
    dimension. *)
 type param_decl =
-  | PScalar  of { pname: string; pkind: param_type; pdim: dim_annotation option; pbounds: (expr * expr) option; pprior: prior_spec option; pdoc: doc option; ploc: loc }
-  | PIndexed of { pname: string; pdims: string list; pkind: param_type; pdim: dim_annotation option; pbounds: (expr * expr) option; pprior: prior_spec option; pdoc: doc option; ploc: loc }
+  | PScalar  of { pname: string; pkind: param_type; pdim: dim_annotation option; pbounds: (expr * expr) option; pprior: prior_spec option; pdoc: doc option; ploc: loc; pspan: loc }
+  | PIndexed of { pname: string; pdims: string list; pkind: param_type; pdim: dim_annotation option; pbounds: (expr * expr) option; pprior: prior_spec option; pdoc: doc option; ploc: loc; pspan: loc }
 
 (** Table dimension entry: bare dim name, or dim + unit *)
 type table_dim_entry =
@@ -170,6 +170,7 @@ type table_decl = {
      declaration, and the caret has to land on the axes rather than on the
      whole declaration — an inline table's value runs to many lines. *)
   tloc       : loc;
+  tspan      : loc;
 }
 
 (** A stoichiometry reference: compartment name + optional indices *)
@@ -277,6 +278,7 @@ type transition_decl = {
   trlineage : bool;
   trdoc     : doc option;   (* `#'` doc block (non-semantic; inspect only) *)
   trloc     : loc;
+  trspan    : loc;
 }
 
 (* Sub-expressions a transition's dynamics carry, for variable / let-reference
@@ -296,6 +298,7 @@ type let_binding = {
   lkind    : param_type option;   (* optional type annotation: count, rate, etc. *)
   ldim     : dim_annotation option;   (* a `dim` clause on the annotation *)
   lloc     : loc;
+  lspan    : loc;
   lbody    : expr;
   (* gh#508: `#'` prose. A derived quantity is where a modelling assumption
      hides — whether `let N[p] = S[p] + E[p] + I[p]` is "total population" or
@@ -307,6 +310,7 @@ type let_binding = {
 type stratify_decl = {
   sdim  : string;
   sonly : string list option;
+  sspan : loc;
 }
 
 type likelihood_kind =
@@ -391,6 +395,7 @@ type init_entry = {
   ibindings : index_binding list;    (* loop: [p in patch] *)
   ivalue    : init_value;
   iloc      : loc;
+  ispan     : loc;
 }
 
 (* Shared "specified times" schedule core: `every = E` (regular cadence) or
@@ -478,6 +483,7 @@ type obs_decl = {
   ocovers     : obs_covers option;
   odoc        : doc option;   (* `#'` doc block (non-semantic; inspect only) *)
   oloc        : loc;
+  ospan       : loc;
 }
 
 type action_decl =
@@ -499,6 +505,7 @@ type intervention_decl = {
   ivschedule: schedule_decl;
   ivguard   : guard option;         (* where expr — compile-time filter *)
   ivloc     : loc;
+  ivspan    : loc;
 }
 
 (* gh#204 reactive trigger predicate (pre-expansion). A dedicated predicate type
@@ -524,9 +531,10 @@ type reactive_decl = {
   rxaction   : action_decl;
   rxguard    : guard option;         (* where expr — compile-time filter *)
   rxloc      : loc;
+  rxspan     : loc;
 }
 
-type ode_decl = { ocomp: string; oderiv: expr }
+type ode_decl = { ocomp: string; oderiv: expr; odspan: loc }
 
 (* A generated-quantity declaration (proposal 2026-06-25): `name [idx]? = body`.
    The body is a plain [expr]; the expander's quantity classifier decides
@@ -538,6 +546,7 @@ type quantity_decl = {
   qd_body    : expr;
   qd_doc     : doc option;   (* `#'` doc block (non-semantic; inspect + doc_index) *)
   qd_loc     : loc;
+  qd_span    : loc;
 }
 
 (* A counterfactual-contrast declaration (proposal 2026-06-25):
@@ -551,6 +560,7 @@ type contrast_decl = {
   cd_body   : expr;            (* arithmetic over ERunMember; reuses EBinOp *)
   cd_doc    : doc option;
   cd_loc    : loc;
+  cd_span   : loc;
 }
 
 (* A forcing-block keyword-argument value (gh#423). The string-vs-expr
@@ -583,6 +593,7 @@ type func_decl = {
      uses this authoritatively — no value-based inference fallback. *)
   funit    : unit_lit;
   fargs    : (string * farg_value) list;
+  fspan    : loc;
 }
 
 type output_traj_decl = {
@@ -592,6 +603,7 @@ type output_traj_decl = {
 
 type output_decl = {
   out_trajectories: output_traj_decl option;
+  out_span: loc;
 }
 
 (* gh#166: sim_integrator ("rk4"|"rk45", None -> default rk4); sim_atol/sim_rtol
@@ -606,9 +618,10 @@ type simulate_decl = {
   sim_integrator: (string * loc) option;
   sim_atol: (expr * loc) option;
   sim_rtol: (expr * loc) option;
+  sim_span: loc;
 }
 
-type timepoint_decl = { tpname: string; tptime: expr }
+type timepoint_decl = { tpname: string; tptime: expr; tpspan: loc }
 
 type scenario_field =
   | ScLabel   of string
@@ -623,6 +636,7 @@ type scenario_field =
 type scenario_decl = {
   scname   : string;
   scfields : scenario_field list;
+  scspan   : loc;
 }
 
 (** Source of dimension levels: inline list or read from a file column *)
@@ -642,9 +656,10 @@ type dimensions_entry = {
   dename : string;
   desrc  : dim_source;
   dedoc  : doc option;   (* `#'` doc block (non-semantic; inspect only) *)
+  despan : loc;
 }
 
-type balance_decl = { bcomp: string; bexpr: expr }
+type balance_decl = { bcomp: string; bexpr: expr; bspan: loc }
 
 type declaration =
   | DTimeUnit    of unit_lit * loc
@@ -714,4 +729,5 @@ and stamp_index_item_file ~file = function
 
 let stamp_quantity_decl_file ~file (qd : quantity_decl) : quantity_decl =
   { qd with qd_body = stamp_expr_file ~file qd.qd_body;
-            qd_loc  = stamp_loc_file ~file qd.qd_loc }
+            qd_loc  = stamp_loc_file ~file qd.qd_loc;
+            qd_span = stamp_loc_file ~file qd.qd_span }

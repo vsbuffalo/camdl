@@ -17,13 +17,19 @@
     "description": "every variant, \"quoted\", and a non-ASCII β",
     "origin": "2024-01-01",
     "dimensions": [
-      { "name": "age", "source": "inline", "levels": [ "child", "adult" ] },
+      {
+        "name": "age",
+        "source": "inline",
+        "levels": [ "child", "adult" ],
+        "source_text": "as written"
+      },
       {
         "name": "patch",
         "source": {
           "read": { "path": "data/patches.tsv", "column": "name" }
         },
-        "levels": [ "north", "south_west" ]
+        "levels": [ "north", "south_west" ],
+        "source_text": "as written"
       }
     ],
     "compartments": [
@@ -31,13 +37,20 @@
         "name": "S",
         "kind": "integer",
         "dims": [ "age" ],
-        "expands_to": [ "S_child", "S_adult" ]
+        "expands_to": [ "S_child", "S_adult" ],
+        "source_text": "as written"
       },
-      { "name": "W", "kind": "real", "dims": [], "expands_to": null }
+      {
+        "name": "W",
+        "kind": "real",
+        "dims": [],
+        "expands_to": null,
+        "source_text": null
+      }
     ],
     "stratify": [
-      { "dim": "age", "only": null },
-      { "dim": "patch", "only": [ "S", "I" ] }
+      { "dim": "age", "only": null, "source_text": "as written" },
+      { "dim": "patch", "only": [ "S", "I" ], "source_text": "as written" }
     ],
     "parameters": [
       {
@@ -64,7 +77,8 @@
             { "name": "sigma", "value": { "const": { "value": 1.0 } } }
           ],
           "pool_over": "patch"
-        }
+        },
+        "source_text": "as written"
       },
       {
         "name": "p1",
@@ -83,7 +97,8 @@
             "reads": []
           }
         },
-        "prior": { "family": "uniform", "args": [], "pool_over": null }
+        "prior": { "family": "uniform", "args": [], "pool_over": null },
+        "source_text": "as written"
       },
       {
         "name": "p2",
@@ -91,7 +106,8 @@
         "kind": "count",
         "dim": null,
         "bounds": null,
-        "prior": null
+        "prior": null,
+        "source_text": "as written"
       },
       {
         "name": "p3",
@@ -99,7 +115,8 @@
         "kind": "positive",
         "dim": null,
         "bounds": null,
-        "prior": null
+        "prior": null,
+        "source_text": "as written"
       },
       {
         "name": "p4",
@@ -107,7 +124,8 @@
         "kind": "real",
         "dim": null,
         "bounds": null,
-        "prior": null
+        "prior": null,
+        "source_text": "as written"
       },
       {
         "name": "p5",
@@ -115,7 +133,8 @@
         "kind": "instant",
         "dim": null,
         "bounds": null,
-        "prior": null
+        "prior": null,
+        "source_text": "as written"
       },
       {
         "name": "p6",
@@ -123,7 +142,8 @@
         "kind": "duration",
         "dim": null,
         "bounds": null,
-        "prior": null
+        "prior": null,
+        "source_text": "as written"
       }
     ],
     "definitions": [
@@ -150,7 +170,8 @@
             { "name": "S", "kind": "compartment" },
             { "name": "I", "kind": "compartment" }
           ]
-        }
+        },
+        "source_text": "as written"
       },
       {
         "name": "everything",
@@ -677,7 +698,8 @@
             { "name": "linear", "kind": "keyword" },
             { "name": "mystery", "kind": "unresolved" }
           ]
-        }
+        },
+        "source_text": "as written"
       }
     ],
     "tables": [
@@ -705,7 +727,8 @@
           },
           "katex": "x",
           "reads": []
-        }
+        },
+        "source_text": "as written"
       },
       {
         "names": [ "w" ],
@@ -736,7 +759,8 @@
           },
           "katex": "x",
           "reads": []
-        }
+        },
+        "source_text": "as written"
       }
     ],
     "time_inputs": [
@@ -759,7 +783,8 @@
               }
             }
           }
-        ]
+        ],
+        "source_text": "as written"
       }
     ],
     "timepoints": [
@@ -769,7 +794,8 @@
           "tree": { "unit": { "value": 30.0, "unit": "days" } },
           "katex": "x",
           "reads": []
-        }
+        },
+        "source_text": "as written"
       }
     ],
     "transitions": [
@@ -917,7 +943,8 @@
           }
         },
         "lineage": true,
-        "expands_to": [ "infection_child", "infection_adult" ]
+        "expands_to": [ "infection_child", "infection_adult" ],
+        "source_text": "#[lineage] infection[a in age] : S[a] --> I[a] + R[age = adult]\n\t  @ beta × S[a]   # per \"capita\" \\ rate\n\t  where a != b"
       },
       {
         "name": "onset",
@@ -1003,7 +1030,8 @@
         },
         "guard": null,
         "lineage": false,
-        "expands_to": null
+        "expands_to": null,
+        "source_text": "as written"
       }
     ],
     "ode_equations": [
@@ -1023,7 +1051,8 @@
           },
           "katex": "x",
           "reads": []
-        }
+        },
+        "source_text": "as written"
       }
     ],
     "balance": [
@@ -1043,7 +1072,8 @@
           },
           "katex": "x",
           "reads": []
-        }
+        },
+        "source_text": "as written"
       }
     ],
     "initial": [
@@ -1081,7 +1111,8 @@
               "reads": []
             }
           }
-        }
+        },
+        "source_text": "as written"
       },
       {
         "compartment": "I",
@@ -1103,7 +1134,8 @@
               ]
             }
           }
-        }
+        },
+        "source_text": "as written"
       },
       {
         "compartment": "I",
@@ -1125,7 +1157,8 @@
               ]
             }
           }
-        }
+        },
+        "source_text": "as written"
       },
       {
         "compartment": "I",
@@ -1147,7 +1180,8 @@
               ]
             }
           }
-        }
+        },
+        "source_text": "as written"
       },
       {
         "compartment": "I",
@@ -1169,7 +1203,8 @@
               ]
             }
           }
-        }
+        },
+        "source_text": "as written"
       },
       {
         "compartment": "I",
@@ -1191,7 +1226,8 @@
               ]
             }
           }
-        }
+        },
+        "source_text": "as written"
       },
       {
         "compartment": "I",
@@ -1213,7 +1249,8 @@
               ]
             }
           }
-        }
+        },
+        "source_text": "as written"
       },
       {
         "compartment": "I",
@@ -1235,7 +1272,8 @@
               ]
             }
           }
-        }
+        },
+        "source_text": "as written"
       },
       {
         "compartment": "I",
@@ -1257,7 +1295,8 @@
               ]
             }
           }
-        }
+        },
+        "source_text": "as written"
       }
     ],
     "observations": [
@@ -1342,7 +1381,8 @@
             "reads": []
           }
         },
-        "expands_to": [ "cases_north", "cases_south_west" ]
+        "expands_to": [ "cases_north", "cases_south_west" ],
+        "source_text": "as written"
       },
       {
         "name": "prevalence",
@@ -1413,7 +1453,8 @@
           }
         },
         "covers": { "form": "day", "column": "t", "span": null },
-        "expands_to": null
+        "expands_to": null,
+        "source_text": "as written"
       }
     ],
     "interventions": [
@@ -1483,7 +1524,8 @@
             ]
           }
         },
-        "guard": { "eq": { "lhs": "p", "rhs": "north" } }
+        "guard": { "eq": { "lhs": "p", "rhs": "north" } },
+        "source_text": "as written"
       },
       {
         "name": "routine",
@@ -1526,7 +1568,8 @@
             "to": null
           }
         },
-        "guard": null
+        "guard": null,
+        "source_text": "as written"
       }
     ],
     "events": [
@@ -1560,7 +1603,8 @@
             }
           }
         },
-        "guard": null
+        "guard": null,
+        "source_text": "as written"
       },
       {
         "name": "import_window",
@@ -1593,7 +1637,8 @@
             }
           }
         },
-        "guard": null
+        "guard": null,
+        "source_text": "as written"
       }
     ],
     "reactive_interventions": [
@@ -1699,7 +1744,8 @@
             ]
           }
         },
-        "guard": { "neq": { "lhs": "p", "rhs": "south_west" } }
+        "guard": { "neq": { "lhs": "p", "rhs": "south_west" } },
+        "source_text": "as written"
       },
       {
         "name": "plain",
@@ -1737,7 +1783,8 @@
             }
           }
         },
-        "guard": null
+        "guard": null,
+        "source_text": "as written"
       }
     ],
     "scenarios": [
@@ -1786,9 +1833,10 @@
             }
           },
           { "extends": { "parent": "default" } }
-        ]
+        ],
+        "source_text": "as written"
       },
-      { "name": "empty", "fields": [] }
+      { "name": "empty", "fields": [], "source_text": null }
     ],
     "simulation": {
       "from": {
@@ -1812,7 +1860,8 @@
         "katex": "1e-08",
         "reads": []
       },
-      "rtol": null
+      "rtol": null,
+      "source_text": "as written"
     },
     "output": {
       "trajectories": {
@@ -1826,7 +1875,8 @@
           }
         },
         "format": "tsv"
-      }
+      },
+      "source_text": "as written"
     },
     "quantities": [
       {
@@ -1846,7 +1896,8 @@
           },
           "katex": "x",
           "reads": []
-        }
+        },
+        "source_text": "as written"
       }
     ],
     "contrasts": [
@@ -1874,7 +1925,8 @@
           },
           "katex": "x",
           "reads": []
-        }
+        },
+        "source_text": "as written"
       }
     ]
   },
@@ -1902,7 +1954,7 @@
     "reactive_interventions": [],
     "scenarios": [],
     "simulation": null,
-    "output": { "trajectories": null },
+    "output": { "trajectories": null, "source_text": null },
     "quantities": [],
     "contrasts": []
   }

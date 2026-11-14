@@ -317,6 +317,15 @@ pub struct FileInput {
 
 // ── Expressions ─────────────────────────────────────────────────────────────
 
+/// A declaration's text exactly as its author wrote it, from the first token of
+/// the declaration to its last (a `#'` doc block above it is not part of it).
+///
+/// For display only. Two declarations are compared on their parsed trees, never
+/// on this text: the parser reads different spellings as one tree (`×` and `*`),
+/// so equal models can have different text. `None` means the compiler had no
+/// source text for the declaration, and a reader shows that as "not recorded".
+pub type SourceText = Option<String>;
+
 /// A top-level expression of a declaration: the parsed tree sameness is
 /// decided on, the rendering that is shown, and the names it reads.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -540,6 +549,8 @@ pub struct DimensionDecl {
     /// The levels the compile used. For an inline source these are the levels
     /// written; for a file source, the levels read.
     pub levels: Vec<String>,
+    /// The declaration exactly as its author wrote it; see [`SourceText`].
+    pub source_text: SourceText,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -561,6 +572,8 @@ pub struct CompartmentDecl {
     /// The expanded compartment names this declaration produced. `None`:
     /// not recorded.
     pub expands_to: Option<Vec<String>>,
+    /// The declaration exactly as its author wrote it; see [`SourceText`].
+    pub source_text: SourceText,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -576,6 +589,8 @@ pub enum CompartmentKind {
 pub struct StratifyDecl {
     pub dim: String,
     pub only: Option<Vec<String>>,
+    /// The declaration exactly as its author wrote it; see [`SourceText`].
+    pub source_text: SourceText,
 }
 
 // ── Parameters, definitions, tables, time inputs ────────────────────────────
@@ -591,6 +606,8 @@ pub struct ParameterDecl {
     pub dim: Option<DimAnnotation>,
     pub bounds: Option<Bounds>,
     pub prior: Option<PriorDecl>,
+    /// The declaration exactly as its author wrote it; see [`SourceText`].
+    pub source_text: SourceText,
 }
 
 /// DSL parameter-type keyword (the `param_kind` production in
@@ -672,6 +689,8 @@ pub struct DefinitionDecl {
     pub kind: Option<ParamKind>,
     pub dim: Option<DimAnnotation>,
     pub body: DeclaredExpr,
+    /// The declaration exactly as its author wrote it; see [`SourceText`].
+    pub source_text: SourceText,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -683,6 +702,8 @@ pub struct TableDecl {
     pub cell_kind: Option<ParamKind>,
     /// An inline literal, or the call that reads the table from a file.
     pub value: DeclaredExpr,
+    /// The declaration exactly as its author wrote it; see [`SourceText`].
+    pub source_text: SourceText,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -702,6 +723,8 @@ pub struct TimeInputDecl {
     pub kind: String,
     pub unit: UnitLit,
     pub args: Vec<TimeInputArg>,
+    /// The declaration exactly as its author wrote it; see [`SourceText`].
+    pub source_text: SourceText,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -725,6 +748,8 @@ pub enum TimeInputValue {
 pub struct TimepointDecl {
     pub name: String,
     pub time: DeclaredExpr,
+    /// The declaration exactly as its author wrote it; see [`SourceText`].
+    pub source_text: SourceText,
 }
 
 // ── Transitions ─────────────────────────────────────────────────────────────
@@ -743,6 +768,8 @@ pub struct TransitionDecl {
     /// The expanded transition names this declaration produced. `None`:
     /// not recorded.
     pub expands_to: Option<Vec<String>>,
+    /// The declaration exactly as its author wrote it; see [`SourceText`].
+    pub source_text: SourceText,
 }
 
 /// A compartment in a transition's source or destination.
@@ -783,6 +810,8 @@ pub enum Dynamics {
 pub struct OdeDecl {
     pub compartment: String,
     pub derivative: DeclaredExpr,
+    /// The declaration exactly as its author wrote it; see [`SourceText`].
+    pub source_text: SourceText,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -790,6 +819,8 @@ pub struct OdeDecl {
 pub struct BalanceDecl {
     pub compartment: String,
     pub expr: DeclaredExpr,
+    /// The declaration exactly as its author wrote it; see [`SourceText`].
+    pub source_text: SourceText,
 }
 
 // ── Initial conditions ──────────────────────────────────────────────────────
@@ -803,6 +834,8 @@ pub struct InitialDecl {
     /// Loop binders: `[p in patch]`.
     pub bindings: Vec<IndexBinding>,
     pub value: InitialValue,
+    /// The declaration exactly as its author wrote it; see [`SourceText`].
+    pub source_text: SourceText,
 }
 
 /// Computed (`S = N0 - I`) or drawn once per particle (`I ~ poisson(...)`).
@@ -853,6 +886,8 @@ pub struct ObservationDecl {
     /// The expanded observation-model names this declaration produced. `None`:
     /// not recorded.
     pub expands_to: Option<Vec<String>>,
+    /// The declaration exactly as its author wrote it; see [`SourceText`].
+    pub source_text: SourceText,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -919,6 +954,8 @@ pub struct InterventionDecl {
     pub actions: Vec<Action>,
     pub schedule: Schedule,
     pub guard: Option<Guard>,
+    /// The declaration exactly as its author wrote it; see [`SourceText`].
+    pub source_text: SourceText,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -949,6 +986,8 @@ pub struct ReactiveDecl {
     pub cooldown: Option<DeclaredExpr>,
     pub action: Action,
     pub guard: Option<Guard>,
+    /// The declaration exactly as its author wrote it; see [`SourceText`].
+    pub source_text: SourceText,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -967,6 +1006,8 @@ pub enum TriggerPred {
 pub struct ScenarioDecl {
     pub name: String,
     pub fields: Vec<ScenarioField>,
+    /// The declaration exactly as its author wrote it; see [`SourceText`].
+    pub source_text: SourceText,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1000,12 +1041,16 @@ pub struct SimulationDecl {
     pub integrator: Option<String>,
     pub atol: Option<DeclaredExpr>,
     pub rtol: Option<DeclaredExpr>,
+    /// The declaration exactly as its author wrote it; see [`SourceText`].
+    pub source_text: SourceText,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutputDecl {
     pub trajectories: Option<TrajectoryOutput>,
+    /// The declaration exactly as its author wrote it; see [`SourceText`].
+    pub source_text: SourceText,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1023,6 +1068,8 @@ pub struct QuantityDecl {
     pub name: String,
     pub indices: Vec<IndexBinding>,
     pub body: DeclaredExpr,
+    /// The declaration exactly as its author wrote it; see [`SourceText`].
+    pub source_text: SourceText,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1030,4 +1077,6 @@ pub struct QuantityDecl {
 pub struct ContrastDecl {
     pub name: String,
     pub body: DeclaredExpr,
+    /// The declaration exactly as its author wrote it; see [`SourceText`].
+    pub source_text: SourceText,
 }
