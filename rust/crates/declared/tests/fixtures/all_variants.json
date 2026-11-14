@@ -1,0 +1,1877 @@
+{
+  "all_variants": {
+    "schema_version": 1,
+    "compile_inputs": {
+      "set_values": [
+        { "name": "beta", "value": 0.3 }, { "name": "N0", "value": 1000.0 }
+      ],
+      "files": [
+        {
+          "path": "data/patches.tsv",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    "time_unit": "days",
+    "description": "every variant, \"quoted\", and a non-ASCII β",
+    "origin": "2024-01-01",
+    "dimensions": [
+      { "name": "age", "source": "inline", "levels": [ "child", "adult" ] },
+      {
+        "name": "patch",
+        "source": {
+          "read": { "path": "data/patches.tsv", "column": "name" }
+        },
+        "levels": [ "north", "south_west" ]
+      }
+    ],
+    "compartments": [
+      {
+        "name": "S",
+        "kind": "integer",
+        "dims": [ "age" ],
+        "expands_to": [ "S_child", "S_adult" ]
+      },
+      { "name": "W", "kind": "real", "dims": [], "expands_to": [ "W" ] }
+    ],
+    "stratify": [
+      { "dim": "age", "only": null },
+      { "dim": "patch", "only": [ "S", "I" ] }
+    ],
+    "parameters": [
+      {
+        "name": "p0",
+        "dims": [ "age", "patch" ],
+        "kind": "rate",
+        "dim": { "population": -1, "time": -1 },
+        "bounds": {
+          "lo": {
+            "tree": { "const": { "value": 0.001 } },
+            "katex": "0.001",
+            "reads": []
+          },
+          "hi": {
+            "tree": { "const": { "value": 2.0 } },
+            "katex": "2",
+            "reads": []
+          }
+        },
+        "prior": {
+          "family": "log_normal",
+          "args": [
+            { "name": "mu", "value": { "const": { "value": 0.0 } } },
+            { "name": "sigma", "value": { "const": { "value": 1.0 } } }
+          ],
+          "pool_over": "patch"
+        }
+      },
+      {
+        "name": "p1",
+        "dims": [],
+        "kind": "probability",
+        "dim": null,
+        "bounds": {
+          "lo": {
+            "tree": { "const": { "value": 0.001 } },
+            "katex": "0.001",
+            "reads": []
+          },
+          "hi": {
+            "tree": { "const": { "value": 2.0 } },
+            "katex": "2",
+            "reads": []
+          }
+        },
+        "prior": { "family": "uniform", "args": [], "pool_over": null }
+      },
+      {
+        "name": "p2",
+        "dims": [],
+        "kind": "count",
+        "dim": null,
+        "bounds": null,
+        "prior": null
+      },
+      {
+        "name": "p3",
+        "dims": [],
+        "kind": "positive",
+        "dim": null,
+        "bounds": null,
+        "prior": null
+      },
+      {
+        "name": "p4",
+        "dims": [],
+        "kind": "real",
+        "dim": null,
+        "bounds": null,
+        "prior": null
+      },
+      {
+        "name": "p5",
+        "dims": [],
+        "kind": "instant",
+        "dim": null,
+        "bounds": null,
+        "prior": null
+      },
+      {
+        "name": "p6",
+        "dims": [],
+        "kind": "duration",
+        "dim": null,
+        "bounds": null,
+        "prior": null
+      }
+    ],
+    "definitions": [
+      {
+        "name": "N",
+        "indices": [],
+        "shape": null,
+        "kind": null,
+        "dim": null,
+        "body": {
+          "tree": {
+            "bin_op": {
+              "op": "add",
+              "lhs": {
+                "ident": { "name": { "name": "S", "kind": "compartment" } }
+              },
+              "rhs": {
+                "ident": { "name": { "name": "I", "kind": "compartment" } }
+              }
+            }
+          },
+          "katex": "S + I",
+          "reads": [
+            { "name": "S", "kind": "compartment" },
+            { "name": "I", "kind": "compartment" }
+          ]
+        }
+      },
+      {
+        "name": "everything",
+        "indices": [
+          { "in": { "var": "a", "dim": "age" } },
+          {
+            "consecutive": { "var": "a", "var_next": "a_next", "dim": "age" }
+          },
+          { "compartments": { "var": "c" } }
+        ],
+        "shape": [ "age", "patch" ],
+        "kind": "rate",
+        "dim": { "population": 0, "time": -1 },
+        "body": {
+          "tree": {
+            "list": {
+              "items": [
+                { "const": { "value": 1.0 } },
+                { "const": { "value": 0.25 } },
+                { "const": { "value": -3.5e-07 } },
+                {
+                  "index": {
+                    "name": { "name": "S", "kind": "compartment" },
+                    "indices": [
+                      {
+                        "positional": {
+                          "value": {
+                            "ident": {
+                              "name": { "name": "child", "kind": "level" }
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                },
+                {
+                  "index": {
+                    "name": { "name": "contact", "kind": "table" },
+                    "indices": [
+                      {
+                        "named": {
+                          "dim": "age",
+                          "value": {
+                            "ident": {
+                              "name": { "name": "a", "kind": "index_var" }
+                            }
+                          }
+                        }
+                      },
+                      {
+                        "positional": {
+                          "value": {
+                            "ident": {
+                              "name": { "name": "b", "kind": "index_var" }
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                },
+                {
+                  "sum": {
+                    "var": "a",
+                    "dim": "age",
+                    "guard": { "neq": { "lhs": "a", "rhs": "b" } },
+                    "body": {
+                      "index": {
+                        "name": { "name": "I", "kind": "compartment" },
+                        "indices": [
+                          {
+                            "positional": {
+                              "value": {
+                                "ident": {
+                                  "name": {
+                                    "name": "a",
+                                    "kind": "index_var"
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "sum": {
+                    "var": "b",
+                    "dim": "age",
+                    "guard": null,
+                    "body": {
+                      "ident": {
+                        "name": { "name": "b", "kind": "index_var" }
+                      }
+                    }
+                  }
+                },
+                {
+                  "cond": {
+                    "pred": {
+                      "bin_op": {
+                        "op": "gt",
+                        "lhs": {
+                          "ident": {
+                            "name": { "name": "I", "kind": "compartment" }
+                          }
+                        },
+                        "rhs": { "const": { "value": 0.0 } }
+                      }
+                    },
+                    "then": {
+                      "ident": {
+                        "name": { "name": "beta", "kind": "parameter" }
+                      }
+                    },
+                    "else": { "const": { "value": 0.0 } }
+                  }
+                },
+                {
+                  "call": {
+                    "function": "overdispersed",
+                    "args": [
+                      {
+                        "name": "rate",
+                        "value": {
+                          "ident": {
+                            "name": { "name": "beta", "kind": "parameter" }
+                          }
+                        }
+                      },
+                      {
+                        "name": "sigma_sq",
+                        "value": { "const": { "value": 0.1 } }
+                      }
+                    ]
+                  }
+                },
+                { "call": { "function": "now", "args": [] } },
+                {
+                  "range": {
+                    "lo": { "const": { "value": 7.0 } },
+                    "hi": { "const": { "value": 100.0 } }
+                  }
+                },
+                { "obs_access": { "stream": "cases" } },
+                {
+                  "run_member": {
+                    "run": "baseline",
+                    "namespace": "quantities",
+                    "member": "R0"
+                  }
+                },
+                {
+                  "run_member": {
+                    "run": "sia",
+                    "namespace": "observations",
+                    "member": "cases"
+                  }
+                },
+                {
+                  "bin_op": {
+                    "op": "add",
+                    "lhs": {
+                      "ident": {
+                        "name": { "name": "beta", "kind": "parameter" }
+                      }
+                    },
+                    "rhs": {
+                      "ident": {
+                        "name": { "name": "S", "kind": "compartment" }
+                      }
+                    }
+                  }
+                },
+                {
+                  "bin_op": {
+                    "op": "sub",
+                    "lhs": {
+                      "ident": {
+                        "name": { "name": "beta", "kind": "parameter" }
+                      }
+                    },
+                    "rhs": {
+                      "ident": {
+                        "name": { "name": "S", "kind": "compartment" }
+                      }
+                    }
+                  }
+                },
+                {
+                  "bin_op": {
+                    "op": "mul",
+                    "lhs": {
+                      "ident": {
+                        "name": { "name": "beta", "kind": "parameter" }
+                      }
+                    },
+                    "rhs": {
+                      "ident": {
+                        "name": { "name": "S", "kind": "compartment" }
+                      }
+                    }
+                  }
+                },
+                {
+                  "bin_op": {
+                    "op": "div",
+                    "lhs": {
+                      "ident": {
+                        "name": { "name": "beta", "kind": "parameter" }
+                      }
+                    },
+                    "rhs": {
+                      "ident": {
+                        "name": { "name": "S", "kind": "compartment" }
+                      }
+                    }
+                  }
+                },
+                {
+                  "bin_op": {
+                    "op": "pow",
+                    "lhs": {
+                      "ident": {
+                        "name": { "name": "beta", "kind": "parameter" }
+                      }
+                    },
+                    "rhs": {
+                      "ident": {
+                        "name": { "name": "S", "kind": "compartment" }
+                      }
+                    }
+                  }
+                },
+                {
+                  "bin_op": {
+                    "op": "eq",
+                    "lhs": {
+                      "ident": {
+                        "name": { "name": "beta", "kind": "parameter" }
+                      }
+                    },
+                    "rhs": {
+                      "ident": {
+                        "name": { "name": "S", "kind": "compartment" }
+                      }
+                    }
+                  }
+                },
+                {
+                  "bin_op": {
+                    "op": "neq",
+                    "lhs": {
+                      "ident": {
+                        "name": { "name": "beta", "kind": "parameter" }
+                      }
+                    },
+                    "rhs": {
+                      "ident": {
+                        "name": { "name": "S", "kind": "compartment" }
+                      }
+                    }
+                  }
+                },
+                {
+                  "bin_op": {
+                    "op": "lt",
+                    "lhs": {
+                      "ident": {
+                        "name": { "name": "beta", "kind": "parameter" }
+                      }
+                    },
+                    "rhs": {
+                      "ident": {
+                        "name": { "name": "S", "kind": "compartment" }
+                      }
+                    }
+                  }
+                },
+                {
+                  "bin_op": {
+                    "op": "gt",
+                    "lhs": {
+                      "ident": {
+                        "name": { "name": "beta", "kind": "parameter" }
+                      }
+                    },
+                    "rhs": {
+                      "ident": {
+                        "name": { "name": "S", "kind": "compartment" }
+                      }
+                    }
+                  }
+                },
+                {
+                  "bin_op": {
+                    "op": "le",
+                    "lhs": {
+                      "ident": {
+                        "name": { "name": "beta", "kind": "parameter" }
+                      }
+                    },
+                    "rhs": {
+                      "ident": {
+                        "name": { "name": "S", "kind": "compartment" }
+                      }
+                    }
+                  }
+                },
+                {
+                  "bin_op": {
+                    "op": "ge",
+                    "lhs": {
+                      "ident": {
+                        "name": { "name": "beta", "kind": "parameter" }
+                      }
+                    },
+                    "rhs": {
+                      "ident": {
+                        "name": { "name": "S", "kind": "compartment" }
+                      }
+                    }
+                  }
+                },
+                {
+                  "un_op": {
+                    "op": "neg",
+                    "arg": {
+                      "ident": {
+                        "name": { "name": "gamma", "kind": "parameter" }
+                      }
+                    }
+                  }
+                },
+                {
+                  "un_op": {
+                    "op": "exp",
+                    "arg": {
+                      "ident": {
+                        "name": { "name": "gamma", "kind": "parameter" }
+                      }
+                    }
+                  }
+                },
+                {
+                  "un_op": {
+                    "op": "log",
+                    "arg": {
+                      "ident": {
+                        "name": { "name": "gamma", "kind": "parameter" }
+                      }
+                    }
+                  }
+                },
+                {
+                  "un_op": {
+                    "op": "sqrt",
+                    "arg": {
+                      "ident": {
+                        "name": { "name": "gamma", "kind": "parameter" }
+                      }
+                    }
+                  }
+                },
+                {
+                  "un_op": {
+                    "op": "abs",
+                    "arg": {
+                      "ident": {
+                        "name": { "name": "gamma", "kind": "parameter" }
+                      }
+                    }
+                  }
+                },
+                {
+                  "un_op": {
+                    "op": "floor",
+                    "arg": {
+                      "ident": {
+                        "name": { "name": "gamma", "kind": "parameter" }
+                      }
+                    }
+                  }
+                },
+                {
+                  "un_op": {
+                    "op": "ceil",
+                    "arg": {
+                      "ident": {
+                        "name": { "name": "gamma", "kind": "parameter" }
+                      }
+                    }
+                  }
+                },
+                {
+                  "un_op": {
+                    "op": "sin",
+                    "arg": {
+                      "ident": {
+                        "name": { "name": "gamma", "kind": "parameter" }
+                      }
+                    }
+                  }
+                },
+                {
+                  "un_op": {
+                    "op": "cos",
+                    "arg": {
+                      "ident": {
+                        "name": { "name": "gamma", "kind": "parameter" }
+                      }
+                    }
+                  }
+                },
+                {
+                  "un_op": {
+                    "op": "tanh",
+                    "arg": {
+                      "ident": {
+                        "name": { "name": "gamma", "kind": "parameter" }
+                      }
+                    }
+                  }
+                },
+                {
+                  "un_op": {
+                    "op": "total",
+                    "arg": {
+                      "ident": {
+                        "name": { "name": "gamma", "kind": "parameter" }
+                      }
+                    }
+                  }
+                },
+                { "unit": { "value": 7.0, "unit": "days" } },
+                { "unit": { "value": 7.0, "unit": "weeks" } },
+                { "unit": { "value": 7.0, "unit": "months" } },
+                { "unit": { "value": 7.0, "unit": "years" } },
+                { "unit": { "value": 7.0, "unit": "per_day" } },
+                { "unit": { "value": 7.0, "unit": "per_week" } },
+                { "unit": { "value": 7.0, "unit": "per_month" } },
+                { "unit": { "value": 7.0, "unit": "per_year" } },
+                { "unit": { "value": 7.0, "unit": "count" } },
+                { "unit": { "value": 7.0, "unit": "ratio" } },
+                {
+                  "ident": { "name": { "name": "S", "kind": "compartment" } }
+                },
+                {
+                  "ident": {
+                    "name": { "name": "beta", "kind": "parameter" }
+                  }
+                },
+                {
+                  "ident": { "name": { "name": "N", "kind": "definition" } }
+                },
+                {
+                  "ident": { "name": { "name": "contact", "kind": "table" } }
+                },
+                {
+                  "ident": {
+                    "name": { "name": "pop", "kind": "time_input" }
+                  }
+                },
+                {
+                  "ident": {
+                    "name": { "name": "sia1", "kind": "timepoint" }
+                  }
+                },
+                { "ident": { "name": { "name": "a", "kind": "index_var" } } },
+                { "ident": { "name": { "name": "child", "kind": "level" } } },
+                { "ident": { "name": { "name": "t", "kind": "builtin" } } },
+                {
+                  "ident": {
+                    "name": { "name": "tested", "kind": "data_column" }
+                  }
+                }
+              ]
+            }
+          },
+          "katex": "\\frac{a}{b}",
+          "reads": [
+            { "name": "S", "kind": "compartment" },
+            { "name": "beta", "kind": "parameter" },
+            { "name": "N", "kind": "definition" },
+            { "name": "contact", "kind": "table" },
+            { "name": "pop", "kind": "time_input" },
+            { "name": "sia1", "kind": "timepoint" },
+            { "name": "a", "kind": "index_var" },
+            { "name": "child", "kind": "level" },
+            { "name": "t", "kind": "builtin" },
+            { "name": "tested", "kind": "data_column" }
+          ]
+        }
+      }
+    ],
+    "tables": [
+      {
+        "names": [ "contact", "contact_se" ],
+        "dims": [
+          { "dim": "age", "unit": null }, { "dim": "week", "unit": "weeks" }
+        ],
+        "cell_kind": "probability",
+        "value": {
+          "tree": {
+            "call": {
+              "function": "read_long",
+              "args": [
+                {
+                  "name": "path",
+                  "value": {
+                    "ident": {
+                      "name": { "name": "contact_file", "kind": "builtin" }
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "katex": "x",
+          "reads": []
+        }
+      },
+      {
+        "names": [ "w" ],
+        "dims": [],
+        "cell_kind": null,
+        "value": {
+          "tree": {
+            "list": {
+              "items": [
+                {
+                  "list": {
+                    "items": [
+                      { "const": { "value": 1.0 } },
+                      { "const": { "value": 2.0 } }
+                    ]
+                  }
+                },
+                {
+                  "list": {
+                    "items": [
+                      { "const": { "value": 3.0 } },
+                      { "const": { "value": 4.0 } }
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          "katex": "x",
+          "reads": []
+        }
+      }
+    ],
+    "time_inputs": [
+      {
+        "name": "pop",
+        "indices": [ { "in": { "var": "p", "dim": "patch" } } ],
+        "kind": "interpolated",
+        "unit": "count",
+        "args": [
+          { "name": "file", "value": { "str": { "value": "data/pop.tsv" } } },
+          {
+            "name": "period",
+            "value": {
+              "expr": {
+                "value": {
+                  "tree": { "unit": { "value": 1.0, "unit": "years" } },
+                  "katex": "x",
+                  "reads": []
+                }
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "timepoints": [
+      {
+        "name": "sia1",
+        "time": {
+          "tree": { "unit": { "value": 30.0, "unit": "days" } },
+          "katex": "x",
+          "reads": []
+        }
+      }
+    ],
+    "transitions": [
+      {
+        "name": "infection",
+        "indices": [ { "in": { "var": "a", "dim": "age" } } ],
+        "from": [ { "compartment": "S", "indices": [] } ],
+        "to": {
+          "sum": {
+            "compartments": [
+              {
+                "compartment": "I",
+                "indices": [
+                  {
+                    "positional": {
+                      "value": {
+                        "ident": {
+                          "name": { "name": "a", "kind": "index_var" }
+                        }
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "compartment": "R",
+                "indices": [
+                  {
+                    "named": {
+                      "dim": "age",
+                      "value": {
+                        "ident": {
+                          "name": { "name": "adult", "kind": "level" }
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "dynamics": {
+          "rate": {
+            "rate": {
+              "tree": {
+                "bin_op": {
+                  "op": "mul",
+                  "lhs": {
+                    "ident": {
+                      "name": { "name": "beta", "kind": "parameter" }
+                    }
+                  },
+                  "rhs": {
+                    "ident": {
+                      "name": { "name": "S", "kind": "compartment" }
+                    }
+                  }
+                }
+              },
+              "katex": "\\beta S",
+              "reads": [
+                { "name": "beta", "kind": "parameter" },
+                { "name": "S", "kind": "compartment" }
+              ]
+            }
+          }
+        },
+        "guard": {
+          "or": {
+            "lhs": {
+              "and": {
+                "lhs": { "eq": { "lhs": "a", "rhs": "child" } },
+                "rhs": { "neq": { "lhs": "p", "rhs": "q" } }
+              }
+            },
+            "rhs": {
+              "and": {
+                "lhs": {
+                  "and": {
+                    "lhs": {
+                      "table": {
+                        "table": "adjacent",
+                        "indices": [ "p", "q" ],
+                        "op": "lt",
+                        "operand": { "num": { "value": 1.0 } }
+                      }
+                    },
+                    "rhs": {
+                      "table": {
+                        "table": "adjacent",
+                        "indices": [ "p", "q" ],
+                        "op": "le",
+                        "operand": { "name": { "name": "threshold" } }
+                      }
+                    }
+                  }
+                },
+                "rhs": {
+                  "and": {
+                    "lhs": {
+                      "and": {
+                        "lhs": {
+                          "table": {
+                            "table": "adjacent",
+                            "indices": [ "p", "q" ],
+                            "op": "gt",
+                            "operand": { "num": { "value": 0.0 } }
+                          }
+                        },
+                        "rhs": {
+                          "table": {
+                            "table": "adjacent",
+                            "indices": [ "p", "q" ],
+                            "op": "ge",
+                            "operand": { "num": { "value": 0.5 } }
+                          }
+                        }
+                      }
+                    },
+                    "rhs": {
+                      "and": {
+                        "lhs": {
+                          "table": {
+                            "table": "adjacent",
+                            "indices": [ "p", "q" ],
+                            "op": "eq",
+                            "operand": { "num": { "value": 1.0 } }
+                          }
+                        },
+                        "rhs": {
+                          "table": {
+                            "table": "adjacent",
+                            "indices": [ "p", "q" ],
+                            "op": "ne",
+                            "operand": { "num": { "value": 2.0 } }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "lineage": true,
+        "expands_to": [ "infection_child", "infection_adult" ]
+      },
+      {
+        "name": "onset",
+        "indices": [],
+        "from": [
+          {
+            "compartment": "I",
+            "indices": [
+              {
+                "positional": {
+                  "value": {
+                    "ident": { "name": { "name": "a", "kind": "index_var" } }
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "to": {
+          "branch": {
+            "arms": [
+              {
+                "to": {
+                  "compartment": "R",
+                  "indices": [
+                    {
+                      "named": {
+                        "dim": "age",
+                        "value": {
+                          "ident": {
+                            "name": { "name": "adult", "kind": "level" }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                },
+                "weight": {
+                  "tree": {
+                    "ident": {
+                      "name": { "name": "p_recover", "kind": "parameter" }
+                    }
+                  },
+                  "katex": "x",
+                  "reads": []
+                }
+              },
+              {
+                "to": { "compartment": "S", "indices": [] },
+                "weight": {
+                  "tree": {
+                    "bin_op": {
+                      "op": "sub",
+                      "lhs": { "const": { "value": 1.0 } },
+                      "rhs": {
+                        "ident": {
+                          "name": {
+                            "name": "p_recover",
+                            "kind": "parameter"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "katex": "x",
+                  "reads": []
+                }
+              }
+            ]
+          }
+        },
+        "dynamics": {
+          "via": {
+            "law": "erlang",
+            "args": [
+              { "name": "stages", "value": { "const": { "value": 3.0 } } },
+              {
+                "name": "mean",
+                "value": { "unit": { "value": 9.0, "unit": "days" } }
+              }
+            ]
+          }
+        },
+        "guard": null,
+        "lineage": false,
+        "expands_to": [ "onset_stage_s1", "onset_stage_s2", "onset" ]
+      }
+    ],
+    "ode_equations": [
+      {
+        "compartment": "W",
+        "derivative": {
+          "tree": {
+            "bin_op": {
+              "op": "sub",
+              "lhs": {
+                "ident": { "name": { "name": "I", "kind": "compartment" } }
+              },
+              "rhs": {
+                "ident": { "name": { "name": "W", "kind": "compartment" } }
+              }
+            }
+          },
+          "katex": "x",
+          "reads": []
+        }
+      }
+    ],
+    "balance": [
+      {
+        "compartment": "R",
+        "expr": {
+          "tree": {
+            "bin_op": {
+              "op": "sub",
+              "lhs": {
+                "ident": { "name": { "name": "pop", "kind": "time_input" } }
+              },
+              "rhs": {
+                "ident": { "name": { "name": "S", "kind": "compartment" } }
+              }
+            }
+          },
+          "katex": "x",
+          "reads": []
+        }
+      }
+    ],
+    "initial": [
+      {
+        "compartment": "S",
+        "indices": [
+          {
+            "positional": {
+              "value": {
+                "ident": { "name": { "name": "child", "kind": "level" } }
+              }
+            }
+          }
+        ],
+        "bindings": [ { "in": { "var": "p", "dim": "patch" } } ],
+        "value": {
+          "expr": {
+            "value": {
+              "tree": {
+                "bin_op": {
+                  "op": "sub",
+                  "lhs": {
+                    "ident": {
+                      "name": { "name": "N0", "kind": "parameter" }
+                    }
+                  },
+                  "rhs": {
+                    "ident": {
+                      "name": { "name": "I0", "kind": "parameter" }
+                    }
+                  }
+                }
+              },
+              "katex": "x",
+              "reads": []
+            }
+          }
+        }
+      },
+      {
+        "compartment": "I",
+        "indices": [],
+        "bindings": [],
+        "value": {
+          "law": {
+            "law": {
+              "family": "neg_binomial",
+              "args": [
+                {
+                  "name": "rate",
+                  "value": {
+                    "ident": {
+                      "name": { "name": "I0", "kind": "parameter" }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "compartment": "I",
+        "indices": [],
+        "bindings": [],
+        "value": {
+          "law": {
+            "law": {
+              "family": "poisson",
+              "args": [
+                {
+                  "name": "rate",
+                  "value": {
+                    "ident": {
+                      "name": { "name": "I0", "kind": "parameter" }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "compartment": "I",
+        "indices": [],
+        "bindings": [],
+        "value": {
+          "law": {
+            "law": {
+              "family": "normal",
+              "args": [
+                {
+                  "name": "rate",
+                  "value": {
+                    "ident": {
+                      "name": { "name": "I0", "kind": "parameter" }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "compartment": "I",
+        "indices": [],
+        "bindings": [],
+        "value": {
+          "law": {
+            "law": {
+              "family": "binomial",
+              "args": [
+                {
+                  "name": "rate",
+                  "value": {
+                    "ident": {
+                      "name": { "name": "I0", "kind": "parameter" }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "compartment": "I",
+        "indices": [],
+        "bindings": [],
+        "value": {
+          "law": {
+            "law": {
+              "family": "beta_binomial",
+              "args": [
+                {
+                  "name": "rate",
+                  "value": {
+                    "ident": {
+                      "name": { "name": "I0", "kind": "parameter" }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "compartment": "I",
+        "indices": [],
+        "bindings": [],
+        "value": {
+          "law": {
+            "law": {
+              "family": "beta",
+              "args": [
+                {
+                  "name": "rate",
+                  "value": {
+                    "ident": {
+                      "name": { "name": "I0", "kind": "parameter" }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "compartment": "I",
+        "indices": [],
+        "bindings": [],
+        "value": {
+          "law": {
+            "law": {
+              "family": "bernoulli",
+              "args": [
+                {
+                  "name": "rate",
+                  "value": {
+                    "ident": {
+                      "name": { "name": "I0", "kind": "parameter" }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "compartment": "I",
+        "indices": [],
+        "bindings": [],
+        "value": {
+          "law": {
+            "law": {
+              "family": "zero_inflated_neg_binomial",
+              "args": [
+                {
+                  "name": "rate",
+                  "value": {
+                    "ident": {
+                      "name": { "name": "I0", "kind": "parameter" }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    ],
+    "observations": [
+      {
+        "name": "cases",
+        "indices": [ { "in": { "var": "p", "dim": "patch" } } ],
+        "source": "surveillance",
+        "columns": [
+          { "name": "week", "role": "time" },
+          { "name": "patch", "role": { "dim": { "dim": "patch" } } },
+          { "name": "start", "role": "window_start" },
+          { "name": "stop", "role": "window_stop" },
+          { "name": "v0", "role": { "value": { "kind": "rate" } } },
+          { "name": "v1", "role": { "value": { "kind": "probability" } } },
+          { "name": "v2", "role": { "value": { "kind": "count" } } },
+          { "name": "v3", "role": { "value": { "kind": "positive" } } },
+          { "name": "v4", "role": { "value": { "kind": "real" } } },
+          { "name": "v5", "role": { "value": { "kind": "instant" } } },
+          { "name": "v6", "role": { "value": { "kind": "duration" } } }
+        ],
+        "measurement": {
+          "scored": "v2",
+          "likelihood": {
+            "family": "neg_binomial",
+            "args": [
+              {
+                "name": "mean",
+                "value": {
+                  "bin_op": {
+                    "op": "mul",
+                    "lhs": {
+                      "ident": {
+                        "name": { "name": "rho", "kind": "parameter" }
+                      }
+                    },
+                    "rhs": {
+                      "ident": {
+                        "name": { "name": "projected", "kind": "builtin" }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "name": "dispersion",
+                "value": {
+                  "ident": { "name": { "name": "k", "kind": "parameter" } }
+                }
+              }
+            ]
+          }
+        },
+        "projection": {
+          "incidence": {
+            "transition": "infection",
+            "indices": [
+              {
+                "positional": {
+                  "value": {
+                    "ident": { "name": { "name": "p", "kind": "index_var" } }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "emit_schedule": {
+          "every": {
+            "every": {
+              "tree": { "unit": { "value": 1.0, "unit": "weeks" } },
+              "katex": "x",
+              "reads": []
+            }
+          }
+        },
+        "covers": {
+          "form": "ending_on",
+          "column": "week",
+          "span": {
+            "tree": { "unit": { "value": 7.0, "unit": "days" } },
+            "katex": "x",
+            "reads": []
+          }
+        },
+        "expands_to": [ "cases_north", "cases_south_west" ]
+      },
+      {
+        "name": "prevalence",
+        "indices": [],
+        "source": null,
+        "columns": [ { "name": "t", "role": "time" } ],
+        "measurement": {
+          "scored": "positive",
+          "likelihood": {
+            "family": "binomial",
+            "args": [
+              {
+                "name": "n",
+                "value": {
+                  "ident": {
+                    "name": { "name": "tested", "kind": "data_column" }
+                  }
+                }
+              },
+              {
+                "name": "p",
+                "value": {
+                  "ident": {
+                    "name": { "name": "projected", "kind": "builtin" }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "projection": {
+          "derived": {
+            "value": {
+              "tree": {
+                "bin_op": {
+                  "op": "div",
+                  "lhs": {
+                    "ident": {
+                      "name": { "name": "I", "kind": "compartment" }
+                    }
+                  },
+                  "rhs": {
+                    "ident": {
+                      "name": { "name": "N", "kind": "definition" }
+                    }
+                  }
+                }
+              },
+              "katex": "x",
+              "reads": []
+            }
+          }
+        },
+        "emit_schedule": {
+          "at": {
+            "times": [
+              {
+                "tree": { "const": { "value": 7.0 } },
+                "katex": "7",
+                "reads": []
+              },
+              {
+                "tree": { "const": { "value": 14.0 } },
+                "katex": "14",
+                "reads": []
+              }
+            ]
+          }
+        },
+        "covers": { "form": "day", "column": "t", "span": null },
+        "expands_to": [ "prevalence" ]
+      }
+    ],
+    "interventions": [
+      {
+        "name": "sia",
+        "indices": [ { "in": { "var": "p", "dim": "patch" } } ],
+        "actions": [
+          {
+            "transfer": {
+              "args": [
+                {
+                  "name": "fraction",
+                  "value": {
+                    "ident": {
+                      "name": { "name": "coverage", "kind": "parameter" }
+                    }
+                  }
+                },
+                {
+                  "name": "from",
+                  "value": {
+                    "ident": {
+                      "name": { "name": "S", "kind": "compartment" }
+                    }
+                  }
+                },
+                {
+                  "name": "to",
+                  "value": {
+                    "ident": {
+                      "name": { "name": "R", "kind": "compartment" }
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "set": {
+              "compartment": "I",
+              "indices": [],
+              "value": {
+                "tree": { "const": { "value": 0.0 } },
+                "katex": "0",
+                "reads": []
+              }
+            }
+          }
+        ],
+        "schedule": {
+          "at_times": {
+            "times": [
+              {
+                "tree": {
+                  "ident": {
+                    "name": { "name": "sia1", "kind": "timepoint" }
+                  }
+                },
+                "katex": "x",
+                "reads": []
+              },
+              {
+                "tree": { "const": { "value": 60.0 } },
+                "katex": "60",
+                "reads": []
+              }
+            ]
+          }
+        },
+        "guard": { "eq": { "lhs": "p", "rhs": "north" } }
+      },
+      {
+        "name": "routine",
+        "indices": [],
+        "actions": [
+          {
+            "add": {
+              "compartment": "R",
+              "indices": [
+                {
+                  "positional": {
+                    "value": {
+                      "ident": {
+                        "name": { "name": "child", "kind": "level" }
+                      }
+                    }
+                  }
+                }
+              ],
+              "count": {
+                "tree": { "const": { "value": 10.0 } },
+                "katex": "10",
+                "reads": []
+              }
+            }
+          }
+        ],
+        "schedule": {
+          "recurring": {
+            "every": {
+              "tree": { "unit": { "value": 1.0, "unit": "months" } },
+              "katex": "x",
+              "reads": []
+            },
+            "from": {
+              "tree": { "const": { "value": 0.0 } },
+              "katex": "0",
+              "reads": []
+            },
+            "to": null
+          }
+        },
+        "guard": null
+      }
+    ],
+    "events": [
+      {
+        "name": "import",
+        "indices": [],
+        "actions": [
+          {
+            "add": {
+              "compartment": "I",
+              "indices": [],
+              "count": {
+                "tree": { "const": { "value": 1.0 } },
+                "katex": "1",
+                "reads": []
+              }
+            }
+          }
+        ],
+        "schedule": {
+          "every_at_day": {
+            "period": {
+              "tree": { "unit": { "value": 1.0, "unit": "years" } },
+              "katex": "x",
+              "reads": []
+            },
+            "at_day": {
+              "tree": { "const": { "value": 250.0 } },
+              "katex": "250",
+              "reads": []
+            }
+          }
+        },
+        "guard": null
+      },
+      {
+        "name": "import_window",
+        "indices": [],
+        "actions": [
+          {
+            "add": {
+              "compartment": "I",
+              "indices": [],
+              "count": {
+                "tree": { "const": { "value": 2.0 } },
+                "katex": "2",
+                "reads": []
+              }
+            }
+          }
+        ],
+        "schedule": {
+          "recurring": {
+            "every": {
+              "tree": { "const": { "value": 7.0 } },
+              "katex": "7",
+              "reads": []
+            },
+            "from": null,
+            "to": {
+              "tree": { "const": { "value": 70.0 } },
+              "katex": "70",
+              "reads": []
+            }
+          }
+        },
+        "guard": null
+      }
+    ],
+    "reactive_interventions": [
+      {
+        "name": "response",
+        "indices": [ { "in": { "var": "p", "dim": "patch" } } ],
+        "when": {
+          "or": {
+            "lhs": {
+              "and": {
+                "lhs": {
+                  "atom": {
+                    "value": {
+                      "tree": {
+                        "bin_op": {
+                          "op": "gt",
+                          "lhs": { "obs_access": { "stream": "cases" } },
+                          "rhs": { "const": { "value": 50.0 } }
+                        }
+                      },
+                      "katex": "x",
+                      "reads": []
+                    }
+                  }
+                },
+                "rhs": {
+                  "not": {
+                    "arg": {
+                      "atom": {
+                        "value": {
+                          "tree": {
+                            "bin_op": {
+                              "op": "lt",
+                              "lhs": {
+                                "ident": {
+                                  "name": { "name": "t", "kind": "builtin" }
+                                }
+                              },
+                              "rhs": { "const": { "value": 30.0 } }
+                            }
+                          },
+                          "katex": "x",
+                          "reads": []
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "rhs": {
+              "atom": {
+                "value": {
+                  "tree": {
+                    "bin_op": {
+                      "op": "ge",
+                      "lhs": {
+                        "ident": {
+                          "name": { "name": "I", "kind": "compartment" }
+                        }
+                      },
+                      "rhs": { "const": { "value": 100.0 } }
+                    }
+                  },
+                  "katex": "x",
+                  "reads": []
+                }
+              }
+            }
+          }
+        },
+        "after": {
+          "tree": { "unit": { "value": 14.0, "unit": "days" } },
+          "katex": "x",
+          "reads": []
+        },
+        "once": {
+          "tree": { "const": { "value": 1.0 } },
+          "katex": "1",
+          "reads": []
+        },
+        "cooldown": {
+          "tree": { "unit": { "value": 90.0, "unit": "days" } },
+          "katex": "x",
+          "reads": []
+        },
+        "action": {
+          "transfer": {
+            "args": [
+              { "name": "count", "value": { "const": { "value": 500.0 } } },
+              {
+                "name": "from",
+                "value": {
+                  "ident": { "name": { "name": "S", "kind": "compartment" } }
+                }
+              },
+              {
+                "name": "to",
+                "value": {
+                  "ident": { "name": { "name": "R", "kind": "compartment" } }
+                }
+              }
+            ]
+          }
+        },
+        "guard": { "neq": { "lhs": "p", "rhs": "south_west" } }
+      },
+      {
+        "name": "plain",
+        "indices": [],
+        "when": {
+          "atom": {
+            "value": {
+              "tree": {
+                "bin_op": {
+                  "op": "gt",
+                  "lhs": {
+                    "ident": {
+                      "name": { "name": "I", "kind": "compartment" }
+                    }
+                  },
+                  "rhs": { "const": { "value": 10.0 } }
+                }
+              },
+              "katex": "x",
+              "reads": []
+            }
+          }
+        },
+        "after": null,
+        "once": null,
+        "cooldown": null,
+        "action": {
+          "set": {
+            "compartment": "I",
+            "indices": [],
+            "value": {
+              "tree": { "const": { "value": 0.0 } },
+              "katex": "0",
+              "reads": []
+            }
+          }
+        },
+        "guard": null
+      }
+    ],
+    "scenarios": [
+      {
+        "name": "baseline",
+        "fields": [
+          { "label": { "text": "No campaign" } },
+          { "enable": { "names": [ "routine" ] } },
+          { "disable": { "names": [ "sia", "import" ] } },
+          {
+            "set": {
+              "values": [
+                {
+                  "name": "beta",
+                  "value": {
+                    "tree": { "const": { "value": 0.4 } },
+                    "katex": "0.4",
+                    "reads": []
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "scale": {
+              "values": [
+                {
+                  "name": "coverage",
+                  "value": {
+                    "tree": { "const": { "value": 0.5 } },
+                    "katex": "0.5",
+                    "reads": []
+                  }
+                }
+              ]
+            }
+          },
+          { "compose": { "names": [ "routine_only", "low_coverage" ] } },
+          {
+            "t_end": {
+              "value": {
+                "tree": { "unit": { "value": 2.0, "unit": "years" } },
+                "katex": "x",
+                "reads": []
+              }
+            }
+          },
+          { "extends": { "parent": "default" } }
+        ]
+      },
+      { "name": "empty", "fields": [] }
+    ],
+    "simulation": {
+      "from": {
+        "tree": { "unit": { "value": 0.0, "unit": "days" } },
+        "katex": "x",
+        "reads": []
+      },
+      "to": {
+        "tree": { "unit": { "value": 80.0, "unit": "days" } },
+        "katex": "x",
+        "reads": []
+      },
+      "dt": {
+        "tree": { "const": { "value": 0.5 } },
+        "katex": "0.5",
+        "reads": []
+      },
+      "integrator": "rk45",
+      "atol": {
+        "tree": { "const": { "value": 1e-08 } },
+        "katex": "1e-08",
+        "reads": []
+      },
+      "rtol": null
+    },
+    "output": {
+      "trajectories": {
+        "schedule": {
+          "every": {
+            "every": {
+              "tree": { "const": { "value": 1.0 } },
+              "katex": "1",
+              "reads": []
+            }
+          }
+        },
+        "format": "tsv"
+      }
+    },
+    "quantities": [
+      {
+        "name": "attack_rate",
+        "indices": [ { "in": { "var": "a", "dim": "age" } } ],
+        "body": {
+          "tree": {
+            "bin_op": {
+              "op": "div",
+              "lhs": {
+                "ident": { "name": { "name": "R", "kind": "compartment" } }
+              },
+              "rhs": {
+                "ident": { "name": { "name": "N", "kind": "definition" } }
+              }
+            }
+          },
+          "katex": "x",
+          "reads": []
+        }
+      }
+    ],
+    "contrasts": [
+      {
+        "name": "averted",
+        "body": {
+          "tree": {
+            "bin_op": {
+              "op": "sub",
+              "lhs": {
+                "run_member": {
+                  "run": "baseline",
+                  "namespace": "observations",
+                  "member": "cases"
+                }
+              },
+              "rhs": {
+                "run_member": {
+                  "run": "sia",
+                  "namespace": "observations",
+                  "member": "cases"
+                }
+              }
+            }
+          },
+          "katex": "x",
+          "reads": []
+        }
+      }
+    ]
+  },
+  "minimal": {
+    "schema_version": 1,
+    "compile_inputs": { "set_values": [], "files": [] },
+    "time_unit": null,
+    "description": null,
+    "origin": null,
+    "dimensions": [],
+    "compartments": [],
+    "stratify": [],
+    "parameters": [],
+    "definitions": [],
+    "tables": [],
+    "time_inputs": [],
+    "timepoints": [],
+    "transitions": [],
+    "ode_equations": [],
+    "balance": [],
+    "initial": [],
+    "observations": [],
+    "interventions": [],
+    "events": [],
+    "reactive_interventions": [],
+    "scenarios": [],
+    "simulation": null,
+    "output": { "trajectories": null },
+    "quantities": [],
+    "contrasts": []
+  }
+}

@@ -169,3 +169,24 @@
  (name test_sha256)
  (modules test_sha256)
  (libraries compiler alcotest))
+
+; The declared-model codec (lib/ir/declared.ml) and its agreement with the Rust
+; `declared` crate. `declared_fixture` is the one hand-written value both the
+; test and the fixture generator use. The fixture file itself lives under
+; rust/crates/declared/tests/fixtures/, outside this dune root: the test
+; resolves the repo root at run time, and `make update-declared-fixture`
+; rewrites the file from `gen_declared_fixture`.
+(library
+ (name declared_fixture)
+ (modules declared_fixture)
+ (libraries ir yojson))
+
+(executable
+ (name gen_declared_fixture)
+ (modules gen_declared_fixture)
+ (libraries declared_fixture))
+
+(test
+ (name test_declared)
+ (modules test_declared)
+ (libraries declared_fixture ir alcotest yojson))

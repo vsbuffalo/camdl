@@ -377,6 +377,16 @@ update-reactive-golden: build-ocaml
 	@$(CAMDLC) $(REACTIVE_DIR)/reactive_sir_observed_threshold.camdl -o $(REACTIVE_DIR)/ir/reactive_sir_observed_threshold.ir.json
 	@$(CAMDLC) $(REACTIVE_DIR)/reactive_indexed_patch_sia.camdl      -o $(REACTIVE_DIR)/ir/reactive_indexed_patch_sia.ir.json
 
+# The cross-language declared-model fixture: one hand-written value
+# (ocaml/test/declared_fixture.ml) written through the OCaml codec. The OCaml
+# test (test_declared) checks the committed file against that value and the
+# Rust test (crates/declared/tests/ocaml_fixture.rs) reads it through the Rust
+# types. Not part of update-golden: it does not come from the compiler.
+DECLARED_FIXTURE := rust/crates/declared/tests/fixtures/all_variants.json
+.PHONY: update-declared-fixture
+update-declared-fixture: build-ocaml
+	cd ocaml && dune exec --no-print-directory ./test/gen_declared_fixture.exe > ../$(DECLARED_FIXTURE)
+
 # Drift gate (gh#204): each reactive .camdl must still compile BYTE-FOR-BYTE to
 # its committed .ir.json. `update-reactive-golden` regenerates; this FAILS if
 # source and golden have diverged (a grammar/expander change that moved the IR
