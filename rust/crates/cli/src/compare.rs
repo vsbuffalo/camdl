@@ -28,7 +28,7 @@ use crate::fit::handle::ResolvedFit;
 use crate::fit::stream_bindings::StreamBindings;
 use crate::posterior_draws::PosteriorDrawsRef;
 use serde::Deserialize;
-use sim::inference::prequential::{
+use score::trace::{
     Conditioning, PrequentialTrace, StreamMean, ThetaSource, TraceOverride,
 };
 use std::path::{Path, PathBuf};
@@ -175,10 +175,10 @@ struct Row {
 
 impl Row {
     /// This row re-scored on one leaf alone
-    /// ([`sim::inference::prequential::project_onto_stream`]); the refusal
+    /// ([`score::trace::project_onto_stream`]); the refusal
     /// names the row.
     fn onto(&self, leaf: &str) -> Result<Row, String> {
-        let trace = sim::inference::prequential::project_onto_stream(&self.trace, leaf)
+        let trace = score::trace::project_onto_stream(&self.trace, leaf)
             .map_err(|e| format!("'{}': {e}", self.name))?;
         Ok(Row { trace, ..self.clone() })
     }
@@ -1043,8 +1043,8 @@ fn in_sample_ablation(rows: &[Row]) -> Option<Mismatch> {
     })
 }
 
-fn provenance_kind(p: &sim::inference::prequential::Provenance) -> String {
-    use sim::inference::prequential::Provenance;
+fn provenance_kind(p: &score::trace::Provenance) -> String {
+    use score::trace::Provenance;
     match p {
         Provenance::PlugIn => "plug_in (a single θ)".to_string(),
         Provenance::Posterior { n_draws } => format!("posterior (mixture over {n_draws} draws)"),
@@ -1367,8 +1367,8 @@ fn check_scored_streams(first: &Row, r: &Row) -> Result<(), String> {
 fn check_step_pair(
     first: &Row,
     r: &Row,
-    a: &sim::inference::prequential::PrequentialStep,
-    b: &sim::inference::prequential::PrequentialStep,
+    a: &score::trace::PrequentialStep,
+    b: &score::trace::PrequentialStep,
 ) -> Result<(), String> {
     let (sa, sb) = (step_streams(a), step_streams(b));
     if sa == sb {
@@ -1453,8 +1453,8 @@ fn check_shared_times(rows: &[Row]) -> Result<(), String> {
 fn check_shared_coverage(
     first: &Row,
     r: &Row,
-    a: &sim::inference::prequential::PrequentialStep,
-    b: &sim::inference::prequential::PrequentialStep,
+    a: &score::trace::PrequentialStep,
+    b: &score::trace::PrequentialStep,
 ) -> Result<(), String> {
     use score::trace::Coverage;
     for sa in &a.per_stream {
@@ -1669,7 +1669,7 @@ fn data_prefix_note(rows: &[Row]) -> Option<String> {
 
 /// The set of stream names scored at one step. Empty for a v1 trace, which has
 /// no per-stream breakdown at all.
-fn step_streams(s: &sim::inference::prequential::PrequentialStep)
+fn step_streams(s: &score::trace::PrequentialStep)
     -> std::collections::BTreeSet<&str>
 {
     s.per_stream.iter().map(|x| x.stream.as_str()).collect()
@@ -1726,7 +1726,7 @@ fn pointwise_rows(rows: &[Row], base_idx: usize) -> Result<Pointwise, String> {
                     names.push(s.stream.as_str());
                 }
             }
-            let find = |ss: &[sim::inference::prequential::StreamScore], n: &str| {
+            let find = |ss: &[score::trace::StreamScore], n: &str| {
                 ss.iter().find(|s| s.stream == n).map(|s| s.log_score)
             };
             for n in names {
@@ -2106,7 +2106,7 @@ fn mc_se_delta(row: &Row, base: &Row) -> Option<f64> {
 /// others. The refusal and the `--allow-mismatched-filter-settings`
 /// renderings share it.
 fn filter_settings_mismatch(rows: &[Row]) -> Option<Mismatch> {
-    let recorded: Vec<(&str, &sim::inference::prequential::Derivation)> = rows.iter()
+    let recorded: Vec<(&str, &score::trace::Derivation)> = rows.iter()
         .filter_map(|r| r.trace.derivation.as_ref().map(|d| (r.name.as_str(), d)))
         .collect();
     // Equality is transitive, so every row is checked against the first that
@@ -2657,7 +2657,7 @@ fn combine_mixture(
     traces: Vec<PrequentialTrace>,
     pit_seed: u64,
 ) -> Result<PrequentialTrace, String> {
-    use sim::inference::prequential::Provenance;
+    use score::trace::Provenance;
     let m = traces.len();
     let mut trace = combine_scored_traces(traces, pit_seed)?;
     trace.provenance = Provenance::Posterior { n_draws: m };
@@ -2686,10 +2686,11 @@ fn combine_scored_traces(
     traces: Vec<PrequentialTrace>,
     pit_seed: u64,
 ) -> Result<PrequentialTrace, String> {
-    use sim::inference::prequential::{
+    use score::trace::{
         crps_sample_fair, pit_sample_randomized, PredInterval, PrequentialStep,
-        StreamScore, PIT_RNG_STREAM,
+        StreamScore,
     };
+    use sim::inference::prequential::PIT_RNG_STREAM;
     let m = traces.len();
     assert!(m >= 2, "combine_scored_traces needs >= 2 components");
     let first = &traces[0];
@@ -3821,7 +3822,7 @@ mod tests {
     /// `Posterior { n_draws }`.
     #[test]
     fn combine_mixture_averages_densities_and_pools_samples() {
-        use sim::inference::prequential::{
+        use score::trace::{
             crps_sample_fair, PredInterval, PrequentialStep, PrequentialTrace,
             PrequentialWarning, Provenance, StreamScore,
         };
@@ -3881,7 +3882,7 @@ mod tests {
 
     #[test]
     fn combine_mixture_refuses_mismatched_axes() {
-        use sim::inference::prequential::{PrequentialStep, PrequentialTrace, Provenance};
+        use score::trace::{PrequentialStep, PrequentialTrace, Provenance};
         let trace_at = |t: f64| PrequentialTrace {
             schema_version: 3,
             t0: 0,
@@ -4081,7 +4082,7 @@ mod tests {
     /// trace warning, and the optimism caveat must reach all three.
     #[test]
     fn no_output_format_drops_a_warning_or_the_optimism_caveat() {
-        use sim::inference::prequential::PrequentialWarning;
+        use score::trace::PrequentialWarning;
         let mut rows = vec![
             row_with_streams("a", &[7.0, 14.0, 21.0], &["cases"]),
             row_with_streams("b", &[7.0, 14.0, 21.0], &["cases"]),
@@ -4392,11 +4393,11 @@ mod tests {
     }
 
     fn derivation(particles: usize, replicates: usize)
-        -> sim::inference::prequential::Derivation
+        -> score::trace::Derivation
     {
-        sim::inference::prequential::Derivation {
+        score::trace::Derivation {
             particles, replicates, dt: 1.0, seed: 1,
-            theta: sim::inference::prequential::ThetaSource::OptimizerWinner,
+            theta: score::trace::ThetaSource::OptimizerWinner,
             excluded_chains: vec![], enabled: vec![], disabled: vec![],
             replicate_elpd: vec![0.0; replicates],
             replicate_elpd_by_stream: Default::default(),
@@ -4436,7 +4437,7 @@ mod tests {
     /// Give a test row the filter-noise SE a replicated derive records, or
     /// (for `None`) no derivation block at all, as an explicit trace has.
     fn set_mc_se(row: &mut Row, mc: Option<f64>) {
-        row.trace.derivation = mc.map(|se| sim::inference::prequential::Derivation {
+        row.trace.derivation = mc.map(|se| score::trace::Derivation {
             mc_se_elpd: Some(se),
             ..derivation(1000, 5)
         });
@@ -4749,7 +4750,7 @@ mod tests {
         match w {
             Waiver::MismatchedHorizon => rows[1] = row_at("b", &[7.0, 14.0], &[-5.0, -6.0]),
             Waiver::MixedProvenance => rows[1].trace.provenance =
-                sim::inference::prequential::Provenance::Posterior { n_draws: 4 },
+                score::trace::Provenance::Posterior { n_draws: 4 },
             Waiver::DataMismatch => {
                 rows[0].data = digests(&[("cases", "aaaaaaaa11")]);
                 rows[1].data = digests(&[("cases", "bbbbbbbb22")]);
@@ -5087,7 +5088,7 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
 
     /// A trace with joint scores at the given times and no per-stream breakdown.
     fn row_at(name: &str, times: &[f64], log_scores: &[f64]) -> Row {
-        use sim::inference::prequential::{Conditioning, PrequentialStep, Provenance};
+        use score::trace::{Conditioning, PrequentialStep, Provenance};
         let steps = times.iter().zip(log_scores).map(|(&t, &ls)| PrequentialStep {
             t,
             log_score: ls,
@@ -5116,7 +5117,7 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
 
     /// A trace scoring the named streams at every one of `times`.
     fn row_with_streams(name: &str, times: &[f64], streams: &[&str]) -> Row {
-        use sim::inference::prequential::StreamScore;
+        use score::trace::StreamScore;
         let log_scores = vec![-6.0; times.len()];
         let mut row = row_at(name, times, &log_scores);
         for step in &mut row.trace.steps {
@@ -5576,7 +5577,7 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
 
         for leaf in ["north", "south"] {
             let by_hand: Vec<f64> = reps.iter()
-                .map(|rep| sim::inference::prequential::project_onto_stream(rep, leaf).unwrap().elpd())
+                .map(|rep| score::trace::project_onto_stream(rep, leaf).unwrap().elpd())
                 .collect();
             let want = numerics::logmeanexp_with_se(&by_hand).1;
             let got = row_mc_se(&row.onto(leaf).unwrap());

@@ -30,7 +30,7 @@
 //! row, the point-mass mixture against the parametric density, and the
 //! randomized PIT's calibration on a Poisson forecast, aborting on failure.
 
-use sim::inference::prequential::{
+use score::trace::{
     crps_sample, crps_sample_fair, log_score_plug_in, pit_sample_randomized,
 };
 use std::path::{Path, PathBuf};

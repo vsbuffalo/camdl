@@ -2181,7 +2181,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // Prequential: record on the first replicate only; scoring
                 // is a property of the point estimate, not a per-rep
                 // quantity. Subsequent reps just build the loglik SD.
-                let mut preq_trace: Option<sim::inference::prequential::PrequentialTrace> = None;
+                let mut preq_trace: Option<score::trace::PrequentialTrace> = None;
                 for r in 0..n_reps {
                     let pf_seed = seed ^ ((r as u64).wrapping_mul(0x7f4a7c15_u64));
                     let process = run_config.build_process();
@@ -2236,9 +2236,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                                 })
                             };
                             trace.derivation = Some(
-                                sim::inference::prequential::Derivation::single_pass(
+                                score::trace::Derivation::single_pass(
                                     &trace, *particles, smc_config.dt, pf_seed,
-                                    sim::inference::prequential::ThetaSource::Supplied,
+                                    score::trace::ThetaSource::Supplied,
                                     enabled, disabled));
                             preq_trace = Some(trace);
                         }

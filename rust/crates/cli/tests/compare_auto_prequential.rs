@@ -14,7 +14,7 @@
 //! (handle-aware `compare`; the prequential scoring is
 //! docs/dev/proposals/2026-04-20-prequential-evaluation.md §8).
 
-use sim::inference::prequential::PrequentialTrace;
+use score::trace::PrequentialTrace;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

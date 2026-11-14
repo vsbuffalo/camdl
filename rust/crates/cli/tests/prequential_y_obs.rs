@@ -20,7 +20,7 @@
 //! the other. `fit_run_prequential_equals_pfilter_prequential` below pins the
 //! two against each other.
 
-use sim::inference::prequential::PrequentialTrace;
+use score::trace::PrequentialTrace;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;

@@ -413,7 +413,7 @@ fn compare_derives_the_prequential_under_the_fits_selection() {
     ok(run(tmp.path(), &["pfilter", archived.to_str().unwrap(), "--data", &data,
         "--params", "theta.toml", "--enable", "vax", "--save-prequential", "manual",
         "--particles", "300", "--seed", "7"]), "manual pfilter");
-    let manual: sim::inference::prequential::PrequentialTrace = serde_json::from_str(
+    let manual: score::trace::PrequentialTrace = serde_json::from_str(
         &std::fs::read_to_string(tmp.path().join("manual.json")).unwrap()).unwrap();
 
     let out = ok(run(tmp.path(), &["compare", "@a", "@b",
