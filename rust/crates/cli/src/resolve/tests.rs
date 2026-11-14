@@ -890,3 +890,87 @@ fn a_profile_points_method_level_is_named_method_and_naming_it_rekeys_nothing() 
         "the path segment is {{label}}-{{hash8}}; renaming the level moves no \
          directory on disk");
 }
+
+// ── Run ids of compiled goldens, pinned ──────────────────────────────────────
+//
+// Invariant 9 of `docs/dev/proposals/2026-11-13-model-structure-diff.md`, on
+// the run-id side. `tests/fixtures/golden_run_ids.tsv` holds, for five compiled
+// goldens, the model-bearing level hash and the leaf `run_id` of every CAS
+// kind (`all_kind_identities`), recorded at the commit named in its header:
+// the last one before the `declared` section of the IR envelope existed. This
+// test recomputes them from the goldens as they are now and compares, so a
+// change to a compiled golden that moves any run id fails here.
+//
+// What the pin does and does not say. Every non-model input is fixed, and so
+// are the two version strings a run id folds beside the model (`IRV`, `ENGV`).
+// A run id on a user's machine folds the real `ir/VERSION` and the engine
+// build, so it changes at every IR version bump and every engine build by
+// design. The pin holds those constant to isolate the one thing the declared
+// section could have disturbed: what the compiled model contributes.
+//
+// Regenerated only by `make update-golden-run-ids`, and only when a re-key of
+// these models is the subject of the change.
+
+const GOLDEN_RUN_IDS_TABLE: &str = "tests/fixtures/golden_run_ids.tsv";
+
+/// Plain; stratified with an indexed parameter, a table and a forcing; a `via`
+/// staged transition; interventions and scenarios; an observation model.
+const PINNED_GOLDENS: &[&str] = &[
+    "sir_basic",
+    "seir_spatial_5_inference",
+    "ebola_outcome_hyper",
+    "polio_age",
+    "seir_observations",
+];
+
+fn golden_run_id_rows() -> Vec<String> {
+    let golden_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../ocaml/golden");
+    let mut rows = Vec::new();
+    for name in PINNED_GOLDENS {
+        let path = golden_dir.join(format!("{name}.ir.json"));
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let model = ir::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+        for (kind, level, run_id) in all_kind_identities(&model) {
+            rows.push(format!("{name}\t{kind}\t{}\t{}", level.to_hex(), run_id.to_hex()));
+        }
+    }
+    rows
+}
+
+#[test]
+fn golden_run_ids_match_the_reference_table() {
+    let table = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(GOLDEN_RUN_IDS_TABLE);
+    let rows = golden_run_id_rows();
+
+    if let Ok(commit) = std::env::var("CAMDL_CAPTURE_GOLDEN_RUN_IDS") {
+        let mut out = String::new();
+        out.push_str("# Model-bearing level hash and run_id of every CAS kind, for five compiled goldens.\n");
+        out.push_str("# Source: ocaml/golden/<golden>.ir.json (primary), resolved by all_kind_identities in\n");
+        out.push_str("#   rust/crates/cli/src/resolve/tests.rs with every non-model input fixed, including\n");
+        out.push_str("#   the IR version and engine strings a real run id folds.\n");
+        out.push_str(&format!("# Recorded at commit: {commit}\n"));
+        out.push_str("# Regenerate: make update-golden-run-ids\n");
+        out.push_str("golden\tkind\tlevel_hash\trun_id\n");
+        for row in &rows {
+            out.push_str(row);
+            out.push('\n');
+        }
+        std::fs::write(&table, out).unwrap_or_else(|e| panic!("write {}: {e}", table.display()));
+        return;
+    }
+
+    let text = std::fs::read_to_string(&table).unwrap_or_else(|e| panic!("read {}: {e}", table.display()));
+    let recorded: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.starts_with("golden\t"))
+        .collect();
+    assert_eq!(recorded.len(), rows.len(), "the table has one row per golden and kind");
+    for (was, now) in recorded.iter().zip(&rows) {
+        assert_eq!(
+            was, now,
+            "a pinned golden run id moved (columns: golden, kind, level hash, run id). \
+             If re-keying these models is the subject of the change, say so and run \
+             `make update-golden-run-ids`; otherwise this is collateral and must be fixed."
+        );
+    }
+}
