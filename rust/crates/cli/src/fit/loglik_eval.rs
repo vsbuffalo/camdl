@@ -41,7 +41,6 @@
 //! reflects the implementation.
 
 use crate::chain_index::ChainIndex;
-use crate::evidence;
 use crate::fit::config_v2::{LoglikEvalConfig, CombineMode};
 use crate::fit::runner::{self, FitRunConfig};
 use sim::inference::if2::IF2Result;
@@ -302,13 +301,13 @@ where
 /// always the SE of the reported point estimate.
 pub fn combine_with_se(xs: &[f64], mode: CombineMode) -> (f64, f64) {
     match mode {
-        CombineMode::LogMeanExp => evidence::logmeanexp_with_se(xs),
+        CombineMode::LogMeanExp => sim::inference::types::logmeanexp_with_se(xs),
         CombineMode::Mean => {
             if xs.is_empty() {
                 return (f64::NEG_INFINITY, f64::NAN);
             }
             let mean = xs.iter().sum::<f64>() / xs.len() as f64;
-            let se = evidence::sample_sd(xs) / (xs.len() as f64).sqrt();
+            let se = sim::inference::types::sample_sd(xs) / (xs.len() as f64).sqrt();
             (mean, se)
         }
     }
@@ -451,8 +450,8 @@ mod tests {
         };
         let out = run_loglik_eval_with_scorer(&results, &cfg, 0, scorer).unwrap();
 
-        // Verify against evidence::logmeanexp_with_se directly.
-        let (expected_ll, expected_se) = evidence::logmeanexp_with_se(&[-100.0, -98.0]);
+        // Verify against logmeanexp_with_se directly.
+        let (expected_ll, expected_se) = sim::inference::types::logmeanexp_with_se(&[-100.0, -98.0]);
         assert!((out.per_chain[0].loglik - expected_ll).abs() < 1e-9);
         assert!((out.per_chain[0].se - expected_se).abs() < 1e-9);
     }

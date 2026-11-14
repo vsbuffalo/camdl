@@ -848,7 +848,7 @@ scout runs a loglik-evaluation pass:
    high-particle PF replicates. Per-replicate logliks are combined via
    `logmeanexp` (unbiased on the likelihood scale) to a single combined score;
    the SE is the delta-method approximation on the log scale via
-   `evidence::logmeanexp_with_se`. Defaults: `n_particles = 4000`,
+   `sim::inference::types::logmeanexp_with_se`. Defaults: `n_particles = 4000`,
    `n_replicates = 8`, `combine = LogMeanExp`. Override per method with
    `--loglik-eval-particles N` / `--loglik-eval-reps M`.
 3. **Cross-chain selection.** The maximum across per-chain clean logliks names

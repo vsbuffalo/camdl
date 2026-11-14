@@ -2192,7 +2192,7 @@ impl ReplicateTotals {
             }
         }
         let mc_se = (elpd.len() >= 2)
-            .then(|| crate::evidence::logmeanexp_with_se(&elpd).1);
+            .then(|| sim::inference::types::logmeanexp_with_se(&elpd).1);
         ReplicateTotals { elpd, by_stream, mc_se }
     }
 }
@@ -2269,7 +2269,7 @@ fn combine_scored_traces(
     let mut steps = Vec::with_capacity(first.steps.len());
     for si in 0..first.steps.len() {
         let ls: Vec<f64> = traces.iter().map(|t| t.steps[si].log_score).collect();
-        let (log_score, _) = crate::evidence::logmeanexp_with_se(&ls);
+        let (log_score, _) = sim::inference::types::logmeanexp_with_se(&ls);
         let ess = traces.iter().map(|t| t.steps[si].ess)
             .fold(f64::INFINITY, f64::min);
 
@@ -2278,7 +2278,7 @@ fn combine_scored_traces(
             let ss0 = &first.steps[si].per_stream[pi];
             let ls_s: Vec<f64> = traces.iter()
                 .map(|t| t.steps[si].per_stream[pi].log_score).collect();
-            let (log_score_s, _) = crate::evidence::logmeanexp_with_se(&ls_s);
+            let (log_score_s, _) = sim::inference::types::logmeanexp_with_se(&ls_s);
             let mut pooled_s: Vec<f64> = Vec::new();
             for t in &traces {
                 pooled_s.extend_from_slice(&t.steps[si].per_stream[pi].y_pred_samples);
@@ -3889,7 +3889,7 @@ mod tests {
         assert_eq!(totals.by_stream["north"], vec![-9.0, -9.0]);
         assert_eq!(totals.by_stream["south"], vec![-9.0, -11.0]);
         assert_eq!(totals.mc_se,
-            Some(crate::evidence::logmeanexp_with_se(&totals.elpd).1),
+            Some(sim::inference::types::logmeanexp_with_se(&totals.elpd).1),
             "the SE is the log-mean-exp SE of the stored totals");
         assert!(totals.mc_se.is_some_and(|se| se > 0.0));
 
