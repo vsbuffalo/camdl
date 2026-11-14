@@ -228,7 +228,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     let bound_streams: Option<Vec<(String, std::path::PathBuf)>> = if cli_data_specs.is_empty() {
         // No CLI --data. Try the fit-toml fallback.
         a.fit.as_ref().map(|fit_path| {
-            load_data_observations_from_fit_toml(fit_path, &model_obs_names)
+            load_data_observations_from_fit_toml(fit_path, &model_in)
                 .unwrap_or_else(|e| {
                     out.fail(format!("error: --fit toml fallback for --data: {}", e));
                 })
@@ -1080,17 +1080,24 @@ use crate::caltime_load::{check_substeps_and_grid, convert_time_column, TimeOpts
 
 /// gh#90: fit-toml fallback for `camdl pfilter --fit fit.toml` (no CLI
 /// `--data` flags). Reads `[data]` from the toml and returns a list of
-/// (stream_name, path) bindings — same shape `resolve_data_specs`
-/// produces, so downstream code is uniform.
+/// (key, path) bindings — the shape `resolve_data_specs` produces, so
+/// downstream code is uniform.
+///
+/// The keys are [`StreamBindings::identity_keyed_training`]'s: the run
+/// identities of `pfilter` and `profile` fold one digest per binding, so the
+/// layout is identity, not presentation.
+///
+/// [`StreamBindings::identity_keyed_training`]:
+///     crate::fit::stream_bindings::StreamBindings::identity_keyed_training
 pub fn load_data_observations_from_fit_toml(
     fit_path: &std::path::Path,
-    model_obs_names: &[String],
+    model: &ir::Model,
 ) -> Result<Vec<(String, std::path::PathBuf)>, String> {
     let path_str = fit_path.to_string_lossy().into_owned();
     let fit_cfg = crate::fit::config_v2::Problem::load(&path_str)
         .map_err(|e| format!("failed to load --fit toml '{}': {}", path_str, e))?;
-    let data_spec = fit_cfg.data_spec()?;
-    let effective = data_spec.effective_observations(model_obs_names)?;
+    let effective = crate::fit::stream_bindings::StreamBindings::resolve(model, fit_cfg.data_spec()?)?
+        .identity_keyed_training();
     if effective.is_empty() {
         return Err(format!(
             "--fit toml '{}' [data] resolves to zero observation streams.",

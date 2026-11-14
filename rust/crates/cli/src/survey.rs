@@ -947,10 +947,10 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
         refuse_survey_without_finite_boxes(&estimated)?;
 
         // Load observations from [data] and hash bytes per stream.
-        let data_spec = config.data_spec()?;
-        let model_obs_names: Vec<String> = model.observations.iter()
-            .map(|o| o.name.clone()).collect();
-        let effective = data_spec.effective_observations(&model_obs_names)?;
+        // Keyed as survey's run identity has always folded its data
+        // (`identity_keyed_training`): one digest per key.
+        let effective = crate::fit::stream_bindings::StreamBindings::resolve(
+            &model, config.data_spec()?)?.identity_keyed_training();
         if effective.is_empty() {
             return Err("fit.toml [data] resolves to zero observation streams.".into());
         }

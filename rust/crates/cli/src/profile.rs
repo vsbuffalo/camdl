@@ -664,7 +664,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             out.say("profile: no --data flags supplied, reading bindings \
                 from --fit toml [data.observations]");
             crate::pfilter::load_data_observations_from_fit_toml(
-                fit_path.as_path(), &model_obs_names,
+                fit_path.as_path(), &model_pre,
             ).unwrap_or_else(|e| {
                 out.fail(format!("error: --fit toml fallback for --data: {}", e));
             })
