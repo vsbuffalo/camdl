@@ -117,16 +117,20 @@ Runbook: `docs/dev/testing.md` ("Gotcha: camdlc version check"). The deeper fix
 
 Docs prose follows the style guide, `docs/documentation-style.md`.
 
-Format any `.md` you touch with `mdfmt` (`dprint fmt`) as the last step, so
-formatting never rides in on the next substantive commit. `main` is protected,
-so a post-push reformat can't be force-pushed — it has to be a fresh commit.
+Format any `.md` you touch with `dprint fmt <the files you touched>` as the last
+step, so formatting never rides in on the next substantive commit. `main` is
+protected, so a post-push reformat can't be force-pushed — it has to be a fresh
+commit. The repository's `dprint.json` is the configuration: Markdown only, with
+the language spec excluded. Name the files: a bare `dprint fmt` reformats every
+Markdown file in the tree, and with `--config-discovery=global` it uses the
+caller's own configuration instead, which can include JSON and so the goldens.
 
-**EXCEPTION: never run `mdfmt`/`dprint fmt` on `docs/camdl-language-spec.md`.**
-It embeds ~30 `<!-- camdl-doctest-preamble -->` markers and fenced `camdl`
-snippets that the doc-test harness parses; `dprint`'s reflow disturbs that
-structure and turns passing doc-tests into failures/ICEs. Edit it by hand. Any
-other `.md` with embedded doctest preambles is the same hazard — check before
-formatting.
+**Exception: `docs/camdl-language-spec.md` is never formatted.** It embeds ~30
+`<!-- camdl-doctest-preamble -->` markers and fenced `camdl` snippets that the
+doc-test harness parses; `dprint`'s reflow disturbs that structure and turns
+passing doc-tests into failures/ICEs. `dprint.json` excludes it. Edit it by
+hand. Any other `.md` with embedded doctest preambles is the same hazard — check
+before formatting.
 
 `docs/camdl-data-spec.md` is executed too (`make test-data-spec`) but is **safe
 to format**: its examples are marked in the fence info string
