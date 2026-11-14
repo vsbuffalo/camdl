@@ -7219,10 +7219,16 @@ PATHS                       ≥2 when --config is absent. Each is a prequential.
 --explain                   print the model-comparison methods guide and exit
                             (the same text as `camdl docs model-comparison`);
                             takes no PATHS
---config compare.toml       [[model]] entries; can also carry baseline/metrics/format
+--config compare.toml       [[model]] entries; can also carry baseline/metrics/format/
+                            streams
 --baseline NAME             reference for Δ columns (default: argmax elpd)
 --metric elpd,crps,pit_cov90
 --format table|md|json      (default table)
+--streams NAME[,NAME...]    one table per observation stream (a leaf, or a source
+                            for all its leaves), every row scored on that stream
+                            alone; no figure combines streams
+--allow-in-sample-ablation  under --streams, render rows whose fits assimilated
+                            different streams although scored in-sample
 --allow-mismatched-horizon  render even if T_score differs (Δ columns → '—');
                             waives only the times one row scored and the other
                             did not
@@ -7251,7 +7257,8 @@ PATHS                       ≥2 when --config is absent. Each is a prequential.
                             forms is rejected. Always warns
 --pointwise PATH            write the per-observation Δelpd vector: joint scores
                             to PATH, per-stream scores to PATH with .streams
-                            before its extension
+                            before its extension (under --streams: only the
+                            .streams file, for the selected streams)
 ```
 
 Columns: `T_score`, `elpd`, `Δelpd`, `LR` (= exp(Δelpd), the in-sample
@@ -7341,6 +7348,32 @@ pass), and `overrides` — the waivers applied to that one trace
 (`in_sample_forced`, `changed_data`), omitted when there are none. A row's
 filter-noise SE is read from this block, so an explicit `prequential.json` that
 carries one takes part in the filter-noise gate.
+
+Under `--streams`, each selected stream (leaf) gets its own table, and each
+row's trace is re-scored on that leaf: a step that did not score it is dropped,
+and a step that did keeps its `t` and `ess`, takes the leaf's own `log_score`,
+and keeps only the leaf's `per_stream` entry. Nothing is recomputed. The
+`derivation` block is restated for the leaf (`replicate_elpd` from
+`replicate_elpd_by_stream` for that leaf, `mc_se_elpd` recomputed from it), an
+`ess_collapse` warning is recounted over the surviving steps and
+`starts_at_prior` kept only when the first step survives, and the trace records
+`scored_streams = [leaf]`, so a re-scored trace is never paired with a joint
+one. A name resolves to a leaf or to every leaf of a source, in the model's
+order, and must resolve in every row; an explicit `prequential.json` accepts
+only a leaf it scored. Every check runs per table, and a refusal names the
+stream. The data check compares only that leaf's source, and a row with digests
+but none for it is refused (`--allow-data-mismatch`). Rows whose fits
+assimilated different leaves (the leaves their fit configs bind; unknown for an
+explicit trace, which counts as different) are refused when in-sample unless
+`--allow-in-sample-ablation` is given, whose override states the bias toward the
+fit trained on fewer streams. Each table is headed by its stream; its footer
+drops `t0` and, when the sets differ, lists each with its rows. The JSON is
+`{ "streams_scored": [...], "tables":
+[...] }`, each table the document above
+plus `stream`, each row plus `streams_assimilated` (null when unknown); there is
+no field combining streams. `--pointwise` writes only the `.streams` file.
+Without `--streams` every output is unchanged, except that the stream-set
+refusal names `--streams` with the streams the two rows share.
 
 ### Browsing, labelling, data
 
