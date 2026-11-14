@@ -474,7 +474,8 @@ so a bare `toml` reader still sees the parameters at the top level. The block
 records `camdl_version`, `timestamp`, `content_hash` (a tamper hash over the
 numeric values only, at 12-decimal precision, so editing a provenance field does
 not invalidate it), `fit_hash`, `backend`, `dt`, `source_model`,
-`model_identity`, per-stream `[provenance.data]` entries of `source` and `hash`,
+`model_identity`, per-source `[provenance.data]` entries of `source` and `hash`
+(the full SHA-256 of each training file, the digest the fit's identity folds),
 `seed`, `method`, `chain` (counted from 0, §2), `log_likelihood`, `loglik_sd`,
 `n_particles`, and optional `ess_mean`/`ess_min`. `source_model` and each data
 `source` are paths relative to the fit folder (`fits/<stem>-<h8>/`, two levels
@@ -514,9 +515,9 @@ structural model hash), `source_config` (the producing config file, as a path
 relative to the fit folder that holds this `fit.meta.json`, below; absent for a
 CLI-only fit), `fit_toml_hash` (SHA-256 of the producing config's raw bytes —
 provenance, i.e. which exact bytes produced this fit; a `fit.toml` handle is NOT
-looked up by it, see below), `data_hashes`, `estimated`, `fixed`, `partition`
-(the run's parameter roles, below), `resolved_priors` (one `{param, source}`
-entry per estimated parameter,
+looked up by it, see below), `data_hashes`, `holdout_hashes`, `estimated`,
+`fixed`, `partition` (the run's parameter roles, below), `resolved_priors` (one
+`{param, source}` entry per estimated parameter,
 `source ∈ {fit_toml, model_ir, flat_explicit, flat_fallback}`, plus
 `overridden_model_prior` when the fit.toml's prior displaced a model `~` prior;
 recorded whichever method ran, because every method run on the problem shares
@@ -568,16 +569,23 @@ the same thing. A record without the key is version 1, whose `fit_toml_path` and
 error: …/fit.meta.json is fit.meta.json schema version 1; this camdl reads version 2 only (…). Re-run the fit with this camdl.
 ```
 
-Two caveats a consumer must know. `data_hashes` holds, per observation stream
-the fit binds, the first eight hex digits of the SHA-256 of the stream's data
-file, over the resolved stream set — so the `[data] file = "..."` shorthand
-records one entry per stream it binds, each the one file's hash (gh#771); a
-holdout file is not hashed here. And `fixed` is projected from the base
-configuration, so under `fit run --sweep` every swept segment records the
-_unswept_ value of the swept parameter; the segment's fit-level hash, not this
-field, distinguishes the sweep points. `estimated`, `fixed`, `partition` and
-`parameters_provenance` are written per segment from that segment's own
-resolution; the fit-level record before any segment has run leaves them empty.
+Two caveats a consumer must know. `data_hashes` holds, per observation source
+the fit binds (the `from <label>` a data file is bound to, which is the stream's
+name for a plain stream), the full SHA-256 of the training file bound to it: the
+same digest the fit's run identity folds. The `[data] file = "..."` shorthand
+records the one file under every source it binds (gh#771); `[data.observations]`
+records each file under the key written. `holdout_hashes` records each
+`[data.holdout]` file the same way and is omitted when there is none. A sidecar
+written by an older camdl may hold the first eight hex digits only, key a
+shorthand fit by observation leaf (`cases_urban`, `cases_rural` for one indexed
+`cases[p in patch]` block), and record no holdout files; `compare` reads such a
+record as its entry in Appendix A (`camdl compare`) describes. And `fixed` is
+projected from the base configuration, so under `fit run --sweep` every swept
+segment records the _unswept_ value of the swept parameter; the segment's
+fit-level hash, not this field, distinguishes the sweep points. `estimated`,
+`fixed`, `partition` and `parameters_provenance` are written per segment from
+that segment's own resolution; the fit-level record before any segment has run
+leaves them empty.
 
 `partition` is the authoritative record of the run's roles. Its `parameters` map
 holds, per parameter, `role` (`estimated` or `fixed`), `declared_by`
@@ -5143,7 +5151,7 @@ Sub-artifacts that are _not_ `RunRecord`s:
   child.
 - `fits/{fit_stem}-{h8}/fit.meta.json` — the fit-wide sidecar:
   `{schema_version, source_model, model_identity, source_config, fit_toml_hash, data_hashes,
-  estimated, fixed, resolved_priors, parameters_provenance, schema}`,
+  holdout_hashes, estimated, fixed, resolved_priors, parameters_provenance, schema}`,
   where `schema` describes each observation stream (`name`, `index_dims`,
   `value_column`, `value_kind`, `likelihood`).
 
@@ -7261,21 +7269,28 @@ guide (`docs/methods/model-comparison.md`), not under every table.
 The JSON keeps every field: `optimism_caveat`, `evidence_scale_note`,
 `se_caveat` (populated below 100 scored steps), `data_mismatch` and
 `data_unchecked`, `data_changed` and `data_change_unchecked`,
-`filter_settings_mismatch` and `filter_settings_unchecked`, and
-`filter_noise_unassessed`, plus per-row `provenance`, `conditioning`,
-`derivation`, `lag1_autocorr_delta_elpd`, `mc_se_elpd`, `warnings` and
-`pit_cov90_warning`. It is the machine surface and loses nothing by repeating
-itself.
+`data_compared_on_prefix`, `filter_settings_mismatch` and
+`filter_settings_unchecked`, and `filter_noise_unassessed`, plus per-row
+`provenance`, `conditioning`, `derivation`, `lag1_autocorr_delta_elpd`,
+`mc_se_elpd`, `warnings` and `pit_cov90_warning`. It is the machine surface and
+loses nothing by repeating itself.
 
 Two further refusals are overridable. A derived row re-reads its fit's training
-files, and each file is hashed and checked against the hash the fit recorded in
+files, and its `[data.holdout]` files when it is scored held out on them, and
+each file is hashed and checked against the hash the fit recorded in
 `fit.meta.json`: a file edited in place since the fit ran would be scored at a θ̂
 fitted to other bytes, so it is refused (exit 2) unless `--allow-changed-data`
-is given. A file that cannot be checked — a stream with no recorded hash, a fit
-with no sidecar, a `[data.holdout]` file — is named in `data_change_unchecked`.
-And two rows whose traces record different particle or replicate counts are
-refused unless `--allow-mismatched-filter-settings` is given, because the log of
-a particle-filter likelihood estimate is biased downward by more at fewer
+is given. A file that cannot be checked — a source with no recorded hash, a fit
+with no sidecar, a holdout file in a sidecar that records none — is named in
+`data_change_unchecked`. The shared-data check compares the holdout files of
+rows scored held out on them as well as the training files. A sidecar that
+records 8-character hashes is compared on those 8 characters, by both checks,
+and `data_compared_on_prefix` (and a line under the table) names the row; one
+that keys a shorthand fit by leaf is read per source where every leaf records
+the same hash, and that source is otherwise named as not checked. And two rows
+whose traces record different particle or replicate counts are refused unless
+`--allow-mismatched-filter-settings` is given, because the log of a
+particle-filter likelihood estimate is biased downward by more at fewer
 particles; a trace that records no settings (older than schema 5) is named in
 `filter_settings_unchecked`.
 
