@@ -18,22 +18,37 @@ block can expand into several concrete streams: an indexed block
 **source**, and each concrete stream a **leaf**. For a plain stream the two
 names are the same string.
 
-A fit config binds data files by source (`[data.observations]`, checked by
-`check_bound_sources` in `rust/crates/cli/src/fit/runner.rs`), or binds every
+A fit config binds data files by source (`[data.observations]`), or binds every
 source to one file with the shorthand `[data] file = "..."`. A fit may bind only
-some of the sources its model declares: `resolve_and_load_obs_streams` keeps the
-observation blocks whose source is bound and ignores the rest. The shorthand
-always binds every source.
+some of the sources its model declares: the observation blocks whose source is
+bound are loaded and the rest are ignored. The shorthand always binds every
+source.
+
+### Stream bindings
+
+`StreamBindings` (`rust/crates/cli/src/fit/stream_bindings.rs`) is the one
+resolution of a fit's `[data]` block against its model.
+`StreamBindings::resolve` expands the shorthand by source and refuses a
+`[data.observations]` or `[data.holdout]` key that names no declared source. Its
+accessors are `training_by_source` and `holdout_by_source` (source → file),
+`leaves` (every bound leaf with its source, sorted by leaf),
+`leaves_of(source)`, `identity_keyed_training` (the key layout run identities
+fold) and `digests`. `fit run`, the fit record and `compare`'s derive step all
+read it, and the fit record's `data_hashes` and `holdout_hashes`
+(`fit.meta.json`) are keyed by source in every config form. This proposal adds
+one accessor, `source_of(leaf)`, read by the restricted data check below.
 
 ### The trace
 
 `camdl compare` works from one **prequential trace** per fit: the record of
 one-step-ahead predictive scores a particle filter produced while passing over
 the data (`PrequentialTrace`, `rust/crates/sim/src/inference/prequential.rs`).
-Each scored time step (`PrequentialStep`) carries two kinds of score:
+Each scored time step (`PrequentialStep`) is `{t, log_score, ess, per_stream}`:
 
 - A **joint** score. `log_score` is the log of the particle average of the
-  product of the likelihoods of every leaf observed at that step.
+  product of the likelihoods of every leaf observed at that step. Summed over
+  steps it is the row's `elpd`.
+- `ess`, the filter's effective sample size at the step.
 - A **per-leaf** breakdown, `per_stream: Vec<StreamScore>`, present since trace
   schema 2. For each leaf observed at the step it holds that leaf's own
   `log_score` (the log of the particle average of that leaf's likelihood alone),
@@ -41,40 +56,45 @@ Each scored time step (`PrequentialStep`) carries two kinds of score:
   (the window the observed value was accumulated over). `StreamScore.stream` is
   the leaf name.
 
-The comparison table is built from the joint score only. The per-leaf scores
-leave `compare` only through `--pointwise`, a TSV of per-step differences.
+A step has no observed value, CRPS, PIT or interval of its own: accuracy and
+calibration exist per leaf only, read through the trace's per-stream summaries
+(`streams()`, `stream_scores(stream)`, `mean_crps(stream)`,
+`pit_coverage(stream, level)`). The comparison table's `elpd`, `Δelpd`, `LR`,
+`se(Δ)` and evidence columns are built from the joint score. CRPS and PIT
+coverage are reported per leaf: as columns of the main table when every row
+scored the same single leaf, otherwise in a per-stream block below it.
+
+A trace at schema 5 also carries a `derivation` block recording how it was
+computed: the particle and replicate counts, the seed, where θ came from, and
+the replicate totals — `replicate_elpd` (each replicate's total joint elpd),
+`replicate_elpd_by_stream` (each replicate's sum of one leaf's `log_score`, per
+leaf) and `mc_se_elpd`, the filter-noise Monte-Carlo standard error of the elpd
+from `replicate_elpd` (the log-mean-exp delta-method SE, `logmeanexp_with_se`;
+absent for a single pass). Every reader of the row's filter-noise SE reads
+`derivation.mc_se_elpd`.
+
+`--pointwise FILE` writes two files: the joint per-step scores and their
+differences against the baseline to `FILE`, and each leaf's own per-step scores
+to the `.streams` sibling (`scores.tsv` → `scores.streams.tsv`).
 
 ### The refusals
 
 Because the joint score covers every leaf a fit bound, two fits that bound
 different sets score different quantities. gh#570 recorded the consequence: a
 model scored on six extra observations was reported as "overwhelming against"
-purely for having been scored on them. Since then
-`check_shared_observation_axis` (`rust/crates/cli/src/compare.rs`) refuses any
-pair whose steps do not carry the same leaf names, with no override, and
-`check_shared_data` refuses fits whose recorded data hashes differ, including a
-stream bound by one fit only, unless `--allow-data-mismatch` is passed.
+purely for having been scored on them. Every cross-row check runs once, in
+`preflight(rows, &Waivers) -> Result<Preflight, String>`
+(`rust/crates/cli/src/compare.rs`); the renderers take the resulting
+`&Preflight` and recompute nothing. Among its checks,
+`check_shared_observation_axis` refuses any pair whose steps do not carry the
+same leaf names, with no override, and `check_shared_data` refuses fits whose
+recorded data hashes differ, including a source bound by one fit only, unless
+`--allow-data-mismatch` is passed. A waiver that was given and needed is
+recorded in `Preflight::overrides` and stated in every format.
 
 Those refusals are correct for the joint score and stay as they are. The cost is
 that the stream ablation experiment — one model fitted to `cases` and `deaths`,
 and to `cases` alone, compared on `cases` — cannot be run through `compare`.
-
-## Prerequisite: one resolution of stream names
-
-Three places name a stream, and they do not agree. The trace uses leaf names.
-`[data.observations]`, `[data.holdout]` and the fit record's `data_hashes` under
-that form use sources. Under the one-file shorthand, `fit run` expands by source
-(`fit/runner.rs`, the `source_labels` expansion) while the fit record's
-`data_hashes` (`resolved_data_hashes`, `fit/mod.rs`) and `compare`'s
-`resolve_streams` expand by leaf name.
-
-This proposal depends on a single typed resolution, built from the model and the
-fit's `[data]` block, that answers for every bound leaf: its source, and the
-data file bound to that source. `fit run`, the fit record, `compare`'s derive
-step and the option below all read it, and `data_hashes` is keyed by source in
-every config form. That change lands first, as its own commits, and is not
-specified further here; this document assumes it under the name
-`StreamBindings`.
 
 ## The design
 
@@ -101,10 +121,11 @@ fn project_onto_stream(
 
 in `prequential.rs`. For each step of the input trace it finds the `per_stream`
 entry for `leaf`. A step with no such entry is dropped: the fit observed only
-other leaves at that time. Otherwise the step's `log_score`, `crps`, `pit`,
-`interval`, `y_obs` and `y_pred_samples` become that entry's, copied unchanged,
-and `per_stream` is reduced to that one entry. No score is recomputed and no
-random number is drawn.
+other leaves at that time. Otherwise the step keeps its `t`, its `log_score`
+becomes that entry's `log_score`, and `per_stream` is reduced to that one entry,
+copied unchanged. No score is recomputed and no random number is drawn. A
+projected trace is a single-stream trace, so its CRPS and PIT coverage are the
+leaf's own and it renders through the existing single-stream table path.
 
 The projected score is exact: it is the fit's one-step-ahead predictive density
 for that leaf, given everything the fit's filter had assimilated up to that
@@ -114,6 +135,15 @@ Fields that describe the filter pass rather than the scored set are handled
 explicitly:
 
 - `ess` is carried over. It describes the filter at that step.
+- The `derivation` block, when present, is restated for the leaf, so every
+  reader of the block sees the leaf's figures: `replicate_elpd` becomes
+  `replicate_elpd_by_stream[leaf]` (each replicate's projected total),
+  `replicate_elpd_by_stream` is reduced to that one entry, and `mc_se_elpd` is
+  recomputed from those totals with `logmeanexp_with_se` (absent for one
+  replicate). The other fields are carried over. A block with no entry for the
+  leaf is refused rather than left describing the joint score.
+  `logmeanexp_with_se` moves from the `cli` crate's `evidence` module into `sim`
+  so the projection can call it.
 - `t0` and `score_from` are carried over, and the table footer's
   `Scored steps: n (t0=…)` drops the `t0` part under `--streams`, because `t0`
   indexes each fit's own time axis and means different things for fits with
@@ -123,10 +153,11 @@ explicitly:
 - `PrequentialWarning::EssCollapse` is recomputed over the surviving steps with
   the threshold the warning recorded, and dropped when none of them is below it.
 - A new optional field `scored_streams: Option<Vec<String>>` on
-  `PrequentialTrace` (serde default, omitted when absent) is set to `[leaf]`. A
-  projected trace is never written by `compare`, but if one is ever serialized
-  it cannot be read back as a joint trace. `check_shared_observation_axis`
-  refuses a pair whose `scored_streams` differ.
+  `PrequentialTrace` (serde default, omitted when absent) is set to `[leaf]`. It
+  is added within schema 5, which is unreleased, so the schema number does not
+  change. A projected trace is never written by `compare`, but if one is ever
+  serialized it cannot be read back as a joint trace.
+  `check_shared_observation_axis` refuses a pair whose `scored_streams` differ.
 
 The function refuses, naming the row and the leaf, when the leaf appears in no
 step, when the trace has steps but no `per_stream` breakdown (a schema 1 trace),
@@ -140,26 +171,34 @@ each `per_stream` entry's `log_score` by log-mean-exp across components, which
 is the leaf's marginal predictive under the mixture. The projection therefore
 runs on the fully combined trace.
 
-`derive_prequential` computes each row's filter-noise Monte-Carlo standard error
-(`mc_se`) from the replicate traces' total joint `elpd`, before combining them.
-Under `--streams` it returns, per selected leaf, the standard error computed
-from the replicates' projected totals. The selection is passed to `load_trace`
-and on to `derive_prequential` as its own argument, not as a field of
-`DeriveSettings`, because it applies to explicit `prequential.json` rows too.
-For an explicit row the projection runs in `load_trace` and there is no `mc_se`.
+The replicate totals the per-leaf filter-noise SE needs are already on the
+combined trace (`derivation.replicate_elpd_by_stream`), so the projection needs
+nothing from the derivation that produced the trace, and `derive_prequential`
+takes no selection. Each row is loaded once, whatever the number of selected
+leaves. `load_trace` returns, beside the trace, the row's **stream names**: for
+a derived row the model's declared leaves with their sources, in the model's
+order, and the row's bound leaves from `StreamBindings`; for an explicit
+`prequential.json` only the leaves present in the trace. `cmd_compare` resolves
+`--streams` against every row's stream names (below) and projects each loaded
+row onto each selected leaf. A name may resolve to different leaves in rows
+whose models differ; the selection is then the union of the resolutions in
+first-seen order, and a row that does not score one of those leaves is refused
+by the projection, naming the row and the leaf.
 
 `cmd_compare` then runs its existing pipeline once per selected leaf, on rows
-whose traces are the projections for that leaf: the conditioning and provenance
-preflights, the T_score check, `check_shared_observation_axis`,
-`check_shared_coverage`, the data check, baseline choice, `paired_delta` with
-its Newey–West standard error, and the renderers. A refusal for one leaf is a
-refusal of the whole command and names the leaf.
+whose traces are the projections for that leaf: `preflight` (the conditioning
+and provenance checks, the T_score check, `check_shared_observation_axis`,
+`check_shared_coverage`, the data checks and the filter-settings check),
+baseline choice, `paired_delta` with its Newey–West standard error, and the
+renderers. A refusal for one leaf is a refusal of the whole command, through the
+existing refusal path (exit 2), and names the leaf.
 
 ### Fits that assimilated different streams must be scored held-out
 
 A row's **assimilated set** is the set of leaves its fit bound: from
-`StreamBindings` for a derived row, and unknown for an explicit
-`prequential.json`. An unknown set is treated as different from every other.
+`StreamBindings::leaves()` of its fit for a derived row, and unknown for an
+explicit `prequential.json`. An unknown set is treated as different from every
+other.
 
 When the rows' assimilated sets differ, the comparison is the ablation
 experiment, and scored in-sample it is biased by construction. The fit trained
@@ -171,11 +210,13 @@ streams. Held-out scoring removes this, because neither fit's parameters were
 tuned to the scored rows.
 
 So under `--streams`, when assimilated sets differ and the rows are stamped
-`InSample`, `compare` refuses (exit 2) and says to declare the same
-`holdout_after` in every fit. `--allow-in-sample-ablation` renders anyway, and
-every format then carries a caveat stating the direction of the bias. When the
-rows are stamped `HoldOutTail`, or when all rows assimilated the same set, no
-flag is needed.
+`InSample`, `preflight` refuses (exit 2) and says to declare the same
+`holdout_after` in every fit. `--allow-in-sample-ablation` is a new `Waiver`:
+under it the comparison renders, the override is recorded in
+`Preflight::overrides` like the others, and every format then carries its
+consequence, a caveat stating the direction of the bias. When the rows are
+stamped `HoldOutTail`, or when all rows assimilated the same set, no flag is
+needed.
 
 A held-out difference between rows with different assimilated sets still
 combines two effects: parameters that were trained on the extra stream, and a
@@ -195,29 +236,30 @@ methods page says so.
   `tables` is the document `compare` emits today plus `"stream"`, and each row
   gains `streams_assimilated` (a list, or `null` when unknown). Without
   `--streams` the JSON is unchanged.
-- `--pointwise` under `--streams` writes rows for the selected leaves only, with
-  `scope=stream`, and its header comment says so.
+- `--pointwise FILE` under `--streams` writes only the per-stream file, the
+  `.streams` sibling of `FILE`, with rows for the selected leaves only, and its
+  header comment says so. The joint file `FILE` is not written, and the terminal
+  message says that it was not.
 
 ### The data check under `--streams`
 
-For the table of a leaf, `check_shared_data` compares the recorded hash of that
-leaf's source, found through `StreamBindings`, across rows. A row that carries
-digests but has none for that source is refused, not skipped: an absent key must
-not read as "no difference". `--allow-data-mismatch` overrides as today. Other
-sources are not compared, and the existing "not checked" note names them. The
-same applies to holdout-file hashes.
+For the table of a leaf, the data check inside `preflight` compares the recorded
+hash of that leaf's source, found through `StreamBindings::source_of`, across
+rows. A row that carries digests but has none for that source is refused, not
+skipped: an absent key must not read as "no difference". `--allow-data-mismatch`
+overrides as today. Other sources are not compared, and the existing "not
+checked" note names them. The same applies to holdout-file hashes.
 
-The result of the data check is computed once per table in `cmd_compare` and
-passed to the renderers. Today `warning_lines` and `render_json` each call
-`check_shared_data` again on the unrestricted entries, which would print a
-mismatch the restricted preflight had cleared.
+Because the check runs inside `preflight` and the renderers read only its
+`Preflight`, no format can report a mismatch the restricted check cleared.
 
 ### What does not change
 
 - Without `--streams`, every check and every number is as today. The stream-set
   refusal's message gains one sentence when the two rows share at least one
   leaf, naming the option and the shared leaves. It does not suggest
-  `--allow-mismatched-horizon`, which skips the observation-axis check.
+  `--allow-mismatched-horizon`, which waives only the T_score check and leaves
+  the stream-set check in force.
 - The conditioning check is untouched: rows must all be in-sample or all
   held-out, with the same training boundary.
 - The selected leaf must be scored at the same times, over the same windows, in
@@ -244,7 +286,7 @@ those leaves, and nothing in a trace can turn one into the other. So under
   With two or more selected leaves the output is two or more separate tables and
   nothing else.
 - The JSON `tables` array has no sibling aggregate.
-- The `--pointwise` TSV carries no `scope=joint` rows.
+- `--pointwise` writes no joint file and no row combining leaves.
 
 If a combined figure is added later (below), it gets its own column and field
 name — never `elpd`, `delta_elpd` or `lr` — and its own label saying it is a sum
@@ -257,11 +299,6 @@ marginal score, not the per-particle likelihoods the true joint over a subset
 would need. A combined table built from a sum of marginal log scores would have
 no valid likelihood ratio, evidence label or PIT column. A later flag may add
 it, with those columns blank, without changing anything specified here.
-
-**The existing joint CRPS and PIT.** For a multi-stream fit they are computed on
-the sum of all leaves' counts while the log score is the joint density. This
-proposal neither uses nor changes them: every number in a `--streams` table
-comes from one leaf's own entry.
 
 ## Alternatives considered
 
@@ -283,37 +320,38 @@ computes. The refusal message supplies the shared leaves.
 ## Implementation
 
 Each step is one commit, cites this document in a `Proposal:` footer, and lands
-with its tests. The `StreamBindings` prerequisite lands before step 1.
+with its tests. The `StreamBindings` prerequisite has landed.
 
-1. `project_onto_stream` and the `scored_streams` field in `prequential.rs`.
-   Tests: the projection copies the entry exactly; steps without the leaf are
-   dropped; each refusal; the two warning rules; projecting a one-leaf trace
-   onto its leaf reproduces the trace's `elpd`; a trace without the field still
-   deserializes.
-2. `--streams` on `CompareArgs` and `streams` on `CompareToml`; name resolution
-   through `StreamBindings`; the selection threaded through `load_trace` and
-   `derive_prequential`; per-leaf `mc_se`; the per-leaf loop in `cmd_compare`.
-   Test: per-leaf `mc_se` equals the value computed by hand from projected
-   replicate traces.
-3. The data check computed once and passed to the renderers, restricted per
-   table, refusing an absent key. Tests: two rows whose `deaths` hashes differ
-   and whose `cases` hashes agree are refused without `--streams` and pass with
-   `--streams cases`, with no mismatch warning in any format; a row lacking the
-   selected source's hash is refused.
-4. The assimilated set, the in-sample refusal, `--allow-in-sample-ablation` and
-   its caveat. Tests: refusal when sets differ in-sample; no refusal when they
-   match; the caveat in every format under the flag; an explicit trace counts as
-   a different set.
-5. Table headings, footer lines, the JSON shape, the `--pointwise` header and
-   the hint in the stream-set refusal. Test: every format states the scored leaf
-   and each row's assimilated set.
+1. `project_onto_stream` and the `scored_streams` field in `prequential.rs`,
+   with `logmeanexp_with_se` moved into `sim` beforehand. Tests: the projection
+   copies the entry exactly; steps without the leaf are dropped; each refusal;
+   the two warning rules; the derivation block restated for the leaf; projecting
+   a one-leaf trace onto its leaf reproduces the trace's `elpd`; a trace without
+   the field still deserializes.
+2. `--streams` on `CompareArgs` and `streams` on `CompareToml`; the row's stream
+   names returned by `load_trace`; name resolution against them; the per-leaf
+   loop in `cmd_compare`. Test: the projected trace's `mc_se_elpd` equals the
+   value computed by hand from the projected replicate traces.
+3. The data check inside `preflight` restricted per table through
+   `StreamBindings::source_of`, refusing an absent key. Tests: two rows whose
+   `deaths` hashes differ and whose `cases` hashes agree are refused without
+   `--streams` and pass with `--streams cases`, with no mismatch warning in any
+   format; a row lacking the selected source's hash is refused.
+4. The assimilated set, the in-sample refusal, the `--allow-in-sample-ablation`
+   waiver and its caveat. Tests: refusal when sets differ in-sample; no refusal
+   when they match; the caveat in every format under the flag; an explicit trace
+   counts as a different set.
+5. Table headings, footer lines, the JSON shape, the `--pointwise` per-stream
+   file and terminal message, and the hint in the stream-set refusal. Test:
+   every format states the scored leaf and each row's assimilated set.
 6. An end-to-end test in `rust/crates/cli/tests/`: one two-stream model fitted
    twice with `[data.observations]` and the same `holdout_after`, once binding
    both sources and once binding one. `compare` refuses the pair and the message
    names `--streams <shared>`; with it the table renders held-out, and each
-   row's `elpd` equals the sum of that leaf's scores in the `--pointwise`
-   output. The same pair without a holdout is refused, and renders with the
-   caveat under `--allow-in-sample-ablation`.
+   row's `elpd` equals the sum of that leaf's `log_score` in the `.streams`
+   pointwise file. The same pair without a holdout is refused, and renders with
+   the caveat under `--allow-in-sample-ablation`.
 7. `docs/methods/model-comparison.md` (the text behind `camdl compare --explain`
    and `camdl docs model-comparison`): the option, what a per-leaf score is, the
-   in-sample bias, and the two effects a held-out ablation difference combines.
+   in-sample bias, and the two effects a held-out ablation difference combines;
+   and the flag lists in `docs/commands.md` and `docs/camdl-run-spec.md`.
