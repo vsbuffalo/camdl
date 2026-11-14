@@ -1,0 +1,19 @@
+[package]
+name = "score"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The scoring report as a library: the types and the pure computation of a
+# model comparison (docs/dev/proposals/2026-11-14-scoring-report-library.md).
+# It has no access to files, the store, processes, threads, the clock,
+# environment variables or a random number generator, so a comparison can be
+# computed and read without the camdl binary. Two tests hold that: this list
+# is exactly the three dependencies below (tests/dependencies.rs), and no file
+# under src/ names the standard library's modules for those things
+# (tests/source.rs). `make check-score-wasm` builds the crate for
+# wasm32-unknown-unknown.
+[dependencies]
+numerics = { path = "../numerics" }
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true

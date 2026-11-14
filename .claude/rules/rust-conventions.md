@@ -20,6 +20,7 @@ io   → ir, sim
 sim  → ir, numerics
 runid → ir, runid-derive
 ir   → differentiate-derive
+score → numerics
 external-harness → numerics
 numerics, differentiate-derive, runid-derive  → (leaves)
 ```

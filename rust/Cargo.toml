@@ -15,6 +15,7 @@ members = [
   "crates/numerics",
   "crates/runid",
   "crates/runid-derive",
+  "crates/score",
   "crates/sim",
 ]
 resolver = "2"
