@@ -760,6 +760,51 @@ let ref_bases (refs : stoich_ref list) : string list =
     (fun (n, _) -> if Hashtbl.mem seen n then None else (Hashtbl.add seen n (); Some n))
     refs
 
+(* The destinations a `via hyper_erlang(branch(..., to = D), ...)` law gives its
+   branches, with each branch's share of the flow: a branch's own `to`, else
+   the transition's arrow target [arrow]. The last branch may leave its weight
+   out, and its share is then one minus the others' (the expander's rule,
+   `Expander.lower_via_transitions`). Empty when the law is not `hyper_erlang`
+   or no branch names a `to`: the arrow target is then the whole answer.
+   Branches that share a destination are drawn as one edge, with no share. *)
+let hyper_branch_dests (t : transition_decl) ~(arrow : string list)
+    : (string option * expr option) list =
+  match t.trdyn with
+  | Rate _ -> []
+  | Via (law, _) when law <> "hyper_erlang" -> []
+  | Via (_, args) ->
+    let branches =
+      List.filter_map (function
+        | (_, EFuncCall ("branch", kvs)) -> Some kvs
+        | _ -> None) args in
+    let own_to kvs =
+      match List.assoc_opt "to" kvs with
+      | Some (EIdent (d, _)) | Some (EIndex (d, _, _)) -> Some d
+      | _ -> None in
+    if not (List.exists (fun kvs -> own_to kvs <> None) branches) then []
+    else begin
+      let explicit = List.filter_map (List.assoc_opt "weight") branches in
+      let remainder =
+        match explicit with
+        | [] -> None
+        | w :: ws ->
+          Some (EBinOp (Sub, EConst 1.0,
+                        List.fold_left (fun acc x -> EBinOp (Add, acc, x)) w ws)) in
+      let specs =
+        List.concat_map (fun kvs ->
+          let share = match List.assoc_opt "weight" kvs with
+            | Some w -> Some w
+            | None -> remainder in
+          match own_to kvs with
+          | Some d -> [ (Some d, share) ]
+          | None -> List.map (fun d -> (Some d, share)) arrow) branches in
+      let dests = List.map fst specs in
+      let once d = List.length (List.filter (( = ) d) dests) = 1 in
+      List.fold_left (fun acc (d, share) ->
+        if List.mem_assoc d acc then acc
+        else acc @ [ (d, if once d then share else None) ]) [] specs
+    end
+
 (* One transition → its edges and their couplings. A single-source, single-
    destination transition is one edge keyed by the transition name; a multi-
    destination (branch or multi-`+` arrow) or multi-source transition fans out
@@ -779,7 +824,13 @@ let transition_graph (pools : (string, string list) Hashtbl.t)
   let to_specs =
     match t.trdst with
     | DstSum refs ->
-      (match ref_bases refs with [] -> [ (None, None) ] | xs -> List.map (fun x -> (Some x, None)) xs)
+      let arrow = ref_bases refs in
+      (match hyper_branch_dests t ~arrow with
+       | [] ->
+         (match arrow with
+          | [] -> [ (None, None) ]
+          | xs -> List.map (fun x -> (Some x, None)) xs)
+       | specs -> specs)
     | DstBranch bs -> List.map (fun ((n, _), w) -> (Some n, Some w)) bs
   in
   let n_edges = List.length from_opts * List.length to_specs in
@@ -797,7 +848,9 @@ let transition_graph (pools : (string, string list) Hashtbl.t)
             let rate =
               match w with
               | None -> base_rate
-              | Some w -> Printf.sprintf "%s \\cdot %s" (tex w) base_rate
+              (* The share is a factor: a sum or difference (`1 - cfr`) is
+                 parenthesised, or the label reads as `1 - (cfr · rate)`. *)
+              | Some w -> Printf.sprintf "%s \\cdot %s" (tex ~prec:7 w) base_rate
             in
             { ge_id = id; ge_from = from_opt; ge_to = to_opt; ge_rate = rate;
               ge_advances = advances; ge_reads_pool = reads_pool })

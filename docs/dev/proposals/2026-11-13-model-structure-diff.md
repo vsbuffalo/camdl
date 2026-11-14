@@ -818,14 +818,13 @@ compiles to `onset_stage_s1`, `onset_stage_s2`, `onset`, and level names may
 contain underscores (measured on `ocaml/golden/seir_erlang_via`). The declared
 section's `expands_to` is the recorded link.
 
-**The flow graph draws a staged transition with branches as an outflow to
-nowhere.** In `ocaml/golden/ebola_outcome_hyper` the transition out of `I` names
-its two destinations inside the `branch(...)` arguments of its
-`via hyper_erlang` law. `Latex.transition_graph` does not read those, so
-`model.graph.json` holds one arrow from `I` to nothing, drawn as a death is.
-This is a defect of the existing diagram and not of the declared section, which
-holds the law's arguments; the agreement test pins the current drawing and fails
-when it is fixed.
+**The flow graph draws a staged transition's branch destinations.** In
+`ocaml/golden/ebola_outcome_hyper` the transition out of `I` names its two
+destinations inside the `branch(...)` arguments of its `via hyper_erlang` law.
+`Latex.transition_graph` reads them, so `model.graph.json` holds one edge to
+each (`outcome__I__D`, `outcome__I__R`), labelled with the branch's share of the
+flow. Before this work it drew one arrow from `I` to nothing, as a death is
+drawn; the agreement test of invariant 11 found it.
 
 **What `model_ir_hash` excludes** (`ir_hash.rs:146`, `:371`, `:400`, `:798`,
 `:975`, `:1494-1508`; `inputs.rs:332-337`): the model name; `quantities`;

@@ -246,9 +246,31 @@ let check_flow_graph file (decls : Ast.declaration list) (d : D.declared_model) 
     List.concat_map (fun (t : D.transition_decl) ->
         let bases refs = distinct (List.map (fun (r : D.stoich_ref) -> r.sr_compartment) refs) in
         let froms = match bases t.tn_from with [] -> [ None ] | xs -> List.map Option.some xs in
+        (* A `hyper_erlang` law may give each branch its own destination
+           (`branch(..., to = D)`); a branch without one goes to the arrow
+           target. Read here from the declared arguments. *)
+        let branch_tos arrow =
+          match t.tn_dynamics with
+          | D.DynVia ("hyper_erlang", args) ->
+            let per_branch = List.filter_map (fun (a : D.arg) ->
+                match a.a_value with
+                | D.TCall ("branch", kvs) ->
+                  Some (List.find_map (fun (k : D.arg) ->
+                      match k.a_name, k.a_value with
+                      | "to", (D.TIdent r | D.TIndex (r, _)) -> Some r.nr_name
+                      | _ -> None) kvs)
+                | _ -> None) args in
+            if List.for_all (( = ) None) per_branch then []
+            else distinct (List.concat_map (function
+                | Some d -> [ Some d ]
+                | None -> List.map Option.some arrow) per_branch)
+          | _ -> [] in
         let tos = match t.tn_to with
           | D.DstSum refs ->
-            (match bases refs with [] -> [ None ] | xs -> List.map Option.some xs)
+            (match branch_tos (bases refs) with
+             | [] ->
+               (match bases refs with [] -> [ None ] | xs -> List.map Option.some xs)
+             | xs -> xs)
           | D.DstBranch arms ->
             List.map (fun (a : D.branch_arm) -> Some a.ba_to.sr_compartment) arms in
         let n = List.length froms * List.length tos in
@@ -312,27 +334,34 @@ let check_flow_graph file (decls : Ast.declaration list) (d : D.declared_model) 
                 a.ba_to.sr_compartment;
             List.iter (fun (e : Latex.g_edge) ->
                 Alcotest.(check string) (file ^ ": rate of " ^ e.ge_id)
-                  (Printf.sprintf "%s \\cdot %s" a.ba_weight.de_katex r.de_katex)
+                  (Printf.sprintf "%s \\cdot %s"
+                     (* A weight that is a sum or a difference is a factor
+                        here, so it is parenthesised. *)
+                     (match a.ba_weight.de_tree with
+                      | D.TBinOp ((D.BAdd | D.BSub), _, _) ->
+                        "\\left(" ^ a.ba_weight.de_katex ^ "\\right)"
+                      | _ -> a.ba_weight.de_katex)
+                     r.de_katex)
                   e.ge_rate) to_arm) arms
       (* A staged transition (`via`): the graph draws the declaration and not
-         the stages. Each edge shows "via <law>" as its rate, runs from the
-         declared source, and no stage compartment or stage transition appears
-         (the node and edge lists above are the declared ones). *)
+         the stages. Each edge runs from the declared source and shows "via
+         <law>" as its rate, preceded by a branch's share where the law splits
+         the flow; no stage compartment or stage transition appears (the node
+         and edge lists above are the declared ones). *)
       | D.DynVia (law, args), dst ->
         if es = [] then Alcotest.failf "%s: staged %s has no edge" file t.tn_name;
+        let plain = via_rate law in
+        let ends_with ~suffix s =
+          let n = String.length suffix and h = String.length s in
+          h >= n && String.sub s (h - n) n = suffix in
         List.iter (fun (e : Latex.g_edge) ->
-            Alcotest.(check string) (file ^ ": rate of staged " ^ e.ge_id)
-              (via_rate law) e.ge_rate) es;
-        (* Where the destination is written decides what the graph can draw. A
-           law whose destination is the arrow's (`E --> I via erlang(...)`) gets
-           an edge to it. `hyper_erlang` writes no arrow: each destination is a
-           `to =` inside a `branch(...)` argument, which the graph does not
-           read, so it draws one edge from the source to nowhere, the same as a
-           death. The section records the same thing as written: an empty `to`
-           and the destinations inside the law's arguments. Pinned here as what
-           the graph draws today; the destinations are asserted to be missing
-           from it so that a graph which learns to draw them fails this test
-           and is brought into the comparison. *)
+            if not (e.ge_rate = plain || ends_with ~suffix:(" \\cdot " ^ plain) e.ge_rate)
+            then
+              Alcotest.failf "%s: staged %s shows the rate %S, not \"via %s\""
+                file e.ge_id e.ge_rate law) es;
+        (* `hyper_erlang` may write no arrow: each destination is then a
+           `to =` inside a `branch(...)` argument. The graph draws one edge to
+           each such destination, and none to nowhere. *)
         let branch_destinations =
           List.concat_map (fun (a : D.arg) ->
               match a.a_value with
@@ -346,14 +375,15 @@ let check_flow_graph file (decls : Ast.declaration list) (d : D.declared_model) 
         (match dst, branch_destinations with
          | D.DstSum [], (_ :: _ as dests) ->
            Alcotest.(check (list (option string)))
-             (file ^ ": staged " ^ t.tn_name ^ " is drawn as one edge to nowhere")
-             [ None ] (List.map (fun (e : Latex.g_edge) -> e.ge_to) es);
-           List.iter (fun dest ->
-               if List.exists (fun (e : Latex.g_edge) -> e.ge_to = Some dest) es then
-                 Alcotest.failf
-                   "%s: the graph now draws %s to its branch destination %s; \
-                    compare it with the declaration here" file t.tn_name dest)
-             dests
+             (file ^ ": staged " ^ t.tn_name ^ " is drawn to each branch destination")
+             (List.map Option.some (distinct dests))
+             (List.map (fun (e : Latex.g_edge) -> e.ge_to) es);
+           (* Two branches to two destinations: each edge carries its share. *)
+           if List.length (distinct dests) = List.length dests then
+             List.iter (fun (e : Latex.g_edge) ->
+                 if e.ge_rate = plain then
+                   Alcotest.failf "%s: branch edge %s shows no share of the flow"
+                     file e.ge_id) es
          | D.DstSum [], [] ->
            Alcotest.failf "%s: staged %s declares no destination anywhere" file t.tn_name
          | _ -> ()))
