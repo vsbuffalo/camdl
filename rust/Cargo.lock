@@ -744,6 +744,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "declared"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "differentiate-derive"
 version = "0.1.0"
 dependencies = [
