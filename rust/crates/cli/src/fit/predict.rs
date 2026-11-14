@@ -1084,7 +1084,7 @@ struct PredictiveSink {
     /// forecast tail per the same declaration continued. The likelihood scored
     /// exactly these periods, so the predictive's first bin opens where the
     /// likelihood's did (gh#702) and never reads the warm-up (gh#833).
-    leaf_coverages: Vec<Vec<(f64, sim::inference::Coverage)>>,
+    leaf_coverages: Vec<Vec<(f64, score::trace::Coverage)>>,
     /// The generated-quantities evaluator, `Some` iff the model declares a
     /// `quantities {}` block. Composed alongside the obs-sample accumulator (same
     /// draw, same params) — not a second [`RunSink`]. Held behind an `Arc` so a
@@ -1985,7 +1985,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
             // What each emitted row covers (gh#833): the observed prefix per the
             // stream's bound declaration — the very periods the likelihood scored
             // — and the forecast tail per the same declaration continued.
-            let leaf_coverages: Vec<Vec<(f64, sim::inference::Coverage)>> = model
+            let leaf_coverages: Vec<Vec<(f64, score::trace::Coverage)>> = model
                 .observations
                 .iter()
                 .enumerate()
@@ -2050,7 +2050,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
                 }
                 // An `Instant` row reads the state at its label, which is an
                 // emitted time and therefore already on the grid.
-                let Some(&(label, sim::inference::Coverage::Interval { start, stop })) =
+                let Some(&(label, score::trace::Coverage::Interval { start, stop })) =
                     leaf_coverages[si].last()
                 else {
                     continue;
@@ -2082,9 +2082,9 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
                     let reads: [Option<f64>; 2] = match cov {
                         // `Unrecorded` is a prequential-trace artefact; a row built
                         // here never carries it, and its label is the one time known.
-                        sim::inference::Coverage::Instant
-                        | sim::inference::Coverage::Unrecorded => [Some(label), None],
-                        sim::inference::Coverage::Interval { start, stop } => {
+                        score::trace::Coverage::Instant
+                        | score::trace::Coverage::Unrecorded => [Some(label), None],
+                        score::trace::Coverage::Interval { start, stop } => {
                             [Some(start), Some(stop)]
                         }
                     };
@@ -3055,9 +3055,9 @@ fn leaf_row_coverages(
     observed_times: &[f64],
     forecast_times: &[f64],
     t_start: f64,
-) -> Vec<(f64, sim::inference::Coverage)> {
+) -> Vec<(f64, score::trace::Coverage)> {
     use ir::observation::TemporalKind;
-    use sim::inference::Coverage;
+    use score::trace::Coverage;
     let mut rows: Vec<(f64, Coverage)> = match observed {
         Some(st) => observed_times.iter().enumerate()
             .map(|(k, &t)| (t, st.coverage(k)))

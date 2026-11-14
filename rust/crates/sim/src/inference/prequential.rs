@@ -15,7 +15,7 @@
 
 use serde::{Serialize, Deserialize};
 
-pub use super::multi_stream_obs::Coverage;
+use score::trace::Coverage;
 
 /// Provenance of the predictive used to compute scores — the
 /// parameter-treatment optimism axis (#295), orthogonal to
