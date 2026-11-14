@@ -161,6 +161,13 @@ fn a_training_file_edited_after_the_fit_is_refused_and_overridable() {
     assert!(v["data_changed"].as_str().is_some_and(|s|
             s.contains("weekly_cases") && s.contains(&recorded[..8]) && s.contains(&current[..8])),
         "the JSON states the mismatch as a field:\n{v}");
+    // And the trace scored on the changed file records the waiver itself.
+    let row = |name: &str| v["rows"].as_array().unwrap().iter()
+        .find(|r| r["name"] == name).unwrap().clone();
+    assert_eq!(row("a/fit.toml")["derivation"]["overrides"],
+        serde_json::json!([{"changed_data": {"streams": ["weekly_cases"]}}]), "{v}");
+    assert!(row("b/fit.toml")["derivation"].get("overrides").is_none(),
+        "the unedited fit's trace waives nothing: {v}");
 }
 
 /// A trace records how it was computed (schema 5): `pfilter

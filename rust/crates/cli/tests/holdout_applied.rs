@@ -136,6 +136,8 @@ dt = 1.0
         assert_eq!(row["conditioning"]["hold_out_tail"]["train_end"],
             serde_json::json!(21.0),
             "row must be stamped hold_out_tail: {row}");
+        assert!(row["derivation"].get("overrides").is_none(),
+            "a held-out derive waives nothing: {row}");
         assert_eq!(row["t_score"], serde_json::json!(2),
             "only t = 28, 35 lie past the sealed boundary: {row}");
     }
@@ -155,6 +157,9 @@ dt = 1.0
     for row in v["rows"].as_array().unwrap() {
         assert_eq!(row["conditioning"], serde_json::json!("in_sample"));
         assert_eq!(row["t_score"], serde_json::json!(5));
+        // The trace itself says the fit's sealed holdout was waived.
+        assert_eq!(row["derivation"]["overrides"], serde_json::json!(["in_sample_forced"]),
+            "{row}");
     }
 
     // The §3.7.3(b) gate: strip the applied-window record from fit A's

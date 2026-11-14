@@ -263,6 +263,10 @@ pub struct Derivation {
     /// The filter-noise Monte-Carlo SE of the elpd, from `replicate_elpd`
     /// (the log-mean-exp delta-method SE); `None` for a single pass.
     pub mc_se_elpd: Option<f64>,
+    /// Waivers applied to this one trace when it was derived, so a reader of
+    /// the trace alone can see them. Empty (and omitted) when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<TraceOverride>,
 }
 
 impl Derivation {
@@ -293,8 +297,22 @@ impl Derivation {
                 .map(|(k, v)| (k, vec![v]))
                 .collect(),
             mc_se_elpd: None,
+            overrides: Vec::new(),
         }
     }
+}
+
+/// A waiver applied to one trace when it was derived (schema 5). Waivers
+/// that only make sense for a pair of traces are not recorded here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceOverride {
+    /// `compare --in-sample` scored a fit that declares a holdout, so the
+    /// trace is in-sample although the fit sealed a training window.
+    InSampleForced,
+    /// Derived under `compare --allow-changed-data`: these streams' training
+    /// files no longer matched the hashes the fit recorded.
+    ChangedData { streams: Vec<String> },
 }
 
 /// Where a trace's parameters came from. Externally tagged like
@@ -960,11 +978,15 @@ mod tests {
             replicate_elpd_by_stream: [("cases".to_string(), vec![-4.0, -4.1, -3.9, -4.0, -4.2])]
                 .into_iter().collect(),
             mc_se_elpd: Some(0.12),
+            overrides: vec![TraceOverride::InSampleForced,
+                            TraceOverride::ChangedData { streams: vec!["cases".into()] }],
         };
         let json = serde_json::to_value(&block).unwrap();
         assert_eq!(json["theta"],
             serde_json::json!({"posterior_draws": {"n_used": 3, "n_available": 80}}));
         assert_eq!(json["excluded_chains"], serde_json::json!([1, 3]));
+        assert_eq!(json["overrides"],
+            serde_json::json!(["in_sample_forced", {"changed_data": {"streams": ["cases"]}}]));
         let back: Derivation = serde_json::from_value(json).unwrap();
         assert_eq!(back, block);
         for (theta, tag) in [(ThetaSource::Supplied, serde_json::json!("supplied")),
@@ -1018,6 +1040,7 @@ mod tests {
         assert_eq!(d.mc_se_elpd, None);
         let json = serde_json::to_value(&d).unwrap();
         assert!(json["mc_se_elpd"].is_null(), "{json}");
+        assert!(json.get("overrides").is_none(), "no overrides, omitted: {json}");
     }
 
     #[test]

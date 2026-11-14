@@ -27,7 +27,7 @@ use crate::chain_selection::ChainSelection;
 use crate::fit::handle::ResolvedFit;
 use crate::posterior_draws::PosteriorDrawsRef;
 use serde::Deserialize;
-use sim::inference::prequential::{Conditioning, PrequentialTrace, ThetaSource};
+use sim::inference::prequential::{Conditioning, PrequentialTrace, ThetaSource, TraceOverride};
 use std::path::{Path, PathBuf};
 
 /// Default particle count for auto-deriving a prequential from a fit handle.
@@ -453,7 +453,7 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
     cohort.warn(&out);
 
     // Load traces, each filtered by its own fit's selection (if any).
-    let rows: Vec<Row> = models.into_iter().map(|m| {
+    let mut rows: Vec<Row> = models.into_iter().map(|m| {
         let selection = cohort.for_fit(&m.name);
         let Loaded { trace, data, freshness } =
             load_trace(&out, &m.path, derive, selection).unwrap_or_else(|e| {
@@ -582,6 +582,17 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
             refuse(&out, format!(
                 "error: {note}\n       Re-run the fit on the current file, restore the \
                  file the fit read, or pass --allow-changed-data to render anyway."));
+        }
+        // Rendered under the override: each trace scored on a changed file
+        // records which streams' files it was.
+        for r in &mut rows {
+            let streams: Vec<String> = r.freshness.findings.iter()
+                .filter(|f| matches!(f.check, FileCheck::Changed { .. }))
+                .map(|f| f.stream.clone())
+                .collect();
+            if let (false, Some(d)) = (streams.is_empty(), r.trace.derivation.as_mut()) {
+                d.overrides.push(TraceOverride::ChangedData { streams });
+            }
         }
     }
 
@@ -1694,6 +1705,12 @@ fn derive_prequential(
     derivation.replicate_elpd = totals.elpd;
     derivation.replicate_elpd_by_stream = totals.by_stream;
     derivation.mc_se_elpd = totals.mc_se;
+    // `--in-sample` waived this fit's sealed holdout: the trace says so.
+    let declares_holdout = config.data.as_ref()
+        .is_some_and(|d| d.holdout_after.is_some() || d.holdout.is_some());
+    if derive.force_in_sample && declares_holdout {
+        derivation.overrides.push(TraceOverride::InSampleForced);
+    }
 
     // gh#585 (Stage 3.5): §3.7.3(c) — the `HoldOutTail` stamp is granted
     // only after checking, on the derived trace itself, that every scored
@@ -3201,6 +3218,7 @@ mod tests {
             replicate_elpd: vec![0.0; replicates],
             replicate_elpd_by_stream: Default::default(),
             mc_se_elpd: None,
+            overrides: vec![],
         }
     }
 
