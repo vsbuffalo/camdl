@@ -84,6 +84,16 @@ impl StreamBindings {
         &self.holdout
     }
 
+    /// Every bound leaf and its source, sorted by leaf name.
+    pub(crate) fn leaves(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.leaves.iter().map(|(l, s)| (l.as_str(), s.as_str()))
+    }
+
+    /// The bound leaves that read `source`, sorted by name.
+    pub(crate) fn leaves_of(&self, source: &str) -> Vec<&str> {
+        self.leaves.iter().filter(|(_, s)| s == source).map(|(l, _)| l.as_str()).collect()
+    }
+
     /// The training files keyed as the run identities of `fit`, `survey`,
     /// `profile` and `pfilter --fit` have always been built over:
     /// `[data.observations]` as written (by source), and under the one-file
@@ -175,6 +185,9 @@ mod tests {
         let b = StreamBindings::resolve(&two_patch(), &data("file = \"x.tsv\"")).unwrap();
         assert_eq!(b.training_by_source().iter().collect::<Vec<_>>(),
             vec![(&"cases".to_string(), &"x.tsv".to_string())]);
+        assert_eq!(b.leaves().collect::<Vec<_>>(),
+            vec![("cases_rural", "cases"), ("cases_urban", "cases")]);
+        assert_eq!(b.leaves_of("cases"), vec!["cases_rural", "cases_urban"]);
         assert!(b.holdout_by_source().is_empty());
         assert_eq!(b.identity_keyed_training().keys().collect::<Vec<_>>(),
             vec!["cases_rural", "cases_urban"], "the shorthand identity folds the file per leaf");

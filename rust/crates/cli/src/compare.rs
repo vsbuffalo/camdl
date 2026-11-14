@@ -25,6 +25,7 @@
 
 use crate::chain_selection::ChainSelection;
 use crate::fit::handle::ResolvedFit;
+use crate::fit::stream_bindings::StreamBindings;
 use crate::posterior_draws::PosteriorDrawsRef;
 use serde::Deserialize;
 use sim::inference::prequential::{Conditioning, PrequentialTrace, ThetaSource, TraceOverride};
@@ -171,18 +172,68 @@ struct Row {
 /// difference with a data difference, and neither the table nor the trace says
 /// so — the trace records scores and times, never which bytes it scored. The
 /// fit's own provenance sidecar (`fit.meta.json`, [`crate::run_meta::FitSidecar`])
-/// does: `data_hashes` is stream name → SHA-256 of that stream's file, recorded
-/// when the fit ran. Read from there rather than re-hashing, so the check
-/// answers "were these fits bound to the same bytes?" using the same record the
-/// fit's own identity was built from.
+/// does: `data_hashes` records, per observation source, a hash of the file
+/// bound to it when the fit ran. Read from there rather than re-hashing, so the
+/// check answers "were these fits bound to the same bytes?" using the record
+/// written when the fit ran.
 enum DataIdentity {
-    /// Stream name → SHA-256 hex of the file's bytes, from the fit's sidecar.
-    Digests(std::collections::BTreeMap<String, String>),
+    /// What the fit's sidecar records for each source it binds.
+    Digests(RecordedData),
     /// Nothing to check, and why — an explicit `prequential.json` (a trace
     /// records no data identity), or a fit whose sidecar is absent. The reason
     /// is printed, because a check that silently covers half the cohort is
     /// worse than one the reader knows the scope of.
     Unknown(String),
+}
+
+/// A fit's recorded data hashes, read per observation source through the fit's
+/// [`StreamBindings`] ([`recorded_by_source`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct RecordedData {
+    /// Source → the hash the fit recorded for the file bound to it.
+    training: std::collections::BTreeMap<String, String>,
+    /// Sources bound by the fit whose hash cannot be read from its record, and
+    /// why. A check involving one of these is reported as not made, never
+    /// passed.
+    unresolved: std::collections::BTreeMap<String, String>,
+}
+
+/// Read a sidecar's `data_hashes` per source of `bindings`.
+///
+/// A sidecar keys `data_hashes` by source. One written before that, by a fit
+/// using the one-file shorthand, keys it by leaf. Such a record is read
+/// through the bindings where it names one file unambiguously, that is when
+/// every leaf of the source records the same hash; otherwise the source is
+/// unresolved, with the reason.
+fn recorded_by_source(
+    record: &std::collections::BTreeMap<String, String>,
+    bindings: &StreamBindings,
+) -> RecordedData {
+    let mut out = RecordedData::default();
+    for source in bindings.training_by_source().keys() {
+        if let Some(h) = record.get(source) {
+            out.training.insert(source.clone(), h.clone());
+            continue;
+        }
+        let leaves = bindings.leaves_of(source);
+        let per_leaf: Vec<(&str, &str)> = leaves.iter()
+            .filter_map(|l| record.get(*l).map(|h| (*l, h.as_str())))
+            .collect();
+        let distinct: std::collections::BTreeSet<&str> = per_leaf.iter().map(|(_, h)| *h).collect();
+        if !per_leaf.is_empty() && per_leaf.len() == leaves.len() && distinct.len() == 1 {
+            out.training.insert(source.clone(), per_leaf[0].1.to_string());
+        } else if per_leaf.is_empty() {
+            out.unresolved.insert(source.clone(), "the fit recorded no hash for it".into());
+        } else {
+            out.unresolved.insert(source.clone(), format!(
+                "the fit recorded hashes per leaf ({}) that do not name one file for \
+                 the leaves {}",
+                per_leaf.iter().map(|(l, h)| format!("{l} = {}", short_digest(h)))
+                    .collect::<Vec<_>>().join(", "),
+                leaves.join(", ")));
+        }
+    }
+    out
 }
 
 /// What one training file `compare` is about to score says against the hash
@@ -243,18 +294,9 @@ struct DataFreshness {
     row_unchecked: Option<String>,
 }
 
-/// The training files a derived row scores, keyed as the fit's sidecar keys
-/// `data_hashes`: `resolve_streams`' map — the config's keys under
-/// `[data.observations]`, the model's observation names under the `[data]
-/// file =` shorthand, the same expansion `fit run` hashed.
-fn scored_training_files(
-    streams: &indexmap::IndexMap<String, String>,
-) -> impl Iterator<Item = (&str, &str)> {
-    streams.iter().map(|(k, v)| (k.as_str(), v.as_str()))
-}
-
-/// Hash every training file a derived row is about to score and compare each
-/// with the sidecar's record for its stream (see [`DataFreshness`]).
+/// Hash every training file a derived row is about to score (`streams`,
+/// source → path, [`StreamBindings::training_by_source`]) and compare each
+/// with the sidecar's record for its source (see [`DataFreshness`]).
 fn check_training_freshness(
     streams: &indexmap::IndexMap<String, String>,
     recorded: &DataIdentity,
@@ -266,11 +308,13 @@ fn check_training_freshness(
             row_unchecked: Some(why.clone()),
         },
     };
-    let findings = scored_training_files(streams).filter_map(|(stream, path)| {
-        let check = match std::fs::read(path) {
-            Ok(bytes) => check_file_against_record(
-                &crate::hashing::sha256_hex(&bytes), record.get(stream).map(|s| s.as_str())),
-            Err(e) => FileCheck::NotChecked(format!("it could not be read: {e}")),
+    let findings = streams.iter().filter_map(|(stream, path)| {
+        let check = match (record.unresolved.get(stream), std::fs::read(path)) {
+            (Some(why), _) => FileCheck::NotChecked(why.clone()),
+            (None, Ok(bytes)) => check_file_against_record(
+                &crate::hashing::sha256_hex(&bytes),
+                record.training.get(stream).map(|s| s.as_str())),
+            (None, Err(e)) => FileCheck::NotChecked(format!("it could not be read: {e}")),
         };
         (check != FileCheck::Matches).then(|| FileFinding {
             stream: stream.to_string(), path: path.to_string(), check,
@@ -890,10 +934,11 @@ fn fmt_coverage(c: sim::inference::Coverage) -> String {
 /// from the same model.
 ///
 /// Rows with no data identity ([`DataIdentity::Unknown`]) are not evidence
-/// either way and are skipped; [`unchecked_data_note`] names them.
+/// either way and are skipped, as is a source either row could not resolve
+/// ([`RecordedData::unresolved`]); [`unchecked_data_note`] names both.
 fn check_shared_data(entries: &[(&str, &DataIdentity)]) -> Result<(), String> {
     use std::collections::BTreeSet;
-    let known: Vec<(&str, &std::collections::BTreeMap<String, String>)> = entries
+    let known: Vec<(&str, &RecordedData)> = entries
         .iter()
         .filter_map(|(name, d)| match d {
             DataIdentity::Digests(m) => Some((*name, m)),
@@ -902,11 +947,15 @@ fn check_shared_data(entries: &[(&str, &DataIdentity)]) -> Result<(), String> {
         .collect();
     // Equality is transitive, so every row is checked against the first that
     // carries digests.
-    let Some(&(ref_name, ref_map)) = known.first() else { return Ok(()) };
-    for &(name, map) in known.iter().skip(1) {
+    let Some(&(ref_name, ref_rec)) = known.first() else { return Ok(()) };
+    for &(name, rec) in known.iter().skip(1) {
+        let (ref_map, map) = (&ref_rec.training, &rec.training);
         let mut streams: BTreeSet<&str> = ref_map.keys().map(|s| s.as_str()).collect();
         streams.extend(map.keys().map(|s| s.as_str()));
         let differing: Vec<String> = streams.iter().filter_map(|s| {
+            if ref_rec.unresolved.contains_key(*s) || rec.unresolved.contains_key(*s) {
+                return None;
+            }
             match (ref_map.get(*s), map.get(*s)) {
                 (Some(a), Some(b)) if a == b => None,
                 (Some(a), Some(b)) => Some(format!(
@@ -943,9 +992,11 @@ fn short_digest(hex: &str) -> String {
 /// when every row carried digests. Separate from [`check_shared_data`] so the
 /// scope of the check is stated even when the check itself refuses.
 fn unchecked_data_note(entries: &[(&str, &DataIdentity)]) -> Option<String> {
-    let skipped: Vec<String> = entries.iter().filter_map(|(name, d)| match d {
-        DataIdentity::Digests(_) => None,
-        DataIdentity::Unknown(why) => Some(format!("'{name}' ({why})")),
+    let skipped: Vec<String> = entries.iter().flat_map(|(name, d)| match d {
+        DataIdentity::Digests(rec) => rec.unresolved.iter()
+            .map(|(source, why)| format!("'{name}' stream '{source}' ({why})"))
+            .collect::<Vec<_>>(),
+        DataIdentity::Unknown(why) => vec![format!("'{name}' ({why})")],
     }).collect();
     (!skipped.is_empty()).then(|| format!(
         "not checked for a shared observation set: {}. \
@@ -1087,6 +1138,7 @@ struct Loaded {
 /// What [`derive_prequential`] produced for one fit.
 struct Derived {
     trace: PrequentialTrace,
+    data: DataIdentity,
     freshness: DataFreshness,
 }
 
@@ -1120,11 +1172,8 @@ fn load_trace(
     }
     // Not an explicit prequential → treat as a fit handle and derive.
     match crate::fit::handle::resolve_fit_run(path) {
-        Ok(resolved) => {
-            let data = fit_data_identity(&resolved);
-            derive_prequential(out, &resolved, derive, selection, &data)
-                .map(|d| Loaded { trace: d.trace, data, freshness: d.freshness })
-        }
+        Ok(resolved) => derive_prequential(out, &resolved, derive, selection)
+            .map(|d| Loaded { trace: d.trace, data: d.data, freshness: d.freshness }),
         Err(resolve_err) => Err(format!(
             "'{path}' is neither a prequential trace nor a resolvable fit handle.\n  \
              - as a fit handle: {resolve_err}\n  \
@@ -1189,14 +1238,17 @@ fn check_derivable_backend(
 /// derived trace before stamping ([`derive_prequential`]).
 struct SealedHoldout {
     train_end: f64,
-    /// stream → holdout file path for explicit `[data.holdout]` fits; the
-    /// scored series is training ∪ holdout, merged per stream. Empty for
+    /// source → holdout file path for explicit `[data.holdout]` fits; the
+    /// scored series is training ∪ holdout, merged per source. Empty for
     /// temporal `holdout_after` fits, whose training files already carry
     /// the full series (truncation happened at fit load, not in the file).
     holdout_files: Vec<(String, String)>,
 }
 
-fn detect_sealed_holdout(resolved: &ResolvedFit) -> Result<Option<SealedHoldout>, String> {
+fn detect_sealed_holdout(
+    resolved: &ResolvedFit,
+    bindings: &StreamBindings,
+) -> Result<Option<SealedHoldout>, String> {
     let data = resolved.config.problem.data.as_ref();
     let declares = data
         .map(|d| d.holdout_after.is_some() || d.holdout.is_some())
@@ -1217,10 +1269,9 @@ fn detect_sealed_holdout(resolved: &ResolvedFit) -> Result<Option<SealedHoldout>
              --in-sample to score it as the in-sample trace it is.",
             resolved.segment.display()));
     };
-    let holdout_files = data
-        .and_then(|d| d.holdout.as_ref())
-        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-        .unwrap_or_default();
+    let holdout_files = bindings.holdout_by_source().iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     Ok(Some(SealedHoldout { train_end: window.train_end, holdout_files }))
 }
 
@@ -1238,15 +1289,14 @@ fn detect_sealed_holdout(resolved: &ResolvedFit) -> Result<Option<SealedHoldout>
 /// which the fit applied at load.
 fn check_training_ends_by_train_end(
     h: &SealedHoldout,
-    streams: &indexmap::IndexMap<String, String>,
-    model_path: &Path,
+    bindings: &StreamBindings,
+    model: &ir::Model,
     dt: f64,
     segment: &Path,
 ) -> Result<(), String> {
     if h.holdout_files.is_empty() {
         return Ok(());
     }
-    let (model, _) = crate::util::load_model(&model_path.to_string_lossy())?;
     let time_opts = crate::caltime_load::TimeOpts {
         origin: model.origin.as_deref(),
         time_unit: &model.time_unit,
@@ -1255,11 +1305,9 @@ fn check_training_ends_by_train_end(
         format: crate::caltime_load::TimeFormat::Auto,
     };
     let mut late: Vec<String> = Vec::new();
-    for obs in &model.observations {
-        // `streams` is keyed by source, except under the single-file
-        // shorthand, which `resolve_streams` keys by stream name.
-        let Some(path) = streams.get(&obs.source).or_else(|| streams.get(&obs.name))
-            else { continue };
+    for (leaf, source) in bindings.leaves() {
+        let path = &bindings.training_by_source()[source];
+        let Some(obs) = model.observations.iter().find(|o| o.name == leaf) else { continue };
         let siblings: Vec<&ir::observation::ObservationModel> = model.observations.iter()
             .filter(|o| o.source == obs.source)
             .collect();
@@ -1384,9 +1432,10 @@ fn filter_noise_unassessed_note(rows: &[Row], base_idx: usize) -> Option<String>
 /// already hashed into the fit's identity. A fit without one (a
 /// hand-assembled directory), or whose sidecar cannot be read, is reported as
 /// unchecked rather than refused.
-fn fit_data_identity(resolved: &ResolvedFit) -> DataIdentity {
+fn fit_data_identity(resolved: &ResolvedFit, bindings: &StreamBindings) -> DataIdentity {
     match crate::run_meta::read_fit_sidecar(&resolved.segment) {
-        Ok(Some(s)) if !s.data_hashes.is_empty() => DataIdentity::Digests(s.data_hashes),
+        Ok(Some(s)) if !s.data_hashes.is_empty() =>
+            DataIdentity::Digests(recorded_by_source(&s.data_hashes, bindings)),
         Ok(Some(_)) => DataIdentity::Unknown(
             "its fit.meta.json records no data hashes".into()),
         Ok(None) => DataIdentity::Unknown(format!(
@@ -1440,7 +1489,7 @@ enum PassError {
 ///
 /// Steps: (a) θ̂ from the winning method as a flat params TOML; (b) the model
 /// (archived IR if present, else the loose source the config names); (c) the
-/// fit's data streams as `--data NAME=PATH`; (d) run `pfilter
+/// fit's data, as `--data LEAF=PATH` for every leaf it binds; (d) run `pfilter
 /// --save-prequential` to a temp stem; (e) read back the `{stem}.json` trace.
 /// All temp files live in the system temp dir and are best-effort cleaned up.
 fn derive_prequential(
@@ -1448,7 +1497,6 @@ fn derive_prequential(
     resolved: &ResolvedFit,
     derive: DeriveSettings,
     selection: Option<&ChainSelection>,
-    recorded_data: &DataIdentity,
 ) -> Result<Derived, String> {
     let segment = &resolved.segment;
     // The run θ̂ comes from: the leaf the handle named, else the folder's.
@@ -1509,6 +1557,7 @@ fn derive_prequential(
     // `pfilter` refuses beside the `--params` θ̂ (gh#194); the lists are the
     // whole of a fit scenario's effect (`util::FitBase`).
     let fit_base = crate::util::FitBase::of(config)?;
+    let (model, _) = crate::util::load_model(&model_path.to_string_lossy())?;
     // The step the fit ran at: the filter re-scores the data through the
     // fitted process, so it integrates at the fit's dt — not the model's
     // declared step or 1.0, which is all `pfilter` would see without it.
@@ -1516,19 +1565,20 @@ fn derive_prequential(
     let (base_enable, base_disable): (Vec<String>, Vec<String>) = if fit_base.is_empty() {
         (Vec::new(), Vec::new())
     } else {
-        let (m, _) = crate::util::load_model(&model_path.to_string_lossy())?;
-        fit_base.lists(&m).map_err(|e| e.to_string())?
+        fit_base.lists(&model).map_err(|e| e.to_string())?
     };
 
-    // (c) data — stream → absolute path. The config's data paths were made
-    // absolute (relative to the original fit.toml) at load, so they pass to the
-    // child unchanged.
+    // (c) data — source → absolute path, and the leaves each source binds.
+    // The config's data paths were made absolute (relative to the original
+    // fit.toml) at load, so they pass to the child unchanged.
     let data = config.data.as_ref().ok_or_else(|| format!(
         "fit at {} has no [data] block — there are no observations to score, so a \
          prequential trace cannot be derived.\n  Provide an explicit \
          prequential.json, or compare fits that bind data.",
         segment.display()))?;
-    let mut streams = resolve_streams(data, &model_path)?;
+    let bindings = StreamBindings::resolve(&model, data)?;
+    let recorded_data = fit_data_identity(resolved, &bindings);
+    let mut streams = bindings.training_by_source().clone();
     if streams.is_empty() {
         return Err(format!(
             "fit at {} has a [data] block with no observation streams.",
@@ -1537,7 +1587,7 @@ fn derive_prequential(
     // The training files about to be scored, against the hashes the fit
     // recorded for them — read before the holdout merge below replaces any
     // path with a temp file.
-    let mut freshness = check_training_freshness(&streams, recorded_data);
+    let mut freshness = check_training_freshness(&streams, &recorded_data);
 
     // gh#585 (Stage 3.4): a fit that declares a holdout is scored held-out
     // by default — the filter runs over the FULL series at the sealed θ̂
@@ -1545,7 +1595,7 @@ fn derive_prequential(
     let holdout = if derive.force_in_sample {
         None
     } else {
-        detect_sealed_holdout(resolved)?
+        detect_sealed_holdout(resolved, &bindings)?
     };
     // A `[data.holdout]` file is scored too, but the fit records no hash for
     // it, so it cannot be checked; say so rather than pass it silently.
@@ -1571,7 +1621,7 @@ fn derive_prequential(
         .join(format!("camdl_compare_{}_{}", std::process::id(), seg_slug));
 
     if let Some(h) = &holdout {
-        check_training_ends_by_train_end(h, &streams, &model_path, fitted_dt, segment)?;
+        check_training_ends_by_train_end(h, &bindings, &model, fitted_dt, segment)?;
     }
 
     // Explicit `[data.holdout]` fits: the scored series is training ∪
@@ -1580,15 +1630,13 @@ fn derive_prequential(
     // series; the fit truncated at load, not in the file).
     let mut merged_paths: Vec<PathBuf> = Vec::new();
     if let Some(h) = &holdout {
-        for (stream, holdout_path) in &h.holdout_files {
-            let Some(train_path) = streams.get(stream).cloned() else {
-                return Err(format!(
-                    "[data.holdout] names stream '{stream}', which is not \
-                     among the fit's bound observation streams."));
-            };
-            let merged = base.with_extension(format!("{stream}.merged.tsv"));
+        for (source, holdout_path) in &h.holdout_files {
+            // `StreamBindings::resolve` refused a holdout source with no
+            // training file.
+            let train_path = streams[source].clone();
+            let merged = base.with_extension(format!("{source}.merged.tsv"));
             merge_holdout_file(&train_path, holdout_path, &merged)?;
-            streams.insert(stream.clone(), merged.to_string_lossy().into_owned());
+            streams.insert(source.clone(), merged.to_string_lossy().into_owned());
             merged_paths.push(merged);
         }
     }
@@ -1626,8 +1674,13 @@ fn derive_prequential(
             // the caller's output root is not.
             .arg("--no-store")
             .env("CAMDL_SKIP_VERSION_CHECK", "1");
-        for (name, abs_path) in &streams {
-            cmd.arg("--data").arg(format!("{name}={abs_path}"));
+        // `pfilter --data NAME=PATH` binds NAME as a leaf name (or the
+        // prefix of a family of leaf names), not as a source, so every leaf
+        // of a source is named with its source's file.
+        for (source, abs_path) in &streams {
+            for leaf in bindings.leaves_of(source) {
+                cmd.arg("--data").arg(format!("{leaf}={abs_path}"));
+            }
         }
         for name in &base_enable {
             cmd.arg("--enable").arg(name);
@@ -1784,7 +1837,7 @@ fn derive_prequential(
                 .unwrap_or_else(|| segment.display().to_string()),
         };
     }
-    Ok(Derived { trace, freshness })
+    Ok(Derived { trace, data: recorded_data, freshness })
 }
 
 /// The replicate totals a derived trace records (schema 5): each replicate's
@@ -2219,29 +2272,6 @@ fn posterior_mean_params_toml(pref: &PosteriorDrawsRef) -> Result<(String, usize
         ));
     }
     Ok((out, n))
-}
-
-/// Resolve a fit's `[data]` spec to a stream-name → absolute-path map for
-/// `--data NAME=PATH`. The per-stream `observations` map is used directly; the
-/// single-file shorthand (`file = "..."`) is expanded via the existing
-/// [`DataSpec::effective_observations`] seam, which needs the model's declared
-/// observation-stream names (loaded from `model_path`).
-fn resolve_streams(
-    data: &crate::fit::config_v2::DataSpec,
-    model_path: &Path,
-) -> Result<indexmap::IndexMap<String, String>, String> {
-    if !data.observations.is_empty() {
-        return Ok(data.observations.clone());
-    }
-    if data.file.is_some() {
-        let (model, _) = crate::util::load_model(&model_path.to_string_lossy())
-            .map_err(|e| format!(
-                "loading model {} to expand the single-file [data] shorthand: {e}",
-                model_path.display()))?;
-        let names: Vec<String> = model.observations.iter().map(|o| o.name.clone()).collect();
-        return data.effective_observations(&names);
-    }
-    Err("the fit's [data] block has neither `observations` nor `file`".to_string())
 }
 
 /// Paired Δ = sum_t (a_t − b_t); paired SE = the Newey–West HAC standard
@@ -3238,7 +3268,7 @@ mod tests {
     }
 
     /// The freshness of a derived row, end to end over real files: the
-    /// stream keys are `resolve_streams`' keys, a key the sidecar lacks is
+    /// keys are sources, a source the sidecar lacks is
     /// "not checked", a row with no sidecar hashes is not checked as a
     /// whole, and the notes say each in every format.
     #[test]
@@ -3632,9 +3662,10 @@ mod tests {
     }
 
     fn digests(entries: &[(&str, &str)]) -> DataIdentity {
-        DataIdentity::Digests(entries.iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect())
+        DataIdentity::Digests(RecordedData {
+            training: entries.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            unresolved: Default::default(),
+        })
     }
 
     /// A trace with joint scores at the given times and no per-stream breakdown.

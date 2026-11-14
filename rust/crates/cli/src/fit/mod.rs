@@ -2637,20 +2637,22 @@ fn identity_data_paths(
     Ok(stream_bindings::StreamBindings::resolve(model, data)?.identity_keyed_training())
 }
 
-/// Content hash of each observation stream the problem binds, over the
-/// RESOLVED stream set (`effective_observations`, gh#771), so the single-file
-/// `[data] file = "..."` shorthand hashes the streams it binds. With no model
-/// in scope the shorthand cannot be expanded and the map is empty.
+/// Content hash of each training file the problem binds, keyed by source
+/// ([`stream_bindings::StreamBindings::training_by_source`]), so the one-file
+/// shorthand records its file under every source it binds (gh#771). With no
+/// model in scope the shorthand cannot be expanded and the map is empty;
+/// `[data.observations]` is then hashed as written, which is by source too.
 fn resolved_data_hashes(
     problem: &config_v2::Problem,
     model: Option<&ir::Model>,
 ) -> std::collections::HashMap<String, String> {
-    let model_obs_names: Vec<String> = model
-        .map(|m| m.observations.iter().map(|o| o.name.clone()).collect())
-        .unwrap_or_default();
-    problem
-        .data.as_ref()
-        .and_then(|d| d.effective_observations(&model_obs_names).ok())
+    let Some(data) = problem.data.as_ref() else { return Default::default() };
+    let by_source = match model {
+        Some(m) => stream_bindings::StreamBindings::resolve(m, data).ok()
+            .map(|b| b.training_by_source().clone()),
+        None => data.file.is_none().then(|| data.observations.clone()),
+    };
+    by_source
         .map(|obs| obs.into_iter()
             .filter_map(|(name, path)| {
                 crate::hashing::file_hash(&path).map(|h| (name, h))
@@ -3679,6 +3681,33 @@ mod tests {
             train.display(), holdout.display()));
         assert_eq!(digest(&per_source), (vec![t], vec![h]),
             "[data.observations]: one training digest per source");
+    }
+
+    /// `fit.meta.json`'s `data_hashes` is keyed by source in every `[data]`
+    /// form. Under the one-file shorthand it was keyed by leaf, so a model
+    /// whose `cases[p in patch]` block expands to `cases_urban`/`cases_rural`
+    /// recorded two keys there and the one key `cases` under
+    /// `[data.observations]`, and `compare`, which reads the sidecar by the
+    /// keys the config binds, looked for one of the two and missed it.
+    #[test]
+    fn sidecar_data_hashes_are_keyed_by_source_under_the_shorthand() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data_path = tmp.path().join("cases_long.tsv");
+        std::fs::write(&data_path, b"time\tpatch\tcases\n7\turban\t12\n7\trural\t3\n").unwrap();
+        let fit_path = tmp.path().join("fit.toml");
+        let toml_src = format!(
+            "[model]\ncamdl = \"no-such-model.ir.json\"\n\
+             [data]\nfile = \"{}\"\n\
+             [estimate]\nbeta = {{ bounds = [0.01, 0.5] }}\n[fixed]\nrho = 0.5\n\
+             [method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
+             chains = 1\nparticles = 10\niterations = 1\ncooling = 0.7\n",
+            data_path.display());
+        std::fs::write(&fit_path, &toml_src).unwrap();
+        let config = config_v2::FitConfig::from_toml_str(&toml_src).unwrap();
+        let model = golden_model("ocaml/golden/sir_two_patch_long_obs.ir.json");
+        let sidecar = build_fit_sidecar(&config, fit_path.to_str().unwrap(), Some(&model));
+        assert_eq!(sidecar.data_hashes.keys().collect::<Vec<_>>(), vec!["cases"],
+            "one entry, keyed by the source both leaves read: {:?}", sidecar.data_hashes);
     }
 
     #[test]
