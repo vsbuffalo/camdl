@@ -90,7 +90,10 @@ governing the caveats under the table.
 The axes are independent: a posterior-mixture score can still be in-sample, and
 a held-out score can still be plug-in. `compare` refuses to difference rows
 whose conditioning differs — the two quantities answer different questions — and
-mixing provenance requires an explicit flag.
+mixing provenance requires an explicit flag. It also refuses a fit whose
+training data file has changed since the fit ran (override:
+`--allow-changed-data`): `compare` re-scores the file as it is now, so the row
+would be scored at a $\hat\theta$ fitted to different observations.
 
 ## 3. Reading the table, column by column
 
@@ -205,7 +208,11 @@ $$\mathrm{se}(\Delta) \;=\; \sqrt{T \cdot \widehat{\mathrm{Var}}_t(d_t)}$$
   Bérard, Del Moral & Doucet 2014). camdl therefore derives each score as $R$
   replicate filter runs combined by log-mean-exp — the practice pomp established
   (King, Nguyen & Ionides 2016) — and prints the resulting MC standard error. A
-  Δelpd within twice the filter noise is labelled as such.
+  Δelpd within twice the filter noise is labelled as such. Because the bias
+  grows as the particle count falls, `compare` refuses two rows whose traces
+  record different particle or replicate counts (override:
+  `--allow-mismatched-filter-settings`): part of their Δelpd would measure the
+  filters rather than the models.
 - **The limitation:** all of this rests on a normal approximation that is
   unreliable when the scored count is small (tens rather than hundreds) or the
   models predict alike (Sivula, Magnusson, Matamoros & Vehtari,
