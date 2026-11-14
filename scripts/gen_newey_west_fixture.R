@@ -28,7 +28,7 @@ repo_root <- tryCatch(
   system2("git", c("rev-parse", "--show-toplevel"), stdout = TRUE),
   error = function(e) stop("run inside the camdl git repository")
 )
-out_path <- file.path(repo_root, "rust", "crates", "cli", "tests",
+out_path <- file.path(repo_root, "rust", "crates", "score", "tests",
                       "fixtures", "newey_west_ref.tsv")
 dir.create(dirname(out_path), showWarnings = FALSE, recursive = TRUE)
 
