@@ -277,6 +277,42 @@ fn label_works_on_pfilter_runs() {
         "list --kind pfilter must surface the new label. Got:\n{}", listed);
 }
 
+/// `--no-store` evaluates without recording a `pfilters/` leaf, on both the
+/// single-run and the replicate path; without it the leaf is still written.
+/// `camdl compare` runs the filter once per draw per replicate and wants only
+/// the trace, so its children pass the flag.
+#[test]
+fn no_store_writes_no_leaf_and_the_default_still_does() {
+    let bin = camdl_bin();
+    let tmp = tempdir("no_store");
+    let (ir, data) = write_fixture(tmp.path());
+
+    for reps in [1usize, 3] {
+        let out_root = tmp.path().join(format!("no_store_{reps}"));
+        let output = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+            .env("CAMDL_OUTPUT_DIR", &out_root)
+            .env("CAMDL_SKIP_VERSION_CHECK", "1")
+            .args([
+                "pfilter", &ir.to_string_lossy(),
+                "--param", "beta=0.3", "--param", "gamma=0.1", "--param", "N0=1000",
+                "--data", &data.to_string_lossy(), "--obs", "cases",
+                "--particles", "30", "--dt", "1", "--seed", "1",
+                "--replicates", &reps.to_string(), "--no-store",
+            ])
+            .output().expect("spawn camdl pfilter");
+        assert!(output.status.success(), "pfilter --no-store (replicates {reps}) failed: {}",
+            String::from_utf8_lossy(&output.stderr));
+        assert!(!out_root.join("pfilters").exists(),
+            "--no-store (replicates {reps}) must write no pfilters/ leaf under {}",
+            out_root.display());
+
+        let out_root = tmp.path().join(format!("default_{reps}"));
+        assert!(run_pfilter_reps(&bin, &out_root, &ir, &data, 0.3, reps).status.success());
+        assert_eq!(all_pfilter_leaves(&out_root).len(), 1,
+            "without --no-store (replicates {reps}) the leaf is still recorded");
+    }
+}
+
 fn all_pfilter_leaves(out_root: &Path) -> Vec<(PathBuf, String)> {
     fn walk(dir: &Path, out: &mut Vec<(PathBuf, String)>) {
         if let Ok(b) = std::fs::read_to_string(dir.join("run.json")) {

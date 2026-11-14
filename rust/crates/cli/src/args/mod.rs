@@ -1674,6 +1674,14 @@ pub struct PfilterArgs {
     /// from {STEM}.json. Keeps scalar scores, shrinks the file.
     #[arg(long)]
     pub no_save_samples: bool,
+
+    /// Do not record this evaluation as a `pfilters/` leaf in the run
+    /// store. The log-likelihood is still printed and every `--save-*`
+    /// output is still written; only the content-addressed leaf under the
+    /// output root is skipped. `camdl compare` passes it to the filter runs
+    /// it derives a trace from.
+    #[arg(long)]
+    pub no_store: bool,
 }
 
 // ─── if2 (removed; deprecation stub) ────────────────────────────────────────────
