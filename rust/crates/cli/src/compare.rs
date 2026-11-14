@@ -14,6 +14,8 @@
 //!   - observation-axis and stream-set preflights (gh#570; not overridable —
 //!     a difference across unlike observations is meaningless however shown)
 //!   - bound-data preflight (gh#713; override: --allow-data-mismatch)
+//!   - changed-data preflight: a derived row's training file must still hash
+//!     to what its fit recorded (override: --allow-changed-data)
 //!   - backend preflight on the derive path (gh#729; no override — gh#312)
 //!   - formats: table (default), md, json
 //!   - compare.toml for reproducible multi-model specs
@@ -161,6 +163,9 @@ struct Row {
     /// derives (§3.4 remedy 4); `None` without replication (an explicit
     /// prequential.json, or `--replicates 1`).
     mc_se: Option<f64>,
+    /// Whether the training files this row scored are the bytes its fit was
+    /// fitted to; empty for an explicit prequential.json.
+    freshness: DataFreshness,
 }
 
 /// What a compared row can say about the observations it was scored against
@@ -182,6 +187,137 @@ enum DataIdentity {
     /// is printed, because a check that silently covers half the cohort is
     /// worse than one the reader knows the scope of.
     Unknown(String),
+}
+
+/// What one training file `compare` is about to score says against the hash
+/// the fit recorded for its stream when it ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FileCheck {
+    /// The bytes are the ones the fit was fitted to.
+    Matches,
+    /// The file was edited after the fit ran. Short hashes, for the message.
+    Changed { recorded: String, current: String },
+    /// Nothing to compare against, and why.
+    NotChecked(String),
+}
+
+/// Compare a freshly computed full SHA-256 of a file's bytes with the hash a
+/// fit recorded for it. The record is a prefix of the full digest — 8 hex
+/// characters today, the full 64 once the sidecar is lengthened — so the
+/// comparison is by prefix, and an empty or absent record is not a match.
+fn check_file_against_record(current_sha256: &str, recorded: Option<&str>) -> FileCheck {
+    match recorded {
+        None => FileCheck::NotChecked("the fit recorded no hash for it".into()),
+        Some("") =>
+            FileCheck::NotChecked("the fit recorded an empty hash for it".into()),
+        Some(r) if current_sha256.starts_with(&r.to_ascii_lowercase()) => FileCheck::Matches,
+        Some(r) => FileCheck::Changed {
+            recorded: short_digest(r),
+            current: short_digest(current_sha256),
+        },
+    }
+}
+
+/// One file of a derived row that could not be shown to be the one the fit
+/// was fitted to: either it changed, or there was nothing to check it against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileFinding {
+    stream: String,
+    path: String,
+    check: FileCheck,
+}
+
+/// Whether the files a derived row scores are the bytes its fit was fitted
+/// to, computed once when the row is loaded and read by the refusal and
+/// every renderer.
+///
+/// `compare` re-reads each training file from its path. The shared-data
+/// check ([`check_shared_data`]) reads only the hashes recorded at fit time,
+/// so a file edited in place after the fit would be scored at a θ̂ fitted to
+/// other bytes, with nothing said. An explicit `prequential.json` row
+/// re-reads nothing, so it has nothing to check here (and is already named
+/// by [`unchecked_data_note`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct DataFreshness {
+    /// Every file that changed or could not be checked; files that match are
+    /// not listed.
+    findings: Vec<FileFinding>,
+    /// The whole row could not be checked, and why (no sidecar, or a sidecar
+    /// with no data hashes).
+    row_unchecked: Option<String>,
+}
+
+/// The training files a derived row scores, keyed as the fit's sidecar keys
+/// `data_hashes`: `resolve_streams`' map — the config's keys under
+/// `[data.observations]`, the model's observation names under the `[data]
+/// file =` shorthand, the same expansion `fit run` hashed.
+fn scored_training_files(
+    streams: &indexmap::IndexMap<String, String>,
+) -> impl Iterator<Item = (&str, &str)> {
+    streams.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+}
+
+/// Hash every training file a derived row is about to score and compare each
+/// with the sidecar's record for its stream (see [`DataFreshness`]).
+fn check_training_freshness(
+    streams: &indexmap::IndexMap<String, String>,
+    recorded: &DataIdentity,
+) -> DataFreshness {
+    let record = match recorded {
+        DataIdentity::Digests(m) => m,
+        DataIdentity::Unknown(why) => return DataFreshness {
+            findings: Vec::new(),
+            row_unchecked: Some(why.clone()),
+        },
+    };
+    let findings = scored_training_files(streams).filter_map(|(stream, path)| {
+        let check = match std::fs::read(path) {
+            Ok(bytes) => check_file_against_record(
+                &crate::hashing::sha256_hex(&bytes), record.get(stream).map(|s| s.as_str())),
+            Err(e) => FileCheck::NotChecked(format!("it could not be read: {e}")),
+        };
+        (check != FileCheck::Matches).then(|| FileFinding {
+            stream: stream.to_string(), path: path.to_string(), check,
+        })
+    }).collect();
+    DataFreshness { findings, row_unchecked: None }
+}
+
+/// The statement that rows were scored on data changed since their fit ran,
+/// or `None`. The refusal and the `--allow-changed-data` renderings share it.
+fn changed_data_note(rows: &[Row]) -> Option<String> {
+    let changed: Vec<String> = rows.iter().flat_map(|r| {
+        r.freshness.findings.iter().filter_map(move |f| match &f.check {
+            FileCheck::Changed { recorded, current } => Some(format!(
+                "'{}' stream '{}' ({}): the fit recorded {recorded}, the file now \
+                 hashes to {current}",
+                r.name, f.stream, f.path)),
+            _ => None,
+        })
+    }).collect();
+    (!changed.is_empty()).then(|| format!(
+        "training data changed after the fit ran: {}. `compare` re-reads these \
+         files, so the row is scored on data its θ̂ was not fitted to.",
+        changed.join("; ")))
+}
+
+/// The scope of the changed-data check: every derived file, or derived row,
+/// that could not be compared with a recorded hash, and why. `None` when
+/// every scored file was checked.
+fn data_change_unchecked_note(rows: &[Row]) -> Option<String> {
+    let mut skipped: Vec<String> = Vec::new();
+    for r in rows {
+        if let Some(why) = &r.freshness.row_unchecked {
+            skipped.push(format!("'{}' ({why})", r.name));
+        }
+        for f in &r.freshness.findings {
+            if let FileCheck::NotChecked(why) = &f.check {
+                skipped.push(format!("'{}' stream '{}' ({}): {why}", r.name, f.stream, f.path));
+            }
+        }
+    }
+    (!skipped.is_empty()).then(|| format!(
+        "not checked for changes since the fit ran: {}.", skipped.join("; ")))
 }
 
 /// Row names for positional inputs: the file basename, extended leftward with
@@ -323,10 +459,11 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
     // Load traces, each filtered by its own fit's selection (if any).
     let rows: Vec<Row> = models.into_iter().map(|m| {
         let selection = cohort.for_fit(&m.name);
-        let (trace, data, mc_se) = load_trace(&out, &m.path, derive, selection).unwrap_or_else(|e| {
-            out.fail(format!("error loading trace for '{}' at '{}': {}", m.name, m.path, e));
-        });
-        Row { name: m.name, path: m.path, trace, data, mc_se }
+        let Loaded { trace, data, mc_se, freshness } =
+            load_trace(&out, &m.path, derive, selection).unwrap_or_else(|e| {
+                out.fail(format!("error loading trace for '{}' at '{}': {}", m.name, m.path, e));
+            });
+        Row { name: m.name, path: m.path, trace, data, mc_se, freshness }
     }).collect();
 
     // Fairness, part zero (gh#585, Stage 3.4): rows with different
@@ -437,6 +574,18 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
     if let Err(e) = check_shared_data(&data_entries) {
         if !a.allow_data_mismatch {
             refuse(&out, format!("error: {e}"));
+        }
+    }
+
+    // A derived row's training file edited after its fit ran is scored at a
+    // θ̂ fitted to other bytes. The same class as the shared-data refusal, and
+    // overridable for the same reason; the statement then travels with the
+    // artifact (`warning_lines`, `data_changed`).
+    if let Some(note) = changed_data_note(&rows) {
+        if !a.allow_changed_data {
+            refuse(&out, format!(
+                "error: {note}\n       Re-run the fit on the current file, restore the \
+                 file the fit read, or pass --allow-changed-data to render anyway."));
         }
     }
 
@@ -865,6 +1014,21 @@ fn write_pointwise(rows: &[Row], base_idx: usize, path: &Path) -> Result<usize, 
     Ok(pw.len())
 }
 
+/// One compared input, loaded: what [`Row`] carries besides its name.
+struct Loaded {
+    trace: PrequentialTrace,
+    data: DataIdentity,
+    mc_se: Option<f64>,
+    freshness: DataFreshness,
+}
+
+/// What [`derive_prequential`] produced for one fit.
+struct Derived {
+    trace: PrequentialTrace,
+    mc_se: Option<f64>,
+    freshness: DataFreshness,
+}
+
 /// Resolve a single comparison input to a `PrequentialTrace`. Two paths:
 ///
 /// 1. **Explicit prequential** (kept, tried first): a `.json` file that exists,
@@ -880,21 +1044,26 @@ fn load_trace(
     path: &str,
     derive: DeriveSettings,
     selection: Option<&ChainSelection>,
-) -> Result<(PrequentialTrace, DataIdentity, Option<f64>), String> {
+) -> Result<Loaded, String> {
     if let Some(trace) = try_load_explicit_prequential(path)? {
         // A trace records scores and times, never which observations produced
         // them — so this row cannot take part in the data-identity check, and
-        // carries no replicate-derived filter-noise SE.
-        return Ok((trace, DataIdentity::Unknown(
-            "read as an explicit prequential.json, which records no bound data".into()),
-            None));
+        // carries no replicate-derived filter-noise SE. It re-reads no data
+        // file, so there is nothing to check for changes since a fit.
+        return Ok(Loaded {
+            trace,
+            data: DataIdentity::Unknown(
+                "read as an explicit prequential.json, which records no bound data".into()),
+            mc_se: None,
+            freshness: DataFreshness::default(),
+        });
     }
     // Not an explicit prequential → treat as a fit handle and derive.
     match crate::fit::handle::resolve_fit_run(path) {
         Ok(resolved) => {
             let data = fit_data_identity(&resolved);
-            derive_prequential(out, &resolved, derive, selection)
-                .map(|(t, mc)| (t, data, mc))
+            derive_prequential(out, &resolved, derive, selection, &data)
+                .map(|d| Loaded { trace: d.trace, data, mc_se: d.mc_se, freshness: d.freshness })
         }
         Err(resolve_err) => Err(format!(
             "'{path}' is neither a prequential trace nor a resolvable fit handle.\n  \
@@ -1165,7 +1334,8 @@ fn derive_prequential(
     resolved: &ResolvedFit,
     derive: DeriveSettings,
     selection: Option<&ChainSelection>,
-) -> Result<(PrequentialTrace, Option<f64>), String> {
+    recorded_data: &DataIdentity,
+) -> Result<Derived, String> {
     let segment = &resolved.segment;
     // The run θ̂ comes from: the leaf the handle named, else the folder's.
     let run_dir = resolved.run_dir();
@@ -1246,6 +1416,10 @@ fn derive_prequential(
             "fit at {} has a [data] block with no observation streams.",
             segment.display()));
     }
+    // The training files about to be scored, against the hashes the fit
+    // recorded for them — read before the holdout merge below replaces any
+    // path with a temp file.
+    let mut freshness = check_training_freshness(&streams, recorded_data);
 
     // gh#585 (Stage 3.4): a fit that declares a holdout is scored held-out
     // by default — the filter runs over the FULL series at the sealed θ̂
@@ -1255,6 +1429,18 @@ fn derive_prequential(
     } else {
         detect_sealed_holdout(resolved)?
     };
+    // A `[data.holdout]` file is scored too, but the fit records no hash for
+    // it, so it cannot be checked; say so rather than pass it silently.
+    if let Some(h) = &holdout {
+        for (stream, path) in &h.holdout_files {
+            freshness.findings.push(FileFinding {
+                stream: stream.clone(),
+                path: path.clone(),
+                check: FileCheck::NotChecked(
+                    "holdout file not checked: the fit recorded no hash for it".into()),
+            });
+        }
+    }
 
     // Temp files: unique per process + fit segment so concurrent compares don't
     // collide. STEM has no `.` so pfilter's `{stem}.json` / `{stem}.tsv` are
@@ -1462,7 +1648,7 @@ fn derive_prequential(
                 .unwrap_or_else(|| segment.display().to_string()),
         };
     }
-    Ok((trace, mc_se))
+    Ok(Derived { trace, mc_se, freshness })
 }
 
 /// Combine per-draw filter traces into the posterior-mixture predictive
@@ -2103,6 +2289,13 @@ fn warning_lines(rows: &[Row], base_idx: usize, t_mismatch: bool) -> Vec<String>
     if let Some(note) = unchecked_data_note(&data_entries) {
         lines.push(format!("ⓘ {note}"));
     }
+    // Reaching a renderer with changed data means `--allow-changed-data`.
+    if let Some(note) = changed_data_note(rows) {
+        lines.push(format!("⚠ {note} (--allow-changed-data was set)"));
+    }
+    if let Some(note) = data_change_unchecked_note(rows) {
+        lines.push(format!("ⓘ {note}"));
+    }
     // PIT warnings — flag clear miscalibration.
     for r in rows {
         if let Some(w) = pit_coverage_warning(r) {
@@ -2370,6 +2563,10 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String]) -> String {
         // note says which rows the check could not cover.
         "data_mismatch": check_shared_data(&data_entries).err(),
         "data_unchecked": unchecked_data_note(&data_entries),
+        // A training file edited after its fit ran (present only under
+        // --allow-changed-data), and the files that could not be checked.
+        "data_changed": changed_data_note(rows),
+        "data_change_unchecked": data_change_unchecked_note(rows),
         // Rows whose evidence label skipped the within-filter-noise gate
         // because only one side of the pair carries an MC SE.
         "filter_noise_unassessed": filter_noise_unassessed_note(rows, base_idx),
@@ -2778,6 +2975,95 @@ mod tests {
             "half a day apart is two different training windows");
     }
 
+    /// A training file's fresh full SHA-256 against the hash its fit
+    /// recorded: equal bytes match whether the record is 8 or 64 hex
+    /// characters, different bytes are a change naming both short hashes,
+    /// and no record is "not checked", never a silent pass.
+    #[test]
+    fn a_training_file_is_checked_against_its_recorded_hash_by_prefix() {
+        let fresh = crate::hashing::sha256_hex(b"time\tcases\n1\t2\n");
+        let other = crate::hashing::sha256_hex(b"time\tcases\n1\t3\n");
+
+        assert_eq!(check_file_against_record(&fresh, Some(&fresh)), FileCheck::Matches,
+            "a 64-character record of the same bytes matches");
+        assert_eq!(check_file_against_record(&fresh, Some(&fresh[..8])), FileCheck::Matches,
+            "an 8-character record (today's sidecar) matches by prefix");
+        assert_eq!(check_file_against_record(&fresh, Some(&fresh[..8].to_uppercase())),
+            FileCheck::Matches, "hex case is not a difference");
+
+        for recorded in [&other[..], &other[..8]] {
+            assert_eq!(check_file_against_record(&fresh, Some(recorded)),
+                FileCheck::Changed { recorded: other[..8].to_string(),
+                                     current: fresh[..8].to_string() },
+                "different bytes are a change, at either record length");
+        }
+
+        assert!(matches!(check_file_against_record(&fresh, None),
+            FileCheck::NotChecked(why) if why.contains("recorded no hash")));
+        assert!(matches!(check_file_against_record(&fresh, Some("")),
+            FileCheck::NotChecked(_)), "an empty record is not a match");
+    }
+
+    /// The freshness of a derived row, end to end over real files: the
+    /// stream keys are `resolve_streams`' keys, a key the sidecar lacks is
+    /// "not checked", a row with no sidecar hashes is not checked as a
+    /// whole, and the notes say each in every format.
+    #[test]
+    fn training_freshness_names_changed_and_unchecked_files_in_every_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let north = dir.path().join("north.tsv");
+        let south = dir.path().join("south.tsv");
+        std::fs::write(&north, "time\tcases\n1\t2\n").unwrap();
+        std::fs::write(&south, "time\tcases\n1\t5\n").unwrap();
+        let streams: indexmap::IndexMap<String, String> = [
+            ("north".to_string(), north.to_string_lossy().into_owned()),
+            ("south".to_string(), south.to_string_lossy().into_owned()),
+        ].into_iter().collect();
+
+        // Both recorded and unchanged: nothing to say.
+        let south_hash = crate::hashing::sha256_hex(b"time\tcases\n1\t5\n");
+        let north_hash = crate::hashing::sha256_hex(b"time\tcases\n1\t2\n");
+        let clean = check_training_freshness(&streams,
+            &digests(&[("north", &north_hash[..8]), ("south", &south_hash[..8])]));
+        assert_eq!(clean, DataFreshness::default());
+
+        // `south` edited since the fit; `north` has no record.
+        let fresh = check_training_freshness(&streams,
+            &digests(&[("south", "deadbeef")]));
+        assert_eq!(fresh.findings.len(), 2, "{fresh:?}");
+        let mut rows = vec![
+            row_at("a", &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0]),
+            row_at("b", &[7.0, 14.0, 21.0], &[-5.0, -6.0, -6.0]),
+        ];
+        rows[0].freshness = fresh;
+        rows[1].freshness = check_training_freshness(&streams,
+            &DataIdentity::Unknown("its fit.meta.json records no data hashes".into()));
+
+        let changed = changed_data_note(&rows).expect("south changed");
+        assert!(changed.contains("'a' stream 'south'") && changed.contains("deadbeef")
+                && changed.contains(&south_hash[..8]) && !changed.contains("north"),
+            "{changed}");
+        let unchecked = data_change_unchecked_note(&rows).expect("north and b unchecked");
+        assert!(unchecked.contains("'a' stream 'north'")
+                && unchecked.contains("recorded no hash")
+                && unchecked.contains("'b' (its fit.meta.json records no data hashes)"),
+            "{unchecked}");
+
+        let metrics = vec!["elpd".to_string()];
+        for (fmt, text) in [("table", render_table(&rows, 0, &metrics, false)),
+                            ("md", render_md(&rows, 0, &metrics, false))] {
+            assert!(text.contains("changed after the fit ran")
+                    && text.contains("--allow-changed-data was set"),
+                "the {fmt} rendering states the change:\n{text}");
+            assert!(text.contains("not checked for changes since the fit ran"),
+                "and what was not checked:\n{text}");
+        }
+        let v: serde_json::Value =
+            serde_json::from_str(&render_json(&rows, 0, &metrics)).unwrap();
+        assert!(v["data_changed"].as_str().is_some_and(|s| s.contains("south")), "{v}");
+        assert!(v["data_change_unchecked"].as_str().is_some_and(|s| s.contains("north")), "{v}");
+    }
+
     /// The "within filter noise" gate needs a filter-noise MC SE on both rows
     /// of a pair. A derived row with replication against an explicit
     /// prequential.json (no SE) used to skip the gate without saying so; the
@@ -3003,6 +3289,7 @@ mod tests {
             name: name.to_string(),
             path: name.to_string(),
             mc_se: None,
+            freshness: DataFreshness::default(),
             data: DataIdentity::Unknown("a test fixture, built from scores alone".into()),
             trace: PrequentialTrace {
                 schema_version: 1,

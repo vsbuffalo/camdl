@@ -89,6 +89,80 @@ fn compare(dir: &Path, extra: &[&str]) -> Output {
         .output().expect("spawn camdl compare")
 }
 
+fn find_fit_meta(root: &Path) -> PathBuf {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.file_name().is_some_and(|n| n == "fit.meta.json") {
+                return p;
+            }
+        }
+    }
+    panic!("no fit.meta.json under {}", root.display());
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(bytes))
+}
+
+/// `compare` re-reads each fit's training file from its path. A file edited
+/// in place after the fit ran used to be scored at a θ̂ fitted to other
+/// bytes with nothing said: the shared-data check reads only the hashes
+/// recorded at fit time, and they still agree. Now it is a refusal (exit 2)
+/// naming the row, the stream, the path and both hashes; with
+/// `--allow-changed-data` the comparison renders and every format says so.
+#[test]
+fn a_training_file_edited_after_the_fit_is_refused_and_overridable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let fit_a = fit(dir, "a", 0.10);
+    fit(dir, "b", 0.15);
+
+    // Unedited: no statement either way.
+    let out = compare(dir, &["--format", "json"]);
+    assert!(out.status.success(), "compare failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert!(v["data_changed"].is_null(), "nothing changed:\n{v}");
+    assert!(v["data_change_unchecked"].is_null(), "every file was checked:\n{v}");
+
+    let meta: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(find_fit_meta(&fit_a.join("results"))).unwrap()).unwrap();
+    let recorded = meta["data_hashes"]["weekly_cases"].as_str()
+        .expect("the fit recorded a hash for weekly_cases").to_string();
+    let edited = OBS.replace("35\t5", "35\t9");
+    std::fs::write(fit_a.join("obs.tsv"), &edited).unwrap();
+    let current = sha256_hex(edited.as_bytes());
+
+    let out = compare(dir, &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2),
+        "an edited training file is a commensurability refusal:\n{stderr}");
+    for needle in ["changed after the fit ran", "'a/fit.toml'", "'weekly_cases'",
+                   "obs.tsv", &recorded[..8], &current[..8], "--allow-changed-data"] {
+        assert!(stderr.contains(needle), "the refusal names {needle:?}:\n{stderr}");
+    }
+    assert!(!stderr.contains("'b/fit.toml' stream"),
+        "the unedited fit is not named:\n{stderr}");
+
+    let out = compare(dir, &["--allow-changed-data"]);
+    let table = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "the override renders:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(table.contains("changed after the fit ran") && table.contains(&current[..8]),
+        "the table states the mismatch:\n{table}");
+
+    let out = compare(dir, &["--allow-changed-data", "--format", "json"]);
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert!(v["data_changed"].as_str().is_some_and(|s|
+            s.contains("weekly_cases") && s.contains(&recorded[..8]) && s.contains(&current[..8])),
+        "the JSON states the mismatch as a field:\n{v}");
+}
+
 /// `compare` derives each row by running `camdl pfilter` once per draw per
 /// replicate. Each of those runs used to record a `pfilters/` leaf under the
 /// caller's output root — a log-likelihood nobody asked for, written into

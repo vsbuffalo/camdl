@@ -2661,6 +2661,15 @@ pub struct CompareArgs {
     #[arg(long)]
     pub allow_data_mismatch: bool,
 
+    /// Render even if a derived row's training data file changed after its
+    /// fit ran. `compare` re-reads each fit's data files and checks each
+    /// against the hash the fit recorded in `fit.meta.json`; a file edited
+    /// in place since would be scored at a θ̂ fitted to other bytes, so by
+    /// default that is refused. With this flag the comparison renders and
+    /// every format states which files changed.
+    #[arg(long)]
+    pub allow_changed_data: bool,
+
     /// Mixture size for a Bayesian fit's derived predictive (§3.6 of the
     /// 2026-08-29 proposal): one filter pass per thinned posterior draw;
     /// per-step predictive densities are averaged over the draws and the
