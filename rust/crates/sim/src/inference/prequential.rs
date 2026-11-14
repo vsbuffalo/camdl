@@ -250,6 +250,51 @@ pub struct Derivation {
     pub enabled: Vec<String>,
     /// Interventions the run switched off by name.
     pub disabled: Vec<String>,
+    /// Each replicate's total elpd (the sum of its steps' `log_score`), in
+    /// replicate order; `replicates` long, one element for a single pass.
+    /// Stored so a paired filter-noise estimate can be computed later from
+    /// the totals without another schema change.
+    pub replicate_elpd: Vec<f64>,
+    /// For each stream scored in `per_stream`, each replicate's sum of that
+    /// stream's `log_score`, in the same order. These need not sum across
+    /// streams to `replicate_elpd`: a step's joint score is the log of a
+    /// joint predictive, not a sum of the per-stream logs.
+    pub replicate_elpd_by_stream: std::collections::BTreeMap<String, Vec<f64>>,
+    /// The filter-noise Monte-Carlo SE of the elpd, from `replicate_elpd`
+    /// (the log-mean-exp delta-method SE); `None` for a single pass.
+    pub mc_se_elpd: Option<f64>,
+}
+
+impl Derivation {
+    /// The block for one filter pass over `trace`: one replicate, its own
+    /// totals, no filter-noise SE. Both single-pass producers
+    /// (`camdl pfilter --save-prequential` and `fit run`'s pfilter method)
+    /// build it here, so they cannot drift apart.
+    pub fn single_pass(
+        trace: &PrequentialTrace,
+        particles: usize,
+        dt: f64,
+        seed: u64,
+        theta: ThetaSource,
+        enabled: Vec<String>,
+        disabled: Vec<String>,
+    ) -> Self {
+        Derivation {
+            particles,
+            replicates: 1,
+            dt,
+            seed,
+            theta,
+            excluded_chains: Vec::new(),
+            enabled,
+            disabled,
+            replicate_elpd: vec![trace.elpd()],
+            replicate_elpd_by_stream: trace.elpd_by_stream().into_iter()
+                .map(|(k, v)| (k, vec![v]))
+                .collect(),
+            mc_se_elpd: None,
+        }
+    }
 }
 
 /// Where a trace's parameters came from. Externally tagged like
@@ -276,6 +321,17 @@ impl PrequentialTrace {
     /// Total expected log predictive density (elpd_preq).
     pub fn elpd(&self) -> f64 {
         self.steps.iter().map(|s| s.log_score).sum()
+    }
+
+    /// Each stream's summed per-stream `log_score` over the scored steps.
+    pub fn elpd_by_stream(&self) -> std::collections::BTreeMap<String, f64> {
+        let mut out = std::collections::BTreeMap::new();
+        for step in &self.steps {
+            for ss in &step.per_stream {
+                *out.entry(ss.stream.clone()).or_insert(0.0) += ss.log_score;
+            }
+        }
+        out
     }
 
     /// A one-line caveat when the score is optimistic on either axis — plug-in
@@ -900,6 +956,10 @@ mod tests {
             excluded_chains: vec![1, 3],
             enabled: vec!["lockdown".into()],
             disabled: vec![],
+            replicate_elpd: vec![-10.0, -10.5, -9.8, -10.1, -10.2],
+            replicate_elpd_by_stream: [("cases".to_string(), vec![-4.0, -4.1, -3.9, -4.0, -4.2])]
+                .into_iter().collect(),
+            mc_se_elpd: Some(0.12),
         };
         let json = serde_json::to_value(&block).unwrap();
         assert_eq!(json["theta"],
@@ -923,6 +983,41 @@ mod tests {
         let written = serde_json::to_value(&t).unwrap();
         assert!(written.get("derivation").is_none(),
             "an absent block is omitted, not written as null: {written}");
+    }
+
+    /// A single pass records its own totals: a one-element `replicate_elpd`
+    /// equal to the trace's elpd, one element per stream equal to that
+    /// stream's summed score, and no filter-noise SE.
+    #[test]
+    fn a_single_pass_records_its_own_totals() {
+        let score = |stream: &str, ls: f64| StreamScore {
+            stream: stream.into(), y_obs: 1.0, y_pred_samples: vec![], log_score: ls,
+            crps: 0.0, pit: 0.5, interval: PredInterval::default(), coverage: Coverage::Instant,
+        };
+        let step = |t: f64, ls: f64, per: Vec<StreamScore>| PrequentialStep {
+            t, y_obs: 1.0, y_pred_samples: vec![], log_score: ls, crps: 0.0, pit: 0.5,
+            ess: 10.0, interval: PredInterval::default(), per_stream: per,
+        };
+        let trace = PrequentialTrace {
+            schema_version: 5, t0: 0, provenance: Provenance::PlugIn,
+            conditioning: Conditioning::InSample,
+            steps: vec![
+                step(7.0, -3.0, vec![score("north", -1.0), score("south", -1.5)]),
+                step(14.0, -2.0, vec![score("north", -0.5)]),
+            ],
+            warnings: vec![], score_from: None, pit_randomization_seed: None,
+            derivation: None,
+        };
+        let d = Derivation::single_pass(&trace, 200, 1.0, 3, ThetaSource::Supplied,
+                                        vec![], vec![]);
+        assert_eq!(d.replicates, 1);
+        assert_eq!(d.replicate_elpd, vec![-5.0]);
+        assert_eq!(d.replicate_elpd_by_stream,
+            [("north".to_string(), vec![-1.5]), ("south".to_string(), vec![-1.5])]
+                .into_iter().collect());
+        assert_eq!(d.mc_se_elpd, None);
+        let json = serde_json::to_value(&d).unwrap();
+        assert!(json["mc_se_elpd"].is_null(), "{json}");
     }
 
     #[test]

@@ -192,9 +192,19 @@ fn the_trace_records_its_filter_settings_and_compare_checks_them() {
     let manual: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("manual.json")).unwrap()).unwrap();
     assert_eq!(manual["schema_version"], 5);
+    // One pass: its own elpd and per-stream sum as one-element vectors, no
+    // filter-noise SE.
+    let elpd: f64 = manual["steps"].as_array().unwrap().iter()
+        .map(|s| s["log_score"].as_f64().unwrap()).sum();
+    let stream_elpd: f64 = manual["steps"].as_array().unwrap().iter()
+        .flat_map(|s| s["per_stream"].as_array().unwrap().iter())
+        .map(|s| s["log_score"].as_f64().unwrap()).sum();
     assert_eq!(manual["derivation"], serde_json::json!({
         "particles": 200, "replicates": 1, "dt": 1.0, "seed": 3,
         "theta": "supplied", "excluded_chains": [], "enabled": [], "disabled": [],
+        "replicate_elpd": [elpd],
+        "replicate_elpd_by_stream": {"weekly_cases": [stream_elpd]},
+        "mc_se_elpd": null,
     }), "pfilter records its single pass: {manual}");
 
     // Derived rows: two replicates of an optimizer fit's winner.
@@ -208,6 +218,14 @@ fn the_trace_records_its_filter_settings_and_compare_checks_them() {
         assert_eq!(d["seed"], 1, "the filter seed replicate 0 ran at: {row}");
         assert_eq!(d["theta"], "optimizer_winner", "an IF2 fit's θ is its winner: {row}");
         assert_eq!(d["excluded_chains"], serde_json::json!([]), "{row}");
+        // The replicate totals and the filter-noise SE live in the trace,
+        // and the row's SE is read from there.
+        assert_eq!(d["replicate_elpd"].as_array().map(|v| v.len()), Some(2), "{row}");
+        assert_eq!(d["replicate_elpd_by_stream"]["weekly_cases"].as_array().map(|v| v.len()),
+            Some(2), "{row}");
+        assert!(d["mc_se_elpd"].as_f64().is_some_and(|se| se.is_finite() && se >= 0.0),
+            "two replicates give an SE: {row}");
+        assert_eq!(row["mc_se_elpd"], d["mc_se_elpd"], "{row}");
     }
     assert!(v["filter_settings_mismatch"].is_null() && v["filter_settings_unchecked"].is_null(),
         "{v}");
