@@ -38,7 +38,7 @@ pub struct StreamAttempt {
     pub stream: String,
     /// The observation's time on the model axis. Matches
     /// `ObsFilterEss.time` and `MultiStreamObsModel`'s union axis.
-    #[serde(with = "crate::inference::json_f64")]
+    #[serde(with = "score::num::json_f64")]
     pub time: f64,
     /// The same instant as a calendar label, when the model declares an
     /// `origin`. `None` for an unanchored model.
@@ -55,11 +55,11 @@ pub struct StreamAttempt {
     ///
     /// A `±∞` here is a value, written `"inf"` / `"-inf"`, and distinct from
     /// `None`, which is `null`.
-    #[serde(with = "crate::inference::json_f64::option", default)]
+    #[serde(with = "score::num::json_f64::option", default)]
     pub projected_max: Option<f64>,
     /// Median of the same non-NaN live projections (lower median for an even
     /// count, so the reported value is always one a particle actually held).
-    #[serde(with = "crate::inference::json_f64::option", default)]
+    #[serde(with = "score::num::json_f64::option", default)]
     pub projected_median: Option<f64>,
     /// Live particles whose projection was exactly zero.
     pub n_projected_zero: usize,
@@ -99,7 +99,7 @@ pub struct StreamAttempt {
 pub enum ObsCellState {
     /// Scheduled here and observed, with the value that was scored.
     Scored {
-        #[serde(with = "crate::inference::json_f64")]
+        #[serde(with = "score::num::json_f64")]
         y_obs: f64,
     },
     /// Scheduled here, value missing (`NA`). No likelihood term — the value is
@@ -167,14 +167,14 @@ pub enum NegInfCause {
     /// Model side.
     ArgumentOutOfDomain {
         arg: String,
-        #[serde(with = "crate::inference::json_f64")]
+        #[serde(with = "score::num::json_f64")]
         value: f64,
     },
     /// The arguments are in domain, but they put the observed value outside
     /// the family's support — a positive count under a zero rate, a proportion
     /// outside `(0, 1)`. Reading this needs both the data and the parameters.
     ObservedOutsideSupport {
-        #[serde(with = "crate::inference::json_f64")]
+        #[serde(with = "score::num::json_f64")]
         observed: f64,
     },
     /// The per-stream density was `−∞` and no guard accounted for it. Never

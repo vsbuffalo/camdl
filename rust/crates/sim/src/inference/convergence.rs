@@ -78,11 +78,11 @@ pub enum ConvergenceError {
     /// `value` is non-finite by construction — that is what the variant is for
     /// — and `serde_json` writes any non-finite `f64` as `null`, which will not
     /// read back. It is carried as `"inf"` / `"-inf"` / `"NaN"` by
-    /// [`crate::inference::json_f64`], so the round-trip is exact.
+    /// [`score::num::json_f64`], so the round-trip is exact.
     NonFiniteDraw {
         chain: usize,
         draw: usize,
-        #[serde(with = "crate::inference::json_f64")]
+        #[serde(with = "score::num::json_f64")]
         value: f64,
     },
     /// Every draw of every chain is the same value to within
