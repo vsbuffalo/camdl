@@ -2114,7 +2114,7 @@ pub(crate) fn apply_holdout_declaration(
 /// Tolerance for "the same observation time" comparisons at the holdout
 /// boundary — float noise from a date→time conversion must not move a row
 /// across the training/held-out cut.
-const TIME_TIE_EPS: f64 = 1e-9;
+pub(crate) const TIME_TIE_EPS: f64 = 1e-9;
 
 /// An observation anchor in a time spec (gh#626): `first_obs` / `last_obs`.
 /// Which observation(s) it folds over is the CALLER's semantics — the union

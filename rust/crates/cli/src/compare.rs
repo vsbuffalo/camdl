@@ -982,6 +982,67 @@ fn detect_sealed_holdout(resolved: &ResolvedFit) -> Result<Option<SealedHoldout>
     Ok(Some(SealedHoldout { train_end: window.train_end, holdout_files }))
 }
 
+/// For an explicit `[data.holdout]` fit, refuse the `HoldOutTail` stamp if
+/// any bound training file has an observation after the recorded
+/// `train_end`. The derived trace scores everything after `train_end`, so
+/// such a row — data θ̂ was fitted to — would be scored as held out. A fit
+/// run before `train_end` covered every bound stream records exactly this
+/// shape (a stream without a holdout file training past another stream's
+/// held-out rows), and so does a training file extended after the fit.
+///
+/// The training files are read through the fit's own loader, so times
+/// (dates included) resolve as the fit resolved them. A `holdout_after`
+/// fit is exempt: its training files legitimately run past the cutoff,
+/// which the fit applied at load.
+fn check_training_ends_by_train_end(
+    h: &SealedHoldout,
+    streams: &indexmap::IndexMap<String, String>,
+    model_path: &Path,
+    dt: f64,
+    segment: &Path,
+) -> Result<(), String> {
+    if h.holdout_files.is_empty() {
+        return Ok(());
+    }
+    let (model, _) = crate::util::load_model(&model_path.to_string_lossy())?;
+    let time_opts = crate::caltime_load::TimeOpts {
+        origin: model.origin.as_deref(),
+        time_unit: &model.time_unit,
+        dt,
+        t_start: model.simulation.t_start,
+        format: crate::caltime_load::TimeFormat::Auto,
+    };
+    let mut late: Vec<String> = Vec::new();
+    for obs in &model.observations {
+        // `streams` is keyed by source, except under the single-file
+        // shorthand, which `resolve_streams` keys by stream name.
+        let Some(path) = streams.get(&obs.source).or_else(|| streams.get(&obs.name))
+            else { continue };
+        let siblings: Vec<&ir::observation::ObservationModel> = model.observations.iter()
+            .filter(|o| o.source == obs.source)
+            .collect();
+        let (rows, _cells, _aux) =
+            crate::fit::runner::load_observations(path, obs, &siblings, dt, &time_opts)?;
+        let last = rows.iter().map(|o| o.time).fold(f64::NEG_INFINITY, f64::max);
+        let entry = format!("'{}' (training data runs to t = {last})", obs.source);
+        if last > h.train_end + crate::fit::runner::TIME_TIE_EPS && !late.contains(&entry) {
+            late.push(entry);
+        }
+    }
+    if late.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "the fit at {} trained on data inside the window `compare` would \
+         score as held out: its recorded training window ends at t = {}, but \
+         stream {} has training observations after that time. Scoring it \
+         would present in-sample scores as held-out.\n  Re-run the fit (it \
+         now requires every held-out row to lie after the training data of \
+         every stream), or pass --in-sample to score it as the in-sample \
+         trace it is.",
+        segment.display(), h.train_end, late.join(", ")))
+}
+
 /// The pair's combined filter-noise SE for a Δ against the baseline,
 /// `√(mc_a² + mc_b²)` (§3.4 remedy 4); `None` unless both rows carry a
 /// replicate-derived MC SE. Conservative under common random numbers.
@@ -1165,6 +1226,10 @@ fn derive_prequential(
         .unwrap_or_else(|| "fit".into());
     let base = std::env::temp_dir()
         .join(format!("camdl_compare_{}_{}", std::process::id(), seg_slug));
+
+    if let Some(h) = &holdout {
+        check_training_ends_by_train_end(h, &streams, &model_path, fitted_dt, segment)?;
+    }
 
     // Explicit `[data.holdout]` fits: the scored series is training ∪
     // holdout, merged per stream into a temp file (temporal `holdout_after`
