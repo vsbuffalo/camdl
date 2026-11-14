@@ -8,15 +8,15 @@
 //! compare`. Regressed by PR #218 (the sparse/multi-cadence union axis), so it
 //! affects single-stream AND multi-stream models.
 //!
-//! These tests pin: `y_obs[step]` equals the bound observed value(s) — the
-//! per-stream sum across all bound streams on the union axis (matching the
-//! joint, cross-stream predictive sample the score is computed against).
+//! These tests pin: each stream's `y_obs` at each step equals that stream's
+//! bound observed value (`{STEM}.streams.tsv`; a step has no observed value
+//! of its own).
 //!
 //! gh#648 is the same bug at the OTHER call site. `fit run`'s PFilter method
 //! built its `y_obs` from `FitRunConfig.observations` — the canonical union
 //! TIME axis, whose `value` is documented as a never-scored placeholder 0.0
 //! (`fit/runner.rs`) — while `camdl pfilter --save-prequential` went through
-//! `obs_model.joint_observed()`. The gh#268 fix landed at one site and missed
+//! the observation model's observed values. The gh#268 fix landed at one site and missed
 //! the other. `fit_run_prequential_equals_pfilter_prequential` below pins the
 //! two against each other.
 
@@ -73,41 +73,33 @@ fn synth_obs(bin: &Path, model: &Path, tmp: &Path, extra_args: &[&str]) -> PathB
 }
 
 /// Parse a TSV with a header row into time -> value maps for the named columns.
-/// Returns a map keyed by the (rounded) time column for robust alignment.
-///
-/// gh#269: the prequential TSV is now tidy/long with a `stream` column (a
-/// `joint` summary row plus per-stream rows). This reader's intent is the JOINT
-/// score per step, so when a `stream` column is present it keeps only the
-/// `stream == "joint"` rows. Files without a `stream` column (the source obs
-/// TSV) are read unfiltered.
-fn read_tsv_columns(path: &Path, time_col: &str, value_cols: &[&str]) -> BTreeMap<i64, Vec<f64>> {
+/// Returns a map keyed by the (rounded) time column for robust alignment. With
+/// `stream`, only the rows of that stream (a `{STEM}.streams.tsv`) are read.
+fn read_tsv_columns(
+    path: &Path,
+    time_col: &str,
+    value_cols: &[&str],
+    stream: Option<&str>,
+) -> BTreeMap<i64, Vec<f64>> {
     let text = std::fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
     let mut lines = text.lines();
     let header: Vec<&str> = lines.next().expect("header").split('\t').collect();
-    let tidx = header
+    let col = |c: &str| header
         .iter()
-        .position(|h| *h == time_col)
-        .unwrap_or_else(|| panic!("no '{}' column in {:?}", time_col, header));
-    let stream_idx = header.iter().position(|h| *h == "stream");
-    let vidxs: Vec<usize> = value_cols
-        .iter()
-        .map(|c| {
-            header
-                .iter()
-                .position(|h| h == c)
-                .unwrap_or_else(|| panic!("no '{}' column in {:?}", c, header))
-        })
-        .collect();
+        .position(|h| *h == c)
+        .unwrap_or_else(|| panic!("no '{}' column in {:?}", c, header));
+    let tidx = col(time_col);
+    let stream_idx = stream.map(|_| col("stream"));
+    let vidxs: Vec<usize> = value_cols.iter().map(|c| col(c)).collect();
     let mut out = BTreeMap::new();
     for line in lines {
         if line.trim().is_empty() {
             continue;
         }
         let f: Vec<&str> = line.split('\t').collect();
-        // Keep only the joint summary row when this is a tidy prequential TSV.
-        if let Some(si) = stream_idx {
-            if f[si] != "joint" {
+        if let (Some(si), Some(want)) = (stream_idx, stream) {
+            if f[si] != want {
                 continue;
             }
         }
@@ -150,8 +142,9 @@ fn prequential_y_obs_single_stream_equals_data() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let preq = read_tsv_columns(&stem.with_extension("tsv"), "t", &["y_obs"]);
-    let data = read_tsv_columns(&obs, "time", &["reported_cases"]);
+    let streams = tmp.path().join("preq.streams.tsv");
+    let preq = read_tsv_columns(&streams, "t", &["y_obs"], None);
+    let data = read_tsv_columns(&obs, "time", &["reported_cases"], None);
     assert!(!preq.is_empty(), "prequential trace empty");
     // The data must contain some nonzero observation, else the all-zero bug
     // could pass vacuously.
@@ -169,8 +162,11 @@ fn prequential_y_obs_single_stream_equals_data() {
     }
 }
 
+/// Each bound stream is scored against its own observed values. (The step
+/// has no observed value of its own: the sum across streams is not an
+/// observed quantity, and nothing is scored against it.)
 #[test]
-fn prequential_y_obs_multi_stream_is_cross_stream_sum() {
+fn prequential_y_obs_multi_stream_is_each_streams_own_value() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
     let obs = synth_obs(&bin, &multi_block_model(), tmp.path(), &["--scenario", "true_params"]);
@@ -206,22 +202,24 @@ fn prequential_y_obs_multi_stream_is_cross_stream_sum() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let preq = read_tsv_columns(&stem.with_extension("tsv"), "t", &["y_obs"]);
-    let data = read_tsv_columns(&obs, "time", &["cases_p1", "cases_p2"]);
-    assert!(!preq.is_empty(), "prequential trace empty");
+    let streams = tmp.path().join("preq.streams.tsv");
+    let data = read_tsv_columns(&obs, "time", &["cases_p1", "cases_p2"], None);
     assert!(
-        data.values().any(|v| v[0] + v[1] != 0.0),
+        data.values().any(|v| v[0] != 0.0 && v[1] != 0.0),
         "synthetic obs are all zero — test would not detect the bug"
     );
-    for (t, y) in &preq {
-        let d = data.get(t).unwrap_or_else(|| panic!("no data at t={}", t));
-        let expected = d[0] + d[1];
-        assert_eq!(
-            y[0], expected,
-            "joint prequential y_obs at t={} = {} but cases_p1+cases_p2 = {} \
-             (the hardcoded-0 bug)",
-            t, y[0], expected
-        );
+    for (k, name) in ["cases_p1", "cases_p2"].iter().enumerate() {
+        let preq = read_tsv_columns(&streams, "t", &["y_obs"], Some(name));
+        assert!(!preq.is_empty(), "no {name} rows in the prequential trace");
+        for (t, y) in &preq {
+            let expected = data.get(t).unwrap_or_else(|| panic!("no data at t={}", t))[k];
+            assert_eq!(
+                y[0], expected,
+                "{name} prequential y_obs at t={} = {} but its bound data = {} \
+                 (the hardcoded-0 bug)",
+                t, y[0], expected
+            );
+        }
     }
 }
 
@@ -470,4 +468,8 @@ fn fit_run_prequential_equals_pfilter_prequential() {
         "fit run and pfilter must write the same prequential.tsv header"
     );
     assert_eq!(tsv_a, tsv_b, "the two prequential.tsv files must be identical");
+    let streams_a = std::fs::read_to_string(fit_json.with_extension("streams.tsv"))
+        .expect("fit run wrote prequential.streams.tsv beside prequential.json");
+    let streams_b = std::fs::read_to_string(dir.join("manual.streams.tsv")).unwrap();
+    assert_eq!(streams_a, streams_b, "the two prequential.streams.tsv files must be identical");
 }

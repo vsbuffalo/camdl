@@ -4179,8 +4179,13 @@ one point (starts = from_mle @scout)`
 in place of a verdict (§6.6). To keep R̂ meaningful, start from the priors (drop
 `starts`; every parameter here has one) or from a short sampler run's cloud
 (`starts = { from_posterior = "@short" }`). The `pfilter` file writes
-`prequential.tsv` and `prequential.json`; the JSON is what `camdl compare` reads
-to score fits against each other.
+`prequential.tsv` (one row per scored step: `t`, the joint `log_score`, `ess`),
+`prequential.streams.tsv` (one row per step and scored stream: `t`, `stream`,
+`y_obs`, the predictive band `y_pred_q05`…`y_pred_q95`, `log_score`, `crps`,
+`pit`) and `prequential.json`; the JSON is what `camdl compare` reads to score
+fits against each other. CRPS and PIT are in the per-stream file only: a step
+has no single observed quantity across streams to score them against, and a
+stream's `log_score` rows do not sum to the joint one.
 
 Beneath the `prequential:` line, whenever at least one observation was scored,
 the filter prints the **surprise table**: the five worst-scored observations of
@@ -4201,16 +4206,15 @@ worst-scored observations (5 of 53 scored; together 12.3% of elpd -562.3):
 ```
 
 Rows are ranked by the step's joint log score; `share` is that score as a
-fraction of the elpd, and the header gives the five rows' combined share. On a
-multi-stream model the joint `y_obs` would be a cross-stream sum, so each row
-names the step's worst stream and shows _that_ stream's observed value, 5–95%
-predictive band and (in parentheses) its own log score — the row a reader can
-look up in the data. `ess` is the filter's effective sample size at the step
-(see `filter_ess` under PGAS). Here the shares are flat at 2–3%, which is the
-healthy reading: no single observation dominates. A row carrying a tenth of the
-elpd by itself, with `pit` at 0 or 1 and `ess` in the single digits, is one
-observation the filter could not explain — check the data row at that `t` before
-anything else.
+fraction of the elpd, and the header gives the five rows' combined share. A step
+has no observed value of its own, so each row names the step's worst stream and
+shows _that_ stream's observed value, 5–95% predictive band, (in parentheses)
+its own log score and its PIT — the row a reader can look up in the data. `ess`
+is the filter's effective sample size at the step (see `filter_ess` under PGAS).
+Here the shares are flat at 2–3%, which is the healthy reading: no single
+observation dominates. A row carrying a tenth of the elpd by itself, with `pit`
+at 0 or 1 and `ess` in the single digits, is one observation the filter could
+not explain — check the data row at that `t` before anything else.
 
 Once a sampler leaf exists, `fit predict` replays the posterior forward and
 writes the predicted-vs-observed pair:
@@ -7101,7 +7105,8 @@ camdl fit predict [FIT]
 --save-paths FILE           smoothing-distribution trajectory samples
 --n-paths N                 how many, for --save-paths (default 1)
 --save-filtering FILE       per-step particle states and log-weights
---save-prequential STEM     {STEM}.tsv + {STEM}.json one-step-ahead predictive
+--save-prequential STEM     {STEM}.tsv (joint score per step) + {STEM}.streams.tsv
+                            (per-stream scores) + {STEM}.json
 --no-save-samples           with --save-prequential, drop per-particle samples
 --no-store                  record no `pfilters/` leaf for this evaluation
 ```
@@ -7316,6 +7321,15 @@ whose traces record different particle or replicate counts are refused unless
 particle-filter likelihood estimate is biased downward by more at fewer
 particles; a trace that records no settings (older than schema 5) is named in
 `filter_settings_unchecked`.
+
+Each step of a trace records its time `t`, the joint `log_score` (the log of the
+joint one-step-ahead predictive density of every stream observed there), the
+filter's `ess`, and `per_stream`: each scored stream's `y_obs`,
+`y_pred_samples`, `log_score`, `crps`, `pit`, `interval` and `coverage`. A step
+has no `y_obs`, `y_pred_samples`, `crps`, `pit` or `interval` of its own; a
+trace written with those step-level fields still reads, and they are ignored.
+The randomized-PIT uniforms are drawn one per scored stream value, step by step
+and in stream order within a step, from `pit_randomization_seed`.
 
 Each trace (schema 5) records how it was computed, as its `derivation` block:
 `particles`, `replicates`, `dt`, `seed`, `theta` (`supplied`,

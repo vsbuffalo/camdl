@@ -2186,23 +2186,19 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     });
                     if record_preq {
                         if let Some(ref recorded) = result.prequential {
-                            // gh#268/gh#648: score against the real observed
-                            // values (cross-stream sum on the union axis), the
-                            // same seam `camdl pfilter --save-prequential`
-                            // uses. NOT `run_config.observations[i].value` —
-                            // that is the canonical union TIME axis, whose
-                            // `value` is a never-scored 0.0 placeholder
-                            // (`runner.rs`), so it scored every forecast
-                            // against a vector of zeros.
-                            let y_obs: Vec<f64> = obs_model.joint_observed();
-                            // gh#269: per-stream observed values for the
-                            // per-district score breakdown.
+                            // gh#268/gh#648/gh#269: score each stream against
+                            // its real observed values, the same seam `camdl
+                            // pfilter --save-prequential` uses. NOT
+                            // `run_config.observations[i].value` — that is the
+                            // canonical union TIME axis, whose `value` is a
+                            // never-scored 0.0 placeholder (`runner.rs`), so it
+                            // scored every forecast against a vector of zeros.
                             let per_stream_obs = obs_model.per_stream_observed();
                             // gh#833: what each value was accumulated over,
                             // for `compare`'s window gate.
                             let per_stream_cov = obs_model.per_stream_coverage();
                             let mut trace = sim::inference::prequential::build_trace(
-                                recorded, &y_obs, &per_stream_obs, &per_stream_cov,
+                                recorded, &per_stream_obs, &per_stream_cov,
                                 &result.ess_trace, 0,
                                 pf_seed,
                                 obs_model.first_observation_opens_after_run_start(smc_config.t_start),

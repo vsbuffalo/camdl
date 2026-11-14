@@ -4493,7 +4493,6 @@ mod tests {
             prequential: Some(PrequentialRecorded {
                 obs_times: vec![7.0, 14.0],
                 log_liks: vec![vec![-5.0, -5.0], vec![-5.0, -5.0]],
-                y_pred_samples: vec![vec![base, base + 1.0], vec![base, base + 1.0]],
                 stream_names: vec!["cases".into()],
                 per_stream_log_liks: vec![vec![vec![-5.0, -5.0]], vec![vec![-5.0, -5.0]]],
                 per_stream_samples: vec![per_time(base), per_time(base)],

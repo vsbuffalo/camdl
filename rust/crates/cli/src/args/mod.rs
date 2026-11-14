@@ -1650,9 +1650,11 @@ pub struct PfilterArgs {
     #[arg(long)]
     pub save_filtering: Option<PathBuf>,
 
-    /// Write {STEM}.tsv (per-step log score, CRPS, PIT, ESS) + {STEM}.json
-    /// (full typed PrequentialTrace) for the plug-in one-step-ahead
-    /// predictive at the fixed parameters. See
+    /// Write {STEM}.tsv (the joint log score and ESS per step),
+    /// {STEM}.streams.tsv (each stream's observed value, predictive band,
+    /// log score, CRPS and PIT per step) + {STEM}.json (full typed
+    /// PrequentialTrace) for the plug-in one-step-ahead predictive at the
+    /// fixed parameters. See
     /// docs/dev/proposals/2026-04-20-prequential-evaluation.md.
     #[arg(long)]
     pub save_prequential: Option<String>,

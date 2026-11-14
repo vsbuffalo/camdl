@@ -2056,11 +2056,11 @@ impl MultiStreamObsModel {
     }
 
     /// The joint observed value at each union index: the sum, across all bound
-    /// streams scheduled-and-observed there, of the cell value. This is the
-    /// correct `y_obs` for the prequential trace and the `--trace` `observed`
-    /// column — the trace records a single scalar observation per step and
-    /// scores it against the joint (cross-stream sum) predictive sample
-    /// (`sample().filter(finite).sum()`). A stream not scheduled at this index
+    /// streams scheduled-and-observed there, of the cell value — the `--trace`
+    /// `observed` column, beside the summed prediction quantiles of the
+    /// filter's prediction diagnostics. The prequential trace does not use it:
+    /// it scores each stream against its own value
+    /// ([`per_stream_observed`]). A stream not scheduled at this index
     /// (`at_union == None`) or a hole (`observations[local] == None`)
     /// contributes nothing; mirrors [`score_streams`]'s union/hole handling so
     /// the recorded observation and the scored predictive share one convention.
@@ -3646,7 +3646,7 @@ mod hole_scoring_tests {
     }
 
     /// gh#268: `joint_observed()` is the per-union-index cross-stream sum used as
-    /// the prequential `y_obs` and the `--trace` `observed` column. It must
+    /// the `--trace` `observed` column. It must
     /// mirror `score_streams`'s union/hole handling: a stream not scheduled at a
     /// union index contributes nothing, and a hole (`None`) contributes nothing.
     /// Two streams on staggered cadences exercise the `at_union == None` gap that

@@ -1691,9 +1691,10 @@ full series, each row of `preq.tsv` with `t` past the split time is a
 one-step-ahead score whose filter state assimilated the training window while θ̂
 never saw the held-out observations. That subset is the held-out quantity.
 
-Sum the `log_score` column over those rows with `stream = "joint"` for the
-held-out elpd. The TSV is tidy/long — a `joint` row per step followed by one row
-per scheduled stream — so summing every row double-counts each step.
+Sum the `log_score` column of `preq.tsv` over those rows for the held-out elpd.
+`preq.tsv` holds one joint score per step; each stream's own score is in
+`preq.streams.tsv`, whose rows do not sum to the joint score and are not part of
+the elpd.
 
 Two numbers not to mis-read:
 
