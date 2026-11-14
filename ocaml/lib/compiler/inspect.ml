@@ -1385,7 +1385,7 @@ let run_inspect path opts =
   | Error e ->
     Fmt.epr "Error: %s@\n" e;
     exit 1
-  | Ok { model; ctx; summary; source; decls = _ } ->
+  | Ok { model; ctx; summary; source; decls = _; declared = _ } ->
     (* compile_detail_result returns Ok only when there are no errors, so any
        remaining diagnostics are warnings/infos — render them and continue. *)
     if ctx.diags.diags <> [] then

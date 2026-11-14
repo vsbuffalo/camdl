@@ -428,6 +428,62 @@ simulate { from = date("2020-01-01")
                        de_reads = []; _ }; _ } -> ()
   | _ -> Alcotest.fail "date(\"…\") should hold a string literal and read no name"
 
+(* ── An unclassified name is reported (W203) ─────────────────────────────── *)
+
+(* The compiler discards a `timepoints { }` block (gh#1047), so a timepoint
+   that refers to another one compiles, and the name it reads is nothing the
+   section can classify. That is a valid model producing an unresolved name. *)
+let with_timepoints block =
+  sir "beta * S * I / N" ^ "\ntimepoints {\n" ^ block ^ "\n}\n"
+
+(* The 1-indexed line of the `later = …` entry in [src]. *)
+let later_line src =
+  let rec find i = function
+    | [] -> Alcotest.fail "no `later` line"
+    | l :: rest ->
+      if String.length l >= 7 && String.sub l 0 7 = "  later" then i
+      else find (i + 1) rest in
+  find 1 (String.split_on_char '\n' src)
+
+let w203 src =
+  List.filter (fun (d : Diagnostics.diagnostic) -> d.code = "W203")
+    (Compiler.collect_diagnostics ~name:"m" ~filename:"m.camdl" src)
+
+let test_unresolved_is_warned () =
+  let src = with_timepoints "  midpoint = 40 'days\n  later = midpoint + 10 'days" in
+  (* The compile succeeds, and the section says "unresolved". *)
+  let _, d = compile "m" src in
+  let later = List.find (fun (tp : D.timepoint_decl) -> tp.tp_name = "later")
+      d.dm_timepoints in
+  Alcotest.(check bool) "the section tags the name unresolved" true
+    (List.mem { D.nr_name = "midpoint"; nr_kind = D.KUnresolved }
+       later.tp_time.de_reads);
+  match w203 src with
+  | [ w ] ->
+    Alcotest.(check bool) "a warning, not an error" true
+      (w.severity = Diagnostics.Warning);
+    Alcotest.(check string) "message"
+      "the declared-model section could not classify the name 'midpoint' in \
+       timepoint 'later'" w.message;
+    let detail = Option.value w.detail ~default:"" in
+    let contains needle =
+      let n = String.length needle and h = String.length detail in
+      let rec at i = i + n <= h && (String.sub detail i n = needle || at (i + 1)) in
+      at 0 in
+    Alcotest.(check bool) "says the compiled model is unaffected" true
+      (contains "the compiled model is unaffected");
+    Alcotest.(check bool) "says what `camdl diff` will report" true
+      (contains "`camdl diff` will report the dependencies of timepoint 'later' \
+                 as unknown");
+    Alcotest.(check (pair int int)) "points at the name" (later_line src, 11)
+      (w.loc.line, w.loc.col)
+  | ws -> Alcotest.failf "expected one W203, got %d" (List.length ws)
+
+(* Every name classified: no warning. *)
+let test_resolved_is_silent () =
+  Alcotest.(check int) "no W203" 0
+    (List.length (w203 (with_timepoints "  midpoint = 40 'days")))
+
 let () =
   Alcotest.run "declared_emit"
     [ ("goldens",
@@ -444,4 +500,9 @@ let () =
          Alcotest.test_case "units are kept" `Quick test_units;
          Alcotest.test_case "comments, layout and let position" `Quick
            test_layout_and_let_position;
-         Alcotest.test_case "a quoted string is not a name" `Quick test_string_literal ]) ]
+         Alcotest.test_case "a quoted string is not a name" `Quick test_string_literal ]);
+      ("unclassified names",
+       [ Alcotest.test_case "an unresolved name is warned, and the compile succeeds"
+           `Quick test_unresolved_is_warned;
+         Alcotest.test_case "a model with none is silent" `Quick
+           test_resolved_is_silent ]) ]

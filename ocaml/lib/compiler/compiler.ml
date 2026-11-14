@@ -9,6 +9,10 @@ type compile_detail = {
      them. The declared-model section is built from these and never from
      [ctx], which the `via` lowering has rewritten. *)
   decls   : Ast.declaration list;
+  (* The declared-model section and the names in it that could not be
+     classified. Lazy so it is built once: [run_analysis] forces it to report
+     W203, and [compile_with_declared] returns the same value. *)
+  declared : (Declared.declared_model * Declared_emit.unresolved list) Lazy.t;
 }
 
 (** Structured, non-raising compile outcome (gh#181 step 1).
@@ -301,7 +305,9 @@ let front_end_collect ?(name = "model") ?(filename = "<input>")
            ~message:msg ?hint ~fixes ()
        ) (List.rev !Parser_errors.pending_errors);
        Parser_errors.pending_errors := [];
-       (Some { model; ctx; summary; source; decls }, ctx.diags, source))
+       (Some { model; ctx; summary; source; decls;
+               declared = lazy (Declared_emit.build_detail ctx decls) },
+        ctx.diags, source))
 
 (** Production front end: run [front_end_collect], and on any front-end
     error (lex/parse/expand failure, or a parser-action error drained
@@ -751,6 +757,28 @@ let maybe_licm (m : Ir.model) : Ir.model =
    raising); [run_analysis] emits them, so no pass throws — a late-phase error
    (validate E5xx, dimcheck, autodiff E600) becomes a [None] the caller renders,
    never an uncaught [Compile_error] (gh#181). *)
+(* W203: a name the declared-model section could not classify. The compile
+   succeeds, since the compiled model does not depend on the section; but the
+   section then says "unresolved" where it should say what the name is, and
+   `camdl diff` cannot follow that declaration's dependencies. Reported here,
+   on the no-error path, so `compile` and `check` both show it. *)
+let run_declared_names (d : compile_detail) : Diagnostics.diagnostic list =
+  let (_section, unresolved) = Lazy.force d.declared in
+  List.map (fun (u : Declared_emit.unresolved) ->
+    Diagnostics.mk_warning ~code:"W203"
+      ~loc:(Expander.diag_loc_of_ast_ctx d.ctx u.u_loc)
+      ~message:(Printf.sprintf
+        "the declared-model section could not classify the name '%s' in %s"
+        u.u_name u.u_site)
+      ~detail:(Printf.sprintf
+        "The model compiled, and the compiled model is unaffected. The record \
+         of the model as written (the `declared` section of the compiled file) \
+         tags '%s' as unresolved, so `camdl diff` will report the dependencies \
+         of %s as unknown." u.u_name u.u_site)
+      ~hint:"this is a gap in camdl's record of the model, not an error in the \
+             model; please report it with the model file"
+      ()) unresolved
+
 let run_analysis (d : compile_detail)
     : (((string * (string * string) list) * (int * int)) list
        * Ir.transition list) option =
@@ -769,7 +797,10 @@ let run_analysis (d : compile_detail)
       let (transitions, gdiags) = differentiate_transitions d in
       emit_all gdiags;
       if Diagnostics.has_errors d.ctx.diags then None
-      else Some (qdims, transitions)
+      else begin
+        emit_all (Passtime.time "declared-names" (fun () -> run_declared_names d));
+        Some (qdims, transitions)
+      end
     end
   end
 
@@ -905,7 +936,7 @@ let compile_with_declared ?(name = "model") ?(filename = "<input>")
   match compile_detail_result ~name ~filename ?quantities src with
   | Ok d ->
     (match finish_compile d with
-     | Ok m -> Ok (m, Expander.reads d.ctx, Declared_emit.build d.ctx d.decls)
+     | Ok m -> Ok (m, Expander.reads d.ctx, fst (Lazy.force d.declared))
      | Error e -> Error e)
   | Error e -> Error e
 

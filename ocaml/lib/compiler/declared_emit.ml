@@ -28,10 +28,23 @@
    keyword of `unchecked_dim(...)` and the bare words of a forcing argument
    that selects from a closed set. Those are tagged `KKeyword`, by position.
    A name nothing here classifies is tagged `KUnresolved`; the golden walk in
-   `test_declared_emit.ml` fails on any. *)
+   `test_declared_emit.ml` fails on any. Each one is also returned by
+   [build_detail] with the declaration it sits in and its source location, and
+   the compiler reports it as warning W203: an unclassified name is never
+   silent, because `camdl diff` cannot follow that declaration's
+   dependencies. *)
 
 open Ast
 module D = Declared
+
+(* A name the section could not classify: the declaration it sits in, in words
+   a diagnostic can print ("transition 'infection'"), the name, and where it
+   was written. *)
+type unresolved = {
+  u_site : string;
+  u_name : string;
+  u_loc  : Ast.loc;
+}
 
 type env = {
   ctx       : Expander.context;
@@ -41,7 +54,18 @@ type env = {
   transitions : string list; (* declared transition names *)
   levels    : (string, unit) Hashtbl.t;   (* every level of every dimension *)
   dims      : string list;   (* declared dimension names *)
+  site      : string ref;    (* the declaration being converted *)
+  unresolved : unresolved list ref;   (* newest first *)
 }
+
+(* Record [name] as unclassified when [kind] says so, and return [kind]. Called
+   only where a name enters a tree, so a probe of [kind_of_bare] (a forcing
+   argument deciding between a name and a keyword) records nothing. *)
+let noted env (name : string) (loc : Ast.loc) (kind : D.name_kind) : D.name_kind =
+  if kind = D.KUnresolved then
+    env.unresolved :=
+      { u_site = !(env.site); u_name = name; u_loc = loc } :: !(env.unresolved);
+  kind
 
 (* Where an expression sits. The classifiers depend on two pieces of use-site
    context (the binder set and a likelihood's data columns); the rest selects
@@ -194,9 +218,10 @@ let rec tree env pos (e : expr) : D.expr_tree =
   (* A quoted string parses to an identifier with no source location
      (parser.mly, the `STRING` atom). *)
   | EIdent (s, loc) when loc = dummy_loc -> TStr s
-  | EIdent (s, _) -> TIdent { nr_name = s; nr_kind = kind_of_bare env pos s }
-  | EIndex (n, items, _) ->
-    TIndex ({ nr_name = n; nr_kind = kind_of_head env pos n },
+  | EIdent (s, loc) ->
+    TIdent { nr_name = s; nr_kind = noted env s loc (kind_of_bare env pos s) }
+  | EIndex (n, items, loc) ->
+    TIndex ({ nr_name = n; nr_kind = noted env n loc (kind_of_head env pos n) },
             List.map (index_item env pos) items)
   | EBinOp (op, a, b) -> TBinOp (bin_op op, tree env pos a, tree env pos b)
   | EUnOp (op, a) -> TUnOp (un_op op, tree env pos a)
@@ -228,7 +253,7 @@ and index_item env pos : Ast.index_item -> D.index_item = function
 and index_tree env pos (e : expr) : D.expr_tree =
   match e with
   | EIdent (s, loc) when loc <> dummy_loc ->
-    TIdent { nr_name = s; nr_kind = kind_of_index env pos s }
+    TIdent { nr_name = s; nr_kind = noted env s loc (kind_of_index env pos s) }
   | _ -> tree env pos e
 
 let args env pos (kvs : (string * expr) list) : D.arg list =
@@ -543,11 +568,13 @@ let files (ctx : Expander.context) : D.file_input list =
 
 (* ── The section ─────────────────────────────────────────────────────────── *)
 
-(** Build the declared-model section. [ctx] is the context a successful
+(** Build the declared-model section, and list every name in it that could not
+    be classified (in source order). [ctx] is the context a successful
     [Expander.expand_detail] returned for [decls]. [set_values] and
     [extra_files] are empty here; `camdlc` adds its `--set` overrides and a
     `--quantities` vocabulary file with [with_compile_inputs]. *)
-let build (ctx : Expander.context) (decls : declaration list) : D.declared_model =
+let build_detail (ctx : Expander.context) (decls : declaration list)
+    : D.declared_model * unresolved list =
   Latex.populate_overrides decls;
   let each f = List.concat_map f decls in
   let comps = each (function
@@ -561,6 +588,7 @@ let build (ctx : Expander.context) (decls : declaration list) : D.declared_model
       (Expander.dim_levels_or_empty ctx d)) dims;
   let env = {
     ctx; comps; dims; levels;
+    site = ref ""; unresolved = ref [];
     quantities = each (function
       | DQuantities qs -> List.map (fun (q : Ast.quantity_decl) -> q.qd_name) qs
       | _ -> []);
@@ -572,7 +600,12 @@ let build (ctx : Expander.context) (decls : declaration list) : D.declared_model
       | _ -> []);
   } in
   let first f = List.find_map f decls in
-  {
+  (* Convert one declaration with [env.site] naming it, so an unclassified
+     name is reported against the declaration it sits in. *)
+  let at what name f x =
+    env.site := (if name = "" then what else Printf.sprintf "%s '%s'" what name);
+    f env x in
+  let section : D.declared_model = {
     dm_schema_version = D.schema_version;
     dm_compile_inputs = { ci_set_values = []; ci_files = files ctx };
     dm_time_unit = first (function DTimeUnit (u, _) -> Some (unit_lit u) | _ -> None);
@@ -584,49 +617,95 @@ let build (ctx : Expander.context) (decls : declaration list) : D.declared_model
     dm_stratify = each (function
       | DStratify s -> [ { D.st_dim = s.sdim; st_only = s.sonly } ] | _ -> []);
     dm_parameters = each (function
-      | DParameters ps -> List.map (parameter env) ps | _ -> []);
-    dm_definitions = each (function DLet lb -> [ definition env lb ] | _ -> []);
+      | DParameters ps ->
+        List.map (fun p ->
+          let name = match p with
+            | PScalar { pname; _ } | PIndexed { pname; _ } -> pname in
+          at "parameter" name parameter p) ps
+      | _ -> []);
+    dm_definitions = each (function
+      | DLet lb -> [ at "let" lb.lname definition lb ] | _ -> []);
     dm_tables = each (function
-      | DTables ts -> List.map (table env) ts | _ -> []);
+      | DTables ts ->
+        List.map (fun (t : Ast.table_decl) ->
+          at "table" (String.concat ", " t.tnames) table t) ts
+      | _ -> []);
     dm_time_inputs = each (function
-      | DForcing fs -> List.map (time_input env) fs | _ -> []);
+      | DForcing fs ->
+        List.map (fun (f : func_decl) -> at "forcing" f.fname time_input f) fs
+      | _ -> []);
     dm_timepoints = each (function
       | DTimepoints tps ->
         List.map (fun (tp : Ast.timepoint_decl) ->
-          { D.tp_name = tp.tpname; tp_time = dexpr env top tp.tptime }) tps
+          at "timepoint" tp.tpname (fun env (tp : Ast.timepoint_decl) ->
+            { D.tp_name = tp.tpname; tp_time = dexpr env top tp.tptime }) tp) tps
       | _ -> []);
     dm_transitions = each (function
-      | DTransitions ts -> List.map (transition env) ts | _ -> []);
+      | DTransitions ts ->
+        List.map (fun (t : Ast.transition_decl) ->
+          at "transition" t.trname transition t) ts
+      | _ -> []);
     dm_ode_equations = each (function
       | DODE os ->
         List.map (fun (o : Ast.ode_decl) ->
-          { D.od_compartment = o.ocomp;
-            od_derivative = dexpr env top o.oderiv }) os
+          at "ODE equation for" o.ocomp (fun env (o : Ast.ode_decl) ->
+            { D.od_compartment = o.ocomp;
+              od_derivative = dexpr env top o.oderiv }) o) os
       | _ -> []);
     dm_balance = each (function
       | DBalance b ->
-        [ { D.bl_compartment = b.bcomp; bl_expr = dexpr env top b.bexpr } ]
+        [ at "balance for" b.bcomp (fun env (b : Ast.balance_decl) ->
+            { D.bl_compartment = b.bcomp; bl_expr = dexpr env top b.bexpr }) b ]
       | _ -> []);
     dm_initial = each (function
-      | DInit is -> List.map (initial env) is | _ -> []);
+      | DInit is ->
+        List.map (fun (i : init_entry) ->
+          at "initial condition for" i.icomp initial i) is
+      | _ -> []);
     dm_observations = each (function
-      | DObservations os -> List.map (observation env) os | _ -> []);
+      | DObservations os ->
+        List.map (fun (o : obs_decl) ->
+          at "observation stream" o.oname observation o) os
+      | _ -> []);
     dm_interventions = each (function
-      | DInterventions ivs -> List.map (intervention env) ivs | _ -> []);
+      | DInterventions ivs ->
+        List.map (fun (iv : Ast.intervention_decl) ->
+          at "intervention" iv.ivname intervention iv) ivs
+      | _ -> []);
     dm_events = each (function
-      | DEvents ivs -> List.map (intervention env) ivs | _ -> []);
+      | DEvents ivs ->
+        List.map (fun (iv : Ast.intervention_decl) ->
+          at "event" iv.ivname intervention iv) ivs
+      | _ -> []);
     dm_reactive_interventions = each (function
-      | DReactiveInterventions rs -> List.map (reactive env) rs | _ -> []);
+      | DReactiveInterventions rs ->
+        List.map (fun (r : Ast.reactive_decl) ->
+          at "reactive intervention" r.rxname reactive r) rs
+      | _ -> []);
     dm_scenarios = each (function
-      | DScenarios ss -> List.map (scenario env) ss | _ -> []);
+      | DScenarios ss ->
+        List.map (fun (s : Ast.scenario_decl) ->
+          at "scenario" s.scname scenario s) ss
+      | _ -> []);
     dm_simulation = first (function
-      | DSimulate s -> Some (simulation env s) | _ -> None);
-    dm_output = first (function DOutput o -> Some (output env o) | _ -> None);
+      | DSimulate s -> Some (at "the simulate block" "" simulation s) | _ -> None);
+    dm_output = first (function
+      | DOutput o -> Some (at "the output block" "" output o) | _ -> None);
     dm_quantities = each (function
-      | DQuantities qs -> List.map (quantity env) qs | _ -> []);
+      | DQuantities qs ->
+        List.map (fun (q : Ast.quantity_decl) ->
+          at "quantity" q.qd_name quantity q) qs
+      | _ -> []);
     dm_contrasts = each (function
-      | DContrasts cs -> List.map (contrast env) cs | _ -> []);
-  }
+      | DContrasts cs ->
+        List.map (fun (c : Ast.contrast_decl) ->
+          at "contrast" c.cd_name contrast c) cs
+      | _ -> []);
+  } in
+  (section, List.rev !(env.unresolved))
+
+(** The declared-model section alone. *)
+let build ctx decls : D.declared_model = fst (build_detail ctx decls)
 
 (** Add what only the compiler's command line knows: the `--set` overrides, in
     the order given, and a `--quantities` vocabulary file. [model_dir] is the
