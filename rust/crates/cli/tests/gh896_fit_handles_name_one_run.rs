@@ -704,8 +704,8 @@ fn a_folder_label_from_an_older_camdl_gets_the_relabel_command() {
         "names the command that labels the folder's run:\n{all}");
 }
 
-/// `camdl list --format json` gives every run its own label in `methods[]`;
-/// the folder-level `label` is only the joined display string.
+/// `camdl list --format json` is one `fit_list_row` per run, each with its
+/// own label.
 #[test]
 fn camdl_list_json_labels_each_run() {
     let p = Project::new();
@@ -716,14 +716,16 @@ fn camdl_list_json_labels_each_run() {
     let out = p.run(&["list", "--kind", "fit", "--format", "json",
         &p.dir().join("results").to_string_lossy()]);
     assert!(out.status.success(), "{}", text(&out));
-    let line = String::from_utf8_lossy(&out.stdout).lines()
-        .find(|l| l.contains("\"kind\":\"fit\"")).unwrap().to_string();
-    let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+    let rows: Vec<serde_json::Value> = String::from_utf8_lossy(&out.stdout).lines()
+        .filter(|l| l.contains("\"kind\":\"fit\""))
+        .map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(rows.len(), 2, "{rows:?}");
     for leaf in p.leaves() {
         let (id, label, _) = record(&leaf);
-        let entry = v["methods"].as_array().unwrap().iter()
-            .find(|m| m["run_id"] == id.as_str()).unwrap_or_else(|| panic!("{v}"));
-        assert_eq!(entry["label"].as_str(), label.as_deref(), "{entry}");
+        let row = rows.iter().find(|r| r["run_id"] == id.as_str()).unwrap_or_else(|| panic!("{rows:?}"));
+        assert_eq!(row["label"].as_str(), label.as_deref(), "{row}");
+        assert_eq!(row["history_index"], 0, "each label's only holder: {row}");
+        assert!(row["verdict"]["kind"].is_string(), "{row}");
     }
 }
 
@@ -1115,4 +1117,90 @@ fn cat_of_a_label_reads_the_runs_draws_and_a_folder_is_ambiguous() {
 
     // A path the folder itself holds still reads.
     p.ok(&["cat", &seg, "--stream", "fit.meta.json"]);
+}
+
+// ── `camdl list`: one row per run ────────────────────────────────────────────
+
+/// The data rows of `camdl list --kind fit` (stdout lines under a table
+/// header, not the header or the problem line).
+fn list_rows(stdout: &str) -> Vec<String> {
+    stdout.lines()
+        .filter(|l| !l.starts_with("problem ") && !l.trim().is_empty() && !l.contains("VERDICT"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// A folder of two runs lists two rows, each naming its run, its method and
+/// its verdict; a run started from another names that run's id in STARTS.
+#[test]
+fn list_shows_one_row_per_run_with_its_source() {
+    let p = Project::new();
+    p.config("scout.toml", &if2(2));
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
+    let (scout_id, ..) = record(&p.leaves()[0]);
+    p.config("post.toml", &pgas_from("{ from_mle = \"@scout\" }"));
+    p.ok(&["fit", "run", "post.toml", "--seed", "1", "--allow-nonconverged-source"]);
+    let root = p.dir().join("results").to_string_lossy().into_owned();
+    let out = p.run(&["list", "--kind", "fit", &root]);
+    assert!(out.status.success(), "{}", text(&out));
+    let stdout = stdout(&out);
+    let rows = list_rows(&stdout);
+    let post = rows.iter().find(|r| r.contains("pgas")).unwrap_or_else(|| panic!("{stdout}"));
+    assert!(post.contains(&format!("from_mle run {} (@scout)", &scout_id[..6])),
+        "STARTS names the source run id with the handle beside it:\n{stdout}");
+    let scout = rows.iter().find(|r| r.contains("if2")).unwrap_or_else(|| panic!("{stdout}"));
+    assert!(scout.trim_start().starts_with("scout") && scout.contains(&scout_id[..6]), "{stdout}");
+    assert!(stdout.contains("LABEL") && stdout.contains("STARTS") && stdout.contains("VERDICT"), "{stdout}");
+}
+
+/// Two seeds of one method share a row with their seed range; `--runs` lists
+/// each; `--limit` counts runs.
+#[test]
+fn list_collapses_seeds_unless_asked_for_runs() {
+    let p = Project::new();
+    p.config_with("seeds.toml", "fit_seeds = [1, 2]", &if2(2));
+    p.ok(&["fit", "run", "seeds.toml"]);
+    let root = p.dir().join("results").to_string_lossy().into_owned();
+    let collapsed = stdout(&p.run(&["list", "--kind", "fit", &root]));
+    let rows = list_rows(&collapsed);
+    assert_eq!(rows.len(), 1, "one row for two seeds of one method:\n{collapsed}");
+    assert!(rows[0].contains("2 runs") && rows[0].contains("1-2"), "{collapsed}");
+    let expanded = stdout(&p.run(&["list", "--kind", "fit", "--runs", &root]));
+    assert_eq!(list_rows(&expanded).len(), 2, "--runs lists each run:\n{expanded}");
+    let json = stdout(&p.run(&["list", "--kind", "fit", "--format", "json", "--limit", "1", &root]));
+    assert_eq!(json.lines().filter(|l| l.contains("fit_list_row")).count(), 1,
+        "--limit counts runs:\n{json}");
+}
+
+/// `--history` adds a label's earlier holders, as `L~1`, and the JSON row
+/// carries the run's history index. (Two runs carrying one label are written
+/// by hand here; `fit run --label` and `camdl label` make them by moving it.)
+#[test]
+fn list_history_shows_earlier_holders() {
+    let p = Project::new();
+    p.config("scout.toml", &if2(2));
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
+    let first = p.leaves();
+    p.config("scout.toml", &if2(3));
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
+    let second: Vec<PathBuf> = p.leaves().into_iter().filter(|l| !first.contains(l)).collect();
+    let mut v: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(second[0].join("run.json")).unwrap()).unwrap();
+    v["provenance"]["label"] = "scout".into();
+    v["provenance"]["created_at"] = "2099-01-01T00:00:00Z".into();
+    std::fs::write(second[0].join("run.json"), serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+    let root = p.dir().join("results").to_string_lossy().into_owned();
+
+    let plain = stdout(&p.run(&["list", "--kind", "fit", &root]));
+    assert_eq!(list_rows(&plain).len(), 1, "only the holder by default:\n{plain}");
+    let hist = stdout(&p.run(&["list", "--kind", "fit", "--history", &root]));
+    let rows = list_rows(&hist);
+    assert_eq!(rows.len(), 2, "{hist}");
+    assert!(rows.iter().any(|r| r.trim_start().starts_with("scout~1")), "{hist}");
+    let json = stdout(&p.run(&["list", "--kind", "fit", "--history", "--format", "json", &root]));
+    let idx: std::collections::BTreeSet<i64> = json.lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|r| r["history_index"].as_i64())
+        .collect();
+    assert_eq!(idx, [0, 1].into_iter().collect(), "{json}");
 }

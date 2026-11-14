@@ -408,8 +408,9 @@ lineage.cohort	stderr	line	lineage cohort:	2 window(s), 99 total events
 lineage.refused	stderr	line	error:	read line list nope.tsv
 list	stderr	line	fits	fits
 list	stderr	line	sims	sims
-list	stdout	line	converged	./results/fits/pmmh_converged-
-list	stdout	line	CREATED	ESTIMATE
+list	stdout	line	problem	./results/fits/pmmh_converged-
+list	stdout	line	LABEL	VERDICT
+list	stdout	line	problem	pmmh_converged.toml
 show	stdout	block	kind	fit_method
 show	stdout	block	method	if2
 show	stdout	line	method	seed 1

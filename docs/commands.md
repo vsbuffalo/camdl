@@ -37,7 +37,7 @@ transform. A few commands delegate to the compiler.
 
 | Command                                            | Does                                                                                                                                                                                  |
 | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `list`                                             | Browse cached runs as a table.                                                                                                                                                        |
+| `list`                                             | Browse cached runs as a table; fits one row per run, grouped by problem folder (`--history`, `--runs`).                                                                               |
 | `show`                                             | Full metadata for one cached run; `--format json` writes it as JSON (`fit_show` for a fit run or a problem folder).                                                                   |
 | `cat`                                              | Emit a cached run's trajectory or observations as TSV; `--stream draws.tsv --chains IDS` (or `--exclude-chains IDS`) prints only the selected chains' rows.                           |
 | `compare`                                          | Paired prequential comparison (elpd, CRPS, PIT) across fits. Scores are plug-in + in-sample-optimistic (the caveat is printed with the table); not a leave-future-out forecast score. |
@@ -46,6 +46,20 @@ transform. A few commands delegate to the compiler.
 | `dev eval`                                         | Evaluate model expressions (parameters, forcings) on a time grid — pure inspection, no simulation.                                                                                    |
 | `data split`                                       | Split a data TSV into train/holdout.                                                                                                                                                  |
 | `lineage {realize,tree,sojourn,cohort}`            | Offline projections over an event log — transmission tree, dwell times, cohort incidence.                                                                                             |
+
+**Listing fit runs.** `camdl list` prints fits one row per run, grouped under a
+`problem` line per problem folder (its fit id, model, config and path). Each row
+gives the run's label, run id, method, seed, how its chains started (`STARTS`:
+the recorded source run id, with the handle as typed beside it, since the handle
+may since have moved), its live status (`completed`, `running`, `interrupted`,
+`failed`) and its stored verdict, the line `fit summary` leads with (`—` when
+there is nothing to judge; `unreadable: <reason>` when the stored summary cannot
+be read, which never fails the listing). Unlabelled runs of one method that
+differ only in seed share a row with the seed range and a combined verdict;
+`--runs` lists each. `--history` adds each label's earlier holders, as `m0~1`,
+`m0~2`. `--limit` counts runs. `--format json` writes one `fit_list_row`
+(schema 3) object per run:
+`{schema, kind, problem {fit_id, model, config}, label, label_set_at, history_index, run_id, method, seed, starts {rule, handle, run_id, chains}, status, verdict, path}`.
 
 **Run handles and folder handles.** `show` and `cat` resolve a fit handle the
 way every fit verb does. `@label`, a leaf directory and a `run_id` prefix name

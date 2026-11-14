@@ -293,6 +293,20 @@ pub fn runs_labelled(root: &Path, label: &str) -> Vec<crate::cas_read::Leaf> {
     runs
 }
 
+/// The runs that hold or have held `label`: the fit runs under `root` that
+/// carry it and whose live state is completed, most recently labelled first
+/// (`label_history(..)[0]` is the label's holder, `[n]` is `@label~n`).
+/// A run's labelling time is its `created_at`; ties are broken by `run_id`.
+pub fn label_history(root: &Path, label: &str) -> Vec<crate::cas_read::Leaf> {
+    let mut runs: Vec<crate::cas_read::Leaf> = runs_labelled(root, label)
+        .into_iter()
+        .filter(|l| matches!(runid::store::leaf_state(&l.dir, &l.record), runid::store::LeafState::Completed))
+        .collect();
+    let key = |l: &crate::cas_read::Leaf| l.record.provenance.created_at.clone().unwrap_or_default();
+    runs.sort_by(|a, b| key(b).cmp(&key(a)).then_with(|| a.record.run_id.to_hex().to_string().cmp(&b.record.run_id.to_hex().to_string())));
+    runs
+}
+
 /// `@name` → the one completed run under `root` labelled `name`.
 pub fn resolve_label(root: &Path, name: &str) -> Result<LeafRef, ResolveError> {
     let mut runs: Vec<crate::cas_read::Leaf> = runs_labelled(root, name)

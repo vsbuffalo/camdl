@@ -1419,7 +1419,8 @@ mod tests {
         // No fit.toml on disk → archive step is skipped; the sidecar still writes.
         write_fit_sidecar(&seg, std::path::Path::new("nonexistent.toml"), std::path::Path::new(""), &sidecar).unwrap();
 
-        let view = FitView::read(&seg).expect("FitView::read must derive a fit entry");
+        assert!(FitView::read(&seg).is_some(), "FitView::read must derive a fit entry");
+        let view = read_fit_sidecar(&seg).unwrap().expect("the sidecar reads back");
         let source = |p: &str| -> Option<&str> {
             view.resolved_priors
                 .iter()

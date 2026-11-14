@@ -246,7 +246,9 @@ problem 76aecea7 · models/m0_seir_terms.camdl · configs/m0_mh.toml
   path}`.
   v2 consumers (scripts; camdl-scope reads the store directly and is checked in
   its own repository, follow-up issue) see a version change, not a silent
-  reshape.
+  reshape. _Implementation note:_ each row also carries `"kind": "fit"`, as the
+  v2 row did, because `list --format json` interleaves the rows of every kind
+  and a consumer tells them apart by `kind`.
 
 **`camdl show <handle>`** on a run handle describes the run:
 

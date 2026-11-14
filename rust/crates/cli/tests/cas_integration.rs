@@ -741,8 +741,16 @@ fn list_shows_fit_entries() {
     assert!(all.contains("fits"), "list output must include a 'fits' section: {}", all);
     assert!(stdout.contains("demo"),
         "fit stem should appear in table: {}", stdout);
-    assert!(stdout.contains("if2,pgas"),
-        "fit METHODS column should show the methods that ran: {}", stdout);
+    // One row per run, under the problem folder's line.
+    assert!(stdout.lines().any(|l| l.starts_with("problem ") && l.contains("demo.camdl")),
+        "a problem line heads the folder's runs: {}", stdout);
+    for m in ["if2", "pgas"] {
+        assert!(stdout.lines().any(|l| l.split_whitespace().any(|w| w == m)),
+            "a row for the {m} run: {}", stdout);
+    }
+    // These synthetic leaves hold no stored summary: the verdict says so,
+    // and the listing still succeeds.
+    assert!(stdout.contains("unreadable:"), "an unreadable verdict renders: {}", stdout);
 }
 
 /// Tamper-with-artifact regression: a corrupted `traj.tsv` whose bytes no
@@ -1175,47 +1183,35 @@ fn fit_list_json_names_methods_and_can_tell_two_leaves_apart() {
         .expect("spawn");
     assert!(out.status.success(), "list failed: {}", String::from_utf8_lossy(&out.stderr));
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    let line = text.lines().find(|l| l.contains("\"kind\":\"fit\""))
-        .unwrap_or_else(|| panic!("no fit row in list output:\n{text}"));
-    let row: serde_json::Value = serde_json::from_str(line).expect("the row is JSON");
+    let rows: Vec<serde_json::Value> = text.lines()
+        .filter(|l| l.contains("\"kind\":\"fit\""))
+        .map(|l| serde_json::from_str(l).expect("each row is JSON"))
+        .collect();
 
-    // The vocabulary.
-    assert_eq!(row["methods_declared"], serde_json::json!(["pgas"]), "{line}");
-    assert!(row.get("stages").is_none(), "no `stages` array: {line}");
-    assert!(row.get("stages_declared").is_none(), "no `stages_declared`: {line}");
-    // Tagged, in `table_row`'s form, so a consumer keys on the contract.
-    assert_eq!(row["schema"]["name"], "fit_list_row", "{line}");
-    assert_eq!(row["schema"]["version"], 2, "{line}");
-    // v2 (gh#1009): the source config relative to the fit folder.
-    assert_eq!(row["source_config"], "demo.toml", "{line}");
-    assert!(row.get("fit_toml_path").is_none(), "{line}");
-
-    // The two entries, and what tells them apart.
-    let methods = row["methods"].as_array().expect("a `methods` array");
-    assert_eq!(methods.len(), 2, "both leaves are listed: {line}");
-    for m in methods {
-        assert_eq!(m["method"], "pgas", "each entry names its method: {line}");
-        assert!(m.get("stage").is_none(), "and carries no `stage` key: {line}");
+    // v3: one row per run, each tagged, each naming its own run and path.
+    assert_eq!(rows.len(), 2, "both leaves are listed, one row each: {text}");
+    for row in &rows {
+        assert_eq!(row["schema"]["name"], "fit_list_row", "{row}");
+        assert_eq!(row["schema"]["version"], 3, "{row}");
+        assert_eq!(row["method"], "pgas", "{row}");
+        assert_eq!(row["problem"]["config"], "demo.toml", "{row}");
+        assert_eq!(row["problem"]["model"], "demo.camdl", "{row}");
+        assert!(row["problem"]["fit_id"].as_str().unwrap().starts_with("abc12345"), "{row}");
+        assert_eq!(row["seed"], 1, "{row}");
+        assert_eq!(row["status"], "completed", "{row}");
+        assert_eq!(row["verdict"]["kind"], "unreadable", "{row}");
+        assert!(row.get("methods").is_none(), "no v2 `methods` array: {row}");
+        let p = row["path"].as_str().expect("each row carries a path");
+        assert!(Path::new(p).join("run.json").is_file(), "the path names the leaf: {p}");
     }
-    let seen: Vec<&str> = methods.iter()
-        .map(|m| m["method_hash"].as_str().expect("method_hash is a string"))
+    let ids: std::collections::BTreeSet<&str> = rows.iter()
+        .map(|r| r["run_id"].as_str().expect("run_id is a string"))
         .collect();
-    assert!(seen.contains(&hashes[0].as_str()) && seen.contains(&hashes[1].as_str()),
-        "each entry carries its own method-level hash; got {seen:?}: {line}");
-    let ids: std::collections::BTreeSet<&str> = methods.iter()
-        .map(|m| m["run_id"].as_str().expect("run_id is a string"))
-        .collect();
-    assert_eq!(ids.len(), 2, "two distinct run_ids: {line}");
-    // Each entry's path addresses its own leaf, under the segment's own path.
-    let seg_path = row["path"].as_str().expect("the segment path");
-    for m in methods {
-        let p = m["path"].as_str().expect("each entry carries a path");
-        assert!(p.starts_with(seg_path),
-            "a leaf path sits under the segment path `{seg_path}`: {p}");
-        assert!(Path::new(p).join("run.json").is_file()
-                || std::path::Path::new(p).is_dir()
-                || p.contains("seed_1"),
-            "the path names the leaf directory: {p}");
+    assert_eq!(ids.len(), 2, "two distinct run_ids: {text}");
+    let paths: Vec<&str> = rows.iter().map(|r| r["path"].as_str().unwrap()).collect();
+    for h in &hashes {
+        assert!(paths.iter().any(|p| p.contains(&format!("pgas-{}", &h[..8]))),
+            "a row for the leaf of method hash {h}: {paths:?}");
     }
 }
 

@@ -523,19 +523,13 @@ mod tests {
     fn fitmeta(model_identity: &str) -> FitView {
         FitView {
             fit_hash: "f".repeat(64),
-            engine_version: "0.1.0+test".into(),
             created_at: "2026-04-27T00:00:00Z".into(),
-            argv: Vec::new(),
             segment: std::path::PathBuf::from("fits/sir-ffffffff"),
             source_model: Some("../../sir.camdl".into()),
             model_identity: model_identity.into(),
             source_config: Some("fit.toml".into()),
             fit_toml_hash: "h".repeat(64),
             data_hashes: HashMap::new(),
-            estimated: Vec::new(),
-            fixed: HashMap::new(),
-            resolved_priors: Vec::new(),
-            parameters_provenance: Default::default(),
             methods_declared: Vec::new(),
             methods: Vec::new(),
         }

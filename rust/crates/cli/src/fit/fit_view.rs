@@ -10,9 +10,8 @@
 //! live once on the sidecar.
 //!
 //! [`FitView::read`] folds those leaves + sidecar into one fit-level view; each
-//! [`FitMethodView`] carries the per-method headline numbers (`method`, `seed`,
-//! `n_chains`, `best_loglik`, `best_chain`, path-derived axes) read directly
-//! from the leaf's `RunRecord`. This is the single consumer-facing projection
+//! [`FitMethodView`] carries the per-method fields (`method`, `run_id`,
+//! `label`, `status`, `backend`) read directly from the leaf's `RunRecord`. This is the single consumer-facing projection
 //! of the new format — `walk_fits_root`, `table_row`, `fit summary`, `browse`
 //! all read it instead of synthesizing a legacy `run_meta::Run`.
 
@@ -21,8 +20,7 @@ use std::path::{Path, PathBuf};
 
 use runid::{ArtifactKind, RunRecord};
 
-use crate::chain_index::ChainIndex;
-use crate::run_meta::{InferenceBackend, FitAlgorithm, ParameterProvenance, ResolvedPriorEntry};
+use crate::run_meta::{InferenceBackend, FitAlgorithm};
 
 /// One fit-method leaf, projected to the headline numbers the fit consumers
 /// read directly from the leaf's `RunRecord` (`inputs` + path-derived `axes`).
@@ -35,16 +33,6 @@ pub struct FitMethodView {
     /// the `method` store level's directory name — so there is no separate
     /// name field to drift from it (gh#901).
     pub method: FitAlgorithm,
-    /// The `method` level's full 64-char hash; its first 8 chars are the
-    /// `<h8>` in `<method>-<h8>/` on disk.
-    ///
-    /// This is what tells two leaves of one algorithm apart (gh#895). Before
-    /// the `[stages]` → `[method]` split a segment held one leaf per stage
-    /// *name* and the name was the key; after it a segment holds one leaf per
-    /// method *hash*, so two PGAS leaves differing only in `sweeps` have
-    /// identical `method`, `backend` and `seed` and are distinguished by
-    /// nothing else. `""` when the record carries no `method` level.
-    pub method_hash: String,
     /// The leaf's own `run_id` (full 64-char hex) — the address `camdl show`
     /// and `fit predict` accept.
     pub run_id: String,
@@ -60,15 +48,6 @@ pub struct FitMethodView {
     /// Simulation backend the method ran on. Defaults to `ChainBinomial` when
     /// absent.
     pub backend: InferenceBackend,
-    pub seed: u64,
-    pub n_chains: usize,
-    pub best_loglik: Option<f64>,
-    /// `inputs.best_chain` as recorded: the chain that won, naming a
-    /// `chain_N/` directory under `method_dir` (gh#912, gh#990). Renderers
-    /// print it as it stands. `None` for a method with replicates rather than
-    /// competing chains (pfilter), and on a leaf written before the field
-    /// existed.
-    pub best_chain: Option<ChainIndex>,
 }
 
 /// Fit-level view of a CAS fit segment: the fit-wide identity + provenance plus
@@ -81,12 +60,8 @@ pub struct FitView {
     /// `camdl show`/`label` address for the fit. The sidecar is never
     /// identity-bearing.
     pub fit_hash: String,
-    /// camdl engine version (first leaf).
-    pub engine_version: String,
     /// Latest leaf `created_at` (ISO 8601 UTC).
     pub created_at: String,
-    /// argv that produced the fit (first leaf).
-    pub argv: Vec<String>,
 
     /// The fit folder (`fits/<stem>-<h8>/`) this view was read from: the
     /// directory `source_config` and `source_model` are relative to.
@@ -104,10 +79,6 @@ pub struct FitView {
     pub source_config: Option<String>,
     pub fit_toml_hash: String,
     pub data_hashes: HashMap<String, String>,
-    pub estimated: Vec<String>,
-    pub fixed: HashMap<String, f64>,
-    pub resolved_priors: Vec<ResolvedPriorEntry>,
-    pub parameters_provenance: HashMap<String, ParameterProvenance>,
 
     // ── from the leaves ──
     /// The method labels found among the leaves, in label order,
@@ -172,24 +143,11 @@ fn method_view_from_record(dir: &Path, rec: &RunRecord) -> Result<FitMethodView,
     Ok(FitMethodView {
         method_dir: dir.to_path_buf(),
         method,
-        method_hash: rec
-            .levels
-            .iter()
-            .find(|l| l.name == "method")
-            .map(|l| l.hash.to_hex())
-            .unwrap_or_default(),
         run_id: rec.run_id.to_hex(),
         label: rec.provenance.label.clone(),
         created_at: rec.provenance.created_at.clone().unwrap_or_default(),
         status: rec.status,
         backend,
-        seed: inputs.get("seed").and_then(|v| v.as_u64()).unwrap_or(0),
-        n_chains: inputs.get("n_chains").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
-        best_loglik: inputs.get("best_loglik").and_then(|v| v.as_f64()),
-        best_chain: inputs
-            .get("best_chain")
-            .and_then(|v| v.as_u64())
-            .map(|x| ChainIndex(x as usize)),
     })
 }
 
@@ -317,14 +275,6 @@ impl FitView {
             .filter_map(|(_, r)| r.provenance.created_at.clone())
             .max()
             .unwrap_or_default();
-        let engine_version = leaves
-            .first()
-            .map(|(_, r)| r.engine_version.clone())
-            .unwrap_or_default();
-        let argv = leaves
-            .first()
-            .map(|(_, r)| r.provenance.argv.clone())
-            .unwrap_or_default();
         // Method labels in label order, dedup preserving order.
         let mut methods_declared: Vec<String> = Vec::new();
         for (_, r) in &leaves {
@@ -382,19 +332,13 @@ impl FitView {
 
         Some(FitView {
             fit_hash,
-            engine_version,
             created_at,
-            argv,
             segment: seg.to_path_buf(),
             source_model: side.source_model,
             model_identity: side.model_identity,
             source_config: side.source_config,
             fit_toml_hash: side.fit_toml_hash,
             data_hashes: side.data_hashes.into_iter().collect(),
-            estimated: side.estimated,
-            fixed: side.fixed.into_iter().collect(),
-            resolved_priors: side.resolved_priors,
-            parameters_provenance: side.parameters_provenance.into_iter().collect(),
             methods_declared,
             methods,
         })
@@ -488,9 +432,8 @@ mod tests {
 
     /// Pins the N→1 aggregation `FitView` performs over a realistic
     /// two-method fixture: the fit-level fold (fit_hash, latest created_at,
-    /// engine/argv, sidecar provenance, label-order `methods_declared`) and the
-    /// per-leaf fold (label / method / backend / seed / n_chains /
-    /// best_loglik / best_chain). Asserts real values — not `None == None` —
+    /// sidecar provenance, label-order `methods_declared`) and the per-leaf
+    /// fold (method / backend). Asserts real values — not `None == None` —
     /// so a degenerate projection (all-empty / all-None) fails.
     #[test]
     fn fit_view_folds_segment_field_for_field() {
@@ -504,8 +447,6 @@ mod tests {
         assert_eq!(view.fit_hash, "abcd1234".to_string() + &"0".repeat(56), "fit_hash");
         assert!(!view.fit_hash.is_empty(), "fit_hash must be non-empty");
         assert_eq!(view.created_at, "2026-04-27T00:00:02Z", "latest of the two leaves");
-        assert_eq!(view.engine_version, "0.1.0+test", "engine_version (first leaf)");
-        assert_eq!(view.argv, vec!["camdl", "fit", "run"], "argv (first leaf)");
         assert_eq!(view.label(), None, "no run is labelled; the sidecar's label is not a run's");
 
         // Sidecar provenance.
@@ -519,8 +460,6 @@ mod tests {
         assert_eq!(view.source_config, None, "no config file was given to the writer");
         assert_eq!(view.fit_toml_hash, "cafe".repeat(16), "fit_toml_hash");
         assert_eq!(view.data_hashes.get("cases").map(String::as_str), Some("d4tad4ta"), "data_hashes");
-        assert_eq!(view.estimated, vec!["beta", "gamma"], "estimated");
-        assert_eq!(view.fixed.get("N0"), Some(&1000.0), "fixed");
 
         // methods_declared: label order, deduped.
         assert_eq!(view.methods_declared, vec!["if2", "pgas"], "label order");
@@ -530,14 +469,8 @@ mod tests {
         let scout = view.methods.iter().find(|s| s.method == FitAlgorithm::If2).unwrap();
         assert_eq!(scout.method, FitAlgorithm::If2, "if2 method");
         assert_eq!(scout.backend, InferenceBackend::ChainBinomial, "if2 backend");
-        assert_eq!(scout.seed, 1, "if2 seed");
-        assert_eq!(scout.n_chains, 4, "if2 n_chains");
-        assert_eq!(scout.best_loglik, Some(-120.5), "if2 best_loglik");
-        assert_eq!(scout.best_chain, Some(ChainIndex(2)), "if2 best_chain");
         let refine = view.methods.iter().find(|s| s.method == FitAlgorithm::Pgas).unwrap();
         assert_eq!(refine.method, FitAlgorithm::Pgas, "pgas method");
-        assert_eq!(refine.best_loglik, Some(-56.7), "pgas best_loglik");
-        assert_eq!(refine.best_chain, Some(ChainIndex(1)), "pgas best_chain");
 
         std::fs::remove_dir_all(&tmp).ok();
     }
@@ -560,7 +493,6 @@ mod tests {
         assert_eq!(view.created_at, "2026-04-27T00:00:01Z", "this run's time, not the latest");
         // Problem provenance is the segment's.
         assert_eq!(view.source_model.as_deref(), Some("../../sir.camdl"));
-        assert_eq!(view.estimated, vec!["beta", "gamma"]);
         assert_eq!(view.fit_hash, "abcd1234".to_string() + &"0".repeat(56));
 
         std::fs::remove_dir_all(&tmp).ok();

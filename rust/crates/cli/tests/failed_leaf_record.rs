@@ -336,8 +336,7 @@ fn a_retry_after_a_failure_preserves_its_evidence_and_completes_clean() {
     let rows: Vec<serde_json::Value> = String::from_utf8_lossy(&out.stdout).lines()
         .map(|l| serde_json::from_str(l).unwrap()).collect();
     let listed: Vec<&serde_json::Value> = rows.iter()
-        .flat_map(|r| r["methods"].as_array().into_iter().flatten())
-        .filter(|m| m["run_id"] == run_id)
+        .filter(|r| r["run_id"] == run_id)
         .collect();
     assert_eq!(listed.len(), 1, "one leaf for the run id: {rows:?}");
 }

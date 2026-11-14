@@ -215,7 +215,7 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
         .collect();
     filtered_runs.sort_by(|x, y| y.created.cmp(&x.created));
 
-    let mut filtered_fits: Vec<FitEntry> = fits.into_iter()
+    let filtered_fits: Vec<FitEntry> = fits.into_iter()
         .filter(|f| a.model.as_deref().is_none_or(|m| f.view.source_model.as_deref().is_some_and(|s| s.contains(m))))
         .filter(|_| a.scenario.is_none())
         .filter(|f| match filter_since {
@@ -223,7 +223,21 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
             None => true,
         })
         .collect();
-    filtered_fits.sort_by(|x, y| y.created.cmp(&x.created));
+    // Fits are listed by run, grouped by problem folder (newest folder first,
+    // runs oldest first within it); `--limit` counts runs.
+    let mut fit_folders: Vec<FitFolder> = filtered_fits
+        .into_iter()
+        .map(|entry| {
+            let problem = crate::fit::run_view::Problem::of(&entry.fit_dir);
+            FitFolder { entry, problem }
+        })
+        .collect();
+    fit_folders.sort_by(|x, y| y.entry.created.cmp(&x.entry.created));
+    let mut fit_rows: Vec<FitRunRow> = fit_run_rows(Path::new(&*root), &fit_folders)
+        .into_iter()
+        .filter(|r| a.history || r.history_index.is_none_or(|n| n == 0))
+        .collect();
+    fit_rows.sort_by(|x, y| x.folder.cmp(&y.folder).then(x.created.cmp(&y.created)));
 
     let mut filtered_profiles: Vec<ProfileEntry> = profiles.into_iter()
         .filter(|p| a.model.as_deref().is_none_or(|m| p.model.contains(m)))
@@ -267,7 +281,7 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
 
     if !a.all {
         filtered_runs.truncate(a.limit);
-        filtered_fits.truncate(a.limit);
+        fit_rows.truncate(a.limit);
         filtered_profiles.truncate(a.limit);
         filtered_surveys.truncate(a.limit);
         filtered_pfilters.truncate(a.limit);
@@ -276,13 +290,16 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
 
     if format_json {
         print_sim_json(&out, &filtered_runs);
-        print_fits_json(&out, &filtered_fits);
+        for row in &fit_rows {
+            let line = fit_list_row_json(row, &fit_folders[row.folder].problem);
+            out.report_line(format_args!("{}", serde_json::to_string(&line).unwrap_or_default()));
+        }
         print_profiles_json(&out, &filtered_profiles);
         print_survey_json(&out, &filtered_surveys);
         print_pfilter_json(&out, &filtered_pfilters);
         print_ensemble_json(&out, &filtered_ensembles);
     } else {
-        let any_other = !filtered_fits.is_empty()
+        let any_other = !fit_rows.is_empty()
             || !filtered_profiles.is_empty()
             || !filtered_surveys.is_empty()
             || !filtered_pfilters.is_empty()
@@ -292,9 +309,9 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
             print_ensemble_table(&out, &filtered_ensembles, now);
             out.say("");
         }
-        if !filtered_fits.is_empty() {
+        if !fit_rows.is_empty() {
             out.say(format_args!("{}", style::stderr().paint("fits", Style::Bold)));
-            print_fits_table(&out, &filtered_fits, now);
+            print_fit_runs_table(&out, &fit_folders, &fit_rows, a.runs);
             out.say("");
         }
         if !filtered_profiles.is_empty() {
@@ -1744,135 +1761,7 @@ fn print_ensemble_json(out: &crate::out::Out, rows: &[EnsembleRow]) {
 /// from) are `source_config` and `source_model`, relative to the fit folder,
 /// or `null` (gh#1009).
 const FIT_LIST_ROW_SCHEMA_NAME: &str = "fit_list_row";
-const FIT_LIST_ROW_SCHEMA_VERSION: u32 = 2;
-
-fn print_fits_json(out: &crate::out::Out, fits: &[FitEntry]) {
-    for f in fits {
-        let v = &f.view;
-        // One object per discovered method leaf — the headline numbers
-        // `FitView` folds from the leaves, plus the leaf's address.
-        let methods: Vec<serde_json::Value> = v
-            .methods
-            .iter()
-            .map(|s| {
-                serde_json::json!({
-                    "method": s.method.as_str(),
-                    // gh#895: `method` alone does not identify a leaf. Two PGAS
-                    // leaves of one segment that differ only in `sweeps` agree
-                    // on method, backend and seed and differ in the `method`
-                    // level's hash — which is the `<h8>` in their directory
-                    // names. Without it the two entries are indistinguishable
-                    // and neither is addressable.
-                    "method_hash": s.method_hash,
-                    "run_id": s.run_id,
-                    // The run's own label and time (gh#896): a label names one
-                    // run, so it belongs on the run's entry.
-                    "label": s.label,
-                    "created_at": s.created_at,
-                    "path": leaf_rel_path(&f.rel_path, &f.fit_dir, &s.method_dir),
-                    "backend": s.backend.as_str(),
-                    "seed": s.seed,
-                    "n_chains": s.n_chains,
-                    "best_loglik": s.best_loglik,
-                    // The loglik class is a property of the method (gh#280): a
-                    // PGAS leaf's `best_loglik` is the complete-data loglik of
-                    // its best sweep, and `complete_data` says so, so it is not
-                    // read as a marginal likelihood comparable to IF2's.
-                    "loglik_type": crate::fit::loglik::LoglikType::from(s.method).tag(),
-                    // Printed exactly as recorded: the number of a `chain_N/`
-                    // directory on the leaf (gh#912, gh#990).
-                    "best_chain": s.best_chain,
-                })
-            })
-            .collect();
-        let json = serde_json::json!({
-            "schema": {
-                "name": FIT_LIST_ROW_SCHEMA_NAME,
-                "version": FIT_LIST_ROW_SCHEMA_VERSION,
-            },
-            "kind": "fit",
-            "hash": v.fit_hash,
-            // Display only: every run's label, joined with ", " (gh#896). A
-            // label names one run; read `methods[].label` to address it.
-            "label": v.label(),
-            // The model file, relative to the fit folder; `null` when it was
-            // not a file when the fit ran.
-            "source_model": v.source_model,
-            "model_identity": v.model_identity,
-            // The producing config, relative to the fit folder (`hash`'s
-            // directory); `null` for a CLI-only fit.
-            "source_config": v.source_config,
-            "fit_toml_hash": v.fit_toml_hash,
-            "data_hashes": v.data_hashes,
-            "estimated": v.estimated,
-            "fixed": v.fixed,
-            "resolved_priors": v.resolved_priors,
-            "parameters_provenance": v.parameters_provenance,
-            "methods_declared": v.methods_declared,
-            "methods": methods,
-            "created_at": v.created_at,
-            "engine_version": v.engine_version,
-            "argv": v.argv,
-            "path": f.rel_path,
-        });
-        out.report_line(format_args!("{}", serde_json::to_string(&json).unwrap_or_default()));
-    }
-}
-
-/// A method leaf's path in the same frame as the segment's `path` field: the
-/// row's own `rel_path` with the leaf's suffix under the segment appended, so a
-/// consumer can pass the string straight to `camdl show` / `fit predict`.
-/// Falls back to the leaf's own path when it is not under the segment.
-fn leaf_rel_path(seg_rel: &str, seg_dir: &Path, leaf_dir: &Path) -> String {
-    match leaf_dir.strip_prefix(seg_dir) {
-        Ok(suffix) => Path::new(seg_rel).join(suffix).to_string_lossy().into_owned(),
-        Err(_) => leaf_dir.to_string_lossy().into_owned(),
-    }
-}
-
-fn print_fits_table(out: &crate::out::Out, fits: &[FitEntry], now: SystemTime) {
-    use comfy_table::{Table, Cell, ContentArrangement, presets::NOTHING};
-    let mut table = Table::new();
-    table
-        .load_preset(NOTHING)
-        .set_content_arrangement(ContentArrangement::Dynamic)
-        .set_header(vec![
-            Cell::new("CREATED").add_attribute(comfy_table::Attribute::Bold),
-            Cell::new("HASH").add_attribute(comfy_table::Attribute::Bold),
-            Cell::new("LABEL").add_attribute(comfy_table::Attribute::Bold),
-            Cell::new("MODEL").add_attribute(comfy_table::Attribute::Bold),
-            Cell::new("ESTIMATE").add_attribute(comfy_table::Attribute::Bold),
-            Cell::new("METHODS").add_attribute(comfy_table::Attribute::Bold),
-            Cell::new("PATH").add_attribute(comfy_table::Attribute::Bold),
-        ]);
-    let mut unlabelled = 0usize;
-    for f in fits {
-        let rel_time = fmt_relative_time(f.created, now);
-        let model    = model_display_name(f.view.source_model.as_deref().unwrap_or("?"));
-        let estimate = {
-            let joined = f.view.estimated.join(",");
-            if joined.chars().count() > 30 {
-                let mut s: String = joined.chars().take(29).collect(); s.push('…'); s
-            } else { joined }
-        };
-        let methods = f.view.methods_declared.join(",");
-        let view_label = f.view.label();
-        if view_label.is_none() { unlabelled += 1; }
-        let hash_short = short_hash_cell(&f.view.fit_hash);
-        let label_cell = label_cell(&view_label);
-        table.add_row(vec![
-            Cell::new(rel_time).fg(comfy_table::Color::Yellow),
-            hash_short,
-            label_cell,
-            Cell::new(model),
-            Cell::new(estimate).add_attribute(comfy_table::Attribute::Dim),
-            Cell::new(methods).fg(comfy_table::Color::Green),
-            Cell::new(&f.rel_path).fg(comfy_table::Color::Cyan),
-        ]);
-    }
-    out.report_line(format_args!("{table}"));
-    crate::fit::fit_table::emit_unlabelled_warning(out, unlabelled);
-}
+const FIT_LIST_ROW_SCHEMA_VERSION: u32 = 3;
 
 fn print_profiles_json(out: &crate::out::Out, profiles: &[ProfileEntry]) {
     for p in profiles {
@@ -2213,6 +2102,221 @@ fn run_show_json(leaf: &cas_read::Leaf, kind: &str, rel_path: &str) -> serde_jso
         "path": rel_path,
         "record": leaf.record,
     })
+}
+
+
+// ── Fit listing: one row per run, grouped by problem folder ──────────────────
+
+/// One fit run as `camdl list` shows it.
+struct FitRunRow {
+    leaf: cas_read::Leaf,
+    /// The problem folder the run sits in, and its index in the listing.
+    folder: usize,
+    /// The run's place in its label's history: `Some(0)` for the label's
+    /// current holder, `Some(n)` for `@label~n`, `None` without a label or
+    /// for a run that cannot hold one (not completed).
+    history_index: Option<usize>,
+    rel_path: String,
+    created: SystemTime,
+}
+
+/// The problem folders `list` shows, with their runs.
+struct FitFolder {
+    entry: FitEntry,
+    problem: crate::fit::run_view::Problem,
+}
+
+/// Every fit run under the listed folders, each with its label's history
+/// index (`fit::handle::label_history`).
+fn fit_run_rows(root: &Path, folders: &[FitFolder]) -> Vec<FitRunRow> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut histories: std::collections::BTreeMap<String, Vec<PathBuf>> = Default::default();
+    let mut rows = Vec::new();
+    for (i, f) in folders.iter().enumerate() {
+        for leaf in folder_runs(&f.entry.fit_dir) {
+            let history_index = leaf.record.provenance.label.clone().and_then(|label| {
+                let order = histories.entry(label.clone()).or_insert_with(|| {
+                    crate::fit::handle::label_history(root, &label)
+                        .into_iter()
+                        .map(|l| l.dir)
+                        .collect()
+                });
+                order.iter().position(|d| d == &leaf.dir)
+            });
+            let created = leaf_created(&leaf);
+            let rel_path = pathdiff_str(&leaf.dir, &cwd);
+            rows.push(FitRunRow { leaf, folder: i, history_index, rel_path, created });
+        }
+    }
+    rows
+}
+
+/// The label cell of a run: `m0`, `m0~1` for a superseded holder, empty
+/// without a label.
+fn run_label_cell(row: &FitRunRow) -> String {
+    match (&row.leaf.record.provenance.label, row.history_index) {
+        (Some(l), Some(0)) | (Some(l), None) => l.clone(),
+        (Some(l), Some(n)) => format!("{l}~{n}"),
+        (None, _) => String::new(),
+    }
+}
+
+/// A run's `fit_list_row` (schema v3) object.
+fn fit_list_row_json(row: &FitRunRow, problem: &crate::fit::run_view::Problem) -> serde_json::Value {
+    use crate::fit::run_view;
+    let rec = &row.leaf.record;
+    serde_json::json!({
+        "schema": { "name": FIT_LIST_ROW_SCHEMA_NAME, "version": FIT_LIST_ROW_SCHEMA_VERSION },
+        "kind": "fit",
+        "problem": problem.to_json(),
+        "label": rec.provenance.label,
+        "label_set_at": serde_json::Value::Null,
+        "history_index": row.history_index,
+        "run_id": rec.run_id.to_hex().to_string(),
+        "method": row.leaf.level_label("method"),
+        "seed": row.leaf.seed(),
+        "starts": run_view::Starts::of(rec).to_json(),
+        "status": run_view::status_word(&row.leaf),
+        "verdict": run_view::RunVerdict::of(&row.leaf).to_json(),
+        "path": row.rel_path,
+    })
+}
+
+/// One line of a folder's table: a run, or several seeds of one method
+/// collapsed.
+struct TableLine {
+    label: String,
+    run: String,
+    method: String,
+    seed: String,
+    starts: String,
+    status: String,
+    verdict: String,
+}
+
+/// `1-3`, `1,2,5`: a sorted seed set, ranges joined.
+fn seed_range(seeds: &[u64]) -> String {
+    let mut s: Vec<u64> = seeds.to_vec();
+    s.sort_unstable();
+    s.dedup();
+    if s.len() > 1 && s.windows(2).all(|w| w[1] == w[0] + 1) {
+        return format!("{}-{}", s[0], s[s.len() - 1]);
+    }
+    s.iter().map(u64::to_string).collect::<Vec<_>>().join(",")
+}
+
+/// The combined verdict of collapsed seeds: the one cell when they agree,
+/// else each verdict's leading words with a count (`2 converged, 1 not
+/// converged`, `1 unreadable`).
+fn combined_verdict(cells: &[String]) -> String {
+    if cells.windows(2).all(|w| w[0] == w[1]) {
+        return cells.first().cloned().unwrap_or_default();
+    }
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for c in cells {
+        let head = c.split([':', '(']).next().unwrap_or(c).trim().to_string();
+        match counts.iter_mut().find(|(h, _)| *h == head) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((head, 1)),
+        }
+    }
+    counts.into_iter().map(|(h, n)| format!("{n} {h}")).collect::<Vec<_>>().join(", ")
+}
+
+/// The table lines of one folder's runs. Unless `expand`, unlabelled runs of
+/// one method that differ only in seed collapse to one line with the seed
+/// range and a combined verdict; a labelled run always has its own line.
+fn folder_lines(rows: &[&FitRunRow], expand: bool) -> Vec<TableLine> {
+    use crate::fit::run_view::{self, short};
+    let line = |r: &FitRunRow| TableLine {
+        label: run_label_cell(r),
+        run: short(&r.leaf.record.run_id.to_hex().to_string(), 6).to_string(),
+        method: r.leaf.level_label("method").to_string(),
+        seed: r.leaf.seed().to_string(),
+        starts: run_view::Starts::of(&r.leaf.record).cell(),
+        status: run_view::status_word(&r.leaf).to_string(),
+        verdict: run_view::RunVerdict::of(&r.leaf).cell(),
+    };
+    if expand {
+        return rows.iter().map(|r| line(r)).collect();
+    }
+    // Group unlabelled runs by everything but the seed: the method level.
+    let method_key = |r: &FitRunRow| {
+        r.leaf.record.levels.iter().find(|l| l.name == "method")
+            .map(|l| format!("{}-{}", l.label, l.hash.to_hex()))
+    };
+    let mut out: Vec<TableLine> = Vec::new();
+    let mut grouped: Vec<(Option<String>, Vec<&FitRunRow>)> = Vec::new();
+    for r in rows {
+        if r.leaf.record.provenance.label.is_some() {
+            grouped.push((None, vec![r]));
+            continue;
+        }
+        let key = method_key(r);
+        match grouped.iter_mut().find(|(k, _)| k.is_some() && *k == key) {
+            Some((_, g)) => g.push(r),
+            None => grouped.push((key.or_else(|| Some(r.leaf.dir.display().to_string())), vec![r])),
+        }
+    }
+    for (_, g) in grouped {
+        if g.len() == 1 {
+            out.push(line(g[0]));
+            continue;
+        }
+        let seeds: Vec<u64> = g.iter().map(|r| r.leaf.seed()).collect();
+        let cells: Vec<String> = g.iter().map(|r| run_view::RunVerdict::of(&r.leaf).cell()).collect();
+        let statuses: Vec<String> = g.iter().map(|r| run_view::status_word(&r.leaf).to_string()).collect();
+        let first = line(g[0]);
+        out.push(TableLine {
+            run: format!("{} runs", g.len()),
+            seed: seed_range(&seeds),
+            status: combined_verdict(&statuses),
+            verdict: combined_verdict(&cells),
+            ..first
+        });
+    }
+    out
+}
+
+/// The fits section of `camdl list`: per problem folder, a header line and a
+/// table of its runs.
+fn print_fit_runs_table(out: &crate::out::Out, folders: &[FitFolder], rows: &[FitRunRow], expand: bool) {
+    use comfy_table::{presets::NOTHING, Attribute, Cell, ContentArrangement, Table};
+    let mut unlabelled = 0usize;
+    for (i, f) in folders.iter().enumerate() {
+        let mine: Vec<&FitRunRow> = rows.iter().filter(|r| r.folder == i).collect();
+        if mine.is_empty() {
+            continue;
+        }
+        unlabelled += mine.iter().filter(|r| r.leaf.record.provenance.label.is_none()).count();
+        out.report_line(format_args!(
+            "{} {} · {}",
+            style::stdout().paint("problem", Style::Bold),
+            f.problem.line(),
+            style::stdout().paint(&f.entry.rel_path, Style::Code)
+        ));
+        let mut table = Table::new();
+        table.load_preset(NOTHING).set_content_arrangement(ContentArrangement::Disabled);
+        table.set_header(
+            ["LABEL", "RUN", "METHOD", "SEED", "STARTS", "STATUS", "VERDICT"]
+                .map(|h| Cell::new(h).add_attribute(Attribute::Bold)),
+        );
+        for l in folder_lines(&mine, expand) {
+            table.add_row(vec![
+                Cell::new(l.label),
+                Cell::new(l.run).add_attribute(Attribute::Dim),
+                Cell::new(l.method).fg(comfy_table::Color::Green),
+                Cell::new(l.seed),
+                Cell::new(l.starts),
+                Cell::new(l.status),
+                Cell::new(l.verdict),
+            ]);
+        }
+        for line in table.to_string().lines() {
+            out.report_line(format_args!(" {}", line.trim_end()));
+        }
+    }
+    crate::fit::fit_table::emit_unlabelled_warning(out, unlabelled);
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

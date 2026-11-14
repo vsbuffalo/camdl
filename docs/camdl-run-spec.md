@@ -2156,9 +2156,27 @@ block therefore shows lone runs and cells that belong to no stored ensemble.
 `--kind sim` excludes ensembles and so lists every per-cell leaf; the cells are
 always reachable by `camdl show` on their `run_id`.
 
-In `--format json` a fit row's `methods[]` holds one entry per run, each with
-its own `run_id`, `label` and `created_at`; the row-level `label` is a display
-string, every run's label joined with `", "`, and names no run (gh#896).
+Fits are listed one row per run, grouped under a `problem` line per problem
+folder (its fit id, model, config and path):
+
+```
+fits
+problem 76aecea7 · models/m0_seir_terms.camdl · configs/m0_mh.toml · results/fits/m0_mh-76aecea7
+  LABEL         RUN     METHOD  SEED  STARTS                                            STATUS     VERDICT
+  m0_mh         3a63b6  mh      2     from_prior                                        completed  not converged (R̂ 2.18)
+  m0_mh_mode_a  9f2c1d  mh      1     from_posterior run 3a63b6 (@m0_mh) chains 0,1,2,4  completed  converged (R̂ 1.006)
+```
+
+`STARTS` prints the recorded source run id with the handle as typed beside it,
+since the handle may since have moved (§6.8). `STATUS` is the run's live state
+(`completed`, `running`, `interrupted`, `failed`). `VERDICT` is the run's stored
+verdict, the line `fit summary` leads with: a sampler's from its schema-tagged
+`<method>_summary.json`, IF2's and the optimizers' gate from `fit_state.toml`,
+and `—` when there is nothing to judge (one chain, a `pfilter`). A verdict that
+cannot be read renders as `unreadable: <reason>`, and `list` still exits zero.
+Unlabelled runs of one method in one folder that differ only in seed share a row
+with a `SEED` range and a combined verdict; `--runs` lists each. `--history`
+adds each label's earlier holders as `L~1`, `L~2`. `--limit` counts runs.
 
 Paths are printed relative to the root you asked for, so they are copy-paste
 ready into `camdl show` / `camdl cat`. Short-hash prefix resolution is
@@ -2184,31 +2202,26 @@ JSON Lines (one object per line) and the survey section as a pretty-printed JSON
 array. The stream is therefore not a single JSON document; parse it per section
 or filter with `--kind`.
 
-A fit row carries `schema = {"name": "fit_list_row", "version": 2}`, the
-fit-level provenance (its `source_config` and `source_model` are
-`fit.meta.json`'s, relative to the fit folder, §2.2.1), `methods_declared` (the
-algorithms that ran on this problem), and `methods` — one entry per method leaf:
+A fit row is one run, `schema = {"name": "fit_list_row", "version": 3}`:
 
 ```json
-{"method":"pgas","method_hash":"0727792d…","run_id":"b99e1710…",
- "path":"./results/fits/pgas-50e0eb11/pgas-0727792d/seed_1-e6a47b86",
- "backend":"chain_binomial","seed":1,"n_chains":2,
- "best_loglik":-35405.944659607965,"loglik_type":"complete_data","best_chain":1}
+{"schema":{"name":"fit_list_row","version":3},"kind":"fit",
+ "problem":{"fit_id":"76aecea7…","model":"models/m0.camdl","config":"configs/m0.toml"},
+ "label":"m0_mh","label_set_at":"2026-11-14T09:30:43.042Z","history_index":0,
+ "run_id":"3a63b6…","method":"mh","seed":2,
+ "starts":{"rule":"from_prior","handle":null,"run_id":null,"chains":null},
+ "status":"completed",
+ "verdict":{"kind":"not_converged","max_rhat":2.18,"min_ess_bulk":12.0},
+ "path":"./results/fits/m0_mh-76aecea7/mh-8914c832/seed_2-e6a47b86"}
 ```
 
-This is a completed two-chain PGAS leaf. `best_loglik` and `best_chain` are the
-leaf's `run.json` `inputs.best_loglik` / `inputs.best_chain`, printed as
-recorded: `best_chain` is the chain number (a `chain_N/` directory), and
-`best_loglik` is the value `loglik_type` names — for PGAS the highest
-complete-data log-likelihood of any sweep, not a marginal likelihood, so it does
-not compare with an IF2 or `pfilter` row. Either field is `null` only when the
-method recorded none (`best_chain` for `pfilter`, which runs replicates rather
-than competing chains; `best_loglik` when the value was not finite).
-
-`method` alone does not identify a leaf. One segment can hold several leaves of
-the same algorithm — the same problem fitted at two `sweeps` settings, say — and
-they agree on `method`, `backend` and `seed`; the `method` level's hash is what
-separates them, and it is the `<h8>` in each leaf's directory name. `run_id` and
+`problem.model` and `problem.config` are `fit.meta.json`'s `source_model` and
+`source_config`, relative to the fit folder (§2.2.1). `history_index` is the
+run's place in its label's history (`0` for the holder, `n` for `@label~n`,
+§6.8; `null` without a label or for a run that is not completed). `verdict.kind`
+is one of `converged`, `not_converged`, `chains_frozen`, `unassessable`,
+`not_assessed`, `not_applicable`, `gate` (with `gate`, the IF2 or optimizer
+verdict), `none`, `not_completed` or `unreadable` (with `reason`). `run_id` and
 `path` are the addresses `camdl show` and `fit predict` accept.
 
 `<root>/index.json` is a derived run_id → leaf index, rebuilt lazily on a

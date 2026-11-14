@@ -581,7 +581,7 @@ algorithm config, tool version)`. Same inputs →
 same hash → cache hit (no re-run).
 
 ```bash
-camdl list                        # all cached runs (content-addressed leaves)
+camdl list                        # all cached runs; fits one row per run, by problem folder
 camdl show <run>                  # full metadata for one run
 camdl show @label --format json   # one fit run as JSON: run_id, path, verdict, outputs
 camdl cat  <run>                  # emit its trajectory or observations

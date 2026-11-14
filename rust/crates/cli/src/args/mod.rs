@@ -2521,6 +2521,18 @@ pub struct ListArgs {
     #[arg(long)]
     pub all: bool,
 
+    /// Also list the earlier holders of each fit label, as `L~1`, `L~2`, …
+    /// (the handles `@L~N` that name them). Without it a label shows only on
+    /// its current holder.
+    #[arg(long)]
+    pub history: bool,
+
+    /// List every fit run on its own line. Without it, unlabelled runs of one
+    /// method in one problem folder that differ only in seed share a line,
+    /// with the seed range and a combined verdict.
+    #[arg(long)]
+    pub runs: bool,
+
     /// Output format: human (default) or json
     #[arg(long)]
     pub format: Option<String>,
