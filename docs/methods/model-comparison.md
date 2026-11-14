@@ -103,7 +103,9 @@ Model      T_score     elpd   Δelpd       LR   se(Δ)               evidence   
 
 - **T_score** — the number of scored observations. Comparisons demand the same
   scored set on every row; mismatched horizons, mismatched observation times,
-  and mismatched stream sets are all refused before rendering.
+  and mismatched stream sets are all refused before rendering. Fits that bound
+  different streams can be compared on a stream they share with `--streams`
+  (§7).
 - **elpd** — the summed log predictive density (§1), in nats (natural-log
   units). Its absolute value is not interpretable across datasets; only
   differences on the same scored set are.
@@ -363,7 +365,78 @@ verdicts, and treat a decisive tier with corresponding respect. Scoring across
 several origins (rolling-origin evaluation) is the planned remedy for both the
 small count and the single-phase dependence of one split.
 
-## 7. Practical guidance
+## 7. Comparing fits on chosen streams
+
+### 7.1 Why the joint score cannot do it
+
+A step's log score is the joint score over every stream the fit observed at that
+step. Two fits that bound different streams therefore score different
+quantities, and their Δelpd is mostly the extra stream's presence on one side;
+`compare` refuses such a pair. That refusal also blocks a question worth asking:
+how much does an observation stream contribute to prediction? The experiment is
+to fit the model with and without the stream (say, to `cases` and `deaths`, and
+to `cases` alone) and compare the two fits on the stream they share.
+
+### 7.2 What `--streams` scores
+
+`--streams NAME[,NAME...]` (or `streams = [...]` in `compare.toml`) renders one
+table per selected stream. A name is a stream of the model's `observations { }`
+block, or a data source, which stands for every stream it expands to (the
+streams of an indexed block, or the blocks that read it through `from`). In the
+table for one stream, every row is scored on that stream alone: each step's
+score is the stream's own entry in the trace's per-stream breakdown,
+$\log \hat p(y^{s}_t \mid y_{1:t-1})$ — the one-step-ahead predictive density of
+stream $s$ given everything the fit's filter had assimilated, the other streams
+included. Steps at which the stream was not observed are dropped. Nothing is
+recomputed and no random number is drawn, so this is exact, not an
+approximation. The table's CRPS and PIT coverage are that stream's own, and the
+filter-noise SE is computed from each replicate's total for that stream.
+
+Each table states the stream it scores. When the rows' fits assimilated
+different streams, its footer lists each set with its rows, and the JSON gives
+each row's set as `streams_assimilated` (null for an explicit
+`prequential.json`, which does not record it). The data check compares only the
+data the table scores, that stream's source; the other sources are named as not
+compared.
+
+No figure combines streams. A stream's score is a marginal, with the other
+streams integrated out, and a sum of marginal log scores over several streams is
+not the log of their joint density. So two selected streams give two separate
+tables and nothing else: no total, no mean, no combined row. Under `--streams`,
+`--pointwise FILE` writes only the per-stream file (`FILE` with `.streams`
+before the extension), with rows for the selected streams, and no joint file.
+
+### 7.3 Ablation in-sample is biased; score it held out
+
+Scored in-sample, the ablation comparison is biased by construction. The fit
+trained on `cases` alone chose $\hat\theta$ to fit `cases`; the fit trained on
+`cases` and `deaths` traded the two off, so on its own training data it fits
+`cases` no better and usually slightly worse, whatever `deaths` contributes to
+prediction. The in-sample difference therefore leans toward the fit trained on
+fewer streams. Held-out scoring removes this, because neither fit's parameters
+were tuned to the scored rows (§6).
+
+So when the rows assimilated different streams and are scored in-sample,
+`compare --streams` refuses and asks for the same `holdout_after` in every fit
+(§6.1). `--allow-in-sample-ablation` renders anyway, and every format then
+states the direction of the bias. An explicit `prequential.json` does not record
+what its fit assimilated and counts as different from every other row.
+
+A fit drops streams by source: binding is by source, so it cannot drop one
+stream of an indexed block or one of several blocks sharing a `from` source. The
+one-file shorthand `[data] file = "..."` binds every source, so the ablated fit
+must use `[data.observations]`.
+
+### 7.4 What a held-out ablation difference contains
+
+A held-out difference between fits that assimilated different streams still
+combines two effects. The larger fit's parameters were trained on the extra
+stream, and its filter goes on assimilating the extra stream's held-out rows as
+it forecasts. Both are part of the predictive that fit would actually issue, and
+that predictive is what the table scores. The table does not separate the two
+effects.
+
+## 8. Practical guidance
 
 - Prefer held-out comparison whenever the question is "which model should we
   believe going forward." Reserve `--in-sample` for exploratory triage, and read

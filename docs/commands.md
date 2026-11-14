@@ -299,6 +299,28 @@ a single reporting batch. An elpd gap taken across two different stream sets
 never reaches them: the preflight refuses that comparison before the table is
 rendered or either file is written, naming the streams that differ (gh#570).
 
+```bash
+camdl compare full/fit.toml cases_only/fit.toml --streams cases
+```
+
+`--streams NAME[,NAME...]` (also `streams = [...]` in `compare.toml`) compares
+the fits on chosen observation streams: one table per stream, each scoring every
+row on that stream's own one-step-ahead predictive, read from the per-stream
+scores the trace already stores. A name is a stream of the model or a data
+source, which selects every stream it expands to. This is how fits that bound
+different streams — the model fitted with and without a stream — are compared on
+a stream they share; the stream-set refusal above names the option and the
+shared streams. Each table states its stream and, when the rows' fits
+assimilated different streams, each row's set; the data check compares only that
+stream's source. No figure combines streams: two selected streams give two
+tables and nothing else, the JSON is
+`{ "streams_scored": [...], "tables": [...] }`, and `--pointwise` writes only
+the `.streams` file. Fits that assimilated different streams and are scored
+in-sample are refused, because that comparison leans toward the fit trained on
+fewer streams; declare the same `holdout_after` in every fit, or pass
+`--allow-in-sample-ablation` to render with that caveat stated. The methods are
+in §7 of `camdl docs model-comparison`.
+
 ## The boundaries, stated plainly
 
 - **`simulate` goes forward; `fit` goes backward.** Simulation maps parameters →
