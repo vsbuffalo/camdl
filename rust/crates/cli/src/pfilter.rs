@@ -564,6 +564,10 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // explicit `--save-*` paths are unchanged. Idempotent: same inputs → same
     // run_id → same path.
     let write_cas_leaf = |mean_ll: f64, sd_ll: f64, n_reps: usize| {
+        // `--no-store`: the caller wants the evaluation, not a stored leaf.
+        if a.no_store {
+            return;
+        }
         let data_hashes: Vec<(String, String)> = bound_streams.iter()
             .filter_map(|(name, path)| std::fs::read(path).ok()
                 .map(|bytes| (name.clone(), runid::ContentHash::digest_bytes(&bytes).to_hex())))

@@ -1292,6 +1292,9 @@ fn derive_prequential(
             .arg("--particles").arg(derive.particles.to_string())
             .arg("--seed").arg(seed.to_string())
             .arg("--dt").arg(fitted_dt.to_string())
+            // The trace is the product; a stored log-likelihood leaf under
+            // the caller's output root is not.
+            .arg("--no-store")
             .env("CAMDL_SKIP_VERSION_CHECK", "1");
         for (name, abs_path) in &streams {
             cmd.arg("--data").arg(format!("{name}={abs_path}"));
