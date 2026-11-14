@@ -251,7 +251,7 @@ filter-noise MC SE per row and the lag-1 autocorrelation of the per-step Δelpd.
 What those quantities are, and their citations and caveats, is
 `camdl compare --explain` (the same guide as `camdl docs model-comparison`).
 
-`compare` refuses, rather than renders, seven unlike-for-unlike comparisons: a
+`compare` refuses, rather than renders, these unlike-for-unlike comparisons: a
 differing `T_score` (override: `--allow-mismatched-horizon`, which suppresses
 the Δ columns and waives only the times one row scored and the other did not —
 at every time both scored, the stream and window checks below still apply),
@@ -270,10 +270,14 @@ a θ̂ fitted to other bytes; override: `--allow-changed-data`), and traces scor
 with different particle or replicate counts, as each trace records them (the log
 of a particle-filter likelihood estimate is biased downward, by more at fewer
 particles, so part of the Δ would measure the filters; override:
-`--allow-mismatched-filter-settings`). Under each override every format states
-what was waived. A fit whose method ran on a backend other than `chain_binomial`
-is refused on the derive path, since the derived score would come from a
-different forward process than the fit used (gh#312).
+`--allow-mismatched-filter-settings`). Provenance kinds that differ (plug-in
+against a posterior mixture) are refused too (override:
+`--allow-mixed-provenance`). Under each override that was needed, every format
+states it once — the flag, the rows it concerned and what it does to the reading
+— as a line under the table and an entry of the JSON's `overrides` array. A fit
+whose method ran on a backend other than `chain_binomial` is refused on the
+derive path, since the derived score would come from a different forward process
+than the fit used (gh#312).
 
 `--pointwise PATH` writes the per-observation difference the table already
 computes in order to form `se(Δelpd)`, as a TSV with one row per candidate ×
