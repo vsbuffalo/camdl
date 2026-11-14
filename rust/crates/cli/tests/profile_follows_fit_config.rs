@@ -214,3 +214,39 @@ fn explicit_holdout_files_are_checked_against_the_bound_data() {
     assert!(stderr(&o).contains("held-out observation row(s) bound as the tail"),
         "the run must say the holdout was checked:\n{}", stderr(&o));
 }
+
+/// Items 3 and 4 of gh#1059: `gamma` is listed in `[estimate]` and swept, so
+/// each cell pins it and estimates `beta` alone. A `from_posterior` source
+/// with a `beta` column and no `gamma` column binds every parameter a cell
+/// estimates and must be accepted; every chain then starts at its row.
+#[test]
+fn a_swept_estimate_parameter_needs_no_column_in_a_starts_source() {
+    let tmp = workdir(&fit_toml(""));
+    let dir = tmp.path();
+    std::fs::write(dir.join("draws.tsv"), "chain\tbeta\n0\t0.33\n1\t0.33\n").unwrap();
+    let mut args: Vec<&str> = vec!["--fit", "fit.toml", "--sweep", "gamma=0.12,0.15",
+        "--rw-sd", "beta=auto", "--n-starts", "2", "--starts", "from_posterior=draws.tsv"];
+    args.extend_from_slice(&NL);
+    let o = profile(dir, &args);
+    assert_ok(&o, "from_posterior without the swept column");
+    let runs = find_all(&dir.join("results"), "run.json");
+    assert!(!runs.is_empty(), "no run.json written");
+    for run in &runs {
+        let text = std::fs::read_to_string(run).unwrap();
+        assert!(text.contains("0.33"),
+            "every chain must start at the source's beta = 0.33 ({}):\n{text}", run.display());
+    }
+}
+
+/// Listing the swept parameter in `[fixed]` stays refused, naming the block.
+#[test]
+fn a_swept_fixed_parameter_is_refused() {
+    let fit = fit_toml("").replace("rho = 0.6\n", "rho = 0.6\ngamma = 0.15\n")
+        .replace("gamma = { bounds = [0.01, 0.5], start = 0.15 }\n", "");
+    let tmp = workdir(&fit);
+    let mut args: Vec<&str> = vec!["--fit", "fit.toml", "--sweep", "gamma=0.12,0.15",
+        "--rw-sd", "beta=auto", "--n-starts", "1"];
+    args.extend_from_slice(&NL);
+    let o = profile(tmp.path(), &args);
+    assert_refused(&o, "a swept [fixed] parameter", &["'gamma' is in both `--sweep`", "[fixed]"]);
+}

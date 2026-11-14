@@ -1237,8 +1237,15 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             .iter()
             .map(|s| (s.name.clone(), crate::fit::runner::resolve_prior(&s.name, &fit_estimate, &resolved.model).0))
             .collect();
+        // The rules bind the resolver's `estimate_set`, which here is the fit
+        // config's [estimate] keys: it still holds a swept name (pinned per
+        // cell, so a source need not carry it) and is empty without --fit
+        // (so a `from_posterior` source would start nothing). A cell
+        // estimates `if2_params`, so that is the set the starts bind.
+        let mut starts_view = resolved.clone();
+        starts_view.estimate_set = if2_params.iter().map(|p| p.name.clone()).collect();
         let ctx = crate::fit::chain_starts::StartContext {
-            resolved: &resolved,
+            resolved: &starts_view,
             base_specs: &if2_params,
             priors: &priors,
         };

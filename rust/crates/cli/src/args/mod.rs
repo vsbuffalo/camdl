@@ -1892,8 +1892,10 @@ pub struct ProfileArgs {
     /// `from_posterior=@base` (one posterior row per chain),
     /// `from_mle=@mle` (every chain at that fit's estimate),
     /// `from_params=theta.toml`. The chains it draws span the
-    /// non-focal estimated parameters' bounds. Keyed into the run's
-    /// identity. How many chains: `--n-starts`.
+    /// non-focal estimated parameters' bounds, and a source binds those
+    /// parameters only: a swept parameter, pinned in every cell, needs no
+    /// column or entry in it. Keyed into the run's identity. How many
+    /// chains: `--n-starts`.
     #[arg(long, value_name = "SPEC", default_value = "uniform")]
     pub starts: crate::fit::starts::ChainStarts,
 

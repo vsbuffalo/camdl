@@ -7187,7 +7187,9 @@ part of the leaf's identity, and the full objective leaves the key unchanged.
 --iterations N              IF2 iterations per grid point (default 50; refused for nl-*)
 --n-starts N                independent starts per grid point (default 3)
 --starts SPEC               where each cell's starts are drawn: the rule grammar
-                            `fit run --starts` takes (default `uniform`)
+                            `fit run --starts` takes (default `uniform`); a
+                            source binds the cell's estimated set, so a swept
+                            parameter needs no column in it
 --cooling F                 IF2 cooling fraction (default 0.95), reached at
                             --cooling-target-iters as in a fit's `cooling`
                             (refused for nl-*)
