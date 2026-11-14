@@ -14,7 +14,8 @@ use crate::error::SimError;
 use crate::schedule::Cursor;
 use super::degeneracy::{check_pf_degeneracy, check_iteration_budget, window_substep_cost, pf_bail_error, DeathMask};
 use super::traits::{ProcessModel, ObservationModel, SMCConfig};
-use super::types::{ParticleState, ParticleSwarm, log_sum_exp, logw_variance, normalize_log_weights, RESAMPLE_RNG_STREAM, init_particle_rngs};
+use super::types::{ParticleState, ParticleSwarm, logw_variance, normalize_log_weights, RESAMPLE_RNG_STREAM, init_particle_rngs};
+use numerics::log_sum_exp;
 use super::resampling::systematic_resample;
 /// Observation: one data point at a specific time.
 #[derive(Clone, Debug, PartialEq)]

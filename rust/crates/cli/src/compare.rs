@@ -2639,7 +2639,7 @@ impl ReplicateTotals {
             }
         }
         let mc_se = (elpd.len() >= 2)
-            .then(|| sim::inference::types::logmeanexp_with_se(&elpd).1);
+            .then(|| numerics::logmeanexp_with_se(&elpd).1);
         ReplicateTotals { elpd, by_stream, mc_se }
     }
 }
@@ -2716,7 +2716,7 @@ fn combine_scored_traces(
     let mut steps = Vec::with_capacity(first.steps.len());
     for si in 0..first.steps.len() {
         let ls: Vec<f64> = traces.iter().map(|t| t.steps[si].log_score).collect();
-        let (log_score, _) = sim::inference::types::logmeanexp_with_se(&ls);
+        let (log_score, _) = numerics::logmeanexp_with_se(&ls);
         let ess = traces.iter().map(|t| t.steps[si].ess)
             .fold(f64::INFINITY, f64::min);
 
@@ -2725,7 +2725,7 @@ fn combine_scored_traces(
             let ss0 = &first.steps[si].per_stream[pi];
             let ls_s: Vec<f64> = traces.iter()
                 .map(|t| t.steps[si].per_stream[pi].log_score).collect();
-            let (log_score_s, _) = sim::inference::types::logmeanexp_with_se(&ls_s);
+            let (log_score_s, _) = numerics::logmeanexp_with_se(&ls_s);
             let mut pooled_s: Vec<f64> = Vec::new();
             for t in &traces {
                 pooled_s.extend_from_slice(&t.steps[si].per_stream[pi].y_pred_samples);
@@ -4423,7 +4423,7 @@ mod tests {
         assert_eq!(totals.by_stream["north"], vec![-9.0, -9.0]);
         assert_eq!(totals.by_stream["south"], vec![-9.0, -11.0]);
         assert_eq!(totals.mc_se,
-            Some(sim::inference::types::logmeanexp_with_se(&totals.elpd).1),
+            Some(numerics::logmeanexp_with_se(&totals.elpd).1),
             "the SE is the log-mean-exp SE of the stored totals");
         assert!(totals.mc_se.is_some_and(|se| se > 0.0));
 
@@ -5578,7 +5578,7 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
             let by_hand: Vec<f64> = reps.iter()
                 .map(|rep| sim::inference::prequential::project_onto_stream(rep, leaf).unwrap().elpd())
                 .collect();
-            let want = sim::inference::types::logmeanexp_with_se(&by_hand).1;
+            let want = numerics::logmeanexp_with_se(&by_hand).1;
             let got = row_mc_se(&row.onto(leaf).unwrap());
             assert_eq!(got, Some(want), "{leaf}");
             assert_ne!(got, totals.mc_se, "{leaf}: not the joint SE");

@@ -15,7 +15,7 @@ description: Rust code conventions — crate layout, dead code, existing seams, 
 Intra-workspace dependencies, read from the `Cargo.toml` files:
 
 ```
-cli  → io, ir, runid, sim
+cli  → io, ir, numerics, runid, sim
 io   → ir, sim
 sim  → ir, numerics
 runid → ir, runid-derive

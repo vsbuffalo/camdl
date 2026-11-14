@@ -485,7 +485,7 @@ impl PrequentialTrace {
 /// `EssCollapse` is recounted at its recorded threshold, and the `derivation`
 /// block's replicate totals and filter-noise SE become the leaf's
 /// (`replicate_elpd_by_stream[leaf]`, with the SE recomputed from them by
-/// [`super::types::logmeanexp_with_se`]). `scored_streams` records `[leaf]`.
+/// [`numerics::logmeanexp_with_se`]). `scored_streams` records `[leaf]`.
 ///
 /// A sum of these per-leaf scores over several leaves is not the joint score
 /// of those leaves (each is a marginal with the other leaves integrated out),
@@ -544,7 +544,7 @@ pub fn project_onto_stream(
                 replicate_elpd_by_stream: [(leaf.to_string(), totals.clone())]
                     .into_iter().collect(),
                 mc_se_elpd: (totals.len() >= 2)
-                    .then(|| super::types::logmeanexp_with_se(totals).1),
+                    .then(|| numerics::logmeanexp_with_se(totals).1),
                 ..d.clone()
             })
         }
@@ -641,7 +641,7 @@ pub fn log_score_plug_in(log_liks: &[f64], log_weights: &[f64]) -> f64 {
     //   = logsumexp(log w + log p) − logsumexp(log w).
     let num: Vec<f64> = log_weights.iter().zip(log_liks)
         .map(|(lw, lp)| lw + lp).collect();
-    super::types::log_sum_exp(&num) - super::types::log_sum_exp(log_weights)
+    numerics::log_sum_exp(&num) - numerics::log_sum_exp(log_weights)
 }
 
 /// Sample-based CRPS: the *plain empirical-CDF (edf)* estimator, via the
@@ -778,7 +778,7 @@ pub fn build_trace(
         }
 
         // Uniform-weight log-score (see docstring).
-        let log_score = super::types::log_sum_exp(log_liks) - n.ln();
+        let log_score = numerics::log_sum_exp(log_liks) - n.ln();
         let ess = ess_trace[idx];
         // The collapse cue scales with the swarm: an absolute floor (the old
         // 10.0) read N = 10_000 with ESS 50 — a 0.5% survival — as healthy.
@@ -803,7 +803,7 @@ pub fn build_trace(
                 stream: recorded.stream_names[si].clone(),
                 y_obs: y_s,
                 y_pred_samples: samp_s.clone(),
-                log_score: super::types::log_sum_exp(ll_s) - n_s.ln(),
+                log_score: numerics::log_sum_exp(ll_s) - n_s.ln(),
                 crps: crps_sample_fair(samp_s, y_s),
                 pit: pit_sample_randomized(samp_s, y_s, pit_rng.uniform()),
                 interval: PredInterval::from_samples(samp_s),
@@ -1505,7 +1505,7 @@ mod tests {
         let log_weights = vec![0.0; 4];  // uniform (unnormalized)
         let ls = log_score_plug_in(&log_liks, &log_weights);
         let n = log_liks.len() as f64;
-        let expected = super::super::types::log_sum_exp(&log_liks) - n.ln();
+        let expected = numerics::log_sum_exp(&log_liks) - n.ln();
         assert!(approx_eq(ls, expected, 1e-12), "got {}, expected {}", ls, expected);
     }
 
@@ -1789,7 +1789,7 @@ mod tests {
         assert_eq!(trace.t0, 0);
 
         // Step 0: log_score = logsumexp(log_liks) - log N
-        let expected_ls0 = super::super::types::log_sum_exp(&recorded.log_liks[0])
+        let expected_ls0 = numerics::log_sum_exp(&recorded.log_liks[0])
             - (4.0_f64).ln();
         assert!(approx_eq(trace.steps[0].log_score, expected_ls0, 1e-12));
         // CRPS/PIT agree with kernels.
@@ -2007,7 +2007,7 @@ mod tests {
         assert_eq!(d.replicate_elpd, totals);
         assert_eq!(d.replicate_elpd_by_stream,
             [("cases".to_string(), totals.clone())].into_iter().collect());
-        let (_, se) = super::super::types::logmeanexp_with_se(&totals);
+        let (_, se) = numerics::logmeanexp_with_se(&totals);
         assert_eq!(d.mc_se_elpd, Some(se), "the leaf's SE, not the joint 0.5");
         let orig = trace.derivation.as_ref().unwrap();
         assert_eq!((d.particles, d.replicates, d.dt, d.seed, d.theta),
