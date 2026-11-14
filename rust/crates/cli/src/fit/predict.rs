@@ -2996,10 +2996,9 @@ fn load_leaf_obs(
     let data = config
         .data_spec()
         .map_err(|e| format!("this fit has no [data] block to read the observed series from: {e}"))?;
-    let model_obs_names: Vec<String> = model.observations.iter().map(|o| o.name.clone()).collect();
-    let effective = data
-        .effective_observations(&model_obs_names)
-        .map_err(|e| format!("resolving [data.observations]: {e}"))?;
+    let bindings = crate::fit::stream_bindings::StreamBindings::resolve(model, data)
+        .map_err(|e| format!("resolving [data]: {e}"))?;
+    let effective = bindings.training_by_source();
     let time_opts = crate::caltime_load::TimeOpts {
         origin: model.origin.as_deref(),
         time_unit: &model.time_unit,
@@ -3763,10 +3762,9 @@ fn one_step_bands(
     let data = config.data_spec().map_err(|e| {
         format!("this fit has no [data] block to read the observed series from: {e}")
     })?;
-    let model_obs_names: Vec<String> = model.observations.iter().map(|o| o.name.clone()).collect();
-    let effective = data
-        .effective_observations(&model_obs_names)
-        .map_err(|e| format!("resolving [data.observations]: {e}"))?;
+    let bindings = crate::fit::stream_bindings::StreamBindings::resolve(model, data)
+        .map_err(|e| format!("resolving [data]: {e}"))?;
+    let effective = bindings.training_by_source();
     let time_opts = crate::caltime_load::TimeOpts {
         origin: model.origin.as_deref(),
         time_unit: &model.time_unit,
@@ -4134,6 +4132,41 @@ mod tests {
     }
 
     use super::*;
+
+    /// `fit predict` reads the observed series of every leaf a fit binds. Under
+    /// the one-file shorthand on a model whose `cases[p in patch]` block
+    /// expands to `cases_urban`/`cases_rural` (both of source `cases`), it
+    /// looked each leaf's file up by source in a map keyed by leaf, found
+    /// nothing, and skipped both leaves as unbound: the predictive was drawn
+    /// with no observed series beside it, and nothing said so.
+    #[test]
+    fn observed_leaves_are_read_under_the_shorthand_on_an_indexed_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("cases_long.tsv");
+        std::fs::write(&data, "time\tpatch\tcases\n7\turban\t12\n7\trural\t3\n\
+                               14\turban\t18\n14\trural\t6\n").unwrap();
+        let path = format!("{}/../../../ocaml/golden/sir_two_patch_long_obs.ir.json",
+            env!("CARGO_MANIFEST_DIR"));
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let mut model: ir::Model = serde_json::from_value(v["model"].clone()).unwrap();
+        for p in &mut model.parameters {
+            p.value = p.value.with_value(0.1);
+        }
+        let compiled = sim::CompiledModel::new(model.clone()).unwrap();
+        let config = crate::fit::config_v2::FitConfig::from_toml_str(&format!(
+            "[model]\ncamdl = \"m.ir.json\"\n[data]\nfile = \"{}\"\n\
+             [estimate]\nbeta = {{ bounds = [0.01, 0.5] }}\n[fixed]\nrho = 0.5\n\
+             [method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
+             chains = 1\nparticles = 10\niterations = 1\ncooling = 0.7\n",
+            data.display())).unwrap().problem;
+        let leaves = load_leaf_obs(&model, &compiled, &config, 1.0, None).unwrap();
+        let read: Vec<(String, Vec<f64>)> = leaves.iter()
+            .map(|l| (l.stratum[0].1.clone(), l.times.clone())).collect();
+        assert_eq!(read, vec![("urban".to_string(), vec![7.0, 14.0]),
+                              ("rural".to_string(), vec![7.0, 14.0])],
+            "both leaves' observed series are read");
+    }
 
     /// The one-step band walks the step the fit ran at: under the one dt rule
     /// that is the model's declared dt whenever it has one — the fit's
