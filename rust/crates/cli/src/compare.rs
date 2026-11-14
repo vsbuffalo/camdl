@@ -550,10 +550,18 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
     // overridable by `--allow-mismatched-horizon`: that flag says "render the Δ
     // columns as '—' because the horizons differ", whereas this is a pairing
     // that is meaningless however it is displayed.
-    if !t_mismatch {
-        if let Err(e) = check_shared_observation_axis(&rows) {
-            refuse(&out, format!("error: {e}"));
-        }
+    //
+    // With the horizons differing (and the flag set — otherwise refused
+    // above), the flag waives the times only one row scored, and nothing
+    // else: at every time both rows scored, the stream-set (gh#570) and
+    // coverage (gh#833) checks still hold.
+    let pairing = if t_mismatch {
+        check_shared_times(&rows)
+    } else {
+        check_shared_observation_axis(&rows)
+    };
+    if let Err(e) = pairing {
+        refuse(&out, format!("error: {e}"));
     }
 
     // Fairness, part three (gh#713): the compared fits must have been bound to
@@ -735,38 +743,74 @@ fn check_shared_observation_axis(rows: &[Row]) -> Result<(), String> {
                     first.name, r.name, k + 1, a.t, first.name, b.t, r.name,
                 ));
             }
-            let (sa, sb) = (step_streams(a), step_streams(b));
-            if sa == sb {
-                check_shared_coverage(first, r, a, b)?;
-                continue;
+            check_step_pair(first, r, a, b)?;
+        }
+    }
+    Ok(())
+}
+
+/// Two rows' steps at one observation time scored the same streams, and the
+/// same quantity for each stream ([`check_shared_coverage`]). The per-step
+/// half of the pairing checks, shared by the equal-horizon path (steps paired
+/// by position, after their times are checked equal) and the
+/// mismatched-horizon path (steps joined by time).
+fn check_step_pair(
+    first: &Row,
+    r: &Row,
+    a: &sim::inference::prequential::PrequentialStep,
+    b: &sim::inference::prequential::PrequentialStep,
+) -> Result<(), String> {
+    let (sa, sb) = (step_streams(a), step_streams(b));
+    if sa == sb {
+        return check_shared_coverage(first, r, a, b);
+    }
+    // A v1 trace carries no `per_stream` at all. Two such traces have
+    // nothing to check and are allowed through; one of each cannot be
+    // checked, and an unverifiable stream set is not a verified one.
+    let detail = if sa.is_empty() || sb.is_empty() {
+        let (with, without) = if sa.is_empty() { (&r.name, &first.name) }
+                              else { (&first.name, &r.name) };
+        format!(
+            "'{without}' has no per-stream breakdown at that step, so its \
+             joint score cannot be shown to cover the same streams as \
+             '{with}' ({}).\n       \
+             Re-derive '{without}' — a v1 `prequential.json` predates \
+             the per-stream breakdown.",
+            fmt_stream_set(if sa.is_empty() { &sb } else { &sa }),
+        )
+    } else {
+        format!(
+            "'{}' scored {} there and '{}' scored {}.\n       \
+             The step's log score is the JOINT score over those streams, \
+             so differencing them compares unlike quantities.\n       \
+             Re-score both models on the same set of observation streams.",
+            first.name, fmt_stream_set(&sa), r.name, fmt_stream_set(&sb),
+        )
+    };
+    Err(format!(
+        "'{}' and '{}' did not score the same streams at t={}: {detail}",
+        first.name, r.name, a.t,
+    ))
+}
+
+/// The pairing checks for rows whose horizons differ, rendered under
+/// `--allow-mismatched-horizon`.
+///
+/// The flag waives the T_score check — the times only one row scored — and
+/// nothing else. At every observation time both rows scored, steps joined by
+/// `t` rather than by position (their positions differ once one series is
+/// longer), the rows must still have scored the same streams and the same
+/// quantity per stream, with the same refusals as the equal-horizon path.
+fn check_shared_times(rows: &[Row]) -> Result<(), String> {
+    let Some(first) = rows.first() else { return Ok(()) };
+    for r in rows.iter().skip(1) {
+        for a in &first.trace.steps {
+            // Step times come from the same observation grid, so a shared
+            // time is the same value; this is the equality the
+            // equal-horizon path pairs on.
+            if let Some(b) = r.trace.steps.iter().find(|b| b.t == a.t) {
+                check_step_pair(first, r, a, b)?;
             }
-            // A v1 trace carries no `per_stream` at all. Two such traces have
-            // nothing to check and are allowed through; one of each cannot be
-            // checked, and an unverifiable stream set is not a verified one.
-            let detail = if sa.is_empty() || sb.is_empty() {
-                let (with, without) = if sa.is_empty() { (&r.name, &first.name) }
-                                      else { (&first.name, &r.name) };
-                format!(
-                    "'{without}' has no per-stream breakdown at that step, so its \
-                     joint score cannot be shown to cover the same streams as \
-                     '{with}' ({}).\n       \
-                     Re-derive '{without}' — a v1 `prequential.json` predates \
-                     the per-stream breakdown.",
-                    fmt_stream_set(if sa.is_empty() { &sb } else { &sa }),
-                )
-            } else {
-                format!(
-                    "'{}' scored {} there and '{}' scored {}.\n       \
-                     The step's log score is the JOINT score over those streams, \
-                     so differencing them compares unlike quantities.\n       \
-                     Re-score both models on the same set of observation streams.",
-                    first.name, fmt_stream_set(&sa), r.name, fmt_stream_set(&sb),
-                )
-            };
-            return Err(format!(
-                "'{}' and '{}' did not score the same streams at t={}: {detail}",
-                first.name, r.name, a.t,
-            ));
         }
     }
     Ok(())
@@ -3117,6 +3161,51 @@ mod tests {
         assert!(same_sealed_boundary(60.0 + 1e-12, 60.0), "symmetric");
         assert!(!same_sealed_boundary(21.0, 21.5),
             "half a day apart is two different training windows");
+    }
+
+    /// `--allow-mismatched-horizon` waives the T_score check and nothing else.
+    /// Two traces of different lengths still refuse when, at a time both
+    /// scored, they scored different stream sets (gh#570) or the same stream
+    /// over different windows (gh#833). Times only one trace scored are what
+    /// the flag waives.
+    #[test]
+    fn mismatched_horizons_still_check_streams_and_coverage_at_shared_times() {
+        use sim::inference::Coverage;
+        let iv = |s: f64, e: f64| Coverage::Interval { start: s, stop: e };
+
+        // (i) Different stream sets at shared t = 14.
+        let short = row_with_streams("short", &[7.0, 14.0], &["north"]);
+        let long = row_with_streams("long", &[7.0, 14.0, 21.0], &["north", "south"]);
+        let err = check_shared_times(&[short, long])
+            .expect_err("different stream sets at a shared time are refused");
+        assert!(err.contains("did not score the same streams") && err.contains("south")
+                && err.contains("t=7"), "{err}");
+
+        // (ii) Same stream, different coverage at shared t = 14; the long
+        // trace's extra step at 21 is not consulted.
+        let short = row_covering("short", &[7.0, 14.0], "cases",
+            &[iv(0.0, 7.0), iv(12.0, 14.0)]);
+        let long = row_covering("long", &[7.0, 14.0, 21.0], "cases",
+            &[iv(0.0, 7.0), iv(7.0, 14.0), iv(14.0, 21.0)]);
+        let err = check_shared_times(&[short, long])
+            .expect_err("different coverage at a shared time is refused");
+        assert!(err.contains("over different windows") && err.contains("t=14"), "{err}");
+
+        // Shared times joined by t, not position: the short trace's t = 14
+        // pairs with the long trace's t = 14 although it sits at index 0.
+        let short = row_covering("short", &[14.0], "cases", &[iv(12.0, 14.0)]);
+        let long = row_covering("long", &[7.0, 14.0], "cases", &[iv(0.0, 7.0), iv(7.0, 14.0)]);
+        assert!(check_shared_times(&[short, long]).is_err(), "joined by time");
+
+        // (iii) Same streams and coverage at every shared time: it renders,
+        // with the Δ columns suppressed as before.
+        let short = row_covering("short", &[7.0, 14.0], "cases", &[iv(0.0, 7.0), iv(7.0, 14.0)]);
+        let long = row_covering("long", &[7.0, 14.0, 21.0], "cases",
+            &[iv(0.0, 7.0), iv(7.0, 14.0), iv(14.0, 21.0)]);
+        let rows = vec![short, long];
+        check_shared_times(&rows).expect("agreeing shared times render");
+        let table = render_table(&rows, 0, &["elpd".to_string()], true);
+        assert!(table.contains("Δ columns suppressed"), "{table}");
     }
 
     /// A training file's fresh full SHA-256 against the hash its fit

@@ -199,3 +199,52 @@ fn compare_refuses_a_gapped_reading_against_a_merged_one() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// A hand-written trace scoring `streams` at each of `times`, each value
+/// covering the week closing at its time.
+fn trace_json(times: &[f64], streams: &[&str]) -> String {
+    let steps: Vec<serde_json::Value> = times.iter().map(|&t| serde_json::json!({
+        "t": t, "y_obs": 1.0, "y_pred_samples": [], "log_score": -1.0,
+        "crps": 0.5, "pit": 0.5, "ess": 100.0,
+        "per_stream": streams.iter().map(|s| serde_json::json!({
+            "stream": s, "y_obs": 1.0, "y_pred_samples": [], "log_score": -1.0,
+            "crps": 0.5, "pit": 0.5,
+            "coverage": {"kind": "interval", "start": t - 7.0, "stop": t},
+        })).collect::<Vec<_>>(),
+    })).collect();
+    serde_json::json!({
+        "schema_version": 4, "t0": 0, "provenance": "plug_in",
+        "conditioning": "in_sample", "steps": steps, "warnings": [],
+    }).to_string()
+}
+
+/// `--allow-mismatched-horizon` waives the T_score check only. Two traces of
+/// different lengths that scored different stream sets at a time both
+/// scored are still refused (exit 2); with the same streams there, they
+/// render with the Δ columns suppressed.
+#[test]
+fn the_horizon_override_does_not_waive_the_stream_check_at_shared_times() {
+    let camdl = camdl_bin();
+    let tmp = tempdir("horizon");
+    let short = tmp.join("short.json");
+    let long = tmp.join("long.json");
+    let long_same = tmp.join("long_same.json");
+    std::fs::write(&short, trace_json(&[7.0, 14.0], &["north"])).unwrap();
+    std::fs::write(&long, trace_json(&[7.0, 14.0, 21.0], &["north", "south"])).unwrap();
+    std::fs::write(&long_same, trace_json(&[7.0, 14.0, 21.0], &["north"])).unwrap();
+
+    let out = run(&camdl, &["compare", short.to_str().unwrap(), long.to_str().unwrap(),
+                            "--allow-mismatched-horizon"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2),
+        "different stream sets at a shared time are refused under the flag:\n{stderr}");
+    assert!(stderr.contains("did not score the same streams") && stderr.contains("south"),
+        "{stderr}");
+
+    let out = run(&camdl, &["compare", short.to_str().unwrap(), long_same.to_str().unwrap(),
+                            "--allow-mismatched-horizon"]);
+    assert!(out.status.success(), "agreeing shared times render:\n{}",
+        String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Δ columns suppressed"));
+    let _ = std::fs::remove_dir_all(&tmp);
+}
