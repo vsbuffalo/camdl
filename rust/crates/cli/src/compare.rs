@@ -362,7 +362,7 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
             Conditioning::HoldOutTail { train_end, .. } => Some(*train_end),
             _ => None,
         }).collect();
-        if ends.windows(2).any(|w| w[0] != w[1]) {
+        if ends.windows(2).any(|w| !same_sealed_boundary(w[0], w[1])) {
             refuse(&out, format!("error: the compared fits seal training at different \
                        boundaries: {ends:?}\n       Held-out scores over different windows are not \
                        commensurable; declare the same holdout_after in every \
@@ -479,6 +479,19 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
         Format::Table => render_table(&rows, base_idx, &metrics_chosen, t_mismatch),
     };
     out.report_raw(rendered);
+}
+
+/// Whether two held-out rows sealed training at the same boundary.
+///
+/// A `train_end` is an observation time read back from each fit's sidecar,
+/// so two fits cut at the same observation can differ by float noise (a
+/// date resolved through a different path, a value round-tripped through
+/// text). The holdout code decides "the same observation time at the
+/// boundary" with [`crate::fit::runner::TIME_TIE_EPS`]; this uses the same
+/// tolerance, so a cohort the fits treat as one window is not refused here
+/// as two.
+fn same_sealed_boundary(a: f64, b: f64) -> bool {
+    (a - b).abs() <= crate::fit::runner::TIME_TIE_EPS
 }
 
 /// A comparison refused because its rows are not commensurable: exit 2, as
@@ -2716,6 +2729,18 @@ mod tests {
             "and the one the derived score would come from: {err}");
         assert!(err.contains("gh#312"), "and where the fix is tracked: {err}");
         assert!(err.contains("sir-abc12345"), "and which fit: {err}");
+    }
+
+    /// Two fits sealed at the same observation can record boundaries that
+    /// differ by float noise; those are one window, not two. A real
+    /// difference between boundaries is still a refusal.
+    #[test]
+    fn sealed_boundaries_agree_up_to_the_holdout_time_tolerance() {
+        assert!(same_sealed_boundary(60.0, 60.0 + 1e-12),
+            "float noise at the boundary is the same observation time");
+        assert!(same_sealed_boundary(60.0 + 1e-12, 60.0), "symmetric");
+        assert!(!same_sealed_boundary(21.0, 21.5),
+            "half a day apart is two different training windows");
     }
 
     /// `se(Δ)` is √(T·Var) of the per-observation differences — a normal
