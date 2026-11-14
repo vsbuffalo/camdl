@@ -172,10 +172,11 @@ struct Row {
 /// difference with a data difference, and neither the table nor the trace says
 /// so — the trace records scores and times, never which bytes it scored. The
 /// fit's own provenance sidecar (`fit.meta.json`, [`crate::run_meta::FitSidecar`])
-/// does: `data_hashes` records, per observation source, a hash of the file
-/// bound to it when the fit ran. Read from there rather than re-hashing, so the
-/// check answers "were these fits bound to the same bytes?" using the record
-/// written when the fit ran.
+/// does: `data_hashes` and `holdout_hashes` record, per observation source, the
+/// SHA-256 of the training and `[data.holdout]` files bound to it, the digests
+/// the fit's run identity was built from. Read from there rather than
+/// re-hashing, so the check answers "were these fits bound to the same bytes?"
+/// with what each fit read when it ran.
 enum DataIdentity {
     /// What the fit's sidecar records for each source it binds.
     Digests(RecordedData),
@@ -196,9 +197,36 @@ struct RecordedData {
     /// why. A check involving one of these is reported as not made, never
     /// passed.
     unresolved: std::collections::BTreeMap<String, String>,
+    /// Source → the hash the fit recorded for its `[data.holdout]` file. Read
+    /// only for a row scored held out on those files.
+    holdout: std::collections::BTreeMap<String, String>,
+    /// Holdout sources the row scores whose hash the record lacks, and why.
+    holdout_unresolved: std::collections::BTreeMap<String, String>,
 }
 
-/// Read a sidecar's `data_hashes` per source of `bindings`.
+impl RecordedData {
+    /// Whether any hash this row's checks compare is shorter than a full
+    /// SHA-256: a sidecar written before full digests were recorded holds 8
+    /// characters, and every comparison involving it is made on those.
+    fn has_short_hash(&self) -> bool {
+        self.training.values().chain(self.holdout.values()).any(|h| h.len() < FULL_DIGEST_LEN)
+    }
+}
+
+/// Hex characters in a full SHA-256.
+const FULL_DIGEST_LEN: usize = 64;
+
+/// Whether two recorded hashes name the same bytes, compared on the length of
+/// the shorter: an older sidecar records 8 characters of the digest a newer one
+/// records in full. An empty hash names nothing and matches nothing.
+fn same_digest(a: &str, b: &str) -> bool {
+    let n = a.len().min(b.len());
+    n > 0 && a.is_char_boundary(n) && b.is_char_boundary(n)
+        && a[..n].eq_ignore_ascii_case(&b[..n])
+}
+
+/// Read a sidecar's `data_hashes` per source of `bindings`, and, for a row
+/// scored held out on `[data.holdout]` files, its `holdout_hashes`.
 ///
 /// A sidecar keys `data_hashes` by source. One written before that, by a fit
 /// using the one-file shorthand, keys it by leaf. Such a record is read
@@ -206,10 +234,22 @@ struct RecordedData {
 /// every leaf of the source records the same hash; otherwise the source is
 /// unresolved, with the reason.
 fn recorded_by_source(
-    record: &std::collections::BTreeMap<String, String>,
+    side: &crate::run_meta::FitSidecar,
     bindings: &StreamBindings,
+    scores_holdout_files: bool,
 ) -> RecordedData {
+    let record = &side.data_hashes;
     let mut out = RecordedData::default();
+    if scores_holdout_files {
+        for source in bindings.holdout_by_source().keys() {
+            match side.holdout_hashes.get(source) {
+                Some(h) => { out.holdout.insert(source.clone(), h.clone()); }
+                None => { out.holdout_unresolved.insert(source.clone(),
+                    "the fit recorded no hash for its holdout file (its fit.meta.json \
+                     was written before holdout files were recorded)".into()); }
+            }
+        }
+    }
     for source in bindings.training_by_source().keys() {
         if let Some(h) = record.get(source) {
             out.training.insert(source.clone(), h.clone());
@@ -249,9 +289,10 @@ enum FileCheck {
 }
 
 /// Compare a freshly computed full SHA-256 of a file's bytes with the hash a
-/// fit recorded for it. The record is a prefix of the full digest — 8 hex
-/// characters today, the full 64 once the sidecar is lengthened — so the
-/// comparison is by prefix, and an empty or absent record is not a match.
+/// fit recorded for it. The record is the full 64-character digest, or its
+/// first 8 characters in a sidecar written before full digests were recorded
+/// ([`data_prefix_note`] says which rows), so the comparison is by prefix, and
+/// an empty or absent record is not a match.
 fn check_file_against_record(current_sha256: &str, recorded: Option<&str>) -> FileCheck {
     match recorded {
         None => FileCheck::NotChecked("the fit recorded no hash for it".into()),
@@ -336,7 +377,7 @@ fn changed_data_note(rows: &[Row]) -> Option<String> {
         })
     }).collect();
     (!changed.is_empty()).then(|| format!(
-        "training data changed after the fit ran: {}. `compare` re-reads these \
+        "data changed after the fit ran: {}. `compare` re-reads these \
          files, so the row is scored on data its θ̂ was not fitted to.",
         changed.join("; ")))
 }
@@ -949,22 +990,30 @@ fn check_shared_data(entries: &[(&str, &DataIdentity)]) -> Result<(), String> {
     // carries digests.
     let Some(&(ref_name, ref_rec)) = known.first() else { return Ok(()) };
     for &(name, rec) in known.iter().skip(1) {
-        let (ref_map, map) = (&ref_rec.training, &rec.training);
-        let mut streams: BTreeSet<&str> = ref_map.keys().map(|s| s.as_str()).collect();
-        streams.extend(map.keys().map(|s| s.as_str()));
-        let differing: Vec<String> = streams.iter().filter_map(|s| {
-            if ref_rec.unresolved.contains_key(*s) || rec.unresolved.contains_key(*s) {
-                return None;
-            }
-            match (ref_map.get(*s), map.get(*s)) {
-                (Some(a), Some(b)) if a == b => None,
-                (Some(a), Some(b)) => Some(format!(
-                    "'{s}' ({} in '{ref_name}', {} in '{name}')",
-                    short_digest(a), short_digest(b))),
-                (Some(_), None) => Some(format!("'{s}' (bound by '{ref_name}' only)")),
-                (None, Some(_)) => Some(format!("'{s}' (bound by '{name}' only)")),
-                (None, None) => None,
-            }
+        // Training files, then the `[data.holdout]` files a held-out row
+        // scores; a source either row could not resolve takes no part.
+        let kinds = [
+            ("", &ref_rec.training, &rec.training, &ref_rec.unresolved, &rec.unresolved),
+            (" holdout", &ref_rec.holdout, &rec.holdout,
+             &ref_rec.holdout_unresolved, &rec.holdout_unresolved),
+        ];
+        let differing: Vec<String> = kinds.iter().flat_map(|(kind, ref_map, map, ref_un, un)| {
+            let mut streams: BTreeSet<&str> = ref_map.keys().map(|s| s.as_str()).collect();
+            streams.extend(map.keys().map(|s| s.as_str()));
+            streams.into_iter().filter_map(move |s| {
+                if ref_un.contains_key(s) || un.contains_key(s) {
+                    return None;
+                }
+                match (ref_map.get(s), map.get(s)) {
+                    (Some(a), Some(b)) if same_digest(a, b) => None,
+                    (Some(a), Some(b)) => Some(format!(
+                        "'{s}'{kind} ({} in '{ref_name}', {} in '{name}')",
+                        short_digest(a), short_digest(b))),
+                    (Some(_), None) => Some(format!("'{s}'{kind} (bound by '{ref_name}' only)")),
+                    (None, Some(_)) => Some(format!("'{s}'{kind} (bound by '{name}' only)")),
+                    (None, None) => None,
+                }
+            }).collect::<Vec<_>>()
         }).collect();
         if !differing.is_empty() {
             return Err(format!(
@@ -995,6 +1044,8 @@ fn unchecked_data_note(entries: &[(&str, &DataIdentity)]) -> Option<String> {
     let skipped: Vec<String> = entries.iter().flat_map(|(name, d)| match d {
         DataIdentity::Digests(rec) => rec.unresolved.iter()
             .map(|(source, why)| format!("'{name}' stream '{source}' ({why})"))
+            .chain(rec.holdout_unresolved.iter()
+                .map(|(source, why)| format!("'{name}' holdout '{source}' ({why})")))
             .collect::<Vec<_>>(),
         DataIdentity::Unknown(why) => vec![format!("'{name}' ({why})")],
     }).collect();
@@ -1004,6 +1055,21 @@ fn unchecked_data_note(entries: &[(&str, &DataIdentity)]) -> Option<String> {
          difference.",
         skipped.join("; "),
     ))
+}
+
+/// The rows whose recorded data hashes are shorter than a full SHA-256, so the
+/// shared-data and changed-data checks compared them on that prefix, or `None`.
+/// Every renderer states it: a difference beyond the prefix is not detected.
+fn data_prefix_note(rows: &[Row]) -> Option<String> {
+    let short: Vec<String> = rows.iter()
+        .filter(|r| matches!(&r.data, DataIdentity::Digests(rec) if rec.has_short_hash()))
+        .map(|r| format!("'{}'", r.name))
+        .collect();
+    (!short.is_empty()).then(|| format!(
+        "data compared on 8 characters of the SHA-256 for {}: its fit.meta.json was \
+         written before full digests were recorded, so the shared-data and \
+         changed-data checks for that row compare the first 8 characters only.",
+        short.join(", ")))
 }
 
 /// The set of stream names scored at one step. Empty for a v1 trace, which has
@@ -1423,19 +1489,26 @@ fn filter_noise_unassessed_note(rows: &[Row], base_idx: usize) -> Option<String>
     ))
 }
 
-/// The per-stream data digests a resolved fit recorded when it ran, read from
-/// its provenance sidecar (`fit.meta.json`). Not re-hashed here: the files may
-/// have moved or changed since, and the question is what the FIT was bound to.
+/// The data digests a resolved fit recorded when it ran, read per source of its
+/// `bindings` from its provenance sidecar (`fit.meta.json`): training files
+/// always, `[data.holdout]` files when the row scores them
+/// (`scores_holdout_files`). Not re-hashed here: the files may have moved or
+/// changed since, and the question is what the FIT was bound to.
 ///
-/// The sidecar is derived provenance rather than a source of truth, which is
-/// the right strength for a preflight — it is a faithful projection of inputs
-/// already hashed into the fit's identity. A fit without one (a
+/// The sidecar records the very digests the fit's run identity folded
+/// ([`crate::fit::stream_bindings::StreamBindings::digests`]); a sidecar
+/// written before that holds 8-character training hashes and no holdout
+/// hashes, which [`recorded_by_source`] and [`data_prefix_note`] account for. A fit without one (a
 /// hand-assembled directory), or whose sidecar cannot be read, is reported as
 /// unchecked rather than refused.
-fn fit_data_identity(resolved: &ResolvedFit, bindings: &StreamBindings) -> DataIdentity {
+fn fit_data_identity(
+    resolved: &ResolvedFit,
+    bindings: &StreamBindings,
+    scores_holdout_files: bool,
+) -> DataIdentity {
     match crate::run_meta::read_fit_sidecar(&resolved.segment) {
         Ok(Some(s)) if !s.data_hashes.is_empty() =>
-            DataIdentity::Digests(recorded_by_source(&s.data_hashes, bindings)),
+            DataIdentity::Digests(recorded_by_source(&s, bindings, scores_holdout_files)),
         Ok(Some(_)) => DataIdentity::Unknown(
             "its fit.meta.json records no data hashes".into()),
         Ok(None) => DataIdentity::Unknown(format!(
@@ -1577,18 +1650,12 @@ fn derive_prequential(
          prequential.json, or compare fits that bind data.",
         segment.display()))?;
     let bindings = StreamBindings::resolve(&model, data)?;
-    let recorded_data = fit_data_identity(resolved, &bindings);
     let mut streams = bindings.training_by_source().clone();
     if streams.is_empty() {
         return Err(format!(
             "fit at {} has a [data] block with no observation streams.",
             segment.display()));
     }
-    // The training files about to be scored, against the hashes the fit
-    // recorded for them — read before the holdout merge below replaces any
-    // path with a temp file.
-    let mut freshness = check_training_freshness(&streams, &recorded_data);
-
     // gh#585 (Stage 3.4): a fit that declares a holdout is scored held-out
     // by default — the filter runs over the FULL series at the sealed θ̂
     // and scores only past the training boundary. `--in-sample` opts out.
@@ -1597,16 +1664,26 @@ fn derive_prequential(
     } else {
         detect_sealed_holdout(resolved, &bindings)?
     };
-    // A `[data.holdout]` file is scored too, but the fit records no hash for
-    // it, so it cannot be checked; say so rather than pass it silently.
-    if let Some(h) = &holdout {
-        for (stream, path) in &h.holdout_files {
-            freshness.findings.push(FileFinding {
-                stream: stream.clone(),
-                path: path.clone(),
-                check: FileCheck::NotChecked(
-                    "holdout file not checked: the fit recorded no hash for it".into()),
-            });
+    let scores_holdout_files = holdout.as_ref().is_some_and(|h| !h.holdout_files.is_empty());
+    let recorded_data = fit_data_identity(resolved, &bindings, scores_holdout_files);
+    // The files about to be scored, against the hashes the fit recorded for
+    // them — read before the holdout merge below replaces any path with a
+    // temp file.
+    let mut freshness = check_training_freshness(&streams, &recorded_data);
+    if let (Some(h), DataIdentity::Digests(rec)) = (&holdout, &recorded_data) {
+        for (source, path) in &h.holdout_files {
+            let check = match (rec.holdout_unresolved.get(source), std::fs::read(path)) {
+                (Some(why), _) => FileCheck::NotChecked(why.clone()),
+                (None, Ok(bytes)) => check_file_against_record(
+                    &crate::hashing::sha256_hex(&bytes),
+                    rec.holdout.get(source).map(String::as_str)),
+                (None, Err(e)) => FileCheck::NotChecked(format!("it could not be read: {e}")),
+            };
+            if check != FileCheck::Matches {
+                freshness.findings.push(FileFinding {
+                    stream: format!("{source} (holdout)"), path: path.clone(), check,
+                });
+            }
         }
     }
 
@@ -2499,6 +2576,9 @@ fn warning_lines(rows: &[Row], base_idx: usize, t_mismatch: bool) -> Vec<String>
     if let Some(note) = data_change_unchecked_note(rows) {
         lines.push(format!("ⓘ {note}"));
     }
+    if let Some(note) = data_prefix_note(rows) {
+        lines.push(format!("ⓘ {note}"));
+    }
     // Reaching a renderer with mismatched settings means the override.
     if let Some(note) = filter_settings_mismatch_note(rows) {
         lines.push(format!("⚠ {note} (--allow-mismatched-filter-settings was set)"));
@@ -2779,6 +2859,9 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String]) -> String {
         // --allow-changed-data), and the files that could not be checked.
         "data_changed": changed_data_note(rows),
         "data_change_unchecked": data_change_unchecked_note(rows),
+        // Rows whose recorded hashes are 8 characters (an older fit.meta.json):
+        // both data checks compared them on that prefix.
+        "data_compared_on_prefix": data_prefix_note(rows),
         // Particle-filter settings that differ across rows (present only under
         // --allow-mismatched-filter-settings), and the rows that record none.
         "filter_settings_mismatch": filter_settings_mismatch_note(rows),
@@ -3664,7 +3747,7 @@ mod tests {
     fn digests(entries: &[(&str, &str)]) -> DataIdentity {
         DataIdentity::Digests(RecordedData {
             training: entries.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
-            unresolved: Default::default(),
+            ..Default::default()
         })
     }
 

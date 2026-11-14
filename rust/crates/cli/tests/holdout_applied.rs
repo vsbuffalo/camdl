@@ -482,12 +482,10 @@ fn compare_refuses_holdout_stamp_when_training_runs_past_train_end() {
             serde_json::json!(21.0), "row must be stamped hold_out_tail: {row}");
         assert_eq!(row["t_score"], serde_json::json!(2), "{row}");
     }
-    // The held-out file is scored, but the fit recorded no hash for it, so
-    // the changed-data check says it could not check it.
-    assert!(v["data_change_unchecked"].as_str().is_some_and(|s|
-            s.contains("cases_holdout.tsv")
-            && s.contains("holdout file not checked: the fit recorded no hash for it")),
-        "the unchecked holdout file is named:\n{v}");
+    // The held-out file is scored, and checked against the hash the fit
+    // recorded for it (`holdout_hashes`), like every training file.
+    assert!(v["data_change_unchecked"].is_null(),
+        "every scored file, the holdout file included, was checked:\n{v}");
     assert!(v["data_changed"].is_null(), "nothing changed:\n{v}");
 
     // The defective shape: `detection`'s training file now runs to t = 42,

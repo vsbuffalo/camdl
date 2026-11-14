@@ -235,12 +235,17 @@ fn fit_meta(fit_dir: &Path) -> PathBuf {
     panic!("no fit.meta.json under {}", fit_dir.display());
 }
 
-/// Rewrite one field of a fit's sidecar.
+/// Rewrite one field of a fit's sidecar; `Null` removes it, as a sidecar
+/// written before the field existed has none.
 fn rewrite_sidecar(fit_dir: &Path, field: &str, value: serde_json::Value) {
     let path = fit_meta(fit_dir);
     let mut meta: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    meta[field] = value;
+    if value.is_null() {
+        meta.as_object_mut().unwrap().remove(field).expect("the field was recorded");
+    } else {
+        meta[field] = value;
+    }
     std::fs::write(&path, serde_json::to_string_pretty(&meta).unwrap()).unwrap();
 }
 
@@ -275,4 +280,105 @@ fn an_old_leaf_keyed_sidecar_is_read_by_source_or_reported_unchecked() {
         assert!(note.contains("'a/fit.toml' stream 'cases'") && note.contains("0badf00d"),
             "{field}: {note}");
     }
+}
+
+/// Two `[data.holdout]` fits on identical training files, scored at the same
+/// times, can still have scored different held-out counts. Only the holdout
+/// files' recorded hashes show it.
+#[test]
+fn holdout_fits_whose_holdout_files_differ_are_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let data = "[data]\nfile = \"train.tsv\"\n\n[data.holdout]\ncases = \"holdout.tsv\"\n";
+    two_patch_fit(dir, "a", data, 0.05,
+        &[("train.tsv", TWO_PATCH_TRAIN), ("holdout.tsv", TWO_PATCH_HOLDOUT)]);
+    let revised = TWO_PATCH_HOLDOUT.replace("42\turban\t11", "42\turban\t30");
+    two_patch_fit(dir, "b", data, 0.05,
+        &[("train.tsv", TWO_PATCH_TRAIN), ("holdout.tsv", &revised)]);
+    let out = compare(dir, &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "different held-out data is refused:\n{stderr}");
+    assert!(stderr.contains("different observed data") && stderr.contains("'cases' holdout")
+            && !stderr.contains("'cases' ("),
+        "names the holdout file, not the training file:\n{stderr}");
+}
+
+/// A `[data.holdout]` file edited after the fit ran is refused by the
+/// changed-data check, like a training file.
+#[test]
+fn an_edited_holdout_file_is_refused_by_the_changed_data_check() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let data = "[data]\nfile = \"train.tsv\"\n\n[data.holdout]\ncases = \"holdout.tsv\"\n";
+    let files = [("train.tsv", TWO_PATCH_TRAIN), ("holdout.tsv", TWO_PATCH_HOLDOUT)];
+    let a = two_patch_fit(dir, "a", data, 0.05, &files);
+    two_patch_fit(dir, "b", data, 0.06, &files);
+    let v = json(&compare(dir, &["--format", "json"]));
+    assert!(v["data_change_unchecked"].is_null(), "the holdout file was checked:\n{v}");
+
+    let edited = TWO_PATCH_HOLDOUT.replace("42\turban\t11", "42\turban\t30");
+    std::fs::write(a.join("holdout.tsv"), &edited).unwrap();
+    let out = compare(dir, &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    let current = sha256_hex(edited.as_bytes());
+    for needle in ["changed after the fit ran", "'a/fit.toml' stream 'cases (holdout)'",
+                   "holdout.tsv", &current[..8]] {
+        assert!(stderr.contains(needle), "names {needle:?}:\n{stderr}");
+    }
+}
+
+/// A sidecar written before full digests holds 8 characters. Its row is
+/// compared on that prefix against a full record, never refused for the
+/// length, and every format says the comparison was made on 8 characters.
+#[test]
+fn an_old_eight_character_sidecar_is_compared_on_its_prefix_and_says_so() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let data = "[data.observations]\ncases = \"train.tsv\"\n";
+    let a = two_patch_fit(dir, "a", data, 0.05, &[("train.tsv", TWO_PATCH_TRAIN)]);
+    two_patch_fit(dir, "b", data, 0.06, &[("train.tsv", TWO_PATCH_TRAIN)]);
+    let h = sha256_hex(TWO_PATCH_TRAIN.as_bytes());
+    rewrite_sidecar(&a, "data_hashes", serde_json::json!({"cases": &h[..8]}));
+
+    let v = json(&compare(dir, &["--format", "json"]));
+    assert!(v["data_mismatch"].is_null() && v["data_changed"].is_null(), "{v}");
+    let note = v["data_compared_on_prefix"].as_str()
+        .unwrap_or_else(|| panic!("the JSON says so:\n{v}"));
+    assert!(note.contains("'a/fit.toml'") && note.contains("8 characters")
+            && !note.contains("'b/fit.toml'"), "{note}");
+    for fmt in ["table", "md"] {
+        let out = compare(dir, &["--format", fmt]);
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success() && text.contains("8 characters")
+                && text.contains("'a/fit.toml'"), "{fmt}:\n{text}");
+    }
+
+    // A different file on the prefix is still a mismatch.
+    rewrite_sidecar(&a, "data_hashes", serde_json::json!({"cases": "0badf00d"}));
+    let out = compare(dir, &[]);
+    assert_eq!(out.status.code(), Some(2), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// A `[data.holdout]` fit whose sidecar predates `holdout_hashes` scores its
+/// holdout file with nothing recorded to check it against: both checks say
+/// the holdout was not checked, and why.
+#[test]
+fn an_old_sidecar_without_holdout_hashes_reports_the_holdout_unchecked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let data = "[data]\nfile = \"train.tsv\"\n\n[data.holdout]\ncases = \"holdout.tsv\"\n";
+    let files = [("train.tsv", TWO_PATCH_TRAIN), ("holdout.tsv", TWO_PATCH_HOLDOUT)];
+    let a = two_patch_fit(dir, "a", data, 0.05, &files);
+    two_patch_fit(dir, "b", data, 0.06, &files);
+    rewrite_sidecar(&a, "holdout_hashes", serde_json::Value::Null);
+
+    let v = json(&compare(dir, &["--format", "json"]));
+    assert!(v["data_mismatch"].is_null(), "an absent record is not a mismatch:\n{v}");
+    let unchecked = v["data_unchecked"].as_str().unwrap_or_else(|| panic!("{v}"));
+    assert!(unchecked.contains("'a/fit.toml' holdout 'cases'")
+            && unchecked.contains("recorded no hash for its holdout file"), "{unchecked}");
+    let unchanged = v["data_change_unchecked"].as_str().unwrap_or_else(|| panic!("{v}"));
+    assert!(unchanged.contains("'a/fit.toml' stream 'cases (holdout)'")
+            && unchanged.contains("holdout.tsv"), "{unchanged}");
 }

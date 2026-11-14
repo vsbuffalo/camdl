@@ -12,9 +12,8 @@ use crate::version;
 /// MLE-params tamper-detection hash. Hashes the canonicalised (name,
 /// value) pairs from an `mle_params.toml` file so we can detect post-
 /// write edits to the parameter values. Naming note: this is **not**
-/// a general content-hash helper (unlike `crate::hashing::file_hash` or
-/// `sha256_hex`); it's mle-specific because it canonicalises numeric
-/// formatting with `{:.12}` precision before hashing. Lives in
+/// a general content-hash helper (unlike `crate::hashing::sha256_hex`); it's
+/// mle-specific because it canonicalises numeric formatting with `{:.12}` precision before hashing. Lives in
 /// `fit::provenance` (not `crate::hashing`) for that reason.
 pub fn mle_params_tamper_hash(params: &std::collections::BTreeMap<String, f64>) -> String {
     let mut pairs: Vec<(&String, &f64)> = params.iter().collect();
@@ -258,9 +257,6 @@ pub fn verify_content_hash(path: &str, declared: &str) -> Result<ContentVerifica
         ContentVerification::Modified { declared: declared.to_string(), computed }
     })
 }
-
-// `file_content_hash` moved to `crate::hashing::file_hash`; callers
-// now use the canonical name directly.
 
 pub struct MleMetadata {
     pub input_hash: String,
