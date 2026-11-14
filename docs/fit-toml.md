@@ -160,6 +160,7 @@ starts = "lhs"
 starts = "uniform"
 starts = "single" # every chain at the base point
 starts = { from_posterior = "@base" } # one row of @base's posterior per chain
+starts = { from_posterior = "@base", chains = [0, 1, 3] } # rows of those chains only
 starts = { from_mle = "@mle" } # every chain at @mle's point estimate
 starts = { from_params = "theta.toml" } # every chain at the values in the file
 ```
@@ -195,6 +196,20 @@ records the choice to start from it anyway. A `@label` names the fit segment,
 which two method files of one problem share: while it holds one leaf the label
 is enough, and once it holds several the refusal lists them — name the leaf by
 its directory or its `run_id` prefix.
+
+**Starting from some of a source's chains.** When a source run is multimodal —
+some chains settled in a mode with far lower posterior density than the others —
+the next run should start from the chains that agree. `chains = [..]` restricts
+`from_posterior` to those chains' rows of the source's `draws.tsv`, and
+`--starts-chains 0,1,3` does the same on the command line. The whole run's
+verdict is then replaced by the selected chains' own R̂: the source passes when
+they agree (R̂ below 1.05 for every parameter column that varies), and is refused
+otherwise, or when one chain leaves R̂ uncomputable;
+`--allow-nonconverged-source` lifts that refusal. A chain the source does not
+hold, or a draws file with no `chain` column, is refused. The subset is part of
+the run's identity, so two subsets of one source are two runs. Compare the
+modes' log-posterior densities before choosing: dropping chains from a mode the
+posterior genuinely weights would remove part of the posterior.
 
 **A `pfilter` method scores one θ**, so the file must determine it: a `start`
 for every estimated parameter (then `starts` defaults to `single`), a sourced

@@ -779,6 +779,86 @@ pub fn check_source_converged(leaf: &Path, handle: &str, allow: bool) -> Result<
     }
 }
 
+/// The convergence gate for a `from_posterior` source restricted to a chain
+/// subset (gh#1056): the selected chains' own R̂, computed from the source's
+/// draws, in place of the whole run's stored verdict. A run diagnosed as
+/// multimodal fails its stored verdict by construction; what the next run
+/// needs to know is whether the chains it starts from agree.
+///
+/// Every numeric column of the draws TSV except `chain` and `draw` is judged
+/// with the rank-normalized split R̂ `fit summary` reports
+/// ([`sim::inference::convergence::rank_convergence`]), against
+/// [`super::method_result::RHAT_CONVERGED_THRESHOLD`]. A column constant over
+/// the selected rows (a fixed parameter carried in the cloud) has nothing to
+/// agree on and is skipped. Anything else that leaves R̂ unassessable — one
+/// selected chain, too few draws — is not converged: it cannot be certified.
+/// `allow` lifts a not-converged verdict, as for a whole-run source; it does
+/// not lift an unreadable file.
+pub fn check_subset_converged(
+    file: &Path,
+    subset: &super::starts::ChainSubset,
+    handle: &str,
+    allow: bool,
+) -> Result<(), String> {
+    use super::method_result::RHAT_CONVERGED_THRESHOLD;
+    use super::row_convergence::{partition_by_chain, ChainOfDraw};
+    use sim::inference::convergence::{rank_convergence, ConvergenceError};
+    let who = format!("starts source {handle} (chains {})", subset.spelled());
+    let (header, rows) = super::chain_starts::read_draws_tsv(file)
+        .map_err(|e| format!("{who}: {e}"))?;
+    let keep = super::chain_starts::select_chain_rows(file, &header, &rows, subset)
+        .map_err(|e| format!("{who}: {e}"))?;
+    let chain_col = header.iter().position(|h| h == "chain").expect("select_chain_rows checked it");
+    let ids = ChainOfDraw(keep.iter().map(|&r| rows[r][chain_col].parse().ok()).collect());
+    let mut failing: Vec<String> = Vec::new();
+    let mut unassessable: Vec<String> = Vec::new();
+    for (c, name) in header.iter().enumerate() {
+        if name == "chain" || name == "draw" {
+            continue;
+        }
+        let values: Option<Vec<f64>> = keep.iter()
+            .map(|&r| rows[r].get(c).and_then(|v| v.parse::<f64>().ok()))
+            .collect();
+        let Some(values) = values else { continue }; // a non-numeric column is not a parameter
+        let verdict = match partition_by_chain(&values, &ids) {
+            None => Err(None),
+            Some(grouped) => rank_convergence(&grouped).map_err(Some),
+        };
+        match verdict {
+            Ok(rc) if rc.rhat < RHAT_CONVERGED_THRESHOLD => {}
+            Ok(rc) => failing.push(format!("{name} (R̂ = {:.3})", rc.rhat)),
+            Err(Some(ConvergenceError::ConstantDraws { .. })) => {}
+            Err(_) => unassessable.push(name.clone()),
+        }
+    }
+    let verdict = if !failing.is_empty() {
+        Some(format!(
+            "the selected chains disagree: {} (threshold {RHAT_CONVERGED_THRESHOLD})",
+            failing.join(", ")))
+    } else if !unassessable.is_empty() {
+        Some(format!(
+            "R̂ cannot be computed over the selected chains for {} (one chain, or too few \
+             draws per chain), so their agreement is not certified",
+            unassessable.join(", ")))
+    } else {
+        None
+    };
+    match verdict {
+        None => Ok(()),
+        Some(msg) if allow => {
+            crate::out::detached().say(format_args!(
+                "{w} {who}: {msg}\n  --allow-nonconverged-source: starting from them anyway.",
+                w = crate::out::paint::warning_tag()
+            ));
+            Ok(())
+        }
+        Some(msg) => Err(format!(
+            "{who}: {msg}.\n\n  To start from them anyway:  camdl fit run fit.toml \
+             --allow-nonconverged-source"
+        )),
+    }
+}
+
 fn parse_algorithm_is(method: &str, want: crate::run_meta::FitAlgorithm) -> bool {
     super::methods::parse_algorithm(method) == Some(want)
 }
@@ -867,6 +947,54 @@ mod tests {
                 .unwrap().as_nanos()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// A draws TSV of `n_chains × n_draws` rows with a fixed `mu` column and
+    /// a `theta` column whose chain `c` is centred at `centre(c)`, with a
+    /// deterministic within-chain wiggle.
+    fn draws_tsv(tag: &str, n_chains: usize, n_draws: usize, centre: impl Fn(usize) -> f64) -> std::path::PathBuf {
+        let dir = scratch_leaf(tag);
+        let mut text = String::from("chain\tdraw\ttheta\tmu\n");
+        for c in 0..n_chains {
+            for i in 0..n_draws {
+                let wiggle = ((i * 7 + c * 3) % 11) as f64 / 11.0 - 0.5;
+                text.push_str(&format!("{c}\t{i}\t{}\t0.02\n", centre(c) + wiggle));
+            }
+        }
+        let p = dir.join("draws.tsv");
+        std::fs::write(&p, text).unwrap();
+        p
+    }
+
+    /// gh#1056: the subset gate judges the selected chains by their own R̂.
+    /// Chains 0-2 agree and chain 3 sits far away: the whole set fails, the
+    /// agreeing subset passes, and the constant `mu` column is skipped.
+    #[test]
+    fn the_subset_gate_judges_the_selected_chains_alone() {
+        use crate::fit::starts::ChainSubset;
+        let p = draws_tsv("subset_gate", 4, 200, |c| if c == 3 { 50.0 } else { 1.0 });
+        let all = ChainSubset::new(vec![0, 1, 2, 3]).unwrap();
+        let err = check_subset_converged(&p, &all, "@src", false).expect_err("chain 3 disagrees");
+        assert!(err.contains("theta (R̂ =") && !err.contains("mu"), "{err}");
+        assert!(err.contains("--allow-nonconverged-source"), "{err}");
+        check_subset_converged(&p, &ChainSubset::new(vec![0, 1, 2]).unwrap(), "@src", false)
+            .expect("chains 0-2 agree");
+        check_subset_converged(&p, &all, "@src", true).expect("allow lifts a not-converged verdict");
+    }
+
+    /// One selected chain has no between-chain comparison: not certified, so
+    /// refused unless allowed; an absent chain is refused even when allowed.
+    #[test]
+    fn the_subset_gate_refuses_what_it_cannot_certify() {
+        use crate::fit::starts::ChainSubset;
+        let p = draws_tsv("subset_gate_one", 3, 100, |_| 1.0);
+        let one = ChainSubset::new(vec![1]).unwrap();
+        let err = check_subset_converged(&p, &one, "@src", false).expect_err("one chain");
+        assert!(err.contains("not certified") && err.contains("theta"), "{err}");
+        check_subset_converged(&p, &one, "@src", true).expect("allow lifts it");
+        let absent = ChainSubset::new(vec![0, 9]).unwrap();
+        let err = check_subset_converged(&p, &absent, "@src", true).expect_err("absent chain");
+        assert!(err.contains("chain(s) 9"), "{err}");
     }
 
     /// A source whose verdict cannot be read is refused, not read as
