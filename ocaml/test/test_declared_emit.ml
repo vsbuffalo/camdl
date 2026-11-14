@@ -378,6 +378,47 @@ let golden_models () =
         Sys.is_directory d && Sys.file_exists (Filename.concat d "ir")) in
   List.concat_map camdl_files (Filename.concat repo_root "ocaml/golden" :: fixture_dirs)
 
+(* ── What each declaration expanded to ───────────────────────────────────── *)
+
+(* The `expands_to` lists of the declared compartments, taken together, are
+   exactly the compiled model's compartments: every compiled compartment is
+   claimed by one declaration and by no other, and no declaration claims a
+   name the model does not hold. The same for transitions and for observation
+   streams. This compares against the finished compiled model, which the
+   emitter does not read, so a name the compiler adds, drops or renames after
+   expansion fails here. *)
+let check_expands_to file (m : Ir.model) (d : D.declared_model) =
+  let partition what (claims : (string * string list option) list)
+      (compiled : string list) =
+    let claimed = List.concat_map (fun (decl, e) ->
+        match e with
+        | Some names -> List.map (fun n -> (n, decl)) names
+        | None ->
+          Alcotest.failf "%s: %s '%s' has no expands_to" file what decl) claims in
+    List.iter (fun (n, decl) ->
+        match List.filter (fun (n', _) -> n' = n) claimed with
+        | [ _ ] -> ()
+        | owners ->
+          Alcotest.failf "%s: compiled %s '%s' is claimed %d times (by %s, ...)"
+            file what n (List.length owners) decl) claimed;
+    Alcotest.(check (list string))
+      (Printf.sprintf "%s: the declared %ss expand to the compiled ones" file what)
+      (List.sort compare compiled)
+      (List.sort compare (List.map fst claimed))
+  in
+  partition "compartment"
+    (List.map (fun (c : D.compartment_decl) -> (c.cd_name, c.cd_expands_to))
+       d.dm_compartments)
+    (List.map (fun (c : Ir.compartment) -> c.name) m.compartments);
+  partition "transition"
+    (List.map (fun (t : D.transition_decl) -> (t.tn_name, t.tn_expands_to))
+       d.dm_transitions)
+    (List.map (fun (t : Ir.transition) -> t.name) m.transitions);
+  partition "observation stream"
+    (List.map (fun (o : D.observation_decl) -> (o.ob_name, o.ob_expands_to))
+       d.dm_observations)
+    (List.map (fun (o : Ir.observation_model) -> o.name) m.observations)
+
 let relative path =
   let n = String.length repo_root + 1 in
   String.sub path n (String.length path - n)
@@ -396,10 +437,7 @@ let test_golden path () =
   check_flow_graph file (parse src) d;
   (* The section round-trips through its own codec. *)
   Alcotest.(check bool) (file ^ ": round-trips") true (D.of_json (D.to_json d) = d);
-  (* Not recorded yet, and so absent, never an empty list. *)
-  List.iter (fun (c : D.compartment_decl) ->
-      Alcotest.(check bool) (file ^ ": compartment expands_to absent") true
-        (c.cd_expands_to = None)) d.dm_compartments;
+  check_expands_to file m d;
   if n_exprs = 0 || n_names = 0 then
     Alcotest.failf "%s: the walk found no expressions or no names" file
 

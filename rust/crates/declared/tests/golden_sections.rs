@@ -125,10 +125,43 @@ fn every_golden_section_reads_through_this_crate() {
             assert_eq!(as_set, in_tree, "{name}: `reads` is not the names of its tree");
         });
 
-        // Not recorded yet: absent, never an empty list.
-        assert!(model.compartments.iter().all(|c| c.expands_to.is_none()), "{name}: compartments");
-        assert!(model.transitions.iter().all(|t| t.expands_to.is_none()), "{name}: transitions");
-        assert!(model.observations.iter().all(|o| o.expands_to.is_none()), "{name}: observations");
+        // Every declaration records what it expanded to, and together the
+        // lists are exactly the compiled model's names, each claimed once.
+        // The compiled names are read from the envelope's JSON, not through
+        // the runtime's reader.
+        let compiled = |key: &str| -> Vec<String> {
+            let mut names: Vec<String> = env["model"][key]
+                .as_array()
+                .unwrap_or_else(|| panic!("{name}: model.{key} is not a list"))
+                .iter()
+                .map(|x| x["name"].as_str().unwrap_or_else(|| panic!("{name}: unnamed {key}")).to_string())
+                .collect();
+            names.sort();
+            names
+        };
+        let claimed = |what: &str, lists: Vec<&Option<Vec<String>>>| -> Vec<String> {
+            let mut names: Vec<String> = lists
+                .into_iter()
+                .flat_map(|l| l.clone().unwrap_or_else(|| panic!("{name}: a {what} has no expands_to")))
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(
+            claimed("compartment", model.compartments.iter().map(|c| &c.expands_to).collect()),
+            compiled("compartments"),
+            "{name}: compartments"
+        );
+        assert_eq!(
+            claimed("transition", model.transitions.iter().map(|t| &t.expands_to).collect()),
+            compiled("transitions"),
+            "{name}: transitions"
+        );
+        assert_eq!(
+            claimed("observation stream", model.observations.iter().map(|o| &o.expands_to).collect()),
+            compiled("observations"),
+            "{name}: observations"
+        );
 
         // A committed artifact holds no absolute path.
         for f in &model.compile_inputs.files {

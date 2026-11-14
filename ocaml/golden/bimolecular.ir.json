@@ -13,9 +13,9 @@
 ],"model_structure":{"dimensions":[],"compartment_dims":{"A":[],"B":[],"C":[]},"base_compartments":["A","B","C"],"transmission_transitions":[],"infectious_compartments":[]},"bindings":[
 {"name":"N","expr":{"pop_sum":["A","B","C"]}}
 ]},"declared":{"schema_version":1,"compile_inputs":{"set_values":[],"files":[]},"time_unit":"days","description":null,"origin":null,"dimensions":[],"compartments":[
-{"name":"A","kind":"integer","dims":[],"expands_to":null,"source_text":"A"},
-{"name":"B","kind":"integer","dims":[],"expands_to":null,"source_text":"B"},
-{"name":"C","kind":"integer","dims":[],"expands_to":null,"source_text":"C"}
+{"name":"A","kind":"integer","dims":[],"expands_to":["A"],"source_text":"A"},
+{"name":"B","kind":"integer","dims":[],"expands_to":["B"],"source_text":"B"},
+{"name":"C","kind":"integer","dims":[],"expands_to":["C"],"source_text":"C"}
 ],"stratify":[],"parameters":[
 {"name":"k","dims":[],"kind":"rate","dim":null,"bounds":{"lo":{"tree":{"const":{"value":0.0001}},"katex":"0.0001","katex_loss":[],"reads":[]},"hi":{"tree":{"const":{"value":1.0}},"katex":"1","katex_loss":[],"reads":[]}},"prior":null,"source_text":"k   : rate  in [0.0001, 1.0]"},
 {"name":"A0","dims":[],"kind":"count","dim":null,"bounds":{"lo":{"tree":{"const":{"value":1.0}},"katex":"1","katex_loss":[],"reads":[]},"hi":{"tree":{"const":{"value":10000.0}},"katex":"10000","katex_loss":[],"reads":[]}},"prior":null,"source_text":"A0  : count in [1, 10000]"},
@@ -23,7 +23,7 @@
 ],"definitions":[
 {"name":"N","indices":[],"shape":null,"kind":null,"dim":null,"body":{"tree":{"bin_op":{"op":"add","lhs":{"bin_op":{"op":"add","lhs":{"ident":{"name":{"name":"A","kind":"compartment"}}},"rhs":{"ident":{"name":{"name":"B","kind":"compartment"}}}}},"rhs":{"ident":{"name":{"name":"C","kind":"compartment"}}}}},"katex":"A + B + C","katex_loss":[],"reads":[{"name":"A","kind":"compartment"},{"name":"B","kind":"compartment"},{"name":"C","kind":"compartment"}]},"source_text":"let N = A + B + C"}
 ],"tables":[],"time_inputs":[],"timepoints":[],"transitions":[
-{"name":"react","indices":[],"from":[{"compartment":"A","indices":[]},{"compartment":"B","indices":[]}],"to":{"sum":{"compartments":[{"compartment":"C","indices":[]}]}},"dynamics":{"rate":{"rate":{"tree":{"bin_op":{"op":"div","lhs":{"bin_op":{"op":"mul","lhs":{"bin_op":{"op":"mul","lhs":{"ident":{"name":{"name":"k","kind":"parameter"}}},"rhs":{"ident":{"name":{"name":"A","kind":"compartment"}}}}},"rhs":{"ident":{"name":{"name":"B","kind":"compartment"}}}}},"rhs":{"ident":{"name":{"name":"N","kind":"definition"}}}}},"katex":"\\frac{k\\,A\\,B}{N}","katex_loss":[],"reads":[{"name":"k","kind":"parameter"},{"name":"A","kind":"compartment"},{"name":"B","kind":"compartment"},{"name":"N","kind":"definition"}]}}},"guard":null,"lineage":false,"expands_to":null,"source_text":"react : A + B --> C  @ k * A * B / N"}
+{"name":"react","indices":[],"from":[{"compartment":"A","indices":[]},{"compartment":"B","indices":[]}],"to":{"sum":{"compartments":[{"compartment":"C","indices":[]}]}},"dynamics":{"rate":{"rate":{"tree":{"bin_op":{"op":"div","lhs":{"bin_op":{"op":"mul","lhs":{"bin_op":{"op":"mul","lhs":{"ident":{"name":{"name":"k","kind":"parameter"}}},"rhs":{"ident":{"name":{"name":"A","kind":"compartment"}}}}},"rhs":{"ident":{"name":{"name":"B","kind":"compartment"}}}}},"rhs":{"ident":{"name":{"name":"N","kind":"definition"}}}}},"katex":"\\frac{k\\,A\\,B}{N}","katex_loss":[],"reads":[{"name":"k","kind":"parameter"},{"name":"A","kind":"compartment"},{"name":"B","kind":"compartment"},{"name":"N","kind":"definition"}]}}},"guard":null,"lineage":false,"expands_to":["react"],"source_text":"react : A + B --> C  @ k * A * B / N"}
 ],"ode_equations":[],"balance":[],"initial":[
 {"compartment":"A","indices":[],"bindings":[],"value":{"expr":{"value":{"tree":{"ident":{"name":{"name":"A0","kind":"parameter"}}},"katex":"A_{0}","katex_loss":[],"reads":[{"name":"A0","kind":"parameter"}]}}},"source_text":"A = A0"},
 {"compartment":"B","indices":[],"bindings":[],"value":{"expr":{"value":{"tree":{"ident":{"name":{"name":"B0","kind":"parameter"}}},"katex":"B_{0}","katex_loss":[],"reads":[{"name":"B0","kind":"parameter"}]}}},"source_text":"B = B0"}

@@ -332,7 +332,8 @@ let compartment env (c : Ast.compartment_decl) : D.compartment_decl =
     cd_kind = (match c.ckind with Integer -> CkInteger | Real -> CkReal);
     cd_dims = List.filter (fun d -> not (invented d))
         (Expander.comp_dims env.ctx c.cname);
-    cd_expands_to = None;
+    cd_expands_to =
+      Some (Expander.expanded_compartments env.ctx ~declared:c.cname);
     cd_text = text env c.cspan }
 
 let prior env pos (p : prior_spec) : D.prior_decl =
@@ -410,7 +411,8 @@ let transition env (t : Ast.transition_decl) : D.transition_decl =
       | Via (law, kvs) -> DynVia (law, args env pos kvs));
     tn_guard = Option.map guard t.trguard;
     tn_lineage = t.trlineage;
-    tn_expands_to = None;
+    tn_expands_to =
+      Some (Expander.expanded_transitions env.ctx ~declared:t.trname);
     tn_text = text env t.trspan }
 
 let initial env (i : init_entry) : D.initial_decl =
@@ -463,7 +465,8 @@ let observation env (o : obs_decl) : D.observation_decl =
         c.oc_name) columns } in
       { D.cv_form = c.ocv_form; cv_column = c.ocv_col;
         cv_span = Option.map (dexpr env span_pos) c.ocv_span }) o.ocovers;
-    ob_expands_to = None;
+    ob_expands_to =
+      Some (Expander.expanded_observations env.ctx ~declared:o.oname);
     ob_text = text env o.ospan }
 
 let action env pos : action_decl -> D.action = function

@@ -155,6 +155,21 @@ type context = {
      site first. Accumulated during resolution, drained by
      [flush_site_tallies]. *)
   mutable site_tallies : ((loc * string) * site_tally) list;
+  (* What each declaration expanded to, recorded at the place the expanded
+     names are made (never recovered from the spelling of a name), for the
+     declared section's `expands_to`. Each list is newest first.
+     - [via_transitions]: a transition the staged-residence lowering
+       synthesised, and the declared `via` transition it stands for;
+     - [via_cells]: a stage compartment that lowering created in place of a
+       declared compartment, and that compartment;
+     - [emitted_transitions]: a transition declaration as it stood after
+       lowering, and the expanded transitions it produced;
+     - [emitted_observations]: an observation stream and one expanded
+       observation model it produced. *)
+  mutable via_transitions      : (string * string) list;
+  mutable via_cells            : (string * string) list;
+  mutable emitted_transitions  : (string * string list) list;
+  mutable emitted_observations : (string * string) list;
 }
 
 (* Stratification-name predicates. Expanded names are [base] itself or a leaf
@@ -224,6 +239,10 @@ let empty_context ?(source_dir = "") ?(filename = "<input>") () = {
   obs_aux_cols         = [];
   table_index          = Hashtbl.create 16;
   site_tallies         = [];
+  via_transitions      = [];
+  via_cells            = [];
+  emitted_transitions  = [];
+  emitted_observations = [];
 }
 
 (* ── Dimension registry accessor ─────────────────────────────────────────── *)
@@ -1761,6 +1780,7 @@ let lower_via_transitions ctx =
         (* 4. Replace the original `via` transition with [chain; exit], and
               redirect every OTHER transition whose destination is the staged
               source to land in stage 1 (`S[a] --> I[a]` ⇒ `I[a, s1]`). *)
+        ctx.via_transitions <- (chain_tr.trname, tr.trname) :: ctx.via_transitions;
         ctx.transitions <- List.concat_map (fun (t : transition_decl) ->
           if t.trname = tr.trname then [ chain_tr; exit_tr ]
           else [ { t with trdst = redirect_dest_to_stage1 t.trdst src n_pre stage1 } ]
@@ -1884,6 +1904,8 @@ let lower_via_transitions ctx =
               all_cells
           in
           ctx.comp_decls <- ctx.comp_decls @ cell_decls;
+          ctx.via_cells <-
+            List.rev_map (fun cell -> (cell, src)) all_cells @ ctx.via_cells;
 
           (* 2. Per branch: the chain transitions + the exit. The per-stage rate
                 COEFFICIENT is `Rate ρ ⇒ k·ρ`, `Mean τ ⇒ k/τ` (same shape as
@@ -1999,6 +2021,10 @@ let lower_via_transitions ctx =
           (* 4. Replace the original `via` transition with the synthesized chains,
                 and redirect every OTHER transition's inflow into the staged source
                 to the weighted branch. *)
+          ctx.via_transitions <-
+            List.rev_map (fun (s : transition_decl) -> (s.trname, tr.trname))
+              synthesized
+            @ ctx.via_transitions;
           ctx.transitions <- List.concat_map (fun (t : transition_decl) ->
             if t.trname = tr.trname then synthesized
             else [ { t with trdst = redirect_entry t } ]
@@ -5454,6 +5480,9 @@ let expand_transitions_counted ctx =
     check_transition_family_distinct ctx tr ~errors_before
       (List.combine combos results);
     let results = List.concat results in
+    ctx.emitted_transitions <-
+      (tr.trname, List.map (fun (r : Ir.transition) -> r.name) results)
+      :: ctx.emitted_transitions;
     (* Warn if a where guard filtered ALL combinations to zero transitions *)
     (match tr.trguard with
      | Some g when results = [] && combos <> [] ->
@@ -6348,6 +6377,35 @@ let expand_compartments ctx =
       ({ Ir.name; Ir.kind = ir_kind } : Ir.compartment)
     ) names
   ) ctx.comp_decls
+
+(* ── What a declaration expanded to ──────────────────────────────────────── *)
+
+(** The expanded compartments a declared compartment produced, in the order
+    the compiled model holds them. A compartment the staged-residence lowering
+    replaced with per-branch stage compartments produced those. [ctx] is the
+    context after expansion. *)
+let expanded_compartments ctx ~(declared : string) : string list =
+  let stands_for (cd : compartment_decl) =
+    cd.cname = declared || List.mem (cd.cname, declared) ctx.via_cells in
+  List.concat_map (fun (cd : compartment_decl) ->
+    if stands_for cd then expand_compartment_name ctx cd.cname else [])
+    ctx.comp_decls
+
+(** The expanded transitions a declared transition produced, in the order the
+    compiled model holds them: its own, and those of every transition the
+    staged-residence lowering synthesised for it. *)
+let expanded_transitions ctx ~(declared : string) : string list =
+  List.concat_map (fun (lowered, names) ->
+    if lowered = declared || List.mem (lowered, declared) ctx.via_transitions
+    then names else [])
+    (List.rev ctx.emitted_transitions)
+
+(** The expanded observation models a declared stream produced, in the order
+    the compiled model holds them. *)
+let expanded_observations ctx ~(declared : string) : string list =
+  List.filter_map (fun (stream, name) ->
+    if stream = declared then Some name else None)
+    (List.rev ctx.emitted_observations)
 
 (* ── Table expansion ─────────────────────────────────────────────────────── *)
 
@@ -10532,6 +10590,7 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
           | ColDim d       -> Ir.RoleDim d
           | ColValue k     -> Ir.RoleValue (ir_param_kind_of_ast k)); }
     ) columns_v in
+    ctx.emitted_observations <- (od.oname, obs_name) :: ctx.emitted_observations;
     Some { Ir.name        = obs_name;
       Ir.obs_source     = source;
       Ir.columns       = ir_columns;
