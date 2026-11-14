@@ -5535,5 +5535,129 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         let twin_joint = [full.clone(), twin.clone()];
         preflight(&twin_joint, &Waivers::default()).expect("a joint comparison is untouched");
     }
+
+    /// The JSON document of [`two_stream_rows`], captured from the renderer
+    /// before `--streams` changed it. Without `--streams` the document must
+    /// stay byte for byte what it was.
+    const TWO_STREAM_JSON: &str = r#"{
+  "baseline": "a",
+  "data_change_unchecked": null,
+  "data_changed": null,
+  "data_compared_on_prefix": null,
+  "data_mismatch": null,
+  "data_unchecked": "not checked for a shared observation set: 'a' (a test fixture, built from scores alone); 'b' (a test fixture, built from scores alone). A difference against such a row may be a data difference, not a model difference.",
+  "evidence_scale_note": "The Jeffreys tiers calibrate Bayes factors; these are in-sample likelihood ratios, not Bayes factors.",
+  "filter_noise_unassessed": null,
+  "filter_settings_mismatch": null,
+  "filter_settings_unchecked": "filter settings not recorded for 'a' (trace older than schema 5); not checked; filter settings not recorded for 'b' (trace older than schema 5); not checked",
+  "metrics": [
+    "elpd",
+    "crps",
+    "pit_cov90"
+  ],
+  "optimism_caveat": "scores are plug-in (scored at a single θ, dropping parameter uncertainty → under-dispersed); and in-sample (θ fit to all the data → optimistic in absolute level, by roughly the effective number of parameters fit, which does not cancel in a Δelpd and so biases differences toward the more flexible model) — not a leave-future-out forecast score. See LFO (#295).",
+  "overrides": [],
+  "rows": [
+    {
+      "conditioning": "in_sample",
+      "delta_elpd": null,
+      "delta_elpd_db": null,
+      "delta_mean_crps": null,
+      "derivation": null,
+      "elpd": -24.0,
+      "evidence_label": null,
+      "lag1_autocorr_delta_elpd": null,
+      "lr": null,
+      "mc_se_delta_elpd": null,
+      "mc_se_elpd": null,
+      "mean_crps": null,
+      "name": "a",
+      "path": "a",
+      "per_stream": [
+        {
+          "crps_nonfinite": 0,
+          "delta_mean_crps": null,
+          "mean_crps": 2.0,
+          "n": 4,
+          "pit_cov90": 1.0,
+          "pit_cov90_warning": null,
+          "pit_nonfinite": 0,
+          "stream": "north"
+        },
+        {
+          "crps_nonfinite": 0,
+          "delta_mean_crps": null,
+          "mean_crps": 5.5,
+          "n": 4,
+          "pit_cov90": 1.0,
+          "pit_cov90_warning": null,
+          "pit_nonfinite": 0,
+          "stream": "south"
+        }
+      ],
+      "per_stream_unavailable": null,
+      "pit_cov90": null,
+      "pit_cov90_warning": null,
+      "provenance": "plug_in",
+      "se_delta_elpd": null,
+      "t_score": 4,
+      "warnings": []
+    },
+    {
+      "conditioning": "in_sample",
+      "delta_elpd": 4.0,
+      "delta_elpd_db": 17.37177927613007,
+      "delta_mean_crps": null,
+      "derivation": null,
+      "elpd": -20.0,
+      "evidence_label": "very strong",
+      "lag1_autocorr_delta_elpd": null,
+      "lr": 54.598150033144236,
+      "mc_se_delta_elpd": null,
+      "mc_se_elpd": null,
+      "mean_crps": null,
+      "name": "b",
+      "path": "b",
+      "per_stream": [
+        {
+          "crps_nonfinite": 0,
+          "delta_mean_crps": -1.0,
+          "mean_crps": 1.0,
+          "n": 4,
+          "pit_cov90": 1.0,
+          "pit_cov90_warning": null,
+          "pit_nonfinite": 0,
+          "stream": "north"
+        },
+        {
+          "crps_nonfinite": 0,
+          "delta_mean_crps": -2.5,
+          "mean_crps": 3.0,
+          "n": 4,
+          "pit_cov90": 0.0,
+          "pit_cov90_warning": "'b' stream 'south': PIT 90%-coverage 0.00 (nominal 0.90) — likely overconfident.",
+          "pit_nonfinite": 0,
+          "stream": "south"
+        }
+      ],
+      "per_stream_unavailable": null,
+      "pit_cov90": null,
+      "pit_cov90_warning": null,
+      "provenance": "plug_in",
+      "se_delta_elpd": 0.0,
+      "t_score": 4,
+      "warnings": []
+    }
+  ],
+  "se_caveat": "se(Δ) is a normal approximation, unreliable at small T (here T = 4) and when the models predict alike (Sivula, Magnusson & Vehtari, arXiv:2008.10296) — read it as descriptive, not as a test."
+}
+"#;
+
+    #[test]
+    fn without_streams_the_json_document_is_unchanged() {
+        let rows = two_stream_rows();
+        let metrics = vec!["elpd".to_string(), "crps".to_string(), "pit_cov90".to_string()];
+        assert_eq!(render_json(&rows, 0, &metrics, &checked(&rows)), TWO_STREAM_JSON);
+    }
 }
 
