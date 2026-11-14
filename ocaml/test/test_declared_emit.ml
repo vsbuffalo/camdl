@@ -428,6 +428,70 @@ simulate { from = date("2020-01-01")
                        de_reads = []; _ }; _ } -> ()
   | _ -> Alcotest.fail "date(\"…\") should hold a string literal and read no name"
 
+(* ── A doc comment is not a model difference ─────────────────────────────── *)
+
+(* Every path at which two JSON values differ, as "a.b[2].c". *)
+let rec json_diff (path : string) (a : json) (b : json) : string list =
+  match a, b with
+  | `Assoc xs, `Assoc ys
+    when List.map fst xs = List.map fst ys ->
+    List.concat (List.map2 (fun (k, x) (_, y) ->
+      json_diff (if path = "" then k else path ^ "." ^ k) x y) xs ys)
+  | `List xs, `List ys when List.length xs = List.length ys ->
+    List.concat (List.mapi (fun i (x, y) ->
+      json_diff (Printf.sprintf "%s[%d]" path i) x y) (List.combine xs ys))
+  | _ -> if a = b then [] else [ path ]
+
+let ends_with ~suffix s =
+  let n = String.length suffix and h = String.length s in
+  h >= n && String.sub s (h - n) n = suffix
+
+let documented ~beta_doc ~model_doc =
+  Printf.sprintf {|%s
+time_unit = 'days
+compartments { S, I, R }
+let N = S + I + R
+parameters {
+%s
+  beta  : rate in [0.001, 2.0]
+  gamma : rate in [0.001, 1.0]
+  N0    : count in [100, 100000]
+}
+transitions {
+  infection : S --> I  @ beta * S * I / N
+  recovery  : I --> R  @ gamma * I
+}
+init { S = N0 - 1
+       I = 1 }
+simulate { from = 0 'days
+           to = 80 'days }
+|} model_doc beta_doc
+
+(* Two sources that differ only in `#'` doc comments, one of which carries an
+   `@symbol` tag the KaTeX renderer substitutes. The compiled model is the same
+   model (its JSON, which is all `model_ir_hash` reads, is equal); every tree
+   and every other field of the declared section is equal; and the only fields
+   that differ are `katex` strings. So a diff that compares trees reports no
+   model-layer change for a doc-comment edit. *)
+let test_doc_comment_is_not_a_model_difference () =
+  let plain = documented ~beta_doc:"" ~model_doc:"" in
+  let doc'd = documented
+      ~model_doc:"#' A bare SIR model.\n#' @ref Kermack and McKendrick 1927"
+      ~beta_doc:"  #' per-capita transmission rate\n  #' @symbol β" in
+  let m0, d0 = compile "m" plain and m1, d1 = compile "m" doc'd in
+  Alcotest.(check bool) "the compiled model is the same model" true
+    (Serde.model_to_json m0 = Serde.model_to_json m1);
+  let diffs = json_diff "" (D.to_json d0) (D.to_json d1) in
+  Alcotest.(check bool) "the doc comment changed a rendering (the test bites)"
+    true (diffs <> []);
+  List.iter (fun path ->
+    if not (ends_with ~suffix:".katex" path) then
+      Alcotest.failf "a doc comment changed a field that is not `katex`: %s" path)
+    diffs;
+  (* Stated outright: which fields differed. *)
+  Alcotest.(check (list string)) "only the renderings that show beta"
+    [ "transitions[0].dynamics.rate.rate.katex" ] diffs
+
 (* ── An unclassified name is reported (W203) ─────────────────────────────── *)
 
 (* The compiler discards a `timepoints { }` block (gh#1047), so a timepoint
@@ -501,6 +565,9 @@ let () =
          Alcotest.test_case "comments, layout and let position" `Quick
            test_layout_and_let_position;
          Alcotest.test_case "a quoted string is not a name" `Quick test_string_literal ]);
+      ("doc comments",
+       [ Alcotest.test_case "a doc comment changes renderings only, and no model"
+           `Quick test_doc_comment_is_not_a_model_difference ]);
       ("unclassified names",
        [ Alcotest.test_case "an unresolved name is warned, and the compile succeeds"
            `Quick test_unresolved_is_warned;
