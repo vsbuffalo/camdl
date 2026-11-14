@@ -93,6 +93,11 @@ impl StreamBindings {
         self.leaves.iter().map(|(l, s)| (l.as_str(), s.as_str()))
     }
 
+    /// The source a bound leaf reads; `None` for a leaf the fit does not bind.
+    pub(crate) fn source_of(&self, leaf: &str) -> Option<&str> {
+        self.leaves.iter().find(|(l, _)| l == leaf).map(|(_, s)| s.as_str())
+    }
+
     /// The bound leaves that read `source`, sorted by name.
     pub(crate) fn leaves_of(&self, source: &str) -> Vec<&str> {
         self.leaves.iter().filter(|(_, s)| s == source).map(|(l, _)| l.as_str()).collect()
@@ -259,6 +264,8 @@ mod tests {
         assert_eq!(b.leaves().collect::<Vec<_>>(),
             vec![("cases_rural", "cases"), ("cases_urban", "cases")]);
         assert_eq!(b.leaves_of("cases"), vec!["cases_rural", "cases_urban"]);
+        assert_eq!(b.source_of("cases_urban"), Some("cases"));
+        assert_eq!(b.source_of("cases"), None, "a source is not a leaf of this model");
         assert!(b.holdout_by_source().is_empty());
         assert_eq!(b.identity_keyed_training().keys().collect::<Vec<_>>(),
             vec!["cases_rural", "cases_urban"], "the shorthand identity folds the file per leaf");

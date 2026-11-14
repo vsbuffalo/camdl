@@ -188,8 +188,8 @@ impl Row {
 #[derive(Clone)]
 enum RowStreams {
     /// A derived row: every leaf the fit's model declares with its source,
-    /// in the model's order.
-    Derived { declared: Vec<(String, String)> },
+    /// in the model's order, and the fit's [`StreamBindings`].
+    Derived { declared: Vec<(String, String)>, bindings: StreamBindings },
     /// An explicit `prequential.json`: the trace names the leaves it scored
     /// and nothing else — not the model's sources, not what the fit bound.
     Explicit,
@@ -1065,9 +1065,46 @@ fn preflight(rows: &[Row], waived: &Waivers) -> Result<Preflight, String> {
     // to say which. Overridable, unlike the axis checks: comparing a fit on
     // revised counts against the fit on the original ones is a real thing to
     // want, as long as the reader knows the Δ is confounded.
-    let data_entries: Vec<(&str, &DataIdentity)> =
-        rows.iter().map(|r| (r.name.as_str(), &r.data)).collect();
-    if let Err(m) = check_shared_data(&data_entries) {
+    //
+    // Rows re-scored on one leaf (`--streams`) compare only the hashes of that
+    // leaf's source, and an absent hash for it is a failed check, not a pass;
+    // the pairing check above has established that every row is scored on the
+    // same leaves.
+    let restricted: Vec<DataIdentity>;
+    let mut absent: Option<Mismatch> = None;
+    let data_entries: Vec<(&str, &DataIdentity)> = match rows.first()
+        .and_then(|r| r.trace.scored_streams.as_ref())
+    {
+        None => rows.iter().map(|r| (r.name.as_str(), &r.data)).collect(),
+        Some(leaves) => {
+            let mut missing: Vec<String> = Vec::new();
+            let mut concerned: Vec<String> = Vec::new();
+            restricted = rows.iter().map(|r| {
+                let (d, m) = data_for_streams(r, leaves);
+                if !m.is_empty() { concerned.push(r.name.clone()); }
+                missing.extend(m);
+                d
+            }).collect();
+            absent = (!missing.is_empty()).then(|| Mismatch {
+                rows: concerned,
+                finding: format!("no hash is recorded for the data this table scores: {}",
+                    missing.join("; ")),
+            });
+            rows.iter().map(|r| r.name.as_str()).zip(&restricted).collect()
+        }
+    };
+    let data_mismatch = match (absent, check_shared_data(&data_entries).err()) {
+        (None, None) => None,
+        (Some(m), None) | (None, Some(m)) => Some(m),
+        (Some(a), Some(b)) => Some(Mismatch {
+            rows: a.rows.iter().chain(&b.rows).fold(Vec::new(), |mut v, r| {
+                if !v.contains(r) { v.push(r.clone()); }
+                v
+            }),
+            finding: format!("{}; and {}", a.finding, b.finding),
+        }),
+    };
+    if let Some(m) = data_mismatch {
         let message = format!("{}.\n       {}\n       Re-fit both on the same \
             observations, or pass --allow-data-mismatch to render the comparison as \
             confounded.", m.finding, Waiver::DataMismatch.consequence());
@@ -1400,6 +1437,68 @@ fn check_shared_data(entries: &[(&str, &DataIdentity)]) -> Result<(), Mismatch> 
         }
     }
     Ok(())
+}
+
+/// A row's data identity as a table scored on `leaves` alone checks it: the
+/// recorded hashes of those leaves' sources (found through the row's
+/// [`StreamBindings::source_of`]), with every other source set aside as not
+/// compared, so [`check_shared_data`] skips it and [`unchecked_data_note`]
+/// names it. Also returns, one line each, the selected sources for which the
+/// row carries digests but no hash at all: an absent hash must not read as a
+/// matching one, so the caller refuses it.
+///
+/// A row with no data identity is returned as it is. So is an explicit
+/// `prequential.json`, which binds nothing.
+fn data_for_streams(r: &Row, leaves: &[String]) -> (DataIdentity, Vec<String>) {
+    let (DataIdentity::Digests(rec), RowStreams::Derived { bindings, .. }) = (&r.data, &r.streams)
+    else {
+        return (r.data.clone(), Vec::new());
+    };
+    let mut sources: Vec<&str> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
+    for leaf in leaves {
+        match bindings.source_of(leaf) {
+            Some(s) => if !sources.contains(&s) { sources.push(s) },
+            None => missing.push(format!(
+                "'{}' does not bind stream '{leaf}', so no hash of its data is recorded",
+                r.name)),
+        }
+    }
+    let not_compared = format!("not compared: this table scores {} alone", leaves.join(", "));
+    let mut out = RecordedData::default();
+    let split = |all: &std::collections::BTreeMap<String, String>,
+                 keep: &mut std::collections::BTreeMap<String, String>,
+                 set_aside: &mut std::collections::BTreeMap<String, String>| {
+        for (source, h) in all {
+            if sources.contains(&source.as_str()) {
+                keep.insert(source.clone(), h.clone());
+            } else {
+                set_aside.insert(source.clone(), not_compared.clone());
+            }
+        }
+    };
+    split(&rec.training, &mut out.training, &mut out.unresolved);
+    split(&rec.holdout, &mut out.holdout, &mut out.holdout_unresolved);
+    for (source, why) in &rec.unresolved {
+        if sources.contains(&source.as_str()) {
+            out.unresolved.insert(source.clone(), why.clone());
+        }
+    }
+    for (source, why) in &rec.holdout_unresolved {
+        if sources.contains(&source.as_str()) {
+            out.holdout_unresolved.insert(source.clone(), why.clone());
+        }
+    }
+    // Refused by the caller, and set aside here so the pairwise comparison
+    // does not report the same absence a second time as a source one row
+    // alone bound.
+    for s in &sources {
+        if !out.training.contains_key(*s) && !out.unresolved.contains_key(*s) {
+            missing.push(format!("'{}' records no hash for source '{s}'", r.name));
+            out.unresolved.insert(s.to_string(), "the fit recorded no hash for it".into());
+        }
+    }
+    (DataIdentity::Digests(out), missing)
 }
 
 /// A content hash abbreviated for a message: enough to tell two apart, short
@@ -2358,6 +2457,7 @@ fn derive_prequential(
     }
     let streams = RowStreams::Derived {
         declared: model.observations.iter().map(|o| (o.name.clone(), o.source.clone())).collect(),
+        bindings,
     };
     Ok(Derived { trace, data: recorded_data, freshness, streams })
 }
@@ -5075,12 +5175,41 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
 
     // ── --streams ───────────────────────────────────────────────────────
 
-    /// A derived row whose model declares these (leaf, source) pairs, scoring
-    /// the given leaves at 7, 14, 21.
+    /// A model declaring these (leaf, source) observation streams: a golden
+    /// model's first stream copied under each name, which is all
+    /// [`StreamBindings::resolve`] reads of it.
+    fn model_declaring(declared: &[(&str, &str)]) -> ir::Model {
+        let path = format!("{}/../../../ocaml/golden/seir_observations.ir.json",
+            env!("CARGO_MANIFEST_DIR"));
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let mut model: ir::Model = serde_json::from_value(v["model"].clone()).unwrap();
+        let template = model.observations[0].clone();
+        model.observations = declared.iter().map(|(l, s)| {
+            let mut o = template.clone();
+            o.name = l.to_string();
+            o.source = s.to_string();
+            o
+        }).collect();
+        model
+    }
+
+    /// A derived row whose model declares these (leaf, source) pairs and whose
+    /// fit binds the sources of the leaves it scores, at 7, 14, 21.
     fn derived_row(name: &str, declared: &[(&str, &str)], scored: &[&str]) -> Row {
         let mut r = row_with_streams(name, &[7.0, 14.0, 21.0], scored);
+        let mut data = String::from("[observations]\n");
+        let mut bound: Vec<&str> = Vec::new();
+        for (l, s) in declared {
+            if scored.contains(l) && !bound.contains(s) {
+                bound.push(s);
+                data.push_str(&format!("{s} = \"{s}.tsv\"\n"));
+            }
+        }
+        let spec: crate::fit::config_v2::DataSpec = toml::from_str(&data).unwrap();
         r.streams = RowStreams::Derived {
             declared: declared.iter().map(|(l, s)| (l.to_string(), s.to_string())).collect(),
+            bindings: StreamBindings::resolve(&model_declaring(declared), &spec).unwrap(),
         };
         r
     }
@@ -5196,6 +5325,76 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         assert!(check_shared_times(&[joint.clone(), projected]).is_err());
         let both = [joint.onto("cases").unwrap(), joint.onto("cases").unwrap()];
         check_shared_observation_axis(&both).expect("two projections onto one leaf compare");
+    }
+
+    const CASES_DEATHS: [(&str, &str); 2] = [("cases", "cases"), ("deaths", "deaths")];
+
+    /// Two fits of cases and deaths whose `deaths` files differ and whose
+    /// `cases` files agree: the joint comparison is refused as fitted to
+    /// different data; on `cases` alone only the `cases` hash is compared, the
+    /// `deaths` one is named as not compared, and no format reports a mismatch.
+    #[test]
+    fn a_table_on_one_stream_compares_only_that_streams_data() {
+        let mut rows = vec![
+            derived_row("a", &CASES_DEATHS, &["cases", "deaths"]),
+            derived_row("b", &CASES_DEATHS, &["cases", "deaths"]),
+        ];
+        rows[0].data = digests(&[("cases", "aaaaaaaa"), ("deaths", "dddddddd")]);
+        rows[1].data = digests(&[("cases", "aaaaaaaa"), ("deaths", "eeeeeeee")]);
+        let refusal = preflight(&rows, &Waivers::default()).unwrap_err();
+        assert!(refusal.contains("different observed data") && refusal.contains("'deaths'"),
+            "{refusal}");
+
+        let on_cases: Vec<Row> = rows.iter().map(|r| r.onto("cases").unwrap()).collect();
+        let checks = preflight(&on_cases, &Waivers::default())
+            .expect("the cases files agree, and only they are compared");
+        assert!(checks.overrides.is_empty() && checks.data_mismatch.is_none(), "{checks:?}");
+        let note = checks.data_unchecked.as_deref().unwrap_or_default();
+        assert!(note.contains("'a' stream 'deaths' (not compared: this table scores cases alone)")
+                && note.contains("'b' stream 'deaths'"), "the set-aside source is named: {note}");
+        let metrics = vec!["elpd".to_string()];
+        for text in [render_table(&on_cases, 0, &metrics, &checks),
+                     render_md(&on_cases, 0, &metrics, &checks),
+                     render_json(&on_cases, 0, &metrics, &checks)] {
+            assert!(!text.contains("different observed data") && !text.contains("--allow-data-mismatch"),
+                "{text}");
+        }
+        let v: serde_json::Value =
+            serde_json::from_str(&render_json(&on_cases, 0, &metrics, &checks)).unwrap();
+        assert!(v["data_mismatch"].is_null(), "{v}");
+
+        // On `deaths` alone the differing files are compared, and refused.
+        let on_deaths: Vec<Row> = rows.iter().map(|r| r.onto("deaths").unwrap()).collect();
+        let refusal = preflight(&on_deaths, &Waivers::default()).unwrap_err();
+        assert!(refusal.contains("'deaths'") && refusal.contains("dddddddd"), "{refusal}");
+    }
+
+    /// A row that records digests but none for the source the table scores is
+    /// refused: an absent hash is not a matching one. The usual waiver renders
+    /// it, stated as the override.
+    #[test]
+    fn a_row_without_a_hash_for_the_scored_stream_is_refused() {
+        let mut rows = [
+            derived_row("a", &CASES_DEATHS, &["cases", "deaths"]),
+            derived_row("b", &CASES_DEATHS, &["cases", "deaths"]),
+        ];
+        rows[0].data = digests(&[("cases", "aaaaaaaa"), ("deaths", "dddddddd")]);
+        rows[1].data = digests(&[("deaths", "dddddddd")]);
+        let on_cases: Vec<Row> = rows.iter().map(|r| r.onto("cases").unwrap()).collect();
+        let refusal = preflight(&on_cases, &Waivers::default()).unwrap_err();
+        assert!(refusal.contains("'b' records no hash for source 'cases'")
+                && refusal.contains("--allow-data-mismatch"), "{refusal}");
+        let waived = Waivers { data_mismatch: true, ..Default::default() };
+        let checks = preflight(&on_cases, &waived).unwrap();
+        assert_eq!(checks.overrides.len(), 1);
+        assert_eq!(checks.overrides[0].mismatch.rows, ["b"]);
+
+        // Both rows lacking it is no better: nothing matched.
+        rows[0].data = digests(&[("deaths", "dddddddd")]);
+        let on_cases: Vec<Row> = rows.iter().map(|r| r.onto("cases").unwrap()).collect();
+        let refusal = preflight(&on_cases, &Waivers::default()).unwrap_err();
+        assert!(refusal.contains("'a' records no hash") && refusal.contains("'b' records no hash"),
+            "{refusal}");
     }
 }
 
