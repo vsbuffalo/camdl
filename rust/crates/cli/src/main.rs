@@ -3285,7 +3285,7 @@ struct ObsRow {
     time: f64,
     /// What the value was drawn over — an instant, or `[start, stop)`; a
     /// windowed stream writes both boundaries (gh#833).
-    coverage: sim::inference::Coverage,
+    coverage: score::trace::Coverage,
     /// The cell this row belongs to, as the table's coordinate columns say it.
     coords: CellCoords,
     value: ObsValue,
@@ -3925,7 +3925,7 @@ impl StreamSink {
                         self.shape.write_coord_cells(&mut w, &row.coords).unwrap();
                         match (&plan.columns, row.coverage) {
                             (crate::obs_emit::TemporalColumns::Window { .. },
-                             sim::inference::Coverage::Interval { start, stop }) => {
+                             score::trace::Coverage::Interval { start, stop }) => {
                                 write!(w, "{start}\t{stop}").unwrap();
                                 if date_render.is_some() {
                                     write!(w, "\t{}\t{}", render_date(start), render_date(stop)).unwrap();
@@ -4410,7 +4410,7 @@ pub(crate) fn project_coverages(
     traj: &sim::Trajectory,
     obs_ir: &ir::observation::ObservationModel,
     model: &ir::Model,
-    rows: &[(f64, sim::inference::Coverage)],
+    rows: &[(f64, score::trace::Coverage)],
 ) -> Result<Vec<f64>, String> {
     let obs_times: Vec<f64> = rows.iter().map(|r| r.0).collect();
     check_obs_times_on_snapshot_grid(traj, &obs_ir.name, &model.time_unit, &obs_times)?;
@@ -4516,9 +4516,9 @@ pub(crate) fn incidence_over_rows(
     traj: &sim::Trajectory,
     obs_name: &str,
     flow_indices: &[usize],
-    rows: &[(f64, sim::inference::Coverage)],
+    rows: &[(f64, score::trace::Coverage)],
 ) -> Result<Vec<f64>, String> {
-    use sim::inference::Coverage;
+    use score::trace::Coverage;
     // `f64` throughout: ODE flows are real-valued (the chain-binomial /
     // Gillespie integer flows widen losslessly via `Flows::value`).
     // `cum_at_snap[i]` is the flow over (run start, snapshots[i].t]: the

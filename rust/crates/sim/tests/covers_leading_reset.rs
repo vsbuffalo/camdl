@@ -40,11 +40,12 @@ use sim::{
         compute_ode_loglik, dense_cells,
         multi_stream_obs::{StreamProjection, StreamSpec},
         obs_loglik::poisson_logpmf,
-        BoundObs, Coverage, MultiStreamObsModel, Period,
+        BoundObs, MultiStreamObsModel, Period,
     },
     simulate::Simulate,
     OdeSim,
 };
+use score::trace::Coverage;
 
 const GAMMA: f64 = 0.1;
 const I0: f64 = 40.0;

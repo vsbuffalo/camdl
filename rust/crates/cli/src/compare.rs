@@ -1456,7 +1456,7 @@ fn check_shared_coverage(
     a: &sim::inference::prequential::PrequentialStep,
     b: &sim::inference::prequential::PrequentialStep,
 ) -> Result<(), String> {
-    use sim::inference::Coverage;
+    use score::trace::Coverage;
     for sa in &a.per_stream {
         let Some(sb) = b.per_stream.iter().find(|s| s.stream == sa.stream) else { continue };
         if sa.coverage == sb.coverage {
@@ -1491,8 +1491,8 @@ fn check_shared_coverage(
     Ok(())
 }
 
-fn fmt_coverage(c: sim::inference::Coverage) -> String {
-    use sim::inference::Coverage;
+fn fmt_coverage(c: score::trace::Coverage) -> String {
+    use score::trace::Coverage;
     match c {
         Coverage::Unrecorded => "unrecorded".into(),
         Coverage::Instant => "an instant reading".into(),
@@ -4264,7 +4264,7 @@ mod tests {
     /// the flag waives.
     #[test]
     fn mismatched_horizons_still_check_streams_and_coverage_at_shared_times() {
-        use sim::inference::Coverage;
+        use score::trace::Coverage;
         let iv = |s: f64, e: f64| Coverage::Interval { start: s, stop: e };
 
         // (i) Different stream sets at shared t = 14.
@@ -5140,7 +5140,7 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         name: &str,
         times: &[f64],
         stream: &str,
-        coverage: &[sim::inference::Coverage],
+        coverage: &[score::trace::Coverage],
     ) -> Row {
         assert_eq!(times.len(), coverage.len());
         let mut row = row_with_streams(name, times, &[stream]);
@@ -5158,7 +5158,7 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
     /// Δelpd would report the difference as evidence about the models.
     #[test]
     fn refuses_traces_that_scored_the_same_stream_over_different_windows() {
-        use sim::inference::Coverage;
+        use score::trace::Coverage;
         let iv = |s: f64, e: f64| Coverage::Interval { start: s, stop: e };
         // Rows closing at 4, 6, 7. Gapped: [5,6) with (4,5) covered by
         // nothing. Merged: [4,6) as one two-day row. Same stops, same count of

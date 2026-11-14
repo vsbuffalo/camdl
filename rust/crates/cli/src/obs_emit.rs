@@ -50,7 +50,8 @@ use std::sync::Arc;
 
 use ir::observation::{ColumnRole, Covers, ObservationModel, TemporalKind};
 use sim::compiled_model::CompiledModel;
-use sim::inference::{Coverage, ObsCell, StreamTimes};
+use score::trace::Coverage;
+use sim::inference::{ObsCell, StreamTimes};
 use sim::rng::StatefulRng;
 
 /// The temporal column(s) an emitted file carries for a stream — the ones the
