@@ -23,7 +23,7 @@ use super::config_v2::GateConfig;
 use super::method_result::If2Record;
 use super::state::FitState;
 use crate::chain_index::ChainIndex;
-use crate::evidence::NATS_TO_DB;
+use score::evidence::NATS_TO_DB;
 
 /// Soft threshold: params between this and `gate.a_thresh` get a
 /// prominent warning but refine still runs. When `gate.a_thresh ≤

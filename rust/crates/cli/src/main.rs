@@ -46,7 +46,6 @@ mod profile_cas;     // gh#147 M3.3: profile-point CAS identity (resolve_profile
 mod profile_diagnostics;
 mod profile_table;    // gh#1059: the collected per-cell table a profile run prints
 mod out;           // the stream layer: notices, progress, milestones, colour
-mod evidence;
 mod survey;
 mod survey_cas;     // gh#147 (M3.3): survey CAS identity (model/config/box/seed)
 mod sim_ensemble_cas; // gh#147: multi-cell simulate ensemble CAS identity (model/config/params/grid)
