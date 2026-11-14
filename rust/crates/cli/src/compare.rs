@@ -1066,6 +1066,32 @@ fn mc_se_delta(row: &Row, base: &Row) -> Option<f64> {
     }
 }
 
+/// The note naming each non-baseline row whose evidence label was not checked
+/// against filter noise because only one side of its pair with the baseline
+/// carries a filter-noise MC SE, or `None`.
+///
+/// [`mc_se_delta`] needs both sides; with one, the "within filter noise" gate
+/// is skipped and the label reads as if it had passed. Neither side having
+/// one is the documented cheap mode (no replication requested) and says
+/// nothing new; both having one is the checked case.
+fn filter_noise_unassessed_note(rows: &[Row], base_idx: usize) -> Option<String> {
+    let base = &rows[base_idx];
+    let one_sided: Vec<String> = rows.iter().enumerate()
+        .filter(|(i, r)| *i != base_idx && r.mc_se.is_some() != base.mc_se.is_some())
+        .map(|(_, r)| {
+            let (with, without) = if r.mc_se.is_some() { (&r.name, &base.name) }
+                                  else { (&base.name, &r.name) };
+            format!("'{}' (filter-noise SE for '{with}' only; '{without}' has none)", r.name)
+        })
+        .collect();
+    (!one_sided.is_empty()).then(|| format!(
+        "evidence label not checked against filter noise for {}: the \
+         within-filter-noise gate needs a replicate-derived MC SE on both rows \
+         of the pair. Re-derive both rows with --replicates ≥ 2 to check it.",
+        one_sided.join("; "),
+    ))
+}
+
 /// The per-stream data digests a resolved fit recorded when it ran, read from
 /// its provenance sidecar (`fit.meta.json`). Not re-hashed here: the files may
 /// have moved or changed since, and the question is what the FIT was bound to.
@@ -2101,6 +2127,9 @@ fn warning_lines(rows: &[Row], base_idx: usize, t_mismatch: bool) -> Vec<String>
             "note: filter-noise MC SE of elpd: {}",
             with_mc.join(", ")));
     }
+    if let Some(note) = filter_noise_unassessed_note(rows, base_idx) {
+        lines.push(format!("ⓘ {note}"));
+    }
     // Stage 4.3 (§3.4 remedy 2): the serial dependence the HAC se(Δ)
     // exists for — printed so the reader sees how far from iid the
     // per-step differentials are. Same split: the value here, the
@@ -2341,6 +2370,9 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String]) -> String {
         // note says which rows the check could not cover.
         "data_mismatch": check_shared_data(&data_entries).err(),
         "data_unchecked": unchecked_data_note(&data_entries),
+        // Rows whose evidence label skipped the within-filter-noise gate
+        // because only one side of the pair carries an MC SE.
+        "filter_noise_unassessed": filter_noise_unassessed_note(rows, base_idx),
         // #295: the plug-in / in-sample caveat, `null` only when every compared
         // trace is honest on both axes.
         "optimism_caveat": optimism_caveat(rows),
@@ -2744,6 +2776,57 @@ mod tests {
         assert!(same_sealed_boundary(60.0 + 1e-12, 60.0), "symmetric");
         assert!(!same_sealed_boundary(21.0, 21.5),
             "half a day apart is two different training windows");
+    }
+
+    /// The "within filter noise" gate needs a filter-noise MC SE on both rows
+    /// of a pair. A derived row with replication against an explicit
+    /// prequential.json (no SE) used to skip the gate without saying so; the
+    /// note names the row in every format. Neither side having one (no
+    /// replication requested) or both having one is not noted.
+    #[test]
+    fn a_pair_with_filter_noise_on_one_side_only_is_named_in_every_format() {
+        let metrics = vec!["elpd".to_string()];
+        let mk = |mc: [Option<f64>; 3]| {
+            let mut rows = vec![
+                row_at("base", &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0]),
+                row_at("half", &[7.0, 14.0, 21.0], &[-3.0, -3.0, -2.0]),
+                row_at("both", &[7.0, 14.0, 21.0], &[-3.0, -3.0, -2.0]),
+            ];
+            for (r, m) in rows.iter_mut().zip(mc) { r.mc_se = m; }
+            rows
+        };
+
+        // Baseline and `both` replicated, `half` read as-is: only `half`.
+        let rows = mk([Some(0.3), None, Some(0.4)]);
+        let note = filter_noise_unassessed_note(&rows, 0).expect("half is unassessed");
+        assert!(note.contains("'half'") && !note.contains("'both'"), "{note}");
+        assert!(note.contains("not checked against filter noise"), "{note}");
+        for (fmt, text) in [("table", render_table(&rows, 0, &metrics, false)),
+                            ("md", render_md(&rows, 0, &metrics, false))] {
+            assert!(text.contains("not checked against filter noise") && text.contains("'half'"),
+                "the {fmt} rendering carries the note:\n{text}");
+        }
+        let v: serde_json::Value =
+            serde_json::from_str(&render_json(&rows, 0, &metrics)).unwrap();
+        assert!(v["filter_noise_unassessed"].as_str().is_some_and(|s| s.contains("'half'")),
+            "the JSON carries it as a field:\n{v}");
+
+        // The SE on the baseline side only is the same gap, for every pair.
+        let rows = mk([Some(0.3), None, None]);
+        let note = filter_noise_unassessed_note(&rows, 0).expect("both pairs one-sided");
+        assert!(note.contains("'half'") && note.contains("'both'"), "{note}");
+        // And the candidate side only.
+        let rows = mk([None, Some(0.3), None]);
+        let note = filter_noise_unassessed_note(&rows, 0).expect("half is one-sided");
+        assert!(note.contains("'half'") && !note.contains("'both'"), "{note}");
+
+        // No replication anywhere, and replication everywhere: nothing to say.
+        assert!(filter_noise_unassessed_note(&mk([None, None, None]), 0).is_none());
+        let all = mk([Some(0.3), Some(0.2), Some(0.4)]);
+        assert!(filter_noise_unassessed_note(&all, 0).is_none());
+        let v: serde_json::Value =
+            serde_json::from_str(&render_json(&all, 0, &metrics)).unwrap();
+        assert!(v["filter_noise_unassessed"].is_null(), "{v}");
     }
 
     /// `se(Δ)` is √(T·Var) of the per-observation differences — a normal
