@@ -2670,6 +2670,16 @@ pub struct CompareArgs {
     #[arg(long)]
     pub allow_changed_data: bool,
 
+    /// Render even if the compared traces were scored with different
+    /// particle-filter settings (particle count or replicate count), as each
+    /// trace records them. The log of a particle-filter likelihood estimate
+    /// is biased downward, by more at fewer particles, so such a Δelpd
+    /// partly measures the filters; by default it is refused. With this flag
+    /// every format states the difference. A trace that records no settings
+    /// (older than schema 5) is reported as not checked.
+    #[arg(long)]
+    pub allow_mismatched_filter_settings: bool,
+
     /// Mixture size for a Bayesian fit's derived predictive (§3.6 of the
     /// 2026-08-29 proposal): one filter pass per thinned posterior draw;
     /// per-step predictive densities are averaged over the draws and the

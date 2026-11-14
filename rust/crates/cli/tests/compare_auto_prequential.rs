@@ -263,6 +263,16 @@ fn compare_auto_derives_prequential_from_two_pgas_fits() {
         assert_eq!(row["provenance"]["posterior"]["n_draws"],
             serde_json::json!(3),
             "a Bayesian fit's row must be stamped posterior: {row}");
+        // Schema 5: the trace records what the derivation did — 3 draws
+        // thinned from the retained cloud, combined over the default 5
+        // replicates.
+        let d = &row["derivation"];
+        assert_eq!(d["theta"]["posterior_draws"]["n_used"], 3, "{row}");
+        assert!(d["theta"]["posterior_draws"]["n_available"].as_u64().is_some_and(|n| n >= 3),
+            "thinned from the whole retained cloud: {row}");
+        assert_eq!(d["replicates"], 5, "{row}");
+        assert_eq!(d["particles"], 300, "{row}");
+        assert_eq!(d["excluded_chains"], serde_json::json!([]), "{row}");
     }
 
     // Stage 4.2: replicate derives attach a filter-noise MC SE per row and
@@ -273,6 +283,10 @@ fn compare_auto_derives_prequential_from_two_pgas_fits() {
         String::from_utf8_lossy(&out.stderr));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     for row in v["rows"].as_array().unwrap() {
+        assert!(row["derivation"]["theta"]["posterior_mean"]["n_draws"].as_u64()
+                .is_some_and(|n| n > 0),
+            "--draws 1 scores the posterior mean, and the trace says over how many draws: {row}");
+        assert_eq!(row["derivation"]["replicates"], 2, "{row}");
         let mc = row["mc_se_elpd"].as_f64()
             .unwrap_or_else(|| panic!("replicates must attach mc_se_elpd: {row}"));
         assert!(mc.is_finite() && mc >= 0.0, "mc_se_elpd must be finite: {row}");
@@ -570,6 +584,17 @@ fn compare_per_fit_exclude_chains_rescores_only_the_named_fit() {
     );
     let sub_out = String::from_utf8_lossy(&sub.stdout);
     let (e_a_sub, e_b_sub) = (elpd_of(&sub_out, "@a"), elpd_of(&sub_out, "@b"));
+    // The derived trace records the exclusion and the mean it led to: the 6
+    // retained draws of chain 0, out of 12.
+    let v: serde_json::Value = serde_json::from_str(&sub_out).unwrap();
+    let row = |name: &str| v["rows"].as_array().unwrap().iter()
+        .find(|r| r["name"] == name).unwrap().clone();
+    assert_eq!(row("@a")["derivation"]["excluded_chains"], serde_json::json!([1]),
+        "@a's trace records the dropped chain: {v}");
+    assert_eq!(row("@a")["derivation"]["theta"],
+        serde_json::json!({"posterior_mean": {"n_draws": 6}}), "{v}");
+    assert_eq!(row("@b")["derivation"]["excluded_chains"], serde_json::json!([]),
+        "@b dropped nothing: {v}");
 
     // @a's θ̂ moves off the fast-epidemic pull → its elpd changes.
     assert!(

@@ -163,6 +163,91 @@ fn a_training_file_edited_after_the_fit_is_refused_and_overridable() {
         "the JSON states the mismatch as a field:\n{v}");
 }
 
+/// A trace records how it was computed (schema 5): `pfilter
+/// --save-prequential` writes its own single pass, and a trace `compare`
+/// derives records what the derivation did — the replicates it combined and
+/// where θ came from. Two rows scored at different particle or replicate
+/// counts are refused (exit 2) and render, stating it, under
+/// `--allow-mismatched-filter-settings`.
+#[test]
+fn the_trace_records_its_filter_settings_and_compare_checks_them() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let fit_a = fit(dir, "a", 0.10);
+    fit(dir, "b", 0.15);
+
+    std::fs::write(dir.join("theta.toml"),
+        "sigma = 0.25\ngamma = 0.3\nrho = 0.5\nk = 10.0\np_detect = 0.5\n\
+         N0 = 1000\nbeta = 0.1\nI0 = 5\n").unwrap();
+    let out = Command::new(binary()).env_remove("CLICOLOR_FORCE")
+        .env_remove("CAMDL_OUTPUT_DIR")
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .args(["pfilter", &golden_ir().to_string_lossy(),
+               "--data", &format!("weekly_cases={}", fit_a.join("obs.tsv").display()),
+               "--params", "theta.toml", "--particles", "200", "--dt", "1",
+               "--seed", "3", "--save-prequential", "manual", "--no-store"])
+        .current_dir(dir)
+        .output().expect("spawn camdl pfilter");
+    assert!(out.status.success(), "pfilter failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    let manual: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("manual.json")).unwrap()).unwrap();
+    assert_eq!(manual["schema_version"], 5);
+    assert_eq!(manual["derivation"], serde_json::json!({
+        "particles": 200, "replicates": 1, "dt": 1.0, "seed": 3,
+        "theta": "supplied", "excluded_chains": [], "enabled": [], "disabled": [],
+    }), "pfilter records its single pass: {manual}");
+
+    // Derived rows: two replicates of an optimizer fit's winner.
+    let out = compare(dir, &["--format", "json"]);
+    assert!(out.status.success(), "compare failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    for row in v["rows"].as_array().unwrap() {
+        let d = &row["derivation"];
+        assert_eq!(d["particles"], 100, "{row}");
+        assert_eq!(d["replicates"], 2, "the derive's replicate count, not the pass's: {row}");
+        assert_eq!(d["seed"], 1, "the filter seed replicate 0 ran at: {row}");
+        assert_eq!(d["theta"], "optimizer_winner", "an IF2 fit's θ is its winner: {row}");
+        assert_eq!(d["excluded_chains"], serde_json::json!([]), "{row}");
+    }
+    assert!(v["filter_settings_mismatch"].is_null() && v["filter_settings_unchecked"].is_null(),
+        "{v}");
+
+    // The pfilter trace (200 particles, 1 replicate) against a derived row
+    // (100 particles, 2 replicates).
+    let run = |extra: &[&str]| {
+        let mut args = vec!["compare", "manual.json", "b/fit.toml",
+            "--particles", "100", "--draws", "1", "--replicates", "2"];
+        args.extend_from_slice(extra);
+        Command::new(binary()).env_remove("CLICOLOR_FORCE")
+            .env_remove("CAMDL_OUTPUT_DIR")
+            .env("CAMDL_SKIP_VERSION_CHECK", "1")
+            .args(&args).current_dir(dir)
+            .output().expect("spawn camdl compare")
+    };
+    let out = run(&[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2),
+        "different filter settings are a commensurability refusal:\n{stderr}");
+    // `b/fit.toml` is the only `fit.toml` here, so its row is `fit.toml`.
+    for needle in ["'manual.json'", "'fit.toml'", "particles 200", "particles 100",
+                   "replicates 1", "replicates 2", "biased downward",
+                   "--allow-mismatched-filter-settings"] {
+        assert!(stderr.contains(needle), "the refusal names {needle:?}:\n{stderr}");
+    }
+
+    let out = run(&["--allow-mismatched-filter-settings"]);
+    assert!(out.status.success(), "the override renders:\n{}",
+        String::from_utf8_lossy(&out.stderr));
+    let table = String::from_utf8_lossy(&out.stdout);
+    assert!(table.contains("different particle-filter settings")
+            && table.contains("--allow-mismatched-filter-settings was set"),
+        "the table states the mismatch:\n{table}");
+    let out = run(&["--allow-mismatched-filter-settings", "--format", "json"]);
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert!(v["filter_settings_mismatch"].as_str().is_some_and(|s| s.contains("particles 200")),
+        "{v}");
+}
+
 /// `compare` derives each row by running `camdl pfilter` once per draw per
 /// replicate. Each of those runs used to record a `pfilters/` leaf under the
 /// caller's output root — a log-likelihood nobody asked for, written into

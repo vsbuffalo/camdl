@@ -1010,6 +1010,19 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             recorded, &y_obs, &per_stream_obs, &per_stream_cov, &result.ess_trace, t0, seed,
             obs_model.first_observation_opens_after_run_start(smc_config.t_start),
             score_from_time);
+        // Schema 5: how this trace was computed. One pass (`--replicates N`
+        // is refused beside `--save-prequential`), at the parameters this
+        // invocation was given.
+        trace.derivation = Some(sim::inference::prequential::Derivation {
+            particles: n_particles,
+            replicates: 1,
+            dt,
+            seed,
+            theta: sim::inference::prequential::ThetaSource::Supplied,
+            excluded_chains: Vec::new(),
+            enabled: adhoc_enable.clone(),
+            disabled: adhoc_disable.clone(),
+        });
         if !save_samples {
             for step in &mut trace.steps {
                 step.y_pred_samples.clear();

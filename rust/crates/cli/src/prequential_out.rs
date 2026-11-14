@@ -178,6 +178,7 @@ mod tests {
             schema_version: 3, t0: 0, provenance: Provenance::PlugIn,
             conditioning: Conditioning::InSample, steps, warnings: vec![],
             score_from: None, pit_randomization_seed: None,
+            derivation: None,
         }
     }
 
