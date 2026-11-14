@@ -414,7 +414,7 @@ store, and a `--sweep` adds a parameter grid to it:
 
 ```bash
 camdl simulate model.camdl --params p.toml --scenario baseline,with_sia --seeds 1:100
-camdl simulate model.camdl --params p.toml --scenario baseline,with_sia --sweep beta=lin(0.2,0.6,5) --seeds 1:50
+camdl simulate model.camdl --params p.toml --scenario baseline,with_sia --sweep "beta=lin(0.2,0.6,5)" --seeds 1:50
 ```
 
 ---

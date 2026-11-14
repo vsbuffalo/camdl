@@ -2415,7 +2415,7 @@ camdl simulate sir_priors.camdl --draws uniform -n 5 --draws-out draws_uniform.t
 
 # ── Deterministic grid over a parameter (the design axis) ─
 camdl simulate sirv.camdl --params params.toml \
-    --scenario baseline,with_vaccination --sweep beta=lin(0.2,0.6,5) --seeds 1:50
+    --scenario baseline,with_vaccination --sweep "beta=lin(0.2,0.6,5)" --seeds 1:50
 
 # ── Two swept parameters: the name-sorted Cartesian product ─
 camdl simulate sir_basic.camdl --params params.toml \
@@ -2425,7 +2425,7 @@ camdl simulate sir_basic.camdl --params params.toml \
 camdl simulate sir_basic.camdl --params params.toml --sweep-file design.tsv --replicates 5
 
 # ── Plan the grid against the store without running ───────
-camdl simulate sirv.camdl --params params.toml --sweep beta=lin(0.2,0.6,5) --seeds 1:50 --dry-run
+camdl simulate sirv.camdl --params params.toml --sweep "beta=lin(0.2,0.6,5)" --seeds 1:50 --dry-run
 ```
 
 `-n` / `--n-draws` sets the draw count for `--draws prior|uniform` (there is no
