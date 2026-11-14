@@ -182,6 +182,17 @@ impl Row {
             .map_err(|e| format!("'{}': {e}", self.name))?;
         Ok(Row { trace, ..self.clone() })
     }
+
+    /// The leaves this row's fit bound, sorted ([`StreamBindings::leaves`]),
+    /// or `None` when the input does not say (an explicit
+    /// `prequential.json`).
+    fn assimilated(&self) -> Option<Vec<String>> {
+        match &self.streams {
+            RowStreams::Derived { bindings, .. } =>
+                Some(bindings.leaves().map(|(l, _)| l.to_string()).collect()),
+            RowStreams::Explicit => None,
+        }
+    }
 }
 
 /// What a row's input says about the observation streams behind its trace.
@@ -793,6 +804,7 @@ enum Waiver {
     DataMismatch,
     ChangedData,
     MismatchedFilterSettings,
+    InSampleAblation,
 }
 
 impl Waiver {
@@ -803,6 +815,7 @@ impl Waiver {
             Waiver::DataMismatch => "--allow-data-mismatch",
             Waiver::ChangedData => "--allow-changed-data",
             Waiver::MismatchedFilterSettings => "--allow-mismatched-filter-settings",
+            Waiver::InSampleAblation => "--allow-in-sample-ablation",
         }
     }
 
@@ -827,6 +840,12 @@ impl Waiver {
                 "The log of a particle-filter likelihood estimate is biased downward, \
                  and by more at fewer particles (and fewer replicates combined), so \
                  part of Δelpd would measure the filters rather than the models.",
+            Waiver::InSampleAblation =>
+                "Scored in-sample, Δelpd leans toward the fit that assimilated fewer \
+                 streams: its θ̂ was chosen to fit the shared stream alone, while the \
+                 other fit's traded that stream off against the rest, so on its own \
+                 training data it fits it no better and usually slightly worse, \
+                 whatever the extra streams contribute to prediction.",
         }
     }
 }
@@ -839,6 +858,7 @@ struct Waivers {
     data_mismatch: bool,
     changed_data: bool,
     mismatched_filter_settings: bool,
+    in_sample_ablation: bool,
 }
 
 impl Waivers {
@@ -849,6 +869,7 @@ impl Waivers {
             data_mismatch: a.allow_data_mismatch,
             changed_data: a.allow_changed_data,
             mismatched_filter_settings: a.allow_mismatched_filter_settings,
+            in_sample_ablation: a.allow_in_sample_ablation,
         }
     }
 
@@ -859,6 +880,7 @@ impl Waivers {
             Waiver::DataMismatch => self.data_mismatch,
             Waiver::ChangedData => self.changed_data,
             Waiver::MismatchedFilterSettings => self.mismatched_filter_settings,
+            Waiver::InSampleAblation => self.in_sample_ablation,
         }
     }
 }
@@ -948,6 +970,48 @@ impl Preflight {
     }
 }
 
+/// Each distinct assimilated set among `rows`, with the rows that have it, in
+/// the order first seen: "'full' assimilated cases, deaths; 'cases_only'
+/// assimilated cases". A row whose set is not recorded is its own entry, since
+/// an unknown set is not known to equal any other.
+fn assimilated_sets(rows: &[Row]) -> Vec<String> {
+    let mut groups: Vec<(Option<Vec<String>>, Vec<&str>)> = Vec::new();
+    for r in rows {
+        let set = r.assimilated();
+        match groups.iter_mut().find(|(s, _)| s.is_some() && *s == set) {
+            Some((_, names)) => names.push(&r.name),
+            None => groups.push((set, vec![&r.name])),
+        }
+    }
+    groups.into_iter().map(|(set, names)| {
+        let who = names.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(", ");
+        match set {
+            Some(s) => format!("{who} assimilated {}", s.join(", ")),
+            None => format!("{who} (not recorded: an explicit prequential.json)"),
+        }
+    }).collect()
+}
+
+/// Whether `rows` assimilated different streams: some row's set is not
+/// recorded, or two recorded sets differ.
+fn assimilated_sets_differ(rows: &[Row]) -> bool {
+    let sets: Vec<Option<Vec<String>>> = rows.iter().map(Row::assimilated).collect();
+    sets.iter().any(Option::is_none) || sets.windows(2).any(|w| w[0] != w[1])
+}
+
+/// The in-sample stream ablation, or `None`: rows re-scored on the same leaves
+/// (`--streams`), stamped in-sample, whose fits assimilated different streams.
+fn in_sample_ablation(rows: &[Row]) -> Option<Mismatch> {
+    let first = rows.first()?;
+    let rescored = first.trace.scored_streams.is_some();
+    let in_sample = first.trace.conditioning == Conditioning::InSample;
+    (rescored && in_sample && rows.len() >= 2 && assimilated_sets_differ(rows)).then(|| Mismatch {
+        rows: rows.iter().map(|r| r.name.clone()).collect(),
+        finding: format!("the compared fits assimilated different streams and are scored \
+            in-sample: {}", assimilated_sets(rows).join("; ")),
+    })
+}
+
 fn provenance_kind(p: &sim::inference::prequential::Provenance) -> String {
     use sim::inference::prequential::Provenance;
     match p {
@@ -997,6 +1061,19 @@ fn preflight(rows: &[Row], waived: &Waivers) -> Result<Preflight, String> {
                    boundaries: {ends:?}\n       Held-out scores over different windows are not \
                    commensurable; declare the same holdout_after in every \
                    compared fit."));
+    }
+
+    // A table re-scored on one leaf (`--streams`) whose rows' fits assimilated
+    // different streams is the stream-ablation experiment. In-sample it is
+    // biased by construction toward the fit trained on fewer streams; held
+    // out, neither fit's θ̂ was tuned to the scored rows. All rows share one
+    // conditioning mode by now, so the first row's is the cohort's.
+    if let Some(m) = in_sample_ablation(rows) {
+        let message = format!("error: {}.\n       {}\n       Declare the same \
+            holdout_after in every compared fit, so the rows are scored held-out, or \
+            pass --allow-in-sample-ablation to render anyway.",
+            m.finding, Waiver::InSampleAblation.consequence());
+        checks.waive(waived, Waiver::InSampleAblation, m, message)?;
     }
 
     // Provenance preflight (Stage 4.1): a plug-in trace (under-dispersed —
@@ -4496,7 +4573,7 @@ mod tests {
     fn every_waiver() -> Waivers {
         Waivers {
             mismatched_horizon: true, mixed_provenance: true, data_mismatch: true,
-            changed_data: true, mismatched_filter_settings: true,
+            changed_data: true, mismatched_filter_settings: true, in_sample_ablation: true,
         }
     }
 
@@ -4528,13 +4605,19 @@ mod tests {
                 rows[0].trace.derivation = Some(derivation(1000, 5));
                 rows[1].trace.derivation = Some(derivation(200, 5));
             }
+            // Fits of different stream sets, both re-scored on the one they
+            // share, in-sample.
+            Waiver::InSampleAblation => rows = vec![
+                derived_row("a", &CASES_DEATHS, &["cases", "deaths"]).onto("cases").unwrap(),
+                derived_row("b", &CASES_DEATHS, &["cases"]).onto("cases").unwrap(),
+            ],
         }
         rows
     }
 
-    const ALL_WAIVERS: [Waiver; 5] = [
+    const ALL_WAIVERS: [Waiver; 6] = [
         Waiver::MismatchedHorizon, Waiver::MixedProvenance, Waiver::DataMismatch,
-        Waiver::ChangedData, Waiver::MismatchedFilterSettings,
+        Waiver::ChangedData, Waiver::MismatchedFilterSettings, Waiver::InSampleAblation,
     ];
 
     /// D13: a comparison that renders only because a flag waived a failed
@@ -5395,6 +5478,62 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         let refusal = preflight(&on_cases, &Waivers::default()).unwrap_err();
         assert!(refusal.contains("'a' records no hash") && refusal.contains("'b' records no hash"),
             "{refusal}");
+    }
+
+    /// The stream-ablation experiment scored in-sample is biased by
+    /// construction, so a `--streams` table whose rows assimilated different
+    /// stream sets is refused unless the rows are scored held-out. The refusal
+    /// names each row's set and the remedy.
+    #[test]
+    fn fits_that_assimilated_different_streams_are_refused_in_sample() {
+        let full = derived_row("full", &CASES_DEATHS, &["cases", "deaths"]);
+        let cases_only = derived_row("cases_only", &CASES_DEATHS, &["cases"]);
+        assert_eq!(full.assimilated(), Some(vec!["cases".to_string(), "deaths".to_string()]));
+        let on_cases = [full.onto("cases").unwrap(), cases_only.onto("cases").unwrap()];
+        let refusal = preflight(&on_cases, &Waivers::default()).unwrap_err();
+        assert!(refusal.contains("assimilated different streams")
+                && refusal.contains("'full' assimilated cases, deaths")
+                && refusal.contains("'cases_only' assimilated cases")
+                && refusal.contains("holdout_after")
+                && refusal.contains("--allow-in-sample-ablation")
+                && refusal.contains("fewer"), "{refusal}");
+
+        // The same set: no refusal.
+        let twin = derived_row("twin", &CASES_DEATHS, &["cases", "deaths"]);
+        preflight(&[full.onto("cases").unwrap(), twin.onto("cases").unwrap()], &Waivers::default())
+            .expect("rows that assimilated the same streams compare in-sample");
+
+        // Held out: no refusal.
+        let held = |r: Row| {
+            let mut p = r.onto("cases").unwrap();
+            p.trace.conditioning = Conditioning::HoldOutTail {
+                train_end: 3.0, theta_source: r.name.clone() };
+            p
+        };
+        let checks = preflight(&[held(full.clone()), held(cases_only.clone())], &Waivers::default())
+            .expect("held-out rows need no flag");
+        assert!(checks.overrides.is_empty(), "{checks:?}");
+
+        // An explicit trace does not record what its fit assimilated, and
+        // counts as different even from a row with the same streams.
+        let mut explicit = full.clone();
+        explicit.name = "pq".into();
+        explicit.streams = RowStreams::Explicit;
+        assert_eq!(explicit.assimilated(), None);
+        let refusal = preflight(&[full.onto("cases").unwrap(), explicit.onto("cases").unwrap()],
+                                &Waivers::default()).unwrap_err();
+        assert!(refusal.contains("'pq' (not recorded: an explicit prequential.json)"), "{refusal}");
+        // Two unknown sets are not known to be equal either.
+        let mut explicit_too = explicit.clone();
+        explicit_too.name = "pq2".into();
+        let refusal = preflight(&[explicit.onto("cases").unwrap(), explicit_too.onto("cases").unwrap()],
+                                &Waivers::default()).unwrap_err();
+        assert!(refusal.contains("'pq' (not recorded") && refusal.contains("'pq2' (not recorded"),
+            "each unknown set is its own entry: {refusal}");
+
+        // A joint comparison is not an ablation: the check is not made there.
+        let twin_joint = [full.clone(), twin.clone()];
+        preflight(&twin_joint, &Waivers::default()).expect("a joint comparison is untouched");
     }
 }
 
