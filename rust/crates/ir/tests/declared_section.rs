@@ -34,8 +34,8 @@ fn golden_text_without_declared() -> String {
 fn the_envelope_reader_keeps_the_declared_section() {
     let text = golden_text();
     let env = ir::envelope_from_str(&text).expect("envelope parses");
-    let declared = env.declared.as_ref().expect("a compiled golden records the declared model");
-    assert_eq!(declared.schema_version, declared::SCHEMA_VERSION);
+    let declared = env.declared.recorded().expect("a compiled golden records the declared model");
+    assert_eq!(declared.schema_version.get(), declared::SCHEMA_VERSION);
 
     // What the envelope type writes back is what the compiler wrote.
     let written: Value = serde_json::to_value(&env).expect("serialize");
@@ -46,7 +46,7 @@ fn the_envelope_reader_keeps_the_declared_section() {
 #[test]
 fn an_envelope_without_the_section_reads_as_not_recorded() {
     let env = ir::envelope_from_str(&golden_text_without_declared()).expect("envelope parses");
-    assert!(env.declared.is_none());
+    assert!(env.declared.is_not_recorded());
     // And writing it back does not invent one.
     let written: Value = serde_json::to_value(&env).expect("serialize");
     assert!(written.get("declared").is_none());

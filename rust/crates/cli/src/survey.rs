@@ -738,7 +738,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
         // only when something moved, so an unanchored model's bytes are
         // untouched.
         let model_ir_json = if moved_any_anchor {
-            ir::to_string_pretty(&model_pre)
+            ir::reemit_with_model(&model_ir_json, &model_pre)
                 .map_err(|e| format!("re-emitting the anchor-resolved IR: {e}"))?
         } else {
             model_ir_json
@@ -1088,7 +1088,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
             &mut model_pre, &inline_bindings, SURVEY_DT,
         )?;
         let model_ir_json = if moved_any_anchor {
-            ir::to_string_pretty(&model_pre)
+            ir::reemit_with_model(&model_ir_json, &model_pre)
                 .map_err(|e| format!("re-emitting the anchor-resolved IR: {e}"))?
         } else {
             model_ir_json

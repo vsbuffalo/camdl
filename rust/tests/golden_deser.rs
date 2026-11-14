@@ -39,7 +39,7 @@ fn deser_golden(name: &str) {
         .unwrap_or_else(|e| panic!("failed to deserialise {}: {}", name, e));
 
     // Round-trip: serialise and deserialise again; structural equality must hold.
-    let json2 = ir::to_string_pretty(&model)
+    let json2 = ir::reemit_with_model(&contents, &model)
         .unwrap_or_else(|e| panic!("failed to serialise {}: {}", name, e));
     let model2 = ir::from_str(&json2)
         .unwrap_or_else(|e| panic!("round-trip deserialise failed for {}: {}", name, e));
@@ -93,7 +93,7 @@ fn binding_bearing_model_round_trips() {
         "fixture must carry model-level bindings"
     );
 
-    let json2 = ir::to_string_pretty(&model).expect("serialise binding model");
+    let json2 = ir::reemit_with_model(&contents, &model).expect("serialise binding model");
     assert!(
         json2.contains("binding_ref"),
         "fixture must reference a binding from a rate (BindingRef), else the \

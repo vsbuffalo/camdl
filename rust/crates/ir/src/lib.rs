@@ -58,10 +58,16 @@ pub fn from_reader<R: std::io::Read>(r: R) -> Result<Model, IrError> {
     env.into_model_checked()
 }
 
-/// Serialise a `Model` to a pretty-printed JSON string. gh#audit-C8:
-/// emits the envelope wrapper with the current `IR_VERSION` constant
-/// (so Rust-emitted IR JSON round-trips through `from_str`).
-pub fn to_string_pretty(model: &Model) -> Result<String, serde_json::Error> {
-    let env = IrEnvelope::wrap(model.clone(), None);
-    serde_json::to_string_pretty(&env)
+/// Re-emit a compiled model after changing it: the envelope read from
+/// `original` with its model replaced by `model`, pretty-printed. The
+/// envelope's `docs` and `declared` sections are carried through unchanged
+/// ([`IrEnvelope::with_model`]). This is the one way a command writes back a
+/// compiled model it read; there is deliberately no function that serialises a
+/// bare `Model` into an envelope, because that would drop both sections
+/// without the caller deciding to.
+///
+/// `original` must be an envelope of the current IR version.
+pub fn reemit_with_model(original: &str, model: &Model) -> Result<String, IrError> {
+    let env = envelope_from_str(original)?.with_model(model.clone());
+    serde_json::to_string_pretty(&env).map_err(|e| IrError::Parse(e.to_string()))
 }

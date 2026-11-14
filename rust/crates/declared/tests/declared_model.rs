@@ -55,7 +55,7 @@ fn small_model() -> DeclaredModel {
     let lit = |v: f64| expr(ExprTree::Const { value: v }, &v.to_string(), &[]);
     let days = |v: f64| expr(ExprTree::Unit { value: v, unit: UnitLit::Days }, &format!("{v}\\,\\text{{d}}"), &[]);
     DeclaredModel {
-        schema_version: SCHEMA_VERSION,
+        schema_version: SchemaVersion::CURRENT,
         compile_inputs: CompileInputs {
             set_values: vec![SetValue { name: "beta".into(), value: 0.3 }],
             files: vec![FileInput { path: "ages.tsv".into(), sha256: Some("ab".repeat(32)) }],

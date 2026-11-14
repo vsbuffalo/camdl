@@ -36,8 +36,8 @@ fn rust_reads_and_rewrites_what_ocaml_wrote() {
 
 #[test]
 fn the_fixture_is_at_the_schema_version_this_crate_writes() {
-    assert_eq!(read("all_variants").schema_version, SCHEMA_VERSION);
-    assert_eq!(read("minimal").schema_version, SCHEMA_VERSION);
+    assert_eq!(read("all_variants").schema_version.get(), SCHEMA_VERSION);
+    assert_eq!(read("minimal").schema_version.get(), SCHEMA_VERSION);
 }
 
 /// `minimal` is the absent case of every optional and the empty case of every

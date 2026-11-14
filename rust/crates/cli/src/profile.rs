@@ -859,7 +859,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 }
             }
         }
-        ir::to_string_pretty(&ident_model).unwrap_or_else(|e| {
+        ir::reemit_with_model(&model_json, &ident_model).unwrap_or_else(|e| {
             out.fail(format!("error: re-emitting the anchor-resolved IR: {e}"));
         })
     } else {

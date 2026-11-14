@@ -95,7 +95,7 @@ fn every_golden_section_reads_through_this_crate() {
 
         let model: DeclaredModel = serde_json::from_value(section.clone())
             .unwrap_or_else(|e| panic!("{name}: the declared section does not deserialize: {e}"));
-        assert_eq!(model.schema_version, SCHEMA_VERSION, "{name}: schema_version");
+        assert_eq!(model.schema_version.get(), SCHEMA_VERSION, "{name}: schema_version");
         let back = serde_json::to_value(&model).expect("serialize");
         assert_eq!(&back, section, "{name}: the section does not round-trip through the typed model");
 
@@ -145,6 +145,6 @@ fn a_section_reads_from_an_envelope_of_another_ir_version() {
     env["model"] = Value::String("not a model this build could read".into());
     let section = env.get("declared").expect("declared section").clone();
     let model: DeclaredModel = serde_json::from_value(section).expect("reads through the declared crate alone");
-    assert_eq!(model.schema_version, SCHEMA_VERSION);
+    assert_eq!(model.schema_version.get(), SCHEMA_VERSION);
     assert!(!model.compartments.is_empty());
 }

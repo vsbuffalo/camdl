@@ -768,7 +768,10 @@ Every serialized IR file is an **envelope** wrapping the model. The top level is
   `schema_version`, so a reader that wants only this section does not need a
   matching `ir_version`. Its shape is the Rust crate `rust/crates/declared`
   (mirrored by `ocaml/lib/ir/declared.ml`); it is not described by
-  `ir/schema.json`. Absent means not recorded. The expanded names each
+  `ir/schema.json`. Absent means not recorded. A section whose `schema_version`
+  the reader does not know is a third state, "unsupported version N": the model
+  still loads and runs, the section is not read, and a command that rewrites the
+  envelope writes the section back as the text it read. The expanded names each
   declaration produced (`expands_to`) are not recorded yet.
 
 ```

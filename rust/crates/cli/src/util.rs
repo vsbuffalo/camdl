@@ -2091,7 +2091,7 @@ mod emitted_ir_version_tests {
             v(r#"{"ir_version":"0.40","validated_by":"ocaml-compiler-v0.40","model":{"#),
             Some("0.40")
         );
-        // ...and the pretty form Rust emits (`ir::to_string_pretty`).
+        // ...and the pretty form Rust emits (`ir::reemit_with_model`).
         assert_eq!(v("{\n  \"ir_version\": \"0.40\",\n  \"model\": {"), Some("0.40"));
     }
 
@@ -4399,7 +4399,7 @@ pub fn rematerialize_with_output_every(
     let mut model = ir::from_str(&src)
         .map_err(|e| format!("IR load error from {}: {}", ir_path, e))?;
     apply_output_every(&mut model, step);
-    let json = ir::to_string_pretty(&model)
+    let json = ir::reemit_with_model(&src, &model)
         .map_err(|e| format!("cannot serialize IR with --output-every: {}", e))?;
     let tmp = tempfile::Builder::new()
         .prefix("camdl-every-")
@@ -5533,5 +5533,40 @@ mod tests {
         // Both messages should be in the same error string.
         assert!(err.contains("outside") && err.contains("not finite"),
             "expected both kinds of violation reported; got: {err}");
+    }
+}
+
+#[cfg(test)]
+mod rewrite_carries_sections_tests {
+    //! A command that reads a compiled model, changes it and writes it back
+    //! must not drop the envelope's `docs` and `declared` sections: both
+    //! describe the model as its author wrote it, and a later `camdl diff`
+    //! reads `declared` from whatever was archived.
+    //!
+    //! Source: `ocaml/golden/sir_basic.ir.json`, a compiled golden (primary).
+
+    use super::rematerialize_with_output_every;
+
+    #[test]
+    fn output_every_rewrite_keeps_the_declared_section() {
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let path = std::path::PathBuf::from(&manifest).join("../../../ocaml/golden/sir_basic.ir.json");
+        let original_text = std::fs::read_to_string(&path).expect("read sir_basic");
+        let original = ir::envelope_from_str(&original_text).expect("parse sir_basic");
+        assert!(original.declared.recorded().is_ok(), "the golden records a declared model");
+
+        let (rewritten_path, _guard) =
+            rematerialize_with_output_every(path.to_str().unwrap(), Some(7.0)).expect("rewrite");
+        assert_ne!(rewritten_path, path.to_str().unwrap(), "the override writes a fresh file");
+        let rewritten = ir::envelope_from_str(&std::fs::read_to_string(&rewritten_path).expect("read rewrite"))
+            .expect("parse rewrite");
+
+        assert_ne!(rewritten.model.output, original.model.output, "the output schedule was overridden");
+        assert_eq!(rewritten.declared, original.declared, "the declared section is carried through");
+        assert_eq!(
+            serde_json::to_string(&rewritten.docs).unwrap(),
+            serde_json::to_string(&original.docs).unwrap(),
+            "the doc dictionary is carried through"
+        );
     }
 }

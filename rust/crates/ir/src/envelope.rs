@@ -101,15 +101,23 @@ pub struct IrEnvelope {
     /// The declared model: the model as its author wrote it, before expansion
     /// (`docs/dev/proposals/2026-11-13-model-structure-diff.md`). Written by
     /// the compiler from the same compile as `model`; like `docs` it sits
-    /// outside `Model`, so no model identity or `run_id` covers it. `None`
-    /// means not recorded: an envelope written without the compiler.
+    /// outside `Model`, so no model identity or `run_id` covers it.
+    ///
+    /// Three states ([`declared::DeclaredSection`]): not recorded (an envelope
+    /// written without the compiler), recorded, and recorded at a
+    /// `schema_version` this build does not read. The last still loads and
+    /// runs, since the section is not the model, and is written back as the
+    /// text it was read from.
     ///
     /// The section is a self-contained document versioned by its own
     /// `schema_version`. A reader that wants only this section parses it with
     /// the `declared` crate from the raw JSON and does not need this type or
     /// a matching `ir_version`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub declared: Option<declared::DeclaredModel>,
+    #[serde(
+        default = "declared::DeclaredSection::not_recorded",
+        skip_serializing_if = "declared::DeclaredSection::is_not_recorded"
+    )]
+    pub declared: declared::DeclaredSection,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -126,14 +134,34 @@ impl IrEnvelope {
     /// Wrap a `Model` in the envelope with the current `IR_VERSION`.
     /// `validated_by` is set by the producer (OCaml compiler) — Rust
     /// passes None for hand-emitted IR (e.g. tests).
-    pub fn wrap(model: Model, validated_by: Option<String>) -> Self {
+    ///
+    /// `declared` has no default: a caller wrapping a model it read from a
+    /// compiled envelope passes the section it read, and a caller wrapping a
+    /// model it built by hand says `DeclaredSection::NotRecorded`. A model
+    /// that was read, changed and is being written back goes through
+    /// [`IrEnvelope::with_model`] instead, which carries `docs` too.
+    pub fn wrap(
+        model: Model,
+        validated_by: Option<String>,
+        declared: declared::DeclaredSection,
+    ) -> Self {
         Self {
             ir_version: IR_VERSION.trim().to_string(),
             validated_by,
             model,
             docs: ModelDocs::default(),
-            declared: None,
+            declared,
         }
+    }
+
+    /// This envelope with its model replaced: what a command writes after it
+    /// read a compiled model and changed it (resolved an observation anchor,
+    /// overrode the output schedule). `docs` and `declared` are carried
+    /// through unchanged, because both describe the model as its author wrote
+    /// it and neither is touched by such a change. `validated_by` is cleared:
+    /// the compiler validated the model it wrote, not this one.
+    pub fn with_model(self, model: Model) -> Self {
+        Self { model, validated_by: None, ..self }
     }
 
     /// Unwrap to a `Model`, asserting version matches. Discards `docs` (use

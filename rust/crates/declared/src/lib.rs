@@ -25,11 +25,205 @@
 //! This crate depends on nothing in the workspace. A document of these types
 //! is versioned by [`DeclaredModel::schema_version`] alone and is readable
 //! without the reader for compiled models.
+//!
+//! # Reading a document
+//!
+//! A document's `schema_version` is checked where it is read, by this crate,
+//! so a reader with no `ir` crate gets the same refusal:
+//!
+//! - [`DeclaredModel::from_json_str`] reads a standalone document and refuses
+//!   a version this crate does not understand, naming the version found and
+//!   the versions understood.
+//! - [`DeclaredSection`] is what an IR envelope holds. It has three states,
+//!   not two: not recorded, recorded, and recorded at a version this build
+//!   does not understand. The third keeps the document's text, so a command
+//!   that reads a compiled model and writes it back carries the section
+//!   through unchanged, and a diff can say "unsupported version N" instead of
+//!   "not recorded".
+//! - A [`DeclaredModel`] cannot hold an unknown version at all:
+//!   [`SchemaVersion`] refuses one when it is deserialized.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::value::RawValue;
 
 /// The schema version this crate writes.
 pub const SCHEMA_VERSION: u32 = 1;
+
+/// Every schema version this crate reads. Published documents are read for as
+/// long as they are cited, so a version is added here and never removed.
+pub const SUPPORTED_SCHEMA_VERSIONS: &[u32] = &[SCHEMA_VERSION];
+
+// ── Versions and reading ────────────────────────────────────────────────────
+
+/// Why a declared-model document could not be used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeclaredError {
+    /// The document's `schema_version` is not one this build reads.
+    UnsupportedVersion { found: u32, supported: &'static [u32] },
+    /// The envelope it was asked of holds no declared section.
+    NotRecorded,
+    /// The text is not a declared-model document of its stated version.
+    Malformed(String),
+}
+
+impl std::fmt::Display for DeclaredError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedVersion { found, supported } => {
+                let known: Vec<String> = supported.iter().map(u32::to_string).collect();
+                write!(
+                    f,
+                    "declared model has schema_version {found}; this build reads {}",
+                    known.join(", ")
+                )
+            }
+            Self::NotRecorded => f.write_str("no declared model is recorded"),
+            Self::Malformed(why) => write!(f, "declared model is malformed: {why}"),
+        }
+    }
+}
+
+impl std::error::Error for DeclaredError {}
+
+/// A schema version this crate reads. The only way to make one is
+/// [`SchemaVersion::new`], which refuses any other, so a [`DeclaredModel`]
+/// holding an unknown version cannot exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SchemaVersion(u32);
+
+impl SchemaVersion {
+    /// The version this crate writes.
+    pub const CURRENT: SchemaVersion = SchemaVersion(SCHEMA_VERSION);
+
+    pub fn new(version: u32) -> Result<Self, DeclaredError> {
+        if SUPPORTED_SCHEMA_VERSIONS.contains(&version) {
+            Ok(Self(version))
+        } else {
+            Err(DeclaredError::UnsupportedVersion {
+                found: version,
+                supported: SUPPORTED_SCHEMA_VERSIONS,
+            })
+        }
+    }
+
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl Serialize for SchemaVersion {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_u32(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for SchemaVersion {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let version = u32::deserialize(d)?;
+        Self::new(version).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Only the version of a document, read before anything else is trusted.
+#[derive(Deserialize)]
+struct VersionOnly {
+    schema_version: u32,
+}
+
+fn peek_version(text: &str) -> Result<u32, DeclaredError> {
+    serde_json::from_str::<VersionOnly>(text)
+        .map(|v| v.schema_version)
+        .map_err(|e| DeclaredError::Malformed(format!("no readable schema_version: {e}")))
+}
+
+/// The declared section of an IR envelope.
+///
+/// Three states, because "absent" and "present but not readable by this
+/// build" lead to different statements downstream: a diff of a model with no
+/// section says "not recorded"; of a model whose section is newer than the
+/// reader, "unsupported version N". Neither stops the model from loading or
+/// running: the section is not part of the model.
+#[derive(Debug, Clone)]
+pub enum DeclaredSection {
+    /// The envelope has no section: it was written without the compiler.
+    NotRecorded,
+    /// A section of a version this build reads.
+    Recorded(Box<DeclaredModel>),
+    /// A section whose `schema_version` this build does not read. `raw` is the
+    /// document exactly as it was read, and is what is written back.
+    UnsupportedVersion { schema_version: u32, raw: Box<RawValue> },
+}
+
+impl DeclaredSection {
+    /// The value an envelope field takes when the JSON has no `declared`
+    /// member. Named, and not a `Default` impl, so that code constructing an
+    /// envelope has to say which state it means.
+    pub fn not_recorded() -> Self {
+        Self::NotRecorded
+    }
+
+    pub fn is_not_recorded(&self) -> bool {
+        matches!(self, Self::NotRecorded)
+    }
+
+    /// The declared model, or why there is none to read.
+    pub fn recorded(&self) -> Result<&DeclaredModel, DeclaredError> {
+        match self {
+            Self::Recorded(model) => Ok(model),
+            Self::NotRecorded => Err(DeclaredError::NotRecorded),
+            Self::UnsupportedVersion { schema_version, .. } => Err(DeclaredError::UnsupportedVersion {
+                found: *schema_version,
+                supported: SUPPORTED_SCHEMA_VERSIONS,
+            }),
+        }
+    }
+
+    fn from_raw(raw: Box<RawValue>) -> Result<Self, DeclaredError> {
+        let schema_version = peek_version(raw.get())?;
+        if SUPPORTED_SCHEMA_VERSIONS.contains(&schema_version) {
+            let model: DeclaredModel = serde_json::from_str(raw.get())
+                .map_err(|e| DeclaredError::Malformed(e.to_string()))?;
+            Ok(Self::Recorded(Box::new(model)))
+        } else {
+            Ok(Self::UnsupportedVersion { schema_version, raw })
+        }
+    }
+}
+
+/// Two sections are equal when they are in the same state and say the same
+/// thing; two unsupported sections, when their text is the same.
+impl PartialEq for DeclaredSection {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::NotRecorded, Self::NotRecorded) => true,
+            (Self::Recorded(a), Self::Recorded(b)) => a == b,
+            (
+                Self::UnsupportedVersion { schema_version: va, raw: ra },
+                Self::UnsupportedVersion { schema_version: vb, raw: rb },
+            ) => va == vb && ra.get() == rb.get(),
+            _ => false,
+        }
+    }
+}
+
+impl Serialize for DeclaredSection {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::NotRecorded => s.serialize_none(),
+            Self::Recorded(model) => model.serialize(s),
+            Self::UnsupportedVersion { raw, .. } => raw.serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for DeclaredSection {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        match Option::<Box<RawValue>>::deserialize(d)? {
+            None => Ok(Self::NotRecorded),
+            Some(raw) => Self::from_raw(raw).map_err(serde::de::Error::custom),
+        }
+    }
+}
 
 // ── The document ────────────────────────────────────────────────────────────
 
@@ -38,7 +232,7 @@ pub const SCHEMA_VERSION: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeclaredModel {
-    pub schema_version: u32,
+    pub schema_version: SchemaVersion,
     pub compile_inputs: CompileInputs,
     /// `time_unit = 'days`.
     pub time_unit: Option<UnitLit>,
@@ -67,6 +261,17 @@ pub struct DeclaredModel {
     pub output: Option<OutputDecl>,
     pub quantities: Vec<QuantityDecl>,
     pub contrasts: Vec<ContrastDecl>,
+}
+
+impl DeclaredModel {
+    /// Read a standalone declared-model document. The version is checked
+    /// first, so a document from a newer camdl is refused with
+    /// [`DeclaredError::UnsupportedVersion`] and not with a complaint about
+    /// whichever of its fields this build happens not to know.
+    pub fn from_json_str(text: &str) -> Result<Self, DeclaredError> {
+        SchemaVersion::new(peek_version(text)?)?;
+        serde_json::from_str(text).map_err(|e| DeclaredError::Malformed(e.to_string()))
+    }
 }
 
 /// What entered the compile from outside the model file. Two compiles of one

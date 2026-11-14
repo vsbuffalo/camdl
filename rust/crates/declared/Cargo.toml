@@ -3,11 +3,11 @@ name = "declared"
 version = "0.1.0"
 edition = "2021"
 
-# A leaf crate: types and serde only. It must not depend on `ir`, `runid`,
-# `sim` or `cli`, so that a reader of a published declared-model document never
-# needs the runtime's reader for compiled models.
+# A leaf crate: types, serde and serde_json only. It must not depend on `ir`,
+# `runid`, `sim` or `cli`, so that a reader of a published declared-model
+# document never needs the runtime's reader for compiled models.
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-
-[dev-dependencies]
-serde_json.workspace = true
+# `raw_value`: a section of a schema version this build does not read is kept
+# as the text it was read from and written back unchanged.
+serde_json = { workspace = true, features = ["raw_value"] }
