@@ -261,7 +261,10 @@ pub struct Derivation {
     /// joint predictive, not a sum of the per-stream logs.
     pub replicate_elpd_by_stream: std::collections::BTreeMap<String, Vec<f64>>,
     /// The filter-noise Monte-Carlo SE of the elpd, from `replicate_elpd`
-    /// (the log-mean-exp delta-method SE); `None` for a single pass.
+    /// (the log-mean-exp delta-method SE); `None` for a single pass. Omitted
+    /// when absent, so a `null` in a trace keeps its one meaning — a
+    /// non-finite value (see `score_from`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mc_se_elpd: Option<f64>,
     /// Waivers applied to this one trace when it was derived, so a reader of
     /// the trace alone can see them. Empty (and omitted) when none.
@@ -1039,7 +1042,8 @@ mod tests {
                 .into_iter().collect());
         assert_eq!(d.mc_se_elpd, None);
         let json = serde_json::to_value(&d).unwrap();
-        assert!(json["mc_se_elpd"].is_null(), "{json}");
+        // Absent, not null: in a trace a null means a non-finite score leaked.
+        assert!(json.get("mc_se_elpd").is_none(), "{json}");
         assert!(json.get("overrides").is_none(), "no overrides, omitted: {json}");
     }
 

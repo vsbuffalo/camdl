@@ -7284,7 +7284,7 @@ Each trace (schema 5) records how it was computed, as its `derivation` block:
 `posterior_mean { n_draws }`, `optimizer_winner` or
 `posterior_draws { n_used, n_available }`), `excluded_chains`, `enabled` and
 `disabled`, the replicate totals `replicate_elpd` and
-`replicate_elpd_by_stream`, `mc_se_elpd` (the filter-noise SE, null for one
+`replicate_elpd_by_stream`, `mc_se_elpd` (the filter-noise SE, absent for one
 pass), and `overrides` — the waivers applied to that one trace
 (`in_sample_forced`, `changed_data`), omitted when there are none. A row's
 filter-noise SE is read from this block, so an explicit `prequential.json` that
