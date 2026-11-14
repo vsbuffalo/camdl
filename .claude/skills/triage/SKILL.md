@@ -21,30 +21,30 @@ Reference surfaces:
 
 ## Procedure
 
-1. **Rebase on current main — fetch FIRST.** The maintainer pushes often, so a
+1. **Fetch, then rebase on current main.** The maintainer pushes often, so a
    local `origin/main` ref goes stale fast; always `git fetch origin`
    immediately before rebasing, then rebase the working branch (verify
    ff-ready). Mine the new-commit delta since last triage for closures:
    `git log <prev>..origin/main`, grep `gh#NN`.
 
 2. **Classify the unclassified.** Find open issues missing a `kind/` or `area/`
-   label; read each (never label from the title alone); apply exactly one
-   `kind/`
-   - at least one `area/` (`gh issue edit N --add-label …`).
+   label; read each, because a title alone mislabels; apply exactly one `kind/`
+   and at least one `area/` (`gh issue edit N --add-label …`).
 
-3. **Audit for stale/fixed — conservatively, against CODE.** For issues
-   plausibly addressed by landed work, verify against current main with a
-   concrete mechanism (commit SHA / file:line / passing test) — NEVER trust a
-   commit message. Subagents are good here (one per issue or small cluster,
-   read-only). Default is KEEP; CLOSE only when the full ask is met with
-   evidence; a **blocker** CLOSEs only with a fix _and_ a pinning test.
-   Distinguish "the forward thing changed" from "the inference thing changed" —
-   different claims (e.g. real-flow ODE forward sim ≠ real-compartment
-   inference).
+3. **Audit for stale or fixed issues against the code.** For issues plausibly
+   addressed by landed work, verify against current main with a concrete
+   mechanism (commit SHA / file:line / passing test); a commit message is a
+   claim, not evidence. Do the reads yourself unless the candidate list is long
+   enough that they would crowd out the triage; then hand a cluster to a
+   read-only subagent and re-check what it reports. The default is to keep an
+   issue open: propose closing only when the full ask is met with evidence, and
+   a **blocker** only with a fix _and_ a pinning test. Distinguish "the forward
+   thing changed" from "the inference thing changed" — different claims (e.g.
+   real-flow ODE forward sim ≠ real-compartment inference).
 
-4. **Present close candidates — do NOT close.** Print a NUMBERED list, each with
-   a 2-3 sentence draft close comment citing the evidence. On the maintainer's
-   nod:
+4. **Present close candidates; the maintainer closes.** Print a numbered list,
+   each with a 2-3 sentence draft close comment citing the evidence. On the
+   maintainer's nod:
    `gh issue comment N --body-file f.md && gh issue close N --reason completed`.
    External-reporter closes especially warrant their eyes.
 
