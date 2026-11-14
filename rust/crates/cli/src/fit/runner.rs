@@ -1975,11 +1975,15 @@ pub use crate::run_meta::TrainingWindow;
 ///   after the last there is nothing withheld and the declaration would
 ///   be inert again — both hard errors.
 /// - `[data.holdout]` explicit files: the training streams are left
-///   whole; each holdout file is loaded (same loader, same checks) and
-///   must lie strictly after its stream's last training time — tail-only
-///   in v1 (decision 6); an interleaved holdout names the h-block
-///   follow-up (§3.9.2). `train_end` is the latest training time across
-///   streams.
+///   whole, and `train_end` is the latest training time over *every* bound
+///   stream, whether or not it has a holdout file. Each holdout file is
+///   loaded (same loader, same checks) and all its rows must lie strictly
+///   after that `train_end` — tail-only in v1 (decision 6); an interleaved
+///   holdout names the h-block follow-up (§3.9.2). Streams may end training
+///   at different times, but no stream may train on a time that `compare`
+///   then scores as held out (`--score-from train_end`): a stream with no
+///   holdout file whose training runs past another stream's held-out rows
+///   is a hard error.
 ///
 /// Called from the fit-only path (`FitRunConfig::build`) — never from the
 /// shared loading seam, which `pfilter`/`profile`/compare's holdout
@@ -2043,7 +2047,14 @@ pub(crate) fn apply_holdout_declaration(
     if let Some(holdout_files) = &data.holdout {
         let sources: Vec<&str> =
             streams.iter().map(|s| s.obs_model_ir.source.as_str()).collect();
-        let mut train_end = f64::NEG_INFINITY;
+        let last_train_of = |s: &ObsStream| s.data.iter()
+            .map(|o| o.time).fold(f64::NEG_INFINITY, f64::max);
+        // Over every bound stream, not only those with a holdout file:
+        // `compare` scores everything after `train_end` as held out, so a
+        // stream that trained past it would be scored in-sample under the
+        // held-out stamp.
+        let train_end = streams.iter()
+            .map(last_train_of).fold(f64::NEG_INFINITY, f64::max);
         let mut n_holdout = 0usize;
         for (source, path) in holdout_files {
             let Some(s) = streams.iter()
@@ -2053,8 +2064,6 @@ pub(crate) fn apply_holdout_declaration(
                      bound observation stream (bound: {}).",
                     sources.join(", ")));
             };
-            let last_train = s.data.iter()
-                .map(|o| o.time).fold(f64::NEG_INFINITY, f64::max);
             let siblings: Vec<&ir::observation::ObservationModel> =
                 model.observations.iter()
                     .filter(|o| o.source == *source)
@@ -2063,17 +2072,33 @@ pub(crate) fn apply_holdout_declaration(
                 load_observations(path, &s.obs_model_ir, &siblings, dt, time_opts)?;
             let first_hold = hold_obs.iter()
                 .map(|o| o.time).fold(f64::INFINITY, f64::min);
-            if first_hold <= last_train + TIME_TIE_EPS {
+            if first_hold <= train_end + TIME_TIE_EPS {
+                // The streams whose training reaches the first held-out row.
+                let mut late: Vec<String> = Vec::new();
+                for t in streams.iter() {
+                    let last = last_train_of(t);
+                    let entry = format!(
+                        "'{}' (training runs to t = {last})", t.obs_model_ir.source);
+                    if last + TIME_TIE_EPS >= first_hold && !late.contains(&entry) {
+                        late.push(entry);
+                    }
+                }
                 return Err(format!(
-                    "[data.holdout] for stream '{source}': held-out time \
-                     t = {first_hold} does not lie strictly after the last \
-                     training time t = {last_train}. v1 supports tail-only \
-                     holdouts (decision 6 of the 2026-08-29 proposal); an \
-                     interior/interleaved holdout is the h-block follow-up \
-                     (§3.9.2)."));
+                    "[data.holdout] for stream '{source}': its held-out rows \
+                     start at t = {first_hold}, but the training data of \
+                     stream {} reaches that time. Every held-out row must lie \
+                     strictly after the latest training time of every bound \
+                     stream (here t = {train_end}); otherwise the fit trains \
+                     on observations that `camdl compare` would score as held \
+                     out.\n  Either give every stream a [data.holdout] file \
+                     whose rows start after all training data, or declare one \
+                     cutoff for all streams with `holdout_after`. v1 supports \
+                     tail-only holdouts (decision 6 of the 2026-08-29 \
+                     proposal); an interior/interleaved holdout is the \
+                     h-block follow-up (§3.9.2).",
+                    late.join(", ")));
             }
             n_holdout += hold_obs.len();
-            train_end = train_end.max(last_train);
         }
         crate::out::detached().say(format_args!(
             "  {h} training window [{t_start}, {train_end}]; \

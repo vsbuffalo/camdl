@@ -340,3 +340,99 @@ dt = 1.0
     assert_eq!(meta2["training_window"]["train_end"], serde_json::json!(21.0),
         "a cache-hit rerun must not erase the recorded training window");
 }
+
+/// A two-stream fit (`weekly_cases` every 7 days, `detection` every 14) with
+/// a `[data.holdout]` file for `weekly_cases` only: training t = 7, 14, 21
+/// and held-out rows t = 28, 35. `detection`'s training file is the caller's,
+/// so a test can make it end before or after the held-out rows.
+fn write_partial_holdout_fit(sub: &Path, beta: f64, detection_tsv: &str) {
+    std::fs::create_dir_all(sub).unwrap();
+    std::fs::write(sub.join("cases.tsv"),
+        "time\tweekly_cases\n7\t1\n14\t2\n21\t3\n").unwrap();
+    std::fs::write(sub.join("cases_holdout.tsv"),
+        "time\tweekly_cases\n28\t4\n35\t5\n").unwrap();
+    std::fs::write(sub.join("detection.tsv"), detection_tsv).unwrap();
+    std::fs::write(sub.join("fit.toml"), format!(r#"
+output_dir = "results"
+
+[model]
+camdl = "{ir}"
+
+[data.observations]
+weekly_cases = "cases.tsv"
+detection = "detection.tsv"
+
+[data.holdout]
+weekly_cases = "cases_holdout.tsv"
+
+[estimate.I0]
+bounds = [1, 1000]
+start  = 5
+
+[fixed]
+sigma    = 0.25
+gamma    = 0.3
+rho      = 0.5
+k        = 10.0
+p_detect = 0.5
+N0       = 1000
+beta     = {beta}
+
+[method]
+algorithm  = "if2"
+backend    = "chain_binomial"
+chains     = 1
+particles  = 50
+iterations = 1
+cooling    = 0.5
+
+[config]
+dt = 1.0
+"#, ir = golden_ir().canonicalize().unwrap().display())).unwrap();
+}
+
+fn fit_run(bin: &Path, sub: &Path) -> std::process::Output {
+    Command::new(bin).env_remove("CLICOLOR_FORCE")
+        .args(["fit", "run", "fit.toml", "--seed", "1"])
+        .current_dir(sub)
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .output()
+        .expect("spawn camdl")
+}
+
+/// `[data.holdout]` records `train_end` as the latest training time over
+/// every bound stream, not only the streams that have a holdout file. A
+/// stream without one whose training runs past another stream's held-out
+/// rows would be scored by `compare` as held out although θ was fitted to
+/// it, so the fit refuses it and names that stream.
+#[test]
+fn partial_holdout_refuses_training_data_inside_the_held_out_window() {
+    let bin = skip_if_missing_binary();
+    let tmp = tempfile::tempdir().unwrap();
+
+    // `detection` trains at t = 14, 28, 42: past the first held-out row of
+    // `weekly_cases` (t = 28).
+    let leaky = tmp.path().join("leaky");
+    write_partial_holdout_fit(&leaky, 0.10, "time\tdetection\n14\t1\n28\t0\n42\t1\n");
+    let out = fit_run(&bin, &leaky);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(),
+        "a stream training past the held-out rows must be refused:\n{stderr}");
+    assert!(stderr.contains("'detection'") && stderr.contains("holdout_after"),
+        "the error must name the stream whose training runs past the \
+         held-out rows, and the fix:\n{stderr}");
+
+    // Streams may end training at different times as long as every held-out
+    // row lies after the latest: `detection` ends at t = 14, `weekly_cases`
+    // at t = 21, so the recorded window ends at t = 21.
+    let ok = tmp.path().join("ok");
+    write_partial_holdout_fit(&ok, 0.10, "time\tdetection\n14\t1\n");
+    let out = fit_run(&bin, &ok);
+    assert!(out.status.success(), "a valid partial holdout must fit:\nstderr={}",
+        String::from_utf8_lossy(&out.stderr));
+    let meta_path = find_fit_meta(&ok.join("results")).unwrap();
+    let meta: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
+    assert_eq!(meta["training_window"]["train_end"], serde_json::json!(21.0),
+        "train_end is the latest training time over all streams: {meta}");
+}
