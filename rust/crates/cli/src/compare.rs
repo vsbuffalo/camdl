@@ -5908,5 +5908,394 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         let err = preflight(&[early, twin], &waived).unwrap_err();
         assert!(!err.contains("ic_free"), "{err}");
     }
+
+    // ── pinned renderings ───────────────────────────────────────────────
+
+    // The text and markdown renderings of the in-memory fixtures, held as
+    // committed text so that a commit moving the scoring code between crates
+    // is seen to change no output. Captured from the code at 868585f7. A
+    // change to any of them is a change to what `compare` prints, and is the
+    // subject of the commit that makes it. `single_stream_rows` is pinned by
+    // `a_single_stream_comparison_renders_as_before`, and the JSON of
+    // `two_stream_rows` by `without_streams_the_json_document_is_unchanged`.
+    const TWO_STREAM_TABLE: &str = r#"Model   T_score     elpd   Δelpd       LR   se(Δ)                    evidence
+─────────────────────────────────────────────────────────────────────────────
+a             4   -24.00       —        —       —                           —
+b             4   -20.00   +4.00   54.598    0.00   +17.4 dB, very strong for
+
+Per-stream accuracy and calibration:
+stream   model   n   mean CRPS   Δ mean CRPS   PIT_cov90
+────────────────────────────────────────────────────────
+north        a   4       2.000             —        1.00
+north        b   4       1.000        -1.000        1.00
+south        a   4       5.500             —        1.00
+south        b   4       3.000        -2.500        0.00
+
+Scored steps: 4 (t0=1).  Baseline: a.
+Sorted by Δelpd ascending — best-supported model at the bottom.
+Conditioning: in-sample — θ fit to all scored data; Δelpd favors the more flexible model.
+ⓘ not checked for a shared observation set: 'a' (a test fixture, built from scores alone); 'b' (a test fixture, built from scores alone). A difference against such a row may be a data difference, not a model difference.
+ⓘ filter settings not recorded for 'a' (trace older than schema 5); not checked; filter settings not recorded for 'b' (trace older than schema 5); not checked
+⚠ 'b' stream 'south': PIT 90%-coverage 0.00 (nominal 0.90) — likely overconfident.
+note: scores are plug-in (scored at a single θ, dropping parameter uncertainty → under-dispersed); and in-sample (θ fit to all the data → optimistic in absolute level, by roughly the effective number of parameters fit, which does not cancel in a Δelpd and so biases differences toward the more flexible model) — not a leave-future-out forecast score. See LFO (#295).
+Definitions and caveats: `camdl compare --explain` (or `camdl docs model-comparison`).
+"#;
+    const TWO_STREAM_MD: &str = r#"| Model | T_score | elpd | Δelpd | LR | se(Δ) | evidence |
+|---|---|---|---|---|---|---|
+| a | 4 | -24.00 | — | — | — | — |
+| b | 4 | -20.00 | +4.00 | 54.598 | 0.00 | +17.4 dB, very strong for |
+
+**Per-stream accuracy and calibration**
+
+| stream | model | n | mean CRPS | Δ mean CRPS | PIT_cov90 |
+|---|---|---|---|---|---|
+| north | a | 4 | 2.000 | — | 1.00 |
+| north | b | 4 | 1.000 | -1.000 | 1.00 |
+| south | a | 4 | 5.500 | — | 1.00 |
+| south | b | 4 | 3.000 | -2.500 | 0.00 |
+
+_Sorted by Δelpd ascending — best-supported model at the bottom._
+
+_Conditioning: in-sample — θ fit to all scored data; Δelpd favors the more flexible model._
+
+- ⓘ not checked for a shared observation set: 'a' (a test fixture, built from scores alone); 'b' (a test fixture, built from scores alone). A difference against such a row may be a data difference, not a model difference.
+- ⓘ filter settings not recorded for 'a' (trace older than schema 5); not checked; filter settings not recorded for 'b' (trace older than schema 5); not checked
+- ⚠ 'b' stream 'south': PIT 90%-coverage 0.00 (nominal 0.90) — likely overconfident.
+- note: scores are plug-in (scored at a single θ, dropping parameter uncertainty → under-dispersed); and in-sample (θ fit to all the data → optimistic in absolute level, by roughly the effective number of parameters fit, which does not cancel in a Δelpd and so biases differences toward the more flexible model) — not a leave-future-out forecast score. See LFO (#295).
+
+_Definitions and caveats: `camdl compare --explain` (or `camdl docs model-comparison`)._
+"#;
+    const ABLATION_TABLE: &str = r#"Stream: cases — every row scored on this stream alone.
+
+Model        T_score    elpd   Δelpd      LR   se(Δ)                 evidence    crps    Δcrps   PIT_cov90
+──────────────────────────────────────────────────────────────────────────────────────────────────────────
+full               3   -9.00       —       —       —                        —   0.500        —        1.00
+cases_only         3   -9.00   +0.00   1.000    0.00   +0.0 dB, indeterminate   0.500   +0.000        1.00
+
+Scored steps: 3.  Baseline: full.
+Sorted by Δelpd ascending — best-supported model at the bottom.
+Conditioning: held-out tail (train_end = 3) — θ sealed before the scored window.
+Assimilated: 'full' assimilated cases, deaths; 'cases_only' assimilated cases.
+ⓘ not checked for a shared observation set: 'full' (a test fixture, built from scores alone); 'cases_only' (a test fixture, built from scores alone). A difference against such a row may be a data difference, not a model difference.
+ⓘ filter settings not recorded for 'full' (trace older than schema 5); not checked; filter settings not recorded for 'cases_only' (trace older than schema 5); not checked
+note: scores are plug-in (scored at a single θ, dropping parameter uncertainty → under-dispersed) — not a leave-future-out forecast score. See LFO (#295).
+Definitions and caveats: `camdl compare --explain` (or `camdl docs model-comparison`).
+"#;
+    const ABLATION_MD: &str = r#"### Stream `cases`
+
+_Every row scored on this stream alone._
+
+| Model | T_score | elpd | Δelpd | LR | se(Δ) | evidence | crps | Δcrps | PIT_cov90 |
+|---|---|---|---|---|---|---|---|---|---|
+| full | 3 | -9.00 | — | — | — | — | 0.500 | — | 1.00 |
+| cases_only | 3 | -9.00 | +0.00 | 1.000 | 0.00 | +0.0 dB, indeterminate | 0.500 | +0.000 | 1.00 |
+
+_Sorted by Δelpd ascending — best-supported model at the bottom._
+
+_Conditioning: held-out tail (train_end = 3) — θ sealed before the scored window._
+
+_Assimilated: 'full' assimilated cases, deaths; 'cases_only' assimilated cases._
+
+- ⓘ not checked for a shared observation set: 'full' (a test fixture, built from scores alone); 'cases_only' (a test fixture, built from scores alone). A difference against such a row may be a data difference, not a model difference.
+- ⓘ filter settings not recorded for 'full' (trace older than schema 5); not checked; filter settings not recorded for 'cases_only' (trace older than schema 5); not checked
+- note: scores are plug-in (scored at a single θ, dropping parameter uncertainty → under-dispersed) — not a leave-future-out forecast score. See LFO (#295).
+
+_Definitions and caveats: `camdl compare --explain` (or `camdl docs model-comparison`)._
+"#;
+    const NONFINITE_TABLE: &str = r#"Model   T_score     elpd   Δelpd   LR   se(Δ)   evidence
+────────────────────────────────────────────────────────
+b             3     -inf    -inf    0    0.00          —
+a             3   -18.00       —    —       —          —
+
+Scored steps: 3 (t0=1).  Baseline: a.
+Sorted by Δelpd ascending — best-supported model at the bottom.
+Conditioning: in-sample — θ fit to all scored data; Δelpd favors the more flexible model.
+ⓘ not checked for a shared observation set: 'a' (a test fixture, built from scores alone); 'b' (a test fixture, built from scores alone). A difference against such a row may be a data difference, not a model difference.
+ⓘ filter settings not recorded for 'a' (trace older than schema 5); not checked; filter settings not recorded for 'b' (trace older than schema 5); not checked
+ⓘ CRPS and PIT calibration not available for 'a' (trace predates the per-stream breakdown), 'b' (trace predates the per-stream breakdown).
+note: scores are plug-in (scored at a single θ, dropping parameter uncertainty → under-dispersed); and in-sample (θ fit to all the data → optimistic in absolute level, by roughly the effective number of parameters fit, which does not cancel in a Δelpd and so biases differences toward the more flexible model) — not a leave-future-out forecast score. See LFO (#295).
+Definitions and caveats: `camdl compare --explain` (or `camdl docs model-comparison`).
+"#;
+    const NONFINITE_MD: &str = r#"| Model | T_score | elpd | Δelpd | LR | se(Δ) | evidence |
+|---|---|---|---|---|---|---|
+| b | 3 | -inf | -inf | 0 | 0.00 | — |
+| a | 3 | -18.00 | — | — | — | — |
+
+_Sorted by Δelpd ascending — best-supported model at the bottom._
+
+_Conditioning: in-sample — θ fit to all scored data; Δelpd favors the more flexible model._
+
+- ⓘ not checked for a shared observation set: 'a' (a test fixture, built from scores alone); 'b' (a test fixture, built from scores alone). A difference against such a row may be a data difference, not a model difference.
+- ⓘ filter settings not recorded for 'a' (trace older than schema 5); not checked; filter settings not recorded for 'b' (trace older than schema 5); not checked
+- ⓘ CRPS and PIT calibration not available for 'a' (trace predates the per-stream breakdown), 'b' (trace predates the per-stream breakdown).
+- note: scores are plug-in (scored at a single θ, dropping parameter uncertainty → under-dispersed); and in-sample (θ fit to all the data → optimistic in absolute level, by roughly the effective number of parameters fit, which does not cancel in a Δelpd and so biases differences toward the more flexible model) — not a leave-future-out forecast score. See LFO (#295).
+
+_Definitions and caveats: `camdl compare --explain` (or `camdl docs model-comparison`)._
+"#;
+    const WAIVED_MISMATCHED_HORIZON_TABLE: &str = r#"Model   T_score     elpd   Δelpd   LR   se(Δ)   evidence
+────────────────────────────────────────────────────────
+a             3   -18.00       —    —       —          —
+b             2   -11.00       —    —       —          —
+
+Scored steps: 3 (t0=1).  Baseline: a.
+Conditioning: in-sample — θ fit to all scored data; Δelpd favors the more flexible model.
+⚠ --allow-mismatched-horizon was set for 'a', 'b': T_score differs across models: 'a' 3, 'b' 2. Δ columns suppressed ('—' in the table, null in the JSON): a Δ pairs two rows' scores observation by observation, and these rows scored different numbers of observations.
+ⓘ not checked for a shared observation set: 'a' (a test fixture, built from scores alone); 'b' (a test fixture, built from scores alone). A difference against such a row may be a data difference, not a model difference.
+ⓘ filter settings not recorded for 'a' (trace older than schema 5); not checked; filter settings not recorded for 'b' (trace older than schema 5); not checked
+ⓘ CRPS and PIT calibration not available for 'a' (trace predates the per-stream breakdown), 'b' (trace predates the per-stream breakdown).
+note: scores are plug-in (scored at a single θ, dropping parameter uncertainty → under-dispersed); and in-sample (θ fit to all the data → optimistic in absolute level, by roughly the effective number of parameters fit, which does not cancel in a Δelpd and so biases differences toward the more flexible model) — not a leave-future-out forecast score. See LFO (#295).
+Definitions and caveats: `camdl compare --explain` (or `camdl docs model-comparison`).
+"#;
+    const WAIVED_MISMATCHED_HORIZON_MD: &str = r#"| Model | T_score | elpd | Δelpd | LR | se(Δ) | evidence |
+|---|---|---|---|---|---|---|
+| a | 3 | -18.00 | — | — | — | — |
+| b | 2 | -11.00 | — | — | — | — |
+
+_Conditioning: in-sample — θ fit to all scored data; Δelpd favors the more flexible model._
+
+- ⚠ --allow-mismatched-horizon was set for 'a', 'b': T_score differs across models: 'a' 3, 'b' 2. Δ columns suppressed ('—' in the table, null in the JSON): a Δ pairs two rows' scores observation by observation, and these rows scored different numbers of observations.
+- ⓘ not checked for a shared observation set: 'a' (a test fixture, built from scores alone); 'b' (a test fixture, built from scores alone). A difference against such a row may be a data difference, not a model difference.
+- ⓘ filter settings not recorded for 'a' (trace older than schema 5); not checked; filter settings not recorded for 'b' (trace older than schema 5); not checked
+- ⓘ CRPS and PIT calibration not available for 'a' (trace predates the per-stream breakdown), 'b' (trace predates the per-stream breakdown).
+- note: scores are plug-in (scored at a single θ, dropping parameter uncertainty → under-dispersed); and in-sample (θ fit to all the data → optimistic in absolute level, by roughly the effective number of parameters fit, which does not cancel in a Δelpd and so biases differences toward the more flexible model) — not a leave-future-out forecast score. See LFO (#295).
+
+_Definitions and caveats: `camdl compare --explain` (or `camdl docs model-comparison`)._
+"#;
+    const WAIVED_MIXED_PROVENANCE_TABLE: &str = r#"Model   T_score     elpd   Δelpd      LR   se(Δ)                evidence
+────────────────────────────────────────────────────────────────────────
+a             3   -18.00       —       —       —                       —
+b             3   -17.00   +1.00   2.718    0.91   +4.3 dB, within noise
+
+Scored steps: 3 (t0=1).  Baseline: a.
+Sorted by Δelpd ascending — best-supported model at the bottom.
+Conditioning: in-sample — θ fit to all scored data; Δelpd favors the more flexible model.
+⚠ --allow-mixed-provenance was set for 'a', 'b': the compared traces mix provenance kinds: 'a' plug_in (a single θ); 'b' posterior (mixture over 4 draws). A plug-in predictive is under-dispersed relative to a posterior mixture, so the Δ confounds model difference with dispersion treatment.
+ⓘ not checked for a shared observation set: 'a' (a test fixture, built from scores alone); 'b' (a test fixture, built from scores alone). A difference against such a row may be a data difference, not a model difference.
+ⓘ filter settings not recorded for 'a' (trace older than schema 5); not checked; filter settings not recorded for 'b' (trace older than schema 5); not checked
+ⓘ CRPS and PIT calibration not available for 'a' (trace predates the per-stream breakdown), 'b' (trace predates the per-stream breakdown).
+note: lag-1 autocorrelation of the per-step Δelpd vs baseline: b -0.17
+note: scores are plug-in (scored at a single θ, dropping parameter uncertainty → under-dispersed); and in-sample (θ fit to all the data → optimistic in absolute level, by roughly the effective number of parameters fit, which does not cancel in a Δelpd and so biases differences toward the more flexible model) — not a leave-future-out forecast score. See LFO (#295).
+Definitions and caveats: `camdl compare --explain` (or `camdl docs model-comparison`).
+"#;
+    const WAIVED_MIXED_PROVENANCE_MD: &str = r#"| Model | T_score | elpd | Δelpd | LR | se(Δ) | evidence |
+|---|---|---|---|---|---|---|
+| a | 3 | -18.00 | — | — | — | — |
+| b | 3 | -17.00 | +1.00 | 2.718 | 0.91 | +4.3 dB, within noise |
+
+_Sorted by Δelpd ascending — best-supported model at the bottom._
+
+_Conditioning: in-sample — θ fit to all scored data; Δelpd favors the more flexible model._
+
+- ⚠ --allow-mixed-provenance was set for 'a', 'b': the compared traces mix provenance kinds: 'a' plug_in (a single θ); 'b' posterior (mixture over 4 draws). A plug-in predictive is under-dispersed relative to a posterior mixture, so the Δ confounds model difference with dispersion treatment.
+- ⓘ not checked for a shared observation set: 'a' (a test fixture, built from scores alone); 'b' (a test fixture, built from scores alone). A difference against such a row may be a data difference, not a model difference.
+- ⓘ filter settings not recorded for 'a' (trace older than schema 5); not checked; filter settings not recorded for 'b' (trace older than schema 5); not checked
+- ⓘ CRPS and PIT calibration not available for 'a' (trace predates the per-stream breakdown), 'b' (trace predates the per-stream breakdown).
+- note: lag-1 autocorrelation of the per-step Δelpd vs baseline: b -0.17
+- note: scores are plug-in (scored at a single θ, dropping parameter uncertainty → under-dispersed); and in-sample (θ fit to all the data → optimistic in absolute level, by roughly the effective number of parameters fit, which does not cancel in a Δelpd and so biases differences toward the more flexible model) — not a leave-future-out forecast score. See LFO (#295).
+
+_Definitions and caveats: `camdl compare --explain` (or `camdl docs model-comparison`)._
+"#;
+    const WAIVED_DATA_MISMATCH_TABLE: &str = r#"Model   T_score     elpd   Δelpd      LR   se(Δ)                evidence
+────────────────────────────────────────────────────────────────────────
+a             3   -18.00       —       —       —                       —
+b             3   -17.00   +1.00   2.718    0.91   +4.3 dB, within noise
+
+Scored steps: 3 (t0=1).  Baseline: a.
+Sorted by Δelpd ascending — best-supported model at the bottom.
+Conditioning: in-sample — θ fit to all scored data; Δelpd favors the more flexible model.
+⚠ --allow-data-mismatch was set for 'a', 'b': 'a' and 'b' were fit to different observed data: 'cases' (aaaaaaaa in 'a', bbbbbbbb in 'b'). Δelpd across them is part model difference and part data difference, and the table cannot separate the two.
+ⓘ data compared on 8 characters of the SHA-256 for 'a', 'b': its fit.meta.json was written before full digests were recorded, so the shared-data and changed-data checks for that row compare the first 8 characters only.
+ⓘ filter settings not recorded for 'a' (trace older than schema 5); not checked; filter settings not recorded for 'b' (trace older than schema 5); not checked
+ⓘ CRPS and PIT calibration not available for 'a' (trace predates the per-stream breakdown), 'b' (trace predates the per-stream breakdown).
+note: lag-1 autocorrelation of the per-step Δelpd vs baseline: b -0.17
+note: scores are plug-in (scored at a single θ, dropping parameter uncertainty → under-dispersed); and in-sample (θ fit to all the data → optimistic in absolute level, by roughly the effective number of parameters fit, which does not cancel in a Δelpd and so biases differences toward the more flexible model) — not a leave-future-out forecast score. See LFO (#295).
+Definitions and caveats: `camdl compare --explain` (or `camdl docs model-comparison`).
+"#;
+    const WAIVED_DATA_MISMATCH_MD: &str = r#"| Model | T_score | elpd | Δelpd | LR | se(Δ) | evidence |
+|---|---|---|---|---|---|---|
+| a | 3 | -18.00 | — | — | — | — |
+| b | 3 | -17.00 | +1.00 | 2.718 | 0.91 | +4.3 dB, within noise |
+
+_Sorted by Δelpd ascending — best-supported model at the bottom._
+
+_Conditioning: in-sample — θ fit to all scored data; Δelpd favors the more flexible model._
+
+- ⚠ --allow-data-mismatch was set for 'a', 'b': 'a' and 'b' were fit to different observed data: 'cases' (aaaaaaaa in 'a', bbbbbbbb in 'b'). Δelpd across them is part model difference and part data difference, and the table cannot separate the two.
+- ⓘ data compared on 8 characters of the SHA-256 for 'a', 'b': its fit.meta.json was written before full digests were recorded, so the shared-data and changed-data checks for that row compare the first 8 characters only.
+- ⓘ filter settings not recorded for 'a' (trace older than schema 5); not checked; filter settings not recorded for 'b' (trace older than schema 5); not checked
+- ⓘ CRPS and PIT calibration not available for 'a' (trace predates the per-stream breakdown), 'b' (trace predates the per-stream breakdown).
+- note: lag-1 autocorrelation of the per-step Δelpd vs baseline: b -0.17
+- note: scores are plug-in (scored at a single θ, dropping parameter uncertainty → under-dispersed); and in-sample (θ fit to all the data → optimistic in absolute level, by roughly the effective number of parameters fit, which does not cancel in a Δelpd and so biases differences toward the more flexible model) — not a leave-future-out forecast score. See LFO (#295).
+
+_Definitions and caveats: `camdl compare --explain` (or `camdl docs model-comparison`)._
+"#;
+    const WAIVED_CHANGED_DATA_TABLE: &str = r#"Model   T_score     elpd   Δelpd      LR   se(Δ)                evidence
+────────────────────────────────────────────────────────────────────────
+a             3   -18.00       —       —       —                       —
+b             3   -17.00   +1.00   2.718    0.91   +4.3 dB, within noise
+
+Scored steps: 3 (t0=1).  Baseline: a.
+Sorted by Δelpd ascending — best-supported model at the bottom.
+Conditioning: in-sample — θ fit to all scored data; Δelpd favors the more flexible model.
+⚠ --allow-changed-data was set for 'b': data changed after the fit ran: 'b' stream 'cases' (cases.tsv): the fit recorded aaaaaaaa, the file now hashes to bbbbbbbb. `compare` re-reads these files, so the row is scored on data its θ̂ was not fitted to.
+ⓘ not checked for a shared observation set: 'a' (a test fixture, built from scores alone); 'b' (a test fixture, built from scores alone). A difference against such a row may be a data difference, not a model difference.
+ⓘ filter settings not recorded for 'a' (trace older than schema 5); not checked; filter settings not recorded for 'b' (trace older than schema 5); not checked
+ⓘ CRPS and PIT calibration not available for 'a' (trace predates the per-stream breakdown), 'b' (trace predates the per-stream breakdown).
+note: lag-1 autocorrelation of the per-step Δelpd vs baseline: b -0.17
+note: scores are plug-in (scored at a single θ, dropping parameter uncertainty → under-dispersed); and in-sample (θ fit to all the data → optimistic in absolute level, by roughly the effective number of parameters fit, which does not cancel in a Δelpd and so biases differences toward the more flexible model) — not a leave-future-out forecast score. See LFO (#295).
+Definitions and caveats: `camdl compare --explain` (or `camdl docs model-comparison`).
+"#;
+    const WAIVED_CHANGED_DATA_MD: &str = r#"| Model | T_score | elpd | Δelpd | LR | se(Δ) | evidence |
+|---|---|---|---|---|---|---|
+| a | 3 | -18.00 | — | — | — | — |
+| b | 3 | -17.00 | +1.00 | 2.718 | 0.91 | +4.3 dB, within noise |
+
+_Sorted by Δelpd ascending — best-supported model at the bottom._
+
+_Conditioning: in-sample — θ fit to all scored data; Δelpd favors the more flexible model._
+
+- ⚠ --allow-changed-data was set for 'b': data changed after the fit ran: 'b' stream 'cases' (cases.tsv): the fit recorded aaaaaaaa, the file now hashes to bbbbbbbb. `compare` re-reads these files, so the row is scored on data its θ̂ was not fitted to.
+- ⓘ not checked for a shared observation set: 'a' (a test fixture, built from scores alone); 'b' (a test fixture, built from scores alone). A difference against such a row may be a data difference, not a model difference.
+- ⓘ filter settings not recorded for 'a' (trace older than schema 5); not checked; filter settings not recorded for 'b' (trace older than schema 5); not checked
+- ⓘ CRPS and PIT calibration not available for 'a' (trace predates the per-stream breakdown), 'b' (trace predates the per-stream breakdown).
+- note: lag-1 autocorrelation of the per-step Δelpd vs baseline: b -0.17
+- note: scores are plug-in (scored at a single θ, dropping parameter uncertainty → under-dispersed); and in-sample (θ fit to all the data → optimistic in absolute level, by roughly the effective number of parameters fit, which does not cancel in a Δelpd and so biases differences toward the more flexible model) — not a leave-future-out forecast score. See LFO (#295).
+
+_Definitions and caveats: `camdl compare --explain` (or `camdl docs model-comparison`)._
+"#;
+    const WAIVED_MISMATCHED_FILTER_SETTINGS_TABLE: &str = r#"Model   T_score     elpd   Δelpd      LR   se(Δ)                evidence
+────────────────────────────────────────────────────────────────────────
+a             3   -18.00       —       —       —                       —
+b             3   -17.00   +1.00   2.718    0.91   +4.3 dB, within noise
+
+Scored steps: 3 (t0=1).  Baseline: a.
+Sorted by Δelpd ascending — best-supported model at the bottom.
+Conditioning: in-sample — θ fit to all scored data; Δelpd favors the more flexible model.
+⚠ --allow-mismatched-filter-settings was set for 'a', 'b': the compared traces were scored with different particle-filter settings: 'a' and 'b': particles 1000 vs particles 200. The log of a particle-filter likelihood estimate is biased downward, and by more at fewer particles (and fewer replicates combined), so part of Δelpd would measure the filters rather than the models.
+ⓘ not checked for a shared observation set: 'a' (a test fixture, built from scores alone); 'b' (a test fixture, built from scores alone). A difference against such a row may be a data difference, not a model difference.
+ⓘ CRPS and PIT calibration not available for 'a' (trace predates the per-stream breakdown), 'b' (trace predates the per-stream breakdown).
+note: lag-1 autocorrelation of the per-step Δelpd vs baseline: b -0.17
+note: scores are plug-in (scored at a single θ, dropping parameter uncertainty → under-dispersed); and in-sample (θ fit to all the data → optimistic in absolute level, by roughly the effective number of parameters fit, which does not cancel in a Δelpd and so biases differences toward the more flexible model) — not a leave-future-out forecast score. See LFO (#295).
+Definitions and caveats: `camdl compare --explain` (or `camdl docs model-comparison`).
+"#;
+    const WAIVED_MISMATCHED_FILTER_SETTINGS_MD: &str = r#"| Model | T_score | elpd | Δelpd | LR | se(Δ) | evidence |
+|---|---|---|---|---|---|---|
+| a | 3 | -18.00 | — | — | — | — |
+| b | 3 | -17.00 | +1.00 | 2.718 | 0.91 | +4.3 dB, within noise |
+
+_Sorted by Δelpd ascending — best-supported model at the bottom._
+
+_Conditioning: in-sample — θ fit to all scored data; Δelpd favors the more flexible model._
+
+- ⚠ --allow-mismatched-filter-settings was set for 'a', 'b': the compared traces were scored with different particle-filter settings: 'a' and 'b': particles 1000 vs particles 200. The log of a particle-filter likelihood estimate is biased downward, and by more at fewer particles (and fewer replicates combined), so part of Δelpd would measure the filters rather than the models.
+- ⓘ not checked for a shared observation set: 'a' (a test fixture, built from scores alone); 'b' (a test fixture, built from scores alone). A difference against such a row may be a data difference, not a model difference.
+- ⓘ CRPS and PIT calibration not available for 'a' (trace predates the per-stream breakdown), 'b' (trace predates the per-stream breakdown).
+- note: lag-1 autocorrelation of the per-step Δelpd vs baseline: b -0.17
+- note: scores are plug-in (scored at a single θ, dropping parameter uncertainty → under-dispersed); and in-sample (θ fit to all the data → optimistic in absolute level, by roughly the effective number of parameters fit, which does not cancel in a Δelpd and so biases differences toward the more flexible model) — not a leave-future-out forecast score. See LFO (#295).
+
+_Definitions and caveats: `camdl compare --explain` (or `camdl docs model-comparison`)._
+"#;
+    const WAIVED_IN_SAMPLE_ABLATION_TABLE: &str = r#"Stream: cases — every row scored on this stream alone.
+
+Model   T_score    elpd   Δelpd      LR   se(Δ)                 evidence
+────────────────────────────────────────────────────────────────────────
+a             3   -9.00       —       —       —                        —
+b             3   -9.00   +0.00   1.000    0.00   +0.0 dB, indeterminate
+
+Scored steps: 3.  Baseline: a.
+Sorted by Δelpd ascending — best-supported model at the bottom.
+Conditioning: in-sample — θ fit to all scored data; Δelpd favors the more flexible model.
+Assimilated: 'a' assimilated cases, deaths; 'b' assimilated cases.
+⚠ --allow-in-sample-ablation was set for 'a', 'b': the compared fits assimilated different streams and are scored in-sample: 'a' assimilated cases, deaths; 'b' assimilated cases. Scored in-sample, Δelpd leans toward the fit that assimilated fewer streams: its θ̂ was chosen to fit the shared stream alone, while the other fit's traded that stream off against the rest, so on its own training data it fits it no better and usually slightly worse, whatever the extra streams contribute to prediction.
+ⓘ not checked for a shared observation set: 'a' (a test fixture, built from scores alone); 'b' (a test fixture, built from scores alone). A difference against such a row may be a data difference, not a model difference.
+ⓘ filter settings not recorded for 'a' (trace older than schema 5); not checked; filter settings not recorded for 'b' (trace older than schema 5); not checked
+note: scores are plug-in (scored at a single θ, dropping parameter uncertainty → under-dispersed); and in-sample (θ fit to all the data → optimistic in absolute level, by roughly the effective number of parameters fit, which does not cancel in a Δelpd and so biases differences toward the more flexible model) — not a leave-future-out forecast score. See LFO (#295).
+Definitions and caveats: `camdl compare --explain` (or `camdl docs model-comparison`).
+"#;
+    const WAIVED_IN_SAMPLE_ABLATION_MD: &str = r#"### Stream `cases`
+
+_Every row scored on this stream alone._
+
+| Model | T_score | elpd | Δelpd | LR | se(Δ) | evidence |
+|---|---|---|---|---|---|---|
+| a | 3 | -9.00 | — | — | — | — |
+| b | 3 | -9.00 | +0.00 | 1.000 | 0.00 | +0.0 dB, indeterminate |
+
+_Sorted by Δelpd ascending — best-supported model at the bottom._
+
+_Conditioning: in-sample — θ fit to all scored data; Δelpd favors the more flexible model._
+
+_Assimilated: 'a' assimilated cases, deaths; 'b' assimilated cases._
+
+- ⚠ --allow-in-sample-ablation was set for 'a', 'b': the compared fits assimilated different streams and are scored in-sample: 'a' assimilated cases, deaths; 'b' assimilated cases. Scored in-sample, Δelpd leans toward the fit that assimilated fewer streams: its θ̂ was chosen to fit the shared stream alone, while the other fit's traded that stream off against the rest, so on its own training data it fits it no better and usually slightly worse, whatever the extra streams contribute to prediction.
+- ⓘ not checked for a shared observation set: 'a' (a test fixture, built from scores alone); 'b' (a test fixture, built from scores alone). A difference against such a row may be a data difference, not a model difference.
+- ⓘ filter settings not recorded for 'a' (trace older than schema 5); not checked; filter settings not recorded for 'b' (trace older than schema 5); not checked
+- note: scores are plug-in (scored at a single θ, dropping parameter uncertainty → under-dispersed); and in-sample (θ fit to all the data → optimistic in absolute level, by roughly the effective number of parameters fit, which does not cancel in a Δelpd and so biases differences toward the more flexible model) — not a leave-future-out forecast score. See LFO (#295).
+
+_Definitions and caveats: `camdl compare --explain` (or `camdl docs model-comparison`)._
+"#;
+
+    /// Both renderings of one comparison, in the order the pins are held.
+    fn rendered(rows: &[Row], base_idx: usize, metrics: &[&str], checks: &Preflight)
+        -> (String, String)
+    {
+        let metrics: Vec<String> = metrics.iter().map(|m| m.to_string()).collect();
+        (render_table(rows, base_idx, &metrics, checks), render_md(rows, base_idx, &metrics, checks))
+    }
+
+    const ALL_METRICS: [&str; 3] = ["elpd", "crps", "pit_cov90"];
+
+    #[test]
+    fn the_two_stream_comparison_renders_as_pinned() {
+        let rows = two_stream_rows();
+        let (table, md) = rendered(&rows, 0, &ALL_METRICS, &checked(&rows));
+        assert_eq!(table, TWO_STREAM_TABLE);
+        assert_eq!(md, TWO_STREAM_MD);
+    }
+
+    #[test]
+    fn the_stream_ablation_table_renders_as_pinned() {
+        let t = ablation_table();
+        let (table, md) = rendered(&t.rows, t.base_idx, &ALL_METRICS, &t.checks);
+        assert_eq!(table, ABLATION_TABLE);
+        assert_eq!(md, ABLATION_MD);
+    }
+
+    /// One comparison per waiver, each rendered under the flag it needs.
+    #[test]
+    fn each_waived_comparison_renders_as_pinned() {
+        let pins = [
+            (Waiver::MismatchedHorizon, WAIVED_MISMATCHED_HORIZON_TABLE, WAIVED_MISMATCHED_HORIZON_MD),
+            (Waiver::MixedProvenance, WAIVED_MIXED_PROVENANCE_TABLE, WAIVED_MIXED_PROVENANCE_MD),
+            (Waiver::DataMismatch, WAIVED_DATA_MISMATCH_TABLE, WAIVED_DATA_MISMATCH_MD),
+            (Waiver::ChangedData, WAIVED_CHANGED_DATA_TABLE, WAIVED_CHANGED_DATA_MD),
+            (Waiver::MismatchedFilterSettings, WAIVED_MISMATCHED_FILTER_SETTINGS_TABLE,
+             WAIVED_MISMATCHED_FILTER_SETTINGS_MD),
+            (Waiver::InSampleAblation, WAIVED_IN_SAMPLE_ABLATION_TABLE, WAIVED_IN_SAMPLE_ABLATION_MD),
+        ];
+        assert_eq!(pins.map(|p| p.0), ALL_WAIVERS, "one pin per waiver");
+        for (w, want_table, want_md) in pins {
+            let rows = rows_needing(w);
+            let (table, md) = rendered(&rows, 0, &["elpd"], &checked(&rows));
+            assert_eq!(table, want_table, "{w:?}: the table");
+            assert_eq!(md, want_md, "{w:?}: the markdown");
+        }
+    }
+
+    /// Row `b` scored one step at −∞. This pins what the renderers print
+    /// today: `-inf` for its elpd and Δelpd, `0` for the LR, `0.00` for
+    /// se(Δ), `—` for the evidence, and no line below the table naming the
+    /// non-finite score.
+    #[test]
+    fn a_row_with_a_non_finite_score_renders_as_pinned() {
+        let rows = vec![
+            row_at("a", &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0]),
+            row_at("b", &[7.0, 14.0, 21.0], &[-5.0, f64::NEG_INFINITY, -6.0]),
+        ];
+        let checks = preflight(&rows, &Waivers::default()).expect("no check refuses it");
+        let (table, md) = rendered(&rows, 0, &["elpd"], &checks);
+        assert_eq!(table, NONFINITE_TABLE);
+        assert_eq!(md, NONFINITE_MD);
+    }
 }
 
