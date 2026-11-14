@@ -42,6 +42,18 @@
 //!   "not recorded".
 //! - A [`DeclaredModel`] cannot hold an unknown version at all:
 //!   [`SchemaVersion`] refuses one when it is deserialized.
+//!
+//! # Compiled models are copied as bytes
+//!
+//! This section travels inside a compiled model's envelope, and tooling that
+//! handles the two together (a bundle, a diff, `publish`) must copy a compiled
+//! model as bytes with a digest and never re-serialize it. In particular a
+//! compiled model must never pass through a generic `serde_json::Value`: in
+//! this workspace `Value` sorts object keys, the order of a model's
+//! `initial_conditions` is part of its identity, and the round trip therefore
+//! yields a different model (`rust/crates/runid/tests/value_round_trip.rs` pins
+//! this). To take the section out of an envelope, parse the envelope with a
+//! typed reader, or extract the `declared` member's own text.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::RawValue;

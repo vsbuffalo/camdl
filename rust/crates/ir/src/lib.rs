@@ -1,3 +1,23 @@
+//! The compiled model (`Model`) and the envelope it is written in
+//! (`IrEnvelope`): the contract between the OCaml compiler and this runtime.
+//!
+//! # Compiled models are copied as bytes, never re-serialized
+//!
+//! A compiled model that only has to be moved (archived with a fit, put in a
+//! bundle, handed to a diff or to `publish`) is copied as bytes, with a digest
+//! of those bytes. It is not parsed and written back.
+//!
+//! In particular a compiled model must never pass through a generic
+//! `serde_json::Value`. In this workspace `Value` keeps object keys sorted,
+//! and the order of a model's `initial_conditions` is part of its identity, so
+//! that round trip yields a different model with a different
+//! `model_ir_hash`. `rust/crates/runid/tests/value_round_trip.rs` pins this.
+//!
+//! A command that has to change a compiled model (resolve an observation
+//! anchor, override the output schedule) reads the envelope through the typed
+//! reader and writes it with [`reemit_with_model`], which preserves order and
+//! carries the envelope's `docs` and `declared` sections through.
+
 pub mod anchor;
 pub mod caltime;
 pub mod contrast;
