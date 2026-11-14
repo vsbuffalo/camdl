@@ -414,17 +414,6 @@ impl PrequentialTrace {
         inside as f64 / self.steps.len() as f64
     }
 
-    /// Binned PIT histogram; returns counts of PIT values falling
-    /// into each of `bins` equal-width bins on [0, 1].
-    pub fn pit_histogram(&self, bins: usize) -> Vec<usize> {
-        let mut counts = vec![0usize; bins];
-        for s in &self.steps {
-            let idx = ((s.pit * bins as f64) as usize).min(bins - 1);
-            counts[idx] += 1;
-        }
-        counts
-    }
-
     /// Number of scored steps (T - t0).
     pub fn n_scored(&self) -> usize { self.steps.len() }
 
@@ -1632,25 +1621,6 @@ mod tests {
         assert_eq!(trace.steps.len(), 2);
         assert_eq!(trace.t0, 1);
         assert_eq!(trace.steps[0].t, 2.0);
-    }
-
-    #[test]
-    fn pit_histogram_bins_sum_to_n() {
-        let steps: Vec<PrequentialStep> = (0..50).map(|i| PrequentialStep {
-            t: i as f64, y_obs: 0.0, y_pred_samples: vec![],
-            log_score: 0.0, crps: 0.0, pit: (i as f64) / 50.0, ess: 0.0,
-            interval: PredInterval::default(),
-            per_stream: vec![],
-        }).collect();
-        let trace = PrequentialTrace {
-            schema_version: 1, t0: 0, provenance: Provenance::PlugIn,
-            conditioning: Conditioning::InSample, steps, warnings: vec![],
-            score_from: None,
-            pit_randomization_seed: None,
-            derivation: None,
-        };
-        let hist = trace.pit_histogram(10);
-        assert_eq!(hist.iter().sum::<usize>(), 50);
     }
 
     #[test]
