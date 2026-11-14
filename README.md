@@ -52,8 +52,9 @@ model comparisons easy and reproducible. Every camdl run is fully provenanced
 and stored in an _input-addressed storage_ system, that ensures reproducibility
 and automatically caches to prevent accidental overwrites of expensive runs.
 
-Originally created at the [Institute for Disease Modeling](https://www.idmod.org/)
-(IDM), Gates Foundation.
+Originally created at the
+[Institute for Disease Modeling](https://www.idmod.org/) (IDM), Gates
+Foundation.
 
 ## A Simple SIR camdl Model
 
@@ -363,18 +364,18 @@ Every camdl binary ships its own version-matched guides offline — run
 `camdl docs` for the topic list (`workflow`, `fit-toml`, `concepts`,
 `diagnosing-fits`, `language`, …). The longer-form references:
 
-| Document                                                       | Contents                                         |
-| -------------------------------------------------------------- | ------------------------------------------------ |
-| [`docs/intro.md`](docs/intro.md)                               | DSL tutorial                                     |
-| [`docs/camdl-language-spec.md`](docs/camdl-language-spec.md)   | Full DSL reference                               |
-| [`docs/user-features.md`](docs/user-features.md)               | Feature catalog with pomp comparison             |
-| [`docs/inference.md`](docs/inference.md)                       | Inference guide (PF, IF2, PGAS, NUTS)            |
-| [`docs/commands.md`](docs/commands.md)                         | Command taxonomy and workflows                   |
-| [`docs/runtimes.md`](docs/runtimes.md)                         | Simulation backend details                       |
-| [`docs/camdl-data-spec.md`](docs/camdl-data-spec.md)           | IR schema and data model                         |
-| [`docs/camdl-inference-spec.md`](docs/camdl-inference-spec.md) | Fitting workflow specification                   |
-| [`docs/camdl-run-spec.md`](docs/camdl-run-spec.md)             | Run-system / sweeps / CAS specification          |
-| [`AGENTS.md`](AGENTS.md)                                       | Briefing for AI coding agents working with camdl |
+| Document                                                                    | Contents                                         |
+| --------------------------------------------------------------------------- | ------------------------------------------------ |
+| [`docs/intro.md`](https://camdl.dev/intro.html)                             | DSL tutorial                                     |
+| [`docs/camdl-language-spec.md`](https://camdl.dev/camdl-language-spec.html) | Full DSL reference                               |
+| [`docs/user-features.md`](https://camdl.dev/user-features.html)             | Feature catalog with pomp comparison             |
+| [`docs/inference.md`](https://camdl.dev/inference.html)                     | Inference guide (PF, IF2, PGAS, NUTS)            |
+| [`docs/commands.md`](docs/commands.md)                                      | Command taxonomy and workflows                   |
+| [`docs/runtimes.md`](https://camdl.dev/runtimes.html)                       | Simulation backend details                       |
+| [`docs/camdl-data-spec.md`](https://camdl.dev/camdl-data-spec.html)         | IR schema and data model                         |
+| [`docs/camdl-inference-spec.md`](docs/camdl-inference-spec.md)              | Fitting workflow specification                   |
+| [`docs/camdl-run-spec.md`](https://camdl.dev/camdl-run-spec.html)           | Run-system / sweeps / CAS specification          |
+| [`AGENTS.md`](AGENTS.md)                                                    | Briefing for AI coding agents working with camdl |
 
 **Using camdl from a downstream project with an AI coding agent?** Start with
 [`AGENTS.md`](AGENTS.md). It covers the canonical workflow, error / diagnostic
@@ -396,7 +397,8 @@ Add `.camdl-source/` to your project's `.gitignore`; sync with
 camdl is **alpha**: the public surface (DSL, CLI, output formats) is documented
 and usable for real fits, but breaking changes are still expected before 1.0.
 See [`VERSIONING.md`](VERSIONING.md) for what the version number promises and
-[`docs/language-changes.md`](docs/language-changes.md) for the migration log.
+[`docs/language-changes.md`](https://camdl.dev/language-changes.html) for the
+migration log.
 
 ## Repository layout
 

@@ -4,7 +4,10 @@
 -- which serves unrendered, unreviewed files as if they were site pages.
 --
 -- The published set is `camdl-published` in _quarto.yml, the same YAML anchor
--- that drives `project.render`, so the two cannot disagree.
+-- that drives `project.render`, so the two cannot disagree. Quarto rewrites
+-- path-like metadata relative to the page, so on guide/first-fit.qmd the
+-- entry "concepts.md" arrives as "../concepts.md"; each entry is resolved
+-- against the page's directory before use.
 
 local published = {}
 local blob_base = "https://github.com/vsbuffalo/camdl/blob/main/docs/"
@@ -40,8 +43,14 @@ end
 return {
   {
     Meta = function(meta)
+      local dir = page_dir()
       for _, item in ipairs(meta["camdl-published"] or {}) do
-        published[pandoc.utils.stringify(item)] = true
+        local entry = pandoc.utils.stringify(item)
+        local resolved = normalize(dir == "" and entry or (dir .. "/" .. entry))
+        if resolved == nil then
+          error("unpublished-links.lua: published entry " .. entry .. " resolves above docs/")
+        end
+        published[resolved] = true
       end
       -- Without the list every docs link would be sent to GitHub.
       if next(published) == nil then
