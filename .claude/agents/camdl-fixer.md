@@ -51,7 +51,7 @@ final report and into the PR body. A step without pasted output did not happen.
      `diff $TMPDIR/clippy-before.txt $TMPDIR/clippy-after.txt` (must add
      nothing).
    - `make update-golden`, then
-     `git status --porcelain ir/golden ocaml/golden tests/fixtures/reactive/ir tests/fixtures/regression/ir`
+     `git status --porcelain -- ir/golden ocaml/golden 'tests/fixtures/*/ir'`
      must print nothing. Paste both.
 
    This is not `make test`. CI is the authoritative gate; say so under "Not

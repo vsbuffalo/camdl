@@ -21,8 +21,9 @@ stoichiometry and a rate expression), observation models, parameters, and
 initial conditions.
 
 The expression language (`expr`) is a pure, total, first-order AST over
-`Const | Param | Pop | PopSum | Time | Dt | BinOp | UnOp | Cond | TimeFunc | TableLookup | Projected | UnitLiteral | UncheckedDim | Reduce | BindingRef`.
-No recursion, no lexical binding — propensities evaluate in bounded time.
+`Const | Param | ConstRef | Pop | PopSum | Time | Dt | BinOp | UnOp | Cond | TimeFunc | TableLookup | Projected | UncheckedDim | UnitLiteral | Reduce | BindingRef | PerEvalRef | ObsColumnRef | ObsAnchor | ForcingBasis`
+(`rust/crates/ir/src/expr.rs` is the authoritative list). No recursion, no
+lexical binding — propensities evaluate in bounded time.
 
 - `Cond` guards against division-by-zero in Gillespie.
 - `TableLookup` keeps stratified models compact (contact matrices, age-specific

@@ -18,13 +18,15 @@ Intra-workspace dependencies, read from the `Cargo.toml` files:
 cli  → io, ir, runid, sim
 io   → ir, sim
 sim  → ir, numerics
-runid → ir
-ir, numerics  → (leaves)
+runid → ir, runid-derive
+ir   → differentiate-derive
+external-harness → numerics
+numerics, differentiate-derive, runid-derive  → (leaves)
 ```
 
 `ir` is pure types + serde, no simulation logic. `sim` holds the backends
 (Gillespie, ODE, chain-binomial) and the propensity evaluator, and defines the
-`Model` trait. `cli` is arg parsing + orchestration.
+`Simulate` trait. `cli` is arg parsing + orchestration.
 
 There is **no `observe` crate.** Projection and likelihood scoring live in `sim`
 and `cli`. CLAUDE.md carried `cli → io → observe → sim → ir` for a long time; it

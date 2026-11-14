@@ -96,8 +96,7 @@ Not worth it for: anything on the high-risk list, anything where the fix shape
 is still an open question, or fewer than three issues.
 
 An issue whose evidence lives only on an unpushed or `worktree-agent-*` branch
-is not s-class until that branch is pushed (gh#957 and gh#958 are the current
-examples).
+is not s-class until that branch is pushed.
 
 ## The gate
 
