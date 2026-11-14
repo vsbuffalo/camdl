@@ -333,7 +333,14 @@ or a run id:
 This rule covers presentation supplied at publish time. Text declared inside the
 model that the model hash covers is identity today: `normalize_for_hash` removes
 only `output.format` and `simulation.time_semantics`
-(`rust/crates/runid/src/inputs.rs:332-337`).
+(`rust/crates/runid/src/inputs.rs:332-337`). A `#'` doc comment is not such
+text, a `@symbol` tag included: two sources that differ only in doc comments
+compile to byte-equal model JSON (`ocaml/test/test_declared_emit.ml`, "a doc
+comment changes renderings only, and no model").
+
+A run id also folds in the IR version string, so every stored run and fit gets a
+new address when `ir/VERSION` changes. That is a property of the camdl version
+and not of anything supplied at publish time.
 
 Enforced by: a `camdl publish` test that changing each of the three leaves the
 model digest, fit digest and run id byte-identical.

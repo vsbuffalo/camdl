@@ -114,7 +114,16 @@ pub struct IrEnvelope {
     pub validated_by: Option<String>,
     pub model: Model,
     pub docs: ModelDocs,
-    pub declared: Option<DeclaredModel>,   // None: not recorded
+    pub declared: DeclaredSection,
+}
+
+pub enum DeclaredSection {
+    NotRecorded,                       // the member is absent
+    Recorded(Box<DeclaredModel>),
+    UnsupportedVersion {               // a schema_version this build cannot read
+        schema_version: SchemaVersion,
+        raw: Box<RawValue>,            // the member's bytes, kept as read
+    },
 }
 
 pub struct DeclaredModel {
@@ -123,6 +132,7 @@ pub struct DeclaredModel {
     pub time_unit: Option<UnitLit>,
     pub description: Option<String>,
     pub origin: Option<String>,
+    // Every declaration below also carries `source_text`, its text as written.
     pub dimensions:    Vec<DimensionDecl>,   // name, level source, resolved levels
     pub compartments:  Vec<CompartmentDecl>, // name, kind, dims, expands_to
     pub stratify:      Vec<StratifyDecl>,
@@ -151,7 +161,8 @@ pub struct DeclaredModel {
 
 pub struct DeclaredExpr {
     pub tree:  ExprTree,     // the parsed form; what sameness is decided on
-    pub katex: String,       // what is shown
+    pub katex: String,       // the formula rendering
+    pub katex_loss: Vec<KatexLoss>, // why `katex` does not show the whole tree
     pub reads: Vec<NameRef>, // the names it reads, each with its kind
 }
 ```
@@ -213,11 +224,76 @@ declaring kinds, and that `reads` is the tree's names
 (`ocaml/test/test_declared_emit.ml`,
 `rust/crates/declared/tests/golden_sections.rs`). A name outside the goldens
 that no rule covers is tagged `unresolved` in the section and does not fail the
-compile.
+compile. It is never silent:
+
+- the compiler emits warning `W203`, naming the declaration and the name, and
+  saying that `camdl diff` will report that declaration's dependencies as
+  unknown. A valid model can trigger it today: a `timepoints` entry that refers
+  to another timepoint, because the compiler discards that block (gh#1047);
+- the diff reports any row whose tree reads an `unresolved` name as
+  "dependencies unknown". It never gives such a row an empty `affected_by`,
+  which would say that nothing it reads changed;
+- `camdl publish --check` refuses or marks a model whose declared section holds
+  one (a requirement on the bundle proposal).
+
+`affected_by` follows only the names that can be a dependency. An `index_var`, a
+`level` and a `keyword` are not: the kind on each name is what lets the diff
+leave them out.
 
 KaTeX strings come from the existing renderer (`Latex.tex`) and so use a
 declaration's `@symbol` doc tag where one is given. A changed `@symbol` changes
-`katex` and nothing else; sameness is never decided on `katex`.
+`katex` and `katex_loss` and nothing else (tested: two sources differing only in
+doc comments give byte-equal compiled-model JSON). Sameness is never decided on
+`katex`.
+
+**The formula rendering is not a faithful picture of the tree, and the section
+says where.** `Latex.tex` was written to draw rates for a document, and it drops
+or regroups parts of an expression. Each declared expression therefore carries
+`katex_loss`, a list of the ways its rendering falls short, empty when the
+rendering can be read back as the tree:
+
+| `katex_loss` entry        | What the rendering does                                                                        |
+| ------------------------- | ---------------------------------------------------------------------------------------------- |
+| `unit_dropped`            | `0.5 'per_day` is rendered `0.5`                                                               |
+| `number_rounded`          | the rendered digits do not read back as the number (six significant digits are kept)           |
+| `placeholder`             | a list, a range, `observations.x` or a run member is rendered as a dot                         |
+| `grouping_changed`        | a product or quotient is regrouped into one fraction, or an operand lacks parentheses it needs |
+| `sum_range_dropped`       | a `sum` is rendered without its dimension and its `where` guard                                |
+| `argument_names_dropped`  | `f(rate = x)` is rendered `f(x)`                                                               |
+| `index_dimension_dropped` | `S[age = a]` is rendered as `S[a]` is                                                          |
+| `string_as_name`          | a quoted string is rendered as a name is                                                       |
+| `symbol_override`         | a name is rendered as its `@symbol`                                                            |
+
+The list is computed by `Latex.tex_loss`, which sits beside the renderer and
+walks an expression the same way. It errs towards reporting:
+`beta * S * (I /
+N)` is listed as regrouped although a careful reader would read
+its fraction correctly. On the 99 compiled goldens, 456 of 2577 expressions have
+an entry (314 for a dropped unit), and 69 of 296 transition rates.
+
+**Each declaration carries its text as written**, `source_text`: the bytes of
+the declaration from its first token to its last, read back from the source by a
+span the parser records on every declaration. A `#'` doc block above it and a
+trailing comment are outside it; `let`, a block keyword and a `#[lineage]`
+attribute are inside it. A quantity declared in a separate `--quantities` file
+takes its text from that file. The text is per declaration, not per expression:
+a branch weight or a prior argument has no text of its own, and the diff shows
+the whole declaration. `null` means the compiler had no text; no compiled golden
+holds one.
+
+The text is for display only and is never compared: the parser reads different
+spellings as one tree (`×` and `*`), so equal declarations can have different
+text. Three rules for the diff follow:
+
+- Where a shown expression has a non-empty `katex_loss`, the diff shows the
+  declaration's `source_text` beside the formula. It never shows a placeholder
+  or a number stripped of its unit as the whole account of a row.
+- A row that is `Changed` while both sides render to the same `katex` string is
+  flagged, and shown by `source_text`. This also covers the one collision
+  `katex_loss` does not record: the styling of names, where `Iv` and `I_v` are
+  both rendered `I_v`.
+- Reformatting a model's source changes `source_text`, and so the compiled file,
+  and no row: the row status and the model hash do not read it.
 
 **Agreement with what already describes the model.** Two older partial
 descriptions stay as they are: `ModelStructure` inside the compiled model
@@ -234,9 +310,23 @@ Each declared transition, compartment and observation stream also carries
 `expands_to`, the expanded names it produced. Nothing else links the expanded
 model back to a declaration (see [Settled facts](#settled-facts)), and the
 viewer and the assumption ledger (proposal 5) need the link to map per-stratum
-outputs back to declarations. Row status never depends on it. The field is
-optional and is not recorded yet: an absent value means not recorded, where an
-empty list would be a false statement.
+outputs back to declarations. Row status never depends on it.
+
+The names are recorded where the expander makes them and are never recovered
+from the spelling of a name: the staged-residence (`via`) lowering records each
+transition it synthesises and each stage compartment it creates against the
+declaration it stands for, and transition and observation expansion record the
+compiled names each declaration produced. A test checks, on every compiled
+golden and in both languages, that the lists partition the compiled model: the
+`expands_to` of all declared compartments together are exactly the compiled
+compartments, each claimed once, and the same for transitions and observation
+streams. In `ocaml/golden/ebola_outcome_hyper`, compartment `I` expands to six
+stage compartments (`I__fatal__1` to `I__recover__3`) and transition `outcome`
+to six stage and exit transitions.
+
+The field stays optional on the wire. `null` means not recorded; an empty list
+means the declaration produced nothing (a transition whose guard excludes every
+combination).
 
 **The section is readable without the runtime's reader for compiled models.**
 That reader refuses any envelope whose IR version is not its own
@@ -250,9 +340,19 @@ the viewer nor `camdl diff` on two bundles ever loads a compiled model. A test
 reads a `declared` document from an envelope whose `ir_version` is not the
 current one.
 
-`declared` absent means not recorded, and the diff then reports itself
-unavailable for that side. It is never backfilled by recompiling at archive
-time.
+The section has three states to a reader, never two. Absent means not recorded.
+Present at a `schema_version` the reader knows means recorded. Present at one it
+does not know means "unsupported version N": the model still loads and runs, and
+the section is not read. In the first and third states the diff reports itself
+unavailable for that side, and says which. The section is never backfilled by
+recompiling at archive time.
+
+**A compiled model is copied as bytes with a digest, never re-serialized.** A
+tool that rewrites an envelope writes the `declared` member back as the text it
+read, in every state (`ir::reemit_with_model`). The general serializer for a
+whole envelope was removed for this reason: a round trip through a generic JSON
+value sorts object keys, and that changes `model_ir_hash` (pinned by
+`rust/crates/runid/tests/value_round_trip.rs`).
 
 ### When two expressions are the same
 
@@ -317,8 +417,9 @@ structural guessing.
   streams, scenarios, quantities: by name.
 - Transitions: by declared name. A branching or multi-source transition fans out
   to several flow-graph edges with ids `name__src__dst` (`latex.ml:676-680`), so
-  each edge carries the declared name it belongs to and the viewer highlights by
-  that.
+  the viewer highlights by the declared name recovered from the id. The edge has
+  no declared-name field of its own; adding one changes `model.graph.json`,
+  which camdl-scope reads, and is left to the viewer proposal.
 - Unmatched entities are reported as only-left or only-right.
 
 For models from different groups, names will differ. A published comparison may
@@ -377,6 +478,14 @@ Every row is tagged with its layer.
 | Balance, ODE         | Definition differs                                                                     |
 | Declaration order    | The same entities of one category appear in a different order                          |
 | Compile input        | A compile-time `--set` value or the digest of a file read at compile time differs      |
+
+A file whose digest is absent (the compiler could not re-open it to hash it) is
+reported as "not recorded", and the diff then states that compile inputs were
+not checked for that file. Such a row is never `Same`.
+
+`--set` values are applied by `camdlc` after the compile
+(`ocaml/bin/camdlc.ml:257-284`), so they are added to the section there and are
+not known to the library entry points.
 
 Declaration order is a category, and not ignored, because the hash covers it:
 reordering transitions, parameters, compartments or `init` entries changes
@@ -559,9 +668,17 @@ regenerated and reviewed.
 
 - **One bump for all declaration kinds.** The section carries its own
   `schema_version`, so later additions to it need no further IR bump.
-- **Identity is untouched, and a test proves it.** Before the change, record
-  `model_ir_hash` and the run ids for every golden; after it, they are
-  byte-identical. The test is committed with the change.
+- **The section does not enter identity, and tests prove it.** `model_ir_hash`
+  of every compiled golden was recorded before the change
+  (`rust/crates/runid/tests/fixtures/golden_model_hashes.tsv`) and is unchanged
+  after it, and after each later addition to the section.
+- **Every stored run and fit gets a new address at 0.44, as at any IR bump.** A
+  run id is derived from a model digest that folds in the IR version string and
+  the engine string (`rust/crates/runid/src/inputs.rs:287-293`). So the bump
+  re-keys every stored run, with or without this section. What the section
+  itself changes is nothing: 30 run ids (five goldens, six kinds of run) were
+  pinned before the change and are equal after it with those two strings held
+  fixed (`rust/crates/cli/tests/fixtures/golden_run_ids.tsv`).
 - **Old compiled models.** The runtime refuses any envelope whose `ir_version`
   is not its own (`envelope.rs:126-133`), so a model compiled before the bump is
   not read at all, with or without this section. `declared: None` therefore
@@ -580,9 +697,13 @@ regenerated and reviewed.
   `schema_version` step.
 - **gh#1046 is a separate change and moves no golden.** None of the 62 files in
   `ocaml/golden/` contains a hoisted subtree (no `__licm_` name appears in any),
-  so its fix re-keys only models that have one and leaves the golden set
-  untouched. It also means no golden exercises the hoisting pass; the fix adds
-  one.
+  so its fix leaves the golden set untouched. It also means no golden exercises
+  the hoisting pass; the fix adds one. The fix is made in the hash, not in the
+  compiler: in the reproduction, two of the three hoisted pieces are referenced
+  only by gradient maps, which the hash excludes, so renaming in the compiler
+  could not have fixed it. It will raise `HASH_VERSION` from 2 to 3, which
+  re-keys every stored fit once; it is to land in the same window as 0.44 so
+  that stored fits re-key once and not twice.
 
 ## Invariants
 
@@ -604,12 +725,18 @@ Each is a test.
    from renamed source.
 7. A roll-up never hides a row that differs in more than the rolled-up respect.
 8. The report is byte-identical across runs and thread counts.
-9. Compiling any golden yields the same `model_ir_hash` and run ids with and
-   without the `declared` section.
+9. Compiling any golden yields the same `model_ir_hash` with and without the
+   `declared` section, and the same run ids once the IR version and engine
+   strings, which a run id folds in, are held fixed.
 10. On every golden, each name in every declared tree resolves to exactly one
     kind, and `reads` is the set the compiler's name resolution reports.
 11. On every golden, `ModelStructure` and the flow graph agree with the declared
     section.
+12. On every golden, the `expands_to` lists of the declared compartments,
+    transitions and observation streams each partition the compiled model's
+    names.
+13. On every golden, every declaration has a `source_text`, and a doc comment, a
+    comment or a change of layout changes no tree.
 
 ## What it does not do
 
@@ -635,7 +762,7 @@ Pairs whose expected outcome follows from how the compiler and the hash behave
 
 | Pair                                                    | Rows                                                    | Outcome            |
 | ------------------------------------------------------- | ------------------------------------------------------- | ------------------ |
-| Reformat; add a `#'` doc comment; move a `let`          | All `Same`                                              | Identical          |
+| Reformat; add a `#'` doc comment; move a `let`          | All `Same` (`source_text` and `katex` may differ)       | Identical          |
 | Rename a `let` that reads a parameter                   | Definition only-left and only-right; readers `Changed`  | WrittenDifferently |
 | Rename a parameter-free `let`                           | The same rows                                           | Different          |
 | Change the body of a `let`                              | Definition `Changed`; readers `Same` with `affected_by` | Different          |
@@ -657,10 +784,12 @@ viewer's first published comparison.
 
 1. Fix gh#1046: `model_ir_hash` differs between a full and a `--no-state-grad`
    compile of one source when a subtree is hoisted. Until it is fixed, a model
-   file compared with its own fit can land in the refused fourth outcome.
-2. The `declared` envelope section: the `declared` crate (types, done), the
-   OCaml types and emission, the envelope field, `ir/VERSION` 0.44, goldens,
-   invariants 9 to 11. Compiler-side tests for the _inferred_ parse facts.
+   file compared with its own fit can land in the refused fourth outcome. Not
+   done; failing tests are on the branch `wip/gh1046-red-tests`.
+2. The `declared` envelope section: the `declared` crate, the OCaml types and
+   emission, the envelope field, `ir/VERSION` 0.44, goldens, `source_text`,
+   `katex_loss`, `expands_to`, warning `W203`, invariants 9 to 13, and
+   compiler-side tests for the parse facts. Done.
 3. The config facts record, and `ConfigDiff` as a function of two of them.
 4. The diff crate: tree sameness, matching, the three layers, `affected_by`, the
    three outcomes, invariants 1 to 5 and 8.
@@ -686,8 +815,17 @@ holds only `origin_kind`, `source_compartment` and `dest_compartment`
 convention (`<declared>_<level>…`, `_<branch destination>`, `_stage_sN` for
 `via`) that cannot be parsed backwards: `onset` under `via erlang(stages = 3)`
 compiles to `onset_stage_s1`, `onset_stage_s2`, `onset`, and level names may
-contain underscores (measured on `ocaml/golden/seir_erlang_via`). The compiler
-has the forward map, `expand_transition_name` (`expander.ml:4901`).
+contain underscores (measured on `ocaml/golden/seir_erlang_via`). The declared
+section's `expands_to` is the recorded link.
+
+**The flow graph draws a staged transition with branches as an outflow to
+nowhere.** In `ocaml/golden/ebola_outcome_hyper` the transition out of `I` names
+its two destinations inside the `branch(...)` arguments of its
+`via hyper_erlang` law. `Latex.transition_graph` does not read those, so
+`model.graph.json` holds one arrow from `I` to nothing, drawn as a death is.
+This is a defect of the existing diagram and not of the declared section, which
+holds the law's arguments; the agreement test pins the current drawing and fails
+when it is fixed.
 
 **What `model_ir_hash` excludes** (`ir_hash.rs:146`, `:371`, `:400`, `:798`,
 `:975`, `:1494-1508`; `inputs.rs:332-337`): the model name; `quantities`;

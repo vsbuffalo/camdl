@@ -760,19 +760,23 @@ Every serialized IR file is an **envelope** wrapping the model. The top level is
 - `declared` — optional; the **declared model**: the model as its author wrote
   it, before expansion. Every declaration in declaration order, each expression
   as its parsed tree (source locations removed, each name tagged with what the
-  compiler resolved it to), a KaTeX rendering, and the names it reads; plus the
-  compile inputs (`--set` values and the digest of each file the compile read).
-  The compiler writes it from the same compile as `model`. Like `docs` it is
-  outside `model` and outside every identity: adding or changing it never
-  changes a model hash or a run id. It is a separate document with its own
-  `schema_version`, so a reader that wants only this section does not need a
-  matching `ir_version`. Its shape is the Rust crate `rust/crates/declared`
-  (mirrored by `ocaml/lib/ir/declared.ml`); it is not described by
-  `ir/schema.json`. Absent means not recorded. A section whose `schema_version`
-  the reader does not know is a third state, "unsupported version N": the model
-  still loads and runs, the section is not read, and a command that rewrites the
-  envelope writes the section back as the text it read. The expanded names each
-  declaration produced (`expands_to`) are not recorded yet.
+  compiler resolved it to), a KaTeX rendering, a list of what that rendering
+  does not show (`katex_loss`), and the names it reads; each declaration's text
+  as written (`source_text`, for display only) and, for a compartment, a
+  transition and an observation stream, the compiled names it produced
+  (`expands_to`); plus the compile inputs (`--set` values and the digest of each
+  file the compile read). The compiler writes it from the same compile as
+  `model`. Like `docs` it is outside `model` and outside every identity: adding
+  or changing it never changes a model hash, nor a run id. (A run id does change
+  at every `ir_version` bump, this section's included, because it folds in the
+  version string.) It is a separate document with its own `schema_version`, so a
+  reader that wants only this section does not need a matching `ir_version`. Its
+  shape is the Rust crate `rust/crates/declared` (mirrored by
+  `ocaml/lib/ir/declared.ml`); it is not described by `ir/schema.json`. Absent
+  means not recorded. A section whose `schema_version` the reader does not know
+  is a third state, "unsupported version N": the model still loads and runs, the
+  section is not read, and a command that rewrites the envelope writes the
+  section back as the text it read.
 
 ```
 model: {
