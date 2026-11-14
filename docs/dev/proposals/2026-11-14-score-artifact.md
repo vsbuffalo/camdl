@@ -588,23 +588,32 @@ fraction of `[pit_lower, pit_upper]` lying inside the central interval
 `[(1−ℓ)/2, (1+ℓ)/2]`, taken as 1 or 0 when the endpoints are equal, averaged
 over scored values. It is the expectation of today's statistic over the uniform
 draw and does not depend on a seed. The histogram is the nonrandomized PIT
-histogram of Czado, Gneiting and Held (2009, _Biometrics_ 65(4), "Predictive
-model assessment for count data"): each scored value spreads unit mass uniformly
-over its interval, and bin heights are the mean mass per bin. Both are computed
-at scoring time and stored in `StreamSummary`, because the viewer computes no
-statistic (R3). This closes gh#1049 for the artifact and for `compare`.
+histogram of Czado, Gneiting and Held (2009, "Predictive model assessment for
+count data", _Biometrics_ 65(4):1254–1261,
+doi:10.1111/j.1541-0420.2009.01191.x): each scored value contributes a function
+that rises linearly from 0 at `pit_lower` to 1 at `pit_upper`, these are
+averaged over scored values, and the height of a bin is the difference of that
+average across the bin. Both are computed at scoring time and stored in
+`StreamSummary`, because the viewer computes no statistic (R3). This closes
+gh#1049 for the artifact and for `compare`.
 
 ### Quantiles replace draws
 
 Trace schema 6 replaces `y_pred_samples` and the five-quantile `interval` with
 `quantiles: Vec<f64>` at the levels listed once in the trace's header,
-`quantile_levels`. The levels are the 23 the forecast hubs use: 0.01, 0.025,
-0.05 to 0.95 in steps of 0.05, 0.975 and 0.99 (Bracher et al. 2021, _PLOS
-Computational Biology_ 17(2), "Evaluating epidemic forecasts in an interval
-format", which describes this set for the COVID-19 Forecast Hub). CRPS and the
-PIT endpoints are computed from the draws before they are discarded. The
-principles ask for a dense quantile set so that export to hub formats stays
-possible. `--no-save-samples` and the `SamplesNotSaved` warning are deleted.
+`quantile_levels`. The levels are the 23 the COVID-19 Forecast Hub required for
+its death and hospitalization targets: 0.01, 0.025, 0.05 to 0.95 in steps of
+0.05, 0.975 and 0.99, which are the median and the ends of 11 central prediction
+intervals (the hub's submission instructions, `reichlab/covid19-forecast-hub`,
+`data-processed/README.md`; its incident-case target asked for 7 quantiles
+only). The hub scores forecasts from those intervals with the weighted interval
+score, which approximates the CRPS (Bracher, Ray, Gneiting and Reich 2021,
+"Evaluating epidemic forecasts in an interval format", _PLOS Computational
+Biology_ 17(2):e1008618, doi:10.1371/journal.pcbi.1008618). Here the set is how
+a predictive distribution is stored, not how it is scored: CRPS and the PIT
+endpoints are computed from the draws before they are discarded. The principles
+ask for a dense quantile set so that export to hub formats stays possible.
+`--no-save-samples` and the `SamplesNotSaved` warning are deleted.
 
 _Not verified:_ the size of the pooled draw array a combined trace carries today
 (`combine_mixture` pools across draws); it was not measured. The change is made
