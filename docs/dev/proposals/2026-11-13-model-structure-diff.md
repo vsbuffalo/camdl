@@ -159,6 +159,18 @@ model back to a declaration (see [Settled facts](#settled-facts)), and the
 viewer and the assumption ledger (proposal 5) need the link to map per-stratum
 outputs back to declarations. Row status never depends on it.
 
+**The section is readable without the runtime's reader for compiled models.**
+That reader refuses any envelope whose IR version is not its own
+(`envelope.rs:126-133`), and a published bundle is read for as long as it is
+cited. So `DeclaredModel` is a self-contained document: it deserializes through
+its own types in the diff crate, is versioned by its own `schema_version` and
+never by `ir_version`, refers to nothing in `Model`, and every published version
+of its schema stays readable. `camdl publish` copies it out of the envelope into
+the bundle as its own file, beside the model identity as a string, so neither
+the viewer nor `camdl diff` on two bundles ever loads a compiled model. A test
+reads a `declared` document from an envelope whose `ir_version` is not the
+current one.
+
 `declared` absent means not recorded, and the diff then reports itself
 unavailable for that side. It is never backfilled by recompiling at archive
 time. `model.graph.json` stays for its existing consumers and becomes a
