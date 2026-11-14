@@ -899,11 +899,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // Real fits resolve their base `[data]` streams; synthetic fits have none
     // (empty map → no data digests folded).
     let fit_data_paths: indexmap::IndexMap<String, String> = config.problem.data_spec().ok()
-        .and_then(|ds| {
-            let model_obs_names: Vec<String> =
-                model.observations.iter().map(|o| o.name.clone()).collect();
-            ds.effective_observations(&model_obs_names).ok()
-        })
+        .and_then(|ds| identity_data_paths(&ds, &model).ok())
         .unwrap_or_default();
     let parent_fit_hash_ch = cas::fit_level_hash(
         &model,
@@ -1247,9 +1243,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // per-stream map before hashing, so the shorthand and the
         // verbose `[data.observations]` form produce identical method
         // hashes when they reference the same data.
-        let model_obs_names: Vec<String> =
-            model.observations.iter().map(|o| o.name.clone()).collect();
-        let effective_obs = data_spec.effective_observations(&model_obs_names)
+        let effective_obs = identity_data_paths(&data_spec, &model)
             .unwrap_or_else(|e| {
                 out.fail(format!("error: {}", e));
             });
@@ -2637,6 +2631,19 @@ fn base_warmup(
 // fit-level config archive for `fit table` config_diff is reworked in M3.3
 // alongside the fit-level outputs' CAS relocation.
 
+/// The data files a fit's run identity (`FitDigest.data`) is built over:
+/// `[data.observations]` as written (keyed by source), or, under the
+/// one-file shorthand, the file once per model observation leaf. Every site
+/// that computes a fit-level or method-level identity calls this, so they
+/// agree.
+fn identity_data_paths(
+    data: &config_v2::DataSpec,
+    model: &ir::Model,
+) -> Result<indexmap::IndexMap<String, String>, String> {
+    let names: Vec<String> = model.observations.iter().map(|o| o.name.clone()).collect();
+    data.effective_observations(&names)
+}
+
 /// Content hash of each observation stream the problem binds, over the
 /// RESOLVED stream set (`effective_observations`, gh#771), so the single-file
 /// `[data] file = "..."` shorthand hashes the streams it binds. With no model
@@ -3004,11 +3011,7 @@ pub fn cmd_fit_new(a: &crate::args::FitNewArgs) {
         let seg = crate::util::load_model(&cfg.model.camdl).ok().and_then(|(m, _)| {
             let ir_version = ir::IR_VERSION.trim().to_string();
             let data_paths = cfg.data_spec().ok()
-                .and_then(|ds| {
-                    let names: Vec<String> =
-                        m.observations.iter().map(|o| o.name.clone()).collect();
-                    ds.effective_observations(&names).ok()
-                })
+                .and_then(|ds| identity_data_paths(&ds, &m).ok())
                 .unwrap_or_default();
             cas::fit_level_hash(&m, &ir_version, crate::version::VERSION_SHORT, &cfg, &data_paths)
                 .ok()
@@ -3639,6 +3642,50 @@ mod tests {
             serde_json::from_str(&json).unwrap_or_else(|e| panic!("parse {path}: {e}"));
         serde_json::from_value(envv["model"].clone())
             .unwrap_or_else(|e| panic!("deserialize {path}: {e}"))
+    }
+
+    /// The data half of a fit's run identity, pinned for both `[data]` forms
+    /// on a model whose one observation block expands to two leaves
+    /// (`cases[p in patch]` → `cases_urban`, `cases_rural`, both of source
+    /// `cases`). `FitDigest.data` is a sorted list of file digests with the
+    /// keys dropped, so the pin is its length and order: the shorthand folds
+    /// the file once per leaf, `[data.observations]` once per source. A change
+    /// to how `[data]` is resolved must leave both byte-identical: changing
+    /// either re-keys every stored fit of that form.
+    #[test]
+    fn fit_identity_data_digests_are_pinned_for_both_data_forms() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let train = tmp.path().join("cases_long.tsv");
+        std::fs::write(&train, b"time\tpatch\tcases\n7\turban\t12\n7\trural\t3\n").unwrap();
+        let holdout = tmp.path().join("cases_holdout.tsv");
+        std::fs::write(&holdout, b"time\tpatch\tcases\n14\turban\t18\n14\trural\t6\n").unwrap();
+        let model = golden_model("ocaml/golden/sir_two_patch_long_obs.ir.json");
+        let config = |data: &str| config_v2::FitConfig::from_toml_str(&format!(
+            "[model]\ncamdl = \"m.ir.json\"\n{data}\n\
+             [estimate]\nbeta = {{ bounds = [0.01, 0.5] }}\n[fixed]\nrho = 0.5\n\
+             [method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
+             chains = 1\nparticles = 10\niterations = 1\ncooling = 0.7\n"))
+            .expect("fixture fit.toml parses").problem;
+        let digest = |problem: &config_v2::Problem| {
+            let paths = identity_data_paths(problem.data_spec().unwrap(), &model).unwrap();
+            let d = cas::fit_level_digest(&model, "pin-ir", "pin-engine", problem, &paths).unwrap();
+            let hex = |v: &[runid::inputs::DataDigest]| -> Vec<String> {
+                v.iter().map(|x| x.0.to_hex()).collect()
+            };
+            (hex(&d.data), hex(&d.holdout_data))
+        };
+        let t = "8ba0c3256c5b1f3c7162167e1cb8d3763ab91807869a1686c10974e7cbd1e5d9".to_string();
+        let h = "1cca7b9d54288f7525f39f73e573151cbc23516850f5fee46716fef2f4859f76".to_string();
+        let shorthand = config(&format!(
+            "[data]\nfile = \"{}\"\n[data.holdout]\ncases = \"{}\"",
+            train.display(), holdout.display()));
+        assert_eq!(digest(&shorthand), (vec![t.clone(), t.clone()], vec![h.clone()]),
+            "shorthand: one training digest per leaf, one holdout digest per source");
+        let per_source = config(&format!(
+            "[data.observations]\ncases = \"{}\"\n[data.holdout]\ncases = \"{}\"",
+            train.display(), holdout.display()));
+        assert_eq!(digest(&per_source), (vec![t], vec![h]),
+            "[data.observations]: one training digest per source");
     }
 
     #[test]
