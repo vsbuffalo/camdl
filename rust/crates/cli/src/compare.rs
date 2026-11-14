@@ -142,6 +142,8 @@ struct CompareToml {
     baseline: Option<String>,
     metrics: Option<Vec<String>>,
     format: Option<String>,
+    /// `--streams`: score each row on these observation streams only.
+    streams: Option<Vec<String>>,
     #[serde(rename = "model")]
     models: Vec<CompareModelEntry>,
 }
@@ -157,6 +159,7 @@ struct CompareModelEntry {
 enum Format { Table, Md, Json }
 
 /// Per-model row in the comparison table.
+#[derive(Clone)]
 struct Row {
     name: String,
     path: String,
@@ -165,6 +168,95 @@ struct Row {
     /// Whether the training files this row scored are the bytes its fit was
     /// fitted to; empty for an explicit prequential.json.
     freshness: DataFreshness,
+    /// The observation streams this row's model declares and its fit bound,
+    /// as far as the input says.
+    streams: RowStreams,
+}
+
+impl Row {
+    /// This row re-scored on one leaf alone
+    /// ([`sim::inference::prequential::project_onto_stream`]); the refusal
+    /// names the row.
+    fn onto(&self, leaf: &str) -> Result<Row, String> {
+        let trace = sim::inference::prequential::project_onto_stream(&self.trace, leaf)
+            .map_err(|e| format!("'{}': {e}", self.name))?;
+        Ok(Row { trace, ..self.clone() })
+    }
+}
+
+/// What a row's input says about the observation streams behind its trace.
+#[derive(Clone)]
+enum RowStreams {
+    /// A derived row: every leaf the fit's model declares with its source,
+    /// in the model's order.
+    Derived { declared: Vec<(String, String)> },
+    /// An explicit `prequential.json`: the trace names the leaves it scored
+    /// and nothing else — not the model's sources, not what the fit bound.
+    Explicit,
+}
+
+/// The leaves `--streams NAME[,NAME...]` selects across `rows`, in the order
+/// first resolved (names in the order given, each name's leaves in each
+/// row's order).
+///
+/// A name is a leaf or a source of a derived row's model; a source selects
+/// every leaf the model expands it to, in the model's order. For an explicit
+/// `prequential.json` row, which records leaf names only, a name must be a
+/// leaf its trace scored. A name must resolve in every row, and a refusal
+/// lists what that row offers. Rows whose models expand a source differently
+/// contribute the union; a row that then lacks one of the selected leaves is
+/// refused when it is projected onto it ([`Row::onto`]).
+fn resolve_selection(names: &[String], rows: &[Row]) -> Result<Vec<String>, String> {
+    if names.is_empty() {
+        return Err("--streams names no stream".into());
+    }
+    let mut selected: Vec<String> = Vec::new();
+    for name in names {
+        for r in rows {
+            let leaves: Vec<&str> = match &r.streams {
+                RowStreams::Derived { declared, .. } => {
+                    let as_leaf: Vec<&str> = declared.iter()
+                        .filter(|(l, _)| l == name).map(|(l, _)| l.as_str()).collect();
+                    if !as_leaf.is_empty() {
+                        as_leaf
+                    } else {
+                        declared.iter().filter(|(_, s)| s == name)
+                            .map(|(l, _)| l.as_str()).collect()
+                    }
+                }
+                RowStreams::Explicit => r.trace.streams().into_iter()
+                    .filter(|l| l == name).collect(),
+            };
+            if leaves.is_empty() {
+                return Err(match &r.streams {
+                    RowStreams::Derived { declared, .. } => {
+                        let mut sources: Vec<&str> = Vec::new();
+                        for (_, s) in declared {
+                            if !sources.contains(&s.as_str()) { sources.push(s); }
+                        }
+                        format!(
+                            "--streams: '{name}' is neither an observation stream nor a \
+                             data source of the model of '{}'. Its streams: {}. Its \
+                             sources: {}.",
+                            r.name,
+                            declared.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>().join(", "),
+                            sources.join(", "))
+                    }
+                    RowStreams::Explicit => format!(
+                        "--streams: '{name}' is not a stream '{}' scored. It is read as an \
+                         explicit prequential.json, which records the streams it scored and \
+                         not the model's data sources, so a name must be one of them: {}.",
+                        r.name, r.trace.streams().join(", ")),
+                });
+            }
+            for l in leaves {
+                if !selected.iter().any(|s| s == l) {
+                    selected.push(l.to_string());
+                }
+            }
+        }
+    }
+    Ok(selected)
 }
 
 /// What a compared row can say about the observations it was scored against
@@ -179,6 +271,7 @@ struct Row {
 /// the fit's run identity was built from. Read from there rather than
 /// re-hashing, so the check answers "were these fits bound to the same bytes?"
 /// with what each fit read when it ran.
+#[derive(Clone)]
 enum DataIdentity {
     /// What the fit's sidecar records for each source it binds.
     Digests(RecordedData),
@@ -502,7 +595,7 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
     };
 
     // Resolve model list: CLI positional > compare.toml
-    let (models, cfg_baseline, cfg_metrics, cfg_format) = if let Some(path) = config_path {
+    let (models, cfg_baseline, cfg_metrics, cfg_format, cfg_streams) = if let Some(path) = config_path {
         let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
             out.fail(format!("error: cannot read {}: {}", path, e));
         });
@@ -515,14 +608,14 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
             "json"  => Some(Format::Json),
             _       => None,
         });
-        (cfg.models, cfg.baseline, cfg.metrics, fmt)
+        (cfg.models, cfg.baseline, cfg.metrics, fmt, cfg.streams)
     } else if positional.len() >= 2 {
         let names = positional_model_names(&positional);
         let models = positional.iter().zip(names).map(|(p, name)| CompareModelEntry {
             name,
             path: p.clone(),
         }).collect();
-        (models, None, None, None)
+        (models, None, None, None, None)
     } else {
         out.fail("error: compare requires either --config FILE or ≥2 fit leaf paths");
     };
@@ -542,19 +635,97 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
     });
     cohort.warn(&out);
 
-    // Load traces, each filtered by its own fit's selection (if any).
-    let mut rows: Vec<Row> = models.into_iter().map(|m| {
+    // Load traces, each filtered by its own fit's selection (if any). Each
+    // input is loaded once, however many streams `--streams` selects.
+    let rows: Vec<Row> = models.into_iter().map(|m| {
         let selection = cohort.for_fit(&m.name);
-        let Loaded { trace, data, freshness } =
+        let Loaded { trace, data, freshness, streams } =
             load_trace(&out, &m.path, derive, selection).unwrap_or_else(|e| {
                 out.fail(format!("error loading trace for '{}' at '{}': {}", m.name, m.path, e));
             });
-        Row { name: m.name, path: m.path, trace, data, freshness }
+        Row { name: m.name, path: m.path, trace, data, freshness, streams }
     }).collect();
 
-    // Every cross-row check, once: a refusal exits here; what renders states
+    // #295 Ask 1 — the optimism caveat, the miscalibration flags and the trace
+    // warnings are emitted by the RENDERERS (`warning_lines`), not here, so they
+    // travel with the artifact: a markdown table pasted into a report and a JSON
+    // document read by a script carry the same caveats the terminal shows.
+
+    let waivers = Waivers::from_args(a);
+    let baseline = baseline.or(cfg_baseline);
+    let metrics_chosen = metrics_cli.or(cfg_metrics)
+        .unwrap_or_else(|| vec!["elpd".into(), "crps".into(), "pit_cov90".into()]);
+    let fmt_final = cfg_format.unwrap_or(format);
+    let render = |t: &Table| match fmt_final {
+        Format::Json  => render_json(&t.rows, t.base_idx, &metrics_chosen, &t.checks),
+        Format::Md    => render_md(&t.rows, t.base_idx, &metrics_chosen, &t.checks),
+        Format::Table => render_table(&t.rows, t.base_idx, &metrics_chosen, &t.checks),
+    };
+
+    let selected: Option<Vec<String>> = a.streams.as_ref()
+        .map(|s| s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect())
+        .or(cfg_streams);
+    let Some(names) = selected else {
+        let t = prepare_table(&out, rows, &waivers, baseline.as_deref())
+            .unwrap_or_else(|e| refuse(&out, e));
+        if let Some(path) = &a.pointwise {
+            match write_pointwise(&t.rows, t.base_idx, path) {
+                Ok(PointwiseWritten { joint: (jp, nj), streams: (sp, ns) }) => out.say(format_args!(
+                    "wrote {nj} joint pointwise rows to {} and {ns} per-stream rows to {}",
+                    jp.display(), sp.display())),
+                Err(e) => {
+                    out.fail(format!("error: {e}"));
+                }
+            }
+        }
+        out.report_raw(render(&t));
+        return;
+    };
+
+    // `--streams`: one table per selected leaf, every row re-scored on that
+    // leaf alone. A refusal for any leaf refuses the command, naming the leaf.
+    let leaves = resolve_selection(&names, &rows).unwrap_or_else(|e| {
+        out.fail(format!("error: {e}"));
+    });
+    let tables: Vec<Table> = leaves.iter().map(|leaf| {
+        let projected: Vec<Row> = rows.iter().map(|r| r.onto(leaf))
+            .collect::<Result<_, _>>()
+            .unwrap_or_else(|e| refuse(&out, for_stream(leaf, format!("error: {e}"))));
+        prepare_table(&out, projected, &waivers, baseline.as_deref())
+            .unwrap_or_else(|e| refuse(&out, for_stream(leaf, e)))
+    }).collect();
+    if let Some(path) = &a.pointwise {
+        match write_pointwise_streams(&tables, path) {
+            Ok((sp, ns)) => out.say(format_args!(
+                "wrote {ns} per-stream pointwise rows to {}", sp.display())),
+            Err(e) => {
+                out.fail(format!("error: {e}"));
+            }
+        }
+    }
+    let rendered: Vec<String> = tables.iter().map(render).collect();
+    out.report_raw(rendered.join("\n"));
+}
+
+/// One comparison table, checked and ready to render: its rows, the
+/// baseline's index among them, and the outcome of every cross-row check.
+struct Table {
+    rows: Vec<Row>,
+    base_idx: usize,
+    checks: Preflight,
+}
+
+/// Run the cross-row checks over `rows` and choose the baseline: `Err` with
+/// the refusal when a check fails and is not waived.
+fn prepare_table(
+    out: &crate::out::Out,
+    mut rows: Vec<Row>,
+    waivers: &Waivers,
+    baseline: Option<&str>,
+) -> Result<Table, String> {
+    // Every cross-row check, once: a refusal returns here; what renders states
     // the outcome, overrides included, from this one value (`Preflight`).
-    let checks = preflight(&rows, &Waivers::from_args(a)).unwrap_or_else(|e| refuse(&out, e));
+    let checks = preflight(&rows, waivers)?;
 
     // Rendered under `--allow-changed-data`: each trace scored on a changed
     // file records which streams' files it was.
@@ -568,13 +739,8 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
         }
     }
 
-    // #295 Ask 1 — the optimism caveat, the miscalibration flags and the trace
-    // warnings are emitted by the RENDERERS (`warning_lines`), not here, so they
-    // travel with the artifact: a markdown table pasted into a report and a JSON
-    // document read by a script carry the same caveats the terminal shows.
-
     // Baseline: explicit > cfg > argmax elpd.
-    let baseline_name = baseline.or(cfg_baseline).unwrap_or_else(|| {
+    let baseline_name = baseline.map(str::to_string).unwrap_or_else(|| {
         let best = rows.iter()
             .max_by(|a, b| a.trace.elpd().partial_cmp(&b.trace.elpd())
                 .unwrap_or(std::cmp::Ordering::Equal))
@@ -587,28 +753,15 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
                 baseline_name,
                 rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()));
         });
+    Ok(Table { rows, base_idx, checks })
+}
 
-    let metrics_chosen = metrics_cli.or(cfg_metrics)
-        .unwrap_or_else(|| vec!["elpd".into(), "crps".into(), "pit_cov90".into()]);
-    let fmt_final = cfg_format.unwrap_or(format);
-
-    if let Some(path) = &a.pointwise {
-        match write_pointwise(&rows, base_idx, path) {
-            Ok(PointwiseWritten { joint: (jp, nj), streams: (sp, ns) }) => out.say(format_args!(
-                "wrote {nj} joint pointwise rows to {} and {ns} per-stream rows to {}",
-                jp.display(), sp.display())),
-            Err(e) => {
-                out.fail(format!("error: {e}"));
-            }
-        }
+/// A refusal of one `--streams` table, naming the stream it was for.
+fn for_stream(leaf: &str, refusal: String) -> String {
+    match refusal.strip_prefix("error: ") {
+        Some(rest) => format!("error: stream '{leaf}': {rest}"),
+        None => format!("stream '{leaf}': {refusal}"),
     }
-
-    let rendered = match fmt_final {
-        Format::Json  => render_json(&rows, base_idx, &metrics_chosen, &checks),
-        Format::Md    => render_md(&rows, base_idx, &metrics_chosen, &checks),
-        Format::Table => render_table(&rows, base_idx, &metrics_chosen, &checks),
-    };
-    out.report_raw(rendered);
 }
 
 /// Whether two held-out rows sealed training at the same boundary.
@@ -1015,6 +1168,7 @@ struct Pointwise {
 fn check_shared_observation_axis(rows: &[Row]) -> Result<(), String> {
     let Some(first) = rows.first() else { return Ok(()) };
     for r in rows.iter().skip(1) {
+        check_scored_streams(first, r)?;
         for (k, (a, b)) in first.trace.steps.iter().zip(&r.trace.steps).enumerate() {
             if a.t != b.t {
                 return Err(format!(
@@ -1033,6 +1187,26 @@ fn check_shared_observation_axis(rows: &[Row]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Two traces are scored on the same thing: both jointly over every leaf their
+/// fit observed, or both re-scored on the same leaves
+/// (`PrequentialTrace::scored_streams`). A step's log score means a different
+/// quantity on each side otherwise, even where the steps' streams agree — a
+/// one-stream trace scored jointly and a projection onto that stream look the
+/// same step by step.
+fn check_scored_streams(first: &Row, r: &Row) -> Result<(), String> {
+    if first.trace.scored_streams == r.trace.scored_streams {
+        return Ok(());
+    }
+    let what = |row: &Row| match &row.trace.scored_streams {
+        None => format!("'{}' is scored jointly over every stream its fit observed", row.name),
+        Some(s) => format!("'{}' is re-scored on {} alone", row.name, s.join(", ")),
+    };
+    Err(format!(
+        "'{}' and '{}' score different quantities: {}, and {}.\n       \
+         Compare traces scored the same way.",
+        first.name, r.name, what(first), what(r)))
 }
 
 /// Two rows' steps at one observation time scored the same streams, and the
@@ -1090,6 +1264,7 @@ fn check_step_pair(
 fn check_shared_times(rows: &[Row]) -> Result<(), String> {
     let Some(first) = rows.first() else { return Ok(()) };
     for r in rows.iter().skip(1) {
+        check_scored_streams(first, r)?;
         for a in &first.trace.steps {
             // Step times come from the same observation grid, so a shared
             // time is the same value; this is the equality the
@@ -1437,11 +1612,28 @@ fn write_pointwise(rows: &[Row], base_idx: usize, path: &Path) -> Result<Pointwi
     })
 }
 
+/// Under `--streams`: write each table's per-stream rows, table by table, to
+/// the [`streams_sibling`] of `path`, and no joint file. Every table's rows are
+/// rendered before the file is written, so a refusal leaves no file behind.
+fn write_pointwise_streams(tables: &[Table], path: &Path) -> Result<(PathBuf, usize), String> {
+    let mut rows: Vec<StreamPointwiseRow> = Vec::new();
+    for t in tables {
+        rows.extend(pointwise_rows(&t.rows, t.base_idx)?.streams);
+    }
+    let streams_path = crate::prequential_out::streams_sibling(path);
+    let joint_name = path.file_name().map_or_else(
+        || path.display().to_string(), |n| n.to_string_lossy().into_owned());
+    std::fs::write(&streams_path, render_pointwise_streams_tsv(&rows, &joint_name))
+        .map_err(|e| format!("cannot write {}: {e}", streams_path.display()))?;
+    Ok((streams_path, rows.len()))
+}
+
 /// One compared input, loaded: what [`Row`] carries besides its name.
 struct Loaded {
     trace: PrequentialTrace,
     data: DataIdentity,
     freshness: DataFreshness,
+    streams: RowStreams,
 }
 
 /// What [`derive_prequential`] produced for one fit.
@@ -1449,6 +1641,7 @@ struct Derived {
     trace: PrequentialTrace,
     data: DataIdentity,
     freshness: DataFreshness,
+    streams: RowStreams,
 }
 
 /// Resolve a single comparison input to a `PrequentialTrace`. Two paths:
@@ -1477,12 +1670,15 @@ fn load_trace(
             data: DataIdentity::Unknown(
                 "read as an explicit prequential.json, which records no bound data".into()),
             freshness: DataFreshness::default(),
+            streams: RowStreams::Explicit,
         });
     }
     // Not an explicit prequential → treat as a fit handle and derive.
     match crate::fit::handle::resolve_fit_run(path) {
         Ok(resolved) => derive_prequential(out, &resolved, derive, selection)
-            .map(|d| Loaded { trace: d.trace, data: d.data, freshness: d.freshness }),
+            .map(|d| Loaded {
+                trace: d.trace, data: d.data, freshness: d.freshness, streams: d.streams,
+            }),
         Err(resolve_err) => Err(format!(
             "'{path}' is neither a prequential trace nor a resolvable fit handle.\n  \
              - as a fit handle: {resolve_err}\n  \
@@ -2160,7 +2356,10 @@ fn derive_prequential(
                 .unwrap_or_else(|| segment.display().to_string()),
         };
     }
-    Ok(Derived { trace, data: recorded_data, freshness })
+    let streams = RowStreams::Derived {
+        declared: model.observations.iter().map(|o| (o.name.clone(), o.source.clone())).collect(),
+    };
+    Ok(Derived { trace, data: recorded_data, freshness, streams })
 }
 
 /// The replicate totals a derived trace records (schema 5): each replicate's
@@ -4341,6 +4540,7 @@ mod tests {
             name: name.into(), path: name.into(), trace,
             data: DataIdentity::Unknown("a test fixture".into()),
             freshness: DataFreshness::default(),
+            streams: RowStreams::Explicit,
         };
         vec![
             row("a", trace([(-3.0, 2.5, 0.40), (-4.0, 3.0, 0.97), (-2.5, 1.5, 0.55), (-3.5, 2.0, 0.30)])),
@@ -4558,6 +4758,7 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
             name: name.to_string(),
             path: name.to_string(),
             freshness: DataFreshness::default(),
+            streams: RowStreams::Explicit,
             data: DataIdentity::Unknown("a test fixture, built from scores alone".into()),
             trace: PrequentialTrace {
                 schema_version: 1,
@@ -4870,6 +5071,131 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
 
         // Missing fit name before ':' → rejected.
         assert!(parse_cohort_exclude(&[":3".to_string()], &names).is_err());
+    }
+
+    // ── --streams ───────────────────────────────────────────────────────
+
+    /// A derived row whose model declares these (leaf, source) pairs, scoring
+    /// the given leaves at 7, 14, 21.
+    fn derived_row(name: &str, declared: &[(&str, &str)], scored: &[&str]) -> Row {
+        let mut r = row_with_streams(name, &[7.0, 14.0, 21.0], scored);
+        r.streams = RowStreams::Derived {
+            declared: declared.iter().map(|(l, s)| (l.to_string(), s.to_string())).collect(),
+        };
+        r
+    }
+
+    const PATCHES: [(&str, &str); 3] =
+        [("cases_south", "cases"), ("cases_north", "cases"), ("deaths", "deaths")];
+
+    /// A `--streams` name is a leaf, or a source standing for its leaves in
+    /// the model's order; it must resolve in every row, and the refusal lists
+    /// what the row offers. An explicit trace records leaves only.
+    #[test]
+    fn streams_names_resolve_to_leaves_in_every_row() {
+        let full = derived_row("full", &PATCHES, &["cases_south", "cases_north", "deaths"]);
+        let cases_only = derived_row("cases_only", &PATCHES, &["cases_south", "cases_north"]);
+        let rows = [full.clone(), cases_only.clone()];
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        assert_eq!(resolve_selection(&names(&["cases"]), &rows).unwrap(),
+            ["cases_south", "cases_north"], "a source selects its leaves in the model's order");
+        assert_eq!(resolve_selection(&names(&["cases_north", "cases"]), &rows).unwrap(),
+            ["cases_north", "cases_south"], "names in the order given, each leaf once");
+        assert_eq!(resolve_selection(&names(&["deaths"]), &rows).unwrap(), ["deaths"],
+            "a name the model declares resolves even where the fit did not bind it");
+
+        let err = resolve_selection(&names(&["hospital"]), &rows).unwrap_err();
+        assert!(err.contains("'hospital'") && err.contains("'full'")
+                && err.contains("cases_south, cases_north, deaths")
+                && err.contains("sources: cases, deaths"), "{err}");
+
+        // An explicit trace names the leaves it scored and nothing more.
+        let mut explicit = row_with_streams("pq", &[7.0, 14.0, 21.0], &["cases_south", "cases_north"]);
+        explicit.streams = RowStreams::Explicit;
+        let rows = [full, explicit];
+        assert_eq!(resolve_selection(&names(&["cases_north"]), &rows).unwrap(), ["cases_north"]);
+        let err = resolve_selection(&names(&["cases"]), &rows).unwrap_err();
+        assert!(err.contains("'pq'") && err.contains("explicit prequential.json")
+                && err.contains("cases_south, cases_north"), "{err}");
+        assert!(resolve_selection(&[], &rows).is_err());
+
+        // Models that expand a source differently contribute the union.
+        let other = derived_row("other", &[("cases", "cases")], &["cases"]);
+        let rows = [cases_only, other];
+        assert_eq!(resolve_selection(&names(&["cases"]), &rows).unwrap(),
+            ["cases_south", "cases_north", "cases"]);
+    }
+
+    /// A row re-scored on one leaf is that leaf's projection; a row that does
+    /// not score the leaf is refused, naming the row and the leaf.
+    #[test]
+    fn a_row_projected_onto_a_leaf_it_never_scored_is_refused_by_name() {
+        let r = derived_row("cases_only", &PATCHES, &["cases_south", "cases_north"]);
+        let err = r.onto("deaths").map(|_| ()).unwrap_err();
+        assert!(err.starts_with("'cases_only': ") && err.contains("'deaths'"), "{err}");
+        let p = r.onto("cases_north").unwrap();
+        assert_eq!(p.trace.streams(), ["cases_north"]);
+        assert_eq!(p.trace.elpd(), -9.0, "three steps of the leaf's own -3");
+        assert_eq!(p.name, "cases_only");
+        assert_eq!(for_stream("deaths", "error: a refusal".into()),
+            "error: stream 'deaths': a refusal");
+    }
+
+    /// The per-leaf filter-noise SE of a replicated derive equals the
+    /// log-mean-exp SE of the replicates' own projected totals — computed
+    /// here by hand from each replicate trace — not the joint SE.
+    #[test]
+    fn the_per_leaf_filter_noise_se_is_that_of_the_projected_replicates() {
+        let t = [7.0, 14.0, 21.0];
+        let reps: Vec<PrequentialTrace> = [(-3.0, -1.0), (-3.5, -2.0), (-2.5, -1.5)].iter()
+            .map(|&(north, south)| {
+                let mut tr = row_with_streams("r", &t, &["north", "south"]).trace;
+                for (k, s) in tr.steps.iter_mut().enumerate() {
+                    s.per_stream[0].log_score = north - k as f64 * 0.25;
+                    s.per_stream[1].log_score = south * (k + 1) as f64;
+                    s.log_score = s.per_stream[0].log_score + s.per_stream[1].log_score - 0.1;
+                }
+                tr
+            }).collect();
+        // What derive_prequential records on the combined trace.
+        let totals = ReplicateTotals::of(&reps);
+        let mut combined = combine_scored_traces(reps.clone(), 1).unwrap();
+        let mut d = derivation(100, reps.len());
+        d.replicate_elpd = totals.elpd.clone();
+        d.replicate_elpd_by_stream = totals.by_stream.clone();
+        d.mc_se_elpd = totals.mc_se;
+        combined.derivation = Some(d);
+        let mut row = row_with_streams("a", &t, &[]);
+        row.trace = combined;
+
+        for leaf in ["north", "south"] {
+            let by_hand: Vec<f64> = reps.iter()
+                .map(|rep| sim::inference::prequential::project_onto_stream(rep, leaf).unwrap().elpd())
+                .collect();
+            let want = sim::inference::types::logmeanexp_with_se(&by_hand).1;
+            let got = row_mc_se(&row.onto(leaf).unwrap());
+            assert_eq!(got, Some(want), "{leaf}");
+            assert_ne!(got, totals.mc_se, "{leaf}: not the joint SE");
+        }
+    }
+
+    /// A projected trace and a joint trace are refused as a pair even where
+    /// their steps agree: one step's log score is a leaf's own, the other's
+    /// the joint score over what its fit observed.
+    #[test]
+    fn a_projected_trace_is_not_compared_with_a_joint_one() {
+        let joint = row_with_streams("joint", &[7.0, 14.0, 21.0], &["cases"]);
+        let projected = joint.onto("cases").unwrap();
+        let mut projected = Row { name: "projected".into(), ..projected };
+        projected.trace.steps.iter_mut().for_each(|s| s.log_score = -6.0);
+        let err = check_shared_observation_axis(&[joint.clone(), projected.clone()]).unwrap_err();
+        assert!(err.contains("'joint' is scored jointly") && err.contains("'projected' is re-scored on cases alone"),
+            "{err}");
+        // Under mismatched horizons the same check holds at shared times.
+        assert!(check_shared_times(&[joint.clone(), projected]).is_err());
+        let both = [joint.onto("cases").unwrap(), joint.onto("cases").unwrap()];
+        check_shared_observation_axis(&both).expect("two projections onto one leaf compare");
     }
 }
 
