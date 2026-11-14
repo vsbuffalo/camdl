@@ -367,8 +367,18 @@ writes a finite value as a number and the others as the text `"inf"`, `"-inf"`
 and `"NaN"` and reads all four back exactly
 (`rust/crates/sim/src/inference/mod.rs:36`). Fields typed `f64` in a `Formed`
 difference are finite by construction: a pair with a non-finite difference is
-`NotFinite`, carries no standard error and no evidence label, and renders as "—"
-as it does today.
+`NotFinite` and carries no standard error and no evidence label.
+
+This changes what is printed. On `main` a row with a step scored at negative
+infinity prints its difference as `-inf`, its likelihood ratio as `0` and its
+standard error as `0.00`, with "—" in the evidence column only and no line
+naming the non-finite score; when that row is the baseline, the other row prints
+`+inf` and a standard error of `0.00` (pinned as it is by
+`a_row_with_a_non_finite_score_renders_as_pinned`, step 0). The standard error
+is not zero; it is undefined. A `NotFinite` row renders its own elpd as the
+value it is (`-inf`), renders "—" for the difference, the ratio, the standard
+error and the evidence, and adds a note naming the row and the number of its
+steps that scored non-finite.
 
 **Row order.** `rows` is in the order the members were given, which is the JSON
 order today. `display_order` is the order the table and markdown print: by
@@ -808,8 +818,10 @@ verbatim, splits a file where only part of it moves, and edits `use` lines.
 comparisons in which no check failed stay byte-identical. Renderings that state
 a finding change in step 6, because findings are restated as partitions; that
 commit's diff of the pinned text is the record of each change. The fixtures are
-rebuilt as `Member` values in step 7 with their pinned text unchanged. The JSON
-changes in step 9 only. No step of proposal A lands before step 9.
+rebuilt as `Member` values in step 7 with their pinned text unchanged, except
+the non-finite pin, which step 7 changes as described under "Numbers that may
+not be finite". The JSON changes in step 9 only. No step of proposal A lands
+before step 9.
 
 6. `CheckId`, `CheckResult`, `Finding`, `Refusal`, with each existing check
    rewritten as a function returning a `CheckResult`; `preflight` evaluates all
