@@ -783,12 +783,17 @@ fn cas_identity_pins() {
         // exactly, and a `from_mle` source keyed on its `start_values` — and
         // neither changes the bytes this fixture hashes (`tiny_model()` is
         // built in code, not parsed, and no fit here starts from_mle).
-        ("sim", "620b719c7c64cdeb20d6d43b6d1e28939aaa884eedce027303c163717950cfe7"),
-        ("fit", "1cdc1bf4e816f6d366b2506625c7770f35d0172080211894f3dca5a140db2868"),
-        ("pfilter", "ba2021fb7775e581c57694621ee990e47c49b1d8580e68751c699eaffad3a1e8"),
-        ("survey", "77fd279f2e78936b0db1d981eb6c2e612f6caafa16e5c041e3d104299338d371"),
-        ("sim_ensemble", "f28885bb455c4c99385ddcaed14230ec41d477696cc997d764bf1d11c24edef6"),
-        ("profile", "c9060dfb10853e3df3d93b89fba7d38c7c6611c2daeed3bca37b2ff84ef8b16e"),
+        //
+        // HASH_VERSION 2 -> 3 (gh#1046) moved EVERY kind again, for the same
+        // reason. It declares one change to what feeds identity: a model is
+        // hashed by the bodies of its hoisted subtrees, not by their numbering,
+        // and the table of them is no longer hashed as a list.
+        ("sim", "ce602a8a41db29645966ec3bf3c5eeb86dfeb4cf78140e0fb76d5fe8c75442e1"),
+        ("fit", "51df9e46ed9511e119be748660283e43dea87aa5a4034a3d596a9179f61bf1c9"),
+        ("pfilter", "52a07fe8e86619237540ab68d094a8361e0b32aa352d8d7064d3d9653088e65b"),
+        ("survey", "e32b7b97d01649235526e4004e8a63bf00fb493762b8ac2d6fce9640a7ab9d77"),
+        ("sim_ensemble", "39740d040018803edaa6bf50cf13a5ebfb6b586a0d2a2de766399caf91a5ed01"),
+        ("profile", "3c71af9c4b7e89e70e77a7254f7de3744061fa3e43b443636ad7b7e6bef0d2c7"),
     ];
     // Compared as whole lists so a failure reports EVERY kind that moved, not
     // just the first — the re-key scope is the thing under review.

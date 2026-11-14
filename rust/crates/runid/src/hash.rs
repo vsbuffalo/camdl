@@ -56,6 +56,18 @@ use sha2::{Digest, Sha256};
 ///
 /// ## History
 ///
+/// - **3** (gh#1046) — a model's hash no longer depends on how the compiler's
+///   hoisting pass numbered a hoisted subtree. A reference to a hoisted
+///   subtree (`Expr::PerEvalRef`) is hashed as the digest of the subtree it
+///   names, and the table of hoisted subtrees is no longer hashed as a list.
+///   Before this, a full compile and a `--no-state-grad` compile of one source
+///   could hash differently, because the numbering also counts subtrees hoisted
+///   out of gradient expressions, which are not identity.
+///
+///   This changes the bytes of every model hash (the table's length prefix is
+///   gone even where the table is empty), so the bump is what it looks like:
+///   every stored run and fit is re-keyed once. Leaves written at version 2
+///   stay readable; they are never served as a cache hit for a version-3 run.
 /// - **2** (gh#1018) — one deliberate re-key for two changes to what feeds a
 ///   run's identity:
 ///   1. *Exact float parsing.* serde_json's default float parser could land
@@ -74,7 +86,7 @@ use sha2::{Digest, Sha256};
 ///   still parses, `fit summary` and the browsers read them); they are never
 ///   served as a cache hit for a version-2 run.
 /// - **1** — the initial encoding.
-pub const HASH_VERSION: u16 = 2;
+pub const HASH_VERSION: u16 = 3;
 
 // ─── ContentHash ─────────────────────────────────────────────────────────────
 
@@ -168,7 +180,16 @@ impl<'de> Deserialize<'de> for ContentHash {
 #[derive(Clone)]
 pub struct CanonicalHasher {
     state: Sha256,
+    /// While a model is being hashed: the digest of each hoisted subtree's
+    /// body, by the name the compiler gave it (gh#1046). `None` outside a
+    /// model. See [`CanonicalHasher::with_hoisted_bodies`].
+    hoisted_bodies: Option<HoistedBodies>,
 }
+
+/// The digest of each hoisted subtree's body, keyed by its compiler-assigned
+/// name (`__licm_<n>`). The names are numbering, not identity; the digests are
+/// what a reference to one is hashed as.
+pub type HoistedBodies = std::collections::BTreeMap<String, ContentHash>;
 
 impl Default for CanonicalHasher {
     fn default() -> Self {
@@ -178,7 +199,35 @@ impl Default for CanonicalHasher {
 
 impl CanonicalHasher {
     pub fn new() -> Self {
-        Self { state: Sha256::new() }
+        Self { state: Sha256::new(), hoisted_bodies: None }
+    }
+
+    /// Run `f` with `bodies` as the table that resolves a reference to a
+    /// hoisted subtree, then restore whatever table was in force before. The
+    /// one caller is the model's own `hash_into`: a reference means something
+    /// only inside the model that holds the subtree.
+    pub fn with_hoisted_bodies(&mut self, bodies: HoistedBodies, f: impl FnOnce(&mut Self)) {
+        let before = self.hoisted_bodies.replace(bodies);
+        f(self);
+        self.hoisted_bodies = before;
+    }
+
+    /// The digest of the hoisted subtree `name`, when a model is being hashed
+    /// and it holds one by that name.
+    pub fn hoisted_body(&self, name: &str) -> Option<ContentHash> {
+        self.hoisted_bodies.as_ref().and_then(|m| m.get(name)).copied()
+    }
+
+    /// The digest of `value` hashed on its own, resolving references to
+    /// hoisted subtrees through `bodies`. Used to digest one hoisted body in
+    /// terms of the bodies before it.
+    pub fn digest_with_hoisted_bodies<T: ContentAddressed + ?Sized>(
+        value: &T,
+        bodies: &HoistedBodies,
+    ) -> ContentHash {
+        let mut h = Self { state: Sha256::new(), hoisted_bodies: Some(bodies.clone()) };
+        value.hash_into(&mut h);
+        h.finalize()
     }
 
     /// Feed raw bytes straight into the digest with no framing. Internal —

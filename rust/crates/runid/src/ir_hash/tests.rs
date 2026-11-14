@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use ir::expr::{BinOp, Expr, ProjectedExpr};
+use ir::expr::{BinOp, Expr, ProjectedExpr, UnOp};
 use ir::intervention::{Action, Intervention, InterventionSchedule, RecurringSchedule, SetAction};
 use ir::model::{
     BalanceSpec, Binding, Compartment, CompartmentKind, Dimension, InitialConditions, Integrator,
@@ -300,7 +300,10 @@ fn model_golden_hash() {
     // version-bumped re-key.
     // HASH_VERSION 1 -> 2 (gh#1018): the version is folded into every root
     // hash, so the golden moves once with no change to the model encoding.
-    const GOLDEN: &str = "91cd885c192925f44a78b5f13fa3f386d316e1964993be67412da4e6ae417429";
+    // HASH_VERSION 2 -> 3 (gh#1046): the model encoding changed (the table of
+    // hoisted subtrees is no longer hashed as a list, so its length prefix is
+    // gone) and the version moved with it.
+    const GOLDEN: &str = "d3570fb022f08d169d28ec2fbf57ba879578b370ca48bc7ad43bb7ee5c2e0f7f";
     let got = representative_model().content_hash().to_hex();
     assert_eq!(got, GOLDEN, "ir Model golden hash changed (got {got})");
 }
@@ -328,25 +331,100 @@ fn ir_constant_value_changes_hash() {
         "a constant reference and a parameter reference of one name differ");
 }
 
-/// gh#272: a non-empty `per_eval_bindings` must change the model hash. The
-/// blocker the proposal flagged was that adding the field to the struct (and the
-/// `hash_into` line) is invisible to `model_golden_hash` on its own — an empty Vec
-/// hashes the same whether or not the field is folded. This pins that the field is
-/// actually read by the hash, so flipping the LICM pass on re-keys `run_id`.
+/// A hoisted subtree that no hashed expression refers to does not change the
+/// model hash (gh#1046): the table is not hashed as a list. That turning the
+/// hoisting pass on does not collide with it off is pinned by
+/// `a_hoisted_rate_and_the_inline_rate_differ`.
 #[test]
-fn ir_per_eval_bindings_changes_hash() {
+fn an_unreferenced_hoisted_subtree_does_not_change_the_model_hash() {
     let base = representative_model().content_hash();
     let mut m = representative_model();
     m.per_eval_bindings.push(Binding {
         name: "__licm_0".into(),
         expr: Expr::param("beta"),
     });
-    assert_ne!(
-        base,
-        m.content_hash(),
-        "a non-empty per_eval_bindings must change the model hash (else flipping LICM \
-         on would collide run_id with the off-form)"
+    assert_eq!(base, m.content_hash());
+}
+
+// ── gh#1046: model identity does not depend on how hoisted subtrees are named ──
+
+/// `representative_model` with its one rate rewritten the way loop-invariant
+/// code motion leaves it: `piece * I`, where `piece` is a per-eval binding
+/// holding `beta * exp(-kappa)`. `bindings` is the whole per-eval table and
+/// `rate_ref` the name the rate refers to.
+fn hoisted_model(bindings: Vec<(&str, Expr)>, rate_ref: &str) -> Model {
+    let mut m = representative_model();
+    m.transitions[0].rate = Expr::bin_op(BinOp::Mul, Expr::per_eval_ref(rate_ref), Expr::pop("I"));
+    m.per_eval_bindings = bindings
+        .into_iter()
+        .map(|(name, expr)| Binding { name: name.into(), expr })
+        .collect();
+    m
+}
+
+fn rate_piece() -> Expr {
+    Expr::bin_op(
+        BinOp::Mul,
+        Expr::param("beta"),
+        Expr::un_op(UnOp::Exp, Expr::un_op(UnOp::Neg, Expr::param("kappa"))),
+    )
+}
+
+fn gradient_only_piece() -> Expr {
+    Expr::un_op(UnOp::Exp, Expr::un_op(UnOp::Neg, Expr::param("kappa")))
+}
+
+/// gh#1046, as measured: a full compile and a `--no-state-grad` compile of one
+/// source hold the same hoisted subtrees under different `__licm_<n>` names,
+/// because the counter runs over gradient expressions too. The rate means the
+/// same thing in both, so the model is the same model.
+#[test]
+fn hoist_numbering_does_not_change_the_model_hash() {
+    let full = hoisted_model(
+        vec![("__licm_0", rate_piece()), ("__licm_1", gradient_only_piece())],
+        "__licm_0",
     );
+    let lean = hoisted_model(
+        vec![("__licm_0", gradient_only_piece()), ("__licm_1", rate_piece())],
+        "__licm_1",
+    );
+    assert_eq!(
+        full.content_hash(),
+        lean.content_hash(),
+        "the same rate under a different hoist numbering must be the same model"
+    );
+}
+
+/// A subtree hoisted only out of a gradient expression is, like the gradient
+/// maps themselves, not identity: a compile that emits fewer gradient maps may
+/// not hold it at all.
+#[test]
+fn a_gradient_only_hoisted_subtree_does_not_change_the_model_hash() {
+    let with = hoisted_model(
+        vec![("__licm_0", rate_piece()), ("__licm_1", gradient_only_piece())],
+        "__licm_0",
+    );
+    let without = hoisted_model(vec![("__licm_0", rate_piece())], "__licm_0");
+    assert_eq!(with.content_hash(), without.content_hash());
+}
+
+/// The body a rate refers to is identity: the same name holding a different
+/// subtree is a different model.
+#[test]
+fn a_hoisted_subtree_a_rate_reads_is_identity() {
+    let a = hoisted_model(vec![("__licm_0", rate_piece())], "__licm_0");
+    let b = hoisted_model(vec![("__licm_0", gradient_only_piece())], "__licm_0");
+    assert_ne!(a.content_hash(), b.content_hash());
+}
+
+/// The hoisted form and the inline form stay distinct, as gh#272 required: the
+/// emitted IR differs, and turning the pass off must not collide with it on.
+#[test]
+fn a_hoisted_rate_and_the_inline_rate_differ() {
+    let hoisted = hoisted_model(vec![("__licm_0", rate_piece())], "__licm_0");
+    let mut inline = representative_model();
+    inline.transitions[0].rate = Expr::bin_op(BinOp::Mul, rate_piece(), Expr::pop("I"));
+    assert_ne!(hoisted.content_hash(), inline.content_hash());
 }
 
 // ── gh#442: the presentation strip, and why moving it did not re-key sim/fit ──
@@ -1098,26 +1176,26 @@ fn projection_variant_hashes_are_pinned() {
     // hashed unconditionally), and at SV=4 (the model name out of identity),
     // each time for the same header reason — no projection's own encoding
     // changed. And once more at HASH_VERSION 1 -> 2 (gh#1018), which every
-    // root hash folds.
+    // root hash folds, and at 2 -> 3 (gh#1046) for the same reason.
     assert_eq!(
         hex(Projection::CumulativeFlow("x".into())),
-        "c3ee62205e8c68b5376229d67e568f6bbc7e7140dabfea4e0ac251370c8029c3"
+        "97218fd83c9feeead18be891533a4c71ab1b4889671ec16c2864a24773dd9966"
     );
     assert_eq!(
         hex(Projection::CurrentPop("x".into())),
-        "c1e822315935388fb37eea6d43c2a40920e6f79050d53c172e858999502d84ee"
+        "9c1cca995b75392731cb3eba5f517f13a2ce5711be0a5408b51ec64059932640"
     );
     assert_eq!(
         hex(Projection::CurrentPopSum(vec!["x".into()])),
-        "736f30727dbd91292d25ef0caf9e1b22a08eb422cf41dd5ca5bc1a49e7a6adf4"
+        "1b30f07c3db4779198c4a2cefba32b8760e4cd329b996cbd98bc84a6979a2004"
     );
     assert_eq!(
         hex(Projection::DerivedExpr(Expr::const_(1.0))),
-        "2cb56d4551a27f251d759b31983fa98e50fd24629de4413aee35bf27394f17a1"
+        "681ac332bd841fa69ad712cc10134694d37ed70ec743ddad5ca32c44720a0531"
     );
     assert_eq!(
         hex(Projection::CumulativeFlowSum(vec!["x".into()])),
-        "148ac4b31e0643a5193c889ce75f1cdc5b0df6e170328b111892d7b59028d4b9"
+        "1c3a0b611535313c32ee2f01fe169c12e4e5fad5ca59be447ab66b05038fb59e"
     );
     // Proposal 2026-09-09 (proportion of flows over a window): appended at 5.
     // The five pins above are unchanged by the addition — that is the
@@ -1127,7 +1205,7 @@ fn projection_variant_hashes_are_pinned() {
             numerator: vec!["x".into()],
             denominator: vec!["x".into(), "y".into()],
         }),
-        "5513b64fb908f87a4630ad63ecb00ffb3f50cf5663b30c7a99d96db65fc6804f"
+        "37d7ac851ffb5817cb0d01fd9361b030d1530fcc321979aaa7d97ce704f53b25"
     );
     // The two sides are hashed in order, so swapping them is a different
     // projection — `a / (a + b)` and `(a + b) / a` must not share a run_id.

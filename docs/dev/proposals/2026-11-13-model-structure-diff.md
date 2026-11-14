@@ -784,8 +784,10 @@ viewer's first published comparison.
 
 1. Fix gh#1046: `model_ir_hash` differs between a full and a `--no-state-grad`
    compile of one source when a subtree is hoisted. Until it is fixed, a model
-   file compared with its own fit can land in the refused fourth outcome. Not
-   done; failing tests are on the branch `wip/gh1046-red-tests`.
+   file compared with its own fit can land in the refused fourth outcome. Done:
+   a reference to a hoisted subtree is hashed as the digest of its body,
+   `HASH_VERSION` is 3, and `tests/fixtures/hoisted_identity` holds one source
+   compiled both ways, which a test checks is one model.
 2. The `declared` envelope section: the `declared` crate, the OCaml types and
    emission, the envelope field, `ir/VERSION` 0.44, goldens, `source_text`,
    `katex_loss`, `expands_to`, warning `W203`, invariants 9 to 13, and

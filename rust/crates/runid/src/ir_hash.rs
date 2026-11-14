@@ -292,9 +292,26 @@ impl ContentAddressed for Expr {
             // gh#272 LICM: fresh variant index 16 (not inserted between 14/15) so
             // existing nodes keep their hash — only the new node and the empty
             // `per_eval_bindings` field shift the model hash at 0.19.
+            //
+            // gh#1046: the name is the hoisting pass's numbering, which also
+            // counts subtrees hoisted out of gradient expressions, so it is not
+            // identity. Inside a model the reference is hashed as the digest of
+            // the subtree it names. The node stays distinct from that subtree
+            // written inline (variant 16 and the marker byte), as gh#272
+            // required. Outside a model, or for a name the model does not hold
+            // (which `ir::validate` refuses), the name is all there is.
             Expr::PerEvalRef(PerEvalRefWrap { per_eval_ref }) => {
                 h.write_u32(16);
-                h.write_str(per_eval_ref);
+                match h.hoisted_body(per_eval_ref) {
+                    Some(body) => {
+                        h.write_u8(1);
+                        body.hash_into(h);
+                    }
+                    None => {
+                        h.write_u8(0);
+                        h.write_str(per_eval_ref);
+                    }
+                }
             }
             // gh#616: fresh index 17, same reason — existing nodes keep their
             // hash. Anchor and offset both enter, so two forcing forks that
@@ -1489,6 +1506,26 @@ impl ContentAddressed for Binding {
 
 impl ContentAddressed for Model {
     fn hash_into(&self, h: &mut CanonicalHasher) {
+        // gh#1046: digest each hoisted subtree's body, in order, each in terms
+        // of the ones before it (a hoisted subtree may contain an earlier one).
+        // Every reference in the fields is then hashed as the body it names.
+        let mut hoisted = crate::hash::HoistedBodies::new();
+        for b in &self.per_eval_bindings {
+            let digest = CanonicalHasher::digest_with_hoisted_bodies(&b.expr, &hoisted);
+            hoisted.insert(b.name.clone(), digest);
+        }
+        h.with_hoisted_bodies(hoisted, |h| self.hash_fields(h));
+    }
+}
+
+/// The model's hashed fields, in order; `Model::hash_into` calls it with the
+/// table of hoisted bodies in force.
+trait HashFields {
+    fn hash_fields(&self, h: &mut CanonicalHasher);
+}
+
+impl HashFields for Model {
+    fn hash_fields(&self, h: &mut CanonicalHasher) {
         // Exhaustive destructure: a new IR field must not silently escape the
         // model hash — add it below, or bind it `_` with the reason.
         let Model {
@@ -1498,7 +1535,9 @@ impl ContentAddressed for Model {
             name: _,
             version, time_unit, description, origin, origin_rata_die,
             compartments, transitions, ode_equations, time_functions, tables,
-            interventions, observations, parameters, constants, bindings, per_eval_bindings,
+            interventions, observations, parameters, constants, bindings,
+            // Not hashed as a list; see below, at `bindings`.
+            per_eval_bindings: _,
             initial_conditions, ic_grad: _, output, simulation, presets,
             model_structure, balance, identity_tracked_compartments,
             // Reporting-only reductions/contrasts, documented in `ir::model` as
@@ -1526,11 +1565,11 @@ impl ContentAddressed for Model {
         // once at the bump — deliberate and version-bumped.
         constants.hash_into(h);
         bindings.hash_into(h);
-        // gh#272 LICM: identity field (the emitted IR is hashed). Empty by default
-        // — but the empty Vec's length prefix still shifts the model hash at the
-        // 0.19 schema bump (a deliberate, version-bumped re-key); pinned by the
-        // distinctness test in this module.
-        per_eval_bindings.hash_into(h);
+        // `per_eval_bindings` (the subtrees hoisted by loop-invariant code
+        // motion, gh#272) is not hashed as a list. A subtree that a hashed
+        // expression refers to enters through that reference, as its body's
+        // digest; one that only a gradient map refers to is, like the gradient
+        // maps, not identity (gh#1046).
         initial_conditions.hash_into(h);
         // ic_grad (∂(initial_state)/∂θ, the forward-sensitivity seed, gh#275) is
         // compiler-derived autodiff of the parameterized initial conditions over

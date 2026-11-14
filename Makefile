@@ -122,7 +122,7 @@ dev-camdlc: build-ocaml
 # CI can run and badge them independently (see .github/workflows/): test-rust =
 # everything except the sim crate; test-inference = the sim crate (simulation
 # engine + the inference stack). Their union is the whole workspace.
-test: lint test-ocaml check-reactive-golden check-quantities-golden check-contrasts-golden check-declared-names-golden test-rust test-inference test-integration test-docs test-cli-docs test-install
+test: lint test-ocaml check-reactive-golden check-quantities-golden check-contrasts-golden check-declared-names-golden check-hoisted-identity-golden test-rust test-inference test-integration test-docs test-cli-docs test-install
 
 # Clippy, the same invocation CI's `test` job runs as its second step. Kept in
 # `make test` because CI aborts that job on a lint error before a single test
@@ -292,7 +292,7 @@ test-install:
 
 # ── Golden file management ────────────────────────────────────────────────────
 
-.PHONY: update-golden update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden update-quantities-golden check-quantities-golden update-contrasts-golden check-contrasts-golden update-gradient-golden update-bspline-inference-golden update-declared-names-golden check-declared-names-golden
+.PHONY: update-golden update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden update-quantities-golden check-quantities-golden update-contrasts-golden check-contrasts-golden update-gradient-golden update-bspline-inference-golden update-declared-names-golden check-declared-names-golden update-hoisted-identity-golden check-hoisted-identity-golden
 
 # Recompile all DSL fixtures → ocaml/golden/*.ir.json
 update-ocaml-golden: build-ocaml
@@ -303,7 +303,7 @@ update-ocaml-golden: build-ocaml
 		$(CAMDLC) "$$src" > "$$out"; \
 	done
 
-update-golden: update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden update-quantities-golden update-contrasts-golden update-gradient-golden update-bspline-inference-golden update-declared-names-golden
+update-golden: update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden update-quantities-golden update-contrasts-golden update-gradient-golden update-bspline-inference-golden update-declared-names-golden update-hoisted-identity-golden
 
 # Recompile the corner-case fixtures (params baked via --set) →
 # tests/fixtures/corner_cases/ir/*.ir.json. These pin the off-grid /
@@ -446,6 +446,34 @@ check-declared-names-golden: build-ocaml
 	done; \
 	if [ $$fail -ne 0 ]; then exit 1; fi; \
 	echo "  declared-names goldens in sync"
+
+# The hoisted-identity fixture (gh#1046): one model compiled twice, in full and
+# with --no-state-grad. Its recovery rate has a parameter-only factor that the
+# compiler hoists and numbers differently in the two compiles;
+# rust/crates/runid/tests/hoisted_identity.rs checks the two files are one
+# model. Compile-only.
+HOISTED_DIR := tests/fixtures/hoisted_identity
+update-hoisted-identity-golden: build-ocaml
+	@echo "Recompiling the hoisted-identity fixture..."
+	@mkdir -p $(HOISTED_DIR)/ir
+	@$(CAMDLC) $(HOISTED_DIR)/hoisted_rate.camdl -o $(HOISTED_DIR)/ir/hoisted_rate.ir.json
+	@$(CAMDLC) $(HOISTED_DIR)/hoisted_rate.camdl --no-state-grad -o $(HOISTED_DIR)/ir/hoisted_rate.no_state_grad.ir.json
+
+# Drift gate: the source must still compile byte-for-byte to both committed
+# files. Runs in `make test`.
+check-hoisted-identity-golden: build-ocaml
+	@echo "Checking the hoisted-identity goldens match their .camdl..."
+	@$(CAMDLC) $(HOISTED_DIR)/hoisted_rate.camdl -o $(HOISTED_DIR)/ir/full.tmp
+	@$(CAMDLC) $(HOISTED_DIR)/hoisted_rate.camdl --no-state-grad -o $(HOISTED_DIR)/ir/lean.tmp
+	@fail=0; \
+	diff -q $(HOISTED_DIR)/ir/hoisted_rate.ir.json $(HOISTED_DIR)/ir/full.tmp >/dev/null 2>&1 || fail=1; \
+	diff -q $(HOISTED_DIR)/ir/hoisted_rate.no_state_grad.ir.json $(HOISTED_DIR)/ir/lean.tmp >/dev/null 2>&1 || fail=1; \
+	rm -f $(HOISTED_DIR)/ir/full.tmp $(HOISTED_DIR)/ir/lean.tmp; \
+	if [ $$fail -ne 0 ]; then \
+	  echo "  DRIFT: hoisted_rate.camdl no longer compiles to its committed files — run: make update-hoisted-identity-golden"; \
+	  exit 1; \
+	fi; \
+	echo "  hoisted-identity goldens in sync"
 
 # Drift gate (gh#204): each reactive .camdl must still compile BYTE-FOR-BYTE to
 # its committed .ir.json. `update-reactive-golden` regenerates; this FAILS if

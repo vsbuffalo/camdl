@@ -1,0 +1,53 @@
+# Base: none — root model
+# Adds: a recovery rate with a factor that depends on parameters only
+# Changes: nothing else
+#
+# What this model is. A closed population in three compartments: susceptible
+# (S), infectious (I) and recovered (R). Susceptible individuals become
+# infectious on contact with infectious ones; infectious individuals recover
+# and stay immune. The recovery rate is `gamma * exp(-kappa)`: a base rate
+# scaled down by a factor that depends on the parameter `kappa` alone and on
+# nothing that changes during a run.
+#
+# What it is fitted to. Nothing: it has no observation streams. It is compiled
+# only.
+#
+# Why the parameter-only factor is here. The compiler computes such a factor
+# once per evaluation instead of once per use, and gives it a numbered internal
+# name. That numbering differs between a full compile and one made with
+# `--no-state-grad`. This model is compiled both ways, and the two compiled
+# files must have the same model identity (gh#1046).
+
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  #' per-capita transmission rate
+  beta  : rate        in [0.001, 2.0]
+  #' base recovery rate
+  gamma : rate        in [0.001, 1.0]
+  #' attenuation of recovery; enters only as exp(-kappa)
+  kappa : probability in [0.001, 1.0]
+  #' total population size
+  N0    : count       in [100, 100000]
+  #' initial number infectious
+  I0    : count       in [1, 1000]
+}
+
+transitions {
+  infection : S --> I  @ beta * S * (I / N)
+  recovery  : I --> R  @ gamma * exp(-kappa) * I
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+simulate {
+  from = 0 'days
+  to   = 80 'days
+}
