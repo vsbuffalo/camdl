@@ -1012,16 +1012,16 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         // Schema 5: how this trace was computed. One pass (`--replicates N`
         // is refused beside `--save-prequential`), at the parameters this
         // invocation was given.
-        trace.derivation = Some(sim::inference::prequential::Derivation::single_pass(
+        trace.derivation = Some(score::trace::Derivation::single_pass(
             &trace, n_particles, dt, seed,
-            sim::inference::prequential::ThetaSource::Supplied,
+            score::trace::ThetaSource::Supplied,
             adhoc_enable.clone(), adhoc_disable.clone()));
         if !save_samples {
             for step in &mut trace.steps {
                 for ss in &mut step.per_stream { ss.y_pred_samples.clear(); }
             }
             trace.warnings.push(
-                sim::inference::prequential::PrequentialWarning::SamplesNotSaved);
+                score::trace::PrequentialWarning::SamplesNotSaved);
         }
         crate::prequential_out::write_prequential_outputs(stem, &trace).unwrap_or_else(|e| {
             out.fail(format!("error writing prequential: {}", e));

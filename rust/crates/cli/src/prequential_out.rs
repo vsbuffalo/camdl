@@ -50,7 +50,7 @@ pub fn streams_sibling(path: &Path) -> PathBuf {
 /// there is no one observed quantity to score them against.
 pub fn write_prequential_outputs(
     stem: &str,
-    trace: &sim::inference::prequential::PrequentialTrace,
+    trace: &score::trace::PrequentialTrace,
 ) -> std::io::Result<()> {
     let tsv_path = format!("{}.tsv", stem);
     let streams_path = streams_sibling(Path::new(&tsv_path));
@@ -83,7 +83,7 @@ pub fn write_prequential_outputs(
 /// 90% coverage. A single-stream trace reads `elpd=…, mean_crps=…, PIT 90%
 /// cov=…`; a multi-stream one names each stream, because no CRPS or coverage
 /// combines streams. A trace with no per-stream breakdown has neither.
-pub fn summary_line(trace: &sim::inference::prequential::PrequentialTrace) -> String {
+pub fn summary_line(trace: &score::trace::PrequentialTrace) -> String {
     let elpd = format!("elpd={:.2}", trace.elpd());
     let figures = |s: &str| format!("mean_crps={:.3}, PIT 90% cov={:.2}",
         trace.mean_crps(s).value, trace.pit_coverage(s, 0.90).value);
@@ -120,7 +120,7 @@ pub const SURPRISE_ROWS: usize = 5;
 /// trace) shows `—` for the stream's columns.
 ///
 /// Empty when the trace scored nothing.
-pub fn surprise_table(trace: &sim::inference::prequential::PrequentialTrace) -> String {
+pub fn surprise_table(trace: &score::trace::PrequentialTrace) -> String {
     let worst = trace.worst_scored(SURPRISE_ROWS);
     if worst.is_empty() {
         return String::new();
@@ -198,7 +198,7 @@ pub fn surprise_table(trace: &sim::inference::prequential::PrequentialTrace) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sim::inference::prequential::{
+    use score::trace::{
         Conditioning, PredInterval, PrequentialStep, PrequentialTrace, Provenance, StreamScore,
     };
 
