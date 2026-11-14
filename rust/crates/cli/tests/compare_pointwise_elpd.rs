@@ -62,8 +62,8 @@ fn read_tsv(path: &Path) -> (Vec<String>, Vec<Vec<String>>) {
 
 /// The whole point: the candidate beats the baseline by 3 nats in total, and
 /// ALL of it comes from the middle step — which the scalar cannot say and the
-/// vector says immediately. The per-stream rows localize it further, to
-/// `north`.
+/// vector says immediately. The per-stream rows, in the sibling
+/// `pointwise.streams.tsv`, localize it further, to `north`.
 #[test]
 fn pointwise_tsv_localizes_the_elpd_difference_to_one_step_and_one_stream() {
     let bin = binary();
@@ -98,23 +98,25 @@ fn pointwise_tsv_localizes_the_elpd_difference_to_one_step_and_one_stream() {
         "compare --pointwise must succeed.\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&run.stdout), String::from_utf8_lossy(&run.stderr));
 
-    let (header, rows) = read_tsv(&out);
-    for col in ["model", "baseline", "t", "scope", "stream", "log_score",
-                "baseline_log_score", "delta_log_score"] {
-        assert!(header.iter().any(|h| h == col),
-            "the pointwise TSV must carry a `{col}` column; header = {header:?}");
-    }
+    let said = String::from_utf8_lossy(&run.stderr);
+    let streams_out = dir.join("pointwise.streams.tsv");
+    assert!(said.contains(&format!("3 joint pointwise rows to {}", out.display()))
+            && said.contains(&format!("6 per-stream rows to {}", streams_out.display())),
+        "the message names both files and their row counts: {said}");
+
+    let (header, joint) = read_tsv(&out);
+    assert_eq!(header, ["model", "baseline", "t", "log_score", "baseline_log_score",
+                        "delta_log_score"],
+        "the joint file carries no scope or stream column");
     let col = |name: &str| header.iter().position(|h| h == name).unwrap();
 
     // The baseline is not differenced against itself — only the candidate has
     // rows, and it is named alongside the baseline it was scored against.
-    assert!(rows.iter().all(|r| r[col("model")] == "cand.json"),
-        "only the compared candidates get rows: {rows:?}");
-    assert!(rows.iter().all(|r| r[col("baseline")] == "base.json"),
-        "every row names the baseline it was differenced against: {rows:?}");
-
-    let joint: Vec<&Vec<String>> = rows.iter().filter(|r| r[col("scope")] == "joint").collect();
-    assert_eq!(joint.len(), 3, "one joint row per scored step: {rows:?}");
+    assert!(joint.iter().all(|r| r[col("model")] == "cand.json"),
+        "only the compared candidates get rows: {joint:?}");
+    assert!(joint.iter().all(|r| r[col("baseline")] == "base.json"),
+        "every row names the baseline it was differenced against: {joint:?}");
+    assert_eq!(joint.len(), 3, "one joint row per scored step: {joint:?}");
     let deltas: Vec<f64> = joint.iter()
         .map(|r| r[col("delta_log_score")].parse().unwrap())
         .collect();
@@ -125,15 +127,20 @@ fn pointwise_tsv_localizes_the_elpd_difference_to_one_step_and_one_stream() {
     // The rows join back to the observation axis by time, not by row index.
     assert_eq!(joint[1][col("t")], "14", "the differing step is t = 14: {joint:?}");
 
-    // Per-stream: the gain is `north`'s alone.
+    // Per-stream, in the sibling file: the gain is `north`'s alone.
+    let (sheader, rows) = read_tsv(&streams_out);
+    assert_eq!(sheader, ["model", "baseline", "t", "stream", "log_score",
+                         "baseline_log_score", "delta_log_score"],
+        "the per-stream file carries no scope column");
+    let scol = |name: &str| sheader.iter().position(|h| h == name).unwrap();
+    assert_eq!(rows.len(), 6, "one row per scored step and stream: {rows:?}");
     let stream_row = |name: &str, t: &str| -> &Vec<String> {
         rows.iter()
-            .find(|r| r[col("scope")] == "stream" && r[col("stream")] == name
-                && r[col("t")] == t)
+            .find(|r| r[scol("stream")] == name && r[scol("t")] == t)
             .unwrap_or_else(|| panic!("no {name} row at t={t}: {rows:?}"))
     };
-    let north: f64 = stream_row("north", "14")[col("delta_log_score")].parse().unwrap();
-    let south: f64 = stream_row("south", "14")[col("delta_log_score")].parse().unwrap();
+    let north: f64 = stream_row("north", "14")[scol("delta_log_score")].parse().unwrap();
+    let south: f64 = stream_row("south", "14")[scol("delta_log_score")].parse().unwrap();
     assert!((north - 3.0).abs() < 1e-9, "north carries the whole gain: {north}");
     assert!(south.abs() < 1e-9, "south is a tie: {south}");
 }
@@ -276,4 +283,6 @@ fn compare_refuses_two_models_that_scored_different_stream_sets() {
     assert!(!stdout.contains("dB"),
         "no evidence verdict may be rendered for an uncomparable pair: {stdout}");
     assert!(!out.exists(), "and no pointwise file is written: {}", out.display());
+    let streams_out = dir.join("pointwise.streams.tsv");
+    assert!(!streams_out.exists(), "nor its per-stream sibling: {}", streams_out.display());
 }

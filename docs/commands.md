@@ -280,14 +280,22 @@ derive path, since the derived score would come from a different forward process
 than the fit used (gh#312).
 
 `--pointwise PATH` writes the per-observation difference the table already
-computes in order to form `se(Δelpd)`, as a TSV with one row per candidate ×
-scored step, joint and per stream: `model`, `baseline`, `t`, `scope`, `stream`,
-`log_score`, `baseline_log_score`, `delta_log_score`. `Δelpd = 12 nats` says a
-model won; this says _where_ it won — on three weeks around an intervention, on
-one district, on a single reporting batch. An elpd gap taken across two
-different stream sets never reaches this file: the preflight refuses that
-comparison before the table is rendered or the TSV is written, naming the
-streams that differ (gh#570).
+computes in order to form `se(Δelpd)`, as two TSV files. `PATH` holds one row
+per candidate × scored step with the joint score — the log of the joint
+predictive density of every stream observed at that time, the quantity elpd
+sums: `model`, `baseline`, `t`, `log_score`, `baseline_log_score`,
+`delta_log_score`. A sibling file, named by inserting `.streams` before the
+extension (`scores.tsv` → `scores.streams.tsv`; a path with no extension gets
+`.streams` appended), holds one row per candidate × step × stream with that
+stream's own score: `model`, `baseline`, `t`, `stream`, `log_score`,
+`baseline_log_score`, `delta_log_score`. The two are separate because a stream's
+score is not a share of the joint one: the per-stream rows at a time do not sum
+to the joint row. An empty cell in the per-stream file means that side did not
+score that stream at that time. `Δelpd = 12 nats` says a model won; these files
+say _where_ it won — on three weeks around an intervention, on one district, on
+a single reporting batch. An elpd gap taken across two different stream sets
+never reaches them: the preflight refuses that comparison before the table is
+rendered or either file is written, naming the streams that differ (gh#570).
 
 ## The boundaries, stated plainly
 
