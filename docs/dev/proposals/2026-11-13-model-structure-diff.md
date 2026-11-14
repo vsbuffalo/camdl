@@ -493,10 +493,16 @@ regenerated and reviewed.
   compiler (hand-edited, or serialized from Rust). Both cases report the diff as
   unavailable for that side.
 - **Landing.** The golden regeneration conflicts with any branch that touches
-  `ocaml/lib/ir/`, `rust/crates/ir/src/` or a golden. It lands directly after
-  the fix for gh#1046, which also regenerates goldens (and re-keys models with
-  hoisted subtrees), so the two reviews of the golden set happen back to back,
-  as separate commits.
+  `ocaml/lib/ir/`, `rust/crates/ir/src/` or a golden. The unmerged branches that
+  do are the b-spline ones (`feat/bsplines`, `feat/bsplines-explicit`,
+  `feat/bsplines-s3-local`, and `origin/feat/bsplines-s1`, which carries its own
+  `ir/VERSION` change) and `nuts-divergence-tests`; whichever of the two lands
+  second rebases and regenerates.
+- **gh#1046 is a separate change and moves no golden.** None of the 62 files in
+  `ocaml/golden/` contains a hoisted subtree (no `__licm_` name appears in any),
+  so its fix re-keys only models that have one and leaves the golden set
+  untouched. It also means no golden exercises the hoisting pass; the fix adds
+  one.
 
 ## Invariants
 
