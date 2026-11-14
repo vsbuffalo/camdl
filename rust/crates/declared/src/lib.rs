@@ -1003,7 +1003,9 @@ pub enum Action {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Schedule {
     AtTimes { times: Vec<DeclaredExpr> },
-    Recurring { every: DeclaredExpr, from: Option<DeclaredExpr>, to: Option<DeclaredExpr> },
+    /// The two optional bounds are boxed to keep the variants near one size;
+    /// the wire form is unchanged.
+    Recurring { every: DeclaredExpr, from: Option<Box<DeclaredExpr>>, to: Option<Box<DeclaredExpr>> },
     EveryAtDay { period: DeclaredExpr, at_day: DeclaredExpr },
 }
 
