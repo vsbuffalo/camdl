@@ -1,4 +1,4 @@
-{"ir_version":"0.43","validated_by":"ocaml-compiler-v0.43","model":{"name":"sir_reservoir","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.44","validated_by":"ocaml-compiler-v0.44","model":{"name":"sir_reservoir","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S","kind":"integer"},
 {"name":"I","kind":"integer"},
 {"name":"R","kind":"integer"},
@@ -19,4 +19,29 @@
 {"name":"baseline","label":"SIWR baseline","params":{"beta":0.3,"gamma":0.1,"xi":1.0,"delta":0.5,"N0":1000.0,"I0":10.0},"enable":[],"disable":[],"t_end":null}
 ],"model_structure":{"dimensions":[],"compartment_dims":{"S":[],"I":[],"R":[],"W":[]},"base_compartments":["S","I","R","W"],"transmission_transitions":["infection"],"infectious_compartments":["I"]},"bindings":[
 {"name":"N","expr":{"pop_sum":["S","I","R"]}}
-]}}
+]},"declared":{"schema_version":1,"compile_inputs":{"set_values":[],"files":[]},"time_unit":"days","description":null,"origin":null,"dimensions":[],"compartments":[
+{"name":"S","kind":"integer","dims":[],"expands_to":null},
+{"name":"I","kind":"integer","dims":[],"expands_to":null},
+{"name":"R","kind":"integer","dims":[],"expands_to":null},
+{"name":"W","kind":"real","dims":[],"expands_to":null}
+],"stratify":[],"parameters":[
+{"name":"beta","dims":[],"kind":"rate","dim":null,"bounds":{"lo":{"tree":{"const":{"value":0.001}},"katex":"0.001","reads":[]},"hi":{"tree":{"const":{"value":2.0}},"katex":"2","reads":[]}},"prior":null},
+{"name":"gamma","dims":[],"kind":"rate","dim":null,"bounds":{"lo":{"tree":{"const":{"value":0.001}},"katex":"0.001","reads":[]},"hi":{"tree":{"const":{"value":1.0}},"katex":"1","reads":[]}},"prior":null},
+{"name":"xi","dims":[],"kind":"rate","dim":null,"bounds":{"lo":{"tree":{"const":{"value":0.001}},"katex":"0.001","reads":[]},"hi":{"tree":{"const":{"value":10.0}},"katex":"10","reads":[]}},"prior":null},
+{"name":"delta","dims":[],"kind":"rate","dim":null,"bounds":{"lo":{"tree":{"const":{"value":0.001}},"katex":"0.001","reads":[]},"hi":{"tree":{"const":{"value":5.0}},"katex":"5","reads":[]}},"prior":null},
+{"name":"N0","dims":[],"kind":"count","dim":null,"bounds":{"lo":{"tree":{"const":{"value":100.0}},"katex":"100","reads":[]},"hi":{"tree":{"const":{"value":100000.0}},"katex":"100000","reads":[]}},"prior":null},
+{"name":"I0","dims":[],"kind":"count","dim":null,"bounds":{"lo":{"tree":{"const":{"value":1.0}},"katex":"1","reads":[]},"hi":{"tree":{"const":{"value":1000.0}},"katex":"1000","reads":[]}},"prior":null}
+],"definitions":[
+{"name":"N","indices":[],"shape":null,"kind":null,"dim":null,"body":{"tree":{"bin_op":{"op":"add","lhs":{"bin_op":{"op":"add","lhs":{"ident":{"name":{"name":"S","kind":"compartment"}}},"rhs":{"ident":{"name":{"name":"I","kind":"compartment"}}}}},"rhs":{"ident":{"name":{"name":"R","kind":"compartment"}}}}},"katex":"S + I + R","reads":[{"name":"S","kind":"compartment"},{"name":"I","kind":"compartment"},{"name":"R","kind":"compartment"}]}}
+],"tables":[],"time_inputs":[],"timepoints":[],"transitions":[
+{"name":"infection","indices":[],"from":[{"compartment":"S","indices":[]}],"to":{"sum":{"compartments":[{"compartment":"I","indices":[]}]}},"dynamics":{"rate":{"rate":{"tree":{"bin_op":{"op":"mul","lhs":{"bin_op":{"op":"mul","lhs":{"ident":{"name":{"name":"beta","kind":"parameter"}}},"rhs":{"ident":{"name":{"name":"S","kind":"compartment"}}}}},"rhs":{"bin_op":{"op":"div","lhs":{"ident":{"name":{"name":"I","kind":"compartment"}}},"rhs":{"ident":{"name":{"name":"N","kind":"definition"}}}}}}},"katex":"\\frac{\\beta\\,S\\,I}{N}","reads":[{"name":"beta","kind":"parameter"},{"name":"S","kind":"compartment"},{"name":"I","kind":"compartment"},{"name":"N","kind":"definition"}]}}},"guard":null,"lineage":false,"expands_to":null},
+{"name":"recovery","indices":[],"from":[{"compartment":"I","indices":[]}],"to":{"sum":{"compartments":[{"compartment":"R","indices":[]}]}},"dynamics":{"rate":{"rate":{"tree":{"bin_op":{"op":"mul","lhs":{"ident":{"name":{"name":"gamma","kind":"parameter"}}},"rhs":{"ident":{"name":{"name":"I","kind":"compartment"}}}}},"katex":"\\gamma\\,I","reads":[{"name":"gamma","kind":"parameter"},{"name":"I","kind":"compartment"}]}}},"guard":null,"lineage":false,"expands_to":null}
+],"ode_equations":[
+{"compartment":"W","derivative":{"tree":{"bin_op":{"op":"sub","lhs":{"bin_op":{"op":"mul","lhs":{"ident":{"name":{"name":"xi","kind":"parameter"}}},"rhs":{"ident":{"name":{"name":"I","kind":"compartment"}}}}},"rhs":{"bin_op":{"op":"mul","lhs":{"ident":{"name":{"name":"delta","kind":"parameter"}}},"rhs":{"ident":{"name":{"name":"W","kind":"compartment"}}}}}}},"katex":"\\xi\\,I - \\delta\\,W","reads":[{"name":"xi","kind":"parameter"},{"name":"I","kind":"compartment"},{"name":"delta","kind":"parameter"},{"name":"W","kind":"compartment"}]}}
+],"balance":[],"initial":[
+{"compartment":"S","indices":[],"bindings":[],"value":{"expr":{"value":{"tree":{"bin_op":{"op":"sub","lhs":{"ident":{"name":{"name":"N0","kind":"parameter"}}},"rhs":{"ident":{"name":{"name":"I0","kind":"parameter"}}}}},"katex":"N_{0} - I_{0}","reads":[{"name":"N0","kind":"parameter"},{"name":"I0","kind":"parameter"}]}}}},
+{"compartment":"I","indices":[],"bindings":[],"value":{"expr":{"value":{"tree":{"ident":{"name":{"name":"I0","kind":"parameter"}}},"katex":"I_{0}","reads":[{"name":"I0","kind":"parameter"}]}}}},
+{"compartment":"W","indices":[],"bindings":[],"value":{"expr":{"value":{"tree":{"const":{"value":0.0}},"katex":"0","reads":[]}}}}
+],"observations":[],"interventions":[],"events":[],"reactive_interventions":[],"scenarios":[
+{"name":"baseline","fields":[{"label":{"text":"SIWR baseline"}},{"set":{"values":[{"name":"beta","value":{"tree":{"const":{"value":0.3}},"katex":"0.3","reads":[]}},{"name":"gamma","value":{"tree":{"const":{"value":0.1}},"katex":"0.1","reads":[]}},{"name":"xi","value":{"tree":{"const":{"value":1.0}},"katex":"1","reads":[]}},{"name":"delta","value":{"tree":{"const":{"value":0.5}},"katex":"0.5","reads":[]}},{"name":"N0","value":{"tree":{"const":{"value":1000.0}},"katex":"1000","reads":[]}},{"name":"I0","value":{"tree":{"const":{"value":10.0}},"katex":"10","reads":[]}}]}}]}
+],"simulation":{"from":{"tree":{"unit":{"value":0.0,"unit":"days"}},"katex":"0","reads":[]},"to":{"tree":{"unit":{"value":60.0,"unit":"days"}},"katex":"60","reads":[]},"dt":null,"integrator":null,"atol":null,"rtol":null},"output":null,"quantities":[],"contrasts":[]}}

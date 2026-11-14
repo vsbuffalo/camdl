@@ -1,4 +1,4 @@
-{"ir_version":"0.43","validated_by":"ocaml-compiler-v0.43","model":{"name":"zinb_vector_catch","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.44","validated_by":"ocaml-compiler-v0.44","model":{"name":"zinb_vector_catch","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S","kind":"integer"},
 {"name":"I","kind":"integer"},
 {"name":"R","kind":"integer"}
@@ -19,4 +19,28 @@
 {"name":"baseline","label":"focal vector catch with excess zeros","params":{"beta":0.4,"gamma":0.15,"rho":0.3,"k":2.0,"pi_zero":0.4,"N0":10000.0,"I0":10.0},"enable":[],"disable":[],"t_end":null}
 ],"model_structure":{"dimensions":[],"compartment_dims":{"S":[],"I":[],"R":[]},"base_compartments":["S","I","R"],"transmission_transitions":["infection"],"infectious_compartments":["I"]},"bindings":[
 {"name":"N","expr":{"pop_sum":["S","I","R"]}}
-]}}
+]},"declared":{"schema_version":1,"compile_inputs":{"set_values":[],"files":[]},"time_unit":"days","description":null,"origin":null,"dimensions":[],"compartments":[
+{"name":"S","kind":"integer","dims":[],"expands_to":null},
+{"name":"I","kind":"integer","dims":[],"expands_to":null},
+{"name":"R","kind":"integer","dims":[],"expands_to":null}
+],"stratify":[],"parameters":[
+{"name":"beta","dims":[],"kind":"rate","dim":null,"bounds":null,"prior":null},
+{"name":"gamma","dims":[],"kind":"rate","dim":null,"bounds":null,"prior":null},
+{"name":"rho","dims":[],"kind":"probability","dim":null,"bounds":null,"prior":null},
+{"name":"k","dims":[],"kind":"positive","dim":null,"bounds":null,"prior":null},
+{"name":"pi_zero","dims":[],"kind":"probability","dim":null,"bounds":null,"prior":null},
+{"name":"N0","dims":[],"kind":"count","dim":null,"bounds":null,"prior":null},
+{"name":"I0","dims":[],"kind":"count","dim":null,"bounds":null,"prior":null}
+],"definitions":[
+{"name":"N","indices":[],"shape":null,"kind":null,"dim":null,"body":{"tree":{"bin_op":{"op":"add","lhs":{"bin_op":{"op":"add","lhs":{"ident":{"name":{"name":"S","kind":"compartment"}}},"rhs":{"ident":{"name":{"name":"I","kind":"compartment"}}}}},"rhs":{"ident":{"name":{"name":"R","kind":"compartment"}}}}},"katex":"S + I + R","reads":[{"name":"S","kind":"compartment"},{"name":"I","kind":"compartment"},{"name":"R","kind":"compartment"}]}}
+],"tables":[],"time_inputs":[],"timepoints":[],"transitions":[
+{"name":"infection","indices":[],"from":[{"compartment":"S","indices":[]}],"to":{"sum":{"compartments":[{"compartment":"I","indices":[]}]}},"dynamics":{"rate":{"rate":{"tree":{"bin_op":{"op":"div","lhs":{"bin_op":{"op":"mul","lhs":{"bin_op":{"op":"mul","lhs":{"ident":{"name":{"name":"beta","kind":"parameter"}}},"rhs":{"ident":{"name":{"name":"S","kind":"compartment"}}}}},"rhs":{"ident":{"name":{"name":"I","kind":"compartment"}}}}},"rhs":{"ident":{"name":{"name":"N","kind":"definition"}}}}},"katex":"\\frac{\\beta\\,S\\,I}{N}","reads":[{"name":"beta","kind":"parameter"},{"name":"S","kind":"compartment"},{"name":"I","kind":"compartment"},{"name":"N","kind":"definition"}]}}},"guard":null,"lineage":false,"expands_to":null},
+{"name":"recovery","indices":[],"from":[{"compartment":"I","indices":[]}],"to":{"sum":{"compartments":[{"compartment":"R","indices":[]}]}},"dynamics":{"rate":{"rate":{"tree":{"bin_op":{"op":"mul","lhs":{"ident":{"name":{"name":"gamma","kind":"parameter"}}},"rhs":{"ident":{"name":{"name":"I","kind":"compartment"}}}}},"katex":"\\gamma\\,I","reads":[{"name":"gamma","kind":"parameter"},{"name":"I","kind":"compartment"}]}}},"guard":null,"lineage":false,"expands_to":null}
+],"ode_equations":[],"balance":[],"initial":[
+{"compartment":"S","indices":[],"bindings":[],"value":{"expr":{"value":{"tree":{"bin_op":{"op":"sub","lhs":{"ident":{"name":{"name":"N0","kind":"parameter"}}},"rhs":{"ident":{"name":{"name":"I0","kind":"parameter"}}}}},"katex":"N_{0} - I_{0}","reads":[{"name":"N0","kind":"parameter"},{"name":"I0","kind":"parameter"}]}}}},
+{"compartment":"I","indices":[],"bindings":[],"value":{"expr":{"value":{"tree":{"ident":{"name":{"name":"I0","kind":"parameter"}}},"katex":"I_{0}","reads":[{"name":"I0","kind":"parameter"}]}}}}
+],"observations":[
+{"name":"vector_catch","indices":[],"source":null,"columns":[{"name":"time","role":"time"},{"name":"vector_catch","role":{"value":{"kind":"count"}}}],"measurement":{"scored":"vector_catch","likelihood":{"family":"zero_inflated_neg_binomial","args":[{"name":"mean","value":{"bin_op":{"op":"mul","lhs":{"ident":{"name":{"name":"rho","kind":"parameter"}}},"rhs":{"ident":{"name":{"name":"projected","kind":"builtin"}}}}}},{"name":"r","value":{"ident":{"name":{"name":"k","kind":"parameter"}}}},{"name":"pi","value":{"ident":{"name":{"name":"pi_zero","kind":"parameter"}}}}]}},"projection":{"derived":{"value":{"tree":{"call":{"function":"incidence","args":[{"name":"","value":{"ident":{"name":{"name":"infection","kind":"transition"}}}}]}},"katex":"\\mathrm{incidence}\\!\\left(\\mathrm{infection}\\right)","reads":[{"name":"infection","kind":"transition"}]}}},"emit_schedule":{"every":{"every":{"tree":{"unit":{"value":7.0,"unit":"days"}},"katex":"7","reads":[]}}},"covers":{"form":"closing_at","column":"time","span":{"tree":{"unit":{"value":7.0,"unit":"days"}},"katex":"7","reads":[]}},"expands_to":null}
+],"interventions":[],"events":[],"reactive_interventions":[],"scenarios":[
+{"name":"baseline","fields":[{"label":{"text":"focal vector catch with excess zeros"}},{"set":{"values":[{"name":"beta","value":{"tree":{"const":{"value":0.4}},"katex":"0.4","reads":[]}},{"name":"gamma","value":{"tree":{"const":{"value":0.15}},"katex":"0.15","reads":[]}},{"name":"rho","value":{"tree":{"const":{"value":0.3}},"katex":"0.3","reads":[]}},{"name":"k","value":{"tree":{"const":{"value":2.0}},"katex":"2","reads":[]}},{"name":"pi_zero","value":{"tree":{"const":{"value":0.4}},"katex":"0.4","reads":[]}},{"name":"N0","value":{"tree":{"const":{"value":10000.0}},"katex":"10000","reads":[]}},{"name":"I0","value":{"tree":{"const":{"value":10.0}},"katex":"10","reads":[]}}]}}]}
+],"simulation":{"from":{"tree":{"unit":{"value":0.0,"unit":"days"}},"katex":"0","reads":[]},"to":{"tree":{"unit":{"value":180.0,"unit":"days"}},"katex":"180","reads":[]},"dt":null,"integrator":null,"atol":null,"rtol":null},"output":null,"quantities":[],"contrasts":[]}}

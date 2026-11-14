@@ -5,6 +5,10 @@ type compile_detail = {
   ctx     : Expander.context;
   summary : Expander.model_summary;
   source  : Source_cache.t;
+  (* The parsed declarations expansion started from, as the parser produced
+     them. The declared-model section is built from these and never from
+     [ctx], which the `via` lowering has rewritten. *)
+  decls   : Ast.declaration list;
 }
 
 (** Structured, non-raising compile outcome (gh#181 step 1).
@@ -297,7 +301,7 @@ let front_end_collect ?(name = "model") ?(filename = "<input>")
            ~message:msg ?hint ~fixes ()
        ) (List.rev !Parser_errors.pending_errors);
        Parser_errors.pending_errors := [];
-       (Some { model; ctx; summary; source }, ctx.diags, source))
+       (Some { model; ctx; summary; source; decls }, ctx.diags, source))
 
 (** Production front end: run [front_end_collect], and on any front-end
     error (lex/parse/expand failure, or a parser-action error drained
@@ -887,6 +891,21 @@ let compile_with_reads ?(name = "model") ?(filename = "<input>")
   | Ok d ->
     (match finish_compile d with
      | Ok m -> Ok (m, Expander.reads d.ctx)
+     | Error e -> Error e)
+  | Error e -> Error e
+
+(* As [compile_with_reads], and also the declared-model section of the IR
+   envelope (docs/dev/proposals/2026-11-13-model-structure-diff.md): the model
+   as its author wrote it. Built from the same compile that produced the
+   model, so the two describe one model. The compiled model is byte-identical
+   to [compile]'s. *)
+let compile_with_declared ?(name = "model") ?(filename = "<input>")
+    ?(quantities : (string * string) option) (src : string)
+    : (Ir.model * (string * string) list * Declared.declared_model, string) result =
+  match compile_detail_result ~name ~filename ?quantities src with
+  | Ok d ->
+    (match finish_compile d with
+     | Ok m -> Ok (m, Expander.reads d.ctx, Declared_emit.build d.ctx d.decls)
      | Error e -> Error e)
   | Error e -> Error e
 

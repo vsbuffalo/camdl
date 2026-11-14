@@ -377,6 +377,17 @@ update-reactive-golden: build-ocaml
 	@$(CAMDLC) $(REACTIVE_DIR)/reactive_sir_observed_threshold.camdl -o $(REACTIVE_DIR)/ir/reactive_sir_observed_threshold.ir.json
 	@$(CAMDLC) $(REACTIVE_DIR)/reactive_indexed_patch_sia.camdl      -o $(REACTIVE_DIR)/ir/reactive_indexed_patch_sia.ir.json
 
+# model_ir_hash of every compiled golden model, as a committed reference table
+# (rust/crates/runid/tests/fixtures/golden_model_hashes.tsv). The test
+# rust/crates/runid/tests/golden_model_hashes.rs recomputes each hash from the
+# goldens and compares, so a change that re-keys a golden model fails unless
+# this target is run on purpose. Not part of update-golden: regenerating the
+# goldens must not move the identities they are checked against.
+.PHONY: update-golden-model-hashes
+update-golden-model-hashes:
+	cd rust && CAMDL_CAPTURE_GOLDEN_MODEL_HASHES="$$(git rev-parse --short HEAD)" \
+	  cargo test -p runid --test golden_model_hashes
+
 # The cross-language declared-model fixture: one hand-written value
 # (ocaml/test/declared_fixture.ml) written through the OCaml codec. The OCaml
 # test (test_declared) checks the committed file against that value and the

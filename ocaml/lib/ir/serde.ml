@@ -2022,14 +2022,23 @@ let validated_by = "ocaml-compiler-v" ^ ir_version
 (* gh#audit-C8. Wrap the model in an envelope: { ir_version,
    validated_by, model: <existing> }. The Rust deserializer
    (rust/crates/ir/src/lib.rs) requires the wrapper and rejects
-   mismatched ir_version with IrError::VersionMismatch. *)
-let envelope_to_json (m : model) : Yojson.Safe.t =
+   mismatched ir_version with IrError::VersionMismatch.
+
+   [declared] is the declared-model section (`Declared.to_json`), already
+   serialized: the model as its author wrote it. It is an argument and not a
+   field of [model] because it is not part of the model: nothing downstream of
+   the compiler reads it to simulate or fit, and no identity covers it. Absent
+   means not recorded. *)
+let envelope_to_json ?(declared : Yojson.Safe.t option) (m : model) : Yojson.Safe.t =
   obj ([
     ("ir_version",   str ir_version);
     ("validated_by", str validated_by);
     ("model",        model_to_json m);
   ] @ (if doc_index_is_empty m.doc_index then []
-       else [("docs", doc_index_to_json m.doc_index)]))
+       else [("docs", doc_index_to_json m.doc_index)])
+    @ (match declared with
+       | None   -> []
+       | Some d -> [("declared", d)]))
 
 (* gh#audit-C8. Parse an envelope and verify the version handshake.
    On mismatch returns Error with a hint pointing the user at the
@@ -2081,7 +2090,7 @@ let model_of_envelope_json (j : Yojson.Safe.t) : (model, string) result =
    bytes come from Yojson, so there is no token-level divergence from pretty. *)
 let write_canonical
     ~(out_str : string -> unit) ~(out_json : Yojson.Safe.t -> unit)
-    (m : model) : unit =
+    ?(declared : Yojson.Safe.t option) (m : model) : unit =
   let key k = out_json (`String k); out_str ":" in
   let write_list_per_line xs =
     out_str "[";
@@ -2094,13 +2103,15 @@ let write_canonical
      | `List (_ :: _ as xs) -> write_list_per_line xs
      | other                -> out_json other)
   in
-  (match envelope_to_json m with
+  (match envelope_to_json ?declared m with
    | `Assoc efields ->
      out_str "{";
      List.iteri (fun i (k, v) ->
        if i > 0 then out_str ",";
        (match k, v with
-        | "model", `Assoc mfields ->
+        (* The declared section is laid out like the model: one declaration
+           per line, so a changed declaration is a one-line diff. *)
+        | ("model" | "declared"), `Assoc mfields ->
           key k; out_str "{";
           List.iteri (fun j kv -> if j > 0 then out_str ","; write_field kv) mfields;
           out_str "}"
@@ -2109,17 +2120,19 @@ let write_canonical
      out_str "}"
    | other -> out_json other)
 
-let model_to_channel ?(pretty = false) (oc : out_channel) (m : model) : unit =
-  if pretty then Yojson.Safe.pretty_to_channel oc (envelope_to_json m)
+let model_to_channel ?(pretty = false) ?(declared : Yojson.Safe.t option)
+    (oc : out_channel) (m : model) : unit =
+  if pretty then Yojson.Safe.pretty_to_channel oc (envelope_to_json ?declared m)
   else write_canonical ~out_str:(output_string oc)
-         ~out_json:(Yojson.Safe.to_channel oc) m
+         ~out_json:(Yojson.Safe.to_channel oc) ?declared m
 
-let model_to_string ?(pretty = false) (m : model) : string =
-  if pretty then Yojson.Safe.pretty_to_string (envelope_to_json m)
+let model_to_string ?(pretty = false) ?(declared : Yojson.Safe.t option)
+    (m : model) : string =
+  if pretty then Yojson.Safe.pretty_to_string (envelope_to_json ?declared m)
   else begin
     let b = Buffer.create 65536 in
     write_canonical ~out_str:(Buffer.add_string b)
-      ~out_json:(Yojson.Safe.to_buffer b) m;
+      ~out_json:(Yojson.Safe.to_buffer b) ?declared m;
     Buffer.contents b
   end
 

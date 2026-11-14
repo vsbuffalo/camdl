@@ -1,4 +1,4 @@
-{"ir_version":"0.43","validated_by":"ocaml-compiler-v0.43","model":{"name":"gh208_sparse_negative_rate","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.44","validated_by":"ocaml-compiler-v0.44","model":{"name":"gh208_sparse_negative_rate","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S","kind":"integer"},
 {"name":"I","kind":"integer"},
 {"name":"R","kind":"integer"}
@@ -13,4 +13,23 @@
 {"name":"cap","value":{"mode":"fixed","value":9.0},"param_kind":"count","param_dim":null}
 ],"initial_conditions":{"S":{"deterministic":{"const":92.0}},"I":{"deterministic":{"const":8.0}},"R":{"deterministic":{"const":0.0}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":5.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[],"model_structure":{"dimensions":[],"compartment_dims":{"S":[],"I":[],"R":[]},"base_compartments":["S","I","R"],"transmission_transitions":["infect"],"infectious_compartments":["I"]},"bindings":[
 {"name":"N","expr":{"pop_sum":["S","I","R"]}}
-]}}
+]},"declared":{"schema_version":1,"compile_inputs":{"set_values":[{"name":"beta","value":2.0},{"name":"gamma","value":0.2},{"name":"omega","value":1.0},{"name":"cap","value":9.0}],"files":[]},"time_unit":"days","description":null,"origin":null,"dimensions":[],"compartments":[
+{"name":"S","kind":"integer","dims":[],"expands_to":null},
+{"name":"I","kind":"integer","dims":[],"expands_to":null},
+{"name":"R","kind":"integer","dims":[],"expands_to":null}
+],"stratify":[],"parameters":[
+{"name":"beta","dims":[],"kind":"rate","dim":null,"bounds":{"lo":{"tree":{"const":{"value":0.001}},"katex":"0.001","reads":[]},"hi":{"tree":{"const":{"value":100.0}},"katex":"100","reads":[]}},"prior":null},
+{"name":"gamma","dims":[],"kind":"rate","dim":null,"bounds":{"lo":{"tree":{"const":{"value":0.001}},"katex":"0.001","reads":[]},"hi":{"tree":{"const":{"value":100.0}},"katex":"100","reads":[]}},"prior":null},
+{"name":"omega","dims":[],"kind":"rate","dim":null,"bounds":{"lo":{"tree":{"const":{"value":0.001}},"katex":"0.001","reads":[]},"hi":{"tree":{"const":{"value":100.0}},"katex":"100","reads":[]}},"prior":null},
+{"name":"cap","dims":[],"kind":"count","dim":null,"bounds":{"lo":{"tree":{"const":{"value":1.0}},"katex":"1","reads":[]},"hi":{"tree":{"const":{"value":1000.0}},"katex":"1000","reads":[]}},"prior":null}
+],"definitions":[
+{"name":"N","indices":[],"shape":null,"kind":null,"dim":null,"body":{"tree":{"bin_op":{"op":"add","lhs":{"bin_op":{"op":"add","lhs":{"ident":{"name":{"name":"S","kind":"compartment"}}},"rhs":{"ident":{"name":{"name":"I","kind":"compartment"}}}}},"rhs":{"ident":{"name":{"name":"R","kind":"compartment"}}}}},"katex":"S + I + R","reads":[{"name":"S","kind":"compartment"},{"name":"I","kind":"compartment"},{"name":"R","kind":"compartment"}]}}
+],"tables":[],"time_inputs":[],"timepoints":[],"transitions":[
+{"name":"infect","indices":[],"from":[{"compartment":"S","indices":[]}],"to":{"sum":{"compartments":[{"compartment":"I","indices":[]}]}},"dynamics":{"rate":{"rate":{"tree":{"bin_op":{"op":"mul","lhs":{"bin_op":{"op":"mul","lhs":{"ident":{"name":{"name":"beta","kind":"parameter"}}},"rhs":{"ident":{"name":{"name":"S","kind":"compartment"}}}}},"rhs":{"bin_op":{"op":"div","lhs":{"ident":{"name":{"name":"I","kind":"compartment"}}},"rhs":{"ident":{"name":{"name":"N","kind":"definition"}}}}}}},"katex":"\\frac{\\beta\\,S\\,I}{N}","reads":[{"name":"beta","kind":"parameter"},{"name":"S","kind":"compartment"},{"name":"I","kind":"compartment"},{"name":"N","kind":"definition"}]}}},"guard":null,"lineage":false,"expands_to":null},
+{"name":"recover","indices":[],"from":[{"compartment":"I","indices":[]}],"to":{"sum":{"compartments":[{"compartment":"R","indices":[]}]}},"dynamics":{"rate":{"rate":{"tree":{"bin_op":{"op":"div","lhs":{"bin_op":{"op":"mul","lhs":{"bin_op":{"op":"mul","lhs":{"ident":{"name":{"name":"gamma","kind":"parameter"}}},"rhs":{"ident":{"name":{"name":"I","kind":"compartment"}}}}},"rhs":{"bin_op":{"op":"sub","lhs":{"ident":{"name":{"name":"cap","kind":"parameter"}}},"rhs":{"ident":{"name":{"name":"I","kind":"compartment"}}}}}}},"rhs":{"ident":{"name":{"name":"N","kind":"definition"}}}}},"katex":"\\frac{\\gamma\\,I\\,\\left(\\mathrm{cap} - I\\right)}{N}","reads":[{"name":"gamma","kind":"parameter"},{"name":"I","kind":"compartment"},{"name":"cap","kind":"parameter"},{"name":"N","kind":"definition"}]}}},"guard":null,"lineage":false,"expands_to":null},
+{"name":"wane","indices":[],"from":[{"compartment":"R","indices":[]}],"to":{"sum":{"compartments":[{"compartment":"S","indices":[]}]}},"dynamics":{"rate":{"rate":{"tree":{"bin_op":{"op":"mul","lhs":{"ident":{"name":{"name":"omega","kind":"parameter"}}},"rhs":{"ident":{"name":{"name":"R","kind":"compartment"}}}}},"katex":"\\omega\\,R","reads":[{"name":"omega","kind":"parameter"},{"name":"R","kind":"compartment"}]}}},"guard":null,"lineage":false,"expands_to":null}
+],"ode_equations":[],"balance":[],"initial":[
+{"compartment":"S","indices":[],"bindings":[],"value":{"expr":{"value":{"tree":{"const":{"value":92.0}},"katex":"92","reads":[]}}}},
+{"compartment":"I","indices":[],"bindings":[],"value":{"expr":{"value":{"tree":{"const":{"value":8.0}},"katex":"8","reads":[]}}}},
+{"compartment":"R","indices":[],"bindings":[],"value":{"expr":{"value":{"tree":{"const":{"value":0.0}},"katex":"0","reads":[]}}}}
+],"observations":[],"interventions":[],"events":[],"reactive_interventions":[],"scenarios":[],"simulation":{"from":{"tree":{"unit":{"value":0.0,"unit":"days"}},"katex":"0","reads":[]},"to":{"tree":{"unit":{"value":5.0,"unit":"days"}},"katex":"5","reads":[]},"dt":null,"integrator":null,"atol":null,"rtol":null},"output":null,"quantities":[],"contrasts":[]}}

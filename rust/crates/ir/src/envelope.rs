@@ -18,6 +18,8 @@
 //!   OCaml-mirrored structural checks (audit H14). For now, opaque
 //!   string passed through.
 //! - `model` — the existing `Model` shape, unchanged.
+//! - `docs`, `declared` — the documentation dictionary and the declared model,
+//!   both outside `Model` and outside every identity.
 //!
 //! Long-term the goal is to generate `schema.json` from one
 //! authoritative side (Option B in the proposal). This commit
@@ -96,6 +98,18 @@ pub struct IrEnvelope {
     /// undocumented model; never part of `run_id` (it sits outside `Model`).
     #[serde(default, skip_serializing_if = "ModelDocs::is_empty")]
     pub docs: ModelDocs,
+    /// The declared model: the model as its author wrote it, before expansion
+    /// (`docs/dev/proposals/2026-11-13-model-structure-diff.md`). Written by
+    /// the compiler from the same compile as `model`; like `docs` it sits
+    /// outside `Model`, so no model identity or `run_id` covers it. `None`
+    /// means not recorded: an envelope written without the compiler.
+    ///
+    /// The section is a self-contained document versioned by its own
+    /// `schema_version`. A reader that wants only this section parses it with
+    /// the `declared` crate from the raw JSON and does not need this type or
+    /// a matching `ir_version`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared: Option<declared::DeclaredModel>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -118,6 +132,7 @@ impl IrEnvelope {
             validated_by,
             model,
             docs: ModelDocs::default(),
+            declared: None,
         }
     }
 

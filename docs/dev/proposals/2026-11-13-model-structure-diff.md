@@ -185,10 +185,39 @@ ways that shape the rows below:
   so the seed is a run input and never a model difference.
 
 **`reads` and every name's kind come from the compiler's own name resolution**,
-not from a second classification written for this section. A compiler test
-checks, over every golden, that each name in a declared tree resolves to exactly
-one kind. The crate's `NameKind` list is provisional until emission fixes it
-from the resolver.
+not from a second classification written for this section: the emitter
+(`ocaml/lib/compiler/declared_emit.ml`) asks `Expander.classify_name` and
+`Expander.classify_indexed_name`, the chain `resolve_expr` itself matches on.
+What that chain cannot answer is settled by position, and each rule names the
+compiler code that reads the name that way:
+
+| Kind                                                                                      | A name is this when                                                                                                                                                                                |
+| ----------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `compartment`, `parameter`, `definition`, `table`, `time_input`, `builtin`, `data_column` | the classifier says so; plus a compartment a `via hyper_erlang` lowering removed from the working context, a parameter family named without its index, and `t_start`/`t_end`                       |
+| `index_var`                                                                               | it is bound by the declaration's index binders or an enclosing `sum`; checked first, as the compiler substitutes binders before resolving                                                          |
+| `level`                                                                                   | it sits in an index position and is a level of a declared dimension                                                                                                                                |
+| `quantity`, `stream`, `transition`                                                        | it is named inside a quantity or contrast body, a projection or a reactive trigger, and is declared as one (a transition also by one expanded cell, `recovery_p1`)                                 |
+| `dimension`                                                                               | it is a forcing argument that names a declared dimension                                                                                                                                           |
+| `obs_anchor`                                                                              | it is `first_obs` or `last_obs`                                                                                                                                                                    |
+| `keyword`                                                                                 | the enclosing form reads the word as text: the `dim` of `unchecked_dim(...)`, the `label` of a `hyper_erlang` branch, `once = true`, a forcing argument selecting from a closed set (`link = log`) |
+| `unresolved`                                                                              | no rule applies                                                                                                                                                                                    |
+
+A quoted string (`date("2020-01-01")`, a file path) is a `Str` node and not a
+name: the parser gives it no source location, which is how the emitter tells it
+from an identifier. `reads` is every name in the tree, once each, in order of
+first appearance, index variables and levels included.
+
+Tests check, over every compiled golden, that no name is `unresolved`, that each
+name's kind names something the section itself declares, that no name has two
+declaring kinds, and that `reads` is the tree's names
+(`ocaml/test/test_declared_emit.ml`,
+`rust/crates/declared/tests/golden_sections.rs`). A name outside the goldens
+that no rule covers is tagged `unresolved` in the section and does not fail the
+compile.
+
+KaTeX strings come from the existing renderer (`Latex.tex`) and so use a
+declaration's `@symbol` doc tag where one is given. A changed `@symbol` changes
+`katex` and nothing else; sameness is never decided on `katex`.
 
 **Agreement with what already describes the model.** Two older partial
 descriptions stay as they are: `ModelStructure` inside the compiled model
@@ -205,7 +234,9 @@ Each declared transition, compartment and observation stream also carries
 `expands_to`, the expanded names it produced. Nothing else links the expanded
 model back to a declaration (see [Settled facts](#settled-facts)), and the
 viewer and the assumption ledger (proposal 5) need the link to map per-stratum
-outputs back to declarations. Row status never depends on it.
+outputs back to declarations. Row status never depends on it. The field is
+optional and is not recorded yet: an absent value means not recorded, where an
+empty list would be a false statement.
 
 **The section is readable without the runtime's reader for compiled models.**
 That reader refuses any envelope whose IR version is not its own

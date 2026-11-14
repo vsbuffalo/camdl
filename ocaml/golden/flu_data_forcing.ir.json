@@ -1,4 +1,4 @@
-{"ir_version":"0.43","validated_by":"ocaml-compiler-v0.43","model":{"name":"flu_data_forcing","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.44","validated_by":"ocaml-compiler-v0.44","model":{"name":"flu_data_forcing","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S","kind":"integer"},
 {"name":"E","kind":"integer"},
 {"name":"I","kind":"integer"},
@@ -23,4 +23,32 @@
 {"name":"baseline","label":"climate-forced seasonal influenza","params":{"beta":0.55,"sigma":0.5,"gamma":0.33,"rho":0.05,"k":3.0,"N0":500000.0,"I0":50.0},"enable":[],"disable":[],"t_end":null}
 ],"model_structure":{"dimensions":[],"compartment_dims":{"S":[],"E":[],"I":[],"R":[]},"base_compartments":["S","E","I","R"],"transmission_transitions":["infection"],"infectious_compartments":["I"]},"bindings":[
 {"name":"N","expr":{"pop_sum":["S","E","I","R"]}}
-]}}
+]},"declared":{"schema_version":1,"compile_inputs":{"set_values":[],"files":[{"path":"data/flu_forcing.tsv","sha256":"908fb5d7e89d7140b1858bd0c83773e14b3b5c40ff397d04c4031e217249f030"}]},"time_unit":"days","description":null,"origin":null,"dimensions":[],"compartments":[
+{"name":"S","kind":"integer","dims":[],"expands_to":null},
+{"name":"E","kind":"integer","dims":[],"expands_to":null},
+{"name":"I","kind":"integer","dims":[],"expands_to":null},
+{"name":"R","kind":"integer","dims":[],"expands_to":null}
+],"stratify":[],"parameters":[
+{"name":"beta","dims":[],"kind":"rate","dim":null,"bounds":null,"prior":null},
+{"name":"sigma","dims":[],"kind":"rate","dim":null,"bounds":null,"prior":null},
+{"name":"gamma","dims":[],"kind":"rate","dim":null,"bounds":null,"prior":null},
+{"name":"rho","dims":[],"kind":"probability","dim":null,"bounds":null,"prior":null},
+{"name":"k","dims":[],"kind":"positive","dim":null,"bounds":null,"prior":null},
+{"name":"N0","dims":[],"kind":"count","dim":null,"bounds":null,"prior":null},
+{"name":"I0","dims":[],"kind":"count","dim":null,"bounds":null,"prior":null}
+],"definitions":[
+{"name":"N","indices":[],"shape":null,"kind":null,"dim":null,"body":{"tree":{"bin_op":{"op":"add","lhs":{"bin_op":{"op":"add","lhs":{"bin_op":{"op":"add","lhs":{"ident":{"name":{"name":"S","kind":"compartment"}}},"rhs":{"ident":{"name":{"name":"E","kind":"compartment"}}}}},"rhs":{"ident":{"name":{"name":"I","kind":"compartment"}}}}},"rhs":{"ident":{"name":{"name":"R","kind":"compartment"}}}}},"katex":"S + E + I + R","reads":[{"name":"S","kind":"compartment"},{"name":"E","kind":"compartment"},{"name":"I","kind":"compartment"},{"name":"R","kind":"compartment"}]}}
+],"tables":[],"time_inputs":[
+{"name":"clim","indices":[],"kind":"interpolated","unit":"ratio","args":[{"name":"data","value":{"str":{"value":"data/flu_forcing.tsv"}}},{"name":"time_col","value":{"str":{"value":"t"}}},{"name":"value_col","value":{"str":{"value":"force"}}},{"name":"method","value":{"expr":{"value":{"tree":{"ident":{"name":{"name":"linear","kind":"keyword"}}},"katex":"\\mathrm{linear}","reads":[{"name":"linear","kind":"keyword"}]}}}}]}
+],"timepoints":[],"transitions":[
+{"name":"infection","indices":[],"from":[{"compartment":"S","indices":[]}],"to":{"sum":{"compartments":[{"compartment":"E","indices":[]}]}},"dynamics":{"rate":{"rate":{"tree":{"bin_op":{"op":"div","lhs":{"bin_op":{"op":"mul","lhs":{"bin_op":{"op":"mul","lhs":{"bin_op":{"op":"mul","lhs":{"ident":{"name":{"name":"beta","kind":"parameter"}}},"rhs":{"call":{"function":"clim","args":[{"name":"","value":{"ident":{"name":{"name":"t","kind":"builtin"}}}}]}}}},"rhs":{"ident":{"name":{"name":"S","kind":"compartment"}}}}},"rhs":{"ident":{"name":{"name":"I","kind":"compartment"}}}}},"rhs":{"ident":{"name":{"name":"N","kind":"definition"}}}}},"katex":"\\frac{\\beta\\,\\mathrm{clim}\\!\\left(t\\right)\\,S\\,I}{N}","reads":[{"name":"beta","kind":"parameter"},{"name":"t","kind":"builtin"},{"name":"S","kind":"compartment"},{"name":"I","kind":"compartment"},{"name":"N","kind":"definition"}]}}},"guard":null,"lineage":false,"expands_to":null},
+{"name":"progression","indices":[],"from":[{"compartment":"E","indices":[]}],"to":{"sum":{"compartments":[{"compartment":"I","indices":[]}]}},"dynamics":{"rate":{"rate":{"tree":{"bin_op":{"op":"mul","lhs":{"ident":{"name":{"name":"sigma","kind":"parameter"}}},"rhs":{"ident":{"name":{"name":"E","kind":"compartment"}}}}},"katex":"\\sigma\\,E","reads":[{"name":"sigma","kind":"parameter"},{"name":"E","kind":"compartment"}]}}},"guard":null,"lineage":false,"expands_to":null},
+{"name":"recovery","indices":[],"from":[{"compartment":"I","indices":[]}],"to":{"sum":{"compartments":[{"compartment":"R","indices":[]}]}},"dynamics":{"rate":{"rate":{"tree":{"bin_op":{"op":"mul","lhs":{"ident":{"name":{"name":"gamma","kind":"parameter"}}},"rhs":{"ident":{"name":{"name":"I","kind":"compartment"}}}}},"katex":"\\gamma\\,I","reads":[{"name":"gamma","kind":"parameter"},{"name":"I","kind":"compartment"}]}}},"guard":null,"lineage":false,"expands_to":null}
+],"ode_equations":[],"balance":[],"initial":[
+{"compartment":"S","indices":[],"bindings":[],"value":{"expr":{"value":{"tree":{"bin_op":{"op":"sub","lhs":{"ident":{"name":{"name":"N0","kind":"parameter"}}},"rhs":{"ident":{"name":{"name":"I0","kind":"parameter"}}}}},"katex":"N_{0} - I_{0}","reads":[{"name":"N0","kind":"parameter"},{"name":"I0","kind":"parameter"}]}}}},
+{"compartment":"I","indices":[],"bindings":[],"value":{"expr":{"value":{"tree":{"ident":{"name":{"name":"I0","kind":"parameter"}}},"katex":"I_{0}","reads":[{"name":"I0","kind":"parameter"}]}}}}
+],"observations":[
+{"name":"weekly_cases","indices":[],"source":null,"columns":[{"name":"time","role":"time"},{"name":"weekly_cases","role":{"value":{"kind":"count"}}}],"measurement":{"scored":"weekly_cases","likelihood":{"family":"neg_binomial","args":[{"name":"mean","value":{"bin_op":{"op":"mul","lhs":{"ident":{"name":{"name":"rho","kind":"parameter"}}},"rhs":{"ident":{"name":{"name":"projected","kind":"builtin"}}}}}},{"name":"r","value":{"ident":{"name":{"name":"k","kind":"parameter"}}}}]}},"projection":{"derived":{"value":{"tree":{"call":{"function":"incidence","args":[{"name":"","value":{"ident":{"name":{"name":"infection","kind":"transition"}}}}]}},"katex":"\\mathrm{incidence}\\!\\left(\\mathrm{infection}\\right)","reads":[{"name":"infection","kind":"transition"}]}}},"emit_schedule":{"every":{"every":{"tree":{"unit":{"value":7.0,"unit":"days"}},"katex":"7","reads":[]}}},"covers":{"form":"closing_at","column":"time","span":{"tree":{"unit":{"value":7.0,"unit":"days"}},"katex":"7","reads":[]}},"expands_to":null}
+],"interventions":[],"events":[],"reactive_interventions":[],"scenarios":[
+{"name":"baseline","fields":[{"label":{"text":"climate-forced seasonal influenza"}},{"set":{"values":[{"name":"beta","value":{"tree":{"const":{"value":0.55}},"katex":"0.55","reads":[]}},{"name":"sigma","value":{"tree":{"const":{"value":0.5}},"katex":"0.5","reads":[]}},{"name":"gamma","value":{"tree":{"const":{"value":0.33}},"katex":"0.33","reads":[]}},{"name":"rho","value":{"tree":{"const":{"value":0.05}},"katex":"0.05","reads":[]}},{"name":"k","value":{"tree":{"const":{"value":3.0}},"katex":"3","reads":[]}},{"name":"N0","value":{"tree":{"const":{"value":500000.0}},"katex":"500000","reads":[]}},{"name":"I0","value":{"tree":{"const":{"value":50.0}},"katex":"50","reads":[]}}]}}]}
+],"simulation":{"from":{"tree":{"unit":{"value":0.0,"unit":"days"}},"katex":"0","reads":[]},"to":{"tree":{"unit":{"value":2.0,"unit":"years"}},"katex":"2","reads":[]},"dt":null,"integrator":null,"atol":null,"rtol":null},"output":null,"quantities":[],"contrasts":[]}}

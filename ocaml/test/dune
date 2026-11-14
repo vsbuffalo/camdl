@@ -200,3 +200,15 @@
  (modules test_classify_name)
  (libraries compiler ir alcotest)
  (deps (source_tree ../golden)))
+
+; The declared-model section the compiler emits (`Declared_emit`): on every
+; compiled golden model, every name has one kind that the section itself
+; declares, `reads` is each tree's names, and `ModelStructure` and the flow
+; graph agree with the section; plus the parse facts the sameness rule of the
+; model-structure-diff proposal relies on. Goldens outside the dune root are
+; found by resolving the repo root at run time.
+(test
+ (name test_declared_emit)
+ (modules test_declared_emit)
+ (libraries compiler ir alcotest yojson)
+ (deps (source_tree ../golden)))

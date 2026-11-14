@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/camdl/camdl/ir/schema.json",
   "title": "Camdl IR",
-  "description": "The inner `model` object of a camdl IR file. The on-wire file wraps it in the envelope { ir_version, validated_by, docs, model } defined by rust/crates/ir/src/envelope.rs; the version is ir/VERSION. Every ocaml/golden/*.ir.json and ir/golden/*.ir.json is validated against this schema by rust/crates/ir/tests/schema_validates_goldens.rs, so a serde change that is not mirrored here fails the test suite.",
+  "description": "The inner `model` object of a camdl IR file. The on-wire file wraps it in the envelope { ir_version, validated_by, model, docs, declared } defined by rust/crates/ir/src/envelope.rs; the version is ir/VERSION. `declared` (the model as its author wrote it, since 0.44) is not described here: it is a separate document with its own schema_version, whose shape is the Rust crate rust/crates/declared and whose OCaml mirror is pinned to it by rust/crates/declared/tests/fixtures/all_variants.json. Every ocaml/golden/*.ir.json and ir/golden/*.ir.json is validated against this schema by rust/crates/ir/tests/schema_validates_goldens.rs, so a serde change that is not mirrored here fails the test suite.",
   "type": "object",
   "required": [
     "name",

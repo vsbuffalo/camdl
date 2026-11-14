@@ -30,9 +30,12 @@ let const v = ex ~katex:(Printf.sprintf "%g" v) (num v)
 (* Every name kind, once. *)
 let all_name_kinds =
   [ nr KCompartment "S"; nr KParameter "beta"; nr KDefinition "N";
-    nr KTable "contact"; nr KTimeInput "pop"; nr KTimepoint "sia1";
+    nr KTable "contact"; nr KTimeInput "pop";
     nr KIndexVar "a"; nr KLevel "child"; nr KBuiltin "t";
-    nr KDataColumn "tested" ]
+    nr KDataColumn "tested"; nr KQuantity "peak"; nr KStream "cases";
+    nr KTransition "infection"; nr KDimension "age";
+    nr KObsAnchor "last_obs"; nr KKeyword "linear";
+    nr KUnresolved "mystery" ]
 
 (* Every binary operator, every unary operator, every unit, every expression
    node and both index-item forms, in one tree. *)
@@ -64,7 +67,7 @@ let every_expression_node =
          ("overdispersed", [ arg "rate" (param "beta"); arg "sigma_sq" (num 0.1) ]);
        TCall ("now", []);
        TRange (num 7.0, num 100.0);
-       TObsAccess "cases";
+       TObsAccess "cases"; TStr "data/contact.tsv";
        TRunMember
          { tr_run = "baseline"; tr_namespace = NsQuantities; tr_member = "R0" };
        TRunMember
@@ -136,7 +139,8 @@ let model : declared_model =
         ci_files =
           [ { fi_path = "data/patches.tsv";
               fi_sha256 =
-                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" } ] };
+                Some "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" };
+            { fi_path = "data/gone.tsv"; fi_sha256 = None } ] };
     dm_time_unit = Some UDays;
     dm_description = Some "every variant, \"quoted\", and a non-ASCII β";
     dm_origin = Some "2024-01-01";
@@ -147,8 +151,8 @@ let model : declared_model =
           dd_levels = [ "north"; "south_west" ] } ];
     dm_compartments =
       [ { cd_name = "S"; cd_kind = CkInteger; cd_dims = [ "age" ];
-          cd_expands_to = [ "S_child"; "S_adult" ] };
-        { cd_name = "W"; cd_kind = CkReal; cd_dims = []; cd_expands_to = [ "W" ] } ];
+          cd_expands_to = Some [ "S_child"; "S_adult" ] };
+        { cd_name = "W"; cd_kind = CkReal; cd_dims = []; cd_expands_to = None } ];
     dm_stratify =
       [ { st_dim = "age"; st_only = None };
         { st_dim = "patch"; st_only = Some [ "S"; "I" ] } ];
@@ -192,7 +196,7 @@ let model : declared_model =
                  ~reads:[ nr KParameter "beta"; nr KCompartment "S" ]
                  (bin BMul (param "beta") (comp "S")));
           tn_guard = Some every_guard; tn_lineage = true;
-          tn_expands_to = [ "infection_child"; "infection_adult" ] };
+          tn_expands_to = Some [ "infection_child"; "infection_adult" ] };
         { tn_name = "onset"; tn_indices = []; tn_from = [ i_ref ];
           tn_to =
             DstBranch
@@ -203,7 +207,7 @@ let model : declared_model =
             DynVia
               ("erlang", [ arg "stages" (num 3.0); arg "mean" (TUnit (9.0, UDays)) ]);
           tn_guard = None; tn_lineage = false;
-          tn_expands_to = [ "onset_stage_s1"; "onset_stage_s2"; "onset" ] } ];
+          tn_expands_to = None } ];
     dm_ode_equations =
       [ { od_compartment = "W";
           od_derivative = ex (bin BSub (comp "I") (comp "W")) } ];
@@ -243,7 +247,7 @@ let model : declared_model =
             Some
               { cv_form = "ending_on"; cv_column = "week";
                 cv_span = Some (ex (TUnit (7.0, UDays))) };
-          ob_expands_to = [ "cases_north"; "cases_south_west" ] };
+          ob_expands_to = Some [ "cases_north"; "cases_south_west" ] };
         { ob_name = "prevalence"; ob_indices = []; ob_source = None;
           ob_columns = [ { oc_name = "t"; oc_role = CrTime } ];
           ob_measurement =
@@ -255,7 +259,7 @@ let model : declared_model =
           ob_projection = PjDerived (ex (bin BDiv (comp "I") (id KDefinition "N")));
           ob_emit_schedule = Some (ScAt [ const 7.0; const 14.0 ]);
           ob_covers = Some { cv_form = "day"; cv_column = "t"; cv_span = None };
-          ob_expands_to = [ "prevalence" ] } ];
+          ob_expands_to = None } ];
     dm_interventions =
       [ { iv_name = "sia"; iv_indices = [ BIn ("p", "patch") ];
           iv_actions =
@@ -264,7 +268,7 @@ let model : declared_model =
                   arg "to" (comp "R") ];
               AcSet
                 { as_compartment = "I"; as_indices = []; as_value = const 0.0 } ];
-          iv_schedule = ShAtTimes [ ex (id KTimepoint "sia1"); const 60.0 ];
+          iv_schedule = ShAtTimes [ ex (id KObsAnchor "first_obs"); const 60.0 ];
           iv_guard = Some (GEq ("p", "north")) };
         { iv_name = "routine"; iv_indices = [];
           iv_actions =

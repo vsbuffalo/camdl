@@ -1,4 +1,4 @@
-{"ir_version":"0.43","validated_by":"ocaml-compiler-v0.43","model":{"name":"origin_effects","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.44","validated_by":"ocaml-compiler-v0.44","model":{"name":"origin_effects","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"A","kind":"integer"},
 {"name":"B","kind":"integer"}
 ],"transitions":[
@@ -10,4 +10,20 @@
 ],"observations":[],"parameters":[
 {"name":"k","value":{"mode":"fixed","value":0.0},"param_kind":"rate","param_dim":null},
 {"name":"keep","value":{"mode":"fixed","value":0.5},"param_kind":"probability","param_dim":null}
-],"initial_conditions":{"A":{"deterministic":{"const":50.0}},"B":{"deterministic":{"const":0.0}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":5.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[],"model_structure":{"dimensions":[],"compartment_dims":{"A":[],"B":[]},"base_compartments":["A","B"],"transmission_transitions":[],"infectious_compartments":[]}}}
+],"initial_conditions":{"A":{"deterministic":{"const":50.0}},"B":{"deterministic":{"const":0.0}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":5.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[],"model_structure":{"dimensions":[],"compartment_dims":{"A":[],"B":[]},"base_compartments":["A","B"],"transmission_transitions":[],"infectious_compartments":[]}},"declared":{"schema_version":1,"compile_inputs":{"set_values":[{"name":"k","value":0.0},{"name":"keep","value":0.5}],"files":[]},"time_unit":"days","description":null,"origin":null,"dimensions":[],"compartments":[
+{"name":"A","kind":"integer","dims":[],"expands_to":null},
+{"name":"B","kind":"integer","dims":[],"expands_to":null}
+],"stratify":[],"parameters":[
+{"name":"k","dims":[],"kind":"rate","dim":null,"bounds":{"lo":{"tree":{"const":{"value":0.0}},"katex":"0","reads":[]},"hi":{"tree":{"const":{"value":1.0}},"katex":"1","reads":[]}},"prior":null},
+{"name":"keep","dims":[],"kind":"probability","dim":null,"bounds":{"lo":{"tree":{"const":{"value":0.0}},"katex":"0","reads":[]},"hi":{"tree":{"const":{"value":1.0}},"katex":"1","reads":[]}},"prior":null}
+],"definitions":[],"tables":[],"time_inputs":[],"timepoints":[],"transitions":[
+{"name":"drain","indices":[],"from":[{"compartment":"A","indices":[]}],"to":{"sum":{"compartments":[{"compartment":"B","indices":[]}]}},"dynamics":{"rate":{"rate":{"tree":{"bin_op":{"op":"mul","lhs":{"ident":{"name":{"name":"k","kind":"parameter"}}},"rhs":{"ident":{"name":{"name":"A","kind":"compartment"}}}}},"katex":"k\\,A","reads":[{"name":"k","kind":"parameter"},{"name":"A","kind":"compartment"}]}}},"guard":null,"lineage":false,"expands_to":null}
+],"ode_equations":[],"balance":[],"initial":[
+{"compartment":"A","indices":[],"bindings":[],"value":{"expr":{"value":{"tree":{"const":{"value":50.0}},"katex":"50","reads":[]}}}},
+{"compartment":"B","indices":[],"bindings":[],"value":{"expr":{"value":{"tree":{"const":{"value":0.0}},"katex":"0","reads":[]}}}}
+],"observations":[],"interventions":[
+{"name":"pull","indices":[],"actions":[{"transfer":{"args":[{"name":"fraction","value":{"ident":{"name":{"name":"keep","kind":"parameter"}}}},{"name":"from","value":{"ident":{"name":{"name":"A","kind":"compartment"}}}},{"name":"to","value":{"ident":{"name":{"name":"B","kind":"compartment"}}}}]}}],"schedule":{"at_times":{"times":[{"tree":{"const":{"value":0.0}},"katex":"0","reads":[]},{"tree":{"const":{"value":3.0}},"katex":"3","reads":[]}]}},"guard":null}
+],"events":[
+{"name":"seed","indices":[],"actions":[{"add":{"compartment":"A","indices":[],"count":{"tree":{"const":{"value":10.0}},"katex":"10","reads":[]}}}],"schedule":{"at_times":{"times":[{"tree":{"const":{"value":0.0}},"katex":"0","reads":[]}]}},"guard":null},
+{"name":"top","indices":[],"actions":[{"add":{"compartment":"A","indices":[],"count":{"tree":{"const":{"value":4.0}},"katex":"4","reads":[]}}}],"schedule":{"at_times":{"times":[{"tree":{"const":{"value":2.0}},"katex":"2","reads":[]}]}},"guard":null}
+],"reactive_interventions":[],"scenarios":[],"simulation":{"from":{"tree":{"unit":{"value":0.0,"unit":"days"}},"katex":"0","reads":[]},"to":{"tree":{"unit":{"value":5.0,"unit":"days"}},"katex":"5","reads":[]},"dt":null,"integrator":null,"atol":null,"rtol":null},"output":null,"quantities":[],"contrasts":[]}}

@@ -60,13 +60,14 @@ fn all_variants_uses_every_expression_level_variant() {
     let mut patterns: Vec<String> = Vec::new();
     for tag in [
         "const", "unit", "ident", "index", "bin_op", "un_op", "sum", "cond", "call", "list",
-        "range", "obs_access", "run_member",
+        "range", "obs_access", "run_member", "str",
     ] {
         patterns.push(format!("{{\"{tag}\":{{"));
     }
     for kind in [
-        "compartment", "parameter", "definition", "table", "time_input", "timepoint",
-        "index_var", "level", "builtin", "data_column",
+        "compartment", "parameter", "definition", "table", "time_input", "index_var",
+        "level", "builtin", "data_column", "quantity", "stream", "transition", "dimension",
+        "obs_anchor", "keyword", "unresolved",
     ] {
         patterns.push(format!("\"kind\":\"{kind}\"}}"));
     }

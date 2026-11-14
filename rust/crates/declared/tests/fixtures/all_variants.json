@@ -9,7 +9,8 @@
         {
           "path": "data/patches.tsv",
           "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        }
+        },
+        { "path": "data/gone.tsv", "sha256": null }
       ]
     },
     "time_unit": "days",
@@ -32,7 +33,7 @@
         "dims": [ "age" ],
         "expands_to": [ "S_child", "S_adult" ]
       },
-      { "name": "W", "kind": "real", "dims": [], "expands_to": [ "W" ] }
+      { "name": "W", "kind": "real", "dims": [], "expands_to": null }
     ],
     "stratify": [
       { "dim": "age", "only": null },
@@ -298,6 +299,7 @@
                   }
                 },
                 { "obs_access": { "stream": "cases" } },
+                { "str": { "value": "data/contact.tsv" } },
                 {
                   "run_member": {
                     "run": "baseline",
@@ -616,17 +618,41 @@
                     "name": { "name": "pop", "kind": "time_input" }
                   }
                 },
-                {
-                  "ident": {
-                    "name": { "name": "sia1", "kind": "timepoint" }
-                  }
-                },
                 { "ident": { "name": { "name": "a", "kind": "index_var" } } },
                 { "ident": { "name": { "name": "child", "kind": "level" } } },
                 { "ident": { "name": { "name": "t", "kind": "builtin" } } },
                 {
                   "ident": {
                     "name": { "name": "tested", "kind": "data_column" }
+                  }
+                },
+                {
+                  "ident": { "name": { "name": "peak", "kind": "quantity" } }
+                },
+                {
+                  "ident": { "name": { "name": "cases", "kind": "stream" } }
+                },
+                {
+                  "ident": {
+                    "name": { "name": "infection", "kind": "transition" }
+                  }
+                },
+                {
+                  "ident": { "name": { "name": "age", "kind": "dimension" } }
+                },
+                {
+                  "ident": {
+                    "name": { "name": "last_obs", "kind": "obs_anchor" }
+                  }
+                },
+                {
+                  "ident": {
+                    "name": { "name": "linear", "kind": "keyword" }
+                  }
+                },
+                {
+                  "ident": {
+                    "name": { "name": "mystery", "kind": "unresolved" }
                   }
                 }
               ]
@@ -639,11 +665,17 @@
             { "name": "N", "kind": "definition" },
             { "name": "contact", "kind": "table" },
             { "name": "pop", "kind": "time_input" },
-            { "name": "sia1", "kind": "timepoint" },
             { "name": "a", "kind": "index_var" },
             { "name": "child", "kind": "level" },
             { "name": "t", "kind": "builtin" },
-            { "name": "tested", "kind": "data_column" }
+            { "name": "tested", "kind": "data_column" },
+            { "name": "peak", "kind": "quantity" },
+            { "name": "cases", "kind": "stream" },
+            { "name": "infection", "kind": "transition" },
+            { "name": "age", "kind": "dimension" },
+            { "name": "last_obs", "kind": "obs_anchor" },
+            { "name": "linear", "kind": "keyword" },
+            { "name": "mystery", "kind": "unresolved" }
           ]
         }
       }
@@ -971,7 +1003,7 @@
         },
         "guard": null,
         "lineage": false,
-        "expands_to": [ "onset_stage_s1", "onset_stage_s2", "onset" ]
+        "expands_to": null
       }
     ],
     "ode_equations": [
@@ -1381,7 +1413,7 @@
           }
         },
         "covers": { "form": "day", "column": "t", "span": null },
-        "expands_to": [ "prevalence" ]
+        "expands_to": null
       }
     ],
     "interventions": [
@@ -1437,7 +1469,7 @@
               {
                 "tree": {
                   "ident": {
-                    "name": { "name": "sia1", "kind": "timepoint" }
+                    "name": { "name": "first_obs", "kind": "obs_anchor" }
                   }
                 },
                 "katex": "x",

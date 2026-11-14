@@ -1,4 +1,4 @@
-{"ir_version":"0.43","validated_by":"ocaml-compiler-v0.43","model":{"name":"sir_dim_annotated","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.44","validated_by":"ocaml-compiler-v0.44","model":{"name":"sir_dim_annotated","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S","kind":"integer"},
 {"name":"I","kind":"integer"},
 {"name":"R","kind":"integer"}
@@ -17,4 +17,26 @@
 {"name":"baseline","label":"default","params":{"beta":0.3,"gamma":0.1,"amplitude":1.0,"mu":0.5,"coupling":0.01},"enable":[],"disable":[],"t_end":null}
 ],"model_structure":{"dimensions":[],"compartment_dims":{"S":[],"I":[],"R":[]},"base_compartments":["S","I","R"],"transmission_transitions":["infection"],"infectious_compartments":["I"]},"bindings":[
 {"name":"N","expr":{"pop_sum":["S","I","R"]}}
-]}}
+]},"declared":{"schema_version":1,"compile_inputs":{"set_values":[],"files":[]},"time_unit":"days","description":null,"origin":null,"dimensions":[],"compartments":[
+{"name":"S","kind":"integer","dims":[],"expands_to":null},
+{"name":"I","kind":"integer","dims":[],"expands_to":null},
+{"name":"R","kind":"integer","dims":[],"expands_to":null}
+],"stratify":[],"parameters":[
+{"name":"beta","dims":[],"kind":"rate","dim":null,"bounds":null,"prior":null},
+{"name":"gamma","dims":[],"kind":"rate","dim":null,"bounds":{"lo":{"tree":{"const":{"value":0.01}},"katex":"0.01","reads":[]},"hi":{"tree":{"const":{"value":1.0}},"katex":"1","reads":[]}},"prior":null},
+{"name":"amplitude","dims":[],"kind":"real","dim":{"population":0,"time":0},"bounds":null,"prior":null},
+{"name":"mu","dims":[],"kind":"positive","dim":{"population":1,"time":-1},"bounds":null,"prior":null},
+{"name":"coupling","dims":[],"kind":"positive","dim":{"population":0,"time":0},"bounds":null,"prior":null}
+],"definitions":[
+{"name":"N","indices":[],"shape":null,"kind":null,"dim":null,"body":{"tree":{"bin_op":{"op":"add","lhs":{"bin_op":{"op":"add","lhs":{"ident":{"name":{"name":"S","kind":"compartment"}}},"rhs":{"ident":{"name":{"name":"I","kind":"compartment"}}}}},"rhs":{"ident":{"name":{"name":"R","kind":"compartment"}}}}},"katex":"S + I + R","reads":[{"name":"S","kind":"compartment"},{"name":"I","kind":"compartment"},{"name":"R","kind":"compartment"}]}}
+],"tables":[],"time_inputs":[],"timepoints":[],"transitions":[
+{"name":"infection","indices":[],"from":[{"compartment":"S","indices":[]}],"to":{"sum":{"compartments":[{"compartment":"I","indices":[]}]}},"dynamics":{"rate":{"rate":{"tree":{"bin_op":{"op":"div","lhs":{"bin_op":{"op":"mul","lhs":{"bin_op":{"op":"mul","lhs":{"bin_op":{"op":"mul","lhs":{"ident":{"name":{"name":"amplitude","kind":"parameter"}}},"rhs":{"ident":{"name":{"name":"beta","kind":"parameter"}}}}},"rhs":{"ident":{"name":{"name":"S","kind":"compartment"}}}}},"rhs":{"ident":{"name":{"name":"I","kind":"compartment"}}}}},"rhs":{"ident":{"name":{"name":"N","kind":"definition"}}}}},"katex":"\\frac{\\mathrm{amplitude}\\,\\beta\\,S\\,I}{N}","reads":[{"name":"amplitude","kind":"parameter"},{"name":"beta","kind":"parameter"},{"name":"S","kind":"compartment"},{"name":"I","kind":"compartment"},{"name":"N","kind":"definition"}]}}},"guard":null,"lineage":false,"expands_to":null},
+{"name":"recovery","indices":[],"from":[{"compartment":"I","indices":[]}],"to":{"sum":{"compartments":[{"compartment":"R","indices":[]}]}},"dynamics":{"rate":{"rate":{"tree":{"bin_op":{"op":"mul","lhs":{"ident":{"name":{"name":"gamma","kind":"parameter"}}},"rhs":{"ident":{"name":{"name":"I","kind":"compartment"}}}}},"katex":"\\gamma\\,I","reads":[{"name":"gamma","kind":"parameter"},{"name":"I","kind":"compartment"}]}}},"guard":null,"lineage":false,"expands_to":null},
+{"name":"import","indices":[],"from":[],"to":{"sum":{"compartments":[{"compartment":"I","indices":[]}]}},"dynamics":{"rate":{"rate":{"tree":{"ident":{"name":{"name":"mu","kind":"parameter"}}},"katex":"\\mu","reads":[{"name":"mu","kind":"parameter"}]}}},"guard":null,"lineage":false,"expands_to":null},
+{"name":"loss","indices":[],"from":[{"compartment":"S","indices":[]}],"to":{"sum":{"compartments":[]}},"dynamics":{"rate":{"rate":{"tree":{"bin_op":{"op":"mul","lhs":{"bin_op":{"op":"mul","lhs":{"ident":{"name":{"name":"coupling","kind":"parameter"}}},"rhs":{"ident":{"name":{"name":"beta","kind":"parameter"}}}}},"rhs":{"ident":{"name":{"name":"S","kind":"compartment"}}}}},"katex":"\\mathrm{coupling}\\,\\beta\\,S","reads":[{"name":"coupling","kind":"parameter"},{"name":"beta","kind":"parameter"},{"name":"S","kind":"compartment"}]}}},"guard":null,"lineage":false,"expands_to":null}
+],"ode_equations":[],"balance":[],"initial":[
+{"compartment":"S","indices":[],"bindings":[],"value":{"expr":{"value":{"tree":{"const":{"value":999.0}},"katex":"999","reads":[]}}}},
+{"compartment":"I","indices":[],"bindings":[],"value":{"expr":{"value":{"tree":{"const":{"value":1.0}},"katex":"1","reads":[]}}}}
+],"observations":[],"interventions":[],"events":[],"reactive_interventions":[],"scenarios":[
+{"name":"baseline","fields":[{"label":{"text":"default"}},{"set":{"values":[{"name":"beta","value":{"tree":{"const":{"value":0.3}},"katex":"0.3","reads":[]}},{"name":"gamma","value":{"tree":{"const":{"value":0.1}},"katex":"0.1","reads":[]}},{"name":"amplitude","value":{"tree":{"const":{"value":1.0}},"katex":"1","reads":[]}},{"name":"mu","value":{"tree":{"const":{"value":0.5}},"katex":"0.5","reads":[]}},{"name":"coupling","value":{"tree":{"const":{"value":0.01}},"katex":"0.01","reads":[]}}]}}]}
+],"simulation":{"from":{"tree":{"unit":{"value":0.0,"unit":"days"}},"katex":"0","reads":[]},"to":{"tree":{"unit":{"value":100.0,"unit":"days"}},"katex":"100","reads":[]},"dt":null,"integrator":null,"atol":null,"rtol":null},"output":null,"quantities":[],"contrasts":[]}}

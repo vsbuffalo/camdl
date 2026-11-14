@@ -42,10 +42,21 @@ type un_op =
 
 type run_namespace = NsQuantities | NsObservations
 
-(* What the compiler resolved a name to. *)
+(* What a name is, from the compiler's own name resolution
+   (`Expander.classify_name`), plus the names it reads outside that chain. *)
 type name_kind =
-  | KCompartment | KParameter | KDefinition | KTable | KTimeInput | KTimepoint
-  | KIndexVar | KLevel | KBuiltin | KDataColumn
+  | KCompartment | KParameter | KDefinition | KTable | KTimeInput
+  | KIndexVar     (* bound by an index binder or a `sum` *)
+  | KLevel        (* a level of a dimension, in an index position *)
+  | KBuiltin      (* t, dt, projected, pi, e, origin, t_start, t_end *)
+  | KDataColumn   (* a data column, inside a likelihood or a `covers` span *)
+  | KQuantity     (* a quantity, inside a quantity or contrast body *)
+  | KStream       (* an observation stream, named by a reporting form *)
+  | KTransition   (* a transition, named by a reporting form *)
+  | KDimension    (* a dimension, named as a forcing argument *)
+  | KObsAnchor    (* first_obs, last_obs: a time read from the data *)
+  | KKeyword      (* a word the enclosing form reads as text, not a name *)
+  | KUnresolved   (* no rule classifies the name at this position *)
 
 type name_ref = { nr_name : string; nr_kind : name_kind }
 
@@ -76,6 +87,7 @@ type expr_tree =
   | TList      of expr_tree list
   | TRange     of expr_tree * expr_tree
   | TObsAccess of string
+  | TStr       of string   (* a quoted string: a path, a date, a reason *)
   | TRunMember of { tr_run : string; tr_namespace : run_namespace;
                     tr_member : string }
 
@@ -98,7 +110,8 @@ type declared_expr = {
 }
 
 type set_value  = { sv_name : string; sv_value : float }
-type file_input = { fi_path : string; fi_sha256 : string }
+(* [fi_sha256] is [None] only when the file could not be re-opened to hash. *)
+type file_input = { fi_path : string; fi_sha256 : string option }
 
 type compile_inputs = {
   ci_set_values : set_value list;
@@ -121,7 +134,7 @@ type compartment_decl = {
   cd_name       : string;
   cd_kind       : compartment_kind;
   cd_dims       : string list;
-  cd_expands_to : string list;
+  cd_expands_to : string list option;
 }
 
 type stratify_decl = { st_dim : string; st_only : string list option }
@@ -199,7 +212,7 @@ type transition_decl = {
   tn_dynamics   : dynamics;
   tn_guard      : guard option;
   tn_lineage    : bool;
-  tn_expands_to : string list;
+  tn_expands_to : string list option;
 }
 
 type ode_decl     = { od_compartment : string; od_derivative : declared_expr }
@@ -256,7 +269,7 @@ type observation_decl = {
   ob_projection    : projection;
   ob_emit_schedule : schedule_core option;
   ob_covers        : covers option;
-  ob_expands_to    : string list;
+  ob_expands_to    : string list option;
 }
 
 type action =
@@ -459,9 +472,12 @@ let run_namespace_table =
 let name_kind_table =
   [ (KCompartment, "compartment"); (KParameter, "parameter");
     (KDefinition, "definition"); (KTable, "table");
-    (KTimeInput, "time_input"); (KTimepoint, "timepoint");
+    (KTimeInput, "time_input");
     (KIndexVar, "index_var"); (KLevel, "level"); (KBuiltin, "builtin");
-    (KDataColumn, "data_column") ]
+    (KDataColumn, "data_column"); (KQuantity, "quantity");
+    (KStream, "stream"); (KTransition, "transition");
+    (KDimension, "dimension"); (KObsAnchor, "obs_anchor");
+    (KKeyword, "keyword"); (KUnresolved, "unresolved") ]
 
 let rel_op_table =
   [ (RLt, "lt"); (RLe, "le"); (RGt, "gt"); (RGe, "ge"); (REq, "eq");
@@ -581,6 +597,7 @@ let rec expr_tree_to_json = function
     variant "range"
       [ ("lo", expr_tree_to_json lo); ("hi", expr_tree_to_json hi) ]
   | TObsAccess s -> variant "obs_access" [ ("stream", str s) ]
+  | TStr s -> variant "str" [ ("value", str s) ]
   | TRunMember m ->
     variant "run_member"
       [ ("run", str m.tr_run);
@@ -634,6 +651,7 @@ let rec expr_tree_of_json j =
     TRange (expr_tree_of_json (g "lo"), expr_tree_of_json (g "hi"))
   | "obs_access", b ->
     TObsAccess (as_str (record "obs_access" [ "stream" ] b "stream"))
+  | "str", b -> TStr (as_str (record "str" [ "value" ] b "value"))
   | "run_member", b ->
     let g = record "run_member" [ "run"; "namespace"; "member" ] b in
     TRunMember
@@ -704,7 +722,8 @@ let compile_inputs_to_json c =
          c.ci_set_values);
       ("files",
        list
-         (fun f -> obj [ ("path", str f.fi_path); ("sha256", str f.fi_sha256) ])
+         (fun f ->
+           obj [ ("path", str f.fi_path); ("sha256", opt str f.fi_sha256) ])
          c.ci_files) ]
 
 let compile_inputs_of_json j =
@@ -719,7 +738,8 @@ let compile_inputs_of_json j =
       of_list
         (fun j ->
           let g = record "file" [ "path"; "sha256" ] j in
-          { fi_path = as_str (g "path"); fi_sha256 = as_str (g "sha256") })
+          { fi_path = as_str (g "path");
+            fi_sha256 = of_opt as_str (g "sha256") })
         (g "files") }
 
 let dim_source_to_json = function
@@ -748,12 +768,12 @@ let dimension_of_json j =
 let compartment_to_json c =
   obj
     [ ("name", str c.cd_name); ("kind", compartment_kind_to_json c.cd_kind);
-      ("dims", strs c.cd_dims); ("expands_to", strs c.cd_expands_to) ]
+      ("dims", strs c.cd_dims); ("expands_to", opt strs c.cd_expands_to) ]
 
 let compartment_of_json j =
   let g = record "compartment" [ "name"; "kind"; "dims"; "expands_to" ] j in
   { cd_name = as_str (g "name"); cd_kind = compartment_kind_of_json (g "kind");
-    cd_dims = of_strs (g "dims"); cd_expands_to = of_strs (g "expands_to") }
+    cd_dims = of_strs (g "dims"); cd_expands_to = of_opt of_strs (g "expands_to") }
 
 let stratify_to_json s =
   obj [ ("dim", str s.st_dim); ("only", opt strs s.st_only) ]
@@ -935,7 +955,7 @@ let transition_to_json t =
       ("to", destination_to_json t.tn_to);
       ("dynamics", dynamics_to_json t.tn_dynamics);
       ("guard", opt guard_to_json t.tn_guard); ("lineage", bool t.tn_lineage);
-      ("expands_to", strs t.tn_expands_to) ]
+      ("expands_to", opt strs t.tn_expands_to) ]
 
 let transition_of_json j =
   let g =
@@ -950,7 +970,7 @@ let transition_of_json j =
     tn_dynamics = dynamics_of_json (g "dynamics");
     tn_guard = of_opt guard_of_json (g "guard");
     tn_lineage = as_bool (g "lineage");
-    tn_expands_to = of_strs (g "expands_to") }
+    tn_expands_to = of_opt of_strs (g "expands_to") }
 
 let ode_to_json o =
   obj [ ("compartment", str o.od_compartment); ("derivative", dx o.od_derivative) ]
@@ -1060,7 +1080,7 @@ let observation_to_json o =
              [ ("form", str c.cv_form); ("column", str c.cv_column);
                ("span", opt dx c.cv_span) ])
          o.ob_covers);
-      ("expands_to", strs o.ob_expands_to) ]
+      ("expands_to", opt strs o.ob_expands_to) ]
 
 let observation_of_json j =
   let g =
@@ -1090,7 +1110,7 @@ let observation_of_json j =
           { cv_form = as_str (g "form"); cv_column = as_str (g "column");
             cv_span = of_opt xd (g "span") })
         (g "covers");
-    ob_expands_to = of_strs (g "expands_to") }
+    ob_expands_to = of_opt of_strs (g "expands_to") }
 
 let action_to_json = function
   | AcTransfer a -> variant "transfer" [ ("args", args a) ]

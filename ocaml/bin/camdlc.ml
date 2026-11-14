@@ -238,7 +238,7 @@ let () =
            close_in ic;
            Some (qp, Bytes.to_string s)
        in
-       match Compiler.compile_with_reads ~name ~filename:path ?quantities src with
+       match Compiler.compile_with_declared ~name ~filename:path ?quantities src with
        | Error e when e = "compilation failed"
                    || (String.length e > 0 && e.[0] = '[') ->
          (* Diagnostics already rendered to stderr (text or JSON) by
@@ -248,7 +248,7 @@ let () =
             (m5 in the 2026-04-19 compiler review). *)
          exit 1
        | Error e -> Printf.eprintf "Error: %s\n" e; exit 1
-       | Ok (m, reads) ->
+       | Ok (m, reads, declared) ->
          (* Read-closure depfile (`--emit-deps`): the external data files this
             compile opened. Written before the IR so a downstream `camdl mre`
             sees it even if IR streaming is later interrupted. *)
@@ -287,15 +287,23 @@ let () =
             Serde.model_to_channel. Default is the canonical compact form;
             --pretty selects the indented view. *)
          let pretty = !pretty_output in
+         (* The declared-model section, completed with what only this command
+            line knows: the `--set` overrides just applied and a `--quantities`
+            vocabulary file. *)
+         let declared =
+           Declared.to_json
+             (Declared_emit.with_compile_inputs
+                ~model_dir:(Filename.dirname path) ~set_values:overrides
+                ~quantities_file:(Option.map fst quantities) declared) in
          (if !output_path = "" then begin
            (* Default: write to stdout, preserving trailing newline. *)
-           Passtime.time "serialize" (fun () -> Serde.model_to_channel ~pretty stdout m);
+           Passtime.time "serialize" (fun () -> Serde.model_to_channel ~pretty ~declared stdout m);
            print_newline ()
          end else begin
            (* -o / --output FILE: write IR JSON to FILE. Includes the
               trailing newline so file output matches `camdl compile … > FILE`. *)
            let oc = open_out !output_path in
-           Passtime.time "serialize" (fun () -> Serde.model_to_channel ~pretty oc m);
+           Passtime.time "serialize" (fun () -> Serde.model_to_channel ~pretty ~declared oc m);
            output_char oc '\n';
            close_out oc
          end);

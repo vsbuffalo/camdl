@@ -744,7 +744,7 @@ references substituted in.
 ## 8. Top-Level IR Schema
 
 Every serialized IR file is an **envelope** wrapping the model. The top level is
-`{ir_version, validated_by, model:{…}}`:
+`{ir_version, validated_by, model:{…}, docs?, declared?}`:
 
 - `ir_version` — the IR **schema** version, read from `ir/VERSION` (the single
   source of truth; do not repeat the number here, it goes stale). This is the
@@ -755,6 +755,21 @@ Every serialized IR file is an **envelope** wrapping the model. The top level is
   goldens).
 - `model` — the model object documented below. Note its inner `version` field is
   the **model author's** own version string, not the schema version.
+- `docs` — optional; the `#'` documentation dictionary. Outside `model`, so
+  outside every identity.
+- `declared` — optional; the **declared model**: the model as its author wrote
+  it, before expansion. Every declaration in declaration order, each expression
+  as its parsed tree (source locations removed, each name tagged with what the
+  compiler resolved it to), a KaTeX rendering, and the names it reads; plus the
+  compile inputs (`--set` values and the digest of each file the compile read).
+  The compiler writes it from the same compile as `model`. Like `docs` it is
+  outside `model` and outside every identity: adding or changing it never
+  changes a model hash or a run id. It is a separate document with its own
+  `schema_version`, so a reader that wants only this section does not need a
+  matching `ir_version`. Its shape is the Rust crate `rust/crates/declared`
+  (mirrored by `ocaml/lib/ir/declared.ml`); it is not described by
+  `ir/schema.json`. Absent means not recorded. The expanded names each
+  declaration produced (`expands_to`) are not recorded yet.
 
 ```
 model: {

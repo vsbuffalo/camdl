@@ -93,8 +93,9 @@ pub struct SetValue {
 pub struct FileInput {
     /// As written in the model, relative to the model file.
     pub path: String,
-    /// Hex SHA-256 of the file's bytes.
-    pub sha256: String,
+    /// Hex SHA-256 of the file's bytes. `None` only when the file could not be
+    /// re-opened to hash it.
+    pub sha256: Option<String>,
 }
 
 // ── Expressions ─────────────────────────────────────────────────────────────
@@ -145,6 +146,9 @@ pub enum ExprTree {
     ObsAccess { stream: String },
     /// `<run>.<quantities|observations>.<member>`, only inside a contrast body.
     RunMember { run: String, namespace: RunNamespace, member: String },
+    /// A quoted string: a file path, a date, a reason. Not a name, and not in
+    /// `reads`.
+    Str { value: String },
 }
 
 /// One keyword argument of a call, a distribution or a staging law.
@@ -176,15 +180,34 @@ pub enum NameKind {
     Table,
     /// A `forcing` declaration.
     TimeInput,
-    Timepoint,
     /// A variable bound by an index binding or a `sum`.
     IndexVar,
     /// A level of a dimension, written as a literal index: `S[child]`.
     Level,
-    /// A name the language defines, such as the time variable.
+    /// A name the language defines: `t`, `dt`, `projected`, `pi`, `e`,
+    /// `origin`, `t_start`, `t_end`.
     Builtin,
-    /// A column of an observation stream's data file, read by its likelihood.
+    /// A column of an observation stream's data file, read by its likelihood
+    /// or its `covers` span.
     DataColumn,
+    /// A quantity, named inside a quantity or contrast body.
+    Quantity,
+    /// An observation stream, named by a reporting form or a trigger.
+    Stream,
+    /// A transition, named by a reporting form.
+    Transition,
+    /// A dimension, named as a forcing argument.
+    Dimension,
+    /// `first_obs` or `last_obs`: a time read from the data, not the model.
+    ObsAnchor,
+    /// A word the enclosing form reads as text and not as a name: the `dim`
+    /// of `unchecked_dim(...)`, a forcing argument that selects from a closed
+    /// set (`method = linear`).
+    Keyword,
+    /// No rule classifies the name at this position. The compiler's test
+    /// suite fails on any in a golden; one in a user's model marks a
+    /// construct the classification does not yet cover.
+    Unresolved,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -318,8 +341,9 @@ pub struct CompartmentDecl {
     /// The dimensions this compartment is stratified by, resolved from the
     /// `stratify` declarations.
     pub dims: Vec<String>,
-    /// The expanded compartment names this declaration produced.
-    pub expands_to: Vec<String>,
+    /// The expanded compartment names this declaration produced. `None`:
+    /// not recorded.
+    pub expands_to: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -499,8 +523,9 @@ pub struct TransitionDecl {
     pub guard: Option<Guard>,
     /// The `#[lineage]` attribute.
     pub lineage: bool,
-    /// The expanded transition names this declaration produced.
-    pub expands_to: Vec<String>,
+    /// The expanded transition names this declaration produced. `None`:
+    /// not recorded.
+    pub expands_to: Option<Vec<String>>,
 }
 
 /// A compartment in a transition's source or destination.
@@ -608,8 +633,9 @@ pub struct ObservationDecl {
     /// by a fit.
     pub emit_schedule: Option<ScheduleCore>,
     pub covers: Option<Covers>,
-    /// The expanded observation-model names this declaration produced.
-    pub expands_to: Vec<String>,
+    /// The expanded observation-model names this declaration produced. `None`:
+    /// not recorded.
+    pub expands_to: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
