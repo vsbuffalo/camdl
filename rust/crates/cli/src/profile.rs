@@ -261,6 +261,25 @@ pub(crate) fn refuse_if2_flags_for_nlopt(
     Ok(())
 }
 
+/// The refusal of a `--fit` config whose `[data] holdout_after` withholds
+/// rows from training. `fit run` drops every row after the cutoff before it
+/// fits (`fit::runner::apply_holdout_declaration`); profile scores the whole
+/// series, so it would fit the held-out rows and report log-likelihoods on a
+/// different basis from the fit of the same config. Explicit `[data.holdout]`
+/// files leave the training files whole and are checked, not refused.
+pub(crate) fn refuse_holdout_after(
+    data: &crate::fit::config_v2::DataSpec,
+    fit_path: &str,
+) -> Option<String> {
+    let spec = data.holdout_after.as_ref()?;
+    Some(format!(
+        "the --fit config '{fit_path}' declares `[data] holdout_after = {raw}`, and          `camdl profile` does not apply a temporal holdout: every cell would be fitted          to the held-out rows as well (the whole series, from --data or from the          config's [data]), so its log-likelihood would not be on the basis of          `fit run` of the same config. To profile the training window, profile a copy          of the config without `holdout_after`, bound to a data file holding only the          rows at or before the cutoff.",
+        raw = match spec {
+            crate::fit::config_v2::TimeSpecToml::Num(v) => format!("{v}"),
+            crate::fit::config_v2::TimeSpecToml::Spec(s) => format!("\"{s}\""),
+        }))
+}
+
 /// A profile cell's IF2 cooling schedule: the one `fit run` uses, from the
 /// same two numbers, so `--cooling c` means what `cooling = c` means in a
 /// fit — `c` reached at `--cooling-target-iters` (default 50), whatever
@@ -459,6 +478,9 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // source used downstream by `resolve_priors_with_precedence`. When
     // `--fit` is absent the map is empty and the resolver falls
     // through to model-IR priors (tier 2) for every parameter.
+    // The fit config's explicit `[data.holdout]` files (source -> path), checked
+    // against the bound training data below as `fit run` checks them.
+    let mut fit_holdout_files: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
     let (fit_estimate, fit_toml_hash, fit_toml_fixed_indexmap, fit_scenario, fit_simplex_groups,
          objective, fit_fixed_via):
         (indexmap::IndexMap<String, crate::fit::config_v2::EstimateSpecV2>,
@@ -502,6 +524,17 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         // through the same function `fit run` uses, so a profile curve is on
         // the scale of the fit it profiles.
         let objective = fit_cfg.likelihood_objective();
+        // The fit's holdout. `holdout_after` truncates the training series in
+        // `fit run`; profile does not truncate, so a profile of that config
+        // would fit every cell to the held-out rows too and report
+        // log-likelihoods on another basis than the fit's. Refused, whether
+        // the data come from --data or from the config (gh#1059).
+        if let Some(data) = fit_cfg.data.as_ref() {
+            if let Some(err) = refuse_holdout_after(data, &fit_path_str) {
+                out.fail(format!("error: {err}"));
+            }
+            fit_holdout_files = data.holdout.clone().unwrap_or_default();
+        }
         (fit_cfg.estimate, Some(hash), fixed_resolved,
          (fit_cfg.scenario, fit_cfg.enable, fit_cfg.disable),
          fit_cfg.simplex_groups, objective, fixed_via)
@@ -856,9 +889,21 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     };
     let effective = crate::fit::runner::data_bindings_to_effective(&model, &bound_streams)
         .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
-    let streams = crate::fit::runner::resolve_and_load_obs_streams(
+    let mut streams = crate::fit::runner::resolve_and_load_obs_streams(
         &model, &compiled, &effective, dt, &time_opts,
     ).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
+    // The fit config's explicit `[data.holdout]` files, checked against the
+    // bound training data by the function `fit run` uses: every held-out row
+    // must lie after the latest training row. The training rows are left
+    // whole, as in `fit run`, so the cells fit what the fit fits. A
+    // `holdout_after` was refused when the config was read.
+    if !fit_holdout_files.is_empty() {
+        crate::fit::runner::apply_holdout_declaration(
+            &mut streams, None, &fit_holdout_files, &model,
+            compiled.model.simulation.t_start, dt, &time_opts,
+        ).unwrap_or_else(|e| { out.fail(format!("error: --fit config: {e}")); });
+    }
+    let streams = streams;
 
     if streams.len() > 1 {
         out.say(format_args!(

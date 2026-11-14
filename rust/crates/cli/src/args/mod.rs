@@ -1858,7 +1858,10 @@ pub struct ProfileArgs {
     /// parameter is always removed from the estimated set, even when it
     /// appears in the fit toml's `[estimate]` block. Its priors do not
     /// enter the per-cell maximization; `--starts from_prior` draws
-    /// starting points from them.
+    /// starting points from them. A config with `[data] holdout_after` is
+    /// refused (a profile does not truncate the series, so it would fit the
+    /// held-out rows); `[data.holdout]` files are checked against the bound
+    /// data, `--data` included, as `fit run` checks them.
     #[arg(long, value_name = "PATH")]
     pub fit: Option<PathBuf>,
 

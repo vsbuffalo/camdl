@@ -1,0 +1,216 @@
+//! `camdl profile --fit` profiles the problem the fit config states (gh#1059).
+//!
+//! A profile of a fit config is read against `fit run` of the same config, so
+//! each cell must score the same data and estimate the same nuisance set:
+//!
+//! * a `[data] holdout_after` the profile cannot apply is refused, never
+//!   fitted over (the held-out rows would enter every cell's likelihood);
+//! * `[data.holdout]` files are checked against the bound training data as
+//!   `fit run` checks them;
+//! * the estimated set is the config's `[estimate]` less the swept and pinned
+//!   names, without `--rw-sd`, on any per-cell algorithm; `--rw-sd` is needed
+//!   only to name the set when there is no `--fit`;
+//! * a `--starts` rule binds the per-cell estimated set, not the swept
+//!   parameter, which each cell pins.
+//!
+//! Every case runs the deterministic `nl-sbplx` cell on the ODE backend
+//! except the one that checks IF2 runs without `--rw-sd`.
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+fn binary() -> PathBuf {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    Path::new(&manifest).join("../../target/release/camdl")
+}
+
+fn camdlc_bin() -> PathBuf {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    Path::new(&manifest).join("../../../ocaml/_build/default/bin/camdlc.exe")
+}
+
+const MODEL: &str = r#"time_unit = 'days
+
+compartments { S, I, R }
+
+parameters {
+  beta  : rate         in [0.05, 1.0]
+  gamma : rate         in [0.01, 0.5]
+  N0    : count        in [100, 100000]
+  I0    : count        in [1, 1000]
+  rho   : probability  in [0.1, 0.9]
+  k     : positive     in [1.0, 100.0]
+}
+
+let N = S + I + R
+
+transitions {
+  infection : S --> I  @ beta * S * I / N
+  recovery  : I --> R  @ gamma * I
+}
+
+init {
+  I = I0
+  S = N0 - I0
+}
+
+observations {
+  weekly_cases {
+    columns       { time : time, weekly_cases : count }
+    covers        = closing_at(time, 7 'days)
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    weekly_cases  ~ neg_binomial(mean = rho * projected, r = k)
+  }
+}
+
+simulate {
+  from = 0 'days
+  to   = 56 'days
+}
+"#;
+
+/// Simulated from the model at beta = 0.4, gamma = 0.15, N0 = 10000, I0 = 10,
+/// rho = 0.6, k = 10 (chain_binomial, dt = 1, seed 7).
+const DATA: &str = "time\tweekly_cases\n7\t47\n14\t111\n21\t474\n28\t1066\n\
+                    35\t1471\n42\t533\n49\t300\n56\t40\n";
+
+/// A fit config estimating `beta` and `gamma`; `extra_data` goes into `[data]`.
+fn fit_toml(extra_data: &str) -> String {
+    format!(
+        r#"output_dir = "results"
+
+[model]
+camdl = "sir.camdl"
+
+[data]
+{extra_data}
+[data.observations]
+weekly_cases = "weekly_cases.tsv"
+
+[estimate]
+beta = {{ bounds = [0.05, 1.0], start = 0.4 }}
+gamma = {{ bounds = [0.01, 0.5], start = 0.15 }}
+
+[fixed]
+N0 = 10000
+I0 = 10
+rho = 0.6
+k = 10.0
+
+[method]
+algorithm = "nl-sbplx"
+backend = "ode"
+chains = 1
+"#
+    )
+}
+
+fn workdir(fit: &str) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("sir.camdl"), MODEL).unwrap();
+    std::fs::write(tmp.path().join("weekly_cases.tsv"), DATA).unwrap();
+    std::fs::write(tmp.path().join("fit.toml"), fit).unwrap();
+    tmp
+}
+
+fn profile(dir: &Path, args: &[&str]) -> Output {
+    Command::new(binary())
+        .env_remove("CLICOLOR_FORCE")
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDLC", camdlc_bin())
+        .current_dir(dir)
+        .arg("profile")
+        .arg("sir.camdl")
+        .args(args)
+        .output()
+        .expect("spawn camdl profile")
+}
+
+fn stderr(o: &Output) -> String {
+    String::from_utf8_lossy(&o.stderr).into_owned()
+}
+
+fn assert_ok(o: &Output, what: &str) {
+    assert!(o.status.success(), "{what}: expected success, got:\n{}", stderr(o));
+}
+
+fn assert_refused(o: &Output, what: &str, needles: &[&str]) {
+    let err = stderr(o);
+    assert!(!o.status.success(), "{what}: must be refused, but exited 0:\n{err}");
+    for n in needles {
+        assert!(err.contains(n), "{what}: the refusal must mention `{n}`:\n{err}");
+    }
+}
+
+/// Every file named `name` under `root`, recursively.
+fn find_all(root: &Path, name: &str) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.file_name().is_some_and(|n| n == name) {
+                found.push(p);
+            }
+        }
+    }
+    found
+}
+
+const NL: [&str; 4] = ["--algorithm", "nl-sbplx", "--backend", "ode"];
+
+/// Item 1 of gh#1059: with `holdout_after = 35` the fit trains on rows
+/// t <= 35, and a profile cell must not fit the three held-out rows. Neither
+/// the `--data` binding nor the config's own `[data.observations]` may slip
+/// past the holdout.
+#[test]
+fn a_holdout_after_the_profile_cannot_apply_is_refused() {
+    let tmp = workdir(&fit_toml("holdout_after = 35\n"));
+    let dir = tmp.path();
+    for (what, data) in [
+        ("--data on the command line", &["--data", "weekly_cases.tsv"][..]),
+        ("data from the fit config", &[][..]),
+    ] {
+        let mut args: Vec<&str> = vec!["--fit", "fit.toml", "--sweep", "gamma=0.15",
+            "--rw-sd", "beta=auto", "--n-starts", "1"];
+        args.extend_from_slice(&NL);
+        args.extend_from_slice(data);
+        let o = profile(dir, &args);
+        assert_refused(&o, what, &["holdout_after = 35", "held-out rows"]);
+        assert!(find_all(&dir.join("results"), "mle.toml").is_empty(),
+            "{what}: a refused profile must store no cell");
+    }
+}
+
+/// `[data.holdout]` files leave the training data whole, so a profile fits what
+/// the fit fits; their rows are checked to lie after the training data, as
+/// `fit run` checks them. A `--data` file that runs into the held-out rows is
+/// refused.
+#[test]
+fn explicit_holdout_files_are_checked_against_the_bound_data() {
+    let tmp = workdir(&fit_toml("[data.holdout]\nweekly_cases = \"holdout.tsv\"\n"));
+    let dir = tmp.path();
+    std::fs::write(dir.join("train.tsv"),
+        "time\tweekly_cases\n7\t47\n14\t111\n21\t474\n28\t1066\n35\t1471\n").unwrap();
+    std::fs::write(dir.join("holdout.tsv"),
+        "time\tweekly_cases\n42\t533\n49\t300\n56\t40\n").unwrap();
+    let mut base: Vec<&str> = vec!["--fit", "fit.toml", "--sweep", "gamma=0.15",
+        "--rw-sd", "beta=auto", "--n-starts", "1"];
+    base.extend_from_slice(&NL);
+
+    let mut overlapping = base.clone();
+    overlapping.extend_from_slice(&["--data", "weekly_cases.tsv"]);
+    let o = profile(dir, &overlapping);
+    assert_refused(&o, "--data overlapping [data.holdout]", &["[data.holdout]", "held-out rows"]);
+
+    let mut training_only = base.clone();
+    training_only.extend_from_slice(&["--data", "train.tsv"]);
+    let o = profile(dir, &training_only);
+    assert_ok(&o, "--data ending before [data.holdout]");
+    assert!(stderr(&o).contains("held-out observation row(s) bound as the tail"),
+        "the run must say the holdout was checked:\n{}", stderr(&o));
+}

@@ -7203,7 +7203,10 @@ part of the leaf's identity, and the full objective leaves the key unchanged.
                             fixed list and [[simplex_groups]] (honoured by IF2;
                             every member must be estimated); an nl-* [method]
                             there also sets each nl-* cell's tolerance and
-                            max_evals (else 1e-4 and 1500)
+                            max_evals (else 1e-4 and 1500). A config with
+                            [data] holdout_after is refused (the profile does
+                            not truncate the series); [data.holdout] files are
+                            checked against the bound data, --data included
 --seeds SPEC                run the whole grid at each seed (multi-seed sensitivity)
 --dt X                      step for a model that declares none (default 1.0);
                             every cell steps at the model's declared dt, and a

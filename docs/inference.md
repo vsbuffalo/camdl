@@ -732,6 +732,12 @@ camdl profile model.camdl --starts from_params=p.toml --data cases.tsv \
 Output: TSV with R₀, max loglik at each grid point, and the estimated values of
 all other parameters.
 
+With `--fit`, every cell scores the data `fit run` of that config trains on. A
+config that declares `[data] holdout_after` is refused, since a profile does not
+truncate the series and would fit the held-out rows; `[data.holdout]` files are
+checked against the bound data (`--data` included) by `fit run`'s tail-only
+rule, and the training files are fitted whole.
+
 A sharp peak means R₀ is well-identified. A flat profile means R₀ is not
 identifiable from the data (the model fits equally well across a range of R₀
 values).
