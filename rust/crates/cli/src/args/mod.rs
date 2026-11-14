@@ -2647,6 +2647,17 @@ pub struct CompareArgs {
     #[arg(long, default_value = "table")]
     pub format: String,
 
+    /// Score every row on these observation streams only, one table per
+    /// stream (comma-separated). A name is a stream (a leaf of the model's
+    /// `observations { }` block) or a data source, which selects every leaf
+    /// it expands to. Each table scores each row on that one stream's own
+    /// one-step-ahead predictive, from the per-stream scores the trace
+    /// already stores, so fits that bound different streams can be compared
+    /// on a stream they share. No figure combines streams. Also `streams =
+    /// [...]` in compare.toml.
+    #[arg(long, value_name = "NAME[,NAME...]")]
+    pub streams: Option<String>,
+
     /// Render even if T_score differs across models (Δ columns → '—')
     #[arg(long)]
     pub allow_mismatched_horizon: bool,
