@@ -59,10 +59,10 @@ pub struct ChainWarmup {
     /// Of those, steps on which it sat at its lower bound.
     pub steps_at_scale_floor: usize,
     /// The scale λ the kept draws were proposed under.
-    #[serde(with = "sim::inference::json_f64")]
+    #[serde(with = "score::num::json_f64")]
     pub final_scale: f64,
     /// The acceptance rate the adaptation chased.
-    #[serde(with = "sim::inference::json_f64")]
+    #[serde(with = "score::num::json_f64")]
     pub target_accept: f64,
 }
 
@@ -106,14 +106,14 @@ pub struct SamplingPlan {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SamplingCost {
     /// Wall time of the chains, start of the first to end of the last.
-    #[serde(with = "sim::inference::json_f64")]
+    #[serde(with = "score::num::json_f64")]
     pub sampling_seconds: f64,
     /// Likelihood evaluations this call ran, as the completion line counts
     /// them: one per MCMC step, so a resumed run counts only its own steps.
     pub evaluations: usize,
     /// Wall time per evaluation within one chain, the chains running in
     /// parallel.
-    #[serde(with = "sim::inference::json_f64")]
+    #[serde(with = "score::num::json_f64")]
     pub ms_per_evaluation: f64,
 }
 

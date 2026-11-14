@@ -7,7 +7,7 @@
 
 use serde::{Serialize, Deserialize};
 
-use crate::inference::json_f64;
+use score::num::json_f64;
 
 /// Severity level for inference diagnostics.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

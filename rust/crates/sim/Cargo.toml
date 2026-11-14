@@ -46,6 +46,7 @@ rand = "0.8"
 rand_chacha = { version = "0.3", features = ["serde1"] }
 rand_distr = "0.4"
 rayon = "1"
+score = { path = "../score" }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
 # Inline-capacity vectors for the scheduling spine's TimelineStop reasons and

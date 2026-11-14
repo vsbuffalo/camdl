@@ -185,7 +185,7 @@ pub enum NotAssessed {
     /// The chain's trace carries fewer than [`CHAIN_LOGLIK_MIN_ESS`]
     /// effective draws, too few to estimate the standard error of its mean.
     TooFewEffectiveDraws {
-        #[serde(with = "sim::inference::json_f64")]
+        #[serde(with = "score::num::json_f64")]
         ess: f64,
     },
     /// No usable standard error was supplied (IF2: `fit_state.toml` records
@@ -234,17 +234,17 @@ pub struct ChainLoglikEstimate {
 pub struct ChainLoglikTest {
     /// `m_i − m_{−i}`: the chain's mean minus the pooled mean of the others,
     /// in nats. Negative when the chain sits below the others.
-    #[serde(with = "sim::inference::json_f64")]
+    #[serde(with = "score::num::json_f64")]
     pub diff: f64,
     /// `sqrt(se_i² + se_{−i}²)`, the standard error of `diff`.
-    #[serde(with = "sim::inference::json_f64")]
+    #[serde(with = "score::num::json_f64")]
     pub se: f64,
     /// `|diff| / se`.
-    #[serde(with = "sim::inference::json_f64")]
+    #[serde(with = "score::num::json_f64")]
     pub z: f64,
     /// The cutoff `z` was compared with, [`chain_loglik_cutoff`] for the
     /// number of chains assessed.
-    #[serde(with = "sim::inference::json_f64")]
+    #[serde(with = "score::num::json_f64")]
     pub cutoff: f64,
     /// `z > cutoff`.
     pub flagged: bool,
@@ -269,7 +269,7 @@ pub struct ChainLoglikScore {
     pub chain: ChainIndex,
     /// The chain's mean log-likelihood. `NaN` when the chain had no readable
     /// trace rows (rendered `—`, never counted as agreeing).
-    #[serde(rename = "mean", with = "sim::inference::json_f64")]
+    #[serde(rename = "mean", with = "score::num::json_f64")]
     pub mean_loglik: f64,
     pub outcome: ChainLoglikOutcome,
 }
@@ -451,10 +451,10 @@ pub struct ChainLoglikAgreement {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub column_absent: bool,
     /// [`CHAIN_LOGLIK_FAMILY_ALPHA`], recorded so the cutoff can be read.
-    #[serde(with = "sim::inference::json_f64")]
+    #[serde(with = "score::num::json_f64")]
     pub family_alpha: f64,
     /// [`CHAIN_LOGLIK_MIN_ESS`], the fewest effective draws assessed.
-    #[serde(with = "sim::inference::json_f64")]
+    #[serde(with = "score::num::json_f64")]
     pub min_ess: f64,
     pub chains: Vec<ChainLoglikScore>,
     /// PGAS only: the sampler's own target and its latent-path term, parallel
@@ -510,10 +510,10 @@ impl ChainLoglikAgreement {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompleteDataMeans {
     /// Per-chain mean `log p(y, X | θ)` (`log_complete_data_ll`).
-    #[serde(with = "sim::inference::json_f64::vec")]
+    #[serde(with = "score::num::json_f64::vec")]
     pub complete: Vec<f64>,
     /// Per-chain mean `log p(X | θ)` (`transition_ll`).
-    #[serde(with = "sim::inference::json_f64::vec")]
+    #[serde(with = "score::num::json_f64::vec")]
     pub transition: Vec<f64>,
 }
 

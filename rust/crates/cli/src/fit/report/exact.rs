@@ -8,7 +8,7 @@
 //! `fit summary` builds from the leaf, and must not read a NaN as an infinity.
 //! [`exact_json`] serializes as `serde_json::to_value` does, except that a
 //! non-finite float becomes the string `"NaN"`, `"inf"` or `"-inf"`, the
-//! spelling `sim::inference::json_f64` already writes.
+//! spelling `score::num::json_f64` already writes.
 //!
 //! The comparison sees the run's report as `events.jsonl` writes it and the
 //! loader's as `fit summary --format json` does; both serialize here.

@@ -48,6 +48,7 @@ rand = "0.8"
 rand_distr = "0.4"
 rayon = "1"
 runid = { path = "../runid" }
+score = { path = "../score" }
 # Semver parse + compare for `camdl check-update` (release tag vs this binary).
 semver = "1"
 serde = { version = "1", features = ["derive"] }

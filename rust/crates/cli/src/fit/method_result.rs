@@ -89,9 +89,9 @@ pub fn loglik_tsv_cell(loglik: f64) -> String {
 /// deviation over its replicate filters, from `logliks.tsv`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PfilterRun {
-    #[serde(with = "sim::inference::json_f64")]
+    #[serde(with = "score::num::json_f64")]
     pub ll_mean: f64,
-    #[serde(with = "sim::inference::json_f64")]
+    #[serde(with = "score::num::json_f64")]
     pub ll_sd: f64,
     pub n_replicates: usize,
     pub n_particles: usize,
@@ -225,7 +225,7 @@ pub struct If2Record {
     /// written before it was recorded.
     pub resolved_gate: Option<crate::fit::config_v2::GateConfig>,
     pub resolved_loglik_eval: Option<crate::fit::config_v2::LoglikEvalConfig>,
-    #[serde(with = "sim::inference::json_f64")]
+    #[serde(with = "score::num::json_f64")]
     pub initial_loglik: f64,
     pub camdl_version: Option<String>,
     pub loglik_type: Option<crate::fit::loglik::LoglikType>,

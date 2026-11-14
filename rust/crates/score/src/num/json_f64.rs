@@ -15,7 +15,7 @@
 //! with [`LEGACY_NULL`]: a `null` was written for all three non-finite values
 //! alike, so admitting it as any one of them would be a guess.
 //!
-//! Use `#[serde(with = "crate::inference::json_f64")]` on an `f64`,
+//! Use `#[serde(with = "score::num::json_f64")]` on an `f64`,
 //! [`option`] on an `Option<f64>` (where `None` stays `null`), [`map`] on
 //! a `BTreeMap<String, f64>`, and [`vec`] on a `Vec<f64>`.
 //!
