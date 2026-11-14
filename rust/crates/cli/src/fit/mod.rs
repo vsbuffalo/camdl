@@ -2233,12 +2233,37 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                             // gh#833: what each value was accumulated over,
                             // for `compare`'s window gate.
                             let per_stream_cov = obs_model.per_stream_coverage();
-                            preq_trace = Some(sim::inference::prequential::build_trace(
+                            let mut trace = sim::inference::prequential::build_trace(
                                 recorded, &y_obs, &per_stream_obs, &per_stream_cov,
                                 &result.ess_trace, 0,
                                 pf_seed,
                                 obs_model.first_observation_opens_after_run_start(smc_config.t_start),
-                                None));
+                                None);
+                            // Schema 5: how this trace was computed, recorded
+                            // as `camdl pfilter --save-prequential` records
+                            // it — one pass (replicate 0) at the point this
+                            // method evaluates, under the fit's intervention
+                            // selection.
+                            let base = crate::util::FitBase::of(&sweep_config)
+                                .unwrap_or_else(|e| abandon_method(&out, format!("error: {e}")));
+                            let (enabled, disabled) = if base.is_empty() {
+                                (Vec::new(), Vec::new())
+                            } else {
+                                base.lists(&run_config.model_declared).unwrap_or_else(|e| {
+                                    abandon_method(&out, format!("error: {e}"))
+                                })
+                            };
+                            trace.derivation = Some(sim::inference::prequential::Derivation {
+                                particles: *particles,
+                                replicates: 1,
+                                dt: smc_config.dt,
+                                seed: pf_seed,
+                                theta: sim::inference::prequential::ThetaSource::Supplied,
+                                excluded_chains: Vec::new(),
+                                enabled,
+                                disabled,
+                            });
+                            preq_trace = Some(trace);
                         }
                     }
                     logliks.push(result.log_likelihood);

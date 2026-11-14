@@ -218,6 +218,58 @@ pub struct PrequentialTrace {
     /// omitted when absent (see `score_from`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pit_randomization_seed: Option<u64>,
+    /// How this trace was computed. `None` on traces written before schema 5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derivation: Option<Derivation>,
+}
+
+/// The settings that move a trace's scores, recorded by whoever ran the
+/// filter (schema 5).
+///
+/// The log of a particle-filter likelihood estimate is biased downward, by
+/// more at fewer particles, and log-mean-exp over replicates reduces that
+/// bias; so two traces scored at different `particles` or `replicates` differ
+/// partly by the filters. `compare` reads this block to refuse such a pair.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Derivation {
+    /// Particles per filter pass.
+    pub particles: usize,
+    /// Filter replicates combined into the trace; 1 for a single pass.
+    pub replicates: usize,
+    /// The integration step the filter ran at.
+    pub dt: f64,
+    /// The filter seed; replicate `r` ran at `seed + r`.
+    pub seed: u64,
+    /// Where the parameters the trace was scored at came from.
+    pub theta: ThetaSource,
+    /// MCMC chains dropped from the posterior before θ was taken (chain
+    /// numbers counted from 0, as `draws.tsv` writes them); empty when none.
+    pub excluded_chains: Vec<usize>,
+    /// Interventions the run switched on by name (`--enable`, or the fit
+    /// config's selection).
+    pub enabled: Vec<String>,
+    /// Interventions the run switched off by name.
+    pub disabled: Vec<String>,
+}
+
+/// Where a trace's parameters came from. Externally tagged like
+/// [`Provenance`]: unit variants are bare strings, struct variants nest under
+/// their tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThetaSource {
+    /// Values handed to the filter by its caller — a params file (or
+    /// `--param`) given to `camdl pfilter`, or the point a fit config's
+    /// `pfilter` method evaluates at — not taken from a fit's posterior or
+    /// optimizer result.
+    Supplied,
+    /// The mean over `n_draws` retained posterior draws.
+    PosteriorMean { n_draws: usize },
+    /// An optimizer fit's winning point.
+    OptimizerWinner,
+    /// An evenly thinned mixture of `n_used` of the `n_available` retained
+    /// posterior draws.
+    PosteriorDraws { n_used: usize, n_available: usize },
 }
 
 impl PrequentialTrace {
@@ -597,10 +649,11 @@ pub fn build_trace(
     PrequentialTrace {
         // v3 (gh#585): score_from + pit_randomization_seed + the
         // Conditioning struct variants. v4 (gh#833): per-stream `coverage`.
-        // All additions serde-defaulted, so older traces still read; they
-        // read as InSample/PlugIn/Unrecorded, which is factually what they
-        // are.
-        schema_version: 4,
+        // v5: the `derivation` block (filled by the caller). All additions
+        // serde-defaulted, so older traces still read; they read as
+        // InSample/PlugIn/Unrecorded/no derivation, which is factually what
+        // they are.
+        schema_version: 5,
         t0,
         // This builder scores a single filter pass at one θ over the full data:
         // plug-in + in-sample. The posterior / LFO producers (#295) stamp their
@@ -611,6 +664,9 @@ pub fn build_trace(
         warnings,
         score_from,
         pit_randomization_seed: Some(pit_seed),
+        // The filter settings are the caller's to record (`pfilter`), not
+        // this builder's: it sees the recorded swarm, not how it was run.
+        derivation: None,
     }
 }
 
@@ -805,7 +861,8 @@ mod tests {
         let trace = build_trace(&recorded, &[14.0, 3.0], &per_stream_observed, &coverage,
                                 &[100.0, 100.0], 0, 7, true, None);
 
-        assert_eq!(trace.schema_version, 4, "coverage is the schema-4 addition");
+        assert_eq!(trace.schema_version, 5,
+            "build_trace writes the current schema (coverage arrived in 4)");
         let s0 = &trace.steps[0].per_stream;
         assert_eq!((s0[0].stream.as_str(), s0[0].coverage), ("inc", inc0));
         assert_eq!((s0[1].stream.as_str(), s0[1].coverage), ("prev", Coverage::Instant));
@@ -826,6 +883,46 @@ mod tests {
         let back: StreamScore = serde_json::from_value(old).unwrap();
         assert_eq!(back.coverage, Coverage::Unrecorded,
             "an old trace says nothing, and must not read as agreeing");
+    }
+
+    /// Schema 5: the derivation block survives the JSON round trip, with
+    /// `ThetaSource` externally tagged (unit variants bare strings, struct
+    /// variants nested under their tag), and a schema-4 trace without the
+    /// block still reads, as `None`.
+    #[test]
+    fn derivation_block_round_trips_and_an_old_trace_reads_without_it() {
+        let block = Derivation {
+            particles: 300,
+            replicates: 5,
+            dt: 0.5,
+            seed: 7,
+            theta: ThetaSource::PosteriorDraws { n_used: 3, n_available: 80 },
+            excluded_chains: vec![1, 3],
+            enabled: vec!["lockdown".into()],
+            disabled: vec![],
+        };
+        let json = serde_json::to_value(&block).unwrap();
+        assert_eq!(json["theta"],
+            serde_json::json!({"posterior_draws": {"n_used": 3, "n_available": 80}}));
+        assert_eq!(json["excluded_chains"], serde_json::json!([1, 3]));
+        let back: Derivation = serde_json::from_value(json).unwrap();
+        assert_eq!(back, block);
+        for (theta, tag) in [(ThetaSource::Supplied, serde_json::json!("supplied")),
+                             (ThetaSource::OptimizerWinner, serde_json::json!("optimizer_winner")),
+                             (ThetaSource::PosteriorMean { n_draws: 12 },
+                              serde_json::json!({"posterior_mean": {"n_draws": 12}}))] {
+            assert_eq!(serde_json::to_value(theta).unwrap(), tag);
+        }
+
+        let old = r#"{
+            "schema_version": 4, "t0": 0, "provenance": "plug_in",
+            "conditioning": "in_sample", "steps": [], "warnings": []
+        }"#;
+        let t: PrequentialTrace = serde_json::from_str(old).expect("a schema-4 trace reads");
+        assert_eq!(t.derivation, None, "a schema-4 trace records no derivation");
+        let written = serde_json::to_value(&t).unwrap();
+        assert!(written.get("derivation").is_none(),
+            "an absent block is omitted, not written as null: {written}");
     }
 
     #[test]
@@ -860,6 +957,7 @@ mod tests {
             steps: vec![], warnings: vec![],
             score_from: None,
             pit_randomization_seed: None,
+            derivation: None,
         };
         let caveat = t.optimism_caveat().expect("plug-in + in-sample must be flagged");
         assert!(caveat.contains("plug-in"), "names the treatment optimism: {caveat}");
@@ -918,6 +1016,7 @@ mod tests {
             steps: vec![], warnings: vec![],
             score_from: Some(21.0),
             pit_randomization_seed: None,
+            derivation: None,
         };
         assert_eq!(t.optimism_caveat(), None,
             "posterior + held-out is honest on both axes");
@@ -942,6 +1041,7 @@ mod tests {
             steps: vec![], warnings: vec![],
             score_from: Some(21.0),
             pit_randomization_seed: None,
+            derivation: None,
         };
         let caveat = t.optimism_caveat().expect("plug-in axis still flagged");
         assert!(caveat.contains("plug-in"));
@@ -976,6 +1076,7 @@ mod tests {
                 scored_step(6.0, -30.0, &[]),
             ],
             warnings: vec![], score_from: None, pit_randomization_seed: None,
+            derivation: None,
         };
         let order: Vec<f64> = t.worst_scored(10).iter().map(|s| s.t).collect();
         // -inf (no particle reached it) precedes NaN (a scoring defect);
@@ -1241,6 +1342,7 @@ mod tests {
             conditioning: Conditioning::InSample, steps, warnings: vec![],
             score_from: None,
             pit_randomization_seed: None,
+            derivation: None,
         };
         // 90% interval = PIT in [0.05, 0.95] — 90 of 100 PITs qualify.
         let cov = trace.pit_coverage(0.90);
@@ -1305,7 +1407,7 @@ mod tests {
 
         // gh#269: one stream, so the single per-stream score equals the joint
         // (same per-particle log-liks + samples + observed value).
-        assert_eq!(trace.schema_version, 4);
+        assert_eq!(trace.schema_version, 5);
         assert_eq!(trace.steps[0].per_stream.len(), 1);
         assert_eq!(trace.steps[0].per_stream[0].stream, "s0");
         assert!(approx_eq(trace.steps[0].per_stream[0].log_score,
@@ -1423,6 +1525,7 @@ mod tests {
             conditioning: Conditioning::InSample, steps, warnings: vec![],
             score_from: None,
             pit_randomization_seed: None,
+            derivation: None,
         };
         let hist = trace.pit_histogram(10);
         assert_eq!(hist.iter().sum::<usize>(), 50);

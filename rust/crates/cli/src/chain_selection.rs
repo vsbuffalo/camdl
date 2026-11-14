@@ -106,6 +106,11 @@ impl ChainSelection {
         Ok(ChainSelection { excluded })
     }
 
+    /// The chain ids to drop.
+    pub fn excluded(&self) -> &BTreeSet<ChainIndex> {
+        &self.excluded
+    }
+
     /// `"3,5"` — the excluded ids as the warning renders them.
     pub fn excluded_csv(&self) -> String {
         self.excluded

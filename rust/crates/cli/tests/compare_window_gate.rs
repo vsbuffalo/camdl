@@ -160,7 +160,7 @@ fn compare_refuses_a_gapped_reading_against_a_merged_one() {
     // the row closing at 12 covers [11, 12) in the gapped reading.
     let trace: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&gapped).unwrap()).unwrap();
-    assert_eq!(trace["schema_version"], 4);
+    assert_eq!(trace["schema_version"], 5);
     let at_12 = trace["steps"].as_array().unwrap().iter()
         .find(|s| s["t"] == 12.0)
         .expect("a scored step at t=12");

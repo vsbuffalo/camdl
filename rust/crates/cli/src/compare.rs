@@ -27,7 +27,7 @@ use crate::chain_selection::ChainSelection;
 use crate::fit::handle::ResolvedFit;
 use crate::posterior_draws::PosteriorDrawsRef;
 use serde::Deserialize;
-use sim::inference::prequential::{Conditioning, PrequentialTrace};
+use sim::inference::prequential::{Conditioning, PrequentialTrace, ThetaSource};
 use std::path::{Path, PathBuf};
 
 /// Default particle count for auto-deriving a prequential from a fit handle.
@@ -586,6 +586,18 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
             refuse(&out, format!(
                 "error: {note}\n       Re-run the fit on the current file, restore the \
                  file the fit read, or pass --allow-changed-data to render anyway."));
+        }
+    }
+
+    // Two rows scored at different particle or replicate counts differ partly
+    // by the filters. Overridable: comparing a cheap explicit trace against a
+    // derived row is a legitimate ask once the reader knows.
+    if let Some(note) = filter_settings_mismatch_note(&rows) {
+        if !a.allow_mismatched_filter_settings {
+            refuse(&out, format!(
+                "error: {note}\n       Re-derive every row with the same --particles and \
+                 --replicates, or pass --allow-mismatched-filter-settings to render \
+                 anyway."));
         }
     }
 
@@ -1235,6 +1247,52 @@ fn mc_se_delta(row: &Row, base: &Row) -> Option<f64> {
     }
 }
 
+/// The statement that two rows were scored with different particle-filter
+/// settings — particle count or replicate count — or `None`. Only rows that
+/// record their settings take part; [`filter_settings_unchecked_note`] names
+/// the others. The refusal and the `--allow-mismatched-filter-settings`
+/// renderings share it.
+fn filter_settings_mismatch_note(rows: &[Row]) -> Option<String> {
+    let recorded: Vec<(&str, &sim::inference::prequential::Derivation)> = rows.iter()
+        .filter_map(|r| r.trace.derivation.as_ref().map(|d| (r.name.as_str(), d)))
+        .collect();
+    // Equality is transitive, so every row is checked against the first that
+    // records its settings.
+    let (ref_name, ref_d) = *recorded.first()?;
+    let differing: Vec<String> = recorded.iter().skip(1).filter_map(|&(name, d)| {
+        let mut parts = Vec::new();
+        if d.particles != ref_d.particles {
+            parts.push(format!("particles {} vs particles {}", ref_d.particles, d.particles));
+        }
+        if d.replicates != ref_d.replicates {
+            parts.push(format!("replicates {} vs replicates {}", ref_d.replicates, d.replicates));
+        }
+        (!parts.is_empty()).then(|| format!("'{ref_name}' and '{name}': {}", parts.join(", ")))
+    }).collect();
+    (!differing.is_empty()).then(|| format!(
+        "the compared traces were scored with different particle-filter settings: \
+         {}. The log of a particle-filter likelihood estimate is biased downward, \
+         and by more at fewer particles (and fewer replicates combined), so part of \
+         Δelpd would measure the filters rather than the models.",
+        differing.join("; ")))
+}
+
+/// The rows whose trace records no filter settings, so the settings check
+/// could not cover them, or `None`.
+fn filter_settings_unchecked_note(rows: &[Row]) -> Option<String> {
+    let unrecorded: Vec<String> = rows.iter()
+        .filter(|r| r.trace.derivation.is_none())
+        .map(|r| if r.trace.schema_version < 5 {
+            format!("filter settings not recorded for '{}' (trace older than schema 5); \
+                     not checked", r.name)
+        } else {
+            format!("filter settings not recorded for '{}' (its producer wrote no \
+                     derivation block); not checked", r.name)
+        })
+        .collect();
+    (!unrecorded.is_empty()).then(|| unrecorded.join("; "))
+}
+
 /// The note naming each non-baseline row whose evidence label was not checked
 /// against filter noise because only one side of its pair with the baseline
 /// carries a filter-noise MC SE, or `None`.
@@ -1365,13 +1423,17 @@ fn derive_prequential(
     // Bayesian fit (PGAS/PMMH/MH) writes no `final_params.toml` — its θ̂ is
     // the posterior MEAN over `draws.tsv`; only an optimizer fit (IF2/NLopt)
     // has a single winner file.
-    let theta_tomls: Vec<String> = if derive.draws >= 2 {
+    let point = |run_dir| -> Result<(Vec<String>, ThetaSource), String> {
+        let (toml, source) = point_estimate_params_toml(run_dir, selection)?;
+        Ok((vec![toml], source))
+    };
+    let (theta_tomls, theta_source): (Vec<String>, ThetaSource) = if derive.draws >= 2 {
         match thinned_draws_params_tomls(run_dir, selection, derive.draws)? {
-            Some(tomls) => tomls,
-            None => vec![point_estimate_params_toml(run_dir, selection)?],
+            Some(thinned) => thinned,
+            None => point(run_dir)?,
         }
     } else {
-        vec![point_estimate_params_toml(run_dir, selection)?]
+        point(run_dir)?
     };
     let is_mixture = theta_tomls.len() >= 2;
 
@@ -1619,6 +1681,20 @@ fn derive_prequential(
     } else {
         replicate_traces.into_iter().next().expect("one replicate ran")
     };
+    // Schema 5: each pass recorded its own single run; the trace as combined
+    // is what this derivation did. The excluded chains are recorded only
+    // where they applied — a θ drawn from a posterior cloud.
+    let excluded_chains = match theta_source {
+        ThetaSource::PosteriorMean { .. } | ThetaSource::PosteriorDraws { .. } =>
+            selection.map(|s| s.excluded().iter().map(|c| c.0).collect()).unwrap_or_default(),
+        ThetaSource::Supplied | ThetaSource::OptimizerWinner => Vec::new(),
+    };
+    let derivation = trace.derivation.as_mut().ok_or_else(|| format!(
+        "internal error: `camdl pfilter` wrote a trace for {} with no derivation \
+         block", segment.display()))?;
+    derivation.replicates = derive.replicates;
+    derivation.theta = theta_source;
+    derivation.excluded_chains = excluded_chains;
 
     // gh#585 (Stage 3.5): §3.7.3(c) — the `HoldOutTail` stamp is granted
     // only after checking, on the derived trace itself, that every scored
@@ -1787,6 +1863,7 @@ fn combine_scored_traces(
         warnings,
         score_from: first.score_from,
         pit_randomization_seed: Some(pit_seed),
+        derivation: first.derivation.clone(),
     })
 }
 
@@ -1801,7 +1878,7 @@ fn thinned_draws_params_tomls(
     segment: &Path,
     selection: Option<&ChainSelection>,
     m: usize,
-) -> Result<Option<Vec<String>>, String> {
+) -> Result<Option<(Vec<String>, ThetaSource)>, String> {
     let pdraws = match crate::posterior_draws::resolve_posterior_draws(
         &segment.to_string_lossy(), None,
     ) {
@@ -1831,7 +1908,7 @@ fn thinned_draws_params_tomls(
         }
         out.push(s);
     }
-    Ok(Some(out))
+    Ok(Some((out, ThetaSource::PosteriorDraws { n_used: m_eff, n_available: n })))
 }
 
 /// Merge a training file and its held-out tail into one scored series
@@ -1996,12 +2073,14 @@ fn parse_cohort_exclude(
 fn point_estimate_params_toml(
     segment: &Path,
     selection: Option<&ChainSelection>,
-) -> Result<String, String> {
+) -> Result<(String, ThetaSource), String> {
     match crate::posterior_draws::resolve_posterior_draws(&segment.to_string_lossy(), None) {
-        Ok(pdraws) => posterior_mean_params_toml(&pdraws.with_selection(selection.cloned())),
+        Ok(pdraws) => posterior_mean_params_toml(&pdraws.with_selection(selection.cloned()))
+            .map(|(toml, n_draws)| (toml, ThetaSource::PosteriorMean { n_draws })),
         // No posterior cloud → an optimizer fit; its θ̂ is the single winner.
         Err(crate::posterior_draws::PosteriorDrawsError::NoPosterior(_)) => {
             crate::fit::fit_summary::winner_params_toml(segment)
+                .map(|toml| (toml, ThetaSource::OptimizerWinner))
         }
         // Anything else — a leaf refused for counting its chains from 1
         // (gh#990) — must not be scored at a winner instead.
@@ -2020,7 +2099,7 @@ fn point_estimate_params_toml(
 /// — the same seam `fit predict`/`fit summary` use, rather than a second raw
 /// draws reader. The `(chain, draw)` key columns are dropped by the keyed
 /// loader, never emitted as parameters (gh#322).
-fn posterior_mean_params_toml(pref: &PosteriorDrawsRef) -> Result<String, String> {
+fn posterior_mean_params_toml(pref: &PosteriorDrawsRef) -> Result<(String, usize), String> {
     let (rows, _info) = pref.load_params_with_info()?;
     let n = rows.len();
     if n == 0 {
@@ -2045,7 +2124,7 @@ fn posterior_mean_params_toml(pref: &PosteriorDrawsRef) -> Result<String, String
             crate::fit::runner::format_param_value(sum / n as f64)
         ));
     }
-    Ok(out)
+    Ok((out, n))
 }
 
 /// Resolve a fit's `[data]` spec to a stream-name → absolute-path map for
@@ -2296,6 +2375,13 @@ fn warning_lines(rows: &[Row], base_idx: usize, t_mismatch: bool) -> Vec<String>
     if let Some(note) = data_change_unchecked_note(rows) {
         lines.push(format!("ⓘ {note}"));
     }
+    // Reaching a renderer with mismatched settings means the override.
+    if let Some(note) = filter_settings_mismatch_note(rows) {
+        lines.push(format!("⚠ {note} (--allow-mismatched-filter-settings was set)"));
+    }
+    if let Some(note) = filter_settings_unchecked_note(rows) {
+        lines.push(format!("ⓘ {note}"));
+    }
     // PIT warnings — flag clear miscalibration.
     for r in rows {
         if let Some(w) = pit_coverage_warning(r) {
@@ -2537,6 +2623,8 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String]) -> String {
             // / LFO traces exist.
             "provenance": r.trace.provenance,
             "conditioning": r.trace.conditioning,
+            // How the trace was computed (schema 5); null for an older trace.
+            "derivation": r.trace.derivation,
             // The trace's own warnings and the miscalibration flag, verbatim
             // from the same source the table prints — a script reading the JSON
             // must not have to re-derive them from `pit_cov90`.
@@ -2567,6 +2655,10 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String]) -> String {
         // --allow-changed-data), and the files that could not be checked.
         "data_changed": changed_data_note(rows),
         "data_change_unchecked": data_change_unchecked_note(rows),
+        // Particle-filter settings that differ across rows (present only under
+        // --allow-mismatched-filter-settings), and the rows that record none.
+        "filter_settings_mismatch": filter_settings_mismatch_note(rows),
+        "filter_settings_unchecked": filter_settings_unchecked_note(rows),
         // Rows whose evidence label skipped the within-filter-noise gate
         // because only one side of the pair carries an MC SE.
         "filter_noise_unassessed": filter_noise_unassessed_note(rows, base_idx),
@@ -2613,6 +2705,7 @@ mod tests {
             warnings: vec![PrequentialWarning::StartsAtPrior],
             score_from: None,
             pit_randomization_seed: Some(1),
+            derivation: None,
         };
         let a = component(0.2_f64.ln(), vec![1.0, 2.0], 40.0);
         let b = component(0.4_f64.ln(), vec![3.0, 4.0], 25.0);
@@ -2664,6 +2757,7 @@ mod tests {
             warnings: vec![],
             score_from: None,
             pit_randomization_seed: None,
+            derivation: None,
         };
         let err = combine_mixture(vec![trace_at(7.0), trace_at(14.0)], 1)
             .expect_err("different step times must refuse");
@@ -3064,6 +3158,98 @@ mod tests {
         assert!(v["data_change_unchecked"].as_str().is_some_and(|s| s.contains("north")), "{v}");
     }
 
+    fn derivation(particles: usize, replicates: usize)
+        -> sim::inference::prequential::Derivation
+    {
+        sim::inference::prequential::Derivation {
+            particles, replicates, dt: 1.0, seed: 1,
+            theta: sim::inference::prequential::ThetaSource::OptimizerWinner,
+            excluded_chains: vec![], enabled: vec![], disabled: vec![],
+        }
+    }
+
+    /// Two rows scored at different particle or replicate counts differ
+    /// partly by the filters — the log of a PF likelihood estimate is biased
+    /// downward, more so at fewer particles — so the pair is named with both
+    /// values; equal settings say nothing. A rendering under the override
+    /// states the mismatch in every format.
+    #[test]
+    fn rows_scored_with_different_filter_settings_are_named_in_every_format() {
+        let mut rows = vec![
+            row_at("a", &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0]),
+            row_at("b", &[7.0, 14.0, 21.0], &[-5.0, -6.0, -6.0]),
+        ];
+        rows[0].trace.derivation = Some(derivation(1000, 5));
+        rows[1].trace.derivation = Some(derivation(1000, 5));
+        assert!(filter_settings_mismatch_note(&rows).is_none(), "equal settings");
+        assert!(filter_settings_unchecked_note(&rows).is_none(), "both recorded");
+
+        rows[1].trace.derivation = Some(derivation(200, 5));
+        let note = filter_settings_mismatch_note(&rows).expect("particles differ");
+        assert!(note.contains("'a'") && note.contains("'b'")
+                && note.contains("particles 1000") && note.contains("particles 200"),
+            "names both rows and both values: {note}");
+        assert!(note.contains("biased downward"), "and why it matters: {note}");
+        assert!(!note.contains("replicates 5 vs"), "replicates agree: {note}");
+
+        rows[1].trace.derivation = Some(derivation(1000, 1));
+        let note = filter_settings_mismatch_note(&rows).expect("replicates differ");
+        assert!(note.contains("replicates 5") && note.contains("replicates 1"), "{note}");
+
+        let metrics = vec!["elpd".to_string()];
+        for (fmt, text) in [("table", render_table(&rows, 0, &metrics, false)),
+                            ("md", render_md(&rows, 0, &metrics, false))] {
+            assert!(text.contains("different particle-filter settings")
+                    && text.contains("--allow-mismatched-filter-settings was set"),
+                "the {fmt} rendering states the mismatch:\n{text}");
+        }
+        let v: serde_json::Value =
+            serde_json::from_str(&render_json(&rows, 0, &metrics)).unwrap();
+        assert!(v["filter_settings_mismatch"].as_str()
+                .is_some_and(|s| s.contains("replicates 1")), "{v}");
+        assert_eq!(v["rows"][1]["derivation"]["replicates"], serde_json::json!(1),
+            "each row carries its own block: {v}");
+    }
+
+    /// A trace older than schema 5 records no filter settings. It is never
+    /// passed silently: it reads, takes no part in the mismatch check, and
+    /// is named as not checked; its JSON row carries a null block.
+    #[test]
+    fn a_trace_older_than_schema_5_is_reported_as_not_checked() {
+        let old: PrequentialTrace = serde_json::from_str(r#"{
+            "schema_version": 4, "t0": 0, "provenance": "plug_in",
+            "conditioning": "in_sample",
+            "steps": [{"t": 7.0, "y_obs": 1.0, "y_pred_samples": [],
+                       "log_score": -1.0, "crps": 0.5, "pit": 0.5, "ess": 100.0}],
+            "warnings": []
+        }"#).expect("a schema-4 trace still reads");
+        assert!(old.derivation.is_none());
+        let mut rows = vec![
+            row_at("new", &[7.0], &[-1.5]),
+            row_at("old", &[7.0], &[-1.0]),
+        ];
+        rows[0].trace.derivation = Some(derivation(1000, 5));
+        rows[1].trace = old;
+
+        assert!(filter_settings_mismatch_note(&rows).is_none(),
+            "an unrecorded side cannot contradict anything");
+        let note = filter_settings_unchecked_note(&rows).expect("old is unchecked");
+        assert!(note.contains(
+            "filter settings not recorded for 'old' (trace older than schema 5); not checked"),
+            "{note}");
+        assert!(!note.contains("'new'"), "{note}");
+
+        let metrics = vec!["elpd".to_string()];
+        let table = render_table(&rows, 0, &metrics, false);
+        assert!(table.contains("filter settings not recorded for 'old'"), "{table}");
+        let v: serde_json::Value =
+            serde_json::from_str(&render_json(&rows, 0, &metrics)).unwrap();
+        assert!(v["filter_settings_unchecked"].as_str().is_some_and(|s| s.contains("'old'")),
+            "{v}");
+        assert!(v["rows"][1]["derivation"].is_null(), "{v}");
+        assert!(v["filter_settings_mismatch"].is_null(), "{v}");
+    }
+
     /// The "within filter noise" gate needs a filter-noise MC SE on both rows
     /// of a pair. A derived row with replication against an explicit
     /// prequential.json (no SE) used to skip the gate without saying so; the
@@ -3300,6 +3486,7 @@ mod tests {
                 warnings: Vec::new(),
                 score_from: None,
                 pit_randomization_seed: None,
+                derivation: None,
             },
         }
     }
@@ -3457,14 +3644,16 @@ mod tests {
 
         // All chains: mean beta = (1.0·4 + 9.0·4)/8 = 5.0 — the stuck chain
         // drags θ̂ up.
-        let all = posterior_mean_params_toml(&pref).unwrap();
+        let (all, n_all) = posterior_mean_params_toml(&pref).unwrap();
         assert_eq!(beta_of(&all), 5.0, "all-chain θ̂ pools both chains");
+        assert_eq!(n_all, 8, "the mean is over all 8 draws");
 
         // Drop the stuck chain 1 → mean beta = 1.0 over the retained chain.
         let sel = ChainSelection::parse_exclude("1").unwrap();
-        let sub =
+        let (sub, n_sub) =
             posterior_mean_params_toml(&pref.clone().with_selection(Some(sel))).unwrap();
         assert_eq!(beta_of(&sub), 1.0, "subset θ̂ is the mean over the retained chain");
+        assert_eq!(n_sub, 4, "and over the 4 retained draws");
         assert_ne!(
             beta_of(&all),
             beta_of(&sub),
