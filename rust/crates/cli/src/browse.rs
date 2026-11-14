@@ -882,12 +882,31 @@ fn show_sim_ensemble_record(out: &crate::out::Out, leaf: &cas_read::Leaf, rel_pa
 
 pub fn cmd_cat(a: &crate::args::CatArgs) {
     let out = crate::out::Out::new(false);
+    let selection = crate::chain_selection::ChainSelection::from_flags(
+        a.chains.as_deref(),
+        a.exclude_chains.as_deref(),
+    )
+    .unwrap_or_else(|e| {
+        out.fail(format!("error: {e}"));
+    });
     let root = a.root.to_string_lossy();
     let resolved = resolve_any(&root, &a.target).unwrap_or_else(|e| {
         out.fail(format!("error: {}", e));
     });
 
     use std::io::Write as _;
+
+    // A chain selection reads a fit run's own stream; every other kind is
+    // refused rather than printed whole.
+    if let Some(sel) = &selection {
+        if !matches!(resolved, Resolved::Fit { .. }) {
+            out.fail(format!(
+                "error: {} selects rows of a fit run's chain-keyed stream (draws.tsv); \
+                 `{}` does not name a fit run",
+                sel.flag(), a.target
+            ));
+        }
+    }
 
     // Every kind is new-format (`RunRecord`); each arm emits and returns.
     match resolved {
@@ -915,6 +934,12 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
             let bytes = std::fs::read(&path).unwrap_or_else(|e| {
                 out.fail(format!("error reading {} in {}: {}", name, rel_path, e));
             });
+            let bytes = match &selection {
+                None => bytes,
+                Some(sel) => select_chain_rows(&out, &leaf, name, sel, &bytes)
+                    .unwrap_or_else(|e| out.fail(format!("error: {e}")))
+                    .into_bytes(),
+            };
             let _ = out.data().write_all(&bytes);
         }
         // New-format profile point: default to the per-(point, seed, start)
@@ -996,6 +1021,37 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
             let _ = out.data().write_all(&bytes);
         }
     }
+}
+
+/// The rows of a fit leaf's stream `name` that a chain selection keeps
+/// (`cat --chains` / `--exclude-chains`). Only a stream whose recorded
+/// `output_schema` has a `chain` column can be selected — in practice
+/// `draws.tsv`; any other is refused by name. The selection is resolved
+/// against the file's own chains, warned about on stderr, and the kept rows
+/// are the file's own bytes.
+fn select_chain_rows(
+    out: &crate::out::Out,
+    leaf: &cas_read::Leaf,
+    name: &str,
+    sel: &crate::chain_selection::ChainSelection,
+    bytes: &[u8],
+) -> Result<String, String> {
+    let has_chain_column = leaf.record.output_schema.get(name).is_some_and(|t| {
+        t.columns.iter().any(|c| c.role == runid::record::ColumnRole::Chain)
+    });
+    if !has_chain_column {
+        return Err(format!(
+            "{} selects rows by chain, and the stream `{name}` has no `chain` column in \
+             this run's recorded output schema; it applies to a stream such as draws.tsv",
+            sel.flag()
+        ));
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| format!("`{name}` is not UTF-8 text"))?;
+    let present = crate::chain_selection::chains_in_draws(&leaf.dir.join(name))?;
+    let info = sel.resolve(&present)?;
+    crate::chain_selection::warn_active_selection(
+        out, sel.polarity(), &info, crate::out::paint::stderr());
+    crate::chain_selection::filter_tsv_rows(text, &info)
 }
 
 /// Locate `<sim_dir>/obs/<obs_subdir>/<stream>.tsv`, taking the first

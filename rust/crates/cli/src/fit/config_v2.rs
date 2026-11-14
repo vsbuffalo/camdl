@@ -7975,7 +7975,8 @@ decibans_thresh = 100.0
             // order keys one run.
             let sub = |ids: Vec<usize>| with(ChainStarts::Spread(Spread::FromPosterior {
                 source: Handle("@a".into()),
-                chains: Some(crate::fit::starts::ChainSubset::new(ids).unwrap()),
+                chains: Some(crate::chain_selection::ChainSelection::from_ids(
+                    ids, crate::chain_selection::Polarity::Keep, "`chains`").unwrap()),
             }));
             assert_ne!(post_a.identity_payload(), sub(vec![0, 1]).identity_payload(), "{who}: whole cloud vs subset");
             assert_ne!(sub(vec![0, 1]).identity_payload(), sub(vec![0, 2]).identity_payload(), "{who}: two subsets");

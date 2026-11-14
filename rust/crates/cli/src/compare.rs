@@ -641,7 +641,7 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
     // no posterior cloud (an optimizer fit, or an explicit prequential.json) has
     // nothing to filter, so the selection is inert there.
     let model_names: Vec<String> = models.iter().map(|m| m.name.clone()).collect();
-    let cohort = parse_cohort_exclude(&a.exclude_chains, &model_names).unwrap_or_else(|e| {
+    let cohort = parse_cohort_selection(&a.chains, &a.exclude_chains, &model_names).unwrap_or_else(|e| {
         out.fail(format!("error: {e}"));
     });
     cohort.warn(&out);
@@ -2553,7 +2553,10 @@ fn derive_prequential(
     // where they applied — a θ drawn from a posterior cloud.
     let excluded_chains = match theta_source {
         ThetaSource::PosteriorMean { .. } | ThetaSource::PosteriorDraws { .. } =>
-            selection.map(|s| s.excluded().iter().map(|c| c.0).collect()).unwrap_or_default(),
+            match selection {
+                Some(s) => dropped_chains(run_dir, s)?,
+                None => Vec::new(),
+            },
         ThetaSource::Supplied | ThetaSource::OptimizerWinner => Vec::new(),
     };
     let derivation = trace.derivation.as_mut().ok_or_else(|| format!(
@@ -2883,35 +2886,52 @@ impl CohortChainSelection {
     }
 }
 
-/// Parse repeatable `--exclude-chains` tokens, bound to the resolved model
-/// `names`. Each token is `@fit:ids` / `fit:ids` (one fit) or bare `ids`
-/// (cohort-wide, applied to every fit). Mixing the two forms is rejected as
-/// ambiguous. A named fit must match EXACTLY ONE model — an unknown or ambiguous
-/// name is a hard error, so a per-fit token can never silently bind nowhere or
-/// to the wrong fit.
-fn parse_cohort_exclude(
-    tokens: &[String],
+/// Parse the repeatable `--chains` (keep) and `--exclude-chains` (drop)
+/// tokens, bound to the resolved model `names`. Each token is `@fit:ids` /
+/// `fit:ids` (one fit) or bare `ids` (cohort-wide, applied to every fit).
+///
+/// Mixing the two forms is rejected as ambiguous, across both flags: a bare
+/// value in either is refused when either holds a per-fit value. The two flags
+/// may name different fits; one fit named in both, or both flags given
+/// cohort-wide (which names every fit in both), is refused. A named fit must
+/// match EXACTLY ONE model — an unknown or ambiguous name is a hard error, so a
+/// per-fit token can never silently bind nowhere or to the wrong fit.
+fn parse_cohort_selection(
+    keep: &[String],
+    drop: &[String],
     names: &[String],
 ) -> Result<CohortChainSelection, String> {
-    if tokens.is_empty() {
+    use crate::chain_selection::Polarity;
+    let all = || keep.iter().chain(drop.iter());
+    if all().next().is_none() {
         return Ok(CohortChainSelection::default());
     }
-    let has_keyed = tokens.iter().any(|t| t.contains(':'));
-    let has_bare = tokens.iter().any(|t| !t.contains(':'));
+    let has_keyed = all().any(|t| t.contains(':'));
+    let has_bare = all().any(|t| !t.contains(':'));
     if has_keyed && has_bare {
         return Err(
-            "--exclude-chains: mixing cohort-wide ids and per-fit `@fit:ids` is ambiguous; \
-             give either bare ids (dropped from every fit) or @fit:ids (per fit), not both"
+            "--chains / --exclude-chains: mixing cohort-wide ids and per-fit `@fit:ids` is \
+             ambiguous; give either bare ids (applied to every fit) or @fit:ids (per fit), \
+             not both"
                 .to_string(),
         );
     }
 
-    let mut per_fit = std::collections::BTreeMap::new();
+    let mut per_fit: std::collections::BTreeMap<String, ChainSelection> =
+        std::collections::BTreeMap::new();
 
     if has_bare {
+        if !keep.is_empty() && !drop.is_empty() {
+            return Err(
+                "--chains and --exclude-chains are both cohort-wide, so both name every fit; \
+                 give one selection per fit"
+                    .to_string(),
+            );
+        }
         // Cohort-wide: union the bare tokens into one selection, applied to all.
-        let sel = ChainSelection::parse_exclude(&tokens.join(","))
-            .map_err(|e| format!("--exclude-chains: {e}"))?;
+        let (tokens, polarity) =
+            if keep.is_empty() { (drop, Polarity::Drop) } else { (keep, Polarity::Keep) };
+        let sel = ChainSelection::parse(&tokens.join(","), polarity, polarity.read_flag())?;
         for name in names {
             per_fit.insert(name.clone(), sel.clone());
         }
@@ -2922,46 +2942,65 @@ fn parse_cohort_exclude(
     // The name is matched VERBATIM against the compared fits' names — a
     // handle-referenced fit is named `@a`, a path-referenced one `ctl_rm.toml`.
     // The `@` is part of a handle name, NOT a per-fit sigil to prepend.
-    for tok in tokens {
-        let (fit, ids) = tok
-            .rsplit_once(':')
-            .expect("every token has ':' in the per-fit branch");
-        if fit.is_empty() {
-            return Err(format!("--exclude-chains '{tok}': missing fit name before ':'"));
-        }
-        let n_match = names.iter().filter(|n| n.as_str() == fit).count();
-        if n_match == 0 {
-            // Common slip: the `--help` example uses a handle name `@a`, so a
-            // user prepends a spurious `@` to a path-named fit. If dropping it
-            // would match, say so rather than a bare "no such fit".
-            let hint = fit
-                .strip_prefix('@')
-                .filter(|stripped| names.iter().any(|n| n == stripped))
-                .map(|stripped| {
+    for (tokens, polarity) in [(keep, Polarity::Keep), (drop, Polarity::Drop)] {
+        let flag = polarity.read_flag();
+        for tok in tokens {
+            let (fit, ids) = tok
+                .rsplit_once(':')
+                .expect("every token has ':' in the per-fit branch");
+            if fit.is_empty() {
+                return Err(format!("{flag} '{tok}': missing fit name before ':'"));
+            }
+            let n_match = names.iter().filter(|n| n.as_str() == fit).count();
+            if n_match == 0 {
+                // Common slip: the `--help` example uses a handle name `@a`, so a
+                // user prepends a spurious `@` to a path-named fit. If dropping it
+                // would match, say so rather than a bare "no such fit".
+                let hint = fit
+                    .strip_prefix('@')
+                    .filter(|stripped| names.iter().any(|n| n == stripped))
+                    .map(|stripped| {
+                        format!(
+                            " — did you mean '{stripped}'? the leading `@` names a run-store \
+                             handle; a fit given by path is named without it"
+                        )
+                    })
+                    .unwrap_or_default();
+                return Err(format!(
+                    "{flag}: no compared fit named '{fit}' (fits: {}){hint}",
+                    names.join(", ")
+                ));
+            }
+            if n_match > 1 {
+                return Err(format!(
+                    "{flag}: fit name '{fit}' is ambiguous ({n_match} compared fits \
+                     share it) — give each `[[model]]` a unique name via --config"
+                ));
+            }
+            let sel = ChainSelection::parse(ids, polarity, &format!("{flag} {fit}"))?;
+            if let Some(prior) = per_fit.insert(fit.to_string(), sel) {
+                return Err(if prior.polarity() == polarity {
+                    format!("{flag}: fit '{fit}' listed more than once")
+                } else {
                     format!(
-                        " — did you mean '{stripped}'? the leading `@` names a run-store \
-                         handle; a fit given by path is named without it"
+                        "fit '{fit}' is named by both --chains and --exclude-chains; give \
+                         one selection per fit"
                     )
-                })
-                .unwrap_or_default();
-            return Err(format!(
-                "--exclude-chains: no compared fit named '{fit}' (fits: {}){hint}",
-                names.join(", ")
-            ));
-        }
-        if n_match > 1 {
-            return Err(format!(
-                "--exclude-chains: fit name '{fit}' is ambiguous ({n_match} compared fits \
-                 share it) — give each `[[model]]` a unique name via --config"
-            ));
-        }
-        let sel = ChainSelection::parse_exclude(ids)
-            .map_err(|e| format!("--exclude-chains @{fit}: {e}"))?;
-        if per_fit.insert(fit.to_string(), sel).is_some() {
-            return Err(format!("--exclude-chains: fit '{fit}' listed more than once"));
+                });
+            }
         }
     }
     Ok(CohortChainSelection { per_fit, cohort_wide: false })
+}
+
+/// The chain ids a selection drops from the run at `run_dir`, by resolving it
+/// against the run's draws: the record a derived prequential carries, which
+/// names dropped chains whichever flag selected them.
+fn dropped_chains(run_dir: &Path, sel: &ChainSelection) -> Result<Vec<usize>, String> {
+    let pdraws = crate::posterior_draws::resolve_posterior_draws(&run_dir.to_string_lossy(), None)
+        .map_err(|e| -> String { e.into() })?;
+    let present = crate::chain_selection::chains_in_draws(&pdraws.draws_path)?;
+    Ok(sel.resolve(&present)?.excluded.iter().map(|c| c.0).collect())
 }
 
 /// θ̂ for the prequential as a flat params TOML, routed through the draws-cloud
@@ -5291,12 +5330,12 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
     fn a_disambiguated_name_is_the_name_exclude_chains_matches() {
         let names = positional_model_names(&[
             "a/fit.toml".to_string(), "b/fit.toml".to_string()]);
-        let c = parse_cohort_exclude(&["a/fit.toml:3".to_string()], &names).unwrap();
-        assert_eq!(c.for_fit("a/fit.toml").unwrap().excluded_csv(), "3");
+        let c = parse_cohort_selection(&[], &["a/fit.toml:3".to_string()], &names).unwrap();
+        assert_eq!(c.for_fit("a/fit.toml").unwrap().ids_csv(), "3");
         assert!(c.for_fit("b/fit.toml").is_none(), "the other fit keeps all chains");
 
         // The bare basename is no longer a fit name, and says so.
-        let e = parse_cohort_exclude(&["fit.toml:3".to_string()], &names).unwrap_err();
+        let e = parse_cohort_selection(&[], &["fit.toml:3".to_string()], &names).unwrap_err();
         assert!(e.contains("no compared fit named 'fit.toml'")
             && e.contains("a/fit.toml"),
             "the error names the fits as displayed: {e}");
@@ -5310,31 +5349,31 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         let names = vec!["@a".to_string(), "@b".to_string()];
 
         // Empty → no filtering.
-        assert!(parse_cohort_exclude(&[], &names).unwrap().per_fit.is_empty());
+        assert!(parse_cohort_selection(&[], &[], &names).unwrap().per_fit.is_empty());
 
         // Bare ids → cohort-wide: every fit gets the same drop set.
-        let c = parse_cohort_exclude(&["3,4".to_string()], &names).unwrap();
+        let c = parse_cohort_selection(&[], &["3,4".to_string()], &names).unwrap();
         assert!(c.cohort_wide);
-        assert_eq!(c.for_fit("@a").unwrap().excluded_csv(), "3,4");
-        assert_eq!(c.for_fit("@b").unwrap().excluded_csv(), "3,4");
+        assert_eq!(c.for_fit("@a").unwrap().ids_csv(), "3,4");
+        assert_eq!(c.for_fit("@b").unwrap().ids_csv(), "3,4");
 
         // Per-fit → ONLY the named fit is filtered; the other keeps all chains.
-        let c = parse_cohort_exclude(&["@a:2".to_string()], &names).unwrap();
+        let c = parse_cohort_selection(&[], &["@a:2".to_string()], &names).unwrap();
         assert!(!c.cohort_wide);
-        assert_eq!(c.for_fit("@a").unwrap().excluded_csv(), "2");
+        assert_eq!(c.for_fit("@a").unwrap().ids_csv(), "2");
         assert!(c.for_fit("@b").is_none(), "@b keeps all chains");
 
         // A path-named fit (no `@`) is matched by its bare name.
         let paths = vec!["ctl_rm.toml".to_string(), "ctl_bb.toml".to_string()];
-        let c = parse_cohort_exclude(&["ctl_rm.toml:4".to_string()], &paths).unwrap();
-        assert_eq!(c.for_fit("ctl_rm.toml").unwrap().excluded_csv(), "4");
+        let c = parse_cohort_selection(&[], &["ctl_rm.toml:4".to_string()], &paths).unwrap();
+        assert_eq!(c.for_fit("ctl_rm.toml").unwrap().ids_csv(), "4");
         assert!(c.for_fit("ctl_bb.toml").is_none());
 
         // Multiple per-fit tokens, each its own drop set.
         let c =
-            parse_cohort_exclude(&["@a:2".to_string(), "@b:5,6".to_string()], &names).unwrap();
-        assert_eq!(c.for_fit("@a").unwrap().excluded_csv(), "2");
-        assert_eq!(c.for_fit("@b").unwrap().excluded_csv(), "5,6");
+            parse_cohort_selection(&[], &["@a:2".to_string(), "@b:5,6".to_string()], &names).unwrap();
+        assert_eq!(c.for_fit("@a").unwrap().ids_csv(), "2");
+        assert_eq!(c.for_fit("@b").unwrap().ids_csv(), "5,6");
     }
 
     #[test]
@@ -5342,7 +5381,7 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         // A path-named fit targeted with a spurious `@` (the common slip garki
         // hit): the error names the fix rather than a bare "no such fit".
         let names = vec!["ctl_rm.toml".to_string(), "ctl_bb.toml".to_string()];
-        let e = parse_cohort_exclude(&["@ctl_rm.toml:4".to_string()], &names).unwrap_err();
+        let e = parse_cohort_selection(&[], &["@ctl_rm.toml:4".to_string()], &names).unwrap_err();
         assert!(e.contains("did you mean 'ctl_rm.toml'"), "{e}");
     }
 
@@ -5354,25 +5393,61 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
 
         // Unknown fit name → error naming the available fits (verbatim, so the
         // message names `@z` — and there is no `z` to hint, so no "did you mean").
-        let e = parse_cohort_exclude(&["@z:3".to_string()], &names).unwrap_err();
+        let e = parse_cohort_selection(&[], &["@z:3".to_string()], &names).unwrap_err();
         assert!(e.contains("no compared fit named '@z'") && e.contains("@a"), "{e}");
         assert!(!e.contains("did you mean"), "no hint when the stripped name also misses: {e}");
 
         // Mixing bare (cohort) and per-fit tokens → rejected as ambiguous.
-        assert!(parse_cohort_exclude(&["3".to_string(), "@a:4".to_string()], &names).is_err());
+        assert!(parse_cohort_selection(&[], &["3".to_string(), "@a:4".to_string()], &names).is_err());
 
         // Ambiguous name (two compared models share it) → rejected.
         let dup = vec!["scout".to_string(), "scout".to_string()];
-        let e = parse_cohort_exclude(&["scout:3".to_string()], &dup).unwrap_err();
+        let e = parse_cohort_selection(&[], &["scout:3".to_string()], &dup).unwrap_err();
         assert!(e.contains("ambiguous"), "{e}");
 
         // Same fit listed twice → rejected.
         assert!(
-            parse_cohort_exclude(&["@a:2".to_string(), "@a:3".to_string()], &names).is_err()
+            parse_cohort_selection(&[], &["@a:2".to_string(), "@a:3".to_string()], &names).is_err()
         );
 
         // Missing fit name before ':' → rejected.
-        assert!(parse_cohort_exclude(&[":3".to_string()], &names).is_err());
+        assert!(parse_cohort_selection(&[], &[":3".to_string()], &names).is_err());
+    }
+
+    /// `--chains` and `--exclude-chains` together: different fits are fine,
+    /// one fit in both is refused, and a bare value in either is refused when
+    /// either has a per-fit value.
+    #[test]
+    fn compare_chain_flag_combinations() {
+        use crate::chain_selection::Polarity;
+        let names = vec!["@a".to_string(), "@b".to_string()];
+        let v = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+
+        let c = parse_cohort_selection(&v(&["@a:0,1"]), &v(&["@b:4"]), &names).unwrap();
+        assert_eq!(c.for_fit("@a").unwrap().polarity(), Polarity::Keep);
+        assert_eq!(c.for_fit("@a").unwrap().ids_csv(), "0,1");
+        assert_eq!(c.for_fit("@b").unwrap().polarity(), Polarity::Drop);
+        assert_eq!(c.for_fit("@b").unwrap().ids_csv(), "4");
+
+        let e = parse_cohort_selection(&v(&["@a:0,1"]), &v(&["@a:4"]), &names).unwrap_err();
+        assert!(e.contains("named by both --chains and --exclude-chains"), "{e}");
+
+        for (keep, drop) in [(v(&["0,1"]), v(&["@b:4"])), (v(&["@a:0"]), v(&["4"]))] {
+            let e = parse_cohort_selection(&keep, &drop, &names).unwrap_err();
+            assert!(e.contains("mixing cohort-wide ids and per-fit"), "{keep:?} {drop:?}: {e}");
+        }
+
+        let e = parse_cohort_selection(&v(&["0,1"]), &v(&["4"]), &names).unwrap_err();
+        assert!(e.contains("both cohort-wide"), "{e}");
+
+        // Cohort-wide keep applies to every fit.
+        let c = parse_cohort_selection(&v(&["0,1"]), &[], &names).unwrap();
+        assert!(c.cohort_wide);
+        assert_eq!(c.for_fit("@b").unwrap().polarity(), Polarity::Keep);
+
+        // A repeated id within one value is refused, named by fit.
+        let e = parse_cohort_selection(&v(&["@a:1,1"]), &[], &names).unwrap_err();
+        assert!(e.contains("--chains @a lists chain 1 twice"), "{e}");
     }
 
     // ── --streams ───────────────────────────────────────────────────────

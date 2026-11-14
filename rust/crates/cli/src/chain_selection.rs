@@ -1,26 +1,45 @@
-//! Read-side chain selection (`--exclude-chains`).
+//! Chain selection: which of a fit's MCMC chains a reader or a new run uses.
 //!
 //! A completed Bayesian fit is a cloud of posterior draws concatenated across
 //! MCMC chains, written to `draws.tsv` with a leading `chain` key column. When a
 //! near-unidentified parameter carves out a flat ridge, a minority of chains can
 //! wander into a non-representative side mode; the per-chain diagnostics (gh#406)
-//! name them. This module is the escape hatch: drop the diagnosed chains from the
-//! posterior cloud on the READ side, at `fit predict` / `fit summary` /
-//! `fit table` time — never re-running the fit, never re-keying its CAS identity.
+//! name them. A [`ChainSelection`] names the chains to use, on two sides:
+//!
+//! - the **read side**, `--chains` (keep) or `--exclude-chains` (drop) at
+//!   `fit predict` / `fit summary` / `fit table` / `compare` /
+//!   `simulate --draws posterior` / `cat` time, which never re-runs the fit
+//!   and never re-keys its CAS identity;
+//! - the **start side**, `starts = { from_posterior = "@base", chains = [..] }`
+//!   or `--starts-chains` (gh#1056), where the kept chains are part of the new
+//!   run's identity ([`crate::fit::starts::ChainStarts::identity_value`]).
+//!
+//! One type serves both, so the parse rules cannot drift between them.
+//!
+//! ## Polarity and the normal form
+//!
+//! A selection either keeps the chains it names ([`Polarity::Keep`]) or drops
+//! them ([`Polarity::Drop`]). Once the fit's chain set is known,
+//! [`ChainSelection::resolve`] reduces either to one [`SubsetInfo`] — the
+//! dropped set and the kept set — which carries no polarity. Keeping chains
+//! 3 and 5 of six and dropping chains 0, 1, 2 and 4 are therefore one
+//! selection, with one record and one artifact address.
 //!
 //! ## The one filter, once
 //!
 //! [`ChainSelection::apply_keyed`] is the single place a chain filter is applied
-//! to a draws cloud. Every read-side consumer that offers `--exclude-chains`
-//! routes its cloud through it (predict via [`crate::posterior_draws`], summary's
-//! subset recompute), so the drop set is validated and applied identically —
-//! there is no per-command re-implementation to drift.
+//! to a draws cloud. Every read-side consumer routes its cloud through it
+//! (predict via [`crate::posterior_draws`], summary's subset recompute), so the
+//! selection is validated and applied identically — there is no per-command
+//! re-implementation to drift.
 //!
 //! ## Parse at the boundary
 //!
-//! The CLI string `"3,5"` is parsed ONCE, by [`ChainSelection::parse_exclude`],
-//! into a validated set of chain ids. Downstream holds the typed
-//! [`ChainSelection`] and never re-parses a string.
+//! The CLI string `"3,5"` and the TOML list `[3, 5]` are parsed once, by
+//! [`ChainSelection::parse`] and [`ChainSelection::from_ids`], into a validated
+//! set of chain ids. An empty list, a repeated id, an empty token and a
+//! non-integer are refused. Downstream holds the typed [`ChainSelection`] and
+//! never re-parses a string.
 //!
 //! ## One base
 //!
@@ -33,7 +52,7 @@
 //!
 //! Post-hoc chain exclusion can bias a posterior (cherry-picking modes). R̂ > 1.1
 //! with chains in different modes is the model telling you something true. So a
-//! selection is never silent: [`warn_active_selection`] prints a loud,
+//! read-side selection is never silent: [`warn_active_selection`] prints a loud,
 //! non-quietable warning naming the dropped chains, and the primary remedy
 //! (is a parameter unidentified?) is surfaced first.
 
@@ -43,108 +62,246 @@ use std::path::Path;
 use crate::chain_index::ChainIndex;
 use crate::KeyedDraw;
 
-/// A validated set of MCMC chain ids to DROP from a posterior cloud.
-///
-/// Constructed only through [`ChainSelection::parse_exclude`] (the boundary
-/// parser) — its existence proves the ids are non-negative integers and the
-/// set is non-empty. Whether the ids actually exist in a given fit is checked
-/// at apply time (that needs the fit's chain set), by
-/// [`ChainSelection::apply_keyed`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChainSelection {
-    /// Chain ids to exclude. Non-empty by construction.
-    excluded: BTreeSet<ChainIndex>,
+/// Whether a [`ChainSelection`] names the chains to keep or the chains to drop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Polarity {
+    /// Use only the named chains.
+    Keep,
+    /// Use every chain except the named ones.
+    Drop,
 }
 
-/// What a chain selection actually did to a cloud — the provenance record.
+impl Polarity {
+    /// The read-side flag that spells this polarity, for messages.
+    pub fn read_flag(self) -> &'static str {
+        match self {
+            Polarity::Keep => "--chains",
+            Polarity::Drop => "--exclude-chains",
+        }
+    }
+}
+
+/// A validated set of chain ids of one fit and whether it keeps or drops them.
+///
+/// Constructed only through [`ChainSelection::parse`] (the CLI spelling) and
+/// [`ChainSelection::from_ids`] (a TOML list): its existence proves the ids are
+/// non-negative integers, the set is non-empty and no id was given twice.
+/// Whether the ids exist in a given fit, and whether the selection keeps any
+/// chain, needs the fit's chain set and is checked when the selection is
+/// resolved against it ([`ChainSelection::resolve`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainSelection {
+    /// The chain ids named. Non-empty by construction.
+    ids: BTreeSet<ChainIndex>,
+    polarity: Polarity,
+}
+
+/// What a chain selection actually did to a cloud — the provenance record, and
+/// the normal form of a selection resolved against a fit's chains.
 ///
 /// `n_total` is the number of distinct chains that were present BEFORE
-/// filtering, so `kept.len() + (excluded that were present) == n_total`.
-/// Stamped into `predictive.json` and printed in the `fit summary` header so a
-/// chain-subset artifact is never mistakable for a full-cloud one.
+/// filtering, so `kept.len() + excluded.len() == n_total`. Stamped into
+/// `predictive.json` and printed in the `fit summary` header so a chain-subset
+/// artifact is never mistakable for a full-cloud one. It carries no polarity:
+/// a kept set and its complementary dropped set produce one record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubsetInfo {
-    /// Chains dropped (sorted). Exactly the requested exclusion set —
-    /// validated to be present, so every id here really was in the fit.
+    /// Chains dropped (sorted). Every id here really was in the fit.
     pub excluded: Vec<ChainIndex>,
-    /// Chains retained (sorted).
+    /// Chains retained (sorted). Non-empty.
     pub kept: Vec<ChainIndex>,
     /// Distinct chains present before filtering (`kept.len() + excluded.len()`).
     pub n_total: usize,
 }
 
 impl ChainSelection {
-    /// Parse `--exclude-chains 3,5` → the drop set `{3, 5}`.
+    /// Build a selection from a list of chain ids — the TOML `chains = [..]`.
     ///
-    /// Rejects (hard error, never a silent shrug): an empty list and a
-    /// non-integer token. A repeated id collapses into the set — `3,3` means
-    /// "drop chain 3".
-    pub fn parse_exclude(raw: &str) -> Result<Self, String> {
-        let mut excluded = BTreeSet::new();
+    /// `what` names the field or flag in the error (`` `chains` ``,
+    /// `--exclude-chains`). Refuses an empty list and a repeated id; order is
+    /// not meaningful, so it is normalized.
+    pub fn from_ids(
+        ids: impl IntoIterator<Item = usize>,
+        polarity: Polarity,
+        what: &str,
+    ) -> Result<Self, String> {
+        let mut set = BTreeSet::new();
+        for id in ids {
+            if !set.insert(ChainIndex(id)) {
+                return Err(format!("{what} lists chain {id} twice"));
+            }
+        }
+        if set.is_empty() {
+            return Err(format!(
+                "{what} names no chain: list at least one chain id, counted from 0"
+            ));
+        }
+        Ok(ChainSelection { ids: set, polarity })
+    }
+
+    /// Parse the CLI spelling, comma-separated chain ids (`3,5`).
+    ///
+    /// `what` names the flag in the error. Refuses (hard error, never a silent
+    /// shrug) an empty list, an empty token (`3,,5`), a non-integer token and a
+    /// repeated id (`3,3`).
+    pub fn parse(raw: &str, polarity: Polarity, what: &str) -> Result<Self, String> {
+        if raw.trim().is_empty() {
+            return Err(format!(
+                "{what} names no chain: give a comma-separated list of chain ids \
+                 counted from 0, e.g. {what} 3,5"
+            ));
+        }
+        let mut ids = Vec::new();
         for tok in raw.split(',') {
             let t = tok.trim();
             if t.is_empty() {
                 return Err(format!(
-                    "--exclude-chains: empty chain id in '{raw}' \
+                    "{what}: empty chain id in '{raw}' \
                      (expected a comma-separated list of chain ids counted from 0, e.g. 3,5)"
                 ));
             }
-            let id: ChainIndex = t.parse().map_err(|_| {
+            let id: usize = t.parse().map_err(|_| {
                 format!(
-                    "--exclude-chains: '{t}' is not a chain id \
-                     (expected a non-negative integer, e.g. 3,5)"
+                    "{what}: '{t}' is not a chain id \
+                     (expected a non-negative integer counted from 0, e.g. 3,5)"
                 )
             })?;
-            excluded.insert(id);
+            ids.push(id);
         }
-        if excluded.is_empty() {
-            return Err(
-                "--exclude-chains: no chain ids given (expected e.g. --exclude-chains 3,5)"
+        ChainSelection::from_ids(ids, polarity, what)
+    }
+
+    /// Parse `--exclude-chains 3,5` → drop chains 3 and 5.
+    pub fn parse_exclude(raw: &str) -> Result<Self, String> {
+        ChainSelection::parse(raw, Polarity::Drop, Polarity::Drop.read_flag())
+    }
+
+    /// Parse `--chains 3,5` → keep only chains 3 and 5.
+    pub fn parse_keep(raw: &str) -> Result<Self, String> {
+        ChainSelection::parse(raw, Polarity::Keep, Polarity::Keep.read_flag())
+    }
+
+    /// The read-side selection a command's `--chains` / `--exclude-chains`
+    /// pair names: at most one of them, parsed. Both together is refused
+    /// (clap also refuses it where the flags are declared together).
+    pub fn from_flags(
+        chains: Option<&str>,
+        exclude_chains: Option<&str>,
+    ) -> Result<Option<Self>, String> {
+        match (chains, exclude_chains) {
+            (Some(_), Some(_)) => Err(
+                "--chains and --exclude-chains name one selection two ways; give one of them"
                     .to_string(),
-            );
+            ),
+            (Some(raw), None) => ChainSelection::parse_keep(raw).map(Some),
+            (None, Some(raw)) => ChainSelection::parse_exclude(raw).map(Some),
+            (None, None) => Ok(None),
         }
-        Ok(ChainSelection { excluded })
     }
 
-    /// The chain ids to drop.
-    pub fn excluded(&self) -> &BTreeSet<ChainIndex> {
-        &self.excluded
+    /// The flag this selection was given with on the read side, for messages.
+    pub fn flag(&self) -> &'static str {
+        self.polarity.read_flag()
     }
 
-    /// `"3,5"` — the excluded ids as the warning renders them.
-    pub fn excluded_csv(&self) -> String {
-        self.excluded
-            .iter()
-            .map(|c| c.to_string())
-            .collect::<Vec<_>>()
-            .join(",")
+    /// Whether the named chains are kept or dropped.
+    pub fn polarity(&self) -> Polarity {
+        self.polarity
     }
 
-    /// The cohort-level warning (`fit table`, `compare`): the same drop set is
+    /// The chain ids named, ascending.
+    pub fn ids(&self) -> &BTreeSet<ChainIndex> {
+        &self.ids
+    }
+
+    /// Does this selection use chain `chain`?
+    pub fn uses(&self, chain: ChainIndex) -> bool {
+        match self.polarity {
+            Polarity::Keep => self.ids.contains(&chain),
+            Polarity::Drop => !self.ids.contains(&chain),
+        }
+    }
+
+    /// `"3,5"` — the named ids, as the CLI accepts them and every record and
+    /// warning prints them.
+    pub fn ids_csv(&self) -> String {
+        csv(self.ids.iter())
+    }
+
+    /// The cohort-level warning (`fit table`, `compare`): the same selection is
     /// applied to every fit, so there is no single kept/total to report — name
     /// the requested ids. Printed once, to stderr, before the derivations run.
     pub fn warn_requested(&self, out: &crate::out::Out, ) {
-        out.say(format_args!(
-            "{w} --exclude-chains will drop chain(s) {} from each fit's \
-             posterior cloud.",
-            self.excluded_csv(), w = crate::out::paint::warning_tag()
-        ));
+        let w = crate::out::paint::warning_tag();
+        match self.polarity {
+            Polarity::Drop => out.say(format_args!(
+                "{w} --exclude-chains will drop chain(s) {} from each fit's \
+                 posterior cloud.",
+                self.ids_csv()
+            )),
+            Polarity::Keep => out.say(format_args!(
+                "{w} --chains will keep only chain(s) {} of each fit's posterior cloud.",
+                self.ids_csv()
+            )),
+        }
         out.say(format_args!("         {BIAS_CAVEAT_A}"));
         out.say(format_args!("         {BIAS_CAVEAT_B}"));
     }
 
-    /// The per-fit warning (`compare --exclude-chains @fit:ids`): this drop set
+    /// The per-fit warning (`compare --exclude-chains @fit:ids`): this selection
     /// targets one named fit, so name it. Printed once per fit, to stderr,
     /// before the derivations run. The bias caveat is left to the caller so it
     /// prints once for a multi-fit selection.
     pub fn warn_requested_for_fit(&self, out: &crate::out::Out, fit: &str) {
-        out.say(format_args!(
-            "{w} --exclude-chains will drop chain(s) {} from fit '{fit}'.",
-            self.excluded_csv(), w = crate::out::paint::warning_tag()
-        ));
+        let w = crate::out::paint::warning_tag();
+        match self.polarity {
+            Polarity::Drop => out.say(format_args!(
+                "{w} --exclude-chains will drop chain(s) {} from fit '{fit}'.",
+                self.ids_csv()
+            )),
+            Polarity::Keep => out.say(format_args!(
+                "{w} --chains will keep only chain(s) {} of fit '{fit}'.",
+                self.ids_csv()
+            )),
+        }
     }
 
-    /// Drop the selected chains from a keyed draws cloud.
+    /// Reduce the selection to its normal form against a fit's chain set.
+    ///
+    /// Every named id must be present (`chain 7 not in this fit (chains
+    /// 0..5)`), the selection must keep at least one chain, and it must drop
+    /// at least one: a `--chains` list naming every chain of the fit selects
+    /// nothing, and is refused rather than written under a chain-subset
+    /// address that would duplicate the whole-cloud artifact. The result
+    /// names the dropped and the kept chains and carries no polarity.
+    pub fn resolve(&self, present: &BTreeSet<ChainIndex>) -> Result<SubsetInfo, String> {
+        let flag = self.polarity.read_flag();
+        let present_hi = present.iter().copied().max().unwrap_or(ChainIndex(0));
+        for &id in &self.ids {
+            if !present.contains(&id) {
+                return Err(format!(
+                    "{flag}: chain {id} not in this fit (chains 0..{present_hi})"
+                ));
+            }
+        }
+        let (kept, excluded): (Vec<ChainIndex>, Vec<ChainIndex>) =
+            present.iter().copied().partition(|&c| self.uses(c));
+        if kept.is_empty() {
+            return Err(format!(
+                "{flag} leaves an empty posterior (every chain was excluded)"
+            ));
+        }
+        if excluded.is_empty() {
+            return Err(format!(
+                "{flag} {} keeps every chain of this fit (chains 0..{present_hi}), so it \
+                 selects nothing; omit the flag to use the whole posterior",
+                self.ids_csv()
+            ));
+        }
+        Ok(SubsetInfo { excluded, kept, n_total: present.len() })
+    }
+
+    /// Apply the selection to a keyed draws cloud.
     ///
     /// This is THE chain filter — the single definition every read-side consumer
     /// shares. Steps, in order:
@@ -152,10 +309,9 @@ impl ChainSelection {
     /// 1. Determine the present chain set from the rows (the distinct `chain`
     ///    keys). A cloud with no `chain` column (an old param-only
     ///    `draws.tsv`) cannot be chain-selected → hard error.
-    /// 2. Every requested id must be present → else `chain 7 not in this fit
-    ///    (chains 0..5)`.
+    /// 2. Resolve the selection against it ([`ChainSelection::resolve`]): an
+    ///    absent id or a selection that keeps no chain is a hard error.
     /// 3. Drop the rows of the excluded chains.
-    /// 4. An empty result (every chain excluded) → hard error.
     ///
     /// Returns the retained rows and the [`SubsetInfo`] provenance record.
     pub fn apply_keyed(
@@ -172,52 +328,99 @@ impl ChainSelection {
                     present.insert(ChainIndex(c));
                 }
                 None => {
-                    return Err(
-                        "--exclude-chains: this fit's draws.tsv has no `chain` column, \
+                    return Err(format!(
+                        "{}: this fit's draws.tsv has no `chain` column, \
                          so its chains cannot be selected (it predates keyed draws, or \
-                         is a hand-built param-only file)"
-                            .to_string(),
-                    );
+                         is a hand-built param-only file)",
+                        self.polarity.read_flag()
+                    ));
                 }
             }
         }
 
-        // 2. Validate every requested id is present.
-        let present_hi = present.iter().copied().max().unwrap_or(ChainIndex(0));
-        for &id in &self.excluded {
-            if !present.contains(&id) {
-                return Err(format!(
-                    "--exclude-chains: chain {id} not in this fit (chains 0..{present_hi})"
-                ));
-            }
-        }
+        // 2. The normal form: validated, polarity-free.
+        let info = self.resolve(&present)?;
 
-        // 3. Drop the excluded chains.
+        // 3. Keep the rows of the kept chains. Every row has Some(chain) here
+        // (step 1 refused None).
         let retained: Vec<KeyedDraw> = draws
             .into_iter()
-            .filter(|d| {
-                // Every row has Some(chain) here (step 1 refused None).
-                !d.chain.is_some_and(|c| self.excluded.contains(&ChainIndex(c)))
-            })
+            .filter(|d| d.chain.is_some_and(|c| self.uses(ChainIndex(c))))
             .collect();
-
-        // 4. Refuse an empty posterior.
-        if retained.is_empty() {
-            return Err(
-                "--exclude-chains leaves an empty posterior (every chain was excluded)".to_string(),
-            );
-        }
-
-        let excluded: Vec<ChainIndex> = self.excluded.iter().copied().collect();
-        let kept: Vec<ChainIndex> =
-            present.iter().copied().filter(|c| !self.excluded.contains(c)).collect();
-        let info = SubsetInfo {
-            excluded,
-            kept,
-            n_total: present.len(),
-        };
         Ok((retained, info))
     }
+}
+
+/// The distinct chain ids of a draws TSV's `chain` column, read without
+/// parsing the parameter columns — the chain set a selection is resolved
+/// against when the cloud itself is not needed (`fit table`, `compare`'s
+/// record, `cat`).
+pub fn chains_in_draws(path: &Path) -> Result<BTreeSet<ChainIndex>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    chains_in_tsv(&text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// [`chains_in_draws`] over a TSV's text: the first non-`#` line is the header.
+fn chains_in_tsv(text: &str) -> Result<BTreeSet<ChainIndex>, String> {
+    let mut lines = text.lines().filter(|l| !l.starts_with('#'));
+    let header = lines.next().ok_or("the file is empty")?;
+    let col = header
+        .split('\t')
+        .position(|h| h.trim() == "chain")
+        .ok_or("the file has no `chain` column, so its chains cannot be selected")?;
+    let mut set = BTreeSet::new();
+    for line in lines.filter(|l| !l.trim().is_empty()) {
+        let cell = line.split('\t').nth(col).unwrap_or("").trim();
+        let c: usize = cell
+            .parse()
+            .map_err(|_| format!("chain cell `{cell}` is not a chain id"))?;
+        set.insert(ChainIndex(c));
+    }
+    Ok(set)
+}
+
+/// Keep the rows of a TSV whose `chain` column names a kept chain — the text
+/// filter `cat --chains` applies, so the bytes of every kept row (and of the
+/// header and any `#` comment) are the file's own. `info` is the selection
+/// resolved against the same text ([`chains_in_draws`] then
+/// [`ChainSelection::resolve`]).
+pub fn filter_tsv_rows(text: &str, info: &SubsetInfo) -> Result<String, String> {
+    let kept: BTreeSet<ChainIndex> = info.kept.iter().copied().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut col: Option<usize> = None;
+    for line in text.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\n', '\r']);
+        if body.starts_with('#') || body.trim().is_empty() {
+            out.push_str(line);
+            continue;
+        }
+        match col {
+            None => {
+                col = Some(
+                    body.split('\t')
+                        .position(|h| h.trim() == "chain")
+                        .ok_or("the file has no `chain` column")?,
+                );
+                out.push_str(line);
+            }
+            Some(c) => {
+                let cell = body.split('\t').nth(c).unwrap_or("").trim();
+                let id: usize = cell
+                    .parse()
+                    .map_err(|_| format!("chain cell `{cell}` is not a chain id"))?;
+                if kept.contains(&ChainIndex(id)) {
+                    out.push_str(line);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `"3,5"` — chain ids joined the way the CLI accepts them.
+fn csv<'a>(ids: impl Iterator<Item = &'a ChainIndex>) -> String {
+    ids.map(|c| c.to_string()).collect::<Vec<_>>().join(",")
 }
 
 impl SubsetInfo {
@@ -233,11 +436,7 @@ impl SubsetInfo {
 
     /// `"3,5"` — the excluded ids as the header/warning render them.
     pub fn excluded_csv(&self) -> String {
-        self.excluded
-            .iter()
-            .map(|c| c.to_string())
-            .collect::<Vec<_>>()
-            .join(",")
+        csv(self.excluded.iter())
     }
 }
 
@@ -420,13 +619,15 @@ pub fn eprint_bias_caveat(out: &crate::out::Out, ) {
 /// *report* that is keyed, not the run. Same convention, same shape, so a run
 /// directory has one addressing scheme rather than two.
 ///
-/// ## The key is the SET
+/// ## The key is the dropped SET
 ///
-/// [`ChainSelection`] holds a `BTreeSet`, so `4,2`, `2,4` and `2,4,2` are one
-/// selection and therefore one address — the normalisation happens at parse, and
-/// [`ChainSelection::excluded_csv`] is the single canonical rendering (the same
-/// one the warnings and the `fit summary` header print), so a name here can
-/// never disagree with what the user was told was dropped.
+/// The address is built from the selection's normal form, the [`SubsetInfo`]
+/// it resolved to against the fit's chains, so `4,2` and `2,4` are one
+/// address, and on a six-chain fit `--chains 0,1,3,5` and
+/// `--exclude-chains 2,4` are one address too. [`SubsetInfo::excluded_csv`]
+/// is the single canonical rendering (the same one the `fit summary` header
+/// prints), so a name here can never disagree with what the user was told
+/// was dropped.
 ///
 /// The ids are spelled out rather than digested: a reader who lists the run
 /// directory must be able to see which artifact is which without opening a
@@ -434,10 +635,10 @@ pub fn eprint_bias_caveat(out: &crate::out::Out, ) {
 /// canonical literal form. The cost is that the name grows with the set — a
 /// selection of some tens of chains would exceed a filesystem's 255-byte
 /// component limit, and fails loudly at write time if it ever does.
-pub fn artifact_name(base: &str, selection: Option<&ChainSelection>) -> String {
+pub fn artifact_name(base: &str, selection: Option<&SubsetInfo>) -> String {
     match selection {
         None => base.to_string(),
-        Some(sel) => format!("{base}-excl{}", sel.excluded_csv()),
+        Some(info) => format!("{base}-excl{}", info.excluded_csv()),
     }
 }
 
@@ -449,15 +650,29 @@ pub fn artifact_name(base: &str, selection: Option<&ChainSelection>) -> String {
 /// the dropped chains and states the bias direction (toward the retained mode),
 /// and points at `fit summary` for the per-chain diagnostics (gh#406). `stderr`
 /// paints the tag under the command's own colour policy (its `--no-color`).
-pub fn warn_active_selection(out: &crate::out::Out, info: &SubsetInfo, stderr: crate::out::paint::Painter) {
-    out.say(format_args!(
-        "{w} --exclude-chains dropped chain(s) {} \
-         ({} of {} chains kept).",
-        info.excluded_csv(),
-        info.kept.len(),
-        info.n_total,
-        w = stderr.paint("warning:", crate::out::paint::Style::Warn)
-    ));
+pub fn warn_active_selection(
+    out: &crate::out::Out,
+    polarity: Polarity,
+    info: &SubsetInfo,
+    stderr: crate::out::paint::Painter,
+) {
+    let w = stderr.paint("warning:", crate::out::paint::Style::Warn);
+    match polarity {
+        Polarity::Drop => out.say(format_args!(
+            "{w} --exclude-chains dropped chain(s) {} \
+             ({} of {} chains kept).",
+            info.excluded_csv(),
+            info.kept.len(),
+            info.n_total,
+        )),
+        Polarity::Keep => out.say(format_args!(
+            "{w} --chains: keeping only chain(s) {}; dropping {} ({} of {} chains kept).",
+            csv(info.kept.iter()),
+            info.excluded_csv(),
+            info.kept.len(),
+            info.n_total,
+        )),
+    }
     out.say(format_args!("         {BIAS_CAVEAT_A}"));
     out.say(format_args!("         {BIAS_CAVEAT_B}"));
 }
@@ -487,12 +702,61 @@ mod tests {
     }
 
     #[test]
-    fn parse_dedups_and_sorts() {
+    fn parse_sorts_and_refuses_a_repeated_id() {
         assert_eq!(
-            ChainSelection::parse_exclude("5,3,5").unwrap(),
+            ChainSelection::parse_exclude("5,3").unwrap(),
             ChainSelection::parse_exclude("3,5").unwrap(),
-            "repeats collapse and order is canonical",
+            "order is canonical",
         );
+        // A repeated id was collapsed before the start-side and read-side
+        // selectors were one type; both now refuse it.
+        let e = ChainSelection::parse_exclude("3,3").unwrap_err();
+        assert!(e.contains("--exclude-chains lists chain 3 twice"), "{e}");
+        let e = ChainSelection::parse_exclude("5,3,5").unwrap_err();
+        assert!(e.contains("chain 5 twice"), "{e}");
+    }
+
+    /// The two polarities resolve to one normal form: keeping 3 and 5 of six
+    /// chains is dropping 0, 1, 2 and 4.
+    #[test]
+    fn keep_and_its_complementary_drop_resolve_to_one_record() {
+        let present: BTreeSet<ChainIndex> = ChainIndex::all(6).collect();
+        let keep = ChainSelection::parse("3,5", Polarity::Keep, "--chains").unwrap();
+        let drop = ChainSelection::parse_exclude("0,1,2,4").unwrap();
+        let a = keep.resolve(&present).unwrap();
+        let b = drop.resolve(&present).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a.excluded, vec![ChainIndex(0), ChainIndex(1), ChainIndex(2), ChainIndex(4)]);
+        assert_eq!(a.kept, vec![ChainIndex(3), ChainIndex(5)]);
+        assert_eq!(a.n_total, 6);
+        let draws: Vec<KeyedDraw> = (0..6).map(|c| kd(c, 0, c as f64)).collect();
+        let (rows_a, _) = keep.apply_keyed(draws.clone()).unwrap();
+        let (rows_b, _) = drop.apply_keyed(draws).unwrap();
+        let chains = |r: &[KeyedDraw]| r.iter().map(|d| d.chain).collect::<Vec<_>>();
+        assert_eq!(chains(&rows_a), vec![Some(3), Some(5)]);
+        assert_eq!(chains(&rows_a), chains(&rows_b));
+    }
+
+    /// Validation against the fit: an absent id is refused under either
+    /// polarity, named by its own flag, and so is a selection keeping nothing.
+    #[test]
+    fn resolve_refuses_an_absent_id_and_keeping_nothing() {
+        let present: BTreeSet<ChainIndex> = ChainIndex::all(4).collect();
+        let e = ChainSelection::parse("1,7", Polarity::Keep, "--chains").unwrap()
+            .resolve(&present).unwrap_err();
+        assert!(e.contains("--chains: chain 7 not in this fit (chains 0..3)"), "{e}");
+        let e = ChainSelection::parse_exclude("0,1,2,3").unwrap()
+            .resolve(&present).unwrap_err();
+        assert!(e.contains("empty posterior"), "{e}");
+    }
+
+    /// The TOML list form refuses what the CLI form refuses.
+    #[test]
+    fn from_ids_refuses_an_empty_list_and_a_repeat() {
+        let e = ChainSelection::from_ids(Vec::new(), Polarity::Keep, "`chains`").unwrap_err();
+        assert!(e.contains("`chains` names no chain"), "{e}");
+        let e = ChainSelection::from_ids(vec![1, 0, 1], Polarity::Keep, "`chains`").unwrap_err();
+        assert!(e.contains("`chains` lists chain 1 twice"), "{e}");
     }
 
     /// Chains count from 0 (gh#990), so `0` names the first chain.
@@ -514,7 +778,7 @@ mod tests {
 
     #[test]
     fn parse_rejects_empty_and_blank() {
-        assert!(ChainSelection::parse_exclude("").is_err());
+        assert!(ChainSelection::parse_exclude("").unwrap_err().contains("names no chain"));
         assert!(ChainSelection::parse_exclude("3,,5").is_err(), "empty token in the middle");
     }
 
@@ -574,43 +838,78 @@ mod tests {
         assert_eq!(artifact_name("quantities-a1b2c3d4", None), "quantities-a1b2c3d4");
     }
 
-    /// The key is the SET, so two spellings of one exclusion are one address —
-    /// and it composes with the `quantities-<key8>` vocabulary key.
+    /// The key is the dropped SET, so two spellings of one exclusion are one
+    /// address, a kept set and its complementary dropped set are one address,
+    /// and the key composes with the `quantities-<key8>` vocabulary key.
     #[test]
-    fn a_selection_keys_the_address_by_its_normalised_set() {
+    fn a_selection_keys_the_address_by_its_normal_form() {
+        let six: BTreeSet<ChainIndex> = ChainIndex::all(6).collect();
+        let name = |base: &str, sel: &ChainSelection| {
+            artifact_name(base, Some(&sel.resolve(&six).unwrap()))
+        };
         let a = ChainSelection::parse_exclude("2,4").unwrap();
         let b = ChainSelection::parse_exclude("4,2").unwrap();
-        let c = ChainSelection::parse_exclude(" 4 , 2 , 4 ").unwrap();
-        assert_eq!(artifact_name("predictive", Some(&a)), "predictive-excl2,4");
-        assert_eq!(
-            artifact_name("predictive", Some(&b)),
-            artifact_name("predictive", Some(&a)),
-            "order must not make a second artifact"
-        );
-        assert_eq!(
-            artifact_name("predictive", Some(&c)),
-            artifact_name("predictive", Some(&a)),
-            "repeats and whitespace must not make a third"
-        );
+        let c = ChainSelection::parse_exclude(" 4 , 2 ").unwrap();
+        let k = ChainSelection::parse_keep("0,1,3,5").unwrap();
+        assert_eq!(name("predictive", &a), "predictive-excl2,4");
+        assert_eq!(name("predictive", &b), name("predictive", &a), "order must not make a second artifact");
+        assert_eq!(name("predictive", &c), name("predictive", &a), "whitespace must not make a third");
+        assert_eq!(name("predictive", &k), name("predictive", &a),
+            "keeping 0,1,3,5 of six chains is dropping 2,4: one address");
 
         // Two different exclusions are two addresses, and neither is the pooled
         // one — the collision the fix exists to prevent.
         let d = ChainSelection::parse_exclude("4").unwrap();
-        assert_ne!(
-            artifact_name("predictive", Some(&d)),
-            artifact_name("predictive", Some(&a))
-        );
+        assert_ne!(name("predictive", &d), name("predictive", &a));
         for sel in [&a, &d] {
-            assert_ne!(artifact_name("predictive", Some(sel)), "predictive");
+            assert_ne!(name("predictive", sel), "predictive");
         }
 
         // Composes with the vocabulary key: a reporting vocabulary AND a chain
         // subset are two independent report keys over one fit.
+        assert_eq!(name("quantities-a1b2c3d4", &a), "quantities-a1b2c3d4-excl2,4");
+        assert_eq!(name("contrasts", &a), "contrasts-excl2,4");
+    }
+
+    /// `--chains` naming every chain selects nothing, and is refused rather
+    /// than written at a subset address that duplicates the whole cloud.
+    #[test]
+    fn keeping_every_chain_is_refused() {
+        let four: BTreeSet<ChainIndex> = ChainIndex::all(4).collect();
+        let e = ChainSelection::parse_keep("0,1,2,3").unwrap().resolve(&four).unwrap_err();
+        assert!(e.contains("--chains 0,1,2,3 keeps every chain"), "{e}");
+    }
+
+    #[test]
+    fn from_flags_takes_one_of_the_two_flags() {
+        assert_eq!(ChainSelection::from_flags(None, None).unwrap(), None);
         assert_eq!(
-            artifact_name("quantities-a1b2c3d4", Some(&a)),
-            "quantities-a1b2c3d4-excl2,4"
+            ChainSelection::from_flags(Some("3,5"), None).unwrap().unwrap().polarity(),
+            Polarity::Keep
         );
-        assert_eq!(artifact_name("contrasts", Some(&a)), "contrasts-excl2,4");
+        assert_eq!(
+            ChainSelection::from_flags(None, Some("3,5")).unwrap().unwrap().polarity(),
+            Polarity::Drop
+        );
+        let e = ChainSelection::from_flags(Some("1"), Some("2")).unwrap_err();
+        assert!(e.contains("give one of them"), "{e}");
+        let e = ChainSelection::from_flags(Some("1,1"), None).unwrap_err();
+        assert!(e.contains("--chains lists chain 1 twice"), "{e}");
+    }
+
+    /// The text filter `cat --chains` uses keeps the header, comments and the
+    /// kept chains' rows byte for byte.
+    #[test]
+    fn the_tsv_filter_keeps_the_kept_rows_verbatim() {
+        let text = "# a comment\nchain\tdraw\tbeta\n0\t0\t0.100\n1\t0\t0.2\n2\t0\t0.30\n1\t1\t0.21\n";
+        let present = chains_in_tsv(text).unwrap();
+        assert_eq!(present, ChainIndex::all(3).collect());
+        let info = ChainSelection::parse_keep("1").unwrap().resolve(&present).unwrap();
+        assert_eq!(
+            filter_tsv_rows(text, &info).unwrap(),
+            "# a comment\nchain\tdraw\tbeta\n1\t0\t0.2\n1\t1\t0.21\n"
+        );
+        assert!(chains_in_tsv("draw\tbeta\n0\t1\n").unwrap_err().contains("no `chain` column"));
     }
 
     #[test]

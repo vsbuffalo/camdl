@@ -239,6 +239,17 @@ then prints these blocks:
   others' by more than Monte Carlo error explains. A chain that differs may be
   sampling a side mode or a weakly identified ridge, or may not have mixed.
 
+To read the posterior of some chains only, give `--chains 0,1,2,4` (keep those
+chains) or `--exclude-chains 3,5` (drop those) to `fit summary`, `fit predict`,
+`fit table --quantity`, `compare`, `simulate --draws posterior` and
+`cat --stream draws.tsv`. The two flags name one selection two ways: on a
+six-chain fit `--chains 0,1,2,4` and `--exclude-chains 3,5` are the same
+selection, and `fit predict` stores both under one name (`predictive-excl3,5/`).
+A selection is a view of the stored run and never re-runs it. It always prints a
+warning, because dropping chains biases the posterior toward the chains kept. To
+start a new fit from some chains of an earlier one, use `--starts-chains`
+(`fit-toml.md`, "Where a chain starts").
+
 `camdl fit summary --explain` adds a short definition of every column under the
 block it belongs to.
 

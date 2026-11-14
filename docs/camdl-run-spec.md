@@ -858,6 +858,10 @@ a second subset would replace that, leaving only a stamp inside the file that
 had already been overwritten. `observed/` is not keyed — it is the recorded
 data, identical under any selection. `camdl show <fit>` lists every address a
 fit holds, and `camdl cat <fit> --stream <address>/<stream>.tsv` reads one.
+`--chains` keeps the named chains instead of dropping them, and is addressed by
+the chains it drops: on a six-chain fit `--chains 0,1,2,4` and
+`--exclude-chains 3,5` both write `predictive-excl3,5/`. A `--chains` list that
+names every chain of the fit selects nothing and is refused.
 
 **Calendar semantics travel with the artifact.** `predictive.json`,
 `observed.json`, `quantities.json`, and the per-chain `trajectories.json` each
@@ -7051,6 +7055,8 @@ camdl fit summary FIT
   --strict                    exit non-zero on provenance mismatch; auto-on when CI=true
   --exclude-chains IDS        recompute diagnostics over a chain subset (view only;
                               always warns; incompatible with --params-only)
+  --chains IDS                the same over only the named chains; not with
+                              --exclude-chains
 
 camdl fit table ROOT          (see §13.1 for filters and formats)
 camdl fit diff A B            (see §13.2)
@@ -7073,6 +7079,7 @@ camdl fit predict [FIT]
   --n-draws N                 posterior subsample cap for both horizons (default 200)
   --seed N                    RNG seed for y_rep sampling (default 1)
   --exclude-chains IDS        drop chain ids (counted from 0) before banding; always warns
+  --chains IDS                band over only the named chains; not with --exclude-chains
 ```
 
 ### `camdl pfilter MODEL`
@@ -7255,6 +7262,8 @@ PATHS                       ≥2 when --config is absent. Each is a prequential.
                             read as `simulate --draws posterior --fit` reads it, §3.4)
 --exclude-chains [@FIT:]IDS per-fit (`@a:4`) or cohort-wide (`3,4`); mixing the two
                             forms is rejected. Always warns
+--chains [@FIT:]IDS         keep only these chains, same forms; may name other fits
+                            than --exclude-chains, never the same one
 --pointwise PATH            write the per-observation Δelpd vector: joint scores
                             to PATH, per-stream scores to PATH with .streams
                             before its extension (under --streams: only the

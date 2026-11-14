@@ -452,7 +452,8 @@ fn two_exclusions_are_two_addresses_and_neither_is_the_pooled_one() {
 }
 
 /// The address is keyed on the normalised SET, exactly as `ChainSelection`
-/// normalises it: order and repeats do not make a second artifact.
+/// normalises it: order and whitespace do not make a second artifact, and a
+/// repeated id is refused at parse rather than collapsed, so it writes nothing.
 #[test]
 fn the_address_is_the_normalised_set_not_the_string() {
     let bin = require_binary();
@@ -462,7 +463,13 @@ fn the_address_is_the_normalised_set_not_the_string() {
     let after_first = f.artifact_names();
     let canonical = f.read("predictive-excl1,3/weekly_cases.tsv");
 
-    for spelling in ["3,1", "1,3,1", " 3 , 1 "] {
+    let repeated = f.predict(&bin, Some("1,3,1"));
+    assert!(!repeated.status.success(), "a repeated chain id is refused");
+    let stderr = String::from_utf8_lossy(&repeated.stderr);
+    assert!(stderr.contains("--exclude-chains lists chain 1 twice"), "{stderr}");
+    assert_eq!(f.artifact_names(), after_first, "a refused selection writes nothing");
+
+    for spelling in ["3,1", " 3 , 1 "] {
         assert_ok(
             &f.predict(&bin, Some(spelling)),
             &format!("predict --exclude-chains {spelling}"),
@@ -518,6 +525,125 @@ fn without_the_flag_the_artifact_names_are_the_historical_ones() {
         !predict_out(&f.seg).join("observed-excl3").exists(),
         "…so it is not keyed either"
     );
+
+    let _ = std::fs::remove_dir_all(&f.tmp);
+}
+
+// ── `--chains`: the keeping polarity of the one chain selector ───────────────
+
+/// `--chains 0,1,2` on the four-chain cloud is `--exclude-chains 3`: one
+/// stored prediction, one address, the same bytes, and a warning on stderr
+/// worded by polarity. Both flags together are refused.
+#[test]
+fn chains_and_its_complementary_exclusion_are_one_prediction() {
+    let bin = require_binary();
+    let f = setup(&bin, "keep");
+    let seg = f.seg.to_string_lossy().into_owned();
+    let predict = |flag: &str, ids: &str| {
+        run(&bin, &f.tmp, &["fit", "predict", &seg, "--horizon", "free_forward", flag, ids])
+    };
+
+    let kept = predict("--chains", "0,1,2");
+    assert_ok(&kept, "predict --chains 0,1,2");
+    let stderr = String::from_utf8_lossy(&kept.stderr);
+    assert!(
+        stderr.contains("--chains: keeping only chain(s) 0,1,2; dropping 3 (3 of 4 chains kept)"),
+        "the warning names what was kept and what was dropped:\n{stderr}"
+    );
+    assert!(!String::from_utf8_lossy(&kept.stdout).contains("keeping only"),
+        "the warning is on stderr, never stdout");
+    let names = f.artifact_names();
+    assert!(names.contains(&"predictive-excl3".to_string()), "{names:?}");
+    let via_keep = f.read("predictive-excl3/weekly_cases.tsv");
+
+    assert_ok(&predict("--exclude-chains", "3"), "predict --exclude-chains 3");
+    assert_eq!(f.artifact_names(), names, "the complement writes no second artifact");
+    assert_eq!(f.read("predictive-excl3/weekly_cases.tsv"), via_keep,
+        "the two spellings band the same cloud");
+
+    let both = run(&bin, &f.tmp, &["fit", "predict", &seg, "--horizon", "free_forward",
+        "--chains", "0", "--exclude-chains", "3"]);
+    assert!(!both.status.success(), "both flags together are refused");
+
+    // The parse tightenings and the keep-everything refusal reach the CLI.
+    for (ids, want) in [("0,0", "lists chain 0 twice"), ("0,,1", "empty chain id"),
+                        ("0,1,2,3", "keeps every chain"), ("7", "chain 7 not in this fit")] {
+        let o = predict("--chains", ids);
+        assert!(!o.status.success(), "--chains {ids} is refused");
+        let e = String::from_utf8_lossy(&o.stderr);
+        assert!(e.contains(want), "--chains {ids}: {e}");
+    }
+
+    let _ = std::fs::remove_dir_all(&f.tmp);
+}
+
+/// `cat --chains` on `draws.tsv` prints the kept chains' rows verbatim, and is
+/// refused for a stream whose recorded schema has no `chain` column.
+#[test]
+fn cat_selects_the_rows_of_draws_tsv_by_chain() {
+    let bin = require_binary();
+    let f = setup(&bin, "cat");
+    let draws = find_draws_tsv(&f.seg).unwrap();
+    let leaf = draws.parent().unwrap().to_string_lossy().into_owned();
+
+    let out = run(&bin, &f.tmp, &["cat", &leaf, "--stream", "draws.tsv", "--chains", "3"]);
+    assert_ok(&out, "cat --chains 3");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let mut want = String::new();
+    for (i, line) in build_cloud().lines().enumerate() {
+        if i == 0 || line.starts_with("3\t") {
+            want.push_str(line);
+            want.push('\n');
+        }
+    }
+    assert_eq!(text, want, "the header and chain 3's rows, byte for byte");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--chains: keeping only chain(s) 3"));
+
+    let out = run(&bin, &f.tmp, &["cat", &leaf, "--stream", "draws.tsv", "--exclude-chains", "3"]);
+    assert_ok(&out, "cat --exclude-chains 3");
+    let n_rows = String::from_utf8_lossy(&out.stdout).lines().count() - 1;
+    assert_eq!(n_rows, 3 * DRAWS_PER_CHAIN);
+
+    let out = run(&bin, &f.tmp, &["cat", &leaf, "--stream", "fit_state.toml", "--chains", "0"]);
+    assert!(!out.status.success(), "a stream without a chain column is refused");
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert!(e.contains("`fit_state.toml` has no `chain` column"), "{e}");
+
+    let _ = std::fs::remove_dir_all(&f.tmp);
+}
+
+/// `simulate --draws posterior --chains 3` replays only chain 3's draws: every
+/// replayed `beta` is the outlier chain's.
+#[test]
+fn simulate_replays_only_the_selected_chains() {
+    let bin = require_binary();
+    let f = setup(&bin, "simulate");
+    let draws = find_draws_tsv(&f.seg).unwrap();
+    let leaf = draws.parent().unwrap().to_string_lossy().into_owned();
+    let read_betas = |path: &Path| -> Vec<f64> {
+        let text = std::fs::read_to_string(path).unwrap();
+        let mut lines = text.lines();
+        let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+        let col = header.iter().position(|c| *c == "beta").expect("a beta column");
+        lines.map(|l| l.split('\t').nth(col).unwrap().parse().unwrap()).collect()
+    };
+
+    let out = run(&bin, &f.tmp, &["simulate", "model.camdl", "--draws", "posterior",
+        "--fit", &leaf, "--chains", "3", "-n", "5", "--draws-out", "kept.tsv"]);
+    assert_ok(&out, "simulate --chains 3");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--chains: keeping only chain(s) 3"));
+    let betas = read_betas(&f.tmp.join("kept.tsv"));
+    assert_eq!(betas.len(), 5);
+    assert!(betas.iter().all(|b| *b > 0.8), "every draw is chain 3's: {betas:?}");
+
+    let out = run(&bin, &f.tmp, &["simulate", "model.camdl", "--draws", "posterior",
+        "--fit", &leaf, "--exclude-chains", "3", "-n", "5", "--draws-out", "dropped.tsv"]);
+    assert_ok(&out, "simulate --exclude-chains 3");
+    assert!(read_betas(&f.tmp.join("dropped.tsv")).iter().all(|b| *b < 0.5));
+
+    let out = run(&bin, &f.tmp, &["simulate", "model.camdl", "--chains", "3"]);
+    assert!(!out.status.success(), "--chains needs --draws posterior");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("needs --draws posterior"));
 
     let _ = std::fs::remove_dir_all(&f.tmp);
 }

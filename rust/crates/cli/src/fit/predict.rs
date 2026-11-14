@@ -1465,11 +1465,8 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     // 2. Resolve the posterior — by artifact. A point-estimate fit is refused.
     //    `--exclude-chains` is parsed at the boundary into a typed selection and
     //    applied to the cloud through the draws authority (one filter, once).
-    let selection = args
-        .exclude_chains
-        .as_deref()
-        .map(ChainSelection::parse_exclude)
-        .transpose()?;
+    let selection =
+        ChainSelection::from_flags(args.chains.as_deref(), args.exclude_chains.as_deref())?;
     let fit_result = FitResult::resolve(out, &segment, &run_dir, selection.clone())?;
     let treatment = fit_result.into_treatment();
     // The label the artifact carries, derived from the treatment before we
@@ -1483,8 +1480,8 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
 
     // A chain selection actually dropped chains — warn loudly (non-quietable),
     // naming the dropped chains and the bias direction, before any output.
-    if let Some(info) = posterior.selection() {
-        warn_active_selection(out, info, crate::out::paint::stderr());
+    if let (Some(info), Some(sel)) = (posterior.selection(), selection.as_ref()) {
+        warn_active_selection(out, sel.polarity(), info, crate::out::paint::stderr());
     }
 
     // 2b. Resolve which horizon(s) to emit. The one-step horizon is gated by a
@@ -2604,7 +2601,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     // canonical predictive with a cherry-picked one, silently, with only a
     // `chain_selection` stamp inside the file it had already overwritten.
     let predictive_sub =
-        crate::chain_selection::artifact_name("predictive", selection.as_ref());
+        crate::chain_selection::artifact_name("predictive", posterior.selection());
 
     for source in &sources {
         // Each free-forward design cell's StreamBands for this source (in
@@ -2833,7 +2830,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     // `quantities-<key8>-excl3,5/`.
     let quantities_sub = crate::chain_selection::artifact_name(
         &crate::quantities_file::quantities_dir_name(vocabulary.as_ref()),
-        selection.as_ref(),
+        posterior.selection(),
     );
     for (name, content) in &quantity_outputs {
         written.push(write_tsv(&out_dir, &quantities_sub, name, content)?);
@@ -2877,7 +2874,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     // and so is the record of what failed while producing it.
     written.push(crate::fit::failures::write_report(
         &out_dir,
-        &crate::chain_selection::artifact_name("report", selection.as_ref()),
+        &crate::chain_selection::artifact_name("report", posterior.selection()),
         &failures,
     )?);
 

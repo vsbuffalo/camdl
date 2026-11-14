@@ -139,17 +139,18 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
         // caveat we warned about above. A chain id absent from a given fit makes
         // that fit's predict refuse, so its cell renders `—` (like any other
         // derivation failure), rather than aborting the whole table.
-        let selection = match args.exclude_chains.as_deref() {
-            Some(raw) => match crate::chain_selection::ChainSelection::parse_exclude(raw) {
-                Ok(sel) => {
-                    sel.warn_requested(&out, );
-                    Some(sel)
-                }
-                Err(e) => {
-                    out.fail(format!("error: {e}"));
-                }
-            },
-            None => None,
+        let selection = match crate::chain_selection::ChainSelection::from_flags(
+            args.chains.as_deref(),
+            args.exclude_chains.as_deref(),
+        ) {
+            Ok(Some(sel)) => {
+                sel.warn_requested(&out, );
+                Some(sel)
+            }
+            Ok(None) => None,
+            Err(e) => {
+                out.fail(format!("error: {e}"));
+            }
         };
         // gh#896: a row reports one run, and `fit predict` writes that run's
         // quantities under `<segment>/predict/<run id>/`; so each cell is read
@@ -472,7 +473,22 @@ fn resolve_quantity_median(
     // to overwrite the fit's stored table to be seen — so rendering a table
     // silently replaced every listed fit's pooled quantities with a chain-subset
     // one, and a second `--exclude-chains` replaced that.
-    let sub = crate::chain_selection::artifact_name("quantities", selection);
+    //
+    // The address is the selection's normal form against THIS fit's chains
+    // (the chains it drops), so `--chains` and the complementary
+    // `--exclude-chains` read and write one table. A selection this fit cannot
+    // take (an absent chain id, every chain kept) leaves the cell absent.
+    let info = match selection {
+        None => None,
+        Some(sel) => {
+            let draws = crate::posterior_draws::resolve_posterior_draws(&leaf.to_string_lossy(), None)
+                .ok()?
+                .draws_path;
+            let present = crate::chain_selection::chains_in_draws(&draws).ok()?;
+            Some(sel.resolve(&present).ok()?)
+        }
+    };
+    let sub = crate::chain_selection::artifact_name("quantities", info.as_ref());
     // The address the derivation below writes: the run's, keyed by the
     // free-forward options it passes (gh#896).
     let key = crate::fit::predict::PredictOptions::free_forward().address_key();
@@ -509,8 +525,8 @@ fn resolve_quantity_median(
     // same subset, in its canonical spelling — the one that resolves to `sub`
     // above. `fit predict` re-parses + validates it against THIS fit's chains;
     // an id absent here makes predict refuse → this cell renders `—`.
-    if let Some(sel) = selection {
-        cmd.arg("--exclude-chains").arg(sel.excluded_csv());
+    if let Some(info) = &info {
+        cmd.arg("--exclude-chains").arg(info.excluded_csv());
     }
     let output = cmd.output().ok()?;
     if !output.status.success() {

@@ -39,13 +39,25 @@ transform. A few commands delegate to the compiler.
 | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `list`                                             | Browse cached runs as a table.                                                                                                                                                        |
 | `show`                                             | Full metadata for one cached run.                                                                                                                                                     |
-| `cat`                                              | Emit a cached run's trajectory or observations as TSV.                                                                                                                                |
+| `cat`                                              | Emit a cached run's trajectory or observations as TSV; `--stream draws.tsv --chains IDS` (or `--exclude-chains IDS`) prints only the selected chains' rows.                           |
 | `compare`                                          | Paired prequential comparison (elpd, CRPS, PIT) across fits. Scores are plug-in + in-sample-optimistic (the caveat is printed with the table); not a leave-future-out forecast score. |
 | `label`                                            | Set a display label on any run.                                                                                                                                                       |
 | `fit {run,summary,predict,diff,table,new,methods}` | Run a fit; inspect, summarize, predict-vs-observe, and aggregate fits; scaffold new `fit.toml`s.                                                                                      |
 | `dev eval`                                         | Evaluate model expressions (parameters, forcings) on a time grid — pure inspection, no simulation.                                                                                    |
 | `data split`                                       | Split a data TSV into train/holdout.                                                                                                                                                  |
 | `lineage {realize,tree,sojourn,cohort}`            | Offline projections over an event log — transmission tree, dwell times, cohort incidence.                                                                                             |
+
+**Selecting chains.** Every reader of a posterior cloud takes `--chains IDS`
+(keep only those chains) or `--exclude-chains IDS` (drop those), never both:
+`fit summary`, `fit predict`, `fit table --quantity`,
+`simulate --draws posterior` and `cat --stream draws.tsv`. `compare` takes
+either per fit (`--chains @a:0,1`, `--exclude-chains @b:4`) or cohort-wide (bare
+ids); one fit named in both flags, or a cohort-wide value beside a per-fit one,
+is refused. Chain ids count from 0. A list that is empty, repeats an id or names
+an id the fit lacks is refused, as is a selection that keeps every chain or
+none. A selection is a view and never re-keys a run; on a six-chain fit
+`--chains 0,1,2,4` and `--exclude-chains 3,5` are one selection, with one stored
+prediction.
 
 ### Compiler passthrough
 

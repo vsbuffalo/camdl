@@ -304,7 +304,12 @@ pub enum Polarity { Keep, Drop }
   refused. This tightens two cases: `--exclude-chains 3,3` (collapsed today) and
   `--starts-chains 0,,1` (an empty token skipped today) become errors.
 - **Validation** against the fit when applied: an id the fit lacks is refused,
-  as is a selection that keeps no chain.
+  as is a selection that keeps no chain. _Implementation note:_ a selection that
+  drops no chain (a `--chains` list naming every chain of the fit) is refused
+  too. Its normal form is the empty dropped set, which would write the whole
+  cloud under a chain-subset address (`predictive-excl/`) beside the pooled one;
+  refusing it keeps the dropped set non-empty, as `--exclude-chains` already
+  guaranteed.
 - **Normal form.** Once the fit's chain count is known, every selection is
   reduced to its dropped set, so `--chains 3,5` and `--exclude-chains 0,1,2,4`
   on a six-chain fit are the same selection: the same stored prediction name
