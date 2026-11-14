@@ -182,14 +182,15 @@ pub fn emit_contrasts(
         // as "this fit cannot be contrasted", which is false. Refuse by name.
         if let Some(info) = &joint.selection {
             return Err(format!(
-                "contrasts: --exclude-chains {} leaves no forkable posterior draws — none of \
+                "contrasts: {} leaves no forkable posterior draws — none of \
                  the {} draws on the retained chain(s) {} carries a saved latent path X(T*), \
                  so there is no cloud to fork {} contrast(s) from. The excluded chain(s) held \
                  the saved paths.\n  \
                  Fix: retain a chain that saved paths (`camdl fit summary` reports the \
                  per-chain forkability), or re-fit with a PGAS method that saves paths on \
                  every chain.",
-                info.excluded_csv(),
+                selection.map(|s| format!("{} {}", s.flag(), s.ids_csv()))
+                    .unwrap_or_else(|| format!("dropping chain(s) {}", info.excluded_csv())),
                 joint.n_total,
                 info.kept.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(","),
                 model.contrasts.len(),
@@ -226,7 +227,7 @@ pub fn emit_contrasts(
     // predictive beside it, so writing a chain-subset one at the pooled address
     // replaced the run's canonical contrast with a cherry-picked one.
     let contrasts_sub =
-        crate::chain_selection::artifact_name("contrasts", selection);
+        crate::chain_selection::artifact_name("contrasts", joint.selection.as_ref());
 
     // Honest denominator, part 1: WHICH cloud. A chain selection narrows the
     // posterior before the forkable subset is taken, and a band over 25 of 25

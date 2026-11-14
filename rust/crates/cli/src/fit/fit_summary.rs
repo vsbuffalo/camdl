@@ -132,9 +132,9 @@ fn apply_selection_to_typed(
         MethodResult::Pmmh(r) => {
             recompute_over_subset(&mut r.diagnostics, &mut r.posterior_mean, method_dir, selection)
         }
-        _ => Err(
-            "--exclude-chains applies only to Bayesian methods (PGAS / PMMH / MH)".to_string(),
-        ),
+        _ => Err(format!(
+            "{} applies only to Bayesian methods (PGAS / PMMH / MH)", selection.flag()
+        )),
     }
 }
 
@@ -146,6 +146,7 @@ fn apply_selection_to_typed(
 fn chain_selection_advisory(
     out: &crate::out::Out,
     chain_logliks: Option<&super::chain_diagnostics::ChainLoglikAgreement>,
+    selection: &ChainSelection,
     info: &SubsetInfo,
     stderr: Painter,
 ) {
@@ -159,7 +160,7 @@ fn chain_selection_advisory(
             ));
         }
     }
-    warn_active_selection(out, info, stderr);
+    warn_active_selection(out, selection.polarity(), info, stderr);
 }
 
 /// The per-chain log-likelihood comparison a Bayesian result carries, as the
@@ -261,24 +262,24 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
     // Parse `--exclude-chains` at the boundary into a typed selection. A
     // selection is meaningless without a Bayesian method to subset — refuse it
     // rather than silently no-op (an optimizer-only fit has no chains-as-draws).
-    let selection: Option<ChainSelection> = match args.exclude_chains.as_deref() {
-        Some(raw) => match ChainSelection::parse_exclude(raw) {
-            Ok(sel) => {
+    let selection: Option<ChainSelection> =
+        match ChainSelection::from_flags(args.chains.as_deref(), args.exclude_chains.as_deref()) {
+            Ok(None) => None,
+            Ok(Some(sel)) => {
                 let has_bayesian = completed.iter().any(|s| {
                     matches!(s.method.as_str(), "pgas" | "pmmh" | "mh")
                 });
                 if !has_bayesian {
-                    out.error(CommandError::new(
-                        "error: --exclude-chains needs a Bayesian method (PGAS / PMMH / MH) to \
-                         subset; this fit's selected method(s) have no posterior chains"
-                    )).exit();
+                    out.error(CommandError::new(format!(
+                        "error: {} needs a Bayesian method (PGAS / PMMH / MH) to \
+                         subset; this fit's selected method(s) have no posterior chains",
+                        sel.flag()
+                    ))).exit();
                 }
                 Some(sel)
             }
             Err(e) => out.error(CommandError::new(format!("error: {e}"))).exit(),
-        },
-        None => None,
-    };
+        };
 
     let failures = match args.format {
         FitSummaryFormat::Text => format_text(&mut out, &dir, args, &selected, strict, selection.as_ref()),
@@ -696,7 +697,7 @@ fn format_text(
                 match apply_selection_to_typed(&mut typed, &resolved.method_dir, sel) {
                     Ok(info) => {
                         if !warned {
-                            chain_selection_advisory(out, chain_logliks.as_ref(), &info, stderr);
+                            chain_selection_advisory(out, chain_logliks.as_ref(), sel, &info, stderr);
                             warned = true;
                         }
                         subset_info = Some(info);
@@ -951,7 +952,7 @@ fn build_summary_doc(
                     match apply_selection_to_typed(t, &resolved.method_dir, sel) {
                         Ok(info) => {
                             if !advised {
-                                chain_selection_advisory(out, chain_logliks.as_ref(), &info, stderr);
+                                chain_selection_advisory(out, chain_logliks.as_ref(), sel, &info, stderr);
                                 advised = true;
                             }
                             chain_selection_json = Some(info.to_json());

@@ -432,6 +432,20 @@ pub struct SimulateArgs {
     #[arg(short = 'n', long)]
     pub n_draws: Option<usize>,
 
+    /// With `--draws posterior`: replay ONLY the named chains of the fit's
+    /// posterior cloud (comma-separated chain ids counted from 0, e.g.
+    /// `--chains 3,5`). Cannot be given with `--exclude-chains`. Always warns;
+    /// a chain id not in the fit, or naming every chain, is a hard error.
+    #[arg(long, value_name = "IDS", conflicts_with = "exclude_chains")]
+    pub chains: Option<String>,
+
+    /// With `--draws posterior`: drop the named chains of the fit's posterior
+    /// cloud before replaying it (comma-separated chain ids counted from 0).
+    /// Post-hoc exclusion biases the posterior toward the retained mode and
+    /// always prints a warning.
+    #[arg(long, value_name = "IDS")]
+    pub exclude_chains: Option<String>,
+
     /// Write the sampled per-draw parameter vectors to this TSV (gh#157).
     /// One row per draw, one column per parameter the draw source carries —
     /// for `--draws prior|uniform`, only the sampled parameters (gh#949) —
@@ -1036,6 +1050,15 @@ pub struct FitSummaryArgs {
     #[arg(long, value_name = "IDS", conflicts_with = "params_only")]
     pub exclude_chains: Option<String>,
 
+    /// Recompute the posterior diagnostics over ONLY the named chains
+    /// (comma-separated chain ids counted from 0, e.g. `--chains 0,1,2,4`):
+    /// the complement of `--exclude-chains`, which it cannot be given with.
+    /// On a six-chain fit `--chains 0,1,2,4` and `--exclude-chains 3,5` are
+    /// the same selection. A view only; always warns. A chain id not in the
+    /// fit, or naming every chain, is a hard error.
+    #[arg(long, value_name = "IDS", conflicts_with_all = ["params_only", "exclude_chains"])]
+    pub chains: Option<String>,
+
     /// Print the model's parameter legend — each parameter's symbol, prior,
     /// citations and caveats, from the model's `#'` docs. Off by default: it
     /// is reference material a modeller reads deliberately, and on a
@@ -1268,6 +1291,15 @@ pub struct FitPredictArgs {
     /// pooled artifact and two subsets never overwrite each other.
     #[arg(long, value_name = "IDS")]
     pub exclude_chains: Option<String>,
+
+    /// Band over ONLY the named chains (comma-separated chain ids counted
+    /// from 0, e.g. `--chains 3,5`): the complement of `--exclude-chains`,
+    /// which it cannot be given with. The artifacts are addressed by the
+    /// chains dropped, so on a six-chain fit `--chains 3,5` writes the same
+    /// `predictive-excl0,1,2,4/` as `--exclude-chains 0,1,2,4`. Always warns;
+    /// a chain id not in the fit, or naming every chain, is a hard error.
+    #[arg(long, value_name = "IDS", conflicts_with = "exclude_chains")]
+    pub chains: Option<String>,
 }
 
 /// The reserved scenario name for the no-overlay row — the fitted model as
@@ -1486,6 +1518,13 @@ pub struct FitTableArgs {
     /// the retained mode and always prints a warning.
     #[arg(long, value_name = "IDS", requires = "quantities")]
     pub exclude_chains: Option<String>,
+
+    /// Derive each `--quantity` cell over ONLY the named chains of each fit
+    /// (comma-separated chain ids counted from 0): the complement of
+    /// `--exclude-chains`, which it cannot be given with. Requires
+    /// `--quantity`; the same ids are applied to every fit. Always warns.
+    #[arg(long, value_name = "IDS", requires = "quantities", conflicts_with = "exclude_chains")]
+    pub chains: Option<String>,
 }
 
 #[derive(Args)]
@@ -2542,6 +2581,18 @@ pub struct CatArgs {
     /// Observation stream name (when run has multiple streams)
     #[arg(long)]
     pub stream: Option<String>,
+
+    /// Print only the rows of the named chains (comma-separated chain ids
+    /// counted from 0) — for a fit stream whose recorded `output_schema` has a
+    /// `chain` column, in practice `draws.tsv`; refused for any other stream.
+    /// Cannot be given with `--exclude-chains`. Always warns on stderr.
+    #[arg(long, value_name = "IDS", requires = "stream", conflicts_with = "exclude_chains")]
+    pub chains: Option<String>,
+
+    /// Print the rows of every chain except the named ones — the complement
+    /// of `--chains`, under the same rules.
+    #[arg(long, value_name = "IDS", requires = "stream")]
+    pub exclude_chains: Option<String>,
 }
 
 #[derive(Args)]
@@ -2783,6 +2834,17 @@ pub struct CompareArgs {
     /// is a hard error.
     #[arg(long, value_name = "[@FIT:]IDS")]
     pub exclude_chains: Vec<String>,
+
+    /// Keep ONLY the named MCMC chains of a fit's posterior cloud before
+    /// deriving its plug-in θ̂: the complement of `--exclude-chains`, with the
+    /// same forms. PER-FIT (repeat the flag): `--chains @a:0,1` keeps chains 0
+    /// and 1 of the fit named `@a`. The two flags may name different fits in
+    /// one invocation (`--chains @a:0,1 --exclude-chains @b:4`); naming one
+    /// fit in both is refused, and a bare cohort-wide value in either flag is
+    /// refused when either flag also has a per-fit `@fit:ids` value. Always
+    /// warns; a chain id not in a fit, or naming every chain, is a hard error.
+    #[arg(long, value_name = "[@FIT:]IDS")]
+    pub chains: Vec<String>,
 
     /// Write the per-observation Δelpd vector to PATH as a TSV (gh#706).
     ///

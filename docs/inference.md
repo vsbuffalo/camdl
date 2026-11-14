@@ -1534,6 +1534,7 @@ run instead (`starts = { from_posterior = "@short" }`, above).
 camdl fit run    scout.toml --seed 1 --label scout
 camdl fit run    posterior.toml --seed 1
 camdl fit summary @scout
+camdl fit summary @scout --chains 0,1,2   # diagnostics over chains 0-2 only (a view)
 camdl fit summary results/fits/<dir>/
 ```
 

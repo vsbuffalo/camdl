@@ -664,18 +664,23 @@ fn resolve_paired_posterior(
     fit_ref: &str,
     ir_path_compiled: &str,
     n_draws: Option<usize>,
+    selection: Option<&crate::chain_selection::ChainSelection>,
 ) -> (Vec<HashMap<String, f64>>, crate::sim_job::InitStateSource) {
     let (model, _) = util::load_model(ir_path_compiled).unwrap_or_else(|e| {
         out.fail(format!("error: {}", e));
     });
     let columns = io::trajectories::TrajColumnSpec::from_model(&model, &[]);
-    // The draws authority for this fit. `simulate` surfaces no `--exclude-chains`
-    // today, so no selection is attached and the cloud is the whole posterior;
-    // attaching one here is the entire change if the flag ever lands (gh#695).
+    // The draws authority for this fit, carrying the `--chains` /
+    // `--exclude-chains` selection, so the paired cloud is filtered at the one
+    // seam every reader shares (gh#695).
     let pref = crate::posterior_draws::resolve_posterior_draws(fit_ref, None)
         .unwrap_or_else(|e| {
             out.fail(format!("error: {}", e));
         });
+    if let Some(sel) = selection {
+        warn_posterior_selection(out, sel, &pref.draws_path);
+    }
+    let pref = pref.with_selection(selection.cloned());
     let ens = crate::fit::joint::resolve_forecast_ensemble(&pref, &columns)
         .unwrap_or_else(|e| {
             out.fail(format!("error: {}", e));
@@ -1298,6 +1303,25 @@ fn run_simulate(a: &args::SimulateArgs) {
     // one notice. Resolved here, before anything reads `backend` / `dt`, so
     // the run, its store key and the `--init-state` checks all see one answer.
     //
+    // `--chains` / `--exclude-chains` select chains of a posterior cloud, so
+    // they need `--draws posterior`; parsed once, here.
+    let posterior_selection = crate::chain_selection::ChainSelection::from_flags(
+        a.chains.as_deref(),
+        a.exclude_chains.as_deref(),
+    )
+    .unwrap_or_else(|e| {
+        out.fail(format!("error: {e}"));
+    });
+    if let Some(sel) = &posterior_selection {
+        if draws_path.as_deref() != Some("posterior") {
+            out.fail(format!(
+                "error: {} selects chains of a fit's posterior cloud, so it needs \
+                 --draws posterior --fit <handle>",
+                sel.flag()
+            ));
+        }
+    }
+
     // `--draws posterior` names a run; its handle is resolved once, here.
     let posterior_fit_ref: Option<String> = match (draws_path.as_deref(), fit_path_for_draws.as_ref()) {
         (Some("posterior"), Some(fit_handle)) => {
@@ -1790,7 +1814,7 @@ fn run_simulate(a: &args::SimulateArgs) {
             }
             if matches!(init_state_arg, Some(InitStateSourceArg::Fit)) {
                 let (rows, source) = resolve_paired_posterior(&out,
-                    fit_ref, &ir_path_compiled, a.n_draws,
+                    fit_ref, &ir_path_compiled, a.n_draws, posterior_selection.as_ref(),
                 );
                 init_state_source = Some(std::sync::Arc::new(source));
                 rows
@@ -1799,7 +1823,14 @@ fn run_simulate(a: &args::SimulateArgs) {
                 .unwrap_or_else(|e| {
                     out.fail(format!("error: {}", e));
                 });
-            let loaded = load_draws_tsv(&resolved.draws_path.to_string_lossy())
+            // The `--chains` / `--exclude-chains` selection is applied through
+            // the draws authority, the one seam every reader of a cloud shares.
+            if let Some(sel) = &posterior_selection {
+                warn_posterior_selection(&out, sel, &resolved.draws_path);
+            }
+            let resolved = resolved.with_selection(posterior_selection.clone());
+            let loaded = resolved.load_params_with_info()
+                .map(|(rows, _)| rows)
                 .unwrap_or_else(|e| {
                     out.fail(format!("error loading posterior draws {}: {}",
                         resolved.draws_path.display(), e));
@@ -5326,6 +5357,23 @@ pub(crate) fn load_draws_tsv_keyed(path: &str) -> Result<Vec<KeyedDraw>, String>
         return Err(format!("draws file has header but no data rows: {}", path));
     }
     Ok(draws)
+}
+
+/// The selection `simulate --draws posterior` replays under, resolved against
+/// the cloud's chains and warned about before any draw is read; an absent id
+/// or a selection that keeps every chain or none is refused here.
+fn warn_posterior_selection(
+    out: &crate::out::Out,
+    sel: &crate::chain_selection::ChainSelection,
+    draws_path: &std::path::Path,
+) {
+    let info = crate::chain_selection::chains_in_draws(draws_path)
+        .and_then(|present| sel.resolve(&present))
+        .unwrap_or_else(|e| {
+            out.fail(format!("error: {e}"));
+        });
+    crate::chain_selection::warn_active_selection(
+        out, sel.polarity(), &info, crate::out::paint::stderr());
 }
 
 /// Param-only draw rows — the `(chain, draw)` key (if any) is dropped. Every

@@ -294,9 +294,9 @@ intervals all inherit parameter uncertainty too.
 
 `compare` uses the mixture automatically for fits with a posterior draws cloud
 (`--draws`, default 64, controls $M$; `--draws 1` falls back to the
-posterior-mean plug-in). Chain exclusions (`--exclude-chains`) apply to the
-cloud before drawing. The per-fit cost is $M \times R$ filter passes and is
-printed before the derivation runs.
+posterior-mean plug-in). Chain selections (`--chains` or `--exclude-chains`)
+apply to the cloud before drawing. The per-fit cost is $M \times R$ filter
+passes and is printed before the derivation runs.
 
 ## 6. Held-out evaluation
 

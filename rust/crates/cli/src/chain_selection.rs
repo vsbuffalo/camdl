@@ -6,9 +6,10 @@
 //! wander into a non-representative side mode; the per-chain diagnostics (gh#406)
 //! name them. A [`ChainSelection`] names the chains to use, on two sides:
 //!
-//! - the **read side**, `--exclude-chains` at `fit predict` / `fit summary` /
-//!   `fit table` / `compare` time, which never re-runs the fit and never
-//!   re-keys its CAS identity;
+//! - the **read side**, `--chains` (keep) or `--exclude-chains` (drop) at
+//!   `fit predict` / `fit summary` / `fit table` / `compare` /
+//!   `simulate --draws posterior` / `cat` time, which never re-runs the fit
+//!   and never re-keys its CAS identity;
 //! - the **start side**, `starts = { from_posterior = "@base", chains = [..] }`
 //!   or `--starts-chains` (gh#1056), where the kept chains are part of the new
 //!   run's identity ([`crate::fit::starts::ChainStarts::identity_value`]).
@@ -175,6 +176,34 @@ impl ChainSelection {
         ChainSelection::parse(raw, Polarity::Drop, Polarity::Drop.read_flag())
     }
 
+    /// Parse `--chains 3,5` → keep only chains 3 and 5.
+    pub fn parse_keep(raw: &str) -> Result<Self, String> {
+        ChainSelection::parse(raw, Polarity::Keep, Polarity::Keep.read_flag())
+    }
+
+    /// The read-side selection a command's `--chains` / `--exclude-chains`
+    /// pair names: at most one of them, parsed. Both together is refused
+    /// (clap also refuses it where the flags are declared together).
+    pub fn from_flags(
+        chains: Option<&str>,
+        exclude_chains: Option<&str>,
+    ) -> Result<Option<Self>, String> {
+        match (chains, exclude_chains) {
+            (Some(_), Some(_)) => Err(
+                "--chains and --exclude-chains name one selection two ways; give one of them"
+                    .to_string(),
+            ),
+            (Some(raw), None) => ChainSelection::parse_keep(raw).map(Some),
+            (None, Some(raw)) => ChainSelection::parse_exclude(raw).map(Some),
+            (None, None) => Ok(None),
+        }
+    }
+
+    /// The flag this selection was given with on the read side, for messages.
+    pub fn flag(&self) -> &'static str {
+        self.polarity.read_flag()
+    }
+
     /// Whether the named chains are kept or dropped.
     pub fn polarity(&self) -> Polarity {
         self.polarity
@@ -203,11 +232,18 @@ impl ChainSelection {
     /// applied to every fit, so there is no single kept/total to report — name
     /// the requested ids. Printed once, to stderr, before the derivations run.
     pub fn warn_requested(&self, out: &crate::out::Out, ) {
-        out.say(format_args!(
-            "{w} --exclude-chains will drop chain(s) {} from each fit's \
-             posterior cloud.",
-            self.ids_csv(), w = crate::out::paint::warning_tag()
-        ));
+        let w = crate::out::paint::warning_tag();
+        match self.polarity {
+            Polarity::Drop => out.say(format_args!(
+                "{w} --exclude-chains will drop chain(s) {} from each fit's \
+                 posterior cloud.",
+                self.ids_csv()
+            )),
+            Polarity::Keep => out.say(format_args!(
+                "{w} --chains will keep only chain(s) {} of each fit's posterior cloud.",
+                self.ids_csv()
+            )),
+        }
         out.say(format_args!("         {BIAS_CAVEAT_A}"));
         out.say(format_args!("         {BIAS_CAVEAT_B}"));
     }
@@ -217,16 +253,26 @@ impl ChainSelection {
     /// before the derivations run. The bias caveat is left to the caller so it
     /// prints once for a multi-fit selection.
     pub fn warn_requested_for_fit(&self, out: &crate::out::Out, fit: &str) {
-        out.say(format_args!(
-            "{w} --exclude-chains will drop chain(s) {} from fit '{fit}'.",
-            self.ids_csv(), w = crate::out::paint::warning_tag()
-        ));
+        let w = crate::out::paint::warning_tag();
+        match self.polarity {
+            Polarity::Drop => out.say(format_args!(
+                "{w} --exclude-chains will drop chain(s) {} from fit '{fit}'.",
+                self.ids_csv()
+            )),
+            Polarity::Keep => out.say(format_args!(
+                "{w} --chains will keep only chain(s) {} of fit '{fit}'.",
+                self.ids_csv()
+            )),
+        }
     }
 
     /// Reduce the selection to its normal form against a fit's chain set.
     ///
     /// Every named id must be present (`chain 7 not in this fit (chains
-    /// 0..5)`), and the selection must keep at least one chain. The result
+    /// 0..5)`), the selection must keep at least one chain, and it must drop
+    /// at least one: a `--chains` list naming every chain of the fit selects
+    /// nothing, and is refused rather than written under a chain-subset
+    /// address that would duplicate the whole-cloud artifact. The result
     /// names the dropped and the kept chains and carries no polarity.
     pub fn resolve(&self, present: &BTreeSet<ChainIndex>) -> Result<SubsetInfo, String> {
         let flag = self.polarity.read_flag();
@@ -243,6 +289,13 @@ impl ChainSelection {
         if kept.is_empty() {
             return Err(format!(
                 "{flag} leaves an empty posterior (every chain was excluded)"
+            ));
+        }
+        if excluded.is_empty() {
+            return Err(format!(
+                "{flag} {} keeps every chain of this fit (chains 0..{present_hi}), so it \
+                 selects nothing; omit the flag to use the whole posterior",
+                self.ids_csv()
             ));
         }
         Ok(SubsetInfo { excluded, kept, n_total: present.len() })
@@ -296,6 +349,73 @@ impl ChainSelection {
             .collect();
         Ok((retained, info))
     }
+}
+
+/// The distinct chain ids of a draws TSV's `chain` column, read without
+/// parsing the parameter columns — the chain set a selection is resolved
+/// against when the cloud itself is not needed (`fit table`, `compare`'s
+/// record, `cat`).
+pub fn chains_in_draws(path: &Path) -> Result<BTreeSet<ChainIndex>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    chains_in_tsv(&text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// [`chains_in_draws`] over a TSV's text: the first non-`#` line is the header.
+fn chains_in_tsv(text: &str) -> Result<BTreeSet<ChainIndex>, String> {
+    let mut lines = text.lines().filter(|l| !l.starts_with('#'));
+    let header = lines.next().ok_or("the file is empty")?;
+    let col = header
+        .split('\t')
+        .position(|h| h.trim() == "chain")
+        .ok_or("the file has no `chain` column, so its chains cannot be selected")?;
+    let mut set = BTreeSet::new();
+    for line in lines.filter(|l| !l.trim().is_empty()) {
+        let cell = line.split('\t').nth(col).unwrap_or("").trim();
+        let c: usize = cell
+            .parse()
+            .map_err(|_| format!("chain cell `{cell}` is not a chain id"))?;
+        set.insert(ChainIndex(c));
+    }
+    Ok(set)
+}
+
+/// Keep the rows of a TSV whose `chain` column names a kept chain — the text
+/// filter `cat --chains` applies, so the bytes of every kept row (and of the
+/// header and any `#` comment) are the file's own. `info` is the selection
+/// resolved against the same text ([`chains_in_draws`] then
+/// [`ChainSelection::resolve`]).
+pub fn filter_tsv_rows(text: &str, info: &SubsetInfo) -> Result<String, String> {
+    let kept: BTreeSet<ChainIndex> = info.kept.iter().copied().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut col: Option<usize> = None;
+    for line in text.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\n', '\r']);
+        if body.starts_with('#') || body.trim().is_empty() {
+            out.push_str(line);
+            continue;
+        }
+        match col {
+            None => {
+                col = Some(
+                    body.split('\t')
+                        .position(|h| h.trim() == "chain")
+                        .ok_or("the file has no `chain` column")?,
+                );
+                out.push_str(line);
+            }
+            Some(c) => {
+                let cell = body.split('\t').nth(c).unwrap_or("").trim();
+                let id: usize = cell
+                    .parse()
+                    .map_err(|_| format!("chain cell `{cell}` is not a chain id"))?;
+                if kept.contains(&ChainIndex(id)) {
+                    out.push_str(line);
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// `"3,5"` — chain ids joined the way the CLI accepts them.
@@ -499,13 +619,15 @@ pub fn eprint_bias_caveat(out: &crate::out::Out, ) {
 /// *report* that is keyed, not the run. Same convention, same shape, so a run
 /// directory has one addressing scheme rather than two.
 ///
-/// ## The key is the SET
+/// ## The key is the dropped SET
 ///
-/// [`ChainSelection`] holds a `BTreeSet`, so `4,2`, `2,4` and `2,4,2` are one
-/// selection and therefore one address — the normalisation happens at parse, and
-/// [`ChainSelection::ids_csv`] is the single canonical rendering (the same
-/// one the warnings and the `fit summary` header print), so a name here can
-/// never disagree with what the user was told was dropped.
+/// The address is built from the selection's normal form, the [`SubsetInfo`]
+/// it resolved to against the fit's chains, so `4,2` and `2,4` are one
+/// address, and on a six-chain fit `--chains 0,1,3,5` and
+/// `--exclude-chains 2,4` are one address too. [`SubsetInfo::excluded_csv`]
+/// is the single canonical rendering (the same one the `fit summary` header
+/// prints), so a name here can never disagree with what the user was told
+/// was dropped.
 ///
 /// The ids are spelled out rather than digested: a reader who lists the run
 /// directory must be able to see which artifact is which without opening a
@@ -513,10 +635,10 @@ pub fn eprint_bias_caveat(out: &crate::out::Out, ) {
 /// canonical literal form. The cost is that the name grows with the set — a
 /// selection of some tens of chains would exceed a filesystem's 255-byte
 /// component limit, and fails loudly at write time if it ever does.
-pub fn artifact_name(base: &str, selection: Option<&ChainSelection>) -> String {
+pub fn artifact_name(base: &str, selection: Option<&SubsetInfo>) -> String {
     match selection {
         None => base.to_string(),
-        Some(sel) => format!("{base}-excl{}", sel.ids_csv()),
+        Some(info) => format!("{base}-excl{}", info.excluded_csv()),
     }
 }
 
@@ -528,15 +650,29 @@ pub fn artifact_name(base: &str, selection: Option<&ChainSelection>) -> String {
 /// the dropped chains and states the bias direction (toward the retained mode),
 /// and points at `fit summary` for the per-chain diagnostics (gh#406). `stderr`
 /// paints the tag under the command's own colour policy (its `--no-color`).
-pub fn warn_active_selection(out: &crate::out::Out, info: &SubsetInfo, stderr: crate::out::paint::Painter) {
-    out.say(format_args!(
-        "{w} --exclude-chains dropped chain(s) {} \
-         ({} of {} chains kept).",
-        info.excluded_csv(),
-        info.kept.len(),
-        info.n_total,
-        w = stderr.paint("warning:", crate::out::paint::Style::Warn)
-    ));
+pub fn warn_active_selection(
+    out: &crate::out::Out,
+    polarity: Polarity,
+    info: &SubsetInfo,
+    stderr: crate::out::paint::Painter,
+) {
+    let w = stderr.paint("warning:", crate::out::paint::Style::Warn);
+    match polarity {
+        Polarity::Drop => out.say(format_args!(
+            "{w} --exclude-chains dropped chain(s) {} \
+             ({} of {} chains kept).",
+            info.excluded_csv(),
+            info.kept.len(),
+            info.n_total,
+        )),
+        Polarity::Keep => out.say(format_args!(
+            "{w} --chains: keeping only chain(s) {}; dropping {} ({} of {} chains kept).",
+            csv(info.kept.iter()),
+            info.excluded_csv(),
+            info.kept.len(),
+            info.n_total,
+        )),
+    }
     out.say(format_args!("         {BIAS_CAVEAT_A}"));
     out.say(format_args!("         {BIAS_CAVEAT_B}"));
 }
@@ -702,43 +838,78 @@ mod tests {
         assert_eq!(artifact_name("quantities-a1b2c3d4", None), "quantities-a1b2c3d4");
     }
 
-    /// The key is the SET, so two spellings of one exclusion are one address —
-    /// and it composes with the `quantities-<key8>` vocabulary key.
+    /// The key is the dropped SET, so two spellings of one exclusion are one
+    /// address, a kept set and its complementary dropped set are one address,
+    /// and the key composes with the `quantities-<key8>` vocabulary key.
     #[test]
-    fn a_selection_keys_the_address_by_its_normalised_set() {
+    fn a_selection_keys_the_address_by_its_normal_form() {
+        let six: BTreeSet<ChainIndex> = ChainIndex::all(6).collect();
+        let name = |base: &str, sel: &ChainSelection| {
+            artifact_name(base, Some(&sel.resolve(&six).unwrap()))
+        };
         let a = ChainSelection::parse_exclude("2,4").unwrap();
         let b = ChainSelection::parse_exclude("4,2").unwrap();
         let c = ChainSelection::parse_exclude(" 4 , 2 ").unwrap();
-        assert_eq!(artifact_name("predictive", Some(&a)), "predictive-excl2,4");
-        assert_eq!(
-            artifact_name("predictive", Some(&b)),
-            artifact_name("predictive", Some(&a)),
-            "order must not make a second artifact"
-        );
-        assert_eq!(
-            artifact_name("predictive", Some(&c)),
-            artifact_name("predictive", Some(&a)),
-            "whitespace must not make a third"
-        );
+        let k = ChainSelection::parse_keep("0,1,3,5").unwrap();
+        assert_eq!(name("predictive", &a), "predictive-excl2,4");
+        assert_eq!(name("predictive", &b), name("predictive", &a), "order must not make a second artifact");
+        assert_eq!(name("predictive", &c), name("predictive", &a), "whitespace must not make a third");
+        assert_eq!(name("predictive", &k), name("predictive", &a),
+            "keeping 0,1,3,5 of six chains is dropping 2,4: one address");
 
         // Two different exclusions are two addresses, and neither is the pooled
         // one — the collision the fix exists to prevent.
         let d = ChainSelection::parse_exclude("4").unwrap();
-        assert_ne!(
-            artifact_name("predictive", Some(&d)),
-            artifact_name("predictive", Some(&a))
-        );
+        assert_ne!(name("predictive", &d), name("predictive", &a));
         for sel in [&a, &d] {
-            assert_ne!(artifact_name("predictive", Some(sel)), "predictive");
+            assert_ne!(name("predictive", sel), "predictive");
         }
 
         // Composes with the vocabulary key: a reporting vocabulary AND a chain
         // subset are two independent report keys over one fit.
+        assert_eq!(name("quantities-a1b2c3d4", &a), "quantities-a1b2c3d4-excl2,4");
+        assert_eq!(name("contrasts", &a), "contrasts-excl2,4");
+    }
+
+    /// `--chains` naming every chain selects nothing, and is refused rather
+    /// than written at a subset address that duplicates the whole cloud.
+    #[test]
+    fn keeping_every_chain_is_refused() {
+        let four: BTreeSet<ChainIndex> = ChainIndex::all(4).collect();
+        let e = ChainSelection::parse_keep("0,1,2,3").unwrap().resolve(&four).unwrap_err();
+        assert!(e.contains("--chains 0,1,2,3 keeps every chain"), "{e}");
+    }
+
+    #[test]
+    fn from_flags_takes_one_of_the_two_flags() {
+        assert_eq!(ChainSelection::from_flags(None, None).unwrap(), None);
         assert_eq!(
-            artifact_name("quantities-a1b2c3d4", Some(&a)),
-            "quantities-a1b2c3d4-excl2,4"
+            ChainSelection::from_flags(Some("3,5"), None).unwrap().unwrap().polarity(),
+            Polarity::Keep
         );
-        assert_eq!(artifact_name("contrasts", Some(&a)), "contrasts-excl2,4");
+        assert_eq!(
+            ChainSelection::from_flags(None, Some("3,5")).unwrap().unwrap().polarity(),
+            Polarity::Drop
+        );
+        let e = ChainSelection::from_flags(Some("1"), Some("2")).unwrap_err();
+        assert!(e.contains("give one of them"), "{e}");
+        let e = ChainSelection::from_flags(Some("1,1"), None).unwrap_err();
+        assert!(e.contains("--chains lists chain 1 twice"), "{e}");
+    }
+
+    /// The text filter `cat --chains` uses keeps the header, comments and the
+    /// kept chains' rows byte for byte.
+    #[test]
+    fn the_tsv_filter_keeps_the_kept_rows_verbatim() {
+        let text = "# a comment\nchain\tdraw\tbeta\n0\t0\t0.100\n1\t0\t0.2\n2\t0\t0.30\n1\t1\t0.21\n";
+        let present = chains_in_tsv(text).unwrap();
+        assert_eq!(present, ChainIndex::all(3).collect());
+        let info = ChainSelection::parse_keep("1").unwrap().resolve(&present).unwrap();
+        assert_eq!(
+            filter_tsv_rows(text, &info).unwrap(),
+            "# a comment\nchain\tdraw\tbeta\n1\t0\t0.2\n1\t1\t0.21\n"
+        );
+        assert!(chains_in_tsv("draw\tbeta\n0\t1\n").unwrap_err().contains("no `chain` column"));
     }
 
     #[test]
