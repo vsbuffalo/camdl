@@ -124,6 +124,23 @@ Model      T_score     elpd   Δelpd       LR   se(Δ)               evidence   
   model's central 90% predictive interval (§4.3). Nominal is 0.90; well below it
   means overconfident intervals.
 
+The last three columns appear only when every row scored exactly one observation
+stream, and the same one. CRPS is in the units of one observed quantity and PIT
+locates one observation in its predictive, and a multi-stream step has no single
+observed quantity: a case count plus a death count plus a count derived from a
+proportion is not something anyone observed. So for multi-stream fits there is
+no combined CRPS or PIT anywhere. The columns leave the main table, and a second
+block, headed "Per-stream accuracy and calibration", has one line per stream and
+model: `n` (the stream's scored observations), `mean CRPS`, `Δ mean CRPS`
+against the baseline (shown only when both rows scored that stream at the same
+times), and `PIT_cov90`. The overconfidence warning (coverage below 0.70) is
+evaluated for each stream and names it, so a well-calibrated stream cannot mask
+a poorly calibrated one. A non-finite CRPS or PIT value is left out of the
+stream's figures and counted in a note. The joint log score, by contrast, is the
+log of a well-defined joint predictive density, so elpd and Δelpd stay
+cross-stream. A trace written before the per-stream breakdown existed (schema 1)
+still compares on elpd; its CRPS and calibration are reported as not available.
+
 ## 4. The scoring rules and diagnostics
 
 ### 4.1 Log score

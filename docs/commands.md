@@ -221,12 +221,14 @@ camdl compare @baseline @candidate
 camdl compare @baseline @candidate --pointwise pointwise.tsv
 ```
 
-`compare` renders a baseline-centered table of prequential scores (per-step
-log-score, CRPS, PIT). Each argument is either an explicit prequential artifact
-— a `prequential.json` (or a method directory holding one), written by a
-`pfilter` method or by `camdl pfilter --save-prequential`, and read **as-is** —
-**or** a fit handle (`@label`, a hash prefix, a run directory, or a `fit.toml`),
-whose prequential is **auto-derived** by re-filtering at the fit's sealed θ̂.
+`compare` renders a baseline-centered table of prequential scores (the joint
+per-step log score, and each stream's CRPS and PIT coverage — in the table for a
+single-stream comparison, in a per-stream block below it otherwise; no figure
+combines streams). Each argument is either an explicit prequential artifact — a
+`prequential.json` (or a method directory holding one), written by a `pfilter`
+method or by `camdl pfilter --save-prequential`, and read **as-is** — **or** a
+fit handle (`@label`, a hash prefix, a run directory, or a `fit.toml`), whose
+prequential is **auto-derived** by re-filtering at the fit's sealed θ̂.
 `--particles` and `--seed` set the filter used for any auto-derived handle and
 are applied **uniformly** across all derived fits, so `T_score` and the scores
 stay commensurable; they are ignored for an explicit `prequential.json` (read

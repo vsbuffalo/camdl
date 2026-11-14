@@ -28,7 +28,9 @@ use crate::fit::handle::ResolvedFit;
 use crate::fit::stream_bindings::StreamBindings;
 use crate::posterior_draws::PosteriorDrawsRef;
 use serde::Deserialize;
-use sim::inference::prequential::{Conditioning, PrequentialTrace, ThetaSource, TraceOverride};
+use sim::inference::prequential::{
+    Conditioning, PrequentialTrace, StreamMean, ThetaSource, TraceOverride,
+};
 use std::path::{Path, PathBuf};
 
 /// Default particle count for auto-deriving a prequential from a fit handle.
@@ -2628,10 +2630,8 @@ fn posterior_mean_params_toml(pref: &PosteriorDrawsRef) -> Result<(String, usize
 /// the footnote; the evidence gate stays the descriptive 2·se band).
 /// At lag 0 / no autocorrelation this is the iid SE with the biased
 /// variance. Returns (delta, se) or (NaN, NaN) if horizons mismatch.
-fn paired_delta(a: &PrequentialTrace, b: &PrequentialTrace, field: Field)
-    -> (f64, f64)
-{
-    let diffs = match paired_diffs(a, b, field) {
+fn paired_delta(a: &PrequentialTrace, b: &PrequentialTrace) -> (f64, f64) {
+    let diffs = match paired_diffs(a, b) {
         Some(d) => d,
         None => return (f64::NAN, f64::NAN),
     };
@@ -2644,22 +2644,204 @@ fn paired_delta(a: &PrequentialTrace, b: &PrequentialTrace, field: Field)
 /// The per-step loss differentials `d_t = a_t − b_t`, or `None` on a
 /// horizon mismatch — the shared input of the paired SE and the lag-1
 /// serial-dependence diagnostic.
-fn paired_diffs(a: &PrequentialTrace, b: &PrequentialTrace, field: Field)
-    -> Option<Vec<f64>>
-{
+fn paired_diffs(a: &PrequentialTrace, b: &PrequentialTrace) -> Option<Vec<f64>> {
     if a.n_scored() != b.n_scored() || a.n_scored() == 0 {
         return None;
     }
     Some(a.steps.iter().zip(&b.steps)
-        .map(|(x, y)| match field {
-            Field::LogScore => x.log_score - y.log_score,
-            Field::Crps     => x.crps - y.crps,
-        })
+        .map(|(x, y)| x.log_score - y.log_score)
         .collect())
 }
 
-#[derive(Copy, Clone)]
-enum Field { LogScore, Crps }
+/// The reason a row has no CRPS or calibration figure when its trace scored
+/// steps but carries no per-stream breakdown.
+const NO_STREAM_BREAKDOWN: &str = "trace predates the per-stream breakdown";
+
+/// One stream's accuracy and calibration in one row.
+#[derive(Debug, Clone, PartialEq)]
+struct StreamAccuracy {
+    stream: String,
+    /// The mean CRPS over the steps that scored the stream; `n` is the
+    /// number of scored observations.
+    mean_crps: StreamMean,
+    /// The mean per-observation CRPS difference against the baseline, or
+    /// `None` for the baseline itself and for a stream the two rows did not
+    /// score at the same times (a mean over different observations is not a
+    /// paired difference).
+    delta_mean_crps: Option<f64>,
+    /// The share of the stream's PIT values inside the central 90%.
+    pit_cov90: StreamMean,
+}
+
+/// What a row can say about accuracy and calibration: per stream, or nothing
+/// and why. There is no combined figure: a CRPS is in the units of one
+/// observed quantity, and the streams together are not one.
+#[derive(Debug, Clone, PartialEq)]
+enum Accuracy {
+    Unavailable(&'static str),
+    PerStream(Vec<StreamAccuracy>),
+}
+
+/// `row`'s per-stream accuracy, with each Δ formed against `base`.
+fn row_accuracy(row: &Row, base: &Row) -> Accuracy {
+    let streams = row.trace.streams();
+    if streams.is_empty() {
+        return Accuracy::Unavailable(if row.trace.steps.is_empty() {
+            "no scored steps"
+        } else {
+            NO_STREAM_BREAKDOWN
+        });
+    }
+    let is_base = std::ptr::eq(row, base);
+    Accuracy::PerStream(streams.into_iter().map(|stream| {
+        let delta_mean_crps = (!is_base).then(|| {
+            let a: Vec<(f64, f64)> = row.trace.stream_scores(stream).map(|(t, s)| (t, s.crps)).collect();
+            let b: Vec<(f64, f64)> = base.trace.stream_scores(stream).map(|(t, s)| (t, s.crps)).collect();
+            let same_times = a.len() == b.len() && a.iter().zip(&b).all(|(x, y)| x.0 == y.0);
+            let diffs: Vec<f64> = a.iter().zip(&b)
+                .map(|(x, y)| x.1 - y.1)
+                .filter(|d| d.is_finite())
+                .collect();
+            (same_times && !diffs.is_empty())
+                .then(|| diffs.iter().sum::<f64>() / diffs.len() as f64)
+        }).flatten();
+        StreamAccuracy {
+            stream: stream.to_string(),
+            mean_crps: row.trace.mean_crps(stream),
+            delta_mean_crps,
+            pit_cov90: row.trace.pit_coverage(stream, 0.90),
+        }
+    }).collect())
+}
+
+/// The one stream every row scored, when each scored exactly one and it is
+/// the same: the case in which the table keeps its CRPS and PIT columns.
+fn shared_single_stream(accuracy: &[Accuracy]) -> Option<&str> {
+    let mut only: Option<&str> = None;
+    for a in accuracy {
+        match a {
+            Accuracy::PerStream(v) if v.len() == 1 => match only {
+                None => only = Some(&v[0].stream),
+                Some(s) if s == v[0].stream => {}
+                Some(_) => return None,
+            },
+            _ => return None,
+        }
+    }
+    only
+}
+
+/// The comparison's per-stream accuracy, row by row (in input order), and the
+/// shared single stream if there is one.
+fn accuracy_view(rows: &[Row], base_idx: usize) -> (Vec<Accuracy>, Option<String>) {
+    let acc: Vec<Accuracy> = rows.iter().map(|r| row_accuracy(r, &rows[base_idx])).collect();
+    let single = shared_single_stream(&acc).map(str::to_string);
+    (acc, single)
+}
+
+/// The streams the rows scored, in the order they first appear.
+fn accuracy_streams(accuracy: &[Accuracy]) -> Vec<&str> {
+    let mut out: Vec<&str> = Vec::new();
+    for a in accuracy {
+        if let Accuracy::PerStream(v) = a {
+            for s in v {
+                if !out.contains(&s.stream.as_str()) { out.push(&s.stream); }
+            }
+        }
+    }
+    out
+}
+
+/// Render order: ascending Δelpd (worst → best), the baseline at its natural
+/// Δelpd = 0 slot, so the best-supported row lands at the bottom where the
+/// reader's eye ends. Under mismatched horizons no Δ exists to sort by, so the
+/// input order stands.
+fn render_order(rows: &[Row], base_idx: usize, t_mismatch: bool) -> Vec<usize> {
+    let mut idx: Vec<usize> = (0..rows.len()).collect();
+    if t_mismatch {
+        return idx;
+    }
+    let base = &rows[base_idx].trace;
+    idx.sort_by(|&a, &b| {
+        let da = if a == base_idx { 0.0 } else { paired_delta(&rows[a].trace, base).0 };
+        let db = if b == base_idx { 0.0 } else { paired_delta(&rows[b].trace, base).0 };
+        // NaN delta → place row at the top (worst-case ranking).
+        match (da.is_nan(), db.is_nan()) {
+            (true, true)  => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            (false, false) => da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal),
+        }
+    });
+    idx
+}
+
+/// The cells of one stream × row line, in the per-stream block's column
+/// order (`n`, then the wanted metrics), or the shared columns of the
+/// single-stream table (`want_n = false`).
+fn accuracy_cells(sa: &StreamAccuracy, want_n: bool, want_crps: bool, want_pit: bool,
+                  delta_shown: bool) -> Vec<String> {
+    let mut cells = Vec::new();
+    if want_n { cells.push(sa.mean_crps.n.to_string()); }
+    if want_crps {
+        cells.push(format!("{:.3}", sa.mean_crps.value));
+        cells.push(match (delta_shown, sa.delta_mean_crps) {
+            (true, Some(d)) => format!("{:+.3}", d),
+            _ => "—".into(),
+        });
+    }
+    if want_pit { cells.push(format!("{:.2}", sa.pit_cov90.value)); }
+    cells
+}
+
+/// The per-stream block's header, with the wanted metric columns.
+fn accuracy_header(want_crps: bool, want_pit: bool) -> Vec<String> {
+    let mut h: Vec<String> = vec!["stream".into(), "model".into(), "n".into()];
+    if want_crps { h.push("mean CRPS".into()); h.push("Δ mean CRPS".into()); }
+    if want_pit { h.push("PIT_cov90".into()); }
+    h
+}
+
+/// The per-stream block's body: one line per stream × row, rows in render
+/// order, `None` when there is nothing to show (no wanted metric, or no row
+/// with a per-stream breakdown).
+fn accuracy_block(rows: &[Row], order: &[usize], accuracy: &[Accuracy],
+                  want_crps: bool, want_pit: bool, t_mismatch: bool) -> Option<Vec<Vec<String>>> {
+    if !(want_crps || want_pit) { return None; }
+    let streams = accuracy_streams(accuracy);
+    if streams.is_empty() { return None; }
+    let mut body = Vec::new();
+    for stream in streams {
+        for &i in order {
+            let Accuracy::PerStream(v) = &accuracy[i] else { continue };
+            let Some(sa) = v.iter().find(|s| s.stream == stream) else { continue };
+            let mut line = vec![stream.to_string(), rows[i].name.clone()];
+            line.extend(accuracy_cells(sa, true, want_crps, want_pit, !t_mismatch));
+            body.push(line);
+        }
+    }
+    Some(body)
+}
+
+/// The `⚠` line for one stream of a row whose 90% predictive interval covers
+/// far less than nominal — the plug-in overconfidence tell. `None` when
+/// coverage is fine or not computable. Evaluated per stream, so one stream's
+/// coverage cannot mask another's.
+fn pit_coverage_warning(row: &str, sa: &StreamAccuracy) -> Option<String> {
+    let cov = sa.pit_cov90.value;
+    (cov < 0.70).then(|| format!(
+        "'{row}' stream '{}': PIT 90%-coverage {:.2} (nominal 0.90) — likely overconfident.",
+        sa.stream, cov))
+}
+
+/// The note for a row stream whose CRPS or PIT values include non-finite
+/// ones, which the per-stream figures leave out.
+fn nonfinite_note(row: &str, sa: &StreamAccuracy) -> Option<String> {
+    let (c, p) = (sa.mean_crps.n_nonfinite, sa.pit_cov90.n_nonfinite);
+    (c + p > 0).then(|| format!(
+        "'{row}' stream '{}': {c} non-finite CRPS and {p} non-finite PIT value(s) of {} \
+         left out of its per-stream figures.", sa.stream, sa.mean_crps.n))
+}
 
 /// Format the likelihood ratio `exp(Δelpd)` for display: the candidate's
 /// in-sample plug-in predictive likelihood over the baseline's, on the same
@@ -2690,41 +2872,22 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Pref
     let t_mismatch = checks.horizons_differ();
     let want_crps = metrics.iter().any(|m| m == "crps");
     let want_pit  = metrics.iter().any(|m| m == "pit_cov90" || m == "pit");
+    let (accuracy, single) = accuracy_view(rows, base_idx);
 
     // Δelpd (nats) is the primary machine-readable column; "evidence"
     // (decibans + Jeffreys label) is the human-interpretable alongside —
     // see docs/dev/proposals/2026-04-23-evidence-in-decibans.md §Scope.
+    // CRPS and PIT columns only when every row scored the same one stream;
+    // otherwise they are per stream, in the block below the table.
     let mut header = vec!["Model".to_string(), "T_score".into(), "elpd".into(),
         "Δelpd".into(), "LR".into(), "se(Δ)".into(), "evidence".into()];
-    if want_crps { header.push("crps".into()); header.push("Δcrps".into()); }
-    if want_pit  { header.push("PIT_cov90".into()); }
+    if single.is_some() {
+        if want_crps { header.push("crps".into()); header.push("Δcrps".into()); }
+        if want_pit  { header.push("PIT_cov90".into()); }
+    }
 
     let base = &rows[base_idx].trace;
-    // Render order: ascending Δelpd (worst → best). Baseline drops in
-    // at its natural Δelpd = 0 slot. Best candidate lands at the
-    // bottom — reader's eye sees the recommended model last. When
-    // T_score mismatches block per-row deltas, we can't sort
-    // meaningfully, so leave the input order alone in that path.
-    let order: Vec<usize> = if t_mismatch {
-        (0..rows.len()).collect()
-    } else {
-        let mut idx: Vec<usize> = (0..rows.len()).collect();
-        idx.sort_by(|&a, &b| {
-            let da = if a == base_idx { 0.0 }
-                else { paired_delta(&rows[a].trace, base, Field::LogScore).0 };
-            let db = if b == base_idx { 0.0 }
-                else { paired_delta(&rows[b].trace, base, Field::LogScore).0 };
-            // NaN delta → place row at the top (worst-case ranking).
-            match (da.is_nan(), db.is_nan()) {
-                (true, true)  => std::cmp::Ordering::Equal,
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                (false, false) => da.partial_cmp(&db)
-                    .unwrap_or(std::cmp::Ordering::Equal),
-            }
-        });
-        idx
-    };
+    let order = render_order(rows, base_idx, t_mismatch);
     let mut body: Vec<Vec<String>> = Vec::with_capacity(rows.len());
     for &i in &order {
         let r = &rows[i];
@@ -2734,55 +2897,32 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Pref
             format!("{}", r.trace.n_scored()),
             format!("{:.2}", elpd),
         ];
-        if i == base_idx {
+        if i == base_idx || t_mismatch {
             row.push("—".into());   // Δelpd
             row.push("—".into());   // LR
             row.push("—".into());   // se(Δ)
             row.push("—".into());   // evidence (dB + Jeffreys label)
-        } else if t_mismatch {
-            row.push("—".into());
-            row.push("—".into());
-            row.push("—".into());
-            row.push("—".into());
         } else {
-            let (d, se) = paired_delta(&r.trace, base, Field::LogScore);
+            let (d, se) = paired_delta(&r.trace, base);
             row.push(format!("{:+.2}", d));
             row.push(fmt_lr(d.exp()));
             row.push(format!("{:.2}", se));
             row.push(crate::evidence::evidence_cell(d, se, mc_se_delta(r, &rows[base_idx])));
         }
-        if want_crps {
-            row.push(format!("{:.3}", r.trace.mean_crps()));
-            if i == base_idx || t_mismatch {
-                row.push("—".into());
-            } else {
-                let (d, _) = paired_delta(&r.trace, base, Field::Crps);
-                let mean_diff = d / r.trace.n_scored() as f64;
-                row.push(format!("{:+.3}", mean_diff));
-            }
-        }
-        if want_pit {
-            row.push(format!("{:.2}", r.trace.pit_coverage(0.90)));
+        if let (Some(_), Accuracy::PerStream(v)) = (&single, &accuracy[i]) {
+            row.extend(accuracy_cells(&v[0], false, want_crps, want_pit,
+                i != base_idx && !t_mismatch));
         }
         body.push(row);
     }
 
-    let widths: Vec<usize> = (0..header.len()).map(|c| {
-        let h = header[c].chars().count();
-        let b = body.iter().map(|r| r[c].chars().count()).max().unwrap_or(0);
-        h.max(b)
-    }).collect();
-
-    let sep = |cols: &[usize]| -> String {
-        let total: usize = cols.iter().sum::<usize>() + 3 * (cols.len() - 1);
-        "─".repeat(total)
-    };
-
     let mut out = String::new();
-    out.push_str(&fmt_table_row(&header, &widths));
-    out.push_str(&format!("{}\n", sep(&widths)));
-    for row in &body {
-        out.push_str(&fmt_table_row(row, &widths));
+    push_aligned(&mut out, &header, &body);
+    if single.is_none() {
+        if let Some(block) = accuracy_block(rows, &order, &accuracy, want_crps, want_pit, t_mismatch) {
+            out.push_str("\nPer-stream accuracy and calibration:\n");
+            push_aligned(&mut out, &accuracy_header(want_crps, want_pit), &block);
+        }
     }
 
     // The footer states what is specific to this comparison — the scored
@@ -2799,13 +2939,28 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Pref
     }
     out.push_str(&conditioning_line(base));
     out.push('\n');
-    for line in warning_lines(rows, base_idx, checks) {
+    for line in warning_lines(rows, base_idx, checks, &accuracy) {
         out.push_str(&line);
         out.push('\n');
     }
     out.push_str(METHODS_POINTER);
     out.push('\n');
     out
+}
+
+/// Append an aligned text table — header, rule, body — to `out`.
+fn push_aligned(out: &mut String, header: &[String], body: &[Vec<String>]) {
+    let widths: Vec<usize> = (0..header.len()).map(|c| {
+        let h = header[c].chars().count();
+        let b = body.iter().map(|r| r[c].chars().count()).max().unwrap_or(0);
+        h.max(b)
+    }).collect();
+    let total: usize = widths.iter().sum::<usize>() + 3 * (widths.len() - 1);
+    out.push_str(&fmt_table_row(header, &widths));
+    out.push_str(&format!("{}\n", "─".repeat(total)));
+    for row in body {
+        out.push_str(&fmt_table_row(row, &widths));
+    }
 }
 
 /// Everything below the table that the reader must not miss: each override
@@ -2817,7 +2972,9 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Pref
 /// asymmetry: the table warned about a miscalibrated model and the markdown
 /// someone pasted into a report did not. A new warning added here appears in
 /// every format by construction.
-fn warning_lines(rows: &[Row], base_idx: usize, checks: &Preflight) -> Vec<String> {
+fn warning_lines(rows: &[Row], base_idx: usize, checks: &Preflight, accuracy: &[Accuracy])
+    -> Vec<String>
+{
     // Each override that was needed, in one line: the flag, the rows, what
     // differed and what that does to the table. The terminal session that
     // granted it is not where the table is read a week later.
@@ -2829,11 +2986,30 @@ fn warning_lines(rows: &[Row], base_idx: usize, checks: &Preflight) -> Vec<Strin
     {
         lines.push(format!("ⓘ {note}"));
     }
-    // PIT warnings — flag clear miscalibration.
-    for r in rows {
-        if let Some(w) = pit_coverage_warning(r) {
-            lines.push(format!("⚠ {w}"));
+    // PIT warnings — flag clear miscalibration, stream by stream — and the
+    // values the per-stream figures could not use.
+    let mut unavailable: Vec<(&str, &str)> = Vec::new();
+    for (r, a) in rows.iter().zip(accuracy) {
+        match a {
+            Accuracy::PerStream(v) => {
+                for sa in v {
+                    if let Some(w) = pit_coverage_warning(&r.name, sa) {
+                        lines.push(format!("⚠ {w}"));
+                    }
+                }
+                for sa in v {
+                    if let Some(n) = nonfinite_note(&r.name, sa) {
+                        lines.push(format!("ⓘ {n}"));
+                    }
+                }
+            }
+            Accuracy::Unavailable(why) => unavailable.push((&r.name, why)),
         }
+    }
+    if !unavailable.is_empty() {
+        let named: Vec<String> = unavailable.iter()
+            .map(|(name, why)| format!("'{name}' ({why})")).collect();
+        lines.push(format!("ⓘ CRPS and PIT calibration not available for {}.", named.join(", ")));
     }
     // Propagate trace-level warnings.
     for r in rows {
@@ -2863,7 +3039,7 @@ fn warning_lines(rows: &[Row], base_idx: usize, checks: &Preflight) -> Vec<Strin
     let lag1: Vec<String> = rows.iter().enumerate()
         .filter(|(i, _)| *i != base_idx)
         .filter_map(|(_, r)| {
-            let d = paired_diffs(&r.trace, &rows[base_idx].trace, Field::LogScore)?;
+            let d = paired_diffs(&r.trace, &rows[base_idx].trace)?;
             let a1 = crate::evidence::lag1_autocorrelation(&d);
             a1.is_finite().then(|| format!("{} {:+.2}", r.name, a1))
         })
@@ -2885,17 +3061,6 @@ fn warning_lines(rows: &[Row], base_idx: usize, checks: &Preflight) -> Vec<Strin
 /// exist, the per-trace tag drives it.
 fn optimism_caveat(rows: &[Row]) -> Option<String> {
     rows.iter().find_map(|r| r.trace.optimism_caveat())
-}
-
-/// The `⚠` line for a row whose 90% predictive interval covers far less than
-/// nominal — the plug-in overconfidence tell. `None` when coverage is fine.
-/// Shared by every renderer: a warning one format prints and another drops is
-/// the failure mode this exists to prevent.
-fn pit_coverage_warning(r: &Row) -> Option<String> {
-    let cov = r.trace.pit_coverage(0.90);
-    (cov < 0.70).then(|| format!(
-        "{}: PIT 90%-coverage {:.2} (nominal 0.90) — likely overconfident.",
-        r.name, cov))
 }
 
 fn fmt_table_row(cells: &[String], widths: &[usize]) -> String {
@@ -2922,38 +3087,27 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Preflig
     let t_mismatch = checks.horizons_differ();
     let want_crps = metrics.iter().any(|m| m == "crps");
     let want_pit  = metrics.iter().any(|m| m == "pit_cov90" || m == "pit");
+    let (accuracy, single) = accuracy_view(rows, base_idx);
+    let md_table = |out: &mut String, header: &[String], body: &[Vec<String>]| {
+        out.push_str(&format!("| {} |\n", header.join(" | ")));
+        out.push_str(&format!("|{}|\n",
+            header.iter().map(|_| "---").collect::<Vec<_>>().join("|")));
+        for cells in body {
+            out.push_str(&format!("| {} |\n", cells.join(" | ")));
+        }
+    };
 
-    let mut out = String::new();
-    let mut header = vec!["Model", "T_score", "elpd", "Δelpd", "LR", "se(Δ)", "evidence"];
-    if want_crps { header.push("crps"); header.push("Δcrps"); }
-    if want_pit  { header.push("PIT_cov90"); }
-    out.push_str(&format!("| {} |\n", header.join(" | ")));
-    out.push_str(&format!("|{}|\n",
-        header.iter().map(|_| "---").collect::<Vec<_>>().join("|")));
+    let mut header: Vec<String> = ["Model", "T_score", "elpd", "Δelpd", "LR", "se(Δ)", "evidence"]
+        .iter().map(|h| h.to_string()).collect();
+    if single.is_some() {
+        if want_crps { header.push("crps".into()); header.push("Δcrps".into()); }
+        if want_pit  { header.push("PIT_cov90".into()); }
+    }
 
     let base = &rows[base_idx].trace;
-    // Same render order as the table renderer: ascending Δelpd
-    // (best-supported last). When T_score mismatches block per-row
-    // deltas, leave input order alone.
-    let order: Vec<usize> = if t_mismatch {
-        (0..rows.len()).collect()
-    } else {
-        let mut idx: Vec<usize> = (0..rows.len()).collect();
-        idx.sort_by(|&a, &b| {
-            let da = if a == base_idx { 0.0 }
-                else { paired_delta(&rows[a].trace, base, Field::LogScore).0 };
-            let db = if b == base_idx { 0.0 }
-                else { paired_delta(&rows[b].trace, base, Field::LogScore).0 };
-            match (da.is_nan(), db.is_nan()) {
-                (true, true)  => std::cmp::Ordering::Equal,
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                (false, false) => da.partial_cmp(&db)
-                    .unwrap_or(std::cmp::Ordering::Equal),
-            }
-        });
-        idx
-    };
+    // Same render order as the table renderer.
+    let order = render_order(rows, base_idx, t_mismatch);
+    let mut body: Vec<Vec<String>> = Vec::with_capacity(rows.len());
     for &i in &order {
         let r = &rows[i];
         let mut cells: Vec<String> = vec![
@@ -2967,24 +3121,25 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Preflig
             cells.push("—".into());  // se(Δ)
             cells.push("—".into());  // evidence
         } else {
-            let (d, se) = paired_delta(&r.trace, base, Field::LogScore);
+            let (d, se) = paired_delta(&r.trace, base);
             cells.push(format!("{:+.2}", d));
             cells.push(fmt_lr(d.exp()));
             cells.push(format!("{:.2}", se));
             cells.push(crate::evidence::evidence_cell(d, se, mc_se_delta(r, &rows[base_idx])));
         }
-        if want_crps {
-            cells.push(format!("{:.3}", r.trace.mean_crps()));
-            if i == base_idx || t_mismatch {
-                cells.push("—".into());
-            } else {
-                let (d, _) = paired_delta(&r.trace, base, Field::Crps);
-                let mean_diff = d / r.trace.n_scored() as f64;
-                cells.push(format!("{:+.3}", mean_diff));
-            }
+        if let (Some(_), Accuracy::PerStream(v)) = (&single, &accuracy[i]) {
+            cells.extend(accuracy_cells(&v[0], false, want_crps, want_pit,
+                i != base_idx && !t_mismatch));
         }
-        if want_pit { cells.push(format!("{:.2}", r.trace.pit_coverage(0.90))); }
-        out.push_str(&format!("| {} |\n", cells.join(" | ")));
+        body.push(cells);
+    }
+    let mut out = String::new();
+    md_table(&mut out, &header, &body);
+    if single.is_none() {
+        if let Some(block) = accuracy_block(rows, &order, &accuracy, want_crps, want_pit, t_mismatch) {
+            out.push_str("\n**Per-stream accuracy and calibration**\n\n");
+            md_table(&mut out, &accuracy_header(want_crps, want_pit), &block);
+        }
     }
     // Same footer as the text table (gh#806), in markdown: the sort order,
     // the conditioning stamp, the comparison-specific notes, and the pointer
@@ -2997,7 +3152,7 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Preflig
     out.push_str(&format!("_{}_\n", conditioning_line(base)));
     // The same block the text table prints, as a markdown list so each warning
     // stays its own line when the document is rendered.
-    let warnings = warning_lines(rows, base_idx, checks);
+    let warnings = warning_lines(rows, base_idx, checks, &accuracy);
     if !warnings.is_empty() {
         out.push('\n');
         for line in warnings {
@@ -3013,13 +3168,36 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Preflig
 fn render_json(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Preflight) -> String {
     use serde_json::json;
     let base = &rows[base_idx].trace;
+    let t_mismatch = checks.horizons_differ();
+    let (accuracy, single) = accuracy_view(rows, base_idx);
     let entries: Vec<serde_json::Value> = rows.iter().enumerate().map(|(i, r)| {
         let (d_elpd, se_elpd) = if i == base_idx { (f64::NAN, f64::NAN) }
-            else { paired_delta(&r.trace, base, Field::LogScore) };
-        let (d_crps, _) = if i == base_idx { (f64::NAN, f64::NAN) }
-            else { paired_delta(&r.trace, base, Field::Crps) };
-        let mean_dcrps = if r.trace.n_scored() == 0 { f64::NAN }
-            else { d_crps / r.trace.n_scored() as f64 };
+            else { paired_delta(&r.trace, base) };
+        // Each stream's accuracy and calibration; the Δ is suppressed under
+        // mismatched horizons, as the table's is.
+        let stream_json = |sa: &StreamAccuracy| json!({
+            "stream": sa.stream,
+            "n": sa.mean_crps.n,
+            "mean_crps": option_finite(sa.mean_crps.value),
+            "crps_nonfinite": sa.mean_crps.n_nonfinite,
+            "delta_mean_crps": sa.delta_mean_crps.filter(|_| !t_mismatch)
+                .map_or(serde_json::Value::Null, option_finite),
+            "pit_cov90": option_finite(sa.pit_cov90.value),
+            "pit_nonfinite": sa.pit_cov90.n_nonfinite,
+            "pit_cov90_warning": pit_coverage_warning(&r.name, sa),
+        });
+        let (per_stream, unavailable): (Vec<serde_json::Value>, Option<&str>) = match &accuracy[i] {
+            Accuracy::PerStream(v) => (v.iter().map(stream_json).collect(), None),
+            Accuracy::Unavailable(why) => (Vec::new(), Some(why)),
+        };
+        // The row-level figures are the single-stream case's, and null
+        // otherwise: there is no combined CRPS or PIT across streams.
+        let only = match (&single, &accuracy[i]) {
+            (Some(_), Accuracy::PerStream(v)) => per_stream.first().cloned()
+                .map(|j| (j, &v[0])),
+            _ => None,
+        };
+        let field = |k: &str| only.as_ref().map_or(serde_json::Value::Null, |(j, _)| j[k].clone());
         let lr = if d_elpd.is_finite() { d_elpd.exp() } else { f64::NAN };
         // Evidence: Δelpd (nats) → decibans + a label. Derived field for
         // human-interpretable consumption; nats remain the primary
@@ -3059,13 +3237,17 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Prefl
             "lag1_autocorr_delta_elpd": if i == base_idx {
                 serde_json::Value::Null
             } else {
-                paired_diffs(&r.trace, base, Field::LogScore)
+                paired_diffs(&r.trace, base)
                     .map_or(serde_json::Value::Null, |d| option_finite(
                         crate::evidence::lag1_autocorrelation(&d)))
             },
-            "mean_crps": r.trace.mean_crps(),
-            "delta_mean_crps": option_finite(mean_dcrps),
-            "pit_cov90": r.trace.pit_coverage(0.90),
+            "mean_crps": field("mean_crps"),
+            "delta_mean_crps": field("delta_mean_crps"),
+            "pit_cov90": field("pit_cov90"),
+            // Accuracy and calibration, one entry per stream the row scored;
+            // empty, with the reason, for a trace with no per-stream breakdown.
+            "per_stream": per_stream,
+            "per_stream_unavailable": unavailable,
             // How this row's score was built and what it saw: the two optimism
             // axes (#295), per row because a cohort may mix them once posterior
             // / LFO traces exist.
@@ -3077,11 +3259,11 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Prefl
             // from the same source the table prints — a script reading the JSON
             // must not have to re-derive them from `pit_cov90`.
             "warnings": r.trace.warnings,
-            "pit_cov90_warning": pit_coverage_warning(r),
+            "pit_cov90_warning": field("pit_cov90_warning"),
         })
     }).collect();
     let any_evidence = rows.iter().enumerate().any(|(i, r)| {
-        i != base_idx && paired_delta(&r.trace, base, Field::LogScore).0.is_finite()
+        i != base_idx && paired_delta(&r.trace, base).0.is_finite()
     });
     let out = json!({
         "baseline": rows[base_idx].name,
@@ -3400,13 +3582,14 @@ mod tests {
     fn no_output_format_drops_a_warning_or_the_optimism_caveat() {
         use sim::inference::prequential::PrequentialWarning;
         let mut rows = vec![
-            row_at("a", &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0]),
-            row_at("b", &[7.0, 14.0, 21.0], &[-5.0, -6.0, -6.0]),
+            row_with_streams("a", &[7.0, 14.0, 21.0], &["cases"]),
+            row_with_streams("b", &[7.0, 14.0, 21.0], &["cases"]),
         ];
+        rows[1].trace.steps[0].log_score = -5.0;
         // Row `b`: every observation lands outside its own 90% predictive
         // interval (PIT 0.99), and the filter saved no predictive samples.
         for s in &mut rows[1].trace.steps {
-            s.pit = 0.99;
+            s.per_stream[0].pit = 0.99;
         }
         rows[1].trace.warnings.push(PrequentialWarning::SamplesNotSaved);
         let metrics = vec!["elpd".to_string(), "pit_cov90".to_string()];
@@ -4166,6 +4349,219 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(&render_json(&rows, 0, &metrics, &silent)).unwrap();
         assert!(v["data_mismatch"].is_null() && v["overrides"] == serde_json::json!([]), "{v}");
+    }
+
+    /// Two single-stream traces as `prequential.json` writes them (schema 4,
+    /// the step-level summed fields alongside the stream's own, equal for one
+    /// stream with no tied PIT).
+    fn single_stream_rows() -> Vec<Row> {
+        let trace = |scores: [(f64, f64, f64); 4]| -> PrequentialTrace {
+            let steps: Vec<String> = scores.iter().enumerate().map(|(k, (ls, crps, pit))| {
+                let t = 7.0 * (k + 1) as f64;
+                format!(r#"{{"t": {t}, "y_obs": 10.0, "y_pred_samples": [], "log_score": {ls},
+                    "crps": {crps}, "pit": {pit}, "ess": 900.0,
+                    "per_stream": [{{"stream": "cases", "y_obs": 10.0, "y_pred_samples": [],
+                        "log_score": {ls}, "crps": {crps}, "pit": {pit},
+                        "coverage": {{"kind": "interval", "start": {s}, "stop": {t}}}}}]}}"#,
+                    s = t - 7.0)
+            }).collect();
+            serde_json::from_str(&format!(r#"{{"schema_version": 4, "t0": 0,
+                "provenance": "plug_in", "conditioning": "in_sample",
+                "steps": [{}], "warnings": []}}"#, steps.join(","))).unwrap()
+        };
+        let row = |name: &str, trace: PrequentialTrace| Row {
+            name: name.into(), path: name.into(), trace,
+            data: DataIdentity::Unknown("a test fixture".into()),
+            freshness: DataFreshness::default(),
+        };
+        vec![
+            row("a", trace([(-3.0, 2.5, 0.40), (-4.0, 3.0, 0.97), (-2.5, 1.5, 0.55), (-3.5, 2.0, 0.30)])),
+            row("b", trace([(-2.0, 1.0, 0.60), (-3.0, 2.0, 0.45), (-2.0, 1.25, 0.02), (-3.0, 1.5, 0.70)])),
+        ]
+    }
+
+    /// The rendering of [`single_stream_rows`] before CRPS and calibration
+    /// became per-stream, captured from the code at 961a6a0a.
+    const SINGLE_STREAM_TABLE: &str = r#"Model   T_score     elpd   Δelpd       LR   se(Δ)               evidence    crps    Δcrps   PIT_cov90
+─────────────────────────────────────────────────────────────────────────────────────────────────────
+a             4   -13.00       —        —       —                      —   2.250        —        0.75
+b             4   -10.00   +3.00   20.086    0.65   +13.0 dB, strong for   1.438   -0.812        0.75
+
+Scored steps: 4 (t0=0).  Baseline: a.
+Sorted by Δelpd ascending — best-supported model at the bottom.
+Conditioning: in-sample — θ fit to all scored data; Δelpd favors the more flexible model.
+ⓘ not checked for a shared observation set: 'a' (a test fixture); 'b' (a test fixture). A difference against such a row may be a data difference, not a model difference.
+ⓘ filter settings not recorded for 'a' (trace older than schema 5); not checked; filter settings not recorded for 'b' (trace older than schema 5); not checked
+note: lag-1 autocorrelation of the per-step Δelpd vs baseline: b +0.25
+note: scores are plug-in (scored at a single θ, dropping parameter uncertainty → under-dispersed); and in-sample (θ fit to all the data → optimistic in absolute level, by roughly the effective number of parameters fit, which does not cancel in a Δelpd and so biases differences toward the more flexible model) — not a leave-future-out forecast score. See LFO (#295).
+Definitions and caveats: `camdl compare --explain` (or `camdl docs model-comparison`).
+"#;
+    const SINGLE_STREAM_MD: &str = r#"| Model | T_score | elpd | Δelpd | LR | se(Δ) | evidence | crps | Δcrps | PIT_cov90 |
+|---|---|---|---|---|---|---|---|---|---|
+| a | 4 | -13.00 | — | — | — | — | 2.250 | — | 0.75 |
+| b | 4 | -10.00 | +3.00 | 20.086 | 0.65 | +13.0 dB, strong for | 1.438 | -0.812 | 0.75 |
+
+_Sorted by Δelpd ascending — best-supported model at the bottom._
+
+_Conditioning: in-sample — θ fit to all scored data; Δelpd favors the more flexible model._
+
+- ⓘ not checked for a shared observation set: 'a' (a test fixture); 'b' (a test fixture). A difference against such a row may be a data difference, not a model difference.
+- ⓘ filter settings not recorded for 'a' (trace older than schema 5); not checked; filter settings not recorded for 'b' (trace older than schema 5); not checked
+- note: lag-1 autocorrelation of the per-step Δelpd vs baseline: b +0.25
+- note: scores are plug-in (scored at a single θ, dropping parameter uncertainty → under-dispersed); and in-sample (θ fit to all the data → optimistic in absolute level, by roughly the effective number of parameters fit, which does not cancel in a Δelpd and so biases differences toward the more flexible model) — not a leave-future-out forecast score. See LFO (#295).
+
+_Definitions and caveats: `camdl compare --explain` (or `camdl docs model-comparison`)._
+"#;
+
+    /// D14: when every row scored exactly one stream, and the same one, the
+    /// table keeps its `crps`, `Δcrps` and `PIT_cov90` columns, with the same
+    /// numbers as before CRPS and calibration became per-stream, and the JSON
+    /// row keeps its row-level fields alongside the per-stream entry.
+    #[test]
+    fn a_single_stream_comparison_renders_as_before() {
+        let rows = single_stream_rows();
+        let metrics = vec!["elpd".to_string(), "crps".to_string(), "pit_cov90".to_string()];
+        let checks = checked(&rows);
+        assert_eq!(render_table(&rows, 0, &metrics, &checks), SINGLE_STREAM_TABLE);
+        assert_eq!(render_md(&rows, 0, &metrics, &checks), SINGLE_STREAM_MD);
+        let v: serde_json::Value =
+            serde_json::from_str(&render_json(&rows, 0, &metrics, &checks)).unwrap();
+        let (a, b) = (&v["rows"][0], &v["rows"][1]);
+        assert_eq!((a["mean_crps"].as_f64(), b["mean_crps"].as_f64()), (Some(2.25), Some(1.4375)));
+        assert_eq!(b["delta_mean_crps"].as_f64(), Some(-0.8125));
+        assert!(a["delta_mean_crps"].is_null());
+        assert_eq!((a["pit_cov90"].as_f64(), b["pit_cov90"].as_f64()), (Some(0.75), Some(0.75)));
+        assert_eq!(b["per_stream"], serde_json::json!([{
+            "stream": "cases", "n": 4, "mean_crps": 1.4375, "crps_nonfinite": 0,
+            "delta_mean_crps": -0.8125, "pit_cov90": 0.75, "pit_nonfinite": 0,
+            "pit_cov90_warning": null,
+        }]), "{v}");
+    }
+
+    /// Two rows scoring `north` and `south`. Each step's own summed fields
+    /// carry sentinels (CRPS 77.7, PIT 0.5) that no output may show: the
+    /// summed predictive is not an observed quantity. `north` is calibrated
+    /// (PIT 0.5 throughout); `south` is not (PIT 0.99), in row `b` only.
+    fn two_stream_rows() -> Vec<Row> {
+        let t = [7.0, 14.0, 21.0, 28.0];
+        let mut a = row_with_streams("a", &t, &["north", "south"]);
+        let mut b = row_with_streams("b", &t, &["north", "south"]);
+        for (k, (sa, sb)) in a.trace.steps.iter_mut().zip(&mut b.trace.steps).enumerate() {
+            for s in [&mut *sa, &mut *sb] {
+                s.crps = 77.7;
+                s.pit = 0.5;
+            }
+            sa.per_stream[0].crps = 2.0;
+            sa.per_stream[1].crps = 4.0 + k as f64;
+            sb.per_stream[0].crps = 1.0;
+            sb.per_stream[1].crps = 3.0;
+            sb.per_stream[1].pit = 0.99;
+            sb.log_score = -5.0;
+        }
+        vec![a, b]
+    }
+
+    /// D14: a comparison of multi-stream fits drops the CRPS and PIT columns
+    /// from the main table and reports them per stream × model, in every
+    /// format, with the calibration warning naming the stream — and no output
+    /// carries a figure that combines the streams.
+    #[test]
+    fn a_multi_stream_comparison_reports_accuracy_per_stream_only() {
+        let rows = two_stream_rows();
+        let metrics = vec!["elpd".to_string(), "crps".to_string(), "pit_cov90".to_string()];
+        let checks = checked(&rows);
+        let table = render_table(&rows, 0, &metrics, &checks);
+        let md = render_md(&rows, 0, &metrics, &checks);
+        let json = render_json(&rows, 0, &metrics, &checks);
+
+        for (fmt, text) in [("table", &table), ("md", &md)] {
+            let header = text.lines().next().unwrap();
+            assert!(!header.contains("crps") && !header.contains("PIT_cov90"),
+                "the {fmt} main table drops the summed columns:\n{text}");
+            assert!(text.contains("Per-stream accuracy and calibration"), "{fmt}:\n{text}");
+            assert!(!text.contains("77.7"),
+                "no {fmt} figure combines the streams:\n{text}");
+            let line = |stream: &str, model: &str| -> String {
+                text.lines()
+                    .find(|l| {
+                        let cells: Vec<&str> = l.split(['|', ' ']).filter(|c| !c.is_empty()).collect();
+                        cells.first() == Some(&stream) && cells.get(1) == Some(&model)
+                    })
+                    .unwrap_or_else(|| panic!("no {stream} × {model} line in {fmt}:\n{text}"))
+                    .to_string()
+            };
+            let cells = |l: String| -> Vec<String> {
+                l.split(['|', ' ']).filter(|c| !c.is_empty()).map(String::from).collect()
+            };
+            // stream, model, n, mean CRPS, Δ mean CRPS, PIT_cov90
+            assert_eq!(cells(line("north", "a")), ["north", "a", "4", "2.000", "—", "1.00"], "{fmt}");
+            assert_eq!(cells(line("north", "b")), ["north", "b", "4", "1.000", "-1.000", "1.00"], "{fmt}");
+            assert_eq!(cells(line("south", "a")), ["south", "a", "4", "5.500", "—", "1.00"], "{fmt}");
+            assert_eq!(cells(line("south", "b")), ["south", "b", "4", "3.000", "-2.500", "0.00"], "{fmt}");
+            let warn: Vec<&str> = text.lines().filter(|l| l.contains("PIT 90%-coverage")).collect();
+            assert_eq!(warn.len(), 1, "one stream is miscalibrated:\n{text}");
+            assert!(warn[0].contains("'b'") && warn[0].contains("'south'"),
+                "and the warning names it: {}", warn[0]);
+        }
+
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(!json.contains("77.7"), "{json}");
+        for r in v["rows"].as_array().unwrap() {
+            for k in ["mean_crps", "delta_mean_crps", "pit_cov90", "pit_cov90_warning"] {
+                assert!(r[k].is_null(), "no row-level `{k}` for a multi-stream row: {r}");
+            }
+        }
+        let south_b = &v["rows"][1]["per_stream"][1];
+        assert_eq!(south_b["stream"], "south");
+        assert_eq!(south_b["n"], 4);
+        assert_eq!(south_b["mean_crps"].as_f64(), Some(3.0));
+        assert_eq!(south_b["delta_mean_crps"].as_f64(), Some(-2.5));
+        assert_eq!(south_b["pit_cov90"].as_f64(), Some(0.0));
+        assert!(south_b["pit_cov90_warning"].as_str().is_some_and(|w| w.contains("'south'")), "{v}");
+        assert!(v["rows"][1]["per_stream"][0]["pit_cov90_warning"].is_null(), "north is calibrated: {v}");
+        assert!(v["rows"][0]["per_stream"][0]["delta_mean_crps"].is_null(), "the baseline: {v}");
+    }
+
+    /// The Δ mean CRPS of a stream is formed only over the same times on both
+    /// sides; a stream the two rows scored at different times gets none.
+    #[test]
+    fn a_stream_scored_at_different_times_gets_no_delta_crps() {
+        let mut rows = two_stream_rows();
+        // `b` loses its `south` score at t = 14 (a hole in that series).
+        rows[1].trace.steps[1].per_stream.truncate(1);
+        let acc = row_accuracy(&rows[1], &rows[0]);
+        let Accuracy::PerStream(streams) = acc else { panic!("{acc:?}") };
+        let south = streams.iter().find(|s| s.stream == "south").unwrap();
+        assert_eq!(south.mean_crps.n, 3);
+        assert_eq!(south.delta_mean_crps, None);
+        let north = streams.iter().find(|s| s.stream == "north").unwrap();
+        assert_eq!(north.delta_mean_crps, Some(-1.0));
+    }
+
+    /// A trace without a per-stream breakdown (schema 1) still compares on
+    /// elpd; its CRPS and calibration are reported as not available, with the
+    /// reason, never as a number.
+    #[test]
+    fn a_trace_without_a_stream_breakdown_reports_no_crps_or_calibration() {
+        let rows = vec![
+            row_at("a", &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0]),
+            row_at("b", &[7.0, 14.0, 21.0], &[-5.0, -6.0, -6.0]),
+        ];
+        let metrics = vec!["elpd".to_string(), "crps".to_string(), "pit_cov90".to_string()];
+        let checks = checked(&rows);
+        for text in [render_table(&rows, 0, &metrics, &checks), render_md(&rows, 0, &metrics, &checks)] {
+            assert!(text.contains("-18.00") && text.contains("+1.00"), "elpd still compares:\n{text}");
+            assert!(!text.lines().next().unwrap().contains("crps"), "{text}");
+            assert!(text.contains("trace predates the per-stream breakdown"), "{text}");
+            assert!(!text.contains("1.000"), "the step-level CRPS is not shown:\n{text}");
+        }
+        let v: serde_json::Value =
+            serde_json::from_str(&render_json(&rows, 0, &metrics, &checks)).unwrap();
+        for r in v["rows"].as_array().unwrap() {
+            assert!(r["mean_crps"].is_null() && r["pit_cov90"].is_null(), "{r}");
+            assert_eq!(r["per_stream"], serde_json::json!([]));
+            assert_eq!(r["per_stream_unavailable"], "trace predates the per-stream breakdown");
+        }
     }
 
     fn digests(entries: &[(&str, &str)]) -> DataIdentity {

@@ -401,7 +401,7 @@ fn fit_run_prequential_equals_pfilter_prequential() {
     // Non-vacuity: the data must carry nonzero observations, or an all-zero
     // y_obs would match one that is merely absent.
     assert!(
-        from_pfilter.steps.iter().any(|s| s.y_obs != 0.0),
+        from_pfilter.steps.iter().flat_map(|s| &s.per_stream).any(|ss| ss.y_obs != 0.0),
         "fixture observations are all zero — this test could not detect the bug"
     );
     assert_eq!(
@@ -412,35 +412,41 @@ fn fit_run_prequential_equals_pfilter_prequential() {
 
     for (a, b) in from_fit.steps.iter().zip(from_pfilter.steps.iter()) {
         assert_eq!(a.t, b.t, "step times diverge");
-        assert_eq!(
-            a.y_obs, b.y_obs,
-            "at t={}: fit run scored against y_obs={} but pfilter scored against \
-             y_obs={} (fit run read the union axis's never-scored 0.0 placeholder)",
-            a.t, a.y_obs, b.y_obs
-        );
         assert_eq!(a.log_score, b.log_score, "log_score diverges at t={}", a.t);
-        assert_eq!(
-            a.crps, b.crps,
-            "at t={}: crps {} vs {} — CRPS reads the forecast LEVEL, not the \
-             forecast ERROR, when y_obs is zero",
-            a.t, a.crps, b.crps
-        );
-        assert_eq!(
-            a.pit, b.pit,
-            "at t={}: pit {} vs {} — a PIT pinned at 0 reads as total \
-             miscalibration",
-            a.t, a.pit, b.pit
-        );
         assert_eq!(a.ess, b.ess, "ess diverges at t={}", a.t);
+        assert_eq!(a.per_stream.len(), b.per_stream.len(), "streams diverge at t={}", a.t);
+        for (x, y) in a.per_stream.iter().zip(&b.per_stream) {
+            assert_eq!(
+                x.y_obs, y.y_obs,
+                "at t={} stream {}: fit run scored against y_obs={} but pfilter scored \
+                 against y_obs={} (fit run read the union axis's never-scored 0.0 placeholder)",
+                a.t, x.stream, x.y_obs, y.y_obs
+            );
+            assert_eq!(
+                x.crps, y.crps,
+                "at t={} stream {}: crps {} vs {} — CRPS reads the forecast LEVEL, not \
+                 the forecast ERROR, when y_obs is zero",
+                a.t, x.stream, x.crps, y.crps
+            );
+            assert_eq!(
+                x.pit, y.pit,
+                "at t={} stream {}: pit {} vs {} — a PIT pinned at 0 reads as total \
+                 miscalibration",
+                a.t, x.stream, x.pit, y.pit
+            );
+        }
     }
 
     assert_eq!(from_fit.elpd(), from_pfilter.elpd(), "elpd diverges");
-    assert_eq!(from_fit.mean_crps(), from_pfilter.mean_crps(), "mean_crps diverges");
-    assert_eq!(
-        from_fit.pit_coverage(0.90),
-        from_pfilter.pit_coverage(0.90),
-        "PIT 90% coverage diverges"
-    );
+    assert_eq!(from_fit.streams(), from_pfilter.streams(), "the streams scored diverge");
+    for s in from_pfilter.streams() {
+        assert_eq!(from_fit.mean_crps(s), from_pfilter.mean_crps(s), "mean_crps diverges for {s}");
+        assert_eq!(
+            from_fit.pit_coverage(s, 0.90),
+            from_pfilter.pit_coverage(s, 0.90),
+            "PIT 90% coverage diverges for {s}"
+        );
+    }
 
     // Catch-all: nothing else in the trace may differ either. Same filter, same
     // seed, same θ — the two files must be identical.
