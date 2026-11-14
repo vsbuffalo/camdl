@@ -957,15 +957,14 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     }
 
     // Save prequential trace (--save-prequential STEM): writes
-    // {STEM}.tsv (per-step scalar scores) + {STEM}.json (full trace,
+    // {STEM}.tsv (joint score per step) + {STEM}.streams.tsv (per-stream
+    // scores) + {STEM}.json (full trace,
     // incl. predictive samples unless --no-save-samples).
     if let Some(ref stem) = save_prequential {
         let recorded = result.prequential.as_ref().expect(
             "record_prequential must be true when save_prequential is set");
-        // gh#268: score against the real observed values (cross-stream sum on
-        // the union axis), not the never-scored 0.0 placeholder.
-        let y_obs: Vec<f64> = obs_model.joint_observed();
-        // gh#269: per-stream observed values for the per-district breakdown.
+        // gh#268/gh#269: score each stream against its real observed values,
+        // not the never-scored 0.0 placeholder.
         let per_stream_obs = obs_model.per_stream_observed();
         // gh#585 / Stage 3.2: `--score-from TIME` windows the trace. The
         // boundary maps to the union-grid index t0 — observations at
@@ -1007,7 +1006,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         // at the same times.
         let per_stream_cov = obs_model.per_stream_coverage();
         let mut trace = sim::inference::prequential::build_trace(
-            recorded, &y_obs, &per_stream_obs, &per_stream_cov, &result.ess_trace, t0, seed,
+            recorded, &per_stream_obs, &per_stream_cov, &result.ess_trace, t0, seed,
             obs_model.first_observation_opens_after_run_start(smc_config.t_start),
             score_from_time);
         // Schema 5: how this trace was computed. One pass (`--replicates N`
@@ -1019,8 +1018,6 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             adhoc_enable.clone(), adhoc_disable.clone()));
         if !save_samples {
             for step in &mut trace.steps {
-                step.y_pred_samples.clear();
-                // gh#269: mirror the clear into each per-stream score.
                 for ss in &mut step.per_stream { ss.y_pred_samples.clear(); }
             }
             trace.warnings.push(

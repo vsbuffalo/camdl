@@ -1412,26 +1412,6 @@ fn fmt_pointwise_time(t: f64) -> String {
     }
 }
 
-/// The per-stream sibling of a joint TSV path: `.streams` inserted before the
-/// final extension (`scores.tsv` → `scores.streams.tsv`), or appended when the
-/// path has none (`scores` → `scores.streams`). `prequential.tsv` uses the same
-/// naming.
-pub(crate) fn streams_sibling(path: &Path) -> PathBuf {
-    match (path.file_stem(), path.extension()) {
-        (Some(stem), Some(ext)) => {
-            let mut name = stem.to_os_string();
-            name.push(".streams.");
-            name.push(ext);
-            path.with_file_name(name)
-        }
-        _ => {
-            let mut name = path.as_os_str().to_os_string();
-            name.push(".streams");
-            PathBuf::from(name)
-        }
-    }
-}
-
 /// What `--pointwise` wrote: each file and its row count.
 struct PointwiseWritten {
     joint: (PathBuf, usize),
@@ -1443,7 +1423,7 @@ struct PointwiseWritten {
 /// refusal leaves neither file behind.
 fn write_pointwise(rows: &[Row], base_idx: usize, path: &Path) -> Result<PointwiseWritten, String> {
     let pw = pointwise_rows(rows, base_idx)?;
-    let streams_path = streams_sibling(path);
+    let streams_path = crate::prequential_out::streams_sibling(path);
     let file_name = |p: &Path| p.file_name().map_or_else(
         || p.display().to_string(), |n| n.to_string_lossy().into_owned());
     let joint_text = render_pointwise_joint_tsv(&pw.joint, &file_name(&streams_path));
@@ -2245,11 +2225,12 @@ fn combine_mixture(
 /// estimates (pomp practice) — and the caller stamps the provenance
 /// accordingly.
 ///
-/// Per step: log score = log-mean-exp over components; predictive samples
-/// pooled (the pooled cloud is a draw from the combined predictive), so
-/// fair CRPS, the randomized PIT (fresh seeded draws), and the intervals
-/// are computed on the pool; ESS is the MIN across components (the
-/// weakest effective support); warnings deduplicated by kind.
+/// Per step: the joint log score = log-mean-exp over components; per
+/// stream, the log score likewise, and the stream's predictive samples
+/// pooled (the pooled cloud is a draw from the combined predictive), so its
+/// fair CRPS, randomized PIT (fresh seeded draws) and interval are computed
+/// on the pool; ESS is the MIN across components (the weakest effective
+/// support); warnings deduplicated by kind.
 ///
 /// Every component ran with the same data and scoring boundary, so the
 /// step axes must be identical — anything else is a derive bug, not a
@@ -2281,24 +2262,16 @@ fn combine_scored_traces(
         }
     }
 
-    // Fresh randomized-PIT draws for the pooled predictive, consumed in
-    // build_trace's order (joint first, then each stream) for consistency.
+    // Fresh randomized-PIT draws for the pooled predictives, consumed in
+    // build_trace's order (step by step, one per stream) for consistency.
     let mut pit_rng = sim::rng::StatefulRng::new_stream(pit_seed, PIT_RNG_STREAM);
 
     let mut steps = Vec::with_capacity(first.steps.len());
     for si in 0..first.steps.len() {
-        let y = first.steps[si].y_obs;
         let ls: Vec<f64> = traces.iter().map(|t| t.steps[si].log_score).collect();
         let (log_score, _) = crate::evidence::logmeanexp_with_se(&ls);
-        let mut pooled: Vec<f64> = Vec::new();
-        for t in &traces {
-            pooled.extend_from_slice(&t.steps[si].y_pred_samples);
-        }
         let ess = traces.iter().map(|t| t.steps[si].ess)
             .fold(f64::INFINITY, f64::min);
-        let crps = crps_sample_fair(&pooled, y);
-        let pit = pit_sample_randomized(&pooled, y, pit_rng.uniform());
-        let interval = PredInterval::from_samples(&pooled);
 
         let mut per_stream = Vec::with_capacity(first.steps[si].per_stream.len());
         for pi in 0..first.steps[si].per_stream.len() {
@@ -2324,10 +2297,7 @@ fn combine_scored_traces(
 
         steps.push(PrequentialStep {
             t: first.steps[si].t,
-            y_obs: y,
-            y_pred_samples: pooled,
-            log_score, crps, pit, ess,
-            interval,
+            log_score, ess,
             per_stream,
         });
     }
@@ -3313,12 +3283,13 @@ mod tests {
     use super::*;
 
     /// §3.6 (Stage 4.1): the mixture combines per-draw *densities*, pools
-    /// samples, takes the min ESS, and stamps `Posterior { n_draws }`.
+    /// each stream's samples, takes the min ESS, and stamps
+    /// `Posterior { n_draws }`.
     #[test]
     fn combine_mixture_averages_densities_and_pools_samples() {
         use sim::inference::prequential::{
             crps_sample_fair, PredInterval, PrequentialStep, PrequentialTrace,
-            PrequentialWarning, Provenance,
+            PrequentialWarning, Provenance, StreamScore,
         };
         let component = |ls: f64, samples: Vec<f64>, ess: f64| PrequentialTrace {
             schema_version: 3,
@@ -3327,14 +3298,18 @@ mod tests {
             conditioning: Conditioning::InSample,
             steps: vec![PrequentialStep {
                 t: 7.0,
-                y_obs: 3.0,
-                interval: PredInterval::from_samples(&samples),
-                y_pred_samples: samples,
                 log_score: ls,
-                crps: 0.0,
-                pit: 0.0,
                 ess,
-                per_stream: vec![],
+                per_stream: vec![StreamScore {
+                    stream: "cases".into(),
+                    y_obs: 3.0,
+                    interval: PredInterval::from_samples(&samples),
+                    y_pred_samples: samples,
+                    log_score: ls,
+                    crps: 0.0,
+                    pit: 0.0,
+                    coverage: Default::default(),
+                }],
             }],
             warnings: vec![PrequentialWarning::StartsAtPrior],
             score_from: None,
@@ -3353,12 +3328,15 @@ mod tests {
         let mean_of_logs = (0.2_f64.ln() + 0.4_f64.ln()) / 2.0;
         assert!(got > mean_of_logs,
             "Jensen: the mixture score is strictly above the mean of logs");
+        assert!((mixed.steps[0].per_stream[0].log_score - want).abs() < 1e-12,
+            "and so is the stream's own");
 
         // Pooled cloud, min ESS, CRPS over the pool.
-        assert_eq!(mixed.steps[0].y_pred_samples, vec![1.0, 2.0, 3.0, 4.0]);
+        let s = &mixed.steps[0].per_stream[0];
+        assert_eq!(s.y_pred_samples, vec![1.0, 2.0, 3.0, 4.0]);
         assert_eq!(mixed.steps[0].ess, 25.0);
         let want_crps = crps_sample_fair(&[1.0, 2.0, 3.0, 4.0], 3.0);
-        assert!((mixed.steps[0].crps - want_crps).abs() < 1e-12);
+        assert!((s.crps - want_crps).abs() < 1e-12);
 
         // Stamps and carried metadata.
         assert_eq!(mixed.provenance, Provenance::Posterior { n_draws: 2 });
@@ -3369,9 +3347,7 @@ mod tests {
 
     #[test]
     fn combine_mixture_refuses_mismatched_axes() {
-        use sim::inference::prequential::{
-            PredInterval, PrequentialStep, PrequentialTrace, Provenance,
-        };
+        use sim::inference::prequential::{PrequentialStep, PrequentialTrace, Provenance};
         let trace_at = |t: f64| PrequentialTrace {
             schema_version: 3,
             t0: 0,
@@ -3379,13 +3355,8 @@ mod tests {
             conditioning: Conditioning::InSample,
             steps: vec![PrequentialStep {
                 t,
-                y_obs: 3.0,
-                y_pred_samples: vec![1.0],
                 log_score: -1.0,
-                crps: 0.0,
-                pit: 0.0,
                 ess: 10.0,
-                interval: PredInterval::default(),
                 per_stream: vec![],
             }],
             warnings: vec![],
@@ -3537,10 +3508,6 @@ mod tests {
     /// the per-stream file says its rows do not sum to the joint file's.
     #[test]
     fn pointwise_writes_the_joint_and_the_per_stream_scores_to_two_files() {
-        assert_eq!(streams_sibling(Path::new("out/scores.tsv")), Path::new("out/scores.streams.tsv"));
-        assert_eq!(streams_sibling(Path::new("out/scores")), Path::new("out/scores.streams"));
-        assert_eq!(streams_sibling(Path::new("a.b.tsv")), Path::new("a.b.streams.tsv"));
-
         let t = [7.0, 14.0];
         let base = row_with_streams("base", &t, &["north", "south"]);
         let mut cand = row_with_streams("cand", &t, &["north", "south"]);
@@ -4438,8 +4405,9 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         }]), "{v}");
     }
 
-    /// Two rows scoring `north` and `south`. Each step's own summed fields
-    /// carry sentinels (CRPS 77.7, PIT 0.5) that no output may show: the
+    /// Two rows scoring `north` and `south`, read back through a
+    /// `prequential.json` whose steps also carry an older trace's summed
+    /// fields with sentinels (CRPS 77.7, PIT 0.5) that no output may show: the
     /// summed predictive is not an observed quantity. `north` is calibrated
     /// (PIT 0.5 throughout); `south` is not (PIT 0.99), in row `b` only.
     fn two_stream_rows() -> Vec<Row> {
@@ -4447,16 +4415,21 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         let mut a = row_with_streams("a", &t, &["north", "south"]);
         let mut b = row_with_streams("b", &t, &["north", "south"]);
         for (k, (sa, sb)) in a.trace.steps.iter_mut().zip(&mut b.trace.steps).enumerate() {
-            for s in [&mut *sa, &mut *sb] {
-                s.crps = 77.7;
-                s.pit = 0.5;
-            }
             sa.per_stream[0].crps = 2.0;
             sa.per_stream[1].crps = 4.0 + k as f64;
             sb.per_stream[0].crps = 1.0;
             sb.per_stream[1].crps = 3.0;
             sb.per_stream[1].pit = 0.99;
             sb.log_score = -5.0;
+        }
+        for r in [&mut a, &mut b] {
+            let mut v = serde_json::to_value(&r.trace).unwrap();
+            for step in v["steps"].as_array_mut().unwrap() {
+                step["crps"] = serde_json::json!(77.7);
+                step["pit"] = serde_json::json!(0.5);
+                step["y_obs"] = serde_json::json!(77.7);
+            }
+            r.trace = serde_json::from_value(v).expect("the older on-disk form reads");
         }
         vec![a, b]
     }
@@ -4576,13 +4549,8 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         use sim::inference::prequential::{Conditioning, PrequentialStep, Provenance};
         let steps = times.iter().zip(log_scores).map(|(&t, &ls)| PrequentialStep {
             t,
-            y_obs: 10.0,
-            y_pred_samples: Vec::new(),
             log_score: ls,
-            crps: 1.0,
-            pit: 0.5,
             ess: 900.0,
-            interval: Default::default(),
             per_stream: Vec::new(),
         }).collect();
         Row {

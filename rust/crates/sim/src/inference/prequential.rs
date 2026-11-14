@@ -6,7 +6,7 @@
 //! score, CRPS, PIT), and the summary statistics (elpd, mean CRPS,
 //! PIT coverage) callers reach for.
 //!
-//! PF-side sample emission (the per-step `y_pred_samples` tensor) is
+//! PF-side sample emission (each stream's per-particle predictive draws) is
 //! wired in `particle_filter.rs`; this module is pure post-processing
 //! once the samples are available.
 //!
@@ -70,11 +70,12 @@ pub enum Conditioning {
 
 /// One stream's (district's) score at a single step (gh#269).
 ///
-/// The `--save-prequential` joint score is the cross-stream sum; this
-/// breaks it out per stream so a national fit can be diagnosed
-/// district-by-district. Computed with the SAME proper-scoring-rule
-/// kernels (log score, CRPS, PIT) as the joint, against the stream's own
-/// observed value and predictive sample.
+/// The step's joint log score is the log of the joint predictive density
+/// of every stream observed there; this is each stream's own, so a national
+/// fit can be diagnosed district-by-district. It is also the only home of
+/// accuracy and calibration: CRPS, PIT and the predictive interval are
+/// computed here, against the stream's own observed value and predictive
+/// sample, and nowhere across streams.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamScore {
     /// Stream name (the bound observation block / district).
@@ -82,14 +83,19 @@ pub struct StreamScore {
     /// This stream's observed value at the step.
     pub y_obs: f64,
     /// Per-particle predictive draws for this stream.
-    /// Cleared under `--no-save-samples` (mirrors the joint).
+    /// Cleared under `--no-save-samples`; the scalar scores remain valid.
     pub y_pred_samples: Vec<f64>,
     /// log p̂(y^stream | y_{1:t}) for this stream.
     pub log_score: f64,
-    /// Per-stream CRPS.
+    /// Continuous Ranked Probability Score, in the units of `y_obs` — the
+    /// fair sample estimator (`crps_sample_fair`; Ferro 2014), unbiased at
+    /// finite ensemble size.
     pub crps: f64,
-    /// Per-stream randomized PIT (same construction as the joint `pit`,
-    /// with its own uniform draw).
+    /// Randomized probability integral transform
+    /// u = P̂(X < y_obs) + v·P̂(X = y_obs), v ~ Uniform(0, 1)
+    /// (`pit_sample_randomized`; seed in the trace's
+    /// `pit_randomization_seed`). Uniform(0, 1) under correct calibration,
+    /// including for count predictives.
     pub pit: f64,
     /// This stream's plot-ready predictive interval (median + 50%/90% bands)
     /// from its predictive samples. The canonical per-district forecast band.
@@ -106,44 +112,33 @@ pub struct StreamScore {
     pub coverage: Coverage,
 }
 
-/// A single step's record: observation, predictive samples, and
-/// pointwise scores.
+/// A single step's record: the joint log score, the filter's ESS, and each
+/// scored stream's own scores.
 ///
-/// Stored per-step so downstream summaries (total elpd with paired
-/// SE, PIT coverage at any level, quantile plots) don't re-run the PF.
+/// Stored per-step so downstream summaries (total elpd with paired SE,
+/// per-stream CRPS and PIT coverage, quantile plots) don't re-run the PF.
+///
+/// The step has no observed value, predictive sample, CRPS, PIT or interval
+/// of its own: those are per stream ([`StreamScore`]). Summed across
+/// streams they would describe the sum of a case count, a death count and a
+/// count derived from a proportion, which no one observed. A trace written
+/// with those step-level fields (schemas 1–4) still reads; serde ignores the
+/// keys.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrequentialStep {
     /// Time index of the assimilated observation.
     pub t: f64,
-    /// Observed value at `t`.
-    pub y_obs: f64,
-    /// Per-particle predictive draws `ỹ^(s) ~ p(y | x_t^(s))`.
-    /// Empty if the pipeline elected not to save samples
-    /// (`--no-save-samples`). Scalar scores remain valid.
-    pub y_pred_samples: Vec<f64>,
-    /// log p̂(y_{t+1} | y_{1:t}) = log Σ w^(s) p(y | x^(s)).
+    /// log p̂(y_t | y_{1:t-1}) = log Σ w^(s) p(y_t | x^(s)): the log of the
+    /// joint one-step-ahead predictive density of every stream observed at
+    /// `t`. Summed over steps it is the elpd.
     pub log_score: f64,
-    /// Continuous Ranked Probability Score — the fair sample estimator
-    /// (`crps_sample_fair`; Ferro 2014), unbiased at finite ensemble size.
-    pub crps: f64,
-    /// Randomized probability integral transform
-    /// u_t = P̂(X < y_obs) + v·P̂(X = y_obs), v ~ Uniform(0, 1)
-    /// (`pit_sample_randomized`; seed in the trace's
-    /// `pit_randomization_seed`). Uniform(0, 1) under correct
-    /// calibration, including for count predictives.
-    pub pit: f64,
     /// Effective sample size of the filter at this step.
     pub ess: f64,
-    /// Plot-ready predictive interval (median + 50%/90% bands) of the JOINT
-    /// predictive samples — the equal-tailed central interval to draw against
-    /// the observed point. `#[serde(default)]`: v1 traces still deserialize.
-    #[serde(default)]
-    pub interval: PredInterval,
     /// Per-stream (per-district) score breakdown (gh#269). One entry per
     /// SCHEDULED, NON-HOLE stream at this step; `Σ per_stream.log_score`
-    /// need not equal `log_score` (log-of-sum vs sum-of-logs), but each
-    /// uses the same kernels on its own predictive. `#[serde(default)]`:
-    /// v1 traces (no per-stream field) still deserialize.
+    /// need not equal `log_score` (log-of-sum vs sum-of-logs).
+    /// `#[serde(default)]`: v1 traces (no per-stream field) still
+    /// deserialize, with no stream to summarize.
     #[serde(default)]
     pub per_stream: Vec<StreamScore>,
 }
@@ -210,10 +205,12 @@ pub struct PrequentialTrace {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score_from: Option<f64>,
     /// Seed of the randomized-PIT uniform draws (`pit_sample_randomized`):
-    /// one `v` per scored value, drawn from
-    /// `StatefulRng::new_stream(seed, PIT_RNG_STREAM)` in step order (joint
-    /// first, then each present stream). Recording it makes the trace's PIT
-    /// values reproducible. `None` on traces written before the randomized
+    /// one `v` per scored stream value, drawn from
+    /// `StatefulRng::new_stream(seed, PIT_RNG_STREAM)` in step order and,
+    /// within a step, in stream order over the present streams. Recording it
+    /// makes the trace's PIT values reproducible. (A trace that carries a
+    /// step-level `pit` drew one more `v` per step, for it, before the
+    /// step's streams.) `None` on traces written before the randomized
     /// PIT (gh#629); `#[serde(default)]` so those still deserialize, and
     /// omitted when absent (see `score_from`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -519,8 +516,8 @@ impl PrequentialStep {
     /// when the step carries no per-stream breakdown (a single-stream
     /// model, or a v1 trace). Non-finite scores sort first as in
     /// [`PrequentialTrace::worst_scored`]; ties break toward the first
-    /// stream. On a multi-stream model the joint `y_obs` is a cross-stream
-    /// sum, so this is the row a reader can actually look up in the data.
+    /// stream. A step has no observed value of its own, so this is the row a
+    /// reader can actually look up in the data.
     pub fn worst_stream(&self) -> Option<&StreamScore> {
         self.per_stream.iter().min_by(|a, b| worse_first(a.log_score, b.log_score))
     }
@@ -615,13 +612,14 @@ pub fn crps_sample_fair(samples: &[f64], y: f64) -> f64 {
     term1 - gini / (s_f * (s_f - 1.0))
 }
 
-/// Build a `PrequentialTrace` from raw PF recordings and the
-/// observation series.
+/// Build a `PrequentialTrace` from raw PF recordings and each stream's
+/// observed values.
 ///
 /// `recorded` comes from `PFilterResult.prequential` (requires
-/// `SMCConfig.record_prequential = true`). `y_obs` is the observation
-/// values in the same order as `recorded.obs_times`. `ess_trace`
-/// mirrors `PFilterResult.ess_trace`.
+/// `SMCConfig.record_prequential = true`). `per_stream_observed[k][s]` is
+/// stream `s`'s observed value at `recorded.obs_times[k]`, non-finite where
+/// the stream is not scheduled or is a hole. `ess_trace` mirrors
+/// `PFilterResult.ess_trace`.
 ///
 /// `t0` is the number of leading observations skipped (not scored).
 /// Under IC-free inference the first obs is used only to pin x_0;
@@ -630,8 +628,8 @@ pub fn crps_sample_fair(samples: &[f64], y: f64) -> f64 {
 /// `pit_seed` seeds the randomized-PIT uniform draws
 /// (`pit_sample_randomized`); callers pass their filter seed, and the
 /// trace records it (`pit_randomization_seed`). Draws are consumed in
-/// step order — one for the joint score, then one per present stream —
-/// so a trace is reproducible from (seed, data).
+/// step order, one per present stream in stream order, so a trace is
+/// reproducible from (seed, data).
 ///
 /// `has_warm_up` says whether the first observation's window opens after
 /// the run's start (`MultiStreamObsModel::first_observation_opens_after_run_start`).
@@ -645,7 +643,6 @@ pub fn crps_sample_fair(samples: &[f64], y: f64) -> f64 {
 /// gains auxiliary weighting, pass weighted log-score here.
 pub fn build_trace(
     recorded: &super::particle_filter::PrequentialRecorded,
-    y_obs: &[f64],
     per_stream_observed: &[Vec<f64>],
     per_stream_coverage: &[Vec<Option<Coverage>>],
     ess_trace: &[f64],
@@ -654,8 +651,6 @@ pub fn build_trace(
     has_warm_up: bool,
     score_from: Option<f64>,
 ) -> PrequentialTrace {
-    assert_eq!(recorded.obs_times.len(), y_obs.len(),
-        "y_obs must align 1:1 with recorded obs_times");
     assert_eq!(recorded.obs_times.len(), per_stream_observed.len(),
         "per_stream_observed must align 1:1 with recorded obs_times");
     assert_eq!(recorded.obs_times.len(), per_stream_coverage.len(),
@@ -671,45 +666,20 @@ pub fn build_trace(
 
     for idx in t0..recorded.obs_times.len() {
         let log_liks = &recorded.log_liks[idx];
-        let samples = &recorded.y_pred_samples[idx];
-        let y = y_obs[idx];
         let n = log_liks.len() as f64;
 
-        // gh#636: presence mask for this step. A hole (NA) or a
-        // not-scheduled sibling carries a non-finite observed value; the
-        // per-stream loop below already skips those. The JOINT scores must
-        // cover the SAME stream set: the recorded joint predictive sums every
-        // stream's draw, so at a partial-hole step it would be compared
-        // against an observed sum that omits the missing stream — a
-        // numerator/denominator mismatch, not a fictitious 0. Recompute the
-        // joint predictive over the PRESENT streams only; a step where no
-        // stream is present carries no information and is skipped entirely.
-        let present: Vec<usize> = (0..recorded.stream_names.len())
-            .filter(|&si| per_stream_observed[idx][si].is_finite())
-            .collect();
-        if present.is_empty() && !recorded.stream_names.is_empty() {
+        // gh#636: a hole (NA) or a not-scheduled sibling carries a
+        // non-finite observed value and has no term at this step; a step
+        // where no stream is present carries no information and is skipped
+        // entirely.
+        let any_present = (0..recorded.stream_names.len())
+            .any(|si| per_stream_observed[idx][si].is_finite());
+        if !any_present && !recorded.stream_names.is_empty() {
             continue;
         }
-        let all_present = present.len() == recorded.stream_names.len();
-        let joint_samples: Vec<f64> = if all_present {
-            // Hole-free step: the recorded joint is exactly this sum — reuse
-            // it so hole-free traces stay byte-identical.
-            samples.clone()
-        } else {
-            let n_particles = recorded.per_stream_samples[idx]
-                .first().map(|v| v.len()).unwrap_or(0);
-            (0..n_particles)
-                .map(|pi| present.iter()
-                    .map(|&si| recorded.per_stream_samples[idx][si][pi])
-                    .filter(|v| v.is_finite())
-                    .sum::<f64>())
-                .collect()
-        };
 
         // Uniform-weight log-score (see docstring).
         let log_score = super::types::log_sum_exp(log_liks) - n.ln();
-        let crps = crps_sample_fair(&joint_samples, y);
-        let pit = pit_sample_randomized(&joint_samples, y, pit_rng.uniform());
         let ess = ess_trace[idx];
         // The collapse cue scales with the swarm: an absolute floor (the old
         // 10.0) read N = 10_000 with ESS 50 — a 0.5% survival — as healthy.
@@ -747,10 +717,7 @@ pub fn build_trace(
 
         steps.push(PrequentialStep {
             t: recorded.obs_times[idx],
-            y_obs: y,
-            interval: PredInterval::from_samples(&joint_samples),
-            y_pred_samples: joint_samples,
-            log_score, crps, pit, ess,
+            log_score, ess,
             per_stream,
         });
     }
@@ -894,20 +861,14 @@ impl PredInterval {
 #[cfg(test)]
 mod tests {
 
-    /// gh#636: holes are first-class. At a partial-hole step the JOINT
-    /// predictive covers only the present streams (the recorded joint sums
-    /// every stream's draw — comparing that against an observed sum missing a
-    /// stream was a numerator/denominator mismatch); an all-hole step carries
-    /// no information and is omitted; a hole-free step reuses the recorded
-    /// joint byte-identically.
+    /// gh#636: holes are first-class. A hole stream has no score at its
+    /// step, the present streams keep theirs, and an all-hole step carries
+    /// no information and is omitted.
     #[test]
     fn build_trace_skips_holes_consistently() {
         let recorded = super::super::particle_filter::PrequentialRecorded {
             obs_times: vec![7.0, 14.0, 21.0],
             log_liks: vec![vec![-2.0, -2.0]; 3],
-            // Recorded joint = A + B at every step (the recorder cannot know
-            // about holes).
-            y_pred_samples: vec![vec![13.0, 15.0]; 3],
             stream_names: vec!["a".into(), "b".into()],
             per_stream_log_liks: vec![vec![vec![-1.0, -1.0], vec![-1.0, -1.0]]; 3],
             per_stream_samples: vec![
@@ -920,24 +881,18 @@ mod tests {
             vec![11.0, f64::NAN],
             vec![f64::NAN, f64::NAN],
         ];
-        let y_obs = vec![14.0, 11.0, 0.0];
-        let trace = build_trace(&recorded, &y_obs, &per_stream_observed,
+        let trace = build_trace(&recorded, &per_stream_observed,
                                 &interval_coverage(&recorded.obs_times, 2),
                                 &[100.0, 100.0, 100.0], 0, 7, true, None);
 
         assert_eq!(trace.steps.len(), 2, "the all-hole step is omitted");
-        // Hole-free step: recorded joint reused verbatim.
-        assert_eq!(trace.steps[0].y_pred_samples, vec![13.0, 15.0]);
         assert_eq!(trace.steps[0].per_stream.len(), 2);
-        // Partial-hole step: joint = present stream (a) only.
-        assert_eq!(trace.steps[1].y_pred_samples, vec![10.0, 12.0],
-            "joint predictive covers the present streams only");
         assert_eq!(trace.steps[1].per_stream.len(), 1,
             "the hole stream has no per-stream score");
         assert_eq!(trace.steps[1].per_stream[0].stream, "a");
-        // And the joint CRPS at that step is against the present-only sum.
+        // The present stream is scored against its own observed value.
         let expect = crps_sample_fair(&[10.0, 12.0], 11.0);
-        assert!((trace.steps[1].crps - expect).abs() < 1e-12);
+        assert!((trace.steps[1].per_stream[0].crps - expect).abs() < 1e-12);
     }
     use super::*;
 
@@ -964,7 +919,6 @@ mod tests {
         let recorded = super::super::particle_filter::PrequentialRecorded {
             obs_times: vec![7.0, 14.0],
             log_liks: vec![vec![-2.0, -2.0]; 2],
-            y_pred_samples: vec![vec![13.0, 15.0]; 2],
             stream_names: vec!["inc".into(), "prev".into()],
             per_stream_log_liks: vec![vec![vec![-1.0, -1.0], vec![-1.0, -1.0]]; 2],
             per_stream_samples: vec![vec![vec![10.0, 12.0], vec![3.0, 3.0]]; 2],
@@ -977,7 +931,7 @@ mod tests {
             vec![Some(inc0), Some(Coverage::Instant)],
             vec![Some(inc1), Some(Coverage::Instant)],
         ];
-        let trace = build_trace(&recorded, &[14.0, 3.0], &per_stream_observed, &coverage,
+        let trace = build_trace(&recorded, &per_stream_observed, &coverage,
                                 &[100.0, 100.0], 0, 7, true, None);
 
         assert_eq!(trace.schema_version, 5,
@@ -1062,8 +1016,7 @@ mod tests {
             crps: 0.0, pit: 0.5, interval: PredInterval::default(), coverage: Coverage::Instant,
         };
         let step = |t: f64, ls: f64, per: Vec<StreamScore>| PrequentialStep {
-            t, y_obs: 1.0, y_pred_samples: vec![], log_score: ls, crps: 0.0, pit: 0.5,
-            ess: 10.0, interval: PredInterval::default(), per_stream: per,
+            t, log_score: ls, ess: 10.0, per_stream: per,
         };
         let trace = PrequentialTrace {
             schema_version: 5, t0: 0, provenance: Provenance::PlugIn,
@@ -1087,6 +1040,63 @@ mod tests {
         // Absent, not null: in a trace a null means a non-finite score leaked.
         assert!(json.get("mc_se_elpd").is_none(), "{json}");
         assert!(json.get("overrides").is_none(), "no overrides, omitted: {json}");
+    }
+
+    /// The step-level fields scored on the summed multi-stream predictive
+    /// (`y_obs`, `y_pred_samples`, `crps`, `pit`, `interval`) are not part of a
+    /// step. A schema-4 trace that carries them still reads, its per-stream
+    /// scores intact and the summed fields ignored, and writing it back drops
+    /// them.
+    #[test]
+    fn a_schema_4_trace_reads_with_its_summed_step_fields_ignored() {
+        let old = r#"{
+            "schema_version": 4, "t0": 0, "provenance": "plug_in",
+            "conditioning": "in_sample", "warnings": [],
+            "steps": [{
+                "t": 7.0, "y_obs": 15.0, "y_pred_samples": [13.0, 17.0],
+                "log_score": -4.5, "crps": 77.7, "pit": 0.5, "ess": 90.0,
+                "interval": {"q05": 1.0, "q25": 2.0, "q50": 3.0, "q75": 4.0, "q95": 5.0},
+                "per_stream": [
+                    {"stream": "cases", "y_obs": 11.0, "y_pred_samples": [10.0, 12.0],
+                     "log_score": -2.0, "crps": 0.5, "pit": 0.25,
+                     "coverage": {"kind": "interval", "start": 0.0, "stop": 7.0}},
+                    {"stream": "deaths", "y_obs": 4.0, "y_pred_samples": [3.0, 5.0],
+                     "log_score": -2.5, "crps": 0.75, "pit": 0.75,
+                     "coverage": {"kind": "instant"}}
+                ]
+            }]
+        }"#;
+        let t: PrequentialTrace = serde_json::from_str(old).expect("a schema-4 trace reads");
+        assert_eq!(t.elpd(), -4.5);
+        assert_eq!(t.streams(), ["cases", "deaths"]);
+        assert_eq!(t.mean_crps("deaths").value, 0.75);
+        assert_eq!(t.steps[0].per_stream[0].y_pred_samples, vec![10.0, 12.0]);
+        let written = serde_json::to_value(&t).unwrap();
+        let step = written["steps"][0].as_object().unwrap();
+        for k in ["y_obs", "y_pred_samples", "crps", "pit", "interval"] {
+            assert!(!step.contains_key(k), "a step carries no summed `{k}`: {written}");
+        }
+        assert!(!written.to_string().contains("77.7"), "{written}");
+    }
+
+    /// A schema-1 trace has no per-stream breakdown. It still reads and its
+    /// elpd still sums, but it names no stream, so it has no CRPS or
+    /// calibration figure to report.
+    #[test]
+    fn a_schema_1_trace_reads_and_has_elpd_but_no_stream_figures() {
+        let old = r#"{
+            "schema_version": 1, "t0": 1, "provenance": "plug_in", "warnings": [],
+            "steps": [
+                {"t": 7.0, "y_obs": 3.0, "y_pred_samples": [], "log_score": -1.5,
+                 "crps": 0.5, "pit": 0.5, "ess": 100.0},
+                {"t": 14.0, "y_obs": 4.0, "y_pred_samples": [], "log_score": -2.5,
+                 "crps": 0.5, "pit": 0.5, "ess": 100.0}
+            ]
+        }"#;
+        let t: PrequentialTrace = serde_json::from_str(old).expect("a schema-1 trace reads");
+        assert_eq!(t.elpd(), -4.0);
+        assert_eq!(t.n_scored(), 2);
+        assert!(t.streams().is_empty(), "no per-stream breakdown, so no stream to summarize");
     }
 
     #[test]
@@ -1215,8 +1225,7 @@ mod tests {
 
     fn scored_step(t: f64, log_score: f64, streams: &[(&str, f64)]) -> PrequentialStep {
         PrequentialStep {
-            t, y_obs: 0.0, y_pred_samples: vec![], log_score, crps: 0.0, pit: 0.5,
-            ess: 10.0, interval: PredInterval::default(),
+            t, log_score, ess: 10.0,
             per_stream: streams.iter().map(|(name, ls)| StreamScore {
                 stream: name.to_string(), y_obs: 0.0, y_pred_samples: vec![],
                 log_score: *ls, crps: 0.0, pit: 0.5, interval: PredInterval::default(),
@@ -1468,24 +1477,26 @@ mod tests {
         let recorded = super::super::particle_filter::PrequentialRecorded {
             obs_times: vec![1.0],
             log_liks: vec![vec![-1.0; 4]],
-            y_pred_samples: vec![vec![1.0, 2.0, 2.0, 3.0]],
             stream_names: vec!["s0".to_string()],
             per_stream_log_liks: vec![vec![vec![-1.0; 4]]],
             per_stream_samples: vec![vec![vec![1.0, 2.0, 2.0, 3.0]]],
         };
-        let y_obs = vec![2.0];  // ties with two samples → v matters
-        let per_stream_observed = vec![vec![2.0]];
+        let per_stream_observed = vec![vec![2.0]];  // ties with two samples → v matters
         let cov = interval_coverage(&recorded.obs_times, 1);
         let ess = vec![100.0];
-        let a = build_trace(&recorded, &y_obs, &per_stream_observed, &cov, &ess, 0, 11, true, None);
-        let b = build_trace(&recorded, &y_obs, &per_stream_observed, &cov, &ess, 0, 11, true, None);
-        let c = build_trace(&recorded, &y_obs, &per_stream_observed, &cov, &ess, 0, 12, true, None);
+        let a = build_trace(&recorded, &per_stream_observed, &cov, &ess, 0, 11, true, None);
+        let b = build_trace(&recorded, &per_stream_observed, &cov, &ess, 0, 11, true, None);
+        let c = build_trace(&recorded, &per_stream_observed, &cov, &ess, 0, 12, true, None);
+        let pit = |t: &PrequentialTrace| t.steps[0].per_stream[0].pit;
         assert_eq!(a.pit_randomization_seed, Some(11));
-        assert_eq!(a.steps[0].pit, b.steps[0].pit, "same seed must reproduce");
-        assert_ne!(a.steps[0].pit, c.steps[0].pit,
-            "a different seed must move the PIT at a tied step");
+        assert_eq!(pit(&a), pit(&b), "same seed must reproduce");
+        assert_ne!(pit(&a), pit(&c), "a different seed must move the PIT at a tied step");
         // The randomized PIT stays inside the atom's interval.
-        assert!(a.steps[0].pit >= 0.25 && a.steps[0].pit <= 0.75);
+        assert!(pit(&a) >= 0.25 && pit(&a) <= 0.75);
+        // The draw order: the stream's PIT takes the first uniform of the
+        // seeded stream — no draw precedes it for a step-level PIT.
+        let v = crate::rng::StatefulRng::new_stream(11, PIT_RNG_STREAM).uniform();
+        assert_eq!(pit(&a), pit_sample_randomized(&[1.0, 2.0, 2.0, 3.0], 2.0, v));
     }
 
     /// A trace whose streams carry the given (CRPS, PIT) at successive steps;
@@ -1568,19 +1579,16 @@ mod tests {
     fn build_trace_from_recorded_aligns_with_kernels() {
         // Hand-rolled PrequentialRecorded with two steps; verify
         // build_trace computes the same log_score / crps / pit as the
-        // standalone kernels and forwards ess correctly.
+        // standalone kernels and forwards ess correctly. The step carries
+        // only the joint log score; CRPS and PIT are the stream's.
         let recorded = super::super::particle_filter::PrequentialRecorded {
             obs_times: vec![1.0, 2.0],
             log_liks: vec![
                 vec![-1.0, -2.0, -0.5, -3.0],
                 vec![-0.1, -0.2, -0.3, -0.4],
             ],
-            y_pred_samples: vec![
-                vec![1.0, 2.0, 3.0, 4.0],
-                vec![5.5, 5.0, 4.5, 6.0],
-            ],
-            // Single-stream recorded: the stream's per-particle log-liks and
-            // samples ARE the joint ones (one stream ⇒ joint = the stream).
+            // Single-stream recorded: the stream's per-particle log-liks ARE
+            // the joint ones (one stream ⇒ joint = the stream).
             stream_names: vec!["s0".to_string()],
             per_stream_log_liks: vec![
                 vec![vec![-1.0, -2.0, -0.5, -3.0]],
@@ -1591,12 +1599,11 @@ mod tests {
                 vec![vec![5.5, 5.0, 4.5, 6.0]],
             ],
         };
-        let y_obs = vec![2.5, 5.2];
         let per_stream_observed = vec![vec![2.5], vec![5.2]];
         // 4 particles ⇒ collapse threshold 0.1·4 = 0.4; second step below it.
         let ess = vec![100.0, 0.3];
 
-        let trace = build_trace(&recorded, &y_obs, &per_stream_observed,
+        let trace = build_trace(&recorded, &per_stream_observed,
                                 &interval_coverage(&recorded.obs_times, 1), &ess, 0, 7, true, None);
         assert_eq!(trace.steps.len(), 2);
         assert_eq!(trace.t0, 0);
@@ -1606,28 +1613,24 @@ mod tests {
             - (4.0_f64).ln();
         assert!(approx_eq(trace.steps[0].log_score, expected_ls0, 1e-12));
         // CRPS/PIT agree with kernels.
-        assert!(approx_eq(trace.steps[0].crps,
-            crps_sample_fair(&recorded.y_pred_samples[0], 2.5), 1e-12));
+        let s0 = &trace.steps[0].per_stream[0];
+        assert!(approx_eq(s0.crps,
+            crps_sample_fair(&recorded.per_stream_samples[0][0], 2.5), 1e-12));
         // y = 2.5 ties no sample, so the PIT is v-independent and must match
         // the kernel at any v.
-        assert!(approx_eq(trace.steps[0].pit,
-            pit_sample_randomized(&recorded.y_pred_samples[0], 2.5, 0.0), 1e-12));
+        assert!(approx_eq(s0.pit,
+            pit_sample_randomized(&recorded.per_stream_samples[0][0], 2.5, 0.0), 1e-12));
 
         // ESS warning fires for the low-ess second step.
         assert_eq!(trace.warnings.len(), 1);
         matches!(trace.warnings[0], PrequentialWarning::EssCollapse { step_count: 1, .. });
 
-        // gh#269: one stream, so the single per-stream score equals the joint
-        // (same per-particle log-liks + samples + observed value).
+        // gh#269: one stream, so the single per-stream log score equals the
+        // joint (same per-particle log-liks).
         assert_eq!(trace.schema_version, 5);
         assert_eq!(trace.steps[0].per_stream.len(), 1);
-        assert_eq!(trace.steps[0].per_stream[0].stream, "s0");
-        assert!(approx_eq(trace.steps[0].per_stream[0].log_score,
-            trace.steps[0].log_score, 1e-12));
-        assert!(approx_eq(trace.steps[0].per_stream[0].crps,
-            trace.steps[0].crps, 1e-12));
-        assert!(approx_eq(trace.steps[0].per_stream[0].pit,
-            trace.steps[0].pit, 1e-12));
+        assert_eq!(s0.stream, "s0");
+        assert!(approx_eq(s0.log_score, trace.steps[0].log_score, 1e-12));
     }
 
     #[test]
@@ -1639,21 +1642,19 @@ mod tests {
         let recorded = super::super::particle_filter::PrequentialRecorded {
             obs_times: vec![1.0, 2.0],
             log_liks: vec![vec![-1.0; 4]; 2],
-            y_pred_samples: vec![vec![0.5, 1.0, 1.5, 2.0]; 2],
             stream_names: vec!["s0".to_string()],
             per_stream_log_liks: vec![vec![vec![-1.0; 4]]; 2],
             per_stream_samples: vec![vec![vec![0.5, 1.0, 1.5, 2.0]]; 2],
         };
-        let y_obs = vec![1.25; 2];
         let per_stream_observed = vec![vec![1.25]; 2];
         let cov = interval_coverage(&recorded.obs_times, 1);
 
-        let healthy = build_trace(&recorded, &y_obs, &per_stream_observed, &cov,
+        let healthy = build_trace(&recorded, &per_stream_observed, &cov,
                                   &[4.0, 4.0], 0, 7, true, None);
         assert!(healthy.warnings.is_empty(),
             "full survival at small N must not warn: {:?}", healthy.warnings);
 
-        let collapsed = build_trace(&recorded, &y_obs, &per_stream_observed, &cov,
+        let collapsed = build_trace(&recorded, &per_stream_observed, &cov,
                                     &[4.0, 0.3], 0, 7, true, None);
         match collapsed.warnings.as_slice() {
             [PrequentialWarning::EssCollapse { step_count, threshold }] => {
@@ -1673,27 +1674,25 @@ mod tests {
         let recorded = super::super::particle_filter::PrequentialRecorded {
             obs_times: vec![1.0, 2.0],
             log_liks: vec![vec![-1.0; 4]; 2],
-            y_pred_samples: vec![vec![0.5, 1.0, 1.5, 2.0]; 2],
             stream_names: vec!["s0".to_string()],
             per_stream_log_liks: vec![vec![vec![-1.0; 4]]; 2],
             per_stream_samples: vec![vec![vec![0.5, 1.0, 1.5, 2.0]]; 2],
         };
-        let y_obs = vec![1.25; 2];
         let obs = vec![vec![1.25]; 2];
         let cov = interval_coverage(&recorded.obs_times, 1);
         let ess = vec![100.0; 2];
 
-        let bare = build_trace(&recorded, &y_obs, &obs, &cov, &ess, 0, 7, false, None);
+        let bare = build_trace(&recorded, &obs, &cov, &ess, 0, 7, false, None);
         assert!(bare.warnings.iter()
             .any(|w| matches!(w, PrequentialWarning::StartsAtPrior)),
             "t0=0 without a warm-up must warn: {:?}", bare.warnings);
 
-        let warmed = build_trace(&recorded, &y_obs, &obs, &cov, &ess, 0, 7, true, None);
+        let warmed = build_trace(&recorded, &obs, &cov, &ess, 0, 7, true, None);
         assert!(!warmed.warnings.iter()
             .any(|w| matches!(w, PrequentialWarning::StartsAtPrior)),
             "a conditioning window places the boundary deliberately");
 
-        let skipped = build_trace(&recorded, &y_obs, &obs, &cov, &ess, 1, 7, false, None);
+        let skipped = build_trace(&recorded, &obs, &cov, &ess, 1, 7, false, None);
         assert!(!skipped.warnings.iter()
             .any(|w| matches!(w, PrequentialWarning::StartsAtPrior)),
             "t0 >= 1 assimilates before scoring");
@@ -1708,16 +1707,14 @@ mod tests {
         let recorded = super::super::particle_filter::PrequentialRecorded {
             obs_times: vec![1.0, 2.0, 3.0],
             log_liks: vec![vec![-1.0; 4]; 3],
-            y_pred_samples: vec![vec![0.5, 1.0, 1.5, 2.0]; 3],
             stream_names: vec!["s0".to_string()],
             per_stream_log_liks: vec![vec![vec![-1.0; 4]]; 3],
             per_stream_samples: vec![vec![vec![0.5, 1.0, 1.5, 2.0]]; 3],
         };
-        let y_obs = vec![1.25; 3];
         let per_stream_observed = vec![vec![1.25]; 3];
         let ess = vec![100.0; 3];
 
-        let trace = build_trace(&recorded, &y_obs, &per_stream_observed,
+        let trace = build_trace(&recorded, &per_stream_observed,
                                 &interval_coverage(&recorded.obs_times, 1), &ess, 1, 7, true, None);
         assert_eq!(trace.steps.len(), 2);
         assert_eq!(trace.t0, 1);
