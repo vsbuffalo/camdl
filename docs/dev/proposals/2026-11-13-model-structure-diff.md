@@ -120,23 +120,31 @@ pub struct IrEnvelope {
 pub struct DeclaredModel {
     pub schema_version: u32,               // its own; starts at 1
     pub compile_inputs: CompileInputs,     // --set values; digests of files read
-    pub dimensions:    Vec<DimensionDecl>,   // name, resolved levels, level source
-    pub compartments:  Vec<CompartmentDecl>, // name, dims, kind
-    pub transitions:   Vec<TransitionDecl>,  // name, from, to, rate or via, draw method
-    pub definitions:   Vec<DefinitionDecl>,  // every `let`: name, indices, body
-    pub parameters:    Vec<ParameterDecl>,   // name, state, prior, bounds, kind, dim
-    pub constants:     Vec<ConstantDecl>,
-    pub time_inputs:   Vec<TimeInputDecl>,   // time functions, tables, splines
-    pub interventions: Vec<InterventionDecl>, // interventions, events, reactive
-    pub scenarios:     Vec<ScenarioDecl>,
-    pub initial:       Vec<InitialDecl>,     // compartment, expression or law
-    pub observations:  Vec<ObservationDecl>, // stream, family, arguments, schedule,
-                                             // source, columns, covers, projection
-    pub simulation:    SimulationDecl,       // dt, time unit, origin, start, end,
-                                             // seed, integrator
-    pub output:        OutputDecl,
-    pub balance:       Option<BalanceDecl>,
+    pub time_unit: Option<UnitLit>,
+    pub description: Option<String>,
+    pub origin: Option<String>,
+    pub dimensions:    Vec<DimensionDecl>,   // name, level source, resolved levels
+    pub compartments:  Vec<CompartmentDecl>, // name, kind, dims, expands_to
+    pub stratify:      Vec<StratifyDecl>,
+    pub parameters:    Vec<ParameterDecl>,   // name, dims, kind, dim, bounds, prior
+    pub definitions:   Vec<DefinitionDecl>,  // every `let`, constants included
+    pub tables:        Vec<TableDecl>,
+    pub time_inputs:   Vec<TimeInputDecl>,
+    pub timepoints:    Vec<TimepointDecl>,
+    pub transitions:   Vec<TransitionDecl>,  // name, from, to, rate or via, guard,
+                                             // expands_to
     pub ode_equations: Vec<OdeDecl>,
+    pub balance:       Vec<BalanceDecl>,
+    pub initial:       Vec<InitialDecl>,     // compartment, expression or law
+    pub observations:  Vec<ObservationDecl>, // source, columns, measurement,
+                                             // projection, schedule, covers,
+                                             // expands_to
+    pub interventions: Vec<InterventionDecl>,
+    pub events:        Vec<InterventionDecl>,
+    pub reactive_interventions: Vec<ReactiveDecl>,
+    pub scenarios:     Vec<ScenarioDecl>,
+    pub simulation:    Option<SimulationDecl>, // from, to, dt, integrator, tolerances
+    pub output:        Option<OutputDecl>,
     pub quantities:    Vec<QuantityDecl>,
     pub contrasts:     Vec<ContrastDecl>,
 }
@@ -148,10 +156,50 @@ pub struct DeclaredExpr {
 }
 ```
 
+The types are the `declared` crate, `rust/crates/declared/src/lib.rs`, which is
+the authority; the listing above is its top level. The crate is a leaf: types
+and serde only, with no dependency on `ir`, `runid`, `sim` or `cli`. `ir`
+depends on it for the envelope field and for `ParamKind`, which is defined there
+once and re-exported. Every type refuses unknown fields, because a reader that
+ignored a field it did not know could report two models as the same when they
+differ in it; adding a field is a `schema_version` step.
+
 Each list is in declaration order. `ExprTree` is the compiler's parsed
 expression type (`expr`, `ocaml/lib/compiler/ast.ml:77-105`) with source
-locations removed and each name tagged with what it resolved to (compartment,
-parameter, definition, constant, time input, index variable).
+locations removed and each name tagged with the kind it resolved to. The types
+follow the parsed declarations, which differ from the compiled model in four
+ways that shape the rows below:
+
+- A parameter declaration holds name, kind, dimension, bounds and prior
+  (`ast.ml:153-155`). Whether it is fixed or estimated is not declared; the
+  compiled model's `ParamValue` state is derived by the compiler.
+- There is no constant declaration. A constant is a `let` with a kind annotation
+  (`ast.ml:292-305`), so it is a definition.
+- A transition has no draw-method field (`ast.ml:263-280`). Overdispersion is a
+  function call inside the rate and is part of the rate tree.
+- The `simulate` block holds from, to, step, integrator and tolerances
+  (`ast.ml:601-609`). Time unit, origin and description are top-level
+  declarations. There is no seed: the compiler writes `rng_seed = None` at both
+  places it builds the simulation settings
+  (`ocaml/lib/compiler/expander.ml:6686`, `:6784`) and no compiler flag sets it,
+  so the seed is a run input and never a model difference.
+
+**`reads` and every name's kind come from the compiler's own name resolution**,
+not from a second classification written for this section. A compiler test
+checks, over every golden, that each name in a declared tree resolves to exactly
+one kind. The crate's `NameKind` list is provisional until emission fixes it
+from the resolver.
+
+**Agreement with what already describes the model.** Two older partial
+descriptions stay as they are: `ModelStructure` inside the compiled model
+(`rust/crates/ir/src/model.rs:379-386`), which is hashed, and the compiler's
+flow-graph types (`ocaml/lib/compiler/latex.ml:541-553`), which build
+`model.graph.json`. A test checks, on every golden, that each agrees with the
+declared section: the same dimensions and levels, the same base compartments and
+their dimensions, and one graph edge per source and destination pair of each
+declared transition. The doc-comment dictionary `docs` also stays where it is;
+folding it into this section is a later change. A changed doc comment is a
+reporting-layer row and never a model difference.
 
 Each declared transition, compartment and observation stream also carries
 `expands_to`, the expanded names it produced. Nothing else links the expanded
@@ -163,9 +211,9 @@ outputs back to declarations. Row status never depends on it.
 That reader refuses any envelope whose IR version is not its own
 (`envelope.rs:126-133`), and a published bundle is read for as long as it is
 cited. So `DeclaredModel` is a self-contained document: it deserializes through
-its own types in the diff crate, is versioned by its own `schema_version` and
-never by `ir_version`, refers to nothing in `Model`, and every published version
-of its schema stays readable. `camdl publish` copies it out of the envelope into
+the `declared` crate alone, is versioned by its own `schema_version` and never
+by `ir_version`, refers to nothing in `Model`, and every published version of
+its schema stays readable. `camdl publish` copies it out of the envelope into
 the bundle as its own file, beside the model identity as a string, so neither
 the viewer nor `camdl diff` on two bundles ever loads a compiled model. A test
 reads a `declared` document from an envelope whose `ir_version` is not the
@@ -173,8 +221,7 @@ current one.
 
 `declared` absent means not recorded, and the diff then reports itself
 unavailable for that side. It is never backfilled by recompiling at archive
-time. `model.graph.json` stays for its existing consumers and becomes a
-projection of this section.
+time.
 
 ### When two expressions are the same
 
@@ -218,8 +265,8 @@ so a transition whose rate reads `N` is `Same` as written when `let N` changes,
 and the Definition row for `N` is `Changed`. That is the correct statement about
 what is written, and on its own it would leave the infection arrow unlit when
 the force of infection changed. So each row also carries `affected_by`: the
-changed definitions, constants and time inputs it reads, directly or through
-other definitions, computed from `reads`. A row that is `Same` with a non-empty
+changed definitions and time inputs it reads, directly or through other
+definitions, computed from `reads`. A row that is `Same` with a non-empty
 `affected_by` is shown as "unchanged as written; reads a changed definition",
 and the flow diagram highlights it.
 
@@ -235,8 +282,8 @@ the same model and the second does not (measured).
 Entities are matched **by category and name, exactly.** No fuzzy matching and no
 structural guessing.
 
-- Compartments, dimensions, levels, definitions, parameters, constants,
-  observation streams, scenarios, quantities: by name.
+- Compartments, dimensions, levels, definitions, parameters, observation
+  streams, scenarios, quantities: by name.
 - Transitions: by declared name. A branching or multi-source transition fans out
   to several flow-graph edges with ids `name__src__dst` (`latex.ml:676-680`), so
   each edge carries the declared name it belongs to and the viewer highlights by
@@ -282,24 +329,23 @@ Every row is tagged with its layer.
 
 **Model layer**: what the model file declares and `model_ir_hash` covers.
 
-| Category             | Changed when                                                                                  |
-| -------------------- | --------------------------------------------------------------------------------------------- |
-| Dimension            | Level set differs                                                                             |
-| Compartment          | Dimensions or kind differ                                                                     |
-| Transition           | From, to, rate tree, staging law or draw method differ                                        |
-| Definition           | Indices or body tree differ                                                                   |
-| Constant             | Value differs                                                                                 |
-| Parameter (declared) | State, fixed value, prior, bounds, kind or dimension, as the model file declares them, differ |
-| Initial condition    | Expression tree or law differs                                                                |
-| Observation stream   | Family, argument trees, schedule, source label, columns, `covers` or projection differ        |
-| Time input, table    | Definition differs                                                                            |
-| Intervention, event  | Definition differs                                                                            |
-| Scenario             | A declared `scenarios {}` entry differs                                                       |
-| Simulation           | Step, time unit, origin, start, end, seed or integrator differ                                |
-| Output               | Output times or the trajectory and observation flags differ                                   |
-| Balance, ODE         | Definition differs                                                                            |
-| Declaration order    | The same entities of one category appear in a different order                                 |
-| Compile input        | A compile-time `--set` value or the digest of a file read at compile time differs             |
+| Category             | Changed when                                                                           |
+| -------------------- | -------------------------------------------------------------------------------------- |
+| Dimension            | Level set differs                                                                      |
+| Compartment          | Dimensions or kind differ                                                              |
+| Transition           | From, to, rate tree, staging law or guard differ                                       |
+| Definition           | Indices, kind or body tree differ (constants are definitions)                          |
+| Parameter (declared) | Kind, dimension, bounds or prior, as the model file declares them, differ              |
+| Initial condition    | Expression tree or law differs                                                         |
+| Observation stream   | Family, argument trees, schedule, source label, columns, `covers` or projection differ |
+| Time input, table    | Definition differs                                                                     |
+| Intervention, event  | Definition differs                                                                     |
+| Scenario             | A declared `scenarios {}` entry differs                                                |
+| Simulation           | Start, end, step, integrator, tolerances, time unit or origin differ                   |
+| Output               | Output times or the trajectory and observation flags differ                            |
+| Balance, ODE         | Definition differs                                                                     |
+| Declaration order    | The same entities of one category appear in a different order                          |
+| Compile input        | A compile-time `--set` value or the digest of a file read at compile time differs      |
 
 Declaration order is a category, and not ignored, because the hash covers it:
 reordering transitions, parameters, compartments or `init` entries changes
@@ -307,8 +353,8 @@ reordering transitions, parameters, compartments or `init` entries changes
 consumption. Moving a `let` does not change the hash and is not an order
 difference.
 
-**Reporting layer**: `quantities` and `contrasts`, which the hash excludes.
-Shown separately.
+**Reporting layer**: `quantities` and `contrasts`, which the hash excludes, and
+doc comments, which sit outside the model. Shown separately.
 
 **Fit layer**: facts that belong to a fit and not to a model.
 
@@ -323,20 +369,18 @@ Shown separately.
 **Parameter state is reported as actually fitted, each fact attributed to the
 layer that set it.** Where each lives (_verified_):
 
-| Fact               | Model file                                               | Fit configuration                                                                                  | Which wins                                                                                         |
-| ------------------ | -------------------------------------------------------- | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| Fixed or estimated | `ParamValue` (`parameter.rs:189-208`)                    | `[estimate]` and `[fixed]`, which together must cover every parameter (`fit/config_v2.rs:115-119`) | The fit configuration always                                                                       |
-| Fixed value        | `ParamValue::Fixed { value }`, or a compile-time `--set` | `[fixed]`                                                                                          | The fit configuration                                                                              |
-| Prior              | `~` in the model (`PriorSpec` inside `Estimated`)        | `[estimate.<p>.prior]` (`config_v2.rs:585-600`)                                                    | Fit configuration, then model, then flat only by explicit opt-in (`fit/priors_precedence.rs:4-42`) |
-| Bounds             | `in [lo, hi]`                                            | `[estimate.<p>].bounds`, which may tighten but not loosen (`config_v2.rs:575-583`)                 | Fit configuration when present, else model                                                         |
-| Scenario           | `scenarios {}` definitions                               | `scenario`, `enable`, `disable` (`config_v2.rs:128-134`)                                           | Definitions are model; the choice is fit                                                           |
+| Fact               | Model file                                                     | Fit configuration                                                                                  | Which wins                                                                                         |
+| ------------------ | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Fixed or estimated | Not declared; `ParamValue` (`parameter.rs:189-208`) is derived | `[estimate]` and `[fixed]`, which together must cover every parameter (`fit/config_v2.rs:115-119`) | The fit configuration always                                                                       |
+| Fixed value        | A compile-time `--set` only                                    | `[fixed]`                                                                                          | The fit configuration                                                                              |
+| Prior              | `~` in the model (`PriorSpec` inside `Estimated`)              | `[estimate.<p>.prior]` (`config_v2.rs:585-600`)                                                    | Fit configuration, then model, then flat only by explicit opt-in (`fit/priors_precedence.rs:4-42`) |
+| Bounds             | `in [lo, hi]`                                                  | `[estimate.<p>].bounds`, which may tighten but not loosen (`config_v2.rs:575-583`)                 | Fit configuration when present, else model                                                         |
+| Scenario           | `scenarios {}` definitions                                     | `scenario`, `enable`, `disable` (`config_v2.rs:128-134`)                                           | Definitions are model; the choice is fit                                                           |
 
 The model identity a fit stores is the model as compiled, without the fit
-configuration applied. So the declared row and the effective row can disagree in
-both directions: a parameter one fit fixes through `[fixed]` is `Same` as
-declared, and a prior edited in the model file but overridden identically in
-both configurations is `Changed` as declared although both fits used the same
-prior.
+configuration applied. So the declared row and the effective row can disagree: a
+prior edited in the model file but overridden identically in both configurations
+is `Changed` as declared although both fits used the same prior.
 
 The effective row is the one given prominence, and it names the source of each
 fact ("prior: log-normal(−1, 0.5), set in fit configuration"). "Model A
@@ -439,8 +483,9 @@ may annotate it; the viewer does not generate interpretation.
 ### Where the code lives
 
 - The declared model is emitted by the compiler on the compile path, after
-  expansion, so that names are resolved and `expands_to` is known. Types in
-  `ocaml/lib/ir/` and `rust/crates/ir/src/`.
+  expansion, so that names are resolved and `expands_to` is known. The Rust
+  types are the `declared` crate; the OCaml types and the serializer are in
+  `ocaml/lib/ir/`.
 - The diff is a Rust crate depending on the declared-model types, `serde` and
   `serde_json`. It hashes nothing: sameness is tree equality, and the two model
   hashes arrive as inputs. It reads no files and starts no threads, so it is
@@ -496,8 +541,12 @@ regenerated and reviewed.
   `ocaml/lib/ir/`, `rust/crates/ir/src/` or a golden. The unmerged branches that
   do are the b-spline ones (`feat/bsplines`, `feat/bsplines-explicit`,
   `feat/bsplines-s3-local`, and `origin/feat/bsplines-s1`, which carries its own
-  `ir/VERSION` change) and `nuts-divergence-tests`; whichever of the two lands
-  second rebases and regenerates.
+  `ir/VERSION` change) and `nuts-divergence-tests`. Their last commits are dated
+  2026-10-27 to 2026-10-29, none has a pull request, and the b-spline proposal
+  keeps `feat/bsplines` off main until its measurement criteria are met. So this
+  change lands first, and the b-spline work, when it lands, rebases, regenerates
+  goldens, and adds its declaration kinds to the declared section as a
+  `schema_version` step.
 - **gh#1046 is a separate change and moves no golden.** None of the 62 files in
   `ocaml/golden/` contains a hoisted subtree (no `__licm_` name appears in any),
   so its fix re-keys only models that have one and leaves the golden set
@@ -526,6 +575,10 @@ Each is a test.
 8. The report is byte-identical across runs and thread counts.
 9. Compiling any golden yields the same `model_ir_hash` and run ids with and
    without the `declared` section.
+10. On every golden, each name in every declared tree resolves to exactly one
+    kind, and `reads` is the set the compiler's name resolution reports.
+11. On every golden, `ModelStructure` and the flow graph agree with the declared
+    section.
 
 ## What it does not do
 
@@ -574,8 +627,9 @@ viewer's first published comparison.
 1. Fix gh#1046: `model_ir_hash` differs between a full and a `--no-state-grad`
    compile of one source when a subtree is hoisted. Until it is fixed, a model
    file compared with its own fit can land in the refused fourth outcome.
-2. The `declared` envelope section: OCaml and Rust types, emission, `ir/VERSION`
-   0.44, goldens, invariant 9. Tests for the three _inferred_ parse facts.
+2. The `declared` envelope section: the `declared` crate (types, done), the
+   OCaml types and emission, the envelope field, `ir/VERSION` 0.44, goldens,
+   invariants 9 to 11. Compiler-side tests for the _inferred_ parse facts.
 3. The config facts record, and `ConfigDiff` as a function of two of them.
 4. The diff crate: tree sameness, matching, the three layers, `affected_by`, the
    three outcomes, invariants 1 to 5 and 8.
