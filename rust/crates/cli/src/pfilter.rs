@@ -1013,16 +1013,10 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         // Schema 5: how this trace was computed. One pass (`--replicates N`
         // is refused beside `--save-prequential`), at the parameters this
         // invocation was given.
-        trace.derivation = Some(sim::inference::prequential::Derivation {
-            particles: n_particles,
-            replicates: 1,
-            dt,
-            seed,
-            theta: sim::inference::prequential::ThetaSource::Supplied,
-            excluded_chains: Vec::new(),
-            enabled: adhoc_enable.clone(),
-            disabled: adhoc_disable.clone(),
-        });
+        trace.derivation = Some(sim::inference::prequential::Derivation::single_pass(
+            &trace, n_particles, dt, seed,
+            sim::inference::prequential::ThetaSource::Supplied,
+            adhoc_enable.clone(), adhoc_disable.clone()));
         if !save_samples {
             for step in &mut trace.steps {
                 step.y_pred_samples.clear();

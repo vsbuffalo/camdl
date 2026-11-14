@@ -2253,16 +2253,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                                     abandon_method(&out, format!("error: {e}"))
                                 })
                             };
-                            trace.derivation = Some(sim::inference::prequential::Derivation {
-                                particles: *particles,
-                                replicates: 1,
-                                dt: smc_config.dt,
-                                seed: pf_seed,
-                                theta: sim::inference::prequential::ThetaSource::Supplied,
-                                excluded_chains: Vec::new(),
-                                enabled,
-                                disabled,
-                            });
+                            trace.derivation = Some(
+                                sim::inference::prequential::Derivation::single_pass(
+                                    &trace, *particles, smc_config.dt, pf_seed,
+                                    sim::inference::prequential::ThetaSource::Supplied,
+                                    enabled, disabled));
                             preq_trace = Some(trace);
                         }
                     }

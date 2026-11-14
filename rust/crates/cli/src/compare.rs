@@ -159,10 +159,6 @@ struct Row {
     path: String,
     trace: PrequentialTrace,
     data: DataIdentity,
-    /// Filter-noise Monte-Carlo SE of this row's elpd, from replicate
-    /// derives (§3.4 remedy 4); `None` without replication (an explicit
-    /// prequential.json, or `--replicates 1`).
-    mc_se: Option<f64>,
     /// Whether the training files this row scored are the bytes its fit was
     /// fitted to; empty for an explicit prequential.json.
     freshness: DataFreshness,
@@ -459,11 +455,11 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
     // Load traces, each filtered by its own fit's selection (if any).
     let rows: Vec<Row> = models.into_iter().map(|m| {
         let selection = cohort.for_fit(&m.name);
-        let Loaded { trace, data, mc_se, freshness } =
+        let Loaded { trace, data, freshness } =
             load_trace(&out, &m.path, derive, selection).unwrap_or_else(|e| {
                 out.fail(format!("error loading trace for '{}' at '{}': {}", m.name, m.path, e));
             });
-        Row { name: m.name, path: m.path, trace, data, mc_se, freshness }
+        Row { name: m.name, path: m.path, trace, data, freshness }
     }).collect();
 
     // Fairness, part zero (gh#585, Stage 3.4): rows with different
@@ -1030,14 +1026,12 @@ fn write_pointwise(rows: &[Row], base_idx: usize, path: &Path) -> Result<usize, 
 struct Loaded {
     trace: PrequentialTrace,
     data: DataIdentity,
-    mc_se: Option<f64>,
     freshness: DataFreshness,
 }
 
 /// What [`derive_prequential`] produced for one fit.
 struct Derived {
     trace: PrequentialTrace,
-    mc_se: Option<f64>,
     freshness: DataFreshness,
 }
 
@@ -1066,7 +1060,6 @@ fn load_trace(
             trace,
             data: DataIdentity::Unknown(
                 "read as an explicit prequential.json, which records no bound data".into()),
-            mc_se: None,
             freshness: DataFreshness::default(),
         });
     }
@@ -1075,7 +1068,7 @@ fn load_trace(
         Ok(resolved) => {
             let data = fit_data_identity(&resolved);
             derive_prequential(out, &resolved, derive, selection, &data)
-                .map(|d| Loaded { trace: d.trace, data, mc_se: d.mc_se, freshness: d.freshness })
+                .map(|d| Loaded { trace: d.trace, data, freshness: d.freshness })
         }
         Err(resolve_err) => Err(format!(
             "'{path}' is neither a prequential trace nor a resolvable fit handle.\n  \
@@ -1237,11 +1230,19 @@ fn check_training_ends_by_train_end(
         segment.display(), h.train_end, late.join(", ")))
 }
 
+/// A row's filter-noise Monte-Carlo SE of its elpd, as its trace records it
+/// (schema 5, `derivation.mc_se_elpd`); `None` without replication or for a
+/// trace that records no derivation. An explicit `prequential.json` that
+/// carries the block takes part in the filter-noise gate like a derived row.
+fn row_mc_se(row: &Row) -> Option<f64> {
+    row.trace.derivation.as_ref().and_then(|d| d.mc_se_elpd)
+}
+
 /// The pair's combined filter-noise SE for a Δ against the baseline,
 /// `√(mc_a² + mc_b²)` (§3.4 remedy 4); `None` unless both rows carry a
 /// replicate-derived MC SE. Conservative under common random numbers.
 fn mc_se_delta(row: &Row, base: &Row) -> Option<f64> {
-    match (row.mc_se, base.mc_se) {
+    match (row_mc_se(row), row_mc_se(base)) {
         (Some(a), Some(b)) => Some((a * a + b * b).sqrt()),
         _ => None,
     }
@@ -1304,9 +1305,9 @@ fn filter_settings_unchecked_note(rows: &[Row]) -> Option<String> {
 fn filter_noise_unassessed_note(rows: &[Row], base_idx: usize) -> Option<String> {
     let base = &rows[base_idx];
     let one_sided: Vec<String> = rows.iter().enumerate()
-        .filter(|(i, r)| *i != base_idx && r.mc_se.is_some() != base.mc_se.is_some())
+        .filter(|(i, r)| *i != base_idx && row_mc_se(r).is_some() != row_mc_se(base).is_some())
         .map(|(_, r)| {
-            let (with, without) = if r.mc_se.is_some() { (&r.name, &base.name) }
+            let (with, without) = if row_mc_se(r).is_some() { (&r.name, &base.name) }
                                   else { (&base.name, &r.name) };
             format!("'{}' (filter-noise SE for '{with}' only; '{without}' has none)", r.name)
         })
@@ -1670,12 +1671,7 @@ fn derive_prequential(
     // Δ machinery reads the steps); the two aggregates agree in
     // expectation to O(per-step variance), and the SE measures the same
     // filter-noise scale either way.
-    let mc_se = if replicate_traces.len() >= 2 {
-        let totals: Vec<f64> = replicate_traces.iter().map(|t| t.elpd()).collect();
-        Some(crate::evidence::logmeanexp_with_se(&totals).1)
-    } else {
-        None
-    };
+    let totals = ReplicateTotals::of(&replicate_traces);
     let mut trace = if replicate_traces.len() >= 2 {
         combine_scored_traces(replicate_traces, derive.seed)?
     } else {
@@ -1695,6 +1691,9 @@ fn derive_prequential(
     derivation.replicates = derive.replicates;
     derivation.theta = theta_source;
     derivation.excluded_chains = excluded_chains;
+    derivation.replicate_elpd = totals.elpd;
+    derivation.replicate_elpd_by_stream = totals.by_stream;
+    derivation.mc_se_elpd = totals.mc_se;
 
     // gh#585 (Stage 3.5): §3.7.3(c) — the `HoldOutTail` stamp is granted
     // only after checking, on the derived trace itself, that every scored
@@ -1724,7 +1723,41 @@ fn derive_prequential(
                 .unwrap_or_else(|| segment.display().to_string()),
         };
     }
-    Ok(Derived { trace, mc_se, freshness })
+    Ok(Derived { trace, freshness })
+}
+
+/// The replicate totals a derived trace records (schema 5): each replicate's
+/// total elpd and per-stream sums, in replicate order, and the filter-noise
+/// Monte-Carlo SE from the totals.
+///
+/// The SE is the log-mean-exp delta-method SE of the replicate TOTAL elpds
+/// (pomp practice; the PF likelihood estimator is unbiased on the natural
+/// scale). The headline elpd is the SUM of per-step log-mean-exp values —
+/// the pointwise-consistent aggregate (its steps sum to it, and the paired Δ
+/// machinery reads the steps); the two aggregates agree in expectation to
+/// O(per-step variance), and the SE measures the same filter-noise scale
+/// either way. `None` for a single replicate.
+#[derive(Debug, Clone, PartialEq)]
+struct ReplicateTotals {
+    elpd: Vec<f64>,
+    by_stream: std::collections::BTreeMap<String, Vec<f64>>,
+    mc_se: Option<f64>,
+}
+
+impl ReplicateTotals {
+    fn of(replicates: &[PrequentialTrace]) -> Self {
+        let elpd: Vec<f64> = replicates.iter().map(|t| t.elpd()).collect();
+        let mut by_stream: std::collections::BTreeMap<String, Vec<f64>> =
+            std::collections::BTreeMap::new();
+        for t in replicates {
+            for (stream, total) in t.elpd_by_stream() {
+                by_stream.entry(stream).or_default().push(total);
+            }
+        }
+        let mc_se = (elpd.len() >= 2)
+            .then(|| crate::evidence::logmeanexp_with_se(&elpd).1);
+        ReplicateTotals { elpd, by_stream, mc_se }
+    }
 }
 
 /// Combine per-draw filter traces into the posterior-mixture predictive
@@ -2399,7 +2432,7 @@ fn warning_lines(rows: &[Row], base_idx: usize, t_mismatch: bool) -> Vec<String>
     // this comparison's; what they are and where they come from is the
     // methods page's job (gh#806).
     let with_mc: Vec<String> = rows.iter()
-        .filter_map(|r| r.mc_se.map(|se| format!("{} ±{:.2}", r.name, se)))
+        .filter_map(|r| row_mc_se(r).map(|se| format!("{} ±{:.2}", r.name, se)))
         .collect();
     if !with_mc.is_empty() {
         lines.push(format!(
@@ -2601,7 +2634,7 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String]) -> String {
             // Filter-noise Monte-Carlo SE from replicate derives (§3.4
             // remedy 4): this row's own, and the pair's combined SE the
             // evidence gate reads. Null without replication.
-            "mc_se_elpd": r.mc_se.map_or(serde_json::Value::Null,
+            "mc_se_elpd": row_mc_se(r).map_or(serde_json::Value::Null,
                 option_finite),
             "mc_se_delta_elpd": mc_se_delta(r, &rows[base_idx])
                 .map_or(serde_json::Value::Null, option_finite),
@@ -3165,7 +3198,47 @@ mod tests {
             particles, replicates, dt: 1.0, seed: 1,
             theta: sim::inference::prequential::ThetaSource::OptimizerWinner,
             excluded_chains: vec![], enabled: vec![], disabled: vec![],
+            replicate_elpd: vec![0.0; replicates],
+            replicate_elpd_by_stream: Default::default(),
+            mc_se_elpd: None,
         }
+    }
+
+    /// The totals a replicated derive stores in its trace: each replicate's
+    /// elpd and per-stream sums in replicate order, and the filter-noise SE
+    /// as the log-mean-exp SE of exactly those totals. One replicate has no
+    /// SE. (The per-stream sums are not expected to add up to the joint.)
+    #[test]
+    fn replicate_totals_are_stored_in_order_with_their_filter_noise_se() {
+        let t = [7.0, 14.0, 21.0];
+        let mut a = row_with_streams("a", &t, &["north", "south"]).trace;
+        let mut b = row_with_streams("b", &t, &["north", "south"]).trace;
+        a.steps[0].log_score = -4.0;
+        b.steps[2].per_stream[1].log_score = -5.0;
+
+        let totals = ReplicateTotals::of(&[a.clone(), b.clone()]);
+        assert_eq!(totals.elpd, vec![a.elpd(), b.elpd()]);
+        assert_eq!(totals.elpd, vec![-16.0, -18.0]);
+        assert_eq!(totals.by_stream["north"], vec![-9.0, -9.0]);
+        assert_eq!(totals.by_stream["south"], vec![-9.0, -11.0]);
+        assert_eq!(totals.mc_se,
+            Some(crate::evidence::logmeanexp_with_se(&totals.elpd).1),
+            "the SE is the log-mean-exp SE of the stored totals");
+        assert!(totals.mc_se.is_some_and(|se| se > 0.0));
+
+        let one = ReplicateTotals::of(&[a]);
+        assert_eq!(one.elpd.len(), 1);
+        assert_eq!(one.by_stream["north"].len(), 1);
+        assert_eq!(one.mc_se, None, "a single replicate has no filter-noise SE");
+    }
+
+    /// Give a test row the filter-noise SE a replicated derive records, or
+    /// (for `None`) no derivation block at all, as an explicit trace has.
+    fn set_mc_se(row: &mut Row, mc: Option<f64>) {
+        row.trace.derivation = mc.map(|se| sim::inference::prequential::Derivation {
+            mc_se_elpd: Some(se),
+            ..derivation(1000, 5)
+        });
     }
 
     /// Two rows scored at different particle or replicate counts differ
@@ -3264,7 +3337,7 @@ mod tests {
                 row_at("half", &[7.0, 14.0, 21.0], &[-3.0, -3.0, -2.0]),
                 row_at("both", &[7.0, 14.0, 21.0], &[-3.0, -3.0, -2.0]),
             ];
-            for (r, m) in rows.iter_mut().zip(mc) { r.mc_se = m; }
+            for (r, m) in rows.iter_mut().zip(mc) { set_mc_se(r, m); }
             rows
         };
 
@@ -3474,7 +3547,6 @@ mod tests {
         Row {
             name: name.to_string(),
             path: name.to_string(),
-            mc_se: None,
             freshness: DataFreshness::default(),
             data: DataIdentity::Unknown("a test fixture, built from scores alone".into()),
             trace: PrequentialTrace {
