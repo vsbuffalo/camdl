@@ -263,15 +263,100 @@ let check_flow_graph file (decls : Ast.declaration list) (d : D.declared_model) 
     Printf.sprintf "%s: %s -> %s" id (Option.value ~default:"-" f) (Option.value ~default:"-" t) in
   Alcotest.(check (list string)) (file ^ ": graph edges")
     (List.map show expected) (List.map show got);
-  (* An ordinary single-edge transition's rate string is the section's. *)
+  (* Every edge carries the name of the declared transition it draws, and of
+     exactly one: its id is that name, or that name followed by the pair
+     `__<from>__<to>`. No two edges share an id, so a viewer told "transition
+     X changed" finds X's edges and no others. *)
+  let ids = List.map (fun (e : Latex.g_edge) -> e.ge_id) g.mg_edges in
+  if List.length (distinct ids) <> List.length ids then
+    Alcotest.failf "%s: two graph edges share an id: %s" file (String.concat ", " ids);
+  let owners (e : Latex.g_edge) =
+    List.filter (fun (t : D.transition_decl) ->
+        e.ge_id = t.tn_name
+        || e.ge_id = Printf.sprintf "%s__%s__%s" t.tn_name
+               (Option.value ~default:"src" e.ge_from)
+               (Option.value ~default:"sink" e.ge_to)) d.dm_transitions in
+  List.iter (fun (e : Latex.g_edge) ->
+      match owners e with
+      | [ _ ] -> ()
+      | ts ->
+        Alcotest.failf "%s: graph edge '%s' belongs to %d declared transitions (%s)"
+          file e.ge_id (List.length ts)
+          (String.concat ", " (List.map (fun (t : D.transition_decl) -> t.tn_name) ts)))
+    g.mg_edges;
+  let edges_of (t : D.transition_decl) =
+    List.filter (fun e -> List.memq t (owners e)) g.mg_edges in
+  let via_rate law = Printf.sprintf "\\text{via } \\mathrm{%s}" (Latex.escape law) in
+  (* What each edge shows as its rate, against the declaration. *)
   List.iter (fun (t : D.transition_decl) ->
+      let es = edges_of t in
       match t.tn_dynamics, t.tn_to with
+      (* An ordinary transition: every edge shows the declared rate. *)
       | D.DynRate r, D.DstSum _ ->
         List.iter (fun (e : Latex.g_edge) ->
-            if e.ge_id = t.tn_name then
-              Alcotest.(check string) (file ^ ": rate of " ^ t.tn_name) r.de_katex e.ge_rate)
-          g.mg_edges
-      | _ -> ()) d.dm_transitions
+            Alcotest.(check string) (file ^ ": rate of " ^ e.ge_id) r.de_katex e.ge_rate)
+          es
+      (* A branching transition: one edge per (source, arm), and the edge to an
+         arm shows that arm's weight times the declared rate. *)
+      | D.DynRate r, D.DstBranch arms ->
+        let n_from = max 1 (List.length (distinct
+            (List.map (fun (s : D.stoich_ref) -> s.sr_compartment) t.tn_from))) in
+        Alcotest.(check int) (file ^ ": one edge per source and arm of " ^ t.tn_name)
+          (n_from * List.length arms) (List.length es);
+        List.iter (fun (a : D.branch_arm) ->
+            let to_arm = List.filter (fun (e : Latex.g_edge) ->
+                e.ge_to = Some a.ba_to.sr_compartment) es in
+            if to_arm = [] then
+              Alcotest.failf "%s: %s has no edge to its arm %s" file t.tn_name
+                a.ba_to.sr_compartment;
+            List.iter (fun (e : Latex.g_edge) ->
+                Alcotest.(check string) (file ^ ": rate of " ^ e.ge_id)
+                  (Printf.sprintf "%s \\cdot %s" a.ba_weight.de_katex r.de_katex)
+                  e.ge_rate) to_arm) arms
+      (* A staged transition (`via`): the graph draws the declaration and not
+         the stages. Each edge shows "via <law>" as its rate, runs from the
+         declared source, and no stage compartment or stage transition appears
+         (the node and edge lists above are the declared ones). *)
+      | D.DynVia (law, args), dst ->
+        if es = [] then Alcotest.failf "%s: staged %s has no edge" file t.tn_name;
+        List.iter (fun (e : Latex.g_edge) ->
+            Alcotest.(check string) (file ^ ": rate of staged " ^ e.ge_id)
+              (via_rate law) e.ge_rate) es;
+        (* Where the destination is written decides what the graph can draw. A
+           law whose destination is the arrow's (`E --> I via erlang(...)`) gets
+           an edge to it. `hyper_erlang` writes no arrow: each destination is a
+           `to =` inside a `branch(...)` argument, which the graph does not
+           read, so it draws one edge from the source to nowhere, the same as a
+           death. The section records the same thing as written: an empty `to`
+           and the destinations inside the law's arguments. Pinned here as what
+           the graph draws today; the destinations are asserted to be missing
+           from it so that a graph which learns to draw them fails this test
+           and is brought into the comparison. *)
+        let branch_destinations =
+          List.concat_map (fun (a : D.arg) ->
+              match a.a_value with
+              | D.TCall ("branch", kvs) ->
+                List.filter_map (fun (kv : D.arg) ->
+                    match kv.a_name, kv.a_value with
+                    | "to", D.TIdent r -> Some r.nr_name
+                    | "to", D.TIndex (r, _) -> Some r.nr_name
+                    | _ -> None) kvs
+              | _ -> []) args in
+        (match dst, branch_destinations with
+         | D.DstSum [], (_ :: _ as dests) ->
+           Alcotest.(check (list (option string)))
+             (file ^ ": staged " ^ t.tn_name ^ " is drawn as one edge to nowhere")
+             [ None ] (List.map (fun (e : Latex.g_edge) -> e.ge_to) es);
+           List.iter (fun dest ->
+               if List.exists (fun (e : Latex.g_edge) -> e.ge_to = Some dest) es then
+                 Alcotest.failf
+                   "%s: the graph now draws %s to its branch destination %s; \
+                    compare it with the declaration here" file t.tn_name dest)
+             dests
+         | D.DstSum [], [] ->
+           Alcotest.failf "%s: staged %s declares no destination anywhere" file t.tn_name
+         | _ -> ()))
+    d.dm_transitions
 
 (* ── Every golden ────────────────────────────────────────────────────────── *)
 
