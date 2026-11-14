@@ -3407,7 +3407,7 @@ impl ChainStarts {
             }
         };
         match self {
-            ChainStarts::Spread(Spread::FromPosterior { source })
+            ChainStarts::Spread(Spread::FromPosterior { source, .. })
             | ChainStarts::Point(Point::FromMle { source }) => anchor(&mut source.0),
             ChainStarts::Point(Point::FromParams { path }) => {
                 let mut s = path.to_string_lossy().into_owned();
@@ -5105,7 +5105,7 @@ starts = { from_posterior = "@mle" }
         assert!(matches!(m.algorithm, Algorithm::PGAS { .. }));
         assert_eq!(
             m.starts,
-            Some(ChainStarts::Spread(Spread::FromPosterior { source: Handle("@mle".into()) }))
+            Some(ChainStarts::Spread(Spread::FromPosterior { source: Handle("@mle".into()), chains: None }))
         );
         assert_eq!(m.starts.as_ref().unwrap().source().as_deref(), Some("@mle"));
 
@@ -6714,7 +6714,7 @@ cooling = 0.70
     fn starts_sourced_rules_parse_as_one_key_tables() {
         let m = method_with_starts("starts = { from_posterior = \"@base\" }").unwrap();
         assert_eq!(m.starts, Some(ChainStarts::Spread(Spread::FromPosterior {
-            source: Handle("@base".into()) })));
+            source: Handle("@base".into()), chains: None })));
         let m = method_with_starts("starts = { from_mle = \"@mle\" }").unwrap();
         assert_eq!(m.starts, Some(ChainStarts::Point(Point::FromMle {
             source: Handle("@mle".into()) })));
@@ -7963,7 +7963,7 @@ decibans_thresh = 100.0
             let prior = with(ChainStarts::from_prior());
             let mle_a = with(ChainStarts::Point(Point::FromMle { source: Handle("@a".into()) }));
             let mle_b = with(ChainStarts::Point(Point::FromMle { source: Handle("@b".into()) }));
-            let post_a = with(ChainStarts::Spread(Spread::FromPosterior { source: Handle("@a".into()) }));
+            let post_a = with(ChainStarts::Spread(Spread::FromPosterior { source: Handle("@a".into()), chains: None }));
             assert_ne!(base.identity_payload(), lhs.identity_payload(), "{who}: uniform_unconstrained vs lhs");
             assert_ne!(lhs.identity_payload(), single.identity_payload(), "{who}: lhs vs single");
             assert_ne!(lhs.identity_payload(), prior.identity_payload(), "{who}: lhs vs from_prior");
@@ -7971,6 +7971,16 @@ decibans_thresh = 100.0
             assert_eq!(mle_a.identity_payload(), mle_b.identity_payload(),
                 "{who}: the handle as typed is not in the key; the source is, through deps");
             assert_ne!(mle_a.identity_payload(), post_a.identity_payload(), "{who}: from_mle vs from_posterior");
+            // gh#1056: a chain subset keys its own run; the same subset in any
+            // order keys one run.
+            let sub = |ids: Vec<usize>| with(ChainStarts::Spread(Spread::FromPosterior {
+                source: Handle("@a".into()),
+                chains: Some(crate::fit::starts::ChainSubset::new(ids).unwrap()),
+            }));
+            assert_ne!(post_a.identity_payload(), sub(vec![0, 1]).identity_payload(), "{who}: whole cloud vs subset");
+            assert_ne!(sub(vec![0, 1]).identity_payload(), sub(vec![0, 2]).identity_payload(), "{who}: two subsets");
+            assert_eq!(sub(vec![1, 0]).identity_payload(), sub(vec![0, 1]).identity_payload(), "{who}: subset order");
+            assert_eq!(post_a.identity_payload()["starts"], serde_json::json!("from_posterior"), "{who}");
             // A sourced rule hashes as its kind; a bare rule as its TOML spelling.
             let v = mle_a.identity_payload();
             assert_eq!(v["starts"], serde_json::json!("from_mle"), "{who}");

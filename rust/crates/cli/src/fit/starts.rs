@@ -15,12 +15,14 @@
 //! ```toml
 //! starts = "from_prior"                   # one draw per chain from the priors
 //! starts = { from_posterior = "@base" }   # one posterior row of @base per chain
+//! starts = { from_posterior = "@base", chains = [0, 2] }  # rows of chains 0 and 2 only
 //! starts = { from_mle = "@mle" }          # every chain at @mle's estimate
 //! starts = { from_params = "theta.toml" } # every chain at a hand-written point
 //! ```
 //!
 //! The CLI spells the same rules as `--starts from_prior` and
-//! `--starts from_posterior=@base` — a name, or a name and a source.
+//! `--starts from_posterior=@base` — a name, or a name and a source — and the
+//! chain subset as `--starts-chains 0,2`.
 //!
 //! When the key is absent the rule is resolved against the problem: `from_prior`
 //! when every estimated parameter declares a prior, `uniform_unconstrained`
@@ -36,6 +38,67 @@ use serde::{Deserialize, Serialize};
 /// Resolved where it is consumed (`crate::fit::chain_starts`), never here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Handle(pub String);
+
+/// The source chains a `from_posterior` rule draws its rows from (gh#1056):
+/// non-empty, sorted, without repeats. Built only by [`ChainSubset::new`], so
+/// every value of the type is one a run can use.
+///
+/// The reason to name chains is a source diagnosed as multimodal: some chains
+/// sit in a mode with negligible posterior weight, and the next run should
+/// start from the ones that agree. The subset is judged by its own R̂ when the
+/// source is resolved (`crate::fit::chain_starts::resolve_starts`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainSubset(Vec<usize>);
+
+impl ChainSubset {
+    /// Parse chain ids as written. Refuses an empty list and a repeated id;
+    /// order is not meaningful, so it is normalized.
+    pub fn new(ids: Vec<usize>) -> Result<Self, String> {
+        if ids.is_empty() {
+            return Err("`chains` names no chain: list at least one chain id, e.g. \
+                        `chains = [0, 1]`".to_string());
+        }
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        if let Some(w) = sorted.windows(2).find(|w| w[0] == w[1]) {
+            return Err(format!("`chains` lists chain {} twice", w[0]));
+        }
+        Ok(ChainSubset(sorted))
+    }
+
+    /// Parse the CLI spelling: comma-separated chain ids (`0,1,2,4`).
+    pub fn parse_list(s: &str) -> Result<Self, String> {
+        let ids = s
+            .split(',')
+            .map(|t| t.trim())
+            .filter(|t| !t.is_empty())
+            .map(|t| t.parse::<usize>().map_err(|_| format!(
+                "`{t}` is not a chain id: chain ids are whole numbers counted from 0, \
+                 written `0,1,2`")))
+            .collect::<Result<Vec<_>, _>>()?;
+        ChainSubset::new(ids)
+    }
+
+    pub fn ids(&self) -> &[usize] {
+        &self.0
+    }
+
+    pub fn contains(&self, chain: usize) -> bool {
+        self.0.binary_search(&chain).is_ok()
+    }
+
+    /// `0,1,2,4` — the spelling the CLI accepts and every record prints.
+    pub fn spelled(&self) -> String {
+        self.0.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(",")
+    }
+}
+
+impl std::str::FromStr for ChainSubset {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        ChainSubset::parse_list(s)
+    }
+}
 
 impl std::fmt::Display for Handle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -69,7 +132,8 @@ pub enum Spread {
     FromPrior,
     /// One row per chain, drawn uniformly with replacement from a posterior
     /// cloud: a fit handle whose leaf wrote `draws.tsv`, or a draws TSV.
-    FromPosterior { source: Handle },
+    /// `chains` restricts the cloud to those source chains' rows (gh#1056).
+    FromPosterior { source: Handle, chains: Option<ChainSubset> },
 }
 
 /// The point rules: every chain at one vector.
@@ -105,7 +169,8 @@ impl ChainStartsKind {
 pub const BARE_RULES: &str = "uniform_unconstrained, lhs, uniform, from_prior, single";
 /// The sourced spellings, for error messages.
 pub const SOURCED_RULES: &str =
-    "{ from_posterior = \"@handle\" }, { from_mle = \"@handle\" }, { from_params = \"params.toml\" }";
+    "{ from_posterior = \"@handle\" } (optionally with `chains = [..]`), { from_mle = \"@handle\" }, \
+     { from_params = \"params.toml\" }";
 
 impl ChainStarts {
     /// The default when the problem gives no reason to prefer the prior.
@@ -151,10 +216,44 @@ impl ChainStarts {
     /// so `@scout`, the scout's leaf directory and a prefix of its run id key
     /// one run. The handle as typed is recorded, unhashed, in run.json
     /// `inputs.starts_source`. A parameterless rule hashes as it serializes.
+    ///
+    /// A chain subset is NOT carried by the deps — the dep is the whole
+    /// `draws.tsv`'s digest — so it is hashed here: `from_posterior` with
+    /// `chains` keys as `{"from_posterior": {"chains": [..]}}`, distinct from
+    /// the whole-cloud rule and from every other subset (gh#1056). Without
+    /// `chains` the value is the bare tag, byte-identical to before.
     pub fn identity_value(&self) -> serde_json::Value {
+        if let Some(chains) = self.chains() {
+            return serde_json::json!({ self.tag(): { "chains": chains.ids() } });
+        }
         match self.source() {
             Some(_) => serde_json::Value::String(self.tag().to_string()),
             None => serde_json::to_value(self).unwrap_or(serde_json::Value::Null),
+        }
+    }
+
+    /// The source chains a `from_posterior` rule is restricted to, if any.
+    pub fn chains(&self) -> Option<&ChainSubset> {
+        match self {
+            ChainStarts::Spread(Spread::FromPosterior { chains, .. }) => chains.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// Restrict the rule to `chains` of its source: the `--starts-chains`
+    /// flag. Only `from_posterior` draws per-chain rows, so any other rule
+    /// refuses, naming what it is.
+    pub fn with_chains(self, chains: ChainSubset) -> Result<Self, String> {
+        match self {
+            ChainStarts::Spread(Spread::FromPosterior { source, .. }) => {
+                Ok(ChainStarts::Spread(Spread::FromPosterior { source, chains: Some(chains) }))
+            }
+            other => Err(format!(
+                "chain subset `{}` given, but the starts rule is `{}`: only `from_posterior` \
+                 draws rows from a source's chains. Write `--starts from_posterior=@handle` \
+                 (or `starts = {{ from_posterior = \"@handle\", chains = [..] }}`)",
+                chains.spelled(), other.tag()
+            )),
         }
     }
 
@@ -162,7 +261,7 @@ impl ChainStarts {
     /// parameterless rules.
     pub fn source(&self) -> Option<String> {
         match self {
-            ChainStarts::Spread(Spread::FromPosterior { source })
+            ChainStarts::Spread(Spread::FromPosterior { source, .. })
             | ChainStarts::Point(Point::FromMle { source }) => Some(source.0.clone()),
             ChainStarts::Point(Point::FromParams { path }) => {
                 Some(path.to_string_lossy().into_owned())
@@ -174,9 +273,10 @@ impl ChainStarts {
     /// The rule as a reader of `fit.toml` would write it: the tag, then the
     /// source when there is one (`from_mle @mle`).
     pub fn spelled(&self) -> String {
-        match self.source() {
-            Some(src) => format!("{} {}", self.tag(), src),
-            None => self.tag().to_string(),
+        match (self.source(), self.chains()) {
+            (Some(src), Some(ch)) => format!("{} {} chains {}", self.tag(), src, ch.spelled()),
+            (Some(src), None) => format!("{} {}", self.tag(), src),
+            (None, _) => self.tag().to_string(),
         }
     }
 
@@ -249,7 +349,7 @@ impl ChainStarts {
             "single" => bare(ChainStarts::Point(Point::Declared)),
             "from_posterior" | "from-posterior" => {
                 let src = sourced("a fit handle or a draws TSV")?;
-                Ok(ChainStarts::Spread(Spread::FromPosterior { source: Handle(src) }))
+                Ok(ChainStarts::Spread(Spread::FromPosterior { source: Handle(src), chains: None }))
             }
             "from_mle" | "from-mle" => {
                 let src = sourced("a fit handle")?;
@@ -310,7 +410,16 @@ impl std::str::FromStr for ChainStarts {
 #[serde(untagged)]
 enum Wire {
     Bare(String),
-    Table(BTreeMap<String, String>),
+    Table(BTreeMap<String, WireValue>),
+}
+
+/// A table entry: a rule's source (a string), or `from_posterior`'s
+/// `chains` (a list of chain ids).
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum WireValue {
+    Source(String),
+    Chains(Vec<i64>),
 }
 
 impl<'de> Deserialize<'de> for ChainStarts {
@@ -323,7 +432,9 @@ impl<'de> Deserialize<'de> for ChainStarts {
             ))
         })? {
             Wire::Bare(name) => ChainStarts::from_parts(&name, None).map_err(D::Error::custom),
-            Wire::Table(map) => {
+            Wire::Table(mut map) => {
+                // `chains` qualifies `from_posterior`; every other key names a rule.
+                let chains = map.remove("chains");
                 if map.len() != 1 {
                     return Err(D::Error::custom(format!(
                         "`starts` names one sourced rule, got {} keys ({}); expected one of \
@@ -333,7 +444,29 @@ impl<'de> Deserialize<'de> for ChainStarts {
                     )));
                 }
                 let (name, source) = map.into_iter().next().expect("one entry");
-                ChainStarts::from_parts(&name, Some(&source)).map_err(D::Error::custom)
+                let source = match source {
+                    WireValue::Source(s) => s,
+                    WireValue::Chains(_) => return Err(D::Error::custom(format!(
+                        "`starts.{name}` is a source (a fit handle or a file path), not a list"
+                    ))),
+                };
+                let rule = ChainStarts::from_parts(&name, Some(&source)).map_err(D::Error::custom)?;
+                match chains {
+                    None => Ok(rule),
+                    Some(WireValue::Chains(ids)) => {
+                        let ids = ids
+                            .into_iter()
+                            .map(|i| usize::try_from(i).map_err(|_| format!(
+                                "`chains` lists {i}: chain ids are counted from 0")))
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(D::Error::custom)?;
+                        let subset = ChainSubset::new(ids).map_err(D::Error::custom)?;
+                        rule.with_chains(subset).map_err(D::Error::custom)
+                    }
+                    Some(WireValue::Source(s)) => Err(D::Error::custom(format!(
+                        "`chains` is a list of chain ids (`chains = [0, 1]`), got the string `{s}`"
+                    ))),
+                }
             }
         }
     }
@@ -347,8 +480,12 @@ impl Serialize for ChainStarts {
             None => ser.serialize_str(self.tag()),
             Some(src) => {
                 use serde::ser::SerializeMap;
-                let mut m = ser.serialize_map(Some(1))?;
+                let chains = self.chains();
+                let mut m = ser.serialize_map(Some(1 + usize::from(chains.is_some())))?;
                 m.serialize_entry(self.tag(), &src)?;
+                if let Some(ch) = chains {
+                    m.serialize_entry("chains", ch.ids())?;
+                }
                 m.end()
             }
         }
@@ -384,7 +521,7 @@ mod tests {
     fn sourced_rules_parse_from_a_one_key_table() {
         assert_eq!(
             parse("starts = { from_posterior = \"@base\" }").unwrap(),
-            ChainStarts::Spread(Spread::FromPosterior { source: Handle("@base".into()) })
+            ChainStarts::Spread(Spread::FromPosterior { source: Handle("@base".into()), chains: None })
         );
         assert_eq!(
             parse("starts = { from_mle = \"@mle\" }").unwrap(),
@@ -430,12 +567,69 @@ mod tests {
         assert!(err.contains("one sourced rule"), "{err}");
     }
 
+    /// gh#1056: `chains` qualifies `from_posterior`, is normalized to sorted
+    /// order, and round-trips through the wire form a user writes.
+    #[test]
+    fn from_posterior_takes_a_chain_subset() {
+        let r = parse("starts = { from_posterior = \"@base\", chains = [4, 0, 2] }").unwrap();
+        assert_eq!(r, ChainStarts::Spread(Spread::FromPosterior {
+            source: Handle("@base".into()),
+            chains: Some(ChainSubset::new(vec![0, 2, 4]).unwrap()),
+        }));
+        assert_eq!(r.chains().unwrap().ids(), &[0, 2, 4]);
+        assert_eq!(r.spelled(), "from_posterior @base chains 0,2,4");
+        let back = toml::to_string(&Doc { starts: r.clone() }).unwrap();
+        assert_eq!(parse(&back).unwrap(), r, "{back}");
+    }
+
+    #[test]
+    fn a_chain_subset_is_refused_where_it_cannot_apply() {
+        for (toml, want) in [
+            ("starts = { from_mle = \"@m\", chains = [0] }", "only `from_posterior`"),
+            ("starts = { from_posterior = \"@b\", chains = [] }", "names no chain"),
+            ("starts = { from_posterior = \"@b\", chains = [1, 1] }", "chain 1 twice"),
+            ("starts = { from_posterior = \"@b\", chains = [-1] }", "counted from 0"),
+            ("starts = { from_posterior = \"@b\", chains = \"0,1\" }", "list of chain ids"),
+            ("starts = { chains = [0, 1] }", "one sourced rule"),
+        ] {
+            let err = parse(toml).expect_err(toml);
+            assert!(err.contains(want), "{toml}: {err}");
+        }
+    }
+
+    #[test]
+    fn the_cli_chain_list_parses_and_with_chains_refuses_other_rules() {
+        assert_eq!("0, 2,1".parse::<ChainSubset>().unwrap().ids(), &[0, 1, 2]);
+        assert!("0,x".parse::<ChainSubset>().unwrap_err().contains("not a chain id"));
+        assert!("".parse::<ChainSubset>().unwrap_err().contains("names no chain"));
+        let sub = ChainSubset::new(vec![0]).unwrap();
+        let err = ChainStarts::from_prior().with_chains(sub.clone()).unwrap_err();
+        assert!(err.contains("from_prior") && err.contains("only `from_posterior`"), "{err}");
+        let post = "from_posterior=@b".parse::<ChainStarts>().unwrap().with_chains(sub).unwrap();
+        assert_eq!(post.chains().unwrap().ids(), &[0]);
+    }
+
+    /// The subset is identity (the dep is the whole `draws.tsv`, so nothing
+    /// else would key it); the whole-cloud rule keeps its old value.
+    #[test]
+    fn a_chain_subset_enters_the_identity_value_and_only_then() {
+        let whole = "from_posterior=@b".parse::<ChainStarts>().unwrap();
+        assert_eq!(whole.identity_value(), serde_json::json!("from_posterior"));
+        let a = whole.clone().with_chains(ChainSubset::new(vec![2, 0]).unwrap()).unwrap();
+        let b = whole.clone().with_chains(ChainSubset::new(vec![0, 2]).unwrap()).unwrap();
+        let c = whole.clone().with_chains(ChainSubset::new(vec![0, 1]).unwrap()).unwrap();
+        assert_eq!(a.identity_value(), serde_json::json!({"from_posterior": {"chains": [0, 2]}}));
+        assert_eq!(a.identity_value(), b.identity_value(), "order is not meaningful");
+        assert_ne!(a.identity_value(), c.identity_value());
+        assert_ne!(a.identity_value(), whole.identity_value());
+    }
+
     #[test]
     fn the_cli_grammar_is_name_or_name_equals_source() {
         assert_eq!("from_prior".parse::<ChainStarts>().unwrap(), ChainStarts::from_prior());
         assert_eq!(
             "from_posterior=@base".parse::<ChainStarts>().unwrap(),
-            ChainStarts::Spread(Spread::FromPosterior { source: Handle("@base".into()) })
+            ChainStarts::Spread(Spread::FromPosterior { source: Handle("@base".into()), chains: None })
         );
         assert_eq!(
             "from_mle=results/fits/x-1234/pgas-abcd/seed_1-ef01".parse::<ChainStarts>().unwrap(),
@@ -479,7 +673,7 @@ mod tests {
         assert!(ChainStarts::Point(Point::Declared).is_point());
         assert!(ChainStarts::Point(Point::FromParams { path: "p".into() }).is_point());
         assert!(!ChainStarts::Spread(Spread::Uniform).is_point());
-        assert!(!ChainStarts::Spread(Spread::FromPosterior { source: Handle("@a".into()) }).is_point());
+        assert!(!ChainStarts::Spread(Spread::FromPosterior { source: Handle("@a".into()), chains: None }).is_point());
         assert_eq!(ChainStarts::from_prior().kind().as_str(), "spread");
         assert_eq!(ChainStarts::Point(Point::Declared).kind().as_str(), "point");
     }
@@ -491,7 +685,7 @@ mod tests {
             ChainStarts::Spread(Spread::Lhs),
             ChainStarts::Spread(Spread::Uniform),
             ChainStarts::Spread(Spread::FromPrior),
-            ChainStarts::Spread(Spread::FromPosterior { source: Handle("@a".into()) }),
+            ChainStarts::Spread(Spread::FromPosterior { source: Handle("@a".into()), chains: None }),
             ChainStarts::Point(Point::Declared),
             ChainStarts::Point(Point::FromMle { source: Handle("@a".into()) }),
             ChainStarts::Point(Point::FromParams { path: "p".into() }),

@@ -480,6 +480,19 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         if let Some(starts) = &a.starts {
             method.starts = Some(starts.clone());
         }
+        // gh#1056: `--starts-chains` qualifies the rule in force, from the
+        // flag or the file; only `from_posterior` takes it.
+        if let Some(subset) = &a.starts_chains {
+            let rule = method.starts.clone().unwrap_or_else(|| {
+                out.fail(format!(
+                    "error: --starts-chains {} restricts a `from_posterior` rule, and this \
+                     fit names no starts rule; add `--starts from_posterior=@handle`",
+                    subset.spelled()))
+            });
+            method.starts = Some(rule.with_chains(subset.clone()).unwrap_or_else(|e| {
+                out.fail(format!("error: --starts-chains: {e}"))
+            }));
+        }
     }
 
     // A sourced `starts` rule reads a stored fit or a file: resolve the handle
@@ -1149,6 +1162,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         None => serde_json::Value::Null,
         Some(src) => serde_json::json!({
             "handle": starts_rule.source(),
+            // gh#1056: the source chains the rows were drawn from; absent
+            // for the whole cloud. Identity already carries it (the method
+            // payload's `starts`); this is the readable record.
+            "chains": starts_rule.chains().map(|c| c.ids().to_vec()),
             // A stored run's id; none for a file named directly, or a
             // directory with no run.json, whose dep is the file's digest.
             "run_id": src.leaf_dir.as_ref()

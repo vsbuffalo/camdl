@@ -427,14 +427,18 @@ pub fn resolve_starts(rule: &ChainStarts, allow_nonconverged: bool) -> Result<Re
         ChainStarts::Point(Point::FromParams { path }) => {
             return ResolvedStarts::from_file(rule.clone(), path.clone());
         }
-        ChainStarts::Spread(Spread::FromPosterior { source })
+        ChainStarts::Spread(Spread::FromPosterior { source, .. })
         | ChainStarts::Point(Point::FromMle { source }) => source.0.clone(),
         _ => return Ok(ResolvedStarts::bare(rule.clone())),
     };
-    // A draws TSV named directly.
+    // A draws TSV named directly. With a chain subset it is judged by the
+    // selected chains' own R̂ (gh#1056); a whole file carries no verdict.
     if matches!(rule, ChainStarts::Spread(Spread::FromPosterior { .. }))
         && handle.ends_with(".tsv")
     {
+        if let Some(subset) = rule.chains() {
+            super::gating::check_subset_converged(Path::new(&handle), subset, &handle, allow_nonconverged)?;
+        }
         return ResolvedStarts::from_file(rule.clone(), PathBuf::from(&handle));
     }
     let leaf = resolve_fit_leaf(&handle)
@@ -445,7 +449,13 @@ pub fn resolve_starts(rule: &ChainStarts, allow_nonconverged: bool) -> Result<Re
             .map_err(|e| format!("starts = {}: cannot read its fit_state.toml: {e}", rule.spelled()))?;
         refuse_sampler_as_mle_source(&method, &handle)?;
     }
-    super::gating::check_source_converged(&leaf, &handle, allow_nonconverged)?;
+    // gh#1056: a chain subset is judged by its own R̂, in place of the whole
+    // run's stored verdict (which a multimodal source fails by construction).
+    match rule.chains() {
+        Some(subset) => super::gating::check_subset_converged(
+            &leaf.join("draws.tsv"), subset, &handle, allow_nonconverged)?,
+        None => super::gating::check_source_converged(&leaf, &handle, allow_nonconverged)?,
+    }
     let (file, artifact) = match rule {
         ChainStarts::Spread(Spread::FromPosterior { .. }) => (leaf.join("draws.tsv"), "draws.tsv"),
         _ => (leaf.join("fit_state.toml"), "fit_state.toml"),
@@ -706,8 +716,8 @@ fn draw_chain_starts_once(
         ChainStarts::Spread(Spread::FromPrior) => {
             draw_from_prior(ctx.resolved, ctx.base_specs, ctx.priors, n_chains, seed)?
         }
-        ChainStarts::Spread(Spread::FromPosterior { .. }) => {
-            draw_from_posterior(ctx.resolved, source_file()?, n_chains, seed)?
+        ChainStarts::Spread(Spread::FromPosterior { chains, .. }) => {
+            draw_from_posterior(ctx.resolved, source_file()?, chains.as_ref(), n_chains, seed)?
         }
         ChainStarts::Point(Point::FromMle { .. }) => {
             draw_from_mle(ctx.resolved, source_file()?, n_chains)?
@@ -996,6 +1006,7 @@ fn sample_gamma_shape_rate(rng: &mut StatefulRng, shape: f64, rate: f64) -> f64 
 fn draw_from_posterior(
     resolved: &ResolvedParameters,
     path: &Path,
+    chains: Option<&super::starts::ChainSubset>,
     n_chains: usize,
     seed: u64,
 ) -> Result<Vec<ChainStart>, InitError> {
@@ -1011,6 +1022,13 @@ fn draw_from_posterior(
             msg: "file has a header but no data rows".into(),
         });
     }
+    // gh#1056: the rows a chain subset keeps, by their index in the file (so
+    // a start's provenance still names the row it read). The whole cloud
+    // when no subset is named.
+    let eligible: Vec<usize> = match chains {
+        None => (0..rows.len()).collect(),
+        Some(subset) => select_chain_rows(&path, &header, &rows, subset)?,
+    };
     // Map header → column index for each estimate-set name.
     let col_for: HashMap<String, usize> = header.iter().enumerate()
         .map(|(i, h)| (h.clone(), i))
@@ -1067,8 +1085,8 @@ fn draw_from_posterior(
     #[allow(clippy::unusual_byte_groupings)]
     let mut rng = StatefulRng::new(seed ^ 0xb05_e_05u64);
     let starts: Vec<ChainStart> = (0..n_chains).map(|chain_id| {
-        let row_idx = (rng.uniform() * rows.len() as f64).floor() as usize;
-        let row_idx = row_idx.min(rows.len() - 1);
+        let pick = (rng.uniform() * eligible.len() as f64).floor() as usize;
+        let row_idx = eligible[pick.min(eligible.len() - 1)];
         let mut values = HashMap::with_capacity(names.len());
         for (k, name) in names.iter().enumerate() {
             values.insert((*name).clone(), parsed[row_idx][k]);
@@ -1080,6 +1098,55 @@ fn draw_from_posterior(
         }
     }).collect();
     Ok(starts)
+}
+
+/// The indices of the rows a chain subset keeps (gh#1056), by the draws TSV's
+/// `chain` column. Refuses a file with no `chain` column, an unparseable
+/// chain cell, and a named chain the file holds no rows for — each would
+/// otherwise draw starts from rows the user did not choose.
+pub(crate) fn select_chain_rows(
+    path: &Path,
+    header: &[String],
+    rows: &[Vec<String>],
+    subset: &super::starts::ChainSubset,
+) -> Result<Vec<usize>, InitError> {
+    let col = header.iter().position(|h| h == "chain").ok_or_else(|| InitError::SchemaMismatch {
+        path: path.to_path_buf(),
+        expected: "posterior draws TSV with a `chain` column",
+        msg: format!(
+            "chains {} were named, but the file has no `chain` column to select them by. \
+             Present columns: {}.",
+            subset.spelled(), header.join(", ")),
+    })?;
+    let mut present = std::collections::BTreeSet::new();
+    let mut keep = Vec::new();
+    for (r, row) in rows.iter().enumerate() {
+        let cell = row.get(col).map(String::as_str).unwrap_or("");
+        let chain: usize = cell.parse().map_err(|_| InitError::SchemaMismatch {
+            path: path.to_path_buf(),
+            expected: "posterior draws TSV",
+            msg: format!("column `chain` row {} has value `{cell}`, which is not a chain id", r + 1),
+        })?;
+        present.insert(chain);
+        if subset.contains(chain) {
+            keep.push(r);
+        }
+    }
+    let missing: Vec<String> = subset.ids().iter()
+        .filter(|c| !present.contains(c))
+        .map(|c| c.to_string())
+        .collect();
+    if !missing.is_empty() {
+        return Err(InitError::SchemaMismatch {
+            path: path.to_path_buf(),
+            expected: "posterior draws TSV",
+            msg: format!(
+                "chain(s) {} were named, but the file holds no rows for them. Chains present: {}.",
+                missing.join(", "),
+                present.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(", ")),
+        });
+    }
+    Ok(keep)
 }
 
 /// `from_mle`: every chain at the point estimate a stored fit's
@@ -1238,6 +1305,13 @@ fn estimate_values_from_resolved(resolved: &ResolvedParameters) -> HashMap<Strin
 /// rows) where `header` is the column names and each row is a vec of
 /// the line's tab-separated cells (unparsed strings — caller parses
 /// per-column).
+/// A posterior draws TSV's header and rows, for the chain-subset gate
+/// ([`super::gating::check_subset_converged`]) — the same reader the starts
+/// draw from, so the gate and the draw see one file the same way.
+pub(crate) fn read_draws_tsv(path: &Path) -> Result<(Vec<String>, Vec<Vec<String>>), String> {
+    read_tsv(path).map_err(|e| e.to_string())
+}
+
 fn read_tsv(path: &Path) -> Result<(Vec<String>, Vec<Vec<String>>), InitError> {
     let path_buf: PathBuf = path.to_path_buf();
     let raw = std::fs::read_to_string(path).map_err(|e| InitError::Io {
@@ -1582,6 +1656,17 @@ mod tests {
         ResolvedStarts::from_file(
             ChainStarts::Spread(Spread::FromPosterior {
                 source: super::super::starts::Handle(path.display().to_string()),
+                chains: None,
+            }),
+            path.to_path_buf(),
+        ).unwrap()
+    }
+
+    fn from_posterior_chains(path: &Path, ids: Vec<usize>) -> ResolvedStarts {
+        ResolvedStarts::from_file(
+            ChainStarts::Spread(Spread::FromPosterior {
+                source: super::super::starts::Handle(path.display().to_string()),
+                chains: Some(super::super::starts::ChainSubset::new(ids).unwrap()),
             }),
             path.to_path_buf(),
         ).unwrap()
@@ -1744,7 +1829,7 @@ mod tests {
         assert!(can_redraw(&ChainStarts::Spread(Spread::UniformUnconstrained), 2));
         assert!(can_redraw(&ChainStarts::Spread(Spread::Lhs), 2));
         assert!(can_redraw(&ChainStarts::Spread(Spread::FromPrior), 1));
-        assert!(can_redraw(&ChainStarts::Spread(Spread::FromPosterior { source: super::super::starts::Handle("d.tsv".into()) }), 1));
+        assert!(can_redraw(&ChainStarts::Spread(Spread::FromPosterior { source: super::super::starts::Handle("d.tsv".into()), chains: None }), 1));
     }
 
     /// A redraw is a fresh draw under the same rule — a different point,
@@ -1876,6 +1961,49 @@ mod tests {
             "expected ≥ 3 distinct rows used in 50 draws, got {}: {:?}",
             used.len(), used);
         std::fs::remove_file(&path).ok();
+    }
+
+    /// gh#1056: a chain subset draws only that subset's rows, and a start's
+    /// provenance still names the row's index in the whole file.
+    #[test]
+    fn from_posterior_with_chains_draws_only_those_chains_rows() {
+        let resolved = mk_resolved(
+            vec![mk_param("beta", 0.3, None, Some((0.0, 1.0)))],
+            &["beta"],
+        );
+        // Chain 1 sits in another mode (0.9); chains 0 and 2 near 0.1-0.3.
+        let path = write_tmp("from_post_chains",
+            "chain\tdraw\tbeta\n0\t0\t0.10\n0\t1\t0.11\n1\t0\t0.90\n1\t1\t0.91\n2\t0\t0.30\n2\t1\t0.31\n");
+        let starts = draw(&resolved, &from_posterior_chains(&path, vec![0, 2]), 60, 7).unwrap();
+        for cs in &starts.starts {
+            let b = cs.values["beta"];
+            assert!(b < 0.5, "chain 1's row ({b}) drawn though only chains 0 and 2 were named");
+            match &cs.source {
+                InitSource::PosteriorRow { row, .. } => assert!(![2, 3].contains(row), "row {row}"),
+                other => panic!("unexpected source {other:?}"),
+            }
+        }
+        let used: HashSet<i64> = starts.starts.iter()
+            .map(|cs| (cs.values["beta"] * 100.0).round() as i64).collect();
+        assert!(used.len() >= 3, "expected the four eligible rows to be used, got {used:?}");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn from_posterior_with_chains_refuses_absent_chains_and_an_unkeyed_file() {
+        let resolved = mk_resolved(
+            vec![mk_param("beta", 0.3, None, Some((0.0, 1.0)))],
+            &["beta"],
+        );
+        let keyed = write_tmp("from_post_chains_absent", "chain\tbeta\n0\t0.1\n1\t0.2\n");
+        let err = draw(&resolved, &from_posterior_chains(&keyed, vec![1, 5]), 2, 1).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("chain(s) 5") && msg.contains("Chains present: 0, 1"), "{msg}");
+        let unkeyed = write_tmp("from_post_chains_unkeyed", "beta\n0.1\n0.2\n");
+        let msg = draw(&resolved, &from_posterior_chains(&unkeyed, vec![0]), 2, 1).unwrap_err().to_string();
+        assert!(msg.contains("no `chain` column"), "{msg}");
+        std::fs::remove_file(&keyed).ok();
+        std::fs::remove_file(&unkeyed).ok();
     }
 
     #[test]

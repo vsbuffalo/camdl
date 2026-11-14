@@ -1307,7 +1307,7 @@ mod tests {
             (ChainStarts::Spread(Spread::UniformUnconstrained), "uniform_unconstrained"),
             (ChainStarts::Spread(Spread::FromPrior), "from_prior"),
             (ChainStarts::Spread(Spread::FromPosterior {
-                source: Handle("draws.tsv".into()),
+                source: Handle("draws.tsv".into()), chains: None
             }), "from_posterior"),
             (ChainStarts::Point(Point::FromMle {
                 source: Handle("@mle".into()),
