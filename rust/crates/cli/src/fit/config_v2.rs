@@ -367,36 +367,6 @@ impl DataSpec {
             _ => Ok(()),
         }
     }
-
-    /// Resolve this spec into the canonical per-stream map, given the
-    /// names of the model's declared observation streams. The single-
-    /// file shorthand expands by mapping every model-declared stream
-    /// to the same file.
-    ///
-    /// Errors if the resolved map is empty (no streams declared in the
-    /// model).
-    pub fn effective_observations(
-        &self,
-        model_obs_names: &[String],
-    ) -> Result<IndexMap<String, String>, String> {
-        let map = if let Some(file) = &self.file {
-            if model_obs_names.is_empty() {
-                return Err(format!(
-                    "[data] file = \"{}\" but the model declares no observation \
-                     streams. Either add an `observations {{ }}` block to the \
-                     .camdl file, or remove [data] from fit.toml.",
-                    file));
-            }
-            let mut out = IndexMap::new();
-            for name in model_obs_names {
-                out.insert(name.clone(), file.clone());
-            }
-            out
-        } else {
-            self.observations.clone()
-        };
-        Ok(map)
-    }
 }
 
 // ─── Synthetic data ──────────────────────────────────────────────────────────
@@ -5977,39 +5947,6 @@ cooling = 0.9
         let err = cfg.validate(&["beta".into(), "N0".into()], InitLaw::Absent).unwrap_err();
         assert!(err.contains("must specify either"),
             "error should suggest both forms: {}", err);
-    }
-
-    #[test]
-    fn effective_observations_expands_shorthand() {
-        // The shorthand expands to one entry per declared stream in the model,
-        // all pointing at the same file.
-        let data = DataSpec {
-            file: Some("data/x.tsv".into()),
-            observations: IndexMap::new(),
-            holdout_after: None,
-            holdout: None,
-        };
-        let names = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let resolved = data.effective_observations(&names).unwrap();
-        assert_eq!(resolved.len(), 3);
-        for n in &names {
-            assert_eq!(resolved.get(n).map(String::as_str), Some("data/x.tsv"));
-        }
-    }
-
-    #[test]
-    fn effective_observations_passes_through_per_stream_form() {
-        let mut obs = IndexMap::new();
-        obs.insert("a".to_string(), "data/a.tsv".to_string());
-        obs.insert("b".to_string(), "data/b.tsv".to_string());
-        let data = DataSpec {
-            file: None,
-            observations: obs.clone(),
-            holdout_after: None,
-            holdout: None,
-        };
-        let resolved = data.effective_observations(&[]).unwrap();
-        assert_eq!(resolved, obs);
     }
 
     // ── gh#33: [fixed] from_scenario shorthand ─────────────────────────

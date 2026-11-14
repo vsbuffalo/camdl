@@ -3993,10 +3993,7 @@ fn simulate_on_bound_design(
     let runs: Vec<util::SimRun> = points.iter().enumerate().map(|(i, p)| run_for(i, p)).collect();
     util::emit_run_notices(out, &runs.iter().collect::<Vec<_>>());
     let (compiled, model) = util::resolve_run_model(&first)?;
-    let model_obs_names: Vec<String> =
-        model.observations.iter().map(|o| o.name.clone()).collect();
-    let bindings =
-        pfilter::load_data_observations_from_fit_toml(design_toml, &model_obs_names)?;
+    let bindings = pfilter::load_data_observations_from_fit_toml(design_toml, &model)?;
     let effective = fit::runner::data_bindings_to_effective(&model, &bindings)?;
     let time_opts = crate::caltime_load::TimeOpts {
         origin: model.origin.as_deref(),
@@ -4083,10 +4080,9 @@ pub(crate) fn obs_anchors_from_config(
 ) -> Result<(f64, f64), String> {
     let data = config.data_spec().map_err(|e| format!(
         "the fit config has no [data] block to read observed times from: {e}"))?;
-    let model_obs_names: Vec<String> =
-        model.observations.iter().map(|o| o.name.clone()).collect();
-    let effective_pairs = data.effective_observations(&model_obs_names)
-        .map_err(|e| format!("resolving [data.observations]: {e}"))?;
+    let bindings = crate::fit::stream_bindings::StreamBindings::resolve(model, data)
+        .map_err(|e| format!("resolving [data]: {e}"))?;
+    let effective_pairs = bindings.training_by_source();
     if effective_pairs.is_empty() {
         return Err("the fit config's [data] resolves to zero observation \
                     streams — nothing to anchor last_obs/first_obs to.".into());

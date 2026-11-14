@@ -2744,15 +2744,14 @@ fn build_fit_sidecar(
         .unwrap_or_default();
     let fit_toml_bytes = std::fs::read(fit_path).unwrap_or_default();
     let fit_toml_hash = crate::hashing::sha256_hex(&fit_toml_bytes);
-    // gh#771: hash the RESOLVED stream set — the same seam the fit identity
-    // uses (`effective_observations`, see `cmd_fit_run_v2`). The single-file
-    // `[data] file = "..."` shorthand leaves `[data.observations]` empty and
-    // binds one wide TSV to every stream the model declares; hashing
-    // `observations` directly wrote an empty `data_hashes` for exactly that
-    // config style, and the `camdl compare` data preflight (gh#713) then
-    // reports such a fit as unchecked instead of comparing its digests.
-    // With no model in scope (`fit where`) the shorthand cannot be expanded,
-    // and `effective_observations` errors — the map stays empty, as before.
+    // gh#771: hash the files the RESOLVED bindings name, by source
+    // (`StreamBindings`). The single-file `[data] file = "..."` shorthand
+    // leaves `[data.observations]` empty and binds one wide TSV to every
+    // source the model declares; hashing `observations` directly wrote an
+    // empty `data_hashes` for exactly that config style, and the `camdl
+    // compare` data preflight (gh#713) then reported such a fit as unchecked.
+    // With no model in scope (`fit where`) the shorthand cannot be expanded
+    // and the map stays empty.
     let data_hashes = resolved_data_hashes(problem, model);
     // gh#75: resolve per-parameter prior provenance. This sidecar belongs to
     // the fit segment, which every method run on the problem shares
@@ -3713,8 +3712,8 @@ mod tests {
     #[test]
     fn sidecar_hashes_every_stream_under_the_single_file_shorthand() {
         // gh#771: `[data] file = "..."` binds one wide TSV to every
-        // observation stream the model declares. Fit IDENTITY resolves that
-        // shorthand through `effective_observations`; the sidecar hashed
+        // observation source the model declares (here each stream is its own
+        // source). Fit IDENTITY resolved that shorthand; the sidecar hashed
         // `[data.observations]` — empty under the shorthand — so
         // `fit.meta.json` carried no `data_hashes` at all, and the
         // `camdl compare` data preflight reported the fit as unchecked.
