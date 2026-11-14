@@ -218,6 +218,13 @@ pub struct PrequentialTrace {
     /// How this trace was computed. `None` on traces written before schema 5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub derivation: Option<Derivation>,
+    /// The leaves a trace re-scored by [`project_onto_stream`] is scored on:
+    /// each step's `log_score` is then that leaf's own, not the joint score
+    /// over every leaf the fit observed. `None` for a trace as a filter wrote
+    /// it. Recorded so a projected trace, if ever serialized, cannot be read
+    /// back as a joint one. Omitted when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scored_streams: Option<Vec<String>>,
 }
 
 /// The settings that move a trace's scores, recorded by whoever ran the
@@ -462,6 +469,98 @@ impl PrequentialTrace {
         });
         idx.into_iter().take(k).map(|i| &self.steps[i]).collect()
     }
+}
+
+/// The trace re-scored on one leaf.
+///
+/// Each step that scored `leaf` keeps its time and ESS, takes the leaf's own
+/// `log_score` as its score, and keeps only the leaf's `per_stream` entry,
+/// copied unchanged; a step that did not score the leaf is dropped. Nothing is
+/// recomputed from samples and no random number is drawn, so the projected
+/// score is exact: the fit's one-step-ahead predictive density for `leaf`
+/// given everything its filter had assimilated, every other leaf included.
+///
+/// What describes the filter pass rather than the scored set is restated for
+/// the surviving steps: `StartsAtPrior` stays only if the first step survives,
+/// `EssCollapse` is recounted at its recorded threshold, and the `derivation`
+/// block's replicate totals and filter-noise SE become the leaf's
+/// (`replicate_elpd_by_stream[leaf]`, with the SE recomputed from them by
+/// [`super::types::logmeanexp_with_se`]). `scored_streams` records `[leaf]`.
+///
+/// A sum of these per-leaf scores over several leaves is not the joint score
+/// of those leaves (each is a marginal with the other leaves integrated out),
+/// so there is deliberately no projection onto a set of leaves.
+///
+/// Refuses, naming the leaf, a trace with no scored step, one with no
+/// per-stream breakdown (schema 1), one that never scored `leaf`, and a
+/// derivation block with no replicate totals for `leaf`.
+pub fn project_onto_stream(
+    trace: &PrequentialTrace,
+    leaf: &str,
+) -> Result<PrequentialTrace, String> {
+    if trace.steps.is_empty() {
+        return Err(format!("cannot score '{leaf}' alone: the trace has no scored step"));
+    }
+    let scored = trace.streams();
+    if scored.is_empty() {
+        return Err(format!(
+            "cannot score '{leaf}' alone: the trace has no per-stream breakdown (a \
+             schema 1 prequential.json), so only its joint score exists. Re-derive it."));
+    }
+    let mut steps: Vec<PrequentialStep> = Vec::new();
+    let mut first_survives = false;
+    for (k, step) in trace.steps.iter().enumerate() {
+        let Some(entry) = step.per_stream.iter().find(|s| s.stream == leaf) else { continue };
+        first_survives |= k == 0;
+        steps.push(PrequentialStep {
+            t: step.t,
+            log_score: entry.log_score,
+            ess: step.ess,
+            per_stream: vec![entry.clone()],
+        });
+    }
+    if steps.is_empty() {
+        return Err(format!("the trace does not score '{leaf}'; it scores {}",
+            scored.join(", ")));
+    }
+    let warnings = trace.warnings.iter().filter_map(|w| match w {
+        PrequentialWarning::StartsAtPrior => first_survives.then(|| w.clone()),
+        PrequentialWarning::EssCollapse { threshold, .. } => {
+            let step_count = steps.iter().filter(|s| s.ess < *threshold).count();
+            (step_count > 0).then_some(PrequentialWarning::EssCollapse {
+                step_count, threshold: *threshold,
+            })
+        }
+        PrequentialWarning::SamplesNotSaved => Some(w.clone()),
+    }).collect();
+    let derivation = match &trace.derivation {
+        None => None,
+        Some(d) => {
+            let totals = d.replicate_elpd_by_stream.get(leaf).ok_or_else(|| format!(
+                "cannot score '{leaf}' alone: the trace's derivation block records no \
+                 replicate totals for it, so its filter-noise SE cannot be restated"))?;
+            Some(Derivation {
+                replicate_elpd: totals.clone(),
+                replicate_elpd_by_stream: [(leaf.to_string(), totals.clone())]
+                    .into_iter().collect(),
+                mc_se_elpd: (totals.len() >= 2)
+                    .then(|| super::types::logmeanexp_with_se(totals).1),
+                ..d.clone()
+            })
+        }
+    };
+    Ok(PrequentialTrace {
+        schema_version: trace.schema_version,
+        t0: trace.t0,
+        provenance: trace.provenance,
+        conditioning: trace.conditioning.clone(),
+        steps,
+        warnings,
+        score_from: trace.score_from,
+        pit_randomization_seed: trace.pit_randomization_seed,
+        derivation,
+        scored_streams: Some(vec![leaf.to_string()]),
+    })
 }
 
 /// One stream's average of a per-observation figure (its CRPS, or whether
@@ -753,6 +852,8 @@ pub fn build_trace(
         // The filter settings are the caller's to record (`pfilter`), not
         // this builder's: it sees the recorded swarm, not how it was run.
         derivation: None,
+        // A filter scores every observed leaf jointly.
+        scored_streams: None,
     }
 }
 
@@ -1026,7 +1127,7 @@ mod tests {
                 step(14.0, -2.0, vec![score("north", -0.5)]),
             ],
             warnings: vec![], score_from: None, pit_randomization_seed: None,
-            derivation: None,
+            derivation: None, scored_streams: None,
         };
         let d = Derivation::single_pass(&trace, 200, 1.0, 3, ThetaSource::Supplied,
                                         vec![], vec![]);
@@ -1131,7 +1232,7 @@ mod tests {
             steps: vec![], warnings: vec![],
             score_from: None,
             pit_randomization_seed: None,
-            derivation: None,
+            derivation: None, scored_streams: None,
         };
         let caveat = t.optimism_caveat().expect("plug-in + in-sample must be flagged");
         assert!(caveat.contains("plug-in"), "names the treatment optimism: {caveat}");
@@ -1190,7 +1291,7 @@ mod tests {
             steps: vec![], warnings: vec![],
             score_from: Some(21.0),
             pit_randomization_seed: None,
-            derivation: None,
+            derivation: None, scored_streams: None,
         };
         assert_eq!(t.optimism_caveat(), None,
             "posterior + held-out is honest on both axes");
@@ -1215,7 +1316,7 @@ mod tests {
             steps: vec![], warnings: vec![],
             score_from: Some(21.0),
             pit_randomization_seed: None,
-            derivation: None,
+            derivation: None, scored_streams: None,
         };
         let caveat = t.optimism_caveat().expect("plug-in axis still flagged");
         assert!(caveat.contains("plug-in"));
@@ -1249,7 +1350,7 @@ mod tests {
                 scored_step(6.0, -30.0, &[]),
             ],
             warnings: vec![], score_from: None, pit_randomization_seed: None,
-            derivation: None,
+            derivation: None, scored_streams: None,
         };
         let order: Vec<f64> = t.worst_scored(10).iter().map(|s| s.t).collect();
         // -inf (no particle reached it) precedes NaN (a scoring defect);
@@ -1517,7 +1618,7 @@ mod tests {
         PrequentialTrace {
             schema_version: 5, t0: 0, provenance: Provenance::PlugIn,
             conditioning: Conditioning::InSample, steps, warnings: vec![],
-            score_from: None, pit_randomization_seed: None, derivation: None,
+            score_from: None, pit_randomization_seed: None, derivation: None, scored_streams: None,
         }
     }
 
@@ -1739,5 +1840,218 @@ mod tests {
         assert!(iv2.q50.is_finite() && (1.0..=3.0).contains(&iv2.q50));
         // All-absent ⇒ all-NaN (no fictitious zeros).
         assert!(PredInterval::from_samples(&[f64::NAN]).q50.is_nan());
+    }
+
+    // ── project_onto_stream ─────────────────────────────────────────────
+
+    /// One stream's score with every field distinct, so a copy that drops or
+    /// swaps one shows.
+    fn distinct_score(stream: &str, k: f64) -> StreamScore {
+        StreamScore {
+            stream: stream.into(), y_obs: 10.0 + k, y_pred_samples: vec![9.0 + k, 11.0 + k],
+            log_score: -1.0 - k, crps: 0.25 + k, pit: 0.3,
+            interval: PredInterval { q05: k, q25: k + 1.0, q50: k + 2.0, q75: k + 3.0, q95: k + 4.0 },
+            coverage: Coverage::Interval { start: k, stop: k + 7.0 },
+        }
+    }
+
+    /// A two-leaf trace: `cases` at 7, 14, 21; `deaths` at 14 and 21 only.
+    /// Joint scores differ from every per-leaf score.
+    fn cases_and_deaths() -> PrequentialTrace {
+        let step = |t: f64, ls: f64, ess: f64, per: Vec<StreamScore>| PrequentialStep {
+            t, log_score: ls, ess, per_stream: per,
+        };
+        PrequentialTrace {
+            schema_version: 5, t0: 1, provenance: Provenance::PlugIn,
+            conditioning: Conditioning::InSample,
+            steps: vec![
+                step(7.0, -10.0, 95.0, vec![distinct_score("cases", 1.0)]),
+                step(14.0, -20.0, 5.0, vec![distinct_score("cases", 2.0), distinct_score("deaths", 3.0)]),
+                step(21.0, -30.0, 90.0, vec![distinct_score("deaths", 4.0), distinct_score("cases", 5.0)]),
+            ],
+            warnings: vec![PrequentialWarning::StartsAtPrior,
+                           PrequentialWarning::EssCollapse { step_count: 1, threshold: 10.0 }],
+            score_from: Some(3.0), pit_randomization_seed: Some(9),
+            derivation: Some(Derivation {
+                particles: 100, replicates: 3, dt: 1.0, seed: 4, theta: ThetaSource::Supplied,
+                excluded_chains: vec![2], enabled: vec!["x".into()], disabled: vec![],
+                replicate_elpd: vec![-60.0, -61.0, -59.0],
+                replicate_elpd_by_stream: [
+                    ("cases".to_string(), vec![-8.0, -9.5, -7.0]),
+                    ("deaths".to_string(), vec![-12.0, -12.5, -11.0]),
+                ].into_iter().collect(),
+                mc_se_elpd: Some(0.5),
+                overrides: vec![TraceOverride::InSampleForced],
+            }),
+            scored_streams: None,
+        }
+    }
+
+    /// Each surviving step is the leaf's own score, copied: the step keeps its
+    /// time and ESS, its log score becomes the leaf's, and its per-stream
+    /// breakdown is the leaf's entry alone, field for field. Steps that did not
+    /// score the leaf are dropped.
+    #[test]
+    fn projection_copies_the_leaf_entry_and_drops_steps_without_it() {
+        let trace = cases_and_deaths();
+        let p = project_onto_stream(&trace, "deaths").unwrap();
+        assert_eq!(p.steps.iter().map(|s| s.t).collect::<Vec<_>>(), vec![14.0, 21.0],
+            "the step at 7 observed only cases");
+        for (got, (src, k)) in p.steps.iter().zip([(&trace.steps[1], 1), (&trace.steps[2], 0)]) {
+            let entry = &src.per_stream[k];
+            assert_eq!(entry.stream, "deaths");
+            assert_eq!(got.log_score, entry.log_score, "the leaf's own score, not the joint");
+            assert_eq!(got.ess, src.ess, "the filter's ESS at that step");
+            assert_eq!(got.per_stream.len(), 1);
+            assert_eq!(serde_json::to_value(&got.per_stream[0]).unwrap(),
+                       serde_json::to_value(entry).unwrap(), "copied unchanged");
+        }
+        assert_eq!(p.scored_streams, Some(vec!["deaths".to_string()]));
+        assert_eq!(p.streams(), ["deaths"], "a single-stream trace");
+        assert_eq!(p.elpd(), -4.0 + -5.0, "Σ of deaths' own log scores");
+        // Fields that describe the pass are carried over.
+        assert_eq!((p.schema_version, p.t0, p.score_from, p.pit_randomization_seed),
+                   (5, 1, Some(3.0), Some(9)));
+        assert_eq!(p.provenance, trace.provenance);
+        assert_eq!(p.conditioning, trace.conditioning);
+    }
+
+    /// The derivation block is restated for the leaf: its replicate totals,
+    /// those totals as the only per-stream entry, and the filter-noise SE
+    /// recomputed from them. Everything else in the block is carried over.
+    #[test]
+    fn projection_restates_the_derivation_for_the_leaf() {
+        let trace = cases_and_deaths();
+        let p = project_onto_stream(&trace, "cases").unwrap();
+        let d = p.derivation.as_ref().unwrap();
+        let totals = vec![-8.0, -9.5, -7.0];
+        assert_eq!(d.replicate_elpd, totals);
+        assert_eq!(d.replicate_elpd_by_stream,
+            [("cases".to_string(), totals.clone())].into_iter().collect());
+        let (_, se) = super::super::types::logmeanexp_with_se(&totals);
+        assert_eq!(d.mc_se_elpd, Some(se), "the leaf's SE, not the joint 0.5");
+        let orig = trace.derivation.as_ref().unwrap();
+        assert_eq!((d.particles, d.replicates, d.dt, d.seed, d.theta),
+                   (orig.particles, orig.replicates, orig.dt, orig.seed, orig.theta));
+        assert_eq!((&d.excluded_chains, &d.enabled, &d.disabled, &d.overrides),
+                   (&orig.excluded_chains, &orig.enabled, &orig.disabled, &orig.overrides));
+
+        // One replicate: no SE, as for a single pass.
+        let mut one = cases_and_deaths();
+        let od = one.derivation.as_mut().unwrap();
+        od.replicates = 1;
+        od.replicate_elpd = vec![-60.0];
+        od.replicate_elpd_by_stream = [("cases".to_string(), vec![-8.0]),
+                                       ("deaths".to_string(), vec![-12.0])].into_iter().collect();
+        od.mc_se_elpd = None;
+        let p = project_onto_stream(&one, "cases").unwrap();
+        assert_eq!(p.derivation.as_ref().unwrap().mc_se_elpd, None);
+        assert_eq!(p.derivation.as_ref().unwrap().replicate_elpd, vec![-8.0]);
+
+        // A block with no totals for the leaf cannot be restated, and must not
+        // be left describing the joint score.
+        let mut bad = cases_and_deaths();
+        bad.derivation.as_mut().unwrap().replicate_elpd_by_stream.remove("cases");
+        let err = project_onto_stream(&bad, "cases").unwrap_err();
+        assert!(err.contains("'cases'") && err.contains("replicate"), "{err}");
+
+        // No block: nothing to restate.
+        let mut none = cases_and_deaths();
+        none.derivation = None;
+        assert_eq!(project_onto_stream(&none, "cases").unwrap().derivation, None);
+    }
+
+    /// `StartsAtPrior` describes the trace's first step, so it stays only when
+    /// that step survives; `EssCollapse` is recounted over the surviving steps
+    /// at the recorded threshold, and dropped when none falls below it.
+    #[test]
+    fn projection_keeps_only_the_warnings_its_steps_still_carry() {
+        let trace = cases_and_deaths();
+        let cases = project_onto_stream(&trace, "cases").unwrap();
+        assert!(cases.warnings.iter().any(|w| matches!(w, PrequentialWarning::StartsAtPrior)),
+            "cases keeps the first step: {:?}", cases.warnings);
+        assert!(cases.warnings.iter().any(|w| matches!(w,
+            PrequentialWarning::EssCollapse { step_count: 1, threshold } if *threshold == 10.0)),
+            "{:?}", cases.warnings);
+
+        let deaths = project_onto_stream(&trace, "deaths").unwrap();
+        assert!(!deaths.warnings.iter().any(|w| matches!(w, PrequentialWarning::StartsAtPrior)),
+            "deaths' first score is at 14, after assimilating 7: {:?}", deaths.warnings);
+        assert!(deaths.warnings.iter().any(|w| matches!(w,
+            PrequentialWarning::EssCollapse { step_count: 1, .. })), "{:?}", deaths.warnings);
+
+        // The collapsed step (ESS 5 at t = 14) projected away: no collapse left.
+        let mut healthy_late = cases_and_deaths();
+        healthy_late.steps[1].per_stream.retain(|s| s.stream == "cases");
+        let deaths = project_onto_stream(&healthy_late, "deaths").unwrap();
+        assert_eq!(deaths.steps.len(), 1);
+        assert!(!deaths.warnings.iter().any(|w| matches!(w, PrequentialWarning::EssCollapse { .. })),
+            "{:?}", deaths.warnings);
+
+        // A step count recounted, not copied: two collapsed steps in the
+        // input, one of them surviving.
+        let mut two = cases_and_deaths();
+        two.steps[0].ess = 1.0;
+        two.warnings[1] = PrequentialWarning::EssCollapse { step_count: 2, threshold: 10.0 };
+        let deaths = project_onto_stream(&two, "deaths").unwrap();
+        assert!(deaths.warnings.iter().any(|w| matches!(w,
+            PrequentialWarning::EssCollapse { step_count: 1, .. })), "{:?}", deaths.warnings);
+
+        // Other warnings are carried over.
+        let mut unsaved = cases_and_deaths();
+        unsaved.warnings.push(PrequentialWarning::SamplesNotSaved);
+        let p = project_onto_stream(&unsaved, "deaths").unwrap();
+        assert!(p.warnings.iter().any(|w| matches!(w, PrequentialWarning::SamplesNotSaved)));
+    }
+
+    /// The refusals: a leaf the trace never scored, a trace with no per-stream
+    /// breakdown, and a trace with no step at all.
+    #[test]
+    fn projection_refuses_what_it_cannot_project() {
+        let err = project_onto_stream(&cases_and_deaths(), "hospital").unwrap_err();
+        assert!(err.contains("'hospital'") && err.contains("cases") && err.contains("deaths"),
+            "names the leaf and the leaves the trace scored: {err}");
+
+        let mut v1 = cases_and_deaths();
+        for s in &mut v1.steps { s.per_stream.clear(); }
+        let err = project_onto_stream(&v1, "cases").unwrap_err();
+        assert!(err.contains("per-stream breakdown") && err.contains("'cases'"), "{err}");
+
+        let mut empty = cases_and_deaths();
+        empty.steps.clear();
+        let err = project_onto_stream(&empty, "cases").unwrap_err();
+        assert!(err.contains("no scored step") && err.contains("'cases'"), "{err}");
+    }
+
+    /// A one-leaf trace's joint score is its leaf's score, so projecting it
+    /// onto that leaf reproduces its elpd.
+    #[test]
+    fn projecting_a_one_leaf_trace_onto_its_leaf_reproduces_its_elpd() {
+        let mut t = cases_and_deaths();
+        for s in &mut t.steps {
+            s.per_stream.retain(|x| x.stream == "cases");
+            s.log_score = s.per_stream[0].log_score;
+        }
+        let p = project_onto_stream(&t, "cases").unwrap();
+        assert_eq!(p.elpd(), t.elpd());
+        assert_eq!(p.n_scored(), t.n_scored());
+    }
+
+    /// `scored_streams` is optional on disk: a trace without it reads as a
+    /// joint trace, and a joint trace writes no such key.
+    #[test]
+    fn a_trace_without_scored_streams_reads_as_a_joint_trace() {
+        let old = r#"{
+            "schema_version": 5, "t0": 0, "provenance": "plug_in",
+            "conditioning": "in_sample", "steps": [], "warnings": []
+        }"#;
+        let t: PrequentialTrace = serde_json::from_str(old).expect("reads");
+        assert_eq!(t.scored_streams, None);
+        let written = serde_json::to_value(&t).unwrap();
+        assert!(written.get("scored_streams").is_none(), "{written}");
+        let p = project_onto_stream(&cases_and_deaths(), "cases").unwrap();
+        let back: PrequentialTrace =
+            serde_json::from_value(serde_json::to_value(&p).unwrap()).unwrap();
+        assert_eq!(back.scored_streams, Some(vec!["cases".to_string()]));
     }
 }

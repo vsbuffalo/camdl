@@ -2324,6 +2324,7 @@ fn combine_scored_traces(
         score_from: first.score_from,
         pit_randomization_seed: Some(pit_seed),
         derivation: first.derivation.clone(),
+        scored_streams: first.scored_streams.clone(),
     })
 }
 
@@ -3314,7 +3315,7 @@ mod tests {
             warnings: vec![PrequentialWarning::StartsAtPrior],
             score_from: None,
             pit_randomization_seed: Some(1),
-            derivation: None,
+            derivation: None, scored_streams: None,
         };
         let a = component(0.2_f64.ln(), vec![1.0, 2.0], 40.0);
         let b = component(0.4_f64.ln(), vec![3.0, 4.0], 25.0);
@@ -3362,7 +3363,7 @@ mod tests {
             warnings: vec![],
             score_from: None,
             pit_randomization_seed: None,
-            derivation: None,
+            derivation: None, scored_streams: None,
         };
         let err = combine_mixture(vec![trace_at(7.0), trace_at(14.0)], 1)
             .expect_err("different step times must refuse");
@@ -4567,7 +4568,7 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
                 warnings: Vec::new(),
                 score_from: None,
                 pit_randomization_seed: None,
-                derivation: None,
+                derivation: None, scored_streams: None,
             },
         }
     }
