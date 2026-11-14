@@ -583,7 +583,9 @@ same hash → cache hit (no re-run).
 ```bash
 camdl list                        # all cached runs (content-addressed leaves)
 camdl show <run>                  # full metadata for one run
+camdl show @label --format json   # one fit run as JSON: run_id, path, verdict, outputs
 camdl cat  <run>                  # emit its trajectory or observations
+camdl cat  @label --stream draws.tsv   # one file of a fit run (leaf, then its predictions)
 camdl fit summary <fit-dir>       # convergence, gate verdict, MLE table for a fit
 camdl fit summary <fit-dir> --explain      # ... plus what each column means
 camdl fit summary <fit-dir> --parameters   # ... plus the model's parameter legend

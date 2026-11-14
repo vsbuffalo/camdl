@@ -869,7 +869,7 @@ fn bare_envelope_paths_mean_the_default_options_only() {
     assert!(!out.status.success(),
         "no default-options predict exists, so the bare path names nothing:\n{}", text(&out));
     let show = p.ok(&["show", "@post", "--root", &root]);
-    let keyed = show.lines().map(str::trim)
+    let keyed = show.lines().filter_map(|l| l.split_whitespace().next())
         .find(|l| l.starts_with("predict/") && l.ends_with("/predictive/weekly_cases.tsv"))
         .unwrap_or_else(|| panic!("the keyed predict is listed under its prefix:\n{show}"))
         .to_string();
@@ -1008,4 +1008,111 @@ fn a_failed_run_is_listed_beside_a_completed_one() {
     let rows: Vec<&str> = doc["table_rows"].as_array().unwrap().iter()
         .map(|r| r["run_id"].as_str().unwrap()).collect();
     assert_eq!(rows, vec![record(&if2_leaf).0.as_str()], "only the completed run has a row: {doc}");
+}
+
+// ── `show` and `cat` resolve a run handle to that run ────────────────────────
+
+/// Two labelled PGAS runs of one problem folder, `@short` (4 sweeps) and
+/// `@long` (7): the same folder, so only the run each label names tells them
+/// apart. Returns `(short leaf, long leaf)`.
+fn two_labelled_posteriors(p: &Project) -> (PathBuf, PathBuf) {
+    p.config("post.toml", &pgas(4));
+    p.ok(&["fit", "run", "post.toml", "--seed", "1", "--label", "short"]);
+    let short = p.leaves();
+    p.config("post.toml", &pgas(7));
+    p.ok(&["fit", "run", "post.toml", "--seed", "1", "--label", "long"]);
+    let long: Vec<PathBuf> = p.leaves().into_iter().filter(|l| !short.contains(l)).collect();
+    assert_eq!((short.len(), long.len()), (1, 1), "premise: two runs");
+    assert_eq!(segment_of(&short[0]), segment_of(&long[0]), "premise: one problem folder");
+    (short[0].clone(), long[0].clone())
+}
+
+fn stdout(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// `show @L` describes the run `@L` names — its id, its draws — not the
+/// folder it shares with another run.
+#[test]
+fn show_of_a_label_describes_that_run() {
+    let p = Project::new();
+    let (short, long) = two_labelled_posteriors(&p);
+    let (short_id, ..) = record(&short);
+    let (long_id, ..) = record(&long);
+    let root = p.dir().join("results").to_string_lossy().into_owned();
+
+    let out = p.run(&["show", "@short", "--root", &root]);
+    assert!(out.status.success(), "{}", text(&out));
+    let shown = stdout(&out);
+    assert!(shown.contains(&short_id[..12]) && shown.contains("(@short)"), "{shown}");
+    assert!(!shown.contains(&long_id[..12]), "the other run is not described:\n{shown}");
+    assert!(shown.lines().any(|l| l.trim_start().starts_with("draws.tsv")),
+        "the run's draws.tsv is among its outputs:\n{shown}");
+    assert!(shown.contains("pgas") && shown.contains("seed 1"), "{shown}");
+}
+
+/// `show --format json` on a run is one `fit_show` object; on a folder it is
+/// the folder's problem and one object per run.
+#[test]
+fn show_format_json_on_a_run_and_on_a_folder() {
+    let p = Project::new();
+    let (short, _long) = two_labelled_posteriors(&p);
+    let (short_id, ..) = record(&short);
+    let root = p.dir().join("results").to_string_lossy().into_owned();
+
+    let out = p.run(&["show", "@short", "--root", &root, "--format", "json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("show --format json is JSON ({e}):\n{}", text(&out)));
+    assert_eq!(v["schema"]["name"], "fit_show");
+    assert_eq!(v["schema"]["version"], 1);
+    assert_eq!(v["run_id"], short_id.as_str());
+    assert_eq!(v["label"], "short");
+    assert_eq!(v["method"], "pgas");
+    assert_eq!(v["chains"], 2);
+    assert_eq!(v["status"], "completed");
+    assert_eq!(v["starts"]["rule"], "from_prior");
+    assert!(v["verdict"]["kind"].is_string(), "{v}");
+    assert!(v["path"].as_str().unwrap().ends_with(
+        short.file_name().unwrap().to_str().unwrap()), "{v}");
+    let draws = v["outputs"].as_array().unwrap().iter()
+        .find(|o| o["path"] == "draws.tsv").unwrap_or_else(|| panic!("draws.tsv listed: {v}"));
+    assert_eq!(draws["role"], "posterior_cloud");
+    assert!(v["problem"]["fit_id"].as_str().is_some_and(|s| s.len() == 64), "{v}");
+
+    let seg = segment_of(&short).to_string_lossy().into_owned();
+    let out = p.run(&["show", &seg, "--format", "json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["schema"]["name"], "fit_show");
+    assert_eq!(v["runs"].as_array().map(Vec::len), Some(2), "{v}");
+
+    let out = p.run(&["show", "@short", "--root", &root, "--format", "yaml"]);
+    assert!(!out.status.success(), "an unknown format is refused:\n{}", text(&out));
+}
+
+/// `cat @L --stream draws.tsv` reads the run's own draws; on a folder holding
+/// two runs it is an ambiguity listing them.
+#[test]
+fn cat_of_a_label_reads_the_runs_draws_and_a_folder_is_ambiguous() {
+    let p = Project::new();
+    let (short, long) = two_labelled_posteriors(&p);
+    let root = p.dir().join("results").to_string_lossy().into_owned();
+
+    let out = p.run(&["cat", "@long", "--stream", "draws.tsv", "--root", &root]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(out.stdout, std::fs::read(long.join("draws.tsv")).unwrap(),
+        "the bytes of @long's draws.tsv");
+
+    let seg = segment_of(&short).to_string_lossy().into_owned();
+    let out = p.run(&["cat", &seg, "--stream", "draws.tsv"]);
+    assert!(!out.status.success(), "a folder of two runs names neither:\n{}", text(&out));
+    let all = text(&out);
+    assert!(all.contains("names 2 runs"), "{all}");
+    for leaf in [&short, &long] {
+        assert!(all.contains(&leaf.display().to_string()), "lists {}:\n{all}", leaf.display());
+    }
+
+    // A path the folder itself holds still reads.
+    p.ok(&["cat", &seg, "--stream", "fit.meta.json"]);
 }

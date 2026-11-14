@@ -222,17 +222,23 @@ thin = 1
         "quantities/peak.tsv must be non-empty"
     );
 
-    // ── (4) no `--stream` defaults to the fit.meta.json summary record ──
+    // ── (4) `@foo` names a run: no `--stream` defaults to the run's
+    // `fit_state.toml`, as for its leaf directory, and the folder's
+    // `fit.meta.json` is still one `--stream` away ──
     let out = run(&bin, &tmp, &["cat", "@foo", "--root", "results"]);
     assert!(
         out.status.success(),
         "cat @foo (default) failed:\nstderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
+    let state = String::from_utf8_lossy(&out.stdout);
+    assert!(state.contains("method"), "default cat emits the run's fit_state.toml; got:\n{state}");
+    let out = run(&bin, &tmp, &["cat", "@foo", "--stream", "fit.meta.json", "--root", "results"]);
+    assert!(out.status.success(), "cat @foo --stream fit.meta.json failed");
     let meta = String::from_utf8_lossy(&out.stdout);
     assert!(
         meta.contains("\"source_model\"") && meta.contains("\"estimated\""),
-        "default cat emits the fit.meta.json sidecar; got:\n{meta}"
+        "the folder's fit.meta.json sidecar; got:\n{meta}"
     );
 
     // ── (5) a missing stream errors actionably (suggests `camdl show`) ──

@@ -412,7 +412,7 @@ list	stdout	line	converged	./results/fits/pmmh_converged-
 list	stdout	line	CREATED	ESTIMATE
 show	stdout	block	kind	fit_method
 show	stdout	block	method	if2
-show	stdout	block	seed	seed_1
+show	stdout	line	method	seed 1
 cat	stdout	line	t_start	flow_infection
 cat	stdout	line	1076	619
 show.refused	stderr	line	error:	no run matches 'zzzzzzzz' in ./results
