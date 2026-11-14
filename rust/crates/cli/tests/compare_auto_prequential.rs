@@ -630,8 +630,9 @@ fn compare_per_fit_exclude_chains_rescores_only_the_named_fit() {
         mixed_err.contains("mixture component") && mixed_err.contains("--exclude-chains"),
         "the refusal names the component and the fix:\n{mixed_err}"
     );
-    // @b is an IF2 fit (no posterior cloud → plug-in), so the healthy
-    // mixture comparison is deliberately mixed-provenance.
+    // Both fits are PGAS fits (`pgas_fit_toml` above), so both rows are
+    // posterior mixtures and their provenance kinds agree;
+    // `--allow-mixed-provenance` lifts no refusal here.
     let healthy = run(&bin, &tmp, &["compare", "@a", "@b", "--baseline", "@b",
         "--format", "json", "--particles", "300", "--seed", "1", "--draws", "4",
         "--replicates", "1", "--allow-mixed-provenance",
