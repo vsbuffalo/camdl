@@ -1753,7 +1753,7 @@ pub struct If2Args {
 #[derive(Args)]
 #[command(after_help = colored_help!("\
 Examples:
-  # 1D profile likelihood for R0 via parallel IF2
+  # 1D profile likelihood for R0, IF2 in each cell
   camdl profile sir.camdl --data cases.tsv \\
       --sweep \"R0=lin(0.5,5,20)\" --particles 2000 --rw-sd auto
 

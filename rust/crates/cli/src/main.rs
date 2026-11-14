@@ -163,7 +163,7 @@ pub(crate) enum Command {
     #[command(alias = "mif2", hide = true)]
     If2(args::If2Args),
 
-    /// Profile likelihood via parallel IF2 over a parameter grid
+    /// Profile likelihood over a parameter grid: per-cell IF2 (chain_binomial) or an nl-* optimizer (ode)
     Profile(args::ProfileArgs),
 
     /// Likelihood-landscape diagnostic via Latin-hypercube sampling.

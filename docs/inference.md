@@ -716,9 +716,11 @@ $\theta$ is shared by the whole swarm and the jitter above does not exist. See
 
 ## Profile likelihoods
 
-Fix a focal parameter at a grid of values, run IF2 at each to maximize over the
-remaining parameters. The resulting curve shows how the MLE changes — revealing
-identifiability, confidence intervals, and parameter correlations.
+Fix a focal parameter at a grid of values and maximize over the remaining
+parameters at each: with IF2 on `chain_binomial` (the default), or with an
+`nl-*` optimizer (`--algorithm nl-sbplx|nl-bobyqa|nl-lbfgs --backend ode`) for a
+deterministic per-cell maximum. The resulting curve shows how the MLE changes —
+revealing identifiability, confidence intervals, and parameter correlations.
 
 ### 1D profile
 
