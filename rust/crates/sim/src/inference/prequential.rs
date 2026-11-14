@@ -391,27 +391,52 @@ impl PrequentialTrace {
         ))
     }
 
-    /// Mean CRPS across scored steps.
-    pub fn mean_crps(&self) -> f64 {
-        if self.steps.is_empty() { return f64::NAN; }
-        self.steps.iter().map(|s| s.crps).sum::<f64>() / self.steps.len() as f64
+    /// The streams the trace scored, in the order they first appear. Empty
+    /// for a trace with no per-stream breakdown (schema 1), which therefore
+    /// has no CRPS or calibration figure to report.
+    pub fn streams(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        for ss in self.steps.iter().flat_map(|s| &s.per_stream) {
+            if !out.contains(&ss.stream.as_str()) {
+                out.push(&ss.stream);
+            }
+        }
+        out
     }
 
-    /// Fraction of observations that fell inside the central
-    /// `level`-predictive interval (level ∈ (0, 1)).
+    /// Each step that scored `stream`, as its time and that stream's score.
+    pub fn stream_scores<'a>(&'a self, stream: &'a str)
+        -> impl Iterator<Item = (f64, &'a StreamScore)> + 'a
+    {
+        self.steps.iter().filter_map(move |s| {
+            s.per_stream.iter().find(|ss| ss.stream == stream).map(|ss| (s.t, ss))
+        })
+    }
+
+    /// `stream`'s mean CRPS over the steps that scored it.
+    ///
+    /// Per stream only: a CRPS is in the units of the observed value, and
+    /// across streams there is no one observed value — the sum of a case
+    /// count, a death count and a count derived from a proportion is not
+    /// something anyone observed.
+    pub fn mean_crps(&self, stream: &str) -> StreamMean {
+        StreamMean::of(self.stream_scores(stream).map(|(_, ss)| ss.crps))
+    }
+
+    /// The share of `stream`'s observations whose PIT fell inside the central
+    /// `level` predictive interval (level ∈ (0, 1)), over the steps that
+    /// scored it.
     ///
     /// Nominal coverage = `level`. Substantial deviation indicates
-    /// miscalibration (plug-in overconfidence is the typical
-    /// failure mode).
-    pub fn pit_coverage(&self, level: f64) -> f64 {
-        if self.steps.is_empty() { return f64::NAN; }
-        let half = level / 2.0;
-        let lo = 0.5 - half;
-        let hi = 0.5 + half;
-        let inside = self.steps.iter()
-            .filter(|s| s.pit >= lo && s.pit <= hi)
-            .count();
-        inside as f64 / self.steps.len() as f64
+    /// miscalibration (plug-in overconfidence is the typical failure mode).
+    /// A non-finite PIT (an empty predictive sample) is left out and counted
+    /// in `n_nonfinite`, not read as an observation outside the interval.
+    pub fn pit_coverage(&self, stream: &str, level: f64) -> StreamMean {
+        let (lo, hi) = (0.5 - level / 2.0, 0.5 + level / 2.0);
+        StreamMean::of(self.stream_scores(stream).map(|(_, ss)| {
+            if ss.pit.is_finite() { f64::from(u8::from(ss.pit >= lo && ss.pit <= hi)) }
+            else { f64::NAN }
+        }))
     }
 
     /// Number of scored steps (T - t0).
@@ -439,6 +464,34 @@ impl PrequentialTrace {
             worse_first(self.steps[a].log_score, self.steps[b].log_score).then(a.cmp(&b))
         });
         idx.into_iter().take(k).map(|i| &self.steps[i]).collect()
+    }
+}
+
+/// One stream's average of a per-observation figure (its CRPS, or whether
+/// its PIT fell inside an interval) over the steps that scored the stream.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StreamMean {
+    /// Steps at which the stream was scored.
+    pub n: usize,
+    /// Of those, the values that were not finite, which `value` leaves out.
+    pub n_nonfinite: usize,
+    /// The mean over the finite values; NaN when there are none.
+    pub value: f64,
+}
+
+impl StreamMean {
+    fn of(values: impl Iterator<Item = f64>) -> Self {
+        let (mut n, mut n_nonfinite, mut sum) = (0usize, 0usize, 0.0);
+        for v in values {
+            n += 1;
+            if v.is_finite() { sum += v; } else { n_nonfinite += 1; }
+        }
+        let finite = n - n_nonfinite;
+        StreamMean {
+            n,
+            n_nonfinite,
+            value: if finite == 0 { f64::NAN } else { sum / finite as f64 },
+        }
     }
 }
 
@@ -1435,32 +1488,80 @@ mod tests {
         assert!(a.steps[0].pit >= 0.25 && a.steps[0].pit <= 0.75);
     }
 
+    /// A trace whose streams carry the given (CRPS, PIT) at successive steps;
+    /// a stream with fewer entries than another is absent from the later steps.
+    fn trace_of_streams(streams: &[(&str, &[(f64, f64)])]) -> PrequentialTrace {
+        let n = streams.iter().map(|(_, v)| v.len()).max().unwrap_or(0);
+        let steps = (0..n).map(|k| {
+            let mut step = scored_step(k as f64, -1.0, &[]);
+            step.per_stream = streams.iter().filter_map(|(name, v)| v.get(k).map(|&(crps, pit)| {
+                StreamScore {
+                    stream: name.to_string(), y_obs: 0.0, y_pred_samples: vec![],
+                    log_score: -1.0, crps, pit, interval: PredInterval::default(),
+                    coverage: Coverage::Unrecorded,
+                }
+            })).collect();
+            step
+        }).collect();
+        PrequentialTrace {
+            schema_version: 5, t0: 0, provenance: Provenance::PlugIn,
+            conditioning: Conditioning::InSample, steps, warnings: vec![],
+            score_from: None, pit_randomization_seed: None, derivation: None,
+        }
+    }
+
     #[test]
     fn pit_coverage_at_perfect_uniform() {
-        // A trace whose PIT values span [0, 1] uniformly should have
+        // A stream whose PIT values span [0, 1] uniformly should have
         // ~level coverage at level. Synthesize 100 evenly-spaced PITs.
-        let steps: Vec<PrequentialStep> = (0..100).map(|i| {
-            let u = (i as f64 + 0.5) / 100.0;  // 0.005, 0.015, ..., 0.995
-            PrequentialStep {
-                t: i as f64, y_obs: 0.0, y_pred_samples: vec![],
-                log_score: 0.0, crps: 0.0, pit: u, ess: 0.0,
-                interval: PredInterval::default(),
-                per_stream: vec![],
-            }
-        }).collect();
-        let trace = PrequentialTrace {
-            schema_version: 1, t0: 0, provenance: Provenance::PlugIn,
-            conditioning: Conditioning::InSample, steps, warnings: vec![],
-            score_from: None,
-            pit_randomization_seed: None,
-            derivation: None,
-        };
+        let pits: Vec<(f64, f64)> = (0..100).map(|i| (0.0, (i as f64 + 0.5) / 100.0)).collect();
+        let trace = trace_of_streams(&[("cases", &pits)]);
         // 90% interval = PIT in [0.05, 0.95] — 90 of 100 PITs qualify.
-        let cov = trace.pit_coverage(0.90);
-        assert!(approx_eq(cov, 0.90, 0.01), "got {}", cov);
+        let cov = trace.pit_coverage("cases", 0.90);
+        assert_eq!((cov.n, cov.n_nonfinite), (100, 0));
+        assert!(approx_eq(cov.value, 0.90, 0.01), "got {:?}", cov);
         // 50% interval = PIT in [0.25, 0.75].
-        let cov50 = trace.pit_coverage(0.50);
-        assert!(approx_eq(cov50, 0.50, 0.02), "got {}", cov50);
+        let cov50 = trace.pit_coverage("cases", 0.50);
+        assert!(approx_eq(cov50.value, 0.50, 0.02), "got {:?}", cov50);
+    }
+
+    /// D14: calibration is a per-stream fact. A trace whose `cases` stream is
+    /// calibrated and whose `deaths` stream is overconfident reports each
+    /// stream's coverage on its own; neither masks the other, and the mean
+    /// CRPS of each is in its own units, over its own observations.
+    #[test]
+    fn per_stream_summaries_do_not_mask_one_stream_with_another() {
+        let cases: Vec<(f64, f64)> = (0..10).map(|i| (2.0, 0.1 + 0.08 * i as f64)).collect();
+        let deaths: Vec<(f64, f64)> = (0..4).map(|i| (0.5 + i as f64, 0.995)).collect();
+        let trace = trace_of_streams(&[("cases", &cases), ("deaths", &deaths)]);
+        assert_eq!(trace.streams(), ["cases", "deaths"]);
+        let c = trace.pit_coverage("cases", 0.90);
+        let d = trace.pit_coverage("deaths", 0.90);
+        assert_eq!((c.n, c.value), (10, 1.0), "every cases PIT is inside: {c:?}");
+        assert_eq!((d.n, d.value), (4, 0.0), "no deaths PIT is inside: {d:?}");
+        assert_eq!(trace.mean_crps("cases"), StreamMean { n: 10, n_nonfinite: 0, value: 2.0 });
+        assert_eq!(trace.mean_crps("deaths"), StreamMean { n: 4, n_nonfinite: 0, value: 2.0 });
+        let none = trace.mean_crps("hospital");
+        assert_eq!((none.n, none.n_nonfinite), (0, 0));
+        assert!(none.value.is_nan(), "a stream never scored has no mean");
+    }
+
+    /// A non-finite PIT or CRPS is left out of the mean and counted, never
+    /// read as an observation outside the interval or as a large error.
+    #[test]
+    fn per_stream_summaries_exclude_and_count_non_finite_values() {
+        let v = [(1.0, 0.5), (f64::NAN, f64::NAN), (3.0, 0.99), (f64::INFINITY, 0.5)];
+        let trace = trace_of_streams(&[("cases", &v)]);
+        let cov = trace.pit_coverage("cases", 0.90);
+        assert_eq!((cov.n, cov.n_nonfinite), (4, 1));
+        assert!(approx_eq(cov.value, 2.0 / 3.0, 1e-12),
+            "two of the three finite PITs are inside, the NaN is not a miss: {cov:?}");
+        let crps = trace.mean_crps("cases");
+        assert_eq!((crps.n, crps.n_nonfinite), (4, 2));
+        assert!(approx_eq(crps.value, 2.0, 1e-12), "{crps:?}");
+        let all_nan = trace_of_streams(&[("cases", &[(f64::NAN, f64::NAN)])]);
+        assert!(all_nan.mean_crps("cases").value.is_nan());
+        assert!(all_nan.pit_coverage("cases", 0.9).value.is_nan());
     }
 
     #[test]

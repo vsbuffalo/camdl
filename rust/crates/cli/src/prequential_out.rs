@@ -53,6 +53,23 @@ pub fn write_prequential_outputs(
     Ok(())
 }
 
+/// The one-line summary `camdl pfilter --save-prequential` and `fit run`
+/// print beside the trace: the elpd, then each stream's mean CRPS and PIT
+/// 90% coverage. A single-stream trace reads `elpd=…, mean_crps=…, PIT 90%
+/// cov=…`; a multi-stream one names each stream, because no CRPS or coverage
+/// combines streams. A trace with no per-stream breakdown has neither.
+pub fn summary_line(trace: &sim::inference::prequential::PrequentialTrace) -> String {
+    let elpd = format!("elpd={:.2}", trace.elpd());
+    let figures = |s: &str| format!("mean_crps={:.3}, PIT 90% cov={:.2}",
+        trace.mean_crps(s).value, trace.pit_coverage(s, 0.90).value);
+    match trace.streams().as_slice() {
+        [] => format!("{elpd} (no per-stream breakdown: CRPS and PIT coverage not available)"),
+        [only] => format!("{elpd}, {}", figures(only)),
+        many => format!("{elpd}; per stream: {}", many.iter()
+            .map(|s| format!("{s} {}", figures(s))).collect::<Vec<_>>().join("; ")),
+    }
+}
+
 /// Rows of the surprise table: the worst-scored observations a trace's
 /// aggregates are read against.
 pub const SURPRISE_ROWS: usize = 5;

@@ -7255,7 +7255,14 @@ e-value: nothing here establishes a null expectation ≤ 1, so it carries no
 anytime-valid reading), `se(Δ)` (paired standard error over pointwise
 differences), `evidence` (decibans plus a Jeffreys tier, or `within noise` when
 `|Δelpd| < 2·se(Δ)`), `crps`, `Δcrps`, `PIT_cov90` (nominal 0.90; below 0.70
-triggers an overconfidence warning).
+triggers an overconfidence warning). The last three are per stream: they stay in
+the main table only when every row scored exactly one stream, the same one;
+otherwise they move to a block headed "Per-stream accuracy and calibration", one
+line per stream × model with `n` (scored observations), `mean CRPS`,
+`Δ mean CRPS` (only when both rows scored the stream at the same times) and
+`PIT_cov90`, and the overconfidence warning names the stream. No figure combines
+streams. A trace with no per-stream breakdown (schema 1) reports CRPS and
+calibration as not available.
 
 The `table` and `md` renderings carry the same footer, and it states only what
 is specific to that comparison: the scored window and baseline, the conditioning
@@ -7283,8 +7290,13 @@ The JSON keeps every field: `overrides`, `optimism_caveat`,
 `data_change_unchecked`, `data_compared_on_prefix`, `filter_settings_mismatch`
 and `filter_settings_unchecked`, and `filter_noise_unassessed`, plus per-row
 `provenance`, `conditioning`, `derivation`, `lag1_autocorr_delta_elpd`,
-`mc_se_elpd`, `warnings` and `pit_cov90_warning`. It is the machine surface and
-loses nothing by repeating itself.
+`mc_se_elpd`, `warnings` and `pit_cov90_warning`, and per-row `per_stream` (one
+entry per stream: `stream`, `n`, `mean_crps`, `crps_nonfinite`,
+`delta_mean_crps`, `pit_cov90`, `pit_nonfinite`, `pit_cov90_warning`) with
+`per_stream_unavailable` naming why it is empty. The row-level `mean_crps`,
+`delta_mean_crps`, `pit_cov90` and `pit_cov90_warning` are the single-stream
+case's values and `null` otherwise. It is the machine surface and loses nothing
+by repeating itself.
 
 Two further refusals are overridable. A derived row re-reads its fit's training
 files, and its `[data.holdout]` files when it is scored held out on them, and
