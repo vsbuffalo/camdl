@@ -299,7 +299,8 @@ let reads_of (t : D.expr_tree) : D.name_ref list =
 
 let dexpr env pos (e : expr) : D.declared_expr =
   let t = tree env pos e in
-  { de_tree = t; de_katex = Latex.tex e; de_reads = reads_of t }
+  { de_tree = t; de_katex = Latex.tex e;
+    de_katex_loss = Latex.tex_loss e; de_reads = reads_of t }
 
 let items env pos = List.map (index_item env pos)
 
@@ -384,7 +385,8 @@ let forcing_arg env pos ((k, v) : string * farg_value) : D.time_input_arg =
         let kind =
           if List.mem s env.dims then D.KDimension else D.KKeyword in
         let t = D.TIdent { nr_name = s; nr_kind = kind } in
-        TvExpr { de_tree = t; de_katex = Latex.tex e; de_reads = reads_of t }
+        TvExpr { de_tree = t; de_katex = Latex.tex e;
+    de_katex_loss = Latex.tex_loss e; de_reads = reads_of t }
       | FExpr e -> TvExpr (dexpr env pos e)) }
 
 let time_input env (f : func_decl) : D.time_input_decl =
@@ -500,7 +502,8 @@ let once env pos (e : expr) : D.declared_expr =
   match e with
   | EIdent (("true" | "false") as s, loc) when loc <> dummy_loc ->
     let t = D.TIdent { nr_name = s; nr_kind = KKeyword } in
-    { de_tree = t; de_katex = Latex.tex e; de_reads = reads_of t }
+    { de_tree = t; de_katex = Latex.tex e;
+    de_katex_loss = Latex.tex_loss e; de_reads = reads_of t }
   | _ -> dexpr env pos e
 
 let reactive env (r : Ast.reactive_decl) : D.reactive_decl =

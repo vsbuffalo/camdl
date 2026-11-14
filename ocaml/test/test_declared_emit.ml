@@ -74,12 +74,13 @@ let rec tree_names (j : json) : (string * string) list =
 let dedup xs =
   List.fold_left (fun acc x -> if List.mem x acc then acc else acc @ [ x ]) [] xs
 
-(* Every top-level expression `{tree, katex, reads}` of a section, and every
+(* Every top-level expression `{tree, katex, katex_loss, reads}` of a section, and every
    name reference anywhere in it outside a `reads` list. *)
 let rec walk_section (on_expr : json -> json -> unit) (on_name : string * string -> unit)
     (j : json) : unit =
   match j with
-  | `Assoc [ ("tree", tree); ("katex", `String _); ("reads", reads) ] ->
+  | `Assoc [ ("tree", tree); ("katex", `String _); ("katex_loss", `List _);
+             ("reads", reads) ] ->
     on_expr tree reads;
     walk_section on_expr on_name tree
   | `Assoc _ when is_name_ref j -> on_name (name_ref j)
@@ -676,6 +677,90 @@ simulate { from = date("2020-01-01")
                        de_reads = []; _ }; _ } -> ()
   | _ -> Alcotest.fail "date(\"…\") should hold a string literal and read no name"
 
+(* ── What the rendering does not show ────────────────────────────────────── *)
+
+let loss_names (ls : D.katex_loss list) : string list =
+  List.map (fun l -> List.assoc l D.katex_loss_table) ls
+
+let rate_loss src =
+  let _, d = compile "m" src in
+  match (List.hd d.dm_transitions).tn_dynamics with
+  | D.DynRate r -> loss_names r.de_katex_loss
+  | D.DynVia _ -> Alcotest.fail "expected a rate"
+
+(* On compiled models: a rate rendered as written has no entry, and each of
+   the common shortfalls is named. The pairs in each group are different
+   trees that render alike, which is why the second of each is reported. *)
+let test_katex_loss_compiled () =
+  let check rate expected =
+    Alcotest.(check (list string)) rate expected (rate_loss (sir rate)) in
+  check "beta * S * I / N" [];
+  check "beta * S * (I / N)" [ "grouping_changed" ];
+  check "beta * S / N * I" [ "grouping_changed" ];
+  check "beta * S * I / N + gamma * I" [];
+  check "beta * (S - (I - R))" [ "grouping_changed" ];
+  check "beta * (S - I - R)" [];
+  check "beta * S * I / N + S / (7 'days)" [ "unit_dropped" ];
+  check "0.1234567 * beta * S" [ "number_rounded" ];
+  check "0.123457 * beta * S" [];
+  check "beta * S * exp(0 - I / N)" []
+
+let located s = Ast.EIdent (s, { Ast.dummy_loc with line = 1; col = 1 })
+
+(* On hand-built trees: every reason, alone, and the shapes that have none.
+   This is the table of what `Latex.tex` does not show. *)
+let test_katex_loss_reasons () =
+  Hashtbl.clear Latex.overrides;
+  let a = located "a" and b = located "b" and c = located "c" in
+  let bin op l r = Ast.EBinOp (op, l, r) in
+  let check what expected e =
+    Alcotest.(check (list string)) what expected (loss_names (Latex.tex_loss e)) in
+  check "a name" [] a;
+  check "a unit literal" [ "unit_dropped" ] (Ast.EUnit (0.5, Ast.PerDay));
+  check "a number of seven digits" [ "number_rounded" ] (Ast.EConst 0.1234567);
+  check "a number of six digits" [] (Ast.EConst 0.123457);
+  check "a whole number" [] (Ast.EConst 100000.0);
+  check "a list" [ "placeholder" ] (Ast.EList [ a; b ]);
+  check "a range" [ "placeholder" ] (Ast.ERange (a, b));
+  check "observations.x" [ "placeholder" ] (Ast.EObsAccess ("x", Ast.dummy_loc));
+  check "a quoted string" [ "string_as_name" ] (Ast.EIdent ("a", Ast.dummy_loc));
+  check "a sum over a dimension" [ "sum_range_dropped" ]
+    (Ast.ESum ("i", "age", None, a, Ast.dummy_loc));
+  check "a positional call" [] (Ast.EFuncCall ("min", [ ("", a); ("", b) ]));
+  check "a call with a named argument" [ "argument_names_dropped" ]
+    (Ast.EFuncCall ("f", [ ("rate", a) ]));
+  check "a positional index" []
+    (Ast.EIndex ("S", [ Ast.IPosn a ], Ast.dummy_loc));
+  check "a named index" [ "index_dimension_dropped" ]
+    (Ast.EIndex ("S", [ Ast.INamed ("age", a) ], Ast.dummy_loc));
+  (* Grouping. *)
+  check "a * b / c" [] (bin Div (bin Mul a b) c);
+  check "a / (b * c)" [] (bin Div a (bin Mul b c));
+  check "a / b / c" [ "grouping_changed" ] (bin Div (bin Div a b) c);
+  check "a * (b * c)" [ "grouping_changed" ] (bin Mul a (bin Mul b c));
+  check "a + b - c" [] (bin Sub (bin Add a b) c);
+  check "a + (b + c)" [ "grouping_changed" ] (bin Add a (bin Add b c));
+  check "(a + b) * c" [] (bin Mul (bin Add a b) c);
+  check "a ^ b" [] (bin Pow a b);
+  check "(a + b) ^ c" [] (bin Pow (bin Add a b) c);
+  check "(-a) ^ b" [ "grouping_changed" ] (bin Pow (Ast.EUnOp (Neg, a)) b);
+  check "(a ^ b) ^ c" [ "grouping_changed" ] (bin Pow (bin Pow a b) c);
+  check "(a / b) ^ c" [ "grouping_changed" ] (bin Pow (bin Div a b) c);
+  check "-(a ^ b)" [] (Ast.EUnOp (Neg, bin Pow a b));
+  check "a * -b" [ "grouping_changed" ] (bin Mul a (Ast.EUnOp (Neg, b)));
+  check "(a < b) * c" [ "grouping_changed" ] (bin Mul (bin Lt a b) c);
+  check "a < b" [] (bin Lt a b);
+  check "if a < b then a else b" [] (Ast.ECond (bin Lt a b, a, b));
+  check "a * sum(b)" [] (bin Mul a (Ast.EUnOp (Total, b)));
+  check "sum(b) * a" [ "grouping_changed" ] (bin Mul (Ast.EUnOp (Total, b)) a);
+  (* A `@symbol` tag. *)
+  Hashtbl.replace Latex.overrides "a" "\\alpha";
+  check "a name with a @symbol" [ "symbol_override" ] a;
+  check "several reasons, in the order of the type"
+    [ "unit_dropped"; "grouping_changed"; "symbol_override" ]
+    (bin Mul a (bin Mul b (Ast.EUnit (1.0, Ast.Days))));
+  Hashtbl.clear Latex.overrides
+
 (* ── A doc comment is not a model difference ─────────────────────────────── *)
 
 let documented ~beta_doc ~model_doc =
@@ -703,7 +788,8 @@ simulate { from = 0 'days
    `@symbol` tag the KaTeX renderer substitutes. The compiled model is the same
    model (its JSON, which is all `model_ir_hash` reads, is equal); every tree
    and every other field of the declared section is equal; and the only fields
-   that differ are `katex` strings. So a diff that compares trees reports no
+   that differ are `katex` strings and, where the tag's symbol is shown, the
+   record that the rendering shows a symbol in place of the name. So a diff that compares trees reports no
    model-layer change for a doc-comment edit. *)
 let test_doc_comment_is_not_a_model_difference () =
   let plain = documented ~beta_doc:"" ~model_doc:"" in
@@ -717,12 +803,14 @@ let test_doc_comment_is_not_a_model_difference () =
   Alcotest.(check bool) "the doc comment changed a rendering (the test bites)"
     true (diffs <> []);
   List.iter (fun path ->
-    if not (ends_with ~suffix:".katex" path) then
+    if not (ends_with ~suffix:".katex" path
+            || ends_with ~suffix:".katex_loss" path) then
       Alcotest.failf "a doc comment changed a field that is not `katex`: %s" path)
     diffs;
   (* Stated outright: which fields differed. *)
   Alcotest.(check (list string)) "only the renderings that show beta"
-    [ "transitions[0].dynamics.rate.rate.katex" ] diffs
+    [ "transitions[0].dynamics.rate.rate.katex";
+      "transitions[0].dynamics.rate.rate.katex_loss" ] diffs
 
 (* ── An unclassified name is reported (W203) ─────────────────────────────── *)
 
@@ -810,6 +898,10 @@ let () =
            Alcotest.test_case (relative path) `Quick
              (test_golden_source_text path))
          (golden_models ()));
+      ("rendering loss",
+       [ Alcotest.test_case "on compiled rates" `Quick test_katex_loss_compiled;
+         Alcotest.test_case "every reason, on hand-built trees" `Quick
+           test_katex_loss_reasons ]);
       ("doc comments",
        [ Alcotest.test_case "a doc comment changes renderings only, and no model"
            `Quick test_doc_comment_is_not_a_model_difference ]);

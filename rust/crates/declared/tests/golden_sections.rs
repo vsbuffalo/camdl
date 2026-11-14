@@ -69,11 +69,16 @@ fn names_in(v: &Value, out: &mut BTreeSet<(String, String)>) {
     }
 }
 
-/// Visit every top-level expression `{tree, katex, reads}` under `v`.
+/// Visit every top-level expression `{tree, katex, katex_loss, reads}` under `v`.
 fn for_each_expr(v: &Value, f: &mut dyn FnMut(&Value, &Value)) {
     match v {
         Value::Object(o) => {
-            if o.len() == 3 && o.contains_key("tree") && o.contains_key("katex") && o.contains_key("reads") {
+            if o.len() == 4
+                && o.contains_key("tree")
+                && o.contains_key("katex")
+                && o.contains_key("katex_loss")
+                && o.contains_key("reads")
+            {
                 f(&o["tree"], &o["reads"]);
             }
             o.values().for_each(|x| for_each_expr(x, f));

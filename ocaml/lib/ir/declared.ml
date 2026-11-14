@@ -110,10 +110,33 @@ type index_binding =
    declaration; a reader shows that as "not recorded". *)
 type source_text = string option
 
-(* A declaration's top-level expression. *)
+(* One way the KaTeX rendering of an expression fails to show what its tree
+   holds: something the tree has and the rendering leaves out, or a grouping
+   the rendering does not keep. Computed by `Latex.tex_loss`, beside the
+   renderer it describes. *)
+type katex_loss =
+  | LUnitDropped         (* `0.5 'per_day` is rendered `0.5` *)
+  | LNumberRounded       (* the rendered digits do not read back as the number *)
+  | LPlaceholder         (* a list, a range, `observations.x` or a run member
+                            is rendered as a dot *)
+  | LGroupingChanged     (* a product or quotient is regrouped into one
+                            fraction, or an operand is rendered without the
+                            parentheses its position needs *)
+  | LSumRangeDropped     (* a `sum` is rendered without its dimension and
+                            its `where` guard *)
+  | LArgNamesDropped     (* `f(rate = x)` is rendered `f(x)` *)
+  | LIndexDimDropped     (* `S[age = a]` is rendered as `S[a]` is *)
+  | LStringAsName        (* a quoted string is rendered as a name is *)
+  | LSymbolOverride      (* a name is rendered as its `@symbol` *)
+
+(* A declaration's top-level expression. [de_katex_loss] is empty when the
+   rendering shows the whole tree; otherwise it lists why not, each reason
+   once, in the order of the type above. A reader shows the declaration's
+   text as written beside a rendering that has any. *)
 type declared_expr = {
   de_tree  : expr_tree;
   de_katex : string;
+  de_katex_loss : katex_loss list;
   de_reads : name_ref list;
 }
 
@@ -507,6 +530,14 @@ let name_kind_table =
     (KDimension, "dimension"); (KObsAnchor, "obs_anchor");
     (KKeyword, "keyword"); (KUnresolved, "unresolved") ]
 
+let katex_loss_table =
+  [ (LUnitDropped, "unit_dropped"); (LNumberRounded, "number_rounded");
+    (LPlaceholder, "placeholder"); (LGroupingChanged, "grouping_changed");
+    (LSumRangeDropped, "sum_range_dropped");
+    (LArgNamesDropped, "argument_names_dropped");
+    (LIndexDimDropped, "index_dimension_dropped");
+    (LStringAsName, "string_as_name"); (LSymbolOverride, "symbol_override") ]
+
 let rel_op_table =
   [ (RLt, "lt"); (RLe, "le"); (RGt, "gt"); (RGe, "ge"); (REq, "eq");
     (RNe, "ne") ]
@@ -530,6 +561,8 @@ let run_namespace_to_json = enum_to "namespace" run_namespace_table
 let run_namespace_of_json = enum_of "namespace" run_namespace_table
 let name_kind_to_json = enum_to "name kind" name_kind_table
 let name_kind_of_json = enum_of "name kind" name_kind_table
+let katex_loss_to_json = enum_to "katex loss" katex_loss_table
+let katex_loss_of_json = enum_of "katex loss" katex_loss_table
 let rel_op_to_json = enum_to "rel_op" rel_op_table
 let rel_op_of_json = enum_of "rel_op" rel_op_table
 let compartment_kind_to_json = enum_to "compartment kind" compartment_kind_table
@@ -726,11 +759,13 @@ let index_binding_of_json j =
 let declared_expr_to_json e =
   obj
     [ ("tree", expr_tree_to_json e.de_tree); ("katex", str e.de_katex);
+      ("katex_loss", list katex_loss_to_json e.de_katex_loss);
       ("reads", list name_ref_to_json e.de_reads) ]
 
 let declared_expr_of_json j =
-  let g = record "expression" [ "tree"; "katex"; "reads" ] j in
+  let g = record "expression" [ "tree"; "katex"; "katex_loss"; "reads" ] j in
   { de_tree = expr_tree_of_json (g "tree"); de_katex = as_str (g "katex");
+    de_katex_loss = of_list katex_loss_of_json (g "katex_loss");
     de_reads = of_list name_ref_of_json (g "reads") }
 
 (* Short names for the two shapes used on almost every declaration. *)

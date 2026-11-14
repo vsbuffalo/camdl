@@ -31,6 +31,7 @@ fn expr(tree: ExprTree, katex: &str, reads: &[(&str, NameKind)]) -> DeclaredExpr
     DeclaredExpr {
         tree,
         katex: katex.into(),
+        katex_loss: Vec::new(),
         reads: reads.iter().map(|(n, k)| NameRef { name: (*n).into(), kind: *k }).collect(),
     }
 }

@@ -161,6 +161,117 @@ and un_tex op a =
   | Tanh -> Printf.sprintf "\\tanh\\!\\left(%s\\right)" (tex a)
   | Total -> Printf.sprintf "\\sum %s" (tex ~prec:7 a)
 
+(* ── What [tex] does not show ───────────────────────────────────────────────── *)
+
+(* Where [tex] places a sub-expression, which decides whether its rendering
+   needs parentheses there to be read back as the same tree. *)
+type slot =
+  | Whole      (* delimited by its surroundings: the whole expression, a call
+                  argument, an index, an exponent, a branch of a conditional *)
+  | Factor     (* a factor of a product or a fraction that another follows *)
+  | LastFactor (* the last factor of a numerator or a denominator *)
+  | SumBody    (* the body of a `sum` *)
+  | AddLeft | AddRight
+  | PowBase
+  | NegArg
+  | CmpArg
+
+(** The ways [tex e] fails to show what [e] holds, each once, in the order of
+    [Declared.katex_loss]; empty when the rendering can be read back as the
+    tree. It walks [e] exactly as [tex] does and must change with it.
+
+    The list errs towards reporting: a rendering a careful reader would still
+    read correctly may be listed (a product written `beta * S * (I / N)` is
+    rendered as one fraction and is reported as regrouped), and one that
+    could be misread is never left out. Two things are outside it. The
+    styling of a name ([sym]: `Iv` and `I_v` are both rendered `I_v`) is not
+    a loss of this expression, and is caught where two renderings are
+    compared. And [overrides] must hold this model's `@symbol` tags
+    ([populate_overrides]) when this is called. *)
+let tex_loss (e : expr) : Declared.katex_loss list =
+  let found = ref [] in
+  let add (l : Declared.katex_loss) =
+    if not (List.mem l !found) then found := l :: !found in
+  let number f =
+    match float_of_string_opt (fmt_num f) with
+    | Some g when g = f -> ()
+    | _ -> add LNumberRounded in
+  let named n = if Hashtbl.mem overrides n then add LSymbolOverride in
+  let is_cmp = function
+    | Eq | Neq | Lt | Gt | Le | Ge -> true
+    | Add | Sub | Mul | Div | Pow -> false in
+  (* A product as [tex] reads it back from its one fraction: the numerator
+     factors multiplied left to right, over the denominator factors
+     multiplied left to right. *)
+  let chain = function
+    | [] -> EConst 1.0
+    | x :: xs -> List.fold_left (fun acc y -> EBinOp (Mul, acc, y)) x xs in
+  let as_rendered num den =
+    if den = [] then chain num else EBinOp (Div, chain num, chain den) in
+  let negative = function
+    | EConst f | EUnit (f, _) -> f < 0.0
+    | _ -> false in
+  (* Is [e], rendered without parentheses of its own, misread in [slot]? [tex]
+     parenthesises a sum or difference wherever it is a factor, a base or a
+     negated operand, and a product with no denominator where it is a base or
+     a negated operand; nothing else. *)
+  let misread slot e =
+    match slot, e with
+    | Whole, _ -> false
+    | _, EBinOp (op, _, _) when is_cmp op -> true
+    | (Factor | LastFactor), _ when negative e -> true
+    | (Factor | LastFactor), EUnOp (Neg, _) -> true
+    (* A sum runs to the end of its product: only what follows it is
+       ambiguous. *)
+    | Factor, (EUnOp (Total, _) | ESum _) -> true
+    | AddRight, EBinOp ((Add | Sub), _, _) -> true
+    | PowBase, (EIdent _ | EIndex _ | EFuncCall _ | EBinOp ((Add | Sub), _, _)) ->
+      false
+    | PowBase, (EConst _ | EUnit _) -> negative e
+    | PowBase, EUnOp ((Log | Sqrt | Abs | Floor | Ceil | Sin | Cos | Tanh), _) ->
+      false
+    | PowBase, EBinOp ((Mul | Div), _, _) -> snd (flatten_product e) <> []
+    | PowBase, _ -> true
+    | _ -> false
+  in
+  let rec go slot e =
+    if misread slot e then add LGroupingChanged;
+    match e with
+    | EConst f -> number f
+    | EUnit (f, _) -> add LUnitDropped; number f
+    | EIdent (n, loc) ->
+      (* A quoted string parses to a name with no location (parser.mly). *)
+      if loc = dummy_loc then add LStringAsName;
+      named n
+    | EIndex (n, items, _) ->
+      named n;
+      List.iter (function
+        | IPosn e -> go Whole e
+        | INamed (_, e) -> add LIndexDimDropped; go Whole e) items
+    | ESum (_, _, _, body, _) -> add LSumRangeDropped; go SumBody body
+    | EBinOp ((Mul | Div), _, _) ->
+      let num, den = flatten_product e in
+      if e <> as_rendered num den then add LGroupingChanged;
+      let factors fs =
+        let last = List.length fs - 1 in
+        List.iteri (fun i f -> go (if i = last then LastFactor else Factor) f) fs in
+      factors num; factors den
+    | EBinOp (Pow, l, r) -> go PowBase l; go Whole r
+    | EBinOp ((Add | Sub), l, r) -> go AddLeft l; go AddRight r
+    | EBinOp ((Eq | Neq | Lt | Gt | Le | Ge), l, r) -> go CmpArg l; go CmpArg r
+    | EUnOp (Neg, a) -> go NegArg a
+    | EUnOp (Total, a) -> go SumBody a
+    | EUnOp ((Exp | Log | Sqrt | Abs | Floor | Ceil | Sin | Cos | Tanh), a) ->
+      go Whole a
+    | ECond (p, a, b) -> go Whole p; go Whole a; go Whole b
+    | EFuncCall (_, args) ->
+      if List.exists (fun (k, _) -> k <> "") args then add LArgNamesDropped;
+      List.iter (fun (_, a) -> go Whole a) args
+    | EList _ | ERange _ | EObsAccess _ | ERunMember _ -> add LPlaceholder
+  in
+  go Whole e;
+  List.sort compare !found
+
 (* ── Partial expansion (`--expand dim`) ─────────────────────────────────────── *)
 
 (* Substitute a binder variable with a concrete level throughout an expression —

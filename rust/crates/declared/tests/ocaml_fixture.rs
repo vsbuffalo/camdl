@@ -85,6 +85,19 @@ fn all_variants_uses_every_expression_level_variant() {
     {
         patterns.push(format!("\"op\":\"{op}\",\"arg\""));
     }
+    for loss in [
+        "unit_dropped",
+        "number_rounded",
+        "placeholder",
+        "grouping_changed",
+        "sum_range_dropped",
+        "argument_names_dropped",
+        "index_dimension_dropped",
+        "string_as_name",
+        "symbol_override",
+    ] {
+        patterns.push(format!("\"{loss}\""));
+    }
     for op in ["lt", "le", "gt", "ge", "eq", "ne"] {
         patterns.push(format!("\"op\":\"{op}\",\"operand\""));
     }

@@ -62,11 +62,13 @@
           "lo": {
             "tree": { "const": { "value": 0.001 } },
             "katex": "0.001",
+            "katex_loss": [],
             "reads": []
           },
           "hi": {
             "tree": { "const": { "value": 2.0 } },
             "katex": "2",
+            "katex_loss": [],
             "reads": []
           }
         },
@@ -89,11 +91,13 @@
           "lo": {
             "tree": { "const": { "value": 0.001 } },
             "katex": "0.001",
+            "katex_loss": [],
             "reads": []
           },
           "hi": {
             "tree": { "const": { "value": 2.0 } },
             "katex": "2",
+            "katex_loss": [],
             "reads": []
           }
         },
@@ -166,6 +170,7 @@
             }
           },
           "katex": "S + I",
+          "katex_loss": [],
           "reads": [
             { "name": "S", "kind": "compartment" },
             { "name": "I", "kind": "compartment" }
@@ -680,6 +685,12 @@
             }
           },
           "katex": "\\frac{a}{b}",
+          "katex_loss": [
+            "unit_dropped", "number_rounded", "placeholder",
+            "grouping_changed", "sum_range_dropped",
+            "argument_names_dropped", "index_dimension_dropped",
+            "string_as_name", "symbol_override"
+          ],
           "reads": [
             { "name": "S", "kind": "compartment" },
             { "name": "beta", "kind": "parameter" },
@@ -726,6 +737,7 @@
             }
           },
           "katex": "x",
+          "katex_loss": [],
           "reads": []
         },
         "source_text": "as written"
@@ -758,6 +770,7 @@
             }
           },
           "katex": "x",
+          "katex_loss": [],
           "reads": []
         },
         "source_text": "as written"
@@ -778,6 +791,7 @@
                 "value": {
                   "tree": { "unit": { "value": 1.0, "unit": "years" } },
                   "katex": "x",
+                  "katex_loss": [],
                   "reads": []
                 }
               }
@@ -793,6 +807,7 @@
         "time": {
           "tree": { "unit": { "value": 30.0, "unit": "days" } },
           "katex": "x",
+          "katex_loss": [],
           "reads": []
         },
         "source_text": "as written"
@@ -857,6 +872,7 @@
                 }
               },
               "katex": "\\beta S",
+              "katex_loss": [],
               "reads": [
                 { "name": "beta", "kind": "parameter" },
                 { "name": "S", "kind": "compartment" }
@@ -989,6 +1005,7 @@
                     }
                   },
                   "katex": "x",
+                  "katex_loss": [],
                   "reads": []
                 }
               },
@@ -1010,6 +1027,7 @@
                     }
                   },
                   "katex": "x",
+                  "katex_loss": [],
                   "reads": []
                 }
               }
@@ -1050,6 +1068,7 @@
             }
           },
           "katex": "x",
+          "katex_loss": [],
           "reads": []
         },
         "source_text": "as written"
@@ -1071,6 +1090,7 @@
             }
           },
           "katex": "x",
+          "katex_loss": [],
           "reads": []
         },
         "source_text": "as written"
@@ -1108,6 +1128,7 @@
                 }
               },
               "katex": "x",
+              "katex_loss": [],
               "reads": []
             }
           }
@@ -1368,6 +1389,7 @@
             "every": {
               "tree": { "unit": { "value": 1.0, "unit": "weeks" } },
               "katex": "x",
+              "katex_loss": [],
               "reads": []
             }
           }
@@ -1378,6 +1400,7 @@
           "span": {
             "tree": { "unit": { "value": 7.0, "unit": "days" } },
             "katex": "x",
+            "katex_loss": [],
             "reads": []
           }
         },
@@ -1432,6 +1455,7 @@
                 }
               },
               "katex": "x",
+              "katex_loss": [],
               "reads": []
             }
           }
@@ -1442,11 +1466,13 @@
               {
                 "tree": { "const": { "value": 7.0 } },
                 "katex": "7",
+                "katex_loss": [],
                 "reads": []
               },
               {
                 "tree": { "const": { "value": 14.0 } },
                 "katex": "14",
+                "katex_loss": [],
                 "reads": []
               }
             ]
@@ -1499,6 +1525,7 @@
               "value": {
                 "tree": { "const": { "value": 0.0 } },
                 "katex": "0",
+                "katex_loss": [],
                 "reads": []
               }
             }
@@ -1514,11 +1541,13 @@
                   }
                 },
                 "katex": "x",
+                "katex_loss": [],
                 "reads": []
               },
               {
                 "tree": { "const": { "value": 60.0 } },
                 "katex": "60",
+                "katex_loss": [],
                 "reads": []
               }
             ]
@@ -1548,6 +1577,7 @@
               "count": {
                 "tree": { "const": { "value": 10.0 } },
                 "katex": "10",
+                "katex_loss": [],
                 "reads": []
               }
             }
@@ -1558,11 +1588,13 @@
             "every": {
               "tree": { "unit": { "value": 1.0, "unit": "months" } },
               "katex": "x",
+              "katex_loss": [],
               "reads": []
             },
             "from": {
               "tree": { "const": { "value": 0.0 } },
               "katex": "0",
+              "katex_loss": [],
               "reads": []
             },
             "to": null
@@ -1584,6 +1616,7 @@
               "count": {
                 "tree": { "const": { "value": 1.0 } },
                 "katex": "1",
+                "katex_loss": [],
                 "reads": []
               }
             }
@@ -1594,11 +1627,13 @@
             "period": {
               "tree": { "unit": { "value": 1.0, "unit": "years" } },
               "katex": "x",
+              "katex_loss": [],
               "reads": []
             },
             "at_day": {
               "tree": { "const": { "value": 250.0 } },
               "katex": "250",
+              "katex_loss": [],
               "reads": []
             }
           }
@@ -1617,6 +1652,7 @@
               "count": {
                 "tree": { "const": { "value": 2.0 } },
                 "katex": "2",
+                "katex_loss": [],
                 "reads": []
               }
             }
@@ -1627,12 +1663,14 @@
             "every": {
               "tree": { "const": { "value": 7.0 } },
               "katex": "7",
+              "katex_loss": [],
               "reads": []
             },
             "from": null,
             "to": {
               "tree": { "const": { "value": 70.0 } },
               "katex": "70",
+              "katex_loss": [],
               "reads": []
             }
           }
@@ -1660,6 +1698,7 @@
                         }
                       },
                       "katex": "x",
+                      "katex_loss": [],
                       "reads": []
                     }
                   }
@@ -1681,6 +1720,7 @@
                             }
                           },
                           "katex": "x",
+                          "katex_loss": [],
                           "reads": []
                         }
                       }
@@ -1704,6 +1744,7 @@
                     }
                   },
                   "katex": "x",
+                  "katex_loss": [],
                   "reads": []
                 }
               }
@@ -1713,16 +1754,19 @@
         "after": {
           "tree": { "unit": { "value": 14.0, "unit": "days" } },
           "katex": "x",
+          "katex_loss": [],
           "reads": []
         },
         "once": {
           "tree": { "const": { "value": 1.0 } },
           "katex": "1",
+          "katex_loss": [],
           "reads": []
         },
         "cooldown": {
           "tree": { "unit": { "value": 90.0, "unit": "days" } },
           "katex": "x",
+          "katex_loss": [],
           "reads": []
         },
         "action": {
@@ -1765,6 +1809,7 @@
                 }
               },
               "katex": "x",
+              "katex_loss": [],
               "reads": []
             }
           }
@@ -1779,6 +1824,7 @@
             "value": {
               "tree": { "const": { "value": 0.0 } },
               "katex": "0",
+              "katex_loss": [],
               "reads": []
             }
           }
@@ -1802,6 +1848,7 @@
                   "value": {
                     "tree": { "const": { "value": 0.4 } },
                     "katex": "0.4",
+                    "katex_loss": [],
                     "reads": []
                   }
                 }
@@ -1816,6 +1863,7 @@
                   "value": {
                     "tree": { "const": { "value": 0.5 } },
                     "katex": "0.5",
+                    "katex_loss": [],
                     "reads": []
                   }
                 }
@@ -1828,6 +1876,7 @@
               "value": {
                 "tree": { "unit": { "value": 2.0, "unit": "years" } },
                 "katex": "x",
+                "katex_loss": [],
                 "reads": []
               }
             }
@@ -1842,22 +1891,26 @@
       "from": {
         "tree": { "unit": { "value": 0.0, "unit": "days" } },
         "katex": "x",
+        "katex_loss": [],
         "reads": []
       },
       "to": {
         "tree": { "unit": { "value": 80.0, "unit": "days" } },
         "katex": "x",
+        "katex_loss": [],
         "reads": []
       },
       "dt": {
         "tree": { "const": { "value": 0.5 } },
         "katex": "0.5",
+        "katex_loss": [],
         "reads": []
       },
       "integrator": "rk45",
       "atol": {
         "tree": { "const": { "value": 1e-08 } },
         "katex": "1e-08",
+        "katex_loss": [],
         "reads": []
       },
       "rtol": null,
@@ -1870,6 +1923,7 @@
             "every": {
               "tree": { "const": { "value": 1.0 } },
               "katex": "1",
+              "katex_loss": [],
               "reads": []
             }
           }
@@ -1895,6 +1949,7 @@
             }
           },
           "katex": "x",
+          "katex_loss": [],
           "reads": []
         },
         "source_text": "as written"
@@ -1924,6 +1979,7 @@
             }
           },
           "katex": "x",
+          "katex_loss": [],
           "reads": []
         },
         "source_text": "as written"

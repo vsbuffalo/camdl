@@ -333,8 +333,40 @@ pub type SourceText = Option<String>;
 pub struct DeclaredExpr {
     pub tree: ExprTree,
     pub katex: String,
+    /// Why `katex` does not show the whole tree; empty when it does. Each
+    /// reason appears once, in the order of [`KatexLoss`]. A reader shows the
+    /// declaration's text as written beside a rendering that has any.
+    pub katex_loss: Vec<KatexLoss>,
     /// Every name the tree reads, once each, in order of first appearance.
     pub reads: Vec<NameRef>,
+}
+
+/// One way the KaTeX rendering of an expression fails to show what its tree
+/// holds: something the tree has and the rendering leaves out, or a grouping
+/// the rendering does not keep. The compiler computes it beside the renderer
+/// (`Latex.tex_loss`); it errs towards reporting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KatexLoss {
+    /// `0.5 'per_day` is rendered `0.5`.
+    UnitDropped,
+    /// The rendered digits do not read back as the number.
+    NumberRounded,
+    /// A list, a range, `observations.x` or a run member is rendered as a dot.
+    Placeholder,
+    /// A product or quotient is regrouped into one fraction, or an operand is
+    /// rendered without the parentheses its position needs.
+    GroupingChanged,
+    /// A `sum` is rendered without its dimension and its `where` guard.
+    SumRangeDropped,
+    /// `f(rate = x)` is rendered `f(x)`.
+    ArgumentNamesDropped,
+    /// `S[age = a]` is rendered as `S[a]` is.
+    IndexDimensionDropped,
+    /// A quoted string is rendered as a name is.
+    StringAsName,
+    /// A name is rendered as its `@symbol`.
+    SymbolOverride,
 }
 
 /// The parsed expression (`expr` in `ast.ml`), without source locations.

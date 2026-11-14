@@ -22,8 +22,11 @@ let bin op l r = TBinOp (op, l, r)
 let arg name value = { a_name = name; a_value = value }
 
 (* A top-level expression; `reads` is given by hand. *)
-let ex ?(katex = "x") ?(reads = []) tree =
-  { de_tree = tree; de_katex = katex; de_reads = reads }
+let ex ?(katex = "x") ?(loss = []) ?(reads = []) tree =
+  { de_tree = tree; de_katex = katex; de_katex_loss = loss; de_reads = reads }
+
+(* Every way a rendering can fall short, once. *)
+let every_katex_loss = List.map fst katex_loss_table
 
 (* A declaration's text as written. The fixture uses one short text for most
    declarations, one text that exercises JSON escaping (a line break, a tab, a
@@ -179,7 +182,9 @@ let model : declared_model =
         { df_text = written; df_name = "everything"; df_indices = every_binding;
           df_shape = Some [ "age"; "patch" ]; df_kind = Some Ir.Rate;
           df_dim = Some { da_population = 0; da_time = -1 };
-          df_body = ex ~katex:"\\frac{a}{b}" ~reads:all_name_kinds every_expression_node } ];
+          df_body =
+            ex ~katex:"\\frac{a}{b}" ~loss:every_katex_loss ~reads:all_name_kinds
+              every_expression_node } ];
     dm_tables =
       [ { tb_text = written; tb_names = [ "contact"; "contact_se" ];
           tb_dims =
