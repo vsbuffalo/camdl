@@ -996,8 +996,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
                          after the last observation (t = {last}) — nothing \
                          would be scored."));
                 }
-                let t0 = recorded.obs_times.iter()
-                    .filter(|&&ot| ot <= t + 1e-9).count();
+                let t0 = crate::fit::runner::first_scored_index(&recorded.obs_times, t);
                 (t0, Some(t))
             }
         };

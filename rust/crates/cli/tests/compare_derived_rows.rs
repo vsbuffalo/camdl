@@ -198,7 +198,8 @@ fn the_trace_records_its_filter_settings_and_compare_checks_them() {
     assert!(out.status.success(), "pfilter failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let manual: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("manual.json")).unwrap()).unwrap();
-    assert_eq!(manual["schema_version"], 5);
+    assert_eq!(manual["schema_version"], 6);
+    assert_eq!(manual["basis"], "filtered", "a pfilter trace is a filter's estimate");
     // One pass: its own elpd and per-stream sum as one-element vectors, no
     // filter-noise SE.
     let elpd: f64 = manual["steps"].as_array().unwrap().iter()

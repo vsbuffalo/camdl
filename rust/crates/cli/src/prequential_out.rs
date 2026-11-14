@@ -219,6 +219,7 @@ mod tests {
     fn trace(steps: Vec<PrequentialStep>) -> PrequentialTrace {
         PrequentialTrace {
             schema_version: 3, t0: 0, provenance: Provenance::PlugIn,
+            basis: score::trace::PredictiveBasis::Filtered,
             conditioning: Conditioning::InSample, steps, warnings: vec![],
             score_from: None, pit_randomization_seed: None,
             derivation: None, scored_streams: None,

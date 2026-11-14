@@ -3,12 +3,16 @@
 **Scope:** every number, label, and caveat that `camdl compare` prints — the
 prequential score it is built on, the two ways a score can be optimistic and how
 camdl labels them, the scoring rules, the uncertainty attached to a difference,
-and the held-out evaluation mode. This is the page the table's footer points at.
+the held-out evaluation mode, and how fits on the ODE backend are scored. This
+is the page the table's footer points at.
 
 **Authoritative code:** the scoring kernels live in
 `rust/crates/sim/src/inference/prequential.rs`, the evidence formatting in
 `rust/crates/cli/src/evidence.rs`, and the comparison logic (preflights,
-derivation, rendering) in `rust/crates/cli/src/compare.rs`. The design record is
+derivation, rendering) in `rust/crates/cli/src/compare.rs`. An ODE fit's
+per-observation record is `ode_prequential_recorded` in
+`rust/crates/sim/src/inference/ode_loglik.rs`, built from the fit by
+`rust/crates/cli/src/compare_ode.rs`. The design record is
 `docs/dev/proposals/2026-08-29-honest-predictive-evaluation.md`.
 
 ---
@@ -87,13 +91,22 @@ governing the caveats under the table.
   (§5). This is the honest Bayesian predictive; it widens the intervals by
   exactly the parameter uncertainty the plug-in ignores.
 
+**Basis — how the predictive at one $\theta$ is formed.**
+
+- `filtered`: a bootstrap particle filter's one-step-ahead estimate, for a fit
+  on the chain-binomial backend (§1).
+- `ode_free_forward`: for a fit on the ODE backend, the deterministic trajectory
+  run from the start of the simulation at $\theta$, never re-anchored to data,
+  with each observation scored by its exact density there (§8).
+
 The axes are independent: a posterior-mixture score can still be in-sample, and
 a held-out score can still be plug-in. `compare` refuses to difference rows
-whose conditioning differs — the two quantities answer different questions — and
-mixing provenance requires an explicit flag. It also refuses a fit whose
-training data file has changed since the fit ran (override:
-`--allow-changed-data`): `compare` re-scores the file as it is now, so the row
-would be scored at a $\hat\theta$ fitted to different observations.
+whose conditioning differs — the two quantities answer different questions —
+refuses rows whose basis differs (§8.2), and mixing provenance requires an
+explicit flag. It also refuses a fit whose training data file has changed since
+the fit ran (override: `--allow-changed-data`): `compare` re-scores the file as
+it is now, so the row would be scored at a $\hat\theta$ fitted to different
+observations.
 
 ## 3. Reading the table, column by column
 
@@ -294,9 +307,10 @@ intervals all inherit parameter uncertainty too.
 
 `compare` uses the mixture automatically for fits with a posterior draws cloud
 (`--draws`, default 64, controls $M$; `--draws 1` falls back to the
-posterior-mean plug-in). Chain selections (`--chains` or `--exclude-chains`)
-apply to the cloud before drawing. The per-fit cost is $M \times R$ filter
-passes and is printed before the derivation runs.
+posterior-mean plug-in). For a fit on the ODE backend each component is one ODE
+solve rather than one filter, and is exact (§8). Chain selections (`--chains` or
+`--exclude-chains`) apply to the cloud before drawing. The per-fit cost is
+$M \times R$ filter passes and is printed before the derivation runs.
 
 ## 6. Held-out evaluation
 
@@ -436,7 +450,75 @@ it forecasts. Both are part of the predictive that fit would actually issue, and
 that predictive is what the table scores. The table does not separate the two
 effects.
 
-## 8. Practical guidance
+## 8. Fits on the ODE backend
+
+### 8.1 What is scored
+
+A fit whose method ran on `backend = "ode"` (`mh`, or an NLopt optimizer) has a
+deterministic latent state: given $\theta$, the trajectory $x_t(\theta)$ is one
+path, fixed from the start of the simulation. The observations before $t$ carry
+no information about a state that is already determined, so the model's
+one-step-ahead predictive is the observation density at that path,
+
+$$p(y_t \mid y_{1:t-1}, \theta) \;=\; p(y_t \mid x_t(\theta), \theta).$$
+
+`compare` evaluates this density exactly, through the fit's own likelihood — the
+model the fit archived, its data binding, its integration step and its
+observation model, the same terms the fit's sampler or optimizer summed — and
+runs no particle filter. For a posterior fit with $M$ thinned draws the step
+score is
+
+$$\log \frac{1}{M}\sum_{m=1}^{M} p\big(y_t \mid x_t(\theta_m), \theta_m\big),$$
+
+the log of the mixture density (§5), not the mean of the per-draw logs. The
+draws are thinned as for a filtered fit, and `--draws 1` scores the posterior
+mean plug-in. For a held-out fit (§6) the draws come from the sealed training
+posterior, the trajectory is integrated from the start through the held-out
+rows, and only the rows past the boundary are scored, at the same index rule
+`camdl pfilter --score-from` uses.
+
+What a held-out ODE score measures differs in one respect from a filtered one:
+the ODE state is never updated on the held-out weeks it scores, so each is a
+forecast from the parameters alone, however far past the boundary it lies,
+whereas a stochastic model's filter assimilates each held-out week before
+forecasting the next. That is a property of the deterministic model, and the
+score reflects it rather than correcting for it.
+
+The predictive samples behind CRPS, PIT and the intervals are draws from the
+observation model at $x_t(\theta)$, `--particles` of them per $\theta$, pooled
+across draws; the log score does not depend on them. There is no filter noise,
+so `--replicates` does not apply, the row carries no filter-noise SE, and its
+trace records `particles = 0`, `replicates = 1` and an ESS of 1 at every step
+(the single state support point). The trace is stamped
+`basis = ode_free_forward`; the JSON states every row's `basis`, and the table
+and markdown footers of an ODE cohort read "Predictive: ODE free-forward" (a
+filtered cohort's footer is unchanged).
+
+### 8.2 Why an ODE row is not differenced against a filtered row
+
+At fixed $\theta$ both are the model's own one-step-ahead predictive, so the
+refusal is not because the two answer different questions. It is because of the
+estimator. A particle filter's log score is a Monte-Carlo estimate whose log is
+biased downward, by an amount that depends on the model and shrinks with the
+particle count (§4.4; Bérard, Del Moral & Doucet 2014); an ODE score is exact.
+Between two filtered rows the bias enters both sides, and `compare` requires
+equal particle and replicate counts and measures the filter noise. Between a
+filtered row and an ODE row it enters one side only, and Δelpd would read the
+filter's bias as evidence for the ODE model. `compare` therefore refuses the
+pair, with no override; compare ODE fits with ODE fits and filtered fits with
+filtered fits.
+
+### 8.3 Requirements
+
+- The model's horizon (`simulate { to }`) and output schedule must reach every
+  scored observation; a held-out score integrates through the held-out rows.
+- The scores integrate at the step the fit recorded, with the integrator it
+  recorded; a fit whose config or model now resolves another is refused.
+- A fit's `burnin_dt` (a coarser step for the unscored warm-up) is not applied:
+  the warm-up is integrated at the fit's step, the exact skeleton that
+  `burnin_dt` approximates.
+
+## 9. Practical guidance
 
 - Prefer held-out comparison whenever the question is "which model should we
   believe going forward." Reserve `--in-sample` for exploratory triage, and read

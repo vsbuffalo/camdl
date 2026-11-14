@@ -2234,6 +2234,73 @@ impl MultiStreamObsModel {
         }).iter().sum()
     }
 
+    /// Per-stream sibling of [`log_likelihood_from_flows_and_counts_real`]:
+    /// the vector whose sum is that joint, through the same `score_streams`
+    /// seam (gh#269). The ODE prequential (gh#312) reads it, so each stream of
+    /// a deterministic trajectory is scored exactly as the ODE likelihood
+    /// scored it.
+    pub fn log_likelihood_per_stream_from_flows_and_counts_real(
+        &self,
+        acc: &[f64],
+        counts: &[i64],
+        obs_idx: usize,
+        params: &[f64],
+    ) -> Vec<f64> {
+        self.score_streams(obs_idx, counts, params, |si, t| {
+            self.project_stream_from_acc_real(si, acc, counts, params, t)
+        })
+    }
+
+    /// One draw per stream from the observation model at union index
+    /// `obs_idx`, given the real-valued Interval bins of a deterministic ODE
+    /// trajectory (gh#312). The real-acc sibling of the particle path's
+    /// [`ObservationModel::sample`]; both route through `sample_streams`.
+    pub fn sample_from_flows_and_counts_real(
+        &self,
+        acc: &[f64],
+        counts: &[i64],
+        obs_idx: usize,
+        params: &[f64],
+        rng: &mut StatefulRng,
+    ) -> Vec<f64> {
+        self.sample_streams(obs_idx, counts, params, rng, |si, t| {
+            self.project_stream_from_acc_real(si, acc, counts, params, t)
+        })
+    }
+
+    /// Shared per-stream sampling loop, the sampling twin of
+    /// `score_streams`: `project(stream_idx, t)` supplies each stream's
+    /// projected value, the only thing that differs between the integer
+    /// (particle) and real (ODE) accumulator paths. A stream not scheduled at
+    /// this union index (a sibling's cadence) yields NaN and consumes no RNG.
+    fn sample_streams(
+        &self,
+        obs_idx: usize,
+        counts: &[i64],
+        params: &[f64],
+        rng: &mut StatefulRng,
+        project: impl Fn(usize, f64) -> f64,
+    ) -> Vec<f64> {
+        let t = self.obs_times[obs_idx];
+        (0..self.streams.len()).map(|si| {
+            let s = &self.streams[si];
+            let local = match s.at_union[obs_idx] {
+                Some(l) => l,
+                None => return f64::NAN,
+            };
+            let projected = project(si, t);
+            // GitHub #6: evaluate likelihood args against actual state,
+            // not zero scratch. Otherwise state-dependent denominators
+            // in p/mean/sd expressions blow up.
+            with_scratch_int_from_counts(counts, |int_s| {
+                sample_obs_resolved(
+                    &s.resolved, t, projected, &s.aux[local], params,
+                    &self.compiled, int_s, &self.real_s, rng,
+                )
+            })
+        }).collect()
+    }
+
     /// Deprecated-shape helper kept for tests that exercise the flow-only
     /// branch. Equivalent to passing a zeroed counts slice; snapshot streams
     /// would project 0. `acc` is the per-Interval-stream bin vector (Phase 2a).
@@ -2765,30 +2832,11 @@ impl ObservationModel<ParticleState> for MultiStreamObsModel {
         &self, state: &ParticleState, obs_idx: usize,
         params: &[f64], rng: &mut StatefulRng,
     ) -> Vec<f64> {
-        let t = self.obs_times[obs_idx];
-        (0..self.streams.len()).map(|si| {
-            let s = &self.streams[si];
-            // Not scheduled at this union index (a sibling's cadence): this
-            // stream emits no value here. NaN marks the absent cell, keeping
-            // the per-stream output-vector shape; no RNG is consumed for it.
-            // (Homogeneous: always `Some`, so order and draws are unchanged.)
-            let local = match s.at_union[obs_idx] {
-                Some(l) => l,
-                None => return f64::NAN,
-            };
-            let projected = self.project_stream_from_acc(
-                si, &state.acc, &state.counts, params, t,
-            );
-            // GitHub #6: evaluate likelihood args against actual state,
-            // not zero scratch. Otherwise state-dependent denominators
-            // in p/mean/sd expressions blow up.
-            with_scratch_int_from_counts(&state.counts, |int_s| {
-                sample_obs_resolved(
-                    &s.resolved, t, projected, &s.aux[local], params,
-                    &self.compiled, int_s, &self.real_s, rng,
-                )
-            })
-        }).collect()
+        // Not scheduled at this union index (a sibling's cadence): NaN marks
+        // the absent cell and no RNG is consumed for it — `sample_streams`.
+        self.sample_streams(obs_idx, &state.counts, params, rng, |si, t| {
+            self.project_stream_from_acc(si, &state.acc, &state.counts, params, t)
+        })
     }
 
     fn mean(

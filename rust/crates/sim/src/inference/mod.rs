@@ -54,7 +54,7 @@ pub use multi_stream_obs::{
     ObsCell, Period, Severity, StreamTimes,
 };
 pub use prior::Prior;
-pub use ode_loglik::compute_ode_loglik;
+pub use ode_loglik::{compute_ode_loglik, ode_prequential_recorded, ODE_PREDICTIVE_RNG_STREAM};
 
 /// gh#226. The absorbing-`-inf` backstop predicate: `true` when a
 /// log-likelihood value is not a finite anchor a fit can rest on.

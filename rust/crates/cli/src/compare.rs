@@ -1,7 +1,8 @@
 //! `camdl compare` — multi-model prequential comparison table.
 //!
 //! Consumes `prequential.json` artifacts written by `fit run` (PFilter
-//! method) or `camdl pfilter --save-prequential`. Computes Δelpd / Δcrps
+//! method) or `camdl pfilter --save-prequential`, or derives one from a fit
+//! handle. Computes Δelpd / Δcrps
 //! with paired pointwise SEs, refuses structurally unfair comparisons
 //! (T_score mismatch by default), renders as table / markdown / JSON.
 //!
@@ -16,7 +17,11 @@
 //!   - bound-data preflight (gh#713; override: --allow-data-mismatch)
 //!   - changed-data preflight: a derived row's training file must still hash
 //!     to what its fit recorded (override: --allow-changed-data)
-//!   - backend preflight on the derive path (gh#729; no override — gh#312)
+//!   - the derive path scores each fit on its own backend (gh#729): a
+//!     `camdl pfilter` child for chain-binomial, the fit's ODE likelihood
+//!     in-process for ODE (gh#312, `compare_ode`)
+//!   - basis preflight: a filtered trace and an ODE free-forward trace are
+//!     never differenced (gh#312; no override)
 //!   - formats: table (default), md, json
 //!   - compare.toml for reproducible multi-model specs
 //!
@@ -29,7 +34,7 @@ use crate::fit::stream_bindings::StreamBindings;
 use crate::posterior_draws::PosteriorDrawsRef;
 use serde::Deserialize;
 use score::trace::{
-    Conditioning, PrequentialTrace, StreamMean, ThetaSource, TraceOverride,
+    Conditioning, PredictiveBasis, PrequentialTrace, StreamMean, ThetaSource, TraceOverride,
 };
 use std::path::{Path, PathBuf};
 
@@ -113,6 +118,21 @@ fn conditioning_line(trace: &PrequentialTrace) -> String {
         Conditioning::HoldOutTail { train_end, .. } => format!(
             "Conditioning: held-out tail (train_end = {train_end}) — θ sealed \
              before the scored window."),
+    }
+}
+
+/// What predictive the scores come from, in one line, from the traces'
+/// `PredictiveBasis` stamp (gh#312); `None` for the particle filter's, the
+/// basis of every trace before the ODE path existed, which the JSON states
+/// per row. One line, not per row: the basis preflight refuses a cohort whose
+/// rows disagree, so the baseline's stamp is the cohort's.
+fn basis_line(trace: &PrequentialTrace) -> Option<&'static str> {
+    match trace.basis {
+        PredictiveBasis::Filtered => None,
+        PredictiveBasis::OdeFreeForward { .. } => Some(
+            "Predictive: ODE free-forward — the deterministic skeleton run from \
+             t_start at each θ, never re-anchored to data; each step scored by \
+             the exact observation density, not a filter estimate."),
     }
 }
 
@@ -1043,6 +1063,17 @@ fn in_sample_ablation(rows: &[Row]) -> Option<Mismatch> {
     })
 }
 
+/// A trace's predictive basis, as the basis refusal names it (gh#312).
+fn basis_kind(b: &PredictiveBasis) -> String {
+    match b {
+        PredictiveBasis::Filtered =>
+            "filtered (a particle filter's one-step-ahead estimate)".to_string(),
+        PredictiveBasis::OdeFreeForward { samples_per_draw } => format!(
+            "ode_free_forward (the ODE skeleton run from t_start at each θ, scored \
+             exactly; {samples_per_draw} observation-model draws per θ)"),
+    }
+}
+
 fn provenance_kind(p: &score::trace::Provenance) -> String {
     use score::trace::Provenance;
     match p {
@@ -1080,6 +1111,25 @@ fn preflight(rows: &[Row], waived: &Waivers) -> Result<Preflight, String> {
                    --in-sample to score all of them in-sample.");
         return Err(message);
     }
+    // gh#312: rows on different predictive bases are never differenced. A
+    // filter's score is a Monte-Carlo estimate whose log is biased downward
+    // by an amount that depends on the model and the particle count; an ODE
+    // trace's is exact. Their Δ would carry that bias as if it were a model
+    // difference, and no setting makes the two estimators agree — so, like
+    // conditioning, there is no override.
+    if rows.windows(2).any(|w| discriminant(&w[0].trace.basis) != discriminant(&w[1].trace.basis)) {
+        let mut message = "error: the compared traces mix predictive bases:".to_string();
+        for r in rows {
+            message.push_str(&format!("\n       {}: {}", r.name, basis_kind(&r.trace.basis)));
+        }
+        message.push_str("\n       A particle filter's log score is a Monte-Carlo estimate, \
+                   biased downward by an amount that depends on the model and the \
+                   particle count; an ODE trace's is exact. Their Δelpd would mix \
+                   that bias into the model difference. Compare ODE fits with ODE \
+                   fits, and filtered fits with filtered fits.");
+        return Err(message);
+    }
+
     // All held-out: the sealed boundaries must also agree, or the rows
     // score different windows (the axis check would refuse anyway, but
     // this names the actual cause).
@@ -1895,9 +1945,11 @@ struct Derived {
 ///    `pfilter --save-prequential` and method-dir inputs; the derive settings do
 ///    not touch it.
 /// 2. **Fit handle** (Phase 2a): `@label` / hash prefix / run dir / `fit.toml`.
-///    The prequential is DERIVED by invoking the canonical `camdl pfilter` at
-///    the fit's sealed θ̂ — never by reimplementing the filter (the obs-model
-///    assembly is already triplicated; a fourth copy is forbidden).
+///    The prequential is DERIVED at the fit's sealed θ̂: for a chain-binomial
+///    fit by invoking the canonical `camdl pfilter` — never by reimplementing
+///    the filter (the obs-model assembly is already triplicated; a fourth copy
+///    is forbidden) — and for an ODE fit by the fit's own likelihood, rebuilt
+///    through `FitRunConfig::build` (gh#312, `compare_ode`).
 fn load_trace(
     out: &crate::out::Out,
     path: &str,
@@ -1929,43 +1981,6 @@ fn load_trace(
              - as a prequential path: no prequential.json at '{path}' (or \
              '{path}/prequential.json') — run `camdl pfilter --save-prequential` \
              or `camdl fit run` with a pfilter method to generate one."
-        )),
-    }
-}
-
-/// Refuse to derive a prequential for a fit that did not run on the backend the
-/// derive path filters with (gh#729).
-///
-/// [`derive_prequential`] invokes `camdl pfilter`, a bootstrap particle filter
-/// over the chain-binomial forward process. That is the right filter for a
-/// chain-binomial fit and the wrong one for any other: an ODE fit's θ̂ describes
-/// a deterministic trajectory, and scoring it through a stochastic
-/// chain-binomial predictive produces a number that is neither the fit's own
-/// likelihood nor a like-for-like predictive score — while the table presents
-/// it as that fit's prequential. A label would not fix it; a reader told to
-/// discount a column will forget to.
-///
-/// No override: the honest ODE prequential is gh#312. Until then an ODE fit can
-/// still be compared by supplying an explicit `prequential.json` scored under
-/// its own backend.
-fn check_derivable_backend(
-    backend: crate::run_meta::InferenceBackend,
-    segment: &Path,
-) -> Result<(), String> {
-    use crate::run_meta::InferenceBackend;
-    match backend {
-        InferenceBackend::ChainBinomial => Ok(()),
-        other => Err(format!(
-            "the fit at {} ran its terminal method on the `{}` backend, but \
-             `compare` derives a prequential by invoking `camdl pfilter`, a \
-             bootstrap particle filter over the `chain_binomial` process.\n  \
-             The derived scores would come from a different forward process \
-             than the one the fit used, and the table would present them as \
-             this fit's own.\n  \
-             Score it under its own backend and pass the resulting \
-             prequential.json instead. The derived path for `{}` fits is \
-             tracked in gh#312 (ODE prequential).",
-            segment.display(), other.as_str(), other.as_str(),
         )),
     }
 }
@@ -2262,20 +2277,20 @@ fn derive_prequential(
     let run_dir = resolved.run_dir();
     let config = &resolved.config.problem;
 
-    // gh#729: the filter this shells out to is chain-binomial. The θ̂ below
-    // comes from the fit's method leaf (both `resolve_posterior_draws` and
-    // `winner_params_toml` pick it), so that method's backend is the one the
-    // derived score must match. A named run's backend is its own record's;
-    // the archived config describes the folder's latest run, which may not
-    // be it (gh#896).
+    // gh#729 / gh#312: the score must come from the forward process the fit
+    // ran on. The θ̂ below comes from the fit's method leaf (both
+    // `resolve_posterior_draws` and `winner_params_toml` pick it), so that
+    // method's backend chooses the scorer: a `camdl pfilter` child (a
+    // chain-binomial bootstrap filter) for a chain-binomial fit, the fit's own
+    // ODE likelihood in-process for an ODE fit (`compare_ode`). A named run's
+    // backend is its own record's; the archived config describes the folder's
+    // latest run, which may not be it (gh#896).
     let backend = match &resolved.leaf {
         Some(leaf) => crate::fit::fit_view::FitView::read(leaf)
             .and_then(|v| v.methods.first().map(|s| s.backend)),
         None => resolved.config.inference.method.as_ref().map(|m| m.algorithm.backend()),
     };
-    if let Some(backend) = backend {
-        check_derivable_backend(backend, run_dir)?;
-    }
+    let is_ode = backend == Some(crate::run_meta::InferenceBackend::Ode);
 
     // (a) θ — what the prequential is scored at. With `--draws M ≥ 2` and a
     // posterior cloud, the honest choice: M thinned draws, one filter pass
@@ -2286,11 +2301,11 @@ fn derive_prequential(
     // Bayesian fit (PGAS/PMMH/MH) writes no `final_params.toml` — its θ̂ is
     // the posterior MEAN over `draws.tsv`; only an optimizer fit (IF2/NLopt)
     // has a single winner file.
-    let point = |run_dir| -> Result<(Vec<String>, ThetaSource), String> {
-        let (toml, source) = point_estimate_params_toml(run_dir, selection)?;
-        Ok((vec![toml], source))
+    let point = |run_dir| -> Result<(Vec<ScoredTheta>, ThetaSource), String> {
+        let (theta, source) = point_estimate_params_toml(run_dir, selection)?;
+        Ok((vec![theta], source))
     };
-    let (theta_tomls, theta_source): (Vec<String>, ThetaSource) = if derive.draws >= 2 {
+    let (thetas, theta_source): (Vec<ScoredTheta>, ThetaSource) = if derive.draws >= 2 {
         match thinned_draws_params_tomls(run_dir, selection, derive.draws)? {
             Some(thinned) => thinned,
             None => point(run_dir)?,
@@ -2298,7 +2313,7 @@ fn derive_prequential(
     } else {
         point(run_dir)?
     };
-    let is_mixture = theta_tomls.len() >= 2;
+    let is_mixture = thetas.len() >= 2;
 
     // (b) model — prefer the self-contained archived IR (Phase 1a), else the
     // loose source the config names (recompiled by pfilter). config.model.camdl
@@ -2320,7 +2335,8 @@ fn derive_prequential(
     // The step the fit ran at: the filter re-scores the data through the
     // fitted process, so it integrates at the fit's dt — not the model's
     // declared step or 1.0, which is all `pfilter` would see without it.
-    let fitted_dt = crate::fit::fitted_model::stored_fit_simulator(resolved)?.dt;
+    let fitted = crate::fit::fitted_model::stored_fit_simulator(resolved)?;
+    let fitted_dt = fitted.dt;
     let (base_enable, base_disable): (Vec<String>, Vec<String>) = if fit_base.is_empty() {
         (Vec::new(), Vec::new())
     } else {
@@ -2489,22 +2505,39 @@ fn derive_prequential(
         trace
     };
 
-    let n_theta = theta_tomls.len();
-    if is_mixture || derive.replicates >= 2 {
+    let mut replicate_traces: Vec<PrequentialTrace> =
+        Vec::with_capacity(derive.replicates);
+    let n_theta = thetas.len();
+    if is_ode {
+        // gh#312: no filter. Each θ is scored by the fit's own ODE likelihood,
+        // exactly; the observation-model draws feed only CRPS, PIT and the
+        // interval, and a seed changes nothing else, so there are no replicates.
+        if is_mixture {
+            out.say(format_args!(
+                "compare: {}: ODE free-forward scores at {} posterior draw(s), {} \
+                 observation-model draws each (deterministic — no filter, so \
+                 --replicates does not apply; --draws 1 for the plug-in mode)",
+                seg_slug, n_theta, derive.particles));
+        }
+        let scored = derive_ode_trace(resolved, &model_path, &streams, &fitted,
+            holdout.as_ref(), &thetas, derive, &base_enable, &base_disable);
+        for p in &merged_paths { let _ = std::fs::remove_file(p); }
+        replicate_traces.push(scored?);
+    } else if is_mixture || derive.replicates >= 2 {
         out.say(format_args!(
             "compare: {}: {} filter passes ({} draw(s) × {} replicate(s), \
              {} particles each; --draws 1 / --replicates 1 for the cheap modes)",
             seg_slug, n_theta * derive.replicates, n_theta, derive.replicates,
             derive.particles));
     }
-    let mut replicate_traces: Vec<PrequentialTrace> =
-        Vec::with_capacity(derive.replicates);
-    for rep in 0..derive.replicates {
+    // The filter passes; none for an ODE fit, scored above.
+    let filter_replicates = if is_ode { 0 } else { derive.replicates };
+    for rep in 0..filter_replicates {
         // §3.4 remedy 4: replicate r reruns everything at seed + r.
         let seed_r = derive.seed + rep as u64;
         let mut component_traces = Vec::with_capacity(n_theta);
-        for (i, params_toml) in theta_tomls.iter().enumerate() {
-            let r = run_pass(rep * n_theta + i, params_toml, seed_r).map_err(|e| match e {
+        for (i, theta) in thetas.iter().enumerate() {
+            let r = run_pass(rep * n_theta + i, &theta.toml, seed_r).map_err(|e| match e {
                 PassError::FilterRejected(e) if is_mixture => {
                     // A degenerate mixture component is informative, not
                     // repairable: dropping it would bias the mixture toward
@@ -2543,6 +2576,7 @@ fn derive_prequential(
     // expectation to O(per-step variance), and the SE measures the same
     // filter-noise scale either way.
     let totals = ReplicateTotals::of(&replicate_traces);
+    let n_replicates = replicate_traces.len();
     let mut trace = if replicate_traces.len() >= 2 {
         combine_scored_traces(replicate_traces, derive.seed)?
     } else {
@@ -2562,7 +2596,8 @@ fn derive_prequential(
     let derivation = trace.derivation.as_mut().ok_or_else(|| format!(
         "internal error: `camdl pfilter` wrote a trace for {} with no derivation \
          block", segment.display()))?;
-    derivation.replicates = derive.replicates;
+    // The replicates that ran: one for an ODE fit, which has no filter noise.
+    derivation.replicates = n_replicates;
     derivation.theta = theta_source;
     derivation.excluded_chains = excluded_chains;
     derivation.replicate_elpd = totals.elpd;
@@ -2644,6 +2679,64 @@ impl ReplicateTotals {
     }
 }
 
+/// An ODE fit's trace (gh#312): each θ scored in-process by the fit's own
+/// ODE likelihood over the full series (`compare_ode::OdeScorer`), then — for
+/// several posterior draws — combined into the posterior mixture by the same
+/// [`combine_mixture`] the filter path uses, so the step score is
+/// `log (1/M) Σ_m p(y_t | x_t(θ_m))`, the log of the mixture density and not
+/// the mean of the per-draw logs.
+///
+/// Every draw is scored with the same observation-sample seed and the same
+/// window, so components differ only in θ, as the filter path's do. A held-out
+/// fit is scored past its sealed boundary by the index rule `camdl pfilter
+/// --score-from` applies ([`crate::fit::runner::first_scored_index`]); the
+/// caller verifies and stamps the window as for any derived trace.
+#[allow(clippy::too_many_arguments)]
+fn derive_ode_trace(
+    resolved: &ResolvedFit,
+    model_path: &Path,
+    streams: &indexmap::IndexMap<String, String>,
+    fitted: &crate::fit::fitted_model::FittedSimulator,
+    holdout: Option<&SealedHoldout>,
+    thetas: &[ScoredTheta],
+    derive: DeriveSettings,
+    enabled: &[String],
+    disabled: &[String],
+) -> Result<PrequentialTrace, String> {
+    let scorer = crate::compare_ode::OdeScorer::build(resolved, model_path, streams, fitted)?;
+    let (t0, score_from) = match holdout {
+        Some(h) => (crate::fit::runner::first_scored_index(scorer.obs_times(), h.train_end),
+                    Some(h.train_end)),
+        None => (0, None),
+    };
+    let n = thetas.len();
+    let mut components = Vec::with_capacity(n);
+    for (i, theta) in thetas.iter().enumerate() {
+        let trace = scorer.score(&theta.values, derive.particles, derive.seed, t0,
+            score_from, enabled.to_vec(), disabled.to_vec())
+            .map_err(|e| {
+                let which = if n >= 2 {
+                    format!("mixture component {} of {n} (a retained posterior draw)", i + 1)
+                } else {
+                    "the point estimate".to_string()
+                };
+                let horizon = if holdout.is_some() {
+                    "\n  A held-out score integrates the ODE through the held-out \
+                     observations, so the model's horizon (`simulate { to }`) and \
+                     output schedule must reach them."
+                } else { "" };
+                format!("fit at {}: {which} could not be scored: {e}{horizon}",
+                    resolved.segment.display())
+            })?;
+        components.push(trace);
+    }
+    if n >= 2 {
+        combine_mixture(components, derive.seed)
+    } else {
+        Ok(components.pop().expect("one θ was scored"))
+    }
+}
+
 /// Combine per-draw filter traces into the posterior-mixture predictive
 /// (§3.6 of the 2026-08-29 proposal; Stage 4.1).
 ///
@@ -2695,7 +2788,8 @@ fn combine_scored_traces(
     assert!(m >= 2, "combine_scored_traces needs >= 2 components");
     let first = &traces[0];
     for t in &traces[1..] {
-        let same_axis = t.steps.len() == first.steps.len()
+        let same_axis = t.basis == first.basis
+            && t.steps.len() == first.steps.len()
             && t.steps.iter().zip(&first.steps).all(|(a, b)| {
                 a.t == b.t
                     && a.per_stream.len() == b.per_stream.len()
@@ -2767,6 +2861,7 @@ fn combine_scored_traces(
         t0: first.t0,
         provenance: first.provenance,
         conditioning: first.conditioning.clone(),
+        basis: first.basis,
         steps,
         warnings,
         score_from: first.score_from,
@@ -2787,7 +2882,7 @@ fn thinned_draws_params_tomls(
     segment: &Path,
     selection: Option<&ChainSelection>,
     m: usize,
-) -> Result<Option<(Vec<String>, ThetaSource)>, String> {
+) -> Result<Option<(Vec<ScoredTheta>, ThetaSource)>, String> {
     let pdraws = match crate::posterior_draws::resolve_posterior_draws(
         &segment.to_string_lossy(), None,
     ) {
@@ -2807,15 +2902,16 @@ fn thinned_draws_params_tomls(
     let mut out = Vec::with_capacity(m_eff);
     for i in 0..m_eff {
         let row = &rows[i * n / m_eff];
-        let sorted: std::collections::BTreeMap<&String, &f64> = row.iter().collect();
+        let values: std::collections::BTreeMap<String, f64> =
+            row.iter().map(|(k, v)| (k.clone(), *v)).collect();
         let mut s = String::new();
         s.push_str("# camdl compare: thinned posterior draw (mixture component)\n\n");
-        for (name, v) in sorted {
+        for (name, v) in &values {
             s.push_str(&format!(
                 "{} = {}\n", name,
                 crate::fit::runner::format_param_value(*v)));
         }
-        out.push(s);
+        out.push(ScoredTheta { toml: s, values });
     }
     Ok(Some((out, ThetaSource::PosteriorDraws { n_used: m_eff, n_available: n })))
 }
@@ -3018,14 +3114,18 @@ fn dropped_chains(run_dir: &Path, sel: &ChainSelection) -> Result<Vec<usize>, St
 fn point_estimate_params_toml(
     segment: &Path,
     selection: Option<&ChainSelection>,
-) -> Result<(String, ThetaSource), String> {
+) -> Result<(ScoredTheta, ThetaSource), String> {
     match crate::posterior_draws::resolve_posterior_draws(&segment.to_string_lossy(), None) {
         Ok(pdraws) => posterior_mean_params_toml(&pdraws.with_selection(selection.cloned()))
-            .map(|(toml, n_draws)| (toml, ThetaSource::PosteriorMean { n_draws })),
-        // No posterior cloud → an optimizer fit; its θ̂ is the single winner.
+            .map(|(theta, n_draws)| (theta, ThetaSource::PosteriorMean { n_draws })),
+        // No posterior cloud → an optimizer fit; its θ̂ is the single winner,
+        // whose values are the winner file's as written.
         Err(crate::posterior_draws::PosteriorDrawsError::NoPosterior(_)) => {
-            crate::fit::fit_summary::winner_params_toml(segment)
-                .map(|toml| (toml, ThetaSource::OptimizerWinner))
+            let toml = crate::fit::fit_summary::winner_params_toml(segment)?;
+            let values = flat_params_of(&toml)
+                .map_err(|e| format!("reading the winning parameters of {}: {e}",
+                    segment.display()))?;
+            Ok((ScoredTheta { toml, values }, ThetaSource::OptimizerWinner))
         }
         // Anything else — a leaf refused for counting its chains from 1
         // (gh#990) — must not be scored at a winner instead.
@@ -3044,7 +3144,7 @@ fn point_estimate_params_toml(
 /// — the same seam `fit predict`/`fit summary` use, rather than a second raw
 /// draws reader. The `(chain, draw)` key columns are dropped by the keyed
 /// loader, never emitted as parameters (gh#322).
-fn posterior_mean_params_toml(pref: &PosteriorDrawsRef) -> Result<(String, usize), String> {
+fn posterior_mean_params_toml(pref: &PosteriorDrawsRef) -> Result<(ScoredTheta, usize), String> {
     let (rows, _info) = pref.load_params_with_info()?;
     let n = rows.len();
     if n == 0 {
@@ -3062,14 +3162,35 @@ fn posterior_mean_params_toml(pref: &PosteriorDrawsRef) -> Result<(String, usize
     let mut out = String::new();
     out.push_str("# camdl compare: posterior-mean point estimate (θ̂) for the prequential\n");
     out.push_str(&format!("# source: {} ({n} draws)\n\n", pref.draws_path.display()));
-    for (name, sum) in &sums {
+    let values: std::collections::BTreeMap<String, f64> =
+        sums.into_iter().map(|(name, sum)| (name, sum / n as f64)).collect();
+    for (name, v) in &values {
         out.push_str(&format!(
             "{} = {}\n",
             name,
-            crate::fit::runner::format_param_value(sum / n as f64)
+            crate::fit::runner::format_param_value(*v)
         ));
     }
-    Ok((out, n))
+    Ok((ScoredTheta { toml: out, values }, n))
+}
+
+/// One θ a derived trace is scored at, in the two forms its two scorers read:
+/// the flat params TOML handed to a `camdl pfilter` child, and the values
+/// themselves, which the in-process ODE scorer uses so that it scores the
+/// draw at full precision rather than at the TOML's printed digits.
+struct ScoredTheta {
+    toml: String,
+    values: std::collections::BTreeMap<String, f64>,
+}
+
+/// The `name = value` entries of a flat params TOML (a fit's winner file).
+fn flat_params_of(toml_text: &str) -> Result<std::collections::BTreeMap<String, f64>, String> {
+    let table: toml::Table = toml_text.parse().map_err(|e| format!("{e}"))?;
+    table.iter().map(|(k, v)| match v {
+        toml::Value::Float(f) => Ok((k.clone(), *f)),
+        toml::Value::Integer(i) => Ok((k.clone(), *i as f64)),
+        other => Err(format!("'{k}' is not a number: {other}")),
+    }).collect()
 }
 
 /// Paired Δ = sum_t (a_t − b_t); paired SE = the Newey–West HAC standard
@@ -3403,6 +3524,10 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Pref
     }
     out.push_str(&conditioning_line(base));
     out.push('\n');
+    if let Some(line) = basis_line(base) {
+        out.push_str(line);
+        out.push('\n');
+    }
     if let Some(line) = assimilated_line(rows) {
         out.push_str(&line);
         out.push('\n');
@@ -3621,6 +3746,9 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Preflig
     }
     out.push('\n');
     out.push_str(&format!("_{}_\n", conditioning_line(base)));
+    if let Some(line) = basis_line(base) {
+        out.push_str(&format!("\n_{line}_\n"));
+    }
     if let Some(line) = assimilated_line(rows) {
         out.push_str(&format!("\n_{line}_\n"));
     }
@@ -3751,6 +3879,9 @@ fn json_document(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Pre
             // / LFO traces exist.
             "provenance": r.trace.provenance,
             "conditioning": r.trace.conditioning,
+            // Which predictive the scores come from (gh#312): a particle
+            // filter's estimate, or the ODE skeleton's exact density.
+            "basis": r.trace.basis,
             // How the trace was computed (schema 5); null for an older trace.
             "derivation": r.trace.derivation,
             // The trace's own warnings and the miscalibration flag, verbatim
@@ -3830,6 +3961,7 @@ mod tests {
             schema_version: 3,
             t0: 0,
             provenance: Provenance::PlugIn,
+            basis: score::trace::PredictiveBasis::Filtered,
             conditioning: Conditioning::InSample,
             steps: vec![PrequentialStep {
                 t: 7.0,
@@ -3887,6 +4019,7 @@ mod tests {
             schema_version: 3,
             t0: 0,
             provenance: Provenance::PlugIn,
+            basis: score::trace::PredictiveBasis::Filtered,
             conditioning: Conditioning::InSample,
             steps: vec![PrequentialStep {
                 t,
@@ -3902,6 +4035,60 @@ mod tests {
         let err = combine_mixture(vec![trace_at(7.0), trace_at(14.0)], 1)
             .expect_err("different step times must refuse");
         assert!(err.contains("different observation axes"), "{err}");
+
+        // gh#312: an ODE component and a filtered one are not two draws of one
+        // predictive; the mixture of ODE components keeps the ODE stamp.
+        let ode = |t: f64| PrequentialTrace {
+            basis: PredictiveBasis::OdeFreeForward { samples_per_draw: 10 },
+            ..trace_at(t)
+        };
+        let err = combine_mixture(vec![trace_at(7.0), ode(7.0)], 1)
+            .expect_err("components on different bases must refuse");
+        assert!(err.contains("different observation axes"), "{err}");
+        let mixed = combine_mixture(vec![ode(7.0), ode(7.0)], 1).expect("ODE draws combine");
+        assert_eq!(mixed.basis, PredictiveBasis::OdeFreeForward { samples_per_draw: 10 });
+        assert_eq!(mixed.provenance, Provenance::Posterior { n_draws: 2 });
+    }
+
+    /// gh#312: a particle filter's log score is a Monte-Carlo estimate biased
+    /// downward by an amount that depends on the model and the particle count,
+    /// and an ODE trace's is exact, so a Δelpd between them would carry that
+    /// bias as a model difference. The pair is refused whatever is waived; two
+    /// rows on one basis are not; and the basis is stated in every format.
+    #[test]
+    fn traces_on_different_predictive_bases_are_never_differenced() {
+        let ode_basis = PredictiveBasis::OdeFreeForward { samples_per_draw: 100 };
+        let mut rows = vec![
+            row_at("pf", &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0]),
+            row_at("ode", &[7.0, 14.0, 21.0], &[-5.0, -6.0, -6.0]),
+        ];
+        rows[1].trace.basis = ode_basis;
+        let err = preflight(&rows, &every_waiver())
+            .expect_err("no waiver lets a filtered and an ODE trace be differenced");
+        assert!(err.contains("mix predictive bases"), "{err}");
+        assert!(err.contains("pf: filtered") && err.contains("ode: ode_free_forward"),
+            "names each row's basis: {err}");
+
+        rows[0].trace.basis = ode_basis;
+        let checks = preflight(&rows, &Waivers::default()).expect("two ODE rows compare");
+        let metrics = vec!["elpd".to_string()];
+        let ode_line = "Predictive: ODE free-forward";
+        assert!(render_table(&rows, 0, &metrics, &checks).contains(ode_line));
+        assert!(render_md(&rows, 0, &metrics, &checks).contains(ode_line));
+        let v: serde_json::Value =
+            serde_json::from_str(&render_json(&rows, 0, &metrics, &checks)).unwrap();
+        for r in v["rows"].as_array().unwrap() {
+            assert_eq!(r["basis"], serde_json::json!({"ode_free_forward": {"samples_per_draw": 100}}),
+                "{v}");
+        }
+
+        // A filtered cohort's table is as it was; its JSON states the basis.
+        let pf = vec![row_at("a", &[7.0], &[-6.0]), row_at("b", &[7.0], &[-5.0])];
+        let checks = preflight(&pf, &Waivers::default()).unwrap();
+        assert!(!render_table(&pf, 0, &metrics, &checks).contains("Predictive:"));
+        let v: serde_json::Value =
+            serde_json::from_str(&render_json(&pf, 0, &metrics, &checks)).unwrap();
+        assert_eq!(v["rows"][0]["basis"], "filtered", "{v}");
     }
 
     /// The exponentiated Δelpd column reports an in-sample likelihood ratio
@@ -4219,31 +4406,6 @@ mod tests {
         assert!(!note.contains("'a'"), "the checked row is not in the note: {note}");
         assert!(unchecked_data_note(&[("a", &same_a), ("b", &same_b)]).is_none(),
             "no note when every row was checked");
-    }
-
-    /// gh#729: the derive path shells out to `camdl pfilter`, which runs a
-    /// chain-binomial bootstrap particle filter whatever the fit ran on. For an
-    /// ODE fit that means the "prequential" is produced by a different forward
-    /// process than the one whose θ̂ it plugs in — a stochastic filter scoring a
-    /// deterministic model's parameters — and the table labels it as that fit's
-    /// score. Refused rather than labelled, since a comparison the reader must
-    /// know to discount is one they will forget to discount.
-    #[test]
-    fn refuses_to_derive_a_prequential_under_a_backend_the_fit_did_not_use() {
-        use crate::run_meta::InferenceBackend;
-        let seg = Path::new("results/fits/sir-abc12345");
-
-        check_derivable_backend(InferenceBackend::ChainBinomial, seg)
-            .expect("the filter and the fit agree — this is the ordinary path");
-
-        let err = check_derivable_backend(InferenceBackend::Ode, seg)
-            .expect_err("an ODE fit's prequential may not be derived by a \
-                         chain-binomial filter");
-        assert!(err.contains("ode"), "names the backend the fit ran on: {err}");
-        assert!(err.contains("chain_binomial"),
-            "and the one the derived score would come from: {err}");
-        assert!(err.contains("gh#312"), "and where the fix is tracked: {err}");
-        assert!(err.contains("sir-abc12345"), "and which fit: {err}");
     }
 
     /// Two fits sealed at the same observation can record boundaries that
@@ -5105,6 +5267,7 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
                 schema_version: 1,
                 t0: 1,
                 provenance: Provenance::PlugIn,
+                basis: score::trace::PredictiveBasis::Filtered,
                 conditioning: Conditioning::InSample,
                 steps,
                 warnings: Vec::new(),
@@ -5269,6 +5432,7 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         // All chains: mean beta = (1.0·4 + 9.0·4)/8 = 5.0 — the stuck chain
         // drags θ̂ up.
         let (all, n_all) = posterior_mean_params_toml(&pref).unwrap();
+        let all = all.toml;
         assert_eq!(beta_of(&all), 5.0, "all-chain θ̂ pools both chains");
         assert_eq!(n_all, 8, "the mean is over all 8 draws");
 
@@ -5276,6 +5440,7 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         let sel = ChainSelection::parse_exclude("1").unwrap();
         let (sub, n_sub) =
             posterior_mean_params_toml(&pref.clone().with_selection(Some(sel))).unwrap();
+        let sub = sub.toml;
         assert_eq!(beta_of(&sub), 1.0, "subset θ̂ is the mean over the retained chain");
         assert_eq!(n_sub, 4, "and over the 4 retained draws");
         assert_ne!(
@@ -5753,6 +5918,7 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
   "overrides": [],
   "rows": [
     {
+      "basis": "filtered",
       "conditioning": "in_sample",
       "delta_elpd": null,
       "delta_elpd_db": null,
@@ -5798,6 +5964,7 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
       "warnings": []
     },
     {
+      "basis": "filtered",
       "conditioning": "in_sample",
       "delta_elpd": 4.0,
       "delta_elpd_db": 17.37177927613007,

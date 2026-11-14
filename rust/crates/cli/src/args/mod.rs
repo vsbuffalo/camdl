@@ -2739,6 +2739,10 @@ Examples:
   # scores are commensurable). No pre-run pfilter needed.
   camdl compare @baseline @candidate --particles 2000 --seed 7
 
+  # Compare two ODE fits (`mh` or NLopt on backend = \"ode\"): each is
+  # scored by its own ODE likelihood, exactly — no filter (gh#312)
+  camdl compare @m0 @m1
+
   # Render despite different T_score across fits (Δ columns → '—')
   camdl compare fits/a/pf fits/b/pf --allow-mismatched-horizon
 "))]
@@ -2746,7 +2750,11 @@ pub struct CompareArgs {
     /// Models to compare — need ≥2 when --config is not used. Each is
     /// either a prequential.json (or a method dir holding one), read
     /// as-is, OR a fit handle (@label / hash prefix / run dir / fit.toml),
-    /// whose prequential is auto-derived from its sealed θ̂ + data.
+    /// whose prequential is auto-derived from its sealed θ̂ + data: by a
+    /// particle filter for a chain-binomial fit, and for an ODE fit by the
+    /// fit's own ODE likelihood, the exact density of each observation at the
+    /// trajectory run from t_start at θ (basis `ode_free_forward`, gh#312).
+    /// A filtered row and an ODE row are never differenced.
     pub paths: Vec<String>,
 
     /// Print the model-comparison methods guide and exit — what elpd, LR,
@@ -2833,7 +2841,8 @@ pub struct CompareArgs {
     pub allow_in_sample_ablation: bool,
 
     /// Mixture size for a Bayesian fit's derived predictive (§3.6 of the
-    /// 2026-08-29 proposal): one filter pass per thinned posterior draw;
+    /// 2026-08-29 proposal): one filter pass (for an ODE fit, one ODE
+    /// solve) per thinned posterior draw;
     /// per-step predictive densities are averaged over the draws and the
     /// predictive samples pooled, so scores and intervals carry parameter
     /// uncertainty (provenance `posterior`). `--draws 1` is the documented
@@ -2850,7 +2859,8 @@ pub struct CompareArgs {
     /// evidence verdict is suppressed ("within filter noise") when |Δelpd|
     /// sits inside twice the pair's combined MC SE — at that scale the Δ
     /// measures the particle filters, not the models. `--replicates 1` is
-    /// the documented cheap mode (no replication, no MC SE).
+    /// the documented cheap mode (no replication, no MC SE). Not applied
+    /// to an ODE fit, whose scores are exact and have no filter noise.
     #[arg(long, default_value_t = crate::compare::DEFAULT_DERIVE_REPLICATES)]
     pub replicates: usize,
 
@@ -2874,7 +2884,10 @@ pub struct CompareArgs {
     /// Particle count for any fit handle whose prequential is
     /// auto-derived. Applied uniformly to every derived fit so T_score
     /// and scores stay commensurable. Ignored for an explicit
-    /// prequential.json path (read as-is).
+    /// prequential.json path (read as-is). An ODE fit runs no filter: for
+    /// it this is the number of observation-model draws per θ behind CRPS,
+    /// PIT and the predictive interval, and the log score does not depend
+    /// on it.
     #[arg(long, default_value_t = crate::compare::DEFAULT_DERIVE_PARTICLES)]
     pub particles: usize,
 

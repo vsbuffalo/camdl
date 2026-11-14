@@ -1,12 +1,16 @@
 //! Building a prequential trace from one particle-filter pass:
 //! [`build_trace`] turns the filter's recorded output into a
 //! `score::trace::PrequentialTrace`, drawing the randomized-PIT uniforms
-//! from `sim`'s random stream. The trace types, the scoring-rule kernels
-//! and the summaries read from a trace are in `score::trace`.
+//! from `sim`'s random stream. The ODE skeleton's record (one exact density
+//! per step plus observation-model draws, gh#312) is built in
+//! `ode_loglik.rs` and goes through the same [`build_trace`]. The trace
+//! types, the scoring-rule kernels and the summaries read from a trace are in
+//! `score::trace`.
 
 use score::trace::{
     crps_sample_fair, pit_sample_randomized, Conditioning, Coverage, PredInterval,
-    PrequentialStep, PrequentialTrace, PrequentialWarning, Provenance, StreamScore,
+    PredictiveBasis, PrequentialStep, PrequentialTrace, PrequentialWarning, Provenance,
+    StreamScore,
 };
 
 /// Build a `PrequentialTrace` from raw PF recordings and each stream's
@@ -132,17 +136,20 @@ pub fn build_trace(
     PrequentialTrace {
         // v3 (gh#585): score_from + pit_randomization_seed + the
         // Conditioning struct variants. v4 (gh#833): per-stream `coverage`.
-        // v5: the `derivation` block (filled by the caller). All additions
-        // serde-defaulted, so older traces still read; they read as
-        // InSample/PlugIn/Unrecorded/no derivation, which is factually what
-        // they are.
-        schema_version: 5,
+        // v5: the `derivation` block (filled by the caller). v6 (gh#312): the
+        // `basis` axis. All additions serde-defaulted, so older traces still
+        // read; they read as InSample/PlugIn/Unrecorded/no derivation/Filtered,
+        // which is factually what they are.
+        schema_version: 6,
         t0,
         // This builder scores a single filter pass at one θ over the full data:
         // plug-in + in-sample. The posterior / LFO producers (#295) stamp their
         // own values.
         provenance: Provenance::PlugIn,
         conditioning: Conditioning::InSample,
+        // The particle filter's record is the default; the ODE caller, whose
+        // record has one deterministic support point, restamps it.
+        basis: PredictiveBasis::Filtered,
         steps,
         warnings,
         score_from,
@@ -247,8 +254,9 @@ mod tests {
         let trace = build_trace(&recorded, &per_stream_observed, &coverage,
                                 &[100.0, 100.0], 0, 7, true, None);
 
-        assert_eq!(trace.schema_version, 5,
-            "build_trace writes the current schema (coverage arrived in 4)");
+        assert_eq!(trace.schema_version, 6,
+            "build_trace writes the current schema (coverage arrived in 4, basis in 6)");
+        assert_eq!(trace.basis, PredictiveBasis::Filtered, "a filter's record is stamped filtered");
         let s0 = &trace.steps[0].per_stream;
         assert_eq!((s0[0].stream.as_str(), s0[0].coverage), ("inc", inc0));
         assert_eq!((s0[1].stream.as_str(), s0[1].coverage), ("prev", Coverage::Instant));
@@ -502,7 +510,7 @@ mod tests {
 
         // gh#269: one stream, so the single per-stream log score equals the
         // joint (same per-particle log-liks).
-        assert_eq!(trace.schema_version, 5);
+        assert_eq!(trace.schema_version, 6);
         assert_eq!(trace.steps[0].per_stream.len(), 1);
         assert_eq!(s0.stream, "s0");
         assert!(approx_eq(s0.log_score, trace.steps[0].log_score, 1e-12));

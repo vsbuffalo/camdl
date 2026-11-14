@@ -7,8 +7,10 @@
 //! PIT coverage) callers reach for.
 //!
 //! PF-side sample emission (each stream's per-particle predictive draws) is
-//! wired in `particle_filter.rs`; this module is pure post-processing
-//! once the samples are available.
+//! wired in `sim`'s `particle_filter.rs`, and the ODE skeleton's record (one
+//! exact density per step plus observation-model draws, gh#312) in `sim`'s
+//! `ode_loglik.rs`; this module is pure post-processing once the record is
+//! available. The record's origin is stamped as [`PredictiveBasis`].
 //!
 //! Scope: plug-in predictive only (provenance = `PlugIn`). LFO-PSIS,
 //! fully-Bayesian, and pseudo-posterior variants are Part II.
@@ -54,6 +56,37 @@ pub enum Provenance {
     /// and predictive samples pooled across the draws' filters, so
     /// intervals widen to carry parameter uncertainty.
     Posterior { n_draws: usize },
+}
+
+/// How the predictive at one θ was formed — the basis axis (gh#312),
+/// orthogonal to [`Provenance`] (how θ enters) and [`Conditioning`] (what θ
+/// saw).
+///
+/// A particle filter scores a Monte-Carlo estimate `p̂(y_t | y_{1:t-1}, θ)`
+/// whose log is biased downward, by more at fewer particles; a deterministic
+/// ODE trajectory is scored exactly, with no filter. Two traces on different
+/// bases differ partly by that estimator and not only by the models, so
+/// `compare` refuses to difference them. Externally tagged like
+/// [`Provenance`]: `filtered` is a bare string, the struct variant nests
+/// under its tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PredictiveBasis {
+    /// A bootstrap particle filter's one-step-ahead predictive: the
+    /// propagated particle cloud at step `t`, before reweighting on `y_t`,
+    /// averaged over the observation density. Every trace written before the
+    /// field existed is one, hence the default.
+    #[default]
+    Filtered,
+    /// The ODE skeleton integrated forward from `t_start` at θ, never
+    /// re-anchored to data: the score at step `t` is the exact observation
+    /// density `p(y_t | x_t(θ), θ)` at the deterministic state. Given θ this
+    /// IS the model's one-step-ahead predictive (a deterministic state has
+    /// nothing to learn from `y_{1:t-1}`), computed without Monte-Carlo
+    /// error. The predictive samples are `samples_per_draw` observation-model
+    /// draws at `x_t(θ)` per θ; the step's `ess` is 1, the single state
+    /// support point.
+    OdeFreeForward { samples_per_draw: usize },
 }
 
 /// How the parameters were conditioned on the data when scoring — the **second**
@@ -208,6 +241,12 @@ pub struct PrequentialTrace {
     /// field) reads as `InSample`, which is factually what every such trace is.
     #[serde(default)]
     pub conditioning: Conditioning,
+    /// How the predictive at one θ was formed — a particle filter's estimate
+    /// or the ODE skeleton's exact density (gh#312, schema 6).
+    /// `#[serde(default)]` so an older trace reads as `Filtered`, which every
+    /// trace written before the ODE path existed is.
+    #[serde(default)]
+    pub basis: PredictiveBasis,
     /// Per-step records, length = T - t0.
     pub steps: Vec<PrequentialStep>,
     /// Warnings collected during trace construction.
@@ -255,7 +294,8 @@ pub struct PrequentialTrace {
 /// partly by the filters. `compare` reads this block to refuse such a pair.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Derivation {
-    /// Particles per filter pass.
+    /// Particles per filter pass; 0 for a trace no filter produced (basis
+    /// `ode_free_forward`, whose predictive sample count its basis records).
     pub particles: usize,
     /// Filter replicates combined into the trace; 1 for a single pass.
     pub replicates: usize,
@@ -573,6 +613,7 @@ pub fn project_onto_stream(
         t0: trace.t0,
         provenance: trace.provenance,
         conditioning: trace.conditioning.clone(),
+        basis: trace.basis,
         steps,
         warnings,
         score_from: trace.score_from,
@@ -885,6 +926,7 @@ mod tests {
         };
         let trace = PrequentialTrace {
             schema_version: 5, t0: 0, provenance: Provenance::PlugIn,
+            basis: PredictiveBasis::Filtered,
             conditioning: Conditioning::InSample,
             steps: vec![
                 step(7.0, -3.0, vec![score("north", -1.0), score("south", -1.5)]),
@@ -992,6 +1034,7 @@ mod tests {
         let t = PrequentialTrace {
             schema_version: 2, t0: 0,
             provenance: Provenance::PlugIn,
+            basis: PredictiveBasis::Filtered,
             conditioning: Conditioning::InSample,
             steps: vec![], warnings: vec![],
             score_from: None,
@@ -1050,6 +1093,7 @@ mod tests {
         let t = PrequentialTrace {
             schema_version: 3, t0: 3,
             provenance: Provenance::Posterior { n_draws: 64 },
+            basis: PredictiveBasis::Filtered,
             conditioning: Conditioning::HoldOutTail {
                 train_end: 21.0, theta_source: "fits/sir-ab12cd34".into() },
             steps: vec![], warnings: vec![],
@@ -1075,6 +1119,7 @@ mod tests {
         let t = PrequentialTrace {
             schema_version: 3, t0: 3,
             provenance: Provenance::PlugIn,
+            basis: PredictiveBasis::Filtered,
             conditioning: Conditioning::HoldOutTail {
                 train_end: 21.0, theta_source: "fits/sir-ab12cd34".into() },
             steps: vec![], warnings: vec![],
@@ -1104,6 +1149,7 @@ mod tests {
         let t = PrequentialTrace {
             schema_version: 3, t0: 0,
             provenance: Provenance::PlugIn,
+            basis: PredictiveBasis::Filtered,
             conditioning: Conditioning::InSample,
             steps: vec![
                 scored_step(1.0, -3.0, &[]),
@@ -1281,6 +1327,7 @@ mod tests {
         }).collect();
         PrequentialTrace {
             schema_version: 5, t0: 0, provenance: Provenance::PlugIn,
+            basis: PredictiveBasis::Filtered,
             conditioning: Conditioning::InSample, steps, warnings: vec![],
             score_from: None, pit_randomization_seed: None, derivation: None, scored_streams: None,
         }
@@ -1381,6 +1428,7 @@ mod tests {
         };
         PrequentialTrace {
             schema_version: 5, t0: 1, provenance: Provenance::PlugIn,
+            basis: PredictiveBasis::Filtered,
             conditioning: Conditioning::InSample,
             steps: vec![
                 step(7.0, -10.0, 95.0, vec![distinct_score("cases", 1.0)]),

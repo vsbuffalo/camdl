@@ -317,10 +317,15 @@ particles, so part of the Δ would measure the filters; override:
 against a posterior mixture) are refused too (override:
 `--allow-mixed-provenance`). Under each override that was needed, every format
 states it once — the flag, the rows it concerned and what it does to the reading
-— as a line under the table and an entry of the JSON's `overrides` array. A fit
-whose method ran on a backend other than `chain_binomial` is refused on the
-derive path, since the derived score would come from a different forward process
-than the fit used (gh#312).
+— as a line under the table and an entry of the JSON's `overrides` array. A
+derived row is scored on the backend its fit ran on: a chain-binomial fit by a
+`camdl pfilter` child, an ODE fit (`mh` or NLopt on `backend = "ode"`) by its
+own ODE likelihood, which gives each observation's exact density at the
+trajectory run from the start at θ, averaged over the posterior draws (gh#312;
+`basis` in the JSON, and a "Predictive: ODE free-forward" line under the table
+of an ODE cohort). A filtered row and an ODE row are refused as a pair, with no
+override: the filter's log-likelihood estimate is biased downward and the ODE
+score is exact, so their Δ would carry that bias.
 
 `--pointwise PATH` writes the per-observation difference the table already
 computes in order to form `se(Δelpd)`, as two TSV files. `PATH` holds one row

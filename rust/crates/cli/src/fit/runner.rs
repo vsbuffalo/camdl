@@ -2114,6 +2114,14 @@ pub(crate) fn say_holdout_after_applied(t_start: f64, tau: f64, withheld: usize)
 /// across the training/held-out cut.
 pub(crate) const TIME_TIE_EPS: f64 = 1e-9;
 
+/// The index of the first observation a trace scored past `score_from` scores:
+/// the number of `obs_times` at or before it, observation-time ties resolved by
+/// [`TIME_TIE_EPS`]. The one rule behind `camdl pfilter --score-from` and the
+/// ODE trace `compare` derives (gh#312), so the two windows cannot differ.
+pub(crate) fn first_scored_index(obs_times: &[f64], score_from: f64) -> usize {
+    obs_times.iter().filter(|&&t| t <= score_from + TIME_TIE_EPS).count()
+}
+
 /// An observation anchor in a time spec (gh#626): `first_obs` / `last_obs`.
 /// Which observation(s) it folds over is the CALLER's semantics — the union
 /// of all bound streams for `simulate --to` and `holdout_after`.

@@ -1693,6 +1693,15 @@ Pass `--in-sample` to force the old full-series in-sample scoring. Comparing a
 holdout fit against a non-holdout fit is refused — those scores answer different
 questions.
 
+A fit on the ODE backend (`mh`, or an NLopt optimizer, with `backend = "ode"`)
+is scored without a filter: given θ its trajectory is fixed, so `compare`
+evaluates each observation's exact density at the trajectory run from the start
+at that θ, through the fit's own likelihood, and averages the densities over the
+thinned posterior draws (`basis = ode_free_forward`). Held-out scoring works as
+above. An ODE row is not differenced against a filtered row: the filter's
+log-likelihood estimate is biased downward and the ODE score is not, so their Δ
+would carry that bias. `camdl docs model-comparison` §8 gives the details.
+
 The equivalent manual construction (also the fallback for a fit produced before
 the holdout was applied):
 

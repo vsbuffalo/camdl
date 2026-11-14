@@ -38,6 +38,7 @@ mod data;
 mod docs;           // `camdl docs <topic>` — embedded, version-locked usage docs
 mod fit;
 mod compare;
+mod compare_ode;     // gh#312: the ODE fit's trace, scored in-process
 mod if2;
 mod profile;
 mod profile_cas;     // gh#147 M3.3: profile-point CAS identity (resolve_profile_point)

@@ -235,6 +235,7 @@ their own heading. Pre-1.0: a MINOR bump may include breaking changes.
 
 ### Features
 
+- *(compare)* Score ODE fits by the exact density of the ODE skeleton, averaged over posterior draws, stamped `basis = ode_free_forward` and never differenced against a filtered trace (gh#312)
 - *(install)* Linux + macOS install script (#63)
 - *(ir)* #[lineage] foundation — DSL attribute, linearity check, IR fields
 - *(ir)* Bump seir_spatial_5 test fixture to ir_version 0.5

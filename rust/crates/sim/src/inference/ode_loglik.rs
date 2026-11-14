@@ -1,10 +1,27 @@
-//! Deterministic ODE marginal likelihood `p(y | θ, ODE_skeleton)`.
+//! Deterministic ODE marginal likelihood `p(y | θ, ODE_skeleton)`, and the
+//! per-observation record the ODE prequential is built from (gh#312).
 //!
 //! Phase 1 of the ODE-inference proposal
 //! (`docs/dev/proposals/2026-05-04-ode-inference-three-phase.md`).
+//!
+//! Both consumers walk the trajectory through one function,
+//! [`walk_ode_observations`], so the snapshot walk, the per-stream bin fold
+//! and the bin reset that define what a deterministic trajectory predicts at
+//! each observation are written once: a score the prequential reports is the
+//! term the likelihood summed.
+
+use std::ops::ControlFlow;
 
 use crate::compiled_model::CompiledModel;
 use crate::inference::MultiStreamObsModel;
+use crate::inference::particle_filter::PrequentialRecorded;
+use crate::rng::StatefulRng;
+
+/// RNG stream for the observation-model draws of an ODE prequential record
+/// ([`ode_prequential_recorded`]). Disjoint from the randomized-PIT stream
+/// (`prequential::PIT_RNG_STREAM`, 1<<49), so passing one seed to both cannot
+/// correlate the predictive draws with the PIT randomization.
+pub const ODE_PREDICTIVE_RNG_STREAM: u64 = 1u64 << 50;
 
 /// Evaluate `p(y | θ, ODE_skeleton)` — the deterministic marginal likelihood.
 ///
@@ -27,6 +44,114 @@ pub fn compute_ode_loglik(
     params: &[f64],
     burnin_dt: f64,
 ) -> Result<f64, crate::error::SimError> {
+    let mut total_ll = 0.0;
+    let mut blew_up = false;
+    walk_ode_observations(
+        compiled, obs_model, obs_times, dt, params, burnin_dt,
+        |obs_idx, acc, counts| {
+            let ll = obs_model.log_likelihood_from_flows_and_counts_real(
+                acc, counts, obs_idx, params,
+            );
+            if !ll.is_finite() {
+                blew_up = true;
+                return ControlFlow::Break(());
+            }
+            total_ll += ll;
+            ControlFlow::Continue(())
+        },
+    )?;
+    Ok(if blew_up { f64::NEG_INFINITY } else { total_ll })
+}
+
+/// The ODE skeleton's predictive at every observation, recorded in the shape
+/// the prequential trace builder reads (`prequential::build_trace`) — the
+/// deterministic counterpart of a particle filter's
+/// [`PrequentialRecorded`] (gh#312).
+///
+/// Given θ the trajectory `x_t(θ)` is a point, so the one-step-ahead
+/// predictive `p(y_t | y_{1:t-1}, θ)` is the observation density at that
+/// point, `p(y_t | x_t(θ), θ)`, and conditioning on earlier observations
+/// changes nothing. The record therefore carries ONE state support point per
+/// step: `log_liks[k] = [log p(y_t | x_t(θ))]`, the exact term
+/// [`compute_ode_loglik`] sums (and the per-stream terms it is the sum of),
+/// so the builder's `logsumexp − ln 1` is that term itself, not an estimate.
+/// The predictive draws are `samples` independent draws per stream from the
+/// observation model at `x_t(θ)`, which is all CRPS, PIT and the interval
+/// need; their number does not touch the log score.
+///
+/// A non-finite term is recorded as it is (the score at that step is `-inf`
+/// or NaN) rather than abandoning the walk, so a trace shows which
+/// observation the trajectory could not produce. An `Err` is the trajectory
+/// itself failing (solver failure, a missing snapshot at an observation
+/// time), exactly as for [`compute_ode_loglik`].
+///
+/// Draws come from `rng`; callers seed it on [`ODE_PREDICTIVE_RNG_STREAM`].
+#[allow(clippy::too_many_arguments)]
+pub fn ode_prequential_recorded(
+    compiled: &CompiledModel,
+    obs_model: &MultiStreamObsModel,
+    obs_times: &[f64],
+    dt: f64,
+    params: &[f64],
+    burnin_dt: f64,
+    samples: usize,
+    rng: &mut StatefulRng,
+) -> Result<PrequentialRecorded, crate::error::SimError> {
+    let n_streams = obs_model.n_streams();
+    let mut recorded = PrequentialRecorded {
+        obs_times: Vec::with_capacity(obs_times.len()),
+        log_liks: Vec::with_capacity(obs_times.len()),
+        stream_names: obs_model.stream_names(),
+        per_stream_log_liks: Vec::with_capacity(obs_times.len()),
+        per_stream_samples: Vec::with_capacity(obs_times.len()),
+    };
+    walk_ode_observations(
+        compiled, obs_model, obs_times, dt, params, burnin_dt,
+        |obs_idx, acc, counts| {
+            let per_stream = obs_model.log_likelihood_per_stream_from_flows_and_counts_real(
+                acc, counts, obs_idx, params,
+            );
+            // The joint is the sum of the per-stream terms — the same sum
+            // `log_likelihood_from_flows_and_counts_real` takes.
+            let joint: f64 = per_stream.iter().sum();
+            let mut draws: Vec<Vec<f64>> = vec![Vec::with_capacity(samples); n_streams];
+            for _ in 0..samples {
+                let y = obs_model.sample_from_flows_and_counts_real(
+                    acc, counts, obs_idx, params, rng,
+                );
+                for (si, v) in y.into_iter().enumerate() {
+                    draws[si].push(v);
+                }
+            }
+            recorded.obs_times.push(obs_times[obs_idx]);
+            recorded.log_liks.push(vec![joint]);
+            recorded.per_stream_log_liks.push(per_stream.into_iter().map(|v| vec![v]).collect());
+            recorded.per_stream_samples.push(draws);
+            ControlFlow::Continue(())
+        },
+    )?;
+    if recorded.obs_times.len() != obs_times.len() {
+        return Err(crate::error::SimError::Validation(format!(
+            "internal error: the ODE walk recorded {} of {} observations",
+            recorded.obs_times.len(), obs_times.len())));
+    }
+    Ok(recorded)
+}
+
+/// Integrate the ODE skeleton at θ and visit each observation in order:
+/// `visit(obs_idx, acc, counts)` sees the per-Interval-stream bins folded
+/// over that observation's interval and the snapshot's integer counts, and
+/// returns `Break` to stop the walk early (`Ok(())` then). The bins are
+/// reset after each visit, per stream, as the likelihood requires.
+fn walk_ode_observations(
+    compiled: &CompiledModel,
+    obs_model: &MultiStreamObsModel,
+    obs_times: &[f64],
+    dt: f64,
+    params: &[f64],
+    burnin_dt: f64,
+    mut visit: impl FnMut(usize, &[f64], &[i64]) -> ControlFlow<()>,
+) -> Result<(), crate::error::SimError> {
     use crate::config::OdeConfig;
 
     // `obs_times` must be the model's own union axis: the loop below scores
@@ -78,7 +203,6 @@ pub fn compute_ode_loglik(
     let mut acc: Vec<f64> = vec![0.0; obs_model.n_interval_streams()];
     let mut next_obs_idx = 0;
     let n_obs = obs_times.len();
-    let mut total_ll = 0.0;
 
     for (snap_idx, snap) in traj.snapshots.iter().enumerate() {
         // The simulator emits a snapshot at t_start with zero flow; from
@@ -98,16 +222,9 @@ pub fn compute_ode_loglik(
             // FOLD (Phase 2a): close this interval's per-transition `cum_flows`
             // into the per-stream `acc` BEFORE scoring; score reads `acc`.
             obs_model.fold_into_acc_real(&cum_flows, &mut acc);
-            let ll = obs_model.log_likelihood_from_flows_and_counts_real(
-                &acc,
-                &snap.int_state.counts,
-                next_obs_idx,
-                params,
-            );
-            if !ll.is_finite() {
-                return Ok(f64::NEG_INFINITY);
+            if visit(next_obs_idx, &acc, &snap.int_state.counts).is_break() {
+                return Ok(());
             }
-            total_ll += ll;
             // Reset for the next obs interval. `cum_flows` blanket-zeroed
             // (unchanged); the per-stream `acc` bins per-stream — only Interval
             // streams scheduled at THIS union index zero.
@@ -140,5 +257,5 @@ pub fn compute_ode_loglik(
             obs_times[next_obs_idx],
         )));
     }
-    Ok(total_ll)
+    Ok(())
 }
