@@ -167,7 +167,7 @@ without the excluded chains (`compare.rs:644-657`) and judges nothing.
 A new workspace crate, `score`, at `rust/crates/score`.
 
 ```
-cli   → io, ir, runid, sim, score
+cli   → io, ir, runid, sim, score, numerics
 sim   → ir, numerics, score
 score → numerics
 ```
@@ -175,13 +175,29 @@ score → numerics
 `score` depends on `serde`, `serde_json` and `numerics`, and on nothing else.
 `numerics` depends on `libm` only (`rust/crates/numerics/Cargo.toml`). `score`
 has no access to files, the store, processes, threads, the clock, environment
-variables or a random number generator. Three things enforce that:
+variables or a random number generator. Two tests enforce that:
 
 - its dependency list, asserted by a test that reads `score/Cargo.toml`;
-- a `clippy.toml` in the crate that disallows `std::fs`, `std::process`,
-  `std::thread`, `std::env`, `std::net` and `std::time::SystemTime` (the
-  workspace has no `clippy.toml` today, so this adds the first);
-- `cargo check -p score --target wasm32-unknown-unknown` in CI.
+- a test that reads every source file under `score/src` and fails if one names
+  `std::fs`, `std::process`, `std::thread`, `std::env`, `std::net`, `std::time`
+  or `std::io`, or imports from the root of `std` with braces (`use std::{`),
+  which would let a module be named without its `std::` prefix.
+
+A lint cannot do the second job: clippy's `disallowed_methods` and
+`disallowed_types` take paths to single functions and types, and reject a module
+path with "expected a function, found a module" (tried on the pinned toolchain,
+clippy 0.1.94). A hand-kept list of every item in five modules would miss what
+it did not name.
+
+`cli` gains `numerics` as a direct dependency: it calls the three helpers that
+move there (`logmeanexp_with_se` in `compare.rs` and `loglik_eval.rs`,
+`sample_sd` in `loglik_eval.rs`, `log_sum_exp` in `survey.rs`).
+
+A third check, `cargo check -p score --target wasm32-unknown-unknown`, is a make
+target run in CI. It shows that the crate and its dependencies build for a
+browser. It is not a check on ambient access: the standard library compiles for
+that target with the file and thread calls present and failing at run time (_not
+verified_; the target is not installed on the machine this was written on).
 
 What lives in it:
 
@@ -715,8 +731,9 @@ inputs:
 
 15. **Dependency list.** `score/Cargo.toml` names exactly `serde`, `serde_json`
     and `numerics` as dependencies.
-16. **No ambient access.** `cargo clippy -p score` passes with the disallowed
-    list, and `cargo check -p score --target wasm32-unknown-unknown` passes.
+16. **No ambient access.** The source test above passes, and fails when a file
+    under `score/src` is given a line naming `std::fs`. `make check-score-wasm`
+    passes in CI.
 17. **Moves change no output.** See [Steps](#steps), phase 1.
 18. **All refusals at once.** A fixture with three independent failures yields a
     report with three refusals, where `main` prints one.
@@ -804,9 +821,10 @@ verbatim, splits a file where only part of it moves, and edits `use` lines.
    existing in-memory fixtures (`single_stream_rows`, `two_stream_rows`, the
    ablation table; `compare.rs:4825`, `:4915`, `:5783`), one waived comparison
    per waiver, and one row with a non-finite score.
-1. Create `score` with its dependency test and `clippy.toml`. Move
-   `log_sum_exp`, `sample_sd` and `logmeanexp_with_se` to `numerics`, and
-   `json_f64` to `score::num`.
+1. Create `score` with its dependency test, its source test and the
+   `check-score-wasm` make target; update the dependency table in
+   `.claude/rules/rust-conventions.md`. Move `log_sum_exp`, `sample_sd` and
+   `logmeanexp_with_se` to `numerics`, and `json_f64` to `score::num`.
 2. Move `Coverage` and the trace module (types, kernels, `project_onto_stream`)
    from `sim` to `score::trace`. `build_trace` and the tests that need `sim`'s
    random stream or the filter's output stay in `sim`.
@@ -855,8 +873,7 @@ before step 9.
     and `camdl score`, and `compare` reading through the store with `SharedData`
     switched to `rows_read` digests.
 17. This proposal's documentation: `docs/commands.md`,
-    `docs/methods/model-comparison.md`, and the dependency table in
-    `.claude/rules/rust-conventions.md`.
+    `docs/methods/model-comparison.md`.
 
 ## Verification
 
@@ -886,7 +903,6 @@ Commands run on `main` at `e8e7c24a0` for the claims the design rests on.
   document built on read.
 - `sed -n '/\[dependencies\]/,$p' rust/crates/numerics/Cargo.toml` → `libm`
   only.
-- `ls clippy.toml rust/clippy.toml rust/crates/clippy.toml` → none exists.
 - `gh issue view 725 --json state`, `716`, `312` → each `OPEN`.
 
 The design was reviewed against the code by an independent agent on 2026-11-14;
