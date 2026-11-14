@@ -2370,6 +2370,7 @@ streams the fit binds.
 
 The observation RNG is seeded independently of the process RNG, so adding
 `--obs` does not change the trajectory.
+
 ---
 
 ## 5. Ensembles and Sweeps
