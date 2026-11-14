@@ -2693,6 +2693,17 @@ pub struct CompareArgs {
     #[arg(long)]
     pub allow_mismatched_filter_settings: bool,
 
+    /// Under `--streams`, render rows whose fits assimilated different
+    /// observation streams although they are scored in-sample. Such a
+    /// comparison is the stream-ablation experiment, and in-sample it is
+    /// biased toward the fit trained on fewer streams (its parameters were
+    /// fitted to the shared stream alone); by default it is refused, and the
+    /// remedy is the same `holdout_after` in every compared fit. With this flag
+    /// every format states the bias. An explicit prequential.json does not
+    /// record what its fit assimilated and counts as different.
+    #[arg(long)]
+    pub allow_in_sample_ablation: bool,
+
     /// Mixture size for a Bayesian fit's derived predictive (§3.6 of the
     /// 2026-08-29 proposal): one filter pass per thinned posterior draw;
     /// per-step predictive densities are averaged over the draws and the
