@@ -251,20 +251,29 @@ filter-noise MC SE per row and the lag-1 autocorrelation of the per-step Δelpd.
 What those quantities are, and their citations and caveats, is
 `camdl compare --explain` (the same guide as `camdl docs model-comparison`).
 
-`compare` refuses, rather than renders, five unlike-for-unlike comparisons: a
+`compare` refuses, rather than renders, seven unlike-for-unlike comparisons: a
 differing `T_score` (override: `--allow-mismatched-horizon`, which suppresses
-the Δ columns), traces scored at different observation times, traces that scored
-different observation streams at the same time (gh#570 — the step's log score is
-the joint score over those streams), traces that scored the same stream at the
-same time over different _windows_ (gh#833 — a gapped reading of a file against
-a merged one, or a stream read as an instant against the same name read as a
-flow, produce different likelihoods at identical times; each per-stream score
-records what its value covered, and an older trace with no such record is
-refused as unverifiable rather than passed as agreeing), and fits bound to
-different observed data (gh#713; override: `--allow-data-mismatch`, which
-renders the Δ as confounded). A fit whose method ran on a backend other than
-`chain_binomial` is refused on the derive path, since the derived score would
-come from a different forward process than the fit used (gh#312).
+the Δ columns and waives only the times one row scored and the other did not —
+at every time both scored, the stream and window checks below still apply),
+traces scored at different observation times, traces that scored different
+observation streams at the same time (gh#570 — the step's log score is the joint
+score over those streams), traces that scored the same stream at the same time
+over different _windows_ (gh#833 — a gapped reading of a file against a merged
+one, or a stream read as an instant against the same name read as a flow,
+produce different likelihoods at identical times; each per-stream score records
+what its value covered, and an older trace with no such record is refused as
+unverifiable rather than passed as agreeing), fits bound to different observed
+data (gh#713; override: `--allow-data-mismatch`, which renders the Δ as
+confounded), a fit whose training data file no longer hashes to what the fit
+recorded when it ran (`compare` re-reads the file, so the row would be scored at
+a θ̂ fitted to other bytes; override: `--allow-changed-data`), and traces scored
+with different particle or replicate counts, as each trace records them (the log
+of a particle-filter likelihood estimate is biased downward, by more at fewer
+particles, so part of the Δ would measure the filters; override:
+`--allow-mismatched-filter-settings`). Under each override every format states
+what was waived. A fit whose method ran on a backend other than `chain_binomial`
+is refused on the derive path, since the derived score would come from a
+different forward process than the fit used (gh#312).
 
 `--pointwise PATH` writes the per-observation difference the table already
 computes in order to form `se(Δelpd)`, as a TSV with one row per candidate ×

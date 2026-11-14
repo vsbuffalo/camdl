@@ -7095,11 +7095,15 @@ camdl fit predict [FIT]
 --save-filtering FILE       per-step particle states and log-weights
 --save-prequential STEM     {STEM}.tsv + {STEM}.json one-step-ahead predictive
 --no-save-samples           with --save-prequential, drop per-particle samples
+--no-store                  record no `pfilters/` leaf for this evaluation
 ```
 
 `camdl pfilter` writes into the content-addressed store under
 `$CAMDL_OUTPUT_DIR` (there is no `--output-dir` flag; `--output` is the TSV
-mirror).
+mirror). `--no-store` skips that leaf and changes nothing else: the
+log-likelihood is still printed and every `--save-*` file is still written.
+`camdl compare` passes it to the filter runs it derives a trace from, so a
+comparison leaves no store entries in the directory it was run from.
 
 When the filter itself fails at the given parameters (its weights collapse, or
 the state goes negative), `pfilter` exits 3; every other error exits 1.
@@ -7206,9 +7210,16 @@ PATHS                       ≥2 when --config is absent. Each is a prequential.
 --baseline NAME             reference for Δ columns (default: argmax elpd)
 --metric elpd,crps,pit_cov90
 --format table|md|json      (default table)
---allow-mismatched-horizon  render even if T_score differs (Δ columns → '—')
+--allow-mismatched-horizon  render even if T_score differs (Δ columns → '—');
+                            waives only the times one row scored and the other
+                            did not
 --allow-data-mismatch       render even if the compared fits were bound to
                             different observed data; the Δ is then confounded
+--allow-changed-data        render even if a derived row's training file no
+                            longer hashes to what its fit recorded
+--allow-mismatched-filter-settings
+                            render even if the traces record different particle
+                            or replicate counts
 --draws N                   mixture size for a Bayesian fit's predictive: one
                             filter pass per posterior draw, densities averaged
                             (default 64; 1 = plug-in at the posterior mean)
@@ -7249,9 +7260,35 @@ guide (`docs/methods/model-comparison.md`), not under every table.
 
 The JSON keeps every field: `optimism_caveat`, `evidence_scale_note`,
 `se_caveat` (populated below 100 scored steps), `data_mismatch` and
-`data_unchecked`, plus per-row `provenance`, `conditioning`,
-`lag1_autocorr_delta_elpd`, `mc_se_elpd`, `warnings` and `pit_cov90_warning`. It
-is the machine surface and loses nothing by repeating itself.
+`data_unchecked`, `data_changed` and `data_change_unchecked`,
+`filter_settings_mismatch` and `filter_settings_unchecked`, and
+`filter_noise_unassessed`, plus per-row `provenance`, `conditioning`,
+`derivation`, `lag1_autocorr_delta_elpd`, `mc_se_elpd`, `warnings` and
+`pit_cov90_warning`. It is the machine surface and loses nothing by repeating
+itself.
+
+Two further refusals are overridable. A derived row re-reads its fit's training
+files, and each file is hashed and checked against the hash the fit recorded in
+`fit.meta.json`: a file edited in place since the fit ran would be scored at a θ̂
+fitted to other bytes, so it is refused (exit 2) unless `--allow-changed-data`
+is given. A file that cannot be checked — a stream with no recorded hash, a fit
+with no sidecar, a `[data.holdout]` file — is named in `data_change_unchecked`.
+And two rows whose traces record different particle or replicate counts are
+refused unless `--allow-mismatched-filter-settings` is given, because the log of
+a particle-filter likelihood estimate is biased downward by more at fewer
+particles; a trace that records no settings (older than schema 5) is named in
+`filter_settings_unchecked`.
+
+Each trace (schema 5) records how it was computed, as its `derivation` block:
+`particles`, `replicates`, `dt`, `seed`, `theta` (`supplied`,
+`posterior_mean { n_draws }`, `optimizer_winner` or
+`posterior_draws { n_used, n_available }`), `excluded_chains`, `enabled` and
+`disabled`, the replicate totals `replicate_elpd` and
+`replicate_elpd_by_stream`, `mc_se_elpd` (the filter-noise SE, null for one
+pass), and `overrides` — the waivers applied to that one trace
+(`in_sample_forced`, `changed_data`), omitted when there are none. A row's
+filter-noise SE is read from this block, so an explicit `prequential.json` that
+carries one takes part in the filter-noise gate.
 
 ### Browsing, labelling, data
 
