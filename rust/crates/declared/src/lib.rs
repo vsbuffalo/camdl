@@ -352,16 +352,45 @@ pub struct ParameterDecl {
     pub prior: Option<PriorDecl>,
 }
 
+/// DSL parameter-type keyword (the `param_kind` production in
+/// `parser.mly`). Was `Option<String>`; the typed enum is rejected at IR
+/// deserialisation rather than re-parsed at every consumer (the gh#191
+/// stringly-typed surface). Each kind's dimensional meaning lives in the
+/// OCaml `Dimcheck.param_dim_of_kind`; `Instant`/`Duration` are time-typed
+/// (`[T]`) per the 2026-05-22 calendar-time proposal. Serialises to the same
+/// snake_case strings the field has always used (`"rate"`, …), so the type
+/// swap is byte-compatible with existing IR JSON.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ParamKind {
     Rate,
     Probability,
-    Positive,
     Count,
+    Positive,
     Real,
     Instant,
     Duration,
+}
+
+impl ParamKind {
+    /// The snake_case string used in IR JSON (mirrors the `serde` rename).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Rate        => "rate",
+            Self::Probability => "probability",
+            Self::Count       => "count",
+            Self::Positive    => "positive",
+            Self::Real        => "real",
+            Self::Instant     => "instant",
+            Self::Duration    => "duration",
+        }
+    }
+}
+
+impl std::fmt::Display for ParamKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// An explicit dimension: exponents of population and of time.

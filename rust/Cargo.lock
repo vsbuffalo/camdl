@@ -1172,6 +1172,7 @@ name = "ir"
 version = "0.1.0"
 dependencies = [
  "boon",
+ "declared",
  "differentiate-derive",
  "indexmap",
  "serde",

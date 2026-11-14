@@ -12,6 +12,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
 thiserror = "1"
 differentiate-derive = { path = "../differentiate-derive" }
+# The declared-model types; `ParamKind` is defined there and re-exported here.
+declared = { path = "../declared" }
 
 [dev-dependencies]
 boon = "0.6.1"

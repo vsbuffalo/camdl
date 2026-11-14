@@ -19,11 +19,15 @@ cli  → io, ir, numerics, runid, score, sim
 io   → ir, sim
 sim  → ir, numerics, score
 runid → ir, runid-derive
-ir   → differentiate-derive
+ir   → declared, differentiate-derive
 score → numerics
 external-harness → numerics
-numerics, differentiate-derive, runid-derive  → (leaves)
+declared, numerics, differentiate-derive, runid-derive  → (leaves)
 ```
+
+`declared` holds the types of the declared-model section of the IR envelope (the
+model as the author wrote it) and nothing else; it must stay a leaf so a reader
+of a published declared-model document never needs `ir`.
 
 `ir` is pure types + serde, no simulation logic. `sim` holds the backends
 (Gillespie, ODE, chain-binomial) and the propensity evaluator, and defines the
