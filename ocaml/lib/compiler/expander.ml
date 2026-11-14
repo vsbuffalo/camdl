@@ -3898,6 +3898,134 @@ let partial_index_error ctx env ~loc ~base ~items : bool =
     true
   end else false
 
+(* ── What a name resolves to ─────────────────────────────────────────────────
+
+   The one precedence chain for names in expressions. [resolve_expr] and
+   [resolve_ident_name] match on these results and build the IR; a caller that
+   only needs to know what kind of thing a name is calls the classifier alone. *)
+
+(** What a bare name resolves to. The constructors are in precedence order:
+    [classify_name] returns the first that applies. *)
+type name_class =
+  | Name_obs_column
+      (** A per-observation auxiliary data column, inside a likelihood (§3). *)
+  | Name_compartment_cell
+      (** A fully-expanded compartment written literally, e.g. [S_child]. *)
+  | Name_compartment
+      (** A base compartment: one cell, or the sum over its strata. *)
+  | Name_param
+      (** A scalar parameter. *)
+  | Name_param_cell
+      (** A fully-expanded indexed-parameter cell written literally. *)
+  | Name_let_cyclic
+      (** A [let] on a definition cycle (E201 already emitted). *)
+  | Name_let_indexed_bare of let_binding
+      (** An indexed or shaped [let] referenced without its indices. *)
+  | Name_let_const of let_binding
+      (** A typed [let]: a model constant. *)
+  | Name_let_hoisted of let_binding
+      (** A state-only scalar [let], extracted once into a shared binding. *)
+  | Name_let_inlined of let_binding
+      (** Any other [let]: its body is inlined at the use. *)
+  | Name_forcing
+      (** A forcing / time function. *)
+  | Name_time        (** [t] *)
+  | Name_dt          (** [dt], the integrator step (gh#54). *)
+  | Name_projected   (** [projected], the observation projection's output. *)
+  | Name_pi          (** [pi] (gh#58). *)
+  | Name_e           (** [e] *)
+  | Name_origin      (** [origin], the t = 0 point of an anchored model. *)
+  | Name_unresolved
+      (** Nothing declares the name (E100 at the use). *)
+
+(** Classify a bare name.
+
+    Name resolution order follows spec §26.10: compartments → parameters →
+    lets → forcings. [check_declaration_names] (gh#117) already makes a name
+    live in at most one namespace — a cross-namespace collision is a hard
+    E278 before we get here — so this order never changes the *result* on a
+    valid model; it pins the implementation to the documented precedence so
+    a future gap in the collision check can't silently re-introduce
+    let-wins-over-param resolution.
+
+    The two pieces of use-site context the chain depends on are arguments, not
+    read from [ctx], so a caller outside expression resolution states them:
+    [obs_aux_cols] is the auxiliary data columns of the likelihood the name is
+    in ([[]] outside a likelihood), and [suppress_hoist] is whether the
+    enclosing transition forbids hoisting (a [#[lineage]] transition).
+
+    Emits no diagnostic and builds no IR. Its one effect is the memo inside
+    [let_is_hoistable]. *)
+let classify_name ctx ~(obs_aux_cols : string list) ~(suppress_hoist : bool)
+    (name : string) : name_class =
+  if List.mem name obs_aux_cols then Name_obs_column
+  (* 1. Compartment: an expanded cell, then a base name. *)
+  else if Hashtbl.mem ctx.expanded_comp_tbl name then Name_compartment_cell
+  else if Hashtbl.mem ctx.comp_tbl name then Name_compartment
+  (* 2. Parameter (scalar or fully-expanded indexed). *)
+  else if Hashtbl.mem ctx.scalar_param_tbl name then Name_param
+  else if is_expanded_indexed_param_name ctx name then Name_param_cell
+  (* 3. Let binding. *)
+  else if Hashtbl.mem ctx.cyclic_lets name then Name_let_cyclic
+  else match Hashtbl.find_opt ctx.let_tbl name with
+  | Some lb when lb.lindices <> [] || lb.lshape <> None -> Name_let_indexed_bare lb
+  | Some lb ->
+    if let_is_typed_const lb then Name_let_const lb
+    else if let_is_hoistable ctx lb && not suppress_hoist then Name_let_hoisted lb
+    else Name_let_inlined lb
+  | None ->
+  (* 4. Forcing / time function, then the built-in names. *)
+  if Hashtbl.mem ctx.func_tbl name then Name_forcing
+  else match name with
+  | "t"         -> Name_time
+  | "dt"        -> Name_dt
+  | "projected" -> Name_projected
+  | "pi"        -> Name_pi
+  | "e"         -> Name_e
+  | "origin"    -> Name_origin
+  | _           -> Name_unresolved
+
+(** What the head of an indexed reference [name[...]] resolves to, in
+    precedence order. *)
+type indexed_name_class =
+  | Indexed_table of string list
+      (** A table with these (non-empty) dimensions. A table declared with no
+          dimensions has no index axes and is not classified here. *)
+  | Indexed_let_cyclic
+      (** A [let] on a definition cycle (E201 already emitted). *)
+  | Indexed_let of let_binding
+      (** A [let] declared with index binders. *)
+  | Indexed_shaped_let of let_binding
+      (** A shaped [let] (a literal with declared dimensions). *)
+  | Indexed_forcing of func_decl
+      (** A forcing declared with index binders. *)
+  | Indexed_param
+      (** An indexed parameter. *)
+  | Indexed_cell
+      (** Anything else: the name and its index values are joined into one
+          concrete name, which is then classified as a bare name. This is how
+          an indexed compartment resolves; an unknown head ends as E100 on
+          the joined name. *)
+
+(** Classify the head of an indexed reference. [base_name] is the head after
+    any binder substitution. Emits no diagnostic and builds no IR. *)
+let classify_indexed_name ctx (base_name : string) : indexed_name_class =
+  (* `Some []` — a table declared with no dimensions (`tables { pop =
+     read("pop.tsv") }`) — is NOT a table lookup here: it has no index axes,
+     so it falls through to the name-resolution path exactly as before A1
+     made it distinguishable from `None` ("no such table"). *)
+  let tdims = Option.value ~default:[] (table_dims ctx base_name) in
+  if tdims <> [] then Indexed_table tdims
+  else if Hashtbl.mem ctx.cyclic_lets base_name then Indexed_let_cyclic
+  else match Hashtbl.find_opt ctx.let_tbl base_name with
+  | Some lb when lb.lindices <> [] -> Indexed_let lb
+  | Some lb when lb.lshape <> None -> Indexed_shaped_let lb
+  | _ ->
+    match Hashtbl.find_opt ctx.func_tbl base_name with
+    | Some fd when fd.findices <> [] -> Indexed_forcing fd
+    | _ ->
+      if is_indexed_param ctx base_name then Indexed_param else Indexed_cell
+
 let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
   match e with
   | EConst f     -> Ir.Const f
@@ -3928,16 +4056,13 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
     let base_name =
       match List.assoc_opt name env with Some n -> n | None -> name
     in
-    (* 1. Table? → TableLookup with a single flattened linear index.
+    match classify_indexed_name ctx base_name with
+    (* 1. Table → TableLookup with a single flattened linear index.
        For a table of dims [d1; d2; ...] with sizes [n1; n2; ...], the
        linear index is: i1*n2*n3*... + i2*n3*... + ... + iN.
        The IR and Rust runtime always expect exactly one index. *)
-    (* `Some []` — a table declared with no dimensions (`tables { pop =
-       read("pop.tsv") }`) — is NOT a table lookup here: it has no index axes,
-       so it falls through to the name-resolution path exactly as before A1
-       made it distinguishable from `None` ("no such table"). *)
-    let tdims = Option.value ~default:[] (table_dims ctx base_name) in
-    if tdims <> [] && List.length items <> List.length tdims then begin
+    | Indexed_table tdims ->
+    if List.length items <> List.length tdims then begin
       (* gh#112: table-lookup arity guard. The stride math below maps over
          the user's `items`, NOT the declared `tdims` — so an under-indexed
          lookup (`C_age[a]` against `age × age`) silently produced a
@@ -3958,7 +4083,7 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
          diagnostics; the compile aborts at phase end. *)
       Ir.TableLookup (base_name, [Ir.Const 0.0])
     end
-    else if tdims <> [] then
+    else
       let items = resolve_index_order ctx ~loc:idx_loc
                     ~what:(Printf.sprintf "table '%s'" base_name)
                     ~dims:tdims items in
@@ -3977,15 +4102,12 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
         (acc + idx * stride, pos + 1)
       ) (0, 0) per_dim |> fst in
       Ir.TableLookup (base_name, [Ir.Const (float_of_int linear)])
-    else
-    (* 2. Indexed let binding? → inline body with index vars substituted.
+    (* 2. Indexed let binding → inline body with index vars substituted.
        A `let` on a definition cycle is NOT inlined: descending would recurse
        without bound (gh#492). [check_let_cycles] has already emitted E201
        naming the cycle, so the placeholder is never silent. *)
-    if Hashtbl.mem ctx.cyclic_lets base_name then Ir.Const 0.0
-    else
-    match Hashtbl.find_opt ctx.let_tbl base_name with
-    | Some lb when lb.lindices <> [] ->
+    | Indexed_let_cyclic -> Ir.Const 0.0
+    | Indexed_let lb ->
       if not (check_index_arity ctx ~loc:idx_loc ~kind:"let binding" ~name:base_name
                 ~axes:(dims_of_index_bindings lb.lindices)
                 ~declared:(List.length lb.lindices) ~provided:(List.length items) ())
@@ -4017,8 +4139,8 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
           (fun () -> note_typed_let ctx lb (normalize_expr (resolve_expr ctx inner_env lb.lbody)))
       else
         note_typed_let ctx lb (normalize_expr (resolve_expr ctx (inner_env @ env) lb.lbody))
-    (* 2b. Shaped let? → flatten body, compute row-major index, resolve cell *)
-    | Some lb when lb.lshape <> None ->
+    (* 2b. Shaped let → flatten body, compute row-major index, resolve cell *)
+    | Indexed_shaped_let lb ->
       let shape = Option.get lb.lshape in
       let flat  = flatten_ast_list lb.lbody in
       let idx   = shape_index ctx ~loc:idx_loc shape items env in
@@ -4032,12 +4154,9 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
             base_name idx (List.length flat)) ();
         Ir.Const 0.0
       end
-    | _ ->
     (* 2c. Indexed time function: beta[p] → Ir.TimeFunc "beta_urban" *)
-    if (match Hashtbl.find_opt ctx.func_tbl base_name with
-        | Some fd -> fd.findices <> [] | None -> false) then
-      (let fd = Hashtbl.find ctx.func_tbl base_name in
-       if not (check_index_arity ctx ~loc:idx_loc ~kind:"forcing" ~name:base_name
+    | Indexed_forcing fd ->
+      (if not (check_index_arity ctx ~loc:idx_loc ~kind:"forcing" ~name:base_name
                  ~axes:(dims_of_index_bindings fd.findices)
                  ~declared:(List.length fd.findices) ~provided:(List.length items) ())
        then Ir.Const 0.0
@@ -4047,9 +4166,8 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
                        ~dims:(dims_of_index_bindings fd.findices) items in
          let idx_vals = List.map (index_item_to_str env) items in
          Ir.TimeFunc (String.concat "_" (base_name :: idx_vals)))
-    else
-    (* 3. Indexed parameter? → resolve index and return Ir.Param of mangled name *)
-    if is_indexed_param ctx base_name then
+    (* 3. Indexed parameter → resolve index and return Ir.Param of mangled name *)
+    | Indexed_param ->
       (let declared =
          match indexed_param_dims ctx base_name with Some d -> List.length d | None -> 1 in
        if not (check_index_arity ctx ~loc:idx_loc ~kind:"parameter" ~name:base_name
@@ -4070,7 +4188,7 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
          let idx_vals = List.map (index_item_to_str env) items in
          let concrete = String.concat "_" (base_name :: idx_vals) in
          resolve_ident_name ctx concrete ~loc:Diagnostics.no_loc)
-    else
+    | Indexed_cell ->
     (* 4. Compartment with indices → concatenate to concrete name, unless the
        index is partial: `E[a]` when `E` has `[age, latent_stage]` names no
        cell. Without the guard it fell through to name-mangling (`E_adult`)
@@ -4574,13 +4692,15 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
     Ir.Const 0.0
 
 and resolve_ident_name ctx name ~loc =
+  match classify_name ctx ~obs_aux_cols:ctx.obs_aux_cols
+          ~suppress_hoist:ctx.suppress_hoist name with
   (* Per-observation aux data column (§3): inside a likelihood, a declared
      value-column name (other than the scored outcome) is a reference to that
      observation's auxiliary data — e.g. the binomial denominator `n = tested`.
      It is resolved by name by the Rust binder, NOT by model name resolution.
      A column name that also collides with a compartment/parameter/let/forcing
      is a hard error naming both (§3.1) — never a silent re-bind. *)
-  if List.mem name ctx.obs_aux_cols then begin
+  | Name_obs_column ->
     if Hashtbl.mem ctx.expanded_comp_tbl name
        || Hashtbl.mem ctx.comp_tbl name
        || Hashtbl.mem ctx.scalar_param_tbl name
@@ -4598,32 +4718,16 @@ and resolve_ident_name ctx name ~loc =
                the likelihood reference is unambiguous"
         ();
     Ir.ObsColumnRef name
-  end else
-  (* Name resolution order follows spec §26.10: compartments → parameters →
-     lets → forcings. `check_declaration_names` (gh#117) already makes a name
-     live in at most one namespace — a cross-namespace collision is a hard
-     E278 before we get here — so this order never changes the *result* on a
-     valid model; it pins the implementation to the documented precedence so
-     a future gap in the collision check can't silently re-introduce
-     let-wins-over-param resolution. *)
-  (* 1. Known expanded compartment? *)
-  if Hashtbl.mem ctx.expanded_comp_tbl name then Ir.Pop name
-  else if Hashtbl.mem ctx.comp_tbl name then begin
+  | Name_compartment_cell -> Ir.Pop name
+  | Name_compartment ->
     let expansions = expand_compartment_name ctx name in
     if List.length expansions = 1 then Ir.Pop (List.hd expansions)
     else Ir.PopSum expansions
-  end
-  (* 2. Parameter (scalar or fully-expanded indexed)? *)
-  else if Hashtbl.mem ctx.scalar_param_tbl name then
-    Ir.Param name
-  else if is_expanded_indexed_param_name ctx name then
-    Ir.Param name
-  (* 3. Let binding? Inline it — unless it's a typed const (emitted as Param),
-     or it lies on a definition cycle, where inlining would recurse without
-     bound (gh#492; E201 already emitted by [check_let_cycles]). *)
-  else if Hashtbl.mem ctx.cyclic_lets name then Ir.Const 0.0
-  else match Hashtbl.find_opt ctx.let_tbl name with
-  | Some lb when lb.lindices <> [] || lb.lshape <> None ->
+  | Name_param | Name_param_cell -> Ir.Param name
+  (* A `let` on a definition cycle is not inlined: inlining would recurse
+     without bound (gh#492; E201 already emitted by [check_let_cycles]). *)
+  | Name_let_cyclic -> Ir.Const 0.0
+  | Name_let_indexed_bare lb ->
     (* A6: an indexed or shaped `let` referenced BARE. Inlining its body here
        would leave every binder unbound, so the body's own indexed references
        mangle the binder into the name — `let N[a in age] = S[a] + I[a] + R[a]`
@@ -4645,39 +4749,33 @@ and resolve_ident_name ctx name ~loc =
     ignore (check_index_arity ctx ~loc ~axes ~kind:"let binding" ~name
               ~declared:(List.length axes) ~provided:0 ());
     Ir.Const 0.0  (* placeholder — keep collecting diagnostics this pass *)
-  | Some lb ->
-    if let_is_typed_const lb then
-      (* A model constant: a reference into `constants`, so dimcheck sees the
-         declared kind and no gradient takes it for a parameter. *)
-      Ir.ConstRef name
-    else if let_is_hoistable ctx lb && not ctx.suppress_hoist then
-      (* Fix B: a state-only scalar let (e.g. a mixed-compartment total) is
-         extracted into a shared binding once instead of inlined per use. *)
-      register_hoisted_binding ctx name
-        (fun () -> note_typed_let ctx lb (normalize_expr (resolve_expr ctx [] lb.lbody)))
-    else
-      note_typed_let ctx lb (normalize_expr (resolve_expr ctx [] lb.lbody))
-  | None ->
-  (* 4. Forcing / time function? *)
-  if Hashtbl.mem ctx.func_tbl name then
-    Ir.TimeFunc name
-  else if name = "t" then
-    Ir.Time
-  else if name = "dt" then
+  | Name_let_const _ ->
+    (* A model constant: a reference into `constants`, so dimcheck sees the
+       declared kind and no gradient takes it for a parameter. *)
+    Ir.ConstRef name
+  | Name_let_hoisted lb ->
+    (* Fix B: a state-only scalar let (e.g. a mixed-compartment total) is
+       extracted into a shared binding once instead of inlined per use. *)
+    register_hoisted_binding ctx name
+      (fun () -> note_typed_let ctx lb (normalize_expr (resolve_expr ctx [] lb.lbody)))
+  | Name_let_inlined lb ->
+    note_typed_let ctx lb (normalize_expr (resolve_expr ctx [] lb.lbody))
+  | Name_forcing -> Ir.TimeFunc name
+  | Name_time -> Ir.Time
+  | Name_dt ->
     (* gh#54: runtime integrator step. Has dimension T (same as `t`).
        Backend evaluates against `EvalCtx.dt` populated from
        SMCConfig / ChainBinomialConfig at substep level. *)
     Ir.Dt
-  else if name = "projected" then
+  | Name_projected ->
     (* Special keyword in likelihood expressions: refers to the observation projection output. *)
     Ir.Projected
-  else if name = "pi" then
+  | Name_pi ->
     (* gh#58: mathematical constant. Resolves to Ir.Const at expand time —
        no new IR variant. *)
     Ir.Const Float.pi
-  else if name = "e" then
-    Ir.Const (Float.exp 1.0)
-  else if name = "origin" then
+  | Name_e -> Ir.Const (Float.exp 1.0)
+  | Name_origin ->
     (* `origin` as a referenceable identifier — Phase 2 of the
        2026-05-22 typed-time proposal §1.1. Resolves to the t=0
        point in anchored mode (origin IS the zero); errors in
@@ -4694,7 +4792,7 @@ and resolve_ident_name ctx name ~loc =
                 or use an explicit numeric/duration value here"
          ();
        Ir.Const 0.0)
-  else begin
+  | Name_unresolved ->
     Diagnostics.error ctx.diags
       ~code:"E100"
       ~loc
@@ -4702,7 +4800,6 @@ and resolve_ident_name ctx name ~loc =
       ~hint:"check spelling, or add a declaration in compartments/parameters/let/tables"
       ();
     Ir.Const 0.0  (* placeholder — compilation continues to collect more errors *)
-  end
 
 (* ── Stoichiometry ────────────────────────────────────────────────────────── *)
 

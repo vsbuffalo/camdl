@@ -190,3 +190,13 @@
  (name test_declared)
  (modules test_declared)
  (libraries declared_fixture ir alcotest yojson))
+
+; `Expander.classify_name` / `classify_indexed_name`: the one precedence chain
+; for names in expressions. Pins each adjacent pair of the chain on models that
+; collide on purpose, and checks over every model in `../golden` that the names
+; its expressions use classify to a declared thing.
+(test
+ (name test_classify_name)
+ (modules test_classify_name)
+ (libraries compiler ir alcotest)
+ (deps (source_tree ../golden)))
