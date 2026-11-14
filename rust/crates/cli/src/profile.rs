@@ -1080,11 +1080,15 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             out.fail(format!(
                 "error: parameter '{}' is in both `--sweep` and {}. \
                  A swept parameter is pinned per cell at the sweep value; \
-                 listing it as fixed is contradictory. Drop it from {}.",
+                 listing it as fixed is contradictory. Drop it from {}.{}",
                 sw, source,
                 if in_cli && !in_toml { "`--fixed`" }
                 else if in_toml && !in_cli { "the fit toml's [fixed]" }
                 else { "both" },
+                if in_toml {
+                    " In a fit config a swept parameter is listed in [estimate], whose \
+                     bounds bound the grid; each cell pins it and estimates the rest."
+                } else { "" },
             ));
         }
     }

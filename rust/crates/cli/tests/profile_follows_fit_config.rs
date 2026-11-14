@@ -248,7 +248,8 @@ fn a_swept_fixed_parameter_is_refused() {
         "--rw-sd", "beta=auto", "--n-starts", "1"];
     args.extend_from_slice(&NL);
     let o = profile(tmp.path(), &args);
-    assert_refused(&o, "a swept [fixed] parameter", &["'gamma' is in both `--sweep`", "[fixed]"]);
+    assert_refused(&o, "a swept [fixed] parameter", &["'gamma' is in both `--sweep`", "[fixed]",
+        "a swept parameter is listed in [estimate]"]);
 }
 /// The `[mle]` table of every `mle.toml` the run wrote.
 fn mle_tables(dir: &Path) -> Vec<toml::Table> {

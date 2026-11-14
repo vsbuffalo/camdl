@@ -1859,9 +1859,10 @@ pub struct ProfileArgs {
 
     /// Optional fit toml supplying the estimated set, bounds, starting
     /// values and fixed list. Mirrors `camdl survey --fit`'s schema (the
-    /// `[estimate]`, `[fixed]`, `[model]` blocks). The focal swept
-    /// parameter is always removed from the estimated set, even when it
-    /// appears in the fit toml's `[estimate]` block. Its priors do not
+    /// `[estimate]`, `[fixed]`, `[model]` blocks). A swept parameter
+    /// belongs in `[estimate]`, whose entry bounds the grid; each cell pins
+    /// it at its grid value and estimates the rest. Listing it in `[fixed]`
+    /// is refused. Priors do not
     /// enter the per-cell maximization; `--starts from_prior` draws
     /// starting points from them. A config with `[data] holdout_after` is
     /// refused (a profile does not truncate the series, so it would fit the
