@@ -452,7 +452,8 @@ fn two_exclusions_are_two_addresses_and_neither_is_the_pooled_one() {
 }
 
 /// The address is keyed on the normalised SET, exactly as `ChainSelection`
-/// normalises it: order and repeats do not make a second artifact.
+/// normalises it: order and whitespace do not make a second artifact, and a
+/// repeated id is refused at parse rather than collapsed, so it writes nothing.
 #[test]
 fn the_address_is_the_normalised_set_not_the_string() {
     let bin = require_binary();
@@ -462,7 +463,13 @@ fn the_address_is_the_normalised_set_not_the_string() {
     let after_first = f.artifact_names();
     let canonical = f.read("predictive-excl1,3/weekly_cases.tsv");
 
-    for spelling in ["3,1", "1,3,1", " 3 , 1 "] {
+    let repeated = f.predict(&bin, Some("1,3,1"));
+    assert!(!repeated.status.success(), "a repeated chain id is refused");
+    let stderr = String::from_utf8_lossy(&repeated.stderr);
+    assert!(stderr.contains("--exclude-chains lists chain 1 twice"), "{stderr}");
+    assert_eq!(f.artifact_names(), after_first, "a refused selection writes nothing");
+
+    for spelling in ["3,1", " 3 , 1 "] {
         assert_ok(
             &f.predict(&bin, Some(spelling)),
             &format!("predict --exclude-chains {spelling}"),

@@ -33,71 +33,23 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::chain_selection::{ChainSelection, Polarity};
+
 /// A fit reference or a file, as written: `@label`, a fit-id hash prefix, a
 /// run directory, a `fit.toml` path, or — for `from_posterior` — a draws TSV.
 /// Resolved where it is consumed (`crate::fit::chain_starts`), never here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Handle(pub String);
 
-/// The source chains a `from_posterior` rule draws its rows from (gh#1056):
-/// non-empty, sorted, without repeats. Built only by [`ChainSubset::new`], so
-/// every value of the type is one a run can use.
+/// The CLI spelling of a `from_posterior` chain subset, `--starts-chains
+/// 0,1,2,4` (gh#1056): a [`ChainSelection`] that keeps the named chains.
 ///
 /// The reason to name chains is a source diagnosed as multimodal: some chains
 /// sit in a mode with negligible posterior weight, and the next run should
 /// start from the ones that agree. The subset is judged by its own R̂ when the
 /// source is resolved (`crate::fit::chain_starts::resolve_starts`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChainSubset(Vec<usize>);
-
-impl ChainSubset {
-    /// Parse chain ids as written. Refuses an empty list and a repeated id;
-    /// order is not meaningful, so it is normalized.
-    pub fn new(ids: Vec<usize>) -> Result<Self, String> {
-        if ids.is_empty() {
-            return Err("`chains` names no chain: list at least one chain id, e.g. \
-                        `chains = [0, 1]`".to_string());
-        }
-        let mut sorted = ids.clone();
-        sorted.sort_unstable();
-        if let Some(w) = sorted.windows(2).find(|w| w[0] == w[1]) {
-            return Err(format!("`chains` lists chain {} twice", w[0]));
-        }
-        Ok(ChainSubset(sorted))
-    }
-
-    /// Parse the CLI spelling: comma-separated chain ids (`0,1,2,4`).
-    pub fn parse_list(s: &str) -> Result<Self, String> {
-        let ids = s
-            .split(',')
-            .map(|t| t.trim())
-            .filter(|t| !t.is_empty())
-            .map(|t| t.parse::<usize>().map_err(|_| format!(
-                "`{t}` is not a chain id: chain ids are whole numbers counted from 0, \
-                 written `0,1,2`")))
-            .collect::<Result<Vec<_>, _>>()?;
-        ChainSubset::new(ids)
-    }
-
-    pub fn ids(&self) -> &[usize] {
-        &self.0
-    }
-
-    pub fn contains(&self, chain: usize) -> bool {
-        self.0.binary_search(&chain).is_ok()
-    }
-
-    /// `0,1,2,4` — the spelling the CLI accepts and every record prints.
-    pub fn spelled(&self) -> String {
-        self.0.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(",")
-    }
-}
-
-impl std::str::FromStr for ChainSubset {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        ChainSubset::parse_list(s)
-    }
+pub fn parse_starts_chains(s: &str) -> Result<ChainSelection, String> {
+    ChainSelection::parse(s, Polarity::Keep, "--starts-chains")
 }
 
 impl std::fmt::Display for Handle {
@@ -133,7 +85,7 @@ pub enum Spread {
     /// One row per chain, drawn uniformly with replacement from a posterior
     /// cloud: a fit handle whose leaf wrote `draws.tsv`, or a draws TSV.
     /// `chains` restricts the cloud to those source chains' rows (gh#1056).
-    FromPosterior { source: Handle, chains: Option<ChainSubset> },
+    FromPosterior { source: Handle, chains: Option<ChainSelection> },
 }
 
 /// The point rules: every chain at one vector.
@@ -221,10 +173,13 @@ impl ChainStarts {
     /// `draws.tsv`'s digest — so it is hashed here: `from_posterior` with
     /// `chains` keys as `{"from_posterior": {"chains": [..]}}`, distinct from
     /// the whole-cloud rule and from every other subset (gh#1056). Without
-    /// `chains` the value is the bare tag, byte-identical to before.
+    /// `chains` the value is the bare tag, byte-identical to before. The list
+    /// is the kept chain ids as plain integers, built here rather than
+    /// serialized from the selection, so a change to [`ChainSelection`]'s
+    /// representation cannot re-key a run.
     pub fn identity_value(&self) -> serde_json::Value {
         if let Some(chains) = self.chains() {
-            return serde_json::json!({ self.tag(): { "chains": chains.ids() } });
+            return serde_json::json!({ self.tag(): { "chains": kept_ids(chains) } });
         }
         match self.source() {
             Some(_) => serde_json::Value::String(self.tag().to_string()),
@@ -233,7 +188,7 @@ impl ChainStarts {
     }
 
     /// The source chains a `from_posterior` rule is restricted to, if any.
-    pub fn chains(&self) -> Option<&ChainSubset> {
+    pub fn chains(&self) -> Option<&ChainSelection> {
         match self {
             ChainStarts::Spread(Spread::FromPosterior { chains, .. }) => chains.as_ref(),
             _ => None,
@@ -242,8 +197,14 @@ impl ChainStarts {
 
     /// Restrict the rule to `chains` of its source: the `--starts-chains`
     /// flag. Only `from_posterior` draws per-chain rows, so any other rule
-    /// refuses, naming what it is.
-    pub fn with_chains(self, chains: ChainSubset) -> Result<Self, String> {
+    /// refuses, naming what it is. The selection names the chains to start
+    /// from, so it must keep them.
+    pub fn with_chains(self, chains: ChainSelection) -> Result<Self, String> {
+        if chains.polarity() != Polarity::Keep {
+            return Err(format!(
+                "a starts chain subset names the chains to start from; got a selection \
+                 that drops chains {}", chains.ids_csv()));
+        }
         match self {
             ChainStarts::Spread(Spread::FromPosterior { source, .. }) => {
                 Ok(ChainStarts::Spread(Spread::FromPosterior { source, chains: Some(chains) }))
@@ -252,7 +213,7 @@ impl ChainStarts {
                 "chain subset `{}` given, but the starts rule is `{}`: only `from_posterior` \
                  draws rows from a source's chains. Write `--starts from_posterior=@handle` \
                  (or `starts = {{ from_posterior = \"@handle\", chains = [..] }}`)",
-                chains.spelled(), other.tag()
+                chains.ids_csv(), other.tag()
             )),
         }
     }
@@ -274,7 +235,7 @@ impl ChainStarts {
     /// source when there is one (`from_mle @mle`).
     pub fn spelled(&self) -> String {
         match (self.source(), self.chains()) {
-            (Some(src), Some(ch)) => format!("{} {} chains {}", self.tag(), src, ch.spelled()),
+            (Some(src), Some(ch)) => format!("{} {} chains {}", self.tag(), src, ch.ids_csv()),
             (Some(src), None) => format!("{} {}", self.tag(), src),
             (None, _) => self.tag().to_string(),
         }
@@ -460,7 +421,8 @@ impl<'de> Deserialize<'de> for ChainStarts {
                                 "`chains` lists {i}: chain ids are counted from 0")))
                             .collect::<Result<Vec<_>, _>>()
                             .map_err(D::Error::custom)?;
-                        let subset = ChainSubset::new(ids).map_err(D::Error::custom)?;
+                        let subset = ChainSelection::from_ids(ids, Polarity::Keep, "`chains`")
+                            .map_err(D::Error::custom)?;
                         rule.with_chains(subset).map_err(D::Error::custom)
                     }
                     Some(WireValue::Source(s)) => Err(D::Error::custom(format!(
@@ -484,7 +446,7 @@ impl Serialize for ChainStarts {
                 let mut m = ser.serialize_map(Some(1 + usize::from(chains.is_some())))?;
                 m.serialize_entry(self.tag(), &src)?;
                 if let Some(ch) = chains {
-                    m.serialize_entry("chains", ch.ids())?;
+                    m.serialize_entry("chains", &kept_ids(ch))?;
                 }
                 m.end()
             }
@@ -492,9 +454,19 @@ impl Serialize for ChainStarts {
     }
 }
 
+/// The chain ids a start-side selection keeps, as plain integers: the shape
+/// `fit.toml` spells and the identity value hashes.
+pub fn kept_ids(chains: &ChainSelection) -> Vec<usize> {
+    chains.ids().iter().map(|c| c.0).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn keep(ids: Vec<usize>) -> ChainSelection {
+        ChainSelection::from_ids(ids, Polarity::Keep, "`chains`").unwrap()
+    }
 
     #[derive(Deserialize, Serialize)]
     struct Doc {
@@ -574,9 +546,9 @@ mod tests {
         let r = parse("starts = { from_posterior = \"@base\", chains = [4, 0, 2] }").unwrap();
         assert_eq!(r, ChainStarts::Spread(Spread::FromPosterior {
             source: Handle("@base".into()),
-            chains: Some(ChainSubset::new(vec![0, 2, 4]).unwrap()),
+            chains: Some(keep(vec![0, 2, 4])),
         }));
-        assert_eq!(r.chains().unwrap().ids(), &[0, 2, 4]);
+        assert_eq!(kept_ids(r.chains().unwrap()), vec![0, 2, 4]);
         assert_eq!(r.spelled(), "from_posterior @base chains 0,2,4");
         let back = toml::to_string(&Doc { starts: r.clone() }).unwrap();
         assert_eq!(parse(&back).unwrap(), r, "{back}");
@@ -599,14 +571,23 @@ mod tests {
 
     #[test]
     fn the_cli_chain_list_parses_and_with_chains_refuses_other_rules() {
-        assert_eq!("0, 2,1".parse::<ChainSubset>().unwrap().ids(), &[0, 1, 2]);
-        assert!("0,x".parse::<ChainSubset>().unwrap_err().contains("not a chain id"));
-        assert!("".parse::<ChainSubset>().unwrap_err().contains("names no chain"));
-        let sub = ChainSubset::new(vec![0]).unwrap();
+        assert_eq!(kept_ids(&parse_starts_chains("0, 2,1").unwrap()), vec![0, 1, 2]);
+        assert!(parse_starts_chains("0,x").unwrap_err().contains("not a chain id"));
+        assert!(parse_starts_chains("").unwrap_err().contains("names no chain"));
+        // An empty token was skipped before the selectors were one type; it is
+        // now refused, as `--exclude-chains` always refused it.
+        let e = parse_starts_chains("0,,1").unwrap_err();
+        assert!(e.contains("--starts-chains") && e.contains("empty chain id"), "{e}");
+        assert!(parse_starts_chains("1,1").unwrap_err().contains("chain 1 twice"));
+        let sub = keep(vec![0]);
         let err = ChainStarts::from_prior().with_chains(sub.clone()).unwrap_err();
         assert!(err.contains("from_prior") && err.contains("only `from_posterior`"), "{err}");
         let post = "from_posterior=@b".parse::<ChainStarts>().unwrap().with_chains(sub).unwrap();
-        assert_eq!(post.chains().unwrap().ids(), &[0]);
+        assert_eq!(kept_ids(post.chains().unwrap()), vec![0]);
+        // A dropping selection cannot qualify a start rule.
+        let drop = ChainSelection::parse_exclude("0").unwrap();
+        let err = "from_posterior=@b".parse::<ChainStarts>().unwrap().with_chains(drop).unwrap_err();
+        assert!(err.contains("drops chains 0"), "{err}");
     }
 
     /// The subset is identity (the dep is the whole `draws.tsv`, so nothing
@@ -615,9 +596,9 @@ mod tests {
     fn a_chain_subset_enters_the_identity_value_and_only_then() {
         let whole = "from_posterior=@b".parse::<ChainStarts>().unwrap();
         assert_eq!(whole.identity_value(), serde_json::json!("from_posterior"));
-        let a = whole.clone().with_chains(ChainSubset::new(vec![2, 0]).unwrap()).unwrap();
-        let b = whole.clone().with_chains(ChainSubset::new(vec![0, 2]).unwrap()).unwrap();
-        let c = whole.clone().with_chains(ChainSubset::new(vec![0, 1]).unwrap()).unwrap();
+        let a = whole.clone().with_chains(keep(vec![2, 0])).unwrap();
+        let b = whole.clone().with_chains(keep(vec![0, 2])).unwrap();
+        let c = whole.clone().with_chains(keep(vec![0, 1])).unwrap();
         assert_eq!(a.identity_value(), serde_json::json!({"from_posterior": {"chains": [0, 2]}}));
         assert_eq!(a.identity_value(), b.identity_value(), "order is not meaningful");
         assert_ne!(a.identity_value(), c.identity_value());

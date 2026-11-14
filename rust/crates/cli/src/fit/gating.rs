@@ -796,14 +796,14 @@ pub fn check_source_converged(leaf: &Path, handle: &str, allow: bool) -> Result<
 /// not lift an unreadable file.
 pub fn check_subset_converged(
     file: &Path,
-    subset: &super::starts::ChainSubset,
+    subset: &crate::chain_selection::ChainSelection,
     handle: &str,
     allow: bool,
 ) -> Result<(), String> {
     use super::method_result::RHAT_CONVERGED_THRESHOLD;
     use super::row_convergence::{partition_by_chain, ChainOfDraw};
     use sim::inference::convergence::{rank_convergence, ConvergenceError};
-    let who = format!("starts source {handle} (chains {})", subset.spelled());
+    let who = format!("starts source {handle} (chains {})", subset.ids_csv());
     let (header, rows) = super::chain_starts::read_draws_tsv(file)
         .map_err(|e| format!("{who}: {e}"))?;
     let keep = super::chain_starts::select_chain_rows(file, &header, &rows, subset)
@@ -966,18 +966,22 @@ mod tests {
         p
     }
 
+    fn keep(ids: Vec<usize>) -> crate::chain_selection::ChainSelection {
+        crate::chain_selection::ChainSelection::from_ids(
+            ids, crate::chain_selection::Polarity::Keep, "`chains`").unwrap()
+    }
+
     /// gh#1056: the subset gate judges the selected chains by their own R̂.
     /// Chains 0-2 agree and chain 3 sits far away: the whole set fails, the
     /// agreeing subset passes, and the constant `mu` column is skipped.
     #[test]
     fn the_subset_gate_judges_the_selected_chains_alone() {
-        use crate::fit::starts::ChainSubset;
         let p = draws_tsv("subset_gate", 4, 200, |c| if c == 3 { 50.0 } else { 1.0 });
-        let all = ChainSubset::new(vec![0, 1, 2, 3]).unwrap();
+        let all = keep(vec![0, 1, 2, 3]);
         let err = check_subset_converged(&p, &all, "@src", false).expect_err("chain 3 disagrees");
         assert!(err.contains("theta (R̂ =") && !err.contains("mu"), "{err}");
         assert!(err.contains("--allow-nonconverged-source"), "{err}");
-        check_subset_converged(&p, &ChainSubset::new(vec![0, 1, 2]).unwrap(), "@src", false)
+        check_subset_converged(&p, &keep(vec![0, 1, 2]), "@src", false)
             .expect("chains 0-2 agree");
         check_subset_converged(&p, &all, "@src", true).expect("allow lifts a not-converged verdict");
     }
@@ -986,13 +990,12 @@ mod tests {
     /// refused unless allowed; an absent chain is refused even when allowed.
     #[test]
     fn the_subset_gate_refuses_what_it_cannot_certify() {
-        use crate::fit::starts::ChainSubset;
         let p = draws_tsv("subset_gate_one", 3, 100, |_| 1.0);
-        let one = ChainSubset::new(vec![1]).unwrap();
+        let one = keep(vec![1]);
         let err = check_subset_converged(&p, &one, "@src", false).expect_err("one chain");
         assert!(err.contains("not certified") && err.contains("theta"), "{err}");
         check_subset_converged(&p, &one, "@src", true).expect("allow lifts it");
-        let absent = ChainSubset::new(vec![0, 9]).unwrap();
+        let absent = keep(vec![0, 9]);
         let err = check_subset_converged(&p, &absent, "@src", true).expect_err("absent chain");
         assert!(err.contains("chain(s) 9"), "{err}");
     }

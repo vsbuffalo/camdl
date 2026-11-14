@@ -2323,7 +2323,7 @@ mod tests {
         let sel = ChainSelection::parse_exclude(value).unwrap_or_else(|e| {
             panic!("the advised `--exclude-chains {value}` is refused by the parser: {e}\n{table}")
         });
-        assert_eq!(sel.excluded_csv(), chain.to_string(), "it excludes the flagged chain");
+        assert_eq!(sel.ids_csv(), chain.to_string(), "it excludes the flagged chain");
     }
 
     #[test]

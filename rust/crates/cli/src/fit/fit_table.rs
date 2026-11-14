@@ -510,7 +510,7 @@ fn resolve_quantity_median(
     // above. `fit predict` re-parses + validates it against THIS fit's chains;
     // an id absent here makes predict refuse → this cell renders `—`.
     if let Some(sel) = selection {
-        cmd.arg("--exclude-chains").arg(sel.excluded_csv());
+        cmd.arg("--exclude-chains").arg(sel.ids_csv());
     }
     let output = cmd.output().ok()?;
     if !output.status.success() {

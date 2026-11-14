@@ -705,8 +705,8 @@ pub struct FitRunArgs {
     /// selected chains must agree (their own R̂ is checked in place of the
     /// source's whole-run verdict), and the subset is keyed into the run's
     /// identity (gh#1056).
-    #[arg(long, value_name = "IDS")]
-    pub starts_chains: Option<crate::fit::starts::ChainSubset>,
+    #[arg(long, value_name = "IDS", value_parser = crate::fit::starts::parse_starts_chains)]
+    pub starts_chains: Option<crate::chain_selection::ChainSelection>,
 
     /// Start from a `from_mle` / `from_posterior` source whose stored verdict
     /// is not converged. Without this the source is refused, since starting

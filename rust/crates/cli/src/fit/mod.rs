@@ -487,7 +487,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 out.fail(format!(
                     "error: --starts-chains {} restricts a `from_posterior` rule, and this \
                      fit names no starts rule; add `--starts from_posterior=@handle`",
-                    subset.spelled()))
+                    subset.ids_csv()))
             });
             method.starts = Some(rule.with_chains(subset.clone()).unwrap_or_else(|e| {
                 out.fail(format!("error: --starts-chains: {e}"))
@@ -1165,7 +1165,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             // gh#1056: the source chains the rows were drawn from; absent
             // for the whole cloud. Identity already carries it (the method
             // payload's `starts`); this is the readable record.
-            "chains": starts_rule.chains().map(|c| c.ids().to_vec()),
+            "chains": starts_rule.chains().map(crate::fit::starts::kept_ids),
             // A stored run's id; none for a file named directly, or a
             // directory with no run.json, whose dep is the file's digest.
             "run_id": src.leaf_dir.as_ref()

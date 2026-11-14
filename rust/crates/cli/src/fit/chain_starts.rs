@@ -1006,7 +1006,7 @@ fn sample_gamma_shape_rate(rng: &mut StatefulRng, shape: f64, rate: f64) -> f64 
 fn draw_from_posterior(
     resolved: &ResolvedParameters,
     path: &Path,
-    chains: Option<&super::starts::ChainSubset>,
+    chains: Option<&crate::chain_selection::ChainSelection>,
     n_chains: usize,
     seed: u64,
 ) -> Result<Vec<ChainStart>, InitError> {
@@ -1108,7 +1108,7 @@ pub(crate) fn select_chain_rows(
     path: &Path,
     header: &[String],
     rows: &[Vec<String>],
-    subset: &super::starts::ChainSubset,
+    subset: &crate::chain_selection::ChainSelection,
 ) -> Result<Vec<usize>, InitError> {
     let col = header.iter().position(|h| h == "chain").ok_or_else(|| InitError::SchemaMismatch {
         path: path.to_path_buf(),
@@ -1116,7 +1116,7 @@ pub(crate) fn select_chain_rows(
         msg: format!(
             "chains {} were named, but the file has no `chain` column to select them by. \
              Present columns: {}.",
-            subset.spelled(), header.join(", ")),
+            subset.ids_csv(), header.join(", ")),
     })?;
     let mut present = std::collections::BTreeSet::new();
     let mut keep = Vec::new();
@@ -1128,12 +1128,12 @@ pub(crate) fn select_chain_rows(
             msg: format!("column `chain` row {} has value `{cell}`, which is not a chain id", r + 1),
         })?;
         present.insert(chain);
-        if subset.contains(chain) {
+        if subset.uses(crate::chain_index::ChainIndex(chain)) {
             keep.push(r);
         }
     }
     let missing: Vec<String> = subset.ids().iter()
-        .filter(|c| !present.contains(c))
+        .filter(|c| !present.contains(&c.0))
         .map(|c| c.to_string())
         .collect();
     if !missing.is_empty() {
@@ -1666,7 +1666,8 @@ mod tests {
         ResolvedStarts::from_file(
             ChainStarts::Spread(Spread::FromPosterior {
                 source: super::super::starts::Handle(path.display().to_string()),
-                chains: Some(super::super::starts::ChainSubset::new(ids).unwrap()),
+                chains: Some(crate::chain_selection::ChainSelection::from_ids(
+                    ids, crate::chain_selection::Polarity::Keep, "`chains`").unwrap()),
             }),
             path.to_path_buf(),
         ).unwrap()

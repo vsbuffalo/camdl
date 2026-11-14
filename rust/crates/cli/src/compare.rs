@@ -2553,7 +2553,7 @@ fn derive_prequential(
     // where they applied — a θ drawn from a posterior cloud.
     let excluded_chains = match theta_source {
         ThetaSource::PosteriorMean { .. } | ThetaSource::PosteriorDraws { .. } =>
-            selection.map(|s| s.excluded().iter().map(|c| c.0).collect()).unwrap_or_default(),
+            selection.map(|s| s.ids().iter().map(|c| c.0).collect()).unwrap_or_default(),
         ThetaSource::Supplied | ThetaSource::OptimizerWinner => Vec::new(),
     };
     let derivation = trace.derivation.as_mut().ok_or_else(|| format!(
@@ -5291,7 +5291,7 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         let names = positional_model_names(&[
             "a/fit.toml".to_string(), "b/fit.toml".to_string()]);
         let c = parse_cohort_exclude(&["a/fit.toml:3".to_string()], &names).unwrap();
-        assert_eq!(c.for_fit("a/fit.toml").unwrap().excluded_csv(), "3");
+        assert_eq!(c.for_fit("a/fit.toml").unwrap().ids_csv(), "3");
         assert!(c.for_fit("b/fit.toml").is_none(), "the other fit keeps all chains");
 
         // The bare basename is no longer a fit name, and says so.
@@ -5314,26 +5314,26 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         // Bare ids → cohort-wide: every fit gets the same drop set.
         let c = parse_cohort_exclude(&["3,4".to_string()], &names).unwrap();
         assert!(c.cohort_wide);
-        assert_eq!(c.for_fit("@a").unwrap().excluded_csv(), "3,4");
-        assert_eq!(c.for_fit("@b").unwrap().excluded_csv(), "3,4");
+        assert_eq!(c.for_fit("@a").unwrap().ids_csv(), "3,4");
+        assert_eq!(c.for_fit("@b").unwrap().ids_csv(), "3,4");
 
         // Per-fit → ONLY the named fit is filtered; the other keeps all chains.
         let c = parse_cohort_exclude(&["@a:2".to_string()], &names).unwrap();
         assert!(!c.cohort_wide);
-        assert_eq!(c.for_fit("@a").unwrap().excluded_csv(), "2");
+        assert_eq!(c.for_fit("@a").unwrap().ids_csv(), "2");
         assert!(c.for_fit("@b").is_none(), "@b keeps all chains");
 
         // A path-named fit (no `@`) is matched by its bare name.
         let paths = vec!["ctl_rm.toml".to_string(), "ctl_bb.toml".to_string()];
         let c = parse_cohort_exclude(&["ctl_rm.toml:4".to_string()], &paths).unwrap();
-        assert_eq!(c.for_fit("ctl_rm.toml").unwrap().excluded_csv(), "4");
+        assert_eq!(c.for_fit("ctl_rm.toml").unwrap().ids_csv(), "4");
         assert!(c.for_fit("ctl_bb.toml").is_none());
 
         // Multiple per-fit tokens, each its own drop set.
         let c =
             parse_cohort_exclude(&["@a:2".to_string(), "@b:5,6".to_string()], &names).unwrap();
-        assert_eq!(c.for_fit("@a").unwrap().excluded_csv(), "2");
-        assert_eq!(c.for_fit("@b").unwrap().excluded_csv(), "5,6");
+        assert_eq!(c.for_fit("@a").unwrap().ids_csv(), "2");
+        assert_eq!(c.for_fit("@b").unwrap().ids_csv(), "5,6");
     }
 
     #[test]
