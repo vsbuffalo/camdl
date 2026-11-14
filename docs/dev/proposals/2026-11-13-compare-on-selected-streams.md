@@ -233,6 +233,23 @@ Binding is by source, so a fit cannot drop one leaf of an indexed block or one
 of several blocks sharing a `from` source. A fit using the one-file shorthand
 binds every source; the ablated fit must use `[data.observations]`.
 
+### No figure combines streams
+
+Per-leaf scores are marginal: each is the predictive density of one leaf with
+the others integrated out. Their sum over leaves is not the joint density of
+those leaves, and nothing in a trace can turn one into the other. So under
+`--streams`:
+
+- No table, footer or JSON field reports a sum, mean or total across leaves.
+  With two or more selected leaves the output is two or more separate tables and
+  nothing else.
+- The JSON `tables` array has no sibling aggregate.
+- The `--pointwise` TSV carries no `scope=joint` rows.
+
+If a combined figure is added later (below), it gets its own column and field
+name — never `elpd`, `delta_elpd` or `lr` — and its own label saying it is a sum
+of marginal scores.
+
 ## Not in this proposal
 
 **One combined table over several leaves.** The trace stores each leaf's
