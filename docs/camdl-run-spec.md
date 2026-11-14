@@ -1144,11 +1144,11 @@ resolved fact becomes a directory on disk.
 Three type families do the work, and conflating them is the usual source of
 confusion:
 
-| Family              | Purpose                                                | Lives in                                                      |
-| ------------------- | ------------------------------------------------------ | ------------------------------------------------------------- |
-| **Surface types**   | Parse the CLI surface: clap args                        | `rust/crates/cli/src/args/`                                     |
-| **Engine input**    | The resolved job the surface lowers to                  | `rust/crates/cli/src/sim_job.rs`                                |
-| **Identity values** | Hashed, per-level digests of the fully-resolved inputs  | `rust/crates/runid/src/inputs.rs`                               |
+| Family              | Purpose                                                | Lives in                          |
+| ------------------- | ------------------------------------------------------ | --------------------------------- |
+| **Surface types**   | Parse the CLI surface: clap args                       | `rust/crates/cli/src/args/`       |
+| **Engine input**    | The resolved job the surface lowers to                 | `rust/crates/cli/src/sim_job.rs`  |
+| **Identity values** | Hashed, per-level digests of the fully-resolved inputs | `rust/crates/runid/src/inputs.rs` |
 
 The pipeline is:
 
@@ -1163,8 +1163,8 @@ camdl simulate <args>  ─→  SimulateJob  ─→  engine::run_job  ─→  per
                                         five LevelIds  →  run_id  →  store path
 ```
 
-`SimulateJob` deliberately has no serde derives: the surface *lowers to one
-resolved struct*, and a wire format for that struct would be a second schema to
+`SimulateJob` deliberately has no serde derives: the surface _lowers to one
+resolved struct_, and a wire format for that struct would be a second schema to
 keep in step with the flags.
 
 ### 3.1 SimulateJob — the resolved engine input
@@ -1221,7 +1221,8 @@ pub struct SimulateJob {
 ```
 
 It carries no output directory, no `--force`, no label, and no GeoJSON path:
-those are write-side concerns owned by the sink, not by the job. `camdl
+those are write-side concerns owned by the sink, not by the job.
+`camdl
 simulate` builds one in `main.rs` with `parallel` from `--parallel` /
 `CAMDL_PARALLEL` (absent: sequential; 0: every core); `fit predict` builds one
 for its free-forward replay and passes its own thread count.
@@ -1252,8 +1253,8 @@ obs_seed     = process_seed ^ SEED_MIX_OBS
 ```
 
 `seed_point_idx` is the point (draw-row) index for every parameter source except
-a sweep, and is always 0 for a `--sweep` / `--sweep-file` design: a sweep
-point is a value the user chose, not a sample, so every design point at a given
+a sweep, and is always 0 for a `--sweep` / `--sweep-file` design: a sweep point
+is a value the user chose, not a sample, so every design point at a given
 replicate shares one random stream (paired differences across points, and
 inserting a point leaves the others' trajectories unchanged; §5.5).
 
@@ -1282,8 +1283,8 @@ pub enum ObsOutput {
 }
 ```
 
-Three accessors keep the interpretation in one place:
-`suppresses_trajectory()`, `file_path()`, `dir_path()`.
+Three accessors keep the interpretation in one place: `suppresses_trajectory()`,
+`file_path()`, `dir_path()`.
 
 CLI mapping:
 
@@ -1295,7 +1296,7 @@ CLI mapping:
 ```
 
 These four flags are mutually exclusive at the clap level. All of them are
-*mirrors*: the observation draws are also written into the run's leaf under
+_mirrors_: the observation draws are also written into the run's leaf under
 `obs/{obs_hash8}-{obs_seed}/`.
 
 ### 3.2 ParamSource — where parameter vectors come from
@@ -1332,20 +1333,19 @@ pub struct SweepPoint {
 }
 ```
 
-Accessors: `param_points()` returns the ordered per-cell override maps (a
-single empty map for `Point`), `point_id(i)` returns the id point `i` is written
-under (a sweep point's own `point_id`, else `i`), and `replicates()` returns the
-replicate count.
-Total cells are `|scenarios| × |param_points| × replicates`, except that an
-explicit seed list overrides the replicate count — see §3.5.
+Accessors: `param_points()` returns the ordered per-cell override maps (a single
+empty map for `Point`), `point_id(i)` returns the id point `i` is written under
+(a sweep point's own `point_id`, else `i`), and `replicates()` returns the
+replicate count. Total cells are `|scenarios| × |param_points| × replicates`,
+except that an explicit seed list overrides the replicate count — see §3.5.
 
 Which front end produces which variant:
 
-| Variant  | Produced by                                                              |
-| -------- | ------------------------------------------------------------------------ |
-| `Point`  | `simulate` with no `--draws` (`--replicates N` sets the count)            |
-| `Sweep`  | `simulate --sweep …` / `--sweep-file FILE` — the design axis (§5.5)        |
-| `Draws`  | `simulate --draws …` (all four sources of §3.4)                           |
+| Variant | Produced by                                                         |
+| ------- | ------------------------------------------------------------------- |
+| `Point` | `simulate` with no `--draws` (`--replicates N` sets the count)      |
+| `Sweep` | `simulate --sweep …` / `--sweep-file FILE` — the design axis (§5.5) |
+| `Draws` | `simulate --draws …` (all four sources of §3.4)                     |
 
 `explicit_file` is what distinguishes a user-authored draws file from generated
 draws, and the distinction has teeth. A scenario whose `set` or `scale` touches
@@ -1369,11 +1369,12 @@ One sweep grammar serves every verb that takes a grid.
 
 **`--sweep NAME=SPEC`** — `rust/crates/cli/src/args/types.rs`, used by
 `camdl simulate`, `camdl profile`, `camdl fit run` and `camdl fit predict`.
-`simulate` and `fit predict` share one expansion (`rust/crates/cli/src/sweep.rs`):
-several `--sweep` flags form the Cartesian product **sorted by parameter name**,
-the first name varying slowest, and `point_id` is a point's 0-based position in
-it, so the two verbs give the same `point_id` for the same flags. `simulate`
-also reads a grid from a file, `--sweep-file FILE` (§5.5).
+`simulate` and `fit predict` share one expansion
+(`rust/crates/cli/src/sweep.rs`): several `--sweep` flags form the Cartesian
+product **sorted by parameter name**, the first name varying slowest, and
+`point_id` is a point's 0-based position in it, so the two verbs give the same
+`point_id` for the same flags. `simulate` also reads a grid from a file,
+`--sweep-file FILE` (§5.5).
 
 ```rust
 pub struct SweepSpec { pub name: String, pub grid: Grid }
@@ -1399,15 +1400,15 @@ from inference output or a prior, and downstream analyses need to know which
 they are looking at.
 
 There is no `DrawsSpec` type. `simulate --draws` resolves its argument to
-concrete rows *before* the job exists, and the rows enter as
+concrete rows _before_ the job exists, and the rows enter as
 `ParamSource::Draws`.
 
-| `--draws <value>` | Source                                                                                                       |
-| ----------------- | ------------------------------------------------------------------------------------------------------------ |
-| `<file.tsv>`      | A TSV of parameter vectors (one row per draw, columns = parameter names).                                     |
-| `prior`           | Sample declared priors. Requires `-n N`. `--fit <fit.toml>` is optional.                                      |
-| `uniform`         | Sample uniformly from each parameter's `in [lo, hi]` bounds. Requires `-n N`.                                 |
-| `posterior`       | A completed fit's canonical post-warm-up `draws.tsv`. Requires `--fit <fit results dir>`.                     |
+| `--draws <value>` | Source                                                                                    |
+| ----------------- | ----------------------------------------------------------------------------------------- |
+| `<file.tsv>`      | A TSV of parameter vectors (one row per draw, columns = parameter names).                 |
+| `prior`           | Sample declared priors. Requires `-n N`. `--fit <fit.toml>` is optional.                  |
+| `uniform`         | Sample uniformly from each parameter's `in [lo, hi]` bounds. Requires `-n N`.             |
+| `posterior`       | A completed fit's canonical post-warm-up `draws.tsv`. Requires `--fit <fit results dir>`. |
 
 `--draws prior` resolves priors through the same three-tier precedence chain
 `camdl fit run` uses — fit.toml `[estimate].prior` first, then the model IR's
@@ -1415,28 +1416,27 @@ concrete rows *before* the job exists, and the rows enter as
 parameters are the fit's `[estimate]` names, and one of them with no usable
 prior in either tier is a hard error naming the remediation. With no `--fit` it
 samples the parameters that declare a `~ <dist>` prior in the model's
-`parameters {}` block; every other parameter is left out of the row and
-resolves per cell. Either way, a run that would sample no parameter at all (no
-`--fit` and no `~` prior in the model, or an empty `[estimate]`) is a hard
-error: every draw would be the same parameter vector. Do **not** describe this
-source as requiring a fit config.
+`parameters {}` block; every other parameter is left out of the row and resolves
+per cell. Either way, a run that would sample no parameter at all (no `--fit`
+and no `~` prior in the model, or an empty `[estimate]`) is a hard error: every
+draw would be the same parameter vector. Do **not** describe this source as
+requiring a fit config.
 
 `--draws uniform` samples `lo + (hi - lo)·U` for each parameter that declares
 `in [lo, hi]` bounds. A parameter without bounds is not drawn: it resolves per
-cell from `--params`, the scenario, or `--param`, and the run
-is refused up front if none of them sets it. A model in which no parameter
-declares bounds is a hard error: every draw would be the same parameter vector.
-The error says what is sampled (each parameter's declared bounds) and where to
-declare them (`name : <type> in [lo, hi]` in `parameters {}`). This is
-space-filling exploration for model debugging, not a prior.
+cell from `--params`, the scenario, or `--param`, and the run is refused up
+front if none of them sets it. A model in which no parameter declares bounds is
+a hard error: every draw would be the same parameter vector. The error says what
+is sampled (each parameter's declared bounds) and where to declare them
+(`name : <type> in [lo, hi]` in `parameters {}`). This is space-filling
+exploration for model debugging, not a prior.
 
 `--draws posterior --fit <fit results dir>` reads the draws the fit's sampler
-(PGAS / PMMH / MH) wrote — the method leaf's `draws.tsv`, which is
-post-warm-up and thinned and carries every model parameter. Resolution is by
-artifact, not by method name: a leaf has a posterior iff it wrote a
-`draws.tsv`, so an optimizer-only fit (IF2 / NLopt) resolves to an error rather
-than to a single point dressed up as a distribution
-(`rust/crates/cli/src/posterior_draws.rs`).
+(PGAS / PMMH / MH) wrote — the method leaf's `draws.tsv`, which is post-warm-up
+and thinned and carries every model parameter. Resolution is by artifact, not by
+method name: a leaf has a posterior iff it wrote a `draws.tsv`, so an
+optimizer-only fit (IF2 / NLopt) resolves to an error rather than to a single
+point dressed up as a distribution (`rust/crates/cli/src/posterior_draws.rs`).
 
 `--draws <file.tsv> --fit <config-or-run>` additionally supplies the fit's
 `[fixed]` block to every parameter the file's columns lack — a raw posterior
@@ -1463,19 +1463,19 @@ The comparison is the one `fit predict --quantities` uses
 (`rust/crates/cli/src/fit/fitted_model.rs`, `compare_to_fitted`): the
 presentation-normalized model identity, which excludes `quantities {}` and
 `contrasts {}`, the model's file name, and `--output-every` (a property of this
-run, applied after the check). A model that differs is refused, naming the
-fit, both identities, and the fix:
+run, applied after the check). A model that differs is refused, naming the fit,
+both identities, and the fix:
 
 ```
 error: --fit results/fits/mh-8d0c7e80: edited.camdl is not the model this fit ran on (fitted model 9bca0399, edited.camdl e905ea63), so its parameters would be replayed through different dynamics. Quantities and contrasts are excluded from this comparison: the difference is in the dynamics, observations, parameters or simulation settings.
   Fix: run with the fitted model, results/fits/mh-8d0c7e80/model.ir.json (the fit's archived IR), or refit edited.camdl. The fit was run from model.camdl (use it only if it still compiles to model 9bca0399).
 ```
 
-The archived IR is itself a valid model argument, so the fitted model can
-always be replayed. A model that differs only in its quantities or contrasts
-runs, and says on stderr that the command line's quantities and contrasts
-apply. A bare directory holding a `draws.tsv` outside any fit has no archived
-model and is not checked (it is said to run "as written").
+The archived IR is itself a valid model argument, so the fitted model can always
+be replayed. A model that differs only in its quantities or contrasts runs, and
+says on stderr that the command line's quantities and contrasts apply. A bare
+directory holding a `draws.tsv` outside any fit has no archived model and is not
+checked (it is said to run "as written").
 
 A model anchored to observed data (`simulate { to = last_obs + 2 'weeks }`, a
 scenario's `to`, a forcing's `breakpoints`) is archived by `fit run` with its
@@ -1484,8 +1484,8 @@ command-line model is resolved the same way, against the fit's data as it reads
 now. The fit's own source therefore replays. If that data has changed since the
 fit, the anchors resolve to a different horizon and the replay is refused,
 saying so: the source is byte-identical to the fit's archived copy
-(`model.camdl.original`), and the message names the horizon each side runs to.
-A refusal calls the source "edited since" only when its bytes differ from that
+(`model.camdl.original`), and the message names the horizon each side runs to. A
+refusal calls the source "edited since" only when its bytes differ from that
 archived copy.
 
 **A replay runs on the simulator the parameters were estimated on.** The same
@@ -1493,10 +1493,10 @@ archived copy.
 step, and, on ODE, its integrator. Without a flag, every arm of
 `--draws posterior|prior|<file> --fit` (and `--init-state fit`) runs on them:
 
-- **backend** — a stored run's own record (its method's `backend` in `run.json`);
-  for a problem-folder handle or a fit config, the config's `[method] backend`.
-  A fit config with no `[method]` names no backend, and the command's default
-  applies.
+- **backend** — a stored run's own record (its method's `backend` in
+  `run.json`); for a problem-folder handle or a fit config, the config's
+  `[method] backend`. A fit config with no `[method]` names no backend, and the
+  command's default applies.
 - **dt** — a stored fit's recorded `fit.meta.json` `dt` (§2.2.1), else the dt
   rule over the archived model's step and the archived config's `[config] dt`;
   for a fit config, the same rule over the command-line model and the config,
@@ -1546,21 +1546,21 @@ pub enum Seeds {
 }
 ```
 
-The load-bearing distinction is whether the seeds were given *explicitly*.
+The load-bearing distinction is whether the seeds were given _explicitly_.
 `Seeds::explicit()` returns `Some(&[..])` only for the list form, and the engine
 branches on it: an explicit list indexes directly by replicate, so seed `N`
 names the same trajectory in every run that mentions it; a single base seed
 derives per-cell seeds by XOR-mixing the point and replicate indices (§3.1).
-With an explicit list, the list length *is* the replicate count — the
+With an explicit list, the list length _is_ the replicate count — the
 `ParamSource`'s own `replicates` is not consulted.
 
 Surfaces:
 
-| Surface                       | Result                                       |
-| ----------------------------- | -------------------------------------------- |
-| `simulate --seed 42`          | `Seeds::Single(42)` (default `1`)             |
-| `simulate --seeds 1:100`      | `Seeds::Explicit([1..=100])`                  |
-| `simulate --seeds 1,2,42`     | `Seeds::Explicit([1, 2, 42])`                 |
+| Surface                   | Result                            |
+| ------------------------- | --------------------------------- |
+| `simulate --seed 42`      | `Seeds::Single(42)` (default `1`) |
+| `simulate --seeds 1:100`  | `Seeds::Explicit([1..=100])`      |
+| `simulate --seeds 1,2,42` | `Seeds::Explicit([1, 2, 42])`     |
 
 `--seed` and `--seeds` conflict, as do `--seeds` and `--replicates`.
 
@@ -1606,27 +1606,26 @@ Resolution follows the variant, the way the engine runs it — a `Named` ref
 through the preset path, an `Inline` arm through the ad-hoc path:
 
 1. `Named`, declared by the model → `Preset`.
-2. `Named`, not declared → **error**, listing the declared scenarios. No name
-   is special: a model may declare a scenario called `baseline`, and
+2. `Named`, not declared → **error**, listing the declared scenarios. No name is
+   special: a model may declare a scenario called `baseline`, and
    `--scenario baseline` then means that scenario; on a model that declares
    none, it is refused like any other undeclared name.
 3. `Inline` → `Adhoc`, carrying its patch. The CLI builds these for the arm a
    run has without `--scenario`: `simulate`'s `(none)` and `fit predict`'s
    `fitted`, each the empty patch unless `--enable`/`--disable` were given.
-4. `Inline` whose name is a declared scenario → **error**. A scenario
-   reference is either a model preset or an ad-hoc patch, never both; the model
-   scenario is the source of truth.
+4. `Inline` whose name is a declared scenario → **error**. A scenario reference
+   is either a model preset or an ad-hoc patch, never both; the model scenario
+   is the source of truth.
 
 When no `[[scenario]]` entries are defined and no `--scenario` flag is given, a
 single implicit arm, labelled `(none)`, is used. This is not a "default
-scenario" — it is the
-absence of any scenario patch, and it hashes to the real digest of the empty
-delta rather than to a literal zero.
+scenario" — it is the absence of any scenario patch, and it hashes to the real
+digest of the empty delta rather than to a literal zero.
 
 A scenario whose `set` or `scale` touches a swept parameter — directly, or
 through a preset it composes — is refused before any cell runs, by
-`simulate --sweep` and its `--dry-run` alike. Precedence alone (§1.3) would
-let the scenario override every sweep value, so the sweep would not vary that
+`simulate --sweep` and its `--dry-run` alike. Precedence alone (§1.3) would let
+the scenario override every sweep value, so the sweep would not vary that
 parameter:
 
 ```
@@ -1640,9 +1639,10 @@ Fix: remove `beta` from the sweep, or use a scenario that does not touch it.
 A `scale` on a swept parameter is refused the same way ("The scenario would
 rescale every sweep point of `beta`; composing a sweep with a scenario that
 scales the same parameter is not supported"), and a value that arrives through
-`compose` is reported with the name of the composed preset it came from. A `[design.*]` block's
-points run as a sweep and are checked the same way. A scenario on parameters the
-sweep does not touch composes with it by Cartesian product as usual.
+`compose` is reported with the name of the composed preset it came from. A
+`[design.*]` block's points run as a sweep and are checked the same way. A
+scenario on parameters the sweep does not touch composes with it by Cartesian
+product as usual.
 
 ### 3.7 From a job to a path: run identity
 
@@ -1671,13 +1671,13 @@ pub struct ResolvedTrajectory {
 five digests, each hashing a disjoint slice of the input set
 (`rust/crates/runid/src/inputs.rs`):
 
-| Level      | Identity value      | What it folds in                                                            |
-| ---------- | ------------------- | ---------------------------------------------------------------------------- |
-| `model`    | `ModelDigest`       | The whole canonical IR, plus `ir_version` and the engine version              |
-| `config`   | `SimConfig`         | backend, `dt`, `t_start`, `t_end`, output schedule, calendar mode, `allow_degenerate_rates`, `no_flows`, `columns` |
-| `params`   | `ResolvedParams`    | The resolved base parameter map, plus content digests of any `--table` files  |
-| `scenario` | `ResolvedScenario`  | Sorted enabled/disabled intervention ids and the canonical parameter patch    |
-| `seed`     | `Seed`              | `process_seed` only                                                           |
+| Level      | Identity value     | What it folds in                                                                                                   |
+| ---------- | ------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| `model`    | `ModelDigest`      | The whole canonical IR, plus `ir_version` and the engine version                                                   |
+| `config`   | `SimConfig`        | backend, `dt`, `t_start`, `t_end`, output schedule, calendar mode, `allow_degenerate_rates`, `no_flows`, `columns` |
+| `params`   | `ResolvedParams`   | The resolved base parameter map, plus content digests of any `--table` files                                       |
+| `scenario` | `ResolvedScenario` | Sorted enabled/disabled intervention ids and the canonical parameter patch                                         |
+| `seed`     | `Seed`             | `process_seed` only                                                                                                |
 
 Two rules govern membership, and they are the whole discipline:
 
@@ -1702,8 +1702,8 @@ type's `#[run_input(schema_version = N)]`, the crate-wide `HASH_VERSION`, or
 
 **Step 3 — the leaf address.** `runid::run_id` folds the artifact kind's
 declaration index and the count-prefixed level-hash sequence
-(`rust/crates/runid/src/kind.rs`), so two kinds with a coincidentally equal level
-sequence cannot alias.
+(`rust/crates/runid/src/kind.rs`), so two kinds with a coincidentally equal
+level sequence cannot alias.
 
 ```rust
 pub fn run_id(kind: ArtifactKind, levels: &[ContentHash]) -> ContentHash;
@@ -1746,19 +1746,20 @@ overflow a path component.
 `resolve::begin_resolved_write`, which derives the path from the resolved
 identity, builds the `RunRecord` in exactly one place, and dispatches to either
 an atomic commit (the whole artifact set handed over at once — the simulate
-path) or a streaming claim that the caller writes into and finalizes (the
-fit path). Cache validity is `FsCasStore::lookup`, which requires an identity
-match, a current schema, `status = Completed`, and an exact-set file check;
-anything else is a `Miss`, a `Stale(reason)`, or a `Collision` on a
-short-hash-prefix clash, which is disambiguated rather than overwritten.
+path) or a streaming claim that the caller writes into and finalizes (the fit
+path). Cache validity is `FsCasStore::lookup`, which requires an identity match,
+a current schema, `status = Completed`, and an exact-set file check; anything
+else is a `Miss`, a `Stale(reason)`, or a `Collision` on a short-hash-prefix
+clash, which is disambiguated rather than overwritten.
 
 **Derived ensembles.** A multi-cell `simulate` also writes the combined
 wide-format TSV as its own artifact kind, `SimEnsemble`, under
 `results/ensembles/` with four levels — `model` / `config` / `params` / `grid`
 (`rust/crates/cli/src/sim_ensemble_cas.rs`). The `grid` level folds the sorted
-per-cell list *and the explicit cell count*, so three replicates and four
+per-cell list _and the explicit cell count_, so three replicates and four
 replicates are different ensembles; the ensemble's `deps` carry one
 `ArtifactRef` per cell leaf, pinned to that cell's `traj.tsv` digest.
+
 ## 4. Single-Run Simulation
 
 The `.camdl` file plus a parameter TOML is a complete, self-contained
@@ -1773,13 +1774,13 @@ camdl simulate seir_vaccine.camdl --params params.toml --seed 42
 ```
 
 ```
-   stored ./results/sims/seir_vaccine-a0c10f3e/chain_binomial-dt1-e669f2d2/base-eb8ec4ef/_none_-e93c95fd/seed_42-dd2fb524
-          camdl cat 18bd7a09b098c20c22fd478abd331b5475d213c57f5505ead75088f35a523c27
+stored ./results/sims/seir_vaccine-a0c10f3e/chain_binomial-dt1-e669f2d2/base-eb8ec4ef/_none_-e93c95fd/seed_42-dd2fb524
+       camdl cat 18bd7a09b098c20c22fd478abd331b5475d213c57f5505ead75088f35a523c27
 ```
 
 The four hex suffixes and the `run_id` are content hashes; they change whenever
-any identity-bearing input changes (including the runtime version), so the
-exact digests in this document will not match your run.
+any identity-bearing input changes (including the runtime version), so the exact
+digests in this document will not match your run.
 
 ```bash
 # Named scenario from the model's `scenarios {}` block
@@ -1855,33 +1856,34 @@ camdl simulate seir_vaccine.camdl --params params.toml --scenario with_sia --par
 
 **Other exclusions enforced at parse time:**
 
-| combination                                        | why                                             |
-| -------------------------------------------------- | ----------------------------------------------- |
-| `--seed` × `--seeds`                                | one base seed vs an explicit seed list          |
-| `--seeds` × `--replicates`                          | explicit seeds vs derived seeds                 |
-| `--stdout` × `--seeds` / `--replicates` / `--draws` / `--sweep` / `--sweep-file` | `--stdout` is single-cell only |
-| `--stdout` × `-o` / `--obs*`                        | those mirror the store `--stdout` opts out of   |
-| `--event-log` × `--seeds` / `--replicates` / `--draws` / `--sweep` / `--sweep-file` | event-log recording is single-run only |
-| `--draws-out` without `--draws`                     | it writes the rows `--draws` generated          |
-| `--obs` × `--obs-dir` / `--obs-only`; `--obs-dir` × `--obs-only`; `--obs-only` × `--obs-only-dir`; `--obs-only` / `--obs-only-dir` × `-o` | one observation output form at a time |
+| combination                                                                                                                               | why                                           |
+| ----------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| `--seed` × `--seeds`                                                                                                                      | one base seed vs an explicit seed list        |
+| `--seeds` × `--replicates`                                                                                                                | explicit seeds vs derived seeds               |
+| `--stdout` × `--seeds` / `--replicates` / `--draws` / `--sweep` / `--sweep-file`                                                          | `--stdout` is single-cell only                |
+| `--stdout` × `-o` / `--obs*`                                                                                                              | those mirror the store `--stdout` opts out of |
+| `--event-log` × `--seeds` / `--replicates` / `--draws` / `--sweep` / `--sweep-file`                                                       | event-log recording is single-run only        |
+| `--draws-out` without `--draws`                                                                                                           | it writes the rows `--draws` generated        |
+| `--obs` × `--obs-dir` / `--obs-only`; `--obs-dir` × `--obs-only`; `--obs-only` × `--obs-only-dir`; `--obs-only` / `--obs-only-dir` × `-o` | one observation output form at a time         |
 
 The `--obs*` combinations are clap conflicts like the rest (§3.1.1), rejected at
 parse time. Two checks need the compiled model and run after it, exiting 1 with
 a one-line message: `--fit` is legal without `--draws` only when something needs
 the fit's data rather than its posterior — an anchored `--to` or an anchored
-model — and is refused otherwise (`--fit requires --draws (or an anchored --to,
-or an anchored model)`). `--init-state fit` is a separate check: it needs
+model — and is refused otherwise
+(`--fit requires --draws (or an anchored --to,
+or an anchored model)`).
+`--init-state fit` is a separate check: it needs
 `--draws posterior --fit <fit results dir>`.
 
-**Precedence of parameter sources (last wins).** Compiled-in values (§1.3
-tier 1, normally none) → `--params`
-files in order → draw row or sweep point → scenario `set`/`scale` (preset or
-inline) → `--param`. A scenario that `set`s a parameter therefore overrides a
-value coming from generated `--draws`. `--param` outranks a scenario only on
-parameters the scenario leaves alone; a `--param` on a parameter a selected
-scenario sets or scales is refused (§1.3). A scenario touching a parameter that
-a `--draws <file>` column or a `--sweep` varies is refused rather than resolved
-(§3.2). See §5.4.
+**Precedence of parameter sources (last wins).** Compiled-in values (§1.3 tier
+1, normally none) → `--params` files in order → draw row or sweep point →
+scenario `set`/`scale` (preset or inline) → `--param`. A scenario that `set`s a
+parameter therefore overrides a value coming from generated `--draws`. `--param`
+outranks a scenario only on parameters the scenario leaves alone; a `--param` on
+a parameter a selected scenario sets or scales is refused (§1.3). A scenario
+touching a parameter that a `--draws <file>` column or a `--sweep` varies is
+refused rather than resolved (§3.2). See §5.4.
 
 ### 4.3 Parameter and Model Inputs
 
@@ -1919,7 +1921,7 @@ new leaf.
 --integrator {rk4|rk45}                    # ODE method override; tolerances live in the model
 ```
 
-**Trajectory column view.** These change the emitted columns *and* the run
+**Trajectory column view.** These change the emitted columns _and_ the run
 identity, so a filtered run is a distinct leaf:
 
 ```bash
@@ -1977,19 +1979,19 @@ camdl show <run-id-prefix>
 camdl cat  <run-id-prefix>
 ```
 
-**The three destinations.** A run always produces exactly one primary
-trajectory artifact; these say where it goes.
+**The three destinations.** A run always produces exactly one primary trajectory
+artifact; these say where it goes.
 
-| flag                        | trajectory                       | store leaf written? |
-| --------------------------- | -------------------------------- | ------------------- |
-| _(default)_                 | store leaf only                  | yes                 |
-| `-o FILE` / `--output FILE` | store leaf **and** `FILE`        | yes                 |
-| `--stdout`                  | stdout only                      | no                  |
+| flag                        | trajectory                | store leaf written? |
+| --------------------------- | ------------------------- | ------------------- |
+| _(default)_                 | store leaf only           | yes                 |
+| `-o FILE` / `--output FILE` | store leaf **and** `FILE` | yes                 |
+| `--stdout`                  | stdout only               | no                  |
 
 The trajectory is **never** written to stdout without `--stdout`, at any size.
 Commands whose primary result is a scalar do echo it: `camdl pfilter` prints the
-log-likelihood to stdout while also writing its own leaf, so the tight
-"vary θ, re-check" loop stays a one-liner:
+log-likelihood to stdout while also writing its own leaf, so the tight "vary θ,
+re-check" loop stays a one-liner:
 
 ```bash
 camdl pfilter seir_observations.camdl --scenario baseline \
@@ -2088,9 +2090,9 @@ whose `seed` column is the pairing key across design points. `draw` is the
 
 `--parallel N` (env `CAMDL_PARALLEL`) runs the simulation phase of a multi-cell
 `simulate` on N Rayon threads (0 = every core; absent = sequential). The
-combined files, the observation tables and the stored ensemble are byte-identical
-whatever the value: a cell's seed is a function of its grid position, and the
-engine merges cells in canonical order.
+combined files, the observation tables and the stored ensemble are
+byte-identical whatever the value: a cell's seed is a function of its grid
+position, and the engine merges cells in canonical order.
 
 ### 4.5 `camdl list` / `show` / `cat` / `label` — the primary access path
 
@@ -2137,17 +2139,18 @@ with a separate `ensembles` block carrying `CELLS` instead of `SCENARIO`/`SEED`.
 one `sim` leaf per cell and one ensemble leaf that lists them as dependencies;
 in any view that includes ensembles, the per-cell `sim` leaves the listed
 ensembles reference are not printed as rows of their own (membership is decided
-over every ensemble in the store, before `--limit`/`--since` truncate). A
-`sims` block therefore shows lone runs and cells that belong to no stored
-ensemble. `--kind sim` excludes ensembles and so lists every per-cell leaf; the
-cells are always reachable by `camdl show` on their `run_id`.
+over every ensemble in the store, before `--limit`/`--since` truncate). A `sims`
+block therefore shows lone runs and cells that belong to no stored ensemble.
+`--kind sim` excludes ensembles and so lists every per-cell leaf; the cells are
+always reachable by `camdl show` on their `run_id`.
 
 In `--format json` a fit row's `methods[]` holds one entry per run, each with
 its own `run_id`, `label` and `created_at`; the row-level `label` is a display
 string, every run's label joined with `", "`, and names no run (gh#896).
 
 Paths are printed relative to the root you asked for, so they are copy-paste
-ready into `camdl show` / `camdl cat`. Short-hash prefix resolution is git-style:
+ready into `camdl show` / `camdl cat`. Short-hash prefix resolution is
+git-style:
 
 ```bash
 camdl show 1
@@ -2171,8 +2174,8 @@ or filter with `--kind`.
 
 A fit row carries `schema = {"name": "fit_list_row", "version": 2}`, the
 fit-level provenance (its `source_config` and `source_model` are
-`fit.meta.json`'s, relative to the fit folder, §2.2.1), `methods_declared` (the algorithms that ran on this
-problem), and `methods` — one entry per method leaf:
+`fit.meta.json`'s, relative to the fit folder, §2.2.1), `methods_declared` (the
+algorithms that ran on this problem), and `methods` — one entry per method leaf:
 
 ```json
 {"method":"pgas","method_hash":"0727792d…","run_id":"b99e1710…",
@@ -2191,10 +2194,10 @@ method recorded none (`best_chain` for `pfilter`, which runs replicates rather
 than competing chains; `best_loglik` when the value was not finite).
 
 `method` alone does not identify a leaf. One segment can hold several leaves of
-the same algorithm — the same problem fitted at two `sweeps` settings, say —
-and they agree on `method`, `backend` and `seed`; the `method` level's hash is
-what separates them, and it is the `<h8>` in each leaf's directory name.
-`run_id` and `path` are the addresses `camdl show` and `fit predict` accept.
+the same algorithm — the same problem fitted at two `sweeps` settings, say — and
+they agree on `method`, `backend` and `seed`; the `method` level's hash is what
+separates them, and it is the `<h8>` in each leaf's directory name. `run_id` and
+`path` are the addresses `camdl show` and `fit predict` accept.
 
 `<root>/index.json` is a derived run_id → leaf index, rebuilt lazily on a
 prefix-resolution miss and by `camdl dev reindex <root>`. Deleting it is safe.
@@ -2249,11 +2252,10 @@ Use --obs-dir (one file per stream, keeps trajectory) or
 ```
 
 `--obs-dir` / `--obs-only-dir` write one file per stream under the columns the
-stream **declared**, so the file re-loads under its own model (gh#833):
-the value under the scored column's name, the time under the `: time` column's
-name — or both boundaries under the `window_start`/`window_stop` names for a
-stream that declares its windows per row, each with a `date_*` twin under
-`--dates`:
+stream **declared**, so the file re-loads under its own model (gh#833): the
+value under the scored column's name, the time under the `: time` column's name
+— or both boundaries under the `window_start`/`window_stop` names for a stream
+that declares its windows per row, each with a `date_*` twin under `--dates`:
 
 ```
 win_start	win_stop	cases
@@ -2262,17 +2264,17 @@ win_start	win_stop	cases
 ```
 
 Each row is drawn over the period the stream's `covers` assigns to its label,
-and a row whose period falls outside the run is not written. Under
-`closing_at` with a schedule starting at `t_start`, the row labelled `t_start` is
-not written: its period `[t_start − Δ, t_start)` was never simulated. A windowed
-stream cannot go into the single wide `--obs` file, which has one `time`
-column; the error names `--obs-dir`.
+and a row whose period falls outside the run is not written. Under `closing_at`
+with a schedule starting at `t_start`, the row labelled `t_start` is not
+written: its period `[t_start − Δ, t_start)` was never simulated. A windowed
+stream cannot go into the single wide `--obs` file, which has one `time` column;
+the error names `--obs-dir`.
 
 A stratified family (`cases[p in patch]`) is one file, not one per leaf. Its
 leaves share one observation `source`, which the loader binds to a single
-long-format file and routes row by row to the leaf named in the `: dim`
-column — so the family is written that way, named for the source, with the dim
-column filled from each leaf's own stratum (gh#884):
+long-format file and routes row by row to the leaf named in the `: dim` column —
+so the family is written that way, named for the source, with the dim column
+filled from each leaf's own stratum (gh#884):
 
 ```
 week_ending	province	province_cases
@@ -2285,14 +2287,14 @@ week_ending	province	province_cases
 
 `--design-from <fit.toml>` replaces the emit schedule as the source of a
 stream's rows. That config's `[data.observations]` is loaded exactly as
-`fit run` loads it, and each stream is written on the rows the loader bound:
-its observed labels, each row's own period — per-row `window_start`/
-`window_stop` widths included — and each `NA` hole, written as a row with its
-period and no value. Only the values are simulated.
+`fit run` loads it, and each stream is written on the rows the loader bound: its
+observed labels, each row's own period — per-row `window_start`/ `window_stop`
+widths included — and each `NA` hole, written as a row with its period and no
+value. Only the values are simulated.
 
-This is what a simulation-based self-consistency test needs (gh#831).
-Simulating on a regular grid gives the synthetic fit more information than the
-real one has: a three-day row becomes three one-day rows, and a hole becomes an
+This is what a simulation-based self-consistency test needs (gh#831). Simulating
+on a regular grid gives the synthetic fit more information than the real one
+has: a three-day row becomes three one-day rows, and a hole becomes an
 observation.
 
 The temporal columns are written in the representation the bound file used. A
@@ -2307,18 +2309,17 @@ camdl simulate model.camdl --params theta.toml \
 ```
 
 It requires `--obs-dir`, `--obs-only-dir` or `--projected-out` (one file per
-stream), and takes θ
-from `--params`/`--param` — one dataset, written into the directory — or from
-`--draws`, which writes one `ds_NN/` subdirectory per draw so each dataset stays
-a file set the loader can bind on its own. What it produces is a **dataset, not
-a run**: no trajectory and no store leaf are written, with `--obs-dir` as with
-`--obs-only-dir`. It conflicts with the flags the store-backed trajectory
-pipeline owns (`--obs`, `--obs-only`, `-o`, `--stdout`, `--seeds`,
-`--replicates`, `--emit-every`, `--dates`, `--init-state`, `--quantities-out`,
-`--event-log`), and with `--scenario`, since the dataset is written from the
-parameter vector alone with no scenario applied; so nothing passed is silently
-dropped. To simulate a dataset under a scenario's parameter values, give the
-values through `--params`.
+stream), and takes θ from `--params`/`--param` — one dataset, written into the
+directory — or from `--draws`, which writes one `ds_NN/` subdirectory per draw
+so each dataset stays a file set the loader can bind on its own. What it
+produces is a **dataset, not a run**: no trajectory and no store leaf are
+written, with `--obs-dir` as with `--obs-only-dir`. It conflicts with the flags
+the store-backed trajectory pipeline owns (`--obs`, `--obs-only`, `-o`,
+`--stdout`, `--seeds`, `--replicates`, `--emit-every`, `--dates`,
+`--init-state`, `--quantities-out`, `--event-log`), and with `--scenario`, since
+the dataset is written from the parameter vector alone with no scenario applied;
+so nothing passed is silently dropped. To simulate a dataset under a scenario's
+parameter values, give the values through `--params`.
 
 A stream whose likelihood reads a data column — a binomial denominator
 `n = tested`, a person-time offset — is refused by name: there is no data file
@@ -2329,7 +2330,7 @@ family shares one file per `source`, which one file per stream would not
 re-load.
 
 **Projections on the design: `--projected-out DIR`.** With `--design-from`,
-`--projected-out DIR` writes each stream's *projected* value on the same rows:
+`--projected-out DIR` writes each stream's _projected_ value on the same rows:
 the model quantity the stream's `projected = …` expression defines over each
 row's period, before any observation noise. One file per stream holds the
 stream's temporal column(s) and a column named `projected`, at full round-trip
@@ -2353,20 +2354,20 @@ Projections are what a sensitivity or identifiability analysis differentiates,
 and what a posterior-predictive mean averages. Like `--quantities-out`, the
 output is a sidecar outside run identity.
 
-`--obs-only` / `--obs-only-dir` suppress only the *loose* trajectory mirror; the
+`--obs-only` / `--obs-only-dir` suppress only the _loose_ trajectory mirror; the
 store leaf still holds `traj.tsv`. In every mode the sampled observations are
 also written into the leaf under `obs/<obs-hash>-<obs-seed>/<stream>.tsv`
-alongside an `obs.json`, so they are reachable with `camdl cat <id> --stream
+alongside an `obs.json`, so they are reachable with
+`camdl cat <id> --stream
 <name>` without keeping the loose files.
 
 These writers — `--obs`, `--obs-dir`, the store's `obs/` subtree, and a
-generated quantity that reduces `observations.<stream>` — draw
-every stream from the model alone, with no data columns. So a stream whose
-likelihood reads a data column is refused by name before any cell runs,
-including a ratio stream's `n` that `--design-from` writes from the model: a
-missing column would otherwise be drawn as `0` (gh#829). A model with such a
-stream emits none of its streams this way; `--design-from` draws only the
-streams the fit binds.
+generated quantity that reduces `observations.<stream>` — draw every stream from
+the model alone, with no data columns. So a stream whose likelihood reads a data
+column is refused by name before any cell runs, including a ratio stream's `n`
+that `--design-from` writes from the model: a missing column would otherwise be
+drawn as `0` (gh#829). A model with such a stream emits none of its streams this
+way; `--design-from` draws only the streams the fit binds.
 
 The observation RNG is seeded independently of the process RNG, so adding
 `--obs` does not change the trajectory.
