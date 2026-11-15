@@ -503,20 +503,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         .map(|p| (p.name.clone(), p.value))
         .collect();
     let _overrides: HashMap<String, f64> = fixed_cli_vec.iter().cloned().collect();
-    // Where each cell's chains begin, as `--starts <spec>` states it — the
-    // same rule grammar and the same typed `ChainStarts` `fit run` takes
-    // (gh#889). How many chains is `--n-starts`, a count. Without `--starts`
-    // the rule is `fit run`'s default, decided below once the estimated set
-    // is known.
-    // `--starts-chains` restricts a `from_posterior` rule to chains of its
-    // source, by the function `fit run` applies it with (gh#1056).
-    let declared_starts: Option<crate::fit::starts::ChainStarts> = match &a.starts_chains {
-        Some(subset) => Some(
-            crate::fit::starts::apply_starts_chains(a.starts.clone(), subset, "profile")
-                .unwrap_or_else(|e| out.fail(format!("error: {e}")))),
-        None => a.starts.clone(),
-    };
-
     let focal_names: Vec<String> = a.sweep.iter().map(|s| s.name.clone()).collect();
 
     struct FocalGrid { name: String, values: Vec<f64>, param_idx: usize }
@@ -632,15 +618,39 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // [method] is an nl-* optimizer (so a profile of that fit optimizes each
     // cell as the fit did), else the profile's defaults. Recorded in the
     // method identity either way.
+    // The `--fit` file's own `[method] starts`, if it spells one (its path
+    // sources anchored at the file, as `fit run` reads them).
+    let mut file_starts: Option<crate::fit::starts::ChainStarts> = None;
     let (nl_tolerance, nl_max_evals, nl_from_fit): (f64, usize, bool) = match a.fit.as_ref() {
         Some(fit_path) => {
             let cfg = crate::fit::config_v2::FitConfig::load(&fit_path.to_string_lossy())
                 .unwrap_or_else(|e| {
                     out.fail(format!("error: failed to load --fit toml '{}': {}", fit_path.display(), e));
                 });
+            file_starts = cfg.inference.method.as_ref().and_then(|m| m.starts.clone());
             nlopt_cell_budget(cfg.inference.method.as_ref().map(|m| &m.algorithm))
         }
         None => nlopt_cell_budget(None),
+    };
+
+    // Where each cell's chains begin: `--starts <spec>` (the rule grammar and
+    // typed `ChainStarts` `fit run` takes, gh#889), else the `--fit` config's
+    // `[method] starts`, else `fit run`'s default rule, decided below once the
+    // estimated set is known. How many chains is `--n-starts`, a count.
+    // `--starts-chains` restricts the rule in force, the file's included, to
+    // chains of its `from_posterior` source, by the function `fit run` applies
+    // it with (gh#1056).
+    let (rule_in_force, starts_from): (Option<crate::fit::starts::ChainStarts>, &str) =
+        match (&a.starts, &file_starts) {
+            (Some(rule), _) => (Some(rule.clone()), "from --starts"),
+            (None, Some(rule)) => (Some(rule.clone()), "from the --fit config's [method] starts"),
+            (None, None) => (None, ""),
+        };
+    let declared_starts: Option<crate::fit::starts::ChainStarts> = match &a.starts_chains {
+        Some(subset) => Some(
+            crate::fit::starts::apply_starts_chains(rule_in_force, subset, "profile")
+                .unwrap_or_else(|e| out.fail(format!("error: {e}")))),
+        None => rule_in_force,
     };
 
     // The scenario this profile runs under: the fit config's top-level
@@ -1348,10 +1358,10 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         out.say_raw(format_args!("{}", w));
     }
 
-    // The starts rule: the one `--starts` names, else the rule `fit run`
-    // defaults to, over the set each cell estimates (`from_prior` when every
-    // one has a prior to draw from, `uniform_unconstrained` otherwise). Said
-    // at startup either way, as `fit run` says it.
+    // The starts rule: the one `--starts` or the config names, else the rule
+    // `fit run` defaults to, over the set each cell estimates (`from_prior`
+    // when every one has a prior to draw from, `uniform_unconstrained`
+    // otherwise). Said at startup with where it came from.
     let starts_resolution = match &declared_starts {
         Some(rule) => crate::fit::config_v2::StartsResolution::Declared(rule.clone()),
         None => crate::fit::config_v2::default_starts(
@@ -1359,7 +1369,12 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             &fit_estimate, &model),
     };
     let init_method: crate::fit::starts::ChainStarts = starts_resolution.rule();
-    out.say(format_args!("profile: starts: {}", starts_resolution.describe()));
+    match &starts_resolution {
+        crate::fit::config_v2::StartsResolution::Declared(_) => out.say(format_args!(
+            "profile: starts: {} — {starts_from}", starts_resolution.describe())),
+        // The default's description says it is the default, and why.
+        _ => out.say(format_args!("profile: starts: {}", starts_resolution.describe())),
+    }
 
     // Per-start init draws across non-focal estimated params (gh#42).
     // Computed once, reused at every grid cell so start_idx=k means the

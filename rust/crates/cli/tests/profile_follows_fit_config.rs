@@ -679,3 +679,60 @@ fn fixed_over_a_fit_estimate_parameter_is_refused() {
     let o = profile(dir, &base(&["--fixed", "k=12"]));
     assert_ok(&o, "--fixed over a [fixed] entry");
 }
+
+/// gh#1059: the starts rule comes from `--starts`, else from the --fit
+/// config's `[method] starts`, else from the default `fit run` takes; the run
+/// says which. `--starts-chains` qualifies the rule in force, the file's
+/// included.
+#[test]
+fn the_starts_rule_is_the_flag_then_the_config_then_the_default() {
+    let fit = fit_toml("").replace("chains = 1\n", "chains = 1\nstarts = \"lhs\"\n");
+    let tmp = workdir(&fit);
+    let dir = tmp.path();
+    let run = |extra: &[&'static str], out: &str| {
+        let mut args: Vec<&str> = vec!["--fit", "fit.toml", "--sweep", "gamma=0.15",
+            "--n-starts", "2", "-o", "t.tsv"];
+        args.extend_from_slice(&NL);
+        args.extend_from_slice(extra);
+        let o = profile(dir, &args);
+        assert_ok(&o, out);
+        assert!(stderr(&o).contains(out), "the run must say where the rule came from:\n{}",
+            stderr(&o));
+        let _ = std::fs::remove_dir_all(dir.join("results"));
+    };
+    run(&[], "profile: starts: lhs (one independent draw per chain) — from the --fit config's [method] starts");
+    assert!(starts_rules_after(dir, &[]).iter().all(|r| r == "lhs"));
+    run(&["--starts", "uniform"], "profile: starts: uniform (one independent draw per chain) — from --starts");
+    assert!(starts_rules_after(dir, &["--starts", "uniform"]).iter().all(|r| r == "uniform"));
+    let tmp2 = workdir(&fit_toml(""));
+    let o = profile(tmp2.path(), &{
+        let mut v: Vec<&str> = vec!["--fit", "fit.toml", "--sweep", "gamma=0.15", "--n-starts", "2"];
+        v.extend_from_slice(&NL);
+        v
+    });
+    assert_ok(&o, "the default");
+    assert!(stderr(&o).contains("profile: starts: uniform_unconstrained (one independent draw per chain) — default: no sampleable prior on beta"), "{}", stderr(&o));
+
+    // `--starts-chains` restricts the config's own from_posterior rule.
+    let fit = fit_toml("").replace("chains = 1\n",
+        "chains = 1\nstarts = { from_posterior = \"draws.tsv\" }\n");
+    let tmp3 = workdir(&fit);
+    std::fs::write(tmp3.path().join("draws.tsv"), THREE_CHAINS).unwrap();
+    let mut args: Vec<&str> = vec!["--fit", "fit.toml", "--sweep", "gamma=0.15",
+        "--n-starts", "4", "--starts-chains", "0,1"];
+    args.extend_from_slice(&NL);
+    assert_ok(&profile(tmp3.path(), &args), "--starts-chains on the config's rule");
+    assert!(beta_starts(tmp3.path()).iter().all(|b| (0.329..0.334).contains(b)),
+        "every start from chains 0 and 1: {:?}", beta_starts(tmp3.path()));
+}
+
+/// Run the profile `the_starts_rule_is_…` runs again with `extra`, and read
+/// the rule each stored cell started under.
+fn starts_rules_after(dir: &Path, extra: &[&str]) -> Vec<String> {
+    let mut args: Vec<&str> = vec!["--fit", "fit.toml", "--sweep", "gamma=0.15",
+        "--n-starts", "2", "-o", "t.tsv"];
+    args.extend_from_slice(&NL);
+    args.extend_from_slice(extra);
+    assert_ok(&profile(dir, &args), "rerun");
+    starts_rules(dir)
+}

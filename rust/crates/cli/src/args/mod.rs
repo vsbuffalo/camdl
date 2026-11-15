@@ -1908,15 +1908,18 @@ pub struct ProfileArgs {
     /// `from_params=theta.toml`. The chains it draws span the
     /// non-focal estimated parameters' bounds, and a source binds those
     /// parameters only: a swept parameter, pinned in every cell, needs no
-    /// column or entry in it. Default, as in `fit run`: `from_prior` if every
-    /// parameter a cell estimates has a prior, `uniform_unconstrained`
-    /// otherwise. Keyed into the run's identity. How many chains:
+    /// column or entry in it. Without this flag, the `--fit` config's
+    /// `[method] starts`; without either, the default `fit run` takes:
+    /// `from_prior` if every parameter a cell estimates has a prior,
+    /// `uniform_unconstrained` otherwise. The run says which. Keyed into the
+    /// run's identity. How many chains:
     /// `--n-starts`.
     #[arg(long, value_name = "SPEC")]
     pub starts: Option<crate::fit::starts::ChainStarts>,
 
-    /// Restrict a `from_posterior` `--starts` rule to these chains of its
-    /// source, comma-separated (`0,1,2,4`), as on `fit run`. Any other rule,
+    /// Restrict the `from_posterior` rule in force (`--starts`, or the `--fit`
+    /// config's `[method] starts`) to these chains of its source,
+    /// comma-separated (`0,1,2,4`), as on `fit run`. Any other rule,
     /// the default included, is refused. The selected chains must agree
     /// (their own R̂ is checked in place of the source's whole-run verdict),
     /// and the subset is keyed into the run's identity (gh#1056).

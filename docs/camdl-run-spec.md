@@ -7241,10 +7241,12 @@ part of the leaf's identity, and the full objective leaves the key unchanged.
 --iterations N              IF2 iterations per grid point (default 50; refused for nl-*)
 --n-starts N                independent starts per grid point (default 3)
 --starts SPEC               where each cell's starts are drawn: the rule grammar
-                            `fit run --starts` takes. Default, as in fit run:
-                            `from_prior` if every parameter a cell estimates
-                            has a prior to draw from, `uniform_unconstrained`
-                            otherwise. A source binds the cell's estimated set,
+                            `fit run --starts` takes. Without it, the --fit
+                            config's [method] starts; without either, the
+                            default fit run takes: `from_prior` if every
+                            parameter a cell estimates has a prior to draw
+                            from, `uniform_unconstrained` otherwise. The run
+                            says which. A source binds the cell's estimated set,
                             so a swept parameter needs no column in it
 --starts-chains IDS         restrict a from_posterior rule to these chains of
                             its source, as on fit run (keyed; any other rule,
