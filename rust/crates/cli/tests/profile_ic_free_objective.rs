@@ -198,14 +198,18 @@ fn profile_scores_the_ic_free_objective_of_the_fit_it_profiles() {
          pfilter full {full} − first {first} = {conditional}"
     );
 
-    // The profile at θ̂: focal beta at the fit's value, gamma pinned at the
-    // fit's value, so the one cell scores exactly θ̂.
+    // The profile at θ̂: focal beta at the fit's value, gamma held at the
+    // fit's value, so the one cell scores exactly θ̂. A held parameter is a
+    // `[fixed]` entry in a copy of the config (`--fixed` over `[estimate]` is
+    // refused, parameter-roles §4.2).
+    std::fs::write(d.join("held.toml"), FIT
+        .replace("gamma = { bounds = [0.01, 0.5], start = 0.15 }\n", "")
+        .replace("[fixed]\n", &format!("[fixed]\ngamma = {gamma}\n"))).unwrap();
     run(
         camdl(&bin, d).args([
             "profile", "sir.camdl",
-            "--fit", "fit.toml",
+            "--fit", "held.toml",
             "--sweep", &format!("beta={beta},{}", beta + 0.05),
-            "--fixed", &format!("gamma={gamma}"),
             "--particles", "500",
             "--iterations", "2",
             "--n-starts", "1",
