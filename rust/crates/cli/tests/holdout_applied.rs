@@ -575,3 +575,76 @@ dt = 1.0
             "{name}: fit.meta.json must record the applied training window: {meta}");
     }
 }
+
+/// gh#585: a stored fit that carries no training-window record gets one when
+/// it is re-run, even though the rerun is a cache hit (same problem, same
+/// engine version) and trains nothing: the window is a function of the problem
+/// the stored run's identity seals. This is what makes "re-run the fit", the
+/// remedy `compare` names when the record is missing, work.
+#[test]
+fn a_cache_hit_rerun_records_a_missing_training_window() {
+    let bin = skip_if_missing_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    std::fs::write(dir.join("obs.tsv"),
+        "time\tweekly_cases\n7\t1\n14\t2\n21\t3\n28\t4\n35\t5\n").unwrap();
+    std::fs::write(dir.join("fit.toml"), format!(r#"
+output_dir = "results"
+
+[model]
+camdl = "{ir}"
+
+[data]
+holdout_after = 21.0
+
+[data.observations]
+weekly_cases = "obs.tsv"
+
+[estimate.beta]
+bounds = [0.01, 0.5]
+start  = 0.1
+prior  = {{ uniform = {{}} }}
+
+[fixed]
+sigma    = 0.25
+gamma    = 0.3
+rho      = 0.5
+k        = 10.0
+p_detect = 0.5
+N0       = 1000
+I0       = 5
+
+[method]
+algorithm = "mh"
+backend = "ode"
+chains = 1
+iterations = 20
+burn_in = 5
+
+[config]
+dt = 1.0
+"#, ir = golden_path())).unwrap();
+    let run = || Command::new(&bin).env_remove("CLICOLOR_FORCE")
+        .args(["fit", "run", "fit.toml", "--seed", "1"])
+        .current_dir(dir)
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .output()
+        .expect("spawn camdl");
+    let out = run();
+    assert!(out.status.success(), "fit run failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    let meta_path = find_fit_meta(&dir.join("results")).expect("a fit.meta.json");
+    let read = || -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap()
+    };
+    // What a fit stored before its method recorded the window looks like.
+    let mut meta = read();
+    meta.as_object_mut().unwrap().remove("training_window");
+    std::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap()).unwrap();
+
+    let out = run();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "rerun failed:\n{stderr}");
+    assert!(stderr.contains("cache hit"), "the rerun reuses the stored run:\n{stderr}");
+    assert_eq!(read()["training_window"]["train_end"], serde_json::json!(21.0),
+        "the cache-hit rerun must record the missing training window");
+}

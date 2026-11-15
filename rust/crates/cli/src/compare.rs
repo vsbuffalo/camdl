@@ -2024,13 +2024,12 @@ fn detect_sealed_holdout(
         .and_then(|s| s.training_window);
     let Some(window) = window else {
         return Err(format!(
-            "the fit at {} declares a holdout but its fit.meta.json carries \
-             no applied training window — it was produced before the holdout \
-             declaration was actually applied (gh#585), so its θ̂ saw the \
-             full series and a \"held-out\" score would be a leak presented \
-             as honest.\n  Re-run the fit (its identity re-keys; the new run \
-             trains on the truncated series and records the window), or pass \
-             --in-sample to score it as the in-sample trace it is.",
+            "the fit at {} declares a holdout, but its fit.meta.json carries \
+             no applied training window: there is no record proving which \
+             observations its θ̂ was fitted to, so `compare` cannot certify a \
+             score of the rows past the boundary as held out.\n  Re-run the fit \
+             with `camdl fit run`, which records the window, or pass \
+             --in-sample to score it in-sample.",
             resolved.segment.display()));
     };
     let holdout_files = bindings.holdout_by_source().iter()

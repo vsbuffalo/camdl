@@ -359,9 +359,13 @@ forces the old full-series in-sample comparison, clearly stamped.
 training window into the fit's metadata at the moment the rows are withheld.
 `compare` refuses the `hold_out_tail` label unless the fit carries that
 applied-window record, the declared window covers every scored time, and the
-scored observations lie strictly past the training window. A fit produced by any
-camdl version that did not enforce the split cannot carry the record, and is
-refused the label.
+scored observations lie strictly past the training window. A fit that carries no
+record — one produced before camdl enforced the split, or a PMMH, PGAS, MH or
+NLopt fit stored before those methods recorded it — is refused the label, since
+nothing proves which observations its θ was fitted to. Re-running it with
+`camdl fit run` writes the record (a fit that predates enforcement re-trains;
+one whose method only failed to record it is reused from the cache and gains the
+record).
 
 The guarantee is exactly "no data leakage into $\theta$." It cannot certify that
 the _modeler_ chose the model family without having seen the full curve — that

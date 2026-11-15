@@ -1533,6 +1533,27 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         } else {
             crate::resolve::WritePolicy::Reuse
         };
+        // gh#585: the applied training window — the §3.7.3(b) proof `compare`
+        // requires before it stamps a score `hold_out_tail` — recorded into the
+        // fit-level sidecar written above, for every method, and on a cache hit
+        // as well as a fresh run. Each method's runner builds its config with
+        // `FitRunConfig::build` from this same problem, and that build is where
+        // the declaration is applied; this is the same build, run once here so
+        // that no method can leave the record out, and before the reuse check
+        // so that re-running a stored fit that predates the record (a cache hit
+        // when the engine version is unchanged) writes it: the window is a
+        // function of the problem the stored run's identity seals. Without the
+        // record `compare` cannot certify a score as held out. A build that
+        // fails here fails again in the method's own runner, which reports it.
+        if let Some(seg) = cas_path.parent().and_then(|p| p.parent()) {
+            if let Ok(window_config) = runner::FitRunConfig::build(
+                &sweep_config, Some(&method.algorithm), 1, 1, 1, 1.0, 1, seed, false,
+            ) {
+                crate::run_meta::record_training_window(
+                    seg, window_config.applied_training_window);
+            }
+        }
+
         // gh#896: the label is checked against this run's identity before any
         // sampling, under the store-wide label lock, which is held only from
         // here to the write that takes the label — the claim below, or the
@@ -1698,24 +1719,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // hint said under the `stored` line (IF2's best chain).
         let mut method_warmup: Vec<report::ChainWarmup> = Vec::new();
         let mut stored_hint: Option<String> = None;
-
-        // gh#585: the applied training window — the §3.7.3(b) proof `compare`
-        // requires before it stamps a score `hold_out_tail` — recorded into the
-        // fit-level sidecar written above, for every method. Each method's
-        // runner builds its config with `FitRunConfig::build` from this same
-        // problem, and that build is where the declaration is applied; this is
-        // the same build, run once here so that no method can leave the record
-        // out: without it `compare` refuses a held-out score for a fit that
-        // did train on the truncated series. A build that fails here fails
-        // again in the method's own runner, which reports it.
-        if let Some(seg) = cas_path.parent().and_then(|p| p.parent()) {
-            if let Ok(window_config) = runner::FitRunConfig::build(
-                &sweep_config, Some(&method.algorithm), 1, 1, 1, 1.0, 1, seed, false,
-            ) {
-                crate::run_meta::record_training_window(
-                    seg, window_config.applied_training_window);
-            }
-        }
 
         match &method.algorithm {
             Algorithm::IF2 { backend, chains, particles, iterations, cooling, cooling_target_iters, loglik_eval, gate, dt_check, .. } => {
