@@ -1493,11 +1493,29 @@ pub fn stream_times_for(
     path: &str,
     opts: &TimeOpts,
 ) -> Result<sim::inference::StreamTimes, String> {
+    stream_times_of_kind(obs, projection.temporal_kind(), label_times, path, opts)
+}
+
+/// [`stream_times_for`], given the stream's [`TemporalKind`] instead of its
+/// resolved projection — the projection is consulted for nothing else. For a
+/// caller that holds the IR but no compiled model: `compare` reading a stored
+/// fit's training rows passes `obs.projection.temporal_kind()`, which agrees
+/// by construction with the resolved projection's
+/// ([`sim::inference::multi_stream_obs::StreamProjection::temporal_kind`]).
+///
+/// [`TemporalKind`]: ir::observation::TemporalKind
+pub fn stream_times_of_kind(
+    obs: &ir::observation::ObservationModel,
+    kind: ir::observation::TemporalKind,
+    label_times: &[f64],
+    path: &str,
+    opts: &TimeOpts,
+) -> Result<sim::inference::StreamTimes, String> {
     use ir::observation::{Covers, TemporalKind};
     use sim::inference::{Period, StreamTimes};
 
     let Some(covers) = &obs.covers else {
-        return match projection.temporal_kind() {
+        return match kind {
             TemporalKind::Instant => Ok(StreamTimes::Instants(label_times.to_vec())),
             TemporalKind::Interval => Err(missing_covers_error(obs)),
         };
