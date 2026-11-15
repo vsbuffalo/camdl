@@ -1,0 +1,14 @@
+left   base.ir.json  model b1cb42f95c224c9f
+right  let_inlined.ir.json  model b1cb42f95c224c9f
+
+Model: written differently; the two compile to the same model.
+Reported quantities and contrasts: identical.
+
+Model
+  transition infection: changed: dynamics.rate.rate
+      left   infection : S --> I  @ foi * S
+      right  infection : S --> I  @ beta * I / N * S
+  the same on both sides: 1 description, 3 compartments, 5 parameters, 2 definitions, 1 transition, 2 initial conditions, 1 observation stream, 1 simulation, 1 output
+
+Reporting (not part of the model's identity)
+  all the same: 1 quantity

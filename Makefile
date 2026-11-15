@@ -122,7 +122,7 @@ dev-camdlc: build-ocaml
 # CI can run and badge them independently (see .github/workflows/): test-rust =
 # everything except the sim crate; test-inference = the sim crate (simulation
 # engine + the inference stack). Their union is the whole workspace.
-test: lint test-ocaml check-reactive-golden check-quantities-golden check-contrasts-golden check-declared-names-golden check-hoisted-identity-golden test-rust test-inference test-integration test-docs test-cli-docs test-install
+test: lint test-ocaml check-reactive-golden check-quantities-golden check-contrasts-golden check-declared-names-golden check-hoisted-identity-golden check-diff-pairs-golden test-rust test-inference test-integration test-docs test-cli-docs test-install
 
 # Clippy, the same invocation CI's `test` job runs as its second step. Kept in
 # `make test` because CI aborts that job on a lint error before a single test
@@ -292,7 +292,7 @@ test-install:
 
 # ── Golden file management ────────────────────────────────────────────────────
 
-.PHONY: update-golden update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden update-quantities-golden check-quantities-golden update-contrasts-golden check-contrasts-golden update-gradient-golden update-bspline-inference-golden update-declared-names-golden check-declared-names-golden update-hoisted-identity-golden check-hoisted-identity-golden
+.PHONY: update-golden update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden update-quantities-golden check-quantities-golden update-contrasts-golden check-contrasts-golden update-gradient-golden update-bspline-inference-golden update-declared-names-golden check-declared-names-golden update-hoisted-identity-golden check-hoisted-identity-golden update-diff-pairs-golden check-diff-pairs-golden
 
 # Recompile all DSL fixtures → ocaml/golden/*.ir.json
 update-ocaml-golden: build-ocaml
@@ -303,7 +303,7 @@ update-ocaml-golden: build-ocaml
 		$(CAMDLC) "$$src" > "$$out"; \
 	done
 
-update-golden: update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden update-quantities-golden update-contrasts-golden update-gradient-golden update-bspline-inference-golden update-declared-names-golden update-hoisted-identity-golden
+update-golden: update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden update-quantities-golden update-contrasts-golden update-gradient-golden update-bspline-inference-golden update-declared-names-golden update-hoisted-identity-golden update-diff-pairs-golden
 
 # Recompile the corner-case fixtures (params baked via --set) →
 # tests/fixtures/corner_cases/ir/*.ir.json. These pin the off-grid /
@@ -474,6 +474,47 @@ check-hoisted-identity-golden: build-ocaml
 	  exit 1; \
 	fi; \
 	echo "  hoisted-identity goldens in sync"
+
+# The `camdl diff` fixture pairs: two reference models and, for each, variants
+# that change one thing (each file's header says what). Compile-only. The tests
+# in rust/crates/diff/tests state what the diff of each variant against its
+# reference must report, and tests/rendered.rs pins the text report of each as
+# $(DIFF_PAIRS_DIR)/expected/<variant>.txt. `base` is also compiled with a
+# compile-time `--set`, the one variant that is not a source file.
+DIFF_PAIRS_DIR := tests/fixtures/diff_pairs
+DIFF_PAIRS := base reformatted let_renamed constant_let_renamed let_body_changed \
+  let_inlined rate_changed parameter_added transitions_reordered prior_changed \
+  observation_family_changed scenario_added simulation_end_changed \
+  quantity_changed age_base age_level_added
+update-diff-pairs-golden: build-ocaml
+	@echo "Recompiling the diff fixture pairs..."
+	@mkdir -p $(DIFF_PAIRS_DIR)/ir
+	@for f in $(DIFF_PAIRS); do \
+	  $(CAMDLC) $(DIFF_PAIRS_DIR)/$$f.camdl -o $(DIFF_PAIRS_DIR)/ir/$$f.ir.json; \
+	done
+	@$(CAMDLC) $(DIFF_PAIRS_DIR)/base.camdl --set beta=0.3 -o $(DIFF_PAIRS_DIR)/ir/base.set_beta.ir.json
+	cd rust && CAMDL_UPDATE_DIFF_EXPECTED=1 $(CARGO_WRAP) cargo test -p diff --test rendered
+
+# Drift gate: each source must still compile byte-for-byte to its committed
+# file. Runs in `make test`. The text reports are checked by the Rust test.
+check-diff-pairs-golden: build-ocaml
+	@echo "Checking the diff fixture pairs match their .camdl..."
+	@fail=0; for f in $(DIFF_PAIRS); do \
+	  $(CAMDLC) $(DIFF_PAIRS_DIR)/$$f.camdl -o $(DIFF_PAIRS_DIR)/ir/$$f.ir.json.tmp; \
+	  if ! diff -q $(DIFF_PAIRS_DIR)/ir/$$f.ir.json $(DIFF_PAIRS_DIR)/ir/$$f.ir.json.tmp >/dev/null 2>&1; then \
+	    echo "  DRIFT: $$f.camdl no longer compiles to the committed .ir.json — run: make update-diff-pairs-golden"; \
+	    fail=1; \
+	  fi; \
+	  rm -f $(DIFF_PAIRS_DIR)/ir/$$f.ir.json.tmp; \
+	done; \
+	$(CAMDLC) $(DIFF_PAIRS_DIR)/base.camdl --set beta=0.3 -o $(DIFF_PAIRS_DIR)/ir/base.set_beta.ir.json.tmp; \
+	if ! diff -q $(DIFF_PAIRS_DIR)/ir/base.set_beta.ir.json $(DIFF_PAIRS_DIR)/ir/base.set_beta.ir.json.tmp >/dev/null 2>&1; then \
+	  echo "  DRIFT: base.camdl with --set beta=0.3 no longer compiles to the committed .ir.json — run: make update-diff-pairs-golden"; \
+	  fail=1; \
+	fi; \
+	rm -f $(DIFF_PAIRS_DIR)/ir/base.set_beta.ir.json.tmp; \
+	if [ $$fail -ne 0 ]; then exit 1; fi; \
+	echo "  diff fixture pairs in sync"
 
 # Drift gate (gh#204): each reactive .camdl must still compile BYTE-FOR-BYTE to
 # its committed .ir.json. `update-reactive-golden` regenerates; this FAILS if

@@ -1,0 +1,64 @@
+# Base: base.camdl
+# Adds: nothing
+# Changes: nothing in the model; only how the file is written
+#
+# The base model with a different layout, extra comments, a changed doc
+# comment, redundant parentheses, numbers spelled differently (`2` for `2.0`),
+# and the population-total definition moved below the transitions. None of
+# these is kept when the file is parsed, so every declaration is the same as
+# the base's and the two files compile to one model.
+#
+# What the model is and what it is fitted to are stated in base.camdl.
+
+time_unit = 'days
+
+compartments { S, I, R }
+
+let foi = (beta * I) / N   # force of infection
+
+parameters {
+  #' per-capita transmission rate, per day
+  #' @symbol β
+  beta  : rate        in [0.001, 2]
+  #' recovery rate; the mean infectious period is 1/gamma
+  gamma : rate        in [0.001, 1.0] ~ log_normal(mu = -2.3, sigma = 0.5)
+  #' fraction of infections that are reported
+  rho   : probability in [0.01, 1.0]
+  #' total population size
+  N0    : count       in [100, 100000]
+  #' initial number infectious
+  I0    : count       in [1, 1000]
+}
+
+transitions {
+  infection : S --> I
+    @ (foi * S)
+
+  recovery : I --> R @ gamma*I
+}
+
+let N = S + I + R
+
+observations {
+  cases {
+    columns       { time : time, cases : count }
+    covers        = closing_at(time, 7 'days)
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    cases         ~ poisson(rate = rho * projected)
+  }
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+simulate {
+  from = 0.0 'days
+  to   = 80 'days
+}
+
+quantities {
+  peak_infectious = max(I)
+}

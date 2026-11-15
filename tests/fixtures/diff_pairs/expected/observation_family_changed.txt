@@ -1,0 +1,28 @@
+left   base.ir.json  model b1cb42f95c224c9f
+right  observation_family_changed.ir.json  model 594a4076c04b52a0
+
+Model: different.
+Reported quantities and contrasts: identical.
+
+Model
+  parameter k: only in right
+      right  k     : real        in [0.1, 100.0]
+  observation stream cases: changed: measurement.likelihood.args, measurement.likelihood.family
+      left   cases {
+               columns       { time : time, cases : count }
+               covers        = closing_at(time, 7 'days)
+               projected     = incidence(infection)
+               emit_schedule = every 7 'days
+               cases         ~ poisson(rate = rho * projected)
+             }
+      right  cases {
+               columns       { time : time, cases : count }
+               covers        = closing_at(time, 7 'days)
+               projected     = incidence(infection)
+               emit_schedule = every 7 'days
+               cases         ~ neg_binomial(mean = rho * projected, r = k)
+             }
+  the same on both sides: 1 description, 3 compartments, 5 parameters, 2 definitions, 2 transitions, 2 initial conditions, 1 simulation, 1 output
+
+Reporting (not part of the model's identity)
+  all the same: 1 quantity

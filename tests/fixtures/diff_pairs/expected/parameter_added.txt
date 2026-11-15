@@ -1,0 +1,16 @@
+left   base.ir.json  model b1cb42f95c224c9f
+right  parameter_added.ir.json  model 80ba5a1604906c24
+
+Model: different.
+Reported quantities and contrasts: identical.
+
+Model
+  parameter kappa: only in right
+      right  kappa : probability in [0.01, 1.0]
+  transition recovery: changed: dynamics.rate.rate
+      left   recovery  : I --> R  @ gamma * I
+      right  recovery  : I --> R  @ gamma * kappa * I
+  the same on both sides: 1 description, 3 compartments, 5 parameters, 2 definitions, 1 transition, 2 initial conditions, 1 observation stream, 1 simulation, 1 output
+
+Reporting (not part of the model's identity)
+  all the same: 1 quantity

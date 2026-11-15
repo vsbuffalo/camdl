@@ -1,0 +1,19 @@
+left   age_base.ir.json  model 1e5471bfd3e0fe53
+right  age_level_added.ir.json  model f9b2b2faec84573d
+
+Model: different.
+
+Model
+  dimension age: changed: levels
+      left   age = [child, adult]
+      right  age = [child, adult, elder]
+  table C_age: changed: value
+      left   C_age : age × age = [[12.0, 4.0], [4.0, 8.0]]
+      right  C_age : age × age = [[12.0, 4.0, 1.0], [4.0, 8.0, 2.0], [1.0, 2.0, 3.0]]
+      note   the two render to the same formula; compare the text as written
+  transition infection: unchanged as written; reads changed: table C_age
+      both   infection[a in age] : S[a] --> E[a]
+             @ beta * S[a] * sum(b in age, C_age[a, b] * I[b] / N_local[b])
+  initial condition S[elder]: only in right
+      right  S[elder] = 2000
+  the same on both sides: 1 description, 4 compartments, 1 stratification, 3 parameters, 1 definition, 3 transitions, 3 initial conditions, 1 simulation, 1 output

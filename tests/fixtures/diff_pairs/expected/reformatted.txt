@@ -1,0 +1,11 @@
+left   base.ir.json  model b1cb42f95c224c9f
+right  reformatted.ir.json  model b1cb42f95c224c9f
+
+Model: identical.
+Reported quantities and contrasts: identical.
+
+Model
+  all the same: 1 description, 3 compartments, 5 parameters, 2 definitions, 2 transitions, 2 initial conditions, 1 observation stream, 1 simulation, 1 output
+
+Reporting (not part of the model's identity)
+  all the same: 1 quantity

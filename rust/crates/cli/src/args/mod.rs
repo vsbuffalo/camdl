@@ -1416,6 +1416,41 @@ impl FitPredictArgs {
     }
 }
 
+/// Output format for `camdl diff`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum DiffFormat {
+    /// Plain text: each changed declaration by its text as written.
+    Table,
+    /// The typed report (`DiffReport`) as JSON.
+    Json,
+}
+
+#[derive(Args)]
+#[command(after_help = colored_help!("\
+Each of A and B is a model file: a .camdl source, which is compiled, or a
+compiled .ir.json. Rows are decided on what the two files declare, and the
+hashes of the two compiled models are a cross-check on them.
+
+Exit status: 0 when the two are identical, 1 when they differ, 2 when no
+report can be made.
+
+Examples:
+  # What differs between two variants of a model
+  camdl diff seir.camdl seir_waning.camdl
+
+  # The typed report, for a script or a viewer
+  camdl diff seir.camdl seir_waning.camdl --format json
+"))]
+pub struct DiffArgs {
+    /// The first (left) model
+    pub a: PathBuf,
+    /// The second (right) model
+    pub b: PathBuf,
+    /// Output format
+    #[arg(long, value_enum, default_value_t = DiffFormat::Table)]
+    pub format: DiffFormat,
+}
+
 #[derive(Args)]
 #[command(after_help = colored_help!("\
 Examples:

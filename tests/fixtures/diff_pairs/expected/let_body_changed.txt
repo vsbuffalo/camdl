@@ -1,0 +1,18 @@
+left   base.ir.json  model b1cb42f95c224c9f
+right  let_body_changed.ir.json  model 7a7ab6a3ad064f17
+
+Model: different.
+Reported quantities and contrasts: identical.
+
+Model
+  definition N: changed: body
+      left   let N = S + I + R
+      right  let N = S + I
+  definition foi: unchanged as written; reads changed: definition N
+      both   let foi = beta * I / N
+  transition infection: unchanged as written; reads changed: definition N
+      both   infection : S --> I  @ foi * S
+  the same on both sides: 1 description, 3 compartments, 5 parameters, 1 definition, 2 transitions, 2 initial conditions, 1 observation stream, 1 simulation, 1 output
+
+Reporting (not part of the model's identity)
+  all the same: 1 quantity

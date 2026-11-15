@@ -1,0 +1,18 @@
+left   base.ir.json  model b1cb42f95c224c9f
+right  let_renamed.ir.json  model b1cb42f95c224c9f
+
+Model: written differently; the two compile to the same model.
+Reported quantities and contrasts: identical.
+
+Model
+  definition foi: only in left
+      left   let foi = beta * I / N
+  definition lambda_t: only in right
+      right  let lambda_t = beta * I / N
+  transition infection: changed: dynamics.rate.rate; reads changed: definition foi, definition lambda_t
+      left   infection : S --> I  @ foi * S
+      right  infection : S --> I  @ lambda_t * S
+  the same on both sides: 1 description, 3 compartments, 5 parameters, 1 definition, 1 transition, 2 initial conditions, 1 observation stream, 1 simulation, 1 output
+
+Reporting (not part of the model's identity)
+  all the same: 1 quantity

@@ -39,6 +39,7 @@ mod docs;           // `camdl docs <topic>` — embedded, version-locked usage d
 mod fit;
 mod compare;
 mod compare_ode;     // gh#312: the ODE fit's trace, scored in-process
+mod model_diff;     // `camdl diff A B`: gathers two models' inputs for the `diff` crate and prints its report
 mod if2;
 mod profile;
 mod profile_cas;     // gh#147 M3.3: profile-point CAS identity (resolve_profile_point)
@@ -191,6 +192,9 @@ pub(crate) enum Command {
 
     /// Compare fits by prequential scores (elpd, CRPS, PIT)
     Compare(args::CompareArgs),
+
+    /// Show what differs between two models, declaration by declaration
+    Diff(args::DiffArgs),
 
     /// Set or update the user-display label on any run (sim, fit, profile, …)
     Label(args::LabelArgs),
@@ -555,6 +559,7 @@ fn main() {
         Command::Show(a)                => browse::cmd_show(&a),
         Command::Cat(a)                 => browse::cmd_cat(&a),
         Command::Compare(a)             => compare::cmd_compare(&a),
+        Command::Diff(a)                => model_diff::cmd_diff(&a),
         Command::Check(a) => {
             let mut refs = vec!["check"];
             refs.extend(a.args.iter().map(String::as_str));

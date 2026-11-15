@@ -9,6 +9,7 @@ members = [
   ".",
   "crates/cli",
   "crates/declared",
+  "crates/diff",
   "crates/differentiate-derive",
   "crates/external-harness",
   "crates/io",

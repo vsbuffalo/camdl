@@ -2,6 +2,7 @@
 # Source: the committed *.ir.json files under ocaml/golden and tests/fixtures/*/ir (primary).
 # Recorded at commit: b2e1d2d39
 # Regenerate: make update-golden-model-hashes
+# Rows added at commit 41f20f4d0: tests/fixtures/diff_pairs/ir/age_base.ir.json, tests/fixtures/diff_pairs/ir/age_level_added.ir.json, tests/fixtures/diff_pairs/ir/base.ir.json, tests/fixtures/diff_pairs/ir/base.set_beta.ir.json, tests/fixtures/diff_pairs/ir/constant_let_renamed.ir.json, tests/fixtures/diff_pairs/ir/let_body_changed.ir.json, tests/fixtures/diff_pairs/ir/let_inlined.ir.json, tests/fixtures/diff_pairs/ir/let_renamed.ir.json, tests/fixtures/diff_pairs/ir/observation_family_changed.ir.json, tests/fixtures/diff_pairs/ir/parameter_added.ir.json, tests/fixtures/diff_pairs/ir/prior_changed.ir.json, tests/fixtures/diff_pairs/ir/quantity_changed.ir.json, tests/fixtures/diff_pairs/ir/rate_changed.ir.json, tests/fixtures/diff_pairs/ir/reformatted.ir.json, tests/fixtures/diff_pairs/ir/scenario_added.ir.json, tests/fixtures/diff_pairs/ir/simulation_end_changed.ir.json, tests/fixtures/diff_pairs/ir/transitions_reordered.ir.json
 file	model_ir_hash
 ocaml/golden/bimolecular.ir.json	3f4e64c082df4ddb7f99702916596a46755c9a97f07c171ac6fd0109c7e6933d
 ocaml/golden/branching_si_symp_asym.ir.json	64fc20057ffa39ae9ebeada22316a5ed45cbb8b1d1a47f5d0651313061fb1f69
@@ -92,6 +93,23 @@ tests/fixtures/corner_cases/ir/seasonal_drift.ir.json	2f3ef7781b935cd6a37409d6c1
 tests/fixtures/declared_names/ir/aux_data_column.ir.json	b112368e6da1b82f2677c08e0147b1850005f185369a5925ce7ceb4b959892a6
 tests/fixtures/declared_names/ir/obs_anchor.ir.json	73c2e0a5b12036a39d58876cfba91d1414680a2833cb561013d41db1f8b62ead
 tests/fixtures/declared_names/ir/table_time_dimension.ir.json	99a4df67624147d233750df966a87559342e40f1edfcd87c77c359de9a9f7d46
+tests/fixtures/diff_pairs/ir/age_base.ir.json	1e5471bfd3e0fe53cf43f91545809fd4102a18e3d7235539d9d3d45873e80ed1
+tests/fixtures/diff_pairs/ir/age_level_added.ir.json	f9b2b2faec84573db2b171ad4999a0481376682bc3ab84dc38498b7005825337
+tests/fixtures/diff_pairs/ir/base.ir.json	b1cb42f95c224c9f32bf5a9e20619e34f3611a1bdedcb27f64ea8ef7ba3119cb
+tests/fixtures/diff_pairs/ir/base.set_beta.ir.json	e53c7db0a9310776fc07453f5f021f352faf1589f06559c6e70db2cba9da53e9
+tests/fixtures/diff_pairs/ir/constant_let_renamed.ir.json	5fdddcec8ae937f2361029bf59c4eac2fcbdf3c4826b08b0bb5e581b1345565b
+tests/fixtures/diff_pairs/ir/let_body_changed.ir.json	7a7ab6a3ad064f17f937b486f4bf5fe97bc06bd951a774e4f6ce70f565020c08
+tests/fixtures/diff_pairs/ir/let_inlined.ir.json	b1cb42f95c224c9f32bf5a9e20619e34f3611a1bdedcb27f64ea8ef7ba3119cb
+tests/fixtures/diff_pairs/ir/let_renamed.ir.json	b1cb42f95c224c9f32bf5a9e20619e34f3611a1bdedcb27f64ea8ef7ba3119cb
+tests/fixtures/diff_pairs/ir/observation_family_changed.ir.json	594a4076c04b52a020df4edbfe15b262858c85c5d1674a833a9991212d9f00e9
+tests/fixtures/diff_pairs/ir/parameter_added.ir.json	80ba5a1604906c243c935aab4ab20ccc1e9d203909228ffc47e24a33ccb63b0f
+tests/fixtures/diff_pairs/ir/prior_changed.ir.json	e1da0485d8269a6b3d255ce6f5ca364ddb4d04f052d013faa01696543c97a764
+tests/fixtures/diff_pairs/ir/quantity_changed.ir.json	b1cb42f95c224c9f32bf5a9e20619e34f3611a1bdedcb27f64ea8ef7ba3119cb
+tests/fixtures/diff_pairs/ir/rate_changed.ir.json	6bc1da11560667e9c74bbbd57994df8392840e9fde918d471143e02d6cd6306c
+tests/fixtures/diff_pairs/ir/reformatted.ir.json	b1cb42f95c224c9f32bf5a9e20619e34f3611a1bdedcb27f64ea8ef7ba3119cb
+tests/fixtures/diff_pairs/ir/scenario_added.ir.json	09e5101cc2cf2a139a8ec6417d09a240c8b6a41c6587f6a5a05f213934f60c48
+tests/fixtures/diff_pairs/ir/simulation_end_changed.ir.json	b1464d768557b6806d4480a731f15a1eaea0bd96b40160c229b870b6809afe05
+tests/fixtures/diff_pairs/ir/transitions_reordered.ir.json	89a756ce92771bfd10ac297ce99404ee7a2ffde77cab80e862d78ba622093f45
 tests/fixtures/gradient/ir/bspline_forcing_grad.ir.json	fdb1dfc428c30a1bdf3cffad7081208faa71e208120ac5f9e6290b536ad5fef1
 tests/fixtures/gradient/ir/bspline_smooth_grad.ir.json	31dd8541a6fde1cd502ecf9ff637ec6d7b60a81a62dc2797fef3f48e248b28b7
 tests/fixtures/gradient/ir/seir_seasonal_lagged.ir.json	006be20b6f30504a2c9e3e39cbe30ae15e0cb6359da2018b539293869cd331a3

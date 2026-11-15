@@ -1,0 +1,56 @@
+# Base: age_base.camdl
+# Adds: a third age group, `elder`
+# Changes: the contact table, which gains a row and a column, and the initial
+#   conditions, which gain an entry for the new group
+#
+# The age dimension has three levels instead of two. No transition is written
+# differently: each is declared once for every age group, so the new group
+# changes the dimension and the contact table the infection rate reads, and
+# nothing in the text of a rate.
+#
+# What the model is and what it is fitted to are stated in age_base.camdl.
+
+time_unit = 'days
+
+compartments { S, E, I, R }
+
+dimensions {
+  age = [child, adult, elder]
+}
+
+stratify(by = age)
+
+let N_local[a in age] = S[a] + E[a] + I[a] + R[a]
+
+parameters {
+  #' transmission rate per infectious contact
+  beta  : rate in [0.001, 0.5]
+  #' rate of becoming infectious; the mean latent period is 1/sigma
+  sigma : rate in [0.01, 1.0]
+  #' recovery rate; the mean infectious period is 1/gamma
+  gamma : rate in [0.01, 1.0]
+}
+
+tables {
+  C_age : age × age = [[12.0, 4.0, 1.0], [4.0, 8.0, 2.0], [1.0, 2.0, 3.0]]
+}
+
+transitions {
+  infection[a in age] : S[a] --> E[a]
+    @ beta * S[a] * sum(b in age, C_age[a, b] * I[b] / N_local[b])
+
+  progression[a in age] : E[a] --> I[a]  @ sigma * E[a]
+  recovery[a in age]    : I[a] --> R[a]  @ gamma * I[a]
+}
+
+init {
+  S[child] = 4990
+  S[adult] = 5000
+  S[elder] = 2000
+  I[child] = 10
+}
+
+simulate {
+  from = 0 'days
+  to   = 100 'days
+}

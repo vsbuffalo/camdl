@@ -390,16 +390,30 @@ Not ignored:
 Those that differ here but compile to the same model are reported as such; see
 [Three outcomes](#three-outcomes).
 
+**A declaration is compared in its document form.** Two declarations are the
+same when the JSON documents the `declared` crate writes for them are equal with
+five members left out: an expression's `katex`, `katex_loss` and `reads`, and a
+declaration's `source_text` and `expands_to`. For an expression that is equality
+of its `tree`. The list of members left out is the only place a member is
+excluded (`diff::document::DISPLAY_ONLY`), so a member added to a declaration
+later is compared unless someone adds it there. A test checks, on every compiled
+golden, that those five names occur only where this paragraph says.
+
 **A `let` is compared by name, and its body by tree.** Every `let` is a
 Definition row. An expression that reads a `let` holds a reference to its name,
 so a transition whose rate reads `N` is `Same` as written when `let N` changes,
 and the Definition row for `N` is `Changed`. That is the correct statement about
 what is written, and on its own it would leave the infection arrow unlit when
 the force of infection changed. So each row also carries `affected_by`: the
-changed definitions and time inputs it reads, directly or through other
-definitions, computed from `reads`. A row that is `Same` with a non-empty
-`affected_by` is shown as "unchanged as written; reads a changed definition",
-and the flow diagram highlights it.
+changed definitions, tables, time inputs and quantities it reads, directly or
+through other definitions, computed from the names in its trees. Tables and
+quantities are followed for the same reason definitions are: a rate that reads a
+table whose cells changed is written the same and is not the same rate. An
+observation stream is not marked through the transition it counts; the walk
+follows names an expression reads, and a projection names its transition outside
+any expression. A row that is `Same` with a non-empty `affected_by` is shown as
+"unchanged as written; reads a changed definition", and the flow diagram
+highlights it.
 
 Renaming a `let` shows as one definition only-left and one only-right, and every
 expression reading it as `Changed`. Whether the compiled model agrees is the
@@ -452,19 +466,27 @@ pub enum Status<T> {
     Changed { fields: Vec<FieldChange<T>> },
     OnlyLeft,
     OnlyRight,
+    NotCompared { why: String },
 }
 pub enum MatchedBy { Name, DeclaredRename }
 pub enum Layer { Model, Reporting, Fit }
 ```
 
-Every row is tagged with its layer.
+Every row is tagged with its layer. `NotCompared` is for a file the compiler
+read whose digest was not recorded on one side or both: the row is present on
+both sides and there is nothing to compare, so it is neither `Same` nor
+`Changed`. A `FieldChange` names the member that differs by its path in the
+declaration's document (`dynamics.rate.rate`, `prior.family`).
 
 **Model layer**: what the model file declares and `model_ir_hash` covers.
 
 | Category             | Changed when                                                                           |
 | -------------------- | -------------------------------------------------------------------------------------- |
+| Description          | The model's `description` differs (the hash covers it)                                 |
 | Dimension            | Level set differs                                                                      |
 | Compartment          | Dimensions or kind differ                                                              |
+| Stratification       | A `stratify` declaration's dimension or `only` list differs                            |
+| Timepoint            | A `timepoints` entry differs (the compiler discards the block, gh#1047)                |
 | Transition           | From, to, rate tree, staging law or guard differ                                       |
 | Definition           | Indices, kind or body tree differ (constants are definitions)                          |
 | Parameter (declared) | Kind, dimension, bounds or prior, as the model file declares them, differ              |
@@ -491,7 +513,14 @@ Declaration order is a category, and not ignored, because the hash covers it:
 reordering transitions, parameters, compartments or `init` entries changes
 `model_ir_hash` (measured), and the order of transitions changes random-number
 consumption. Moving a `let` does not change the hash and is not an order
-difference.
+difference; that holds for two definitions exchanged with each other as well
+(measured: the two compiled models are equal). Every other category gets an
+order row when the entities two models share appear in a different order,
+whether or not the hash is known to cover that category's order. Where it does
+not, the outcome reads "written differently", which is true.
+
+Two declarations of one name in one category are matched in the order they were
+written, the second and later shown with a number (`S (2)`).
 
 **Reporting layer**: `quantities` and `contrasts`, which the hash excludes, and
 doc comments, which sit outside the model. Shown separately.
@@ -550,7 +579,14 @@ because the declared model then covers every input to compilation, including
 compile inputs and declaration order. If it does occur the diff refuses with
 both hashes, and does not report "identical". Between two compiler versions it
 can occur legitimately, and is reported as "declared the same; compiled by
-different camdl versions (`x`, `y`)".
+different camdl versions (`x`, `y`)", the fourth variant of `ModelOutcome`. The
+compiler is read from the envelope's `validated_by`; when either side does not
+name one, the case is refused.
+
+A row that is `NotCompared` counts as not the same. With equal hashes the
+outcome is then "written differently" and the row says what was not checked: a
+time input's data file is outside the model hash, so equal hashes do not show
+that an unhashed file was the same.
 
 ### Roll-ups
 
@@ -596,6 +632,13 @@ pub struct DiffReport {
     pub counts:  BTreeMap<(Layer, Category), Counts>,
 }
 ```
+
+As built so far the report holds `schema_version`, `left`, `right`,
+`model_outcome`, `model_identical`, `reporting_identical`, `rows` and `counts`.
+`counts` is a list with one entry for each category that has a row, since a JSON
+object cannot be keyed by a pair. Each row carries the declaration's text as
+written on each side. `fit_identical` and `config` arrive with the fit layer,
+`renames` and `matched_by` with rename maps, and `rollups` with the roll-up.
 
 `model_identical` is the hash comparison itself, never derived from rows.
 `reporting_identical` agrees with `compare_to_fitted` (`fitted_model.rs:49-60`),
@@ -652,6 +695,11 @@ bundle path. Two model files give the model and reporting layers; anything else
 adds the fit layer. Exit status 0 when identical in every layer present, 1 when
 different, 2 on refusal (invalid rename map, unreadable input, declared model
 not recorded, the fourth outcome above).
+
+Built so far: two model files, each a `.camdl` (compiled by the command) or a
+compiled `.ir.json`, with `--format table` and `--format json`. Until the fit
+layer is built, a fit configuration is refused with a pointer to
+`camdl fit diff`, which stays in place.
 
 `camdl diff` replaces `camdl fit diff`, which is removed. Everything that
 command prints is kept as the fit layer: the Data, Parameters and Method
@@ -772,6 +820,12 @@ Pairs whose expected outcome follows from how the compiler and the hash behave
 | Change `simulate { to = … }`                            | Simulation `Changed`                                    | Different          |
 | Compile one side with `--set beta=0.3`                  | Compile input `Changed`                                 | Different          |
 
+These pairs are `tests/fixtures/diff_pairs`: a reference model, one file for
+each change, and a stratified pair. `rust/crates/diff/tests/pairs.rs` states
+every row each must give, `tests/invariants.rs` runs invariants 1, 2, 3, 5 and 8
+(3 over every pair of compiled goldens), and `expected/<variant>.txt` beside the
+sources is the text report of each, reviewed like a golden.
+
 The compiler's `declared` output is covered by the regenerated goldens, since it
 is part of each `*.ir.json`. The diff's own golden reports use a named subset of
 about ten model pairs covering stratification, `via` staging, branching, indexed
@@ -792,13 +846,16 @@ viewer's first published comparison.
    emission, the envelope field, `ir/VERSION` 0.44, goldens, `source_text`,
    `katex_loss`, `expands_to`, warning `W203`, invariants 9 to 13, and
    compiler-side tests for the parse facts. Done.
-3. The config facts record, and `ConfigDiff` as a function of two of them.
-4. The diff crate: tree sameness, matching, the three layers, `affected_by`, the
-   three outcomes, invariants 1 to 5 and 8.
-5. The dimension roll-up and the N-way shared list, invariant 7.
-6. Rename maps, invariant 6.
-7. `camdl diff` and its three renderers, all from `DiffReport`; remove
-   `camdl fit diff`.
+3. The diff crate on two models: sameness, matching, the model and reporting
+   layers, `affected_by`, the outcomes, invariants 1, 2, 3, 5 and 8. Done
+   (`rust/crates/diff`). Rows for doc comments are not built: they live in the
+   envelope's `docs`, outside the declared section.
+4. `camdl diff A B` for two model files, with the text and JSON renderers. Done.
+5. The fit layer: the config facts record, `ConfigDiff` as a function of two of
+   them, fit configurations and fit handles as inputs to `camdl diff`, invariant
+   4, the Markdown renderer, and the removal of `camdl fit diff`.
+6. The dimension roll-up and the N-way shared list, invariant 7.
+7. Rename maps, invariant 6.
 8. WASM build; the viewer's structure screen reads `DiffReport` from fixtures.
 
 Steps 1 to 7 need no published bundle: their inputs are model files, fit

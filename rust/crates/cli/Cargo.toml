@@ -42,6 +42,8 @@ indexmap = { version = "2", features = ["serde"] }
 indicatif = "0.17"
 io = { path = "../io" }
 ir = { path = "../ir" }
+declared = { path = "../declared" }
+diff = { path = "../diff" }
 log = "0.4"
 numerics = { path = "../numerics" }
 rand = "0.8"

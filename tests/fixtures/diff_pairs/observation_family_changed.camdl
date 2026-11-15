@@ -1,0 +1,59 @@
+# Base: base.camdl
+# Adds: a dispersion parameter `k`
+# Changes: the likelihood of the `cases` stream
+#
+# Reported cases are negative binomial instead of Poisson, with dispersion
+# `k`.
+#
+# What the model is and what it is fitted to are stated in base.camdl.
+
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+let foi = beta * I / N
+
+parameters {
+  #' per-capita transmission rate
+  beta  : rate        in [0.001, 2.0]
+  #' recovery rate; the mean infectious period is 1/gamma
+  gamma : rate        in [0.001, 1.0] ~ log_normal(mu = -2.3, sigma = 0.5)
+  #' fraction of infections that are reported
+  rho   : probability in [0.01, 1.0]
+  #' dispersion of reported cases
+  k     : real        in [0.1, 100.0]
+  #' total population size
+  N0    : count       in [100, 100000]
+  #' initial number infectious
+  I0    : count       in [1, 1000]
+}
+
+transitions {
+  infection : S --> I  @ foi * S
+  recovery  : I --> R  @ gamma * I
+}
+
+observations {
+  cases {
+    columns       { time : time, cases : count }
+    covers        = closing_at(time, 7 'days)
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    cases         ~ neg_binomial(mean = rho * projected, r = k)
+  }
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+simulate {
+  from = 0 'days
+  to   = 80 'days
+}
+
+quantities {
+  peak_infectious = max(I)
+}

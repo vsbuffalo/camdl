@@ -1,0 +1,61 @@
+# Base: none — root model
+# Adds: nothing
+# Changes: nothing
+#
+# What this model is. A closed population in four compartments, susceptible
+# (S), exposed (E), infectious (I) and recovered (R), each split into two age
+# groups, children and adults. A susceptible person of one age group is
+# infected at a rate that sums, over both age groups, the contact rate between
+# the two groups times the infectious fraction of the other group. Exposed
+# people become infectious, and infectious people recover and stay immune.
+#
+# What it is fitted to. Nothing: it has no observation streams. It is compiled
+# only.
+#
+# This is the stratified reference model of the `camdl diff` fixture set.
+# `age_level_added.camdl` is this model with a third age group, and the tests
+# in `rust/crates/diff/tests` state what the diff of the two must report.
+
+time_unit = 'days
+
+compartments { S, E, I, R }
+
+dimensions {
+  age = [child, adult]
+}
+
+stratify(by = age)
+
+let N_local[a in age] = S[a] + E[a] + I[a] + R[a]
+
+parameters {
+  #' transmission rate per infectious contact
+  beta  : rate in [0.001, 0.5]
+  #' rate of becoming infectious; the mean latent period is 1/sigma
+  sigma : rate in [0.01, 1.0]
+  #' recovery rate; the mean infectious period is 1/gamma
+  gamma : rate in [0.01, 1.0]
+}
+
+tables {
+  C_age : age × age = [[12.0, 4.0], [4.0, 8.0]]
+}
+
+transitions {
+  infection[a in age] : S[a] --> E[a]
+    @ beta * S[a] * sum(b in age, C_age[a, b] * I[b] / N_local[b])
+
+  progression[a in age] : E[a] --> I[a]  @ sigma * E[a]
+  recovery[a in age]    : I[a] --> R[a]  @ gamma * I[a]
+}
+
+init {
+  S[child] = 4990
+  S[adult] = 5000
+  I[child] = 10
+}
+
+simulate {
+  from = 0 'days
+  to   = 100 'days
+}

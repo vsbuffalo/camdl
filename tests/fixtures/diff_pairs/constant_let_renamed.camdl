@@ -1,0 +1,58 @@
+# Base: base.camdl
+# Adds: nothing
+# Changes: the name of the population-total definition
+#
+# The population total, a `let` that reads no parameter, is named `Npop`
+# instead of `N`. The compiler keeps such a definition under its name, so this
+# file and the base compile to different models.
+#
+# What the model is and what it is fitted to are stated in base.camdl.
+
+time_unit = 'days
+
+compartments { S, I, R }
+
+let Npop = S + I + R
+let foi = beta * I / Npop
+
+parameters {
+  #' per-capita transmission rate
+  beta  : rate        in [0.001, 2.0]
+  #' recovery rate; the mean infectious period is 1/gamma
+  gamma : rate        in [0.001, 1.0] ~ log_normal(mu = -2.3, sigma = 0.5)
+  #' fraction of infections that are reported
+  rho   : probability in [0.01, 1.0]
+  #' total population size
+  N0    : count       in [100, 100000]
+  #' initial number infectious
+  I0    : count       in [1, 1000]
+}
+
+transitions {
+  infection : S --> I  @ foi * S
+  recovery  : I --> R  @ gamma * I
+}
+
+observations {
+  cases {
+    columns       { time : time, cases : count }
+    covers        = closing_at(time, 7 'days)
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    cases         ~ poisson(rate = rho * projected)
+  }
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+simulate {
+  from = 0 'days
+  to   = 80 'days
+}
+
+quantities {
+  peak_infectious = max(I)
+}

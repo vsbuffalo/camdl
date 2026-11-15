@@ -15,19 +15,22 @@ description: Rust code conventions — crate layout, dead code, existing seams, 
 Intra-workspace dependencies, read from the `Cargo.toml` files:
 
 ```
-cli  → io, ir, numerics, runid, score, sim
+cli  → declared, diff, io, ir, numerics, runid, score, sim
 io   → ir, sim
 sim  → ir, numerics, score
 runid → ir, runid-derive
 ir   → declared, differentiate-derive
 score → numerics
+diff → declared
 external-harness → numerics
 declared, numerics, differentiate-derive, runid-derive  → (leaves)
 ```
 
 `declared` holds the types of the declared-model section of the IR envelope (the
 model as the author wrote it) and nothing else; it must stay a leaf so a reader
-of a published declared-model document never needs `ir`.
+of a published declared-model document never needs `ir`. `diff` is the model
+structure diff, a pure function of two declared models; it depends on `declared`
+alone for the same reason.
 
 `ir` is pure types + serde, no simulation logic. `sim` holds the backends
 (Gillespie, ODE, chain-binomial) and the propensity evaluator, and defines the

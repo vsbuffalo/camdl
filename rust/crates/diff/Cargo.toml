@@ -1,0 +1,23 @@
+[package]
+name = "diff"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The model structure diff as a library: a pure function of two declared
+# models and their two model hashes
+# (docs/dev/proposals/2026-11-13-model-structure-diff.md). It reads no files,
+# consults no store and hashes nothing, so the command line and a viewer can
+# call the same function. It must not depend on `ir`, `runid`, `sim` or `cli`:
+# a diff of two published declared-model documents never needs the reader for
+# compiled models. `tests/dependencies.rs` holds the list below.
+[dependencies]
+declared = { path = "../declared" }
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+
+# Tests only: the compiled model's hash, for the cross-check of the declared
+# rows against what the two files compile to.
+[dev-dependencies]
+ir = { path = "../ir" }
+runid = { path = "../runid" }

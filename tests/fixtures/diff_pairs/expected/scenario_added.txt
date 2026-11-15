@@ -1,0 +1,21 @@
+left   base.ir.json  model b1cb42f95c224c9f
+right  scenario_added.ir.json  model 09e5101cc2cf2a13
+
+Model: different.
+Reported quantities and contrasts: identical.
+
+Model
+  scenario baseline: only in right
+      right  baseline {
+               set = {
+                 beta  = 0.3
+                 gamma = 0.1
+                 rho   = 0.5
+                 N0    = 1000
+                 I0    = 10
+               }
+             }
+  the same on both sides: 1 description, 3 compartments, 5 parameters, 2 definitions, 2 transitions, 2 initial conditions, 1 observation stream, 1 simulation, 1 output
+
+Reporting (not part of the model's identity)
+  all the same: 1 quantity

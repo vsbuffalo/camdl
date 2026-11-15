@@ -513,6 +513,8 @@ dependencies = [
  "clap",
  "comfy-table",
  "csv",
+ "declared",
+ "diff",
  "env_logger",
  "flate2",
  "hex",
@@ -747,6 +749,17 @@ dependencies = [
 name = "declared"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "diff"
+version = "0.1.0"
+dependencies = [
+ "declared",
+ "ir",
+ "runid",
  "serde",
  "serde_json",
 ]

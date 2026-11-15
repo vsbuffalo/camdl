@@ -1,0 +1,14 @@
+left   base.ir.json  model b1cb42f95c224c9f
+right  prior_changed.ir.json  model e1da0485d8269a6b
+
+Model: different.
+Reported quantities and contrasts: identical.
+
+Model
+  parameter gamma: changed: prior.args[0].name, prior.args[0].value, prior.args[1].name, prior.args[1].value, prior.family
+      left   gamma : rate        in [0.001, 1.0] ~ log_normal(mu = -2.3, sigma = 0.5)
+      right  gamma : rate        in [0.001, 1.0] ~ gamma(shape = 2.0, rate = 20.0)
+  the same on both sides: 1 description, 3 compartments, 4 parameters, 2 definitions, 2 transitions, 2 initial conditions, 1 observation stream, 1 simulation, 1 output
+
+Reporting (not part of the model's identity)
+  all the same: 1 quantity

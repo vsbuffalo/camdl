@@ -1,0 +1,13 @@
+left   base.ir.json  model b1cb42f95c224c9f
+right  base.set_beta.ir.json  model e53c7db0a9310776
+
+Model: different.
+Reported quantities and contrasts: identical.
+
+Model
+  compile input --set beta: only in right
+      right  --set beta=0.3
+  the same on both sides: 1 description, 3 compartments, 5 parameters, 2 definitions, 2 transitions, 2 initial conditions, 1 observation stream, 1 simulation, 1 output
+
+Reporting (not part of the model's identity)
+  all the same: 1 quantity
