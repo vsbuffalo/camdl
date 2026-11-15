@@ -491,8 +491,9 @@ the log of the mixture density (§5), not the mean of the per-draw logs. The
 draws are thinned as for a filtered fit, and `--draws 1` scores the posterior
 mean plug-in. For a held-out fit (§6) the draws come from the sealed training
 posterior, the trajectory is integrated from the start through the held-out
-rows, and only the rows past the boundary are scored, at the same index rule
-`camdl pfilter --score-from` uses.
+rows, and only the rows scored after the boundary of §6.2 (the latest scoring
+time of any training row, the same boundary a filtered fit is scored after) are
+scored, at the same index rule `camdl pfilter --score-from` uses.
 
 What a held-out ODE score measures differs in one respect from a filtered one:
 the ODE state is never updated on the held-out weeks it scores, so each is a
