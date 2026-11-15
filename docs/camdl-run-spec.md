@@ -2854,7 +2854,8 @@ A holdout declaration is applied when the fit loads its data
 (`apply_holdout_declaration`, `fit/runner.rs`). `profile --fit` applies it to
 its bound data through the same function, and `survey --fit` removes the rows
 after a `holdout_after` cutoff resolved by the same function
-(`resolve_holdout_cutoff`); the cutoff enters the profile's base identity and
+(`resolve_holdout_cutoff`) and checks `[data.holdout]` files by the same rule
+(`check_holdout_files`); the cutoff enters the profile's base identity and
 the survey's `config` level, omitted without one. `pfilter` and `compare`'s
 holdout scoring see the full series.
 
@@ -7298,7 +7299,9 @@ part of the leaf's identity, and the full objective leaves the key unchanged.
 --fit FIT                   fit.toml supplying [estimate] bounds and [data].
                             The model scored is MODEL; the config's [model]
                             is not read. A [data] holdout_after removes every
-                            row after the cutoff, as fit run does. Mutually
+                            row after the cutoff, and [data.holdout] files are
+                            checked to lie after the training rows, as in fit
+                            run. Mutually
                             exclusive with --estimate/--data
 --estimate NAME=LO:HI       inline LHS bounds (repeatable). With --fit, an
                             estimated parameter whose box has an infinite end

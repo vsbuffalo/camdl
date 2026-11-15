@@ -153,3 +153,27 @@ fn a_holdout_after_is_left_out_of_every_point() {
     assert!(err.contains("2 observation row(s) at t > 4 withheld from training"),
         "the run must say what the holdout withheld:\n{err}");
 }
+
+/// `[data.holdout]` files leave the training files whole, so a survey scores
+/// what the fit trains on; the files are checked as `fit run` checks them:
+/// every held-out row must lie after the latest training row. A holdout that
+/// overlaps the training data is refused.
+#[test]
+fn explicit_holdout_files_are_checked_against_the_training_data() {
+    let holdout = "[data.holdout]\ncases = \"held.tsv\"";
+    for (what, training, ok) in [("tail", "train.tsv", true), ("overlapping", "cases.tsv", false)] {
+        let tmp = setup(what, &fit_toml(holdout, training));
+        std::fs::write(tmp.0.join("held.tsv"), "time\tcases\n5\t22\n6\t24\n").unwrap();
+        let out = survey(&tmp.0, "fitted.ir.json", "res");
+        let err = String::from_utf8_lossy(&out.stderr);
+        if ok {
+            assert!(out.status.success(), "{what}: {err}");
+            assert!(err.contains("2 held-out observation row(s) bound as the tail"),
+                "{what}: the run must say the holdout was checked:\n{err}");
+        } else {
+            assert!(!out.status.success(), "{what}: must be refused:\n{err}");
+            assert!(err.contains("[data.holdout]") && err.contains("held-out rows"),
+                "{what}: the refusal names the holdout:\n{err}");
+        }
+    }
+}

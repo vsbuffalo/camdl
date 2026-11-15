@@ -955,8 +955,9 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
         // Load observations from [data] and hash bytes per stream.
         // Keyed as survey's run identity has always folded its data
         // (`identity_keyed_training`): one digest per key.
-        let effective = crate::fit::stream_bindings::StreamBindings::resolve(
-            &model, config.data_spec()?)?.identity_keyed_training();
+        let bindings = crate::fit::stream_bindings::StreamBindings::resolve(
+            &model, config.data_spec()?)?;
+        let effective = bindings.identity_keyed_training();
         if effective.is_empty() {
             return Err("fit.toml [data] resolves to zero observation streams.".into());
         }
@@ -998,8 +999,6 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
         // after the cutoff, resolved over the union of the bound streams'
         // times by the same function, leaves every stream's observations,
         // aux and windows. The streams share one schedule, so they still do.
-        // (`[data.holdout]` files leave the training files whole, as in
-        // `fit run`, so the rows scored above are the fit's.)
         let holdout_after: Option<f64> = match config.data.as_ref()
             .and_then(|d| d.holdout_after.as_ref())
         {
@@ -1025,6 +1024,23 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
             }
             None => None,
         };
+        // `[data.holdout]` files leave the training files whole, as in
+        // `fit run`, so the rows scored above are the fit's; the files are
+        // checked against them by the function `fit run` and `profile` use
+        // (every held-out row after the latest training row).
+        {
+            let training: Vec<crate::fit::runner::TrainingStream<'_>> = obs_models.iter()
+                .zip(&per_stream_obs)
+                .map(|(obs, rows)| crate::fit::runner::TrainingStream {
+                    obs,
+                    last_train: rows.iter().map(|o| o.time).fold(f64::NEG_INFINITY, f64::max),
+                })
+                .collect();
+            crate::fit::runner::check_holdout_files(
+                &training, bindings.holdout_by_source(), &model,
+                compiled.model.simulation.t_start, SURVEY_DT, &time_opts,
+            ).map_err(|e| format!("--fit config: {e}"))?;
+        }
 
         // Capture [estimate].start for the start-rank diagnostic.
         let estimate_starts: HashMap<String, f64> = sampled.iter()

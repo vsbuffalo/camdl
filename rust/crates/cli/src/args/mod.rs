@@ -2144,7 +2144,8 @@ pub struct SurveyArgs {
     /// fit.toml supplying [estimate] bounds and [data] (fit-aware mode).
     /// The model scored is MODEL; the config's [model] is not read. A
     /// `[data] holdout_after` removes every row after the cutoff from every
-    /// point's likelihood, as `fit run` removes it from training.
+    /// point's likelihood, as `fit run` removes it from training, and
+    /// `[data.holdout]` files must lie after the training rows.
     /// Mutually exclusive with --estimate / --data; pass exactly one.
     #[arg(long, conflicts_with_all = ["estimate", "data"])]
     pub fit: Option<PathBuf>,

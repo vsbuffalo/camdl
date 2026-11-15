@@ -80,7 +80,7 @@ function, whether its data come from `--data` or from the config: under
 `[data.holdout]` config's training files are fitted whole, its holdout files
 checked against the bound training data by the same tail-only rule.
 `camdl survey --fit` likewise scores only the rows at or before a
-`holdout_after` cutoff.
+`holdout_after` cutoff, and checks `[data.holdout]` files by the same rule.
 
 `[synthetic]` may stand beside `[data]`: `fit run` then fits the real data, and
 the synthetic block records the truth a recovery check reads.

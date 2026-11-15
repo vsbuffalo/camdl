@@ -1956,21 +1956,51 @@ pub(crate) fn apply_holdout_declaration(
         return Ok(Some(TrainingWindow { train_end: tau }));
     }
 
+    let training: Vec<TrainingStream<'_>> = streams.iter()
+        .map(|s| TrainingStream {
+            obs: &s.obs_model_ir,
+            last_train: s.data.iter().map(|o| o.time).fold(f64::NEG_INFINITY, f64::max),
+        })
+        .collect();
+    check_holdout_files(&training, holdout_files, model, t_start, dt, time_opts)
+}
+
+/// One bound training stream, as [`check_holdout_files`] reads it: its
+/// observation model and the time of its last training row.
+pub(crate) struct TrainingStream<'a> {
+    pub obs: &'a ir::observation::ObservationModel,
+    pub last_train: f64,
+}
+
+/// Check the `[data.holdout]` files against the training streams: the
+/// training streams are left whole, and `train_end` is the latest training
+/// time over *every* bound stream, whether or not it has a holdout file.
+/// Each holdout file is loaded (same loader, same checks) and all its rows
+/// must lie strictly after that `train_end` (tail-only, v1). `None` when
+/// there are no holdout files. `fit run` and `profile` reach it through
+/// [`apply_holdout_declaration`]; `survey`, which loads its streams with its
+/// own reader, calls it directly.
+pub(crate) fn check_holdout_files(
+    streams: &[TrainingStream<'_>],
+    holdout_files: &indexmap::IndexMap<String, String>,
+    model: &ir::Model,
+    t_start: f64,
+    dt: f64,
+    time_opts: &crate::caltime_load::TimeOpts,
+) -> Result<Option<TrainingWindow>, String> {
     if !holdout_files.is_empty() {
         let sources: Vec<&str> =
-            streams.iter().map(|s| s.obs_model_ir.source.as_str()).collect();
-        let last_train_of = |s: &ObsStream| s.data.iter()
-            .map(|o| o.time).fold(f64::NEG_INFINITY, f64::max);
+            streams.iter().map(|s| s.obs.source.as_str()).collect();
         // Over every bound stream, not only those with a holdout file:
         // `compare` scores everything after `train_end` as held out, so a
         // stream that trained past it would be scored in-sample under the
         // held-out stamp.
         let train_end = streams.iter()
-            .map(last_train_of).fold(f64::NEG_INFINITY, f64::max);
+            .map(|s| s.last_train).fold(f64::NEG_INFINITY, f64::max);
         let mut n_holdout = 0usize;
         for (source, path) in holdout_files {
             let Some(s) = streams.iter()
-                .find(|s| s.obs_model_ir.source == *source) else {
+                .find(|s| s.obs.source == *source) else {
                 return Err(format!(
                     "[data.holdout] names stream '{source}', which is not a \
                      bound observation stream (bound: {}).",
@@ -1981,16 +2011,16 @@ pub(crate) fn apply_holdout_declaration(
                     .filter(|o| o.source == *source)
                     .collect();
             let (hold_obs, _cells, _aux) =
-                load_observations(path, &s.obs_model_ir, &siblings, dt, time_opts)?;
+                load_observations(path, s.obs, &siblings, dt, time_opts)?;
             let first_hold = hold_obs.iter()
                 .map(|o| o.time).fold(f64::INFINITY, f64::min);
             if first_hold <= train_end + TIME_TIE_EPS {
                 // The streams whose training reaches the first held-out row.
                 let mut late: Vec<String> = Vec::new();
                 for t in streams.iter() {
-                    let last = last_train_of(t);
+                    let last = t.last_train;
                     let entry = format!(
-                        "'{}' (training runs to t = {last})", t.obs_model_ir.source);
+                        "'{}' (training runs to t = {last})", t.obs.source);
                     if last + TIME_TIE_EPS >= first_hold && !late.contains(&entry) {
                         late.push(entry);
                     }
