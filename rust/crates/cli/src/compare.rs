@@ -7111,14 +7111,30 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
     }
 
     /// Guarantee 2: one result per check, in declaration order, whatever
-    /// fails and whatever is waived.
+    /// fails and whatever is waived. The order and the count are stated
+    /// here, not read from `CheckId::ALL`: the match is exhaustive, so a new
+    /// check fails to compile until it is placed, and a check missing from
+    /// the results, repeated or out of order breaks the sequence.
     #[test]
     fn every_check_has_one_result_in_declaration_order() {
+        let position = |c: CheckId| match c {
+            CheckId::Basis => 0,
+            CheckId::Conditioning => 1,
+            CheckId::TrainingBoundary => 2,
+            CheckId::InSampleAblation => 3,
+            CheckId::Provenance => 4,
+            CheckId::ScoredSteps => 5,
+            CheckId::Pairing => 6,
+            CheckId::SharedData => 7,
+            CheckId::ChangedData => 8,
+            CheckId::FilterSettings => 9,
+        };
+        let declared: Vec<usize> = (0..10).collect();
         for (name, rows) in fixtures() {
             for waivers in [Waivers::default(), every_waiver()] {
-                let checks: Vec<CheckId> =
-                    preflight(&rows, &waivers).results.iter().map(|r| r.check).collect();
-                assert_eq!(checks, CheckId::ALL, "{name}");
+                let got: Vec<usize> =
+                    preflight(&rows, &waivers).results.iter().map(|r| position(r.check)).collect();
+                assert_eq!(got, declared, "{name}, {waivers:?}");
             }
         }
     }
@@ -7233,42 +7249,128 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         }
     }
 
+    /// Two rows that differ only in their predictive basis.
+    fn mixed_bases() -> Vec<Row> {
+        let mut rows = rows_needing(Waiver::MixedProvenance);
+        rows[1].trace.provenance = rows[0].trace.provenance;
+        rows[1].trace.basis = PredictiveBasis::OdeFreeForward { samples_per_draw: 100 };
+        rows
+    }
+
+    /// Held-out rows sealing training at these boundaries.
+    fn held_out_at(ends: &[f64]) -> Vec<Row> {
+        let t = [7.0, 14.0, 21.0];
+        ends.iter().zip(["x", "y", "z"]).map(|(&end, name)| {
+            let mut r = row_at(name, &t, &[-1.0; 3]);
+            r.trace.conditioning = Conditioning::HoldOutTail { train_end: end, theta_source: "f".into() };
+            r
+        }).collect()
+    }
+
+    /// The flag `w` alone.
+    fn only(w: Waiver) -> Waivers {
+        let none = Waivers::default();
+        match w {
+            Waiver::MismatchedHorizon => Waivers { mismatched_horizon: true, ..none },
+            Waiver::MixedProvenance => Waivers { mixed_provenance: true, ..none },
+            Waiver::DataMismatch => Waivers { data_mismatch: true, ..none },
+            Waiver::ChangedData => Waivers { changed_data: true, ..none },
+            Waiver::MismatchedFilterSettings => Waivers { mismatched_filter_settings: true, ..none },
+            Waiver::InSampleAblation => Waivers { in_sample_ablation: true, ..none },
+        }
+    }
+
     /// Guarantee 4: an override is listed when, and only when, its check
-    /// failed and its waiver was given.
+    /// failed and its waiver was given. Per fixture, stated here rather than
+    /// recomputed: the waivers it needs, and the checks it fails that have no
+    /// waiver (conditioning, basis, training boundary, pairing), which stay
+    /// refused when every waiver is given.
     #[test]
     fn overrides_are_exactly_the_waived_failures() {
-        for (name, rows) in fixtures() {
-            for w in ALL_WAIVERS {
-                let none = Waivers::default();
-                let given = match w {
-                    Waiver::MismatchedHorizon => Waivers { mismatched_horizon: true, ..none },
-                    Waiver::MixedProvenance => Waivers { mixed_provenance: true, ..none },
-                    Waiver::DataMismatch => Waivers { data_mismatch: true, ..none },
-                    Waiver::ChangedData => Waivers { changed_data: true, ..none },
-                    Waiver::MismatchedFilterSettings =>
-                        Waivers { mismatched_filter_settings: true, ..none },
-                    Waiver::InSampleAblation => Waivers { in_sample_ablation: true, ..none },
-                };
-                for waivers in [given, every_waiver(), none] {
-                    let checks = preflight(&rows, &waivers);
-                    let want: Vec<Waiver> = checks.results.iter().filter_map(|r| match r.outcome {
-                        CheckOutcome::Failed { .. } => r.waiver.filter(|w| waivers.allows(*w)),
-                        _ => None,
-                    }).collect();
-                    let got: Vec<Waiver> = checks.overrides().iter().map(|o| o.waiver).collect();
-                    assert_eq!(got, want, "{name}, {waivers:?}");
-                    for r in &checks.results {
-                        if let CheckOutcome::Failed { waived, .. } = r.outcome {
-                            assert_eq!(waived, r.waiver.is_some_and(|w| waivers.allows(w)),
-                                "{name}: {r:?}");
-                        }
-                    }
-                }
-            }
+        use CheckId as C;
+        use Waiver as W;
+        for c in [C::Basis, C::Conditioning, C::TrainingBoundary, C::Pairing] {
+            assert_eq!(c.waiver(), None, "{c:?} has no waiver");
         }
-        // A waiver given and not needed is absent.
-        let rows = &fixtures()[0].1;
-        assert!(preflight(rows, &every_waiver()).overrides().is_empty());
+        let mut cases: Vec<(String, Vec<Row>, Vec<Waiver>, Vec<CheckId>)> = vec![
+            ("passing".into(), fixtures()[0].1.clone(), vec![], vec![]),
+            ("single stream".into(), single_stream_rows(), vec![], vec![]),
+            ("two streams".into(), two_stream_rows(), vec![], vec![]),
+            ("ablation".into(), ablation_table().rows, vec![], vec![]),
+            ("three failures".into(), three_failures(),
+                vec![W::MixedProvenance, W::DataMismatch, W::MismatchedFilterSettings], vec![]),
+            ("mixed conditioning".into(), mixed_conditioning(), vec![], vec![C::Conditioning]),
+            ("unpaired on one stream".into(), unpaired_on_one_stream(), vec![], vec![C::Pairing]),
+            ("mixed bases".into(), mixed_bases(), vec![], vec![C::Basis]),
+            ("boundaries".into(), held_out_at(&[3.0, 5.0]), vec![], vec![C::TrainingBoundary]),
+        ];
+        for w in ALL_WAIVERS {
+            cases.push((format!("{w:?}"), rows_needing(w), vec![w], vec![]));
+        }
+        let waivers_of = |o: &[Override]| o.iter().map(|o| o.waiver).collect::<Vec<_>>();
+        let refused = |c: &Preflight| c.refusals().iter().map(|r| r.check).collect::<Vec<_>>();
+        for (name, rows, needed, unwaivable) in cases {
+            let all = preflight(&rows, &every_waiver());
+            assert_eq!(waivers_of(&all.overrides()), needed, "{name}: every flag given");
+            assert_eq!(refused(&all), unwaivable, "{name}: refused whatever is waived");
+            for w in ALL_WAIVERS {
+                let one = preflight(&rows, &only(w));
+                let want: Vec<Waiver> = needed.iter().copied().filter(|n| *n == w).collect();
+                assert_eq!(waivers_of(&one.overrides()), want, "{name}: {w:?} alone");
+            }
+            assert!(preflight(&rows, &Waivers::default()).overrides().is_empty(), "{name}: none");
+        }
+    }
+
+    /// Differing training boundaries are refused, with no waiver to give.
+    /// Boundaries are grouped within the time tolerance of a group's
+    /// smallest, so three boundaries each within the tolerance of the next
+    /// but not of the smallest are refused in every order, where the code
+    /// comparing adjacent rows passed them in that order; three within the
+    /// tolerance of the smallest pass.
+    #[test]
+    fn differing_training_boundaries_are_refused_whatever_is_waived() {
+        let eps = crate::fit::runner::TIME_TIE_EPS;
+        assert_eq!(eps, 1e-9, "the cases below are written for this tolerance");
+        let boundary = |rows: &[Row], w: &Waivers| preflight(rows, w)
+            .result(CheckId::TrainingBoundary).unwrap().outcome.clone();
+        let rows = held_out_at(&[3.0, 5.0]);
+        for w in [Waivers::default(), every_waiver()] {
+            assert!(matches!(boundary(&rows, &w), CheckOutcome::Failed { waived: false, .. }),
+                "{w:?}");
+            let refusal = outcome_of(&rows, &w).expect_err("refused");
+            assert!(refusal.contains("seal training at different boundaries"), "{refusal}");
+        }
+        for ends in orders(&[60.0, 60.0 + 0.8e-9, 60.0 + 1.6e-9]) {
+            assert!(matches!(boundary(&held_out_at(&ends), &every_waiver()),
+                CheckOutcome::Failed { waived: false, .. }), "{ends:?}");
+        }
+        for ends in orders(&[60.0, 60.0 + 0.5e-9, 60.0 + 0.9e-9]) {
+            assert_eq!(boundary(&held_out_at(&ends), &Waivers::default()), CheckOutcome::Passed,
+                "{ends:?}");
+        }
+    }
+
+    /// An override's JSON `rows` are every member of its finding, sorted by
+    /// name: for a data mismatch over three rows, all three, the two that
+    /// agree included.
+    #[test]
+    fn a_waived_data_mismatch_lists_every_row_of_the_finding() {
+        let mut rows = vec![
+            row_at("c", &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0]),
+            row_at("a", &[7.0, 14.0, 21.0], &[-5.0, -6.0, -6.0]),
+            row_at("b", &[7.0, 14.0, 21.0], &[-5.5, -6.0, -6.0]),
+        ];
+        rows[0].data = digests(&[("cases", "aaaaaaaa11")]);
+        rows[1].data = digests(&[("cases", "bbbbbbbb22")]);
+        rows[2].data = digests(&[("cases", "aaaaaaaa11")]);
+        let checks = outcome_of(&rows, &Waivers { data_mismatch: true, ..Default::default() })
+            .expect("waived");
+        let v: serde_json::Value =
+            serde_json::from_str(&render_json(&rows, 0, &["elpd".to_string()], &checks)).unwrap();
+        assert_eq!(v["overrides"].as_array().map(Vec::len), Some(1), "{v}");
+        assert_eq!(v["overrides"][0]["flag"], "--allow-data-mismatch");
+        assert_eq!(v["overrides"][0]["rows"], serde_json::json!(["a", "b", "c"]), "{v}");
     }
 
     /// Guarantee 11, for the checks: permuting the rows changes no result,
