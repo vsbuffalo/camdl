@@ -599,7 +599,8 @@ pub struct ConvergenceRule {
 }
 pub struct ConvergenceDiagnostics {
     pub schema: String,                  // "camdl.fit-summary/v2"
-    pub diagnostics: PosteriorDiagnostics,
+    pub per_param: BTreeMap<String, ParamConvergence>,
+    pub frozen_chains: Recorded<Vec<ChainIndex>>,
     pub chains_excluded: Vec<usize>,
 }
 pub struct ConvergenceRecord {
@@ -608,7 +609,7 @@ pub struct ConvergenceRecord {
     pub diagnostics: Recorded<ConvergenceDiagnostics>,
     pub gate: Recorded<GateVerdict>,
 }
-pub fn judge(d: &PosteriorDiagnostics, rule: &ConvergenceRule) -> Verdict
+pub fn judge(d: &ConvergenceDiagnostics, rule: &ConvergenceRule) -> Verdict
 ```
 
 A verdict is a function of diagnostics and a rule, and is computed when it is
@@ -626,16 +627,42 @@ point-started fit's stored diagnostics already say its R̂ was not assessable,
 under any rule. A record built from the summary file alone would read such a fit
 as converged; test 21 covers it.
 
-**What moves.** `judge` is `report::verdict` (`facts.rs:218-243`) and
-`max_rhat_status` (`method_result.rs:603`) with the rule passed in. These move
-to `score::convergence`, verbatim, and gain `Deserialize` where they lack it:
-`PosteriorDiagnostics`, `ParamConvergence`, `Stat`, `RhatBand`, `MaxRhat`,
-`GateVerdict` and `Verdict` from `cli`; the error types `ParamConvergence`
-embeds, `ConvergenceError`, `RhatRefusal` and `RhatDriver`, from
-`rust/crates/sim/src/inference/convergence.rs` (the estimator in that file stays
-in `sim`); and the `ChainIndex` newtype from
-`rust/crates/cli/src/chain_index.rs` (its path helpers stay in `cli` as
-functions). `Verdict::ChainsFrozen` keeps `Vec<ChainIndex>`.
+**What moves, and what does not.** The verdict reads two things from a fit's
+diagnostics: the per-parameter statistics and the frozen chains
+(`max_rhat_status`, `method_result.rs:603-640`). `ConvergenceDiagnostics` holds
+exactly those. `PosteriorDiagnostics` itself stays in `cli`: it also carries the
+agreement of the chains' log-likelihoods (`chain_logliks`, a `cli` type with its
+own family of types and tests) and a `findings` method that returns a `sim`
+diagnostic type, neither of which the verdict reads and neither of which `score`
+may depend on. `cli` builds a `ConvergenceDiagnostics` from a
+`PosteriorDiagnostics` by copying the two fields.
+
+Step 5 moves to `score::convergence`, verbatim, the types that move cleanly:
+
+- from `cli`: `ParamConvergence`, `Stat`, `RhatBand` (with the two threshold
+  constants it reads), `MaxRhat`, `MinEss`, `GateVerdict`, the serde default
+  helpers only these use (`default_thin` stays with `PosteriorDiagnostics`;
+  `undefined_stat` moves), and the `Verdict` type;
+- from `rust/crates/sim/src/inference/convergence.rs`: the error types
+  `ParamConvergence` embeds, `ConvergenceError`, `RhatRefusal` and `RhatDriver`.
+  The estimator in that file stays in `sim`;
+- from `rust/crates/cli/src/chain_index.rs`: the `ChainIndex` newtype with its
+  directory-name methods (`dir_name`, `dir_in`, `parse_dir_name`), which use
+  only path types and read no file. `refuse_one_based_layout`, which reads the
+  file system, stays in `cli` as a function.
+
+`demote_point_start` (a method of `PosteriorDiagnostics`, reading no file),
+`point_start` (which reads `fit_state.toml`), `max_rhat_status` and
+`report::verdict` do not move in step 5.
+
+Step 10 then adds `judge`. Its body is `max_rhat_status` followed by
+`report::verdict`'s mapping from `MaxRhat` to `Verdict` (`facts.rs:231-242`),
+reading `d.per_param` and `d.frozen_chains` where the originals read `self`, and
+the rule's thresholds where they read the constants.
+`PosteriorDiagnostics::
+max_rhat_status` and `report::verdict` become calls to
+it, so there is one implementation. `Verdict` gains `Deserialize` in step 10,
+and `Verdict::ChainsFrozen` keeps `Vec<ChainIndex>`.
 
 **One place for the thresholds.** `RHAT_CONVERGED_THRESHOLD` and
 `RHAT_SEVERE_THRESHOLD` (`method_result.rs:787`, `:792`) become the two
@@ -845,7 +872,8 @@ verbatim, splits a file where only part of it moves, and edits `use` lines.
    random stream or the filter's output stay in `sim`.
 3. Move `evidence.rs` to `score::evidence`.
 4. Move `ReplicateTotals`, `paired_delta` and `paired_diffs` to `score`.
-5. Move the convergence types listed under "What moves" to `score::convergence`.
+5. Move the convergence types listed under "What moves, and what does not" to
+   `score::convergence`.
 
 **Phase 2: the report.** Through steps 6 to 8 the step 0 renderings of
 comparisons in which no check failed stay byte-identical. Renderings that state
@@ -866,8 +894,11 @@ before step 9.
    renderers deleted. Test 7.
 9. `render::json` as the serialized `Report`; `docs/camdl-run-spec.md` documents
    it. This commit's subject is the JSON change.
-10. `ConvergenceRule`, `ConvergenceRecord`, `judge` with the rule passed in;
-    every threshold site reads the rule; `fit summary` prints it. Tests 22, 23.
+10. `ConvergenceRule`, `ConvergenceDiagnostics`, `ConvergenceRecord` and `judge`
+    with the rule passed in; `max_rhat_status` and `report::verdict` call it;
+    every threshold site reads the rule; `fit summary` prints it. Tests 22, 23,
+    and a test that `judge` gives, for every existing verdict fixture, the
+    verdict `report::verdict` gave before.
 11. The `Convergence` and `ConvergenceRule` checks, `--allow-nonconverged`,
     diagnostics over the scored chains, `SampleStatus` and its label in every
     format. Tests 5, 6, 24. Addresses the `compare` half of gh#716.
