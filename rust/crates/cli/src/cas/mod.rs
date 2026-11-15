@@ -54,6 +54,18 @@ pub fn iso8601_utc(t: std::time::SystemTime) -> String {
     format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", year, month, day, hour, minute, second)
 }
 
+/// [`iso8601_utc`] with millisecond resolution (`2026-11-14T09:30:43.042Z`):
+/// the form of a fit run's `label_set_at`, fine enough to order two labels
+/// given within one second.
+pub fn iso8601_utc_millis(t: std::time::SystemTime) -> String {
+    let d = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let (year, month, day, hour, minute, second) = civil_from_secs(d.as_secs() as i64);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        year, month, day, hour, minute, second, d.subsec_millis()
+    )
+}
+
 /// Convert a unix timestamp to civil date + time-of-day. The civil-date
 /// arithmetic is the canonical proleptic-Gregorian one in `ir::caltime`
 /// (`civil_from_unix_epoch_days`); only the HH:MM:SS split is local.

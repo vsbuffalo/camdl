@@ -584,6 +584,7 @@ same hash → cache hit (no re-run).
 camdl list                        # all cached runs; fits one row per run, by problem folder
 camdl show <run>                  # full metadata for one run
 camdl show @label --format json   # one fit run as JSON: run_id, path, verdict, outputs
+camdl show @label~1               # the run that held the label before
 camdl cat  <run>                  # emit its trajectory or observations
 camdl cat  @label --stream draws.tsv   # one file of a fit run (leaf, then its predictions)
 camdl fit summary <fit-dir>       # convergence, gate verdict, MLE table for a fit
@@ -602,6 +603,12 @@ camdl fit diff fit_prev.toml fit.toml   # what changed in the config
 camdl fit run fit.toml                  # output lands in a new content-addressed leaf
 camdl list                              # the new run appears alongside the previous one
 ```
+
+A fit label moves: rerunning a changed fit under `--label m0` makes `@m0` the
+new run and `@m0~1` the previous one. Resolve each label once per session with
+`camdl show @m0 --format json`, read its `run_id` and `path`, and use the run id
+from then on; when using `@m0` directly, read the `@m0 → run …` line every
+resolving command prints on stderr.
 
 Cite a fit hash in writeups — paste it into a methods section and any reader
 with the source can reproduce the result bit-for-bit.

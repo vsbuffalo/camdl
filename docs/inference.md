@@ -1629,10 +1629,11 @@ assessed_ — chains that began together agree by construction:
 | `{ from_mle = "<handle>" }`  | Every chain at a stored fit's point estimate.                                                                                                          | Refining an optimizer's estimate with more particles, where the chain-agreement Â is about IF2's own re-spreading of the swarm and the summary says so. |
 | `{ from_params = "<toml>" }` | Every chain at the values in a flat params TOML.                                                                                                       | A hand-picked start.                                                                                                                                    |
 
-A handle is `@label`, a fit-id prefix, a method leaf's `run_id` prefix, the leaf
-directory, or a `fit.toml`. A source whose stored verdict is not converged is
-refused; `fit run --allow-nonconverged-source` records the choice to start from
-it anyway.
+A handle is `@label` (the run that holds the label now; `@label~1` the one
+before), a fit-id prefix, a method leaf's `run_id` prefix, the leaf directory,
+or a `fit.toml`. A source whose stored verdict is not converged is refused;
+`fit run --allow-nonconverged-source` records the choice to start from it
+anyway.
 
 **Why `uniform_unconstrained` is the fallback.** Stan initializes by drawing
 `Uniform(-2, 2)` on the unconstrained (transformed) scale and mapping back into

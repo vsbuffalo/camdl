@@ -966,10 +966,10 @@ thin = 1
 }
 
 #[test]
-fn a_second_fit_under_a_held_label_is_refused() {
-    // gh#896: a label names one run and never moves. A second fit asking for
-    // a label another run holds is refused before it runs, naming the holder,
-    // and `@label` keeps naming the first run.
+fn a_second_fit_under_a_held_label_takes_it() {
+    // A fit label moves: a second fit asking for a label another run holds
+    // runs, takes the label, says which run it displaced, and `@label` then
+    // names the second run while `@label~1` names the first.
     let bin = skip_if_missing_binary();
     let tmp = std::env::temp_dir().join(format!("camdl_handle_ambig_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
@@ -1001,15 +1001,19 @@ cooling = 0.7
     let out = run(&bin, &tmp, &["fit", "run", "a.toml", "--label", "dup", "--seed", "1"]);
     assert!(out.status.success(), "fit run a.toml failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
     let out = run(&bin, &tmp, &["fit", "run", "b.toml", "--label", "dup", "--seed", "1"]);
-    assert!(!out.status.success(), "a held label must be refused, not shared");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("the label \"dup\" already names run") && stderr.contains("results/fits/a-"),
-        "the refusal names the run that holds the label, got: {stderr}"
-    );
+    assert!(out.status.success(), "a held label moves to the new run:\n{stderr}");
+    assert!(stderr.contains("note: @dup now names run"), "the move is said: {stderr}");
 
     let out = run(&bin, &tmp, &["fit", "summary", "@dup"]);
-    assert!(out.status.success(), "@dup names a.toml's run:\n{}", String::from_utf8_lossy(&out.stderr));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(stderr.contains("results/fits/b-") && stderr.contains("(1 earlier holder)"),
+        "@dup names b.toml's run, and the resolution line says so: {stderr}");
+    let out = run(&bin, &tmp, &["fit", "summary", "@dup~1"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success() && stderr.contains("results/fits/a-"),
+        "@dup~1 names a.toml's run: {stderr}");
 
     let _ = std::fs::remove_dir_all(&tmp);
 }

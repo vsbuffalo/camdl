@@ -819,8 +819,8 @@ fn rewrite_record(
 /// rewriting it only when it differs. `provenance` is metadata, not identity —
 /// the run_id and exact-set are untouched — applied at write time so an
 /// explicit `simulate --label` survives a CAS cache hit, which relabels a sim.
-/// Idempotent: a no-op when the leaf already has the requested label. A fit
-/// run's label never moves; fits use [`set_fit_label`].
+/// Idempotent: a no-op when the leaf already has the requested label. Fit
+/// runs use [`set_fit_label`], which also stamps the time.
 pub(crate) fn ensure_provenance_label(leaf_dir: &std::path::Path, label: &str) -> Result<(), String> {
     rewrite_record(leaf_dir, |rec| {
         if rec.provenance.label.as_deref() == Some(label) {
@@ -831,22 +831,34 @@ pub(crate) fn ensure_provenance_label(leaf_dir: &std::path::Path, label: &str) -
     })
 }
 
-/// Give a fit run `label`, compare-and-set (gh#896): a no-op when it already
-/// carries it, refused when it carries another, written when it has none.
-/// Store-wide uniqueness is the caller's check, made under
-/// [`fit_label_lock`].
-pub(crate) fn set_fit_label(leaf_dir: &std::path::Path, label: &str) -> Result<(), String> {
-    rewrite_record(leaf_dir, |rec| match rec.provenance.label.as_deref() {
-        Some(l) if l == label => Ok(false),
-        Some(other) => Err(format!(
-            "{} is already labelled @{other}; a fit run keeps the label it was first given",
-            leaf_dir.display()
-        )),
-        None => {
-            rec.provenance.label = Some(label.to_string());
-            Ok(true)
-        }
-    })
+/// Give a fit run `label`, stamped `label_set_at`: the run becomes the
+/// label's holder, since a fit label names the completed run carrying it with
+/// the latest stamp. A label the run already carries is re-stamped; another
+/// is replaced, and the previous one is returned.
+///
+/// The one way a fit run's label is written. It changes only the two
+/// provenance fields, never anything identity-bearing, and goes through the
+/// store's record-update path (the leaf lock, `run.json.tmp`, fsync, rename).
+/// The caller holds [`fit_label_lock`] and has checked that no live run
+/// carries the label.
+pub(crate) fn set_fit_label(
+    leaf_dir: &std::path::Path,
+    label: &str,
+    label_set_at: &str,
+) -> Result<Option<String>, String> {
+    let mut previous = None;
+    rewrite_record(leaf_dir, |rec| {
+        previous = rec.provenance.label.clone().filter(|l| l != label);
+        rec.provenance.label = Some(label.to_string());
+        rec.provenance.label_set_at = Some(label_set_at.to_string());
+        Ok(true)
+    })?;
+    Ok(previous)
+}
+
+/// Now, as a `label_set_at` stamp: RFC 3339 UTC with millisecond resolution.
+pub(crate) fn label_stamp() -> String {
+    crate::cas::iso8601_utc_millis(std::time::SystemTime::now())
 }
 
 /// The store-wide lock under which a fit label is checked for uniqueness and
@@ -1208,16 +1220,44 @@ mod tests {
 
     /// gh#896: a fit run's label is compare-and-set — another label on it is
     /// refused and left in place, the same label is a no-op, none is written.
+    /// A fit label is written with its stamp: a fresh run takes it, a run
+    /// carrying it is re-stamped, and a run carrying another has it replaced,
+    /// the old one returned. Nothing but the two provenance fields changes.
     #[test]
-    fn a_fit_label_is_compare_and_set() {
-        let held = record_leaf("label_cas_held", Some("scout"));
-        let err = set_fit_label(&held, "renamed").expect_err("a label never moves");
-        assert!(err.contains("already labelled @scout"), "{err}");
-        assert_eq!(stored_label(&held).as_deref(), Some("scout"));
-        set_fit_label(&held, "scout").expect("the same label is a no-op");
-        let fresh = record_leaf("label_cas_fresh", None);
-        set_fit_label(&fresh, "wide").unwrap();
+    fn a_fit_label_is_written_with_its_stamp() {
+        let stamp = |leaf: &std::path::Path| -> Option<String> {
+            let v: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(leaf.join("run.json")).unwrap()).unwrap();
+            v["provenance"]["label_set_at"].as_str().map(String::from)
+        };
+        let fresh = record_leaf("label_set_fresh", None);
+        assert_eq!(set_fit_label(&fresh, "wide", "2026-11-14T00:00:00.000Z").unwrap(), None);
         assert_eq!(stored_label(&fresh).as_deref(), Some("wide"));
+        assert_eq!(stamp(&fresh).as_deref(), Some("2026-11-14T00:00:00.000Z"));
+
+        let held = record_leaf("label_set_held", Some("scout"));
+        let before: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(held.join("run.json")).unwrap()).unwrap();
+        assert_eq!(set_fit_label(&held, "scout", "2026-11-14T00:00:01.000Z").unwrap(), None,
+            "re-stamping the same label replaces nothing");
+        assert_eq!(set_fit_label(&held, "renamed", "2026-11-14T00:00:02.000Z").unwrap().as_deref(),
+            Some("scout"), "the replaced label is returned");
+        assert_eq!(stored_label(&held).as_deref(), Some("renamed"));
+        assert_eq!(stamp(&held).as_deref(), Some("2026-11-14T00:00:02.000Z"));
+        let after: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(held.join("run.json")).unwrap()).unwrap();
+        for key in ["run_id", "levels", "deps", "inputs", "artifacts", "status"] {
+            assert_eq!(before[key], after[key], "{key} is untouched");
+        }
+    }
+
+    #[test]
+    fn a_label_stamp_is_rfc3339_with_milliseconds() {
+        let s = label_stamp();
+        assert_eq!(s.len(), "2026-11-14T00:00:00.000Z".len(), "{s}");
+        assert!(s.ends_with('Z') && s.as_bytes()[10] == b'T' && s.as_bytes()[19] == b'.', "{s}");
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_794_614_400_042);
+        assert_eq!(crate::cas::iso8601_utc_millis(t), "2026-11-14T00:00:00.042Z");
     }
 
     /// gh#896: concurrent read-modify-writes of one record lose nothing — each

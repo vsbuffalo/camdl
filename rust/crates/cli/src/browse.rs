@@ -2022,8 +2022,8 @@ fn fit_show_json(leaf: &cas_read::Leaf, rel_path: &str) -> serde_json::Value {
         "schema": { "name": run_view::FIT_SHOW_SCHEMA_NAME, "version": run_view::FIT_SHOW_SCHEMA_VERSION },
         "run_id": rec.run_id.to_hex().to_string(),
         "label": rec.provenance.label,
-        "label_set_at": serde_json::Value::Null,
-        "history_index": serde_json::Value::Null,
+        "label_set_at": rec.provenance.label.as_ref().and_then(|_| crate::fit::handle::label_set_at(leaf)),
+        "history_index": history_index(leaf, segment.as_deref()),
         "problem": segment.as_deref().map(|s| run_view::Problem::of(s).to_json()),
         "method": leaf.level_label("method"),
         "seed": leaf.seed(),
@@ -2034,6 +2034,16 @@ fn fit_show_json(leaf: &cas_read::Leaf, rel_path: &str) -> serde_json::Value {
         "path": rel_path,
         "outputs": outputs,
     })
+}
+
+/// A fit run's place in its label's history (`0` for the holder, `n` for
+/// `@label~n`); `None` without a label, or for a run that holds no place
+/// (not completed). The store root is the problem folder's grandparent
+/// (`<root>/fits/<folder>`).
+fn history_index(leaf: &cas_read::Leaf, segment: Option<&Path>) -> Option<usize> {
+    let label = leaf.record.provenance.label.as_deref()?;
+    let root = segment?.parent()?.parent()?;
+    crate::fit::handle::label_history(root, label).iter().position(|l| l.dir == leaf.dir)
 }
 
 /// The fit runs directly under a problem folder, completed or not, in
@@ -2170,7 +2180,7 @@ fn fit_list_row_json(row: &FitRunRow, problem: &crate::fit::run_view::Problem) -
         "kind": "fit",
         "problem": problem.to_json(),
         "label": rec.provenance.label,
-        "label_set_at": serde_json::Value::Null,
+        "label_set_at": rec.provenance.label.as_ref().and_then(|_| crate::fit::handle::label_set_at(&row.leaf)),
         "history_index": row.history_index,
         "run_id": rec.run_id.to_hex().to_string(),
         "method": row.leaf.level_label("method"),

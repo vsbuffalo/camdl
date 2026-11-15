@@ -506,7 +506,7 @@ so two identical runs produce byte-identical sidecars and a diff of two runs'
 metadata is meaningful.
 
 Fields: `schema_version` (2; below), `label` (a profile's label only; a fit's
-label names one run and lives on that run's `run.json`, see §6.8),
+label lives on its runs' `run.json` and moves between them, see §6.8),
 `source_model` (the model file the fit ran on, a `.camdl` or `.ir.json`, as a
 path relative to the fit folder by the same rule as `source_config`; absent when
 the model was not a file; the archived copies are the folder's
@@ -3380,16 +3380,57 @@ with `role` from `run.json` `output_schema`; on a problem folder,
 `run_show` (schema 1), `{schema, kind, path, record}`, where `record` is the
 leaf's `run.json`.
 
-A label names exactly one run and never moves. It is recorded on that run's
-`run.json` (`provenance.label`) by `fit run --label` or `camdl label <run_id>`.
-`fit run --label L` is refused before any sampling when another run that has not
-failed holds `L`, when the run is already stored under another label, or when
-the invocation writes several runs (several `fit_seeds`, synthetic datasets or
-sweep points). `camdl label` refuses a held label, a run that already has a
-different label, and a fit id, which names a problem folder rather than a run. A
-run started from a labelled source (`from_mle`, `from_posterior`) records the
-source leaf's `run_id` in `deps`, so no later label can change what it was
-started from.
+A fit label is a name that moves, with history. It is recorded on a run's
+`run.json` as `provenance.label`, beside `provenance.label_set_at`, the time the
+run was given it (RFC 3339 UTC, millisecond resolution). Neither is hashed. A
+label's **holder** is, among the fit runs carrying it whose live state is
+completed, the one with the latest `label_set_at`, ties broken by `run_id`; a
+run labelled before the stamp existed counts with its `created_at`. A run whose
+state is interrupted (recorded running, its lock gone) or failed never holds a
+label.
+
+Every path that gives a fit run a label stamps it, under the store's label lock
+(`<root>/.fit-labels.lock`), and that is the only way a run becomes a holder:
+the run you just invoked with `--label L`, or labelled `L`, is `@L`.
+
+| Event                                                  | Result                                                                         |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------ |
+| `fit run --label L`, new identity                      | The new run gets `L`, stamped when it completes.                               |
+| `fit run --label L`, cache hit, stored run unlabelled  | `L` written and stamped: the run becomes `@L`.                                 |
+| `fit run --label L`, cache hit, stored run carries `L` | Re-stamped: the run becomes `@L` again (reverting a change points `@L` back).  |
+| `fit run --label L`, cache hit, stored run carries `M` | `M` is replaced by `L` and stamped; prints `label: run 3a63b6 was @M, now @L`. |
+| `camdl label <run_id> L`                               | As the cache-hit rows: the named run becomes `@L`, whatever its age.           |
+
+When another run held `L`, the command prints, after the lock is released,
+`note: @L now names run 7c01e2 (previously run 3a63b6, labelled 2026-11-14, max R̂ 2.18)`.
+A move rewrites one `run.json`, the gaining run's, through the store's record
+update (the leaf lock, `run.json.tmp`, fsync, rename); the run losing the label
+is not touched. `fit run --label L` and `camdl label … L` are refused while
+another fit run carrying `L` is in flight (its live state running, or held on
+another host), since two runs in flight under one name is a race;
+`fit run
+--label` is refused when the invocation writes several runs (several
+`fit_seeds`, synthetic datasets or sweep points); and `camdl label` refuses a
+run still running and a fit id, which names a problem folder rather than a run.
+A run carries at most one label.
+
+**History.** `@L~N` names the Nth earlier holder: the completed runs carrying
+`L`, ordered by `label_set_at` descending, `@L~0` being `@L`. `~` is outside the
+label alphabet, so it cannot be part of a label; `@L~` and `@L~x` are refused
+naming the form, and `@L~N` past the end is refused with the history listed (run
+id, `label_set_at`, verdict). History is derived from the runs that still carry
+`L`, so relabelling one of them, or rerunning one with `--force` (which
+quarantines the old leaf), renumbers the rest; `camdl list --history` shows the
+current numbering.
+
+**Every resolution says what it resolved to.** Every verb that resolves `@L` or
+`@L~N` prints `@L → run 7c01e2 (results/fits/…)` to stderr, followed by
+`(2 earlier holders)` when the history is non-empty. A script that must pin one
+run uses its run id. A run started from a labelled source (`from_mle`,
+`from_posterior`) records the handle as typed and the source run's `run_id` in
+`deps` and `inputs.starts_source`, so moving the label cannot change what an
+existing run was started from; rerunning it after the move resolves the new
+source, a new dependency, and re-keys.
 
 ### 6.9 Load-time validation
 
@@ -4519,7 +4560,8 @@ fit_id     run          label                  stem           method   methods c
 ```
 
 Labels come from `--label` at run time or from the top-level `camdl label`
-afterwards, addressed by the run's `run_id` (a label names one run, §6.8):
+afterwards, addressed by the run's `run_id` (the run labelled becomes the
+label's holder, §6.8):
 
 ```
 $ camdl label 4b1e0c9a2f77 mle

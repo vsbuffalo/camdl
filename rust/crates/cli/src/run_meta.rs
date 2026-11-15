@@ -665,7 +665,7 @@ pub struct FitSidecar {
     #[serde(default)]
     pub schema_version: u32,
     /// A profile's label. A fit segment's sidecar carries none: a fit's label
-    /// names one run and lives on that run's `run.json` (gh#896).
+    /// lives on its runs' `run.json` (`provenance.label`, gh#896).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     /// The model file the fit ran on (`[model] camdl`, a `.camdl` or

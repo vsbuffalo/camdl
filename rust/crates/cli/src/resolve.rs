@@ -489,6 +489,13 @@ impl ResolvedClaim {
         self.record.output_schema = schema;
     }
 
+    /// Stamp the run's label as given now (`provenance.label_set_at`), before
+    /// `finalize`: a fit run that completes under `--label L` becomes `@L`.
+    /// Recorded, not hashed.
+    pub fn set_label_set_at(&mut self, stamp: String) {
+        self.record.provenance.label_set_at = Some(stamp);
+    }
+
     /// Commit Running → Completed, writing the post-run `display_inputs` into
     /// `run.json.inputs`. (`StreamClaim::finalize` flips status and builds the
     /// exact-set manifest from the streamed files.)

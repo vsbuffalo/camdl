@@ -205,10 +205,12 @@ A **handle** is any fit reference: `@label`, a fit-id prefix, a method leaf's
 `run_id` prefix, the leaf directory, or a `fit.toml`. A source whose stored
 verdict is not converged is refused, since starting from an unconverged fit
 launders its multi-modality into this one; `fit run --allow-nonconverged-source`
-records the choice to start from it anyway. A `@label` names the fit segment,
-which two method files of one problem share: while it holds one leaf the label
-is enough, and once it holds several the refusal lists them — name the leaf by
-its directory or its `run_id` prefix.
+records the choice to start from it anyway. A `@label` names the run that
+currently holds the label, and `@label~1` the one that held it before; a label
+moves to the run most recently given it (`camdl-run-spec.md` §6.8). The run the
+handle resolved to is recorded by its `run_id` beside the handle as typed, and
+that run id is what the new run's identity keys on, so moving the label later
+does not change what this run started from.
 
 **Starting from some of a source's chains.** When a source run is multimodal —
 some chains settled in a mode with far lower posterior density than the others —

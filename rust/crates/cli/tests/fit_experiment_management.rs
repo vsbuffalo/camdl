@@ -977,19 +977,27 @@ fn fit_label_workflow_persists_and_surfaces_in_table() {
     assert_eq!(row_label, Some(initial_label),
         "table_row.label must reflect Run.label; got {:?}", row_label);
 
-    // Step 3: `camdl label` refuses to move the label — by fit id (a problem
-    // folder, not a run) and by the run's own id (a label never moves).
+    // Step 3: `camdl label` refuses a fit id (a problem folder, not a run),
+    // and relabels the run by its own id: a fit run's label is replaced.
     let run_id: String = only_run(&fit_dir)["run_id"].as_str().unwrap().chars().take(12).collect();
-    for target in [hash_prefix.as_str(), run_id.as_str()] {
-        let status = std::process::Command::new(&camdl).env_remove("CLICOLOR_FORCE")
-            .arg("label").arg(target).arg("narrow R0, take 2")
-            .arg("--root").arg(&output_dir)
-            .status().expect("camdl label must invoke");
-        assert!(!status.success(), "`camdl label {target}` must not move the label");
-    }
-    assert_eq!(run_label(&fit_dir).as_deref(), Some(initial_label), "the label did not move");
+    let status = std::process::Command::new(&camdl).env_remove("CLICOLOR_FORCE")
+        .arg("label").arg(&hash_prefix).arg("narrow R0, take 2")
+        .arg("--root").arg(&output_dir)
+        .status().expect("camdl label must invoke");
+    assert!(!status.success(), "`camdl label <fit id>` names a folder, not a run");
+    assert_eq!(run_label(&fit_dir).as_deref(), Some(initial_label), "the folder refusal wrote nothing");
+    let relabel = std::process::Command::new(&camdl).env_remove("CLICOLOR_FORCE")
+        .arg("label").arg(&run_id).arg("narrow R0, take 2")
+        .arg("--root").arg(&output_dir)
+        .output().expect("camdl label must invoke");
+    assert!(relabel.status.success(), "{}", String::from_utf8_lossy(&relabel.stderr));
+    assert!(String::from_utf8_lossy(&relabel.stderr).contains(&format!(
+        "label: run {} was @{initial_label}, now @narrow R0, take 2", &run_id[..6])),
+        "{}", String::from_utf8_lossy(&relabel.stderr));
+    let initial_label = "narrow R0, take 2";
+    assert_eq!(run_label(&fit_dir).as_deref(), Some(initial_label), "the run's label is replaced");
     assert_eq!(fit_level_hash(&fit_dir), full_hash,
-        "relabel attempts must not change the fit-level hash");
+        "a relabel must not change the fit-level hash");
 
     // Step 4: fit table still shows it.
     let table_out2 = std::process::Command::new(&camdl).env_remove("CLICOLOR_FORCE")

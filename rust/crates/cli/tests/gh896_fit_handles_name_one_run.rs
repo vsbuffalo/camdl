@@ -283,65 +283,187 @@ fn record(leaf: &Path) -> (String, Option<String>, serde_json::Value) {
     (id, label, v)
 }
 
-/// A label names the one run it was given to and never moves. Rerunning a
-/// changed file under the same label is refused before any sampling; a
-/// second label on a rerun names the new run without touching the first;
-/// and a run started from `@scout` records the scout's run id.
+/// The leaves in the store that `before` did not hold.
+fn new_leaves(p: &Project, before: &[PathBuf]) -> Vec<PathBuf> {
+    p.leaves().into_iter().filter(|l| !before.contains(l)).collect()
+}
+
+/// A fit label moves to the run most recently given it. A changed file under
+/// the same label runs and takes it; the earlier holder is `@L~1`; a cache
+/// hit on a run carrying the label, another label, or none makes that run
+/// `@L`; and the handle forms that name no run are refused by name.
 #[test]
-fn a_label_names_one_run_and_never_moves() {
+fn a_label_moves_to_the_run_last_given_it() {
     let p = Project::new();
     p.config("scout.toml", &if2(2));
     p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
-    let first = p.leaves();
-    assert_eq!(first.len(), 1);
-    let (scout_id, scout_label, _) = record(&first[0]);
-    assert_eq!(scout_label.as_deref(), Some("scout"), "the label is on the run");
+    let two = p.leaves();
+    let (two_id, _, two_rec) = record(&two[0]);
+    assert!(two_rec["provenance"]["label_set_at"].as_str().is_some(),
+        "a labelled run is stamped when it completes: {two_rec}");
 
-    // Same file, changed `[method]`, same label: refused, nothing written.
+    // A new identity under the held label runs, and the label moves to it.
     p.config("scout.toml", &if2(3));
-    let out = p.run(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
-    let all = text(&out);
-    assert!(!out.status.success(), "a held label is refused:\n{all}");
-    assert!(all.contains(&format!("already names run {}", &scout_id[..12])), "{all}");
-    assert_eq!(p.leaves(), first, "the refused run wrote no leaf");
+    let all = p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
+    let three = new_leaves(&p, &two);
+    assert_eq!(three.len(), 1);
+    let (three_id, three_label, _) = record(&three[0]);
+    assert_eq!(three_label.as_deref(), Some("scout"));
+    assert!(all.contains(&format!("note: @scout now names run {} (previously run {}",
+        &three_id[..6], &two_id[..6])), "the move is said once:\n{all}");
+    assert_eq!(record(&two[0]).1.as_deref(), Some("scout"),
+        "the displaced run is not rewritten: it keeps the label as an earlier holder");
 
-    // Under a new label it runs, and the old label still names the old run.
-    p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout3"]);
-    let second: Vec<PathBuf> = p.leaves().into_iter().filter(|l| !first.contains(l)).collect();
-    assert_eq!(second.len(), 1);
-    assert_eq!(record(&second[0]).1.as_deref(), Some("scout3"));
-    assert_eq!(record(&first[0]).1.as_deref(), Some("scout"), "the first label did not move");
+    // `@scout` is the 3-chain run, `@scout~0` the same, `@scout~1` the 2-chain run.
+    let now = p.ok(&["fit", "summary", "@scout"]);
+    assert!(now.contains("3 chains"), "{now}");
+    assert!(now.contains(&format!("@scout → run {}", &three_id[..6])) && now.contains("(1 earlier holder)"),
+        "the resolution line names the run and the history:\n{now}");
+    assert!(p.ok(&["fit", "summary", "@scout~0"]).contains("3 chains"));
+    assert!(p.ok(&["fit", "summary", "@scout~1"]).contains("2 chains"));
+    for bad in ["@scout~", "@scout~x", "@scout~+1"] {
+        let out = p.run(&["fit", "summary", bad]);
+        assert!(!out.status.success(), "{bad} is refused");
+        assert!(text(&out).contains("@<label>~<N>"), "{bad}: {}", text(&out));
+    }
+    let out = p.run(&["fit", "summary", "@scout~2"]);
+    assert!(!out.status.success());
+    let past = text(&out);
+    assert!(past.contains("@scout~2 names no run") && past.contains(&two_id[..12])
+        && past.contains(&three_id[..12]), "past the end lists the history:\n{past}");
 
-    // A cache hit under its own label is fine; under another it is refused.
+    // Reverting the change: a cache hit on a run that carries `scout` is
+    // re-stamped, and `@scout` points back at it.
+    p.config("scout.toml", &if2(2));
+    let all = p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
+    assert!(all.contains("cache hit"), "{all}");
+    assert!(all.contains(&format!("note: @scout now names run {}", &two_id[..6])), "{all}");
+    assert!(p.ok(&["fit", "summary", "@scout"]).contains("2 chains"));
+    assert!(p.ok(&["fit", "summary", "@scout~1"]).contains("3 chains"));
+
+    // A cache hit on a run carrying another label: replaced, and said.
+    p.config("scout.toml", &if2(3));
+    let all = p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "wide"]);
+    assert!(all.contains(&format!("label: run {} was @scout, now @wide", &three_id[..6])), "{all}");
+    assert_eq!(record(&three[0]).1.as_deref(), Some("wide"));
+    assert!(p.ok(&["fit", "summary", "@wide"]).contains("3 chains"));
+    let out = p.run(&["fit", "summary", "@scout~1"]);
+    assert!(!out.status.success(), "relabelling an earlier holder renumbers the history");
+
+    // A cache hit on an unlabelled run: it takes the label.
+    p.config("scout.toml", &if2(4));
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
+    let four = new_leaves(&p, &[two.clone(), three.clone()].concat());
+    assert_eq!(record(&four[0]).1, None);
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "four"]);
+    assert_eq!(record(&four[0]).1.as_deref(), Some("four"));
+    assert!(p.ok(&["fit", "summary", "@four"]).contains("4 chains"));
+}
+
+/// A run started from `@scout` records the run `@scout` named, so moving the
+/// label does not change what an existing run started from; rerunning it
+/// after the move resolves the new source, a new dependency, so it re-keys.
+#[test]
+fn a_downstream_run_rekeys_after_its_source_label_moves() {
+    let p = Project::new();
     p.config("scout.toml", &if2(2));
     p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
-    let out = p.run(&["fit", "run", "scout.toml", "--seed", "1", "--label", "renamed"]);
-    assert!(!out.status.success(), "a run keeps its label:\n{}", text(&out));
-    assert!(text(&out).contains("already stored as @scout"), "{}", text(&out));
-
-    // `@scout` names the first run; the dependent run records its run id.
+    let (scout_a, ..) = record(&p.leaves()[0]);
     p.config("post.toml", &pgas_from("{ from_mle = \"@scout\" }"));
-    // The 10-particle scout loses one of its two chains to the filter's
-    // degeneracy watchdog, so its verdict is `incomplete` and a warm start
-    // refuses it. This test is about which run `@scout` names, so it starts
-    // from it anyway.
+    // The 10-particle scout can lose a chain to the filter's degeneracy
+    // watchdog, so its verdict may not pass; this test is about identity.
     p.ok(&["fit", "run", "post.toml", "--seed", "1", "--allow-nonconverged-source"]);
-    let post: Vec<PathBuf> = p
-        .leaves()
-        .into_iter()
-        .filter(|l| !first.contains(l) && !second.contains(l))
-        .collect();
-    assert_eq!(post.len(), 1);
-    let (_, _, rec) = record(&post[0]);
-    let deps: Vec<&str> =
-        rec["deps"].as_array().unwrap().iter().map(|d| d["run_id"].as_str().unwrap()).collect();
-    assert_eq!(deps, vec![scout_id.as_str()], "the source's run id is in deps");
-    assert_eq!(rec["inputs"]["starts_source"]["handle"], "@scout");
-    assert_eq!(rec["inputs"]["starts_source"]["run_id"], scout_id.as_str(),
-        "the record links the handle to the run it read");
-    let summary = p.ok(&["fit", "summary", &post[0].to_string_lossy()]);
-    assert!(summary.contains(&format!("from_mle @scout, run {}", &scout_id[..12])),
-        "the summary names the source run beside its handle:\n{summary}");
+    let before = p.leaves();
+    let post_a = before.iter().find(|l| record(l).2["inputs"]["starts_source"]["handle"] == "@scout")
+        .unwrap().clone();
+    assert_eq!(record(&post_a).2["inputs"]["starts_source"]["run_id"], scout_a.as_str());
+
+    p.config("scout.toml", &if2(3));
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
+    let (_, _, a_rec) = record(&post_a);
+    assert_eq!(a_rec["deps"][0]["run_id"], scout_a.as_str(), "the existing run's source is unchanged");
+
+    let all = p.ok(&["fit", "run", "post.toml", "--seed", "1", "--allow-nonconverged-source"]);
+    assert!(!all.contains("cache hit"), "the moved source is a new dependency:\n{all}");
+    let post_b: Vec<PathBuf> = new_leaves(&p, &before).into_iter()
+        .filter(|l| record(l).2["inputs"]["starts_source"]["handle"] == "@scout").collect();
+    assert_eq!(post_b.len(), 1, "the downstream run re-keyed to a new leaf");
+    assert_ne!(record(&post_b[0]).2["deps"][0]["run_id"], scout_a.as_str());
+}
+
+/// Rewrite a leaf's `run.json` through `edit` (a test fixture: a record a
+/// run in flight, interrupted, or written before `label_set_at` existed).
+fn edit_record(leaf: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
+    let mut v: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(leaf.join("run.json")).unwrap()).unwrap();
+    edit(&mut v);
+    std::fs::write(leaf.join("run.json"), serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+}
+
+/// A run in flight under a label blocks it; an interrupted one neither holds
+/// nor blocks it; a run recorded before `label_set_at` orders by `created_at`.
+#[test]
+fn a_live_run_blocks_its_label_and_an_interrupted_one_does_not() {
+    let p = Project::new();
+    p.config("scout.toml", &if2(2));
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
+    let two = p.leaves();
+    p.config("scout.toml", &if2(3));
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
+    let three = new_leaves(&p, &two);
+    let (three_id, ..) = record(&three[0]);
+
+    // The 2-chain run "in flight": recorded running, its lock held by a live
+    // process (this test's).
+    edit_record(&two[0], |v| v["status"] = "running".into());
+    std::fs::write(two[0].join(".lock"), format!("{}\n", std::process::id())).unwrap();
+    let out = p.run(&["label", &three_id[..12], "scout"]);
+    assert!(!out.status.success(), "a live run carrying the label blocks it:\n{}", text(&out));
+    assert!(text(&out).contains("still running"), "{}", text(&out));
+    let out = p.run(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
+    assert!(!out.status.success() && text(&out).contains("still running"), "{}", text(&out));
+
+    // Its lock gone, the run is interrupted: it holds nothing and blocks nothing.
+    std::fs::remove_file(two[0].join(".lock")).unwrap();
+    let out = p.run(&["fit", "summary", "@scout"]);
+    assert!(!out.status.success(), "an interrupted run does not hold its label:\n{}", text(&out));
+    p.ok(&["label", &three_id[..12], "scout"]);
+    assert!(p.ok(&["fit", "summary", "@scout"]).contains("3 chains"));
+
+    // Restored, and stamped before the label existed: the order is by
+    // `created_at`, so the run written earlier is the earlier holder.
+    edit_record(&two[0], |v| {
+        v["status"] = "completed".into();
+        v["provenance"].as_object_mut().unwrap().remove("label_set_at");
+        v["provenance"]["created_at"] = "2099-01-01T00:00:00Z".into();
+    });
+    assert!(p.ok(&["fit", "summary", "@scout"]).contains("2 chains"),
+        "a run with no label_set_at counts with its created_at");
+    edit_record(&two[0], |v| v["provenance"]["created_at"] = "2000-01-01T00:00:00Z".into());
+    assert!(p.ok(&["fit", "summary", "@scout"]).contains("3 chains"));
+}
+
+/// Every verb that resolves `@L` says which run it resolved to, on stderr.
+#[test]
+fn every_resolving_verb_prints_the_resolution_line() {
+    let p = Project::new();
+    p.config("post.toml", &pgas(4));
+    p.ok(&["fit", "run", "post.toml", "--seed", "1", "--label", "post"]);
+    let (id, ..) = record(&p.leaves()[0]);
+    let root = p.dir().join("results").to_string_lossy().into_owned();
+    let want = format!("@post → run {}", &id[..6]);
+    for args in [
+        vec!["fit", "summary", "@post"],
+        vec!["fit", "predict", "@post", "--horizon", "free_forward", "--n-draws", "2"],
+        vec!["show", "@post", "--root", &root],
+        vec!["cat", "@post", "--stream", "draws.tsv", "--root", &root],
+    ] {
+        let out = p.run(&args);
+        assert!(out.status.success(), "{args:?}: {}", text(&out));
+        assert!(String::from_utf8_lossy(&out.stderr).contains(&want),
+            "{args:?} prints `{want}` on stderr:\n{}", text(&out));
+        assert!(!String::from_utf8_lossy(&out.stdout).contains(&want), "never on stdout");
+    }
 }
 
 /// One invocation writing several runs has no one run to give a label to.
@@ -356,30 +478,25 @@ fn a_label_on_an_invocation_that_writes_several_runs_is_refused() {
     assert!(p.leaves().is_empty(), "nothing ran");
 }
 
-/// `camdl label` gives a fit run a label once: a held label or a relabel is
-/// refused, and a fit id (a problem folder, not a run) is refused with its
-/// runs listed.
+/// `camdl label` moves a label to the run it names, whatever its age, and a
+/// fit id (a problem folder, not a run) is refused with its runs listed.
 #[test]
-fn camdl_label_labels_a_fit_run_once() {
+fn camdl_label_moves_a_label_to_the_run_it_names() {
     let p = Project::new();
     p.config("scout.toml", &if2(2));
-    p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
-    p.config("scout.toml", &if2(3));
     p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
+    let older = p.leaves();
+    p.config("scout.toml", &if2(3));
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
+    let (older_id, ..) = record(&older[0]);
+    assert!(p.ok(&["fit", "summary", "@scout"]).contains("3 chains"));
+
+    let all = p.ok(&["label", &older_id[..12], "scout"]);
+    assert!(all.contains(&format!("note: @scout now names run {}", &older_id[..6])), "{all}");
+    assert!(p.ok(&["fit", "summary", "@scout"]).contains("2 chains"), "@scout follows the label");
+    assert!(p.ok(&["fit", "summary", "@scout~1"]).contains("3 chains"));
+
     let leaves = p.leaves();
-    let ids: Vec<(String, Option<String>)> =
-        leaves.iter().map(|l| { let (i, lab, _) = record(l); (i, lab) }).collect();
-    let (labelled, unlabelled) = if ids[0].1.is_some() { (&ids[0], &ids[1]) } else { (&ids[1], &ids[0]) };
-
-    let held = p.run(&["label", &unlabelled.0[..12], "scout"]);
-    assert!(!held.status.success(), "a held label is refused:\n{}", text(&held));
-    let relabel = p.run(&["label", &labelled.0[..12], "other"]);
-    assert!(!relabel.status.success(), "a label never moves:\n{}", text(&relabel));
-
-    p.ok(&["label", &unlabelled.0[..12], "wide"]);
-    let out = p.ok(&["fit", "summary", "@wide"]);
-    assert!(out.contains("3 chains"), "@wide is the 3-chain run:\n{out}");
-
     let fit_id = record(&leaves[0]).2["levels"][0]["hash"].as_str().unwrap()[..8].to_string();
     let folder = p.run(&["label", &fit_id, "folder"]);
     assert!(!folder.status.success(), "{}", text(&folder));
@@ -645,11 +762,11 @@ fn a_config_does_not_name_a_run_made_with_overrides() {
     assert_eq!(made.len(), 5, "four overridden runs and the file's own: {made:?}");
 }
 
-/// Concurrent `camdl label` of different runs with one label: exactly one
-/// takes it. The uniqueness check and the write are one step under a
-/// store-wide lock; without it several could find the label free.
+/// Concurrent `camdl label` of different runs with one label: every run
+/// takes it, each stamped under the store-wide lock, and `@label` names
+/// exactly one of them, the run stamped last (ties broken by run id).
 #[test]
-fn concurrent_labels_give_one_label_to_one_run() {
+fn concurrent_labels_leave_one_holder() {
     let p = Project::new();
     for k in 0..6 {
         // Six runs of one cheap method, told apart by their cooling.
@@ -677,8 +794,18 @@ fn concurrent_labels_give_one_label_to_one_run() {
             .map(|c| c.wait_with_output().unwrap().status.success())
             .filter(|s| *s)
             .count();
-        let holders = p.leaves().iter().filter(|l| record(l).1.as_deref() == Some(label.as_str())).count();
-        assert_eq!((ok, holders), (1, 1), "one run takes {label}");
+        let carrying: Vec<(String, String)> = p.leaves().iter()
+            .map(|l| record(l))
+            .filter(|(_, l, _)| l.as_deref() == Some(label.as_str()))
+            .map(|(id, _, rec)| (rec["provenance"]["label_set_at"].as_str().unwrap().to_string(), id))
+            .collect();
+        assert_eq!((ok, carrying.len()), (6, 6), "every run takes {label}, stamped");
+        // The holder: the latest stamp, the smallest run id among equal ones.
+        let latest = carrying.iter().map(|(at, _)| at.clone()).max().unwrap();
+        let holder = carrying.iter().filter(|(at, _)| *at == latest).map(|(_, id)| id).min().unwrap();
+        let out = p.ok(&["fit", "summary", &format!("@{label}")]);
+        assert!(out.contains(&format!("@{label} → run {}", &holder[..6])) && out.contains("(5 earlier holders)"),
+            "@{label} names the run stamped last:\n{out}");
     }
 }
 

@@ -210,6 +210,12 @@ pub struct Provenance {
     pub argv: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// When a fit run was last given its `label` (RFC 3339, millisecond
+    /// resolution). A fit label's holder is the completed run carrying it
+    /// with the latest stamp, so this is what moves a label; recorded, not
+    /// hashed, like `created_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_set_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -210,7 +210,13 @@ camdl fit run fit.toml --label baseline --seed 1
 ```
 
 `--label baseline` names the fit, so every later command can refer to it as
-`@baseline` instead of by its run directory.
+`@baseline` instead of by its run directory. The label moves with the work: edit
+a prior and rerun with `--label baseline`, and `@baseline` names the new run
+while `@baseline~1` names the one before (`camdl compare @baseline~1 @baseline`
+compares them). Reverting the edit and rerunning is a cache hit that points
+`@baseline` back at the first run. Every command that resolves `@baseline` says
+on stderr which run it resolved to; a script that must pin one run uses its run
+id.
 
 ## 5. Read the diagnostics
 

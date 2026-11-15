@@ -282,8 +282,8 @@ pub(crate) fn resolve_hash_prefix(root: &Path, prefix: &str) -> Result<FitTarget
 }
 
 /// Every fit run under `root` carrying `label`, whatever its status, in
-/// directory order. At most one non-failed run holds a label: `fit run
-/// --label` and `camdl label` refuse to give a held label to another run.
+/// directory order. Several can carry one label; [`label_history`] orders
+/// the completed ones, and its first is the label's holder.
 pub fn runs_labelled(root: &Path, label: &str) -> Vec<crate::cas_read::Leaf> {
     let mut runs: Vec<crate::cas_read::Leaf> = crate::cas_read::walk_fit_leaves(root)
         .into_iter()
@@ -296,32 +296,106 @@ pub fn runs_labelled(root: &Path, label: &str) -> Vec<crate::cas_read::Leaf> {
 /// The runs that hold or have held `label`: the fit runs under `root` that
 /// carry it and whose live state is completed, most recently labelled first
 /// (`label_history(..)[0]` is the label's holder, `[n]` is `@label~n`).
-/// A run's labelling time is its `created_at`; ties are broken by `run_id`.
+/// A run's labelling time is its `label_set_at`, or its `created_at` when it
+/// was labelled before runs carried the stamp; ties are broken by `run_id`.
+/// A run whose live state is interrupted, failed or running holds nothing.
 pub fn label_history(root: &Path, label: &str) -> Vec<crate::cas_read::Leaf> {
     let mut runs: Vec<crate::cas_read::Leaf> = runs_labelled(root, label)
         .into_iter()
         .filter(|l| matches!(runid::store::leaf_state(&l.dir, &l.record), runid::store::LeafState::Completed))
         .collect();
-    let key = |l: &crate::cas_read::Leaf| l.record.provenance.created_at.clone().unwrap_or_default();
+    let key = |l: &crate::cas_read::Leaf| label_order_key(label_set_at(l).as_deref());
     runs.sort_by(|a, b| key(b).cmp(&key(a)).then_with(|| a.record.run_id.to_hex().to_string().cmp(&b.record.run_id.to_hex().to_string())));
     runs
 }
 
-/// `@name` → the one completed run under `root` labelled `name`.
-pub fn resolve_label(root: &Path, name: &str) -> Result<LeafRef, ResolveError> {
-    let mut runs: Vec<crate::cas_read::Leaf> = runs_labelled(root, name)
-        .into_iter()
-        .filter(|l| l.record.status == runid::RunStatus::Completed)
-        .collect();
-    match runs.len() {
-        0 => Err(ResolveError::NotFound(format!(
-            "no completed fit run labelled @{name} under {}{}",
-            root.join("fits").display(),
-            folder_label_hint(root, name)
-        ))),
-        1 => Ok(LeafRef::of(runs.remove(0))),
-        _ => Err(ResolveError::AmbiguousRuns { handle: format!("@{name}"), runs }),
+/// When a fit run was given its label: `label_set_at`, else (a run labelled
+/// before runs carried the stamp) its `created_at`.
+pub fn label_set_at(leaf: &crate::cas_read::Leaf) -> Option<String> {
+    let p = &leaf.record.provenance;
+    p.label_set_at.clone().or_else(|| p.created_at.clone())
+}
+
+/// A stamp as a string that orders by time: `created_at` is written to the
+/// second (`…:05Z`) and `label_set_at` to the millisecond (`…:05.120Z`), so
+/// both are brought to the millisecond before they are compared.
+fn label_order_key(stamp: Option<&str>) -> String {
+    let s = stamp.unwrap_or("").trim_end_matches('Z');
+    if s.is_empty() || s.contains('.') { s.to_string() } else { format!("{s}.000") }
+}
+
+/// A label handle's name and its history position: `m0` → (`m0`, 0),
+/// `m0~2` → (`m0`, 2). `~` is outside the label alphabet, so it cannot be part
+/// of a label; `m0~` and `m0~x` are refused naming the form.
+pub fn parse_label_handle(name: &str) -> Result<(&str, usize), ResolveError> {
+    match name.split_once('~') {
+        None => Ok((name, 0)),
+        Some((label, n)) => match n.parse::<usize>() {
+            Ok(k) if !label.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => Ok((label, k)),
+            _ => Err(ResolveError::NotFound(format!(
+                "`@{name}` is not a fit handle: a label's earlier holders are named \
+                 @<label>~<N>, N a whole number (@{label}~1 is the holder before @{label})"
+            ))),
+        },
     }
+}
+
+/// `@name` or `@name~N` → the run under `root` that holds the label, or its
+/// Nth earlier holder ([`label_history`]). Prints the resolution line on
+/// stderr, once per handle per process.
+pub fn resolve_label(root: &Path, name: &str) -> Result<LeafRef, ResolveError> {
+    let (label, n) = parse_label_handle(name)?;
+    let mut history = label_history(root, label);
+    if history.is_empty() {
+        return Err(ResolveError::NotFound(format!(
+            "no completed fit run labelled @{label} under {}{}",
+            root.join("fits").display(),
+            folder_label_hint(root, label)
+        )));
+    }
+    if n >= history.len() {
+        let mut msg = format!(
+            "@{name} names no run: @{label} has {} earlier holder{} (@{label}~0 is @{label}):",
+            history.len() - 1,
+            if history.len() == 2 { "" } else { "s" }
+        );
+        for (i, l) in history.iter().enumerate() {
+            let id = l.run_id_hex();
+            msg.push_str(&format!(
+                "\n    @{label}~{i}  run {}  labelled {}  {}",
+                &id[..12.min(id.len())],
+                label_set_at(l).unwrap_or_else(|| "at an unrecorded time".into()),
+                crate::fit::run_view::RunVerdict::of(l).cell(),
+            ));
+        }
+        return Err(ResolveError::NotFound(msg));
+    }
+    let earlier = history.len() - 1;
+    let leaf = history.swap_remove(n);
+    say_resolution(name, &leaf, earlier);
+    Ok(LeafRef::of(leaf))
+}
+
+/// The line every verb that resolves `@L` or `@L~N` prints to stderr:
+/// `@m0 → run 7c01e2 (results/fits/…)`, then `(2 earlier holders)` when the
+/// label has any. A label can move between two invocations, so the run it
+/// named is said every time, once per handle per process.
+fn say_resolution(name: &str, leaf: &crate::cas_read::Leaf, earlier: usize) {
+    static SAID: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+    if said.iter().any(|s| s == name) {
+        return;
+    }
+    said.push(name.to_string());
+    let id = leaf.run_id_hex();
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let path = leaf.dir.strip_prefix(&cwd).unwrap_or(&leaf.dir).display().to_string();
+    let tail = match earlier {
+        0 => String::new(),
+        1 => " (1 earlier holder)".to_string(),
+        n => format!(" ({n} earlier holders)"),
+    };
+    crate::out::detached().say(format_args!("@{name} → run {} ({path}){tail}", &id[..6.min(id.len())]));
 }
 
 /// For a label no run carries: the problem folders whose `fit.meta.json` still
@@ -342,7 +416,7 @@ fn folder_label_hint(root: &Path, name: &str) -> String {
     for seg in folders {
         out.push_str(&format!(
             "\n  {} records @{name} in its fit.meta.json, where an older camdl kept a \
-             fit's label; a label now names one run. Give it to the run you mean:",
+             fit's label; a label is now kept on a run. Give it to the run you mean:",
             seg.display()
         ));
         for leaf in completed_leaves(&seg) {

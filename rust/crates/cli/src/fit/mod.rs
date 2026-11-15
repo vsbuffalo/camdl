@@ -1554,7 +1554,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 let lock = crate::cas_sink::fit_label_lock(&cas_root).unwrap_or_else(|e| {
                     out.fail(format!("error: {e}"));
                 });
-                if let Err(e) = check_label_is_free(&cas_root, label, &resolved.run_id) {
+                if let Err(e) = check_label_movable(&cas_root, label, &resolved.run_id) {
                     drop(lock);
                     out.fail(format!("error: {e}"));
                 }
@@ -1578,13 +1578,18 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         out.say(format_args!("warning: record this config on {}: {e}", dir.display()));
                     }
                 }
-                // A label given to an unlabelled stored run is recorded on
-                // it (`check_label_is_free` refused every other case).
+                // The stored run takes the label, stamped now, whatever it
+                // carried: the run just invoked with `--label L` is `@L`.
                 if let Some(label) = &validated_label {
-                    let written = crate::cas_sink::set_fit_label(&dir, label);
+                    let before = crate::fit::handle::label_history(&cas_root, label).into_iter().next();
+                    let written = crate::cas_sink::set_fit_label(&dir, label, &crate::cas_sink::label_stamp());
                     drop(label_lock);
-                    if let Err(e) = written {
-                        out.fail(format!("error: label the stored run {}: {e}", dir.display()));
+                    match written {
+                        Err(e) => out.fail(format!("error: label the stored run {}: {e}", dir.display())),
+                        Ok(previous) => {
+                            say_label_replaced(&out, &dir, previous.as_deref(), label);
+                            say_label_moved(&out, label, before.as_ref(), &dir);
+                        }
                     }
                 }
                 continue;
@@ -2331,6 +2336,19 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 .unwrap_or_else(|e| abandon_method(&out, format!("error: --resume lineage: {e}")));
         }
         let mut write = out.take_claim().expect("the claim is held from the claim to here");
+        // A run that completes under `--label L` is stamped as it completes,
+        // under the store's label lock, and so becomes `@L`; the holder it
+        // displaces is read under the same lock for the note below.
+        let label_move = match &validated_label {
+            Some(label) => {
+                let lock = crate::cas_sink::fit_label_lock(&cas_root)
+                    .unwrap_or_else(|e| abandon_method(&out, format!("error: {e}")));
+                let before = crate::fit::handle::label_history(&cas_root, label).into_iter().next();
+                write.set_label_set_at(crate::cas_sink::label_stamp());
+                Some((label.clone(), lock, before))
+            }
+            None => None,
+        };
         // Declare the tabular outputs' column schema in run.json (proposal
         // 2026-07-15): classify each written file's real header so a consumer
         // reads roles instead of reverse-engineering columns. Recorded, not
@@ -2365,6 +2383,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             Err(e) => abandon_method(&out, format!(
                 "error: could not finalize fit method leaf {}: {}", cas_path.display(), e)),
         };
+        if let Some((label, lock, before)) = label_move {
+            drop(lock);
+            say_label_moved(&out, &label, before.as_ref(), &dest);
+        }
         // The leaf is `completed`: the `done` already in `progress.json` is
         // final. Before this point a failure rewrites it as `failed`.
         out.method_committed();
@@ -3040,48 +3062,79 @@ pub fn cmd_fit_new(a: &crate::args::FitNewArgs) {
 
 // ─── Labels (proposal §5) ─────────────────────────────────────────────
 
-/// Refuse `label` for the run identified by `run_id` unless the label is free
-/// for it (gh#896): no other run under `root` that has not failed holds it,
-/// and the run, if already stored, carries no other label. A label names one
-/// run and never moves, so a second run asking for it gets a refusal naming
-/// the run that holds it.
-fn check_label_is_free(
+/// Refuse to give `label` to the run identified by `run_id` while another
+/// fit run carrying it is in flight — its live state running, or held by a
+/// process on another host whose liveness cannot be checked. Two runs in
+/// flight under one name is a race. A run that was interrupted or failed
+/// carries the label without holding it, and does not block it.
+fn check_label_movable(
     root: &std::path::Path,
     label: &str,
     run_id: &runid::ContentHash,
 ) -> Result<(), String> {
-    let holder = crate::fit::handle::runs_labelled(root, label)
-        .into_iter()
-        .find(|l| &l.record.run_id != run_id && l.record.status != runid::RunStatus::Failed);
-    if let Some(h) = holder {
-        let id = h.run_id_hex();
-        return Err(format!(
-            "the label \"{label}\" already names run {} ({}, {}, {}).\n  \
-             A label names one run and never moves: give this run another label, \
-             or use @{label} to start from that run.",
-            &id[..12],
-            h.dir.display(),
-            h.record.provenance.created_at.as_deref().unwrap_or("time not recorded"),
-            match h.record.status {
-                runid::RunStatus::Completed => "completed",
-                runid::RunStatus::Running => "still running",
-                runid::RunStatus::Failed => "failed",
-            },
-        ));
-    }
-    let stored = crate::cas_read::walk_fit_leaves(root)
-        .into_iter()
-        .find(|l| &l.record.run_id == run_id);
-    if let Some(l) = stored {
-        if let Some(other) = l.record.provenance.label.as_deref().filter(|o| *o != label) {
-            return Err(format!(
-                "this run is already stored as @{other} ({}); a run keeps the label it \
-                 was first given. Refer to it as @{other}.",
-                l.dir.display()
-            ));
+    use runid::store::LeafState;
+    let live = crate::fit::handle::runs_labelled(root, label).into_iter().find(|l| {
+        &l.record.run_id != run_id
+            && matches!(
+                runid::store::leaf_state(&l.dir, &l.record),
+                LeafState::Running { .. } | LeafState::OwnerUnknown { .. }
+            )
+    });
+    match live {
+        None => Ok(()),
+        Some(l) => {
+            let id = l.run_id_hex();
+            Err(format!(
+                "the label \"{label}\" is on run {} ({}), which is still running; two runs \
+                 in flight under one label is a race.\n  Wait for it to finish, or give this \
+                 run another label.",
+                &id[..12.min(id.len())],
+                l.dir.display(),
+            ))
         }
     }
-    Ok(())
+}
+
+/// `label: run 3a63b6 was @M, now @L` — said when a fit run's own label was
+/// replaced.
+fn say_label_replaced(out: &crate::out::Out, dir: &std::path::Path, previous: Option<&str>, label: &str) {
+    if let Some(m) = previous {
+        let id = crate::fit::fit_view::leaf_run_id(dir).ok().flatten().unwrap_or_default();
+        out.say(format_args!("label: run {} was @{m}, now @{label}", &id[..6.min(id.len())]));
+    }
+}
+
+/// `note: @L now names run 7c01e2 (previously run 3a63b6, completed
+/// 2026-11-14, max R̂ 2.18)` — said, after the label lock is released, when
+/// `label` moved to the run at `now` from another run, `before`.
+fn say_label_moved(
+    out: &crate::out::Out,
+    label: &str,
+    before: Option<&crate::cas_read::Leaf>,
+    now: &std::path::Path,
+) {
+    let Some(prev) = before.filter(|b| b.dir != now) else { return };
+    let new_id = crate::fit::fit_view::leaf_run_id(now).ok().flatten().unwrap_or_default();
+    let old_id = prev.run_id_hex();
+    let mut what = vec![format!("previously run {}", &old_id[..6.min(old_id.len())])];
+    if let Some(at) = crate::fit::handle::label_set_at(prev) {
+        what.push(format!("labelled {}", at.get(..10).unwrap_or(&at)));
+    }
+    if let crate::fit::run_view::RunVerdict::Posterior { verdict, .. } =
+        crate::fit::run_view::RunVerdict::of(prev)
+    {
+        use crate::fit::report::facts::Verdict;
+        if let Verdict::Converged { max_rhat, .. } | Verdict::NotConverged { max_rhat, .. } = verdict {
+            if max_rhat.is_finite() {
+                what.push(format!("max R̂ {max_rhat:.2}"));
+            }
+        }
+    }
+    out.say(format_args!(
+        "note: @{label} now names run {} ({})",
+        &new_id[..6.min(new_id.len())],
+        what.join(", ")
+    ));
 }
 
 /// Validate a user-supplied label string against the proposal's
@@ -3126,11 +3179,13 @@ pub fn validate_label(raw: &str) -> Result<String, String> {
 /// validated, written to the record's `label`, and the run.json is rewritten
 /// atomically.
 ///
-/// A fit run is addressed by its leaf `run_id` and its label never moves
-/// (gh#896): the label is refused when another fit run holds it, when the run
-/// already carries a different one, or while the run is still running (its
-/// finalize would rewrite the record). A fit-id prefix names a problem folder,
-/// not a run, and is refused with its runs listed.
+/// A fit run is addressed by its leaf `run_id`, and labelling it makes it the
+/// label's holder whatever its age: the label is stamped
+/// (`provenance.label_set_at`), replacing any label the run carried, and the
+/// run that held it before keeps it only as an earlier holder (`@L~1`). It is
+/// refused while the run is still running (its finalize would rewrite the
+/// record) and while another run carrying the label is. A fit-id prefix names
+/// a problem folder, not a run, and is refused with its runs listed.
 ///
 /// Concurrent invocations are last-write-wins; we don't lock the
 /// file. For single-user workflows this is fine; if cross-process
@@ -3232,26 +3287,28 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
         crate::out::ExitCode(1).exit();
     }
 
-    // A fit run: its label is written once and never moves (gh#896).
+    // A fit run: it becomes the label's holder, stamped now.
     if let Some(run) = fit_runs.into_iter().next() {
         if run.record.status == runid::RunStatus::Running {
             out.fail(format!("error: {} is still running; label it when it has finished",
                 run.dir.display()));
         }
-        // Check and write under the store-wide label lock, compare-and-set.
+        // Check and write under the store-wide label lock.
         let lock = crate::cas_sink::fit_label_lock(&root).unwrap_or_else(|e| {
             out.fail(format!("error: {e}"));
         });
-        let written = check_label_is_free(&root, &new_label, &run.record.run_id)
-            .and_then(|()| crate::cas_sink::set_fit_label(&run.dir, &new_label));
+        let before = crate::fit::handle::label_history(&root, &new_label).into_iter().next();
+        let written = check_label_movable(&root, &new_label, &run.record.run_id).and_then(|()| {
+            crate::cas_sink::set_fit_label(&run.dir, &new_label, &crate::cas_sink::label_stamp())
+        });
         drop(lock); // released before any `exit`, which runs no destructors
-        let prior = run.record.provenance.label.clone();
-        if let Err(e) = written {
-            out.fail(format!("error: {e}"));
-        }
-        match prior {
-            Some(_) => out.say(format_args!("ok: label unchanged (\"{}\") on {}", new_label, run.dir.display())),
-            None => out.say(format_args!("ok: label set to \"{}\" on {}", new_label, run.dir.display())),
+        match written {
+            Err(e) => out.fail(format!("error: {e}")),
+            Ok(previous) => {
+                out.say(format_args!("ok: label set to \"{}\" on {}", new_label, run.dir.display()));
+                say_label_replaced(&out, &run.dir, previous.as_deref(), &new_label);
+                say_label_moved(&out, &new_label, before.as_ref(), &run.dir);
+            }
         }
         return;
     }

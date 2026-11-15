@@ -820,11 +820,13 @@ pub struct FitRunArgs {
     pub _removed_rho: Option<String>,
 
     /// The run's label (1–64 chars after trim; allowed: letters, digits,
-    /// spaces, commas, dot, underscore, hyphen). `@label` names this one run
-    /// from then on, and the label never moves: it is refused when another
-    /// run holds it, when this run is already stored under another label,
-    /// and when the invocation writes several runs (fit seeds, datasets,
-    /// sweep points). Surfaced in `camdl list` and `camdl fit table`.
+    /// spaces, commas, dot, underscore, hyphen). The run this invocation
+    /// writes or reuses becomes `@label`: a label moves to the run most
+    /// recently given it, and the run that held it before stays reachable as
+    /// `@label~1`. A run stored under another label is relabelled. Refused
+    /// while another run carrying the label is still running, and when the
+    /// invocation writes several runs (fit seeds, datasets, sweep points).
+    /// Surfaced in `camdl list` and `camdl fit table`.
     /// Examples: --label "narrow R0, take 1", --label "iota free".
     #[arg(long, value_name = "TEXT")]
     pub label: Option<String>,
@@ -1571,9 +1573,10 @@ Notes:
   - Errors on ambiguous or unmatched prefix.
   - Errors on a still-running fit (RunStatus::Running); the
     runner would otherwise overwrite the label at completion.
-  - A fit run's label never moves: a label another fit run holds, a
-    second label for a labelled run, and a fit id (a problem folder,
-    not a run) are refused.
+  - A fit run labelled L becomes @L, whatever its age; the run that
+    held L before is @L~1 (`camdl list --history` shows the numbering).
+    A label on the run is replaced. Refused while another run carrying
+    L is still running, and for a fit id (a problem folder, not a run).
   - Concurrent invocations are last-write-wins.
 "))]
 pub struct LabelArgs {
