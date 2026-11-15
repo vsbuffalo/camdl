@@ -36,6 +36,8 @@ use serde::Deserialize;
 use score::trace::{
     Conditioning, PredictiveBasis, PrequentialTrace, StreamMean, ThetaSource, TraceOverride,
 };
+use score::combine::ReplicateTotals;
+use score::evidence::{paired_delta, paired_diffs};
 use std::path::{Path, PathBuf};
 
 /// Default particle count for auto-deriving a prequential from a fit handle.
@@ -2644,40 +2646,6 @@ fn derive_prequential(
     Ok(Derived { trace, data: recorded_data, freshness, streams })
 }
 
-/// The replicate totals a derived trace records (schema 5): each replicate's
-/// total elpd and per-stream sums, in replicate order, and the filter-noise
-/// Monte-Carlo SE from the totals.
-///
-/// The SE is the log-mean-exp delta-method SE of the replicate TOTAL elpds
-/// (pomp practice; the PF likelihood estimator is unbiased on the natural
-/// scale). The headline elpd is the SUM of per-step log-mean-exp values —
-/// the pointwise-consistent aggregate (its steps sum to it, and the paired Δ
-/// machinery reads the steps); the two aggregates agree in expectation to
-/// O(per-step variance), and the SE measures the same filter-noise scale
-/// either way. `None` for a single replicate.
-#[derive(Debug, Clone, PartialEq)]
-struct ReplicateTotals {
-    elpd: Vec<f64>,
-    by_stream: std::collections::BTreeMap<String, Vec<f64>>,
-    mc_se: Option<f64>,
-}
-
-impl ReplicateTotals {
-    fn of(replicates: &[PrequentialTrace]) -> Self {
-        let elpd: Vec<f64> = replicates.iter().map(|t| t.elpd()).collect();
-        let mut by_stream: std::collections::BTreeMap<String, Vec<f64>> =
-            std::collections::BTreeMap::new();
-        for t in replicates {
-            for (stream, total) in t.elpd_by_stream() {
-                by_stream.entry(stream).or_default().push(total);
-            }
-        }
-        let mc_se = (elpd.len() >= 2)
-            .then(|| numerics::logmeanexp_with_se(&elpd).1);
-        ReplicateTotals { elpd, by_stream, mc_se }
-    }
-}
-
 /// An ODE fit's trace (gh#312): each θ scored in-process by the fit's own
 /// ODE likelihood over the full series (`compare_ode::OdeScorer`), then — for
 /// several posterior draws — combined into the posterior mixture by the same
@@ -3190,42 +3158,6 @@ fn flat_params_of(toml_text: &str) -> Result<std::collections::BTreeMap<String, 
         toml::Value::Integer(i) => Ok((k.clone(), *i as f64)),
         other => Err(format!("'{k}' is not a number: {other}")),
     }).collect()
-}
-
-/// Paired Δ = sum_t (a_t − b_t); paired SE = the Newey–West HAC standard
-/// error of that sum with the Harvey–Leybourne–Newbold small-sample
-/// inflation (Stage 4.3 of the 2026-08-29 proposal, §3.4 remedy 2).
-///
-/// Loss differentials are autocorrelated exactly when a model is
-/// misspecified — the interesting case — so the iid `√(T·Var_t(d_t))` is
-/// anti-conservative there. The Diebold–Mariano standard: a Bartlett
-/// long-run variance at the pinned `sandwich`-default lag
-/// (`evidence::newey_west_lag`), the SE divided by the HLN factor
-/// `√((T−1)/T)`, with `t_{T−1}` as the reference distribution (stated in
-/// the footnote; the evidence gate stays the descriptive 2·se band).
-/// At lag 0 / no autocorrelation this is the iid SE with the biased
-/// variance. Returns (delta, se) or (NaN, NaN) if horizons mismatch.
-fn paired_delta(a: &PrequentialTrace, b: &PrequentialTrace) -> (f64, f64) {
-    let diffs = match paired_diffs(a, b) {
-        Some(d) => d,
-        None => return (f64::NAN, f64::NAN),
-    };
-    let delta: f64 = diffs.iter().sum();
-    let se = score::evidence::newey_west_se_of_sum(&diffs)
-        / score::evidence::hln_factor(diffs.len());
-    (delta, se)
-}
-
-/// The per-step loss differentials `d_t = a_t − b_t`, or `None` on a
-/// horizon mismatch — the shared input of the paired SE and the lag-1
-/// serial-dependence diagnostic.
-fn paired_diffs(a: &PrequentialTrace, b: &PrequentialTrace) -> Option<Vec<f64>> {
-    if a.n_scored() != b.n_scored() || a.n_scored() == 0 {
-        return None;
-    }
-    Some(a.steps.iter().zip(&b.steps)
-        .map(|(x, y)| x.log_score - y.log_score)
-        .collect())
 }
 
 /// The reason a row has no CRPS or calibration figure when its trace scored
