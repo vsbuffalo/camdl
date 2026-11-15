@@ -452,3 +452,82 @@ fn the_default_starts_rule_is_the_one_fit_run_defaults_to() {
         assert!(stderr(&o).contains(line), "the run must say why `{rule}`:\n{}", stderr(&o));
     }
 }
+
+/// A draws file of three chains: 0 and 1 agree on `beta` near 0.33, chain 2
+/// sits at 0.9.
+const THREE_CHAINS: &str = "chain\tbeta\n\
+    0\t0.330\n0\t0.332\n0\t0.331\n0\t0.333\n0\t0.330\n0\t0.332\n\
+    1\t0.331\n1\t0.333\n1\t0.330\n1\t0.332\n1\t0.331\n1\t0.333\n\
+    2\t0.900\n2\t0.902\n2\t0.901\n2\t0.903\n2\t0.900\n2\t0.902\n";
+
+/// Every `beta` start value recorded in the run.json files under `dir`.
+fn beta_starts(dir: &Path) -> Vec<f64> {
+    fn walk(v: &serde_json::Value, out: &mut Vec<f64>) {
+        match v {
+            serde_json::Value::Object(m) => {
+                if let Some(chains) = m.get("init_provenance").and_then(|ip| ip.get("chains")) {
+                    for c in chains.as_array().into_iter().flatten() {
+                        if let Some(b) = c.get("beta").and_then(|b| b.get("value")) {
+                            out.push(b.as_f64().unwrap());
+                        }
+                    }
+                    return;
+                }
+                m.values().for_each(|x| walk(x, out));
+            }
+            serde_json::Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for r in find_all(&dir.join("results"), "run.json") {
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(r).unwrap()).unwrap();
+        walk(&v, &mut out);
+    }
+    out
+}
+
+/// gh#1059 (gh#1056 on `profile`): `--starts-chains` restricts a
+/// `from_posterior` rule to those chains of its source, as on `fit run`, and
+/// the subset is keyed: the same profile without it is a different run.
+#[test]
+fn starts_chains_restricts_a_from_posterior_rule() {
+    let tmp = workdir(&fit_toml(""));
+    let dir = tmp.path();
+    std::fs::write(dir.join("draws.tsv"), THREE_CHAINS).unwrap();
+    let mut args: Vec<&str> = vec!["--fit", "fit.toml", "--sweep", "gamma=0.15",
+        "--n-starts", "6", "--starts", "from_posterior=draws.tsv", "--starts-chains", "0,1"];
+    args.extend_from_slice(&NL);
+    let o = profile(dir, &args);
+    assert_ok(&o, "--starts-chains 0,1");
+    let starts = beta_starts(dir);
+    assert!(!starts.is_empty(), "no recorded starts");
+    assert!(starts.iter().all(|b| (0.329..0.334).contains(b)),
+        "every start must come from chains 0 and 1: {starts:?}");
+
+    // Without the subset, the same profile is another run: its leaves land
+    // beside the first ones rather than on them.
+    let before = find_all(&dir.join("results"), "run.json").len();
+    let whole: Vec<&str> = args.iter().copied()
+        .filter(|a| *a != "--starts-chains" && *a != "0,1").collect();
+    assert_ok(&profile(dir, &whole), "the whole cloud");
+    assert_eq!(find_all(&dir.join("results"), "run.json").len(), 2 * before,
+        "the chain subset must be part of the run's identity");
+}
+
+/// A chain subset names chains of a `from_posterior` source; on any other
+/// rule, the default included, it is refused, as on `fit run`.
+#[test]
+fn starts_chains_without_from_posterior_is_refused() {
+    let tmp = workdir(&fit_toml(""));
+    for extra in [&[][..], &["--starts", "uniform"][..]] {
+        let mut args: Vec<&str> = vec!["--fit", "fit.toml", "--sweep", "gamma=0.15",
+            "--n-starts", "2", "--starts-chains", "0,1"];
+        args.extend_from_slice(&NL);
+        args.extend_from_slice(extra);
+        let o = profile(tmp.path(), &args);
+        assert_refused(&o, "--starts-chains without from_posterior",
+            &["--starts-chains", "from_posterior"]);
+    }
+}

@@ -484,15 +484,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // gh#1056: `--starts-chains` qualifies the rule in force, from the
         // flag or the file; only `from_posterior` takes it.
         if let Some(subset) = &a.starts_chains {
-            let rule = method.starts.clone().unwrap_or_else(|| {
-                out.fail(format!(
-                    "error: --starts-chains {} restricts a `from_posterior` rule, and this \
-                     fit names no starts rule; add `--starts from_posterior=@handle`",
-                    subset.ids_csv()))
-            });
-            method.starts = Some(rule.with_chains(subset.clone()).unwrap_or_else(|e| {
-                out.fail(format!("error: --starts-chains: {e}"))
-            }));
+            method.starts = Some(
+                crate::fit::starts::apply_starts_chains(method.starts.clone(), subset, "fit")
+                    .unwrap_or_else(|e| out.fail(format!("error: {e}"))));
         }
     }
 

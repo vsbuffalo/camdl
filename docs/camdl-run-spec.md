@@ -7239,6 +7239,9 @@ part of the leaf's identity, and the full objective leaves the key unchanged.
                             has a prior to draw from, `uniform_unconstrained`
                             otherwise. A source binds the cell's estimated set,
                             so a swept parameter needs no column in it
+--starts-chains IDS         restrict a from_posterior rule to these chains of
+                            its source, as on fit run (keyed; any other rule,
+                            the default included, is refused)
 --cooling F                 IF2 cooling fraction (default 0.95), reached at
                             --cooling-target-iters as in a fit's `cooling`
                             (refused for nl-*)

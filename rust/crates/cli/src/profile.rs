@@ -466,7 +466,14 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // (gh#889). How many chains is `--n-starts`, a count. Without `--starts`
     // the rule is `fit run`'s default, decided below once the estimated set
     // is known.
-    let declared_starts: Option<crate::fit::starts::ChainStarts> = a.starts.clone();
+    // `--starts-chains` restricts a `from_posterior` rule to chains of its
+    // source, by the function `fit run` applies it with (gh#1056).
+    let declared_starts: Option<crate::fit::starts::ChainStarts> = match &a.starts_chains {
+        Some(subset) => Some(
+            crate::fit::starts::apply_starts_chains(a.starts.clone(), subset, "profile")
+                .unwrap_or_else(|e| out.fail(format!("error: {e}")))),
+        None => a.starts.clone(),
+    };
 
     let focal_names: Vec<String> = a.sweep.iter().map(|s| s.name.clone()).collect();
 

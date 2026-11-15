@@ -52,6 +52,23 @@ pub fn parse_starts_chains(s: &str) -> Result<ChainSelection, String> {
     ChainSelection::parse(s, Polarity::Keep, "--starts-chains")
 }
 
+/// Apply `--starts-chains` to the starts rule in force, `rule` (from
+/// `--starts`, or a fit config's `starts`): only a `from_posterior` rule takes
+/// a chain subset. `run` names what has no rule when `rule` is absent
+/// (`"fit"`, `"profile"`). `fit run` and `profile` both qualify their rule
+/// here, so the flag means one thing on both.
+pub fn apply_starts_chains(
+    rule: Option<ChainStarts>,
+    subset: &ChainSelection,
+    run: &str,
+) -> Result<ChainStarts, String> {
+    let rule = rule.ok_or_else(|| format!(
+        "--starts-chains {} restricts a `from_posterior` rule, and this {run} names no \
+         starts rule; add `--starts from_posterior=@handle`",
+        subset.ids_csv()))?;
+    rule.with_chains(subset.clone()).map_err(|e| format!("--starts-chains: {e}"))
+}
+
 impl std::fmt::Display for Handle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)

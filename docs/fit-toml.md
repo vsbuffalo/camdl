@@ -216,17 +216,17 @@ does not change what this run started from.
 some chains settled in a mode with far lower posterior density than the others —
 the next run should start from the chains that agree. `chains = [..]` restricts
 `from_posterior` to those chains' rows of the source's `draws.tsv`, and
-`--starts-chains 0,1,3` does the same on the command line. The whole run's
-verdict is then replaced by the selected chains' own R̂: the source passes when
-they agree (R̂ below 1.05 for every parameter column that varies), and is refused
-otherwise, or when one chain leaves R̂ uncomputable;
-`--allow-nonconverged-source` lifts that refusal. An empty list, a chain id
-given twice, an empty entry (`0,,1`) and an entry that is not a whole number are
-refused, as they are for `--exclude-chains`. A chain the source does not hold,
-or a draws file with no `chain` column, is refused. The subset is part of the
-run's identity, so two subsets of one source are two runs. Compare the modes'
-log-posterior densities before choosing: dropping chains from a mode the
-posterior genuinely weights would remove part of the posterior.
+`--starts-chains 0,1,3` does the same on the command line, on `fit run` and on
+`camdl profile` alike. The whole run's verdict is then replaced by the selected
+chains' own R̂: the source passes when they agree (R̂ below 1.05 for every
+parameter column that varies), and is refused otherwise, or when one chain
+leaves R̂ uncomputable; `--allow-nonconverged-source` lifts that refusal. An
+empty list, a chain id given twice, an empty entry (`0,,1`) and an entry that is
+not a whole number are refused, as they are for `--exclude-chains`. A chain the
+source does not hold, or a draws file with no `chain` column, is refused. The
+subset is part of the run's identity, so two subsets of one source are two runs.
+Compare the modes' log-posterior densities before choosing: dropping chains from
+a mode the posterior genuinely weights would remove part of the posterior.
 
 **A `pfilter` method scores one θ**, so the file must determine it: a `start`
 for every estimated parameter (then `starts` defaults to `single`), a sourced

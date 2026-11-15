@@ -1915,6 +1915,14 @@ pub struct ProfileArgs {
     #[arg(long, value_name = "SPEC")]
     pub starts: Option<crate::fit::starts::ChainStarts>,
 
+    /// Restrict a `from_posterior` `--starts` rule to these chains of its
+    /// source, comma-separated (`0,1,2,4`), as on `fit run`. Any other rule,
+    /// the default included, is refused. The selected chains must agree
+    /// (their own R̂ is checked in place of the source's whole-run verdict),
+    /// and the subset is keyed into the run's identity (gh#1056).
+    #[arg(long, value_name = "IDS", value_parser = crate::fit::starts::parse_starts_chains)]
+    pub starts_chains: Option<crate::chain_selection::ChainSelection>,
+
     // The `--init` family the `[stages]` -> `[method]` split removed on
     // `fit run`, and gh#889 removes here: accepted by clap so the error can
     // name the replacement, trapped before any work runs. Per CLAUDE.md's
