@@ -110,6 +110,10 @@ struct ResolvedSurveyInputs {
     /// (`ic_free`, through `Problem::likelihood_objective`), so the landscape
     /// ranks starts on the objective the fit maximises. Full in inline mode.
     objective: crate::fit::config_v2::LikelihoodObjective,
+    /// The cutoff the fit config's `[data] holdout_after` resolved to: every
+    /// row after it was removed before scoring, as `fit run` removes it from
+    /// training (gh#1059). `None` without one, and in inline mode.
+    holdout_after: Option<f64>,
 }
 
 // ─── cmd_survey entry point ──────────────────────────────────────────────────
@@ -340,6 +344,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
         eval_particles:  a.eval_particles as u32,
         eval_replicates: a.eval_replicates as u32,
         objective,
+        holdout_after:   resolved.holdout_after,
         bounds:          &bounds_vec,
         fixed:           &fixed_vec,
         scenario:        resolved.scenario.as_deref(),
@@ -989,6 +994,38 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
             per_stream_times.push(times);
         }
 
+        // The fit's `holdout_after`, applied as `fit run` applies it: every row
+        // after the cutoff, resolved over the union of the bound streams'
+        // times by the same function, leaves every stream's observations,
+        // aux and windows. The streams share one schedule, so they still do.
+        // (`[data.holdout]` files leave the training files whole, as in
+        // `fit run`, so the rows scored above are the fit's.)
+        let holdout_after: Option<f64> = match config.data.as_ref()
+            .and_then(|d| d.holdout_after.as_ref())
+        {
+            Some(spec) => {
+                let all_times = per_stream_obs.iter().flatten().map(|o| o.time);
+                let tau = crate::fit::runner::resolve_holdout_cutoff(spec, all_times, &model)?;
+                let mut withheld = 0usize;
+                for ((obs, aux), times) in per_stream_obs.iter_mut()
+                    .zip(per_stream_aux.iter_mut())
+                    .zip(per_stream_times.iter_mut())
+                {
+                    let idx: Vec<usize> = (0..obs.len())
+                        .filter(|&i| crate::fit::runner::within_training(obs[i].time, tau))
+                        .collect();
+                    withheld += obs.len() - idx.len();
+                    *obs = idx.iter().map(|&i| obs[i].clone()).collect();
+                    *aux = idx.iter().map(|&i| aux[i].clone()).collect();
+                    *times = crate::fit::runner::retain_stream_times(times, &idx);
+                }
+                crate::fit::runner::say_holdout_after_applied(
+                    compiled.model.simulation.t_start, tau, withheld);
+                Some(tau)
+            }
+            None => None,
+        };
+
         // Capture [estimate].start for the start-rank diagnostic.
         let estimate_starts: HashMap<String, f64> = sampled.iter()
             .filter_map(|&(name, spec)| spec.start.map(|v| (name.clone(), v)))
@@ -1006,6 +1043,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
             fixed: fixed_resolved.into_iter().collect(),
             scenario: scenario_opt,
             objective: config.likelihood_objective(),
+            holdout_after,
             parameters_provenance,
             notices,
             roles,
@@ -1211,6 +1249,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
             estimate_starts: None,
             // Inline mode has no `ic_free` key: every observation is scored.
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
+            holdout_after: None,
         })
     }
 }

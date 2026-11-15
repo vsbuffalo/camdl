@@ -47,6 +47,9 @@ pub struct SurveyCtx<'a> {
     /// The likelihood each point is scored under (`ic_free` from the fit
     /// config). It changes every stored loglik, so it is identity.
     pub objective: crate::fit::config_v2::LikelihoodObjective,
+    /// The cutoff the fit config's `holdout_after` resolved to; every row
+    /// after it was left out of every point's likelihood, so it is identity.
+    pub holdout_after: Option<f64>,
     /// The LHS box: `(param, lo, hi)`, the estimated-param bounds.
     pub bounds: &'a [(String, f64, f64)],
     /// Fixed `(param, value)` (excluded from the LHS box).
@@ -74,6 +77,11 @@ struct SurveyConfigLevel<'a> {
     /// Omitted when full, so a survey that never set `ic_free` keeps its key.
     #[serde(skip_serializing_if = "crate::fit::config_v2::LikelihoodObjective::is_full")]
     objective: crate::fit::config_v2::LikelihoodObjective,
+    /// The resolved `holdout_after` cutoff. The data and fixed values are
+    /// keyed already; this is what says the rows after it were cut. Omitted
+    /// without one, so every other survey keeps its key (gh#1059).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    holdout_after: Option<f64>,
 }
 
 /// The `box` level: the LHS sampling spec.
@@ -102,6 +110,7 @@ pub fn resolve_survey(ctx: &SurveyCtx) -> Result<ResolvedSurvey, String> {
         fixed: &fixed_sorted,
         scenario: ctx.scenario,
         objective: ctx.objective,
+        holdout_after: ctx.holdout_after,
     };
 
     // box level — the LHS sampling spec.
@@ -176,6 +185,7 @@ mod tests {
             eval_method: "pfilter", eval_particles: 200, eval_replicates: 1,
             data: &data, fixed: &fixed, scenario: None,
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
+            holdout_after: None,
         };
         assert_eq!(canonical_config_hash(&cfg, &[]).unwrap(),
                    config_level("pfilter", 200, 1, &[("cases", &h1)], None),
@@ -200,13 +210,32 @@ mod tests {
         let fixed: Vec<(&str, f64)> = Vec::new();
         let level = |objective| canonical_config_hash(&SurveyConfigLevel {
             eval_method: "pfilter", eval_particles: 200, eval_replicates: 1,
-            data: &data, fixed: &fixed, scenario: None, objective,
+            data: &data, fixed: &fixed, scenario: None, objective, holdout_after: None,
         }, &[]).unwrap();
         let literal = config_level("pfilter", 200, 1, &[("cases", &h1)], None);
         assert_eq!(level(LikelihoodObjective::Full), literal,
             "the full objective must leave the key unchanged");
         assert_ne!(level(LikelihoodObjective::ConditionalOnFirstObservation), literal,
             "the conditional objective must change the config hash");
+    }
+
+    /// A `holdout_after` cutoff is identity: a survey of a holdout config
+    /// scores fewer rows than one of the same files without it. Without one
+    /// the level is the literal (gh#1059).
+    #[test]
+    fn a_holdout_after_cutoff_rekeys_the_config_level() {
+        let h1 = h(1);
+        let data: Vec<(&str, &str)> = vec![("cases", h1.as_str())];
+        let fixed: Vec<(&str, f64)> = Vec::new();
+        let level = |holdout_after| canonical_config_hash(&SurveyConfigLevel {
+            eval_method: "pfilter", eval_particles: 200, eval_replicates: 1,
+            data: &data, fixed: &fixed, scenario: None,
+            objective: crate::fit::config_v2::LikelihoodObjective::Full, holdout_after,
+        }, &[]).unwrap();
+        let literal = config_level("pfilter", 200, 1, &[("cases", &h1)], None);
+        assert_eq!(level(None), literal, "no cutoff must leave the key unchanged");
+        assert_ne!(level(Some(4.0)), literal, "a cutoff must change the config hash");
+        assert_ne!(level(Some(4.0)), level(Some(5.0)), "the cutoff's value is keyed");
     }
 
     /// The eval count knobs are identity-bearing — `eval_method`,

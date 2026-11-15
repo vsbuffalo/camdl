@@ -2849,8 +2849,10 @@ are declared in the `.camdl`; `fit.toml` supplies only the file paths.
 
 A holdout declaration is applied when the fit loads its data
 (`apply_holdout_declaration`, `fit/runner.rs`). `profile --fit` applies it to
-its bound data through the same function, and a `holdout_after` cutoff enters
-the profile's base identity (omitted without one). `pfilter` and `compare`'s
+its bound data through the same function, and `survey --fit` removes the rows
+after a `holdout_after` cutoff resolved by the same function
+(`resolve_holdout_cutoff`); the cutoff enters the profile's base identity and
+the survey's `config` level, omitted without one. `pfilter` and `compare`'s
 holdout scoring see the full series.
 
 - `holdout_after` is a bare model time, a date, or an observation-anchored
@@ -4789,8 +4791,9 @@ pfilter path hashes the _resolver's_ model (scenario already applied), unlike
 
 **`Survey` `config`** digests
 `{eval_method, eval_particles, eval_replicates,
-data, fixed, scenario}`; `box`
-digests `{bounds, n_points}`.
+data, fixed, scenario}`, plus `objective` when it is conditional (`ic_free`)
+and `holdout_after` (the resolved cutoff) when the fit config declares one;
+`box` digests `{bounds, n_points}`.
 
 **Lineage.** `deps` is a set of `ArtifactRef { run_id, kind, artifact, digest }`
 hashed **sorted by `run_id`** (the one documented exception to the
@@ -7277,8 +7280,9 @@ part of the leaf's identity, and the full objective leaves the key unchanged.
 ```
 --fit FIT                   fit.toml supplying [estimate] bounds and [data].
                             The model scored is MODEL; the config's [model]
-                            is not read. Mutually exclusive with
-                            --estimate/--data
+                            is not read. A [data] holdout_after removes every
+                            row after the cutoff, as fit run does. Mutually
+                            exclusive with --estimate/--data
 --estimate NAME=LO:HI       inline LHS bounds (repeatable). With --fit, an
                             estimated parameter whose box has an infinite end
                             (no `bounds`, no `in [lo, hi]`) is refused

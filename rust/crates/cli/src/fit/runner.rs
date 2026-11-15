@@ -73,14 +73,21 @@ impl ObsStream {
         self.data = idx.iter().map(|&i| self.data[i].clone()).collect();
         self.cells = idx.iter().map(|&i| self.cells[i]).collect();
         self.aux = idx.iter().map(|&i| self.aux[i].clone()).collect();
-        self.times = match &self.times {
-            sim::inference::StreamTimes::Intervals(ps) =>
-                sim::inference::StreamTimes::Intervals(
-                    idx.iter().map(|&i| ps[i]).collect()),
-            sim::inference::StreamTimes::Instants(ts) =>
-                sim::inference::StreamTimes::Instants(
-                    idx.iter().map(|&i| ts[i]).collect()),
-        };
+        self.times = retain_stream_times(&self.times, &idx);
+    }
+}
+
+/// The rows `idx` of a stream's per-row times, in order: what a row filter
+/// keeps of the windows (or instants) the rows cover.
+pub(crate) fn retain_stream_times(
+    times: &sim::inference::StreamTimes,
+    idx: &[usize],
+) -> sim::inference::StreamTimes {
+    match times {
+        sim::inference::StreamTimes::Intervals(ps) =>
+            sim::inference::StreamTimes::Intervals(idx.iter().map(|&i| ps[i]).collect()),
+        sim::inference::StreamTimes::Instants(ts) =>
+            sim::inference::StreamTimes::Instants(idx.iter().map(|&i| ts[i]).collect()),
     }
 }
 
@@ -1937,48 +1944,15 @@ pub(crate) fn apply_holdout_declaration(
     time_opts: &crate::caltime_load::TimeOpts,
 ) -> Result<Option<TrainingWindow>, String> {
     if let Some(spec) = holdout_after {
-        let raw = spec.raw();
         let all_times = || streams.iter().flat_map(|s| s.data.iter().map(|o| o.time));
-        let first_obs = all_times().fold(f64::INFINITY, f64::min);
-        let last_obs = all_times().fold(f64::NEG_INFINITY, f64::max);
-        let tau = match parse_time_spec(
-            "holdout_after", &raw, model.origin.as_deref(), &model.time_unit)? {
-            TimeSpec::Absolute(v) => v,
-            TimeSpec::Anchored(a) => {
-                let anchor_time = match a.anchor {
-                    ObsAnchor::First => first_obs,
-                    ObsAnchor::Last => last_obs,
-                };
-                a.resolve(anchor_time)
-            }
-        };
-        if tau <= first_obs + TIME_TIE_EPS {
-            return Err(format!(
-                "holdout_after = \"{raw}\" resolves to t = {tau}, at or before \
-                 the first observation (t = {first_obs}) — no training data \
-                 would remain. The boundary must cut strictly inside the \
-                 observed range: first_obs < holdout_after < last_obs."));
-        }
-        if tau >= last_obs - TIME_TIE_EPS {
-            return Err(format!(
-                "holdout_after = \"{raw}\" resolves to t = {tau}, at or after \
-                 the last observation (t = {last_obs}) — nothing would be \
-                 withheld and the declaration would be inert. The boundary \
-                 must cut strictly inside the observed range: \
-                 first_obs < holdout_after < last_obs."));
-        }
+        let tau = resolve_holdout_cutoff(spec, all_times(), model)?;
         let mut withheld = 0usize;
         for s in streams.iter_mut() {
-            let keep: Vec<bool> =
-                s.data.iter().map(|o| o.time <= tau + TIME_TIE_EPS).collect();
+            let keep: Vec<bool> = s.data.iter().map(|o| within_training(o.time, tau)).collect();
             withheld += keep.iter().filter(|k| !**k).count();
             s.retain_rows(&keep);
         }
-        crate::out::detached().say(format_args!(
-            "  {h} training window [{t_start}, {tau}]; \
-             {withheld} observation row(s) at t > {tau} withheld from \
-             training (scored out-of-sample by `camdl compare`)",
-            h = crate::out::paint::stderr().paint("holdout:", Style::Info)));
+        say_holdout_after_applied(t_start, tau, withheld);
         return Ok(Some(TrainingWindow { train_end: tau }));
     }
 
@@ -2047,6 +2021,62 @@ pub(crate) fn apply_holdout_declaration(
     }
 
     Ok(None)
+}
+
+/// The model time a `holdout_after` spec cuts training at, resolved over
+/// `times`, the observation times of every bound stream (the anchors
+/// `first_obs`/`last_obs` fold over their union). The cutoff must lie strictly
+/// inside the observed range: at or before the first observation nothing
+/// would be left to train on, at or after the last nothing would be withheld.
+pub(crate) fn resolve_holdout_cutoff(
+    spec: &super::config_v2::TimeSpecToml,
+    times: impl Iterator<Item = f64> + Clone,
+    model: &ir::Model,
+) -> Result<f64, String> {
+    let raw = spec.raw();
+    let first_obs = times.clone().fold(f64::INFINITY, f64::min);
+    let last_obs = times.fold(f64::NEG_INFINITY, f64::max);
+    let tau = match parse_time_spec(
+        "holdout_after", &raw, model.origin.as_deref(), &model.time_unit)? {
+        TimeSpec::Absolute(v) => v,
+        TimeSpec::Anchored(a) => {
+            let anchor_time = match a.anchor {
+                ObsAnchor::First => first_obs,
+                ObsAnchor::Last => last_obs,
+            };
+            a.resolve(anchor_time)
+        }
+    };
+    if tau <= first_obs + TIME_TIE_EPS {
+        return Err(format!(
+            "holdout_after = \"{raw}\" resolves to t = {tau}, at or before \
+             the first observation (t = {first_obs}) — no training data \
+             would remain. The boundary must cut strictly inside the \
+             observed range: first_obs < holdout_after < last_obs."));
+    }
+    if tau >= last_obs - TIME_TIE_EPS {
+        return Err(format!(
+            "holdout_after = \"{raw}\" resolves to t = {tau}, at or after \
+             the last observation (t = {last_obs}) — nothing would be \
+             withheld and the declaration would be inert. The boundary \
+             must cut strictly inside the observed range: \
+             first_obs < holdout_after < last_obs."));
+    }
+    Ok(tau)
+}
+
+/// Whether an observation at `time` is a training row under the cutoff `tau`.
+pub(crate) fn within_training(time: f64, tau: f64) -> bool {
+    time <= tau + TIME_TIE_EPS
+}
+
+/// The startup line saying what a `holdout_after` cutoff withheld.
+pub(crate) fn say_holdout_after_applied(t_start: f64, tau: f64, withheld: usize) {
+    crate::out::detached().say(format_args!(
+        "  {h} training window [{t_start}, {tau}]; \
+         {withheld} observation row(s) at t > {tau} withheld from \
+         training (scored out-of-sample by `camdl compare`)",
+        h = crate::out::paint::stderr().paint("holdout:", Style::Info)));
 }
 
 /// Tolerance for "the same observation time" comparisons at the holdout
