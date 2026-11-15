@@ -1429,6 +1429,13 @@ pub struct FitDiffArgs {
     pub b: PathBuf,
 }
 
+/// Format of the table a `camdl profile` run prints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum ProfileTableFormat {
+    Tsv,
+    Json,
+}
+
 /// Output format for `camdl fit table`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum FitTableFormat {
@@ -1801,35 +1808,28 @@ WHAT EACH CELL COMPUTES
 
 OUTPUT
 
-  The `--output` TSV mirrors the umbrella `summary.tsv`. Schema:
+  Each (cell x seed x start) is stored as its own leaf under
+  `profiles/`, with an `mle.toml` (final_loglik, [focal], [mle],
+  [diagnostics]). When the run ends it prints one table, to stdout or
+  to `--output FILE`, one row per grid cell, read back from the cell's
+  leaves (so a rerun served from the store prints the same table):
 
-    <focal_1> ... <focal_N>  loglik  [<spread_cols>]  <param_1> ...
-      loglik_spread_starts  loglik_rhat_starts  starts_n_completed
-      iterations_used  cooling_final
+    <focal_1> ... <focal_N>  loglik  <param_1> ... <param_K>
+      loglik_spread_starts  starts_n_completed  n_starts  run_id
 
-  The trailing five columns are gh#74 Option B per-cell convergence
-  diagnostics. Read them by column name — order is stable per run
-  but future schema additions land after this block.
+    loglik                  best finite final log-likelihood over the
+                            cell's seeds and starts (NaN if none)
+    <param_k>               the estimates at that start
+    loglik_spread_starts    max - min of the finite starts' log-
+                            likelihoods. > ~5 nats means the starts
+                            disagree on the basin.
+    starts_n_completed      starts with a finite log-likelihood
+    n_starts                starts run at the cell (seeds x --n-starts)
+    run_id                  the best start's leaf run id
 
-  Per-column meaning (algorithm-specific cells render as NaN when
-  the algorithm doesn't supply that value):
-
-    loglik_spread_starts          max - min of per-start final
-                                  log-likelihoods. > ~5 nats means
-                                  the starts disagree on the basin.
-    loglik_rhat_starts            Gelman-Rubin R-hat across the K
-                                  per-start log-likelihood traces.
-                                  NaN at K < 3 (R-hat is unstable
-                                  at K=2, undefined at K=1).
-    starts_n_completed            Count of starts that produced a
-                                  finite final loglik. < K when one
-                                  or more starts diverged.
-    iterations_used               IF2: final cooling step index.
-    cooling_final                 IF2: actual ending perturbation
-                                  SD (mean across estimated params),
-                                  not the target.
-
-  Full reference: docs/inference.md, `Per-cell diagnostics` section.
+  `--format json` writes the same rows as {focal, estimated,
+  likelihood_objective, loglik_type, cells: [...]}, null for a missing
+  value. Full reference: docs/inference.md, `The profile table`.
 
   --dt: every cell (IF2 and nl-*) integrates at the model's own `dt` when
   it declares one, as `fit run` does; a different --dt, or a different
@@ -1978,9 +1978,17 @@ pub struct ProfileArgs {
     #[arg(long)]
     pub rw_sd: Option<RwSd>,
 
-    /// Profile TSV output (default: stdout)
+    /// Where the collected table goes (default: stdout): one row per grid
+    /// cell with the swept values, the best log-likelihood over the cell's
+    /// seeds and starts, the estimates at that start, the spread of the
+    /// finite starts, how many completed out of how many ran, and the best
+    /// start's run id. Written on a rerun served from the store too.
     #[arg(short, long)]
     pub output: Option<PathBuf>,
+
+    /// Format of the collected table: `tsv` (default) or `json`.
+    #[arg(long, value_enum, default_value_t = ProfileTableFormat::Tsv)]
+    pub format: ProfileTableFormat,
 
     /// Multi-seed sensitivity: run the entire profile grid at each
     /// seed in this list. Surfaces stochastic IF2 instability per

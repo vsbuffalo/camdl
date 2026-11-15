@@ -1814,10 +1814,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         None
     };
 
-    // Throttled rollup rewrites: per-seed profile.tsv (1s throttle) and
-    // (multi-seed only) the cross-seed summary.tsv (2s throttle, since
-    // it reads N seeds' rollups). Last-completion-wins.
-
     // ── Run remaining jobs: greedy priority work-queue ──────────────
     // Per focal axis, its grid's value range — for normalizing cell
     // coordinates so the nearest-to-best ordering is scale-fair.
@@ -2209,22 +2205,63 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
 
     bar.finish();
 
-    // gh#147 (M3.3): the per-seed profile.tsv curve + the cross-seed
-    // summary.tsv are cross-point / cross-seed aggregates with no home in the
-    // base/point/method/seed/start tree — they are M4-derived views over the
-    // per-cell leaves (same as the grid summary). gh#154 restores them via
-    // `reindex`. Until then a profile run writes per-cell leaves but no curve.
-    let n_cells = resolved_jobs.len();
+    let n_leaves = resolved_jobs.len();
     out.say(format_args!(
-        "profile: {} cell{} written under {}; the profile curve / summary is \
-         a derived view (gh#154 / reindex) and lands in M4.",
-        n_cells, if n_cells == 1 { "" } else { "s" },
+        "profile: {} start{} stored under {}",
+        n_leaves, if n_leaves == 1 { "" } else { "s" },
         root.join("profiles").display()));
-    if let Some(ref path) = output_tsv_path {
-        out.say(format_args!(
-            "note: --output {} not written — the profile curve is an M4 derived \
-             view (gh#154); the per-cell leaves carry each point's loglik.",
-            path));
+
+    // The collected table (gh#1059): one row per grid cell, read back from
+    // every (seed, start) leaf of the cell, fresh or served from the store, so
+    // a rerun prints the same table. A start whose leaf cannot be read counts
+    // as run and not completed, and is named.
+    let estimated_names: Vec<String> = if2_params.iter().map(|p| p.name.clone()).collect();
+    let rows: Vec<crate::profile_table::CellRow> = (0..grid_points.len()).map(|gi| {
+        let starts = resolved_jobs.iter()
+            .filter(|(_, g, _, _, _)| *g == gi)
+            .map(|(_, _, _, resolved, cas_path)| {
+                match crate::profile_table::read_start(
+                    cas_path, &estimated_names, resolved.run_id.to_hex(),
+                ) {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        out.say(format_args!(
+                            "warning: profile table: {e}; the start counts as not completed"));
+                        None
+                    }
+                }
+            })
+            .collect();
+        crate::profile_table::CellRow {
+            focal: grid_points[gi].iter().map(|&(_, v)| v).collect(),
+            starts,
+        }
+    }).collect();
+    let table = crate::profile_table::ProfileTable {
+        focal_names: focal_grids.iter().map(|fg| fg.name.clone()).collect(),
+        estimated: estimated_names,
+        objective,
+        loglik_type: crate::fit::loglik::LoglikType::from(profile_algo.method_kind()).tag(),
+        rows,
+    };
+    let rendered = match a.format {
+        crate::args::ProfileTableFormat::Tsv => table.to_tsv(),
+        crate::args::ProfileTableFormat::Json => {
+            let mut s = serde_json::to_string_pretty(&table.to_json())
+                .unwrap_or_else(|e| { out.fail(format!("error: profile table JSON: {e}")); });
+            s.push('\n');
+            s
+        }
+    };
+    match output_tsv_path {
+        Some(ref path) => {
+            std::fs::write(path, rendered).unwrap_or_else(|e| {
+                out.fail(format!("error: cannot write --output {path}: {e}"));
+            });
+            out.say(format_args!("profile: {} cell{} written to {path}",
+                table.rows.len(), if table.rows.len() == 1 { "" } else { "s" }));
+        }
+        None => out.data_raw(rendered),
     }
 }
 

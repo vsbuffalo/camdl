@@ -12,7 +12,10 @@
 //!   names, without `--rw-sd`, on any per-cell algorithm; `--rw-sd` is needed
 //!   only to name the set when there is no `--fit`;
 //! * a `--starts` rule binds the per-cell estimated set, not the swept
-//!   parameter, which each cell pins.
+//!   parameter, which each cell pins; without `--starts` the rule is `fit
+//!   run`'s default, `--starts-chains` and `--allow-nonconverged-source` mean
+//!   what they mean on `fit run`;
+//! * the run prints one table row per cell, read back from its leaves.
 //!
 //! Every case runs the deterministic `nl-sbplx` cell on the ODE backend
 //! except the one that checks IF2 runs without `--rw-sd`.
@@ -572,4 +575,73 @@ fn allow_nonconverged_source_without_a_fit_source_is_refused() {
         assert_refused(&o, "--allow-nonconverged-source without a source",
             &["--allow-nonconverged-source", "would change nothing"]);
     }
+}
+
+/// Each leaf's `(focal gamma, final_loglik, mle beta, run_id)`.
+fn leaves(dir: &Path) -> Vec<(f64, f64, f64, String)> {
+    let num = |v: &toml::Value| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)).unwrap();
+    find_all(&dir.join("results"), "mle.toml").iter().map(|f| {
+        let t: toml::Table = std::fs::read_to_string(f).unwrap().parse().unwrap();
+        let run: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(f.with_file_name("run.json")).unwrap()).unwrap();
+        (num(&t["focal"]["gamma"]), num(&t["final_loglik"]), num(&t["mle"]["beta"]),
+         run["run_id"].as_str().unwrap().to_string())
+    }).collect()
+}
+
+/// Item 5 of gh#1059: the run collects its cells into one table, one row per
+/// grid cell: the swept value, the best log-likelihood over the cell's
+/// starts, the estimates at that start, how many starts completed, and the
+/// best start's run id. TSV to `--output` (or stdout), JSON with
+/// `--format json`; a rerun served from the store prints the same table.
+#[test]
+fn the_run_writes_one_table_row_per_cell() {
+    let tmp = workdir(&fit_toml(""));
+    let dir = tmp.path();
+    let mut args: Vec<&str> = vec!["--fit", "fit.toml", "--sweep", "gamma=0.12,0.15",
+        "--n-starts", "2", "--starts", "uniform", "-o", "table.tsv"];
+    args.extend_from_slice(&NL);
+    let o = profile(dir, &args);
+    assert_ok(&o, "profile -o table.tsv");
+    let table = std::fs::read_to_string(dir.join("table.tsv")).expect("table.tsv written");
+    let mut lines = table.lines();
+    assert_eq!(lines.next().unwrap(),
+        "gamma\tloglik\tbeta\tloglik_spread_starts\tstarts_n_completed\tn_starts\trun_id");
+    let rows: Vec<Vec<&str>> = lines.map(|l| l.split('\t').collect()).collect();
+    assert_eq!(rows.len(), 2, "one row per cell:\n{table}");
+
+    let leaves = leaves(dir);
+    assert_eq!(leaves.len(), 4);
+    for row in &rows {
+        let gamma: f64 = row[0].parse().unwrap();
+        let cell: Vec<&(f64, f64, f64, String)> =
+            leaves.iter().filter(|l| l.0 == gamma).collect();
+        assert_eq!(cell.len(), 2, "two starts at gamma = {gamma}");
+        let best = cell.iter().max_by(|a, b| a.1.total_cmp(&b.1)).unwrap();
+        let worst = cell.iter().min_by(|a, b| a.1.total_cmp(&b.1)).unwrap();
+        assert_eq!(row[1].parse::<f64>().unwrap(), best.1, "loglik is the cell's best");
+        assert_eq!(row[2].parse::<f64>().unwrap(), best.2, "beta is the best start's");
+        assert_eq!(row[3].parse::<f64>().unwrap(), best.1 - worst.1, "spread over starts");
+        assert_eq!((row[4], row[5]), ("2", "2"));
+        assert_eq!(row[6], best.3, "the best start's run id");
+    }
+
+    // JSON, to stdout, from the store: the same cells.
+    let json_args: Vec<&str> = args.iter().copied()
+        .filter(|a| *a != "-o" && *a != "table.tsv")
+        .chain(["--format", "json"]).collect();
+    let o = profile(dir, &json_args);
+    assert_ok(&o, "profile --format json");
+    assert!(stderr(&o).contains("already cached"), "the rerun is served from the store");
+    let doc: serde_json::Value = serde_json::from_slice(&o.stdout)
+        .unwrap_or_else(|e| panic!("stdout is not JSON ({e}):\n{}", String::from_utf8_lossy(&o.stdout)));
+    let cells = doc["cells"].as_array().expect("cells");
+    assert_eq!(cells.len(), 2);
+    for (cell, row) in cells.iter().zip(&rows) {
+        assert_eq!(cell["focal"]["gamma"].as_f64().unwrap(), row[0].parse::<f64>().unwrap());
+        assert_eq!(cell["loglik"].as_f64().unwrap(), row[1].parse::<f64>().unwrap());
+        assert_eq!(cell["estimates"]["beta"].as_f64().unwrap(), row[2].parse::<f64>().unwrap());
+        assert_eq!(cell["run_id"].as_str().unwrap(), row[6]);
+    }
+    assert_eq!(doc["likelihood_objective"], "full");
 }

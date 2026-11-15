@@ -8,26 +8,12 @@
 //! compute would smooth, genuine multimodality, or per-cell
 //! optimization failures.
 //!
-//! This module owns the per-start → per-cell aggregation:
-//!
-//! * `PerStartDiagnostics` is the per-start record. The profile driver
-//!   populates one per (cell × start) and serializes it into that
-//!   start's `mle.toml` under a `[diagnostics]` block. Persisting it
-//!   on disk (rather than threading it through the parallel loop) is
-//!   what lets the per-cell rollup phase — which already scans every
-//!   start's `mle.toml` — compute aggregates without changing the
-//!   job-scheduling shape.
-//!
-//! * `CellDiagnostics` is the per-cell aggregate. The rollup reads
-//!   each `mle.toml`'s `[diagnostics]` block, builds the per-cell
-//!   diagnostic, and emits it as new columns in the per-seed
-//!   `profile.tsv` and the umbrella `summary.tsv`.
-//!
-//! The aggregate columns are documented in `docs/inference.md`
-//! ("Per-cell diagnostics") and in the `camdl profile --help` OUTPUT
-//! section. Schema is stable per-run; algorithms that don't supply a
-//! given column write `NaN` (capital N — matches camdl's existing TSV
-//! NaN convention).
+//! `PerStartDiagnostics` is the per-start record. The profile driver
+//! populates one per (cell × start) and serializes it into that start's
+//! `mle.toml` under a `[diagnostics]` block, documented in
+//! `docs/inference.md` ("The profile table"). The run's collected table
+//! (`crate::profile_table`) aggregates the starts' log-likelihoods per
+//! cell; it does not read this block.
 
 use serde::{Deserialize, Serialize};
 

@@ -7277,9 +7277,12 @@ part of the leaf's identity, and the full objective leaves the key unchanged.
 --data / --obs / --time-format / --seed / --parallel / --scenario /
 --enable / --disable / --table / --allow-degenerate-rates /
 --pf-max-substeps (if2 only)
--o, --output FILE           accepted, writes nothing: a profile run stores one leaf
-                            per grid cell under `profiles/` and prints no curve
-                            (the curve is a derived view, gh#154); a note says so
+-o, --output FILE           where the collected table goes (default stdout): one
+                            row per grid cell, read back from its leaves under
+                            `profiles/`: swept values, best loglik over seeds and
+                            starts, the estimates there, loglik_spread_starts,
+                            starts_n_completed, n_starts, the best run_id
+--format tsv|json           the table's format (default tsv)
 --label TEXT
 ```
 

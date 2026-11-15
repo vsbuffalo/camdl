@@ -119,8 +119,10 @@ gradient-free Metropolis-within-Gibbs fallback.
 
 Two routines are **standalone only**. `survey` is a diagnostic, not a fit — it
 maps the landscape so you can see ridges and multimodality before committing
-compute. `profile` is a meta-fit that runs IF2 at each point of a parameter
-grid; it orchestrates fits rather than being a single method.
+compute. `profile` is a meta-fit that maximizes the likelihood at each point of
+a parameter grid (IF2, or an `nl-*` optimizer); it orchestrates fits rather than
+being a single method, and prints one table row per grid point (TSV, or
+`--format json`).
 
 ## Workflows
 

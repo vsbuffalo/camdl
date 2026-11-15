@@ -1010,45 +1010,36 @@ or adaptive-MH sampler moves off the plateau. This is a modeling choice you make
 the reciprocal parameterization is yours to apply where the geometry calls for
 it.
 
-### Per-cell diagnostics
+### The profile table
 
-Profile output gains a fixed-schema block of per-cell convergence columns
-appended after the existing focal / loglik / parameter columns (gh#74 Option B).
-The columns are written into the umbrella `summary.tsv` (the file `--output`
-mirrors) and into each per-seed `profile.tsv`.
+A profile run stores every (cell × seed × start) as its own leaf under
+`profiles/`, each holding an `mle.toml` (`final_loglik`, `[focal]`, `[mle]`, and
+a `[diagnostics]` block). When the run ends it prints one table, to stdout or to
+`--output FILE`, with one row per grid cell. The table is read back from the
+leaves, so a rerun served from the store prints the same table.
 
-**Read by column name, not column index.** The diagnostic columns are the API;
-their order is stable across runs, but defensive consumers should look them up
-by name so future schema additions land cleanly.
+| Column                    | Meaning                                                                                                           |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `<focal_1>` … `<focal_N>` | The swept values of the cell.                                                                                     |
+| `loglik`                  | The best finite final log-likelihood over the cell's seeds and starts; `NaN` when no start completed.             |
+| `<param_1>` … `<param_K>` | The estimated parameters at that start.                                                                           |
+| `loglik_spread_starts`    | `max − min` of the finite starts' log-likelihoods. More than about 5 nats means the starts disagree on the basin. |
+| `starts_n_completed`      | Starts that produced a finite log-likelihood.                                                                     |
+| `n_starts`                | Starts run at the cell: the number of seeds times `--n-starts`.                                                   |
+| `run_id`                  | The best start's leaf `run_id`; empty when no start completed.                                                    |
 
-The full list:
+Read the columns by name. A cell where no start completed stays in the table as
+a row of `NaN`, so a grid point that failed is visible rather than missing.
+`--format json` writes the same rows as
+`{focal, estimated, likelihood_objective, loglik_type, cells}`, with `null` for
+a missing value; `likelihood_objective` says whether `loglik` is the full
+likelihood or the `ic_free` conditional one.
 
-| Column                 | Algorithm | Meaning                                                                                                                                                                                                      |
-| ---------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `loglik_spread_starts` | all       | `max − min` of per-start final log-likelihoods. > ~5 nats means the starts disagree on the basin.                                                                                                            |
-| `loglik_rhat_starts`   | IF2       | Gelman–Rubin R̂ on the per-start log-likelihood traces (Gelman & Rubin 1992, _Statist. Sci._ 7(4); Brooks & Gelman 1998 corrected variant). > 1.05 is the conventional "chains haven't agreed yet" threshold. |
-| `starts_n_completed`   | all       | Count of starts that produced a finite final loglik (didn't diverge).                                                                                                                                        |
-| `iterations_used`      | IF2       | Final cooling-step index reached (= `--iterations` on normal completion).                                                                                                                                    |
-| `cooling_final`        | IF2       | Mean across estimated parameters of the final iteration's `effective_rw_sd` — the _actual_ ending perturbation SD, not the target.                                                                           |
-
-For algorithms that don't supply a given column (e.g. `iterations_used` on an
-`nl-*` run), the cell renders as `NaN` (capital N — camdl's TSV NaN convention).
-
-**The K<3 rule.** `loglik_rhat_starts` is `NaN` when fewer than three of the K
-starts have a usable trace. Gelman–Rubin R̂ is undefined at K=1 and unstable at
-K=2; the rule prevents a spurious diagnostic from a single-chain spike. To get a
-finite R̂ supply `--n-starts 3` or more.
-
-The diagnostic R̂ is computed on log-likelihood traces, not on per-parameter
-posteriors, so it is a chain-level "are these starts walking the same basin"
-check rather than a full multivariate convergence diagnostic. The column name
-reflects that: it's `loglik_rhat_starts`, not `rhat`.
-
-**Cross-seed aggregation.** For multi-seed profile runs (`--seeds
-1,2,3`), each
-cell's diagnostic columns are averaged across seeds in `summary.tsv` (with
-`starts_n_completed` summing rather than averaging — it's a total count).
-Per-seed values remain visible in each `replicates/seed_<n>/profile.tsv`.
+Each leaf's `[diagnostics]` block carries the per-start record behind the row:
+`completed`, and for IF2 `iterations_used` (the final cooling step),
+`cooling_final` (the mean over estimated parameters of the last iteration's
+actual perturbation SD) and `loglik_trace` (the per-iteration perturbed
+log-likelihood). The table does not compute an R̂ across starts.
 
 ---
 
