@@ -12017,7 +12017,26 @@ let check_surface_time_typing ctx =
        List.iter (fun e ->
          walk_expr_rule1 ~loc ~context:("observation '" ^ od.oname ^ "'.at") e
        ) ts
-     | None -> ())
+     | None -> ());
+    (* gh#1069: a `covers` width is folded to one constant span, so under an
+       origin a calendar width would give every row the average month or
+       year rather than its own (E321, Rule 1's reasoning applied to a
+       period rather than an offset). *)
+    (match od.ocovers with
+     | Some { ocv_span = Some e; ocv_form; ocv_loc; _ } when anchored ->
+       (match Time_typing.classify env e with
+        | Time_typing.TCalendar ->
+          Diagnostics.error ctx.diags
+            ~code:"E321"
+            ~loc:(diag_loc_of_ast_ctx ctx ocv_loc)
+            ~message:(Printf.sprintf
+              "observation '%s': calendar duration `%s` as the width of \
+               `covers = %s(...)`"
+              od.oname (Time_typing.show_short e) ocv_form)
+            ~hint:Time_typing.hint_calendar_width_in_covers
+            ()
+        | _ -> ())
+     | _ -> ())
   ) ctx.obs_decls;
 
   (* ── forcing functions: kwarg exprs (period, step, on=[...]) ──────────
