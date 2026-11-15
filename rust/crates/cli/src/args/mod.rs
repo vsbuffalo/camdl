@@ -1923,6 +1923,14 @@ pub struct ProfileArgs {
     #[arg(long, value_name = "IDS", value_parser = crate::fit::starts::parse_starts_chains)]
     pub starts_chains: Option<crate::chain_selection::ChainSelection>,
 
+    /// Start from a `from_mle` / `from_posterior` source whose stored verdict
+    /// (or, under `--starts-chains`, whose selected chains' R̂) is not
+    /// converged, as on `fit run`. Without this the source is refused, since
+    /// starting from an unconverged fit launders its multi-modality into
+    /// every cell. Refused on any other rule, which has no verdict to lift.
+    #[arg(long)]
+    pub allow_nonconverged_source: bool,
+
     // The `--init` family the `[stages]` -> `[method]` split removed on
     // `fit run`, and gh#889 removes here: accepted by clap so the error can
     // name the replacement, trapped before any work runs. Per CLAUDE.md's

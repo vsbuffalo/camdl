@@ -422,6 +422,22 @@ fn source_artifact_name(rule: &ChainStarts) -> &'static str {
 /// A fit source whose stored verdict is not converged is refused unless
 /// `allow_nonconverged` — the purpose of the old pre-refine gate, kept at the
 /// one seam where an upstream fit is consumed (proposal §8, item 11).
+/// `--allow-nonconverged-source` lifts the refusal of a `from_mle` or
+/// `from_posterior` source whose verdict is not converged; on any other rule
+/// it would change nothing, so it is refused. `run` names what starts from
+/// `rule` (`"fit"`, `"profile"`).
+pub fn refuse_inert_allow_nonconverged(rule: &ChainStarts, run: &str) -> Result<(), String> {
+    if matches!(rule, ChainStarts::Point(Point::FromMle { .. })
+                    | ChainStarts::Spread(Spread::FromPosterior { .. })) {
+        return Ok(());
+    }
+    Err(format!(
+        "--allow-nonconverged-source lifts the refusal of a `from_mle` or `from_posterior` \
+         source whose stored verdict is not converged, and this {run} starts from `{}`, which \
+         has no such verdict, so the flag would change nothing. Drop the flag.",
+        rule.tag()))
+}
+
 pub fn resolve_starts(rule: &ChainStarts, allow_nonconverged: bool) -> Result<ResolvedStarts, String> {
     let handle = match rule {
         ChainStarts::Point(Point::FromParams { path }) => {

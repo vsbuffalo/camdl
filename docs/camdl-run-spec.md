@@ -3915,8 +3915,8 @@ error: starts source @scout: it did not converge.
     - narrow bounds to the basin its best chain found
     - fix a weakly identified initial-state parameter rather than estimate it
 
-  To start from it anyway (the starts may launder multi-modality):
-    camdl fit run fit.toml --allow-nonconverged-source
+  To start from it anyway (the starts may launder multi-modality), re-run
+  with --allow-nonconverged-source
 ```
 
 Every estimated parameter's Â is judged, initial-state (`perturb_only_at_t0`)
@@ -7242,6 +7242,9 @@ part of the leaf's identity, and the full objective leaves the key unchanged.
 --starts-chains IDS         restrict a from_posterior rule to these chains of
                             its source, as on fit run (keyed; any other rule,
                             the default included, is refused)
+--allow-nonconverged-source start from a from_mle / from_posterior source whose
+                            verdict is not converged; without it the source is
+                            refused, as on fit run
 --cooling F                 IF2 cooling fraction (default 0.95), reached at
                             --cooling-target-iters as in a fit's `cooling`
                             (refused for nl-*)

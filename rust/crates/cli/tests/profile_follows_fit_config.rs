@@ -531,3 +531,45 @@ fn starts_chains_without_from_posterior_is_refused() {
             &["--starts-chains", "from_posterior"]);
     }
 }
+
+/// gh#1059: a starts source that is not converged is refused unless
+/// `--allow-nonconverged-source` is passed, as on `fit run`. Chains 0 and 2
+/// of the source disagree on `beta`, so their own R̂ fails the gate.
+#[test]
+fn a_nonconverged_starts_source_is_refused_unless_allowed() {
+    let tmp = workdir(&fit_toml(""));
+    let dir = tmp.path();
+    std::fs::write(dir.join("draws.tsv"), THREE_CHAINS).unwrap();
+    let mut args: Vec<&str> = vec!["--fit", "fit.toml", "--sweep", "gamma=0.15",
+        "--n-starts", "2", "--starts", "from_posterior=draws.tsv", "--starts-chains", "0,2"];
+    args.extend_from_slice(&NL);
+    let o = profile(dir, &args);
+    assert_refused(&o, "a disagreeing chain subset",
+        &["the selected chains disagree", "--allow-nonconverged-source"]);
+    assert!(!stderr(&o).contains("camdl fit run"),
+        "the remedy must not name another command:\n{}", stderr(&o));
+    assert!(find_all(&dir.join("results"), "mle.toml").is_empty(),
+        "a refused profile must store no cell");
+
+    args.push("--allow-nonconverged-source");
+    let o = profile(dir, &args);
+    assert_ok(&o, "--allow-nonconverged-source");
+    assert!(stderr(&o).contains("starting from them anyway"),
+        "the run must say it started from them anyway:\n{}", stderr(&o));
+}
+
+/// The flag lifts the refusal of a sourced rule's verdict; on a rule with no
+/// verdict, the default included, it would change nothing and is refused.
+#[test]
+fn allow_nonconverged_source_without_a_fit_source_is_refused() {
+    let tmp = workdir(&fit_toml(""));
+    for extra in [&[][..], &["--starts", "uniform"][..]] {
+        let mut args: Vec<&str> = vec!["--fit", "fit.toml", "--sweep", "gamma=0.15",
+            "--n-starts", "2", "--allow-nonconverged-source"];
+        args.extend_from_slice(&NL);
+        args.extend_from_slice(extra);
+        let o = profile(tmp.path(), &args);
+        assert_refused(&o, "--allow-nonconverged-source without a source",
+            &["--allow-nonconverged-source", "would change nothing"]);
+    }
+}

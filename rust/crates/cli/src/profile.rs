@@ -1309,10 +1309,18 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // (Single mode; or `--starts 1`).
     // Every rule draws through the one seam the fit runners use
     // (`chain_starts::draw_chain_starts`), with a sourced rule's handle
-    // resolved once. A source that did not converge is a warning here, not a
-    // refusal: a profile is exploratory and makes no claim about the fit it
-    // starts from.
-    let resolved_starts = crate::fit::chain_starts::resolve_starts(&init_method, true)
+    // resolved once. A source that did not converge is refused, as on
+    // `fit run`, unless `--allow-nonconverged-source`: starting a profile
+    // from an unconverged fit launders its multi-modality into every cell.
+    if a.allow_nonconverged_source {
+        if let Err(e) = crate::fit::chain_starts::refuse_inert_allow_nonconverged(
+            &init_method, "profile",
+        ) {
+            out.fail(format!("error: {e}"));
+        }
+    }
+    let resolved_starts = crate::fit::chain_starts::resolve_starts(
+        &init_method, a.allow_nonconverged_source)
         .unwrap_or_else(|e| {
             out.fail(format!("error: profile --starts {}: {}", init_method, e));
         });

@@ -661,14 +661,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     let allow_nonconverged_source = a.allow_nonconverged_source;
     // Only a fit source carries a convergence verdict to lift.
     if allow_nonconverged_source {
-        use crate::fit::starts::{ChainStarts, Point, Spread};
         let rule = method.starts().unwrap_or_else(|e| { out.fail(format!("error: {e}")) });
-        if !matches!(rule, ChainStarts::Point(Point::FromMle { .. })
-                         | ChainStarts::Spread(Spread::FromPosterior { .. })) {
-            out.fail(format!("error: --allow-nonconverged-source lifts the refusal of a `from_mle` or \
-                       `from_posterior` source whose stored verdict is not converged, and this \
-                       fit starts from `{}`, which has no such verdict, so the flag would change \
-                       nothing. Drop the flag.", rule.tag()));
+        if let Err(e) = chain_starts::refuse_inert_allow_nonconverged(rule, "fit") {
+            out.fail(format!("error: {e}"));
         }
     }
     if let Some(msg) = config.point_start_multichain_note() {

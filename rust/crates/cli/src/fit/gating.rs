@@ -589,7 +589,7 @@ const PICK_ONE: &str = "\n  Pick one:\n    \
                     [method.loglik_eval] n_particles or n_replicates\n    \
                   - relax the gate via [method.gate].decibans_thresh\n      \
                     or pass --decibans-thresh on the next run\n\n  \
-                  To start from it anyway:  camdl fit run fit.toml --allow-nonconverged-source";
+                  To start from it anyway, re-run with --allow-nonconverged-source";
 
 /// Render the Hard verdict as a human error message.
 ///
@@ -652,8 +652,8 @@ pub fn format_hard_verdict(
     }
     msg.push_str("- fix a weakly identified initial-state parameter rather than \
                   estimate it\n\n  \
-                  To start from it anyway (the starts may launder multi-modality):\n    \
-                  camdl fit run fit.toml --allow-nonconverged-source");
+                  To start from it anyway (the starts may launder multi-modality), re-run \
+                  with --allow-nonconverged-source");
     msg
 }
 
@@ -746,7 +746,7 @@ pub fn check_source_converged(leaf: &Path, handle: &str, allow: bool) -> Result<
                             "\n\n  Re-run the source fit so that every chain finishes (more \
                              particles, or narrower bounds that keep the starts where the \
                              filter can follow the data).\n\n  \
-                             To start from it anyway:  camdl fit run fit.toml \
+                             To start from it anyway, re-run with \
                              --allow-nonconverged-source");
                     }
                     Some(msg)
@@ -853,7 +853,7 @@ pub fn check_subset_converged(
             Ok(())
         }
         Some(msg) => Err(format!(
-            "{who}: {msg}.\n\n  To start from them anyway:  camdl fit run fit.toml \
+            "{who}: {msg}.\n\n  To start from them anyway, re-run with \
              --allow-nonconverged-source"
         )),
     }

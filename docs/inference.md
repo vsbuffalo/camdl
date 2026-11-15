@@ -1634,9 +1634,9 @@ assessed_ — chains that began together agree by construction:
 
 A handle is `@label` (the run that holds the label now; `@label~1` the one
 before), a fit-id prefix, a method leaf's `run_id` prefix, the leaf directory,
-or a `fit.toml`. A source whose stored verdict is not converged is refused;
-`fit run --allow-nonconverged-source` records the choice to start from it
-anyway.
+or a `fit.toml`. A source whose stored verdict is not converged is refused, by
+`fit run` and by `profile` alike; `--allow-nonconverged-source` on either
+records the choice to start from it anyway.
 
 **Why `uniform_unconstrained` is the fallback.** Stan initializes by drawing
 `Uniform(-2, 2)` on the unconstrained (transformed) scale and mapping back into
