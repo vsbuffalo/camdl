@@ -17,7 +17,7 @@
 
 use serde::{Serialize, Deserialize};
 
-/// What a scored value was accumulated over — the answer a [`StreamTimes`]
+/// What a scored value was accumulated over — the answer a `StreamTimes`
 /// gives for one of its rows, recorded on every per-stream prequential score so
 /// a comparison can check that two traces scored the *same quantity* at a
 /// step, not merely at the same time (gh#833; `compare`'s window gate).
@@ -202,7 +202,7 @@ pub struct PrequentialStep {
 pub enum PrequentialWarning {
     /// ESS dropped below `threshold` at `step_count` scored steps.
     /// `threshold` is the absolute ESS cut applied, derived as
-    /// [`ESS_COLLAPSE_FRACTION`] of the particle count.
+    /// `ESS_COLLAPSE_FRACTION` of the particle count.
     EssCollapse { step_count: usize, threshold: f64 },
     /// Scoring starts at the prior: `t0 = 0` and no warm-up precedes the
     /// first observation — its window opens at the run's start — so the
