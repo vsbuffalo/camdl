@@ -32,7 +32,7 @@ in three places:
 The proposed fix adds four small runtime types (`ObservedRow.support`,
 `TrainingPartition`, `ConditioningRecord`, `ForecastPlan`), factors one existing
 one (`CalendarAxis`), and needs no new DSL syntax and no IR change until the
-optional calendar-month schedule.
+optional Stage 7 calendar periods (`covers = month(time)` and week forms).
 
 ## 2. Audit of current representations
 
@@ -299,37 +299,40 @@ Ranked by scientific severity: a silent wrong number first, then a misleading
 record, then a refusal. Architectural weight is given beside each. "Gate" marks
 the issues that must be resolved before a forecast score can be trusted.
 
-| Rank | ID         | Issue                                                               | Effect                                                                                  | Arch.                                            | Gate                           |
-| ---- | ---------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------ | ------------------------------ |
-| 1    | P1         | `fit predict` one-step band filters through held-out rows, unmarked | a band presented as a forecast has seen the data; looks excellent                       | high: conditioning sets not represented          | yes                            |
-| 2    | T1, T2     | forecast targets from a guessed cadence                             | wrong targets for monthly and irregular series; forecast rows not the observed quantity | high: no shared target plan                      | yes                            |
-| 3    | A2         | PGAS snaps an off-grid support silently                             | scores a different period than declared                                                 | medium: alignment enforced at the wrong boundary | yes                            |
-| 4    | C2         | training cut by label under period-start forms                      | parameters see data past the cutoff they report                                         | high: label vs support                           | yes                            |
-| 5    | C1         | held-out row overlapping another leaf's trained time                | held-out score is partly in-sample                                                      | high: same                                       | yes                            |
-| 6    | K2         | `covers` accepts a calendar width as an affine span                 | a monthly period is 30.44 days, silently                                                | low: one check                                   | yes, for monthly streams       |
-| 7    | K1         | `date_range(calendar_months)` drifts after a clamp                  | wrong instants for month-end schedules                                                  | low: one loop                                    | no                             |
-| 8    | K3         | instant algebra unchecked                                           | a nonsensical expression yields an instant                                              | medium: typing rule                              | no                             |
-| 9    | F1, F2     | silent forcing hold; future covariates readable                     | forecast quietly a scenario                                                             | medium: plan notes                               | yes, as a record               |
-| 10   | T3         | mid-period restart drops a row silently                             | missing target, no notice                                                               | covered by the plan                              | yes                            |
-| 11   | P2         | two holdout forms disagree in `fit predict`                         | inconsistency                                                                           | covered by the partition                         | yes                            |
-| 12   | M1, M2, M3 | calendar metadata missing or unreadable in artifacts                | artifacts cannot be dated or reloaded                                                   | medium: one axis type                            | M1 yes for published forecasts |
-| 13   | K5         | emit grid phase from `from`, not `origin`                           | doc vs code; affects only generated grids                                               | low                                              | no                             |
-| 14   | C3         | ODE compare cuts by label                                           | refusal (fails closed)                                                                  | low                                              | yes for ODE                    |
-| 15   | A1, A3     | off-grid refused before the policy; wrong advice                    | refusal                                                                                 | low                                              | no                             |
-| 16   | K4, K6, K7 | `date()` dimensionless; position inconsistency; help text           | refusals, doc                                                                           | low                                              | no                             |
+| Rank | ID         | Issue                                                                                                     | Effect                                                                                         | Arch.                                            | Gate                           |
+| ---- | ---------- | --------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------ | ------------------------------ |
+| 1    | P1         | `fit predict` one-step band filters through held-out rows, unmarked                                       | a band presented as a forecast has seen the data; looks excellent                              | high: conditioning sets not represented          | yes                            |
+| 2    | T1, T2     | forecast targets from a guessed cadence                                                                   | wrong targets for monthly and irregular series; forecast rows not the observed quantity        | high: no shared target plan                      | yes                            |
+| 3    | A2         | PGAS snaps an off-grid support silently                                                                   | scores a different period than declared                                                        | medium: alignment enforced at the wrong boundary | yes                            |
+| 4    | C2         | training cut by label under period-start forms                                                            | parameters see data past the cutoff they report                                                | high: label vs support                           | yes                            |
+| 5    | C1         | held-out row overlapping another leaf's trained time                                                      | held-out score is partly in-sample                                                             | high: same                                       | yes                            |
+| 6    | K2         | `covers` accepts a calendar width as an affine span                                                       | a monthly period is 30.44 days, silently                                                       | low: one check                                   | yes, for monthly streams       |
+| 7    | K1         | `date_range(calendar_months)` drifts after a clamp                                                        | wrong instants for month-end schedules                                                         | low: one loop                                    | no                             |
+| 8    | K3         | instant algebra unchecked                                                                                 | a nonsensical expression yields an instant                                                     | medium: typing rule                              | no                             |
+| 9    | F1, F2     | silent forcing hold on every run (F1, Stage 0(f)); future covariates readable by a forecast (F2, Stage 5) | a simulation, fit or forecast quietly assumes the last value; a forecast is quietly a scenario | low: one note (F1); medium: plan notes (F2)      | yes, as a record               |
+| 10   | T3         | mid-period restart drops a row silently                                                                   | missing target, no notice                                                                      | covered by the plan                              | yes                            |
+| 11   | P2         | two holdout forms disagree in `fit predict`                                                               | inconsistency                                                                                  | covered by the partition                         | yes                            |
+| 12   | M1, M2, M3 | calendar metadata missing or unreadable in artifacts                                                      | artifacts cannot be dated or reloaded                                                          | medium: one axis type                            | M1 yes for published forecasts |
+| 13   | K5         | emit grid phase from `from`, not `origin`                                                                 | doc vs code; affects only generated grids                                                      | low                                              | no                             |
+| 14   | C3         | ODE compare cuts by label                                                                                 | refusal (fails closed)                                                                         | low                                              | yes for ODE                    |
+| 15   | A1, A3     | off-grid refused before the policy; wrong advice                                                          | refusal                                                                                        | low                                              | no                             |
+| 16   | K4, K6, K7 | `date()` dimensionless; position inconsistency; help text                                                 | refusals, doc                                                                                  | low                                              | no                             |
 
 ## 4. Overlapping work
 
-| Item                                                              | Relation                                                                                                                                                                                                                                                                                                  |
-| ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `2026-11-14-score-artifact.md` (proposal)                         | Supplies the row digest, `TimeAxis`, `ScoredLeadTime`, the store kind and `camdl score`. This proposal amends it in three ways: `ObservedRow.time` becomes `support`; `train_end` becomes the extent and a per-leaf position prefix; the trace schema becomes 7. The two land in one `HASH_VERSION` bump. |
-| `2026-11-14-scoring-report-library.md` (Phase 1 steps 0–2 landed) | Unaffected; its preflight reads `ConditioningRecord` once that exists.                                                                                                                                                                                                                                    |
-| `2026-11-13-published-comparison-principles.md`                   | Vocabulary amendment: "horizon" gets one meaning (decision D3).                                                                                                                                                                                                                                           |
-| `2026-08-29-honest-predictive-evaluation.md` §3.7.2, gh#808       | Forecast mode is built on `ForecastPlan` (Stage 6).                                                                                                                                                                                                                                                       |
-| `2026-09-05-observation-time-as-a-sum-type.md` (accepted, landed) | Supplies `Period`, `StreamTimes` and `covers`; extended, not replaced.                                                                                                                                                                                                                                    |
-| `2026-09-10-camdlc-version-guard.md`                              | Unrelated.                                                                                                                                                                                                                                                                                                |
-| Open issues                                                       | gh#1062 (C3), gh#861 (T1), gh#838 (M1), gh#839 (M2), gh#624 (forecast TSV lacks supports), gh#808 (forecast mode), gh#847 and gh#844 (K6), gh#1054 (draw and seed checks), gh#277 (held-out ergonomics), gh#454 (`output at` below `t_start`).                                                            |
-| No issue found                                                    | K1, K2, K3, K4, K5, A1, A2, A3, C1, C2, P1, T2, T3, F1, F2. To be filed on approval.                                                                                                                                                                                                                      |
+| Item                                                              | Relation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `2026-11-14-score-artifact.md` (proposal)                         | Supplies the row digest, `TimeAxis`, `ScoredLeadTime`, the store kind and `camdl score`. This proposal amends it in three ways: `ObservedRow.time` becomes `support`; `train_end` becomes the extent and a per-leaf position prefix; the trace schema becomes 7. The two land in one `HASH_VERSION` bump.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `2026-11-14-scoring-report-library.md` (Phase 1 steps 0–2 landed) | Unaffected; its preflight reads `ConditioningRecord` once that exists.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `2026-11-13-published-comparison-principles.md`                   | Vocabulary amendment: "horizon" gets one meaning (decision D3).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `2026-08-29-honest-predictive-evaluation.md` §3.7.2, gh#808       | Forecast mode is built on `ForecastPlan` (Stage 6).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `2026-09-05-observation-time-as-a-sum-type.md` (accepted, landed) | Supplies `Period`, `StreamTimes` and `covers`; extended, not replaced.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `2026-06-09-time-interval-model.md` (draft)                       | Its forecast and forcing sections are superseded by the spec. Two disagreements are resolved in the spec's favour: the June draft makes the forecast horizon the end of integration (`forecast: Option<f64>`, "horizon ≥ D.end"), where the spec makes it a bound on targets (spec §2.4, §6.2), with integration running to the last target's close; and the June draft refuses a run past a forcing's knots (§7.1 point 5), where the spec records a note (I13, D11). Its `RunWindows` / `cond_to` interval abstraction is not adopted; `ConditioningRecord` covers the conditioning end. Its conditioning-window lineage is moot: the `condition_from` key it generalizes was removed (`fit/config_v2.rs:2256` refuses it), and per-stream periods now open where `covers` says. Status line to add on acceptance: "forecast and forcing-domain sections superseded by `docs/dev/specs/temporal-architecture.md`". |
+| `2026-06-09-time-and-observation-overview.md` (overview)          | Calls itself the entry point to time and observations. On acceptance its status line points to the spec as the current account of forecasting, partitions and supports, and marks its description of the interval model as superseded.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `2026-06-06-scheduling-effect-topology.md` (scheduling spine)     | Unaffected: the spec hands engines plain `f64` vectors through `Schedule` (spec §7) and merges no output or intervention schedule generators. `ForecastPlan::required_times` is one more producer of output times through the existing seam.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `2026-09-10-camdlc-version-guard.md`                              | Unrelated.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| Open issues                                                       | gh#1062 (C3), gh#861 (T1), gh#838 (M1), gh#839 (M2), gh#624 (forecast TSV lacks supports), gh#808 (forecast mode), gh#847 and gh#844 (K6), gh#1054 (draw and seed checks), gh#277 (held-out ergonomics), gh#454 (`output at` below `t_start`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| No issue found                                                    | K1, K2, K3, K4, K5, A1, A2, A3, C1, C2, P1, T2, T3, F1, F2. To be filed on approval.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 
 ## 5. Recommended architecture and rejected alternatives
 
@@ -407,6 +410,16 @@ commit and issue.
 - (e) **K3.** Refuse `Instant + Instant`, `k · Instant`, `Duration − Instant`
   and `Instant + bare number` under an origin (a new error code). Behaviour
   change: refusals.
+- (f) **F1.** Every run that evaluates a data-backed forcing (interpolated,
+  cubic, piecewise) outside its knot range says so once, as a `RunNote` naming
+  the forcing, the knot range and the span held, as B-splines already do
+  (`spline-held-past-window`, `cli/src/obs_anchor.rs:497-560`). This applies to
+  plain `simulate` and `fit`, not only to forecasts: the hold is live today on
+  every path. _Verified (read)_ at `0ed74876d` (§2.3, F1); the June audit
+  reproduced it by running (`2026-06-09-time-interval-model.md`, defect F2: a
+  forcing whose last knot is `t = 750` held at that value over `t = 751..1100`,
+  exit 0, no message). Numbers do not change; the note is presentation. Stage
+  5's plan notes reuse it (decision D11).
 
 **Stage 1: one row reader.** Land the score-artifact proposal's `observed_rows`
 with `support` in place of `time`, and rebuild `load_observations` and
@@ -440,14 +453,28 @@ with `support` in place of `time`, and rebuild `load_observations` and
 **Stage 3: alignment at the right boundary.**
 
 - Delete the `time % dt` check in `load_observations`.
-- After `resolve_obs_alignment`, check per algorithm and measure from `t_start`:
-  - `Exact` passes off-grid supports to the engine, as if2, pfilter and pmmh
-    already support.
-  - `Snap` refuses any off-grid open or close (decision D6).
-- Record the resolved policy in `run.json`.
+- Check per algorithm, after the algorithm is known, measuring from `t_start`:
+  - if2, pfilter and pmmh step exactly to every off-grid open and close.
+  - PGAS refuses any off-grid open or close, naming the row and the nearest grid
+    times (decision D6).
+- Delete the `[config] obs_alignment` key, `ObsAlignment` and
+  `resolve_obs_alignment`. With the refusal above, the policy no longer changes
+  any number: on-grid data runs identically under either value, and off-grid
+  data is either stepped to exactly or refused, determined by the algorithm.
+  Today the key can only equal its algorithm's default or be refused
+  (`fit/methods.rs:515-551`), and nothing in `sim` reads the resolved value; it
+  is a validation gate and a run-identity input (`runid/src/inputs.rs:468`).
+  What a method can do becomes a capability of the method in the `METHODS`
+  registry (`docs/dev/capabilities-system.md`), and `run.json` records the
+  stepping the run used. Removing the key touches configuration and identity,
+  not how PGAS receives observation times; the comment at `fit/pgas.rs:712`
+  anticipating a flipped default is updated to name the capability.
 - **Behaviour changes:**
   - Off-grid data now fits under if2, pfilter and pmmh (A1).
   - PGAS refuses the A2 case instead of shifting it.
+  - A fit.toml with `obs_alignment` is refused with a message saying the key was
+    removed.
+- Re-keys: dropping the field from the fit identity rides the D8 bump.
 - Depends on Stage 1.
 
 **Stage 4: `CalendarAxis` in every artifact; render and parse round-trip.**
@@ -469,8 +496,9 @@ with `support` in place of `time`, and rebuild `load_observations` and
   - Under `one_step`, the band is computed over `Iθ` plus held-out rows. Rows
     are marked `trained / held_out / straddles / target`, and the JSON states
     both information sets (P1, P2).
-- The plan's notes cover forcing domain and future covariates (F1, F2), and
-  straddled first periods (T3).
+- The plan's notes cover future covariates (F2) and straddled first periods
+  (T3), and carry Stage 0(f)'s forcing-domain note (F1) into the predictive
+  artifact.
 - `fit predict` gains `--horizon DURATION`. The mode flag is renamed (decision
   D3).
 - **Behaviour changes:**
@@ -495,13 +523,42 @@ with `support` in place of `time`, and rebuild `load_observations` and
   for ODE.
 - Depends on Stage 5 and on the score artifact.
 
-**Stage 7: deferred to its own decision.**
+**Stage 7: calendar periods (deferred to its own decision, D7).**
 
-- A calendar-month emit schedule IR variant (`ir/VERSION` bump), lowered from
-  `date_range` allowed in `emit_schedule at` plus a regular calendar cadence.
-  This is decision D7.
-- K4 (`date()` carries `[T]`), K5 (decision D9) and K6 (fold unit literals in
-  `resolve_float_expr`).
+After Stage 0(c), a monthly flow stream can be declared only with per-row window
+columns, has no declared cadence, and is refused a forecast tail (D5). What a
+monthly row spans would then need three declarations: window columns to load it,
+an emit schedule to forecast it, and the same schedule to simulate it. One
+`covers` form states it once.
+
+- **`covers = month(time)`**, anchored models only. The row's label must be the
+  first day of a month; the support is
+  `[that day, add_calendar_months(that day,
+  1))`. A label on any other day is
+  refused at load, which is a phase check the loader cannot make today. One IR
+  variant, `Covers::Calendar { period: Month }`, serves all three uses:
+  - loading: the support is computed with calendar arithmetic;
+  - forecast targets: the stream becomes the spec's case 2 (spec §6.2), tiling
+    forward by calendar months from its last close;
+  - emission: `simulate` emits at the same calendar periods.
+- **Week forms**, `iso_week(time)` (label a Monday) and `mmwr_week(time)` (label
+  a Sunday; MMWR is the US CDC epidemiological week), are the same variant with
+  `period: IsoWeek | MmwrWeek`. They add the ingestion check that matters most
+  for weekly surveillance files: a file of Wednesday-dated rows declared as MMWR
+  weeks is refused at load. They land in the same bump if the label convention
+  (week-starting versus week-ending labels) is settled by then; if not, they
+  follow without a further IR change to the variant's shape.
+- **The calendar-month `emit_schedule`** remains, for instant streams only (a
+  monthly census): `date_range` allowed in `emit_schedule at`, and a calendar
+  cadence in `emit_schedule every` when an origin exists, lowered to calendar
+  stepping from a stated start.
+- The Rust runtime needs calendar-month stepping, mirroring the compiler's
+  `add_calendar_months` with an equivalence test
+  (`.claude/rules/calendar-time.md`, "Cross-language constants").
+- One `ir/VERSION` bump and its golden update cover the variant and the
+  schedule.
+- Also in this stage: K4 (`date()` carries `[T]`), K5 (decision D9) and K6 (fold
+  unit literals in `resolve_float_expr`).
 
 **Dependency graph.**
 
@@ -510,12 +567,12 @@ with `support` in place of `time`, and rebuild `load_observations` and
 1 ──┬── 2 ──┐
     └── 3   ├── 5 ── 6
 4 ──────────┘
-7 (independent; unblocks monthly window-column forecasts)
+7 (independent; unblocks monthly and weekly calendar-period forecasts)
 ```
 
 **What must land before a forecast score can be trusted:** Stages 1, 2, 3 and 5,
-Stage 0(a), Stage 0(c) (for monthly streams), and Stage 4's calendar metadata
-for any forecast that is published. Stage 0(b) and (e) and Stage 7 are
+Stage 0(a), Stage 0(c) (for monthly streams), Stage 0(f), and Stage 4's calendar
+metadata for any forecast that is published. Stage 0(b) and (e) and Stage 7 are
 independent improvements.
 
 ## 7. Compatibility and identity
@@ -568,22 +625,25 @@ Each change below is pinned by a new test that fails on `0ed74876d`:
 
 ### 8.3 New tests, by required property
 
-| Property                                        | Test (fixture)                                                                                                                                                                                                                                     |
-| ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Start- vs end-labeled periods                   | the same synthetic series written under `day`, `starting_on`, `ending_on` and `closing_at`, with relabeled files: identical partitions, identical held-out scores (F2)                                                                             |
-| Period straddling the boundary                  | C1 and C2 as tests: the straddling row is neither trained nor scored; `fit.meta.json` extent equals the latest trained close                                                                                                                       |
-| Multiple cadences                               | daily plus weekly (C1 fixture); targets per leaf tile from each leaf's own last close                                                                                                                                                              |
-| Irregular times                                 | window-column rows with gaps: held-out targets are exactly the observed supports; the forecast tail is refused without `emit_schedule`                                                                                                             |
-| Exact vs snapped alignment                      | F1 under if2 `exact` fits; the A2 case under PGAS is refused, naming the row; `run.json` records the policy                                                                                                                                        |
-| Calendar months and leap years                  | `date_range(2020-01-31, count = 4, calendar_months = 1)` equals `add_calendar_months` from the start; month-end window rows across 2020-02-29                                                                                                      |
-| Deterministic vs stochastic semantics           | one plan, three backends: identical target lists and identical `(open, close)` per target; no trajectory equality required. ODE predictive mean within Monte Carlo error of the chain-binomial mean at large population, as a distributional check |
-| Incidence at boundaries                         | a target `[a, b)` equals `N(b) − N(a)` from the trajectory's cumulative flow at the recorded snapshots, on each backend                                                                                                                            |
-| Continuing the observation schedule             | a `closing_at(time, 7 'days)` stream whose observed gaps are irregular (a missing week): the tail tiles by 7 days, not by the modal gap                                                                                                            |
-| Forcing data ending before the forecast horizon | an interpolated forcing ending at 100 with a forecast to 120: one note, recorded in the artifact; the numbers are unchanged                                                                                                                        |
-| Parameter vs state information sets             | a fit with `holdout_after`; `fit predict --mode one_step` marks held-out rows and records `Iθ` ≠ `Ix`; `[data.holdout]` gives the identical record                                                                                                 |
-| Membership proof                                | a score on a file with an edited training row refuses as changed data; appended rows keep the fit's identity and are scored                                                                                                                        |
-| Round-trip                                      | dated output at sub-day `dt` loads back to the identical model times (I14); simulation leaf `run.json` carries `calendar`                                                                                                                          |
-| Forecast origin validation                      | E4, E5 from the spec as tests                                                                                                                                                                                                                      |
+| Property                                         | Test (fixture)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Start- vs end-labeled periods                    | the same synthetic series written under `day`, `starting_on`, `ending_on` and `closing_at`, with relabeled files: identical partitions, identical held-out scores (F2)                                                                                                                                                                                                                                                                                                                                                                                             |
+| Period straddling the boundary                   | C1 and C2 as tests: the straddling row is neither trained nor scored; `fit.meta.json` extent equals the latest trained close                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Multiple cadences                                | daily plus weekly (C1 fixture); targets per leaf tile from each leaf's own last close                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Irregular times                                  | window-column rows with gaps: held-out targets are exactly the observed supports; the forecast tail is refused without `emit_schedule`                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Exact vs snapped alignment                       | F1 under if2 `exact` fits; the A2 case under PGAS is refused, naming the row; `run.json` records the policy                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Calendar months and leap years                   | `date_range(2020-01-31, count = 4, calendar_months = 1)` equals `add_calendar_months` from the start; month-end window rows across 2020-02-29                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| Deterministic vs stochastic semantics            | one plan, three backends: identical target lists and identical `(open, close)` per target; no trajectory equality required. ODE predictive mean within Monte Carlo error of the chain-binomial mean at large population, as a distributional check                                                                                                                                                                                                                                                                                                                 |
+| Incidence at boundaries                          | a target `[a, b)` equals `N(b) − N(a)` from the trajectory's cumulative flow at the recorded snapshots, on each backend                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Continuing the observation schedule              | a `closing_at(time, 7 'days)` stream whose observed gaps are irregular (a missing week): the tail tiles by 7 days, not by the modal gap                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Forcing data ending before the forecast horizon  | an interpolated forcing ending at 100 with a forecast to 120: one note, recorded in the artifact; the numbers are unchanged                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Parameter vs state information sets              | a fit with `holdout_after`; `fit predict --mode one_step` marks held-out rows and records `Iθ` ≠ `Ix`; `[data.holdout]` gives the identical record                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Membership proof                                 | a score on a file with an edited training row refuses as changed data; appended rows keep the fit's identity and are scored                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Round-trip                                       | dated output at sub-day `dt` loads back to the identical model times (I14); simulation leaf `run.json` carries `calendar`                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Forecast origin validation                       | E4, E5 from the spec as tests                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| Intervention on a period boundary with live flow | an intervention at `date("…")` (a day boundary), a `day(time)` incidence stream and transitions firing at non-zero rates, on chain-binomial, Gillespie and ODE: the flow of the day before the boundary is unchanged with and without the intervention, and the day it opens is affected (`docs/dates.md`, "Interventions and events are instants"). _Not verified:_ the claim that the existing cross-backend lifecycle test uses zero-rate models; the new test is needed either way, because it combines a boundary intervention with a scored incidence period |
+| Forcing past its knots                           | Stage 0(f): `simulate` and `fit` on a model whose interpolated, cubic and piecewise forcings end before `t_end` each print the note once; numbers bit-identical with and without the change                                                                                                                                                                                                                                                                                                                                                                        |
+| Removed `obs_alignment` key                      | a fit.toml carrying the key is refused with the removal message; PGAS on F1's A2 variant is refused                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 
 ### 8.4 Fixtures
 
@@ -741,7 +801,8 @@ are restated here so they survive.
 - Options:
   - (a) Refuse the forecast tail, saying how to declare a cadence.
   - (b) Keep the modal gap with a warning.
-- (a) is honest but blocks monthly forecasts until Stage 7; (b) produces T1-type
+- (a) is honest but blocks monthly forecasts until Stage 7, whose `month(time)`
+  form gives a monthly stream a declared cadence (D7); (b) produces T1-type
   wrong targets that a warning does not prevent anyone from using.
 - **Recommendation: (a).** Solid.
 
@@ -754,18 +815,32 @@ are restated here so they survive.
   declared one; the record only documents that.
 - **Recommendation: (a).** Solid. A user can choose `dt` to put the supports on
   the grid.
+- **Consequence: retire `obs_alignment` (Stage 3).** Under (a) the setting no
+  longer changes any number, so it would remain only as a run-identity input
+  that never alters a result. Delete it, record the method's capability instead,
+  and ride the D8 bump. Leaning, because a future PGAS exact-stepping path would
+  then arrive as a capability change rather than a user setting, which is the
+  more honest form for it anyway.
 
-**D7. Calendar-month emit schedules (Stage 7).**
+**D7. Calendar periods (Stage 7).**
 
-- Adding an IR schedule variant is an `ir/VERSION` bump, a golden update and a
-  small DSL relaxation:
-  - allow `date_range` in `emit_schedule at`;
-  - allow a calendar cadence in `emit_schedule every` when an origin exists,
-    lowered to calendar stepping from a stated start.
-- It unblocks monthly forecast targets.
-- **Recommendation:** do it, after Stage 5 and not before, bundled with any
-  other pending IR bump. Leaning. Monthly surveillance series are common enough
-  that refusal should not be permanent.
+- The question is how a monthly (or ISO/MMWR weekly) series states its periods
+  once Stage 0(c) refuses `closing_at(time, 1 'months)`.
+- Options:
+  - (a) Calendar `covers` forms, `month(time)` first and the week forms in the
+    same IR variant, plus the calendar-month `emit_schedule` for instant streams
+    (Stage 7 as written).
+  - (b) The calendar-month `emit_schedule` alone. Monthly flow streams keep
+    window columns to load and the schedule to forecast: two declarations of one
+    fact, and no phase check at ingestion.
+- Both are one `ir/VERSION` bump. (a) is a new DSL form, which this proposal
+  otherwise avoids; the usability gap it closes is demonstrable (a monthly
+  series cannot be forecast at all, and a mis-phased weekly file loads without
+  complaint today).
+- **Recommendation: (a), after Stage 5, bundled with any other pending IR
+  bump.** Leaning. If the week label convention is not settled, ship
+  `month(time)` and the schedule first; the week forms follow without changing
+  the variant.
 
 **D8. One hash bump.**
 
@@ -798,3 +873,22 @@ are restated here so they survive.
   - trace schema 6 becomes 7.
 - **Recommendation:** amend it in place when this proposal is accepted, rather
   than carrying a contradiction between two documents. Solid.
+
+**D11. A forcing evaluated past its knots: note or refusal.**
+
+- `2026-06-09-time-interval-model.md` §7.1 (point 5) proposed refusing a run
+  that integrates past the end of an interpolated forcing. The spec's I13
+  records it instead.
+- Options:
+  - (a) A note on every run (Stage 0(f)), carried into every predictive and
+    score artifact. Endpoint holding is a legitimate scenario assumption ("hold
+    temperature at its last observed value"), so a refusal would block
+    deliberate use and push modelers to pad their tables with invented values,
+    which hides the assumption instead of stating it.
+  - (b) A refusal, with an explicit opt-in. Safer against a forgotten table end,
+    at the cost of a new opt-in surface before any declaration exists for it.
+- **Recommendation: (a), stated as overriding the June draft's point 5.**
+  Leaning on note over error; solid that the note must appear on every run, not
+  only on forecasts. An explicit per-forcing `extrapolation = hold | error`
+  declaration remains deferred (spec §10) and would make (b) available per
+  forcing.

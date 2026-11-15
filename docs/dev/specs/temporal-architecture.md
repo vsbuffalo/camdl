@@ -149,22 +149,22 @@ another.
 means a constructor returns an error; "convention" means only a comment says so.
 No invariant in this table is left to convention.
 
-| #   | Invariant                                                                                                                                             | Owner                                               | Kind                                                    |
-| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- | ------------------------------------------------------- |
-| I1  | A calendar duration never translates an instant except via `add_calendar_*`, in every DSL position, including `covers` widths                         | OCaml `time_typing.ml`                              | static (compile error E321)                             |
-| I2  | `Instant + Instant`, `k · Instant`, `Duration − Instant` are refused; `Instant − Instant` is a Duration                                               | OCaml `time_typing.ml`                              | static (compile error)                                  |
-| I3  | `date_range(d, …, calendar_months = n)` yields `add_calendar_months(d, i·n)` for each `i`, computed from `d`                                          | OCaml expander                                      | static (by construction)                                |
-| I4  | The calendar axis (`time_unit`, `origin`) of a model is carried, unchanged, into every artifact derived from it                                       | Rust `ir::caltime::CalendarAxis`                    | dynamic (artifact constructors take it)                 |
-| I5  | A period has finite, ordered endpoints                                                                                                                | Rust `Period::new`                                  | dynamic (exists)                                        |
-| I6  | A row's support is computed only by `observed_rows` (one reader)                                                                                      | Rust `cli::fit::observed_rows`                      | static (the only producer of `ObservedRow`)             |
-| I7  | Partitions by time read supports, never labels                                                                                                        | Rust `TrainingPartition::from_cutoff`               | static (takes `&[ObservedRow]`, has no label parameter) |
-| I8  | Per leaf, a training partition is a prefix of the leaf's rows                                                                                         | Rust `TrainingPartition`                            | dynamic (constructor)                                   |
-| I9  | A held-out score scores only rows after the training extent, and the rows before it digest to the fit's recorded prefix                               | Rust `score` preflight                              | dynamic (refusal)                                       |
-| I10 | A target's support opens at or after the forecast origin, and closes at or before `s + H`                                                             | Rust `ForecastPlan::new`                            | dynamic (constructor)                                   |
-| I11 | Targets of one leaf do not overlap and are strictly increasing                                                                                        | Rust `ForecastPlan::new`                            | dynamic                                                 |
-| I12 | A target's support is the declared scientific period; a numerical approximation of it (snapping) never replaces it, and any approximation is recorded | Rust alignment check, after `resolve_obs_alignment` | dynamic (refusal or record)                             |
-| I13 | A forcing evaluated outside its data domain, or a data covariate read after the forecast origin, is reported in the run's notes and in the artifact   | Rust `ForecastPlan` validation and `RunNote`        | dynamic (record, not refusal)                           |
-| I14 | A rendered date parses back to the same model time                                                                                                    | Rust `ir::caltime` render/parse pair                | dynamic (property test)                                 |
+| #   | Invariant                                                                                                                                                                              | Owner                                                    | Kind                                                    |
+| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------- |
+| I1  | A calendar duration never translates an instant except via `add_calendar_*`, in every DSL position, including `covers` widths                                                          | OCaml `time_typing.ml`                                   | static (compile error E321)                             |
+| I2  | `Instant + Instant`, `k · Instant`, `Duration − Instant` are refused; `Instant − Instant` is a Duration                                                                                | OCaml `time_typing.ml`                                   | static (compile error)                                  |
+| I3  | `date_range(d, …, calendar_months = n)` yields `add_calendar_months(d, i·n)` for each `i`, computed from `d`                                                                           | OCaml expander                                           | static (by construction)                                |
+| I4  | The calendar axis (`time_unit`, `origin`) of a model is carried, unchanged, into every artifact derived from it                                                                        | Rust `ir::caltime::CalendarAxis`                         | dynamic (artifact constructors take it)                 |
+| I5  | A period has finite, ordered endpoints                                                                                                                                                 | Rust `Period::new`                                       | dynamic (exists)                                        |
+| I6  | A row's support is computed only by `observed_rows` (one reader)                                                                                                                       | Rust `cli::fit::observed_rows`                           | static (the only producer of `ObservedRow`)             |
+| I7  | Partitions by time read supports, never labels                                                                                                                                         | Rust `TrainingPartition::from_cutoff`                    | static (takes `&[ObservedRow]`, has no label parameter) |
+| I8  | Per leaf, a training partition is a prefix of the leaf's rows                                                                                                                          | Rust `TrainingPartition`                                 | dynamic (constructor)                                   |
+| I9  | A held-out score scores only rows after the training extent, and the rows before it digest to the fit's recorded prefix                                                                | Rust `score` preflight                                   | dynamic (refusal)                                       |
+| I10 | A target's support opens at or after the forecast origin, and closes at or before `s + H`                                                                                              | Rust `ForecastPlan::new`                                 | dynamic (constructor)                                   |
+| I11 | Targets of one leaf do not overlap and are strictly increasing                                                                                                                         | Rust `ForecastPlan::new`                                 | dynamic                                                 |
+| I12 | A target's support is the declared scientific period; a numerical approximation of it (snapping) never replaces it                                                                     | Rust alignment check, once the inference method is known | dynamic (refusal)                                       |
+| I13 | A forcing evaluated outside its data domain is reported on every run; a data covariate read after the forecast origin is reported on every forecast; both are recorded in the artifact | Rust `RunNote` (every run) and `ForecastPlan` validation | dynamic (record, not refusal)                           |
+| I14 | A rendered date parses back to the same model time                                                                                                                                     | Rust `ir::caltime` render/parse pair                     | dynamic (property test)                                 |
 
 I1–I3 are compile-time and belong to the compiler because the source-language
 semantics have one authoritative definition (§7). I4–I14 are runtime because
@@ -451,11 +451,16 @@ For each leaf, targets after `s` are, in order of preference:
 The most-common observed gap is never a target source. The forecast horizon only
 truncates: targets with `close ≤ s + H`.
 
-Calendar-month cadences are not representable in an anchored model's
-`emit_schedule` today (E322 refuses `every 1 'months`; E270 refuses `date_range`
-in `emit_schedule at [...]`). A monthly window-column leaf is therefore case 4
-until the migration's calendar-month schedule step lands (migration §6, Stage
-7). Refusing is correct in the meantime: a 30-day step is a different target.
+Calendar-month cadences are not representable in an anchored model today (E322
+refuses `every 1 'months`; E270 refuses `date_range` in
+`emit_schedule at
+[...]`; a month-wide `covers` width is refused once the
+migration's Stage 0(c) lands). A monthly window-column leaf is therefore case 4
+until the migration's calendar-period forms land (migration §6, Stage 7). With
+them, a stream declared `covers = month(time)` (or an ISO/MMWR week form) is
+case 2: its span is a calendar period, and targets tile forward by calendar
+months (or weeks) from its last close. Refusing is correct in the meantime: a
+30-day step is a different target.
 
 ### 6.3 Accumulation
 
@@ -470,35 +475,45 @@ backends' legitimate differences.
 ### 6.4 Alignment
 
 The scientific support of a target or observation is fixed by §2.2. A backend
-that can evaluate only on its step grid evaluates an approximation. The resolved
-`obs_alignment` policy (`fit/methods.rs:499-551`) governs which approximations
-are permitted, measured from `t_start`:
+that can evaluate only on its step grid evaluates an approximation. There is one
+rule, determined by what the inference method can do, measured from `t_start`:
 
-- `Exact`: the backend steps to every open and close. No approximation.
-- `Snap`: every open and close must lie on the grid `t_start + k·dt` within the
-  named grid tolerance. If one does not, the run is refused, naming the row and
-  the nearest grid times. Snapping is not used to move a support to a different
-  period (I12).
+- A method that can step exactly (if2, pfilter, pmmh) steps to every open and
+  close. No approximation.
+- A method that cannot (PGAS) requires every open and close to lie on the grid
+  `t_start + k·dt` within the named grid tolerance. If one does not, the run is
+  refused, naming the row and the nearest grid times. Snapping is never used to
+  move a support to a different period (I12).
 
-A policy-blind `time % dt` check before the policy is resolved is removed.
+This is a capability of the method, not a user setting. Under it a user-facing
+alignment policy changes no number, so the `[config] obs_alignment` key is
+removed (migration Stage 3). A policy-blind `time % dt` check before the method
+is known is removed.
 
 ### 6.5 Forcings and covariates
 
 Each forcing with a data domain (interpolated, piecewise, cubic, B-spline: the
-constant `times`/`breakpoints` in the IR) has a domain `[first, last]`. The plan
-records two notes (I13), never a refusal:
+constant `times`/`breakpoints` in the IR) has a domain `[first, last]`. Two
+notes (I13) are recorded, never a refusal:
 
-- **Held past its domain:** the run evaluates the forcing at `t > last` (or
-  `t
-  < first`), where it holds its endpoint value. Today only B-splines report
-  this (`spline-held-past-window`, `obs_anchor.rs:497-560`).
+- **Held past its domain**, on **every run** — `simulate`, `fit`, `pfilter`,
+  every predictive and scoring command — not only on forecasts: the run
+  evaluates the forcing at `t > last` (or `t < first`), where it holds its
+  endpoint value. The note is a `RunNote`, said once per forcing, naming the
+  knot range and the span held. Today only B-splines report this
+  (`spline-held-past-window`, `obs_anchor.rs:497-560`). A forecast carries the
+  same note into its artifact.
 - **Read after the forecast origin:** the forcing's domain extends past `s`, so
   the forecast reads covariate values that would not have been available at `s`
   if they are observations rather than a scenario. camdl cannot know which; the
   note names the forcing and the span, and the artifact records it, so a reader
   can tell a scenario forecast from a leaked one.
 
-An explicit per-forcing extrapolation declaration is deferred (§10).
+Endpoint holding is a legitimate scenario assumption, so it is stated rather
+than refused. This overrides the refusal proposed in
+`docs/dev/proposals/2026-06-09-time-interval-model.md` §7.1, point 5. An
+explicit per-forcing extrapolation declaration, which would make a refusal
+available per forcing, is deferred (§10).
 
 ## 7. Compiler / IR / runtime boundary
 
@@ -518,8 +533,9 @@ artifacts.
   data**, and already does: the calendar axis (`time_unit`, `origin`,
   `origin_rata_die`), each stream's `covers` (offset and span, or window
   columns), column roles, emit schedules, forcing knot times. No new IR field is
-  required for Stages 1–6. One IR addition is proposed for monthly cadences (a
-  calendar-month emit schedule), Stage 7.
+  required for Stages 1–6. One IR change is proposed for calendar periods, Stage
+  7: a calendar `covers` variant (`month(time)`, ISO and MMWR weeks) and a
+  calendar-month emit schedule for instant streams.
 - **The runtime owns everything about data, fits and forecasts**: supports,
   partitions, conditioning sets, plans, alignment, notes, artifacts. Every
   runtime temporal type is constructed at one boundary and the engines receive
@@ -587,7 +603,7 @@ principles' vocabulary needs the matching amendment (migration, decision D3).
 | Rolling-origin evaluation              | `J` forecast origins                                                     | `J` plans over `J` partitions; scores are already per lead and per origin (`ScoredLeadTime::FromOrigin`)                             |
 | Hubverse import/export                 | external quantile/sample forecasts                                       | a `Target` is the hub's (target, `target_end_date`) join key; the score artifact's 23 quantile levels are the hub's set              |
 | Explicit forcing extrapolation         | `extrapolation = hold \| error` per forcing                              | I13's notes become the default for `hold`; `error` is a new refusal                                                                  |
-| ISO/MMWR week constructors             | week phase from a standard                                               | targets tile from observed closes, so a week phase enters only through data or a future schedule variant                             |
+| ISO/MMWR week `covers` forms           | week phase from a standard, checked at load                              | planned in the migration's Stage 7 as the same IR variant as `month(time)`; a calendar span is one more case-2 target source (§6.2)  |
 | Comprehensive provenance graphs        | lineage of every artifact                                                | the score artifact's `ArtifactRef` lineage already exists                                                                            |
 
 ## 11. Worked examples
