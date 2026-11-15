@@ -463,8 +463,10 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let _overrides: HashMap<String, f64> = fixed_cli_vec.iter().cloned().collect();
     // Where each cell's chains begin, as `--starts <spec>` states it — the
     // same rule grammar and the same typed `ChainStarts` `fit run` takes
-    // (gh#889). How many chains is `--n-starts`, a count.
-    let init_method: crate::fit::starts::ChainStarts = a.starts.clone();
+    // (gh#889). How many chains is `--n-starts`, a count. Without `--starts`
+    // the rule is `fit run`'s default, decided below once the estimated set
+    // is known.
+    let declared_starts: Option<crate::fit::starts::ChainStarts> = a.starts.clone();
 
     let focal_names: Vec<String> = a.sweep.iter().map(|s| s.name.clone()).collect();
 
@@ -659,7 +661,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // parameter with no DSL default even though the user named a file
     // carrying it. See `starts_values_from_init_method`.
     let starts_values: Option<(crate::params_resolver::StartsOrigin, Vec<(String, f64)>)> =
-        starts_values_from_init_method(&init_method)
+        declared_starts.as_ref().map(starts_values_from_init_method).transpose()
+            .map(Option::flatten)
             .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
 
     // The `[estimate]` start fall-back, by the function `fit run` uses
@@ -1278,6 +1281,19 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     {
         out.say_raw(format_args!("{}", w));
     }
+
+    // The starts rule: the one `--starts` names, else the rule `fit run`
+    // defaults to, over the set each cell estimates (`from_prior` when every
+    // one has a prior to draw from, `uniform_unconstrained` otherwise). Said
+    // at startup either way, as `fit run` says it.
+    let starts_resolution = match &declared_starts {
+        Some(rule) => crate::fit::config_v2::StartsResolution::Declared(rule.clone()),
+        None => crate::fit::config_v2::default_starts(
+            &if2_params.iter().map(|p| p.name.clone()).collect::<Vec<_>>(),
+            &fit_estimate, &model),
+    };
+    let init_method: crate::fit::starts::ChainStarts = starts_resolution.rule();
+    out.say(format_args!("profile: starts: {}", starts_resolution.describe()));
 
     // Per-start init draws across non-focal estimated params (gh#42).
     // Computed once, reused at every grid cell so start_idx=k means the

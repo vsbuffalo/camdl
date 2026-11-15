@@ -1908,10 +1908,12 @@ pub struct ProfileArgs {
     /// `from_params=theta.toml`. The chains it draws span the
     /// non-focal estimated parameters' bounds, and a source binds those
     /// parameters only: a swept parameter, pinned in every cell, needs no
-    /// column or entry in it. Keyed into the run's identity. How many
-    /// chains: `--n-starts`.
-    #[arg(long, value_name = "SPEC", default_value = "uniform")]
-    pub starts: crate::fit::starts::ChainStarts,
+    /// column or entry in it. Default, as in `fit run`: `from_prior` if every
+    /// parameter a cell estimates has a prior, `uniform_unconstrained`
+    /// otherwise. Keyed into the run's identity. How many chains:
+    /// `--n-starts`.
+    #[arg(long, value_name = "SPEC")]
+    pub starts: Option<crate::fit::starts::ChainStarts>,
 
     // The `--init` family the `[stages]` -> `[method]` split removed on
     // `fit run`, and gh#889 removes here: accepted by clap so the error can
@@ -3056,19 +3058,20 @@ mod tests {
         let a = try_parse_profile(&["--starts", "from_params=truth.toml", "--n-starts", "4"])
             .expect("profile must take the sourced rule grammar");
         match &a.starts {
-            ChainStarts::Point(Point::FromParams { path }) =>
+            Some(ChainStarts::Point(Point::FromParams { path })) =>
                 assert_eq!(path.to_string_lossy(), "truth.toml"),
             other => panic!("expected the from_params rule, got {other:?}"),
         }
         assert_eq!(a.n_starts, 4, "the count moved to --n-starts");
 
         let a = try_parse_profile(&["--starts", "lhs"]).expect("a bare rule name");
-        assert_eq!(a.starts, ChainStarts::Spread(Spread::Lhs));
+        assert_eq!(a.starts, Some(ChainStarts::Spread(Spread::Lhs)));
         assert_eq!(a.n_starts, 3, "the count keeps its default");
 
-        // Unchanged default, so no run identity moves with this rename.
+        // No flag leaves the rule to `fit run`'s default, decided per profile
+        // over the estimated set (gh#1059).
         let a = try_parse_profile(&[]).expect("no flags");
-        assert_eq!(a.starts, ChainStarts::Spread(Spread::Uniform));
+        assert_eq!(a.starts, None);
     }
 
     /// The old `--starts <N>` is now a parse error, and it must name the flag

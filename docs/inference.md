@@ -1599,7 +1599,9 @@ every seed and ignored the parameter's transform.
 How chain (or per-cell) starting points are drawn. Set under `[method]` with the
 `starts` key, or overridden on the CLI with `fit run --starts <spec>`;
 `camdl profile --starts <spec>` takes the same rules for its per-cell starts,
-and `--n-starts <N>` says how many chains are drawn from them. Honoured by every
+and `--n-starts <N>` says how many chains are drawn from them. Without
+`--starts`, a profile takes the default `fit run` takes, decided over the
+parameters each cell estimates (the swept ones excluded). Honoured by every
 method: **IF2**, **PGAS**, **PMMH**, **mh**, **NLopt** (`nl-sbplx`, `nl-bobyqa`,
 `nl-lbfgs`), and **profile**.
 

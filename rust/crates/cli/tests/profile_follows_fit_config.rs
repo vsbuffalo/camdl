@@ -401,3 +401,54 @@ fn an_explicit_rw_sd_list_profiles_reproducibly() {
         assert_eq!(run, &seen[0], "the same invocation must store the same cells");
     }
 }
+
+/// The starts rule every cell's chains were drawn under, from each run.json's
+/// `init_provenance`.
+fn starts_rules(dir: &Path) -> Vec<String> {
+    fn find(v: &serde_json::Value) -> Option<String> {
+        match v {
+            serde_json::Value::Object(m) => {
+                if let Some(ip) = m.get("init_provenance") {
+                    return ip.get("method").and_then(|s| s.as_str()).map(String::from);
+                }
+                m.values().find_map(find)
+            }
+            serde_json::Value::Array(a) => a.iter().find_map(find),
+            _ => None,
+        }
+    }
+    let runs = find_all(&dir.join("results"), "run.json");
+    assert!(!runs.is_empty(), "no run.json under {}", dir.display());
+    runs.iter()
+        .map(|r| {
+            let v: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(r).unwrap()).unwrap();
+            find(&v).unwrap_or_else(|| panic!("no init_provenance in {}", r.display()))
+        })
+        .collect()
+}
+
+/// gh#1059: without `--starts` a profile draws each cell's chains by the rule
+/// `fit run` defaults to: `from_prior` when every parameter a cell estimates
+/// has a prior to draw from, `uniform_unconstrained` otherwise. The swept
+/// parameter is pinned, so its prior (or lack of one) does not count.
+#[test]
+fn the_default_starts_rule_is_the_one_fit_run_defaults_to() {
+    let with_prior = fit_toml("").replace(
+        "beta = { bounds = [0.05, 1.0], start = 0.4 }",
+        "beta = { bounds = [0.05, 1.0], start = 0.4, prior = { uniform = {} } }");
+    for (fit, rule, line) in [
+        (with_prior, "from_prior", "every estimated parameter declares a prior"),
+        (fit_toml(""), "uniform_unconstrained", "no sampleable prior on beta"),
+    ] {
+        let tmp = workdir(&fit);
+        let mut args: Vec<&str> = vec!["--fit", "fit.toml", "--sweep", "gamma=0.12,0.15",
+            "--n-starts", "2"];
+        args.extend_from_slice(&NL);
+        let o = profile(tmp.path(), &args);
+        assert_ok(&o, rule);
+        assert!(starts_rules(tmp.path()).iter().all(|r| r == rule),
+            "every cell must start under `{rule}`: {:?}", starts_rules(tmp.path()));
+        assert!(stderr(&o).contains(line), "the run must say why `{rule}`:\n{}", stderr(&o));
+    }
+}

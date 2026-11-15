@@ -1276,25 +1276,8 @@ impl Method {
         if let Some(declared) = &self.starts {
             return Ok(StartsResolution::Declared(declared.clone()));
         }
-        use super::priors_precedence::{resolve_priors_with_precedence, PriorSource};
         let names: Vec<String> = problem.estimate.keys().cloned().collect();
-        let without_prior: Vec<String> =
-            resolve_priors_with_precedence(&names, &problem.estimate, model)
-                .into_iter()
-                .filter(|r| {
-                    // A flat prior (explicit or fallen back to) has no
-                    // distribution to draw from; a hierarchical prior cannot
-                    // be sampled without its hyperparameters' values.
-                    matches!(r.source, PriorSource::FlatFallback | PriorSource::FlatExplicit)
-                        || r.prior.is_hierarchical()
-                })
-                .map(|r| r.param)
-                .collect();
-        let resolved = if without_prior.is_empty() {
-            StartsResolution::DefaultFromPrior
-        } else {
-            StartsResolution::DefaultUniformUnconstrained { without_prior }
-        };
+        let resolved = default_starts(&names, &problem.estimate, model);
         self.starts = Some(resolved.rule());
         Ok(resolved)
     }
@@ -1420,6 +1403,37 @@ impl Method {
         super::cas::serialize_minus(self, exclude).unwrap_or_else(|_| serde_json::json!({}))
     }
 
+}
+
+/// The chain-starts rule a run that names none draws under (§3.4), for the
+/// parameters `names` it estimates: `from_prior` when each one's resolved
+/// prior (`estimate` over the model's `~`) is a distribution the chains can
+/// be drawn from, `uniform_unconstrained` otherwise. `fit run`
+/// ([`Method::resolve_starts`]) and `profile` (over a cell's estimated set)
+/// both default through here.
+pub fn default_starts(
+    names: &[String],
+    estimate: &IndexMap<String, EstimateSpecV2>,
+    model: &ir::Model,
+) -> StartsResolution {
+    use super::priors_precedence::{resolve_priors_with_precedence, PriorSource};
+    let without_prior: Vec<String> =
+        resolve_priors_with_precedence(names, estimate, model)
+            .into_iter()
+            .filter(|r| {
+                // A flat prior (explicit or fallen back to) has no
+                // distribution to draw from; a hierarchical prior cannot
+                // be sampled without its hyperparameters' values.
+                matches!(r.source, PriorSource::FlatFallback | PriorSource::FlatExplicit)
+                    || r.prior.is_hierarchical()
+            })
+            .map(|r| r.param)
+            .collect();
+    if without_prior.is_empty() {
+        StartsResolution::DefaultFromPrior
+    } else {
+        StartsResolution::DefaultUniformUnconstrained { without_prior }
+    }
 }
 
 /// What [`Method::resolve_starts`] decided, and why, so the startup block can
