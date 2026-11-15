@@ -487,10 +487,12 @@ fn survey_and_profile_refuse_from_scenario_that_sets_an_estimated_parameter() {
 
 // ─── layered overrides reported at info ───────────────────────────────────────
 
-/// `--fixed N0=1000` over a fit config listing N0 in `[estimate]` pins it:
-/// one `info:` line, not a warning, and the profile runs.
+/// `--fixed N0=1000` over a fit config listing N0 in `[estimate]` is refused
+/// (parameter-roles §4.2, gh#1059): it would hold an estimated parameter the
+/// config says is estimated. The message names the fix, a copy of the config
+/// with N0 in `[fixed]`. It used to pin N0 with an info notice.
 #[test]
-fn profile_fixed_over_estimate_is_an_info_notice() {
+fn profile_fixed_over_estimate_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     setup(dir);
@@ -498,11 +500,10 @@ fn profile_fixed_over_estimate_is_an_info_notice() {
     fit_toml(dir, "pf_kick", "", &est, "");
     let out = profile(dir, "kick", "pf_kick.toml", &["--fixed", "N0=1000", "--rw-sd", "beta=0.02"]);
     let err = stderr(&out);
-    assert!(out.status.success(), "profile --fixed: {err}");
-    let line = "info: N0: `--fixed N0=1000` pins it, so it is not estimated (the fit \
-                config lists it in [estimate])";
-    assert_eq!(err.matches(line).count(), 1, "want {line:?} once; stderr:\n{err}");
-    assert!(!err.contains("warning: --fixed"), "no warning for a layered --fixed: {err}");
+    assert!(!out.status.success(), "profile --fixed over [estimate] must be refused: {err}");
+    assert!(err.contains("`--fixed N0=…` names N0") && err.contains("lists in [estimate]")
+        && err.contains("move it from [estimate] to [fixed] in a copy of the config"),
+        "the refusal names the parameter and the fix:\n{err}");
 }
 
 /// A profile's scenario that sets the focal parameter is replaced by the grid,

@@ -1777,8 +1777,8 @@ Examples:
       --sweep \"R0=lin(0.5,5,10)\" --sweep \"sigma=lin(0.1,1.0,10)\" \\
       --rw-sd auto
 
-  # Slice profile: hold gamma at 0.1, sweep tau (the canonical
-  # `--fixed NAME=VALUE` pattern — kicks gamma from [estimate])
+  # Slice profile: hold gamma at 0.1, sweep tau (`--rw-sd auto`
+  # estimates neither; with --fit, a held parameter goes in [fixed])
   camdl profile sir.camdl --data cases.tsv \\
       --sweep \"tau=lin(-35,-1,30)\" --fixed gamma=0.1 --rw-sd auto
 

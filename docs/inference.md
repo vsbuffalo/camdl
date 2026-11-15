@@ -897,11 +897,13 @@ if2, fit run, survey) were removed in the same revision. Their replacements are:
   _warm-start chain origin_ case — when the file is a starting point for
   inference, not a pin.
 
-`--fixed` (on `profile` and `survey`) and `--fixed-file` (on `profile`) also
-remove the listed parameter from the `[estimate]` set if it was there — so
-`--fixed gamma=0.1 --sweep tau=lin(-35,-1,30)` is the canonical
-slice-while-holding-gamma pattern. Each such parameter gets one `info:` line on
-stderr, so the override is never silent:
+On `profile --fit`, a `--fixed` or plain `--fixed-file` naming a parameter the
+config lists in `[estimate]` is refused (parameter-roles proposal §4.2): it
+would make every cell solve a conditional problem the config does not state. To
+slice while holding `gamma`, move `gamma` from `[estimate]` to `[fixed]` in a
+copy of the config and sweep the other parameter. `survey --fit` still accepts
+`--fixed` over `[estimate]`: the parameter is held and not sampled, with one
+`info:` line on stderr:
 ``info: gamma: `--fixed gamma=0.1` pins it, so it is not estimated (the fit config lists it in [estimate])``.
 
 `camdl fit run` takes no `--fixed`: the fit config is the record of the problem

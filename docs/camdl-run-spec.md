@@ -222,11 +222,14 @@ A fit.toml naming one parameter in both `[estimate]` and `[fixed]` is refused by
 every command that reads it (`fit run`, `profile --fit`, `survey --fit`);
 neither block wins.
 
-`[estimate]` membership is narrowed by the same walk: a parameter named by a
-user-explicit `--fixed`/`--fixed-file` is removed from the estimated set — a
-layered override, reported as one `info:` line naming the parameter, the flag
-and its value — while a draw/sweep value never kicks a parameter out of
-`[estimate]` and a scenario touching an estimated parameter is refused (above).
+`[estimate]` membership is narrowed by the same walk: on `survey --fit` a
+parameter named by a user-explicit `--fixed` is removed from the estimated set —
+a layered override, reported as one `info:` line naming the parameter, the flag
+and its value. `profile --fit` refuses a `--fixed` or plain `--fixed-file` over
+`[estimate]` instead (parameter-roles §4.2), naming the fix: the parameter in
+`[fixed]` in a copy of the config. A draw/sweep value never kicks a parameter
+out of `[estimate]`, and a scenario touching an estimated parameter is refused
+(above).
 
 **Priors** resolve on their own three-tier chain (`fit.toml [estimate.p.prior]`
 → the model IR's `~` declaration → flat). For `camdl profile` the flat tier is a
@@ -7229,8 +7232,11 @@ part of the leaf's identity, and the full objective leaves the key unchanged.
                             in the parameter's bounds (the model's, narrowed by
                             --fit [estimate]); the swept name is recorded `focal`
 --particles N               IF2 particles per cell: required for if2, refused for nl-*
---fixed NAME=VALUE          pin a parameter AND remove it from [estimate] (repeatable)
---fixed-file TOML           bulk form of the above (repeatable, later files win)
+--fixed NAME=VALUE          pin a parameter (repeatable); with --fit, a name the
+                            config lists in [estimate] is refused (move it to
+                            [fixed] in a copy of the config)
+--fixed-file TOML           bulk form of the above (repeatable, later files win;
+                            a fit artifact's [estimate] names are exempt)
 --iterations N              IF2 iterations per grid point (default 50; refused for nl-*)
 --n-starts N                independent starts per grid point (default 3)
 --starts SPEC               where each cell's starts are drawn: the rule grammar

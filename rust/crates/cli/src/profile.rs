@@ -304,6 +304,48 @@ pub(crate) fn refuse_rw_sd_list_short_of_estimate(
     ))
 }
 
+/// The swept parameter names, as `--sweep` gives them.
+fn swept_names(a: &crate::args::ProfileArgs) -> Vec<String> {
+    a.sweep.iter().map(|s| s.name.clone()).collect()
+}
+
+/// Parameter-roles §4.2: holding a parameter the fit config estimates, from
+/// the command line, turns the config's problem into a conditional one while
+/// the config, the record of the problem, still says it is estimated. A
+/// `--fixed` name (`cli`) or a key of a plain `--fixed-file` (`files`; a fit
+/// artifact carrying `[provenance]` is not passed here) that is in
+/// `[estimate]` and not swept is refused, naming the fix: the parameter in
+/// `[fixed]` in a copy of the config. A swept name has its own refusal.
+pub(crate) fn refuse_fixed_over_fit_estimate(
+    fit_estimate: &indexmap::IndexMap<String, crate::fit::config_v2::EstimateSpecV2>,
+    swept: &[String],
+    cli: &[String],
+    files: &[(std::path::PathBuf, Vec<String>)],
+    fit_path: &str,
+) -> Option<String> {
+    let held = |n: &String| fit_estimate.contains_key(n) && !swept.contains(n);
+    let mut by: Vec<String> = Vec::new();
+    for n in cli.iter().filter(|n| held(n)) {
+        by.push(format!("`--fixed {n}=…` names {n}"));
+    }
+    for (path, names) in files {
+        let mut names: Vec<&String> = names.iter().filter(|n| held(n)).collect();
+        names.sort();
+        for n in names {
+            by.push(format!("`--fixed-file {}` names {n}", path.display()));
+        }
+    }
+    if by.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{}, which the --fit config '{fit_path}' lists in [estimate]. Holding an \
+         estimated parameter would make every cell solve a conditional problem the \
+         config does not state. To hold it, move it from [estimate] to [fixed] in a \
+         copy of the config and profile that copy (parameter-roles proposal §4.2).",
+        by.join("; ")))
+}
+
 /// A profile cell's IF2 cooling schedule: the one `fit run` uses, from the
 /// same two numbers, so `--cooling c` means what `cooling = c` means in a
 /// fit — `c` reached at `--cooling-target-iters` (default 50), whatever
@@ -645,6 +687,23 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             .collect();
         if !refusals.is_empty() {
             out.fail(format!("error: {}", refusals.join("\n\nerror: ")));
+        }
+    }
+
+    // Parameter-roles §4.2: a `--fixed` or plain `--fixed-file` naming an
+    // `[estimate]` parameter of the fit config is refused, not resolved into a
+    // conditional problem the config does not state (gh#1059).
+    if let Some(fit_path) = a.fit.as_ref() {
+        let files: Vec<(std::path::PathBuf, Vec<String>)> = fixed_files_vec.iter()
+            .filter(|p| !crate::params_resolver::carries_fit_provenance(p))
+            .filter_map(|p| crate::util::load_params_toml(&p.to_string_lossy()).ok()
+                .map(|m| (p.clone(), m.into_keys().collect())))
+            .collect();
+        let cli: Vec<String> = fixed_cli_vec.iter().map(|(n, _)| n.clone()).collect();
+        if let Some(msg) = refuse_fixed_over_fit_estimate(
+            &fit_estimate, &swept_names(a), &cli, &files, &fit_path.to_string_lossy(),
+        ) {
+            out.fail(format!("error: {msg}"));
         }
     }
 

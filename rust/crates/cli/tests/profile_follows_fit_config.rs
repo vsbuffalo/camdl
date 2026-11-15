@@ -645,3 +645,37 @@ fn the_run_writes_one_table_row_per_cell() {
     }
     assert_eq!(doc["likelihood_objective"], "full");
 }
+
+/// Parameter-roles §4.2: `--fixed` (or a plain `--fixed-file`) naming a
+/// parameter the fit config lists in `[estimate]` would turn the config's
+/// problem into a conditional one while the config still says the parameter
+/// is estimated. It is refused, and the message names the fix: a copy of the
+/// config with the parameter in `[fixed]`. A `--fixed` over a `[fixed]` entry
+/// is a value tier, not a conflict, and runs.
+#[test]
+fn fixed_over_a_fit_estimate_parameter_is_refused() {
+    let fit = fit_toml("").replace(
+        "[fixed]\nN0 = 10000\nI0 = 10\nrho = 0.6\n",
+        "rho = { bounds = [0.1, 0.9], start = 0.6 }\n\n[fixed]\nN0 = 10000\nI0 = 10\n");
+    let tmp = workdir(&fit);
+    let dir = tmp.path();
+    std::fs::write(dir.join("hold.toml"), "rho = 0.5\n").unwrap();
+    let base = |extra: &[&'static str]| -> Vec<&'static str> {
+        let mut v: Vec<&str> = vec!["--fit", "fit.toml", "--sweep", "gamma=0.15",
+            "--n-starts", "1", "--starts", "single"];
+        v.extend_from_slice(&NL);
+        v.extend_from_slice(extra);
+        v
+    };
+    for (what, extra) in [
+        ("--fixed", &["--fixed", "rho=0.5"][..]),
+        ("--fixed-file", &["--fixed-file", "hold.toml"][..]),
+    ] {
+        let o = profile(dir, &base(extra));
+        assert_refused(&o, what, &["rho", "[estimate]", "[fixed]", "copy of the config"]);
+        assert!(find_all(&dir.join("results"), "mle.toml").is_empty(),
+            "{what}: a refused profile must store no cell");
+    }
+    let o = profile(dir, &base(&["--fixed", "k=12"]));
+    assert_ok(&o, "--fixed over a [fixed] entry");
+}
