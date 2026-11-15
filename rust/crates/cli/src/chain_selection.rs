@@ -59,7 +59,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use crate::chain_index::ChainIndex;
+use score::convergence::ChainIndex;
 use crate::KeyedDraw;
 
 /// Whether a [`ChainSelection`] names the chains to keep or the chains to drop.
@@ -460,7 +460,7 @@ pub struct SubsetDiagnostics {
     /// A constant / fixed param yields a non-finite R̂ and is omitted, so a `max`
     /// over this map is the max R̂ across the *estimated* params (mirrors
     /// `PosteriorDiagnostics::max_rhat`).
-    pub per_param: BTreeMap<String, crate::fit::method_result::ParamConvergence>,
+    pub per_param: BTreeMap<String, score::convergence::ParamConvergence>,
 
     /// Retained draw count (rows kept).
     pub n_samples: usize,
@@ -555,8 +555,8 @@ pub fn recompute_subset_diagnostics(
 /// parameter instead of removing it.
 fn d_to_param(
     d: &crate::fit::runner::RhatEss,
-) -> crate::fit::method_result::ParamConvergence {
-    use crate::fit::method_result::{ParamConvergence, Stat};
+) -> score::convergence::ParamConvergence {
+    use score::convergence::{ParamConvergence, Stat};
     match d.rank() {
         None => {
             let e = d.refusal().expect("an unscored param carries its refusal");

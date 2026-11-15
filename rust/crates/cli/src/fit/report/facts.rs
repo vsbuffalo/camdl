@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use score::convergence::Verdict;
 use serde::{Deserialize, Serialize};
 
 /// The run's opening block, as `fit run` prints it under `fit:`. Recorded in
@@ -193,30 +194,11 @@ pub fn obs_stream_checks(model: &ir::Model) -> Vec<Check> {
     }).collect()
 }
 
-/// The verdict on a method, decided by its R̂ alone ([`verdict`]). Serialized
-/// with the report so a consumer reads it rather than recomputing it.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Verdict {
-    Converged { max_rhat: f64, param: Option<String> },
-    NotConverged { max_rhat: f64, param: Option<String>, band: crate::fit::method_result::RhatBand },
-    /// These chains took no step after burn-in (gh#1032): not converged,
-    /// whatever any R̂ says.
-    ChainsFrozen { chains: Vec<crate::chain_index::ChainIndex> },
-    /// R̂ could not be computed for these parameters for a reason that is a
-    /// problem: not converged, with no number to show.
-    Unassessable { params: Vec<String> },
-    /// R̂ was never computable for a structural reason (too few chains, a
-    /// point start): not assessed.
-    NotAssessed { reason: String },
-    /// IF2, NLopt and pfilter: no chains to compare.
-    NotApplicable,
-}
-
 /// The verdict on `result`, from its max R̂ and the band `fit summary`
 /// glyphs it in (`RhatBand`).
 pub fn verdict(result: &crate::fit::method_result::MethodResult) -> Verdict {
-    use crate::fit::method_result::{MaxRhat, MethodResult, RhatBand};
+    use crate::fit::method_result::MethodResult;
+    use score::convergence::{MaxRhat, RhatBand};
     let diag = match result {
         MethodResult::Pgas(r) => &r.diagnostics,
         MethodResult::Pmmh(r) => &r.diagnostics,
@@ -227,7 +209,7 @@ pub fn verdict(result: &crate::fit::method_result::MethodResult) -> Verdict {
     let param = diag.per_param.iter()
         .filter_map(|(n, p)| p.rhat().finite().map(|r| (n, r)))
         .chain(diag.per_param.iter()
-            .filter(|(_, p)| matches!(p.rhat(), crate::fit::method_result::Stat::Infinite))
+            .filter(|(_, p)| matches!(p.rhat(), score::convergence::Stat::Infinite))
             .map(|(n, _)| (n, f64::INFINITY)))
         .max_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(n, _)| n.clone());
@@ -428,7 +410,7 @@ fn null_culprits(entry: &serde_json::Value) -> Vec<String> {
 #[derive(Debug, Clone, Default)]
 pub struct RefusedChains {
     /// `(chain, reason)`, in chain order.
-    pub records: Vec<(crate::chain_index::ChainIndex, String)>,
+    pub records: Vec<(score::convergence::ChainIndex, String)>,
     /// What in `diagnostics.json` could not be read ([`ReadFindings::unreadable`]),
     /// so the summary says it could not look rather than implying nothing was
     /// refused.
@@ -440,7 +422,7 @@ impl RefusedChains {
         use sim::inference::diagnostic::DiagnosticKind;
         let mut records: Vec<_> = findings.iter().filter_map(|d| match &d.kind {
             DiagnosticKind::BadInit { chain_id, reason, .. } => {
-                Some((crate::chain_index::ChainIndex(*chain_id), reason.clone()))
+                Some((score::convergence::ChainIndex(*chain_id), reason.clone()))
             }
             _ => None,
         }).collect();

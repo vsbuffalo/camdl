@@ -38,7 +38,8 @@
 //! for parameters (gh#84). One implementation, so a per-row number and a
 //! per-parameter number mean the same thing.
 
-use sim::inference::convergence::{rank_convergence, ConvergenceError};
+use sim::inference::convergence::rank_convergence;
+use score::convergence::ConvergenceError;
 
 /// R̂ and bulk-ESS of one artifact row's value across the chains that produced
 /// it.

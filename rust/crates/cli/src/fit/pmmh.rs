@@ -5,7 +5,7 @@
 //! convergence diagnostics (R̂, ESS), and a summary JSON.
 
 use crate::out::paint::Style;
-use crate::chain_index::ChainIndex;
+use score::convergence::ChainIndex;
 use crate::fit::state::FitState;
 use crate::fit::pf_noise;
 use crate::fit::report::{ChainWarmup, SamplingCost, SamplingPlan};
@@ -918,7 +918,7 @@ pub fn run_method(
         // uninformative, `fit summary` reports it as not assessed, and this
         // block says the same rather than a number the summary declines.
         let withheld = starts.rule.is_point().then(|| {
-            sim::inference::convergence::ConvergenceError::PointStart {
+            score::convergence::ConvergenceError::PointStart {
                 n_chains, starts: starts.rule.spelled(),
             }
         });

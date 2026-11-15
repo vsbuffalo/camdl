@@ -103,7 +103,7 @@ impl Starts {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RunVerdict {
     /// A sampler's R̂ verdict, from its schema-tagged `<method>_summary.json`.
-    Posterior { verdict: crate::fit::report::facts::Verdict, min_ess_bulk: Option<f64> },
+    Posterior { verdict: score::convergence::Verdict, min_ess_bulk: Option<f64> },
     /// IF2 and the optimizers: the gating verdict from `fit_state.toml`.
     Gate(String),
     /// Nothing to judge: one chain, or a method with no chains to compare.
@@ -116,7 +116,8 @@ pub enum RunVerdict {
 
 impl RunVerdict {
     pub fn of(leaf: &Leaf) -> RunVerdict {
-        use crate::fit::method_result::{GateVerdict, MethodResult};
+        use crate::fit::method_result::MethodResult;
+        use score::convergence::GateVerdict;
         if leaf.record.status != runid::RunStatus::Completed {
             return RunVerdict::NotCompleted;
         }
@@ -156,7 +157,7 @@ impl RunVerdict {
 
     /// `converged (R̂ 1.006)`, `not converged (R̂ 2.18)`, `gate pass`, `—`.
     pub fn cell(&self) -> String {
-        use crate::fit::report::facts::Verdict;
+        use score::convergence::Verdict;
         match self {
             RunVerdict::Posterior { verdict, .. } => match verdict {
                 Verdict::Converged { max_rhat, .. } => format!("converged (R̂ {})", rhat(*max_rhat)),
@@ -179,7 +180,7 @@ impl RunVerdict {
 
     /// `{kind, max_rhat, min_ess_bulk}`; `kind` is the verdict's tag.
     pub fn to_json(&self) -> Value {
-        use crate::fit::report::facts::Verdict;
+        use score::convergence::Verdict;
         match self {
             RunVerdict::Posterior { verdict, min_ess_bulk } => {
                 let max_rhat = match verdict {
@@ -291,7 +292,7 @@ pub fn outputs(leaf: &Leaf, segment: &Path) -> Vec<Output> {
 /// for per-chain files.
 fn per_chain_key(path: &str) -> String {
     match path.split_once('/') {
-        Some((first, rest)) if crate::chain_index::ChainIndex::parse_dir_name(first).is_some() => {
+        Some((first, rest)) if score::convergence::ChainIndex::parse_dir_name(first).is_some() => {
             format!("chain_{{n}}/{rest}")
         }
         _ => path.to_string(),

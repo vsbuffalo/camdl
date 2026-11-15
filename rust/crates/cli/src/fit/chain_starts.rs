@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use sim::inference::prior::{Density, Prior};
 use sim::inference::types::EstimatedParam;
 
-use crate::chain_index::ChainIndex;
+use score::convergence::ChainIndex;
 use sim::rng::StatefulRng;
 
 use crate::params_resolver::ResolvedParameters;
@@ -1144,7 +1144,7 @@ pub(crate) fn select_chain_rows(
             msg: format!("column `chain` row {} has value `{cell}`, which is not a chain id", r + 1),
         })?;
         present.insert(chain);
-        if subset.uses(crate::chain_index::ChainIndex(chain)) {
+        if subset.uses(score::convergence::ChainIndex(chain)) {
             keep.push(r);
         }
     }

@@ -18,55 +18,9 @@
 //! is named. `Display` and serde render the number itself, so a TOML or JSON
 //! consumer sees `best_chain = 2`, not a wrapper.
 
-use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use serde::{Deserialize, Serialize};
-
-/// A chain's number, counted from 0 — the same number in every artifact and
-/// message that names a chain, and the `chain` key of `draws.tsv`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ChainIndex(pub usize);
-
-/// The directory-name prefix: a chain's outputs live under `chain_<n>/`.
-const DIR_PREFIX: &str = "chain_";
-
-impl ChainIndex {
-    /// The chain numbers `0 .. n`, in order.
-    pub fn all(n: usize) -> impl Iterator<Item = ChainIndex> {
-        (0..n).map(ChainIndex)
-    }
-
-    /// `chain_<n>`: the name of the directory this chain's outputs are under.
-    pub fn dir_name(self) -> String {
-        format!("{DIR_PREFIX}{}", self.0)
-    }
-
-    /// `<method_dir>/chain_<n>`.
-    pub fn dir_in(self, method_dir: &Path) -> PathBuf {
-        method_dir.join(self.dir_name())
-    }
-
-    /// The chain whose directory is named `name`, when `name` is `chain_<n>`.
-    pub fn parse_dir_name(name: &str) -> Option<ChainIndex> {
-        name.strip_prefix(DIR_PREFIX)?.parse().ok().map(ChainIndex)
-    }
-}
-
-impl fmt::Display for ChainIndex {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Delegate so width and alignment flags (`{:>5}`) apply to the number.
-        fmt::Display::fmt(&self.0, f)
-    }
-}
-
-impl std::str::FromStr for ChainIndex {
-    type Err = std::num::ParseIntError;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        s.parse().map(ChainIndex)
-    }
-}
+use score::convergence::ChainIndex;
 
 /// Refuse a method leaf whose chain directories were written by a camdl that
 /// counted them from 1.
@@ -101,14 +55,7 @@ pub fn refuse_one_based_layout(method_dir: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn displays_the_bare_number_and_honours_width() {
-        assert_eq!(ChainIndex(0).to_string(), "0");
-        assert_eq!(ChainIndex(12).to_string(), "12");
-        assert_eq!(format!("{:>4}|", ChainIndex(7)), "   7|");
-        assert_eq!(format!("{:<3}|", ChainIndex(7)), "7  |");
-    }
+    use serde::{Deserialize, Serialize};
 
     #[test]
     fn serde_is_transparent() {
@@ -125,32 +72,6 @@ mod tests {
         assert!(toml.contains("best_chain = 1"), "{toml}");
         assert!(toml.contains("ids = [0, 1]"), "{toml}");
         assert_eq!(toml::from_str::<S>(&toml).unwrap(), s);
-    }
-
-    #[test]
-    fn directory_names_round_trip() {
-        assert_eq!(ChainIndex(0).dir_name(), "chain_0");
-        assert_eq!(ChainIndex(0).dir_in(Path::new("/leaf")), PathBuf::from("/leaf/chain_0"));
-        assert_eq!(ChainIndex::parse_dir_name("chain_10"), Some(ChainIndex(10)));
-        assert_eq!(ChainIndex::parse_dir_name("chain_"), None);
-        assert_eq!(ChainIndex::parse_dir_name("chain_x"), None);
-        assert_eq!(ChainIndex::parse_dir_name("draws.tsv"), None);
-        assert_eq!(ChainIndex::parse_dir_name("chain_starts.tsv"), None);
-    }
-
-    #[test]
-    fn parses_from_a_cli_token() {
-        assert_eq!("0".parse::<ChainIndex>().unwrap(), ChainIndex(0));
-        assert_eq!("5".parse::<ChainIndex>().unwrap(), ChainIndex(5));
-        assert!("-1".parse::<ChainIndex>().is_err());
-        assert!("x".parse::<ChainIndex>().is_err());
-    }
-
-    #[test]
-    fn all_counts_from_zero() {
-        assert_eq!(ChainIndex::all(3).collect::<Vec<_>>(),
-            vec![ChainIndex(0), ChainIndex(1), ChainIndex(2)]);
-        assert_eq!(ChainIndex::all(0).count(), 0);
     }
 
     #[test]

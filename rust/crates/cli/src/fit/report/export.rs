@@ -4,7 +4,8 @@
 
 use super::build::MethodReport;
 use crate::fit::fit_summary::FitSummaryDoc;
-use crate::fit::method_result::{MaxRhat, MethodResult, PosteriorDiagnostics};
+use crate::fit::method_result::{MethodResult, PosteriorDiagnostics};
+use score::convergence::MaxRhat;
 use crate::version;
 
 /// The max-R̂ cell for the export formats: the number, or a word saying why

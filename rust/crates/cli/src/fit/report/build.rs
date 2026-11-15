@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
-use super::{Check, ChainWarmup, MethodFacts, Verdict};
-use crate::chain_index::ChainIndex;
+use super::{Check, ChainWarmup, MethodFacts};
+use score::convergence::{ChainIndex, Verdict};
 use crate::fit::config_v2::{GateConfig, LoglikEvalConfig};
 use crate::fit::method_result::{If2Record, If2Run, MethodResult};
 use crate::version;

@@ -21,11 +21,12 @@ use indexmap::IndexMap;
 
 use crate::quantile::{band, fmt_time, fmt_value, QUANTILE_LEVELS};
 
-use crate::chain_index::ChainIndex;
+use score::convergence::ChainIndex;
 use crate::chain_selection::{warn_active_selection, ChainSelection, SubsetInfo};
 use crate::fit::failures::{DeterministicFailure, Site};
 use crate::posterior_draws;
-use crate::fit::method_result::{MaxRhat, PosteriorDiagnostics};
+use crate::fit::method_result::PosteriorDiagnostics;
+use score::convergence::MaxRhat;
 use crate::run_meta::{FitAlgorithm, ObsSchema};
 
 // ── The two axes, as types ─────────────────────────────────────────────────
@@ -907,7 +908,7 @@ fn subset_convergence(
         chain_logliks: None,
     };
     match diag.max_rhat_status() {
-        crate::fit::method_result::MaxRhat::Reported(rhat_max) => {
+        score::convergence::MaxRhat::Reported(rhat_max) => {
             Ok(ConvergenceStatus::Reported {
                 rhat_max,
                 ess_min: diag.min_ess().unwrap_or(f64::NAN),

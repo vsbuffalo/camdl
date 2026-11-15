@@ -5,7 +5,7 @@
 //! Outputs per-chain trace files, convergence diagnostics, and summary.
 
 use crate::out::paint::Style;
-use crate::chain_index::ChainIndex;
+use score::convergence::ChainIndex;
 use crate::fit::state::FitState;
 use crate::fit::loglik::LoglikType;
 use crate::fit::runner::{FitRunConfig, MethodConvergence};
@@ -1450,7 +1450,7 @@ pub fn run_method(
         // Same predicate as the read side (`method_result::point_start`): a
         // point rule, two chains or more.
         let withheld = starts.rule.is_point().then(|| {
-            sim::inference::convergence::ConvergenceError::PointStart {
+            score::convergence::ConvergenceError::PointStart {
                 n_chains, starts: starts.rule.spelled(),
             }
         });

@@ -2,7 +2,7 @@
 
 use sha2::{Sha256, Digest};
 
-use crate::chain_index::ChainIndex;
+use score::convergence::ChainIndex;
 use crate::version;
 
 // `compute_input_hash` moved to `crate::hashing::fit_input_hash`

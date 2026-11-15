@@ -375,7 +375,7 @@ pub struct LeafEntry {
     pub status: runid::RunStatus,
     /// The completed run's verdict (`methods[].verdict`); `null` for a run
     /// that did not complete or could not be read.
-    pub verdict: Option<crate::fit::report::Verdict>,
+    pub verdict: Option<score::convergence::Verdict>,
     /// The verdict, or the state, in a few words — what the text index shows.
     pub verdict_text: String,
     /// Why the run has no result: the error a failed run recorded in its
@@ -414,7 +414,7 @@ fn recorded_state(leaf: &Path) -> Option<runid::LeafState> {
 
 /// The verdict of a completed run in a few words, for the leaf index.
 fn verdict_text(report: &MethodReport) -> String {
-    use crate::fit::report::Verdict;
+    use score::convergence::Verdict;
     match &report.verdict {
         Verdict::Converged { max_rhat, .. } => format!("converged (max R̂ {max_rhat:.3})"),
         Verdict::NotConverged { max_rhat, .. } => format!("not converged (max R̂ {max_rhat:.3})"),
@@ -1160,7 +1160,7 @@ fn dump_params_only(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chain_index::ChainIndex;
+    use score::convergence::ChainIndex;
     use crate::fit::method_result::{If2Record, If2Run, PgasRun, PmmhRun};
     use crate::fit::report::RefusedChains;
     use crate::fit::report::export::{render_latex_method, render_md_method};
@@ -1169,7 +1169,7 @@ mod tests {
         bayesian_method_report, if2_method_report, if2_parameters, if2_provenance, ParameterReport,
     };
     use crate::fit::report::render::seeded_from_line as render_seeded_from_line;
-    use crate::fit::method_result::Stat;
+    use score::convergence::Stat;
 
     /// gh#663: the chain-count text for a method that refused chains. Nothing
     /// refused reads as the plain count (`None`); a refusal names the ids; a
@@ -2616,7 +2616,7 @@ mod tests {
     /// — the chains agree on where it sits and disagree on its spread — which
     /// is the distinction the `worse` column exists to carry.
     fn layout_pgas_result() -> PgasRun {
-        use crate::fit::method_result::ParamConvergence;
+        use score::convergence::ParamConvergence;
         use std::collections::BTreeMap;
         let scored = |rhat: f64, bulk: f64, folded: f64, classic: f64,
                       ess: f64, tail: f64, per_chain: Vec<f64>| {
@@ -3835,7 +3835,7 @@ mod tests {
             best_chain: ChainIndex(1),
             theta_hat: BTreeMap::new(),
             max_chain_agreement: Some(1.04),
-            gate_verdict: crate::fit::method_result::GateVerdict::Pass,
+            gate_verdict: score::convergence::GateVerdict::Pass,
             ess_at_mle: None,
             n_chains: 8,
             n_iter: 50,
