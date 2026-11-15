@@ -54,8 +54,10 @@
 #     (`timestamp`, `created_at`). They vary between two runs of the same
 #     binary.
 #   - The fit-level identity: the `fits/<stem>-<h8>` directory, `fit_id`,
-#     `fit_hash`, `baseline_hash`, the leaf's `run_id`, and the `<stem>_<h8>`
-#     row names on compare's stderr. The fit-level digest includes the
+#     `fit_hash`, `baseline_hash`, the leaf's `run_id`, the `<stem>_<h8>`
+#     row names on compare's stderr, and the six-character run id in the
+#     `@label → run <id>` line a label handle prints on stderr. The
+#     fit-level digest includes the
 #     engine version, git hash and all (fit/cas.rs, `fit_level_digest`),
 #     so every commit re-keys every fit by design and these differ between
 #     any two commits. The method and seed directory hashes do not include
@@ -170,6 +172,7 @@ normalize() {
         -e 's#"(run_id|fit_hash|baseline_hash)": "[0-9a-f]{64}"#"\1": "<HASH>"#g' \
         -e 's#"fit_id": "[0-9a-f]{8}"#"fit_id": "<FIT>"#g' \
         -e 's#^compare: ([a-z]+)_[0-9a-f]{8}:#compare: \1_<FIT>:#' \
+        -e 's#^(@[a-z]+ → run )[0-9a-f]{6} #\1<RUN> #' \
         "$1" > "$2"
 }
 
