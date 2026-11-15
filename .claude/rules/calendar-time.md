@@ -13,6 +13,9 @@ description: Calendar / time / date changes — the policy document, the unit ta
 - [`docs/camdl-language-spec.md`](../../docs/camdl-language-spec.md) §2.1 — the
   unit table.
 - `rust/crates/ir/src/caltime.rs` — the conversion code.
+- [`docs/dev/temporal-architecture.md`](../../docs/dev/temporal-architecture.md)
+  — observation periods, training membership, forecast origins, targets and
+  horizons; which layer owns each rule.
 
 Background design, **archived** (decided; read for rationale, not for pending
 work):
