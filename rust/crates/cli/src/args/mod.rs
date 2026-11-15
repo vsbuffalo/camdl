@@ -307,7 +307,8 @@ pub struct SimulateArgs {
     /// "first_obs - 1 week". Anchored forms require --fit (the fit's
     /// [data.observations] supplies the observed times; last_obs = the max
     /// observation time over the bound streams). months/years are fixed
-    /// spans (30.4375 d / 365.2425 d), not calendar arithmetic. A scenario
+    /// spans (365.2425/12 = 30.436875 d / 365.2425 d), not calendar
+    /// arithmetic. A scenario
     /// that declares its own different horizon is a hard error.
     #[arg(long, value_name = "SPEC")]
     pub to: Option<String>,
@@ -3510,5 +3511,26 @@ mod tests {
                     "--scenario", "no_sia", "--enable", "sia"];
         assert!(Cli::try_parse_from(full).is_err(),
             "--scenario + --enable must be a clap conflict");
+    }
+
+    #[test]
+    fn simulate_to_help_states_the_runtime_month_and_year_lengths() {
+        // gh#1073: `--to "last_obs + N months"` converts through
+        // `ir::caltime::days_per_unit` (`parse_time_spec`), so the help must
+        // state those lengths, not a Julian-style 30.4375-day month.
+        let mut cmd = Cli::command();
+        let help = cmd
+            .find_subcommand_mut("simulate")
+            .expect("simulate subcommand")
+            .render_long_help()
+            .to_string();
+        let month = ir::caltime::days_per_unit("months").unwrap();
+        let year = ir::caltime::days_per_unit("years").unwrap();
+        for stated in [format!("{month} d"), format!("{year} d")] {
+            assert!(help.contains(&stated),
+                "simulate --help must state the runtime span {stated:?}");
+        }
+        assert!(!help.contains("30.4375"),
+            "simulate --help still states a 30.4375-day month");
     }
 }
