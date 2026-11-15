@@ -22,7 +22,7 @@ use std::path::Path;
 use super::config_v2::GateConfig;
 use super::method_result::If2Record;
 use super::state::FitState;
-use crate::chain_index::ChainIndex;
+use score::convergence::ChainIndex;
 use score::evidence::NATS_TO_DB;
 
 /// Soft threshold: params between this and `gate.a_thresh` get a
@@ -788,7 +788,7 @@ pub fn check_source_converged(leaf: &Path, handle: &str, allow: bool) -> Result<
 /// Every numeric column of the draws TSV except `chain` and `draw` is judged
 /// with the rank-normalized split R̂ `fit summary` reports
 /// ([`sim::inference::convergence::rank_convergence`]), against
-/// [`super::method_result::RHAT_CONVERGED_THRESHOLD`]. A column constant over
+/// [`score::convergence::RHAT_CONVERGED_THRESHOLD`]. A column constant over
 /// the selected rows (a fixed parameter carried in the cloud) has nothing to
 /// agree on and is skipped. Anything else that leaves R̂ unassessable — one
 /// selected chain, too few draws — is not converged: it cannot be certified.
@@ -800,9 +800,10 @@ pub fn check_subset_converged(
     handle: &str,
     allow: bool,
 ) -> Result<(), String> {
-    use super::method_result::RHAT_CONVERGED_THRESHOLD;
+    use score::convergence::RHAT_CONVERGED_THRESHOLD;
     use super::row_convergence::{partition_by_chain, ChainOfDraw};
-    use sim::inference::convergence::{rank_convergence, ConvergenceError};
+    use sim::inference::convergence::rank_convergence;
+    use score::convergence::ConvergenceError;
     let who = format!("starts source {handle} (chains {})", subset.ids_csv());
     let (header, rows) = super::chain_starts::read_draws_tsv(file)
         .map_err(|e| format!("{who}: {e}"))?;
@@ -902,7 +903,8 @@ fn nlopt_source_verdict(state: &FitState) -> Option<String> {
 /// sampler or its R̂ was never applicable; `Err` when the record or the method
 /// result cannot be read — an unreadable verdict is not a converged one.
 fn sampler_source_verdict(leaf: &Path) -> Result<Option<String>, String> {
-    use super::method_result::{MaxRhat, MethodResult, RHAT_CONVERGED_THRESHOLD};
+    use super::method_result::MethodResult;
+    use score::convergence::{MaxRhat, RHAT_CONVERGED_THRESHOLD};
     let rec = match runid::read_leaf(leaf) {
         Ok(Some(l)) => l.record,
         Ok(None) => return Err("it holds no run.json, so its convergence cannot be checked".into()),

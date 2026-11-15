@@ -20,7 +20,7 @@ use sim::inference::deterministic::{
     optimize_det, NloptAlgorithm, OptResult, OptStatus,
 };
 
-use crate::chain_index::ChainIndex;
+use score::convergence::ChainIndex;
 use crate::fit::config_v2::{Algorithm, DtCheckConfig, GateConfig, Method, NloptConfig, Problem};
 use crate::fit::dt_check;
 use crate::fit::loglik::LoglikType;

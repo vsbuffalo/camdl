@@ -136,7 +136,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::chain_index::ChainIndex;
+use score::convergence::ChainIndex;
 
 use super::loglik::{LoglikType, TRACE_COL_COMPLETE_DATA_LL, TRACE_COL_TRANSITION_LL};
 

@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 // unchanged.
 use std::collections::BTreeMap;
 
-use crate::chain_index::ChainIndex;
+use score::convergence::ChainIndex;
 use crate::fit::config_v2::{LoglikEvalConfig, GateConfig};
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -23,7 +23,8 @@
 //!
 //! Skipped when the release binary or camdlc isn't present.
 
-use sim::inference::convergence::{rank_convergence, ConvergenceError};
+use sim::inference::convergence::rank_convergence;
+use score::convergence::ConvergenceError;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;

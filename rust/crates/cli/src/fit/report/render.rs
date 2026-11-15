@@ -11,7 +11,8 @@ use super::{ChainDetail, ChainWarmup, RefusedChains, RunHeader};
 use crate::fit::chain_diagnostics::ChainLoglikOutcome;
 use crate::fit::config_v2::GateConfig;
 use crate::fit::method_result::{If2Record, If2Run, MethodResult, NloptRun, PfilterRun};
-use crate::fit::method_result::{PosteriorDiagnostics, Stat};
+use crate::fit::method_result::PosteriorDiagnostics;
+use score::convergence::Stat;
 use crate::out::paint::{Line, Span, Style};
 
 /// The acceptance table at the end of a PMMH or `mh` run: one row per chain
@@ -273,7 +274,7 @@ fn pgas_run_blocks(detail: &ChainDetail) -> Vec<Line> {
 /// `threshold 1.05` above the tables and the `threshold 1.100` in the findings
 /// read as two bars with two jobs rather than as a contradiction.
 pub(crate) fn rhat_legend() -> Vec<Line> {
-    use crate::fit::method_result::RHAT_CONVERGED_THRESHOLD;
+    use score::convergence::RHAT_CONVERGED_THRESHOLD;
     use crate::fit::runner::RHAT_REPORT_THRESHOLD;
     use sim::inference::diagnostic::CONVERGENCE_ERROR_SEVERITY;
     vec![
@@ -303,7 +304,7 @@ fn stat_f64(s: Stat) -> f64 {
 /// shape withholds R̂ — every chain started at one point (gh#890) — the table
 /// says so and shows the ESS alone: no number, no glyph, no decomposition.
 pub(crate) fn rhat_run_table(diag: &PosteriorDiagnostics) -> Vec<Line> {
-    use crate::fit::method_result::{ParamConvergence, RhatBand, RHAT_CONVERGED_THRESHOLD};
+    use score::convergence::{ParamConvergence, RhatBand, RHAT_CONVERGED_THRESHOLD};
     use crate::fit::runner::RHAT_REPORT_THRESHOLD;
     let withheld = diag.per_param.values().find_map(|p| match p {
         ParamConvergence::Scored { rhat_withheld: Some(e), .. } => Some(e),
@@ -1007,7 +1008,7 @@ pub(crate) fn provenance_section(prov: &ProvenanceReport) -> Vec<Line> {
 /// below — the point is that a reader who stops here has not been misled,
 /// and a reader who continues knows what to look for.
 pub(crate) fn verdict_section(diag: &PosteriorDiagnostics, detail: &ChainDetail) -> Vec<Line> {
-    use crate::fit::method_result::{MaxRhat, ParamConvergence, RhatBand, RHAT_CONVERGED_THRESHOLD};
+    use score::convergence::{MaxRhat, ParamConvergence, RhatBand, RHAT_CONVERGED_THRESHOLD};
     let mut out = vec![Line::default()];
     match diag.max_rhat_status() {
         MaxRhat::Reported(v) => {
@@ -1297,7 +1298,7 @@ pub(crate) fn convergence_section(
 /// parameters that withhold it — the blank is then the diagnosis rather than
 /// a gap the reader must interpret.
 pub(crate) fn efficiency_lines(diag: &PosteriorDiagnostics) -> Vec<Line> {
-    use crate::fit::method_result::MinEss;
+    use score::convergence::MinEss;
     let mut out = Vec::new();
     match diag.min_ess_status() {
         MinEss::Reported(min_ess) => {
@@ -1371,7 +1372,7 @@ pub(crate) fn efficiency_lines(diag: &PosteriorDiagnostics) -> Vec<Line> {
 /// skipping.
 pub(crate) fn chains_section(
     n_chains_expected: usize,
-    frozen_chains: &[crate::chain_index::ChainIndex],
+    frozen_chains: &[score::convergence::ChainIndex],
     detail: &ChainDetail,
     explain_on: bool,
 ) -> Vec<Line> {

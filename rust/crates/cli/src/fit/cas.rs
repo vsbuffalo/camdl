@@ -635,10 +635,10 @@ fn fit_method_levels(ctx: &FitMethodCtx, target_length: u64) -> Result<Vec<Level
 pub fn cas_resume_dep(leaf: &Path) -> Result<Option<ArtifactRef>, String> {
     use crate::fit::resumed_chain::CARRIED_CHAIN_FILES;
     let Ok(entries) = std::fs::read_dir(leaf) else { return Ok(None) };
-    let mut chains: Vec<(crate::chain_index::ChainIndex, std::path::PathBuf)> = entries
+    let mut chains: Vec<(score::convergence::ChainIndex, std::path::PathBuf)> = entries
         .flatten()
         .filter_map(|e| {
-            let chain = crate::chain_index::ChainIndex::parse_dir_name(&e.file_name().to_string_lossy())?;
+            let chain = score::convergence::ChainIndex::parse_dir_name(&e.file_name().to_string_lossy())?;
             e.path().join("resume_state.bin").is_file().then(|| (chain, e.path()))
         })
         .collect();

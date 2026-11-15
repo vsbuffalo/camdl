@@ -40,7 +40,7 @@
 //! is preserved as the original design record but no longer
 //! reflects the implementation.
 
-use crate::chain_index::ChainIndex;
+use score::convergence::ChainIndex;
 use crate::fit::config_v2::{LoglikEvalConfig, CombineMode};
 use crate::fit::runner::{self, FitRunConfig};
 use sim::inference::if2::IF2Result;

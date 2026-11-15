@@ -18,10 +18,12 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use score::convergence::{
+    ChainIndex, ConvergenceError, GateVerdict, MaxRhat, MinEss, ParamConvergence, RhatRefusal,
+    Stat,
+};
 use serde::{Deserialize, Serialize};
-use sim::inference::convergence::{ConvergenceError, RhatDriver, RhatRefusal};
 
-use crate::chain_index::ChainIndex;
 use crate::fit::state::FitState;
 
 /// One method of a fit, typed by method. The variant carries the
@@ -137,41 +139,6 @@ impl PfilterRun {
     }
 }
 
-/// Compound convergence gate verdict (the IF2 "is this method
-/// converged" answer). String projection used in
-/// `table_row.gate_verdict`:
-///
-/// | variant   | string       |
-/// |-----------|--------------|
-/// | `Pass`    | `"pass"`     |
-/// | `FailA`   | `"fail_a"`   |
-/// | `FailDb`  | `"fail_db"`  |
-/// | `FailBoth`| `"fail_both"`|
-///
-/// Bayesian rows render `"n/a"` because the IF2 gate doesn't apply.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GateVerdict {
-    Pass,
-    FailA,
-    FailDb,
-    FailBoth,
-    /// No Â failed, but some required Â is unavailable (not finite;
-    /// within-chain variance collapsed). Not a pass: the decibans leg does not
-    /// stand in for a missing Â.
-    Incomplete,
-    /// Nothing was assessed: one chain, so there is no between-chain
-    /// agreement or spread to judge. Not a pass.
-    NotAssessed,
-}
-
-// String projection for the four variants is supplied by the
-// `serde(rename_all = "snake_case")` derive: serializing a
-// `GateVerdict` produces exactly `"pass"` / `"fail_a"` / `"fail_db"`
-// / `"fail_both"`. A separate `as_str` method would be redundant
-// with that and prone to drift; consumers call `serde_json::to_value`
-// (or destructure on the variant) instead.
-
 /// IF2-method result: point estimate + convergence diagnostics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct If2Run {
@@ -270,257 +237,6 @@ pub struct EssSummary {
     /// `chain_evaluations.tsv` convention; `None` when ESS computation
     /// failed across the board).
     pub ess_min_step: Option<usize>,
-}
-
-/// Posterior convergence + efficiency diagnostics, shared by every Bayesian
-/// sampler (PGAS, PMMH, mh). Every sampler computes these the same way
-/// — per-param rank-normalized R̂ and bulk/tail ESS via
-/// [`crate::fit::runner::compute_rhat_ess`]
-/// — and every renderer reads the same accessors below. Adding a new Bayesian
-/// method means *filling this struct*, not re-deriving efficiency metrics per
-/// method (the divergence that let a per-method allowlist drop `mh`).
-///
-/// One convergence statistic, in the three states it can actually be in.
-///
-/// Not `Option<f64>`, and not a bare `f64`. `serde_json` writes any non-finite
-/// `f64` as `null`, so `Some(f64::INFINITY)` and `None` are indistinguishable
-/// once a summary round-trips through disk — which would silently collapse
-/// "∞, the sampler never moved" into "not computed". The three states have to
-/// be named to survive serialization.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Stat {
-    /// A finite measurement.
-    Value(f64),
-    /// Mathematically `+∞`: R̂ with zero within-chain variance, i.e. every
-    /// chain sat at its own single value. A real answer, not a failure.
-    Infinite,
-    /// Not defined for this input — R's `NA`. The folded half of R̂ is
-    /// undefined whenever `|x − median(x)|` is constant, and tail-ESS is
-    /// undefined when a tail indicator is constant.
-    Undefined,
-}
-
-impl Stat {
-    /// From a raw `f64`, mapping the two non-finite cases onto their names.
-    pub fn from_f64(v: f64) -> Self {
-        if v.is_finite() {
-            Stat::Value(v)
-        } else if v.is_infinite() {
-            Stat::Infinite
-        } else {
-            Stat::Undefined
-        }
-    }
-
-    /// The finite value, if there is one. `Infinite` yields `None` — callers
-    /// that must distinguish "no number" from "unboundedly bad" match instead.
-    pub fn finite(self) -> Option<f64> {
-        match self {
-            Stat::Value(v) => Some(v),
-            _ => None,
-        }
-    }
-
-    /// Rendered for a table cell: the number, `∞`, or `missing`.
-    pub fn cell(self, precision: usize, missing: &str) -> String {
-        match self {
-            Stat::Value(v) => format!("{:.*}", precision, v),
-            Stat::Infinite => "∞".to_string(),
-            Stat::Undefined => missing.to_string(),
-        }
-    }
-}
-
-/// What the estimator produced for one parameter.
-///
-/// A sum type because the two cases have disjoint payloads: there is no R̂ to
-/// hold when the reason it is missing is the thing being reported.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum ParamConvergence {
-    /// The estimator ran. Individual statistics may still be `Infinite` or
-    /// `Undefined`; each says so for itself.
-    Scored {
-        /// `max(rank-normalized split-R̂, folded split-R̂)` — the headline.
-        rhat: Stat,
-        /// The **location** half of that max: rank-normalized split-R̂ without
-        /// the fold. `Undefined` on a fit written before this was stored.
-        #[serde(default = "undefined_stat")]
-        rhat_bulk: Stat,
-        /// The **spread** half: the same statistic on `|x − median(x)|`.
-        /// Which of the two is larger is the answer to *why* R̂ is high, and
-        /// the two remedies are different — see
-        /// `docs/dev/proposals/2026-08-22-reporting-two-rhat-estimators.md`.
-        #[serde(default = "undefined_stat")]
-        rhat_folded: Stat,
-        /// Gelman & Rubin (1992), unsplit and on the raw scale. Kept because
-        /// the rank-normalized statistic is BOUNDED (ceiling ~1.85 for two
-        /// chains, ~4.5 for eight) and so cannot express severity, while this
-        /// one can. See the 2026-08-22 proposal.
-        rhat_classic: Stat,
-        /// Rank-normalized bulk ESS.
-        ess_bulk: Stat,
-        /// Tail ESS: the smaller of the 5% and 95% indicator ESS.
-        ess_tail: Stat,
-        /// Per-chain Geyer ESS, one entry per chain, in chain order.
-        ///
-        /// Answers the follow-up question to a high R̂, which no cross-chain
-        /// statistic can: are the chains each mixing well *within their own
-        /// mode* (large and similar per-chain values — a multimodality
-        /// problem) or is one of them stuck (one small value — a starting
-        /// point or step-size problem)? Empty on a fit written before this was
-        /// stored.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        ess_per_chain: Vec<f64>,
-        /// Every chain sat at its own single value — the sampler never
-        /// accepted a move. R̂ is then `∞` or `Undefined`; this is what lets a
-        /// report say *why* rather than printing an infinity and leaving the
-        /// reader to infer the cause.
-        #[serde(default, skip_serializing_if = "core::ops::Not::not")]
-        all_chains_frozen: bool,
-        /// The R̂ was withheld for a reason that is a property of how the
-        /// chains were started — every chain at one point (proposal
-        /// 2026-09-08, §3.4) — so the four R̂ fields are `Undefined` while the
-        /// ESS fields, which the start does not invalidate the same way, are
-        /// kept. Carries the refusal with its numbers for the report.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        rhat_withheld: Option<ConvergenceError>,
-    },
-    /// The estimator could not run at all — a structural precondition, or a
-    /// non-finite draw.
-    NotScored {
-        /// The classification: is this a sampler pathology or a shape the run
-        /// was never given? [`MaxRhat`] keys on it.
-        reason: RhatRefusal,
-        /// The same refusal **with its numbers** — "R̂ needs at least 2 chains;
-        /// got 1" rather than "fewer than 2 chains". `None` when the refusal
-        /// was derived from a non-finite R̂ rather than raised by
-        /// `rank_convergence`, and on a fit written before this was stored.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        detail: Option<ConvergenceError>,
-    },
-}
-
-/// `serde` default for the two R̂ halves: a fit written before they were
-/// stored has no value, which is `Undefined`, not zero.
-fn undefined_stat() -> Stat {
-    Stat::Undefined
-}
-
-impl ParamConvergence {
-    /// The headline R̂, or `Undefined` when the parameter was never scored.
-    pub fn rhat(&self) -> Stat {
-        match self {
-            Self::Scored { rhat, .. } => *rhat,
-            Self::NotScored { .. } => Stat::Undefined,
-        }
-    }
-
-    /// Bulk ESS, or `Undefined` when the parameter was never scored.
-    pub fn ess_bulk(&self) -> Stat {
-        match self {
-            Self::Scored { ess_bulk, .. } => *ess_bulk,
-            Self::NotScored { .. } => Stat::Undefined,
-        }
-    }
-
-    /// Tail ESS, or `Undefined` when the parameter was never scored.
-    pub fn ess_tail(&self) -> Stat {
-        match self {
-            Self::Scored { ess_tail, .. } => *ess_tail,
-            Self::NotScored { .. } => Stat::Undefined,
-        }
-    }
-
-    /// The **location** half of `max(rhat_bulk, rhat_folded)`: rank-normalized
-    /// split-R̂ without the fold. `Undefined` when the parameter was never
-    /// scored, or on a fit written before the halves were stored.
-    pub fn rhat_bulk(&self) -> Stat {
-        match self {
-            Self::Scored { rhat_bulk, .. } => *rhat_bulk,
-            Self::NotScored { .. } => Stat::Undefined,
-        }
-    }
-
-    /// The **spread** half: the same statistic on `|x − median(x)|`.
-    /// `Undefined` on the same two conditions as [`rhat_bulk`](Self::rhat_bulk),
-    /// and additionally whenever `|x − median(x)|` is constant.
-    pub fn rhat_folded(&self) -> Stat {
-        match self {
-            Self::Scored { rhat_folded, .. } => *rhat_folded,
-            Self::NotScored { .. } => Stat::Undefined,
-        }
-    }
-
-    /// Gelman & Rubin (1992), unsplit and on the raw scale. Kept beside the
-    /// headline because the rank-normalized statistic is bounded and so cannot
-    /// express severity, while this one can — a large gap between them says the
-    /// disagreement lives in the tails.
-    pub fn rhat_classic(&self) -> Stat {
-        match self {
-            Self::Scored { rhat_classic, .. } => *rhat_classic,
-            Self::NotScored { .. } => Stat::Undefined,
-        }
-    }
-
-    /// Which of the two halves set the headline, as a value rather than a
-    /// sentence — the column a table shows beside both numbers. `None` when
-    /// either half is undefined, so there is no comparison to report.
-    pub fn rhat_driver(&self) -> Option<RhatDriver> {
-        let Self::Scored { rhat_bulk, rhat_folded, .. } = self else {
-            return None;
-        };
-        RhatDriver::of(rhat_bulk.finite()?, rhat_folded.finite()?)
-    }
-
-    /// Per-chain Geyer ESS, one entry per chain, in chain order.
-    ///
-    /// Empty for an unscored parameter and on a fit written before it was
-    /// stored. The spread is the point — similar large values mean each chain
-    /// mixes well inside its own mode, one small value means that chain is
-    /// stuck, and those call for different fixes.
-    pub fn ess_per_chain(&self) -> &[f64] {
-        match self {
-            Self::Scored { ess_per_chain, .. } => ess_per_chain,
-            Self::NotScored { .. } => &[],
-        }
-    }
-
-    /// One clause saying why this parameter carries no usable R̂, or `None`
-    /// when it carries one.
-    ///
-    /// When the refusal's numbers survived to disk they are what is said —
-    /// "chain 1 draw 7 is -inf; rank normalization is undefined for non-finite
-    /// draws" locates the problem, where "a draw was NaN or infinite" only
-    /// classifies it.
-    pub fn why_no_rhat(&self) -> Option<String> {
-        match self {
-            Self::Scored { rhat_withheld: Some(e), .. } => Some(e.to_string()),
-            Self::NotScored { detail: Some(e), .. } => Some(e.to_string()),
-            Self::NotScored { reason, detail: None } => Some(reason.describe().to_string()),
-            Self::Scored { all_chains_frozen: true, .. } => Some(
-                "every chain sat at its own single value — the sampler never \
-                 accepted a move".to_string(),
-            ),
-            Self::Scored { rhat: Stat::Undefined, .. } => Some(
-                "the folded half of the statistic is undefined for this \
-                 marginal".to_string(),
-            ),
-            Self::Scored { .. } => None,
-        }
-    }
-
-    /// Whether this parameter is evidence the sampler MISBEHAVED, as opposed to
-    /// simply not having been given the shape a between-chain statistic needs.
-    pub fn is_pathology(&self) -> bool {
-        match self {
-            Self::NotScored { reason, .. } => reason.is_pathology(),
-            Self::Scored { all_chains_frozen, rhat, .. } => {
-                *all_chains_frozen || matches!(rhat, Stat::Infinite)
-            }
-        }
-    }
 }
 
 /// Map fields use [`BTreeMap`] so any serialization is lexicographically
@@ -777,144 +493,6 @@ impl PosteriorDiagnostics {
     }
 }
 
-/// The R̂ below which a Bayesian fit is reported as converged — the
-/// machine-readable `converged` column and `fit summary`'s ✓/✗.
-///
-/// Named once so the gh#84 threshold decision (Vehtari et al. recommend 1.01
-/// for the rank-normalized statistic, plus ESS > 400 before R̂ is read at all)
-/// is a one-line change rather than a hunt through four call sites. Its VALUE
-/// is unchanged and deliberately not part of that review's scope.
-pub const RHAT_CONVERGED_THRESHOLD: f64 = 1.05;
-
-/// The R̂ above which a surface marks a parameter ✗ rather than ~ — "not
-/// converged" against "badly enough that the chains are somewhere else".
-/// Display only: nothing keys on it, and it draws no diagnostic of its own.
-pub const RHAT_SEVERE_THRESHOLD: f64 = 1.5;
-
-/// Where a reported R̂ sits against the bar camdl **certifies** against.
-///
-/// One band for every surface that glyphs an R̂. Two surfaces used to spell it
-/// differently — the end-of-run block against `RHAT_REPORT_THRESHOLD` (1.1,
-/// which is the bar that draws a *finding*), `fit summary` against
-/// `RHAT_CONVERGED_THRESHOLD` (1.05, the bar `converged_at` and the
-/// machine-readable `converged` column key on). A parameter in `[1.05, 1.1)`
-/// therefore printed ✓ when the fit finished and ✗ when the user ran
-/// `fit summary` on the same directory.
-///
-/// Certification and severity are separate questions and stay separate: this
-/// band answers "may this be reported as converged", and
-/// `DiagnosticKind::severity` answers "is the finding a warning or an error".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RhatBand {
-    /// Below [`RHAT_CONVERGED_THRESHOLD`]: may be reported as converged.
-    Converged,
-    /// Between the two thresholds: not converged.
-    NotConverged,
-    /// At or above [`RHAT_SEVERE_THRESHOLD`]: the chains are somewhere else.
-    Severe,
-    /// R̂ is not a finite number, so there is no band. NOT a pass — the caller
-    /// renders the reason ([`ParamConvergence::why_no_rhat`]) instead of a
-    /// glyph.
-    NotAssessed,
-}
-
-impl RhatBand {
-    /// The band an R̂ falls in.
-    ///
-    /// The two non-finite cases are NOT the same and must not share an arm.
-    /// `+∞` is a real answer and the worst one — every chain sat at its own
-    /// single value, the 0%-acceptance deadlock — so it belongs in `Severe`;
-    /// collapsing it into `NotAssessed` would render the most broken fit camdl
-    /// can produce with the same neutral dash it uses for "not applicable".
-    /// `NaN` is R's `NA`: the folded half was undefined for this marginal, so
-    /// there genuinely is no band and the caller renders the reason instead.
-    /// [`Stat::from_f64`] draws the same line.
-    pub fn of(rhat: f64) -> Self {
-        if rhat.is_nan() {
-            Self::NotAssessed
-        } else if rhat.is_infinite() {
-            Self::Severe
-        } else if rhat < RHAT_CONVERGED_THRESHOLD {
-            Self::Converged
-        } else if rhat < RHAT_SEVERE_THRESHOLD {
-            Self::NotConverged
-        } else {
-            Self::Severe
-        }
-    }
-
-    /// The plain glyph; colour is the renderer's business.
-    pub fn glyph(self) -> &'static str {
-        match self {
-            Self::Converged => "✓",
-            Self::NotConverged => "~",
-            Self::Severe => "✗",
-            Self::NotAssessed => "—",
-        }
-    }
-
-    /// The verdict in words, so a glyph never has to carry the whole meaning
-    /// on a surface a public-health decision is read off.
-    pub fn describe(self) -> &'static str {
-        match self {
-            Self::Converged => "converged",
-            Self::NotConverged => "NOT converged",
-            Self::Severe => "NOT converged — the chains are in different places",
-            Self::NotAssessed => "not assessed",
-        }
-    }
-
-    /// The glyph, never greener than a drawn finding allows.
-    ///
-    /// `drew_finding` is `R̂ > RHAT_REPORT_THRESHOLD` at the call site. The two
-    /// thresholds are independent knobs, and if the finding bar is ever set
-    /// BELOW the certification bar — gh#84's open 1.01 candidate would do
-    /// exactly that — a parameter could print green beside an error-level
-    /// finding drawn on the same number. Demoting here makes that
-    /// unrepresentable rather than a coincidence of the current constants.
-    pub fn glyph_with_finding(self, drew_finding: bool) -> &'static str {
-        match (self, drew_finding) {
-            (Self::Converged, true) => Self::NotConverged.glyph(),
-            _ => self.glyph(),
-        }
-    }
-}
-
-/// The max-over-parameters R̂, or the reason there isn't one.
-///
-/// `max_rhat` previously folded from `0.0` over a map that a refused parameter
-/// never entered, so a fit where every parameter was refused reported
-/// `max R̂ = 0.000 ✓` and `converged: true` — a fit that could not be assessed
-/// certifying itself. Reachable whenever the sampler never accepted a move
-/// (every chain internally constant ⇒ R̂ non-finite) or a draw was `−inf`
-/// (gh#607).
-///
-/// The three non-reporting arms are deliberately distinct because they call for
-/// different actions, and because collapsing them is what produced the defect:
-/// `Unassessable` means the sampler misbehaved and the fit is NOT converged;
-/// `NotApplicable` means the run was never given the shape a between-chain
-/// statistic needs, so the honest word is "not assessed"; `NoParams` means
-/// there was nothing to assess. None of them is "converged".
-#[derive(Debug, Clone, PartialEq)]
-pub enum MaxRhat {
-    /// Every assessed parameter reported, and this is the worst.
-    Reported(f64),
-    /// These chains took no step after burn-in (gh#1032): not converged,
-    /// whatever any R̂ says. Ascending.
-    ChainsFrozen { chains: Vec<ChainIndex> },
-    /// At least one parameter's R̂ could not be computed for a reason that
-    /// indicates a PROBLEM, or is unavailable with no reason recorded (a
-    /// `null` in the stored summary, a refusal this build cannot read).
-    /// `params` names them (ascending).
-    Unassessable { params: Vec<String> },
-    /// R̂ was never computable for a structural reason — too few chains, too
-    /// few draws, unequal chain lengths. Report "not assessed".
-    NotApplicable { reason: RhatRefusal },
-    /// No parameter was assessed and no reason was recorded.
-    NoParams,
-}
-
 /// `chain 2 took no step after burn-in` / `chains 0 and 1 took no step after
 /// burn-in`: the clause every surface states a [`MaxRhat::ChainsFrozen`]
 /// verdict with.
@@ -925,49 +503,6 @@ pub fn frozen_chains_clause(chains: &[ChainIndex]) -> String {
         [init @ .., last] => format!("chains {} and {last} took no step after burn-in", init.join(", ")),
         [] => "no chain took a step after burn-in".to_string(),
     }
-}
-
-/// The min-over-parameters ESS, or the reason there isn't one.
-///
-/// Bulk ESS is the rank-normalized cross-chain statistic of Vehtari et al.
-/// (2021). It is never suppressed by R̂: it uses the between-chain variance
-/// rather than summing per-chain estimates, so it does not overstate the
-/// effective N when chains sit in different modes, and there is nothing to
-/// gate. (The previous `ess_total` — a sum of per-chain Geyer estimates set to
-/// NaN above R̂ 1.1 — was removed in gh#299 precisely because it reported
-/// nothing exactly when a fit most needed a number.)
-///
-/// A parameter can still carry no bulk ESS: `rank_convergence` refused its
-/// draws, or the rank-transformed draws are constant so the autocorrelation is
-/// undefined. Those parameters reach [`PosteriorDiagnostics`] in one of two
-/// encodings: **absent** on the loaded path (a NaN serializes to JSON `null`,
-/// which `read_f64_map` drops) or **NaN-valued** on the `--exclude-chains`
-/// recompute path (`chain_selection::recompute_subset_diagnostics`).
-///
-/// Either way, a minimum taken over the parameters that *did* report is a
-/// minimum over a subset — and it RISES as a fit gets worse, because the
-/// badly-mixing parameters leave the map and the well-mixing survivors set the
-/// minimum. Measured (gh#687), two runs of one model differing only in particle
-/// count: N=1200 gave max R̂ 2.639, min-param ESS 559, ESS/iter 0.013; N=4800
-/// gave max R̂ 1.455, min-param ESS 73, ESS/iter 0.001. The better fit's
-/// efficiency headline was 13x worse, purely because it converged four more
-/// parameters into the map. So the minimum is reported only when every
-/// parameter that could carry a pooled ESS carries one, and the blank is
-/// rendered with the names of the ones that do not.
-#[derive(Debug, Clone, PartialEq)]
-pub enum MinEss {
-    /// Every assessed parameter reports a pooled ESS; this is the slowest.
-    Reported(f64),
-    /// At least one assessed parameter has no pooled ESS. `missing` names them
-    /// (ascending); `n_expected` is how many parameters were assessed, so a
-    /// renderer can say "k of n".
-    Unreportable {
-        missing: Vec<String>,
-        n_expected: usize,
-    },
-    /// No parameter was assessed across chains at all — nothing to minimize
-    /// over (an empty diagnostics record, or a single-chain fit).
-    NoParams,
 }
 
 /// PGAS-method result: posterior approximation. Convergence + efficiency
@@ -1980,6 +1515,7 @@ mod tests {
 
     use super::*;
     use crate::fit::config_v2::{LoglikEvalConfig, GateConfig};
+    use score::convergence::RHAT_CONVERGED_THRESHOLD;
 
     struct TempDir(PathBuf);
     impl TempDir {
@@ -2748,41 +2284,6 @@ mod tests {
         }
     }
 
-    /// `Infinite` and `Undefined` are different answers and must stay
-    /// different **through serialization**.
-    ///
-    /// This is why `Stat` is a three-arm enum rather than `Option<f64>`:
-    /// `serde_json` writes any non-finite `f64` as `null`, so `Some(INFINITY)`
-    /// and `None` are the same bytes on disk. Collapsing them would turn "∞ —
-    /// the sampler never moved" into "not computed" the moment a summary
-    /// round-trips, which is the loudest signal camdl has silently becoming
-    /// the quietest.
-    #[test]
-    fn infinite_and_undefined_are_distinct_through_a_json_round_trip() {
-        assert_eq!(Stat::from_f64(f64::INFINITY), Stat::Infinite);
-        assert_eq!(Stat::from_f64(f64::NEG_INFINITY), Stat::Infinite);
-        assert_eq!(Stat::from_f64(f64::NAN), Stat::Undefined);
-        assert_eq!(Stat::from_f64(1.03), Stat::Value(1.03));
-        assert_ne!(Stat::Infinite, Stat::Undefined);
-
-        for original in [Stat::Value(1.03), Stat::Infinite, Stat::Undefined] {
-            let json = serde_json::to_string(&original).expect("serialize");
-            let back: Stat = serde_json::from_str(&json).expect("deserialize");
-            assert_eq!(back, original, "round-trip must preserve the arm: {json}");
-        }
-        // The specific collapse the enum exists to prevent.
-        assert_ne!(
-            serde_json::to_string(&Stat::Infinite).unwrap(),
-            serde_json::to_string(&Stat::Undefined).unwrap(),
-            "the two must not serialize to the same bytes"
-        );
-
-        // And they render differently.
-        assert_eq!(Stat::Infinite.cell(3, "—"), "∞");
-        assert_eq!(Stat::Undefined.cell(3, "—"), "—");
-        assert_eq!(Stat::Value(1.0295).cell(3, "—"), "1.030");
-    }
-
     /// The per-chain ESS must survive the round trip through
     /// `*_summary.json` to the surface. It was written by every sampler and
     /// read by nothing, so the follow-up question to a high R̂ — is each chain
@@ -2898,67 +2399,6 @@ mod tests {
         // The healthy parameter is untouched and still readable.
         assert_eq!(d.rhat_cell("beta", "—"), "1.010");
         assert_eq!(d.rhat_cell("frozen", "—"), "∞", "∞ is shown, not hidden");
-    }
-
-    /// Every non-reporting state carries a reason a reader can act on. A blank
-    /// cell with no explanation is what sent people to `diagnostics.json`.
-    #[test]
-    fn every_non_reporting_state_explains_itself() {
-        let frozen = ParamConvergence::Scored {
-            rhat: Stat::Infinite,
-            rhat_bulk: Stat::Infinite, rhat_folded: Stat::Undefined,
-            rhat_classic: Stat::Infinite,
-            ess_bulk: Stat::Value(3.0), ess_tail: Stat::Undefined,
-            ess_per_chain: Vec::new(), all_chains_frozen: true, rhat_withheld: None,
-        };
-        assert!(frozen.why_no_rhat().expect("frozen explains itself").contains("never accepted"));
-        assert!(frozen.is_pathology());
-
-        let undefined_fold = ParamConvergence::Scored {
-            rhat: Stat::Undefined,
-            rhat_bulk: Stat::Value(1.02), rhat_folded: Stat::Undefined,
-            rhat_classic: Stat::Value(1.02),
-            ess_bulk: Stat::Value(500.0), ess_tail: Stat::Value(400.0),
-            ess_per_chain: Vec::new(), all_chains_frozen: false, rhat_withheld: None,
-        };
-        assert!(undefined_fold.why_no_rhat().expect("an undefined R̂ explains itself")
-            .contains("folded"));
-
-        let not_scored =
-            ParamConvergence::NotScored { reason: RhatRefusal::NonFiniteDraw, detail: None };
-        let why = not_scored.why_no_rhat().expect("a refusal explains itself");
-        assert!(why.contains("NaN") || why.contains("infinite"), "got {why}");
-        assert!(not_scored.is_pathology(), "a non-finite draw is a pathology");
-
-        // Structural: not a pathology, but still not "converged".
-        let too_few =
-            ParamConvergence::NotScored { reason: RhatRefusal::TooFewChains, detail: None };
-        assert!(!too_few.is_pathology(), "being given one chain is not a sampler failure");
-        assert!(too_few.why_no_rhat().is_some(), "but it still says so");
-
-        // An infinite R̂ is a pathology on its own, whether or not the
-        // frozen-chains flag was set: R̂ = ∞ means the within-chain variance is
-        // zero, and there is no benign way for that to happen.
-        let inf_only = ParamConvergence::Scored {
-            rhat: Stat::Infinite,
-            rhat_bulk: Stat::Infinite, rhat_folded: Stat::Undefined,
-            rhat_classic: Stat::Infinite,
-            ess_bulk: Stat::Value(4.0), ess_tail: Stat::Undefined,
-            ess_per_chain: Vec::new(), all_chains_frozen: false, rhat_withheld: None,
-        };
-        assert!(inf_only.is_pathology(),
-            "R̂ = ∞ is a pathology by itself, not only when the flag agrees");
-
-        // A healthy parameter has nothing to explain.
-        let ok = ParamConvergence::Scored {
-            rhat: Stat::Value(1.01),
-            rhat_bulk: Stat::Value(1.01), rhat_folded: Stat::Value(1.00),
-            rhat_classic: Stat::Value(1.00),
-            ess_bulk: Stat::Value(900.0), ess_tail: Stat::Value(850.0),
-            ess_per_chain: Vec::new(), all_chains_frozen: false, rhat_withheld: None,
-        };
-        assert_eq!(ok.why_no_rhat(), None);
-        assert!(!ok.is_pathology());
     }
 
     /// A structural refusal is "not assessed", which is NOT "converged" — the
@@ -3117,25 +2557,5 @@ mod tests {
         assert!(d.min_ess().is_none());
         assert!(d.ess_per_iter().is_none(), "no samples → None, no divide-by-zero");
         assert!(d.ess_per_sec().is_none());
-    }
-
-    /// The proposal pins `gate_verdict` strings to `pass` / `fail_a`
-    /// / `fail_db` / `fail_both` (proposal §2). `serde_json` is the
-    /// projection — assert the rendered scalar matches exactly so a
-    /// future `rename_all` change to the enum doesn't silently shift
-    /// the wire format.
-    #[test]
-    fn gate_verdict_serializes_to_proposal_strings() {
-        for (variant, expected) in [
-            (GateVerdict::Pass, "pass"),
-            (GateVerdict::FailA, "fail_a"),
-            (GateVerdict::FailDb, "fail_db"),
-            (GateVerdict::FailBoth, "fail_both"),
-            (GateVerdict::Incomplete, "incomplete"),
-            (GateVerdict::NotAssessed, "not_assessed"),
-        ] {
-            let s = serde_json::to_value(variant).unwrap();
-            assert_eq!(s, serde_json::Value::String(expected.into()));
-        }
     }
 }

@@ -45,7 +45,7 @@ use std::path::{Path, PathBuf};
 
 use indexmap::{IndexMap, IndexSet};
 
-use crate::chain_index::ChainIndex;
+use score::convergence::ChainIndex;
 use ir::contrast::{Contrast, ContrastExpr, RunNamespace};
 use ir::expr::{BinOp, Expr, UnOp};
 use ir::intervention::{Intervention, InterventionSchedule};

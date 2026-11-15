@@ -52,11 +52,12 @@
 
 use io::trajectories::{PosteriorDraw, TrajColumnSpec};
 use sim::inference::convergence::{
-    rank_convergence, ConvergenceError, RankConvergence, DEGENERATE_REL_TOL,
+    rank_convergence, RankConvergence, DEGENERATE_REL_TOL,
     MIN_DRAWS_FOR_INFORMATIVE_ESS,
 };
+use score::convergence::ConvergenceError;
 use super::report::render::display_width;
-use crate::chain_index::ChainIndex;
+use score::convergence::ChainIndex;
 use sim::inference::pgas::{PositionBins, RENEWAL_BINS};
 use sim::state::Flows;
 use std::path::Path;

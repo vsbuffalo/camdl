@@ -13,7 +13,7 @@
 
 use std::path::Path;
 
-use crate::chain_index::ChainIndex;
+use score::convergence::ChainIndex;
 
 /// The per-chain files a resumed leaf copies from its parent before the new
 /// segment runs. `resume_state.bin` is the chain state the sampler continues

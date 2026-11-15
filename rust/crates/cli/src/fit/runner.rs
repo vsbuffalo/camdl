@@ -5,7 +5,7 @@
 //! chain-agreement (Â) computation, and MAD-based auto rw_sd calibration.
 
 use crate::out::paint::Style;
-use crate::chain_index::ChainIndex;
+use score::convergence::ChainIndex;
 use crate::fit::loglik_eval;
 use crate::params_resolver::resolved_bounds;
 use sim::{
@@ -3066,7 +3066,8 @@ pub struct MethodConvergence {
 }
 
 use std::collections::BTreeMap;
-use sim::inference::convergence::{ConvergenceError, RankConvergence, RhatRefusal};
+use sim::inference::convergence::RankConvergence;
+use score::convergence::{ConvergenceError, RhatRefusal};
 
 /// The `*_summary.json` key holding the chains that took no step after
 /// burn-in, written by [`MethodConvergence::summary_fields`] and read by
@@ -3242,7 +3243,7 @@ impl MethodConvergence {
     pub fn rhat_findings(
         &self,
         rhat_threshold: f64,
-        withheld: Option<&sim::inference::convergence::ConvergenceError>,
+        withheld: Option<&score::convergence::ConvergenceError>,
     ) -> Vec<sim::inference::diagnostic::DiagnosticKind> {
         if withheld.is_some() {
             return Vec::new();
@@ -5813,7 +5814,7 @@ dt = 1.0
     /// precondition it was.
     #[test]
     fn rhat_ess_refuses_by_name_when_too_few_samples() {
-        use sim::inference::convergence::ConvergenceError;
+        use score::convergence::ConvergenceError;
         let chain_a: Vec<f64> = vec![1.0, 1.1, 1.05];
         let chain_b: Vec<f64> = vec![1.0, 1.2, 1.10];
         let d = compute_rhat_ess(&[chain_a, chain_b]);
@@ -5825,7 +5826,7 @@ dt = 1.0
 
     #[test]
     fn rhat_ess_refuses_by_name_for_a_single_chain() {
-        use sim::inference::convergence::ConvergenceError;
+        use score::convergence::ConvergenceError;
         // R-hat needs >= 2 chains.
         let chain: Vec<f64> = (0..200).map(|i| 1.0 + 0.01 * i as f64).collect();
         let d = compute_rhat_ess(&[chain]);
@@ -5862,8 +5863,8 @@ dt = 1.0
         // A finding bar below the certification bar is the case where the
         // two could disagree: the glyph must then follow the finding.
         assert_eq!(
-            crate::fit::method_result::RhatBand::Converged.glyph_with_finding(true),
-            crate::fit::method_result::RhatBand::NotConverged.glyph(),
+            score::convergence::RhatBand::Converged.glyph_with_finding(true),
+            score::convergence::RhatBand::NotConverged.glyph(),
             "a parameter that draws a finding must not print green");
     }
 
@@ -5929,7 +5930,7 @@ dt = 1.0
     /// `Inf` for this shape (the folded half is only constant at two chains).
     #[test]
     fn a_frozen_parameter_glyphs_as_the_worst_band_not_as_a_blank() {
-        use crate::fit::method_result::RhatBand;
+        use score::convergence::RhatBand;
 
         let frozen: Vec<Vec<f64>> = vec![
             vec![0.239349270; 30],
@@ -5973,9 +5974,8 @@ dt = 1.0
     /// verdict read back from the summary is not converged, whatever the R̂.
     #[test]
     fn a_frozen_chain_is_not_converged_even_when_its_rhat_passes() {
-        use crate::fit::method_result::{
-            ConvergenceMaps, MaxRhat, PosteriorDiagnostics, RHAT_CONVERGED_THRESHOLD,
-        };
+        use crate::fit::method_result::{ConvergenceMaps, PosteriorDiagnostics};
+        use score::convergence::{MaxRhat, RHAT_CONVERGED_THRESHOLD};
         let mut chains = eight_moving_chains();
         let mut pooled: Vec<f64> = chains.iter().flatten().copied().collect();
         pooled.sort_by(f64::total_cmp);
@@ -6027,7 +6027,7 @@ dt = 1.0
     /// one answer.
     #[test]
     fn the_method_report_glyphs_rhat_against_the_bar_camdl_certifies_against() {
-        use crate::fit::method_result::{RhatBand, RHAT_CONVERGED_THRESHOLD};
+        use score::convergence::{RhatBand, RHAT_CONVERGED_THRESHOLD};
 
         let chains = offset_chains(0.09);
         let d = compute_rhat_ess(&chains);
@@ -6089,7 +6089,7 @@ dt = 1.0
     /// so the fix cannot be read as "print less".
     #[test]
     fn a_point_started_run_reports_rhat_as_not_assessed_and_keeps_the_ess() {
-        use sim::inference::convergence::ConvergenceError;
+        use score::convergence::ConvergenceError;
 
         let chains = offset_chains(0.09);
         let conv = MethodConvergence::compute(&chain_ids(&chains), [("beta".to_string(), chains)]);

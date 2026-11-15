@@ -10,6 +10,7 @@
 //! Design: `docs/dev/proposals/2026-11-14-scoring-report-library.md`.
 
 pub mod combine;
+pub mod convergence;
 pub mod evidence;
 pub mod num;
 pub mod trace;

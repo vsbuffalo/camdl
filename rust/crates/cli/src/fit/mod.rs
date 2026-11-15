@@ -1656,7 +1656,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // existing `chain_N/` directory (gh#912, gh#990). PFilter has
         // replicates, not competing chains, so it legitimately leaves this
         // None.
-        let mut method_best_chain: Option<crate::chain_index::ChainIndex> = None;
+        let mut method_best_chain: Option<score::convergence::ChainIndex> = None;
 
         // gh#278, gh#900: the method's liveness/progress heartbeat. A background
         // thread writes `progress.json` into the method dir on a fixed
@@ -3118,7 +3118,7 @@ fn say_label_moved(
     if let crate::fit::run_view::RunVerdict::Posterior { verdict, .. } =
         crate::fit::run_view::RunVerdict::of(prev)
     {
-        use crate::fit::report::facts::Verdict;
+        use score::convergence::Verdict;
         if let Verdict::Converged { max_rhat, .. } | Verdict::NotConverged { max_rhat, .. } = verdict {
             if max_rhat.is_finite() {
                 what.push(format!("max R̂ {max_rhat:.2}"));

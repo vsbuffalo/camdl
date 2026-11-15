@@ -43,7 +43,7 @@
 use serde::{Deserialize, Serialize};
 use sim::inference::diagnostic::DiagnosticKind;
 
-use crate::chain_index::ChainIndex;
+use score::convergence::ChainIndex;
 use sim::inference::pgas::WeightCollapse;
 use std::path::Path;
 

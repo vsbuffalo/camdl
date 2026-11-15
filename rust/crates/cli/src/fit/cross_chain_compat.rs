@@ -64,7 +64,7 @@ use serde::{Deserialize, Serialize};
 
 use sim::compiled_model::CompiledModel;
 use sim::error::SimError;
-use crate::chain_index::ChainIndex;
+use score::convergence::ChainIndex;
 use sim::inference::multi_stream_obs::MultiStreamObsModel;
 use sim::inference::particle_filter::Observation;
 use sim::inference::pgas::{complete_data_loglik, ObsAtSubstep, PGASTrajectory};

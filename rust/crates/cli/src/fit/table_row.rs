@@ -20,9 +20,10 @@ use crate::fit::config_diff::ConfigDiff;
 use crate::fit::fit_tree::{self, MethodNode};
 use crate::fit::fit_view::FitView;
 use crate::fit::method_result::{
-    EssSummary, GateVerdict, If2Run, MethodResult, MethodResultError,
+    EssSummary, If2Run, MethodResult, MethodResultError,
     PgasRun, PmmhRun,
 };
+use score::convergence::GateVerdict;
 
 /// Schema discriminator. Field additions are non-breaking under a
 /// version; a rename or a change of meaning bumps it, and pre-1.0 the old
@@ -390,7 +391,7 @@ impl MethodView {
         let d = &r.diagnostics;
         Self {
             converged: d.converged_at(
-                crate::fit::method_result::RHAT_CONVERGED_THRESHOLD),
+                score::convergence::RHAT_CONVERGED_THRESHOLD),
             gate_verdict: "n/a".into(),
             best_loglik: None,
             max_chain_agreement: None,
@@ -408,7 +409,7 @@ impl MethodView {
         let d = &r.diagnostics;
         Self {
             converged: d.converged_at(
-                crate::fit::method_result::RHAT_CONVERGED_THRESHOLD),
+                score::convergence::RHAT_CONVERGED_THRESHOLD),
             gate_verdict: "n/a".into(),
             best_loglik: Some(r.map_loglik),
             max_chain_agreement: None,

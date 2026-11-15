@@ -32,7 +32,8 @@
 //! | `two_chains_short`   | the smallest accepted input; the `max_t == 0` branch |
 //! | `all_constant`       | the degenerate-variance refusal                      |
 
-use sim::inference::convergence::{rank_convergence, ConvergenceError};
+use sim::inference::convergence::rank_convergence;
+use score::convergence::ConvergenceError;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
