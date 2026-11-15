@@ -512,9 +512,10 @@ A weekly row is scored over the seven days ending at its instant. Under the
 loader's current behaviour that means a row labelled `2026-07-08` is scored
 against 1–7 July — it contains nothing from the 8th.
 
-Worse, the grid's **phase** is set by `origin`, not by a weekday. With
-`origin = date("2026-07-01")`, a Wednesday, every weekly row falls on a
-Wednesday:
+Worse, the grid's **phase**, the weekday its rows fall on, is not set by any
+calendar rule. A generated grid counts its steps from the start of the
+simulation, `simulate { from }`. With `origin = date("2026-07-01")`, a
+Wednesday, and `from = origin`, every weekly row falls on a Wednesday:
 
 ```
 t   date        cases
@@ -522,13 +523,34 @@ t   date        cases
 14  2026-07-15  6998
 ```
 
+Keep the same `origin` but start the simulation two days earlier, on Monday 29
+June (`from = date("2026-06-29")`, which is `t = -2`), and every weekly row
+falls on a Monday instead:
+
+```
+t   date
+5   2026-07-06
+12  2026-07-13
+19  2026-07-20
+```
+
+`origin` played no part in that shift. It only names the calendar date of
+`t = 0`, and it moves nothing in time: changing it relabels every instant with a
+different date, but leaves each row exactly where it was relative to the start
+of the simulation. The grid counts from `from` because a simulation's first
+observation counts from its own start: the first weekly row closes the first
+seven simulated days, whatever date `t = 0` happens to carry.
+
 An ISO week always ends on a Sunday and an MMWR week on a Saturday.
 
 The remedy differs by where the boundaries come from, and conflating the two is
 a trap:
 
-- **Generated boundaries** — a numeric cadence, or `--emit-every` — take their
-  weekday from `origin`, so choosing `origin` does set the phase.
+- **Generated boundaries** — a numeric cadence (`emit_schedule = every 7 'days`)
+  or `--emit-every` — count from `simulate { from }`, so `from` sets the phase:
+  a seven-day grid falls on the weekday of `from`. To end each generated week on
+  a Saturday, start the simulation on a Sunday; each row is then dated the
+  Sunday that follows its week. Choosing `origin` does not set the phase.
 - **Explicitly dated observations** — a file carrying `2026-07-08`, `2026-07-15`
   — already fix their own boundaries. `origin` changes only their numeric
   coordinates, never the periods between them, so it cannot repair a phase or
@@ -540,9 +562,9 @@ stream. Do not match a camdl weekly row to an ISO or MMWR week by its date
 alone.
 
 Named week constructors (`iso_week(2026, 28)`, `mmwr_week(2026, 28)`) would fix
-a week's phase from the standard rather than from `origin`. They do not exist;
-`ending_on` states what a week-ending row spans, but its phase still comes from
-the labels in the file.
+a week's phase from the standard rather than from the start of the simulation.
+They do not exist; `ending_on` states what a week-ending row spans, but its
+phase still comes from the labels in the file.
 
 ## Interventions and events are instants
 
