@@ -2619,7 +2619,7 @@ fn derive_prequential(
                 seg_slug, n_theta, derive.particles));
         }
         let scored = derive_ode_trace(resolved, &model_path, &streams, &fitted,
-            holdout.as_ref(), &thetas, derive, &base_enable, &base_disable);
+            score_from, &thetas, derive, &base_enable, &base_disable);
         for p in &merged_paths { let _ = std::fs::remove_file(p); }
         replicate_traces.push(scored?);
     } else if is_mixture || derive.replicates >= 2 {
@@ -2748,27 +2748,27 @@ fn derive_prequential(
 ///
 /// Every draw is scored with the same observation-sample seed and the same
 /// window, so components differ only in θ, as the filter path's do. A held-out
-/// fit is scored past its sealed boundary by the index rule `camdl pfilter
-/// --score-from` applies ([`crate::fit::runner::first_scored_index`]); the
-/// caller verifies and stamps the window as for any derived trace.
+/// fit is scored past `score_from`, the scoring-axis boundary the filter path
+/// passes to `camdl pfilter --score-from` ([`heldout_scoring_boundary`],
+/// gh#1062), by the index rule `--score-from` applies
+/// ([`crate::fit::runner::first_scored_index`]), and the trace records that
+/// boundary as the filter's does; the caller verifies and stamps the window
+/// as for any derived trace.
 #[allow(clippy::too_many_arguments)]
 fn derive_ode_trace(
     resolved: &ResolvedFit,
     model_path: &Path,
     streams: &indexmap::IndexMap<String, String>,
     fitted: &crate::fit::fitted_model::FittedSimulator,
-    holdout: Option<&SealedHoldout>,
+    score_from: Option<f64>,
     thetas: &[ScoredTheta],
     derive: DeriveSettings,
     enabled: &[String],
     disabled: &[String],
 ) -> Result<PrequentialTrace, String> {
     let scorer = crate::compare_ode::OdeScorer::build(resolved, model_path, streams, fitted)?;
-    let (t0, score_from) = match holdout {
-        Some(h) => (crate::fit::runner::first_scored_index(scorer.obs_times(), h.train_end),
-                    Some(h.train_end)),
-        None => (0, None),
-    };
+    let t0 = score_from
+        .map_or(0, |t| crate::fit::runner::first_scored_index(scorer.obs_times(), t));
     let n = thetas.len();
     let mut components = Vec::with_capacity(n);
     for (i, theta) in thetas.iter().enumerate() {
@@ -2780,7 +2780,7 @@ fn derive_ode_trace(
                 } else {
                     "the point estimate".to_string()
                 };
-                let horizon = if holdout.is_some() {
+                let horizon = if score_from.is_some() {
                     "\n  A held-out score integrates the ODE through the held-out \
                      observations, so the model's horizon (`simulate { to }`) and \
                      output schedule must reach them."

@@ -14,7 +14,10 @@
 //! reads which rows `compare` scored: the scored times come from
 //! `compare --pointwise`, and the observed value at each scored time from a
 //! full-series `camdl pfilter --save-prequential` of the same data (the
-//! observed value at a step is the data, independent of θ).
+//! observed value at a step is the data, independent of θ). Most fits run
+//! IF2 on the chain-binomial backend, so `compare` derives their trace with
+//! `camdl pfilter`; the `ode_` tests run MH on the `ode` backend, whose trace
+//! `compare` scores in-process (gh#312).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -59,6 +62,17 @@ enum Form {
     /// `[data.holdout]`: a training file (labels 1..=10) and a holdout file
     /// (labels 11..=16).
     HoldoutFiles,
+}
+
+/// How a fit is run: the particle-filter path (`compare` derives its trace
+/// with `camdl pfilter`) or the ODE path (`compare` scores it in-process by
+/// the fit's own ODE likelihood, gh#312).
+#[derive(Clone, Copy, PartialEq)]
+enum Backend {
+    /// IF2 on the chain-binomial backend.
+    Filter,
+    /// MH on the `ode` backend.
+    Ode,
 }
 
 /// The `covers` value that stands for per-row window columns
@@ -132,7 +146,8 @@ fn rows_tsv(stream: &Stream, labels: std::ops::RangeInclusive<u64>) -> String {
     s
 }
 
-fn fit_toml(streams: &[Stream], form: Form, rho: f64, output_dir: &str) -> String {
+fn fit_toml(streams: &[Stream], form: Form, backend: Backend, rho: f64, output_dir: &str)
+    -> String {
     let mut data = String::new();
     if form == Form::HoldoutAfter {
         data.push_str(&format!("[data]\nholdout_after = {TAU}.0\n\n"));
@@ -150,6 +165,12 @@ fn fit_toml(streams: &[Stream], form: Form, rho: f64, output_dir: &str) -> Strin
             data.push_str(&format!("{0} = \"{0}_holdout.tsv\"\n", s.name));
         }
     }
+    let method = match backend {
+        Backend::Filter => "algorithm = \"if2\"\nbackend = \"chain_binomial\"\nchains = 2\n\
+                            particles = 100\niterations = 5\ncooling = 0.7\n",
+        Backend::Ode => "algorithm = \"mh\"\nbackend = \"ode\"\nchains = 1\n\
+                         iterations = 200\nburn_in = 50\nstarts = \"single\"\n",
+    };
     format!(r#"output_dir = "{output_dir}"
 
 [model]
@@ -167,13 +188,7 @@ rho = {rho}
 k   = 10.0
 
 [method]
-algorithm = "if2"
-backend = "chain_binomial"
-chains = 2
-particles = 100
-iterations = 5
-cooling = 0.7
-"#)
+{method}"#)
 }
 
 fn camdl(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
@@ -197,7 +212,7 @@ struct Scored {
 
 /// Fit two configs (differing only in a fixed `rho`) under `form`, compare
 /// them held-out, and read back what the first one scored.
-fn heldout_scored(slug: &str, streams: &[Stream], form: Form) -> Scored {
+fn heldout_scored(slug: &str, streams: &[Stream], form: Form, backend: Backend) -> Scored {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::Builder::new().prefix(&format!("camdl_gh1062_{slug}_")).tempdir().unwrap();
     let dir = tmp.path();
@@ -209,8 +224,10 @@ fn heldout_scored(slug: &str, streams: &[Stream], form: Form) -> Scored {
         std::fs::write(dir.join(format!("{}_holdout.tsv", s.name)),
             rows_tsv(s, TAU + 1..=16)).unwrap();
     }
-    std::fs::write(dir.join("a.toml"), fit_toml(streams, form, 0.5, "results_a")).unwrap();
-    std::fs::write(dir.join("b.toml"), fit_toml(streams, form, 0.6, "results_b")).unwrap();
+    std::fs::write(dir.join("a.toml"), fit_toml(streams, form, backend, 0.5, "results_a"))
+        .unwrap();
+    std::fs::write(dir.join("b.toml"), fit_toml(streams, form, backend, 0.6, "results_b"))
+        .unwrap();
     for cfg in ["a.toml", "b.toml"] {
         camdl(&bin, dir, &["fit", "run", cfg, "--seed", "1"]);
     }
@@ -273,8 +290,15 @@ fn heldout_scored(slug: &str, streams: &[Stream], form: Form) -> Scored {
 /// The one-stream assertions: exactly the withheld rows are scored, starting
 /// at the first one, and the last training row is not among them.
 fn assert_scores_only_the_withheld_rows(covers: &'static str, form: Form, slug: &str) {
+    assert_backend_scores_only_the_withheld_rows(covers, form, Backend::Filter, slug);
+}
+
+/// [`assert_scores_only_the_withheld_rows`] for fits run on `backend`.
+fn assert_backend_scores_only_the_withheld_rows(
+    covers: &'static str, form: Form, backend: Backend, slug: &str,
+) {
     let streams = [Stream { name: "cases", covers, flow: "infection", values: &CASES }];
-    let got = heldout_scored(slug, &streams, form);
+    let got = heldout_scored(slug, &streams, form, backend);
     let scored = &got.values["cases"];
     let withheld: Vec<u64> = CASES[TAU as usize..].to_vec();
     assert_eq!(got.t_score, withheld.len() as u64,
@@ -339,7 +363,7 @@ fn two_streams_score_no_training_row_of_either() {
         Stream { name: "deaths", covers: "closing_at(time, 1 'days)", flow: "recovery",
                  values: &DEATHS },
     ];
-    let got = heldout_scored("two", &streams, Form::HoldoutAfter);
+    let got = heldout_scored("two", &streams, Form::HoldoutAfter, Backend::Filter);
     for (name, values) in [("cases", &CASES), ("deaths", &DEATHS)] {
         let scored = &got.values[name];
         for training in &values[..TAU as usize] {
@@ -351,4 +375,23 @@ fn two_streams_score_no_training_row_of_either() {
         "cases scores its six withheld rows");
     assert_eq!(got.values["deaths"], DEATHS[TAU as usize + 1..].to_vec(),
         "deaths scores its withheld rows after the first, which closes at the boundary");
+}
+
+/// The ODE path (gh#312) cuts on the same scoring-axis boundary: two ODE+MH
+/// fits of a `day(time)` stream are compared on the withheld rows labelled
+/// 11 to 16, and not on the training row labelled 10, which closes at
+/// t = 11.
+#[test]
+fn ode_day_holdout_after_scores_only_withheld_rows() {
+    assert_backend_scores_only_the_withheld_rows("day(time)", Form::HoldoutAfter, Backend::Ode,
+        "ode_day");
+}
+
+/// Control for the ODE path: a `closing_at` row is scored at its label, so
+/// the boundary is the last training label and the scored rows are the
+/// withheld ones, before and after gh#1062.
+#[test]
+fn ode_closing_at_holdout_after_scores_only_withheld_rows() {
+    assert_backend_scores_only_the_withheld_rows("closing_at(time, 1 'days)",
+        Form::HoldoutAfter, Backend::Ode, "ode_closing");
 }
