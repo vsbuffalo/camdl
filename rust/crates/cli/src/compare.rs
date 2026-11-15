@@ -676,22 +676,8 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
     let leaves = resolve_selection(&names, &rows).unwrap_or_else(|e| {
         out.fail(format!("error: {e}"));
     });
-    let mut refusals: Vec<String> = Vec::new();
-    let tables: Vec<Table> = leaves.iter().filter_map(|leaf| {
-        let projected: Vec<Row> = rows.iter().map(|r| r.onto(leaf))
-            .collect::<Result<_, _>>()
-            .unwrap_or_else(|e| refuse(&out, for_stream(leaf, format!("error: {e}"))));
-        match prepare_table(&out, projected, &waivers, baseline.as_deref()) {
-            Ok(t) => Some(t),
-            Err(e) => {
-                refusals.extend(e.into_iter().map(|m| for_stream(leaf, m)));
-                None
-            }
-        }
-    }).collect();
-    if !refusals.is_empty() {
-        refuse(&out, refusals.join("\n"));
-    }
+    let tables = stream_tables(&out, &rows, &leaves, &waivers, baseline.as_deref())
+        .unwrap_or_else(|e| refuse(&out, e.join("\n")));
     if let Some(path) = &a.pointwise {
         match write_pointwise_streams(&tables, &leaves, path) {
             Ok((sp, ns)) => out.say(format_args!(
@@ -762,6 +748,36 @@ fn prepare_table(
                 rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()));
         });
     Ok(Table { rows, base_idx, checks })
+}
+
+/// One checked table per leaf, every row re-scored on that leaf alone, or
+/// `Err` with every table's refusals, each naming its leaf, in leaf order. A
+/// row that cannot be projected onto a leaf is that leaf's refusal.
+fn stream_tables(
+    out: &crate::out::Out,
+    rows: &[Row],
+    leaves: &[String],
+    waivers: &Waivers,
+    baseline: Option<&str>,
+) -> Result<Vec<Table>, Vec<String>> {
+    let mut refusals: Vec<String> = Vec::new();
+    let tables: Vec<Table> = leaves.iter().filter_map(|leaf| {
+        let projected: Vec<Row> = match rows.iter().map(|r| r.onto(leaf)).collect() {
+            Ok(p) => p,
+            Err(e) => {
+                refusals.push(for_stream(leaf, format!("error: {e}")));
+                return None;
+            }
+        };
+        match prepare_table(out, projected, waivers, baseline) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                refusals.extend(e.into_iter().map(|m| for_stream(leaf, m)));
+                None
+            }
+        }
+    }).collect();
+    if refusals.is_empty() { Ok(tables) } else { Err(refusals) }
 }
 
 /// A refusal of one `--streams` table, naming the stream it was for.
@@ -6308,6 +6324,31 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         let refusal = outcome_of(&on_cases, &Waivers::default()).unwrap_err();
         assert!(refusal.contains("'a' records no hash") && refusal.contains("'b' records no hash"),
             "{refusal}");
+    }
+
+    /// Under `--streams`, a row that cannot be projected onto a later leaf is
+    /// one more refusal: the refusals of the earlier leaves' tables are
+    /// printed with it, each naming its stream.
+    #[test]
+    fn an_unprojectable_row_is_refused_with_the_other_tables_refusals() {
+        let mut full = derived_row("full", &CASES_DEATHS, &["cases", "deaths"]);
+        let mut cases_only = derived_row("cases_only", &CASES_DEATHS, &["cases"]);
+        full.data = digests(&[("cases", "aaaaaaaa")]);
+        cases_only.data = digests(&[("cases", "bbbbbbbb")]);
+        let leaves = ["cases".to_string(), "deaths".to_string()];
+        let refusals = match stream_tables(&crate::out::Out::new(false), &[full, cases_only],
+                &leaves, &Waivers::default(), None) {
+            Err(e) => e,
+            Ok(_) => panic!("refused"),
+        };
+        let at = |needle: &str| refusals.iter().position(|m| m.contains(needle))
+            .unwrap_or_else(|| panic!("{needle:?} in {refusals:#?}"));
+        let data = at("different observed data");
+        assert!(refusals[data].starts_with("error: stream 'cases': "), "{refusals:#?}");
+        let unprojectable = at("'cases_only': ");
+        assert!(refusals[unprojectable].starts_with("error: stream 'deaths': ")
+                && refusals[unprojectable].contains("'deaths'"), "{refusals:#?}");
+        assert!(data < unprojectable, "in leaf order: {refusals:#?}");
     }
 
     /// The stream-ablation experiment scored in-sample is biased by
