@@ -2069,7 +2069,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             out.say(format_args!(
                 "warning: profile grid point {} (start {}) produced a non-finite \
                  log-likelihood ({}); its `best_loglik` is recorded as null and the \
-                 point will be MISSING from the profile curve. This is usually a \
+                 start counts as not completed in the profile table (a cell with no \
+                 completed start is a row of NaN). This is usually a \
                  particle filter too small to score a θ this far from the optimum — \
                  re-run with more `--particles`.",
                 grid_idx, start_idx, final_loglik,
@@ -2205,9 +2206,11 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
 
     bar.finish();
 
+    let n_cells = grid_points.len();
     let n_leaves = resolved_jobs.len();
     out.say(format_args!(
-        "profile: {} start{} stored under {}",
+        "profile: {} cell{} written ({} start{}) under {}",
+        n_cells, if n_cells == 1 { "" } else { "s" },
         n_leaves, if n_leaves == 1 { "" } else { "s" },
         root.join("profiles").display()));
 
@@ -2258,8 +2261,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             std::fs::write(path, rendered).unwrap_or_else(|e| {
                 out.fail(format!("error: cannot write --output {path}: {e}"));
             });
-            out.say(format_args!("profile: {} cell{} written to {path}",
-                table.rows.len(), if table.rows.len() == 1 { "" } else { "s" }));
+            out.say(format_args!("profile: table written to {path}"));
         }
         None => out.data_raw(rendered),
     }

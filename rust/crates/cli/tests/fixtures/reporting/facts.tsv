@@ -359,11 +359,14 @@ profile	stderr	line	profile: no --data flags supplied	reading bindings from --fi
 profile	stderr	line	profile: using observation model	'cases' from IR
 profile	stderr	line	profile:	3 grid (beta=3) × 2 starts × 1 seeds = 6 IF2 runs
 profile	stderr	line	profile: IF2 per cell	100 particles × 3 iterations
-profile	stderr	line	warning: profile grid point 1 (start 1)	produced a non-finite log-likelihood (-inf)
-profile	stderr	line	warning: profile grid point 0 (start 0)	the point will be MISSING from the profile curve
-profile	stderr	line	profile:	6 cells written under results/profiles
+profile	stderr	line	profile: starts:	from_prior (one independent draw per chain) — default: every estimated parameter declares a prior
+profile	stderr	line	warning: profile grid point 0 (start 1)	produced a non-finite log-likelihood (-inf)
+profile	stderr	line	warning: profile grid point 0 (start 1)	the start counts as not completed in the profile table
+profile	stderr	line	profile:	3 cells written (6 starts) under results/profiles
+profile	stdout	line	loglik_spread_starts	starts_n_completed
 profile.cached	stderr	line	profile:	6 of 6 starts already cached — resuming
-profile.cached	stderr	line	profile:	6 cells written under results/profiles
+profile.cached	stderr	line	profile:	3 cells written (6 starts) under results/profiles
+profile.cached	stdout	line	loglik_spread_starts	starts_n_completed
 profile.refused	stderr	line	error:	--particles is required for an if2 profile
 survey	stderr	line	survey: --eval auto	resolved to 'simulate' (model does not have stochastic process noise)
 survey	stderr	line	note: --n-points 8	below the rule-of-thumb coverage floor of n_points/d^2 >= 50 (d=2, recommended >= 200)
