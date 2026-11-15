@@ -331,8 +331,10 @@ pub enum ConditioningMode {
 pub struct SourceDigests {
     pub source: String,
     pub file: DataFile,
-    /// The compared prefix of each member's hash, or `None` where the member
-    /// does not bind the source.
+    /// The members grouped by recorded hash, or under `None` where a member
+    /// does not bind the source. A short hash that is the prefix of one
+    /// group's hash is in that group; one that is the prefix of several is
+    /// its own group, on its own value.
     pub groups: Groups<Option<String>>,
 }
 
