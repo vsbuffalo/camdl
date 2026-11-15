@@ -1,5 +1,11 @@
 # The conditioning boundary: a covariate-informed burn-in
 
+**Superseded (2026-11-15).** `condition_from` was removed in `4b11b19d5`
+(gh#833): an incidence stream's `covers` declaration now says where each period
+opens, and `fit/config_v2.rs` refuses the key. The warm-up mechanics it
+described live on in the reset-only union boundary of
+`2026-09-05-observation-time-as-a-sum-type.md`. Retained for history only.
+
 - **Status:** Active. A fit often has covariate history (births, SIA/MCV
   campaigns, seasonal forcing) for a span _before_ the first case datum. A
   modeler should be able to run the model through that span so the boundary

@@ -1,5 +1,12 @@
 # Implementation plan: phases and gates for the time + observation system
 
+**Superseded (2026-11-15).** Of the three specs this runbook sequences, the
+spine landed, the observation-system proposal was superseded, and the interval
+model is superseded by `docs/dev/temporal-architecture.md`. The runbook agents
+now follow is
+`docs/dev/proposals/2026-11-15-temporal-architecture-migration.md`. Retained for
+history only.
+
 - **Status:** The single runbook coding agents work from to land the time +
   observation redesign. The
   [overview](2026-06-09-time-and-observation-overview.md) is the **what** (the

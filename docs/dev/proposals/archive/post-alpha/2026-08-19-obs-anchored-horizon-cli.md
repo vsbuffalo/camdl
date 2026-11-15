@@ -1,5 +1,9 @@
 # Obs-anchored horizons on the simulate CLI: `--to "last_obs + 8 weeks"`
 
+**Implemented** in `ce25c3e0c` (gh#626, closed). The meaning of `last_obs` is
+refined by D40 in `docs/dev/temporal-architecture.md` (the latest end of an
+observed period).
+
 Status: proposed (revised after 3-agent adversarial review) Issue: gh#626 Scope:
 Rust CLI only — no DSL, no IR change, no `ir/VERSION` bump.
 

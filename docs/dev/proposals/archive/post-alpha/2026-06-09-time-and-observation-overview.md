@@ -1,5 +1,12 @@
 # Time, observations, and the run: a system overview
 
+**Superseded (2026-11-15).** The stack it maps is closed: the observation-system
+proposal was superseded by `2026-06-10-observation-data-entry-dsl.md`, the
+interval model by `docs/dev/temporal-architecture.md`, and the spine landed
+(`docs/dev/scheduling-spine.md`). The entry point for time, observation periods,
+training membership and forecasting is now `docs/dev/temporal-architecture.md`.
+Retained for history only.
+
 - **Status:** Overview / reader's map. This is the entry point to a
   three-proposal stack; it explains _how time and observations are meant to
   work_ end-to-end and marks clearly what **exists in code today** vs what is

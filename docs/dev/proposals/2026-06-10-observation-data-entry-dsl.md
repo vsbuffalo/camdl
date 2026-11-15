@@ -1,10 +1,10 @@
 ---
 date: 2026-06-10
 status: implemented — Stage 1-2 + §4.2 stratified long-form (IR 0.14)
-supersedes: 2026-06-06-observation-system.md
+supersedes: docs/dev/proposals/archive/post-alpha/2026-06-06-observation-system.md
 related:
   - 2026-06-10-multi-stream-multi-cadence-union-axis.md # the inference-side companion (proposal B)
-  - 2026-06-09-burnin-conditioning-window.md # condition_from rides this binding
+  - docs/dev/proposals/archive/post-alpha/2026-06-09-burnin-conditioning-window.md # condition_from rides this binding
 area: observation data entry / DSL surface / binding
 issue: gh#171 (sparse/irregular obs), gh#98 (date-parse equivalence), gh#172
 ---
@@ -730,6 +730,7 @@ semantics). Both bump `ir/VERSION`.
   form: `parser.mly:463`. Forcing `_col` convention: `spec:1093`. Two-eval-path
   / gh#6: `obs_model.rs`, `multi_stream_obs.rs:708/730`. Spine seam:
   `schedule.rs:187`, `pgas.rs build_substep_grid`. gh#98 cross-language pin.
-- Superseded: `2026-06-06-observation-system.md` (carried forward:
-  bind-not-join, `Option` holes, the NaN guard, the positional-fallback removal
-  — extended here).
+- Superseded:
+  `docs/dev/proposals/archive/post-alpha/2026-06-06-observation-system.md`
+  (carried forward: bind-not-join, `Option` holes, the NaN guard, the
+  positional-fallback removal — extended here).

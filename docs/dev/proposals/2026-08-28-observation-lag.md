@@ -108,10 +108,10 @@ silently drop an observation when two round to the same substep.
 
 **Warm-up already has a mechanism.** `condition_from` runs the dynamics without
 scoring so the first scored bin is properly filled
-(`2026-06-09-burnin-conditioning-window.md`, shipped at `588a40e`), and
-`first_window_guard` (`cli/src/util.rs`) is gated on temporal kind — a hard
-error for interval streams, a soft warning for instant ones, suppressed when
-`condition_from` is set.
+(`docs/dev/proposals/archive/post-alpha/2026-06-09-burnin-conditioning-window.md`,
+shipped at `588a40e`), and `first_window_guard` (`cli/src/util.rs`) is gated on
+temporal kind — a hard error for interval streams, a soft warning for instant
+ones, suppressed when `condition_from` is set.
 
 **Backends.** For fitting, the supported pairs are chain-binomial × {IF2, PGAS,
 PMMH, particle filter} and ODE × {NLopt Sbplx, and the gradient methods}

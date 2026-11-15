@@ -1,5 +1,9 @@
 # DSL observation anchors: `last_obs` (± offset) in `to`, `breakpoints`, `value_at`
 
+**Implemented** in `4c076b860` and `99435da72` (gh#616, closed; `ir/VERSION`
+0.32). The meaning of `last_obs` is refined by D40 in
+`docs/dev/temporal-architecture.md`.
+
 Status: proposed (revised after a 3-agent adversarial review; the first draft's
 placeholder and run-identity claims were refuted and are replaced) Issue: gh#616
 (the DSL half of F15; gh#626 shipped the CLI half) Scope: OCaml expander + IR
