@@ -68,10 +68,14 @@ recorded in `fit.meta.json`, and `camdl compare` scores such fits held-out by
 default (`--in-sample` opts out). For a fit that predates the split being
 applied, score the **full** series with
 `camdl pfilter --save-prequential --score-from <time>`, summing the `log_score`
-of the `{STEM}.tsv` rows (the joint score per step) past the split time —
-scoring the held-out file on its own starts the filter from the prior with
-nothing assimilated from the training window, which is a different (and unfairly
-harsh) quantity. The recipe is spelled out under "Out-of-sample validation" in
+of the `{STEM}.tsv` rows (the joint score per step), with `<time>` the split
+time. For a stream labelled by the start of its period (`covers = day(time)`,
+`starting_on`, `ending_on`) the last training row is scored at its period's
+close, after the split time, so pass that close as `<time>` instead; `compare`
+draws this boundary itself. Scoring the full series matters: scoring the
+held-out file on its own starts the filter from the prior with nothing
+assimilated from the training window, which is a different (and unfairly harsh)
+quantity. The recipe is spelled out under "Out-of-sample validation" in
 `camdl docs inference`.
 
 `camdl profile --fit` applies the holdout as `fit run` does, through the same
