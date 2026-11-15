@@ -150,10 +150,15 @@ because they legitimately differ:
 - the **state set**: the rows the latent state at the forecast origin was
   conditioned on, by a filter or by sampled paths.
 
-Under D35 the parameters are fitted once, and the state may then be conditioned
-on newer rows up to each forecast date without a refit, so the state set can
-extend past the parameter set. For a free-running projection from the start of
-the run, the state set is empty.
+In this migration the state set is the training rows: the forecast origin is the
+training extent, and the latent state is conditioned on exactly the rows the
+parameters were fitted to (D57). Conditioning the state on newer rows without a
+refit, which D35 allows and rolling forecast dates need, is deferred (Part 7);
+the two sets are still recorded separately so that it can be added without
+changing any type. For a free-running projection from the start of the run, the
+state set is empty, though its parameters are still posterior draws fitted to
+the training rows: it is conditioned on the data through the parameters, not an
+unconditional distribution.
 
 What the state set means depends on the backend:
 
@@ -169,7 +174,8 @@ What the state set means depends on the backend:
   posterior parameter draw. PGAS's stored sampled paths are not used: a path is
   a draw given all of the fit's data, so it is a valid state at the origin only
   when the origin is the end of that data. For an earlier origin, later data
-  shaped it; for a later origin (D35), the newer rows still need filtering.
+  shaped it; a later origin needs the newer rows filtered, which is deferred
+  (D57).
 - **ODE:** given the parameters the state is fully determined, so conditioning
   on observations after fitting changes nothing; the data reach an ODE forecast
   only through the parameters. The state set is empty for every ODE forecast.
@@ -178,6 +184,10 @@ What the state set means depends on the backend:
   forecast dates does. Comparing the two is fair, since the difference is the
   model's, and the artifact says which kind each forecast is.
 - **Gillespie:** no forecast path exists; a forecast on this backend is refused.
+- **Single-estimate fits** (IF2 on chain-binomial; the NLopt optimizers on ODE)
+  are refused for forecasting in this migration (D51); the full method ×
+  forecast matrix, each cell supported or refused with a test, is listed in the
+  migration plan's Stage 5.
 
 ### 2.5 Forecast origin, targets, horizon and lead time
 
@@ -197,11 +207,13 @@ Four quantities describe a target, and they are kept separate:
 - the **target interval**, the stream and the period (or instant) predicted;
 - the **lead time**, the duration from the forecast origin to the end of the
   target interval;
-- the **horizon**, an integer: the number of the stream's own periods between
-  the period that contains the forecast origin (horizon 0) and the target's
-  period. A stream's unit is the width its `covers` line declares, so a weekly
-  stream counts weeks and a daily stream counts days, with no separate setting,
-  and the rule is the same for every stream.
+- the **horizon**, an integer: the position of the target among its stream's
+  targets, counting the first target that ends after the forecast origin as
+  horizon 0. For a stream whose periods tile, this is the number of the stream's
+  own periods between the period containing the origin and the target's period;
+  the same rule also covers instant streams and window columns with gaps. A
+  stream's unit is its declared width or schedule, so a weekly stream counts
+  weeks and a daily stream counts days, with no separate setting.
 
 Forecast hubs count horizons the same way in structure: in the CDC COVID-19 hub
 and FluSight, `target_end_date = reference_date + horizon × 7 days`, with the
@@ -241,15 +253,18 @@ horizon 0.
 
 ### 2.6 Three independent axes of a prediction
 
-| Axis                                        | Values                                                                                                                                                                                                                               | Recorded as                                                       |
-| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------- |
-| **Mode**: what the prediction conditions on | in-sample (parameters fitted to the predicted rows); one step ahead (parameters exclude the predicted row; state filtered through every earlier row); fixed origin (state conditioned up to the forecast origin, free-running after) | the plan's `mode`                                                 |
-| **Parameter uncertainty**                   | one plug-in point, or a mixture over posterior draws                                                                                                                                                                                 | the trace's `Provenance` (exists)                                 |
-| **Numerical method**                        | particle filter, ODE skeleton plus observation noise                                                                                                                                                                                 | the trace's `basis` (exists, `rust/crates/score/src/trace.rs:61`) |
+| Axis                                        | Values                                                                                                                                                                                                                                                                                                                   | Recorded as                                                       |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------- |
+| **Mode**: what the prediction conditions on | in-sample (parameters fitted to the predicted rows); one step ahead (parameters exclude the predicted row; state filtered through every earlier row, so its lead is the time since the last assimilated row of any stream, which varies); fixed origin (state conditioned up to the forecast origin, free-running after) | the plan's `mode`                                                 |
+| **Parameter uncertainty**                   | one plug-in point, or a mixture over posterior draws                                                                                                                                                                                                                                                                     | the trace's `Provenance` (exists)                                 |
+| **Numerical method**                        | particle filter, ODE skeleton plus observation noise                                                                                                                                                                                                                                                                     | the trace's `basis` (exists, `rust/crates/score/src/trace.rs:61`) |
 
 A free-running projection from the start of the run is a fixed-origin forecast
-whose origin is the run's start and whose state set is empty, not a fourth mode.
-No value on one axis implies a value on another.
+whose origin is the run's start and whose state set is empty, not a fourth mode;
+its parameters remain conditioned on the training rows. No value on one axis
+implies a value on another. The three `fit predict` modes (free-forward,
+one-step, forecast) are three settings of the conditioning rule; they stay
+separate on the command line in this migration (D50).
 
 ## Part 3. Type design
 
@@ -358,7 +373,7 @@ pub enum StateConditioning {
 pub struct Target {
     pub stream: String,
     pub measures: Measures,
-    pub horizon: Option<i64>,          // count of the stream's periods; None if it has no step
+    pub horizon: i64,                  // position among the stream's targets; 0 = first ending after the origin
     pub lead: f64,                     // end − origin
     pub observed: Option<usize>,       // position of a held-out row, when one exists
 }
@@ -487,17 +502,17 @@ different target.
 
 ### 4.4 Computing a target's value
 
-**Stochastic models (chain-binomial, under PMMH, PGAS or a plug-in fit).** For
-each parameter draw (one for a plug-in fit), the forecast driver runs the
-existing bootstrap particle filter over the observed rows that end at or before
-the forecast origin, with the plan's targets appended to their streams as
-declared periods that carry no value. Rows ending after the origin are not given
-to the filter, so they cannot be assimilated. After the origin the filter
-propagates every particle without reweighting: a period with no value adds
-nothing to the likelihood. At each target's end it draws the observable from the
-stream's observation model (`obs_model.sample`) given that particle's
-projection. A forecast is therefore a draw of the observed quantity, with
-process noise, parameter uncertainty and the declared observation noise.
+**Stochastic models (chain-binomial, under PMMH or PGAS).** For each posterior
+parameter draw, the forecast driver runs the existing bootstrap particle filter
+over the observed rows that end at or before the forecast origin, with the
+plan's targets appended to their streams as declared periods that carry no
+value. Rows ending after the origin are not given to the filter, so they cannot
+be assimilated. After the origin the filter propagates every particle without
+reweighting: a period with no value adds nothing to the likelihood. At each
+target's end it draws the observable from the stream's observation model
+(`obs_model.sample`) given that particle's projection. A forecast is therefore a
+draw of the observed quantity, with process noise, parameter uncertainty and the
+declared observation noise.
 
 A target that began before the origin needs no special handling. Each particle
 carries its stream's running total since the period began; it travels with the
@@ -531,17 +546,34 @@ is checked by the migration plan's Stage 5 tests.
 posterior draw's trajectory, both recorded snapshot times, plus a draw from the
 observation model.
 
-**What a forecast provides, and what it does not.** Per target, the driver
-yields draws of the observable, so marginal quantiles, the weighted interval
-score and the CRPS can be computed. It does not yet yield joint draws across
-targets: resampling at steps after the origin keeps each target's distribution
-but not which draw at one target belongs with which at another. Joint predictive
-trajectories, such as a hub's "sample" output, are not exposed until the path
-tracer (`sim/src/inference/ancestor_trace.rs`) also records each stream's
-running total at target ends. The log score needs the predictive density at an
-observed value, which a period carrying no value does not supply; how a forecast
-score computes it is settled in the migration plan's Stage 6 without changing
-what a forecast is.
+**How far the run goes.** A forecast runs to the latest end among its targets,
+even past the model's `simulate { to }`, and builds its intervention plan to
+that end (D49). Extending the run extends nothing else: a recurring schedule
+with a literal end keeps it, and a forcing or B-spline evaluated past its range
+is the error of §4.6 unless overridden.
+
+**Draws and failures.** Posterior draws are pooled with equal weights: the
+forecast approximates ∫ p(y_future | θ, training rows) · p(θ | training rows)
+dθ, with the state conditioned on the training rows (D53, D57). No draw is
+dropped: a draw whose filter collapses, or any particle that dies after the
+origin (a numerical failure, `NumericalCollapse` or a negative count; not
+epidemic extinction, which is a valid state), fails the forecast with a
+diagnostic naming the draw, the time and the cause.
+
+**Joint samples.** After the origin every particle's weight is equal, and
+systematic resampling with equal weights keeps particles in their own order
+(`sim/src/inference/resampling.rs:30-46`), so particle _i_'s draws at successive
+targets form one joint sample, with observation noise drawn from that particle's
+own trajectory. Joint samples, such as a hub's "sample" output, are therefore
+exposed (D54); since any particle death after the origin already fails the
+forecast, every exposed sample is a complete trajectory.
+
+**The log score.** Quantiles, the weighted interval score and the CRPS come from
+the draws. The log score needs the predictive density at the observed value,
+`log p̂(y) = logsumexp_i log p(y | x_i, θ_i) − log N` over equally weighted
+particles, evaluated with the same likelihood code as fitting and before the
+observation could be assimilated. How Stage 6 evaluates it is an implementation
+choice that does not change what a forecast is (D56).
 
 **Restarts.** `simulate --init-state` restores compartment counts only, not the
 running totals or which period each belongs to. It therefore refuses to emit a
@@ -730,13 +762,16 @@ over days 60–100 were read after the forecast origin.
 
 ## Part 7. Deferred, and why this design does not block it
 
-| Later work                                             | What it adds                                                                                            | Why nothing here is rewritten                                                                                            |
-| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| Calendar `covers` forms (D45, the immediate follow-up) | `month(time)`, `iso_week(time)`, `mmwr_week(time)`; a load-time check that labels fall on the right day | a calendar width is one more declared tiling (§4.3, case 2); one IR variant                                              |
-| Aggregated targets                                     | weekly targets from a daily stream                                                                      | a target is a stream and a period; an aggregate is a new target kind beside it                                           |
-| Observation identity across datasets                   | a key per row independent of position                                                                   | consumers read membership only through `RowPrefix` and `trained`; a key set can replace the count behind the same method |
-| Data vintages and `as_of` reconstruction               | "the data as known at the forecast origin"                                                              | the two information sets are already separate; a vintage becomes one more field of `RowPrefix`                           |
-| Hubverse import and export                             | external forecasts scored on camdl targets                                                              | a target's stream, end date and horizon are a hub's join key; the score artifact stores the hubs' 23 quantile levels     |
-| A per-forcing extrapolation declaration                | `extrapolate = hold` in the model                                                                       | replaces the run-level override for that forcing; the error remains the default                                          |
-| Joint predictive samples across targets                | hub "sample" output                                                                                     | the path tracer records each stream's running total at target ends; the plan and targets are unchanged                   |
-| Restarts that continue a period under way              | `simulate --init-state` carrying running totals                                                         | a new saved-state version with each total's stream and period start; forecasts never depend on it                        |
+| Later work                                                            | What it adds                                                                                            | Why nothing here is rewritten                                                                                                |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Calendar `covers` forms (D45, the immediate follow-up)                | `month(time)`, `iso_week(time)`, `mmwr_week(time)`; a load-time check that labels fall on the right day | a calendar width is one more declared tiling (§4.3, case 2); one IR variant                                                  |
+| Aggregated targets                                                    | weekly targets from a daily stream                                                                      | a target is a stream and a period; an aggregate is a new target kind beside it                                               |
+| Observation identity across datasets                                  | a key per row independent of position                                                                   | consumers read membership only through `RowPrefix` and `trained`; a key set can replace the count behind the same method     |
+| Data vintages and `as_of` reconstruction                              | "the data as known at the forecast origin"                                                              | the two information sets are already separate; a vintage becomes one more field of `RowPrefix`                               |
+| Hubverse import and export                                            | external forecasts scored on camdl targets                                                              | a target's stream, end date and horizon are a hub's join key; the score artifact stores the hubs' 23 quantile levels         |
+| A per-forcing extrapolation declaration                               | `extrapolate = hold` in the model                                                                       | replaces the run-level override for that forcing; the error remains the default                                              |
+| Conditioning the state on rows after the fit (rolling forecast dates) | D35's per-date state conditioning without a refit                                                       | the plan already records the parameter and state sets separately; the driver filters further rows with fixed parameter draws |
+| Forecasts from single-estimate fits (IF2, NLopt)                      | one plug-in draw, labelled                                                                              | the driver runs per draw; a plug-in fit is one draw                                                                          |
+| Filtering once and forking scenarios at the origin                    | scenario arms without repeating the historical filtering                                                | running totals live in each particle in memory, so the swarm can be copied per arm                                           |
+| Standalone external-forecast scoring                                  | scoring hub files against hub target data with no camdl fit                                             | a target is a stream, an interval and an observed value; a target-data reader supplies them instead of a fit                 |
+| Restarts that continue a period under way                             | `simulate --init-state` carrying running totals                                                         | a new saved-state version with each total's stream and period start; forecasts never depend on it                            |

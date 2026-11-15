@@ -1,6 +1,8 @@
 # Proposal: temporal architecture migration
 
-**Status:** Decided 2026-11-15 (D35, D38–D48); implementation not started.
+**Status:** Decided 2026-11-15 (D35, D38–D57); implementation not started. The
+current scope is Phase A (Stages 0–4 and Stage 4R); Phase B (Stages 5–6,
+forecasting) starts only on the maintainer's go-ahead after Phase A lands.
 **Spec:** `docs/dev/temporal-architecture.md` (the spec; "spec §N" below).
 **Motivation:** forecasts, forecast scoring (gh#808) and published score
 artifacts (`2026-11-14-score-artifact.md`) all consume observation times,
@@ -9,9 +11,10 @@ re-interpreted at each consumer under different conventions. This document is
 the runbook for moving the code to the spec: the audit that motivates it, the
 stages as self-contained work packages, the tests, and the landing rules.
 
-Code references are to `main` at `0ed74876d`. _Verified (read)_ means read in
-the code at that commit; _verified (run)_ means reproduced by running binaries
-built from it (`CAMDL_SKIP_VERSION_CHECK=1`,
+Code references are to `main` at `0ed74876d`; files have moved since, so an
+implementer locates each by its function or type name, not its line number.
+_Verified (read)_ means read in the code at that commit; _verified (run)_ means
+reproduced by running binaries built from it (`CAMDL_SKIP_VERSION_CHECK=1`,
 `CAMDLC=ocaml/_build/default/bin/camdlc.exe`); _inferred_ means neither.
 
 ## Part 1. Audit of the current code
@@ -70,11 +73,12 @@ Defects, each with a fixture in Part 6:
   `fit.meta.json` records `train_end: 24`. Nothing leaks in today's `compare`,
   which draws its own boundary, but a forecast from the recorded cutoff would
   score days the parameters were fitted to.
-- **C3. The ODE comparison path cuts by label** (the open half of gh#1062).
-  Verified (run), fixture F4: a `day(time)` stream with `holdout_after = 10`
-  under `mh` on the `ode` backend makes `camdl compare` exit 1. The check
-  `check_no_training_row_scored` (`compare.rs:2158`) refuses it, so this fails
-  closed. `cli/tests/compare_ode_prequential.rs` covers only `closing_at`.
+- **C3. The ODE comparison path cut by label** (the open half of gh#1062; fixed
+  on `main` in `4a7c17f6f` since the audit). Verified (run), fixture F4: a
+  `day(time)` stream with `holdout_after = 10` under `mh` on the `ode` backend
+  makes `camdl compare` exit 1. The check `check_no_training_row_scored`
+  (`compare.rs:2158`) refuses it, so this fails closed.
+  `cli/tests/compare_ode_prequential.rs` covers only `closing_at`.
 - **L1. `last_obs` means two things.** Verified (read): last label at some
   sites, last period end at others, and the model's anchors include held-out
   rows, so appending held-out data changes a fit's end time (one run resolved
@@ -194,7 +198,7 @@ score can be trusted.
 | 10   | K1         | month-end `date_range` instants drift                                                                                        | 0(b)                  | no                         |
 | 11   | K3         | nonsensical instant arithmetic compiles                                                                                      | 0(d)                  | no                         |
 | 12   | M1, M2, M3 | artifacts cannot be dated or reloaded                                                                                        | 4                     | M1 for published forecasts |
-| 13   | C3         | ODE held-out compare refused                                                                                                 | 0(a)                  | yes, for ODE               |
+| 13   | C3         | ODE held-out compare refused                                                                                                 | fixed in `4a7c17f6f`  | —                          |
 | 14   | A1, A3     | off-grid data refused; advice for a missing flag                                                                             | 3, 0(e)               | no                         |
 | 15   | K4–K7      | refusals and documentation                                                                                                   | follow-up, 0(e), 0(g) | no                         |
 
@@ -206,10 +210,22 @@ fixed on `main` in `4a7c17f6f`.
 
 ## Part 3. How agents run this plan
 
-**Order.** Stage 0 items are independent of each other and of everything else.
-Stages 1–6 depend on each other (Part 4, "Dependencies") and run one at a time,
-each finishing its gate before the next starts. The calendar `covers` forms are
-a separate follow-up proposal written after Stage 6 (D45).
+**Order and phases.** The plan has two phases.
+
+- **Phase A, the current scope: the temporal foundations.** Stage 0's
+  independent fixes, then Stages 1–4 (one row reader, the training partition,
+  alignment, dates in artifacts), then Stage 4R, which removes every piece of
+  code the new types supersede. Phase A changes how camdl represents and
+  partitions time; it adds no forecasting feature.
+- **Phase B, after a separate go-ahead: forecasting.** Stage 5 (the forecast
+  plan and the fixed-origin driver) and Stage 6 (forecast scoring). The
+  decisions that govern them (D49–D57) are recorded so that the Phase B stages
+  need no further design, but no Phase B code is written until Phase A has
+  landed and the maintainer starts Phase B.
+
+Stage 0 items are independent of each other and of everything else. Stages 1–4
+run one at a time, each finishing its gate before the next starts. The calendar
+`covers` forms are a separate follow-up proposal (D45).
 
 **One worktree per stage**, cut from a freshly fetched `origin/main`. Stage 0
 items go through the existing `camdl-fixer` → `camdl-reviewer` loop
@@ -255,11 +271,10 @@ repository.
 Each item is one GitHub issue, one branch and one commit.
 
 - **0(a) ODE held-out boundary (C3). Done:** fixed on `main` in `4a7c17f6f`
-  (gh#1062, closed); the description below is kept as the record. **0(a) ODE
-  held-out boundary (C3).** In `derive_ode_trace` (`cli/src/compare.rs:2799`),
-  use `heldout_scoring_boundary` as the chain-binomial path does. Red test:
-  fixture F4 in `cli/tests/compare_ode_prequential.rs` (a `day(time)` stream);
-  today it exits
+  (gh#1062, closed). The change was: in `derive_ode_trace`
+  (`cli/src/compare.rs:2799`), use `heldout_scoring_boundary` as the
+  chain-binomial path does. Red test: fixture F4 in
+  `cli/tests/compare_ode_prequential.rs` (a `day(time)` stream); today it exits
   1. Behaviour change: a refusal becomes a score.
 - **0(b) `date_range` from its start (K1).** In `expander.ml:3343-3364`, compute
   entry `i` as `step_fn start (i·k)`. Red test: the 2020-01-31 example, compared
@@ -349,6 +364,30 @@ Each item is one GitHub issue, one branch and one commit.
     observation is more than one of its own periods before `last_obs`.
   - Fit identity: fold the partition rule version and the per-stream training
     row digests into `FitDigest`.
+- **Rules pinned for the implementer.**
+  - Under `[data.holdout]`, a holdout row that does not end after the training
+    extent is refused at fit time, as today (`check_holdout_files`); scoring
+    therefore never meets one.
+  - A stream left with no training rows by the period rule is refused at fit
+    time, naming the stream and the cutoff.
+  - The `first_obs < cutoff < last_obs` check (`resolve_holdout_cutoff`) is
+    restated on periods: some row must train and some row must not.
+  - "At or before" uses the existing named tolerance `TIME_TIE_EPS`; no new
+    epsilon.
+  - `first_obs` is the earliest start of an observed period, the counterpart of
+    D40's `last_obs`. Rows whose value is `NA` count toward neither, since they
+    were not observed (today `obs_anchors_from_bindings` counts trailing `NA`
+    rows).
+  - Further sites that carry the label-based boundary and change with it: the
+    `holdout_after` values folded into the profile and survey identities
+    (`cli/src/profile.rs`, `cli/src/survey_cas.rs`),
+    `Conditioning::HoldOutTail
+    { train_end }` in `score/src/trace.rs` (its
+    `train_end` becomes the training extent), and `cli/src/compare_ode.rs`,
+    which clears the holdout to score the full series.
+  - The fit prints the date of the first held-out row of each stream at start:
+    with the new rule `holdout_after = "2026-07-25"` holds out 25 July's row of
+    a `day(time)` stream, which the key's name alone could hide.
 - **Red tests (fail on `main`).**
   - Fixture F3: row 21 does not train; the recorded extent is 21, the end of row
     14's period.
@@ -415,62 +454,123 @@ Each item is one GitHub issue, one branch and one commit.
 - **Docs:** `docs/camdl-run-spec.md`, `docs/dates.md` ("Getting dates back
   out").
 
-### Stage 5: the forecast plan and the fixed-origin driver
+### Stage 4R: remove superseded code (end of Phase A)
+
+- **Goal.** When Stages 1–4 have landed, no code from the old representation
+  remains: nothing that compares a label with a cutoff, a second copy of a rule,
+  or a helper the new types replaced.
+- **Depends on:** Stages 1–4 landed on `main`.
+- **Changes.** Delete, in separate commits each named for what it removes
+  (`.claude/rules/rust-conventions.md`, "Delete dead code on sight"):
+  - the label-based cut helpers and every caller left after Stage 2
+    (`within_training` on labels, the label path in `resolve_holdout_cutoff`,
+    `survey`'s copy of the truncation loop, `TrainingWindow` and
+    `record_training_window`);
+  - after Stage 3, every remnant of `obs_alignment` (`ObsAlignment`,
+    `resolve_obs_alignment`, their tests, any `time % dt` check);
+  - after Stage 1, the readers `observed_rows` replaced, and any per-row time
+    the loader kept beside `measures`;
+  - after Stage 4, per-artifact calendar reassembly that `CalendarAxis`
+    replaced;
+  - stale comments and documents that name removed symbols or describe the old
+    behaviour, including the doc comment naming the removed
+    `check_holes_output_compat` (`multi_stream_obs.rs`);
+  - any `#[allow(dead_code)]` added during Phase A.
+- **How to find them.** For each symbol the spec names as superseded, search the
+  tree (`rg`) and confirm zero hits outside history; run `cargo clippy` for the
+  workspace with dead-code warnings visible; search `docs/` and `.claude/` for
+  the removed names.
+- **Must stay identical:** every test result and every fixed-seed number from
+  the end of Stage 4; this stage changes no behaviour.
+- **Done when:** the searches above return nothing, the full gate is green, and
+  the commit list names every removed item.
+
+### Stage 5 (Phase B): the forecast plan and the fixed-origin driver
 
 - **Goal.** Every prediction is made against one validated list of targets by
-  one fixed-origin driver, with what conditioned it recorded (D39, D41, D42). No
-  inference backend gains new support in this stage.
-- **Depends on:** Stages 1, 2 and 4.
+  one fixed-origin driver, with what conditioned it recorded (D39, D41, D42,
+  D49–D55, D57). No inference backend gains new support.
+- **Depends on:** Stages 1 and 2 (D55). If Stage 4 has landed, the forecast
+  artifact writes the calendar block through `CalendarAxis`; if not, it writes
+  the model's `time_unit` and `origin` directly. A forecast from a model with an
+  origin always carries its calendar axis.
+- **What is supported** (D51; the backend-matrix rule,
+  `.claude/rules/sim-and-inference.md`), each cell with a test:
+
+  | Fit method                                      | Forecast                                                                                |
+  | ----------------------------------------------- | --------------------------------------------------------------------------------------- |
+  | PMMH (chain-binomial)                           | supported: the driver per posterior draw                                                |
+  | PGAS (chain-binomial)                           | supported: the driver per posterior draw; stored paths not used                         |
+  | MH (ODE)                                        | supported: cumulative-flow differences per draw                                         |
+  | IF2 (chain-binomial)                            | refused: single estimate (D51)                                                          |
+  | NLopt `nl-sbplx`, `nl-bobyqa`, `nl-lbfgs` (ODE) | refused: single estimate (D51)                                                          |
+  | `pfilter` with fixed parameters                 | refused in Stage 5                                                                      |
+  | Gillespie                                       | refused: not a fitting backend; `simulate --backend gillespie --init-state` refuses too |
+
 - **Changes.**
   - Add `ForecastPlan`, `StateConditioning` and `Target` (spec §3.3). The
     conditioning fields are built only from the fit record and from what the
     filter returns.
   - **Targets are declared by the plan.** `ForecastPlan::new` derives the
     targets (spec §4.3) and turns each into a declared period of its stream (a
-    row carrying no value) before any filtering. The driver reads a stream's
-    running total only at the end of a period the plan declared; no caller
-    declares periods. This is an invariant because an undeclared period gives a
-    wrong prediction silently (spec §4.4).
-  - **The fixed-origin driver.** For each posterior draw of a PMMH or PGAS fit
-    (one draw for a plug-in fit), run the existing bootstrap particle filter
-    (`bootstrap_filter`, through `BoundObs::bind`) over the observed rows that
-    end at or before the forecast origin, plus the plan's declared target
-    periods, and record each stream's predictive draws (from the observation
-    model) at each target's end. Rows ending after the origin are never given to
-    the filter. PGAS stored paths and `simulate --init-state` are not used. ODE
-    forecasts take the cumulative-flow difference on each draw's trajectory. No
-    change to `particle_filter.rs`, resampling or the saved-state format; the
-    new code is the driver, the appending of declared periods, and per-stream,
-    per-target output (today's trace sums streams that end at the same time).
-  - **The period under way (D39, narrowed).** A target whose period began before
-    the origin is computed by the same driver with no special case: the
-    particle's running total holds the inferred flow before the origin plus the
-    simulated flow after it.
-  - **Marginal output only.** The driver yields per-target predictive draws, so
-    quantiles, the weighted interval score and the CRPS are supported. Joint
-    draws across targets are not exposed (resampling after the origin does not
-    keep cross-target pairing); hub "sample" output is refused with a message
-    until the path tracer records running totals at target ends (spec Part 7).
+    row carrying no value) before any filtering; it also checks targets against
+    the same stream's observed rows and refuses an overlap. The driver reads a
+    stream's running total only at the end of a declared period; callers cannot
+    declare periods. An undeclared period gives a wrong prediction silently
+    (spec §4.4).
+  - **The fixed-origin driver.** The forecast origin is the training extent and
+    the state is conditioned on the training rows only (D57). For each posterior
+    draw, run the existing bootstrap particle filter (through `BoundObs::bind`
+    and `bootstrap_filter`) over the training rows plus the plan's declared
+    target periods, and record each stream's predictive draws from the
+    observation model at each target's end. The existing per-draw filter loop of
+    `one_step_bands` (`cli/src/fit/predict.rs`) and the per-stream samples the
+    filter already records (`PrequentialRecorded.per_stream_samples`) are the
+    starting point; no second propagation path is written. ODE forecasts take
+    the cumulative-flow difference on each draw's trajectory
+    (`project_coverages`). No change to `particle_filter.rs`, resampling or the
+    saved-state format.
+  - **Run extent (D49).** The driver runs to the latest end among its targets,
+    past the model's `simulate { to }` when needed, and builds the intervention
+    plan to that end. A recurring schedule with a literal end keeps it; a
+    forcing or B-spline past its range is Stage 0(f)'s error.
+  - **The period under way (D39).** Computed by the same driver with no special
+    case.
+  - **Pooling and failures (D53).** Draws are pooled with equal weights. No draw
+    is dropped: a draw whose filter collapses, or a particle that dies after the
+    origin (a numerical failure, not epidemic extinction), fails the forecast
+    with a diagnostic naming the draw, the time and the cause.
+  - **Joint samples (D54).** Particle _i_'s draws across targets are one joint
+    sample (equal weights keep particle order); they are written as samples.
+  - **Modes (D50).** `fit predict` gains a forecast mode beside free-forward and
+    one-step, which stay as they are. Scenarios whose first difference from the
+    baseline is at or after the forecast origin run as separate arms of the
+    driver with the same seed; scenarios that differ before the origin, and
+    sweeps over parameters used before it, are refused in forecast mode. Each
+    arm repeats the historical filtering; filtering once and forking at the
+    origin is deferred (spec Part 7).
+  - **Design columns (D52).** A stream whose likelihood reads a data column
+    (such as a binomial's `n`) is refused a forecast tail unless a design file
+    supplies the column for the target periods; reuse `fit predict`'s existing
+    design handling if it fits, otherwise refuse with a message naming the
+    column.
   - **Restarts stay conservative.** `simulate --init-state` refuses to emit any
-    period that began before the restart, naming it and the restart time,
-    instead of dropping it (T3, gh#1081) or writing a partial total (R2,
-    gh#1085). `pfilter --save-final-state` honours `holdout_after` or refuses
-    under it (R1, gh#1084). The saved-state format does not change.
+    period that began before the restart (T3, gh#1081; R2, gh#1085).
+    `pfilter --save-final-state` honours `holdout_after` or refuses under it
+    (R1, gh#1084). Correct the PMMH message (R3, gh#1086).
   - `fit predict` reads the fit's partition; one-step rows are marked `trained`
-    or `held_out` and the JSON states both information sets (P1, P2). Its
-    forecast tail comes from the driver; delete `forecast_times` and
-    `leaf_row_coverages`. A stream with no declared rhythm is refused a tail
-    (D42).
-  - Flags (D41): `fit predict --horizon` (a mode today) becomes
-    `--mode {free-forward, one-step}`; `--horizon DURATION` sets the reach;
-    `compare --allow-mismatched-horizon` becomes
-    `--allow-mismatched-scored-steps`.
-  - Each target records its stream, interval, lead time and camdl horizon (spec
-    §2.5); hub horizons are computed only at hub export, from the target's end
-    date and the hub's reference date.
-  - Notes: covariates read after the forecast origin (F2), detected through the
-    Stage 0(f) flag; the stale-stream note from Stage 2. Correct the PMMH
-    message (R3, gh#1086).
+    or `held_out` and the JSON states both information sets (P1, P2). Delete
+    `forecast_times` and `leaf_row_coverages`. A stream with no declared rhythm
+    is refused a tail (D42).
+  - Flags (D41): `fit predict --horizon` (a mode today) becomes the mode flag's
+    value set; `--horizon DURATION` sets the reach;
+    `compare
+    --allow-mismatched-horizon` becomes
+    `--allow-mismatched-scored-steps`. No other CLI redesign.
+  - Each target records its stream, interval, lead time and horizon (spec §2.5);
+    hub horizons are computed only at hub export.
+  - Notes: covariates read after the forecast origin (F2), through the Stage
+    0(f) flag; the stale-stream note from Stage 2.
   - Predictive TSVs gain `role`, `t_start`, `t_stop`, `horizon` and `lead`
     (gh#624).
 - **Red tests.**
@@ -480,44 +580,56 @@ Each item is one GitHub issue, one branch and one commit.
     Carlo error. A slow test.
   - **Observation noise.** The same model with negative-binomial reported counts
     (mean `rho · flow`, dispersion `k`): the predictive mean of the reported
-    count agrees with `rho · E[W]` and its variance with the law of total
-    variance, `rho² · Var[W] + E[rho·W + (rho·W)² / k]`, both computed from the
-    importance-sampling reference, within Monte Carlo error. This checks that
-    forecasts carry process, observation and (with draws) parameter uncertainty,
-    not latent flow alone.
-  - **Undeclared periods are impossible.** No public path reads a running total
-    at a time that is not the end of a declared period; a forecast built without
-    the plan's declaration step does not compile or is refused.
-  - **Layout invariance.** The target's value is bit-identical with matched
-    random streams whether the data stop at the origin, every day is listed, or
-    only the weekly times are.
-  - **No assimilation after the origin.** Every likelihood increment after the
-    origin is zero, and no row ending after the origin is bound.
-  - **Origin inside a week**, on chain-binomial under PMMH and PGAS draws and on
-    ODE: identical target lists, intervals, leads and horizons.
-  - **Restarts.** `simulate --init-state` across a period under way is refused
-    with a message, for a uniform stream and a window-column stream;
-    `pfilter --save-final-state` under `holdout_after` saves at the training
+    count agrees with `rho · E[W]` and its variance with
+    `rho² · Var[W] + E[rho·W + (rho·W)² / k]`, both from the reference, within
+    Monte Carlo error.
+  - **Undeclared periods are refused.** Requesting a prediction at a time that
+    is not the end of a declared period is an error.
+  - **Layout invariance of the latent flow.** With matched random streams, the
+    target's latent flow is bit-identical whether the data stop at the origin,
+    every day is listed, or only the weekly times are. (Observation draws are
+    not compared: they come from per-particle streams consumed once per
+    scheduled step, so listing other targets changes them.)
+  - **No assimilation after the origin.** No row ending after the origin is
+    bound, and every value-carrying cell after the origin is absent (each is a
+    declared period with no value); a particle death after the origin fails the
+    forecast.
+  - **Run extent.** A `to = last_obs` model with `holdout_after`, forecast 4
+    weeks: runs past `to`; an intervention scheduled after the original `to`
+    fires; a recurring schedule with a literal end does not extend.
+  - **Joint samples.** Across three targets, each sample's draws come from one
+    particle's trajectory (pairing verified directly, not only means and
+    variances).
+  - **Scenario arms.** Two arms differing only after the origin: identical
+    particle states, weights and running totals at the origin; an arm differing
+    before the origin is refused.
+  - **Failure policy.** A draw forced to collapse fails the forecast with the
+    diagnostic; nothing is silently dropped.
+  - **Origin inside a week**, on PMMH and PGAS draws and on ODE: identical
+    target lists, intervals, leads and horizons.
+  - **Capability matrix.** Each refused cell in the table above is refused with
+    its message.
+  - **Restarts.** `simulate --init-state` across a period under way is refused,
+    for a uniform stream and a window-column stream;
+    `pfilter
+    --save-final-state` under `holdout_after` saves at the training
     extent or refuses.
-  - **Joint samples.** Requesting hub sample output is refused with the message.
   - Fixture F5: the forecast tail is refused (today a 30-day step).
   - A `closing_at(time, 7 'days)` stream with one `NA` week: the tail continues
     by 7 days, not by the most common gap.
   - Fixture F3 under PMMH: one-step rows past the training extent are marked
     `held_out`; `[data.holdout]` describing the same split gives the same
     record.
-  - A forecast origin earlier than the state's last row is refused.
   - `--horizon "4 weeks"` from a week boundary gives weekly horizons 0–3 and
     daily horizons 0–27.
-- **Must stay identical:** free-forward bands at observed times
+- **Must stay identical:** free-forward and one-step output
   (`cli/tests/fit_predict_e2e.rs`);
   `fit/predict.rs::forecast_times_land_on_the_snapshot_grid`, converted to
   assert the same times through the plan for a regular `closing_at` stream;
-  every filter likelihood (the driver adds no step to `bootstrap_filter`).
+  every filter likelihood.
 - **Not verified before this stage; its tests settle them:** interventions or
   events between the origin and a target; streams that are a ratio of flows; the
-  ODE accumulator path (`fold_into_acc_real`); step sizes other than 1 and
-  off-grid boundaries.
+  ODE accumulator path; step sizes other than 1 and off-grid boundaries.
 - **Intentional changes:** forecast target times move wherever the most common
   gap differed from the declared width or schedule; restarts across a period
   under way are refused; `gh696_predict_horizon_rows.rs`,
@@ -528,33 +640,36 @@ Each item is one GitHub issue, one branch and one commit.
   `docs/agents.md`; the principles document's vocabulary lifts the ban on
   "horizon" with its one meaning.
 
-### Stage 6: forecast scoring
+### Stage 6 (Phase B): forecast scoring
 
-- **Goal.** Fixed-origin forecasts are scored per forecast date and horizon, on
-  the score artifact (gh#808, D35).
+- **Goal.** Fixed-origin forecasts are scored per horizon on the score artifact
+  (gh#808).
 - **Depends on:** Stage 5 and the score-artifact proposal's artifact steps.
 - **Changes.** The score artifact's lead-time type gains a fixed-origin variant
   carrying the forecast origin; each scored target records its horizon and lead;
-  rolling forecast dates reuse one fit's parameters and condition the state up
-  to each date; scores are kept per (forecast date, stream, horizon) and never
-  pooled across horizons. `camdl score FIT --horizon "4 weeks"` scores the
-  fixed-origin plan whose origin is the training extent; rolling dates are given
-  as a stride. `compare` refuses to difference scores whose modes, forecast
-  dates or horizon sets differ. Forecasts come from the Stage 5 driver
-  unchanged; the ODE path uses its existing free-forward basis.
-- **Open dependency: the log score.** CRPS, quantiles and the weighted interval
-  score come from the driver's predictive draws. The log score needs the
-  predictive density at the observed value, which a declared period carrying no
-  value does not supply. Stage 6 chooses between (a) a filter switch that scores
-  a row's density without reweighting on it, a small change in
-  `particle_filter.rs`, a high-risk file, and (b) recording each particle's
-  observation-model parameters at target ends and computing the density in the
-  `score` crate. Either leaves the forecasting contract of Stage 5 unchanged:
-  the same targets, conditioning and predictive distribution.
-- **Red tests.** A forecast score's targets equal the held-out rows' periods; a
-  forecast at origin _s_ never reads a row ending after _s_ (asserted by the
-  plan's record of assimilated rows); scores at different horizons are never
-  summed.
+  scores are kept per (stream, horizon) and never pooled across horizons.
+  `camdl score FIT --horizon "4 weeks"` scores the forecast whose origin is the
+  training extent, against the held-out rows. Rolling forecast dates, which need
+  the state conditioned on rows after the fit, are deferred (D57). `compare`
+  refuses to difference scores whose modes, origins or horizon sets differ.
+  Forecasts come from the Stage 5 driver unchanged.
+- **The log score (D56).** CRPS, quantiles and the weighted interval score come
+  from the predictive draws. The log score is
+  `logsumexp_i log p(y | x_i, θ_i) − log N` over the predictive particles at the
+  target's end, evaluated with the same likelihood code as fitting
+  (`log_likelihood_per_stream`) and before the observation could be assimilated.
+  The implementer compares three ways of obtaining it and takes the first that
+  works without duplicating likelihood code: (1) record each particle's
+  projected value at each target's end and evaluate the existing per-stream
+  likelihood afterwards with the held-out value; (2) a filter switch that
+  evaluates a row's likelihood without reweighting on it (a change in
+  `particle_filter.rs`, a high-risk file); (3) exporting each observation
+  family's parameters to the `score` crate. None changes the forecast contract
+  of Stage 5.
+- **Red tests.** A forecast score's targets equal the held-out rows' periods;
+  the forecast never binds a row ending after the origin; scores at different
+  horizons are never summed; the log score at a target equals an independent
+  computation from the same particles' likelihoods.
 - **Docs:** `docs/inference.md` ("Out-of-sample validation"), the score-artifact
   schema documentation.
 
@@ -562,26 +677,32 @@ Each item is one GitHub issue, one branch and one commit.
 
 ```mermaid
 graph LR
-  S0["Stage 0 (independent items)"]
-  S1["1 row reader"] --> S2["2 training partition"]
-  S1 --> S3["3 alignment"]
-  S2 --> S5["5 forecast plan"]
-  S4["4 dates in artifacts"] --> S5
-  S5 --> S6["6 forecast scoring"]
+  subgraph PhaseA["Phase A: temporal foundations"]
+    S0["Stage 0 (independent items)"]
+    S1["1 row reader"] --> S2["2 training partition"]
+    S1 --> S3["3 alignment"]
+    S4["4 dates in artifacts"]
+    S2 --> S4R["4R remove superseded code"]
+    S3 --> S4R
+    S4 --> S4R
+    S2 -. "one HASH_VERSION 4 bump" .- S3
+  end
+  subgraph PhaseB["Phase B: forecasting, after go-ahead"]
+    S5["5 forecast plan and driver"] --> S6["6 forecast scoring"]
+  end
+  S4R --> S5
   SA["score-artifact steps"] --> S6
-  S2 -. "one HASH_VERSION 4 bump" .- S3
   S6 --> FU["follow-up: calendar covers forms"]
 ```
 
-**Before forecast scores can be trusted:** Stages 1, 2, 3, 5 and 0(a), 0(c),
-0(f); Stage 4's calendar block for any forecast that is published. Stage 0(b),
-0(d), 0(e) and 0(g) are independent improvements.
+**Before forecast scores can be trusted:** all of Phase A, then Stage 5; Stage
+0(a) is already on `main`, and 0(c) and 0(f) are in Phase A.
 
-**Scope.** The temporal refactor (Stages 0–4) is roughly half the work: Stage 0
-is seven small items, Stage 1 one medium refactor, Stage 2 the largest refactor
-step, Stages 3 and 4 small each. New forecasting (Stages 5–6) is the other half,
-and Stage 6 also waits on the score artifact. These are relative sizes, not
-measurements.
+**Scope.** Phase A (Stages 0–4 and 4R) is the temporal refactor: Stage 0 is
+seven small items (one already done), Stage 1 one medium refactor, Stage 2 the
+largest refactor step, Stages 3, 4 and 4R small each. Phase B (Stages 5–6) is
+new forecasting and waits on a separate go-ahead and, for Stage 6, the score
+artifact. These are relative sizes, not measurements.
 
 ## Part 5. Acceptance suite
 
@@ -684,8 +805,9 @@ in a fixed parameter; `camdl compare`.
 - **Stage 3 removes a refusal.** Off-grid observations become fittable under
   exact methods; the dt-agreement check is the guard.
 - **High-risk files.** Stage 3 touches PGAS's error text and how it receives
-  periods; Stage 5 changes the particle filter's saved state. Both require
-  reading the full functions first.
+  periods; Stage 5 runs the particle filter through a new driver but changes
+  neither the filter nor its saved-state format. Both require reading the full
+  functions first.
 
 ## Part 8. Decisions
 
@@ -716,6 +838,27 @@ Recorded in the maintainer's docket; each is reflected in the spec and above.
 - **D47.** One `HASH_VERSION` 4 bump with the score artifact.
 - **D48.** D44's rule covers every time function outside its range, B-spline
   windows included.
+- **D49.** A forecast runs to the latest end among its targets, past
+  `simulate { to }` when needed, with interventions planned to that end; nothing
+  else is extended.
+- **D50.** A forecast mode beside free-forward and one-step, which stay as they
+  are; post-origin scenarios as same-seed arms with identical origin states;
+  pre-origin scenarios and sweeps refused; no CLI redesign.
+- **D51.** Single-estimate fits (IF2, NLopt) are refused for forecasting, with
+  the full matrix listed and tested.
+- **D52.** A stream whose likelihood reads a data column is refused a forecast
+  tail unless a design supplies the column.
+- **D53.** Equal-weight pooling of posterior draws; no draw dropped; any
+  particle death after the origin fails the forecast with a diagnostic.
+- **D54.** Joint samples are exposed: equal weights keep particle order, and
+  deaths already fail the forecast.
+- **D55.** Stage 5 depends on Stages 1 and 2, not Stage 4; a forecast still
+  carries its calendar axis.
+- **D56.** The log score uses the fitting likelihood code, before assimilation;
+  the implementer picks the route that avoids duplicating it.
+- **D57.** Conditioning the state on rows after the fit is deferred: the
+  forecast origin is the training extent and the state is conditioned on the
+  training rows only. Rolling forecast dates (D35) wait for it.
 
 ## Part 9. Documents this plan changes
 
