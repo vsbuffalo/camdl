@@ -23,8 +23,12 @@ Code references are to `main` at `e8e7c24a0` (2026-11-14). Since then the trace
 module has moved from `rust/crates/sim/src/inference/prequential.rs` to
 `rust/crates/score/src/trace.rs` and the evidence module from `cli` to
 `rust/crates/score/src/evidence.rs` (phase 1 of proposal B), and `compare`'s
-chain selection has gained `--chains` (`982eca439`, `770013f76`). File paths and
-line numbers below are as they were at `e8e7c24a0`. Every statement under
+chain selection has gained `--chains` (`982eca439`, `770013f76`). Three later
+changes on `main` bear on the design and are stated where they apply: fits on
+the ODE backend can be compared (gh#312, `derive_ode_trace`); the held-out cut
+is made on the scoring axis (gh#1062, pull requests #1064 and #1066); and
+`HASH_VERSION` is 3 (gh#1046). File paths and line numbers below are as they
+were at `e8e7c24a0`. Every statement under
 [What exists today](#what-exists-today) was read in the code at that commit.
 Nothing was built or run for this proposal; a statement that rests on something
 other than reading the cited lines is marked _not verified_ with the reason.
@@ -159,7 +163,7 @@ size is the minimum over passes (`compare.rs:2721`); warnings are merged
 (`compare.rs:2755-2763`); passes whose steps are not at the same times are
 refused (`compare.rs:2697-2711`).
 
-### The training cut and the scoring cut are on different time axes
+### The training cut is by label, the scoring cut by scoring time
 
 A data row has a **label time**, the value in its time column. A stream that
 accumulates over a period is **scored** at the close of that period, which need
@@ -168,19 +172,28 @@ period [D, D+1) and scores it at D+1 (`Covers::From`,
 `rust/crates/ir/src/observation.rs:304-309`).
 
 The fit cuts its training rows by label (`o.time <= tau`,
-`rust/crates/cli/src/fit/runner.rs:1972`; the last training label,
-`runner.rs:1993`), and records that label time as `train_end`. `compare` then
-scores every step whose scoring time is after `train_end`
-(`pfilter
---score-from`, `rust/crates/cli/src/pfilter.rs:999-1000`), and its
-last check is that every scored time is after `train_end` (`compare.rs:2589`).
+`rust/crates/cli/src/fit/runner.rs:1972`) and records that label time as
+`train_end`. At `e8e7c24a0`, `compare` cut scoring at `train_end` on the scoring
+axis, so for a stream scored after its label the last training row was scored as
+held-out; gh#1062 reproduced it. Since #1064 and #1066, `compare` takes the
+boundary on the scoring axis, as the latest scoring time of any training row
+over the bound leaves (`heldout_scoring_boundary`), passes it to both the filter
+and the ODE path, and checks per leaf that no scored row is a training row
+(`check_no_training_row_scored`). The design below keeps exactly that rule and
+adds the proof that the earlier rows are the ones the fit trained on.
 
-For a stream whose scoring time is later than its label, the last training row
-has a label at or before `train_end` and a scoring time after it. It passes the
-check and is scored as held-out, although the fit trained on it. This follows
-from the lines cited and was not reproduced with a run; the existing holdout
-tests use streams whose label is the period's close. It is a defect on `main`
-today, independent of this proposal, and the design below removes it.
+### Two ways a trace is derived
+
+A fit on the chain-binomial backend is scored by particle-filter passes
+(`camdl pfilter` child processes). A fit on the ODE backend is scored in process
+by its own likelihood, with no filter (`derive_ode_trace`,
+`rust/crates/cli/src/compare_ode.rs`): given the parameters the trajectory is a
+point, and the predictive at each observation is the observation density there.
+A trace records which, as its `basis` (`PredictiveBasis::Filtered` or
+`OdeFreeForward { samples_per_draw }`, `rust/crates/score/src/trace.rs`), and
+`compare` refuses to difference traces on different bases, with no override.
+Both kinds are combined across posterior draws by the same function
+(`combine_mixture`).
 
 ### The score may run a model other than the fit's
 
@@ -439,10 +452,10 @@ row read for each bound leaf, in the same commit. `Pfilter` already folds name
 and digest pairs (`rust/crates/cli/src/pfilter_cas.rs:82`, `:104-106`).
 `--table` files are not observation data and keep byte digests.
 
-**One re-key.** These changes raise `HASH_VERSION`
-(`rust/crates/runid/src/hash.rs:77`, currently 2). The docket's D25 already
-raises it to 3 for an unrelated fix. Both land in the same bump, so every stored
-result re-keys once; `HASH_VERSION` is folded into every root hash
+**One re-key.** These changes raise `HASH_VERSION` from 3 to 4
+(`rust/crates/runid/src/hash.rs`). The plan to share the bump with the gh#1046
+fix is no longer possible: that fix landed on its own and took 3. So every
+stored result re-keys once more; `HASH_VERSION` is folded into every root hash
 (`rust/crates/runid/src/kind.rs:79-83`). What the bump invalidates: every stored
 leaf is recomputed on next use. Old leaves stay on disk and readable by path.
 
@@ -545,11 +558,11 @@ existing run id.
 
 A score's run id has three levels, in path order:
 
-| Level      | Folds                                                                                                                                                                                                                 | Path label                    |
-| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
-| `fit`      | The run id of the fit-method leaf that supplied the parameters, and the content digest of the parameter file read from it (`draws.tsv`, or the optimizer's winner)                                                    | the fit's directory name      |
-| `data`     | For each leaf the filter read, sorted by leaf name: the leaf name and the row digest of every row read. Then the scoring boundary: absent for in-sample, `train_end` otherwise                                        | `in_sample` or `held_out`     |
-| `settings` | Particles, replicates, draws, seed, integration step, excluded chains, enabled and disabled interventions; the engine version that computes the score; the trace schema version; the major and minor of `camdl.score` | the profile name, or `custom` |
+| Level      | Folds                                                                                                                                                                                                                                                      | Path label                    |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
+| `fit`      | The run id of the fit-method leaf that supplied the parameters, and the content digest of the parameter file read from it (`draws.tsv`, or the optimizer's winner)                                                                                         | the fit's directory name      |
+| `data`     | For each leaf the filter read, sorted by leaf name: the leaf name and the row digest of every row read. Then the scoring boundary: absent for in-sample, `train_end` otherwise                                                                             | `in_sample` or `held_out`     |
+| `settings` | Particles, replicates, draws, seed, integration step, the basis with its samples per draw, excluded chains, enabled and disabled interventions; the engine version that computes the score; the trace schema version; the major and minor of `camdl.score` | the profile name, or `custom` |
 
 The fit level uses the existing lineage reference
 (`ArtifactRef { run_id, kind,
@@ -672,9 +685,9 @@ freshly derived `score.json`. Its `--particles`, `--replicates`, `--draws` and
 longer keeps traces in the temporary directory.
 
 `compare` also accepts a path to a `score.json` or to a score leaf. It continues
-to accept a bare trace file, for a score computed outside camdl's derivation (an
-ODE fit, gh#312); such a row has no identity and every check that needs one
-reports it as not checked.
+to accept a bare trace file, for a score computed outside camdl's derivation;
+such a row has no identity and every check that needs one reports it as not
+checked.
 
 ### One filter pass, and the stored trace
 
@@ -682,15 +695,15 @@ A mixture's CRPS and quantiles cannot be formed from each pass's CRPS and
 quantiles, so the predictive draws must survive until the passes are combined,
 and are dropped only then. There are therefore two types.
 
-- **`score::trace::PassTrace`** is one filter pass at one parameter vector and
-  one seed: per step, the time, the joint log score and the effective sample
-  size; per step and leaf, the observed value, the predictive draws, the leaf's
-  log score and the coverage; and the pass's settings and warnings.
-  `build_trace` produces it. It is the interchange between a `camdl pfilter`
-  child process and its parent, written by a new option
-  `pfilter --save-pass
-  FILE` and read back by the same binary. It is not a
-  stored or published format and carries no schema promise.
+- **`score::trace::PassTrace`** is one scoring pass at one parameter vector and
+  one seed, by a particle filter or by the ODE scorer: per step, the time, the
+  joint log score and the effective sample size; per step and leaf, the observed
+  value, the predictive draws, the leaf's log score and the coverage; and the
+  pass's settings and warnings. `build_trace` produces it, for both bases. For a
+  filter pass it is the interchange between a `camdl pfilter` child process and
+  its parent, written by a new option `pfilter --save-pass FILE` and read back
+  by the same binary; an ODE pass is produced in process. It is not a stored or
+  published format and carries no schema promise.
 - **`PrequentialTrace`, schema 6** is the finished trace, with no draws.
 
 One function produces the second from the first:
@@ -708,7 +721,7 @@ same number of draws. `finish` computes, in this order:
 1. **Agreement.** Every pass must have the same step times and, at each step,
    the same leaves with the same observed values and coverage. Otherwise it
    returns `CombineError`, with the pass and step named. This is today's
-   refusal.
+   refusal. Every pass must also have the same `basis`.
 2. **Per replicate.** At each step, the joint log score and each leaf's log
    score are the log-mean-exp over that replicate's draws. The replicate's total
    elpd is the sum over steps of its joint log scores, and its per-leaf totals
@@ -950,7 +963,14 @@ possible, and the viewer converts nothing.
 pub enum ScoredLeadTime {
     /// Each scored value was predicted from every observation, of every
     /// assimilated stream, at earlier times; the filter then assimilated it.
+    /// The basis is `Filtered`.
     OneObservationAhead,
+    /// Nothing is assimilated: each scored value is predicted from the
+    /// parameters alone, by the trajectory run forward from the start. The
+    /// basis is `OdeFreeForward`. For a held-out score the lead time of a
+    /// scored value is its scoring time minus the scoring boundary, and grows
+    /// across the window.
+    Unassimilated,
 }
 
 /// The gap, in model time, between a scored observation and the latest earlier
@@ -967,6 +987,13 @@ prior, which the trace's `StartsAtPrior` warning already flags) is left out of
 the span; a leaf whose only scored step is that one has
 `lead_span:
 NotRecorded`.
+
+For an `Unassimilated` held-out score, `lead_span` is measured from the scoring
+boundary: its minimum is the first scored value's distance from the boundary and
+its maximum the last one's. For an `Unassimilated` in-sample score the
+parameters were fitted to every scored row and no lead time is defined;
+`lead_span` is `NotRecorded`. The artifact's `lead` follows from the trace's
+`basis`.
 
 The predictive-artifact proposal will give each predictive series a value of
 type `score::LeadTimeStatus`, defined here so the two cannot drift:
@@ -986,8 +1013,9 @@ variants to `ScoredLeadTime` (a lead counted from a forecast origin) and will
 store its scores as separate entries per lead time, never summed with one
 another or with one-observation-ahead scores, as gh#808's own scope states.
 Adding variants is a minor version of `camdl.score`; an older reader shows the
-new value as unknown. Nothing in major 1 has to change for it. Until then every
-artifact is `OneObservationAhead`, and a free-running projection is `NotScored`.
+new value as unknown. Nothing in major 1 has to change for it. Until then a
+filtered artifact is `OneObservationAhead`, an ODE artifact is `Unassimilated`,
+and a free-running projection from a filtered fit is `NotScored`.
 
 `fit predict` spells its modes with a flag named `--horizon`. Renaming it is
 left for a later decision and is not part of this proposal.
@@ -1155,9 +1183,7 @@ Each is a test that fails if the property is lost.
 
 - It defines no predictive artifact. Only the lead-time types those will carry.
 - It defines no bundle, no `camdl publish`, and no private-data mode.
-- It does not build forecast-mode scoring (gh#808) or the ODE score (gh#312). A
-  fit on the ODE backend has no derived score artifact and is not comparable
-  through one.
+- It does not build forecast-mode scoring for filtered fits (gh#808).
 - It does not store what a joint score over a subset of streams would need.
 - It does not settle the publish profile's values.
 - It does not rename `fit predict --horizon`.
@@ -1195,11 +1221,11 @@ phases 1 and 2 come first, then the steps below.
 - **A4.** Identity: `FitDigest.data` as `(leaf, row digest)` pairs,
   `holdout_data` deleted, `[data.holdout]` removed from both configuration
   hashes, the other data-folding identities switched, `HASH_VERSION` raised
-  together with the D25 change. The commit states what the bump invalidates.
-  Tests 2 (fit half), 3, 8. This step needs the maintainer's confirmation before
-  it lands, as every identity change does. A3 and A4 land in one pull request,
-  in this order: A3 makes fits recorded earlier unscorable as held-out until
-  they are re-run, and A4's bump is what re-runs them.
+  to 4. The commit states what the bump invalidates. Tests 2 (fit half), 3, 8.
+  This step needs the maintainer's confirmation before it lands, as every
+  identity change does. A3 and A4 land in one pull request, in this order: A3
+  makes fits recorded earlier unscorable as held-out until they are re-run, and
+  A4's bump is what re-runs them.
 - **A5.** The `.meta.toml` reader; the two values in the fit record;
   `docs/camdl-data-spec.md`.
 - **A6.** `ScoreArtifact` and its parts in `score`; `ScoredLeadTime`,
