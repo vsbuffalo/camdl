@@ -1287,11 +1287,13 @@ fn step_finding(at: &[(&Row, &score::trace::PrequentialStep)]) -> Option<Finding
 /// those come from the same model.
 ///
 /// Per source, the rows that record a hash for it or bind it not at all are
-/// partitioned by that hash, compared on the length of the shortest (an
+/// compared pair by pair, each pair on the shorter of its two hashes (an
 /// older sidecar records 8 characters of the digest a newer one records in
-/// full); an empty hash names nothing and matches nothing. A row with no data
-/// identity, and a source a row could not resolve, take no part and are
-/// listed as not checked.
+/// full), and partitioned by [`hash_groups`]; an empty hash names nothing and
+/// matches nothing, and a row that binds the source beside one that does not
+/// is a failure. A row with no data identity, and a source a row could not
+/// resolve, take no part and are listed as not checked. The rows whose
+/// comparison rested on a short hash are qualified.
 ///
 /// Rows re-scored on one leaf (`--streams`) compare only the hashes of that
 /// leaf's source, and an absent hash for it is a failed check, not a pass;
@@ -1336,6 +1338,7 @@ fn check_shared_data(rows: &[Row]) -> CheckResult {
         DataIdentity::Unknown(_) => None,
     }).collect();
     let mut sources: Vec<SourceDigests> = Vec::new();
+    let mut prefix_only: Vec<String> = Vec::new();
     for file in [DataFile::Training, DataFile::Holdout] {
         type Hashes = std::collections::BTreeMap<String, String>;
         fn of(rec: &RecordedData, file: DataFile) -> (&Hashes, &Hashes) {
@@ -1347,17 +1350,13 @@ fn check_shared_data(rows: &[Row]) -> CheckResult {
         let all: std::collections::BTreeSet<&String> =
             known.iter().flat_map(|(_, rec)| of(rec, file).0.keys()).collect();
         for source in all {
-            let taking_part: Vec<(Option<&str>, &str)> = known.iter()
+            let taking_part: Vec<(Option<String>, String)> = known.iter()
                 .filter(|(_, rec)| !of(rec, file).1.contains_key(source))
-                .map(|(name, rec)| (of(rec, file).0.get(source).map(String::as_str), *name))
+                .map(|(name, rec)| (of(rec, file).0.get(source).map(|h| h.to_ascii_lowercase()),
+                    name.to_string()))
                 .collect();
-            let len = taking_part.iter().filter_map(|(h, _)| h.filter(|h| !h.is_empty()))
-                .map(|h| h.chars().count()).min().unwrap_or(0);
-            let items: Vec<(Option<String>, String)> = taking_part.iter().map(|(h, name)| (
-                h.map(|h| h.chars().take(len).collect::<String>().to_ascii_lowercase()),
-                name.to_string())).collect();
-            let groups = pf::partition(items, |a, b| a.cmp(b),
-                |a, b| a == b && a.as_deref() != Some(""));
+            let (groups, short) = hash_groups(taking_part);
+            prefix_only.extend(short);
             if groups.len() > 1 {
                 sources.push(SourceDigests { source: source.clone(), file, groups });
             }
@@ -1366,18 +1365,70 @@ fn check_shared_data(rows: &[Row]) -> CheckResult {
     let failure = (!sources.is_empty() || !unhashed.is_empty())
         .then_some(Finding::DataDiffers { sources, unhashed });
     let comparable = known.len() >= 2 || failure.is_some();
+    prefix_only.sort();
+    prefix_only.dedup();
     CheckResult {
         check: CheckId::SharedData,
         outcome: outcome(failure, comparable),
         not_checked,
-        qualified: hash_prefix_rows(rows),
+        qualified: prefix_only.into_iter()
+            .map(|member| Qualified { member, how: Qualification::HashPrefixOnly }).collect(),
         waiver: CheckId::SharedData.waiver(),
     }
 }
 
+/// One source's recorded hashes (lowercased; `None` where the member records
+/// none) partitioned for [`check_shared_data`], and the members whose
+/// comparison rested on a hash shorter than a full SHA-256.
+///
+/// Two hashes match when one is a non-empty prefix of the other: each pair is
+/// compared on the shorter of its two lengths, so a short hash in one member
+/// does not shorten the comparison of two full ones. The source passes when
+/// every two recorded hashes match and no member lacks one beside a member
+/// that has one, that is when there is one group:
+///
+/// - a hash that is a proper prefix of no other recorded hash is a group's
+///   value, and the members recording it are the group;
+/// - a shorter hash that is the prefix of exactly one such value joins that
+///   group; one that is the prefix of two or more (which differ, so the
+///   source fails) is shown on its own value, as its own group;
+/// - an empty hash names nothing and matches nothing, not even another
+///   empty one: each such member is its own group;
+/// - the members recording no hash are one group, under `None`.
+///
+/// A member is returned as compared on a prefix when it records a non-empty
+/// hash shorter than [`FULL_DIGEST_LEN`] and some other member records a
+/// non-empty hash for the source.
+fn hash_groups(items: Vec<(Option<String>, String)>) -> (pf::Groups<Option<String>>, Vec<String>) {
+    let recorded: std::collections::BTreeSet<&str> =
+        items.iter().filter_map(|(h, _)| h.as_deref()).filter(|h| !h.is_empty()).collect();
+    let longest: Vec<&str> = recorded.iter().copied()
+        .filter(|h| !recorded.iter().any(|o| o != h && o.starts_with(h)))
+        .collect();
+    let with_hash = items.iter().filter(|(h, _)| h.as_deref().is_some_and(|h| !h.is_empty())).count();
+    let short: Vec<String> = items.iter()
+        .filter(|(h, _)| h.as_deref().is_some_and(|h| !h.is_empty() && h.len() < FULL_DIGEST_LEN))
+        .filter(|_| with_hash >= 2)
+        .map(|(_, name)| name.clone())
+        .collect();
+    let keyed: Vec<(Option<String>, String)> = items.iter().map(|(h, name)| {
+        let key = h.as_deref().map(|h| {
+            let extensions: Vec<&str> = longest.iter().copied()
+                .filter(|l| !h.is_empty() && l.starts_with(h)).collect();
+            match extensions.as_slice() {
+                [only] => only.to_string(),
+                _ => h.to_string(),
+            }
+        });
+        (key, name.clone())
+    }).collect();
+    let groups = pf::partition(keyed, |a, b| a.cmp(b), |a, b| a == b && a.as_deref() != Some(""));
+    (groups, short)
+}
+
 /// The rows whose recorded data hashes are shorter than a full SHA-256, so
-/// the shared-data and changed-data checks compared them on that prefix: a
-/// difference beyond the prefix is not detected.
+/// the changed-data check compared them on that prefix: a difference beyond
+/// the prefix is not detected.
 fn hash_prefix_rows(rows: &[Row]) -> Vec<Qualified> {
     let mut out: Vec<Qualified> = rows.iter()
         .filter(|r| matches!(&r.data, DataIdentity::Digests(rec) if rec.has_short_hash()))
@@ -4637,6 +4688,125 @@ mod tests {
         let result = check_shared_data(&rows);
         assert!(data_unchecked_note(&Preflight { results: vec![result] }, &rows).is_none(),
             "no note when every row was checked");
+    }
+
+    /// A 64-character hash: `head` padded with `f`.
+    fn full_hash(head: &str) -> String {
+        format!("{head:f<64}")
+    }
+
+    /// Every order of three items.
+    fn orders<T: Clone>(v: &[T; 3]) -> Vec<Vec<T>> {
+        [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]].iter()
+            .map(|o| o.iter().map(|&i| v[i].clone()).collect()).collect()
+    }
+
+    fn qualified_members(r: &CheckResult) -> Vec<&str> {
+        r.qualified.iter().map(|q| q.member.as_str()).collect()
+    }
+
+    /// Recorded hashes are compared pair by pair, each pair on the shorter
+    /// of its two lengths: a short hash in one row (an older fit record holds
+    /// 8 characters) does not shorten the comparison of two full ones. `a`
+    /// and `b` differ after a shared 8-character prefix and are refused in
+    /// every order of the rows; `c`, the 8-character prefix of both, matches
+    /// either and is the only row whose comparison rested on a short hash.
+    #[test]
+    fn two_full_hashes_that_differ_after_a_short_ones_prefix_are_refused() {
+        let (a, b) = (full_hash("aaaaaaaa1"), full_hash("aaaaaaaa2"));
+        let ids = [("a", digests(&[("cases", a.as_str())])),
+                   ("b", digests(&[("cases", b.as_str())])),
+                   ("c", digests(&[("cases", "aaaaaaaa")]))];
+        let waived = Waivers { data_mismatch: true, ..Default::default() };
+        for order in orders(&ids) {
+            let rows = data_rows(&order.iter().map(|(n, d)| (*n, d)).collect::<Vec<_>>());
+            let names: Vec<&str> = order.iter().map(|(n, _)| *n).collect();
+            let r = check_shared_data(&rows);
+            // The full hashes differ, so `c` (a prefix of both) is shown on
+            // its own value, which sorts first.
+            let want = Finding::DataDiffers {
+                sources: vec![SourceDigests { source: "cases".into(), file: DataFile::Training,
+                    groups: vec![(Some("aaaaaaaa".into()), vec!["c".into()]),
+                                 (Some(a.clone()), vec!["a".into()]),
+                                 (Some(b.clone()), vec!["b".into()])] }],
+                unhashed: vec![],
+            };
+            assert_eq!(r.outcome, CheckOutcome::Failed { finding: want, waived: false }, "{names:?}");
+            assert_eq!(qualified_members(&r), ["c"], "{names:?}");
+            let refusal = outcome_of(&rows, &Waivers::default()).expect_err("refused");
+            assert!(refusal.contains("different observed data")
+                    && refusal.contains("--allow-data-mismatch"), "{names:?}: {refusal}");
+            let checks = outcome_of(&rows, &waived).expect("renders under the waiver");
+            assert_eq!(checks.overrides().iter().map(|o| o.waiver).collect::<Vec<_>>(),
+                [Waiver::DataMismatch], "{names:?}: the waiver is recorded");
+        }
+
+        // A full hash and its 8-character prefix match; the short row is
+        // qualified, and only it.
+        let rows = data_rows(&[("a", &ids[0].1), ("c", &ids[2].1)]);
+        let r = check_shared_data(&rows);
+        assert_eq!(r.outcome, CheckOutcome::Passed, "{r:?}");
+        assert_eq!(qualified_members(&r), ["c"]);
+
+        // Two rows with the same full hash and the short one pass.
+        let a2 = digests(&[("cases", a.to_ascii_uppercase().as_str())]);
+        for order in orders(&[("a", ids[0].1.clone()), ("a2", a2), ("c", ids[2].1.clone())]) {
+            let rows = data_rows(&order.iter().map(|(n, d)| (*n, d)).collect::<Vec<_>>());
+            let r = check_shared_data(&rows);
+            assert_eq!(r.outcome, CheckOutcome::Passed, "{r:?}");
+            assert_eq!(qualified_members(&r), ["c"]);
+        }
+
+        // An empty recorded hash matches nothing: not a full hash, not a short
+        // one, not another empty one.
+        let empty = digests(&[("cases", "")]);
+        for other in [&ids[0].1, &ids[2].1, &empty] {
+            let r = check_shared_data(&data_rows(&[("e", &empty), ("x", other)]));
+            assert!(matches!(r.outcome, CheckOutcome::Failed { .. }), "{r:?}");
+            assert!(r.qualified.is_empty(), "no comparison rested on a short hash: {r:?}");
+        }
+    }
+
+    /// The same cases on a table re-scored on one stream: only the scored
+    /// stream's source is compared, pair by pair.
+    #[test]
+    fn on_one_stream_two_full_hashes_that_differ_after_a_short_ones_prefix_are_refused() {
+        let (a, b) = (full_hash("aaaaaaaa1"), full_hash("aaaaaaaa2"));
+        let deaths = full_hash("dddddddd");
+        let row = |name: &str, cases: &str| {
+            let mut r = derived_row(name, &CASES_DEATHS, &["cases", "deaths"]);
+            r.data = digests(&[("cases", cases), ("deaths", deaths.as_str())]);
+            r.onto("cases").unwrap()
+        };
+        let waived = Waivers { data_mismatch: true, ..Default::default() };
+        let rows3 = [row("a", &a), row("b", &b), row("c", "aaaaaaaa")];
+        for rows in orders(&rows3) {
+            let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+            let checks = preflight(&rows, &Waivers::default());
+            let r = checks.result(CheckId::SharedData).unwrap();
+            assert!(matches!(&r.outcome, CheckOutcome::Failed { finding: Finding::DataDiffers {
+                sources, .. }, waived: false } if sources.len() == 1 && sources[0].groups.len() == 3),
+                "{names:?}: {r:?}");
+            assert_eq!(qualified_members(r), ["c"], "{names:?}");
+            let refusal = outcome_of(&rows, &Waivers::default()).expect_err("refused");
+            assert!(refusal.contains("--allow-data-mismatch"), "{names:?}: {refusal}");
+            let checks = outcome_of(&rows, &waived).expect("renders under the waiver");
+            assert_eq!(checks.overrides().iter().map(|o| o.waiver).collect::<Vec<_>>(),
+                [Waiver::DataMismatch], "{names:?}");
+        }
+        let pass = |rows: &[Row]| {
+            let checks = outcome_of(rows, &Waivers::default()).expect("passes");
+            let r = checks.result(CheckId::SharedData).unwrap().clone();
+            assert_eq!(r.outcome, CheckOutcome::Passed, "{r:?}");
+            assert_eq!(qualified_members(&r), ["c"]);
+        };
+        pass(&[row("a", &a), row("c", "aaaaaaaa")]);
+        for rows in orders(&[row("a", &a), row("a2", &a), row("c", "aaaaaaaa")]) {
+            pass(&rows);
+        }
+        let r = preflight(&[row("a", &a), row("e", "")], &Waivers::default());
+        assert!(matches!(r.result(CheckId::SharedData).unwrap().outcome,
+            CheckOutcome::Failed { .. }), "an empty hash matches nothing: {r:?}");
     }
 
     /// Rows that differ only in the data identity given, in that order.
