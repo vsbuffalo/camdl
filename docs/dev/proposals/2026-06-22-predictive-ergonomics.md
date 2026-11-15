@@ -1,5 +1,9 @@
 # Predictive-output ergonomics: a `predict` verb + tidy artifact, typed so the predictive object can't be misread
 
+**Amended (2026-11-15):** forecast targets, the forecast origin and what
+conditioned a prediction are governed by `docs/dev/temporal-architecture.md`;
+`fit predict --horizon` becomes `--mode` (D41).
+
 Status: draft\
 Relates: #273 (fill-missing params from the fit — execution step 1), #279
 (obs/dimension schema + tidy postpred artifact), #277 (model-criticism metrics +
