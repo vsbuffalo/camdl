@@ -3,7 +3,7 @@ date: 2026-06-10
 status: Phases 1-3 + fixture landed; heterogeneous fits run end-to-end. Remaining Phase 5 (docs) + 6 (Z->X profiling)
 related:
   - 2026-06-10-observation-data-entry-dsl.md # the data-layer companion (proposal A): the DSL surface this consumes
-  - 2026-06-09-burnin-conditioning-window.md # the per-stream first-bin boundary generalizes condition_from
+  - docs/dev/proposals/archive/post-alpha/2026-06-09-burnin-conditioning-window.md # the per-stream first-bin boundary generalizes condition_from
 area: inference / multi-cadence observation axis / per-stream flow reset
 issue: gh#171 (the multi-cadence remainder of the sparse-observation lift)
 ---
@@ -217,8 +217,9 @@ modeller sets that edge with `condition_from` (per-stream, below); when set, the
 leading span `[t_start, cond_from_s)` warms up (simulated, not scored) and the
 first scored bin is `(cond_from_s, first_obs_s]`. The boundary is realised as a
 per-stream **leading reset-only hole** at `cond_from_s` (the burn-in mechanism,
-`2026-06-09-burnin-conditioning-window.md`, generalised per stream — it rides
-the Phase-2a hole+reset seam, no new mechanism).
+`docs/dev/proposals/archive/post-alpha/2026-06-09-burnin-conditioning-window.md`,
+generalised per stream — it rides the Phase-2a hole+reset seam, no new
+mechanism).
 
 **`condition_from` is a default + per-stream shadows** (a serde-`untagged`
 `All(String) | PerStream(table)`):
@@ -683,7 +684,8 @@ is self-contained and recover-known-params.
   (`Schedule`, `with_obs`).
 - The simulate/fit asymmetry: `acceptance_obs_only_dir.rs`.
 - Fixture base: `ocaml/golden/polio_spatial_5.camdl` (gravity coupling).
-- The sparse/hole machinery this reuses: `2026-06-06-observation-system.md`.
+- The sparse/hole machinery this reuses:
+  `docs/dev/proposals/archive/post-alpha/2026-06-06-observation-system.md`.
 - Sibling data-layer proposal: `2026-06-10-observation-data-entry-dsl.md`.
 - The per-stream first-bin boundary generalizes:
-  `2026-06-09-burnin-conditioning-window.md`.
+  `docs/dev/proposals/archive/post-alpha/2026-06-09-burnin-conditioning-window.md`.

@@ -5,7 +5,7 @@ area: simulation engine / inference / observation layer / DSL
 related:
   - 2026-06-05-unified-timeline-effect-architecture.md
   - 2026-06-05-substep-time-sdt-convention.md
-  - 2026-06-06-observation-system.md
+  - docs/dev/proposals/archive/post-alpha/2026-06-06-observation-system.md
   - 2026-05-14-reactive-interventions-and-evsi.md
   - 2026-06-06-unified-timeline-consolidation-review.md
   - ../notes/2026-06-06-backend-rationalization.md
@@ -728,8 +728,8 @@ work, not the data loader — see the handoff below.
 
 The next push after this one is the observation system (the data-loading and
 sparse-cell layer,
-[`2026-06-06-observation-system.md`](2026-06-06-observation-system.md), which
-supersedes the pre-spine
+[`docs/dev/proposals/archive/post-alpha/2026-06-06-observation-system.md`](archive/post-alpha/2026-06-06-observation-system.md),
+which supersedes the pre-spine
 [`2026-06-05-observation-data-binding.md`](2026-06-05-observation-data-binding.md)).
 It lands cleanly only if the seam between "timeline reconciliation" and "data
 binding" is drawn here, not blurred. The split:

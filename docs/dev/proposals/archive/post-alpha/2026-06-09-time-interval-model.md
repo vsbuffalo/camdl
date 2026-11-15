@@ -1,5 +1,12 @@
 # A unified time-interval model for simulate, fit, and forecast
 
+**Superseded (2026-11-15)** by `docs/dev/temporal-architecture.md` and
+`docs/dev/proposals/2026-11-15-temporal-architecture-migration.md`. Its
+`RunWindows`/`cond_to`/`forecast`-operation design was never built; forecast
+horizons are a bound on targets, not an integration end; a data-table forcing
+past its last point is an error unless overridden (D44, which agrees with §7.1
+point 5 here). Retained for history only.
+
 - **Status:** Draft — design from a verified code + reproduction surface audit
   (2026-06-09); the interval abstraction (`RunWindows`, `cond_to`, the
   `forecast` operation) is **unbuilt**. The per-area fixes are phased in §9.

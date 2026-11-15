@@ -1,7 +1,7 @@
 //! `camdl simulate --to SPEC` — the obs-anchored horizon override (gh#626).
 //!
 //! Pins the proposal's contract
-//! (docs/dev/proposals/2026-08-19-obs-anchored-horizon-cli.md):
+//! (docs/dev/proposals/archive/post-alpha/2026-08-19-obs-anchored-horizon-cli.md):
 //! an absolute `--to` moves the run horizon (trajectory rows appear past the
 //! model's baked `simulate { to }`); an anchored `--to` without `--fit` is a
 //! named refusal (a forward simulation binds no observed data); with
