@@ -1,5 +1,15 @@
 # Proposal: the score artifact
 
+**Amended by** `docs/dev/temporal-architecture.md` and
+`2026-11-15-temporal-architecture-migration.md` (2026-11-15). Where they differ,
+they govern: `ObservedRow` carries what the row measures (`measures`, its
+instant or period) instead of `time`; the fit records a `training_partition`
+(per-stream row prefix and digest, with the training extent) instead of
+`train_end`; held-out means every row that did not train and ends after the
+training extent; the trace change here is schema 7, since `main` already writes
+schema 6 (gh#312); the lead-time type gains a fixed-origin variant with
+per-target horizons (D35, D41).
+
 **Status:** Proposal **Date:** 2026-11-14 **Motivation:** camdl fits are to be
 published as immutable bundles and compared on a static site that computes
 nothing. The scores a bundle carries must therefore be computed once, stored,
