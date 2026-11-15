@@ -172,6 +172,11 @@ score can be trusted.
 | 14   | A1, A3     | off-grid data refused; advice for a missing flag        | 3, 0(e)               | no                         |
 | 15   | K4–K7      | refusals and documentation                              | follow-up, 0(e), 0(g) | no                         |
 
+**Issues.** Each defect is filed: K1 gh#1068, K2 gh#1069, K3 gh#1070, K4
+gh#1071, K5 gh#1072, K7 and A3 gh#1073, A1 gh#1074, A2 gh#1075, `obs_alignment`
+gh#1076, C2 gh#1077, L1 gh#1078, P1 gh#1079, T1 gh#861, T2 gh#1080, T3 gh#1081,
+F1 gh#1082, F2 gh#1083. C3 was gh#1062, fixed on `main` in `4a7c17f6f`.
+
 ## Part 3. How agents run this plan
 
 **Order.** Stage 0 items are independent of each other and of everything else.
@@ -222,10 +227,12 @@ repository.
 
 Each item is one GitHub issue, one branch and one commit.
 
-- **0(a) ODE held-out boundary (C3).** In `derive_ode_trace`
-  (`cli/src/compare.rs:2799`), use `heldout_scoring_boundary` as the
-  chain-binomial path does. Red test: fixture F4 in
-  `cli/tests/compare_ode_prequential.rs` (a `day(time)` stream); today it exits
+- **0(a) ODE held-out boundary (C3). Done:** fixed on `main` in `4a7c17f6f`
+  (gh#1062, closed); the description below is kept as the record. **0(a) ODE
+  held-out boundary (C3).** In `derive_ode_trace` (`cli/src/compare.rs:2799`),
+  use `heldout_scoring_boundary` as the chain-binomial path does. Red test:
+  fixture F4 in `cli/tests/compare_ode_prequential.rs` (a `day(time)` stream);
+  today it exits
   1. Behaviour change: a refusal becomes a score.
 - **0(b) `date_range` from its start (K1).** In `expander.ml:3343-3364`, compute
   entry `i` as `step_fn start (i·k)`. Red test: the 2020-01-31 example, compared
@@ -612,7 +619,7 @@ Recorded in the maintainer's docket; each is reflected in the spec and above.
 
 ## Part 9. Documents this plan changes
 
-- **Archived** (`316af507c`): the June interval model, its overview and runbook,
+- **Archived** (`671be6ef3`): the June interval model, its overview and runbook,
   the burn-in conditioning window, the two observation-anchor proposals, the
   June observation system, the conditioned-scenario predictive.
 - **Amended now:** `2026-11-14-score-artifact.md` (status line naming the
