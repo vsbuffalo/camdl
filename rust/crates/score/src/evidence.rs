@@ -59,6 +59,8 @@
 //! 8.7/26.1/43.4 dB — not 5-dB boundaries, so the two scales are
 //! not interchangeable without conversion.
 
+use crate::trace::PrequentialTrace;
+
 /// Nats → decibans: 1 nat ≈ 4.342944819 dB.
 pub const NATS_TO_DB: f64 = 10.0 / std::f64::consts::LN_10;
 
@@ -250,6 +252,42 @@ pub fn evidence_cell(delta_nats: f64, se_nats: f64, mc_se_delta: Option<f64>) ->
         format!("{} against", tag)
     };
     format!("{:+.1} dB, {}", db, labeled)
+}
+
+/// Paired Δ = sum_t (a_t − b_t); paired SE = the Newey–West HAC standard
+/// error of that sum with the Harvey–Leybourne–Newbold small-sample
+/// inflation (Stage 4.3 of the 2026-08-29 proposal, §3.4 remedy 2).
+///
+/// Loss differentials are autocorrelated exactly when a model is
+/// misspecified — the interesting case — so the iid `√(T·Var_t(d_t))` is
+/// anti-conservative there. The Diebold–Mariano standard: a Bartlett
+/// long-run variance at the pinned `sandwich`-default lag
+/// (`evidence::newey_west_lag`), the SE divided by the HLN factor
+/// `√((T−1)/T)`, with `t_{T−1}` as the reference distribution (stated in
+/// the footnote; the evidence gate stays the descriptive 2·se band).
+/// At lag 0 / no autocorrelation this is the iid SE with the biased
+/// variance. Returns (delta, se) or (NaN, NaN) if horizons mismatch.
+pub fn paired_delta(a: &PrequentialTrace, b: &PrequentialTrace) -> (f64, f64) {
+    let diffs = match paired_diffs(a, b) {
+        Some(d) => d,
+        None => return (f64::NAN, f64::NAN),
+    };
+    let delta: f64 = diffs.iter().sum();
+    let se = crate::evidence::newey_west_se_of_sum(&diffs)
+        / crate::evidence::hln_factor(diffs.len());
+    (delta, se)
+}
+
+/// The per-step loss differentials `d_t = a_t − b_t`, or `None` on a
+/// horizon mismatch — the shared input of the paired SE and the lag-1
+/// serial-dependence diagnostic.
+pub fn paired_diffs(a: &PrequentialTrace, b: &PrequentialTrace) -> Option<Vec<f64>> {
+    if a.n_scored() != b.n_scored() || a.n_scored() == 0 {
+        return None;
+    }
+    Some(a.steps.iter().zip(&b.steps)
+        .map(|(x, y)| x.log_score - y.log_score)
+        .collect())
 }
 
 #[cfg(test)]
