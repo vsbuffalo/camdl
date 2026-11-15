@@ -884,9 +884,13 @@ the non-finite pin, which step 7 changes as described under "Numbers that may
 not be finite". The JSON changes in step 9 only. No step of proposal A lands
 before step 9.
 
-6. `CheckId`, `CheckResult`, `Finding`, `Refusal`, with each existing check
-   rewritten as a function returning a `CheckResult`; `preflight` evaluates all
-   of them. Tests 2, 3, 4, 18, 19, 20.
+6. `CheckId`, `CheckResult`, `Finding`, `Refusal` and `Waiver` in
+   `score::preflight`. Each existing check in `compare.rs` is rewritten as a
+   function returning a `CheckResult`, still over `cli`'s rows; `preflight`
+   evaluates all of them and returns every result, and a refused comparison
+   prints every refusal, where `main` prints the first. The check functions move
+   into `score` in step 7, when `Member` exists for them to take. Tests 2, 3, 4,
+   18, 19, 20.
 7. `Member`, `Request`, `Report`, `Num`, `score::compare`; `cmd_compare` builds
    members and calls it. `Evidence` and the other label enums. The baseline tie
    rule. Tests 1, 8, 9, 10, 11, 12, 13, 14, 25.
