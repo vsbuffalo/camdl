@@ -38,6 +38,7 @@ use score::trace::{
 };
 use score::combine::ReplicateTotals;
 use score::evidence::{paired_delta, paired_diffs};
+use score::preflight::Waiver;
 use std::path::{Path, PathBuf};
 
 /// Default particle count for auto-deriving a prequential from a fit handle.
@@ -822,60 +823,6 @@ fn refuse(out: &crate::out::Out, message: String) -> ! {
 }
 
 // ── the cross-row checks, computed once (D13) ───────────────────────────
-
-/// A cross-row check that a `compare` flag lets a comparison render through.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Waiver {
-    MismatchedHorizon,
-    MixedProvenance,
-    DataMismatch,
-    ChangedData,
-    MismatchedFilterSettings,
-    InSampleAblation,
-}
-
-impl Waiver {
-    fn flag(self) -> &'static str {
-        match self {
-            Waiver::MismatchedHorizon => "--allow-mismatched-horizon",
-            Waiver::MixedProvenance => "--allow-mixed-provenance",
-            Waiver::DataMismatch => "--allow-data-mismatch",
-            Waiver::ChangedData => "--allow-changed-data",
-            Waiver::MismatchedFilterSettings => "--allow-mismatched-filter-settings",
-            Waiver::InSampleAblation => "--allow-in-sample-ablation",
-        }
-    }
-
-    /// What the failed check does to the reading of the table, in one
-    /// sentence. The refusal and every rendering under the flag share it.
-    fn consequence(self) -> &'static str {
-        match self {
-            Waiver::MismatchedHorizon =>
-                "Δ columns suppressed ('—' in the table, null in the JSON): a Δ pairs \
-                 two rows' scores observation by observation, and these rows scored \
-                 different numbers of observations.",
-            Waiver::MixedProvenance =>
-                "A plug-in predictive is under-dispersed relative to a posterior \
-                 mixture, so the Δ confounds model difference with dispersion treatment.",
-            Waiver::DataMismatch =>
-                "Δelpd across them is part model difference and part data difference, \
-                 and the table cannot separate the two.",
-            Waiver::ChangedData =>
-                "`compare` re-reads these files, so the row is scored on data its θ̂ \
-                 was not fitted to.",
-            Waiver::MismatchedFilterSettings =>
-                "The log of a particle-filter likelihood estimate is biased downward, \
-                 and by more at fewer particles (and fewer replicates combined), so \
-                 part of Δelpd would measure the filters rather than the models.",
-            Waiver::InSampleAblation =>
-                "Scored in-sample, Δelpd leans toward the fit that assimilated fewer \
-                 streams: its θ̂ was chosen to fit the shared stream alone, while the \
-                 other fit's traded that stream off against the rest, so on its own \
-                 training data it fits it no better and usually slightly worse, \
-                 whatever the extra streams contribute to prediction.",
-        }
-    }
-}
 
 /// The waivers the command line gave.
 #[derive(Debug, Clone, Copy, Default)]

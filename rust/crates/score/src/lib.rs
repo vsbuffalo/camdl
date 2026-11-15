@@ -13,4 +13,5 @@ pub mod combine;
 pub mod convergence;
 pub mod evidence;
 pub mod num;
+pub mod preflight;
 pub mod trace;
