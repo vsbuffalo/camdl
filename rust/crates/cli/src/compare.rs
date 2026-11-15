@@ -38,7 +38,11 @@ use score::trace::{
 };
 use score::combine::ReplicateTotals;
 use score::evidence::{paired_delta, paired_diffs};
-use score::preflight::Waiver;
+use score::preflight::{
+    self as pf, ChangedFile, CheckId, CheckOutcome, CheckResult, ConditioningMode, DataFile, Finding,
+    NotCheckedReason, Override, Qualification, Qualified, Refusal, SourceDigests, Unchecked, Unhashed,
+    UnhashedData, Waiver,
+};
 use std::path::{Path, PathBuf};
 
 /// Default particle count for auto-deriving a prequential from a fit handle.
@@ -345,15 +349,6 @@ impl RecordedData {
 /// Hex characters in a full SHA-256.
 const FULL_DIGEST_LEN: usize = 64;
 
-/// Whether two recorded hashes name the same bytes, compared on the length of
-/// the shorter: an older sidecar records 8 characters of the digest a newer one
-/// records in full. An empty hash names nothing and matches nothing.
-fn same_digest(a: &str, b: &str) -> bool {
-    let n = a.len().min(b.len());
-    n > 0 && a.is_char_boundary(n) && b.is_char_boundary(n)
-        && a[..n].eq_ignore_ascii_case(&b[..n])
-}
-
 /// Read a sidecar's `data_hashes` per source of `bindings`, and, for a row
 /// scored held out on `[data.holdout]` files, its `holdout_hashes`.
 ///
@@ -453,7 +448,7 @@ struct FileFinding {
 /// so a file edited in place after the fit would be scored at a θ̂ fitted to
 /// other bytes, with nothing said. An explicit `prequential.json` row
 /// re-reads nothing, so it has nothing to check here (and is already named
-/// by [`unchecked_data_note`]).
+/// by [`data_unchecked_note`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct DataFreshness {
     /// Every file that changed or could not be checked; files that match are
@@ -491,47 +486,6 @@ fn check_training_freshness(
         })
     }).collect();
     DataFreshness { findings, row_unchecked: None }
-}
-
-/// The rows scored on data changed since their fit ran, and which files, or
-/// `None`. The refusal and the `--allow-changed-data` renderings share it.
-fn changed_data(rows: &[Row]) -> Option<Mismatch> {
-    let mut concerned: Vec<String> = Vec::new();
-    let changed: Vec<String> = rows.iter().flat_map(|r| {
-        r.freshness.findings.iter().filter_map(move |f| match &f.check {
-            FileCheck::Changed { recorded, current } => Some((r.name.clone(), format!(
-                "'{}' stream '{}' ({}): the fit recorded {recorded}, the file now \
-                 hashes to {current}",
-                r.name, f.stream, f.path))),
-            _ => None,
-        })
-    }).map(|(name, text)| {
-        if !concerned.contains(&name) { concerned.push(name); }
-        text
-    }).collect();
-    (!changed.is_empty()).then(|| Mismatch {
-        rows: concerned,
-        finding: format!("data changed after the fit ran: {}", changed.join("; ")),
-    })
-}
-
-/// The scope of the changed-data check: every derived file, or derived row,
-/// that could not be compared with a recorded hash, and why. `None` when
-/// every scored file was checked.
-fn data_change_unchecked_note(rows: &[Row]) -> Option<String> {
-    let mut skipped: Vec<String> = Vec::new();
-    for r in rows {
-        if let Some(why) = &r.freshness.row_unchecked {
-            skipped.push(format!("'{}' ({why})", r.name));
-        }
-        for f in &r.freshness.findings {
-            if let FileCheck::NotChecked(why) = &f.check {
-                skipped.push(format!("'{}' stream '{}' ({}): {why}", r.name, f.stream, f.path));
-            }
-        }
-    }
-    (!skipped.is_empty()).then(|| format!(
-        "not checked for changes since the fit ran: {}.", skipped.join("; ")))
 }
 
 /// Row names for positional inputs: the file basename, extended leftward with
@@ -701,7 +655,7 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
         .or(cfg_streams);
     let Some(names) = selected else {
         let t = prepare_table(&out, rows, &waivers, baseline.as_deref())
-            .unwrap_or_else(|e| refuse(&out, e));
+            .unwrap_or_else(|e| refuse(&out, e.join("\n")));
         if let Some(path) = &a.pointwise {
             match write_pointwise(&t.rows, t.base_idx, path) {
                 Ok(PointwiseWritten { joint: (jp, nj), streams: (sp, ns) }) => out.say(format_args!(
@@ -717,17 +671,27 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
     };
 
     // `--streams`: one table per selected leaf, every row re-scored on that
-    // leaf alone. A refusal for any leaf refuses the command, naming the leaf.
+    // leaf alone. A refusal for any leaf refuses the command; every table's
+    // refusals are printed, each naming its leaf.
     let leaves = resolve_selection(&names, &rows).unwrap_or_else(|e| {
         out.fail(format!("error: {e}"));
     });
-    let tables: Vec<Table> = leaves.iter().map(|leaf| {
+    let mut refusals: Vec<String> = Vec::new();
+    let tables: Vec<Table> = leaves.iter().filter_map(|leaf| {
         let projected: Vec<Row> = rows.iter().map(|r| r.onto(leaf))
             .collect::<Result<_, _>>()
             .unwrap_or_else(|e| refuse(&out, for_stream(leaf, format!("error: {e}"))));
-        prepare_table(&out, projected, &waivers, baseline.as_deref())
-            .unwrap_or_else(|e| refuse(&out, for_stream(leaf, e)))
+        match prepare_table(&out, projected, &waivers, baseline.as_deref()) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                refusals.extend(e.into_iter().map(|m| for_stream(leaf, m)));
+                None
+            }
+        }
     }).collect();
+    if !refusals.is_empty() {
+        refuse(&out, refusals.join("\n"));
+    }
     if let Some(path) = &a.pointwise {
         match write_pointwise_streams(&tables, &leaves, path) {
             Ok((sp, ns)) => out.say(format_args!(
@@ -755,16 +719,21 @@ struct Table {
 }
 
 /// Run the cross-row checks over `rows` and choose the baseline: `Err` with
-/// the refusal when a check fails and is not waived.
+/// every refusal, in check order, when any check fails and is not waived.
 fn prepare_table(
     out: &crate::out::Out,
     mut rows: Vec<Row>,
     waivers: &Waivers,
     baseline: Option<&str>,
-) -> Result<Table, String> {
-    // Every cross-row check, once: a refusal returns here; what renders states
-    // the outcome, overrides included, from this one value (`Preflight`).
-    let checks = preflight(&rows, waivers)?;
+) -> Result<Table, Vec<String>> {
+    // Every cross-row check, once: all of them run, and the refusals return
+    // here together; what renders states the outcome, overrides included,
+    // from this one value (`Preflight`).
+    let checks = preflight(&rows, waivers);
+    let refusals = checks.refusals();
+    if !refusals.is_empty() {
+        return Err(refusals.iter().map(|r| refusal_message(r, &rows)).collect());
+    }
 
     // Rendered under `--allow-changed-data`: each trace scored on a changed
     // file records which streams' files it was.
@@ -859,88 +828,42 @@ impl Waivers {
     }
 }
 
-/// A failed cross-row check: the rows it concerns and what differed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Mismatch {
-    rows: Vec<String>,
-    finding: String,
-}
-
-impl Mismatch {
-    /// The finding and its consequence as one statement.
-    fn note(&self, w: Waiver) -> String {
-        format!("{}. {}", self.finding, w.consequence())
-    }
-}
-
-/// A waiver that was given and needed: the check would have refused.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Override {
-    waiver: Waiver,
-    mismatch: Mismatch,
-}
-
-impl Override {
-    /// The one line every human rendering prints for it.
-    fn line(&self) -> String {
-        let rows: Vec<String> = self.mismatch.rows.iter().map(|r| format!("'{r}'")).collect();
-        format!("⚠ {} was set for {}: {}", self.waiver.flag(), rows.join(", "),
-            self.mismatch.note(self.waiver))
-    }
-
-    fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "flag": self.waiver.flag(),
-            "rows": self.mismatch.rows,
-            "finding": self.mismatch.finding,
-            "consequence": self.waiver.consequence(),
-        })
-    }
-}
-
-/// The outcome of every cross-row check, computed once by [`preflight`] and
-/// read by every renderer, so no format can state a different outcome from
-/// another, or from the refusal.
-#[derive(Debug, Clone, Default)]
+/// The result of every preflight check over one table's rows, computed once
+/// by [`preflight`] and read by every renderer, so no format can state a
+/// different outcome from another, or from the refusals.
+#[derive(Debug, Clone, Default, PartialEq)]
 struct Preflight {
-    /// The waivers that were given and needed, in check order.
-    overrides: Vec<Override>,
-    /// The bound-data refusal text, present only under its override.
-    data_mismatch: Option<String>,
-    /// What the bound-data check could not cover.
-    data_unchecked: Option<String>,
-    /// The changed-data statement, present only under its override.
-    data_changed: Option<String>,
-    /// What the changed-data check could not cover.
-    data_change_unchecked: Option<String>,
-    /// Rows whose data hashes were compared on an 8-character prefix.
-    data_compared_on_prefix: Option<String>,
-    /// The filter-settings statement, present only under its override.
-    filter_settings_mismatch: Option<String>,
-    /// Rows whose trace records no filter settings.
-    filter_settings_unchecked: Option<String>,
+    /// One result per [`CheckId`], in declaration order.
+    results: Vec<CheckResult>,
 }
 
 impl Preflight {
-    /// Record `w` as needed, or refuse with `refusal` when it was not given.
-    fn waive(&mut self, waived: &Waivers, w: Waiver, m: Mismatch, refusal: String)
-        -> Result<(), String>
-    {
-        if !waived.allows(w) {
-            return Err(refusal);
-        }
-        self.overrides.push(Override { waiver: w, mismatch: m });
-        Ok(())
+    fn result(&self, check: CheckId) -> Option<&CheckResult> {
+        self.results.iter().find(|r| r.check == check)
     }
 
-    fn overridden(&self, w: Waiver) -> bool {
-        self.overrides.iter().any(|o| o.waiver == w)
+    /// The failed checks that were not waived, in check order.
+    fn refusals(&self) -> Vec<Refusal> {
+        self.results.iter().filter_map(CheckResult::refusal).collect()
+    }
+
+    /// The waivers that were given and needed, in check order.
+    fn overrides(&self) -> Vec<Override> {
+        self.results.iter().filter_map(CheckResult::override_).collect()
+    }
+
+    /// The finding of `check` when it failed and its waiver let it through.
+    fn waived_finding(&self, check: CheckId) -> Option<&Finding> {
+        match &self.result(check)?.outcome {
+            CheckOutcome::Failed { finding, waived: true } => Some(finding),
+            _ => None,
+        }
     }
 
     /// Whether the rows scored different numbers of observations, so no Δ is
     /// formed (the comparison rendered under `--allow-mismatched-horizon`).
     fn horizons_differ(&self) -> bool {
-        self.overridden(Waiver::MismatchedHorizon)
+        self.waived_finding(CheckId::ScoredSteps).is_some()
     }
 }
 
@@ -999,19 +922,6 @@ fn assimilated_sets_differ(rows: &[Row]) -> bool {
     sets.iter().any(Option::is_none) || sets.windows(2).any(|w| w[0] != w[1])
 }
 
-/// The in-sample stream ablation, or `None`: rows re-scored on the same leaves
-/// (`--streams`), stamped in-sample, whose fits assimilated different streams.
-fn in_sample_ablation(rows: &[Row]) -> Option<Mismatch> {
-    let first = rows.first()?;
-    let rescored = first.trace.scored_streams.is_some();
-    let in_sample = first.trace.conditioning == Conditioning::InSample;
-    (rescored && in_sample && rows.len() >= 2 && assimilated_sets_differ(rows)).then(|| Mismatch {
-        rows: rows.iter().map(|r| r.name.clone()).collect(),
-        finding: format!("the compared fits assimilated different streams and are scored \
-            in-sample: {}", assimilated_sets(rows).join("; ")),
-    })
-}
-
 /// A trace's predictive basis, as the basis refusal names it (gh#312).
 fn basis_kind(b: &PredictiveBasis) -> String {
     match b {
@@ -1031,226 +941,897 @@ fn provenance_kind(p: &score::trace::Provenance) -> String {
     }
 }
 
-/// Run every cross-row check over the loaded rows: `Err` with the refusal
-/// message when a check fails and `waived` does not allow it, otherwise the
-/// outcome every renderer states.
-fn preflight(rows: &[Row], waived: &Waivers) -> Result<Preflight, String> {
-    use std::mem::discriminant;
-    let mut checks = Preflight::default();
-    let names: Vec<String> = rows.iter().map(|r| r.name.clone()).collect();
-
-    // Fairness, part zero (gh#585, Stage 3.4): rows with different
-    // conditioning modes are never differenced. An in-sample score (θ saw
-    // the scored window) and a held-out score (θ sealed before it) answer
-    // different questions; their Δ is meaningless however displayed, so
-    // there is no override — the fix is to make the modes agree.
-    let mixed = rows.windows(2).any(|w|
-        discriminant(&w[0].trace.conditioning) != discriminant(&w[1].trace.conditioning));
-    if mixed {
-        let mut message = "error: the compared traces mix conditioning modes:".to_string();
-        for r in rows {
-            let kind = match &r.trace.conditioning {
-                Conditioning::InSample => "in_sample (θ saw the scored window)".to_string(),
-                Conditioning::HoldOutTail { train_end, .. } =>
-                    format!("hold_out_tail (θ sealed at t = {train_end})"),
-            };
-            message.push_str(&format!("\n       {}: {}", r.name, kind));
-        }
-        message.push_str("\n       Declare the same holdout in every compared fit, or pass \
-                   --in-sample to score all of them in-sample.");
-        return Err(message);
+fn conditioning_kind(c: &ConditioningMode) -> String {
+    match c {
+        ConditioningMode::InSample => "in_sample (θ saw the scored window)".to_string(),
+        ConditioningMode::HoldOutTail { train_end } =>
+            format!("hold_out_tail (θ sealed at t = {train_end})"),
     }
-    // gh#312: rows on different predictive bases are never differenced. A
-    // filter's score is a Monte-Carlo estimate whose log is biased downward
-    // by an amount that depends on the model and the particle count; an ODE
-    // trace's is exact. Their Δ would carry that bias as if it were a model
-    // difference, and no setting makes the two estimators agree — so, like
-    // conditioning, there is no override.
-    if rows.windows(2).any(|w| discriminant(&w[0].trace.basis) != discriminant(&w[1].trace.basis)) {
-        let mut message = "error: the compared traces mix predictive bases:".to_string();
-        for r in rows {
-            message.push_str(&format!("\n       {}: {}", r.name, basis_kind(&r.trace.basis)));
-        }
-        message.push_str("\n       A particle filter's log score is a Monte-Carlo estimate, \
-                   biased downward by an amount that depends on the model and the \
-                   particle count; an ODE trace's is exact. Their Δelpd would mix \
-                   that bias into the model difference. Compare ODE fits with ODE \
-                   fits, and filtered fits with filtered fits.");
-        return Err(message);
-    }
+}
 
-    // All held-out: the sealed boundaries must also agree, or the rows
-    // score different windows (the axis check would refuse anyway, but
-    // this names the actual cause).
-    let ends: Vec<f64> = rows.iter().filter_map(|r| match &r.trace.conditioning {
-        Conditioning::HoldOutTail { train_end, .. } => Some(*train_end),
+/// Run every cross-row check over the loaded rows, in [`CheckId`] order, and
+/// record each result. A check that reads what an earlier check established
+/// ([`prerequisite`]) is recorded as not evaluated when that check failed
+/// unwaived or was itself not evaluated. A failed check is waived when
+/// `waived` gives its flag.
+fn preflight(rows: &[Row], waived: &Waivers) -> Preflight {
+    let mut results: Vec<CheckResult> = Vec::with_capacity(CheckId::ALL.len());
+    for check in CheckId::ALL {
+        let blocked = prerequisite(check, rows).filter(|p| {
+            !results.iter().find(|r| r.check == *p)
+                .expect("a prerequisite precedes the check that reads it")
+                .established()
+        });
+        let mut result = match blocked {
+            Some(because) => CheckResult {
+                check,
+                outcome: CheckOutcome::NotEvaluated { because },
+                not_checked: Vec::new(),
+                qualified: Vec::new(),
+                waiver: check.waiver(),
+            },
+            None => evaluate(check, rows, &results),
+        };
+        let allowed = result.waiver.is_some_and(|w| waived.allows(w));
+        if let CheckOutcome::Failed { waived, .. } = &mut result.outcome {
+            *waived = allowed;
+        }
+        results.push(result);
+    }
+    Preflight { results }
+}
+
+/// The earlier check whose result `check` reads, if any.
+///
+/// - `TrainingBoundary` compares boundaries among held-out rows, and
+///   `InSampleAblation` reads the one conditioning the rows share: both
+///   need `Conditioning`.
+/// - `Pairing` pairs steps by position when the rows scored the same number
+///   of steps and joins them by time when they did not (under the waiver):
+///   it needs `ScoredSteps`.
+/// - `SharedData`, when a row is re-scored on one leaf, compares the hashes
+///   of the leaf's source, the same for every row only once `Pairing` has
+///   shown the rows are scored on the same leaves.
+fn prerequisite(check: CheckId, rows: &[Row]) -> Option<CheckId> {
+    match check {
+        CheckId::TrainingBoundary | CheckId::InSampleAblation => Some(CheckId::Conditioning),
+        CheckId::Pairing => Some(CheckId::ScoredSteps),
+        CheckId::SharedData if rows.iter().any(|r| r.trace.scored_streams.is_some()) =>
+            Some(CheckId::Pairing),
         _ => None,
+    }
+}
+
+/// One check over `rows`; `earlier` holds the results of the checks before
+/// it. The outcome of a failed check is not yet waived.
+fn evaluate(check: CheckId, rows: &[Row], earlier: &[CheckResult]) -> CheckResult {
+    match check {
+        CheckId::Basis => check_basis(rows),
+        CheckId::Conditioning => check_conditioning(rows),
+        CheckId::TrainingBoundary => check_training_boundary(rows),
+        CheckId::InSampleAblation => check_in_sample_ablation(rows),
+        CheckId::Provenance => check_provenance(rows),
+        CheckId::ScoredSteps => check_scored_steps(rows),
+        CheckId::Pairing => {
+            // With the step counts differing (and waived: otherwise this
+            // check is not evaluated), steps are joined by time.
+            let horizons_differ = earlier.iter().any(|r| r.check == CheckId::ScoredSteps
+                && matches!(r.outcome, CheckOutcome::Failed { .. }));
+            check_pairing(rows, horizons_differ)
+        }
+        CheckId::SharedData => check_shared_data(rows),
+        CheckId::ChangedData => check_changed_data(rows),
+        CheckId::FilterSettings => check_filter_settings(rows),
+    }
+}
+
+/// A result with nothing not checked or qualified: failed on `failure`,
+/// passed when the members compared, and nothing to compare otherwise.
+fn simple_result(check: CheckId, failure: Option<Finding>, comparable: bool) -> CheckResult {
+    CheckResult {
+        check,
+        outcome: outcome(failure, comparable),
+        not_checked: Vec::new(),
+        qualified: Vec::new(),
+        waiver: check.waiver(),
+    }
+}
+
+fn outcome(failure: Option<Finding>, comparable: bool) -> CheckOutcome {
+    match failure {
+        Some(finding) => CheckOutcome::Failed { finding, waived: false },
+        None if comparable => CheckOutcome::Passed,
+        None => CheckOutcome::NothingToCompare,
+    }
+}
+
+/// `rows` as (value, name) items for [`score::preflight::partition`].
+fn by_row<V>(rows: &[Row], value: impl Fn(&Row) -> V) -> Vec<(V, String)> {
+    rows.iter().map(|r| (value(r), r.name.clone())).collect()
+}
+
+/// Whether the groups' values take more than one variant.
+fn variants_differ<V>(groups: &[(V, Vec<String>)]) -> bool {
+    groups.windows(2).any(|w| std::mem::discriminant(&w[0].0) != std::mem::discriminant(&w[1].0))
+}
+
+/// gh#312: rows on different predictive bases are never differenced. A
+/// filter's score is a Monte-Carlo estimate whose log is biased downward by
+/// an amount that depends on the model and the particle count; an ODE
+/// trace's is exact. Their Δ would carry that bias as if it were a model
+/// difference, and no setting makes the two estimators agree, so there is
+/// no override.
+fn check_basis(rows: &[Row]) -> CheckResult {
+    let key = |b: &PredictiveBasis| match b {
+        PredictiveBasis::Filtered => (0, 0),
+        PredictiveBasis::OdeFreeForward { samples_per_draw } => (1, *samples_per_draw),
+    };
+    let groups = pf::partition(by_row(rows, |r| r.trace.basis),
+        |a, b| key(a).cmp(&key(b)), |a, b| a == b);
+    let failure = variants_differ(&groups).then_some(Finding::BasisDiffers { groups });
+    simple_result(CheckId::Basis, failure, rows.len() >= 2)
+}
+
+/// Fairness, part zero (gh#585, Stage 3.4): rows with different
+/// conditioning modes are never differenced. An in-sample score (θ saw the
+/// scored window) and a held-out score (θ sealed before it) answer
+/// different questions; their Δ is meaningless however displayed, so there
+/// is no override: the fix is to make the modes agree.
+fn check_conditioning(rows: &[Row]) -> CheckResult {
+    let mode = |r: &Row| match &r.trace.conditioning {
+        Conditioning::InSample => ConditioningMode::InSample,
+        Conditioning::HoldOutTail { train_end, .. } =>
+            ConditioningMode::HoldOutTail { train_end: *train_end },
+    };
+    let order = |a: &ConditioningMode, b: &ConditioningMode| match (a, b) {
+        (ConditioningMode::InSample, ConditioningMode::InSample) => std::cmp::Ordering::Equal,
+        (ConditioningMode::InSample, _) => std::cmp::Ordering::Less,
+        (_, ConditioningMode::InSample) => std::cmp::Ordering::Greater,
+        (ConditioningMode::HoldOutTail { train_end: x }, ConditioningMode::HoldOutTail { train_end: y }) =>
+            x.total_cmp(y),
+    };
+    let groups = pf::partition(by_row(rows, mode), order, |a, b| a == b);
+    let failure = variants_differ(&groups).then_some(Finding::ConditioningDiffers { groups });
+    simple_result(CheckId::Conditioning, failure, rows.len() >= 2)
+}
+
+/// All held-out: the sealed boundaries must also agree, or the rows score
+/// different windows (the pairing check would refuse anyway, but this names
+/// the actual cause). Boundaries within [`same_sealed_boundary`] of a
+/// group's smallest are one group.
+fn check_training_boundary(rows: &[Row]) -> CheckResult {
+    let held: Vec<(f64, String)> = rows.iter().filter_map(|r| match &r.trace.conditioning {
+        Conditioning::HoldOutTail { train_end, .. } => Some((*train_end, r.name.clone())),
+        Conditioning::InSample => None,
     }).collect();
-    if ends.windows(2).any(|w| !same_sealed_boundary(w[0], w[1])) {
-        return Err(format!("error: the compared fits seal training at different \
-                   boundaries: {ends:?}\n       Held-out scores over different windows are not \
-                   commensurable; declare the same holdout_after in every \
-                   compared fit."));
-    }
+    let comparable = held.len() >= 2;
+    let groups = pf::partition(held, |a, b| a.total_cmp(b), |a, b| same_sealed_boundary(*a, *b));
+    let failure = (groups.len() > 1).then_some(Finding::TrainingBoundaryDiffers { groups });
+    simple_result(CheckId::TrainingBoundary, failure, comparable)
+}
 
-    // A table re-scored on one leaf (`--streams`) whose rows' fits assimilated
-    // different streams is the stream-ablation experiment. In-sample it is
-    // biased by construction toward the fit trained on fewer streams; held
-    // out, neither fit's θ̂ was tuned to the scored rows. All rows share one
-    // conditioning mode by now, so the first row's is the cohort's.
-    if let Some(m) = in_sample_ablation(rows) {
-        let message = format!("error: {}.\n       {}\n       Declare the same \
-            holdout_after in every compared fit, so the rows are scored held-out, or \
-            pass --allow-in-sample-ablation to render anyway.",
-            m.finding, Waiver::InSampleAblation.consequence());
-        checks.waive(waived, Waiver::InSampleAblation, m, message)?;
-    }
+/// A table re-scored on one leaf (`--streams`) whose rows' fits assimilated
+/// different streams is the stream-ablation experiment. In-sample it is
+/// biased by construction toward the fit trained on fewer streams; held
+/// out, neither fit's θ̂ was tuned to the scored rows. The rows share one
+/// conditioning mode (the check's prerequisite).
+fn check_in_sample_ablation(rows: &[Row]) -> CheckResult {
+    let rescored = rows.iter().any(|r| r.trace.scored_streams.is_some());
+    let in_sample = rows.iter().all(|r| r.trace.conditioning == Conditioning::InSample);
+    let failure = (rescored && in_sample && rows.len() >= 2 && assimilated_sets_differ(rows))
+        .then(|| Finding::InSampleAblation {
+            groups: pf::partition(by_row(rows, Row::assimilated), |a, b| a.cmp(b),
+                // An unknown set is not known to equal any other.
+                |a, b| a.is_some() && a == b),
+        });
+    simple_result(CheckId::InSampleAblation, failure, rows.len() >= 2)
+}
 
-    // Provenance preflight (Stage 4.1): a plug-in trace (under-dispersed —
-    // one θ) against a posterior mixture is a Δ between predictives of
-    // different dispersion. Overridable, unlike conditioning: an optimizer
-    // fit has no posterior and comparing it against a Bayesian fit is a
-    // legitimate ask — as long as the reader chose it.
-    let mixed = rows.windows(2).any(|w|
-        discriminant(&w[0].trace.provenance) != discriminant(&w[1].trace.provenance));
-    if mixed {
-        let kinds: Vec<String> = rows.iter()
-            .map(|r| format!("'{}' {}", r.name, provenance_kind(&r.trace.provenance)))
-            .collect();
-        let mut message = "error: the compared traces mix provenance kinds:".to_string();
-        for r in rows {
-            message.push_str(&format!("\n       {}: {}", r.name, provenance_kind(&r.trace.provenance)));
-        }
-        message.push_str(&format!("\n       {}\n       Pass --draws 1 to score every fit \
-                   plug-in, or --allow-mixed-provenance to render anyway.",
-                   Waiver::MixedProvenance.consequence()));
-        checks.waive(waived, Waiver::MixedProvenance, Mismatch {
-            rows: names.clone(),
-            finding: format!("the compared traces mix provenance kinds: {}", kinds.join("; ")),
-        }, message)?;
-    }
-
-    // Under `--streams`, rows that assimilated different streams may start
-    // scoring the leaf at different times for a reason the refusals below
-    // would not otherwise name.
-    let first_step = first_step_note(rows).map(|n| format!("\n       {n}")).unwrap_or_default();
-
-    // Fairness: T_score (n_scored) must agree across rows unless overridden.
-    let t_scores: Vec<usize> = rows.iter().map(|r| r.trace.n_scored()).collect();
-    let t_mismatch = t_scores.iter().any(|&t| t != t_scores[0]);
-    if t_mismatch {
-        let per_row: Vec<String> = rows.iter()
-            .map(|r| format!("'{}' {}", r.name, r.trace.n_scored()))
-            .collect();
-        checks.waive(waived, Waiver::MismatchedHorizon, Mismatch {
-            rows: names.clone(),
-            finding: format!("T_score differs across models: {}", per_row.join(", ")),
-        }, format!("error: T_score differs across models: {:?}\n       \
-            Δelpd and Δcrps are not commensurable.\n       \
-            Pass --allow-mismatched-horizon to render (uncomparable Δ columns → '—').{first_step}",
-            t_scores))?;
-    }
-
-    // Fairness, part two: equal T_score is not an equal observation AXIS.
-    // `paired_delta` zips steps by index, so two traces scoring the same NUMBER
-    // of observations at different TIMES — a hole in one series, a different
-    // `t0` — produce a Δelpd, an se(Δ) and a deciban verdict computed across
-    // two different axes, rendered as a confident answer. This is not
-    // overridable by `--allow-mismatched-horizon`: that flag says "render the Δ
-    // columns as '—' because the horizons differ", whereas this is a pairing
-    // that is meaningless however it is displayed.
-    //
-    // With the horizons differing (and the flag set — otherwise refused
-    // above), the flag waives the times only one row scored, and nothing
-    // else: at every time both rows scored, the stream-set (gh#570) and
-    // coverage (gh#833) checks still hold.
-    let pairing = if t_mismatch {
-        check_shared_times(rows)
-    } else {
-        check_shared_observation_axis(rows)
+/// Provenance preflight (Stage 4.1): a plug-in trace (under-dispersed: one
+/// θ) against a posterior mixture is a Δ between predictives of different
+/// dispersion. Overridable, unlike conditioning: an optimizer fit has no
+/// posterior and comparing it against a Bayesian fit is a legitimate ask, as
+/// long as the reader chose it.
+fn check_provenance(rows: &[Row]) -> CheckResult {
+    use score::trace::Provenance;
+    let key = |p: &Provenance| match p {
+        Provenance::PlugIn => (0, 0),
+        Provenance::Posterior { n_draws } => (1, *n_draws),
     };
-    pairing.map_err(|e| format!("error: {e}{first_step}"))?;
+    let groups = pf::partition(by_row(rows, |r| r.trace.provenance),
+        |a, b| key(a).cmp(&key(b)), |a, b| a == b);
+    let failure = variants_differ(&groups).then_some(Finding::ProvenanceDiffers { groups });
+    simple_result(CheckId::Provenance, failure, rows.len() >= 2)
+}
 
-    // Fairness, part three (gh#713): the compared fits must have been bound to
-    // the same observations. Two fits on different data produce a Δelpd that is
-    // part model difference and part data difference, with nothing in the table
-    // to say which. Overridable, unlike the axis checks: comparing a fit on
-    // revised counts against the fit on the original ones is a real thing to
-    // want, as long as the reader knows the Δ is confounded.
-    //
-    // Rows re-scored on one leaf (`--streams`) compare only the hashes of that
-    // leaf's source, and an absent hash for it is a failed check, not a pass;
-    // the pairing check above has established that every row is scored on the
-    // same leaves.
-    let restricted: Vec<DataIdentity>;
-    let mut absent: Option<Mismatch> = None;
-    let data_entries: Vec<(&str, &DataIdentity)> = match rows.first()
-        .and_then(|r| r.trace.scored_streams.as_ref())
-    {
-        None => rows.iter().map(|r| (r.name.as_str(), &r.data)).collect(),
+/// Fairness: T_score (the number of scored steps) must agree across rows
+/// unless overridden.
+fn check_scored_steps(rows: &[Row]) -> CheckResult {
+    let groups = pf::partition(by_row(rows, |r| r.trace.n_scored()), |a, b| a.cmp(b), |a, b| a == b);
+    let failure = (groups.len() > 1).then_some(Finding::ScoredStepsDiffer { groups });
+    simple_result(CheckId::ScoredSteps, failure, rows.len() >= 2)
+}
+
+/// Fairness, part two: equal T_score is not an equal observation axis.
+/// `paired_delta` zips steps by index, so two traces scoring the same number
+/// of observations at different times (a hole in one series, a different
+/// `t0`) produce a Δelpd, an se(Δ) and a deciban verdict computed across two
+/// different axes, rendered as a confident answer. Not overridable by
+/// `--allow-mismatched-horizon`: that flag says "render the Δ columns as '—'
+/// because the horizons differ", whereas this is a pairing that is
+/// meaningless however it is displayed.
+///
+/// With the horizons differing (and the flag set: otherwise this check is
+/// not evaluated), the flag waives the times only one row scored, and
+/// nothing else: at every time two or more rows scored, the stream-set
+/// (gh#570) and coverage (gh#833) checks still hold.
+fn check_pairing(rows: &[Row], horizons_differ: bool) -> CheckResult {
+    simple_result(CheckId::Pairing, pairing_finding(rows, horizons_differ), rows.len() >= 2)
+}
+
+/// The first way `rows` fail to pair, or `None`.
+///
+/// The rows must score the same quantity: all jointly over every leaf their
+/// fit observed, or all re-scored on the same leaves
+/// (`PrequentialTrace::scored_streams`); a step's log score means a different
+/// quantity otherwise, even where the steps' streams agree. Then, step by
+/// step (by position when `by_time` is false, at each time two or more rows
+/// scored when it is true), the rows must be at the same time and pass
+/// [`step_finding`].
+fn pairing_finding(rows: &[Row], by_time: bool) -> Option<Finding> {
+    let quantity = pf::partition(by_row(rows, |r| r.trace.scored_streams.clone()),
+        |a, b| a.cmp(b), |a, b| a == b);
+    if quantity.len() > 1 {
+        return Some(Finding::ScoredQuantityDiffers { groups: quantity });
+    }
+    if !by_time {
+        let n = rows.iter().map(|r| r.trace.steps.len()).min().unwrap_or(0);
+        for k in 0..n {
+            let times = pf::partition(by_row(rows, |r| r.trace.steps[k].t),
+                |a, b| a.total_cmp(b), |a, b| a == b);
+            if times.len() > 1 {
+                return Some(Finding::ObservationTimesDiffer { step: k + 1, groups: times });
+            }
+            let at: Vec<(&Row, &score::trace::PrequentialStep)> =
+                rows.iter().map(|r| (r, &r.trace.steps[k])).collect();
+            if let Some(f) = step_finding(&at) {
+                return Some(f);
+            }
+        }
+        return None;
+    }
+    // Step times come from the same observation grid, so a shared time is
+    // the same value; this is the equality the equal-horizon path pairs on.
+    let mut times: Vec<f64> = rows.iter().flat_map(|r| r.trace.steps.iter().map(|s| s.t)).collect();
+    times.sort_by(f64::total_cmp);
+    times.dedup();
+    for t in times {
+        let at: Vec<(&Row, &score::trace::PrequentialStep)> = rows.iter()
+            .filter_map(|r| r.trace.steps.iter().find(|s| s.t == t).map(|s| (r, s)))
+            .collect();
+        if at.len() >= 2 {
+            if let Some(f) = step_finding(&at) {
+                return Some(f);
+            }
+        }
+    }
+    None
+}
+
+/// The rows' steps at one observation time scored the same streams, and the
+/// same quantity for each stream.
+///
+/// A v1 trace carries no per-stream breakdown at all (an empty stream set).
+/// Two such traces have nothing to check and pass; one of each cannot be
+/// checked, and an unverifiable stream set is not a verified one.
+///
+/// The coverage half (gh#833): two fits of one file that differ only in what
+/// a row is declared to cover (a gapped window against a merged one, a
+/// stream read as an instant against the same name read as a flow) score at
+/// the same times and produce different likelihoods, and nothing else in the
+/// pipeline can tell that apart from a model difference. An `Unrecorded`
+/// coverage (a trace older than schema 4) is treated as the v1 case is.
+fn step_finding(at: &[(&Row, &score::trace::PrequentialStep)]) -> Option<Finding> {
+    use score::trace::Coverage;
+    let t = at.first()?.1.t;
+    let streams_of = |s: &score::trace::PrequentialStep| -> Vec<String> {
+        step_streams(s).into_iter().map(str::to_string).collect()
+    };
+    let sets = pf::partition(at.iter().map(|(r, s)| (streams_of(s), r.name.clone())).collect(),
+        |a, b| a.cmp(b), |a, b| a == b);
+    if sets.len() > 1 {
+        // The streams every one of these rows scores anywhere: `--streams`
+        // compares the rows on those, each alone.
+        let mut shared: Vec<String> = at[0].0.trace.streams().into_iter().map(str::to_string).collect();
+        for (r, _) in &at[1..] {
+            let theirs = r.trace.streams();
+            shared.retain(|s| theirs.contains(&s.as_str()));
+        }
+        shared.sort();
+        return Some(Finding::StreamSetsDiffer { t, groups: sets, shared_streams: shared });
+    }
+    let key = |c: &Coverage| match c {
+        Coverage::Unrecorded => (0, 0.0, 0.0),
+        Coverage::Instant => (1, 0.0, 0.0),
+        Coverage::Interval { start, stop } => (2, *start, *stop),
+    };
+    let order = |a: &Coverage, b: &Coverage| {
+        let (ka, kb) = (key(a), key(b));
+        ka.0.cmp(&kb.0).then(ka.1.total_cmp(&kb.1)).then(ka.2.total_cmp(&kb.2))
+    };
+    for stream in &sets[0].0 {
+        let items: Vec<(Coverage, String)> = at.iter().filter_map(|(r, s)| {
+            s.per_stream.iter().find(|x| &x.stream == stream).map(|x| (x.coverage, r.name.clone()))
+        }).collect();
+        let groups = pf::partition(items, order, |a, b| a == b);
+        if groups.len() > 1 {
+            return Some(Finding::CoverageDiffers { t, stream: stream.clone(), groups });
+        }
+    }
+    None
+}
+
+/// Fairness, part three (gh#713): the compared fits must have been bound to
+/// the same observations. Two fits on different data produce a Δelpd that is
+/// part model difference and part data difference, with nothing in the
+/// table to say which. Overridable, unlike the pairing check: comparing a fit
+/// on revised counts against the fit on the original ones is a real thing
+/// to want, as long as the reader knows the Δ is confounded.
+///
+/// `compare @a @b` re-filters each fit at its own θ̂ and differences the
+/// scores. If the two fits read different data (a corrected case series, a
+/// stream added between runs, a file edited in place) the difference carries
+/// both effects and the table attributes all of it to the models. Nothing
+/// else in the pipeline catches this: each fit is internally consistent, and
+/// the derived traces agree on T_score, times and stream names, because
+/// those come from the same model.
+///
+/// Per source, the rows that record a hash for it or bind it not at all are
+/// partitioned by that hash, compared on the length of the shortest (an
+/// older sidecar records 8 characters of the digest a newer one records in
+/// full); an empty hash names nothing and matches nothing. A row with no data
+/// identity, and a source a row could not resolve, take no part and are
+/// listed as not checked.
+///
+/// Rows re-scored on one leaf (`--streams`) compare only the hashes of that
+/// leaf's source, and an absent hash for it is a failed check, not a pass;
+/// the pairing check (this check's prerequisite then) has established that
+/// every row is scored on the same leaves.
+fn check_shared_data(rows: &[Row]) -> CheckResult {
+    let leaves = rows.iter().find_map(|r| r.trace.scored_streams.as_ref());
+    let mut unhashed: Vec<UnhashedData> = Vec::new();
+    let entries: Vec<(&str, DataIdentity)> = rows.iter().map(|r| match leaves {
+        None => (r.name.as_str(), r.data.clone()),
         Some(leaves) => {
-            let mut missing: Vec<String> = Vec::new();
-            let mut concerned: Vec<String> = Vec::new();
-            restricted = rows.iter().map(|r| {
-                let (d, m) = data_for_streams(r, leaves);
-                if !m.is_empty() { concerned.push(r.name.clone()); }
-                missing.extend(m);
-                d
-            }).collect();
-            absent = (!missing.is_empty()).then(|| Mismatch {
-                rows: concerned,
-                finding: format!("no hash is recorded for the data this table scores: {}",
-                    missing.join("; ")),
+            let (d, missing) = data_for_streams(r, leaves);
+            unhashed.extend(missing.into_iter()
+                .map(|what| UnhashedData { member: r.name.clone(), what }));
+            (r.name.as_str(), d)
+        }
+    }).collect();
+    pf::sort_by_member(&mut unhashed, |u| &u.member);
+
+    let mut not_checked: Vec<Unchecked> = Vec::new();
+    for (name, d) in &entries {
+        let unchecked = |reason| Unchecked { member: name.to_string(), reason };
+        match d {
+            DataIdentity::Digests(rec) => {
+                for (source, why) in &rec.unresolved {
+                    not_checked.push(unchecked(NotCheckedReason::SourceUnresolved {
+                        source: source.clone(), file: DataFile::Training, why: why.clone() }));
+                }
+                for (source, why) in &rec.holdout_unresolved {
+                    not_checked.push(unchecked(NotCheckedReason::SourceUnresolved {
+                        source: source.clone(), file: DataFile::Holdout, why: why.clone() }));
+                }
+            }
+            DataIdentity::Unknown(why) =>
+                not_checked.push(unchecked(NotCheckedReason::NoDataIdentity { why: why.clone() })),
+        }
+    }
+    pf::sort_by_member(&mut not_checked, |u| &u.member);
+
+    let known: Vec<(&str, &RecordedData)> = entries.iter().filter_map(|(name, d)| match d {
+        DataIdentity::Digests(rec) => Some((*name, rec)),
+        DataIdentity::Unknown(_) => None,
+    }).collect();
+    let mut sources: Vec<SourceDigests> = Vec::new();
+    for file in [DataFile::Training, DataFile::Holdout] {
+        type Hashes = std::collections::BTreeMap<String, String>;
+        fn of(rec: &RecordedData, file: DataFile) -> (&Hashes, &Hashes) {
+            match file {
+                DataFile::Training => (&rec.training, &rec.unresolved),
+                DataFile::Holdout => (&rec.holdout, &rec.holdout_unresolved),
+            }
+        }
+        let all: std::collections::BTreeSet<&String> =
+            known.iter().flat_map(|(_, rec)| of(rec, file).0.keys()).collect();
+        for source in all {
+            let taking_part: Vec<(Option<&str>, &str)> = known.iter()
+                .filter(|(_, rec)| !of(rec, file).1.contains_key(source))
+                .map(|(name, rec)| (of(rec, file).0.get(source).map(String::as_str), *name))
+                .collect();
+            let len = taking_part.iter().filter_map(|(h, _)| h.filter(|h| !h.is_empty()))
+                .map(|h| h.chars().count()).min().unwrap_or(0);
+            let items: Vec<(Option<String>, String)> = taking_part.iter().map(|(h, name)| (
+                h.map(|h| h.chars().take(len).collect::<String>().to_ascii_lowercase()),
+                name.to_string())).collect();
+            let groups = pf::partition(items, |a, b| a.cmp(b),
+                |a, b| a == b && a.as_deref() != Some(""));
+            if groups.len() > 1 {
+                sources.push(SourceDigests { source: source.clone(), file, groups });
+            }
+        }
+    }
+    let failure = (!sources.is_empty() || !unhashed.is_empty())
+        .then_some(Finding::DataDiffers { sources, unhashed });
+    let comparable = known.len() >= 2 || failure.is_some();
+    CheckResult {
+        check: CheckId::SharedData,
+        outcome: outcome(failure, comparable),
+        not_checked,
+        qualified: hash_prefix_rows(rows),
+        waiver: CheckId::SharedData.waiver(),
+    }
+}
+
+/// The rows whose recorded data hashes are shorter than a full SHA-256, so
+/// the shared-data and changed-data checks compared them on that prefix: a
+/// difference beyond the prefix is not detected.
+fn hash_prefix_rows(rows: &[Row]) -> Vec<Qualified> {
+    let mut out: Vec<Qualified> = rows.iter()
+        .filter(|r| matches!(&r.data, DataIdentity::Digests(rec) if rec.has_short_hash()))
+        .map(|r| Qualified { member: r.name.clone(), how: Qualification::HashPrefixOnly })
+        .collect();
+    pf::sort_by_member(&mut out, |q| &q.member);
+    out
+}
+
+/// A derived row's training file edited after its fit ran is scored at a θ̂
+/// fitted to other bytes. The same class as the shared-data refusal, and
+/// overridable for the same reason. A check of each row against its own
+/// record: it passes when no file changed. Every derived file, or derived
+/// row, that could not be compared with a recorded hash is listed as not
+/// checked.
+fn check_changed_data(rows: &[Row]) -> CheckResult {
+    let mut files: Vec<ChangedFile> = Vec::new();
+    let mut not_checked: Vec<Unchecked> = Vec::new();
+    for r in rows {
+        if let Some(why) = &r.freshness.row_unchecked {
+            not_checked.push(Unchecked { member: r.name.clone(),
+                reason: NotCheckedReason::NoDataIdentity { why: why.clone() } });
+        }
+        for f in &r.freshness.findings {
+            match &f.check {
+                FileCheck::Changed { recorded, current } => files.push(ChangedFile {
+                    member: r.name.clone(), stream: f.stream.clone(), path: f.path.clone(),
+                    recorded: recorded.clone(), current: current.clone(),
+                }),
+                FileCheck::NotChecked(why) => not_checked.push(Unchecked {
+                    member: r.name.clone(),
+                    reason: NotCheckedReason::FileNotChecked {
+                        stream: f.stream.clone(), path: f.path.clone(), why: why.clone() },
+                }),
+                FileCheck::Matches => {}
+            }
+        }
+    }
+    pf::sort_by_member(&mut files, |f| &f.member);
+    pf::sort_by_member(&mut not_checked, |u| &u.member);
+    let failure = (!files.is_empty()).then_some(Finding::DataChanged { files });
+    CheckResult {
+        check: CheckId::ChangedData,
+        outcome: outcome(failure, true),
+        not_checked,
+        qualified: hash_prefix_rows(rows),
+        waiver: CheckId::ChangedData.waiver(),
+    }
+}
+
+/// Two rows scored at different particle or replicate counts differ partly
+/// by the filters. Overridable: comparing a cheap explicit trace against a
+/// derived row is a legitimate ask once the reader knows. Only rows that
+/// record their settings take part; the others are listed as not checked.
+fn check_filter_settings(rows: &[Row]) -> CheckResult {
+    let recorded: Vec<(&str, &score::trace::Derivation)> = rows.iter()
+        .filter_map(|r| r.trace.derivation.as_ref().map(|d| (r.name.as_str(), d)))
+        .collect();
+    let counts = |of: fn(&score::trace::Derivation) -> usize| pf::partition(
+        recorded.iter().map(|(name, d)| (of(d), name.to_string())).collect(),
+        |a, b| a.cmp(b), |a, b| a == b);
+    let particles = counts(|d| d.particles);
+    let replicates = counts(|d| d.replicates);
+    let failure = (particles.len() > 1 || replicates.len() > 1)
+        .then_some(Finding::FilterSettingsDiffer { particles, replicates });
+    let mut not_checked: Vec<Unchecked> = rows.iter()
+        .filter(|r| r.trace.derivation.is_none())
+        .map(|r| Unchecked {
+            member: r.name.clone(),
+            reason: if r.trace.schema_version < 5 {
+                NotCheckedReason::TraceBeforeSchema5
+            } else {
+                NotCheckedReason::NoDerivationBlock
+            },
+        })
+        .collect();
+    pf::sort_by_member(&mut not_checked, |u| &u.member);
+    CheckResult {
+        check: CheckId::FilterSettings,
+        outcome: outcome(failure, recorded.len() >= 2),
+        not_checked,
+        qualified: Vec::new(),
+        waiver: CheckId::FilterSettings.waiver(),
+    }
+}
+
+// ── the sentences the checks' results are rendered as ─────────────────
+
+/// `'a', 'b'`.
+fn quoted(names: &[String]) -> String {
+    names.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(", ")
+}
+
+/// `'a'`, `'a' and 'b'`, `'a', 'b' and 'c'`.
+fn quoted_and(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => format!("'{one}'"),
+        [rest @ .., last] => format!("{} and '{last}'", quoted(rest)),
+    }
+}
+
+fn plain(names: &[String]) -> String {
+    names.join(", ")
+}
+
+/// The finding as one statement, the form an override and the JSON state it
+/// in. For the checks no flag waives, the statement of the refusal.
+fn finding_text(f: &Finding) -> String {
+    match f {
+        Finding::BasisDiffers { groups } => format!("the compared traces mix predictive bases: {}",
+            groups.iter().map(|(b, m)| format!("{}: {}", plain(m), basis_kind(b)))
+                .collect::<Vec<_>>().join("; ")),
+        Finding::ConditioningDiffers { groups } => format!(
+            "the compared traces mix conditioning modes: {}",
+            groups.iter().map(|(c, m)| format!("{}: {}", plain(m), conditioning_kind(c)))
+                .collect::<Vec<_>>().join("; ")),
+        Finding::TrainingBoundaryDiffers { groups } => format!(
+            "the compared fits seal training at different boundaries: {}",
+            groups.iter().map(|(t, m)| format!("{} at t = {t}", quoted(m)))
+                .collect::<Vec<_>>().join("; ")),
+        Finding::InSampleAblation { groups } => format!(
+            "the compared fits assimilated different streams and are scored in-sample: {}",
+            groups.iter().map(|(set, m)| match set {
+                Some(s) => format!("{} assimilated {}", quoted(m), s.join(", ")),
+                None => format!("{} (not recorded: an explicit prequential.json)", quoted(m)),
+            }).collect::<Vec<_>>().join("; ")),
+        Finding::ProvenanceDiffers { groups } => format!(
+            "the compared traces mix provenance kinds: {}",
+            groups.iter().map(|(p, m)| format!("{} {}", quoted(m), provenance_kind(p)))
+                .collect::<Vec<_>>().join("; ")),
+        Finding::ScoredStepsDiffer { groups } => format!("T_score differs across models: {}",
+            groups.iter().map(|(n, m)| format!("{} {n}", quoted(m)))
+                .collect::<Vec<_>>().join("; ")),
+        Finding::ScoredQuantityDiffers { groups } => {
+            let what = |set: &Option<Vec<String>>, m: &[String]| {
+                let (is, fit) = if m.len() == 1 { ("is", "its fit") } else { ("are", "their fits") };
+                match set {
+                    None => format!("{} {is} scored jointly over every stream {fit} observed", quoted(m)),
+                    Some(s) => format!("{} {is} re-scored on {} alone", quoted(m), s.join(", ")),
+                }
+            };
+            format!("{} score different quantities: {}.\n       \
+                     Compare traces scored the same way.",
+                quoted_and(&f.members()),
+                groups.iter().map(|(s, m)| what(s, m)).collect::<Vec<_>>().join(", and "))
+        }
+        Finding::ObservationTimesDiffer { step, groups } => format!(
+            "{} are not on the same observation axis: scored step {step} is {}.\n       \
+             Δelpd pairs observations by position, so differencing these \
+             would compare unlike times.\n       \
+             Re-score both models on the same observation set \
+             (check for a hole in one series, a different t0, or a \
+             different `covers` declaration — a period is scored at its \
+             stop, so `day(t)` scores one bucket after `closing_at`).",
+            quoted_and(&f.members()),
+            groups.iter().map(|(t, m)| format!("t={t} in {}", quoted_and(m)))
+                .collect::<Vec<_>>().join(" and ")),
+        Finding::StreamSetsDiffer { t, groups, shared_streams } => {
+            let set = |s: &[String]| format!("{{{}}}", s.join(", "));
+            let detail = match groups.iter().find(|(s, _)| s.is_empty()) {
+                Some((_, without)) => {
+                    let others: Vec<&(Vec<String>, Vec<String>)> =
+                        groups.iter().filter(|(s, _)| !s.is_empty()).collect();
+                    let with: Vec<String> = others.iter().flat_map(|(_, m)| m.clone()).collect();
+                    format!(
+                        "{} has no per-stream breakdown at that step, so its \
+                         joint score cannot be shown to cover the same streams as \
+                         {} ({}).\n       \
+                         Re-derive {} — a v1 `prequential.json` predates \
+                         the per-stream breakdown.",
+                        quoted_and(without), quoted_and(&with),
+                        others.iter().map(|(s, _)| set(s)).collect::<Vec<_>>().join(", "),
+                        quoted_and(without))
+                }
+                None => {
+                    let hint = if shared_streams.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\n       To compare them on the streams they share, each scored \
+                                 alone, pass --streams {}.", shared_streams.join(","))
+                    };
+                    format!(
+                        "{}.\n       \
+                         The step's log score is the JOINT score over those streams, \
+                         so differencing them compares unlike quantities.\n       \
+                         Re-score both models on the same set of observation streams.{hint}",
+                        groups.iter().enumerate().map(|(i, (s, m))| if i == 0 {
+                            format!("{} scored {} there", quoted(m), set(s))
+                        } else {
+                            format!("{} scored {}", quoted(m), set(s))
+                        }).collect::<Vec<_>>().join(" and "))
+                }
+            };
+            format!("{} did not score the same streams at t={t}: {detail}", quoted_and(&f.members()))
+        }
+        Finding::CoverageDiffers { t, stream, groups } => {
+            use score::trace::Coverage;
+            match groups.iter().find(|(c, _)| *c == Coverage::Unrecorded) {
+                Some((_, without)) => {
+                    let others: Vec<&(Coverage, Vec<String>)> =
+                        groups.iter().filter(|(c, _)| *c != Coverage::Unrecorded).collect();
+                    let with: Vec<String> = others.iter().flat_map(|(_, m)| m.clone()).collect();
+                    format!(
+                        "{} cannot be shown to score the same quantity for '{stream}' at \
+                         t={t}: {} does not record what its rows cover, so its score \
+                         cannot be shown to span the same window as {} ({}).\n       \
+                         Re-derive {} — a `prequential.json` older than schema 4 \
+                         predates the coverage record.",
+                        quoted_and(&f.members()), quoted_and(without), quoted_and(&with),
+                        others.iter().map(|(c, _)| fmt_coverage(*c)).collect::<Vec<_>>().join(", "),
+                        quoted_and(without))
+                }
+                None => format!(
+                    "{} score '{stream}' over different windows at t={t}: {}.\n       \
+                     The two were scored at the same time but not against the same quantity — \
+                     a different `covers` declaration or different window columns — and \
+                     Δelpd would report that as a model difference.\n       \
+                     Re-fit both with the same declaration of what each row covers.",
+                    quoted_and(&f.members()),
+                    groups.iter().map(|(c, m)| format!("{} in {}", fmt_coverage(*c), quoted_and(m)))
+                        .collect::<Vec<_>>().join(" and ")),
+            }
+        }
+        Finding::DataDiffers { sources, unhashed } => {
+            let missing = (!unhashed.is_empty()).then(|| format!(
+                "no hash is recorded for the data this table scores: {}",
+                unhashed.iter().map(|u| match &u.what {
+                    Unhashed::StreamNotBound { stream } => format!(
+                        "'{}' does not bind stream '{stream}', so no hash of its data is recorded",
+                        u.member),
+                    Unhashed::NoHashForSource { source } =>
+                        format!("'{}' records no hash for source '{source}'", u.member),
+                }).collect::<Vec<_>>().join("; ")));
+            let differing = (!sources.is_empty()).then(|| {
+                let mut members: Vec<String> =
+                    sources.iter().flat_map(|s| s.groups.iter().flat_map(|(_, m)| m.clone())).collect();
+                members.sort();
+                members.dedup();
+                format!("{} were fit to different observed data: {}", quoted_and(&members),
+                    sources.iter().map(source_digests_text).collect::<Vec<_>>().join("; "))
             });
-            rows.iter().map(|r| r.name.as_str()).zip(&restricted).collect()
+            match (missing, differing) {
+                (Some(a), Some(b)) => format!("{a}; and {b}"),
+                (Some(a), None) | (None, Some(a)) => a,
+                (None, None) => String::new(),
+            }
+        }
+        Finding::DataChanged { files } => format!("data changed after the fit ran: {}",
+            files.iter().map(|f| format!(
+                "'{}' stream '{}' ({}): the fit recorded {}, the file now hashes to {}",
+                f.member, f.stream, f.path, f.recorded, f.current))
+                .collect::<Vec<_>>().join("; ")),
+        Finding::FilterSettingsDiffer { particles, replicates } => {
+            let dimension = |label: &str, g: &[(usize, Vec<String>)]| (g.len() > 1).then(|| {
+                g.iter().map(|(v, m)| format!("{label} {v} in {}", quoted_and(m)))
+                    .collect::<Vec<_>>().join(" vs ")
+            });
+            format!("the compared traces were scored with different particle-filter settings: {}",
+                [dimension("particles", particles), dimension("replicates", replicates)]
+                    .into_iter().flatten().collect::<Vec<_>>().join("; "))
+        }
+    }
+}
+
+/// One source of a data mismatch: `'cases' (aaaaaaaa in 'a', bbbbbbbb in
+/// 'b')`, or `'east' (bound by 'b' only)`.
+fn source_digests_text(s: &SourceDigests) -> String {
+    let kind = match s.file {
+        DataFile::Training => "",
+        DataFile::Holdout => " holdout",
+    };
+    let bound: Vec<&(Option<String>, Vec<String>)> =
+        s.groups.iter().filter(|(h, _)| h.is_some()).collect();
+    let unbound: Vec<String> =
+        s.groups.iter().filter(|(h, _)| h.is_none()).flat_map(|(_, m)| m.clone()).collect();
+    let detail = match (bound.as_slice(), unbound.is_empty()) {
+        ([(_, only)], false) => format!("bound by {} only", quoted_and(only)),
+        _ => {
+            let hashes = bound.iter()
+                .map(|(h, m)| format!("{} in {}", short_digest(h.as_deref().unwrap_or("")), quoted_and(m)))
+                .collect::<Vec<_>>().join(", ");
+            if unbound.is_empty() { hashes } else { format!("{hashes}; not bound by {}", quoted_and(&unbound)) }
         }
     };
-    let data_mismatch = match (absent, check_shared_data(&data_entries).err()) {
-        (None, None) => None,
-        (Some(m), None) | (None, Some(m)) => Some(m),
-        (Some(a), Some(b)) => Some(Mismatch {
-            rows: a.rows.iter().chain(&b.rows).fold(Vec::new(), |mut v, r| {
-                if !v.contains(r) { v.push(r.clone()); }
-                v
-            }),
-            finding: format!("{}; and {}", a.finding, b.finding),
-        }),
+    format!("'{}'{kind} ({detail})", s.source)
+}
+
+/// The finding and its consequence as one statement.
+fn finding_note(f: &Finding, w: Waiver) -> String {
+    format!("{}. {}", finding_text(f), w.consequence())
+}
+
+/// The bound-data statement: the finding, its consequence and the remedy.
+/// The refusal and the `--allow-data-mismatch` JSON field share it.
+fn shared_data_statement(f: &Finding) -> String {
+    format!("{}.\n       {}\n       Re-fit both on the same \
+        observations, or pass --allow-data-mismatch to render the comparison as \
+        confounded.", finding_text(f), Waiver::DataMismatch.consequence())
+}
+
+/// What `compare` prints for one refusal: the finding, what it does to the
+/// comparison and how to proceed. `rows` are the table's, for the sentence
+/// a `--streams` table's horizon or time refusal adds.
+fn refusal_message(r: &Refusal, rows: &[Row]) -> String {
+    let first_step = first_step_note(rows).map(|n| format!("\n       {n}")).unwrap_or_default();
+    let lines = |head: &str, groups: Vec<String>| {
+        let mut m = format!("error: {head}:");
+        for g in groups {
+            m.push_str(&format!("\n       {g}"));
+        }
+        m
     };
-    if let Some(m) = data_mismatch {
-        let message = format!("{}.\n       {}\n       Re-fit both on the same \
-            observations, or pass --allow-data-mismatch to render the comparison as \
-            confounded.", m.finding, Waiver::DataMismatch.consequence());
-        checks.waive(waived, Waiver::DataMismatch, m, format!("error: {message}"))?;
-        checks.data_mismatch = Some(message);
+    match &r.finding {
+        Finding::BasisDiffers { groups } => format!("{}\n       A particle filter's log score is a \
+                   Monte-Carlo estimate, biased downward by an amount that depends on the model \
+                   and the particle count; an ODE trace's is exact. Their Δelpd would mix that \
+                   bias into the model difference. Compare ODE fits with ODE fits, and filtered \
+                   fits with filtered fits.",
+            lines("the compared traces mix predictive bases", groups.iter()
+                .map(|(b, m)| format!("{}: {}", plain(m), basis_kind(b))).collect())),
+        Finding::ConditioningDiffers { groups } => format!("{}\n       Declare the same holdout \
+                   in every compared fit, or pass --in-sample to score all of them in-sample.",
+            lines("the compared traces mix conditioning modes", groups.iter()
+                .map(|(c, m)| format!("{}: {}", plain(m), conditioning_kind(c))).collect())),
+        Finding::TrainingBoundaryDiffers { .. } => format!("error: {}\n       Held-out scores \
+                   over different windows are not commensurable; declare the same \
+                   holdout_after in every compared fit.", finding_text(&r.finding)),
+        Finding::InSampleAblation { .. } => format!("error: {}.\n       {}\n       Declare the \
+                   same holdout_after in every compared fit, so the rows are scored held-out, \
+                   or pass --allow-in-sample-ablation to render anyway.",
+            finding_text(&r.finding), Waiver::InSampleAblation.consequence()),
+        Finding::ProvenanceDiffers { groups } => format!("{}\n       {}\n       Pass --draws 1 \
+                   to score every fit plug-in, or --allow-mixed-provenance to render anyway.",
+            lines("the compared traces mix provenance kinds", groups.iter()
+                .map(|(p, m)| format!("{}: {}", plain(m), provenance_kind(p))).collect()),
+            Waiver::MixedProvenance.consequence()),
+        Finding::ScoredStepsDiffer { .. } => format!("error: {}\n       Δelpd and Δcrps are not \
+                   commensurable.\n       Pass --allow-mismatched-horizon to render \
+                   (uncomparable Δ columns → '—').{first_step}", finding_text(&r.finding)),
+        Finding::ScoredQuantityDiffers { .. }
+        | Finding::ObservationTimesDiffer { .. }
+        | Finding::StreamSetsDiffer { .. }
+        | Finding::CoverageDiffers { .. } =>
+            format!("error: {}{first_step}", finding_text(&r.finding)),
+        Finding::DataDiffers { .. } => format!("error: {}", shared_data_statement(&r.finding)),
+        Finding::DataChanged { .. } => format!("error: {}\n       Re-run the fit on the current \
+                   file, restore the file the fit read, or pass --allow-changed-data to render \
+                   anyway.", finding_note(&r.finding, Waiver::ChangedData)),
+        Finding::FilterSettingsDiffer { .. } => format!("error: {}\n       Re-derive every row \
+                   with the same --particles and --replicates, or pass \
+                   --allow-mismatched-filter-settings to render anyway.",
+            finding_note(&r.finding, Waiver::MismatchedFilterSettings)),
     }
-    checks.data_unchecked = unchecked_data_note(&data_entries);
+}
 
-    // A derived row's training file edited after its fit ran is scored at a
-    // θ̂ fitted to other bytes. The same class as the shared-data refusal, and
-    // overridable for the same reason.
-    if let Some(m) = changed_data(rows) {
-        let note = m.note(Waiver::ChangedData);
-        checks.waive(waived, Waiver::ChangedData, m, format!(
-            "error: {note}\n       Re-run the fit on the current file, restore the \
-             file the fit read, or pass --allow-changed-data to render anyway."))?;
-        checks.data_changed = Some(note);
-    }
-    checks.data_change_unchecked = data_change_unchecked_note(rows);
-    checks.data_compared_on_prefix = data_prefix_note(rows);
+/// The one line every human rendering prints for an override.
+fn override_line(o: &Override) -> String {
+    format!("⚠ {} was set for {}: {}", o.waiver.flag(), quoted(&o.finding.members()),
+        finding_note(&o.finding, o.waiver))
+}
 
-    // Two rows scored at different particle or replicate counts differ partly
-    // by the filters. Overridable: comparing a cheap explicit trace against a
-    // derived row is a legitimate ask once the reader knows.
-    if let Some(m) = filter_settings_mismatch(rows) {
-        let note = m.note(Waiver::MismatchedFilterSettings);
-        checks.waive(waived, Waiver::MismatchedFilterSettings, m, format!(
-            "error: {note}\n       Re-derive every row with the same --particles and \
-             --replicates, or pass --allow-mismatched-filter-settings to render \
-             anyway."))?;
-        checks.filter_settings_mismatch = Some(note);
-    }
-    checks.filter_settings_unchecked = filter_settings_unchecked_note(rows);
-    Ok(checks)
+fn override_json(o: &Override) -> serde_json::Value {
+    serde_json::json!({
+        "flag": o.waiver.flag(),
+        "rows": o.finding.members(),
+        "finding": finding_text(&o.finding),
+        "consequence": o.waiver.consequence(),
+    })
+}
+
+/// A check's entries in the order of the rows they name, each row's own
+/// entries in the order the check recorded them.
+fn in_row_order<'a, T>(entries: &'a [T], member: impl Fn(&T) -> &str, rows: &[Row]) -> Vec<&'a T> {
+    let mut out: Vec<&T> = entries.iter().collect();
+    out.sort_by_key(|e| rows.iter().position(|r| r.name == member(e)).unwrap_or(usize::MAX));
+    out
+}
+
+fn not_checked<'a>(checks: &'a Preflight, check: CheckId, rows: &[Row]) -> Vec<&'a Unchecked> {
+    checks.result(check)
+        .map(|r| in_row_order(&r.not_checked, |u| &u.member, rows))
+        .unwrap_or_default()
+}
+
+/// The rows and sources the bound-data check could not cover, and why, or
+/// `None` when every row carried digests. Stated even when the check itself
+/// fails, so the scope of the check is known.
+fn data_unchecked_note(checks: &Preflight, rows: &[Row]) -> Option<String> {
+    let skipped: Vec<String> = not_checked(checks, CheckId::SharedData, rows).into_iter()
+        .map(|u| match &u.reason {
+            NotCheckedReason::NoDataIdentity { why } => format!("'{}' ({why})", u.member),
+            NotCheckedReason::SourceUnresolved { source, file: DataFile::Training, why } =>
+                format!("'{}' stream '{source}' ({why})", u.member),
+            NotCheckedReason::SourceUnresolved { source, file: DataFile::Holdout, why } =>
+                format!("'{}' holdout '{source}' ({why})", u.member),
+            other => format!("'{}' ({other:?})", u.member),
+        }).collect();
+    (!skipped.is_empty()).then(|| format!(
+        "not checked for a shared observation set: {}. \
+         A difference against such a row may be a data difference, not a model \
+         difference.",
+        skipped.join("; "),
+    ))
+}
+
+/// The scope of the changed-data check: every derived file, or derived row,
+/// that could not be compared with a recorded hash, and why. `None` when
+/// every scored file was checked.
+fn data_change_unchecked_note(checks: &Preflight, rows: &[Row]) -> Option<String> {
+    let skipped: Vec<String> = not_checked(checks, CheckId::ChangedData, rows).into_iter()
+        .map(|u| match &u.reason {
+            NotCheckedReason::NoDataIdentity { why } => format!("'{}' ({why})", u.member),
+            NotCheckedReason::FileNotChecked { stream, path, why } =>
+                format!("'{}' stream '{stream}' ({path}): {why}", u.member),
+            other => format!("'{}' ({other:?})", u.member),
+        }).collect();
+    (!skipped.is_empty()).then(|| format!(
+        "not checked for changes since the fit ran: {}.", skipped.join("; ")))
+}
+
+/// The rows whose data the shared-data and changed-data checks compared on
+/// an 8-character prefix, or `None`. Every renderer states it: a difference
+/// beyond the prefix is not detected.
+fn data_prefix_note(checks: &Preflight, rows: &[Row]) -> Option<String> {
+    let qualified: Vec<Qualified> = [CheckId::SharedData, CheckId::ChangedData].iter()
+        .filter_map(|c| checks.result(*c))
+        .flat_map(|r| r.qualified.iter().cloned())
+        .collect();
+    let mut names: Vec<String> = in_row_order(&qualified, |q| &q.member, rows).into_iter()
+        .map(|q| q.member.clone()).collect();
+    names.dedup();
+    (!names.is_empty()).then(|| format!(
+        "data compared on 8 characters of the SHA-256 for {}: its fit.meta.json was \
+         written before full digests were recorded, so the shared-data and \
+         changed-data checks for that row compare the first 8 characters only.",
+        quoted(&names)))
+}
+
+/// The rows whose trace records no filter settings, so the settings check
+/// could not cover them, or `None`.
+fn filter_settings_unchecked_note(checks: &Preflight, rows: &[Row]) -> Option<String> {
+    let unrecorded: Vec<String> = not_checked(checks, CheckId::FilterSettings, rows).into_iter()
+        .map(|u| match &u.reason {
+            NotCheckedReason::TraceBeforeSchema5 => format!(
+                "filter settings not recorded for '{}' (trace older than schema 5); not checked",
+                u.member),
+            NotCheckedReason::NoDerivationBlock => format!(
+                "filter settings not recorded for '{}' (its producer wrote no derivation block); \
+                 not checked", u.member),
+            other => format!("filter settings not recorded for '{}' ({other:?}); not checked",
+                u.member),
+        }).collect();
+    (!unrecorded.is_empty()).then(|| unrecorded.join("; "))
 }
 
 // ── the pointwise Δelpd vector (gh#706) ──────────────────────────────────
@@ -1295,201 +1876,6 @@ struct Pointwise {
     streams: Vec<StreamPointwiseRow>,
 }
 
-/// Every pair of traces that will be differenced must sit on the same
-/// observation axis — same count, same times, and the same STREAMS at each of
-/// those times.
-///
-/// `paired_delta` zips by index. That is safe only if index `k` means the same
-/// observation on both sides, which `n_scored()` alone does not establish: a
-/// hole in one series or a different `t0` gives two traces of equal length at
-/// different times. Differencing those is not a comparison at any level of
-/// display, so this runs in the preflight rather than in one renderer.
-///
-/// Equal times are not enough either (gh#570). A step's `log_score` is the
-/// JOINT score across the streams scored there, so a trace covering two
-/// districts and one covering a single district can agree on every `t` and
-/// still be scoring different quantities; their difference then reads as
-/// evidence about the models when it is mostly the second district's absence.
-///
-/// The message names the traces AND what differs: this refuses pairs that
-/// previously rendered, and "not comparable" with no detail is not actionable
-/// for someone reading it against a live outbreak.
-fn check_shared_observation_axis(rows: &[Row]) -> Result<(), String> {
-    let Some(first) = rows.first() else { return Ok(()) };
-    for r in rows.iter().skip(1) {
-        check_scored_streams(first, r)?;
-        for (k, (a, b)) in first.trace.steps.iter().zip(&r.trace.steps).enumerate() {
-            if a.t != b.t {
-                return Err(format!(
-                    "'{}' and '{}' are not on the same observation axis: scored \
-                     step {} is t={} in '{}' and t={} in '{}'.\n       \
-                     Δelpd pairs observations by position, so differencing these \
-                     would compare unlike times.\n       \
-                     Re-score both models on the same observation set \
-                     (check for a hole in one series, a different t0, or a \
-                     different `covers` declaration — a period is scored at its \
-                     stop, so `day(t)` scores one bucket after `closing_at`).",
-                    first.name, r.name, k + 1, a.t, first.name, b.t, r.name,
-                ));
-            }
-            check_step_pair(first, r, a, b)?;
-        }
-    }
-    Ok(())
-}
-
-/// Two traces are scored on the same thing: both jointly over every leaf their
-/// fit observed, or both re-scored on the same leaves
-/// (`PrequentialTrace::scored_streams`). A step's log score means a different
-/// quantity on each side otherwise, even where the steps' streams agree — a
-/// one-stream trace scored jointly and a projection onto that stream look the
-/// same step by step.
-fn check_scored_streams(first: &Row, r: &Row) -> Result<(), String> {
-    if first.trace.scored_streams == r.trace.scored_streams {
-        return Ok(());
-    }
-    let what = |row: &Row| match &row.trace.scored_streams {
-        None => format!("'{}' is scored jointly over every stream its fit observed", row.name),
-        Some(s) => format!("'{}' is re-scored on {} alone", row.name, s.join(", ")),
-    };
-    Err(format!(
-        "'{}' and '{}' score different quantities: {}, and {}.\n       \
-         Compare traces scored the same way.",
-        first.name, r.name, what(first), what(r)))
-}
-
-/// Two rows' steps at one observation time scored the same streams, and the
-/// same quantity for each stream ([`check_shared_coverage`]). The per-step
-/// half of the pairing checks, shared by the equal-horizon path (steps paired
-/// by position, after their times are checked equal) and the
-/// mismatched-horizon path (steps joined by time).
-fn check_step_pair(
-    first: &Row,
-    r: &Row,
-    a: &score::trace::PrequentialStep,
-    b: &score::trace::PrequentialStep,
-) -> Result<(), String> {
-    let (sa, sb) = (step_streams(a), step_streams(b));
-    if sa == sb {
-        return check_shared_coverage(first, r, a, b);
-    }
-    // A v1 trace carries no `per_stream` at all. Two such traces have
-    // nothing to check and are allowed through; one of each cannot be
-    // checked, and an unverifiable stream set is not a verified one.
-    let detail = if sa.is_empty() || sb.is_empty() {
-        let (with, without) = if sa.is_empty() { (&r.name, &first.name) }
-                              else { (&first.name, &r.name) };
-        format!(
-            "'{without}' has no per-stream breakdown at that step, so its \
-             joint score cannot be shown to cover the same streams as \
-             '{with}' ({}).\n       \
-             Re-derive '{without}' — a v1 `prequential.json` predates \
-             the per-stream breakdown.",
-            fmt_stream_set(if sa.is_empty() { &sb } else { &sa }),
-        )
-    } else {
-        // The streams both traces score anywhere, in the first trace's order:
-        // `--streams` compares the rows on those, each alone.
-        let other = r.trace.streams();
-        let shared: Vec<&str> = first.trace.streams().into_iter()
-            .filter(|s| other.contains(s)).collect();
-        let hint = if shared.is_empty() {
-            String::new()
-        } else {
-            format!("\n       To compare them on the streams they share, each scored \
-                     alone, pass --streams {}.", shared.join(","))
-        };
-        format!(
-            "'{}' scored {} there and '{}' scored {}.\n       \
-             The step's log score is the JOINT score over those streams, \
-             so differencing them compares unlike quantities.\n       \
-             Re-score both models on the same set of observation streams.{hint}",
-            first.name, fmt_stream_set(&sa), r.name, fmt_stream_set(&sb),
-        )
-    };
-    Err(format!(
-        "'{}' and '{}' did not score the same streams at t={}: {detail}",
-        first.name, r.name, a.t,
-    ))
-}
-
-/// The pairing checks for rows whose horizons differ, rendered under
-/// `--allow-mismatched-horizon`.
-///
-/// The flag waives the T_score check — the times only one row scored — and
-/// nothing else. At every observation time both rows scored, steps joined by
-/// `t` rather than by position (their positions differ once one series is
-/// longer), the rows must still have scored the same streams and the same
-/// quantity per stream, with the same refusals as the equal-horizon path.
-fn check_shared_times(rows: &[Row]) -> Result<(), String> {
-    let Some(first) = rows.first() else { return Ok(()) };
-    for r in rows.iter().skip(1) {
-        check_scored_streams(first, r)?;
-        for a in &first.trace.steps {
-            // Step times come from the same observation grid, so a shared
-            // time is the same value; this is the equality the
-            // equal-horizon path pairs on.
-            if let Some(b) = r.trace.steps.iter().find(|b| b.t == a.t) {
-                check_step_pair(first, r, a, b)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// The stream sets agree at this step; do the values scored agree on what they
-/// COVER? (gh#833.) Two fits of one file that differ only in what a row is
-/// declared to cover — a gapped window against a merged one, a stream read as
-/// an instant against the same name read as a flow — score at the same times
-/// and produce different likelihoods, and nothing else in the pipeline can tell
-/// that apart from a model difference: the times agree, the stream names agree,
-/// the data hashes agree. Only the per-stream coverage record does not.
-///
-/// An `Unrecorded` side (a trace older than schema 4) is treated as the v1
-/// per-stream case is: two such traces have nothing to check and pass, one of
-/// each cannot be checked and is refused, because an unverifiable window is not
-/// a verified one.
-fn check_shared_coverage(
-    first: &Row,
-    r: &Row,
-    a: &score::trace::PrequentialStep,
-    b: &score::trace::PrequentialStep,
-) -> Result<(), String> {
-    use score::trace::Coverage;
-    for sa in &a.per_stream {
-        let Some(sb) = b.per_stream.iter().find(|s| s.stream == sa.stream) else { continue };
-        if sa.coverage == sb.coverage {
-            continue;
-        }
-        if sa.coverage == Coverage::Unrecorded || sb.coverage == Coverage::Unrecorded {
-            let (without, with, known) = if sa.coverage == Coverage::Unrecorded {
-                (&first.name, &r.name, sb.coverage)
-            } else {
-                (&r.name, &first.name, sa.coverage)
-            };
-            return Err(format!(
-                "'{}' and '{}' cannot be shown to score the same quantity for '{}' at \
-                 t={}: '{without}' does not record what its rows cover, so its score \
-                 cannot be shown to span the same window as '{with}' ({}).\n       \
-                 Re-derive '{without}' — a `prequential.json` older than schema 4 \
-                 predates the coverage record.",
-                first.name, r.name, sa.stream, a.t, fmt_coverage(known),
-            ));
-        }
-        return Err(format!(
-            "'{}' and '{}' score '{}' over different windows at t={}: {} in '{}' and \
-             {} in '{}'.\n       \
-             The two were scored at the same time but not against the same quantity — \
-             a different `covers` declaration or different window columns — and \
-             Δelpd would report that as a model difference.\n       \
-             Re-fit both with the same declaration of what each row covers.",
-            first.name, r.name, sa.stream, a.t,
-            fmt_coverage(sa.coverage), first.name, fmt_coverage(sb.coverage), r.name,
-        ));
-    }
-    Ok(())
-}
-
 fn fmt_coverage(c: score::trace::Coverage) -> String {
     use score::trace::Coverage;
     match c {
@@ -1499,92 +1885,27 @@ fn fmt_coverage(c: score::trace::Coverage) -> String {
     }
 }
 
-/// Refuse a comparison whose fits were bound to different observed data
-/// (gh#713).
-///
-/// `compare @a @b` re-filters each fit at its own θ̂ and differences the
-/// scores. If the two fits read different data — a corrected case series, a
-/// stream added between runs, a file edited in place — the difference carries
-/// both effects and the table attributes all of it to the models. Nothing else
-/// in the pipeline catches this: each fit is internally consistent, and the
-/// derived traces agree on T_score, times and stream names, because those come
-/// from the same model.
-///
-/// Rows with no data identity ([`DataIdentity::Unknown`]) are not evidence
-/// either way and are skipped, as is a source either row could not resolve
-/// ([`RecordedData::unresolved`]); [`unchecked_data_note`] names both.
-fn check_shared_data(entries: &[(&str, &DataIdentity)]) -> Result<(), Mismatch> {
-    use std::collections::BTreeSet;
-    let known: Vec<(&str, &RecordedData)> = entries
-        .iter()
-        .filter_map(|(name, d)| match d {
-            DataIdentity::Digests(m) => Some((*name, m)),
-            DataIdentity::Unknown(_) => None,
-        })
-        .collect();
-    // Equality is transitive, so every row is checked against the first that
-    // carries digests.
-    let Some(&(ref_name, ref_rec)) = known.first() else { return Ok(()) };
-    for &(name, rec) in known.iter().skip(1) {
-        // Training files, then the `[data.holdout]` files a held-out row
-        // scores; a source either row could not resolve takes no part.
-        let kinds = [
-            ("", &ref_rec.training, &rec.training, &ref_rec.unresolved, &rec.unresolved),
-            (" holdout", &ref_rec.holdout, &rec.holdout,
-             &ref_rec.holdout_unresolved, &rec.holdout_unresolved),
-        ];
-        let differing: Vec<String> = kinds.iter().flat_map(|(kind, ref_map, map, ref_un, un)| {
-            let mut streams: BTreeSet<&str> = ref_map.keys().map(|s| s.as_str()).collect();
-            streams.extend(map.keys().map(|s| s.as_str()));
-            streams.into_iter().filter_map(move |s| {
-                if ref_un.contains_key(s) || un.contains_key(s) {
-                    return None;
-                }
-                match (ref_map.get(s), map.get(s)) {
-                    (Some(a), Some(b)) if same_digest(a, b) => None,
-                    (Some(a), Some(b)) => Some(format!(
-                        "'{s}'{kind} ({} in '{ref_name}', {} in '{name}')",
-                        short_digest(a), short_digest(b))),
-                    (Some(_), None) => Some(format!("'{s}'{kind} (bound by '{ref_name}' only)")),
-                    (None, Some(_)) => Some(format!("'{s}'{kind} (bound by '{name}' only)")),
-                    (None, None) => None,
-                }
-            }).collect::<Vec<_>>()
-        }).collect();
-        if !differing.is_empty() {
-            return Err(Mismatch {
-                rows: vec![ref_name.to_string(), name.to_string()],
-                finding: format!("'{ref_name}' and '{name}' were fit to different observed \
-                    data: {}", differing.join("; ")),
-            });
-        }
-    }
-    Ok(())
-}
-
 /// A row's data identity as a table scored on `leaves` alone checks it: the
 /// recorded hashes of those leaves' sources (found through the row's
 /// [`StreamBindings::source_of`]), with every other source set aside as not
-/// compared, so [`check_shared_data`] skips it and [`unchecked_data_note`]
-/// names it. Also returns, one line each, the selected sources for which the
-/// row carries digests but no hash at all: an absent hash must not read as a
-/// matching one, so the caller refuses it.
+/// compared, so [`check_shared_data`] skips it and lists it as not checked.
+/// Also returns each selected leaf the row does not bind and each selected
+/// source for which the row carries digests but no hash at all: an absent
+/// hash must not read as a matching one, so the check fails on it.
 ///
 /// A row with no data identity is returned as it is. So is an explicit
 /// `prequential.json`, which binds nothing.
-fn data_for_streams(r: &Row, leaves: &[String]) -> (DataIdentity, Vec<String>) {
+fn data_for_streams(r: &Row, leaves: &[String]) -> (DataIdentity, Vec<Unhashed>) {
     let (DataIdentity::Digests(rec), RowStreams::Derived { bindings, .. }) = (&r.data, &r.streams)
     else {
         return (r.data.clone(), Vec::new());
     };
     let mut sources: Vec<&str> = Vec::new();
-    let mut missing: Vec<String> = Vec::new();
+    let mut missing: Vec<Unhashed> = Vec::new();
     for leaf in leaves {
         match bindings.source_of(leaf) {
             Some(s) => if !sources.contains(&s) { sources.push(s) },
-            None => missing.push(format!(
-                "'{}' does not bind stream '{leaf}', so no hash of its data is recorded",
-                r.name)),
+            None => missing.push(Unhashed::StreamNotBound { stream: leaf.clone() }),
         }
     }
     let not_compared = format!("not compared: this table scores {} alone", leaves.join(", "));
@@ -1617,7 +1938,7 @@ fn data_for_streams(r: &Row, leaves: &[String]) -> (DataIdentity, Vec<String>) {
     // alone bound.
     for s in &sources {
         if !out.training.contains_key(*s) && !out.unresolved.contains_key(*s) {
-            missing.push(format!("'{}' records no hash for source '{s}'", r.name));
+            missing.push(Unhashed::NoHashForSource { source: s.to_string() });
             out.unresolved.insert(s.to_string(), "the fit recorded no hash for it".into());
         }
     }
@@ -1631,41 +1952,6 @@ fn short_digest(hex: &str) -> String {
     hex.chars().take(8).collect()
 }
 
-/// The note naming the rows excluded from the data check and why, or `None`
-/// when every row carried digests. Separate from [`check_shared_data`] so the
-/// scope of the check is stated even when the check itself refuses.
-fn unchecked_data_note(entries: &[(&str, &DataIdentity)]) -> Option<String> {
-    let skipped: Vec<String> = entries.iter().flat_map(|(name, d)| match d {
-        DataIdentity::Digests(rec) => rec.unresolved.iter()
-            .map(|(source, why)| format!("'{name}' stream '{source}' ({why})"))
-            .chain(rec.holdout_unresolved.iter()
-                .map(|(source, why)| format!("'{name}' holdout '{source}' ({why})")))
-            .collect::<Vec<_>>(),
-        DataIdentity::Unknown(why) => vec![format!("'{name}' ({why})")],
-    }).collect();
-    (!skipped.is_empty()).then(|| format!(
-        "not checked for a shared observation set: {}. \
-         A difference against such a row may be a data difference, not a model \
-         difference.",
-        skipped.join("; "),
-    ))
-}
-
-/// The rows whose recorded data hashes are shorter than a full SHA-256, so the
-/// shared-data and changed-data checks compared them on that prefix, or `None`.
-/// Every renderer states it: a difference beyond the prefix is not detected.
-fn data_prefix_note(rows: &[Row]) -> Option<String> {
-    let short: Vec<String> = rows.iter()
-        .filter(|r| matches!(&r.data, DataIdentity::Digests(rec) if rec.has_short_hash()))
-        .map(|r| format!("'{}'", r.name))
-        .collect();
-    (!short.is_empty()).then(|| format!(
-        "data compared on 8 characters of the SHA-256 for {}: its fit.meta.json was \
-         written before full digests were recorded, so the shared-data and \
-         changed-data checks for that row compare the first 8 characters only.",
-        short.join(", ")))
-}
-
 /// The set of stream names scored at one step. Empty for a v1 trace, which has
 /// no per-stream breakdown at all.
 fn step_streams(s: &score::trace::PrequentialStep)
@@ -1674,14 +1960,10 @@ fn step_streams(s: &score::trace::PrequentialStep)
     s.per_stream.iter().map(|x| x.stream.as_str()).collect()
 }
 
-fn fmt_stream_set(s: &std::collections::BTreeSet<&str>) -> String {
-    format!("{{{}}}", s.iter().copied().collect::<Vec<_>>().join(", "))
-}
-
 /// Project every candidate against the baseline, step by step and stream by
 /// stream.
 ///
-/// The preflight ([`check_shared_observation_axis`]) has already established
+/// The preflight ([`check_pairing`]) has already established
 /// that paired steps carry the same `t`; the check is repeated here because
 /// this function is also the one that would turn a mismatch into a plot that
 /// looks fine, and it must not depend on a caller having run the preflight.
@@ -2151,55 +2433,6 @@ fn mc_se_delta(row: &Row, base: &Row) -> Option<f64> {
         (Some(a), Some(b)) => Some((a * a + b * b).sqrt()),
         _ => None,
     }
-}
-
-/// The rows scored with different particle-filter settings — particle count
-/// or replicate count — and how they differ, or `None`. Only rows that record
-/// their settings take part; [`filter_settings_unchecked_note`] names the
-/// others. The refusal and the `--allow-mismatched-filter-settings`
-/// renderings share it.
-fn filter_settings_mismatch(rows: &[Row]) -> Option<Mismatch> {
-    let recorded: Vec<(&str, &score::trace::Derivation)> = rows.iter()
-        .filter_map(|r| r.trace.derivation.as_ref().map(|d| (r.name.as_str(), d)))
-        .collect();
-    // Equality is transitive, so every row is checked against the first that
-    // records its settings.
-    let (ref_name, ref_d) = *recorded.first()?;
-    let mut concerned = vec![ref_name.to_string()];
-    let differing: Vec<String> = recorded.iter().skip(1).filter_map(|&(name, d)| {
-        let mut parts = Vec::new();
-        if d.particles != ref_d.particles {
-            parts.push(format!("particles {} vs particles {}", ref_d.particles, d.particles));
-        }
-        if d.replicates != ref_d.replicates {
-            parts.push(format!("replicates {} vs replicates {}", ref_d.replicates, d.replicates));
-        }
-        (!parts.is_empty()).then(|| {
-            concerned.push(name.to_string());
-            format!("'{ref_name}' and '{name}': {}", parts.join(", "))
-        })
-    }).collect();
-    (!differing.is_empty()).then(|| Mismatch {
-        rows: concerned,
-        finding: format!("the compared traces were scored with different \
-            particle-filter settings: {}", differing.join("; ")),
-    })
-}
-
-/// The rows whose trace records no filter settings, so the settings check
-/// could not cover them, or `None`.
-fn filter_settings_unchecked_note(rows: &[Row]) -> Option<String> {
-    let unrecorded: Vec<String> = rows.iter()
-        .filter(|r| r.trace.derivation.is_none())
-        .map(|r| if r.trace.schema_version < 5 {
-            format!("filter settings not recorded for '{}' (trace older than schema 5); \
-                     not checked", r.name)
-        } else {
-            format!("filter settings not recorded for '{}' (its producer wrote no \
-                     derivation block); not checked", r.name)
-        })
-        .collect();
-    (!unrecorded.is_empty()).then(|| unrecorded.join("; "))
 }
 
 /// The note naming each non-baseline row whose evidence label was not checked
@@ -3542,10 +3775,10 @@ fn warning_lines(rows: &[Row], base_idx: usize, checks: &Preflight, accuracy: &[
     // Each override that was needed, in one line: the flag, the rows, what
     // differed and what that does to the table. The terminal session that
     // granted it is not where the table is read a week later.
-    let mut lines: Vec<String> = checks.overrides.iter().map(Override::line).collect();
+    let mut lines: Vec<String> = checks.overrides().iter().map(override_line).collect();
     // What the checks could not cover.
-    for note in [&checks.data_unchecked, &checks.data_change_unchecked,
-                 &checks.data_compared_on_prefix, &checks.filter_settings_unchecked]
+    for note in [data_unchecked_note(checks, rows), data_change_unchecked_note(checks, rows),
+                 data_prefix_note(checks, rows), filter_settings_unchecked_note(checks, rows)]
         .into_iter().flatten()
     {
         lines.push(format!("ⓘ {note}"));
@@ -3881,22 +4114,24 @@ fn json_document(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Pre
         // Every waiver the comparison needed to render: the flag, the rows it
         // concerned, what differed, and what it does to the reading. Empty
         // when every cross-row check passed.
-        "overrides": checks.overrides.iter().map(Override::to_json).collect::<Vec<_>>(),
+        "overrides": checks.overrides().iter().map(override_json).collect::<Vec<_>>(),
         // The bound-data check (gh#713): present only under
         // --allow-data-mismatch, and the rows the check could not cover.
-        "data_mismatch": checks.data_mismatch,
-        "data_unchecked": checks.data_unchecked,
+        "data_mismatch": checks.waived_finding(CheckId::SharedData).map(shared_data_statement),
+        "data_unchecked": data_unchecked_note(checks, rows),
         // A training file edited after its fit ran (present only under
         // --allow-changed-data), and the files that could not be checked.
-        "data_changed": checks.data_changed,
-        "data_change_unchecked": checks.data_change_unchecked,
+        "data_changed": checks.waived_finding(CheckId::ChangedData)
+            .map(|f| finding_note(f, Waiver::ChangedData)),
+        "data_change_unchecked": data_change_unchecked_note(checks, rows),
         // Rows whose recorded hashes are 8 characters (an older fit.meta.json):
         // both data checks compared them on that prefix.
-        "data_compared_on_prefix": checks.data_compared_on_prefix,
+        "data_compared_on_prefix": data_prefix_note(checks, rows),
         // Particle-filter settings that differ across rows (present only under
         // --allow-mismatched-filter-settings), and the rows that record none.
-        "filter_settings_mismatch": checks.filter_settings_mismatch,
-        "filter_settings_unchecked": checks.filter_settings_unchecked,
+        "filter_settings_mismatch": checks.waived_finding(CheckId::FilterSettings)
+            .map(|f| finding_note(f, Waiver::MismatchedFilterSettings)),
+        "filter_settings_unchecked": filter_settings_unchecked_note(checks, rows),
         // Rows whose evidence label skipped the within-filter-noise gate
         // because only one side of the pair carries an MC SE.
         "filter_noise_unassessed": filter_noise_unassessed_note(rows, base_idx),
@@ -3918,6 +4153,28 @@ fn option_finite(x: f64) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What `cmd_compare` would do with `rows` under `waivers`: the outcome
+    /// every renderer reads, or every refusal as the command prints them.
+    fn outcome_of(rows: &[Row], waivers: &Waivers) -> Result<Preflight, String> {
+        let checks = preflight(rows, waivers);
+        let refusals = checks.refusals();
+        if refusals.is_empty() {
+            Ok(checks)
+        } else {
+            Err(refusals.iter().map(|r| refusal_message(r, rows)).collect::<Vec<_>>().join("\n"))
+        }
+    }
+
+    /// The pairing check over rows of equal horizons, as a refusal's text.
+    fn axis(rows: &[Row]) -> Result<(), String> {
+        pairing_finding(rows, false).map_or(Ok(()), |f| Err(finding_text(&f)))
+    }
+
+    /// The pairing check over rows of differing horizons, joined by time.
+    fn shared_times(rows: &[Row]) -> Result<(), String> {
+        pairing_finding(rows, true).map_or(Ok(()), |f| Err(finding_text(&f)))
+    }
 
     /// §3.6 (Stage 4.1): the mixture combines per-draw *densities*, pools
     /// each stream's samples, takes the min ESS, and stamps
@@ -4034,14 +4291,14 @@ mod tests {
             row_at("ode", &[7.0, 14.0, 21.0], &[-5.0, -6.0, -6.0]),
         ];
         rows[1].trace.basis = ode_basis;
-        let err = preflight(&rows, &every_waiver())
+        let err = outcome_of(&rows, &every_waiver())
             .expect_err("no waiver lets a filtered and an ODE trace be differenced");
         assert!(err.contains("mix predictive bases"), "{err}");
         assert!(err.contains("pf: filtered") && err.contains("ode: ode_free_forward"),
             "names each row's basis: {err}");
 
         rows[0].trace.basis = ode_basis;
-        let checks = preflight(&rows, &Waivers::default()).expect("two ODE rows compare");
+        let checks = outcome_of(&rows, &Waivers::default()).expect("two ODE rows compare");
         let metrics = vec!["elpd".to_string()];
         let ode_line = "Predictive: ODE free-forward";
         assert!(render_table(&rows, 0, &metrics, &checks).contains(ode_line));
@@ -4055,7 +4312,7 @@ mod tests {
 
         // A filtered cohort's table is as it was; its JSON states the basis.
         let pf = vec![row_at("a", &[7.0], &[-6.0]), row_at("b", &[7.0], &[-5.0])];
-        let checks = preflight(&pf, &Waivers::default()).unwrap();
+        let checks = outcome_of(&pf, &Waivers::default()).unwrap();
         assert!(!render_table(&pf, 0, &metrics, &checks).contains("Predictive:"));
         let v: serde_json::Value =
             serde_json::from_str(&render_json(&pf, 0, &metrics, &checks)).unwrap();
@@ -4297,13 +4554,13 @@ mod tests {
         // Same streams at every step → the ordinary case still compares.
         let a = row_with_streams("a", &t, &["north", "south"]);
         let b = row_with_streams("b", &t, &["south", "north"]);
-        check_shared_observation_axis(&[a, b])
+        axis(&[a, b])
             .expect("the same stream set in a different order is the same set");
 
         // Different sets → refused, naming the step, both sets, both traces.
         let a = row_with_streams("a", &t, &["north", "south"]);
         let b = row_with_streams("b", &t, &["north"]);
-        let err = check_shared_observation_axis(&[a, b])
+        let err = axis(&[a, b])
             .expect_err("a 2-stream joint may not be differenced against a 1-stream one");
         assert!(err.contains("south"), "names the stream that differs: {err}");
         assert!(err.contains("'a'") && err.contains("'b'"),
@@ -4314,7 +4571,7 @@ mod tests {
         // information to check, so they are allowed through.
         let a = row_at("a", &t, &[-6.0, -6.0, -6.0]);
         let b = row_at("b", &t, &[-6.0, -6.0, -6.0]);
-        check_shared_observation_axis(&[a, b])
+        axis(&[a, b])
             .expect("two traces with no per-stream breakdown are not a mismatch");
 
         // One with a breakdown and one without: the sets cannot be compared, so
@@ -4323,7 +4580,7 @@ mod tests {
         // phantom stream mismatch.
         let a = row_with_streams("a", &t, &["north", "south"]);
         let b = row_at("b", &t, &[-6.0, -6.0, -6.0]);
-        let err = check_shared_observation_axis(&[a, b])
+        let err = axis(&[a, b])
             .expect_err("an unverifiable stream set is not a verified one");
         assert!(err.contains("no per-stream breakdown"),
             "the message names the real problem: {err}");
@@ -4339,13 +4596,13 @@ mod tests {
     fn refuses_fits_bound_to_different_observed_data() {
         let same_a = digests(&[("north", "aaa"), ("south", "bbb")]);
         let same_b = digests(&[("north", "aaa"), ("south", "bbb")]);
-        check_shared_data(&[("a", &same_a), ("b", &same_b)])
+        failure(&check_shared_data(&data_rows(&[("a", &same_a), ("b", &same_b)])))
             .expect("fits bound to the same bytes compare");
 
         // One stream's file differs → refused, naming the stream and both fits.
         let revised = digests(&[("north", "aaa"), ("south", "ccc")]);
-        let err = check_shared_data(&[("a", &same_a), ("b", &revised)])
-            .expect_err("a differing data file must be refused").finding;
+        let err = failure(&check_shared_data(&data_rows(&[("a", &same_a), ("b", &revised)])))
+            .expect_err("a differing data file must be refused");
         assert!(err.contains("south"), "names the stream that differs: {err}");
         assert!(!err.contains("north"), "and not the one that agrees: {err}");
         assert!(err.contains("'a'") && err.contains("'b'"), "names both fits: {err}");
@@ -4355,28 +4612,58 @@ mod tests {
         ];
         rows[0].data = digests(&[("north", "aaa"), ("south", "bbb")]);
         rows[1].data = revised;
-        let refusal = preflight(&rows, &Waivers::default())
+        let refusal = outcome_of(&rows, &Waivers::default())
             .expect_err("refused without the flag");
         assert!(refusal.contains("south") && refusal.contains("--allow-data-mismatch"),
             "and how to proceed deliberately: {refusal}");
 
         // A stream one fit bound and the other did not is the same failure.
         let extra = digests(&[("north", "aaa"), ("south", "bbb"), ("east", "ddd")]);
-        let err = check_shared_data(&[("a", &same_a), ("b", &extra)])
-            .expect_err("an extra bound stream must be refused").finding;
+        let err = failure(&check_shared_data(&data_rows(&[("a", &same_a), ("b", &extra)])))
+            .expect_err("an extra bound stream must be refused");
         assert!(err.contains("east"), "{err}");
 
         // Rows with no data identity are not evidence either way: they neither
         // refuse the comparison nor pass silently.
         let unknown = DataIdentity::Unknown("read as an explicit prequential.json".into());
-        check_shared_data(&[("a", &same_a), ("t", &unknown)])
-            .expect("a row with no data identity cannot contradict anything");
-        let note = unchecked_data_note(&[("a", &same_a), ("t", &unknown)])
+        let rows = data_rows(&[("a", &same_a), ("t", &unknown)]);
+        let result = check_shared_data(&rows);
+        failure(&result).expect("a row with no data identity cannot contradict anything");
+        let note = data_unchecked_note(&Preflight { results: vec![result] }, &rows)
             .expect("but it is named");
         assert!(note.contains("'t'") && note.contains("prequential.json"), "{note}");
         assert!(!note.contains("'a'"), "the checked row is not in the note: {note}");
-        assert!(unchecked_data_note(&[("a", &same_a), ("b", &same_b)]).is_none(),
+        let rows = data_rows(&[("a", &same_a), ("b", &same_b)]);
+        let result = check_shared_data(&rows);
+        assert!(data_unchecked_note(&Preflight { results: vec![result] }, &rows).is_none(),
             "no note when every row was checked");
+    }
+
+    /// Rows that differ only in the data identity given, in that order.
+    fn data_rows(entries: &[(&str, &DataIdentity)]) -> Vec<Row> {
+        entries.iter().map(|(name, d)| Row {
+            data: (*d).clone(),
+            ..row_at(name, &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0])
+        }).collect()
+    }
+
+    /// A check's result as the old `Result`: `Err` with the finding's text
+    /// when it failed.
+    fn failure(r: &CheckResult) -> Result<(), String> {
+        match &r.outcome {
+            CheckOutcome::Failed { finding, .. } => Err(finding_text(finding)),
+            _ => Ok(()),
+        }
+    }
+
+    /// A failed check's finding with its consequence, as an override states
+    /// it, or `None` when it did not fail.
+    fn waived_note(r: &CheckResult) -> Option<String> {
+        match &r.outcome {
+            CheckOutcome::Failed { finding, .. } =>
+                Some(finding_note(finding, r.waiver.expect("a waivable check"))),
+            _ => None,
+        }
     }
 
     /// Two fits sealed at the same observation can record boundaries that
@@ -4404,7 +4691,7 @@ mod tests {
         // (i) Different stream sets at shared t = 14.
         let short = row_with_streams("short", &[7.0, 14.0], &["north"]);
         let long = row_with_streams("long", &[7.0, 14.0, 21.0], &["north", "south"]);
-        let err = check_shared_times(&[short, long])
+        let err = shared_times(&[short, long])
             .expect_err("different stream sets at a shared time are refused");
         assert!(err.contains("did not score the same streams") && err.contains("south")
                 && err.contains("t=7"), "{err}");
@@ -4415,7 +4702,7 @@ mod tests {
             &[iv(0.0, 7.0), iv(12.0, 14.0)]);
         let long = row_covering("long", &[7.0, 14.0, 21.0], "cases",
             &[iv(0.0, 7.0), iv(7.0, 14.0), iv(14.0, 21.0)]);
-        let err = check_shared_times(&[short, long])
+        let err = shared_times(&[short, long])
             .expect_err("different coverage at a shared time is refused");
         assert!(err.contains("over different windows") && err.contains("t=14"), "{err}");
 
@@ -4423,7 +4710,7 @@ mod tests {
         // pairs with the long trace's t = 14 although it sits at index 0.
         let short = row_covering("short", &[14.0], "cases", &[iv(12.0, 14.0)]);
         let long = row_covering("long", &[7.0, 14.0], "cases", &[iv(0.0, 7.0), iv(7.0, 14.0)]);
-        assert!(check_shared_times(&[short, long]).is_err(), "joined by time");
+        assert!(shared_times(&[short, long]).is_err(), "joined by time");
 
         // (iii) Same streams and coverage at every shared time: it renders,
         // with the Δ columns suppressed as before.
@@ -4431,7 +4718,7 @@ mod tests {
         let long = row_covering("long", &[7.0, 14.0, 21.0], "cases",
             &[iv(0.0, 7.0), iv(7.0, 14.0), iv(14.0, 21.0)]);
         let rows = vec![short, long];
-        check_shared_times(&rows).expect("agreeing shared times render");
+        shared_times(&rows).expect("agreeing shared times render");
         let table = render_table(&rows, 0, &["elpd".to_string()], &checked(&rows));
         assert!(table.contains("Δ columns suppressed"), "{table}");
     }
@@ -4500,11 +4787,13 @@ mod tests {
         rows[1].freshness = check_training_freshness(&streams,
             &DataIdentity::Unknown("its fit.meta.json records no data hashes".into()));
 
-        let changed = changed_data(&rows).map(|m| m.note(Waiver::ChangedData)).expect("south changed");
+        let changed = waived_note(&check_changed_data(&rows)).expect("south changed");
         assert!(changed.contains("'a' stream 'south'") && changed.contains("deadbeef")
                 && changed.contains(&south_hash[..8]) && !changed.contains("north"),
             "{changed}");
-        let unchecked = data_change_unchecked_note(&rows).expect("north and b unchecked");
+        let unchecked = data_change_unchecked_note(
+            &Preflight { results: vec![check_changed_data(&rows)] }, &rows)
+            .expect("north and b unchecked");
         assert!(unchecked.contains("'a' stream 'north'")
                 && unchecked.contains("recorded no hash")
                 && unchecked.contains("'b' (its fit.meta.json records no data hashes)"),
@@ -4589,11 +4878,11 @@ mod tests {
         ];
         rows[0].trace.derivation = Some(derivation(1000, 5));
         rows[1].trace.derivation = Some(derivation(1000, 5));
-        assert!(filter_settings_mismatch(&rows).map(|m| m.note(Waiver::MismatchedFilterSettings)).is_none(), "equal settings");
-        assert!(filter_settings_unchecked_note(&rows).is_none(), "both recorded");
+        assert!(waived_note(&check_filter_settings(&rows)).is_none(), "equal settings");
+        assert!(filter_settings_unchecked_note(&Preflight { results: vec![check_filter_settings(&rows)] }, &rows).is_none(), "both recorded");
 
         rows[1].trace.derivation = Some(derivation(200, 5));
-        let note = filter_settings_mismatch(&rows).map(|m| m.note(Waiver::MismatchedFilterSettings)).expect("particles differ");
+        let note = waived_note(&check_filter_settings(&rows)).expect("particles differ");
         assert!(note.contains("'a'") && note.contains("'b'")
                 && note.contains("particles 1000") && note.contains("particles 200"),
             "names both rows and both values: {note}");
@@ -4601,7 +4890,7 @@ mod tests {
         assert!(!note.contains("replicates 5 vs"), "replicates agree: {note}");
 
         rows[1].trace.derivation = Some(derivation(1000, 1));
-        let note = filter_settings_mismatch(&rows).map(|m| m.note(Waiver::MismatchedFilterSettings)).expect("replicates differ");
+        let note = waived_note(&check_filter_settings(&rows)).expect("replicates differ");
         assert!(note.contains("replicates 5") && note.contains("replicates 1"), "{note}");
 
         let metrics = vec!["elpd".to_string()];
@@ -4639,9 +4928,9 @@ mod tests {
         rows[0].trace.derivation = Some(derivation(1000, 5));
         rows[1].trace = old;
 
-        assert!(filter_settings_mismatch(&rows).map(|m| m.note(Waiver::MismatchedFilterSettings)).is_none(),
+        assert!(waived_note(&check_filter_settings(&rows)).is_none(),
             "an unrecorded side cannot contradict anything");
-        let note = filter_settings_unchecked_note(&rows).expect("old is unchecked");
+        let note = filter_settings_unchecked_note(&Preflight { results: vec![check_filter_settings(&rows)] }, &rows).expect("old is unchecked");
         assert!(note.contains(
             "filter settings not recorded for 'old' (trace older than schema 5); not checked"),
             "{note}");
@@ -4871,7 +5160,7 @@ mod tests {
     /// The preflight outcome `cmd_compare` would hand the renderers for
     /// `rows`, every flag given.
     fn checked(rows: &[Row]) -> Preflight {
-        preflight(rows, &every_waiver()).expect("every check is waived")
+        outcome_of(rows, &every_waiver()).expect("every check is waived")
     }
 
     /// Two clean rows, then the one change that makes `w` necessary.
@@ -4920,10 +5209,10 @@ mod tests {
         let metrics = vec!["elpd".to_string()];
         for w in ALL_WAIVERS {
             let rows = rows_needing(w);
-            assert!(preflight(&rows, &Waivers::default()).is_err(),
+            assert!(outcome_of(&rows, &Waivers::default()).is_err(),
                 "{w:?}: refused without its flag");
             let checks = checked(&rows);
-            assert_eq!(checks.overrides.iter().map(|o| o.waiver).collect::<Vec<_>>(), vec![w],
+            assert_eq!(checks.overrides().iter().map(|o| o.waiver).collect::<Vec<_>>(), vec![w],
                 "{w:?}: exactly the needed override is listed");
 
             for (fmt, text) in [("table", render_table(&rows, 0, &metrics, &checks)),
@@ -4953,7 +5242,7 @@ mod tests {
             row_at("b", &[7.0, 14.0, 21.0], &[-5.0, -6.0, -6.0]),
         ];
         let checks = checked(&rows);
-        assert!(checks.overrides.is_empty(), "{checks:?}");
+        assert!(checks.overrides().is_empty(), "{checks:?}");
         let metrics = vec!["elpd".to_string()];
         for text in [render_table(&rows, 0, &metrics, &checks), render_md(&rows, 0, &metrics, &checks)] {
             assert!(!text.contains("was set"), "{text}");
@@ -5345,11 +5634,11 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
 
         let a = row_covering("a", &t, "cases", &gapped);
         let b = row_covering("b", &t, "cases", &gapped);
-        check_shared_observation_axis(&[a, b]).expect("identical windows compare");
+        axis(&[a, b]).expect("identical windows compare");
 
         let a = row_covering("a", &t, "cases", &gapped);
         let b = row_covering("b", &t, "cases", &merged);
-        let err = check_shared_observation_axis(&[a, b])
+        let err = axis(&[a, b])
             .expect_err("a gapped reading may not be differenced against a merged one");
         assert!(err.contains("[5, 6)") && err.contains("[4, 6)"),
             "names both windows: {err}");
@@ -5362,21 +5651,21 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         // other is not the same quantity either.
         let a = row_covering("a", &t, "cases", &gapped);
         let b = row_covering("b", &t, "cases", &[Coverage::Instant; 3]);
-        let err = check_shared_observation_axis(&[a, b])
+        let err = axis(&[a, b])
             .expect_err("an instant reading is not a flow");
         assert!(err.contains("instant") && err.contains("[3, 4)"), "{err}");
 
         // Two traces that never recorded coverage carry nothing to check.
         let a = row_with_streams("a", &t, &["cases"]);
         let b = row_with_streams("b", &t, &["cases"]);
-        check_shared_observation_axis(&[a, b])
+        axis(&[a, b])
             .expect("two traces with no coverage record are not a mismatch");
 
         // One recorded, one not: unverifiable, and the message says which
         // side to re-derive rather than inventing a window mismatch.
         let a = row_covering("a", &t, "cases", &gapped);
         let b = row_with_streams("b", &t, &["cases"]);
-        let err = check_shared_observation_axis(&[a, b])
+        let err = axis(&[a, b])
             .expect_err("an unverifiable window is not a verified one");
         assert!(err.contains("does not record what its rows cover") && err.contains("Re-derive 'b'"),
             "{err}");
@@ -5772,13 +6061,13 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         let projected = joint.onto("cases").unwrap();
         let mut projected = Row { name: "projected".into(), ..projected };
         projected.trace.steps.iter_mut().for_each(|s| s.log_score = -6.0);
-        let err = check_shared_observation_axis(&[joint.clone(), projected.clone()]).unwrap_err();
+        let err = axis(&[joint.clone(), projected.clone()]).unwrap_err();
         assert!(err.contains("'joint' is scored jointly") && err.contains("'projected' is re-scored on cases alone"),
             "{err}");
         // Under mismatched horizons the same check holds at shared times.
-        assert!(check_shared_times(&[joint.clone(), projected]).is_err());
+        assert!(shared_times(&[joint.clone(), projected]).is_err());
         let both = [joint.onto("cases").unwrap(), joint.onto("cases").unwrap()];
-        check_shared_observation_axis(&both).expect("two projections onto one leaf compare");
+        axis(&both).expect("two projections onto one leaf compare");
     }
 
     const CASES_DEATHS: [(&str, &str); 2] = [("cases", "cases"), ("deaths", "deaths")];
@@ -5795,15 +6084,15 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         ];
         rows[0].data = digests(&[("cases", "aaaaaaaa"), ("deaths", "dddddddd")]);
         rows[1].data = digests(&[("cases", "aaaaaaaa"), ("deaths", "eeeeeeee")]);
-        let refusal = preflight(&rows, &Waivers::default()).unwrap_err();
+        let refusal = outcome_of(&rows, &Waivers::default()).unwrap_err();
         assert!(refusal.contains("different observed data") && refusal.contains("'deaths'"),
             "{refusal}");
 
         let on_cases: Vec<Row> = rows.iter().map(|r| r.onto("cases").unwrap()).collect();
-        let checks = preflight(&on_cases, &Waivers::default())
+        let checks = outcome_of(&on_cases, &Waivers::default())
             .expect("the cases files agree, and only they are compared");
-        assert!(checks.overrides.is_empty() && checks.data_mismatch.is_none(), "{checks:?}");
-        let note = checks.data_unchecked.as_deref().unwrap_or_default();
+        assert!(checks.overrides().is_empty() && checks.waived_finding(CheckId::SharedData).is_none(), "{checks:?}");
+        let note = data_unchecked_note(&checks, &on_cases).unwrap_or_default();
         assert!(note.contains("'a' stream 'deaths' (not compared: this table scores cases alone)")
                 && note.contains("'b' stream 'deaths'"), "the set-aside source is named: {note}");
         let metrics = vec!["elpd".to_string()];
@@ -5819,7 +6108,7 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
 
         // On `deaths` alone the differing files are compared, and refused.
         let on_deaths: Vec<Row> = rows.iter().map(|r| r.onto("deaths").unwrap()).collect();
-        let refusal = preflight(&on_deaths, &Waivers::default()).unwrap_err();
+        let refusal = outcome_of(&on_deaths, &Waivers::default()).unwrap_err();
         assert!(refusal.contains("'deaths'") && refusal.contains("dddddddd"), "{refusal}");
     }
 
@@ -5835,18 +6124,18 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         rows[0].data = digests(&[("cases", "aaaaaaaa"), ("deaths", "dddddddd")]);
         rows[1].data = digests(&[("deaths", "dddddddd")]);
         let on_cases: Vec<Row> = rows.iter().map(|r| r.onto("cases").unwrap()).collect();
-        let refusal = preflight(&on_cases, &Waivers::default()).unwrap_err();
+        let refusal = outcome_of(&on_cases, &Waivers::default()).unwrap_err();
         assert!(refusal.contains("'b' records no hash for source 'cases'")
                 && refusal.contains("--allow-data-mismatch"), "{refusal}");
         let waived = Waivers { data_mismatch: true, ..Default::default() };
-        let checks = preflight(&on_cases, &waived).unwrap();
-        assert_eq!(checks.overrides.len(), 1);
-        assert_eq!(checks.overrides[0].mismatch.rows, ["b"]);
+        let checks = outcome_of(&on_cases, &waived).unwrap();
+        assert_eq!(checks.overrides().len(), 1);
+        assert_eq!(checks.overrides()[0].finding.members(), ["b"]);
 
         // Both rows lacking it is no better: nothing matched.
         rows[0].data = digests(&[("deaths", "dddddddd")]);
         let on_cases: Vec<Row> = rows.iter().map(|r| r.onto("cases").unwrap()).collect();
-        let refusal = preflight(&on_cases, &Waivers::default()).unwrap_err();
+        let refusal = outcome_of(&on_cases, &Waivers::default()).unwrap_err();
         assert!(refusal.contains("'a' records no hash") && refusal.contains("'b' records no hash"),
             "{refusal}");
     }
@@ -5861,7 +6150,7 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         let cases_only = derived_row("cases_only", &CASES_DEATHS, &["cases"]);
         assert_eq!(full.assimilated(), Some(vec!["cases".to_string(), "deaths".to_string()]));
         let on_cases = [full.onto("cases").unwrap(), cases_only.onto("cases").unwrap()];
-        let refusal = preflight(&on_cases, &Waivers::default()).unwrap_err();
+        let refusal = outcome_of(&on_cases, &Waivers::default()).unwrap_err();
         assert!(refusal.contains("assimilated different streams")
                 && refusal.contains("'full' assimilated cases, deaths")
                 && refusal.contains("'cases_only' assimilated cases")
@@ -5871,7 +6160,7 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
 
         // The same set: no refusal.
         let twin = derived_row("twin", &CASES_DEATHS, &["cases", "deaths"]);
-        preflight(&[full.onto("cases").unwrap(), twin.onto("cases").unwrap()], &Waivers::default())
+        outcome_of(&[full.onto("cases").unwrap(), twin.onto("cases").unwrap()], &Waivers::default())
             .expect("rows that assimilated the same streams compare in-sample");
 
         // Held out: no refusal.
@@ -5881,9 +6170,9 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
                 train_end: 3.0, theta_source: r.name.clone() };
             p
         };
-        let checks = preflight(&[held(full.clone()), held(cases_only.clone())], &Waivers::default())
+        let checks = outcome_of(&[held(full.clone()), held(cases_only.clone())], &Waivers::default())
             .expect("held-out rows need no flag");
-        assert!(checks.overrides.is_empty(), "{checks:?}");
+        assert!(checks.overrides().is_empty(), "{checks:?}");
 
         // An explicit trace does not record what its fit assimilated, and
         // counts as different even from a row with the same streams.
@@ -5891,20 +6180,20 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         explicit.name = "pq".into();
         explicit.streams = RowStreams::Explicit;
         assert_eq!(explicit.assimilated(), None);
-        let refusal = preflight(&[full.onto("cases").unwrap(), explicit.onto("cases").unwrap()],
+        let refusal = outcome_of(&[full.onto("cases").unwrap(), explicit.onto("cases").unwrap()],
                                 &Waivers::default()).unwrap_err();
         assert!(refusal.contains("'pq' (not recorded: an explicit prequential.json)"), "{refusal}");
         // Two unknown sets are not known to be equal either.
         let mut explicit_too = explicit.clone();
         explicit_too.name = "pq2".into();
-        let refusal = preflight(&[explicit.onto("cases").unwrap(), explicit_too.onto("cases").unwrap()],
+        let refusal = outcome_of(&[explicit.onto("cases").unwrap(), explicit_too.onto("cases").unwrap()],
                                 &Waivers::default()).unwrap_err();
         assert!(refusal.contains("'pq' (not recorded") && refusal.contains("'pq2' (not recorded"),
             "each unknown set is its own entry: {refusal}");
 
         // A joint comparison is not an ablation: the check is not made there.
         let twin_joint = [full.clone(), twin.clone()];
-        preflight(&twin_joint, &Waivers::default()).expect("a joint comparison is untouched");
+        outcome_of(&twin_joint, &Waivers::default()).expect("a joint comparison is untouched");
     }
 
     /// The JSON document of [`two_stream_rows`], captured from the renderer
@@ -6046,7 +6335,7 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
             held(derived_row("full", &CASES_DEATHS, &["cases", "deaths"])),
             held(derived_row("cases_only", &CASES_DEATHS, &["cases"])),
         ];
-        let checks = preflight(&rows, &Waivers::default()).unwrap();
+        let checks = outcome_of(&rows, &Waivers::default()).unwrap();
         Table { rows, base_idx: 0, checks }
     }
 
@@ -6075,7 +6364,7 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         // Rows that assimilated the same set: no list.
         let same = vec![derived_row("a", &CASES_DEATHS, &["cases", "deaths"]).onto("cases").unwrap(),
                         derived_row("b", &CASES_DEATHS, &["cases", "deaths"]).onto("cases").unwrap()];
-        let checks = preflight(&same, &Waivers::default()).unwrap();
+        let checks = outcome_of(&same, &Waivers::default()).unwrap();
         assert!(!render_table(&same, 0, &metrics, &checks).contains("Assimilated:"));
 
         let doc = json_document(&t.rows, t.base_idx, &metrics, &t.checks);
@@ -6131,12 +6420,12 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         let t = [7.0, 14.0, 21.0];
         let full = row_with_streams("full", &t, &["cases", "deaths"]);
         let cases_only = row_with_streams("cases_only", &t, &["cases"]);
-        let err = check_shared_observation_axis(&[full.clone(), cases_only]).unwrap_err();
+        let err = axis(&[full.clone(), cases_only]).unwrap_err();
         assert!(err.contains("--streams cases"), "{err}");
         assert!(!err.contains("--allow-mismatched-horizon"), "{err}");
         // Nothing shared, nothing suggested.
         let hosp = row_with_streams("hosp", &t, &["hospital"]);
-        let err = check_shared_observation_axis(&[full, hosp]).unwrap_err();
+        let err = axis(&[full, hosp]).unwrap_err();
         assert!(!err.contains("--streams"), "{err}");
     }
 
@@ -6149,18 +6438,18 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         let mut late = derived_row("cases_only", &CASES_DEATHS, &["cases"]).onto("cases").unwrap();
         late.trace.steps.remove(0);
         let waived = Waivers { in_sample_ablation: true, ..Default::default() };
-        let err = preflight(&[full.clone(), late.clone()], &waived).unwrap_err();
+        let err = outcome_of(&[full.clone(), late.clone()], &waived).unwrap_err();
         assert!(err.contains("T_score") && err.contains("ic_free") && err.contains("one step later"),
             "{err}");
         // The same count of steps at different times: the axis check speaks.
         let mut early = full.clone();
         early.trace.steps.pop();
-        let err = preflight(&[early.clone(), late.clone()], &waived).unwrap_err();
+        let err = outcome_of(&[early.clone(), late.clone()], &waived).unwrap_err();
         assert!(err.contains("not on the same observation axis") && err.contains("ic_free"), "{err}");
         // Rows that assimilated the same set get no such sentence.
         let mut twin = derived_row("twin", &CASES_DEATHS, &["cases", "deaths"]).onto("cases").unwrap();
         twin.trace.steps.remove(0);
-        let err = preflight(&[early, twin], &waived).unwrap_err();
+        let err = outcome_of(&[early, twin], &waived).unwrap_err();
         assert!(!err.contains("ic_free"), "{err}");
     }
 
@@ -6294,7 +6583,7 @@ b             2   -11.00       —    —       —          —
 
 Scored steps: 3 (t0=1).  Baseline: a.
 Conditioning: in-sample — θ fit to all scored data; Δelpd favors the more flexible model.
-⚠ --allow-mismatched-horizon was set for 'a', 'b': T_score differs across models: 'a' 3, 'b' 2. Δ columns suppressed ('—' in the table, null in the JSON): a Δ pairs two rows' scores observation by observation, and these rows scored different numbers of observations.
+⚠ --allow-mismatched-horizon was set for 'a', 'b': T_score differs across models: 'b' 2; 'a' 3. Δ columns suppressed ('—' in the table, null in the JSON): a Δ pairs two rows' scores observation by observation, and these rows scored different numbers of observations.
 ⓘ not checked for a shared observation set: 'a' (a test fixture, built from scores alone); 'b' (a test fixture, built from scores alone). A difference against such a row may be a data difference, not a model difference.
 ⓘ filter settings not recorded for 'a' (trace older than schema 5); not checked; filter settings not recorded for 'b' (trace older than schema 5); not checked
 ⓘ CRPS and PIT calibration not available for 'a' (trace predates the per-stream breakdown), 'b' (trace predates the per-stream breakdown).
@@ -6308,7 +6597,7 @@ Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compari
 
 _Conditioning: in-sample — θ fit to all scored data; Δelpd favors the more flexible model._
 
-- ⚠ --allow-mismatched-horizon was set for 'a', 'b': T_score differs across models: 'a' 3, 'b' 2. Δ columns suppressed ('—' in the table, null in the JSON): a Δ pairs two rows' scores observation by observation, and these rows scored different numbers of observations.
+- ⚠ --allow-mismatched-horizon was set for 'a', 'b': T_score differs across models: 'b' 2; 'a' 3. Δ columns suppressed ('—' in the table, null in the JSON): a Δ pairs two rows' scores observation by observation, and these rows scored different numbers of observations.
 - ⓘ not checked for a shared observation set: 'a' (a test fixture, built from scores alone); 'b' (a test fixture, built from scores alone). A difference against such a row may be a data difference, not a model difference.
 - ⓘ filter settings not recorded for 'a' (trace older than schema 5); not checked; filter settings not recorded for 'b' (trace older than schema 5); not checked
 - ⓘ CRPS and PIT calibration not available for 'a' (trace predates the per-stream breakdown), 'b' (trace predates the per-stream breakdown).
@@ -6426,7 +6715,7 @@ b             3   -17.00   +1.00   2.718    0.91   +4.3 dB, within noise
 Scored steps: 3 (t0=1).  Baseline: a.
 Sorted by Δelpd ascending — best-supported model at the bottom.
 Conditioning: in-sample — θ fit to all scored data; Δelpd favors the more flexible model.
-⚠ --allow-mismatched-filter-settings was set for 'a', 'b': the compared traces were scored with different particle-filter settings: 'a' and 'b': particles 1000 vs particles 200. The log of a particle-filter likelihood estimate is biased downward, and by more at fewer particles (and fewer replicates combined), so part of Δelpd would measure the filters rather than the models.
+⚠ --allow-mismatched-filter-settings was set for 'a', 'b': the compared traces were scored with different particle-filter settings: particles 200 in 'b' vs particles 1000 in 'a'. The log of a particle-filter likelihood estimate is biased downward, and by more at fewer particles (and fewer replicates combined), so part of Δelpd would measure the filters rather than the models.
 ⓘ not checked for a shared observation set: 'a' (a test fixture, built from scores alone); 'b' (a test fixture, built from scores alone). A difference against such a row may be a data difference, not a model difference.
 ⓘ CRPS and PIT calibration not available for 'a' (trace predates the per-stream breakdown), 'b' (trace predates the per-stream breakdown).
 note: lag-1 autocorrelation of the per-step Δelpd vs baseline: b -0.17
@@ -6442,7 +6731,7 @@ _Sorted by Δelpd ascending — best-supported model at the bottom._
 
 _Conditioning: in-sample — θ fit to all scored data; Δelpd favors the more flexible model._
 
-- ⚠ --allow-mismatched-filter-settings was set for 'a', 'b': the compared traces were scored with different particle-filter settings: 'a' and 'b': particles 1000 vs particles 200. The log of a particle-filter likelihood estimate is biased downward, and by more at fewer particles (and fewer replicates combined), so part of Δelpd would measure the filters rather than the models.
+- ⚠ --allow-mismatched-filter-settings was set for 'a', 'b': the compared traces were scored with different particle-filter settings: particles 200 in 'b' vs particles 1000 in 'a'. The log of a particle-filter likelihood estimate is biased downward, and by more at fewer particles (and fewer replicates combined), so part of Δelpd would measure the filters rather than the models.
 - ⓘ not checked for a shared observation set: 'a' (a test fixture, built from scores alone); 'b' (a test fixture, built from scores alone). A difference against such a row may be a data difference, not a model difference.
 - ⓘ CRPS and PIT calibration not available for 'a' (trace predates the per-stream breakdown), 'b' (trace predates the per-stream breakdown).
 - note: lag-1 autocorrelation of the per-step Δelpd vs baseline: b -0.17
@@ -6461,7 +6750,7 @@ Scored steps: 3.  Baseline: a.
 Sorted by Δelpd ascending — best-supported model at the bottom.
 Conditioning: in-sample — θ fit to all scored data; Δelpd favors the more flexible model.
 Assimilated: 'a' assimilated cases, deaths; 'b' assimilated cases.
-⚠ --allow-in-sample-ablation was set for 'a', 'b': the compared fits assimilated different streams and are scored in-sample: 'a' assimilated cases, deaths; 'b' assimilated cases. Scored in-sample, Δelpd leans toward the fit that assimilated fewer streams: its θ̂ was chosen to fit the shared stream alone, while the other fit's traded that stream off against the rest, so on its own training data it fits it no better and usually slightly worse, whatever the extra streams contribute to prediction.
+⚠ --allow-in-sample-ablation was set for 'a', 'b': the compared fits assimilated different streams and are scored in-sample: 'b' assimilated cases; 'a' assimilated cases, deaths. Scored in-sample, Δelpd leans toward the fit that assimilated fewer streams: its θ̂ was chosen to fit the shared stream alone, while the other fit's traded that stream off against the rest, so on its own training data it fits it no better and usually slightly worse, whatever the extra streams contribute to prediction.
 ⓘ not checked for a shared observation set: 'a' (a test fixture, built from scores alone); 'b' (a test fixture, built from scores alone). A difference against such a row may be a data difference, not a model difference.
 ⓘ filter settings not recorded for 'a' (trace older than schema 5); not checked; filter settings not recorded for 'b' (trace older than schema 5); not checked
 note: scores are plug-in (scored at a single θ, dropping parameter uncertainty → under-dispersed); and in-sample (θ fit to all the data → optimistic in absolute level, by roughly the effective number of parameters fit, which does not cancel in a Δelpd and so biases differences toward the more flexible model) — not a leave-future-out forecast score. See LFO (#295).
@@ -6482,7 +6771,7 @@ _Conditioning: in-sample — θ fit to all scored data; Δelpd favors the more f
 
 _Assimilated: 'a' assimilated cases, deaths; 'b' assimilated cases._
 
-- ⚠ --allow-in-sample-ablation was set for 'a', 'b': the compared fits assimilated different streams and are scored in-sample: 'a' assimilated cases, deaths; 'b' assimilated cases. Scored in-sample, Δelpd leans toward the fit that assimilated fewer streams: its θ̂ was chosen to fit the shared stream alone, while the other fit's traded that stream off against the rest, so on its own training data it fits it no better and usually slightly worse, whatever the extra streams contribute to prediction.
+- ⚠ --allow-in-sample-ablation was set for 'a', 'b': the compared fits assimilated different streams and are scored in-sample: 'b' assimilated cases; 'a' assimilated cases, deaths. Scored in-sample, Δelpd leans toward the fit that assimilated fewer streams: its θ̂ was chosen to fit the shared stream alone, while the other fit's traded that stream off against the rest, so on its own training data it fits it no better and usually slightly worse, whatever the extra streams contribute to prediction.
 - ⓘ not checked for a shared observation set: 'a' (a test fixture, built from scores alone); 'b' (a test fixture, built from scores alone). A difference against such a row may be a data difference, not a model difference.
 - ⓘ filter settings not recorded for 'a' (trace older than schema 5); not checked; filter settings not recorded for 'b' (trace older than schema 5); not checked
 - note: scores are plug-in (scored at a single θ, dropping parameter uncertainty → under-dispersed); and in-sample (θ fit to all the data → optimistic in absolute level, by roughly the effective number of parameters fit, which does not cancel in a Δelpd and so biases differences toward the more flexible model) — not a leave-future-out forecast score. See LFO (#295).
@@ -6547,10 +6836,261 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
             row_at("a", &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0]),
             row_at("b", &[7.0, 14.0, 21.0], &[-5.0, f64::NEG_INFINITY, -6.0]),
         ];
-        let checks = preflight(&rows, &Waivers::default()).expect("no check refuses it");
+        let checks = outcome_of(&rows, &Waivers::default()).expect("no check refuses it");
         let (table, md) = rendered(&rows, 0, &["elpd"], &checks);
         assert_eq!(table, NONFINITE_TABLE);
         assert_eq!(md, NONFINITE_MD);
     }
-}
 
+    // ── every check evaluated and recorded (proposal step 6) ─────────────
+
+    /// Three rows failing three independent checks: mixed provenance,
+    /// differing filter settings and differing bound data.
+    fn three_failures() -> Vec<Row> {
+        let mut rows = vec![
+            row_at("a", &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0]),
+            row_at("b", &[7.0, 14.0, 21.0], &[-5.0, -6.0, -6.0]),
+            row_at("c", &[7.0, 14.0, 21.0], &[-5.5, -6.0, -6.0]),
+        ];
+        rows[1].trace.provenance = score::trace::Provenance::Posterior { n_draws: 4 };
+        rows[0].trace.derivation = Some(derivation(1000, 5));
+        rows[1].trace.derivation = Some(derivation(200, 5));
+        rows[2].trace.derivation = Some(derivation(1000, 5));
+        rows[0].data = digests(&[("cases", "aaaaaaaa11")]);
+        rows[1].data = digests(&[("cases", "aaaaaaaa11")]);
+        rows[2].data = digests(&[("cases", "bbbbbbbb22")]);
+        rows
+    }
+
+    /// Rows whose conditioning modes differ, one of them held out.
+    fn mixed_conditioning() -> Vec<Row> {
+        let mut rows = rows_needing(Waiver::InSampleAblation);
+        rows[1].trace.conditioning = Conditioning::HoldOutTail {
+            train_end: 3.0, theta_source: "b".into() };
+        rows
+    }
+
+    /// Rows re-scored on one stream that fail to pair: the same count of
+    /// steps at different times.
+    fn unpaired_on_one_stream() -> Vec<Row> {
+        let full = derived_row("full", &CASES_DEATHS, &["cases", "deaths"]).onto("cases").unwrap();
+        let mut late = derived_row("late", &CASES_DEATHS, &["cases", "deaths"]).onto("cases").unwrap();
+        late.trace.steps[2].t = 28.0;
+        vec![full, late]
+    }
+
+    /// Every fixture the tests below run over: passing, each waiver needed,
+    /// several failures, and the dependency cases.
+    fn fixtures() -> Vec<(String, Vec<Row>)> {
+        let mut out = vec![
+            ("passing".to_string(), vec![
+                row_at("a", &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0]),
+                row_at("b", &[7.0, 14.0, 21.0], &[-5.0, -6.0, -6.0])]),
+            ("single stream".into(), single_stream_rows()),
+            ("two streams".into(), two_stream_rows()),
+            ("ablation".into(), ablation_table().rows),
+            ("three failures".into(), three_failures()),
+            ("mixed conditioning".into(), mixed_conditioning()),
+            ("unpaired on one stream".into(), unpaired_on_one_stream()),
+        ];
+        for w in ALL_WAIVERS {
+            out.push((format!("{w:?}"), rows_needing(w)));
+        }
+        out
+    }
+
+    /// Guarantee 2: one result per check, in declaration order, whatever
+    /// fails and whatever is waived.
+    #[test]
+    fn every_check_has_one_result_in_declaration_order() {
+        for (name, rows) in fixtures() {
+            for waivers in [Waivers::default(), every_waiver()] {
+                let checks: Vec<CheckId> =
+                    preflight(&rows, &waivers).results.iter().map(|r| r.check).collect();
+                assert_eq!(checks, CheckId::ALL, "{name}");
+            }
+        }
+    }
+
+    /// Test 18: three independent failures are three refusals, and the
+    /// command prints all three, in check order, where it printed the first.
+    #[test]
+    fn three_independent_failures_are_refused_together() {
+        let rows = three_failures();
+        let refusals = preflight(&rows, &Waivers::default()).refusals();
+        assert_eq!(refusals.iter().map(|r| r.check).collect::<Vec<_>>(),
+            [CheckId::Provenance, CheckId::SharedData, CheckId::FilterSettings]);
+        let message = match prepare_table(&crate::out::Out::new(false), rows, &Waivers::default(), None) {
+            Err(m) => m.join("\n"),
+            Ok(_) => panic!("refused"),
+        };
+        assert_eq!(message.matches("error: ").count(), 3, "{message}");
+        let at = |needle: &str| message.find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} in:\n{message}"));
+        assert!(at("mix provenance kinds") < at("different observed data")
+                && at("different observed data") < at("particle-filter settings"),
+            "in check order:\n{message}");
+        for flag in ["--allow-mixed-provenance", "--allow-data-mismatch",
+                     "--allow-mismatched-filter-settings"] {
+            assert!(message.contains(flag), "each with its remedy: {flag}\n{message}");
+        }
+    }
+
+    /// Test 19: a check that reads what a failed check established is
+    /// recorded as not evaluated, naming that check.
+    #[test]
+    fn a_check_whose_prerequisite_failed_is_not_evaluated() {
+        let outcome_of_check = |checks: &Preflight, c: CheckId| {
+            checks.result(c).map(|r| r.outcome.clone())
+        };
+        let checks = preflight(&mixed_conditioning(), &every_waiver());
+        assert!(matches!(checks.result(CheckId::Conditioning).unwrap().outcome,
+            CheckOutcome::Failed { waived: false, .. }));
+        for c in [CheckId::InSampleAblation, CheckId::TrainingBoundary] {
+            assert_eq!(outcome_of_check(&checks, c),
+                Some(CheckOutcome::NotEvaluated { because: CheckId::Conditioning }), "{c:?}");
+        }
+
+        let checks = preflight(&unpaired_on_one_stream(), &every_waiver());
+        assert!(matches!(&checks.result(CheckId::Pairing).unwrap().outcome,
+            CheckOutcome::Failed { finding: Finding::ObservationTimesDiffer { step: 3, .. }, waived: false }),
+            "{checks:?}");
+        assert_eq!(outcome_of_check(&checks, CheckId::SharedData),
+            Some(CheckOutcome::NotEvaluated { because: CheckId::Pairing }));
+        // The same rows scored jointly: the data check does not need pairing.
+        let joint: Vec<Row> = unpaired_on_one_stream().into_iter()
+            .map(|mut r| { r.trace.scored_streams = None; r }).collect();
+        let checks = preflight(&joint, &every_waiver());
+        assert!(!matches!(checks.result(CheckId::SharedData).unwrap().outcome,
+            CheckOutcome::NotEvaluated { .. }), "{checks:?}");
+
+        // Step counts differing without the waiver: pairing is not evaluated;
+        // with it, pairing joins the steps by time.
+        let rows = rows_needing(Waiver::MismatchedHorizon);
+        assert_eq!(outcome_of_check(&preflight(&rows, &Waivers::default()), CheckId::Pairing),
+            Some(CheckOutcome::NotEvaluated { because: CheckId::ScoredSteps }));
+        assert_eq!(outcome_of_check(&preflight(&rows, &every_waiver()), CheckId::Pairing),
+            Some(CheckOutcome::Passed));
+    }
+
+    fn unchecked_members(r: &CheckResult) -> Vec<&str> {
+        r.not_checked.iter().map(|u| u.member.as_str()).collect()
+    }
+
+    /// Guarantee 3 and test 20: a row lacking the fact a check reads is
+    /// listed as not checked whatever the outcome over the other rows. Two
+    /// rows that differ and one that carries nothing: a failure over the two,
+    /// and the third not checked; for the bound-data, changed-data and
+    /// filter-settings checks.
+    #[test]
+    fn a_failed_check_still_lists_the_rows_it_could_not_check() {
+        let mut rows = vec![
+            row_at("a", &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0]),
+            row_at("b", &[7.0, 14.0, 21.0], &[-5.0, -6.0, -6.0]),
+            row_at("c", &[7.0, 14.0, 21.0], &[-5.5, -6.0, -6.0]),
+        ];
+        rows[0].data = digests(&[("cases", "aaaaaaaa")]);
+        rows[1].data = digests(&[("cases", "bbbbbbbb")]);
+        let r = check_shared_data(&rows);
+        assert!(matches!(r.outcome, CheckOutcome::Failed { .. }), "{r:?}");
+        assert_eq!(unchecked_members(&r), ["c"]);
+
+        // Changed data: `a` changed, `b` checked and unchanged, `c` with no record.
+        rows[0].freshness.findings.push(FileFinding {
+            stream: "cases".into(), path: "cases.tsv".into(),
+            check: FileCheck::Changed { recorded: "aaaaaaaa".into(), current: "cccccccc".into() },
+        });
+        rows[2].freshness.row_unchecked = Some("its fit.meta.json records no data hashes".into());
+        let r = check_changed_data(&rows);
+        assert!(matches!(r.outcome, CheckOutcome::Failed { .. }), "{r:?}");
+        assert_eq!(unchecked_members(&r), ["c"]);
+
+        // Filter settings: `a` and `b` differ, `c` records none.
+        rows[0].trace.derivation = Some(derivation(1000, 5));
+        rows[1].trace.derivation = Some(derivation(200, 5));
+        let r = check_filter_settings(&rows);
+        assert!(matches!(r.outcome, CheckOutcome::Failed { .. }), "{r:?}");
+        assert_eq!(r.not_checked, [Unchecked { member: "c".into(),
+            reason: NotCheckedReason::TraceBeforeSchema5 }]);
+
+        // Every format still states the rows not checked when the checks
+        // fail and are waived.
+        let checks = checked(&rows);
+        for note in [data_unchecked_note(&checks, &rows), data_change_unchecked_note(&checks, &rows),
+                     filter_settings_unchecked_note(&checks, &rows)] {
+            assert!(note.as_deref().is_some_and(|n| n.contains("'c'")), "{note:?}");
+        }
+    }
+
+    /// Guarantee 4: an override is listed when, and only when, its check
+    /// failed and its waiver was given.
+    #[test]
+    fn overrides_are_exactly_the_waived_failures() {
+        for (name, rows) in fixtures() {
+            for w in ALL_WAIVERS {
+                let none = Waivers::default();
+                let given = match w {
+                    Waiver::MismatchedHorizon => Waivers { mismatched_horizon: true, ..none },
+                    Waiver::MixedProvenance => Waivers { mixed_provenance: true, ..none },
+                    Waiver::DataMismatch => Waivers { data_mismatch: true, ..none },
+                    Waiver::ChangedData => Waivers { changed_data: true, ..none },
+                    Waiver::MismatchedFilterSettings =>
+                        Waivers { mismatched_filter_settings: true, ..none },
+                    Waiver::InSampleAblation => Waivers { in_sample_ablation: true, ..none },
+                };
+                for waivers in [given, every_waiver(), none] {
+                    let checks = preflight(&rows, &waivers);
+                    let want: Vec<Waiver> = checks.results.iter().filter_map(|r| match r.outcome {
+                        CheckOutcome::Failed { .. } => r.waiver.filter(|w| waivers.allows(*w)),
+                        _ => None,
+                    }).collect();
+                    let got: Vec<Waiver> = checks.overrides().iter().map(|o| o.waiver).collect();
+                    assert_eq!(got, want, "{name}, {waivers:?}");
+                    for r in &checks.results {
+                        if let CheckOutcome::Failed { waived, .. } = r.outcome {
+                            assert_eq!(waived, r.waiver.is_some_and(|w| waivers.allows(w)),
+                                "{name}: {r:?}");
+                        }
+                    }
+                }
+            }
+        }
+        // A waiver given and not needed is absent.
+        let rows = &fixtures()[0].1;
+        assert!(preflight(rows, &every_waiver()).overrides().is_empty());
+    }
+
+    /// Guarantee 11, for the checks: permuting the rows changes no result,
+    /// because a finding partitions the rows by value.
+    #[test]
+    fn permuting_the_rows_changes_no_check_result() {
+        use score::trace::Coverage;
+        let mut fixtures = fixtures();
+        // Three rows that pair badly on stream sets, on coverage, and three
+        // held-out rows two of which seal at one boundary up to float noise.
+        let t = [7.0, 14.0, 21.0];
+        fixtures.push(("stream sets".into(), vec![row_with_streams("x", &t, &["north"]),
+            row_with_streams("y", &t, &["north", "south"]), row_with_streams("z", &t, &["north"])]));
+        let iv = |s: f64, e: f64| Coverage::Interval { start: s, stop: e };
+        fixtures.push(("coverage".into(), vec![
+            row_covering("x", &t, "cases", &[iv(0.0, 7.0), iv(7.0, 14.0), iv(14.0, 21.0)]),
+            row_covering("y", &t, "cases", &[iv(0.0, 7.0), iv(8.0, 14.0), iv(14.0, 21.0)]),
+            row_covering("z", &t, "cases", &[iv(0.0, 7.0), iv(7.0, 14.0), iv(14.0, 21.0)])]));
+        let mut boundaries = vec![row_at("x", &t, &[-1.0; 3]), row_at("y", &t, &[-1.0; 3]),
+                                  row_at("z", &t, &[-1.0; 3])];
+        for (r, end) in boundaries.iter_mut().zip([3.0, 3.0 + 1e-12, 5.0]) {
+            r.trace.conditioning = Conditioning::HoldOutTail { train_end: end, theta_source: "f".into() };
+        }
+        fixtures.push(("boundaries".into(), boundaries));
+        for (name, rows) in fixtures {
+            let want = preflight(&rows, &every_waiver());
+            for shift in 1..rows.len() {
+                let mut permuted = rows.clone();
+                permuted.rotate_left(shift);
+                assert_eq!(preflight(&permuted, &every_waiver()), want, "{name}, rotated {shift}");
+                permuted.reverse();
+                assert_eq!(preflight(&permuted, &every_waiver()), want, "{name}, reversed");
+            }
+        }
+    }
+}
