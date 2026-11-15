@@ -10555,6 +10555,56 @@ let test_typed_time_e322_unanchored_months_cadence_ok () =
   |} in
   ()
 
+(* gh#1069: a `covers` width is a fixed span, so a calendar width
+   (`'months`/`'years`) under an origin would attribute every row the same
+   30.436875 (or 365.2425) days whatever month it falls in. Each form is
+   refused with E321, and the hint names the window columns, which state a
+   per-row period exactly. *)
+let covers_src ?(origin = {|origin = date("2020-01-01")|}) ?(lets = "") covers =
+  Printf.sprintf {|
+    time_unit = 'days
+    %s
+    compartments { S, I, R }
+    parameters { beta : rate  gamma : rate  rho : probability  N0 : count  I0 : count }
+    let N = S + I + R
+    %s
+    transitions {
+      infection : S --> I  @ beta * S * I / N
+      recovery  : I --> R  @ gamma * I
+    }
+    init { S = N0 - I0  I = I0 }
+    simulate { from = 0 'days  to = 365 'days }
+    observations {
+      cases {
+        columns       { time : time, cases : count }
+        covers        = %s
+        projected     = incidence(recovery)
+        emit_schedule = every 30 'days
+        cases         ~ poisson(rate = rho * projected)
+      }
+    }
+  |} origin lets covers
+
+let test_gh1069_calendar_covers_width_rejected () =
+  List.iter (fun covers ->
+    expect_error_code ~code:"E321" ~contains:"window_start"
+      (covers_src covers))
+    [ "closing_at(time, 1 'months)";
+      "starting_on(time, 1 'months)";
+      "ending_on(time, 1 'months)";
+      "closing_at(time, 1 'years)" ];
+  (* The laundered form: a `let`-bound calendar width. *)
+  expect_error_code ~code:"E321" ~contains:"window_start"
+    (covers_src ~lets:"let w = 1 'months" "closing_at(time, w)")
+
+let test_gh1069_exact_covers_width_ok () =
+  (* A fixed width under an origin still compiles; and without an origin a
+     calendar width is an average length, as for every other anchored-only
+     calendar rule (E321/E322 are vacuous unanchored). *)
+  let _ = compile_expect_ok (covers_src "closing_at(time, 7 'days)") in
+  let _ = compile_expect_ok (covers_src ~origin:"" "closing_at(time, 1 'months)") in
+  ()
+
 let test_typed_time_e323_bare_numeric_on_periodic_anchored () =
   (* Bare-numeric entries in `on=[7:100]` inside a periodic forcing
      under an anchored model: hard error. *)
@@ -16183,6 +16233,10 @@ let () =
         `Quick test_typed_time_e322_calendar_cadence_in_recurring;
       Alcotest.test_case "E322 unanchored every = 1 'months is fine (vacuous rule)"
         `Quick test_typed_time_e322_unanchored_months_cadence_ok;
+      Alcotest.test_case "gh#1069 E321 calendar width in any covers form rejected"
+        `Quick test_gh1069_calendar_covers_width_rejected;
+      Alcotest.test_case "gh#1069 fixed covers width, or unanchored, still compiles"
+        `Quick test_gh1069_exact_covers_width_ok;
       (* Rule 4 (E323): bare-numeric on=[] in anchored periodic. *)
       Alcotest.test_case "E323 bare-numeric on=[7:100] in anchored periodic rejected"
         `Quick test_typed_time_e323_bare_numeric_on_periodic_anchored;

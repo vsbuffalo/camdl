@@ -3526,7 +3526,10 @@ reports on and takes `day`, `starting_on` or `ending_on`. The width is a
 compile-time constant duration; `day(...)` takes none. A width given to `day`, a
 width missing from the other three, an unknown form name, or a width naming a
 data column is **E349** — a width that varies row to row is stated with the
-window columns, not with a duration column. `covers` must name the stream's own
+window columns, not with a duration column. Under `origin = date(...)` a
+calendar width (`1 'months`, `1 'years`) is **E321**: the width is one fixed
+span for every row, and a calendar month is 28 to 31 days, so monthly or yearly
+periods are stated with the window columns. `covers` must name the stream's own
 `: time` column (**E347** otherwise).
 
 **Window columns.** `window_start` and `window_stop` are `columns { }` roles
