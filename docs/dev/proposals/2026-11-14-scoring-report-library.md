@@ -17,11 +17,13 @@ Code references are to `main` at `e8e7c24a0` (2026-11-14). Since then phase 1 of
 this proposal has moved the trace and evidence modules into `rust/crates/score`,
 and `compare`'s chain selection has gained `--chains` beside `--exclude-chains`
 (`982eca439`, `770013f76`); "excluded chains" below means the resolved set under
-either spelling. File paths and line numbers are as they were at `e8e7c24a0`.
-Every statement under [What exists today](#what-exists-today) was read in the
-code at that commit. Nothing was built or run for this proposal; anything that
-rests on more than reading the cited lines is marked _not verified_ with the
-reason.
+either spelling. Fits on the ODE backend can now be compared (gh#312): a trace
+records its `basis`, and `preflight` refuses to difference a filtered trace
+against an ODE one, with no override. File paths and line numbers are as they
+were at `e8e7c24a0`. Every statement under
+[What exists today](#what-exists-today) was read in the code at that commit.
+Nothing was built or run for this proposal; anything that rests on more than
+reading the cited lines is marked _not verified_ with the reason.
 
 ## Terms
 
@@ -287,8 +289,7 @@ name that is not a member (`compare.rs:766-771`), which `Request::new` refuses.
 **What becomes an unusable member.** Every refusal raised while a member's trace
 is derived becomes a `Refusal` in `Member::Unusable`, so the report lists it
 with every other result and the remaining members are still checked against each
-other. On `main` these are: a backend the derivation cannot filter
-(`compare.rs:2276-2278`); no `[data]` block or no bound stream (`:2333`,
+other. On `main` these are: no `[data]` block or no bound stream (`:2333`,
 `:2341`); a declared holdout with no recorded training window (`:2351`); a
 training row inside the window scored as held-out (`:2387`); a posterior draw
 the filter cannot score (`:2512`); an empty held-out window (`:2582`); and a
@@ -453,9 +454,8 @@ The change is the subject of its own commit, the document is listed in
 ### Every check is evaluated and recorded
 
 ```rust
-pub enum CheckId {
-    MemberUsable, Convergence, ConvergenceRule, Conditioning, TrainingBoundary,
-    InSampleAblation, Provenance, StreamScored, ScoredSteps, Pairing, SharedData,
+pub enum CheckId {    MemberUsable, Convergence, ConvergenceRule, Basis, Conditioning,
+    TrainingBoundary, InSampleAblation, Provenance, StreamScored, ScoredSteps, Pairing, SharedData,
     ChangedData, FilterSettings, FilterSeed, Profile,
 }
 pub struct CheckResult {
@@ -509,12 +509,17 @@ with status 2, as it does today (`compare.rs:798-800`).
 established is `NotEvaluated { because }` when that check failed unwaived. That
 is a recorded result, not an absence.
 
-| Check              | Depends on                    | Why                                                                                      |
-| ------------------ | ----------------------------- | ---------------------------------------------------------------------------------------- |
-| `TrainingBoundary` | `Conditioning`                | boundaries are compared among held-out members only                                      |
-| `InSampleAblation` | `Conditioning`                | it reads the one conditioning the members share (`compare.rs:1038`, `:1100-1101`)        |
-| `Pairing`          | `StreamScored`, `ScoredSteps` | with step counts differing under the waiver it compares shared times only (`:1168-1172`) |
-| `SharedData`       | `Pairing`, under `--streams`  | it assumes every member is scored on the same leaf                                       |
+| Check                                                                             | Depends on                    | Why                                                                                      |
+| --------------------------------------------------------------------------------- | ----------------------------- | ---------------------------------------------------------------------------------------- |
+| `TrainingBoundary`                                                                | `Conditioning`                | boundaries are compared among held-out members only                                      |
+| `InSampleAblation`                                                                | `Conditioning`                | `FilterSettings`                                                                         |
+| it reads the one conditioning the members share (`compare.rs:1038`, `:1100-1101`) |                               |                                                                                          |
+| `Pairing`                                                                         | `StreamScored`, `ScoredSteps` | with step counts differing under the waiver it compares shared times only (`:1168-1172`) |
+| `SharedData`                                                                      | `Pairing`, under `--streams`  | it assumes every member is scored on the same leaf                                       |
+
+`Basis` fails when the members' traces are on different bases (a particle
+filter's estimate against an ODE trajectory's exact density). It has no waiver,
+as on `main`.
 
 `StreamScored` exists under `--streams` only: it fails for a table when a member
 cannot be projected onto that table's leaf (today's exit at `compare.rs:704`).
@@ -817,7 +822,6 @@ inputs:
   a quantity is driven by its prior (proposal 5).
 - It does not define the bundle record or `camdl publish`; it states what they
   must store for convergence.
-- It does not make an ODE fit comparable (gh#312).
 
 ## What a later browser build would need
 
