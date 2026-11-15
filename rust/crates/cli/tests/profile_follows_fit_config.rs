@@ -3,8 +3,9 @@
 //! A profile of a fit config is read against `fit run` of the same config, so
 //! each cell must score the same data and estimate the same nuisance set:
 //!
-//! * a `[data] holdout_after` the profile cannot apply is refused, never
-//!   fitted over (the held-out rows would enter every cell's likelihood);
+//! * a `[data] holdout_after` is applied as `fit run` applies it, to the
+//!   `--data` binding as to the config's own data, so the held-out rows enter
+//!   no cell's likelihood;
 //! * `[data.holdout]` files are checked against the bound training data as
 //!   `fit run` checks them;
 //! * the estimated set is the config's `[estimate]` less the swept and pinned
@@ -163,26 +164,54 @@ fn find_all(root: &Path, name: &str) -> Vec<PathBuf> {
 
 const NL: [&str; 4] = ["--algorithm", "nl-sbplx", "--backend", "ode"];
 
+/// `final_loglik` and the `[mle]` table of every cell the run under `dir`
+/// wrote, sorted, for comparing two profiles cell for cell.
+fn cells(dir: &Path) -> Vec<String> {
+    let mut out: Vec<String> = find_all(&dir.join("results"), "mle.toml")
+        .iter()
+        .map(|f| {
+            let t: toml::Table = std::fs::read_to_string(f).unwrap().parse().unwrap();
+            format!("focal={} final_loglik={} mle={}", t["focal"], t["final_loglik"], t["mle"])
+        })
+        .collect();
+    out.sort();
+    out
+}
+
 /// Item 1 of gh#1059: with `holdout_after = 35` the fit trains on rows
-/// t <= 35, and a profile cell must not fit the three held-out rows. Neither
-/// the `--data` binding nor the config's own `[data.observations]` may slip
-/// past the holdout.
+/// t <= 35, and a profile cell fits exactly those rows, whether the data come
+/// from `--data` or from the config's own `[data.observations]`: each cell
+/// equals the cell of a profile of the same config without `holdout_after`
+/// bound to a file holding only the training rows.
 #[test]
-fn a_holdout_after_the_profile_cannot_apply_is_refused() {
-    let tmp = workdir(&fit_toml("holdout_after = 35\n"));
-    let dir = tmp.path();
+fn a_holdout_after_is_applied_as_fit_run_applies_it() {
+    let train = "time\tweekly_cases\n7\t47\n14\t111\n21\t474\n28\t1066\n35\t1471\n";
+    let base_args = |extra: &[&'static str]| -> Vec<&'static str> {
+        let mut v: Vec<&str> = vec!["--fit", "fit.toml", "--sweep", "gamma=0.12,0.15",
+            "--n-starts", "1", "--starts", "single"];
+        v.extend_from_slice(&NL);
+        v.extend_from_slice(extra);
+        v
+    };
+    let reference = {
+        let tmp = workdir(&fit_toml(""));
+        std::fs::write(tmp.path().join("train.tsv"), train).unwrap();
+        let o = profile(tmp.path(), &base_args(&["--data", "train.tsv"]));
+        assert_ok(&o, "the training rows, no holdout");
+        cells(tmp.path())
+    };
+    assert_eq!(reference.len(), 2, "one cell per grid value: {reference:?}");
     for (what, data) in [
         ("--data on the command line", &["--data", "weekly_cases.tsv"][..]),
         ("data from the fit config", &[][..]),
     ] {
-        let mut args: Vec<&str> = vec!["--fit", "fit.toml", "--sweep", "gamma=0.15",
-            "--rw-sd", "beta=auto", "--n-starts", "1"];
-        args.extend_from_slice(&NL);
-        args.extend_from_slice(data);
-        let o = profile(dir, &args);
-        assert_refused(&o, what, &["holdout_after = 35", "held-out rows"]);
-        assert!(find_all(&dir.join("results"), "mle.toml").is_empty(),
-            "{what}: a refused profile must store no cell");
+        let tmp = workdir(&fit_toml("holdout_after = 35\n"));
+        let o = profile(tmp.path(), &base_args(data));
+        assert_ok(&o, what);
+        assert_eq!(cells(tmp.path()), reference,
+            "{what}: every cell must fit the training rows only");
+        assert!(stderr(&o).contains("3 observation row(s) at t > 35 withheld from training"),
+            "{what}: the run must say what the holdout withheld:\n{}", stderr(&o));
     }
 }
 

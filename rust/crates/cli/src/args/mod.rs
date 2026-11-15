@@ -1872,10 +1872,10 @@ pub struct ProfileArgs {
     /// it at its grid value and estimates the rest. Listing it in `[fixed]`
     /// is refused. Priors do not
     /// enter the per-cell maximization; `--starts from_prior` draws
-    /// starting points from them. A config with `[data] holdout_after` is
-    /// refused (a profile does not truncate the series, so it would fit the
-    /// held-out rows); `[data.holdout]` files are checked against the bound
-    /// data, `--data` included, as `fit run` checks them.
+    /// starting points from them. The config's holdout applies to the
+    /// bound data, `--data` included, as in `fit run`: `[data] holdout_after`
+    /// removes every row after the cutoff from every cell's likelihood, and
+    /// `[data.holdout]` files must lie after the training rows.
     #[arg(long, value_name = "PATH")]
     pub fit: Option<PathBuf>,
 

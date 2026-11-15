@@ -74,13 +74,11 @@ nothing assimilated from the training window, which is a different (and unfairly
 harsh) quantity. The recipe is spelled out under "Out-of-sample validation" in
 `camdl docs inference`.
 
-`camdl profile --fit` does not apply a `holdout_after`: it refuses the config
-rather than fit each cell to the held-out rows, whether its data come from
-`--data` or from the config. Profile a copy of the config without
-`holdout_after`, bound to a file holding only the training rows. A
-`[data.holdout]` config is accepted: its training files are fitted whole, as in
-`fit run`, and its holdout files are checked against the bound training data,
-`--data` included, by the same tail-only rule.
+`camdl profile --fit` applies the holdout as `fit run` does, through the same
+function, whether its data come from `--data` or from the config: under
+`holdout_after` every cell fits only the rows at or before the cutoff, and a
+`[data.holdout]` config's training files are fitted whole, its holdout files
+checked against the bound training data by the same tail-only rule.
 
 `[synthetic]` may stand beside `[data]`: `fit run` then fits the real data, and
 the synthetic block records the truth a recovery check reads.

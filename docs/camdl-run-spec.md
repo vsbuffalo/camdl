@@ -2848,8 +2848,10 @@ Exactly one of `file` / `observations` must be set. The observation model
 are declared in the `.camdl`; `fit.toml` supplies only the file paths.
 
 A holdout declaration is applied when the fit loads its data
-(`apply_holdout_declaration`, `fit/runner.rs`), and only on the fit path:
-`pfilter`, `profile` and `compare`'s holdout scoring see the full series.
+(`apply_holdout_declaration`, `fit/runner.rs`). `profile --fit` applies it to
+its bound data through the same function, and a `holdout_after` cutoff enters
+the profile's base identity (omitted without one). `pfilter` and `compare`'s
+holdout scoring see the full series.
 
 - `holdout_after` is a bare model time, a date, or an observation-anchored
   expression (`last_obs - 6 weeks`; anchors resolve over the union of the bound
@@ -7252,10 +7254,11 @@ part of the leaf's identity, and the full objective leaves the key unchanged.
                             fixed list and [[simplex_groups]] (honoured by IF2;
                             every member must be estimated); an nl-* [method]
                             there also sets each nl-* cell's tolerance and
-                            max_evals (else 1e-4 and 1500). A config with
-                            [data] holdout_after is refused (the profile does
-                            not truncate the series); [data.holdout] files are
-                            checked against the bound data, --data included
+                            max_evals (else 1e-4 and 1500). Its holdout applies
+                            to the bound data, --data included, as in fit run:
+                            holdout_after removes every row after the cutoff
+                            (keyed into the base), [data.holdout] files are
+                            checked to lie after the training rows
 --seeds SPEC                run the whole grid at each seed (multi-seed sensitivity)
 --dt X                      step for a model that declares none (default 1.0);
                             every cell steps at the model's declared dt, and a

@@ -144,6 +144,14 @@ struct ProfileBaseLevel<'a> {
     /// keeps its key.
     #[serde(skip_serializing_if = "crate::fit::config_v2::LikelihoodObjective::is_full")]
     objective: crate::fit::config_v2::LikelihoodObjective,
+    /// The resolved cutoff of the fit config's `[data] holdout_after`: every
+    /// cell is fitted to the rows at or before it, so it changes each stored
+    /// loglik and is identity. The bound files' bytes and the config's bytes
+    /// are keyed already; this is what says the rows were cut. Omitted without
+    /// `holdout_after`, so every other profile keeps its key. (`[data.holdout]`
+    /// files leave the training data whole and add nothing here.)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    holdout_after: Option<f64>,
 }
 
 /// The `method` level's identity: the METHOD, i.e. how each cell is fitted.
@@ -294,25 +302,6 @@ pub(crate) fn refuse_rw_sd_list_short_of_estimate(
         if left_out.len() == 1 { "it" } else { "them" },
         if left_out.len() == 1 { "it" } else { "them" },
     ))
-}
-
-/// The refusal of a `--fit` config whose `[data] holdout_after` withholds
-/// rows from training. `fit run` drops every row after the cutoff before it
-/// fits (`fit::runner::apply_holdout_declaration`); profile scores the whole
-/// series, so it would fit the held-out rows and report log-likelihoods on a
-/// different basis from the fit of the same config. Explicit `[data.holdout]`
-/// files leave the training files whole and are checked, not refused.
-pub(crate) fn refuse_holdout_after(
-    data: &crate::fit::config_v2::DataSpec,
-    fit_path: &str,
-) -> Option<String> {
-    let spec = data.holdout_after.as_ref()?;
-    Some(format!(
-        "the --fit config '{fit_path}' declares `[data] holdout_after = {raw}`, and          `camdl profile` does not apply a temporal holdout: every cell would be fitted          to the held-out rows as well (the whole series, from --data or from the          config's [data]), so its log-likelihood would not be on the basis of          `fit run` of the same config. To profile the training window, profile a copy          of the config without `holdout_after`, bound to a data file holding only the          rows at or before the cutoff.",
-        raw = match spec {
-            crate::fit::config_v2::TimeSpecToml::Num(v) => format!("{v}"),
-            crate::fit::config_v2::TimeSpecToml::Spec(s) => format!("\"{s}\""),
-        }))
 }
 
 /// A profile cell's IF2 cooling schedule: the one `fit run` uses, from the
@@ -517,8 +506,10 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // source used downstream by `resolve_priors_with_precedence`. When
     // `--fit` is absent the map is empty and the resolver falls
     // through to model-IR priors (tier 2) for every parameter.
-    // The fit config's explicit `[data.holdout]` files (source -> path), checked
-    // against the bound training data below as `fit run` checks them.
+    // The fit config's holdout, applied to the bound data below by the function
+    // `fit run` applies it with: `holdout_after` cuts the training rows,
+    // `[data.holdout]` files are checked to lie after them.
+    let mut fit_holdout_after: Option<crate::fit::config_v2::TimeSpecToml> = None;
     let mut fit_holdout_files: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
     let (fit_estimate, fit_toml_hash, fit_toml_fixed_indexmap, fit_scenario, fit_simplex_groups,
          objective, fit_fixed_via):
@@ -563,15 +554,9 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         // through the same function `fit run` uses, so a profile curve is on
         // the scale of the fit it profiles.
         let objective = fit_cfg.likelihood_objective();
-        // The fit's holdout. `holdout_after` truncates the training series in
-        // `fit run`; profile does not truncate, so a profile of that config
-        // would fit every cell to the held-out rows too and report
-        // log-likelihoods on another basis than the fit's. Refused, whether
-        // the data come from --data or from the config (gh#1059).
+        // The fit's holdout, applied once the data are loaded (gh#1059).
         if let Some(data) = fit_cfg.data.as_ref() {
-            if let Some(err) = refuse_holdout_after(data, &fit_path_str) {
-                out.fail(format!("error: {err}"));
-            }
+            fit_holdout_after = data.holdout_after.clone();
             fit_holdout_files = data.holdout.clone().unwrap_or_default();
         }
         (fit_cfg.estimate, Some(hash), fixed_resolved,
@@ -931,17 +916,18 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let mut streams = crate::fit::runner::resolve_and_load_obs_streams(
         &model, &compiled, &effective, dt, &time_opts,
     ).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
-    // The fit config's explicit `[data.holdout]` files, checked against the
-    // bound training data by the function `fit run` uses: every held-out row
-    // must lie after the latest training row. The training rows are left
-    // whole, as in `fit run`, so the cells fit what the fit fits. A
-    // `holdout_after` was refused when the config was read.
-    if !fit_holdout_files.is_empty() {
-        crate::fit::runner::apply_holdout_declaration(
-            &mut streams, None, &fit_holdout_files, &model,
-            compiled.model.simulation.t_start, dt, &time_opts,
-        ).unwrap_or_else(|e| { out.fail(format!("error: --fit config: {e}")); });
-    }
+    // The fit config's holdout, applied to the bound data (`--data` or the
+    // config's own) by the function `fit run` applies it with, so every cell
+    // fits the rows the fit fits: `holdout_after` removes every row after the
+    // cutoff, and `[data.holdout]` files leave the training rows whole and must
+    // lie after them.
+    let training_window = crate::fit::runner::apply_holdout_declaration(
+        &mut streams, fit_holdout_after.as_ref(), &fit_holdout_files, &model,
+        compiled.model.simulation.t_start, dt, &time_opts,
+    ).unwrap_or_else(|e| { out.fail(format!("error: --fit config: {e}")); });
+    // The cutoff `holdout_after` resolved to, for the base identity.
+    let holdout_after_cutoff: Option<f64> = fit_holdout_after.as_ref()
+        .and(training_window.map(|w| w.train_end));
     let streams = streams;
 
     if streams.len() > 1 {
@@ -1557,6 +1543,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         fit_toml: &fit_toml_hash,
         priors: &priors_blob,
         objective,
+        holdout_after: holdout_after_cutoff,
     }, &[]).unwrap_or_else(|e| {
         out.fail(format!("error: profile base identity: {e}"));
     });
@@ -1741,6 +1728,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                         .find(|o| &o.param == n).map(|o| o.model.clone()) })
                 .collect(),
             parameters_provenance: parameters_provenance.clone(),
+            training_window,
             ..Default::default()
         };
         // Archive the producing `fit.toml` (best-effort; `write_fit_sidecar`
@@ -2421,6 +2409,7 @@ mod tests {
             fit_toml: &fit_toml,
             priors: &priors,
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
+            holdout_after: None,
         }).unwrap();
         let base_literal = serde_json::json!({
             "base_params": "bp-hash",
@@ -2442,12 +2431,29 @@ mod tests {
             fit_toml: &fit_toml,
             priors: &priors,
             objective: crate::fit::config_v2::LikelihoodObjective::ConditionalOnFirstObservation,
+            holdout_after: None,
         }).unwrap();
         let mut conditional_literal = base_literal.clone();
         conditional_literal["objective"] =
             serde_json::json!("conditional_on_first_observation");
         assert_eq!(conditional, conditional_literal,
             "a conditional objective must enter the base level");
+
+        // A `holdout_after` cutoff enters the base and re-keys it; without
+        // one the base is the literal above (gh#1059).
+        let held_out = serde_json::to_value(ProfileBaseLevel {
+            base_params: "bp-hash",
+            fixed: &fixed,
+            obs_family: "poisson",
+            fit_toml: &fit_toml,
+            priors: &priors,
+            objective: crate::fit::config_v2::LikelihoodObjective::Full,
+            holdout_after: Some(35.0),
+        }).unwrap();
+        let mut held_out_literal = base_literal.clone();
+        held_out_literal["holdout_after"] = serde_json::json!(35.0);
+        assert_eq!(held_out, held_out_literal,
+            "a holdout_after cutoff must enter the base level");
 
         let rw_sd: Vec<(&str, Option<f64>)> = vec![("N0", Some(5.0))];
         let init = crate::fit::starts::ChainStarts::Spread(crate::fit::starts::Spread::Lhs);
@@ -2496,6 +2502,41 @@ mod tests {
         let mut literal_with_groups = method_literal.clone();
         literal_with_groups["simplex_groups"] = serde_json::json!(groups);
         assert_eq!(with_groups, literal_with_groups);
+    }
+
+    /// The digests of a profile's base and method levels as they stood before
+    /// gh#1059's bundle (holdout applied, starts default, `--starts-chains`):
+    /// a profile with no `holdout_after`, an explicit `--starts uniform` and
+    /// no chain subset must keep both. The literal test above pins the shape;
+    /// this pins the bytes the shape hashes to.
+    #[test]
+    fn a_profile_without_the_new_inputs_keeps_its_level_digests() {
+        let fixed: Vec<String> = vec!["N0".into(), "rho".into()];
+        let priors: Vec<(String, String)> = vec![("beta".into(), "fit_toml".into())];
+        let fit_toml: Option<String> = Some("abc123".into());
+        let base = crate::fit::cas::canonical_config_hash(&ProfileBaseLevel {
+            base_params: "bp-hash",
+            fixed: &fixed,
+            obs_family: "weekly_cases",
+            fit_toml: &fit_toml,
+            priors: &priors,
+            objective: crate::fit::config_v2::LikelihoodObjective::Full,
+            holdout_after: None,
+        }, &[]).unwrap().into_inner().to_hex();
+        let rw_sd: Vec<(&str, Option<f64>)> = vec![("beta", None)];
+        let uniform = crate::fit::starts::ChainStarts::Spread(crate::fit::starts::Spread::Uniform);
+        let method = crate::fit::cas::canonical_config_hash(&ProfileMethodLevel {
+            algorithm: "nlopt(sbplx)",
+            if2: None,
+            nlopt: Some(ProfileNloptKnobs { tolerance: 1e-4, max_evals: 1500, dt: 1.0, starts: 2 }),
+            rw_sd: &rw_sd,
+            rw_sd_auto: false,
+            simplex_groups: &[],
+            init: uniform.identity_value(),
+            pf_max_substeps: None,
+        }, &[]).unwrap().into_inner().to_hex();
+        assert_eq!(base, "11d76d9cfe912830d6f32260c5bf160d7948b0f664f8f8b408f25e972f8cfb2d", "base level digest moved");
+        assert_eq!(method, "069bdb09a59613aefb5133f4c171825f49357bb501109524999614d61a68d959", "method level digest moved");
     }
 
     /// An nl-* profile optimizes each cell with the `--fit` file's own

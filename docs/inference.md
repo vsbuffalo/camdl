@@ -749,11 +749,12 @@ camdl profile model.camdl --fit fit.toml \
     --sweep "gamma=lin(0.08,0.2,13)" --algorithm nl-sbplx --backend ode
 ```
 
-With `--fit`, every cell scores the data `fit run` of that config trains on. A
-config that declares `[data] holdout_after` is refused, since a profile does not
-truncate the series and would fit the held-out rows; `[data.holdout]` files are
-checked against the bound data (`--data` included) by `fit run`'s tail-only
-rule, and the training files are fitted whole.
+With `--fit`, every cell scores the data `fit run` of that config trains on, and
+the config's holdout applies to the bound data (`--data` included) through the
+function `fit run` uses. `[data] holdout_after` removes every row after the
+cutoff, so no cell fits a held-out row; `[data.holdout]` files are checked by
+`fit run`'s tail-only rule, and the training files are fitted whole. A
+`holdout_after` cutoff is part of the profile's identity.
 
 A sharp peak means R₀ is well-identified. A flat profile means R₀ is not
 identifiable from the data (the model fits equally well across a range of R₀

@@ -449,9 +449,9 @@ impl FitRunConfig {
             resolve_and_load_obs_streams(&model, &compiled, effective, dt, &time_opts)?;
 
         // gh#585 / Stage 3.1: the declared holdout, applied. Training
-        // truncation happens HERE — the fit-only callsite — never inside
-        // `resolve_and_load_obs_streams`, whose other callers (pfilter,
-        // profile, compare's holdout scoring) must see the full series.
+        // truncation happens at the callsite — here, and in `profile --fit`
+        // — never inside `resolve_and_load_obs_streams`, whose other callers
+        // (pfilter, compare's holdout scoring) must see the full series.
         let applied_training_window = apply_holdout_declaration(
             &mut streams,
             fit.data.as_ref().and_then(|d| d.holdout_after.as_ref()),
@@ -1923,8 +1923,9 @@ pub use crate::run_meta::TrainingWindow;
 ///   holdout file whose training runs past another stream's held-out rows
 ///   is a hard error.
 ///
-/// Called from the fit-only path (`FitRunConfig::build`) — never from the
-/// shared loading seam, which `pfilter`/`profile`/compare's holdout
+/// Called by the commands that fit a config's training data
+/// (`FitRunConfig::build`, and `profile --fit` on its bound data) — never
+/// from the shared loading seam, which `pfilter` and compare's holdout
 /// scoring also use and which must see the full series.
 pub(crate) fn apply_holdout_declaration(
     streams: &mut [ObsStream],
