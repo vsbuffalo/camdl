@@ -10992,6 +10992,76 @@ let test_phase2_date_range_calendar_years_count () =
       1827.0 (List.nth ts 5)
   | _ -> Alcotest.fail "expected AtTimes"
 
+(* gh#1068: a calendar `date_range` computes entry i from the start
+   (`add_calendar_months start (i·k)`), not by stepping from the
+   previous, possibly clamped, entry. From Jan 31 2020 the monthly
+   entries are Jan 31, Feb 29, Mar 31, Apr 30, May 31 — stepping from
+   the clamped Feb 29 would drift to Mar 29, Apr 29, May 29. *)
+let month_end_expected_days = [30.0; 59.0; 90.0; 120.0; 151.0]
+
+let check_against_add_calendar_months label ts =
+  (* The oracle is the independent `add_calendar_months` expander path,
+     evaluated from the start for each i. *)
+  let oracle =
+    List.init 5 (fun i ->
+        let src = anchored_at_src
+            ~at_expr:(Printf.sprintf
+                        "add_calendar_months(date(\"2020-01-31\"), %d)" i) in
+        match at_times_of_first_intervention src with
+        | [t] -> t
+        | _ -> Alcotest.failf "oracle i=%d: expected one fire time" i)
+  in
+  Alcotest.(check (list (float 1e-9)))
+    (label ^ ": oracle is the month ends") month_end_expected_days oracle;
+  Alcotest.(check (list (float 1e-9)))
+    (label ^ ": equals add_calendar_months(start, i)") oracle ts
+
+let test_gh1068_date_range_month_end_count () =
+  let ts = at_times_of_first_intervention
+      (anchored_at_src
+         ~at_expr:"date_range(date(\"2020-01-31\"), count = 4, \
+                   calendar_months = 1)") in
+  check_against_add_calendar_months "count form" ts
+
+let test_gh1068_date_range_month_end_start_end () =
+  let src = anchored_at_src
+      ~at_expr:"date_range(date(\"2020-01-31\"), date(\"2020-05-31\"), \
+                calendar_months = 1)" in
+  let ts = at_times_of_first_intervention src in
+  check_against_add_calendar_months "start-end form" ts;
+  (* May 31 is on cadence from Jan 31, so no W328. *)
+  match compile_with_diags src with
+  | Error e -> Alcotest.failf "compile failed: %s" e
+  | Ok d ->
+    let w328 = List.filter (fun (x : Diagnostics.diagnostic) ->
+        x.code = "W328") (diags_of_detail d) in
+    Alcotest.(check int) "no W328 for an on-cadence end" 0
+      (List.length w328)
+
+let test_gh1068_date_range_leap_day_calendar_years () =
+  (* The same drift on the years cadence: Feb 29 2020 stepped yearly
+     clamps to Feb 28 2021; from the start, 2024's entry is Feb 29. *)
+  let ts = at_times_of_first_intervention
+      (anchored_at_src
+         ~at_expr:"date_range(date(\"2020-02-29\"), count = 4, \
+                   calendar_years = 1)") in
+  let oracle =
+    List.init 5 (fun i ->
+        match at_times_of_first_intervention
+                (anchored_at_src
+                   ~at_expr:(Printf.sprintf
+                               "add_calendar_years(date(\"2020-02-29\"), %d)"
+                               i)) with
+        | [t] -> t
+        | _ -> Alcotest.failf "oracle i=%d: expected one fire time" i)
+  in
+  (* Jan 1 2024 is day 366+365+365+365 = 1461; Feb 29 is 59 days
+     later, day 1520. *)
+  Alcotest.(check (float 1e-9)) "oracle: 2024 entry is Feb 29"
+    1520.0 (List.nth oracle 4);
+  Alcotest.(check (list (float 1e-9)))
+    "equals add_calendar_years(start, i)" oracle ts
+
 let test_phase2_date_range_non_aligned_end_w328 () =
   (* Non-aligned end fires W328. start=Jan 1 2020, end=Jan 5 2020,
      every = 3 'days. Boundaries: Jan 1, Jan 4. Jan 5 doesn't land. *)
@@ -16163,6 +16233,12 @@ let () =
         `Quick test_phase2_date_range_calendar_months_start_end;
       Alcotest.test_case "date_range calendar_years = 1 count = 5 produces 6 entries"
         `Quick test_phase2_date_range_calendar_years_count;
+      Alcotest.test_case "gh#1068 date_range count form from Jan 31 equals add_calendar_months(start, i)"
+        `Quick test_gh1068_date_range_month_end_count;
+      Alcotest.test_case "gh#1068 date_range start-end form from Jan 31 equals add_calendar_months(start, i)"
+        `Quick test_gh1068_date_range_month_end_start_end;
+      Alcotest.test_case "gh#1068 date_range calendar_years from Feb 29 equals add_calendar_years(start, i)"
+        `Quick test_gh1068_date_range_leap_day_calendar_years;
       Alcotest.test_case "W328 non-aligned end fires with inclusive_end hint"
         `Quick test_phase2_date_range_non_aligned_end_w328;
       Alcotest.test_case "E329 every = 0 rejected as non-positive"
