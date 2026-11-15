@@ -3343,24 +3343,32 @@ let expand_date_range_to_consts ctx (args : (string * expr) list) : expr list =
                 k_step) ();
             []
           end else
+            (* Entry i is `step_fn start (i·k)`, computed from the
+               start — never from the previous entry, whose day may
+               have been clamped to a shorter month's end (gh#1068:
+               Jan 31 → Feb 29 → Mar 31, not Mar 29). *)
+            let entry i = step_fn s_ymd (i * k_step) in
             let entries = ref [s_ymd] in
             (match end_ymd, count_int with
              | _, Some n ->
-               let cur = ref s_ymd in
-               for _ = 1 to n do
-                 cur := step_fn !cur k_step;
-                 entries := !cur :: !entries
+               for i = 1 to n do
+                 entries := entry i :: !entries
                done;
                List.rev !entries
              | Some e_ymd, None ->
-               (* Step until next would exceed end. *)
+               (* Step until the next entry would exceed end. Entries
+                  are strictly increasing in i (k_step > 0, and a
+                  clamp never moves a date past its month), so the
+                  first one past end ends the range. *)
                let cur = ref s_ymd in
+               let i = ref 1 in
                let stop = ref false in
                while not !stop do
-                 let nxt = step_fn !cur k_step in
+                 let nxt = entry !i in
                  if cmp_ymd nxt e_ymd <= 0 then begin
                    cur := nxt;
-                   entries := nxt :: !entries
+                   entries := nxt :: !entries;
+                   incr i
                  end else
                    stop := true
                done;
