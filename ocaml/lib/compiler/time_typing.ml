@@ -309,6 +309,13 @@ let hint_calendar_cadence_in_recurring =
    Use every = 30 'days for an affine ~monthly recurrence, or list \
    the calendar-aligned firings explicitly via at = [date(...), ...]."
 
+let hint_calendar_width_in_covers =
+  "a `covers` width is one fixed span for every row, but a calendar month \
+   or year is 28-31 or 365-366 days depending on which one it is. For \
+   calendar periods give the file `window_start` and `window_stop` columns, \
+   which state each row's own boundaries; for a fixed span write the width \
+   in 'days or 'weeks."
+
 let hint_bare_numeric_on_periodic =
   "bare-numeric entries in `on=[...]` of a periodic forcing under an \
    anchored model are interpreted as internal-time units from origin. \
