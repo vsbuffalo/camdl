@@ -35,7 +35,7 @@ pub enum ConvergenceError {
     /// `value` is non-finite by construction — that is what the variant is for
     /// — and `serde_json` writes any non-finite `f64` as `null`, which will not
     /// read back. It is carried as `"inf"` / `"-inf"` / `"NaN"` by
-    /// [`score::num::json_f64`], so the round-trip is exact.
+    /// [`crate::num::json_f64`], so the round-trip is exact.
     NonFiniteDraw {
         chain: usize,
         draw: usize,
@@ -43,7 +43,7 @@ pub enum ConvergenceError {
         value: f64,
     },
     /// Every draw of every chain is the same value to within
-    /// [`DEGENERATE_REL_TOL`] of the parameter's own scale. The total variance
+    /// `DEGENERATE_REL_TOL` of the parameter's own scale. The total variance
     /// is zero, so R̂'s denominator is zero and the rank transform is constant.
     ConstantDraws { value: f64 },
     /// Every chain began at one point (`starts = "single"`, `from_mle`,
@@ -249,7 +249,7 @@ pub enum GateVerdict {
 /// Posterior convergence + efficiency diagnostics, shared by every Bayesian
 /// sampler (PGAS, PMMH, mh). Every sampler computes these the same way
 /// — per-param rank-normalized R̂ and bulk/tail ESS via
-/// [`crate::fit::runner::compute_rhat_ess`]
+/// `fit::runner::compute_rhat_ess` in `cli`
 /// — and every renderer reads the same accessors below. Adding a new Bayesian
 /// method means *filling this struct*, not re-deriving efficiency metrics per
 /// method (the divergence that let a per-method allowlist drop `mh`).
@@ -647,7 +647,7 @@ pub enum MaxRhat {
 ///
 /// A parameter can still carry no bulk ESS: `rank_convergence` refused its
 /// draws, or the rank-transformed draws are constant so the autocorrelation is
-/// undefined. Those parameters reach [`PosteriorDiagnostics`] in one of two
+/// undefined. Those parameters reach `PosteriorDiagnostics` in one of two
 /// encodings: **absent** on the loaded path (a NaN serializes to JSON `null`,
 /// which `read_f64_map` drops) or **NaN-valued** on the `--exclude-chains`
 /// recompute path (`chain_selection::recompute_subset_diagnostics`).
@@ -678,7 +678,7 @@ pub enum MinEss {
     NoParams,
 }
 
-/// The verdict on a method, decided by its R̂ alone ([`verdict`]). Serialized
+/// The verdict on a method, decided by its R̂ alone (`verdict`). Serialized
 /// with the report so a consumer reads it rather than recomputing it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

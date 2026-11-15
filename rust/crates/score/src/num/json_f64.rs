@@ -17,7 +17,7 @@
 //!
 //! Use `#[serde(with = "score::num::json_f64")]` on an `f64`,
 //! [`option`] on an `Option<f64>` (where `None` stays `null`), [`map`] on
-//! a `BTreeMap<String, f64>`, and [`vec`] on a `Vec<f64>`.
+//! a `BTreeMap<String, f64>`, and [`mod@vec`] on a `Vec<f64>`.
 //!
 //! JSON only: the reader dispatches on the token it finds (`deserialize_any`),
 //! which a non-self-describing format such as bincode cannot serve. No type
