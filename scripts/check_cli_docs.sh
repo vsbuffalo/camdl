@@ -43,6 +43,8 @@ WORKBIN="$(mktemp -d)" || { echo "FATAL: cannot create a temporary directory" >&
 ln -sf "$CAMDL" "$WORKBIN/camdl"
 [[ -x "$CAMDLC_DIR/camdlc.exe" ]] && ln -sf "$CAMDLC_DIR/camdlc.exe" "$WORKBIN/camdlc"
 export PATH="$WORKBIN:$PATH"
+SCRATCH="$(mktemp -d)" || { echo "FATAL: cannot create a temporary directory" >&2; exit 1; }
+trap 'rm -rf "$WORKBIN" "$SCRATCH"' EXIT
 
 # ── Surface check ────────────────────────────────────────────────────────────
 # Strip the leading `camdl` token and ask the parser. Returns the child's exit
@@ -60,7 +62,12 @@ check_surface() {
   # `eval` to honor the doc's own quoting/word-splitting (e.g. quoted
   # `--sweep "tau=lin(-60,5,12)"`). The `--` guards args that look like flags
   # to __check-args itself.
-  eval "\"$CAMDL\" __check-args -- $rest" >/dev/null 2>&1
+  #
+  # Docs examples carry their own redirections and pipes (`> out.tsv`,
+  # `2>&1 | tee fit.log`), which `eval` performs. Run it in a scratch directory
+  # so those files are created there and not in the caller's working directory
+  # (the repository root under `make test-cli-docs`).
+  ( cd "$SCRATCH" && eval "\"$CAMDL\" __check-args -- $rest" >/dev/null 2>&1 )
   echo $?
 }
 
@@ -107,7 +114,7 @@ DOCS=("$@")
 
 n_drift=0 n_ok=0 n_skip=0
 LINES="$(mktemp)" || { echo "FATAL: cannot create a temporary file" >&2; exit 1; }
-trap 'rm -f "$LINES"; rm -rf "$WORKBIN"' EXIT
+trap 'rm -f "$LINES"; rm -rf "$WORKBIN" "$SCRATCH"' EXIT
 declare -a DRIFT_REPORT=()
 
 gate_one() {
