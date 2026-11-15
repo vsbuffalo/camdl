@@ -2703,18 +2703,22 @@ Columns:
              steps:  Σ_t log p̂(y_t | y_{1:t-1}). Higher = better.
   Δelpd      elpd(this) − elpd(baseline). Positive = this model beats
              the baseline. Paired over the same observations.
-  E_T        exp(Δelpd). The terminal e-value / Bayes factor vs baseline
-             (Shafer 2021): a bettor who started with $1 and wagered
-             this model's predictive against baseline's would end with
-             $E_T. Values < 1 favour the baseline; > 1 favour this
-             model. Order-of-magnitude intuition: E_T ≈ 10 is 'strong
-             evidence', ≈ 100 'very strong', ≈ 1000 'decisive'
-             (Jeffreys scale applied to the e-value as a Bayes factor).
-             Valid even at small T where se(Δ) is unreliable.
+  LR         exp(Δelpd), the likelihood ratio against the baseline: how
+             many times more probability this model assigned to the
+             scored observations. Values < 1 favour the baseline; > 1
+             favour this model. It is computed at a θ̂ fit to the same
+             observations, so it is optimistic and biased toward the
+             more flexible model. It is not a Bayes factor (no
+             integration over θ) and not an e-value (no anytime-valid
+             guarantee); read it with se(Δ).
   se(Δ)      Paired standard error of Δelpd from pointwise differences:
              √(T · Var_t(ℓ^A_t − ℓ^B_t))  (Vehtari/Gelman/Gabry).
              Rule of thumb: |Δelpd| > 2·se → 'the gap is real';
              smaller → inconclusive on this data alone.
+  evidence   Δelpd restated in decibans with a qualitative tier (Jeffreys
+             scale, extended by camdl), or 'within noise' when
+             |Δelpd| < 2·se(Δ). The tiers calibrate Bayes factors; the
+             quantity here is an in-sample likelihood ratio.
   crps       Mean Continuous Ranked Probability Score across scored
              steps. Lower = sharper predictive, correctly calibrated.
   Δcrps      Mean CRPS difference (this − baseline). Negative = this
