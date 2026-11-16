@@ -1,9 +1,12 @@
 # Temporal architecture: observation periods, training data and forecasts
 
 **Status:** Normative design, decided 2026-11-15 (decisions D35 and D38–D48 in
-the maintainer's docket). Not yet implemented; the staged plan that implements
-it is `docs/dev/proposals/2026-11-15-temporal-architecture-migration.md` (the
-migration plan). Until a stage lands, the code behaves as described in Part 1.
+the maintainer's docket). The staged plan that implements it is
+`docs/dev/proposals/2026-11-15-temporal-architecture-migration.md` (the
+migration plan). Its Phase A (row periods, the training partition, alignment
+judged by the method, dated artifacts) is implemented; the forecast plan and
+forecast scoring (its Stages 5 and 6) are not. Part 1 describes the code before
+Phase A.
 
 **Reader.** A contributor who needs to know how camdl represents time from a
 data file through a fit to a forecast and its score, and which code owns each
@@ -69,12 +72,12 @@ reproductions.
 - **Artifacts cannot all be dated.** The stored simulation record carries no
   calendar; sub-day dated output cannot be read back.
 
-![Figure 1: four rows under a cutoff at day 24. The same week, days 21 to 27, is row 21 under starting_on and row 28 under closing_at; under day(time), row 23 trains and row 24 is held out. Today the starting_on row and the day-24 row train because their labels are at or before 24.](figures/temporal-row-periods.svg)
+![Figure 1: four rows under a cutoff at day 24. The same week, days 21 to 27, is row 21 under starting_on and row 28 under closing_at; under day(time), row 23 trains and row 24 is held out. Before Phase A the starting_on row and the day-24 row trained because their labels are at or before 24.](figures/temporal-row-periods.svg)
 
 _Figure 1. A row's period, not its label, decides training._ All four rows are
-judged against `holdout_after = 24`. Today two of them train because their label
-is at or before 24, although their periods end after it. The rule in §4.1 holds
-both out.
+judged against `holdout_after = 24`. Before Phase A two of them trained because
+their label is at or before 24, although their periods end after it. The rule in
+§4.1 holds both out.
 
 ## Part 2. Concepts
 
@@ -331,9 +334,6 @@ impl TrainingPartition {
 - **Removes:** a fit recording a training window it did not use; the two holdout
   forms recording different things; later commands re-deriving membership by a
   different convention.
-- **Why the existing type does not suffice:** `TrainingWindow { train_end }`
-  (`rust/crates/cli/src/run_meta.rs:626`) is a bare label time with no row count
-  or digest, and is absent when no holdout is declared.
 - **Why a count and a digest:** the digest proves the fitted rows are unchanged
   when a later step reads the file again (rows appended after them do not
   matter; an edited fitted row is refused as changed data). The count makes
@@ -743,9 +743,8 @@ score result; its notes are presentation.
 
 **A day-labelled stream across a cutoff.** `covers = day(time)`, labels 1–16,
 `holdout_after = 10`. Row 9 counts day 9 and ends at 10, so it trains; row 10
-counts day 10 and ends at 11, so it is held out (today it trains, since 10 ≤
-10). The training extent is 10. The fit reports "trained on 9 rows, through day
-10".
+counts day 10 and ends at 11, so it is held out. The training extent is 10. The
+fit reports "trained on 9 rows, through day 10".
 
 **Two cadences.** A weekly `closing_at(time, 7 'days)` stream labelled 7–70 and
 a daily `day(time)` stream labelled 0–69, `holdout_after = 24`. Daily rows 0–23
@@ -767,8 +766,7 @@ was conditioned on (through day 40)".
 **A period moved by a grid (invalid).** PGAS, `simulate { from = 0.5 'days }`,
 `dt = 1 'days`, a `closing_at(time, 2 'days)` stream with labels 3, 5, 7. The
 first period, days 1–3, does not lie on the grid 0.5, 1.5, 2.5, …. Refused,
-naming row 3 and the grid times 2.5 and 3.5. Today PGAS scores days 1.5–3.5 and
-labels the row 3.
+naming row 3 and the grid times 2.5 and 3.5.
 
 **A forcing past its data.** An interpolated temperature forcing with data
 through day 100, a run to day 130: an error naming the forcing and the span
