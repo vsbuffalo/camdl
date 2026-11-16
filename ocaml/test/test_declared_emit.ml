@@ -936,6 +936,39 @@ let test_resolved_is_silent () =
   Alcotest.(check int) "no W203" 0
     (List.length (w203 (with_timepoints "  midpoint = 40 'days")))
 
+(* gh#1117. `inclusive_end = true | false` is a Boolean word chosen by
+   spelling, as a reactive intervention's `once` is. The compiled schedule was
+   right, and the section tagged the word unresolved, so every model using the
+   flag warned and `camdl diff` read the intervention as having unknown
+   dependencies. *)
+let with_date_range inclusive_end =
+  Printf.sprintf {|
+time_unit = 'days
+origin = date("2020-01-01")
+compartments { S, V }
+parameters { N0 : count }
+transitions { leak : S --> V @ 0.0 'per_day * S }
+interventions {
+  mo : transfer(from = S, to = V, fraction = 0.1)
+       at [date_range(date("2020-01-01"), date("2020-05-01"),
+                      calendar_months = 1, inclusive_end = %s)]
+}
+init { S = N0 }
+simulate { from = 0 'days  to = 800 'days }
+|} inclusive_end
+
+let test_boolean_keyword_argument word () =
+  let src = with_date_range word in
+  Alcotest.(check int) "no W203" 0 (List.length (w203 src));
+  let _, d = compile "m" src in
+  let iv = List.find (fun (i : D.intervention_decl) -> i.iv_name = "mo")
+      d.dm_interventions in
+  match iv.iv_schedule with
+  | D.ShAtTimes [ e ] ->
+    Alcotest.(check bool) (word ^ " is a keyword") true
+      (List.mem { D.nr_name = word; nr_kind = D.KKeyword } e.de_reads)
+  | _ -> Alcotest.fail "expected an `at [...]` schedule"
+
 let () =
   Alcotest.run "declared_emit"
     [ ("goldens",
@@ -957,6 +990,11 @@ let () =
          Alcotest.test_case "comments, layout and let position" `Quick
            test_layout_and_let_position;
          Alcotest.test_case "a quoted string is not a name" `Quick test_string_literal ]);
+      ("boolean keyword arguments",
+       [ Alcotest.test_case "gh#1117 inclusive_end = false" `Quick
+           (test_boolean_keyword_argument "false");
+         Alcotest.test_case "gh#1117 inclusive_end = true" `Quick
+           (test_boolean_keyword_argument "true") ]);
       ("text as written",
        Alcotest.test_case "each declaration carries its own bytes" `Quick
          test_source_text
