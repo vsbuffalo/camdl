@@ -439,6 +439,8 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     // `Out` holds the claim until the finalize below, so every error it
     // reports while the survey runs marks the leaf `failed` (`Out::error`).
     out.hold_claim(write, "survey");
+    // A forcing refused from here on fails this claim, through `out`.
+    let _refusal_deferred = crate::forcing_extrapolation::defer_while_claimed();
     let landscape_path = staging.join("landscape.tsv");
     let summary_path = staging.join("summary.json");
     let html_path = staging.join("landscape.html");
@@ -662,6 +664,9 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     // `stored` is said once it is true: after every point is evaluated and
     // the leaf is committed. A leaf that did not commit is not stored, and
     // the survey fails rather than exiting 0 on a warning.
+    if let Some(refusal) = crate::forcing_extrapolation::refused() {
+        out.fail(refusal);
+    }
     let write = out.take_claim().expect("the claim is held from the claim to here");
     if let Err(e) = write.finalize(inputs_json) {
         out.fail(format!("error: finalize survey leaf {}: {}", run_dir.display(), e));

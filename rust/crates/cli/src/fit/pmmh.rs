@@ -767,6 +767,7 @@ pub fn run_method(
                 // the parallel chains — a cheap atomic, no I/O on the step
                 // path, so it cannot touch a fit number.
                 heartbeat.bump(step as u64);
+                super::stop_if_refused(out);
             };
 
             // gh#224: a structural error from the sampling PF aborts the fit
