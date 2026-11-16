@@ -10,8 +10,9 @@
 //!
 //! The rows are those of the file, routed to the leaf, before any filtering
 //! that depends on the run: the drop of a hole whose period opens before the
-//! run starts, and the check against the integration step, are applied by
-//! `load_observations` afterwards.
+//! run starts is applied by `load_observations` afterwards, and whether a
+//! period's boundaries may lie off the integration grid is the method's to
+//! say once it is known (`runner::refuse_periods_off_the_grid`).
 
 use ir::observation::{Covers, ObservationModel, TemporalKind};
 use sim::inference::{ObsCell, Period};
@@ -76,8 +77,8 @@ pub(crate) struct ObservedRow {
 
 impl ObservedRow {
     /// The row's time cell in model time — not what the row measures. Read by
-    /// the sites that still compare labels (the holdout cut, the `dt`
-    /// alignment check, observation anchors) until Stage 2 of the
+    /// the sites that still compare labels (the holdout cut, observation
+    /// anchors) until Stage 2 of the
     /// temporal-architecture migration moves them onto [`Self::measures`] and
     /// removes this accessor.
     pub(crate) fn label(&self) -> f64 {

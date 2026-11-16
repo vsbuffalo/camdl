@@ -420,7 +420,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     let effective = crate::fit::runner::data_bindings_to_effective(&model, &bound_streams)
         .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
     let streams = crate::fit::runner::resolve_and_load_obs_streams(
-        &model, &compiled, &effective, dt, &time_opts,
+        &model, &compiled, &effective, &time_opts,
     ).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
     let n_streams = streams.len();
 

@@ -45,6 +45,50 @@ pub enum MethodCategory {
     Diagnostic,
 }
 
+/// Where a method can place the start and end of an observed period
+/// (`docs/dev/temporal-architecture.md` §4.5, decision D43). A capability of
+/// the method, not a user setting: a period is never moved to a different
+/// period to fit a grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeriodBoundaries {
+    /// Steps exactly to every boundary, with a shortened step where one falls
+    /// between grid times: the bootstrap filter's exact inference schedule
+    /// (`sim::schedule::Schedule::exact_inference`), which if2, pfilter and
+    /// pmmh share.
+    Anywhere,
+    /// Steps only on the grid `t_start + k·dt`, so a boundary off it is
+    /// refused before the run, naming the row ([`off_grid_neighbours`]).
+    OnGrid,
+    /// Reads the integrated ODE trajectory at its output snapshots: a boundary
+    /// with no snapshot is refused by the trajectory walk
+    /// (`sim::inference::ode_loglik`), naming the time.
+    AtOutputTimes,
+}
+
+/// The grid times either side of `t` when `t` is off the grid
+/// `t_start + k·dt`, or `None` when it is on it. On the grid means within
+/// `sim::schedule::GRID_TOL` steps of a grid time, the tolerance every other
+/// grid test uses.
+pub fn off_grid_neighbours(t: f64, t_start: f64, dt: f64) -> Option<(f64, f64)> {
+    let u = (t - t_start) / dt;
+    if (u - u.round()).abs() <= sim::schedule::GRID_TOL {
+        return None;
+    }
+    let k = u.floor();
+    Some((t_start + k * dt, t_start + (k + 1.0) * dt))
+}
+
+/// What `algorithm` can do with a period boundary, from its `METHODS` entry.
+/// Every algorithm has exactly one entry
+/// (`every_algorithm_records_its_period_boundaries`).
+pub fn period_boundaries(algorithm: FitAlgorithm) -> PeriodBoundaries {
+    METHODS
+        .iter()
+        .find(|m| m.algorithm == algorithm)
+        .map(|m| m.period_boundaries)
+        .unwrap_or_else(|| unreachable!("{algorithm} has no METHODS entry"))
+}
+
 /// One supported `(algorithm, backend)` combination.
 #[derive(Debug, Clone, Copy)]
 pub struct InferenceMethod {
@@ -61,6 +105,8 @@ pub struct InferenceMethod {
     /// a Stable method may carry usage guidance (e.g. PMMH's "prefer PGAS for
     /// long series"). Empty = no banner.
     pub status_note: &'static str,
+    /// Where the method can place an observed period's start and end.
+    pub period_boundaries: PeriodBoundaries,
 }
 
 /// Canonical method registry. Order is rendering order in
@@ -75,6 +121,7 @@ pub const METHODS: &[InferenceMethod] = &[
         one_liner: "Iterated filtering MLE — perturbation-and-filter loop.",
         use_for: "maximum-likelihood point estimates on stochastic models, and starts for a sampler (`from_mle`).",
         status_note: "",
+        period_boundaries: PeriodBoundaries::Anywhere,
     },
     InferenceMethod {
         algorithm: FitAlgorithm::Pgas,
@@ -84,6 +131,7 @@ pub const METHODS: &[InferenceMethod] = &[
         one_liner: "Particle Gibbs + NUTS-on-θ; default Bayesian path.",
         use_for: "Bayesian posteriors on stochastic models.",
         status_note: "",
+        period_boundaries: PeriodBoundaries::OnGrid,
     },
     InferenceMethod {
         algorithm: FitAlgorithm::Pmmh,
@@ -97,6 +145,7 @@ pub const METHODS: &[InferenceMethod] = &[
             "Acceptance rates degrade for long observation series \
              (T > 500); prefer PGAS — the default Bayesian path — on long \
              chain-binomial series.",
+        period_boundaries: PeriodBoundaries::Anywhere,
     },
     InferenceMethod {
         algorithm: FitAlgorithm::Pfilter,
@@ -107,6 +156,7 @@ pub const METHODS: &[InferenceMethod] = &[
         use_for: "post-fit diagnostic loglik (mean ± SD across replicates) \
                   and prequential scoring.",
         status_note: "",
+        period_boundaries: PeriodBoundaries::Anywhere,
     },
     // ─── ode backend (deterministic skeleton; new in Phase 1) ─────────────
     InferenceMethod {
@@ -121,6 +171,7 @@ pub const METHODS: &[InferenceMethod] = &[
         status_note:
             "Phase 1 typhoid validation passed; other model classes still \
              gathering downstream feedback.",
+        period_boundaries: PeriodBoundaries::AtOutputTimes,
     },
     InferenceMethod {
         algorithm: FitAlgorithm::NlBobyqa,
@@ -134,6 +185,7 @@ pub const METHODS: &[InferenceMethod] = &[
             "Requires smooth objective in the search box; fails at \
              parameter-bound boundaries where Sbplx succeeds. Prefer \
              nl-sbplx unless you've confirmed the boundary is interior.",
+        period_boundaries: PeriodBoundaries::AtOutputTimes,
     },
     InferenceMethod {
         algorithm: FitAlgorithm::NlLbfgs,
@@ -152,6 +204,7 @@ pub const METHODS: &[InferenceMethod] = &[
              adaptive integrator, a scheduled effect, or a parameterized \
              initial condition — at config validation, before any \
              optimization. Use `nl-sbplx` when the gate refuses.",
+        period_boundaries: PeriodBoundaries::AtOutputTimes,
     },
     InferenceMethod {
         algorithm: FitAlgorithm::Mh,
@@ -161,6 +214,7 @@ pub const METHODS: &[InferenceMethod] = &[
         one_liner: "Metropolis-Hastings on the deterministic ODE marginal likelihood.",
         use_for: "Bayesian posteriors on ODE/equilibrium models without gradients.",
         status_note: "",
+        period_boundaries: PeriodBoundaries::AtOutputTimes,
     },
 ];
 
@@ -1135,6 +1189,35 @@ mod tests {
                 "expected ({a}, {b}) in METHODS"
             );
         }
+    }
+
+    #[test]
+    fn every_algorithm_records_its_period_boundaries() {
+        use FitAlgorithm as A;
+        for a in [A::If2, A::Pgas, A::Pmmh, A::Mh, A::Pfilter, A::NlSbplx, A::NlBobyqa, A::NlLbfgs] {
+            assert_eq!(METHODS.iter().filter(|m| m.algorithm == a).count(), 1,
+                "{a} must have exactly one METHODS entry");
+        }
+        // The bootstrap-filter methods step to any boundary; PGAS only to its grid.
+        for a in [A::If2, A::Pfilter, A::Pmmh] {
+            assert_eq!(period_boundaries(a), PeriodBoundaries::Anywhere, "{a}");
+        }
+        assert_eq!(period_boundaries(A::Pgas), PeriodBoundaries::OnGrid);
+    }
+
+    #[test]
+    fn off_grid_neighbours_measures_from_the_run_start() {
+        // The grid 0.5, 1.5, 2.5, … : 3 is off it, between 2.5 and 3.5.
+        assert_eq!(off_grid_neighbours(3.0, 0.5, 1.0), Some((2.5, 3.5)));
+        assert_eq!(off_grid_neighbours(1.0, 0.5, 1.0), Some((0.5, 1.5)));
+        assert_eq!(off_grid_neighbours(2.5, 0.5, 1.0), None);
+        // From 0 with dt = 1, 2.5 is off and 3 is on.
+        assert_eq!(off_grid_neighbours(2.5, 0.0, 1.0), Some((2.0, 3.0)));
+        assert_eq!(off_grid_neighbours(3.0, 0.0, 1.0), None);
+        // A float-rounded grid time is on the grid: 0.1 · 3 is not exactly 0.3.
+        assert_eq!(off_grid_neighbours(0.1 * 3.0, 0.0, 0.1), None);
+        // Before the start: the grid extends below it.
+        assert_eq!(off_grid_neighbours(-0.5, 0.0, 1.0), Some((-1.0, 0.0)));
     }
 
     // ── ic_free / conditioning support check (F1) ──────────────────────────

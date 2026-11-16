@@ -708,7 +708,9 @@ pub fn run_method(
                 max_tree_depth: pgas_opts.max_tree_depth,
                 trajectory_warmup: pgas_opts.trajectory_warmup,
                 csmc_sweeps_per_nuts: pgas_opts.csmc_sweeps_per_nuts,
-                // PGAS steps on its grid `t_start + k·dt`.
+                // PGAS steps on its grid. `FitRunConfig::build` has refused any
+                // period boundary off it (`refuse_periods_off_the_grid`, D43),
+                // so the snap grid scores every row on its own period.
                 step_policy: sim::schedule::StepPolicy::Snap,
                 ancestor_sampling: pgas_opts.ancestor_sampling,
             };

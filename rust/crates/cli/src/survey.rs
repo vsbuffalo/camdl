@@ -1044,7 +1044,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
                 .collect();
             crate::fit::runner::check_holdout_files(
                 &training, bindings.holdout_by_source(), &model,
-                compiled.model.simulation.t_start, SURVEY_DT, &time_opts,
+                compiled.model.simulation.t_start, &time_opts,
             ).map_err(|e| format!("--fit config: {e}"))?;
         }
 
