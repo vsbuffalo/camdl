@@ -1644,9 +1644,11 @@ The `periodic` type supports two forms:
 - **Range form:** `step = 1 'days` + `on = [7:100, 115:199]` — binary on/off
   with range literals. The compiler generates the values array. Use for
   calendars with known active periods (school terms, work weeks, campaign
-  windows). Each range is written low to high; a reversed range (`100:7`)
-  is **E406**, and a window that spans the end of the period is written as
-  two ranges (`100:364, 0:7` for a 365-day period with 1-day steps).
+  windows). Each range is written low to high and lies inside the period
+  (`0:364` for a 365-day period with 1-day steps); a reversed range (`100:7`)
+  or one that runs past the end of the period (`400:500`, or `300:500`, which
+  is not read modulo the period) is **E406**. A window that spans the end of
+  the period is written as two ranges (`100:364, 0:7`).
   **In anchored mode** (top-level `origin` declared), bare-numeric
   entries inside `on=[...]` are **E323** — anchored periodic schedules must use
   `date(...)` entries (or, for the rare legitimate "day-offset from origin"
