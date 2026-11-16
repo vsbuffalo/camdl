@@ -1,15 +1,17 @@
 # Proposal: temporal architecture migration
 
-**Status:** Decided 2026-11-15 (D35, D38–D57); implementation not started. The
-current scope is Phase A (Stages 0–4 and Stage 4R); Phase B (Stages 5–6,
-forecasting) starts only on the maintainer's go-ahead after Phase A lands.
-**Spec:** `docs/dev/temporal-architecture.md` (the spec; "spec §N" below).
-**Motivation:** forecasts, forecast scoring (gh#808) and published score
-artifacts (`2026-11-14-score-artifact.md`) all consume observation times,
-training cutoffs and forecast targets that today are bare model times
-re-interpreted at each consumer under different conventions. This document is
-the runbook for moving the code to the spec: the audit that motivates it, the
-stages as self-contained work packages, the tests, and the landing rules.
+**Status:** Decided 2026-11-15 (D35, D38–D57). Phase A (Stages 0–4 and Stage 4R)
+has landed: Stage 0 in #1105 (the fixes, with Stage 1), #1107 (0(f)) and
+`4a7c17f6f` (0(a)); Stage 1 in #1105; Stage 2 in #1113; Stage 3 in #1112; Stage
+4 in #1109; Stage 4R in #1114. Phase B (Stages 5–6, forecasting) is not started;
+it starts only on the maintainer's go-ahead. **Spec:**
+`docs/dev/temporal-architecture.md` (the spec; "spec §N" below). **Motivation:**
+forecasts, forecast scoring (gh#808) and published score artifacts
+(`2026-11-14-score-artifact.md`) all consume observation times, training cutoffs
+and forecast targets that today are bare model times re-interpreted at each
+consumer under different conventions. This document is the runbook for moving
+the code to the spec: the audit that motivates it, the stages as self-contained
+work packages, the tests, and the landing rules.
 
 Code references are to `main` at `0ed74876d`; files have moved since, so an
 implementer locates each by its function or type name, not its line number.
@@ -268,6 +270,8 @@ repository.
 
 ### Stage 0: independent fixes
 
+_Landed:_ 0(a) in `4a7c17f6f`; 0(b)–0(e) and 0(g) in #1105; 0(f) in #1107.
+
 Each item is one GitHub issue, one branch and one commit.
 
 - **0(a) ODE held-out boundary (C3). Done:** fixed on `main` in `4a7c17f6f`
@@ -321,6 +325,8 @@ Each item is one GitHub issue, one branch and one commit.
 
 ### Stage 1: one row reader
 
+_Landed:_ #1105.
+
 - **Goal.** One function reads a stream's rows once and records what each row
   measures. Pure refactor.
 - **Depends on:** nothing.
@@ -339,6 +345,8 @@ Each item is one GitHub issue, one branch and one commit.
 - **Done when:** the full gate is green with no test edited.
 
 ### Stage 2: the training partition
+
+_Landed:_ #1113.
 
 - **Goal.** Training membership is decided once from periods and recorded as a
   per-stream prefix with a digest (D38, D40).
@@ -433,6 +441,8 @@ Each item is one GitHub issue, one branch and one commit.
 
 ### Stage 3: alignment once the method is known
 
+_Landed:_ #1112.
+
 - **Goal.** A period is never moved to fit a grid; the setting that pretends to
   choose is removed (D43).
 - **Depends on:** Stage 1. Lands in the shared identity bump with Stage 2.
@@ -461,6 +471,8 @@ Each item is one GitHub issue, one branch and one commit.
 
 ### Stage 4: dates in every artifact
 
+_Landed:_ #1109.
+
 - **Goal.** Every artifact can be dated without the model source, and every date
   camdl writes loads back.
 - **Depends on:** nothing.
@@ -478,6 +490,8 @@ Each item is one GitHub issue, one branch and one commit.
   out").
 
 ### Stage 4R: remove superseded code (end of Phase A)
+
+_Landed:_ #1114.
 
 - **Goal.** When Stages 1–4 have landed, no code from the old representation
   remains: nothing that compares a label with a cutoff, a second copy of a rule,
