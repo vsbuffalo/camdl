@@ -25,14 +25,12 @@ fn resolve_anchors_into_temp_ir(
     let mut env = ir::envelope_from_str(&src)
         .map_err(|e| format!("IR load error from {ir_path}: {e}"))?;
     if !crate::obs_anchor::model_is_anchored(&env.model) {
-        out.notices(&crate::obs_anchor::spline_hold_notices(&env.model, &[], env.model.simulation.t_end));
         return Ok(ir_path.to_string());
     }
     let window = crate::obs_anchor::fit_window(&env.model, config)
         .map_err(|e| format!("resolving this model's observation anchors from [data]: {e}"))?;
     let moved = crate::obs_anchor::substitute(&mut env.model, window)?;
     crate::obs_anchor::report(out, &moved, &env.model);
-    out.notices(&crate::obs_anchor::spline_hold_notices(&env.model, &moved, env.model.simulation.t_end));
 
     // A fresh temp, never the input path: `resolve_ir_path` returns a
     // user-supplied `.ir.json` unchanged, and a command must not rewrite the
@@ -426,6 +424,12 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // (folds into the fit-identity hash via the config blob), set before any rate
     // evaluation. Was a CLI flag, which silently bypassed the run_id.
     sim::eval_stats::set_allow_degenerate_rates(config.problem.config.allow_degenerate_rates);
+    // A forcing outside its range: the flag sets the keyed `[config]` field,
+    // so the override reaches the fit identity either way.
+    if a.forcing_extrapolation.allow_forcing_extrapolation {
+        config.problem.config.allow_forcing_extrapolation = true;
+    }
+    crate::forcing_extrapolation::set_allowed(config.problem.config.allow_forcing_extrapolation);
 
     // gh#656: `--emit-every` reaches exactly one thing on this command — the
     // `[synthetic]` generator, which is the only fit path where the emission

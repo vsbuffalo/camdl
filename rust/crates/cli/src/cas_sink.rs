@@ -133,10 +133,6 @@ pub(crate) struct CasSink {
     /// engine makes (gh#583). A parallel map rebuilt beside it put a draw/sweep
     /// value above `--param` where the resolver puts it below.
     pub(crate) base_model: ir::Model,
-    /// The observation anchors `base_model`'s load substituted (empty when
-    /// none) — read only to name an anchored window end in the recorded
-    /// `spline-held-past-window` notice.
-    pub(crate) base_anchors: Vec<crate::obs_anchor::ResolvedAnchor>,
     pub(crate) backend: crate::args::types::ForwardBackend,
     pub(crate) dt: f64,
     pub(crate) allow_degenerate_rates: bool,
@@ -345,14 +341,7 @@ impl CasSink {
                 crate::run_meta::ParameterProvenance::of_all(&resolved_params.params);
             obj.insert("parameters_provenance".into(),
                 serde_json::to_value(&provenance).map_err(|e| e.to_string())?);
-            let horizon = resolved.t_end.unwrap_or(self.base_model.simulation.t_end);
-            let notices: crate::out::notice::Notices = crate::params_resolver::notices(&[&resolved_params])
-                .iter()
-                .cloned()
-                .chain(crate::obs_anchor::spline_hold_notices(&self.base_model, &self.base_anchors, horizon)
-                    .iter()
-                    .cloned())
-                .collect();
+            let notices = crate::params_resolver::notices(&[&resolved_params]);
             obj.insert("notices".into(),
                 serde_json::to_value(&notices).map_err(|e| e.to_string())?);
         }
@@ -476,6 +465,11 @@ impl CasSink {
         let Some(dir) = runid::find_leaf(&self.root(), runid::ArtifactKind::Sim, &rt.levels) else {
             return Ok(None);
         };
+        // A leaf that held a forcing under `--allow-forcing-extrapolation`
+        // does not answer for a run without it: the cell runs, and is refused.
+        if crate::forcing_extrapolation::leaf_held_without_override(&dir) {
+            return Ok(None);
+        }
         if self.obs_enabled && !self.base_model.observations.is_empty() {
             let model = crate::util::resolve_run_ir(&spec.sim_run)?;
             let obs_dir = obs_subtree_dir(
@@ -1380,7 +1374,6 @@ mod tests {
             model_path: "model.ir.json".to_string(),
             model_stem: Some("sir".to_string()),
             base_model: tiny_model(),
-            base_anchors: Vec::new(),
             backend: crate::args::types::ForwardBackend::ChainBinomial,
             dt: 1.0,
             allow_degenerate_rates: false,

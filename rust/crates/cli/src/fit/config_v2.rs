@@ -268,6 +268,17 @@ pub struct FitBackendConfig {
     /// so existing fits don't re-key.
     #[serde(default, skip_serializing_if = "is_false")]
     pub allow_degenerate_rates: bool,
+    /// Let the fit evaluate a forcing outside the range it is defined on (a
+    /// data table past its data, a `bspline` past its window), holding its
+    /// end value, with one warning per forcing; without it such a fit is
+    /// refused (spec `docs/dev/temporal-architecture.md` §4.6). Keyed: a fit
+    /// made under it and one refused without it are different computations,
+    /// and a stored fit must not answer for a run that would be refused.
+    /// `skip_serializing_if` keeps the common `false` out of the identity
+    /// hash, so existing fits do not re-key. `fit run
+    /// --allow-forcing-extrapolation` sets it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_forcing_extrapolation: bool,
 }
 fn default_backend() -> crate::args::types::ForwardBackend {
     crate::args::types::ForwardBackend::ChainBinomial
@@ -280,6 +291,7 @@ impl Default for FitBackendConfig {
             dt: default_dt(),
             obs_alignment: None,
             allow_degenerate_rates: false,
+            allow_forcing_extrapolation: false,
         }
     }
 }

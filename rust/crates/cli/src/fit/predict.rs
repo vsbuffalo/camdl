@@ -1390,6 +1390,7 @@ struct PredictOutcome {
 
 /// `camdl fit predict` — write the free-forward posterior predictive artifact.
 pub fn cmd_fit_predict(args: &crate::args::FitPredictArgs) {
+    crate::forcing_extrapolation::set_allowed(args.forcing_extrapolation.allow_forcing_extrapolation);
     // fit predict has no `--no-color`: its painters follow the environment
     // and whether each stream is a terminal.
     let out = crate::out::Out::new(false);
@@ -1571,13 +1572,16 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
             })?;
             let moved = crate::obs_anchor::substitute(&mut model, w)?;
             crate::obs_anchor::report(out, &moved, &model);
-            out.notices(&crate::obs_anchor::spline_hold_notices(&model, &moved, model.simulation.t_end));
             Some(w)
         } else {
-            out.notices(&crate::obs_anchor::spline_hold_notices(&model, &[], model.simulation.t_end));
             None
         };
     let model = model;
+    // A fit made under `allow_forcing_extrapolation` is predicted under it:
+    // the predictive replays the fit's own model over its own horizon.
+    if config.config.allow_forcing_extrapolation {
+        crate::forcing_extrapolation::set_allowed(true);
+    }
     // One calendar block for every sidecar manifest this run writes
     // (predictive / observed / quantities), read once off the model.
     let calendar = io::CalendarMeta::from_model(&model);

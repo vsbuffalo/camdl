@@ -36,6 +36,11 @@ command = [
   "@params",
   "--data",
   "data/he2010_london_cases.tsv",
+  # The pop and birthrate covariate table ends at t = 7298 days and the case
+  # data run to t = 7672: the filter's last year holds both at their last
+  # value, as the reference log-likelihood was computed. The override keeps
+  # this regression lock on the values it was captured with.
+  "--allow-forcing-extrapolation",
   "--particles",
   "2000",
   "--replicates",

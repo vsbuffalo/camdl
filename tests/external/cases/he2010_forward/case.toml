@@ -22,6 +22,11 @@ command = [
   "chain_binomial",
   "--dt",
   "1.0",
+  # The pop and birthrate covariate table ends at t = 7298 days and the run
+  # goes to 21 years (t = 7670): the last year holds both at their last
+  # value, as the reference results were computed. The override keeps this
+  # regression lock on the values it was captured with.
+  "--allow-forcing-extrapolation",
   "--seed",
   "@seed",
   "--obs-only",

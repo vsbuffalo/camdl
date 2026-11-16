@@ -79,6 +79,7 @@ fn references_compartments(expr: &Expr) -> Option<String> {
 }
 
 pub fn cmd_eval(a: &crate::args::EvalArgs) {
+    crate::forcing_extrapolation::set_allowed(a.forcing_extrapolation.allow_forcing_extrapolation);
     // eval has no `--no-color`: its painters follow the environment and
     // whether each stream is a terminal.
     let out = crate::out::Out::new(false);
