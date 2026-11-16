@@ -222,6 +222,12 @@ let kind_of_index env pos (name : string) : D.name_kind =
    branch (`Expander`'s via lowering reads the identifier's spelling). *)
 let keyword_args = [ ("unchecked_dim", "dim"); ("branch", "label") ]
 
+(* The Boolean words. The compiler matches them by spelling wherever a
+   Boolean is accepted (`date_range`'s `inclusive_end`, a reactive
+   intervention's `once`), so a `true` or `false` that is a call argument or a
+   `once` value is a keyword whatever the call (gh#1117). *)
+let is_boolean_word = function "true" | "false" -> true | _ -> false
+
 let rec tree env pos (e : expr) : D.expr_tree =
   match e with
   | EConst f -> TConst f
@@ -253,7 +259,8 @@ let rec tree env pos (e : expr) : D.expr_tree =
 
 and call_arg env pos f ((k, v) : string * expr) : D.arg =
   match v with
-  | EIdent (s, loc) when loc <> dummy_loc && List.mem (f, k) keyword_args ->
+  | EIdent (s, loc) when loc <> dummy_loc
+                         && (is_boolean_word s || List.mem (f, k) keyword_args) ->
     { a_name = k; a_value = TIdent { nr_name = s; nr_kind = KKeyword } }
   | _ -> { a_name = k; a_value = tree env pos v }
 
@@ -503,7 +510,7 @@ let rec trigger env pos : trig_pred -> D.trigger_pred = function
 (* `once = true | false`: the compiler matches the two words by spelling. *)
 let once env pos (e : expr) : D.declared_expr =
   match e with
-  | EIdent (("true" | "false") as s, loc) when loc <> dummy_loc ->
+  | EIdent (s, loc) when loc <> dummy_loc && is_boolean_word s ->
     let t = D.TIdent { nr_name = s; nr_kind = KKeyword } in
     { de_tree = t; de_katex = Latex.tex e;
     de_katex_loss = Latex.tex_loss e; de_reads = reads_of t }
