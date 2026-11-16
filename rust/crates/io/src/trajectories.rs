@@ -12,7 +12,7 @@ use std::path::Path;
 
 use sim::{Flows, IntState, RealState, Snapshot, Trajectory};
 
-use crate::calendar::CalendarMeta;
+use ir::caltime::CalendarAxis;
 
 /// Tolerance for matching a requested fork time T* to a saved snapshot time.
 /// A trajectory is recorded at discrete snapshot times; the conditioned
@@ -171,7 +171,7 @@ pub struct TrajManifest {
     pub predictive_obs_file: Option<String>,
     /// Calendar semantics for the `time` axis — so a consumer maps `time →
     /// Date` without re-deriving `origin`/`time_unit` from the header.
-    pub calendar: CalendarMeta,
+    pub calendar: CalendarAxis,
 }
 
 impl TrajManifest {
@@ -1539,11 +1539,7 @@ mod tests {
             degeneracy_caveat: false,
             n_trajectories: 4,
             predictive_obs_file: None,
-            calendar: CalendarMeta {
-                time_unit: "days".into(),
-                origin: Some("1910-01-01".into()),
-                days_per_unit: 1.0,
-            },
+            calendar: CalendarAxis::parse("days", Some("1910-01-01")).unwrap(),
         };
         let json = m.to_json();
         assert_eq!(json["conditioned"], serde_json::json!(true));
@@ -1559,7 +1555,7 @@ mod tests {
 
     #[test]
     fn manifest_calendar_null_when_unanchored() {
-        let cal = CalendarMeta { time_unit: "days".into(), origin: None, days_per_unit: 1.0 };
+        let cal = CalendarAxis::parse("days", None).unwrap();
         let json = cal.to_json();
         assert_eq!(json["time_unit"], serde_json::json!("days"));
         assert_eq!(json["origin"], serde_json::Value::Null);

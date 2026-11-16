@@ -2268,7 +2268,8 @@ fn run_simulate(a: &args::SimulateArgs) {
                 compiled: None,
                 eval: None,
                 by_group: indexmap::IndexMap::new(),
-                calendar: io::CalendarMeta::from_model(&q_model),
+                calendar: ir::caltime::CalendarAxis::from_model(&q_model)
+                    .unwrap_or_else(|e| out.fail(format!("error: {e}"))),
                 emit_every: emit_every.clone(),
             })
         } else {
@@ -2626,7 +2627,7 @@ struct SimQuantities {
     by_group: indexmap::IndexMap<(usize, String), GroupQuant>,
     /// Calendar semantics for the `time` axis, stamped into `quantities.json` so
     /// a consumer maps `time → Date` without re-deriving `origin`/`time_unit`.
-    calendar: io::CalendarMeta,
+    calendar: ir::caltime::CalendarAxis,
     /// gh#656: the `--emit-every` override, so an `observations.<stream>`
     /// quantity reduces the same y_sim series `--obs` emits under the same flags.
     emit_every: Option<crate::emit_every::EmitEvery>,

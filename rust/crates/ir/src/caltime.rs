@@ -367,9 +367,13 @@ const EXACT_RENDER_NEIGHBOURS: usize = 4;
 /// reads back to the time it was rendered from.
 ///
 /// Stored as the `calendar` block of every artifact that carries a model time:
-/// `{"days_per_unit", "origin", "time_unit"}`. `days_per_unit` is derived from
-/// the unit and written so a consumer needs no unit table of its own; it is
-/// not read back.
+/// `{"days_per_unit", "origin", "time_unit"}`. A consumer maps `time` to a
+/// date as `origin + time · days_per_unit` days, and reads a null `origin` as
+/// "plot `time` numerically". `days_per_unit` is derived from the unit and
+/// written so a consumer needs no unit table of its own; it is not read back.
+/// The model's `origin_rata_die` is deliberately not exported: that day
+/// number is keyed to this module's arbitrary epoch and would mislead a
+/// consumer that read it as a standard Julian or Rata Die day.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CalendarAxis {
     pub time_unit: TimeUnit,
@@ -453,6 +457,41 @@ impl CalendarAxis {
         let (date, frac) = split_instant(s)?;
         let days = date.rata_die() - origin.rata_die();
         Ok(days_to_time(frac.map_or(days as f64, |f| f.offset_days(days)), self.time_unit))
+    }
+
+    /// The `calendar` block an artifact stores.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("a calendar block serializes")
+    }
+}
+
+/// The stored form of a [`CalendarAxis`]: fields in sorted order, so a struct
+/// serializer and a `serde_json::Value` write the same bytes.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CalendarBlock {
+    /// Written for consumers; derived from `time_unit`, so never read back.
+    #[serde(default, skip_deserializing)]
+    days_per_unit: f64,
+    origin: Option<String>,
+    time_unit: String,
+}
+
+impl serde::Serialize for CalendarAxis {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        CalendarBlock {
+            days_per_unit: self.days_per_unit(),
+            origin: self.origin.map(|o| o.to_string()),
+            time_unit: self.time_unit.as_str().to_string(),
+        }
+        .serialize(s)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for CalendarAxis {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let block = CalendarBlock::deserialize(d)?;
+        CalendarAxis::parse(&block.time_unit, block.origin.as_deref())
+            .map_err(serde::de::Error::custom)
     }
 }
 
