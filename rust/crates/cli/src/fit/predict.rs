@@ -1218,9 +1218,9 @@ impl crate::engine::RunSink for PredictiveSink {
             if want_obs {
                 // Key by the stream's declared `name` — what `observations.<name>`
                 // in the DSL references (v1.1 is unstratified, so name == base).
-                // Each draw sits where it was evaluated, as `simulate`'s
-                // series for the same quantity does.
-                obs_set.streams.insert(obs_ir.name.clone(), (scored_at, stream_vals.clone()));
+                // Each draw is named by its row's label, as the predictive
+                // table names it (which time names a row: D69).
+                obs_set.streams.insert(obs_ir.name.clone(), (times.clone(), stream_vals.clone()));
             }
             leaf_y[si] = stream_vals;
             leaf_mean[si] = stream_means;

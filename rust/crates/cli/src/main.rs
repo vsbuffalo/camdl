@@ -2710,12 +2710,14 @@ fn materialize_obs_for_quantities(
             emit.and_then(|e| e.resolve_for(&obs_ir.source)),
         )?;
         let projected = project_coverages(traj, obs_ir, model, &plan.scored())?;
-        // The series axis is when each row is scored, where its state is read.
-        let times: Vec<f64> = plan.rows.iter().map(|r| r.at).collect();
+        // Each row is drawn where it is scored, and named on the series by
+        // its label, as the `--obs` file names it: which time names a row is
+        // a separate question (D69), not settled here.
+        let times: Vec<f64> = plan.rows.iter().map(|r| r.label).collect();
         let mut vals = Vec::with_capacity(times.len());
-        for (ti, &t) in times.iter().enumerate() {
-            let snap = snap_at(traj, t);
-            vals.push(sampler(projected[ti], t, &snap.int_state.counts, &[], &mut obs_rng));
+        for (ti, row) in plan.rows.iter().enumerate() {
+            let snap = snap_at(traj, row.at);
+            vals.push(sampler(projected[ti], row.at, &snap.int_state.counts, &[], &mut obs_rng));
         }
         out.insert(obs_ir.name.clone(), (times, vals));
     }
