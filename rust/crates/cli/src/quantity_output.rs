@@ -343,7 +343,7 @@ pub(crate) fn render_quantities(
     coords: DesignCoords,
     evaluated_on: Option<EvaluatedOn>,
     chains: Option<&crate::fit::row_convergence::ChainOfDraw>,
-    calendar: &io::CalendarMeta,
+    calendar: &ir::caltime::CalendarAxis,
 ) -> Result<RenderedQuantities, String> {
     use ir::quantity::{QuantityBody, TemporalReduce};
 
@@ -583,7 +583,7 @@ impl StackedQuantities {
         times: &[f64],
         evaluated_on: Option<EvaluatedOn<'_>>,
         chains: Option<&crate::fit::row_convergence::ChainOfDraw>,
-        calendar: &io::CalendarMeta,
+        calendar: &ir::caltime::CalendarAxis,
     ) -> Result<(), String> {
         let rendered = render_quantities(
             quantities, draws, times, self.mode, coords, evaluated_on, chains, calendar,
@@ -625,7 +625,7 @@ impl StackedQuantities {
     /// prevent (proposal §6).
     pub(crate) fn finish(
         self,
-        calendar: &io::CalendarMeta,
+        calendar: &ir::caltime::CalendarAxis,
     ) -> Result<RenderedQuantities, String> {
         // A quantity that refused in ANY cell is dropped everywhere, including
         // the cells that had already stacked cleanly, and its manifest entries
@@ -912,12 +912,8 @@ mod tests {
 
     /// An anchored calendar for the render tests. The manifest carries these
     /// verbatim; the render output itself is calendar-independent.
-    fn test_cal() -> io::CalendarMeta {
-        io::CalendarMeta {
-            time_unit: "days".into(),
-            origin: Some("2020-01-01".into()),
-            days_per_unit: 1.0,
-        }
+    fn test_cal() -> ir::caltime::CalendarAxis {
+        ir::caltime::CalendarAxis::parse("days", Some("2020-01-01")).unwrap()
     }
 
     #[test]

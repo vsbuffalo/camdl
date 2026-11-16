@@ -659,7 +659,8 @@ pub fn run_method(
     let traj_model_hash = crate::resolve::model_identity_from_ir(&config.model_ir_json);
     let traj_date_origin: Option<(String, String)> = config.model.origin.as_ref()
         .map(|o| (o.clone(), config.model.time_unit.clone()));
-    let traj_calendar = io::CalendarMeta::from_model(&config.model);
+    let traj_calendar = ir::caltime::CalendarAxis::from_model(&config.model)
+        .unwrap_or_else(|e| super::abandon_method(out, format!("error: {e}")));
     // The column layout of every chain's `trajectories.tsv` and of the dense
     // block `latent_convergence` reduces across chains — chain-invariant, so
     // built once and named once.

@@ -1580,7 +1580,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     let model = model;
     // One calendar block for every sidecar manifest this run writes
     // (predictive / observed / quantities), read once off the model.
-    let calendar = io::CalendarMeta::from_model(&model);
+    let calendar = ir::caltime::CalendarAxis::from_model(&model).map_err(|e| e.to_string())?;
     // The step this command walks, for both horizons: the step the FIT ran
     // at, by the one dt rule (`crate::dt_rule`) — the model's declared dt, else
     // the fit's `[config] dt`. The one-step band re-filters the observed
