@@ -460,6 +460,12 @@ fn a_fit_with_no_saved_paths_censors_instead_of_falling_back() {
         stderr.contains("cum_infections") && stderr.contains("saved no latent path"),
         "the empty band must be explained, by name; stderr was:\n{stderr}"
     );
+    // The fix it points at must be one this fit's method can deliver: this is a PMMH
+    // fit, and only PGAS saves smoothing paths (gh#1086).
+    assert!(
+        !stderr.contains("PMMH save") && stderr.contains("only PGAS saves"),
+        "the remedy must say only PGAS saves the smoothing paths; stderr was:\n{stderr}"
+    );
 
     // The replay-side quantities and the predictive band are untouched.
     assert!(
