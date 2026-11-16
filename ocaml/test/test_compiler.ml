@@ -11426,6 +11426,46 @@ let test_phase2_date_range_calendar_in_unanchored_errors () =
       simulate { from = 0  to = 24 }
     |}
 
+(* gh#1123: an unanchored `date_range` whose start is a `date(...)`
+   literal and whose cadence is `every = D` compiled silently, with every
+   entry at t = 0. It is E220, as for the same `date(...)` written bare;
+   an `add_calendar_*` start is E327, as for that call written bare. *)
+let unanchored_at_src ~at_expr =
+  Printf.sprintf {|
+    time_unit = 'days
+    compartments { S, V }
+    parameters { N0 : count }
+    transitions { leak : S --> V @ 0.0 'per_day * S }
+    interventions {
+      vacc : transfer(from = S, to = V, fraction = 0.1) at [%s]
+    }
+    init { S = N0 }
+    simulate { from = 0  to = 2000 }
+  |} at_expr
+
+let test_gh1123_date_range_date_start_every_count_unanchored_e220 () =
+  expect_error_code
+    ~code:"E220"
+    ~contains:"origin"
+    (unanchored_at_src
+       ~at_expr:"date_range(date(\"2020-01-01\"), count = 2, every = 7 'days)")
+
+let test_gh1123_date_range_date_start_every_end_unanchored_e220 () =
+  expect_error_code
+    ~code:"E220"
+    ~contains:"origin"
+    (unanchored_at_src
+       ~at_expr:"date_range(date(\"2020-01-01\"), date(\"2020-01-15\"), \
+                 every = 7 'days)")
+
+let test_gh1123_date_range_add_calendar_start_unanchored_e327 () =
+  expect_error_code
+    ~code:"E327"
+    ~contains:"anchored"
+    (unanchored_at_src
+       ~at_expr:"date_range(add_calendar_months(date(\"2020-01-01\"), 1), \
+                 count = 2, every = 7 'days)")
+
 (* ── Round-trip W327 ───────────────────────────────────────────────── *)
 
 let test_phase2_round_trip_w327 () =
@@ -16682,6 +16722,12 @@ let () =
         `Quick test_phase2_date_range_count_zero_errors;
       Alcotest.test_case "E327 calendar cadence in unanchored model"
         `Quick test_phase2_date_range_calendar_in_unanchored_errors;
+      Alcotest.test_case "gh#1123 E220 date() start + every + count in unanchored model"
+        `Quick test_gh1123_date_range_date_start_every_count_unanchored_e220;
+      Alcotest.test_case "gh#1123 E220 date() start + every + end in unanchored model"
+        `Quick test_gh1123_date_range_date_start_every_end_unanchored_e220;
+      Alcotest.test_case "gh#1123 E327 add_calendar_months start + every in unanchored model"
+        `Quick test_gh1123_date_range_add_calendar_start_unanchored_e327;
       (* Round-trip W327 *)
       Alcotest.test_case "W327 round-trip composition warns on month-end clamp"
         `Quick test_phase2_round_trip_w327;
