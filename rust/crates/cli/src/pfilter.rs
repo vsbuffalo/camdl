@@ -87,9 +87,9 @@ fn collapse_message(result: &sim::inference::particle_filter::PFilterResult) -> 
 }
 
 /// Refuse `--save-final-state` when a bound row with a value ends after the
-/// fit's `holdout_after` cutoff (gh#1084). The cutoff resolves over
-/// `fit_streams`, the fit config's own files (its anchors are resolved there
-/// by `fit run`), and each row of `bound` is judged by the rule the fit's
+/// fit's `holdout_after` cutoff (gh#1084). An anchored cutoff resolves over
+/// `fit_streams`, the fit config's own files (where `fit run` resolves it); a
+/// bare time reads no rows. Each row of `bound` is judged by the rule the fit's
 /// training partition uses
 /// ([`crate::fit::training_partition::trains_under_cutoff`]), so a run bound
 /// to the training rows alone passes and saves its state at their end.
@@ -466,28 +466,35 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // conditions on the data a forecast from it is scored against, so refuse
     // it before the filter runs.
     //
-    // The cutoff resolves over the fit config's own files, as `fit run`
-    // resolved it: an anchored `holdout_after = "last_obs - 4 weeks"` resolved
-    // over `--data` files holding only the training rows would move the cutoff
-    // back and refuse the very rows that trained.
+    // The cutoff resolves as `fit run` resolved it. A bare time or date needs
+    // no rows. An anchored one (`holdout_after = "last_obs - 4 weeks"`)
+    // resolves over the fit config's own files: resolved over `--data` files
+    // holding only the training rows, it would move back and refuse the very
+    // rows that trained. Those files are read only in that case.
     if save_final_state.is_some() {
         let holdout_after = fit_problem.as_ref()
             .and_then(|p| p.data.as_ref())
             .and_then(|d| d.holdout_after.as_ref());
         if let (Some(spec), Some(fit_path)) = (holdout_after, a.fit.as_ref()) {
+            let anchored = matches!(
+                crate::fit::runner::parse_time_spec(
+                    "holdout_after", &spec.raw(), model.origin.as_deref(), &model.time_unit),
+                Ok(crate::fit::runner::TimeSpec::Anchored(_)));
             let fit_streams;
-            let cutoff_streams: &[crate::fit::runner::ObsStream] = if cli_data_specs.is_empty() {
-                &streams
-            } else {
-                fit_streams = load_data_observations_from_fit_toml(fit_path, &model)
-                    .and_then(|b| crate::fit::runner::data_bindings_to_effective(&model, &b))
-                    .and_then(|e| crate::fit::runner::resolve_and_load_obs_streams(
-                        &model, &compiled, &e, &time_opts))
-                    .unwrap_or_else(|e| {
-                        out.fail(format!("error: --fit toml data, read to resolve holdout_after: {e}"));
-                    });
-                &fit_streams
-            };
+            let cutoff_streams: &[crate::fit::runner::ObsStream] =
+                if !anchored || cli_data_specs.is_empty() {
+                    &streams
+                } else {
+                    fit_streams = load_data_observations_from_fit_toml(fit_path, &model)
+                        .and_then(|b| crate::fit::runner::data_bindings_to_effective(&model, &b))
+                        .and_then(|e| crate::fit::runner::resolve_and_load_obs_streams(
+                            &model, &compiled, &e, &time_opts))
+                        .unwrap_or_else(|e| {
+                            out.fail(format!(
+                                "error: --fit toml data, read to resolve holdout_after: {e}"));
+                        });
+                    &fit_streams
+                };
             if let Err(e) = refuse_final_state_past_cutoff(spec, cutoff_streams, &streams, &model) {
                 out.fail(format!("error: {e}"));
             }

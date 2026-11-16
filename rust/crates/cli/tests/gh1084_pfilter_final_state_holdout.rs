@@ -161,6 +161,44 @@ fn an_anchored_cutoff_resolves_over_the_fit_files() {
     assert_eq!(origin_of(&tmp.path().join("fs.tsv")), 6.0);
 }
 
+/// An `NA` row past the cutoff carries no value, so filtering through it
+/// conditions on nothing held out: the state is saved, at the last row.
+#[test]
+fn trailing_na_rows_past_the_cutoff_are_not_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    fixture(tmp.path(), "holdout_after = 6");
+    std::fs::write(tmp.path().join("na_tail.tsv"),
+        format!("{TRAINING}7\tNA\n8\tNA\n9\tNA\n10\tNA\n")).unwrap();
+    let out = pfilter(tmp.path(),
+        &["--data", "cases=na_tail.tsv", "--save-final-state", "fs.tsv"]);
+    assert!(out.status.success(),
+        "NA rows past the cutoff hold no data and must not be refused; stderr:\n{}",
+        stderr(&out));
+    assert_eq!(origin_of(&tmp.path().join("fs.tsv")), 10.0);
+}
+
+/// A bare-time cutoff needs no rows, so the fit config's own files are not
+/// read when `--data` replaces them: here the fit's file is gone, and only an
+/// anchored cutoff (which must read it) fails on that.
+#[test]
+fn a_bare_time_cutoff_does_not_read_the_fit_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    fixture(tmp.path(), "holdout_after = 6");
+    std::fs::remove_file(tmp.path().join("cases.tsv")).unwrap();
+    let out = pfilter(tmp.path(),
+        &["--data", "cases=training.tsv", "--save-final-state", "fs.tsv"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(origin_of(&tmp.path().join("fs.tsv")), 6.0);
+
+    let anchored = tempfile::tempdir().unwrap();
+    fixture(anchored.path(), "holdout_after = \"last_obs - 4 days\"");
+    std::fs::remove_file(anchored.path().join("cases.tsv")).unwrap();
+    let out = pfilter(anchored.path(),
+        &["--data", "cases=training.tsv", "--save-final-state", "fs.tsv"]);
+    assert!(!out.status.success(), "{}", stderr(&out));
+    assert!(stderr(&out).contains("read to resolve holdout_after"), "{}", stderr(&out));
+}
+
 /// Control: with no holdout the state is saved at the last row, as before.
 #[test]
 fn without_a_holdout_the_state_is_saved_at_the_last_row() {
