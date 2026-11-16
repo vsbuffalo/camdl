@@ -1569,9 +1569,12 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // The one place `fit run` says which rows train: the method's
                 // own build below decides the same partition silently.
                 window_config.partition_lines.say();
-                crate::run_meta::record_training_partition(
-                    seg, window_config.training_partition.record(
-                        window_config.model.origin.as_deref(), &window_config.model.time_unit));
+                match ir::caltime::CalendarAxis::from_model(&window_config.model) {
+                    Ok(calendar) => crate::run_meta::record_training_partition(
+                        seg, window_config.training_partition.record(&calendar)),
+                    Err(e) => out.say(format_args!(
+                        "warning: cannot record the training partition: {e}")),
+                }
             }
         }
 

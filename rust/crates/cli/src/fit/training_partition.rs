@@ -242,14 +242,15 @@ impl TrainingPartition {
     }
 
     /// What the fit records in `fit.meta.json`, with each time also as a date
-    /// when the model has an `origin`.
-    pub(crate) fn record(&self, origin: Option<&str>, time_unit: &str)
+    /// when the model has an `origin`, written by the model's `calendar` axis
+    /// (the one renderer of the `calendar` block the same sidecar stores).
+    pub(crate) fn record(&self, calendar: &ir::caltime::CalendarAxis)
         -> crate::run_meta::TrainingPartitionRecord
     {
         use crate::run_meta::{PartitionRuleRecord, RowPrefixRecord, TimePoint};
         let point = |t: f64| TimePoint {
             t,
-            date: origin.and_then(|o| ir::caltime::internal_to_date_hires(o, t, time_unit).ok()),
+            date: calendar.date_of(t).map(ir::caltime::RenderedInstant::into_string),
         };
         crate::run_meta::TrainingPartitionRecord {
             rule_version: PARTITION_RULE_VERSION,
@@ -419,6 +420,23 @@ mod tests {
         assert_ne!(d(&a), d(&c), "an edited value changes the digest");
         assert_ne!(d(&a), d(&na), "a hole is not a value");
         assert_ne!(d(&a), d(&b), "the row count is hashed");
+    }
+
+    /// The record dates each time through the model's calendar axis, as the
+    /// sidecar's `calendar` block would; no dates without an origin.
+    #[test]
+    fn the_record_dates_times_through_the_calendar_axis() {
+        let rows = one(rows_of("record", CLOSING_7, "time\tcases\n7\t1\n14\t2\n21\t3\n"));
+        let p = TrainingPartition::from_cutoff(&rows, 14.5).unwrap();
+        let axis = ir::caltime::CalendarAxis::parse("days", Some("2020-01-01")).unwrap();
+        let r = p.record(&axis);
+        assert_eq!(r.extent.date.as_deref(), Some("2020-01-15"));
+        let crate::run_meta::PartitionRuleRecord::Cutoff { at } = &r.rule else {
+            panic!("a cutoff rule: {:?}", r.rule);
+        };
+        assert_eq!(at.date, axis.date_of(14.5).map(|d| d.into_string()));
+        let numeric = ir::caltime::CalendarAxis::parse("days", None).unwrap();
+        assert_eq!(p.record(&numeric).extent.date, None);
     }
 
     /// The observed window leaves out `NA` rows at either end.
