@@ -23,6 +23,12 @@ that runs a model, naming the forcing, its range and the side it was evaluated
 on. The check reads the times actually evaluated, with `lag` applied.
 `piecewise` and the periodic kinds are unaffected.
 
+A lagged data-table forcing is the case most likely to meet this unexpectedly.
+With `lag = ℓ` the forcing is read at t − ℓ, so a forcing whose data start where
+the run starts is read ℓ before its first data point from the first step, and
+the run is now refused at its start, even though the data cover the run's span.
+Before, it held the first data value over the first ℓ of the run.
+
 **Migration.** Extend the forcing's data or window to cover the run, or end the
 run within it. Where holding the end value is what the run means (a forecast
 past a `bspline` window anchored on `last_obs`, say), pass
@@ -30,7 +36,10 @@ past a `bspline` window anchored on `last_obs`, say), pass
 `[config] allow_forcing_extrapolation =
 true` in the fit config: the values held
 are exactly the values held before, with one warning per forcing, and `run.json`
-records the override.
+records the override. For a lagged forcing whose data start at the run start,
+extend its data back to `t_start − ℓ` (with `lag = 10 'days` and a run from t =
+0, a row at t = −10), or start the run ℓ later; the override holds the first
+data value over that first ℓ, as before.
 
 **Diagnostic.**
 ``error: forcing `beta_t` was evaluated after the end of its

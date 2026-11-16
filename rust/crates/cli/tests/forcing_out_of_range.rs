@@ -378,6 +378,30 @@ fn a_run_before_the_first_data_point_is_refused() {
     assert!(err.contains("before its first data point") && err.contains("t = 10 to t = 100"), "{err}");
 }
 
+/// A lag is applied before the check: a forcing with `lag = 10 'days` whose
+/// data start where the run does is read at t − 10 from the run's start, before
+/// its first data point, and is refused there although its data cover the
+/// run's span. Extending the data back by the lag covers it.
+#[test]
+fn a_lagged_forcing_whose_data_start_at_the_run_start_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let m = model(tmp.path(), "linear", &[(0, 1.0), (50, 0.8), (100, 0.6)]);
+    let src = std::fs::read_to_string(&m).unwrap().replace("method = linear", "method = linear\n    lag = 10 'days");
+    assert!(src.contains("lag = 10 'days"), "the lag was added");
+    std::fs::write(&m, src).unwrap();
+    let o = simulate(tmp.path(), &m, &[]);
+    let err = stderr(&o);
+    assert!(!o.status.success(), "the lag reads before the data at the run's start:\n{err}");
+    assert!(err.contains("before its first data point") && err.contains("t = 0 to t = 100"), "{err}");
+    assert!(err.contains("the forcing has a lag"), "names the lag:\n{err}");
+
+    std::fs::write(tmp.path().join("mult.tsv"), "time\tmult\n-10\t1.0\n0\t1.0\n50\t0.8\n100\t0.6\n").unwrap();
+    let o = simulate(tmp.path(), &m, &[]);
+    let err = stderr(&o);
+    assert!(o.status.success(), "data extended back by the lag cover the run:\n{err}");
+    assert_eq!(warnings(&err), 0, "{err}");
+}
+
 /// The check reads the times evaluated, not the run's span: a forcing read
 /// only under a condition that is false past its range raises nothing.
 #[test]
