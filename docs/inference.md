@@ -751,10 +751,11 @@ camdl profile model.camdl --fit fit.toml \
 
 With `--fit`, every cell scores the data `fit run` of that config trains on, and
 the config's holdout applies to the bound data (`--data` included) through the
-function `fit run` uses. `[data] holdout_after` removes every row after the
-cutoff, so no cell fits a held-out row; `[data.holdout]` files are checked by
-`fit run`'s tail-only rule, and the training files are fitted whole. A
-`holdout_after` cutoff is part of the profile's identity.
+function `fit run` uses. `[data] holdout_after` removes every row ending after
+the cutoff, so no cell fits a held-out row; `[data.holdout]` files are checked
+by `fit run`'s tail-only rule, and the training files are fitted whole. The
+training rows a `holdout_after` cutoff leaves are part of the profile's
+identity.
 
 A sharp peak means R₀ is well-identified. A flat profile means R₀ is not
 identifiable from the data (the model fits equally well across a range of R₀
@@ -1669,13 +1670,14 @@ point, IF2 RNG provides the spread" behaviour.
 
 **The `fit.toml` holdout keys are applied at fit load (gh#585).** Declaring
 `holdout_after = <time>` under `[data]` (a model-time number, a date under a
-calendar-anchored model, or `last_obs - 6 weeks`) truncates training to
-observations at `t ≤ <time>`; a `[data.holdout]` section binds explicit held-out
-files, which must lie strictly after each stream's last training time
-(tail-only; an interior holdout is refused). The fit banner prints the training
-window, and the applied window is recorded in the fit's `fit.meta.json` — the
-machine-checked proof `camdl compare` requires before labelling any score
-`hold_out_tail`.
+calendar-anchored model, or `last_obs - 6 weeks`) trains on the rows whose
+period (or instant) ends at or before `<time>`; a `[data.holdout]` section binds
+explicit held-out files, every row of which must end strictly after the latest
+training row of every stream (tail-only; an interior holdout is refused). The
+fit banner prints the rows trained and the first held-out row of each stream,
+and the training partition (per stream the training rows and their digest) is
+recorded in the fit's `fit.meta.json` — the machine-checked proof
+`camdl compare` requires before labelling any score `hold_out_tail`.
 
 ```toml
 [data]

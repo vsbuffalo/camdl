@@ -1940,7 +1940,7 @@ pub struct ProfileArgs {
     /// enter the per-cell maximization; `--starts from_prior` draws
     /// starting points from them. The config's holdout applies to the
     /// bound data, `--data` included, as in `fit run`: `[data] holdout_after`
-    /// removes every row after the cutoff from every cell's likelihood, and
+    /// removes every row ending after the cutoff from every cell's likelihood, and
     /// `[data.holdout]` files must lie after the training rows.
     #[arg(long, value_name = "PATH")]
     pub fit: Option<PathBuf>,
@@ -2215,7 +2215,7 @@ pub struct SurveyArgs {
 
     /// fit.toml supplying [estimate] bounds and [data] (fit-aware mode).
     /// The model scored is MODEL; the config's [model] is not read. A
-    /// `[data] holdout_after` removes every row after the cutoff from every
+    /// `[data] holdout_after` removes every row ending after the cutoff from every
     /// point's likelihood, as `fit run` removes it from training, and
     /// `[data.holdout]` files must lie after the training rows.
     /// Mutually exclusive with --estimate / --data; pass exactly one.

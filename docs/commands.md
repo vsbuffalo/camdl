@@ -379,8 +379,9 @@ in §7 of `camdl docs model-comparison`.
   `--allow-forcing-extrapolation` on any of them (in a fit config,
   `[config] allow_forcing_extrapolation = true`) holds the forcing's end value
   instead, prints one warning per forcing naming its range and the span held,
-  and records the override in each `run.json` the command writes. A stored run
-  that held a forcing is not served to a run without the override.
+  and records the override in each `run.json` the command writes. The override
+  is part of the run's identity, so a run under it and the same run without it
+  are two runs: neither is served the other's stored result.
 
 - **`simulate` goes forward; `fit` goes backward.** Simulation maps parameters →
   data; fitting maps data → parameters. A sweep is many forward runs, never an
