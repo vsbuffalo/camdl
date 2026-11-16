@@ -531,9 +531,10 @@ exactly.
 
 The same rules, and this is where they most often bite.
 
-A weekly row is scored over the seven days ending at its instant. Under the
-loader's current behaviour that means a row labelled `2026-07-08` is scored
-against 1–7 July — it contains nothing from the 8th.
+A weekly row's period is what its stream's `covers` declaration says. Under
+`closing_at(time, 7 'days)`, the form `simulate --obs` writes, a row labelled
+`2026-07-08` is scored over the seven days ending at its label, 1–7 July — it
+contains nothing from the 8th.
 
 Worse, the grid's **phase**, the weekday its rows fall on, is not set by any
 calendar rule. A generated grid counts its steps from the start of the
