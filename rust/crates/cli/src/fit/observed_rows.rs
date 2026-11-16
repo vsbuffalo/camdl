@@ -82,6 +82,18 @@ impl ObservedRow {
     }
 }
 
+/// Whether the file wrote `rows`' time cells as ISO dates. Read off each row's
+/// label cell (`window_stop` for a stream with per-row windows, its `: time`
+/// cell otherwise): the loader decides dated or numeric once per column, so
+/// the cells of one column are all one or the other, and a windowed stream's
+/// two boundary columns are read by the same conversion, so the closing
+/// boundary settles the pair. Asked so a diagnostic or a written file quotes
+/// times in the representation the modeller published them in (gh#842,
+/// gh#882).
+pub(crate) fn rows_were_dated(rows: &[ObservedRow]) -> bool {
+    rows.iter().any(|r| matches!(r.temporal.last(), Some(TemporalCell::Date(_))))
+}
+
 /// Read one leaf's rows from `path`: its labels, the cells as written, the
 /// observed values with holes, the auxiliary values, and what each row
 /// measures.

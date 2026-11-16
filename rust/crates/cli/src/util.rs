@@ -1761,15 +1761,13 @@ pub fn format_unbound_streams_warning(
 ///
 /// The times are quoted the way the file states them (gh#842): on a file whose
 /// time column is ISO dates, a bare `-3` is a conversion the reader has to do
-/// by hand on a model where every other time is a calendar date. `dated` is a
-/// closure because answering it costs a re-read of the column
-/// ([`crate::pfilter::stream_cells_were_dated`]) and only the error path needs
-/// the answer — the same shape `pfilter::stream_times_of_rows`'s two refusals use.
+/// by hand on a model where every other time is a calendar date. `dated` says
+/// whether it is one ([`crate::fit::observed_rows::rows_were_dated`]).
 pub fn check_obs_before_origin(
     stream_name: &str,
     t_start: f64,
     obs_times: &[f64],
-    dated: impl FnOnce() -> bool,
+    dated: bool,
     opts: &crate::caltime_load::TimeOpts<'_>,
 ) -> Result<(), String> {
     if let Some(&t) = obs_times.iter().find(|&&t| t < t_start - 1e-9) {
@@ -1778,7 +1776,7 @@ pub fn check_obs_before_origin(
         const WHY: &str = "so an earlier observation can never be propagated to \
              — its likelihood term would be scored against a particle that \
              never advanced (a silent wrong answer).";
-        if dated() {
+        if dated {
             // The dated form quotes the row and the run's start as dates, and
             // prescribes the two anchors that actually move the start.
             // "set `simulate.from` ≤ <date>" is not offered, because
@@ -1913,7 +1911,7 @@ mod obs_before_origin_tests {
     #[test]
     fn obs_strictly_before_origin_errors_and_locates_it() {
         // Model origin t_start = 21, obs at 0/7/14 all precede it (F4).
-        let e = check_obs_before_origin("cases", 21.0, &[0.0, 7.0, 14.0], || false, &numeric_opts())
+        let e = check_obs_before_origin("cases", 21.0, &[0.0, 7.0, 14.0], false, &numeric_opts())
             .unwrap_err();
         assert!(e.contains("cases"), "error must name the stream: {e}");
         // Locates the offending time and the origin.
@@ -1929,18 +1927,18 @@ mod obs_before_origin_tests {
         // An observation exactly at the origin is fine here — whether an
         // incidence row there can be scored is judged from what it covers, in
         // `stream_times_for`, not by this check.
-        assert!(check_obs_before_origin("cases", 21.0, &[21.0, 28.0], || false, &numeric_opts()).is_ok());
+        assert!(check_obs_before_origin("cases", 21.0, &[21.0, 28.0], false, &numeric_opts()).is_ok());
     }
 
     #[test]
     fn obs_after_origin_is_allowed() {
-        assert!(check_obs_before_origin("cases", 21.0, &[28.0, 35.0], || false, &numeric_opts()).is_ok());
-        assert!(check_obs_before_origin("cases", 0.0, &[0.0, 7.0, 14.0], || false, &numeric_opts()).is_ok());
+        assert!(check_obs_before_origin("cases", 21.0, &[28.0, 35.0], false, &numeric_opts()).is_ok());
+        assert!(check_obs_before_origin("cases", 0.0, &[0.0, 7.0, 14.0], false, &numeric_opts()).is_ok());
     }
 
     #[test]
     fn empty_obs_times_is_ok() {
-        assert!(check_obs_before_origin("cases", 21.0, &[], || false, &numeric_opts()).is_ok());
+        assert!(check_obs_before_origin("cases", 21.0, &[], false, &numeric_opts()).is_ok());
     }
 
     /// gh#842: on a file whose time column is ISO dates, the refusal quotes
@@ -1954,7 +1952,7 @@ mod obs_before_origin_tests {
     #[test]
     fn a_pre_origin_observation_on_a_dated_file_is_reported_in_dates() {
         // Origin 2026-07-01, run starts there; the row is three days earlier.
-        let e = check_obs_before_origin("cases", 0.0, &[-3.0], || true, &dated_opts())
+        let e = check_obs_before_origin("cases", 0.0, &[-3.0], true, &dated_opts())
             .unwrap_err();
         assert!(e.contains("2026-06-28"),
             "the offending row must be named by the date the file wrote: {e}");
@@ -1976,7 +1974,7 @@ mod obs_before_origin_tests {
     /// times are numbers should see no churn from the dated form existing.
     #[test]
     fn a_numeric_file_keeps_the_message_it_had() {
-        let e = check_obs_before_origin("cases", 0.0, &[-3.0], || false, &numeric_opts())
+        let e = check_obs_before_origin("cases", 0.0, &[-3.0], false, &numeric_opts())
             .unwrap_err();
         assert_eq!(
             e,
@@ -1996,7 +1994,7 @@ mod obs_before_origin_tests {
     /// the diagnostic — the same fallback `quote_time` makes everywhere.
     #[test]
     fn a_dated_column_without_an_origin_falls_back_to_the_number() {
-        let e = check_obs_before_origin("cases", 0.0, &[-3.0], || true, &numeric_opts())
+        let e = check_obs_before_origin("cases", 0.0, &[-3.0], true, &numeric_opts())
             .unwrap_err();
         assert!(e.contains("-3"), "{e}");
     }
@@ -2006,9 +2004,9 @@ mod obs_before_origin_tests {
         // A time a hair below the origin (within float tolerance) is NOT an
         // error — it's treated as on-origin. Strictly-before means by more
         // than the obs-time comparison tolerance used elsewhere.
-        assert!(check_obs_before_origin("cases", 21.0, &[21.0 - 1e-12, 28.0], || false, &numeric_opts()).is_ok());
+        assert!(check_obs_before_origin("cases", 21.0, &[21.0 - 1e-12, 28.0], false, &numeric_opts()).is_ok());
         // ...but a clearly-earlier time is rejected.
-        assert!(check_obs_before_origin("cases", 21.0, &[20.0, 28.0], || false, &numeric_opts()).is_err());
+        assert!(check_obs_before_origin("cases", 21.0, &[20.0, 28.0], false, &numeric_opts()).is_err());
     }
 }
 
