@@ -7823,6 +7823,20 @@ let expand_time_function_one ctx fname (env : (string * string) list)
                     ~hint:"Use a numeric literal, e.g. 7:100"
                     ();
                   0 in
+              (* gh#1135: a reversed range would run the fill loop below zero
+                 times and leave the forcing 0 in every bin. *)
+              if lo > hi then
+                Diagnostics.error ctx.diags ~code:"E406" ~loc:Diagnostics.no_loc
+                  ~message:(Printf.sprintf
+                    "periodic time function '%s': `on` range %d:%d is reversed \
+                     (its lower bound is above its upper bound), so it would \
+                     switch on no bins"
+                    fname lo hi)
+                  ~hint:(Printf.sprintf
+                    "write the range low to high, e.g. %d:%d; a window that \
+                     spans the end of the period is two ranges, %d:%d and 0:%d"
+                    hi lo lo (n_bins - 1) hi)
+                  ();
               let step_int = int_of_float step_f in
               if step_int > 1 && (lo mod step_int <> 0 || (hi + 1) mod step_int <> 0) then
                 Diagnostics.warning ctx.diags ~code:"W301" ~loc:Diagnostics.no_loc
