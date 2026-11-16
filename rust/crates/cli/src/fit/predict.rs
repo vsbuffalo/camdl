@@ -2279,8 +2279,9 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
                              reported as fully censored rather than taken from the \
                              free-forward replay, which ignores every observation they are \
                              anchored inside (gh#722).\n  \
-                             Fix: re-fit with `n_trajectories` set on the posterior method \
-                             (PGAS/PMMH save the smoothing paths), then re-run \
+                             Fix: re-fit with a PGAS method and `n_trajectories` > 0 \
+                             (only PGAS saves the smoothing paths; PMMH and \
+                             particle-filter methods write none), then re-run \
                              `fit predict`."
                         ));
                     }
