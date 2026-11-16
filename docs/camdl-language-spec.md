@@ -3972,8 +3972,8 @@ NAME : ACTION {
 }
 ```
 
-**In anchored mode**, `every`, `from`, and `to` must be classified `Exact`
-(§2.1) — a `Calendar`-classified duration (e.g. `every = 1
+**In anchored mode**, `every`, `from`, and `to` (and the `at_day` offset of
+§13.7) must be classified `Exact` (§2.1) — a `Calendar`-classified duration (e.g. `every = 1
 'months`) is
 **E322**, with a hint pointing at `every = 30 'days` for an affine ~monthly
 recurrence or at an explicit calendar-listed `at [date(...), date(...), ...]`
@@ -4202,6 +4202,12 @@ not reject it.
 
 Example: `every 365.25 'days at_day 251` fires on day 251 of each year. If
 simulation starts at `t = 100`, the first fire is at `t = 251` (not `t = 351`).
+
+**In anchored mode**, `at_day` must be classified `Exact` (§2.1), as `every`
+must. `at_day` is folded to one number, so a `Calendar`-classified offset such
+as `at_day 1 'months` would mean the average month (30.436875 days) for every
+period; it is **E322**. Write the offset in `'days` or `'weeks`, or list
+calendar-aligned firings with `at [date(...), ...]`.
 
 This replaces manual `mod(t, period)` arithmetic, which silently double-fires
 when `dt` does not evenly divide the period.

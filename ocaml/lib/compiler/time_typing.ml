@@ -428,6 +428,12 @@ let hint_calendar_cadence_in_recurring =
    Use every = 30 'days for an affine ~monthly recurrence, or list \
    the calendar-aligned firings explicitly via at = [date(...), ...]."
 
+let hint_calendar_offset_in_at_day =
+  "an `at_day` offset is one fixed span from the start of every period, \
+   but a calendar month or year is 28-31 or 365-366 days depending on \
+   which one it is. Write the offset in 'days or 'weeks, or list the \
+   calendar-aligned firings explicitly via at = [date(...), ...]."
+
 let hint_calendar_width_in_covers =
   "a `covers` width is one fixed span for every row, but a calendar month \
    or year is 28-31 or 365-366 days depending on which one it is. For \
