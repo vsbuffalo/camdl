@@ -10536,6 +10536,59 @@ let test_e360_scaled_offset_from_model_time_allowed () =
        {|date("2020-03-01")|}) in
   ()
 
+(* The offset is judged by its dimension, not its spelling: any constant
+   with no unit is read silently in `time_unit`, so `5 * 2` is the same
+   refusal as `5`. The control `2 * 3 'days` carries a unit and is legal. *)
+let test_e360_unitless_constant_expression_offset () =
+  let _ = compile_expect_ok
+    (instant_arith_model {|date("2020-03-01") + 2 * 3 'days|}) in
+  expect_error_code ~code:"E360" ~contains:"bare number"
+    (instant_arith_model {|date("2020-03-01") + 5 * 2|});
+  expect_error_code ~code:"E360" ~contains:"bare number"
+    (instant_arith_model {|date("2020-03-01") + 0.5 * 10|})
+
+(* A sum of instants is the n-ary form of Instant + Instant. The control is
+   one indexed instant on its own, which is legal. *)
+let sum_of_instants_model at =
+  Printf.sprintf {|
+    time_unit = 'days
+    origin = date("2020-01-01")
+    dimensions { age = [young, old] }
+    compartments { S, I, R }
+    parameters { beta : rate  gamma : rate  t0[age] : instant }
+    transitions {
+      infection : S --> I @ beta * S * I / (S + I + R)
+      recovery  : I --> R @ gamma * I
+    }
+    init { S = 990  I = 10 }
+    interventions {
+      bump : transfer(fraction = 0.1, from = S, to = R) at [%s]
+    }
+    simulate { from = date("2020-01-01")  to = date("2021-01-01") }
+  |} at
+
+let test_e360_sum_of_instants () =
+  let _ = compile_expect_ok (sum_of_instants_model "t0[young]") in
+  expect_error_code ~code:"E360" ~contains:"adds instants"
+    (sum_of_instants_model "sum(a in age, t0[a])")
+
+(* One malformed term is one diagnostic. `t0 + 5` is refused for its bare
+   offset; the enclosing product must not be refused again as a scaled
+   instant, which would print the whole rate as the culprit. *)
+let test_e360_one_diagnostic_per_malformed_term () =
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"t"
+    (instant_arith_model ~extra_params:"t0 : instant"
+       ~rate_extra:" * (t0 + 5)" {|date("2020-03-01")|}) in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> Alcotest.fail "expected E360"
+  | Error e ->
+    Alcotest.(check int) "exactly one E360" 1
+      (count_substring ~needle:{|"code":"E360"|} e);
+    Alcotest.(check bool) "the one names the bare number" true
+      (contains_substring ~needle:"bare number" e)
+
 let test_typed_time_e320_time_unit_months_with_origin_rejected () =
   expect_error_code
     ~code:"E320"
@@ -16192,6 +16245,12 @@ let () =
         `Quick test_e360_instant_minus_instant_allowed;
       Alcotest.test_case "k * (t0 - t) in a rate is not refused (gh#1070)"
         `Quick test_e360_scaled_offset_from_model_time_allowed;
+      Alcotest.test_case "E360 unitless constant expression offset (gh#1070)"
+        `Quick test_e360_unitless_constant_expression_offset;
+      Alcotest.test_case "E360 sum of instants (gh#1070)"
+        `Quick test_e360_sum_of_instants;
+      Alcotest.test_case "E360 one diagnostic per malformed term (gh#1070)"
+        `Quick test_e360_one_diagnostic_per_malformed_term;
       (* Rule 2 (E320): time_unit = 'months/'years with origin. *)
       Alcotest.test_case "E320 time_unit = 'months with origin rejected"
         `Quick test_typed_time_e320_time_unit_months_with_origin_rejected;

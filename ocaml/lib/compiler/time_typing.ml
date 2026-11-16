@@ -243,15 +243,27 @@ let rec walk_rule1 env ~on_hit (e : expr) : unit =
    modeller's eyes. Refusing `k * (t0 - t)` on that guess would reject a
    rate that means something. A definite Instant is one built only from
    `date(...)`, `origin`, the calendar primitives, `instant`-kind
-   parameters and `let`s of those, moved only by classified durations
-   (or by a bare number, which is itself refused below). *)
+   parameters and `let`s of those, moved only by classified durations.
+   An Instant moved by a unitless number is refused at that node and is
+   not definite for the node above it, so one malformed term gives one
+   diagnostic.
+
+   A unitless offset is judged by dimension, not spelling: the caller
+   passes [~unitless], true of a constant expression whose dimension is
+   1 (`5`, `5 * 2`, `0.5 * 10`). The expander passes the same
+   `const_expr_dim` test the observation-anchor offsets use, so the two
+   paths share one rule. *)
 
 type instant_misuse =
   | InstantPlusInstant       (* Instant + Instant *)
+  | SumOfInstants            (* sum(i in d, <instant>) *)
   | ScaledInstant            (* k · Instant, Instant / k, Instant ^ k, −Instant *)
   | DurationMinusInstant     (* Duration − Instant *)
-  | InstantPlusBareNumber    (* Instant ± 5, 5 + Instant *)
+  | InstantPlusBareNumber    (* Instant ± 5, Instant + 5 * 2, 5 + Instant *)
 
+(* A numeric literal as spelled, for the W324/W325 warnings, which are
+   about how a time position is written. E360 judges by dimension
+   instead (see [~unitless] above). *)
 let is_bare_number (e : expr) : bool =
   match e with
   | EConst _ | EUnOp (Neg, EConst _) -> true
@@ -268,50 +280,49 @@ let rec is_definite_instant env (e : expr) : bool =
      | Some lb -> is_definite_instant env lb.lbody
      | None -> classify env e = TInstant)
   | EBinOp (Add, l, r) ->
-    (is_definite_instant env l
-     && (is_classified_duration (classify env r) || is_bare_number r))
-    || (is_definite_instant env r
-        && (is_classified_duration (classify env l) || is_bare_number l))
+    (is_definite_instant env l && is_classified_duration (classify env r))
+    || (is_definite_instant env r && is_classified_duration (classify env l))
   | EBinOp (Sub, l, r) ->
-    is_definite_instant env l
-    && (is_classified_duration (classify env r) || is_bare_number r)
+    is_definite_instant env l && is_classified_duration (classify env r)
   | ECond (_, a, b) -> is_definite_instant env a && is_definite_instant env b
   | EFuncCall _ -> classify env e = TInstant
   | _ -> false
 
 (* The misuse at this node, if any. Only the node itself is judged; the
    walk below visits every sub-expression. *)
-let instant_misuse_at env (e : expr) : instant_misuse option =
+let instant_misuse_at env ~unitless (e : expr) : instant_misuse option =
   let definite = is_definite_instant env in
   match e with
   | EBinOp (Add, l, r) when definite l && definite r -> Some InstantPlusInstant
-  | EBinOp ((Add | Sub), l, r) when definite l && is_bare_number r ->
+  | EBinOp ((Add | Sub), l, r) when definite l && unitless r ->
     Some InstantPlusBareNumber
-  | EBinOp (Add, l, r) when is_bare_number l && definite r ->
+  | EBinOp (Add, l, r) when unitless l && definite r ->
     Some InstantPlusBareNumber
   | EBinOp (Sub, l, r)
     when definite r
-         && (is_classified_duration (classify env l) || is_bare_number l) ->
+         && (is_classified_duration (classify env l) || unitless l) ->
     Some DurationMinusInstant
   | EBinOp ((Mul | Div | Pow), l, r) when definite l || definite r ->
     Some ScaledInstant
   | EUnOp (Neg, a) when definite a -> Some ScaledInstant
+  | ESum (_, _, _, body, _) when definite body -> Some SumOfInstants
   | _ -> None
 
-let rec walk_instant_misuse env ~on_hit (e : expr) : unit =
-  (match instant_misuse_at env e with
+let rec walk_instant_misuse env ~unitless ~on_hit (e : expr) : unit =
+  (match instant_misuse_at env ~unitless e with
    | Some m -> on_hit m e
    | None -> ());
-  List.iter (walk_instant_misuse env ~on_hit) (subexprs e)
+  List.iter (walk_instant_misuse env ~unitless ~on_hit) (subexprs e)
 
 let describe_instant_misuse = function
   | InstantPlusInstant    -> "adds two instants"
+  | SumOfInstants         -> "adds instants in a sum"
   | ScaledInstant         -> "scales an instant"
   | DurationMinusInstant  -> "subtracts an instant from a duration"
   | InstantPlusBareNumber -> "moves an instant by a bare number"
 
 let hint_instant_misuse = function
-  | InstantPlusInstant ->
+  | InstantPlusInstant | SumOfInstants ->
     "an instant is a point on the calendar; two of them do not add. \
      The difference of two instants is a duration (date(b) - date(a)), \
      and an instant plus a duration is an instant (origin + 30 'days)."
