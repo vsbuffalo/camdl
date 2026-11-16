@@ -661,20 +661,19 @@ camdl pfilter model.camdl --data cases_dated.tsv ...
   `--help` currently lists only the first three.
 - **`--time-col NAME`** selects the time column by name.
 - A dated column with no `origin` in the model → clear error.
-- **Off-grid times are governed by `obs_alignment`, not by a silent snap.**
-  Converted times need not land on the integrator step `dt`. What happens then
-  is a declared, per-algorithm choice (`fit.toml [backend]`, alongside `dt`):
-  `exact` steps to the observation time with a shortened final substep, `snap`
-  rounds onto the `dt` grid. `pfilter`, `if2` and `pmmh` default to `exact` and
-  reject `snap`; `pgas` uses a uniform grid and therefore `snap`, and rejects
-  `exact` naming the algorithms that support it. Nothing falls back silently.
-  Where snapping applies the rule is nearest, with on-grid meaning within
-  `1e-9`. Interventions and events fire on the run's own grid from `t_start`,
+- **An observation period is never moved to fit the step grid.** Converted times
+  need not land on the integrator's grid `t_start + k·dt`, measured from the
+  run's start `simulate.from`. What happens then is a property of the method,
+  not a setting. `pfilter`, `if2` and `pmmh` step exactly to every period's
+  start and end, with a shortened step where one falls between grid times.
+  `pgas` steps only on its grid, so it refuses a run in which any period starts
+  or ends off it, naming the stream, the row, its period and the two grid times
+  either side; on-grid means within `1e-9` steps of a grid time. The ODE methods
+  read their trajectory at its output times and refuse a period boundary that
+  has no output time. Interventions and events fire on the run's own grid,
   `k = ⌊(t − t_start)/dt + ½⌋` on every chain-binomial path (language spec
-  §13.2), so a snapped observation and an intervention at the same instant land
-  on the same step. The one hard error common to all is two distinct
-  observations mapping to the _same_ step (obs spacing `< dt`) — a real
-  data/`dt` mismatch.
+  §13.2). The `[config] obs_alignment` key that used to name a choice here is
+  removed; a fit config that carries it is refused.
 
 ## Getting dates back out
 

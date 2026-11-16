@@ -454,11 +454,10 @@ file digest into the method's `deps`.
 
 **Method levels and lineage.** The method level hashes the method's identity
 payload (the algorithm block and the resolved `starts` rule), the number of
-stored posterior trajectories, the target chain length, the _resolved_
-observation alignment (`exact` or `snap`, per algorithm), and the method's
-`deps` — the upstream artifacts a sourced `starts` rule consumes. Folding `deps`
-in is what makes cross-file invalidation work: a posterior file's hash contains
-the leaf its `from_mle = "@scout"` names, so regenerating the scout re-keys the
+stored posterior trajectories, the target chain length, and the method's `deps`
+— the upstream artifacts a sourced `starts` rule consumes. Folding `deps` in is
+what makes cross-file invalidation work: a posterior file's hash contains the
+leaf its `from_mle = "@scout"` names, so regenerating the scout re-keys the
 posterior. The method's path label is the algorithm's name (`if2-<h8>`,
 `pgas-<h8>`); there is no execution order among methods and nothing for an
 ordinal to encode.
@@ -2834,14 +2833,14 @@ with the serde list quoted in §6.9.
 
 `[config]` (`FitBackendConfig`, `config_v2.rs`):
 
-| key                      | type                  | default                      | meaning                                                                                                                                                                 |
-| ------------------------ | --------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `dt`                     | float                 | the model's `dt`, else `1.0` | Integrator step. A model's declared `simulate { dt }` is the step; a `[config] dt` that differs is refused, an agreeing one accepted. A top-level `dt` is a load error. |
-| `obs_alignment`          | `"exact"` \| `"snap"` | algorithm's own              | How observation times relate to the `dt` grid. Resolved per algorithm (§6.5); an unsupported request errors.                                                            |
-| `allow_degenerate_rates` | bool                  | `false`                      | Treat a numerical collapse in a rate expression (div-by-zero, `Pow`→NaN, `Sqrt` of a negative) as `0.0`.                                                                |
+| key                      | type  | default                      | meaning                                                                                                                                                                 |
+| ------------------------ | ----- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dt`                     | float | the model's `dt`, else `1.0` | Integrator step. A model's declared `simulate { dt }` is the step; a `[config] dt` that differs is refused, an agreeing one accepted. A top-level `dt` is a load error. |
+| `allow_degenerate_rates` | bool  | `false`                      | Treat a numerical collapse in a rate expression (div-by-zero, `Pow`→NaN, `Sqrt` of a negative) as `0.0`.                                                                |
 
 `[config] backend` was relocated to `[synthetic] backend` (gh#241) and is
-rejected with a migration message.
+rejected with a migration message. `[config] obs_alignment` is removed (§6.5)
+and refused with a message saying so.
 
 `[data]` (`DataSpec`, `config_v2.rs`):
 
@@ -3129,11 +3128,20 @@ out not to be computable at some θ the search reaches, that chain fails with th
 reason and the θ rather than scoring the point badly and continuing — L-BFGS has
 no direction to search in there.
 
-**Observation alignment.** `[config] obs_alignment` is resolved per algorithm
-(`resolve_obs_alignment`, `methods.rs`). `if2` and `pfilter` step exactly to
-observation times and reject `"snap"`. `pgas` uses a uniform grid and rejects
-`"exact"`. `pmmh` is exact. The ODE algorithms score on the integrator grid and
-reject the key entirely.
+**Observation periods and the step grid.** Where a method can place an observed
+period's start and end is a capability of the method, recorded in the `METHODS`
+registry (`PeriodBoundaries`, `methods.rs`), not a setting. `if2`, `pfilter` and
+`pmmh` step exactly to every start and end, with a shortened step where one
+falls between grid times. `pgas` steps only on its grid `t_start + k·dt`: once
+the method is known, `FitRunConfig::build` checks every row's period, held-out
+rows included, measured from `t_start`, and refuses the run if any start or end
+lies off the grid (within `schedule::GRID_TOL`), naming the stream, the row, its
+period and the two grid times either side
+(`runner::refuse_periods_off_the_grid`). The ODE algorithms read the trajectory
+at its output times and refuse a boundary with no output time. No method moves a
+period. The `[config] obs_alignment` key that used to name a choice here is
+removed; a config carrying it is refused before parsing, with a message saying
+so.
 
 **IC-free support.** `ic_free = true` is honored by `if2`, and by `pfilter` /
 `pmmh` on a model whose `init { }` declares a law
@@ -4644,7 +4652,7 @@ over-invalidation.
 
 One pinned function and encoding, in `rust/crates/runid/src/hash.rs`:
 
-- SHA-256, recorded by `HASH_VERSION` (currently `1`), folded into every root
+- SHA-256, recorded by `HASH_VERSION` (currently `4`), folded into every root
   hash so the whole store migrates on a single bump.
 - **Domain separation.** Every named type writes its fully-qualified type name
   (length-prefixed) then its `SCHEMA_VERSION` before any field.
@@ -4779,10 +4787,8 @@ different models (the `model` level; `config` is unchanged).
 - `method` — `MethodLevel` = `MethodConfig` folded with `deps`. `MethodConfig`
   carries the digest of `Method::identity_payload()` — the algorithm block and
   the resolved `starts` rule — re-augmented with `n_trajectories`, plus
-  `target_length` and the **resolved** (not requested) observation-time
-  alignment (`Exact` vs `Snap`). Folding `deps` here is what makes a posterior
-  file re-key when the scout its `starts` names changes. The label is the
-  algorithm's name.
+  `target_length`. Folding `deps` here is what makes a posterior file re-key
+  when the scout its `starts` names changes. The label is the algorithm's name.
 - `seed` — the resolved fit RNG seed.
 
 `Method::identity_payload()` deliberately omits the _extension dimension_ (PGAS
@@ -5000,7 +5006,7 @@ from scratch with --force.
 
 Because the key is the run's identity, it covers every input that re-keys a fit
 (`[config]` with its `dt`, the scenario, `ic_free`, the holdout,
-`n_trajectories`, the resolved observation alignment) and nothing else.
+`n_trajectories`) and nothing else.
 
 ### 9.5 run.json — the per-run metadata contract
 
