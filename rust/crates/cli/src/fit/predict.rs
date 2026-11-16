@@ -3015,15 +3015,17 @@ fn load_leaf_obs(
         };
         let siblings: Vec<&ir::observation::ObservationModel> =
             model.observations.iter().filter(|o| o.source == obs_model.source).collect();
-        let (obs, cells, aux) =
+        let rows =
             crate::fit::runner::load_observations(data_path, obs_model, &siblings, dt, &time_opts)?;
-        let times: Vec<f64> = obs.iter().map(|o| o.time).collect();
-        let projection = sim::inference::multi_stream_obs::StreamProjection::from_ir(
+        // Resolved only to refuse a projection the compiled model cannot
+        // resolve; the rows already carry what they measure.
+        sim::inference::multi_stream_obs::StreamProjection::from_ir(
             &obs_model.projection, compiled, &obs_model.name,
         )?;
-        let stream_times = crate::fit::runner::load_stream_times(
-            data_path, obs_model, &projection, &times, &time_opts,
-        )?;
+        let stream_times =
+            crate::pfilter::stream_times_of_rows(obs_model, &rows, data_path, &time_opts)?;
+        let (obs, cells, aux) = crate::fit::runner::observation_columns(rows);
+        let times: Vec<f64> = obs.iter().map(|o| o.time).collect();
         let observed: Vec<Option<f64>> = cells
             .iter()
             .map(|c| c.as_ref().map(|cell| match cell {
@@ -3784,16 +3786,11 @@ fn one_step_bands(
         };
         let siblings: Vec<&ir::observation::ObservationModel> =
             model.observations.iter().filter(|o| o.source == obs_model.source).collect();
-        let (obs, cells, aux) =
+        let rows =
             crate::fit::runner::load_observations(data_path, obs_model, &siblings, dt, &time_opts)?;
         let projection = StreamProjection::from_ir(&obs_model.projection, &compiled, &obs_model.name)?;
-        let times = crate::fit::runner::load_stream_times(
-            data_path,
-            obs_model,
-            &projection,
-            &obs.iter().map(|o| o.time).collect::<Vec<f64>>(),
-            &time_opts,
-        )?;
+        let times = crate::pfilter::stream_times_of_rows(obs_model, &rows, data_path, &time_opts)?;
+        let (obs, cells, aux) = crate::fit::runner::observation_columns(rows);
         obs_streams.push(ObsStream {
             name: obs_model.name.clone(),
             projection,

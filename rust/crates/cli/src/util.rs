@@ -1750,7 +1750,7 @@ pub fn format_unbound_streams_warning(
 /// Returns `Ok(())` when every observation is at or after the origin. An
 /// observation exactly AT the origin is allowed here; whether an incidence row
 /// there can be scored is judged from the period it covers, by
-/// `pfilter::stream_times_for`.
+/// `pfilter::stream_times_of_rows`.
 ///
 /// "Strictly before" is judged with the same 1e-9 tolerance the loaders use
 /// for obs-time comparisons, so a time a float-ULP below the origin is treated
@@ -1761,7 +1761,7 @@ pub fn format_unbound_streams_warning(
 /// by hand on a model where every other time is a calendar date. `dated` is a
 /// closure because answering it costs a re-read of the column
 /// ([`crate::pfilter::stream_cells_were_dated`]) and only the error path needs
-/// the answer — the same shape `pfilter::stream_times_for`'s two refusals use.
+/// the answer — the same shape `pfilter::stream_times_of_rows`'s two refusals use.
 pub fn check_obs_before_origin(
     stream_name: &str,
     t_start: f64,

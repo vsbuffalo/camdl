@@ -113,6 +113,28 @@ pub fn cells_are_dated(cells: &[&str], opts: &TimeOpts) -> bool {
         })
 }
 
+/// One temporal cell as the file wrote it: a number, or an ISO date
+/// (`YYYY-MM-DD`). Kept beside the model time it converts to, which depends on
+/// the model's `origin` and `time_unit`; the cell itself does not.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TemporalCell {
+    Number(f64),
+    Date(String),
+}
+
+/// The cells of one temporal column, already converted to `times` by
+/// [`convert_time_column`], as written. A column [`cells_are_dated`] calls
+/// dated gives each cell's trimmed text; a numeric one gives each cell's
+/// number, which is its converted time, since a numeric column converts by
+/// parsing.
+pub fn cells_as_written(cells: &[&str], times: &[f64], opts: &TimeOpts) -> Vec<TemporalCell> {
+    if cells_are_dated(cells, opts) {
+        cells.iter().map(|c| TemporalCell::Date(c.trim().to_string())).collect()
+    } else {
+        times.iter().map(|&t| TemporalCell::Number(t)).collect()
+    }
+}
+
 /// Quote an internal time back to the modeller the way the file states it: as
 /// an ISO date when the column was dated and the model carries the `origin` to
 /// render through, and as the bare number otherwise.
