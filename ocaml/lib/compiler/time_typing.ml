@@ -419,6 +419,18 @@ let hint_calendar_width_in_covers =
    which state each row's own boundaries; for a fixed span write the width \
    in 'days or 'weeks."
 
+let hint_calendar_span_in_trigger span =
+  let rule =
+    "a trigger's `window`, `after` and `cooldown` are each folded to one \
+     fixed span, but a calendar month or year is 28-31 or 365-366 days \
+     depending on which one it is."
+  in
+  match span with
+  | Some (days, rendered) ->
+    Printf.sprintf "%s State it in 'days or 'weeks: %d 'days (≈ %s)."
+      rule days rendered
+  | None -> rule ^ " State it in 'days or 'weeks, which are fixed spans."
+
 let hint_bare_numeric_on_periodic =
   "bare-numeric entries in `on=[...]` of a periodic forcing under an \
    anchored model are interpreted as internal-time units from origin. \

@@ -4326,6 +4326,11 @@ policy fires, its effect is enqueued at `trigger_time + after`, and `cooldown`
 is measured from the **trigger time** (when the predicate crossed), not from the
 delayed effect time.
 
+`window`, `after` and `cooldown` are each folded to one fixed span at compile
+time. Under `origin = date(...)` a calendar duration in any of them
+(`after = 1 'months`) is **E321**: a calendar month is 28 to 31 days, so the
+span is stated in `'days` or `'weeks`.
+
 The trigger always reads **reported surveillance** — the realized observation
 draw at each emission boundary — never latent model state. Reactive policies run
 only on the chain-binomial *forward* backend, which has no particle ensemble

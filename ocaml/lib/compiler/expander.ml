@@ -12045,6 +12045,48 @@ let check_surface_time_typing ctx =
   check_iv_list ctx.interv_decls ~label:"intervention";
   check_iv_list ctx.event_decls  ~label:"event";
 
+  (* ── reactive interventions: trigger window, after, cooldown ─────────
+     gh#1101: `sum_observed(..., window = w)` is a fixed span and `after` /
+     `cooldown` are offsets from a firing instant; `expand_reactive` folds
+     each to one number. Under an origin a calendar duration would silently
+     become the average month or year (E321, the reasoning gh#1069 applied
+     to a `covers` width). *)
+  (if anchored then
+    let rec trigger_windows acc (e : expr) =
+      match e with
+      | EFuncCall ("sum_observed", args) ->
+        List.fold_left (fun acc (k, a) ->
+          if k = "window" then a :: acc else acc) acc args
+      | EBinOp (_, a, b) -> trigger_windows (trigger_windows acc a) b
+      | EUnOp (_, a) -> trigger_windows acc a
+      | _ -> acc
+    in
+    let rec pred_windows acc = function
+      | TgAtom e -> trigger_windows acc e
+      | TgAnd (a, b) | TgOr (a, b) -> pred_windows (pred_windows acc a) b
+      | TgNot a -> pred_windows acc a
+    in
+    List.iter (fun (rx : reactive_decl) ->
+      let loc = diag_loc_of_ast_ctx ctx rx.rxloc in
+      let check field e =
+        match Time_typing.classify env e with
+        | Time_typing.TCalendar ->
+          Diagnostics.error ctx.diags
+            ~code:"E321"
+            ~loc
+            ~message:(Printf.sprintf
+              "reactive intervention '%s': calendar duration `%s` as `%s`"
+              rx.rxname (Time_typing.show_short e) field)
+            ~hint:(Time_typing.hint_calendar_span_in_trigger
+                    (calendar_span_days e))
+            ()
+        | _ -> ()
+      in
+      List.iter (check "window") (List.rev (pred_windows [] rx.rxwhen));
+      Option.iter (check "after") rx.rxafter;
+      Option.iter (check "cooldown") rx.rxcooldown
+    ) ctx.reactive_decls);
+
   (* ── observations: schedule expressions ─────────────────────────────── *)
   List.iter (fun (od : obs_decl) ->
     let loc = diag_loc_of_ast_ctx ctx od.oloc in
