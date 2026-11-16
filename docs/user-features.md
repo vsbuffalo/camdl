@@ -86,7 +86,8 @@ let latent = 1 'months              # affine 30.44 days as a length
 # (c) Calendar stepping (anchored mode only)
 let mid_year       = add_calendar_months(origin, 6)
 let school_quarter = date_range(origin, date("2025-01-01"), calendar_months = 3)
-                                   # 21 quarterly breakpoints, calendar-aligned
+                                   # 20 quarterly breakpoints, calendar-aligned,
+                                   # and a W328: 2025-01-01 is not on the cadence
 
 simulate { from = origin to = add_calendar_years(origin, 5) }
 ```

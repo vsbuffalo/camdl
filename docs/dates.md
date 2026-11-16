@@ -495,6 +495,107 @@ positions.
 In unanchored mode, a reference to `origin` is **E327** (same family as
 `add_calendar_*` in unanchored mode).
 
+## Generating a list of dates with `date_range`
+
+An intervention that repeats (a campaign every quarter) would otherwise need its
+dates written out one by one. `date_range(...)` generates them at compile time.
+In an intervention's `at [...]` list it splices its entries into the list in
+place. It needs an anchored model: `origin` as `start` and a calendar cadence
+are both **E327** without one. Write an `origin` before using any form. A
+`date(...)` start with an `every` cadence in an unanchored model is not rejected
+today and puts every entry at time 0 (gh#1123).
+
+A call has a `start`, a way to say where the list stops, and one cadence.
+
+- **`start`** is the first positional argument: a `date(...)` literal, `origin`,
+  or an `add_calendar_*` call. It is always the first entry.
+- **The stop** is either an `end` instant (the second positional argument) or
+  `count = N`. Give exactly one.
+- **The cadence** is exactly one of `every = D`, `calendar_months = N` or
+  `calendar_years = N`. `every` takes a duration in `'days` or `'weeks`;
+  calendar steps take a positive whole number.
+
+```camdl
+date_range(date("2020-01-01"), count = 3, every = 7 'days)
+    # 2020-01-01  2020-01-08  2020-01-15  2020-01-22
+
+date_range(origin, count = 3, calendar_months = 3)
+    # origin = 2020-01-01:  2020-01-01  2020-04-01  2020-07-01  2020-10-01
+
+date_range(date("2020-01-01"), date("2020-10-01"), calendar_months = 3)
+    # the same four dates, stopping at `end`
+```
+
+**`count` is the number of steps, so `count = N` gives N + 1 entries.** The
+`start` is entry 0 and the entries after it are steps 1 to N. The first example
+above has `count = 3` and four dates.
+
+**A calendar entry is counted from `start`, not from the entry before it.**
+Entry _i_ of a `calendar_months = k` range is
+`add_calendar_months(start, i * k)`. This matters when `start` falls on a day
+that some months lack. Stepping from the previous entry would clamp to 29
+February and then stay on the 29th; counting from `start` returns to the 31st
+whenever the month has one (see the clamping rule above):
+
+```camdl
+date_range(date("2020-01-31"), count = 4, calendar_months = 1)
+    # 2020-01-31  2020-02-29  2020-03-31  2020-04-30  2020-05-31
+date_range(date("2020-02-29"), count = 4, calendar_years = 1)
+    # 2020-02-29  2021-02-28  2022-02-28  2023-02-28  2024-02-29
+```
+
+The start-and-end form gives the same entries as the count form would, cut off
+at `end`: it keeps every entry that is on or before `end`. An `every` cadence
+steps a fixed number of days, so for it the question of where to count from does
+not arise.
+
+**An `end` that is not on the cadence is not added.** The range stops at the
+last entry on or before `end`, and the compiler warns with **W328** that the
+list does not reach `end`:
+
+```camdl
+date_range(date("2020-01-01"), date("2020-02-01"), every = 2 'weeks)
+    # 2020-01-01  2020-01-15  2020-01-29, plus W328: `end = 2020-02-01` does not
+    # land on a cadence boundary from `start = 2020-01-01`
+```
+
+If you wanted `2020-02-01` in the list, write it next to the call:
+`at [date_range(...), date("2020-02-01")]`.
+
+`inclusive_end = false` silences W328, and that is all it does today: an `end`
+that is on the cadence is still the last entry, whichever way `inclusive_end` is
+set (gh#1100). Setting `inclusive_end` to either value also currently draws a
+spurious **W203** from the compiler, which does not affect the compiled model
+(gh#1116).
+
+The errors are **E328** for an argument that does not fit the shapes above
+(missing `start`, no cadence or two, both `end` and `count`, `every` in
+`'months`, an unknown keyword) and **E329** for a cadence that is zero or
+negative or for `count < 1`. In an unanchored model, a calendar cadence is
+**E327**; use `every` there.
+
+A complete model that uses it:
+
+```camdl
+time_unit = 'days
+origin    = date("2020-01-01")
+
+compartments { S, V }
+parameters { N0 : count }
+
+transitions { leak : S --> V @ 0.0 'per_day * S }
+
+interventions {
+  # A booster every quarter for a year: origin plus three quarterly steps.
+  booster : transfer(from = S, to = V, fraction = 0.1)
+    at [date_range(origin, count = 3, calendar_months = 3)]
+}
+
+init { S = N0 }
+
+simulate { from = origin  to = add_calendar_years(origin, 2) }
+```
+
 ## The one rule
 
 **Calendar structure is erased at the compiler and data-loader boundary.** The
