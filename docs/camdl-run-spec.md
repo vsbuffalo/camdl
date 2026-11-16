@@ -6847,13 +6847,13 @@ Pairing guidance:
 incidence stream states what its rows cover (`covers`, or `window_start` /
 `window_stop` columns — `docs/camdl-data-spec.md`), so each row's period is
 known at load. A row whose period opens before `t_start` would be scored against
-flow that was never simulated; the loader (`pfilter::stream_times_for`) refuses
-it before the filter runs, naming the period's start and `t_start`, and the fix
-is to move `simulate.from` back or drop the rows the model cannot cover. Under
-`closing_at(time, Δ)` a row labelled `t_start` is exactly this case. A hole
-(`NA`) whose period opens before the run carries nothing to score and is dropped
-instead. There is no zero-width bin to reason about: a row's period is never
-inferred from its neighbours.
+flow that was never simulated; the loader (`pfilter::stream_times_of_rows`)
+refuses it before the filter runs, naming the period's start and `t_start`, and
+the fix is to move `simulate.from` back or drop the rows the model cannot cover.
+Under `closing_at(time, Δ)` a row labelled `t_start` is exactly this case. A
+hole (`NA`) whose period opens before the run carries nothing to score and is
+dropped instead. There is no zero-width bin to reason about: a row's period is
+never inferred from its neighbours.
 
 **The startup block prints the pairing — for two of the algorithms.** `pgas` and
 `pmmh` print each stream's projection kind and likelihood family before running,
