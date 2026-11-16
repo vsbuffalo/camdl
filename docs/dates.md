@@ -692,18 +692,35 @@ camdl pfilter model.camdl --data cases_dated.tsv ...
   the same date (gh#108). The suffix is a fractional-day delta, deliberately
   _not_ the `YYYY-MM-DDTHH:MM` datetime form (datetimes are out of scope — see
   "Not supported (yet)" below); a consumer grouping on the date column can split
-  on `+` to recover the calendar day.
+  on `+` to recover the calendar day. The fraction is written to six decimals
+  when that reads back to `t` exactly (quarter and half days), and otherwise in
+  full, as the shortest decimal that does: an hourly grid's `t = 1/24` is
+  `2020-02-28+0.041666666666666664d`, not `+0.041667d`, which would read back as
+  a different time.
+- **Every stored artifact carries a `calendar` block**
+  `{"days_per_unit", "origin", "time_unit"}`: a simulation leaf's `run.json`,
+  `fit.meta.json`, and the predictive, observed, quantities and trajectory
+  sidecar manifests. A consumer dates a numeric `t` as
+  `origin + t · days_per_unit` days, without the model source; `origin` is
+  `null` for a model without one.
+- **Prequential output and the worst-scored table**
+  (`camdl pfilter
+  --save-prequential`, `fit run`'s pfilter method) add a
+  `date` column after `t` when the model has an origin, written the same way.
 - **`camdl fit summary`** renders `instant`-kind estimands as dates when the
   model has an `origin` (e.g. `tau = 23.0  (2020-02-13)`); `duration` estimands
   render as spans. Numeric `t` stays the canonical, diff-stable value. A point
   estimate is a single value (never a column joined on), so its date annotation
   rounds to the nearest whole day for readability.
 
-**camdl cannot read this column back.** The `+0.25d` suffix is emitted by
-`--dates` and rejected by the `--data` loader, with an error that misattributes
-the cause to time-of-day support (gh#839). Under a sub-day `dt`, treat `--dates`
-output as for reading, not as input; the numeric `t` column round-trips
-correctly.
+**Every date camdl writes reads back to the time it was written from.** The
+`--data` loader accepts the `+<frac>d` suffix, so a `--dates` column loads as a
+dated time column and each cell lands on the exact model time it was rendered
+from (gh#839). Under `'days` this holds for every time. Under `'weeks` a date is
+read as days / 7, and a time that is not such a quotient of any floating-point
+number of days has no exact days offset: it reads back to the adjacent
+floating-point number. A malformed suffix (`+1.5d`, `+0d`) is refused as camdl's
+own sub-day form, by name.
 
 ## International / multi-source data
 
@@ -860,9 +877,8 @@ behaves differently, each tracked:
 
 | deviation                                                                                                                                                                                                                                        | issue  |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------ |
-| `--dates` emits `YYYY-MM-DD+0.25d` for sub-day times, which camdl's own `--data` loader rejects, with an error naming the wrong cause.                                                                                                           | gh#839 |
 | A duration literal in an instant position (`to = 600 'months`) is accepted and read as an origin-relative coordinate, contradicting the Instant/Duration rule stated above. Retained for migration compatibility; do not write it in new models. | gh#847 |
-| The CAS leaf carries no `date` column or calendar metadata, so a stored run cannot be mapped back to dates without its source model.                                                                                                             | gh#838 |
+| The CAS leaf's `traj.tsv` carries no `date` column; its `run.json` carries the `calendar` block that maps `t` to dates.                                                                                                                          | gh#838 |
 | Observation-alignment errors on a dated file report bare model time and suggest numeric fixes.                                                                                                                                                   | gh#842 |
 | `--time-format internal-days` is accepted as an alias for `numeric`, but the name is misleading when `time_unit` is not days, and `--help` omits it.                                                                                             | —      |
 

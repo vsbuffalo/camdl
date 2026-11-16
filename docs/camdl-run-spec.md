@@ -535,7 +535,9 @@ the config's `[config] dt`, else 1.0) and `integrator` (the ODE integrator the
 model declares, `{"method": "rk4"}` when it declares none — what an ODE-backend
 run integrated with), which a replay of the fit's parameters runs on by default
 (§3.4; a sidecar written before these were recorded lacks them, and a replay
-recovers them from the archived config and model), `schema` (the
+recovers them from the archived config and model), `calendar` (the model's
+calendar axis, §2.2.2's block, so the fit's model times can be dated without the
+model; absent from a sidecar written before it was recorded), `schema` (the
 observation/dimension schema below), and `docs` (the model's `#'` documentation
 dictionary, keyed by declaration name, so a consumer can label any output
 column).
@@ -867,9 +869,10 @@ the chains it drops: on a six-chain fit `--chains 0,1,2,4` and
 names every chain of the fit selects nothing and is refused.
 
 **Calendar semantics travel with the artifact.** `predictive.json`,
-`observed.json`, `quantities.json`, and the per-chain `trajectories.json` each
-carry a top-level `calendar` block, produced by one shared emitter so every
-exporter agrees:
+`observed.json`, `quantities.json`, the per-chain `trajectories.json`, a
+simulation leaf's `run.json` (§9.5) and `fit.meta.json` each carry a top-level
+`calendar` block, written through one type (`ir::caltime::CalendarAxis`) so
+every artifact agrees:
 
 ```jsonc
 "calendar": { "time_unit": "days", "origin": "1910-01-01", "days_per_unit": 1.0 }
@@ -887,7 +890,10 @@ with `months`/`years`, E320), so wherever there is an `origin` to map,
 rendered `date` column. The model's internal `origin_rata_die` is deliberately
 not exported: it is keyed to camdl's own epoch and would mislead a consumer that
 read it as a Julian or Rata day number. Numeric `time` stays the canonical,
-diff-stable axis; `calendar` is additive metadata, not a re-encoding of it.
+diff-stable axis; `calendar` is additive metadata, not a re-encoding of it. A
+date camdl renders from the axis (`--dates`, the prequential `date` column)
+loads back through `--data` to the time it was rendered from (`docs/dates.md`,
+"Getting dates back out").
 
 #### 2.2.3 Which object a quantity is read on
 
@@ -2855,9 +2861,9 @@ A holdout declaration is applied when the fit loads its data
 its bound data through the same function, and `survey --fit` removes the rows
 after a `holdout_after` cutoff resolved by the same function
 (`resolve_holdout_cutoff`) and checks `[data.holdout]` files by the same rule
-(`check_holdout_files`); the cutoff enters the profile's base identity and
-the survey's `config` level, omitted without one. `pfilter` and `compare`'s
-holdout scoring see the full series.
+(`check_holdout_files`); the cutoff enters the profile's base identity and the
+survey's `config` level, omitted without one. `pfilter` and `compare`'s holdout
+scoring see the full series.
 
 - `holdout_after` is a bare model time, a date, or an observation-anchored
   expression (`last_obs - 6 weeks`; anchors resolve over the union of the bound
@@ -4259,10 +4265,12 @@ in place of a verdict (§6.6). To keep R̂ meaningful, start from the priors (dr
 `prequential.tsv` (one row per scored step: `t`, the joint `log_score`, `ess`),
 `prequential.streams.tsv` (one row per step and scored stream: `t`, `stream`,
 `y_obs`, the predictive band `y_pred_q05`…`y_pred_q95`, `log_score`, `crps`,
-`pit`) and `prequential.json`; the JSON is what `camdl compare` reads to score
-fits against each other. CRPS and PIT are in the per-stream file only: a step
-has no single observed quantity across streams to score them against, and a
-stream's `log_score` rows do not sum to the joint one.
+`pit`) and `prequential.json`. When the model declares an `origin`, both TSVs
+carry a `date` column after `t`, and the surprise table below a `date` column
+after `t`, each the step's instant as `--dates` writes it; the JSON is what
+`camdl compare` reads to score fits against each other. CRPS and PIT are in the
+per-stream file only: a step has no single observed quantity across streams to
+score them against, and a stream's `log_score` rows do not sum to the joint one.
 
 Beneath the `prequential:` line, whenever at least one observation was scored,
 the filter prints the **surprise table**: the five worst-scored observations of
@@ -4735,15 +4743,16 @@ different models (the `model` level; `config` is unchanged).
 `runid::inputs`):
 
 - `model` — `ModelDigest` (§9.2.3). Label: the model file stem.
-- `config` — `SimConfig`, `schema_version = 5`: `backend`
+- `config` — `SimConfig`, `schema_version = 6`: `backend`
   (gillespie/chain_binomial/ode), `dt`, `t_start`, `t_end`, the resolved output
   schedule (`Regular { start, step }` or `AtTimes([…])`), `calendar` (a
   placeholder always `Numeric` today), `allow_degenerate_rates`, `no_flows`, the
   `columns` allow-list as a sorted set, and `init_state`. The schema version is
   also where the leaf's _file format_ enters the key: version 5 changed no
   field, it re-keyed every sim leaf because `traj.tsv` gained `t_start`/`t_stop`
-  (§10.1) and a key must not name bytes a recompute no longer reproduces. Label:
-  `{backend}-dt{dt}`.
+  (§10.1) and a key must not name bytes a recompute no longer reproduces;
+  version 6 likewise re-keyed every sim leaf because its `run.json` gained the
+  `calendar` block (§9.5). Label: `{backend}-dt{dt}`.
 - `params` — `ResolvedParams`: the resolved base parameter map
   (`BTreeMap<ParamId, FiniteF64>`, i.e. compiled-in values overlaid by
   `--params` then `--param`, plus any sweep point) and the SHA-256 **content**
@@ -4795,9 +4804,9 @@ pfilter path hashes the _resolver's_ model (scenario already applied), unlike
 
 **`Survey` `config`** digests
 `{eval_method, eval_particles, eval_replicates,
-data, fixed, scenario}`, plus `objective` when it is conditional (`ic_free`)
-and `holdout_after` (the resolved cutoff) when the fit config declares one;
-`box` digests `{bounds, n_points}`.
+data, fixed, scenario}`, plus
+`objective` when it is conditional (`ic_free`) and `holdout_after` (the resolved
+cutoff) when the fit config declares one; `box` digests `{bounds, n_points}`.
 
 **Lineage.** `deps` is a set of `ArtifactRef { run_id, kind, artifact, digest }`
 hashed **sorted by `run_id`** (the one documented exception to the
@@ -5067,6 +5076,7 @@ A real `sims/` leaf record (hashes and paths abbreviated):
       ]
     }
   },
+  "calendar": { "days_per_unit": 1.0, "origin": "2020-03-01", "time_unit": "days" },
   "provenance": {
     "argv": [
       "<camdl>",
@@ -5083,6 +5093,10 @@ A real `sims/` leaf record (hashes and paths abbreviated):
   }
 }
 ```
+
+A `sims/` leaf always carries `calendar`, the model's calendar axis (§2.2.2):
+with it, the `t` column of `traj.tsv` maps to dates without the model source,
+and a model with no `origin` records `"origin": null`. Other kinds omit it.
 
 A `fits/` method leaf adds `deps` (when its `starts` consumed a source), nests
 artifact keys (`chain_0/trace.tsv`), keys per-chain schema entries under a `{n}`
