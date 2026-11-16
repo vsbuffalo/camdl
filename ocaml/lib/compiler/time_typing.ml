@@ -36,7 +36,11 @@
    through the LUB propagation rule below because `let` references
    classify recursively through the binding's body.
 
-   In unanchored mode (no `origin` declared) the rule is vacuous:
+   E360 (gh#1070) refuses the arithmetic an Instant does not have:
+   Instant + Instant, k · Instant, Duration − Instant, and an Instant
+   moved by a bare number. See `walk_instant_misuse`.
+
+   In unanchored mode (no `origin` declared) the rules are vacuous:
    we never emit a diagnostic, because the torsor refinement is
    inactive — see proposal §1.1, decision of record. *)
 
@@ -191,6 +195,21 @@ let rec classify env (e : expr) : tclass =
 
 (* ── Sink walk: Rule 1 at Instant ± Duration nodes ──────────────────── *)
 
+(* The direct sub-expressions of a node, for the walks below that judge
+   each node on its own and then descend. Observation accesses and
+   contrast operands are leaves. *)
+let subexprs (e : expr) : expr list =
+  match e with
+  | EConst _ | EUnit _ | EIdent _ | EObsAccess _ | ERunMember _ -> []
+  | EIndex (_, items, _) ->
+    List.map (function IPosn e | INamed (_, e) -> e) items
+  | EBinOp (_, l, r) | ERange (l, r) -> [l; r]
+  | EUnOp (_, a) -> [a]
+  | ECond (p, a, b) -> [p; a; b]
+  | ESum (_, _, _, body, _) -> [body]
+  | EFuncCall (_, args) -> List.map snd args
+  | EList items -> items
+
 (* Walk an expression and call [on_hit] at every Add/Sub node whose
    operands trigger the rule: Instant ± Calendar-duration in
    anchored mode.
@@ -208,32 +227,105 @@ let rec walk_rule1 env ~on_hit (e : expr) : unit =
         on_hit ~lhs:l ~rhs:r
       | _ -> ())
    | _ -> ());
-  walk_subexprs env ~on_hit e
+  List.iter (walk_rule1 env ~on_hit) (subexprs e)
 
-and walk_subexprs env ~on_hit (e : expr) : unit =
+(* ── Instant arithmetic: the forms with no meaning (E360, gh#1070) ──── *)
+
+(* Under an origin an Instant is a point on the calendar. The algebra is
+   a torsor: an Instant moves by a duration, and the difference of two
+   Instants is a duration. Nothing else is defined. `classify` answers
+   these forms with TInstant (or TOther) and lets them through, so the
+   refusal is a separate walk.
+
+   The check fires only on a *definite* Instant. `classify` treats model
+   time `t` (and any parameter without a time kind) as TOther, so
+   `t0 - t` classifies as TInstant although it is a duration in the
+   modeller's eyes. Refusing `k * (t0 - t)` on that guess would reject a
+   rate that means something. A definite Instant is one built only from
+   `date(...)`, `origin`, the calendar primitives, `instant`-kind
+   parameters and `let`s of those, moved only by classified durations
+   (or by a bare number, which is itself refused below). *)
+
+type instant_misuse =
+  | InstantPlusInstant       (* Instant + Instant *)
+  | ScaledInstant            (* k · Instant, Instant / k, Instant ^ k, −Instant *)
+  | DurationMinusInstant     (* Duration − Instant *)
+  | InstantPlusBareNumber    (* Instant ± 5, 5 + Instant *)
+
+let is_bare_number (e : expr) : bool =
   match e with
-  | EConst _ | EUnit _ | EIdent _ -> ()
-  | EIndex (_, items, _) ->
-    List.iter (fun ii ->
-      match ii with
-      | IPosn e          -> walk_rule1 env ~on_hit e
-      | INamed (_, e)    -> walk_rule1 env ~on_hit e
-    ) items
-  | EBinOp (_, l, r) ->
-    walk_rule1 env ~on_hit l; walk_rule1 env ~on_hit r
-  | EUnOp (_, a) -> walk_rule1 env ~on_hit a
-  | ECond (p, a, b) ->
-    walk_rule1 env ~on_hit p;
-    walk_rule1 env ~on_hit a;
-    walk_rule1 env ~on_hit b
-  | ESum (_, _, _, body, _) -> walk_rule1 env ~on_hit body
-  | EFuncCall (_, args) ->
-    List.iter (fun (_, e) -> walk_rule1 env ~on_hit e) args
-  | EList items -> List.iter (walk_rule1 env ~on_hit) items
-  | ERange (a, b) ->
-    walk_rule1 env ~on_hit a; walk_rule1 env ~on_hit b
-  | EObsAccess _ -> ()
-  | ERunMember _ -> ()   (* leaf — no sub-expressions to walk *)
+  | EConst _ | EUnOp (Neg, EConst _) -> true
+  | _ -> false
+
+let is_classified_duration = function
+  | TExact | TCalendar -> true
+  | TInstant | TOther  -> false
+
+let rec is_definite_instant env (e : expr) : bool =
+  match e with
+  | EIdent (name, _) | EIndex (name, _, _) ->
+    (match Hashtbl.find_opt env.let_tbl name with
+     | Some lb -> is_definite_instant env lb.lbody
+     | None -> classify env e = TInstant)
+  | EBinOp (Add, l, r) ->
+    (is_definite_instant env l
+     && (is_classified_duration (classify env r) || is_bare_number r))
+    || (is_definite_instant env r
+        && (is_classified_duration (classify env l) || is_bare_number l))
+  | EBinOp (Sub, l, r) ->
+    is_definite_instant env l
+    && (is_classified_duration (classify env r) || is_bare_number r)
+  | ECond (_, a, b) -> is_definite_instant env a && is_definite_instant env b
+  | EFuncCall _ -> classify env e = TInstant
+  | _ -> false
+
+(* The misuse at this node, if any. Only the node itself is judged; the
+   walk below visits every sub-expression. *)
+let instant_misuse_at env (e : expr) : instant_misuse option =
+  let definite = is_definite_instant env in
+  match e with
+  | EBinOp (Add, l, r) when definite l && definite r -> Some InstantPlusInstant
+  | EBinOp ((Add | Sub), l, r) when definite l && is_bare_number r ->
+    Some InstantPlusBareNumber
+  | EBinOp (Add, l, r) when is_bare_number l && definite r ->
+    Some InstantPlusBareNumber
+  | EBinOp (Sub, l, r)
+    when definite r
+         && (is_classified_duration (classify env l) || is_bare_number l) ->
+    Some DurationMinusInstant
+  | EBinOp ((Mul | Div | Pow), l, r) when definite l || definite r ->
+    Some ScaledInstant
+  | EUnOp (Neg, a) when definite a -> Some ScaledInstant
+  | _ -> None
+
+let rec walk_instant_misuse env ~on_hit (e : expr) : unit =
+  (match instant_misuse_at env e with
+   | Some m -> on_hit m e
+   | None -> ());
+  List.iter (walk_instant_misuse env ~on_hit) (subexprs e)
+
+let describe_instant_misuse = function
+  | InstantPlusInstant    -> "adds two instants"
+  | ScaledInstant         -> "scales an instant"
+  | DurationMinusInstant  -> "subtracts an instant from a duration"
+  | InstantPlusBareNumber -> "moves an instant by a bare number"
+
+let hint_instant_misuse = function
+  | InstantPlusInstant ->
+    "an instant is a point on the calendar; two of them do not add. \
+     The difference of two instants is a duration (date(b) - date(a)), \
+     and an instant plus a duration is an instant (origin + 30 'days)."
+  | ScaledInstant ->
+    "an instant is a point on the calendar, not a quantity, so it cannot \
+     be multiplied, divided, raised to a power or negated. Scale a \
+     duration instead: origin + 2 * (date(b) - date(a)), or 2 * 30 'days."
+  | DurationMinusInstant ->
+    "subtracting an instant from a duration has no meaning. Write the \
+     instant first: date(b) - 7 'days is an instant, and date(b) - date(a) \
+     is a duration."
+  | InstantPlusBareNumber ->
+    "a bare number has no unit, so the offset would silently be read in \
+     the model's time_unit. State the unit: date(\"2020-03-01\") + 5 'days."
 
 (* ── Public diagnostic hints ────────────────────────────────────────── *)
 

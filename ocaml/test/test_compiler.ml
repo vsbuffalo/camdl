@@ -10462,6 +10462,80 @@ let test_typed_time_e321_hint_no_span_when_not_constant () =
     Alcotest.(check bool) "no E401 from the hint's fold"
       false (contains_substring ~needle:"E401" e)
 
+(* ── E360: arithmetic that has no meaning on an instant (gh#1070) ───────
+   Under an origin an instant is a point on the calendar. Only an exact
+   duration may move it, and only the difference of two instants is a
+   duration. Each of the forms below compiled before gh#1070 and folded
+   to a number that is not a date of anything. *)
+
+(* An anchored SIR model with one scheduled intervention at [at]. *)
+let instant_arith_model ?(extra_params = "") ?(lets = "") ?(rate_extra = "") at =
+  Printf.sprintf {|
+    time_unit = 'days
+    origin = date("2020-01-01")
+    compartments { S, I, R }
+    parameters { beta : rate  gamma : rate %s }
+    %s
+    transitions {
+      infection : S --> I @ beta * S * I / (S + I + R)%s
+      recovery  : I --> R @ gamma * I
+    }
+    init { S = 990  I = 10 }
+    interventions {
+      bump : transfer(fraction = 0.1, from = S, to = R) at [%s]
+    }
+    simulate { from = date("2020-01-01")  to = date("2021-01-01") }
+  |} extra_params lets rate_extra at
+
+let test_e360_instant_plus_instant () =
+  expect_error_code ~code:"E360" ~contains:"adds two instants"
+    (instant_arith_model {|date("2020-03-01") + date("2020-04-01")|})
+
+let test_e360_scalar_times_instant () =
+  expect_error_code ~code:"E360" ~contains:"scales an instant"
+    (instant_arith_model {|2 * date("2020-03-01")|})
+
+let test_e360_duration_minus_instant () =
+  expect_error_code ~code:"E360" ~contains:"subtracts an instant"
+    (instant_arith_model {|7 'days - date("2020-03-01")|})
+
+let test_e360_instant_plus_bare_number () =
+  expect_error_code ~code:"E360" ~contains:"bare number"
+    (instant_arith_model {|date("2020-03-01") + 5|})
+
+(* The laundered spelling is the same form: `let` references classify
+   through their bodies, as they do for E321. The control is the same
+   model with the legal `a - origin`, so the refusal is E360's alone. *)
+let laundered_model op =
+  instant_arith_model
+    ~lets:(Printf.sprintf
+             {|let a = date("2020-03-01")  let span = a %s origin|} op)
+    {|date("2020-03-01")|}
+
+let test_e360_instant_plus_instant_through_let () =
+  let _ = compile_expect_ok (laundered_model "-") in
+  expect_error_code ~code:"E360" ~contains:"adds two instants"
+    (laundered_model "+")
+
+(* Instant − Instant is an exact duration and stays legal, including as
+   the offset that moves another instant. *)
+let test_e360_instant_minus_instant_allowed () =
+  let _ = compile_expect_ok
+    (instant_arith_model
+       {|origin + (date("2020-04-01") - date("2020-03-01"))|}) in
+  ()
+
+(* Model time `t` is not classified as an instant, so `t0 - t` is not
+   known to be one either. A rate that scales it must not be refused:
+   only a definite instant is checked. *)
+let test_e360_scaled_offset_from_model_time_allowed () =
+  let _ = compile_expect_ok
+    (instant_arith_model
+       ~extra_params:"t0 : instant  k : rate"
+       ~rate_extra:" * exp(k * (t0 - t))"
+       {|date("2020-03-01")|}) in
+  ()
+
 let test_typed_time_e320_time_unit_months_with_origin_rejected () =
   expect_error_code
     ~code:"E320"
@@ -16103,6 +16177,21 @@ let () =
         `Quick test_typed_time_e321_hint_span_through_let;
       Alcotest.test_case "E321 hint invents no span for a non-constant (gh#843)"
         `Quick test_typed_time_e321_hint_no_span_when_not_constant;
+      (* E360: arithmetic with no meaning on an instant (gh#1070). *)
+      Alcotest.test_case "E360 Instant + Instant rejected (gh#1070)"
+        `Quick test_e360_instant_plus_instant;
+      Alcotest.test_case "E360 k * Instant rejected (gh#1070)"
+        `Quick test_e360_scalar_times_instant;
+      Alcotest.test_case "E360 Duration - Instant rejected (gh#1070)"
+        `Quick test_e360_duration_minus_instant;
+      Alcotest.test_case "E360 Instant + bare number rejected (gh#1070)"
+        `Quick test_e360_instant_plus_bare_number;
+      Alcotest.test_case "E360 Instant + Instant through a let rejected (gh#1070)"
+        `Quick test_e360_instant_plus_instant_through_let;
+      Alcotest.test_case "Instant - Instant is a duration, still legal (gh#1070)"
+        `Quick test_e360_instant_minus_instant_allowed;
+      Alcotest.test_case "k * (t0 - t) in a rate is not refused (gh#1070)"
+        `Quick test_e360_scaled_offset_from_model_time_allowed;
       (* Rule 2 (E320): time_unit = 'months/'years with origin. *)
       Alcotest.test_case "E320 time_unit = 'months with origin rejected"
         `Quick test_typed_time_e320_time_unit_months_with_origin_rejected;

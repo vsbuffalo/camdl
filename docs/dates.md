@@ -465,6 +465,12 @@ simulate { from = origin
 translate an Instant). Use `add_calendar_years` / `add_calendar_months`, or a
 bare number. The asymmetry is tracked in gh#844.
 
+**An Instant moves only by a duration.** `date(b) - date(a)` is an Exact
+duration and `origin + 30 'days` is an Instant; every other arithmetic on an
+Instant is **E360**: `date(a) + date(b)`, `2 * date(a)` (and `/`, `^`,
+negation), `7 'days - date(a)`, and `date(a) + 5`, whose bare offset would be
+read silently in `time_unit` — write `5 'days`.
+
 `origin` is a compile-time constant, not a runtime value, so it cannot appear
 inside rate expressions or any compartment-state context — only in DSL constant
 positions.

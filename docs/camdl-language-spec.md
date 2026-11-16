@@ -295,6 +295,25 @@ from an `Instant` (**E321**), because calendar months/years are non-invertible
 relative to a date. Use `add_calendar_months` / `add_calendar_years` (§2.3) for
 calendar-exact stepping, or an explicit `'days` literal for an affine offset.
 
+An `Instant` moves only by a duration, and the difference of two Instants is an
+Exact duration. Every other arithmetic on an Instant is **E360** in anchored
+mode: `Instant + Instant`, `k * Instant` (likewise `/`, `^` and negation),
+`Duration − Instant`, and an Instant moved by a bare number
+(`date("2020-03-01") + 5`, whose offset would silently be read in `time_unit`;
+write `5 'days`). The check judges only a definite Instant — one built from
+`date(...)`, `origin`, `add_calendar_*`, `instant`-kind parameters and `let`s of
+those, moved by durations — so a rate term such as `k * (t0 - t)`, with model
+time `t`, is not refused.
+
+| Expression                            | Result                     |
+| ------------------------------------- | -------------------------- |
+| `date(b) - date(a)`                   | Exact duration             |
+| `date(a) + 30 'days`, `origin - d`    | Instant (`d` a duration)   |
+| `date(a) + date(b)`                   | **E360**                   |
+| `2 * date(a)`, `date(a) / 2`          | **E360**                   |
+| `7 'days - date(a)`                   | **E360**                   |
+| `date(a) + 5`                         | **E360**                   |
+
 In **unanchored mode** (no `origin`) the refinement is inactive: no calendar
 reference exists, so `5 'months` as an affine span is fine, including in rate
 expressions, table values, and parameter bounds. The dacca SIRS configuration
@@ -846,7 +865,8 @@ dimensional analysis of rate expressions.
 `[T]`. In **anchored mode** (top-level `origin` declared), `instant` is the
 Instant side of the typed-time torsor: it can be added to / subtracted from an
 `Exact` duration (§2.1), and an `Instant − Instant` is itself an Exact duration.
-In **unanchored mode** the torsor refinement is inactive — both kinds behave as
+Adding two instants, scaling one, or subtracting one from a duration is
+**E360** (§2.1). In **unanchored mode** the torsor refinement is inactive — both kinds behave as
 plain `[T]`-dimensioned scalars and are interchangeable in expression
 arithmetic. See the typed-time proposal §1.1 for the formal "classification
 synthesised per occurrence from its leaves" invariant: a **reference** to a
@@ -6754,6 +6774,7 @@ authoritative list is whatever `ocaml/lib/compiler/` and `ocaml/lib/ir/` emit.
 | E357 | Error   | `prevalence(of = …, among = …)`: the numerator reads a compartment cell the denominator does not (§12.1) |
 | E358 | Error   | `prevalence(of = …, among = …)`: the two sides collapse different dimensions (§12.1) |
 | E359 | Error   | `prevalence(of = …, among = …)` reads a flow on one side (§12.1) |
+| E360 | Error   | Arithmetic with no meaning on an instant: `Instant + Instant`, `k * Instant`, `Duration − Instant`, `Instant + <bare number>` (§2.1) |
 | W103 | Warning | Let binding name shadows a stratum value in some dimension                                |
 
 Diagnostics can be emitted as structured JSON by passing `--json-errors` to
