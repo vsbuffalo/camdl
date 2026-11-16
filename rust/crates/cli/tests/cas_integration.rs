@@ -565,7 +565,7 @@ fn starts_from_resolves_short_hash() {
     // `run_id` hex prefix. Plant a leaf whose `run_id` starts `deadbeef`.
     let target_hash = "deadbeefc0ffee00000000000000000000000000000000000000000000000000";
     let run_json = format!(r#"{{
-        "format_version":1,"kind":"fit_method","run_id":"{}","hash_version":1,
+        "format_version":1,"kind":"fit_method","run_id":"{}","hash_version":1,"calendar":{{"days_per_unit":1.0,"origin":null,"time_unit":"days"}},
         "ir_version":"0.7","engine_version":"0.1.0+test",
         "levels":[
             {{"name":"fit","label":"demo","hash":"abc1234500000000000000000000000000000000000000000000000000000000","schema_version":1}},
@@ -1024,7 +1024,7 @@ fn write_cas_fit_method(output: &Path, run_id: &str, fit_label: &str) -> PathBuf
         "format_version": 1,
         "kind": "fit_method",
         "run_id": "{run_id}",
-        "hash_version": 1,
+        "hash_version": 1,"calendar":{{"days_per_unit":1.0,"origin":null,"time_unit":"days"}},
         "ir_version": "0.7",
         "engine_version": "0.1.0+test",
         "levels": [
@@ -1093,7 +1093,7 @@ fn write_cas_fit(output: &Path, label: &str, fit_h8: &str, methods: &[&str], mod
             "format_version": 1,
             "kind": "fit_method",
             "run_id": "{run_id}",
-            "hash_version": 1,
+            "hash_version": 1,"calendar":{{"days_per_unit":1.0,"origin":null,"time_unit":"days"}},
             "ir_version": "0.7",
             "engine_version": "0.1.0+test",
             "levels": [
@@ -1110,7 +1110,7 @@ fn write_cas_fit(output: &Path, label: &str, fit_h8: &str, methods: &[&str], mod
     }
     std::fs::write(
         seg.join("fit.meta.json"),
-        format!(r#"{{"model_identity":"{model_identity}","source_model":"demo.camdl","schema_version":2,"source_config":"demo.toml"}}"#),
+        format!(r#"{{"model_identity":"{model_identity}","source_model":"demo.camdl","schema_version":3,"calendar":{{"days_per_unit":1.0,"origin":null,"time_unit":"days"}},"source_config":"demo.toml"}}"#),
     )
     .unwrap();
     seg
@@ -1138,7 +1138,7 @@ fn write_two_leaves_of_one_method(output: &Path, method: &str) -> (PathBuf, [Str
             "format_version": 1,
             "kind": "fit_method",
             "run_id": "{run_id}",
-            "hash_version": 1,
+            "hash_version": 1,"calendar":{{"days_per_unit":1.0,"origin":null,"time_unit":"days"}},
             "ir_version": "0.7",
             "engine_version": "0.1.0+test",
             "levels": [
@@ -1155,7 +1155,7 @@ fn write_two_leaves_of_one_method(output: &Path, method: &str) -> (PathBuf, [Str
     }
     std::fs::write(
         seg.join("fit.meta.json"),
-        r#"{"model_identity":"m000","source_model":"demo.camdl","schema_version":2,"source_config":"demo.toml"}"#,
+        r#"{"model_identity":"m000","source_model":"demo.camdl","schema_version":3,"calendar":{"days_per_unit":1.0,"origin":null,"time_unit":"days"},"source_config":"demo.toml"}"#,
     )
     .unwrap();
     (seg, hashes)

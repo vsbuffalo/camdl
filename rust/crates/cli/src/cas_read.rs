@@ -254,7 +254,7 @@ mod tests {
 
     fn record(kind: &str, run_id: &str) -> String {
         format!(
-            r#"{{"format_version":1,"kind":"{kind}","run_id":"{run_id}","hash_version":1,
+            r#"{{"format_version":1,"kind":"{kind}","run_id":"{run_id}","hash_version":1,"calendar":{{"days_per_unit":1.0,"origin":null,"time_unit":"days"}},
                 "ir_version":"0.31","engine_version":"0.1.0+test",
                 "levels":[{{"name":"seed","label":"seed_1","hash":"{run_id}","schema_version":1}}],
                 "status":"completed","artifacts":{{}},

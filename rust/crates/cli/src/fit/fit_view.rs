@@ -361,7 +361,7 @@ mod tests {
         let leaf = dir.join("nuts-1fb03eee").join("seed_1-06cbd6b3");
         std::fs::create_dir_all(&leaf).unwrap();
         let rec: RunRecord = serde_json::from_str(&format!(
-            r#"{{"format_version":1,"kind":"fit_method","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"method","label":"nuts","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"nuts","backend":"ode","seed":1,"n_chains":2}},"provenance":{{"created_at":"2026-07-07T00:00:00Z","argv":["camdl","fit","run"]}}}}"#,
+            r#"{{"format_version":1,"kind":"fit_method","run_id":"{run_id}","hash_version":1,"calendar":{{"days_per_unit":1.0,"origin":null,"time_unit":"days"}},"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"method","label":"nuts","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"nuts","backend":"ode","seed":1,"n_chains":2}},"provenance":{{"created_at":"2026-07-07T00:00:00Z","argv":["camdl","fit","run"]}}}}"#,
             run_id = "ab".repeat(32),
         ))
         .unwrap();
@@ -394,7 +394,7 @@ mod tests {
             // run_id must be valid 64-char hex (ContentHash rejects non-hex).
             let run_id = format!("{:0<64}", format!("{fit_h8}0{ord}"));
             let rec = format!(
-                r#"{{"format_version":1,"kind":"fit_method","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"demo","hash":"{fit_hash}","schema_version":1}},{{"name":"method","label":"{label}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"{method}","backend":"chain_binomial","seed":1,"n_chains":4,"best_loglik":{best_ll},"best_chain":{best_chain}}},"provenance":{{"created_at":"{created_at}","argv":["camdl","fit","run"]}}}}"#
+                r#"{{"format_version":1,"kind":"fit_method","run_id":"{run_id}","hash_version":1,"calendar":{{"days_per_unit":1.0,"origin":null,"time_unit":"days"}},"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"demo","hash":"{fit_hash}","schema_version":1}},{{"name":"method","label":"{label}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"{method}","backend":"chain_binomial","seed":1,"n_chains":4,"best_loglik":{best_ll},"best_chain":{best_chain}}},"provenance":{{"created_at":"{created_at}","argv":["camdl","fit","run"]}}}}"#
             );
             std::fs::write(leaf.join("run.json"), rec).unwrap();
         }
@@ -421,7 +421,7 @@ mod tests {
             training_partition: None,
             dt: None,
             integrator: None,
-            calendar: None,
+            calendar: ir::caltime::CalendarAxis::parse("days", None).unwrap(),
         };
         // The model file two levels above the fit folder (`<root>/sir.camdl`
         // for `<root>/fits/<stem>-<h8>/`). No fit.toml on disk → the archive

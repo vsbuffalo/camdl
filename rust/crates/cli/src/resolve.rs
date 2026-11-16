@@ -298,9 +298,9 @@ pub struct RecordMeta {
     /// known in memory before commit); the streaming fit path sets it at
     /// finalize instead.
     pub output_schema: BTreeMap<String, runid::record::TableSchema>,
-    /// The model's calendar axis, recorded as `run.json`'s `calendar` block
-    /// on a simulation leaf; `None` for the kinds that do not record one.
-    pub calendar: Option<ir::caltime::CalendarAxis>,
+    /// The model's calendar axis, recorded as `run.json`'s `calendar` block.
+    /// Every record carries one, so it is a constructor argument (D59).
+    pub calendar: ir::caltime::CalendarAxis,
 }
 
 impl RecordMeta {
@@ -309,6 +309,7 @@ impl RecordMeta {
         ir_version: impl Into<String>,
         model_path: impl Into<String>,
         label: Option<String>,
+        calendar: ir::caltime::CalendarAxis,
     ) -> Self {
         RecordMeta {
             ir_version: ir_version.into(),
@@ -318,13 +319,8 @@ impl RecordMeta {
             source_paths: vec![model_path.into()],
             label,
             output_schema: BTreeMap::new(),
-            calendar: None,
+            calendar,
         }
-    }
-
-    pub fn with_calendar(mut self, calendar: ir::caltime::CalendarAxis) -> Self {
-        self.calendar = Some(calendar);
-        self
     }
 
     pub fn with_deps(mut self, deps: Vec<runid::inputs::ArtifactRef>) -> Self {
