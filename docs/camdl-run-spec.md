@@ -528,17 +528,21 @@ this segment and the resolution is a fact about the problem, not the method —
 `flat_fallback` appears only on a problem no posterior sampler can run on, since
 a sampler refuses an implicit flat prior before it starts),
 `parameters_provenance` (per parameter: resolved value, the tier that supplied
-it, and its role), `training_window` (`{train_end}`, present only when a
-`[data]` holdout declaration was applied, §6.2), `dt` (the integration step
-every run in the segment ran at — the model's declared `simulate { dt }`, else
-the config's `[config] dt`, else 1.0) and `integrator` (the ODE integrator the
-model declares, `{"method": "rk4"}` when it declares none — what an ODE-backend
-run integrated with), which a replay of the fit's parameters runs on by default
-(§3.4; a sidecar written before these were recorded lacks them, and a replay
-recovers them from the archived config and model), `schema` (the
-observation/dimension schema below), and `docs` (the model's `#'` documentation
-dictionary, keyed by declaration name, so a consumer can label any output
-column).
+it, and its role), `training_partition` (which rows the fit trained on, recorded
+for every fit, §6.2: `rule_version`; `rule`, one of `{"kind": "all"}`,
+`{"kind": "cutoff", "at": {"t", "date"}}` and `{"kind": "separate_files"}`;
+`extent`, `{"t", "date"}`, the latest end among the training rows; and
+`streams`, per stream `{"stream", "rows", "digest"}`: rows `[0, rows)` trained,
+and `digest` is the row digest of exactly those rows; `date` is present when the
+model has an `origin`), `dt` (the integration step every run in the segment ran
+at — the model's declared `simulate { dt }`, else the config's `[config] dt`,
+else 1.0) and `integrator` (the ODE integrator the model declares,
+`{"method": "rk4"}` when it declares none — what an ODE-backend run integrated
+with), which a replay of the fit's parameters runs on by default (§3.4; a
+sidecar written before these were recorded lacks them, and a replay recovers
+them from the archived config and model), `schema` (the observation/dimension
+schema below), and `docs` (the model's `#'` documentation dictionary, keyed by
+declaration name, so a consumer can label any output column).
 
 **`source_config` and the archived config are two different files.**
 `fit.toml.original`, beside `fit.meta.json`, is the archived copy of the
@@ -1071,15 +1075,15 @@ results/sims/{model}-{h8}/{backend}-dt{dt}-{h8}/{params}-{h8}/{scenario}-{h8}/se
 The five levels hash disjoint slices of the resolved input set. **model** is the
 presentation-normalized whole-IR digest plus `ir/VERSION` and the engine
 version. **config** is backend, `dt`, `t_start`, `t_end`, the output schedule,
-`allow_degenerate_rates`, and the trajectory column view (`--no-flows`,
-`--columns`); `--output-every` is not here because it is lowered into the output
-schedule upstream. **params** is the resolved base name→value map plus the
-digests of any `--table` files. **scenario** is the scenario's effective delta —
-the enabled and disabled intervention sets, the parameter patch (`set`), and the
-`scale` factors, each including whatever the scenario inherits through `compose`
-— so two presets that differ only in `scale` or only in what they compose cannot
-share a `run_id`. **seed** is the resolved `process_seed` (the only hashed field
-of the level).
+`allow_degenerate_rates`, `allow_forcing_extrapolation`, and the trajectory
+column view (`--no-flows`, `--columns`); `--output-every` is not here because it
+is lowered into the output schedule upstream. **params** is the resolved base
+name→value map plus the digests of any `--table` files. **scenario** is the
+scenario's effective delta — the enabled and disabled intervention sets, the
+parameter patch (`set`), and the `scale` factors, each including whatever the
+scenario inherits through `compose` — so two presets that differ only in `scale`
+or only in what they compose cannot share a `run_id`. **seed** is the resolved
+`process_seed` (the only hashed field of the level).
 
 Segment labels: the model label is the model file's slugged stem; the config
 label is `{backend}-dt{dt}`; the params label is `base` when no per-cell
@@ -1686,13 +1690,13 @@ pub struct ResolvedTrajectory {
 five digests, each hashing a disjoint slice of the input set
 (`rust/crates/runid/src/inputs.rs`):
 
-| Level      | Identity value     | What it folds in                                                                                                   |
-| ---------- | ------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| `model`    | `ModelDigest`      | The whole canonical IR, plus `ir_version` and the engine version                                                   |
-| `config`   | `SimConfig`        | backend, `dt`, `t_start`, `t_end`, output schedule, calendar mode, `allow_degenerate_rates`, `no_flows`, `columns` |
-| `params`   | `ResolvedParams`   | The resolved base parameter map, plus content digests of any `--table` files                                       |
-| `scenario` | `ResolvedScenario` | Sorted enabled/disabled intervention ids and the canonical parameter patch                                         |
-| `seed`     | `Seed`             | `process_seed` only                                                                                                |
+| Level      | Identity value     | What it folds in                                                                                                                                  |
+| ---------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`    | `ModelDigest`      | The whole canonical IR, plus `ir_version` and the engine version                                                                                  |
+| `config`   | `SimConfig`        | backend, `dt`, `t_start`, `t_end`, output schedule, calendar mode, `allow_degenerate_rates`, `allow_forcing_extrapolation`, `no_flows`, `columns` |
+| `params`   | `ResolvedParams`   | The resolved base parameter map, plus content digests of any `--table` files                                                                      |
+| `scenario` | `ResolvedScenario` | Sorted enabled/disabled intervention ids and the canonical parameter patch                                                                        |
+| `seed`     | `Seed`             | `process_seed` only                                                                                                                               |
 
 Two rules govern membership, and they are the whole discipline:
 
@@ -2843,7 +2847,7 @@ rejected with a migration message.
 | --------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `file`          | string          | Single wide TSV holding one column per model-declared observation stream. Exclusive with `observations`.                                                     |
 | `observations`  | map name → path | Per-stream file paths, keyed on the `observations { }` block names in the `.camdl`. Exclusive with `file`.                                                   |
-| `holdout_after` | time spec       | Temporal split: observation rows at `t >` this value are removed from training (see below). Exclusive with `holdout`.                                        |
+| `holdout_after` | time spec       | Temporal split: observation rows whose end is after this value are removed from training (see below). Exclusive with `holdout`.                              |
 | `holdout`       | map name → path | Explicit held-out files, tail-only; the training streams stay whole and the files' bytes are digested into the fit `run_id`. Exclusive with `holdout_after`. |
 
 Exactly one of `file` / `observations` must be set. The observation model
@@ -2851,33 +2855,44 @@ Exactly one of `file` / `observations` must be set. The observation model
 are declared in the `.camdl`; `fit.toml` supplies only the file paths.
 
 A holdout declaration is applied when the fit loads its data
-(`apply_holdout_declaration`, `fit/runner.rs`). `profile --fit` applies it to
-its bound data through the same function, and `survey --fit` removes the rows
-after a `holdout_after` cutoff resolved by the same function
-(`resolve_holdout_cutoff`) and checks `[data.holdout]` files by the same rule
-(`check_holdout_files`); the cutoff enters the profile's base identity and
-the survey's `config` level, omitted without one. `pfilter` and `compare`'s
-holdout scoring see the full series.
+(`apply_holdout_declaration`, `fit/runner.rs`), which decides the fit's training
+partition (`fit/training_partition.rs`). `profile --fit` applies it to its bound
+data through the same function, and `survey --fit` keeps the rows a
+`holdout_after` cutoff trains through the same `cutoff_partition` and checks
+`[data.holdout]` files by the same rule (`check_holdout_files`); the training
+rows a cutoff leaves each stream enter the profile's base identity and the
+survey's `config` level, omitted without one. `pfilter` and `compare`'s holdout
+scoring see the full series.
 
-- `holdout_after` is a bare model time, a date, or an observation-anchored
-  expression (`last_obs - 6 weeks`; anchors resolve over the union of the bound
-  streams). Every row with `t >` the resolved boundary is withheld from
-  training. The boundary must cut strictly inside the observed range — at or
-  before the first observation nothing would be left to train on, at or after
-  the last nothing would be withheld — and either is a hard error.
-- `[data.holdout]` names a stream and a file of rows strictly after that
-  stream's last training time. An interleaved holdout is refused; only tail
-  holdouts are supported.
+- `holdout_after` is a bare model time, a date (the instant that day begins), or
+  an observation-anchored expression (`last_obs - 6 weeks`). Its anchors resolve
+  over the full files: `first_obs` is the earliest start and `last_obs` the
+  latest end of a row with a value, across every bound stream; an `NA` row
+  counts toward neither. A row trains if the end of what it measures (its
+  instant, or its period's end) is at or before the cutoff, so each stream
+  trains a prefix of its rows. Every bound stream must keep a training row and
+  some row must be held out; either failing is a hard error.
+- `[data.holdout]` names a stream and a file of held-out rows. Every row of the
+  training files trains, and every held-out row must end strictly after the
+  training extent, the latest end among the training rows of every bound stream.
+  An interleaved holdout is refused; only tail holdouts are supported.
 
-The fit prints one line stating the training window and how many rows were
-withheld (for example
-`holdout: training window [0, 15]; 5 observation
-row(s) at t > 15 withheld from training`),
-and records the applied window in `fit.meta.json`. `camdl compare` scores such a
-fit out of sample on the withheld rows (stamped `held-out tail`, with the sealed
-`train_end`); a fit without a holdout is scored in-sample. `camdl data split`,
-which writes separate train/holdout TSVs for a second fit, remains an
-alternative.
+The fit prints the rows it trained on, the training extent and what was withheld
+(for example
+`holdout: trained on 9 row(s) through t = 10; 7
+observation row(s) ending after t = 10 withheld from training`),
+and the first held-out row of each stream as the file writes it, and records the
+partition in `fit.meta.json` (`training_partition`). `camdl compare` scores such
+a fit out of sample on every row that did not train and ends after the training
+extent (stamped `held-out tail`, with `train_end` the extent), after checking
+that each training file's leading rows still digest to the recorded prefix; a
+fit without a holdout is scored in-sample. `camdl data
+split`, which writes
+separate train/holdout TSVs for a second fit, remains an alternative.
+
+A model anchor (`simulate { to = last_obs + … }`, a `piecewise` breakpoint) and
+`fit predict`'s `value_at(…, last_obs)` resolve over the training rows only, so
+appending held-out rows to a `holdout_after` file moves no anchor.
 
 `[synthetic]` (`SyntheticSpec`, `config_v2.rs`):
 
@@ -4636,7 +4651,7 @@ over-invalidation.
 
 One pinned function and encoding, in `rust/crates/runid/src/hash.rs`:
 
-- SHA-256, recorded by `HASH_VERSION` (currently `1`), folded into every root
+- SHA-256, recorded by `HASH_VERSION` (currently `4`), folded into every root
   hash so the whole store migrates on a single bump.
 - **Domain separation.** Every named type writes its fully-qualified type name
   (length-prefixed) then its `SCHEMA_VERSION` before any field.
@@ -4738,12 +4753,12 @@ different models (the `model` level; `config` is unchanged).
 - `config` — `SimConfig`, `schema_version = 5`: `backend`
   (gillespie/chain_binomial/ode), `dt`, `t_start`, `t_end`, the resolved output
   schedule (`Regular { start, step }` or `AtTimes([…])`), `calendar` (a
-  placeholder always `Numeric` today), `allow_degenerate_rates`, `no_flows`, the
-  `columns` allow-list as a sorted set, and `init_state`. The schema version is
-  also where the leaf's _file format_ enters the key: version 5 changed no
-  field, it re-keyed every sim leaf because `traj.tsv` gained `t_start`/`t_stop`
-  (§10.1) and a key must not name bytes a recompute no longer reproduces. Label:
-  `{backend}-dt{dt}`.
+  placeholder always `Numeric` today), `allow_degenerate_rates`,
+  `allow_forcing_extrapolation`, `no_flows`, the `columns` allow-list as a
+  sorted set, and `init_state`. The schema version is also where the leaf's
+  _file format_ enters the key: version 5 changed no field, it re-keyed every
+  sim leaf because `traj.tsv` gained `t_start`/`t_stop` (§10.1) and a key must
+  not name bytes a recompute no longer reproduces. Label: `{backend}-dt{dt}`.
 - `params` — `ResolvedParams`: the resolved base parameter map
   (`BTreeMap<ParamId, FiniteF64>`, i.e. compiled-in values overlaid by
   `--params` then `--param`, plus any sweep point) and the SHA-256 **content**
@@ -4787,17 +4802,20 @@ cell **count** is in the key explicitly.
 
 **`Pfilter` `config`** digests
 `{particles, replicates, dt, obs_block,
-flow_indices, data}` where `data` is the
-sorted per-stream file digests; `params` digests the sorted scored point.
-Scenario selection reaches identity through the model digest, because the
-pfilter path hashes the _resolver's_ model (scenario already applied), unlike
-`Sim`.
+flow_indices, data}`, plus `objective`
+when it is conditional and `allow_forcing_extrapolation` when the override is
+on, where `data` is the sorted per-stream file digests; `params` digests the
+sorted scored point. Scenario selection reaches identity through the model
+digest, because the pfilter path hashes the _resolver's_ model (scenario already
+applied), unlike `Sim`.
 
 **`Survey` `config`** digests
 `{eval_method, eval_particles, eval_replicates,
-data, fixed, scenario}`, plus `objective` when it is conditional (`ic_free`)
-and `holdout_after` (the resolved cutoff) when the fit config declares one;
-`box` digests `{bounds, n_points}`.
+data, fixed, scenario}`, plus
+`objective` when it is conditional (`ic_free`), `training_rows` (the training
+rows a `holdout_after` cutoff leaves each stream) when the fit config declares
+one, and `allow_forcing_extrapolation` when the override is on; `box` digests
+`{bounds, n_points}`.
 
 **Lineage.** `deps` is a set of `ArtifactRef { run_id, kind, artifact, digest }`
 hashed **sorted by `run_id`** (the one documented exception to the
@@ -7276,7 +7294,7 @@ part of the leaf's identity, and the full objective leaves the key unchanged.
                             there also sets each nl-* cell's tolerance and
                             max_evals (else 1e-4 and 1500). Its holdout applies
                             to the bound data, --data included, as in fit run:
-                            holdout_after removes every row after the cutoff
+                            holdout_after removes every row ending after the cutoff
                             (keyed into the base), [data.holdout] files are
                             checked to lie after the training rows
 --seeds SPEC                run the whole grid at each seed (multi-seed sensitivity)
@@ -7301,7 +7319,7 @@ part of the leaf's identity, and the full objective leaves the key unchanged.
 --fit FIT                   fit.toml supplying [estimate] bounds and [data].
                             The model scored is MODEL; the config's [model]
                             is not read. A [data] holdout_after removes every
-                            row after the cutoff, and [data.holdout] files are
+                            row ending after the cutoff, and [data.holdout] files are
                             checked to lie after the training rows, as in fit
                             run. Mutually
                             exclusive with --estimate/--data
