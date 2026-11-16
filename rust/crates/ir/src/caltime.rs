@@ -38,6 +38,11 @@ pub enum CalError {
     ZoneUnsupported { date: String, zone: String },
     /// `time_unit` is not a recognised calendar unit.
     UnknownUnit(String),
+    /// A date with camdl's fractional-day suffix (`YYYY-MM-DD+<frac>d`,
+    /// gh#839) whose fraction is not a plain decimal strictly between 0 and 1.
+    BadSubDay(String),
+    /// A calendar instant read on an axis with no origin to measure it from.
+    NoOrigin(String),
 }
 
 impl std::fmt::Display for CalError {
@@ -58,6 +63,17 @@ impl std::fmt::Display for CalError {
             CalError::DatetimeUnsupported(s) => write!(
                 f,
                 "time-of-day is not supported (dates only in v1): '{s}'"
+            ),
+            CalError::BadSubDay(s) => write!(
+                f,
+                "'{s}' is not a time inside a day as camdl writes one: \
+                 'YYYY-MM-DD+<frac>d', the date followed by the elapsed fraction \
+                 of the day, a decimal strictly between 0 and 1 (e.g. '2020-01-01+0.25d')"
+            ),
+            CalError::NoOrigin(s) => write!(
+                f,
+                "'{s}' is a calendar date, but the model declares no `origin` to \
+                 measure it from"
             ),
             CalError::UnknownUnit(s) => write!(
                 f,
@@ -81,13 +97,7 @@ pub fn rata_die(y: i64, m: i64, d: i64) -> i64 {
 /// Canonical duration of one `time_unit` in **days**. Matches the OCaml `D`
 /// table. `months`/`years` are *average* lengths (365.2425-day Gregorian year).
 pub fn days_per_unit(time_unit: &str) -> Result<f64, CalError> {
-    match time_unit {
-        "days" => Ok(1.0),
-        "weeks" => Ok(7.0),
-        "months" => Ok(365.2425 / 12.0),
-        "years" => Ok(365.2425),
-        other => Err(CalError::UnknownUnit(other.to_string())),
-    }
+    Ok(TimeUnit::parse(time_unit)?.days())
 }
 
 fn is_leap(y: i64) -> bool {
@@ -179,7 +189,7 @@ pub fn date_to_internal(origin: &str, date: &str, time_unit: &str) -> Result<f64
     let (oy, om, od) = parse_iso_date(origin)?;
     let (ty, tm, td) = parse_iso_date(date)?;
     let delta = rata_die(ty, tm, td) - rata_die(oy, om, od);
-    Ok(delta as f64 / days_per_unit(time_unit)?)
+    Ok(days_to_time(delta as f64, TimeUnit::parse(time_unit)?))
 }
 
 /// Civil date from a rata-die day number (inverse of `rata_die`). Used to render
@@ -236,44 +246,321 @@ pub fn internal_to_date(origin: &str, t: f64, time_unit: &str) -> Result<String,
 }
 
 /// Render an internal time back to a calendar label that stays **one-to-one
-/// with the timepoint**, for the `--dates` output column (gh#108).
-///
-/// A whole-day offset renders as a bare `YYYY-MM-DD` — identical to
-/// [`internal_to_date`], so integer-day steps are unchanged. A **sub-day**
-/// offset (a fractional `dt < 1 day`, the canonical hot-epidemic regime)
-/// renders the floor date with the fractional day appended as a `+<frac>d`
-/// suffix (e.g. `2020-01-01+0.25d`). Without this, `dt = 0.5` would coalesce
-/// `t = 0.0, 0.5, 1.0` onto `origin+0, origin+1, origin+1` — silently lossy for
-/// a column users group/join on. The suffix is a fractional-day **delta**,
-/// deliberately not the `YYYY-MM-DDTHH:MM` datetime form (datetimes are rejected
-/// on input and out of scope — `docs/dates.md`).
+/// with the timepoint** (gh#108): [`CalendarAxis::date_of`] on the axis that
+/// `origin` and `time_unit` name.
 pub fn internal_to_date_hires(origin: &str, t: f64, time_unit: &str) -> Result<String, CalError> {
-    let (oy, om, od) = parse_iso_date(origin)?;
-    let offset = t * days_per_unit(time_unit)?;
+    let axis = CalendarAxis { time_unit: TimeUnit::parse(time_unit)?, origin: Some(IsoDate::parse(origin)?) };
+    axis.date_of(t)
+        .map(RenderedInstant::into_string)
+        .ok_or_else(|| CalError::BadFormat(format!("{t}")))
+}
+
+// ── The calendar axis ──────────────────────────────────────────────────────
+
+/// A model's time unit: what one unit of model time is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeUnit {
+    Days,
+    Weeks,
+    Months,
+    Years,
+}
+
+impl TimeUnit {
+    /// The unit a model's `time_unit` names.
+    pub fn parse(s: &str) -> Result<Self, CalError> {
+        match s {
+            "days" => Ok(TimeUnit::Days),
+            "weeks" => Ok(TimeUnit::Weeks),
+            "months" => Ok(TimeUnit::Months),
+            "years" => Ok(TimeUnit::Years),
+            other => Err(CalError::UnknownUnit(other.to_string())),
+        }
+    }
+
+    /// The spelling a model's `time_unit` uses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TimeUnit::Days => "days",
+            TimeUnit::Weeks => "weeks",
+            TimeUnit::Months => "months",
+            TimeUnit::Years => "years",
+        }
+    }
+
+    /// Canonical length of one unit in **days**. Matches the OCaml `D` table.
+    /// `months`/`years` are *average* lengths (365.2425-day Gregorian year).
+    pub fn days(self) -> f64 {
+        match self {
+            TimeUnit::Days => 1.0,
+            TimeUnit::Weeks => 7.0,
+            TimeUnit::Months => 365.2425 / 12.0,
+            TimeUnit::Years => 365.2425,
+        }
+    }
+}
+
+/// A validated civil date, `YYYY-MM-DD`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IsoDate {
+    year: i64,
+    month: i64,
+    day: i64,
+}
+
+impl IsoDate {
+    /// Parse `YYYY-MM-DD` ([`parse_iso_date`]).
+    pub fn parse(s: &str) -> Result<Self, CalError> {
+        let (year, month, day) = parse_iso_date(s)?;
+        Ok(IsoDate { year, month, day })
+    }
+
+    fn rata_die(self) -> i64 {
+        rata_die(self.year, self.month, self.day)
+    }
+
+    /// The date `days` days after this one (before it, when negative).
+    fn plus_days(self, days: i64) -> IsoDate {
+        let (year, month, day) = date_from_rata_die(self.rata_die() + days);
+        IsoDate { year, month, day }
+    }
+}
+
+impl std::fmt::Display for IsoDate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:04}-{:02}-{:02}", self.year, self.month, self.day)
+    }
+}
+
+/// A model time written as a calendar instant by [`CalendarAxis::date_of`]:
+/// `YYYY-MM-DD` at a whole day, `YYYY-MM-DD+<frac>d` inside one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedInstant(String);
+
+impl RenderedInstant {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Display for RenderedInstant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// How many adjacent doubles either side of `t · days_per_unit` the renderer
+/// tries before settling for the closest reading. One step suffices under
+/// `days`; under `weeks` a time that no days offset reads back to exactly is
+/// not reached by more steps either (see [`CalendarAxis::date_of`]).
+const EXACT_RENDER_NEIGHBOURS: usize = 4;
+
+/// The mapping from model time to dates (`docs/dev/temporal-architecture.md`
+/// §3.4): the model's time unit and the date of `t = 0`, if it has one.
+///
+/// It owns the render/parse pair. [`Self::date_of`] writes a time as a date;
+/// [`Self::parse_instant`] is how the data loader reads one; a rendered date
+/// reads back to the time it was rendered from.
+///
+/// Stored as the `calendar` block of every artifact that carries a model time:
+/// `{"days_per_unit", "origin", "time_unit"}`. `days_per_unit` is derived from
+/// the unit and written so a consumer needs no unit table of its own; it is
+/// not read back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CalendarAxis {
+    pub time_unit: TimeUnit,
+    /// `None`: the model has no origin, and its times have no dates.
+    pub origin: Option<IsoDate>,
+}
+
+impl CalendarAxis {
+    /// The axis a compiled model declares.
+    pub fn from_model(m: &crate::Model) -> Result<Self, CalError> {
+        Ok(CalendarAxis {
+            time_unit: TimeUnit::parse(&m.time_unit)?,
+            origin: m.origin.as_deref().map(IsoDate::parse).transpose()?,
+        })
+    }
+
+    /// Length of one model time unit in days.
+    pub fn days_per_unit(&self) -> f64 {
+        self.time_unit.days()
+    }
+
+    /// The date of model time `t`: `YYYY-MM-DD` when `t` falls on a whole day,
+    /// and otherwise the day it falls in followed by the elapsed fraction of
+    /// that day, `YYYY-MM-DD+<frac>d` (`2020-01-01+0.25d`; gh#108). `None`
+    /// when the model has no origin, or `t` is not finite.
+    ///
+    /// The fraction is written to six decimals when that reads back to `t`
+    /// exactly, which it does for the quarter- and half-day grids and for any
+    /// time read from such a date. Otherwise (an hourly grid, `k · 0.1`) it is
+    /// written in full, as the shortest decimal that reads back to `t`. Under
+    /// `days` that always exists. Under `weeks` the loader reads a date as
+    /// `days / 7`, and a double that is not such a quotient of any double has
+    /// no exact reading: the renderer then writes the reading closest to `t`,
+    /// one double away.
+    pub fn date_of(&self, t: f64) -> Option<RenderedInstant> {
+        let origin = self.origin?;
+        if !t.is_finite() {
+            return None;
+        }
+        let offset = t * self.days_per_unit();
+        let readable = render_six_decimals(origin, offset);
+        if self.parse_instant(&readable).ok() == Some(t) {
+            return Some(RenderedInstant(readable));
+        }
+        let mut candidates = vec![offset];
+        let (mut up, mut down) = (offset, offset);
+        for _ in 0..EXACT_RENDER_NEIGHBOURS {
+            up = up.next_up();
+            down = down.next_down();
+            candidates.extend([up, down]);
+        }
+        let mut closest: Option<(f64, String)> = None;
+        for days in candidates {
+            let text = render_exact(origin, days);
+            match self.parse_instant(&text) {
+                Ok(back) if back == t => return Some(RenderedInstant(text)),
+                Ok(back) => {
+                    let miss = (back - t).abs();
+                    if closest.as_ref().is_none_or(|(m, _)| miss < *m) {
+                        closest = Some((miss, text));
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        Some(RenderedInstant(closest.map_or(readable, |(_, text)| text)))
+    }
+
+    /// The model time of a calendar instant as [`Self::date_of`] writes it:
+    /// `YYYY-MM-DD`, or `YYYY-MM-DD+<frac>d` with `0 < frac < 1` written as a
+    /// plain decimal. A bare date converts exactly as [`date_to_internal`]
+    /// does.
+    pub fn parse_instant(&self, s: &str) -> Result<f64, CalError> {
+        let s = s.trim();
+        let origin = self.origin.ok_or_else(|| CalError::NoOrigin(s.to_string()))?;
+        let (date, frac) = split_instant(s)?;
+        let days = date.rata_die() - origin.rata_die();
+        Ok(days_to_time(frac.map_or(days as f64, |f| f.offset_days(days)), self.time_unit))
+    }
+}
+
+/// Model time of an offset in days from the origin.
+fn days_to_time(days: f64, unit: TimeUnit) -> f64 {
+    days / unit.days()
+}
+
+/// Whether `s` is a calendar instant [`CalendarAxis::parse_instant`] reads:
+/// a bare date, or a date with the fractional-day suffix.
+pub fn is_instant(s: &str) -> bool {
+    split_instant(s.trim()).is_ok()
+}
+
+/// The fraction of a day in a `+0.<digits>d` suffix, kept as its decimal
+/// digits: strictly between 0 and 1, with no trailing zero.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DayFraction(String);
+
+impl DayFraction {
+    /// Read the `0.<digits>` of a suffix.
+    fn parse(text: &str) -> Option<Self> {
+        let digits = text.strip_prefix("0.")?;
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let digits = digits.trim_end_matches('0');
+        (!digits.is_empty()).then(|| DayFraction(digits.to_string()))
+    }
+
+    /// `1 − self`, digit by digit: `0.75` → `0.25`.
+    fn complement(&self) -> DayFraction {
+        let d = self.0.as_bytes();
+        let last = d.len() - 1; // the last digit is not zero
+        let digits = d.iter().enumerate().map(|(i, &c)| {
+            let v = c - b'0';
+            char::from(b'0' + if i == last { 10 - v } else { 9 - v })
+        });
+        DayFraction(digits.collect())
+    }
+
+    /// `days + 0.<digits>` as the double nearest the exact decimal sum.
+    ///
+    /// The sum is formed in decimal and rounded once, so the reading does not
+    /// depend on how the fraction alone rounds: a date before the origin is a
+    /// negative day count plus a fraction, `−1 + 0.958…`, and adding the two
+    /// as doubles would lose the low digits the fraction carries.
+    fn offset_days(&self, days: i64) -> f64 {
+        let text = if days >= 0 {
+            format!("{days}.{}", self.0)
+        } else {
+            format!("-{}.{}", -days - 1, self.complement().0)
+        };
+        text.parse().expect("a signed decimal parses")
+    }
+}
+
+/// A rendered instant's date and, inside a day, its fraction.
+fn split_instant(s: &str) -> Result<(IsoDate, Option<DayFraction>), CalError> {
+    if let Some(suffix) = s.get(10..).filter(|r| r.starts_with('+') && r.ends_with('d')) {
+        let frac = DayFraction::parse(&suffix[1..suffix.len() - 1])
+            .ok_or_else(|| CalError::BadSubDay(s.to_string()))?;
+        return Ok((IsoDate::parse(&s[..10])?, Some(frac)));
+    }
+    Ok((IsoDate::parse(s)?, None))
+}
+
+/// `days` after `origin` with the fraction of the day quantized to six
+/// decimals, which absorbs the float noise of a non-day unit (a whole date
+/// under `weeks` can land on 2.9999999999999996 days) and snaps a near-whole
+/// offset to a bare date.
+fn render_six_decimals(origin: IsoDate, days: f64) -> String {
     // Floor to the calendar day; the remainder is the fractional day in [0, 1).
     // `floor`/remainder is well-defined for negative offsets (pre-origin dates),
     // unlike `round`, which would split a tie inconsistently across the sign.
-    let floor_day = offset.floor();
-    // Quantize the fractional day to absorb float noise from non-day units
-    // (e.g. a "whole" date under `'years` lands on 13.999999999 days). Six
-    // decimals resolves any practical sub-day `dt` while snapping near-integers
-    // back to a bare date.
-    let frac = ((offset - floor_day) * 1e6).round() / 1e6;
+    let floor_day = days.floor();
+    let frac = ((days - floor_day) * 1e6).round() / 1e6;
     let (floor_day, frac) = if frac >= 1.0 {
         // Quantization pushed the fraction up to a full day; carry it.
         (floor_day + 1.0, 0.0)
     } else {
         (floor_day, frac)
     };
-    let (y, m, d) = date_from_rata_die(rata_die(oy, om, od) + floor_day as i64);
-    let date = format!("{y:04}-{m:02}-{d:02}");
+    let date = origin.plus_days(floor_day as i64);
     if frac == 0.0 {
-        Ok(date)
+        date.to_string()
     } else {
         // Trim trailing zeros from the fractional-day suffix: 0.250000 → 0.25.
         let frac_str = format!("{frac:.6}");
-        let frac_str = frac_str.trim_end_matches('0');
-        Ok(format!("{date}+{frac_str}d"))
+        format!("{date}+{}d", frac_str.trim_end_matches('0'))
+    }
+}
+
+/// `days` after `origin`, written from the shortest decimal that parses to
+/// `days` (Rust's `Display` for `f64`, which never uses an exponent) by
+/// splitting it at the decimal point: the whole days give the date, the digits
+/// after the point the fraction. A negative offset `−I.F` is the day `−(I+1)`
+/// plus `1 − 0.F`. [`DayFraction::offset_days`] reverses the split exactly, so
+/// the text reads back to `days`.
+fn render_exact(origin: IsoDate, days: f64) -> String {
+    let text = format!("{days}");
+    let (negative, magnitude) = match text.strip_prefix('-') {
+        Some(m) => (true, m),
+        None => (false, text.as_str()),
+    };
+    let (whole, digits) = magnitude.split_once('.').unwrap_or((magnitude, ""));
+    let whole: i64 = whole.parse().expect("the integer part of a finite double's decimal");
+    match DayFraction::parse(&format!("0.{digits}")) {
+        None => origin.plus_days(if negative { -whole } else { whole }).to_string(),
+        Some(frac) if negative => {
+            format!("{}+0.{}d", origin.plus_days(-whole - 1), frac.complement().0)
+        }
+        Some(frac) => format!("{}+0.{}d", origin.plus_days(whole), frac.0),
     }
 }
 
