@@ -86,6 +86,41 @@ fn collapse_message(result: &sim::inference::particle_filter::PFilterResult) -> 
         "error: the log-likelihood is -inf at these parameters: {c}"))
 }
 
+/// Refuse `--save-final-state` when a bound row with a value ends after the
+/// fit's `holdout_after` cutoff (gh#1084). The cutoff resolves over
+/// `fit_streams`, the fit config's own files (its anchors are resolved there
+/// by `fit run`), and each row of `bound` is judged by the rule the fit's
+/// training partition uses
+/// ([`crate::fit::training_partition::trains_under_cutoff`]), so a run bound
+/// to the training rows alone passes and saves its state at their end.
+fn refuse_final_state_past_cutoff(
+    spec: &crate::fit::config_v2::TimeSpecToml,
+    fit_streams: &[crate::fit::runner::ObsStream],
+    bound: &[crate::fit::runner::ObsStream],
+    model: &ir::Model,
+) -> Result<(), String> {
+    let fit_rows: std::collections::BTreeMap<String, Vec<crate::fit::observed_rows::ObservedRow>> =
+        fit_streams.iter().map(|s| (s.name.clone(), s.rows.clone())).collect();
+    let at = crate::fit::runner::resolve_holdout_cutoff(spec, &fit_rows, model)?;
+    let held_out = bound.iter().find_map(|s| {
+        s.rows.iter()
+            .find(|r| r.cell.is_some()
+                && !crate::fit::training_partition::trains_under_cutoff(r, at))
+            .map(|r| (&s.name, r.measures.end()))
+    });
+    match held_out {
+        None => Ok(()),
+        Some((stream, end)) => Err(format!(
+            "--save-final-state cannot save a state filtered through held-out rows: the \
+             --fit config declares holdout_after = \"{raw}\" (t = {at}), and stream \
+             '{stream}' has a row ending at t = {end}, after it. The saved state would be \
+             a forecast origin that has already seen the data the forecast is scored \
+             against.\n  Fix: bind only the training rows (those ending at or before \
+             t = {at}) with `--data NAME=FILE`; the state is then saved at their end.",
+            raw = spec.raw())),
+    }
+}
+
 pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // pfilter has no `--no-color`: its painters follow the environment and
     // whether each stream is a terminal.
@@ -423,6 +458,41 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         &model, &compiled, &effective, &time_opts,
     ).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
     let n_streams = streams.len();
+
+    // gh#1084: the filter scores every bound row, held-out ones included (its
+    // log-likelihood and prequential outputs are what `compare` scores a
+    // holdout with), but a saved final state is a forecast origin. Under the
+    // fit's `holdout_after`, one filtered through rows past the cutoff already
+    // conditions on the data a forecast from it is scored against, so refuse
+    // it before the filter runs.
+    //
+    // The cutoff resolves over the fit config's own files, as `fit run`
+    // resolved it: an anchored `holdout_after = "last_obs - 4 weeks"` resolved
+    // over `--data` files holding only the training rows would move the cutoff
+    // back and refuse the very rows that trained.
+    if save_final_state.is_some() {
+        let holdout_after = fit_problem.as_ref()
+            .and_then(|p| p.data.as_ref())
+            .and_then(|d| d.holdout_after.as_ref());
+        if let (Some(spec), Some(fit_path)) = (holdout_after, a.fit.as_ref()) {
+            let fit_streams;
+            let cutoff_streams: &[crate::fit::runner::ObsStream] = if cli_data_specs.is_empty() {
+                &streams
+            } else {
+                fit_streams = load_data_observations_from_fit_toml(fit_path, &model)
+                    .and_then(|b| crate::fit::runner::data_bindings_to_effective(&model, &b))
+                    .and_then(|e| crate::fit::runner::resolve_and_load_obs_streams(
+                        &model, &compiled, &e, &time_opts))
+                    .unwrap_or_else(|e| {
+                        out.fail(format!("error: --fit toml data, read to resolve holdout_after: {e}"));
+                    });
+                &fit_streams
+            };
+            if let Err(e) = refuse_final_state_past_cutoff(spec, cutoff_streams, &streams, &model) {
+                out.fail(format!("error: {e}"));
+            }
+        }
+    }
 
     // Holes (missing observations via `NA`) are correct for the filter
     // log-likelihood — a hole contributes no term but still resets the bin
