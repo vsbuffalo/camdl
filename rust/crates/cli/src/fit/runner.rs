@@ -1962,13 +1962,15 @@ fn partition_error(e: PartitionError, cutoff: Option<(&str, f64)>) -> String {
     let declared = |raw: &str, at: f64| format!("holdout_after = \"{raw}\" resolves to t = {at}");
     match (e, cutoff) {
         (PartitionError::NoTrainingRows { stream }, Some((raw, at))) => format!(
-            "{}, but no row of stream '{stream}' ends at or before it — no training data \
-             would remain for that stream. A row trains when the end of what it measures is \
-             at or before the cutoff, and every bound stream must keep a training row.",
+            "{}, but no row of stream '{stream}' with an observed value ends at or before \
+             it — no training data would remain for that stream. A row trains when the end \
+             of what it measures is at or before the cutoff, and every bound stream must keep \
+             a training row that is not NA.",
             declared(raw, at)),
         (PartitionError::NothingHeldOut, Some((raw, at))) => format!(
-            "{}, at or after the end of every observation row — nothing would be withheld \
-             and the declaration would be inert. Some row must end after the cutoff.",
+            "{}, at or after the end of every observation row with a value — nothing would \
+             be withheld and the declaration would be inert. Some row that is not NA must \
+             end after the cutoff.",
             declared(raw, at)),
         (PartitionError::NotAPrefix { stream, position }, _) => format!(
             "internal error: the training rows of stream '{stream}' are not a prefix \
