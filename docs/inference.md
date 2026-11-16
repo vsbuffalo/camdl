@@ -1714,16 +1714,19 @@ camdl fit summary @train --params-only
 camdl pfilter model.camdl --params theta.toml --data weekly_cases=data/cases.tsv --save-prequential preq --score-from 5474
 ```
 
-`camdl data split` writes the train and holdout TSVs; point the fit's
-`[data.observations]` at the training file, and write the fit's θ̂ (from
-`fit summary --params-only`) to `theta.toml`. `--score-from` windows the trace
-to the held-out rows while still assimilating the training window. It cuts on
-the time each row is scored at, which for a row counting events over a period is
-the period's close, not the row's label. For a stream labelled by the start of
-its period (`covers = day(time)`, `starting_on`, `ending_on`), pass the close of
-the last training row's period (under `day(time)`, the split time plus one day);
-passing the split time scores the last training row as held out. `camdl compare`
-draws this boundary itself.
+`camdl data split` writes the train and holdout TSVs. Without a model it splits
+on each row's time label; for a stream labelled by the start of its period, add
+`--model model.camdl --stream NAME` so it splits on the end of what each row
+measures, as `holdout_after` does. Point the fit's `[data.observations]` at the
+training file, and write the fit's θ̂ (from `fit summary --params-only`) to
+`theta.toml`. `--score-from` windows the trace to the held-out rows while still
+assimilating the training window. It cuts on the time each row is scored at,
+which for a row counting events over a period is the period's close, not the
+row's label. For a stream labelled by the start of its period
+(`covers = day(time)`, `starting_on`, `ending_on`), pass the close of the last
+training row's period (under `day(time)`, the split time plus one day); passing
+the split time scores the last training row as held out. `camdl compare` draws
+this boundary itself.
 
 Score the full series, not the holdout file alone. Binding only the held-out
 rows starts the filter from the model's prior at the first held-out observation,

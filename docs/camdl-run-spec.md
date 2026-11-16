@@ -4468,6 +4468,23 @@ Split at t = 56 (column 'time')
   Train:   9 observations, t ∈ [0, 56]
   Holdout: 3 observations, t ∈ [63, 77]
   Written: data/train.tsv, data/holdout.tsv
+note: split on the time label. A stream labelled by the start of the period each row measures (covers = day(time), starting_on) keeps a row in the training file that the fit's holdout_after holds out; pass --model and --stream to split as holdout_after does.
+```
+
+Without a model, the split compares each row's time label with `--at-time`. That
+is the rule `holdout_after` uses only when the label is the end of what the row
+measures. Under `covers = day(time)` the row labelled 23 covers [23, 24), so
+`holdout_after = 23` holds it out while a label split at 23 trains it. Given the
+model and the stream the file holds, `data split` reads the file as the fit does
+and trains a row when the end of what it measures is at or before the split
+time, so the training file holds the rows `holdout_after` at the same time
+trains on:
+
+```
+$ camdl data split daily.tsv --at-time 23 --model model.camdl --stream daily_cases
+Split at t = 23 (stream 'daily_cases': a row trains when what it measures ends at or before t = 23, as under holdout_after)
+  Train:   22 observations, t ∈ [1, 22]
+  Holdout: 18 observations, t ∈ [23, 40]
 ```
 
 The fit then points at the training file:
@@ -7553,7 +7570,8 @@ camdl show TARGET             --root DIR   --format human|json
 camdl cat TARGET              --root DIR   --stream NAME
 camdl label HASH LABEL        --root DIR
 camdl data split FILE         --at-time T | --fraction F, --time-col NAME,
-                              --train PATH, --holdout PATH
+                              --model M --stream NAME, --train PATH,
+                              --holdout PATH
 ```
 
 ### Compiler passthroughs

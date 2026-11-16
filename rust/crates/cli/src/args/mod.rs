@@ -2377,9 +2377,19 @@ Examples:
   camdl data split cases.tsv --at-time 100 \\
       --train train.tsv --holdout holdout.tsv
 
+  # Split as the fit's holdout_after = 23 does: a row trains when the
+  # period it measures ends by t = 23 (under covers = day(time), the row
+  # labelled 23 covers [23, 24) and is held out)
+  camdl data split daily.tsv --at-time 23 \\
+      --model model.camdl --stream daily_cases
+
   # Split at a fraction of the rows (last 20% as holdout)
   camdl data split cases.tsv --fraction 0.8 \\
       --train train.tsv --holdout holdout.tsv
+
+Without --model the split compares each row's time label with --at-time.
+That agrees with holdout_after only for a stream labelled by the end of
+what each row measures (no covers, or closing_at).
 "))]
 pub struct DataSplitArgs {
     /// Input data TSV
@@ -2393,9 +2403,20 @@ pub struct DataSplitArgs {
     #[arg(long, conflicts_with = "at_time")]
     pub fraction: Option<f64>,
 
-    /// Name of the time column (auto-detected if absent)
-    #[arg(long)]
+    /// Name of the time column (auto-detected if absent; the model declares it under --model)
+    #[arg(long, conflicts_with = "model")]
     pub time_col: Option<String>,
+
+    /// Model whose observation stream the file holds: a row then trains when
+    /// the end of what it measures is at or before the split time, as under
+    /// the fit's holdout_after
+    #[arg(long)]
+    pub model: Option<PathBuf>,
+
+    /// Observation stream the file holds (needed with --model when the model
+    /// declares more than one)
+    #[arg(long, requires = "model")]
+    pub stream: Option<String>,
 
     /// Training set output path
     #[arg(long)]
