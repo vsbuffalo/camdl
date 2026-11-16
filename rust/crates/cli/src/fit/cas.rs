@@ -12,10 +12,9 @@
 //!   normalized out) + engine version.
 //! - **method level** = [`MethodLevel`] = [`MethodConfig`] (the method's
 //!   `identity_payload` — its algorithm's fields plus `starts` — +
-//!   `n_trajectories` + obs/flow + `target_length` + the resolved
-//!   `obs_alignment`, gh#189) folded with its `deps` (the content of a
-//!   `from_mle` / `from_posterior` / `from_params` source, so a regenerated
-//!   source re-keys the run). Its path label is the algorithm's name.
+//!   `n_trajectories` + obs/flow + `target_length`) folded with its `deps`
+//!   (the content of a `from_mle` / `from_posterior` / `from_params` source,
+//!   so a regenerated source re-keys the run). Its path label is the algorithm's name.
 //! - **seed level** = [`Seed`] = the resolved fit RNG seed.
 //!
 //! `n_trajectories` (the count of posterior trajectories PGAS writes to
@@ -26,17 +25,19 @@
 //! `run_id` could serve a different trajectory count's output. So each value
 //! yields a distinct leaf (count-in-the-key), at the cost of re-fitting when it
 //! changes.
+//!
+//! [`Algorithm::cas_n_trajectories`]: super::config_v2::Algorithm::cas_n_trajectories
 
 
 use std::path::Path;
 
 use runid::inputs::{
-    ArtifactRef, DataDigest, Deps, EngineVersion, FitDigest, ModelDigest, ResolvedObsAlignment,
-    Seed, MethodConfig, MethodLevel,
+    ArtifactRef, DataDigest, Deps, EngineVersion, FitDigest, ModelDigest, Seed, MethodConfig,
+    MethodLevel,
 };
 use runid::{run_id, ArtifactKind, ContentAddressed, ContentHash, LevelId};
 
-use super::config_v2::{Algorithm, FitConfig, Method, Problem};
+use super::config_v2::{FitConfig, Method, Problem};
 use super::stream_bindings::BoundDataDigests;
 
 /// A fully-resolved fit-method leaf: the factored identity levels (in path
@@ -445,6 +446,8 @@ pub fn config_identity_hash(config: &FitConfig) -> Result<String, String> {
 /// `n_trajectories`, which is count-in-the-key (see the module note and
 /// [`Algorithm::cas_n_trajectories`]).
 ///
+/// [`Algorithm::cas_n_trajectories`]: super::config_v2::Algorithm::cas_n_trajectories
+///
 /// Refuses a method whose `starts` was never resolved: the default rule is a
 /// function of the problem, and hashing an absent key would let a file that
 /// spells the default and one that omits it key differently — or, worse, let
@@ -518,30 +521,6 @@ pub fn fit_segment_dir(root: &Path, stem: &str, fit_hash: &ContentHash) -> std::
         .join(format!("{}-{}", runid::path_label(stem), fit_hash.short8()))
 }
 
-/// The resolved observation-time alignment a method will actually run under,
-/// for the method CAS identity (gh#189). Resolution is the single
-/// `crate::fit::methods::resolve_obs_alignment` gate, fed the algorithm and
-/// the fit-wide requested `[config] obs_alignment`. A non-inference method
-/// (or an unsupported combo, which aborts the run before any output is
-/// stored) is keyed as `Snap` — the historical uniform-grid default — so it
-/// never silently aliases an `Exact` run.
-fn resolved_obs_alignment(algorithm: &Algorithm, problem: &Problem) -> ResolvedObsAlignment {
-    use crate::run_meta::FitAlgorithm;
-    if !matches!(
-        algorithm.method_kind(),
-        FitAlgorithm::If2 | FitAlgorithm::Pgas | FitAlgorithm::Pmmh | FitAlgorithm::Pfilter
-    ) {
-        return ResolvedObsAlignment::Snap;
-    }
-    match crate::fit::methods::resolve_obs_alignment(
-        algorithm.method_kind(),
-        problem.config.obs_alignment,
-    ) {
-        Ok(crate::fit::methods::ObsAlignment::Exact) => ResolvedObsAlignment::Exact,
-        Ok(crate::fit::methods::ObsAlignment::Snap) | Err(_) => ResolvedObsAlignment::Snap,
-    }
-}
-
 /// Resolve a fit-method leaf's identity: the three factored levels (fit /
 /// method / seed) and the `run_id` derived from their hashes. The method
 /// level's label is the algorithm's name — there is no order among methods
@@ -599,8 +578,6 @@ fn fit_method_levels(ctx: &FitMethodCtx, target_length: u64) -> Result<Vec<Level
         obs_block: String::new(),
         flow_indices: Vec::new(),
         target_length,
-        // gh#189: the resolved (not requested) obs alignment, keyed per method.
-        obs_alignment: resolved_obs_alignment(&ctx.method.algorithm, ctx.problem),
     };
     let method_level = MethodLevel { config: method_config, deps: Deps(ctx.deps.clone()) };
 
@@ -1060,7 +1037,7 @@ mod tests {
     }
 
     /// gh#189: the integrator `[config] dt` changes the substep grid (and, via
-    /// `Expr::Dt` and the obs-alignment substep window, the computed output), so
+    /// `Expr::Dt` and the substep window at an observation, the computed output), so
     /// two fits differing only in `dt` must get distinct fit-level hashes — else
     /// a changed `dt` silently reuses a stale fit / method leaf (the
     /// count-in-the-key, silent-wrong-answer class). `dt` is keyed at the fit
@@ -1123,46 +1100,6 @@ mod tests {
         // No explicit holdout → empty (temporal holdout_after is a numeric
         // threshold already in the fit.toml blob, not a file).
         assert!(holdout_digests(&data("")).is_empty());
-    }
-
-    /// gh#189: the *resolved* obs alignment is folded into the method identity,
-    /// and resolution is per-algorithm. A PGAS method resolves to `Snap`; an
-    /// IF2 method resolves to `Exact`. The two must therefore produce distinct
-    /// `MethodConfig`s (so a snap and an exact fit never collide in the store).
-    #[test]
-    fn resolved_obs_alignment_is_keyed_per_method() {
-        let if2 = if2_method(4000);
-        let pgas = pgas_method(200);
-        let cfg = minimal_config(""); // obs_alignment unset → per-algorithm default
-        assert_eq!(
-            resolved_obs_alignment(&if2.algorithm, &cfg),
-            ResolvedObsAlignment::Exact,
-            "if2 resolves to exact (steps exactly to obs times)"
-        );
-        assert_eq!(
-            resolved_obs_alignment(&pgas.algorithm, &cfg),
-            ResolvedObsAlignment::Snap,
-            "pgas resolves to snap (uniform grid)"
-        );
-
-        // The resolved value is folded into the method-level identity. Holding
-        // every other MethodConfig field fixed, flipping ONLY the resolved
-        // alignment must change the method hash (snap and exact can't collide).
-        let mk = |align: ResolvedObsAlignment| -> ContentHash {
-            MethodConfig {
-                config: ContentHash::from_bytes([0; 32]),
-                obs_block: String::new(),
-                flow_indices: Vec::new(),
-                target_length: 0,
-                obs_alignment: align,
-            }
-            .content_hash()
-        };
-        assert_ne!(
-            mk(ResolvedObsAlignment::Snap),
-            mk(ResolvedObsAlignment::Exact),
-            "the resolved obs_alignment must distinguish the method identities (gh#189)"
-        );
     }
 
     /// gh#541: a `from_posterior` / `from_params` source file is keyed by its
