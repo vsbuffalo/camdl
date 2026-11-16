@@ -629,9 +629,11 @@ data files, because it defines the split; for every other anchor
 (`simulate { to
 = last_obs + … }`, breakpoints, `value_at`) over the training
 rows only, so appending held-out rows never changes a fit's end time or its
-identity. A fit and a forecast print a note naming any stream whose last
-observation is more than one of its own periods before `last_obs`, so a stream
-that stopped reporting is visible.
+identity. A fit prints a note, once, naming any stream whose last observation is
+more than one of its own periods before `last_obs`, so a stream that stopped
+reporting is visible. The same note for a forecast, and `fit predict`'s
+free-forward grid (whose `last_obs` is still the largest label over the full
+file), come with the forecast plan in Phase B.
 
 ## Part 5. Boundaries, artifacts and identity
 
@@ -706,12 +708,20 @@ recorded" for a model without an origin.
 
 The training rule is part of a fit's identity: a `holdout_after` fit on a start-
 or day-labelled stream trains on different rows after this change, so it must
-re-key. The removal of `obs_alignment` from the fit identity, the score-artifact
-proposal's row digests, and the removal of holdout files from fit identity
-change the same structure (`FitDigest`) and land together in one `HASH_VERSION`
-bump, from 3 to 4 (D47). A forecast plan's mode, origin, horizon and target list
-are identity for any stored predictive or score result; its notes are
-presentation.
+re-key. Each change to identity bumps `HASH_VERSION` on its own (D58, which
+supersedes D47's single shared bump): the removal of `obs_alignment` from the
+fit identity is the bump from 3 to 4, the training partition the bump from 4 to
+5, and the score-artifact proposal's identity step a later one.
+
+`FitDigest` carries the partition rule's version, so a change to the rule
+re-keys every fit with no `HASH_VERSION` bump. It keeps the whole-file digests
+of the training files and the digests of the `[data.holdout]` files: with
+`holdout_after` in the config and the rule version, they determine the
+partition, so a stored fit never answers for another one. Replacing them with
+the per-stream training row digests, and dropping the holdout files from fit
+identity, is the score-artifact proposal's identity step. A forecast plan's
+mode, origin, horizon and target list are identity for any stored predictive or
+score result; its notes are presentation.
 
 ### 5.5 Names
 
