@@ -150,6 +150,30 @@ fn truncated_json_is_malformed_and_keeps_its_header() {
     assert_eq!(u.run_id, Some(id(7)));
 }
 
+/// A record written before the `calendar` block became required is named as
+/// such (D59), not reported as a parse error; one broken in another way too
+/// stays `Malformed`.
+#[test]
+fn a_record_without_the_calendar_block_is_named_as_predating_it() {
+    let root = TmpRoot::new("no_calendar");
+    let mut v =
+        serde_json::to_value(record(ArtifactKind::FitMethod, id(4), RunStatus::Completed)).unwrap();
+    v.as_object_mut().unwrap().remove("calendar");
+    let bytes = serde_json::to_vec(&v).unwrap();
+    let dir = plant_bytes(&root.join("fits/a"), &bytes);
+    let u = unreadable(&dir);
+    assert_eq!(u.reason, Unreadable::PredatesCalendar, "{u:?}");
+    assert!(u.reason.to_string().contains("before the calendar axis was recorded"), "{}", u.reason);
+    assert!(crate::record::predates_calendar(&bytes));
+    assert_eq!((u.kind, u.run_id), (Some(ArtifactKind::FitMethod), Some(id(4))));
+
+    v.as_object_mut().unwrap().remove("levels");
+    let bytes = serde_json::to_vec(&v).unwrap();
+    let dir = plant_bytes(&root.join("fits/b"), &bytes);
+    assert!(matches!(unreadable(&dir).reason, Unreadable::Malformed { .. }),
+        "a record missing more than the calendar is not misnamed");
+}
+
 #[test]
 fn a_renamed_kind_is_named_with_the_sentence_readers_already_print() {
     let root = TmpRoot::new("renamed");

@@ -43,12 +43,13 @@ pub struct Bounds<'a> {
 }
 
 /// Say once per path, on stderr, that a skipped `run.json` was written by an
-/// older camdl under a since-renamed `kind` ([`runid::renamed_kind`]). Any
+/// older camdl: under a since-renamed `kind` ([`runid::renamed_kind`]), or
+/// before the calendar axis was recorded ([`runid::predates_calendar`]). Any
 /// other unreadable record is skipped silently, as before.
-fn warn_if_renamed_kind(leaf: &UnreadableLeaf) {
+fn warn_if_from_an_older_camdl(leaf: &UnreadableLeaf) {
     use std::sync::{Mutex, OnceLock};
     static WARNED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
-    if !matches!(leaf.reason, Unreadable::RenamedKind { .. }) {
+    if !matches!(leaf.reason, Unreadable::RenamedKind { .. } | Unreadable::PredatesCalendar) {
         return;
     }
     let run_json = leaf.dir.join("run.json");
@@ -65,7 +66,7 @@ fn warn_if_renamed_kind(leaf: &UnreadableLeaf) {
 
 /// The readable leaves of a [`runid::discover_in_walk_order`] walk, in the
 /// order it met them, as `(dir, record)`. Unreadable entries are dropped here
-/// (renamed kinds named on stderr), which is what every caller of this module
+/// (records from an older camdl named on stderr), which is what every caller of this module
 /// has always been given.
 fn readable(under: &Path, scope: Scope) -> Vec<(PathBuf, RunRecord)> {
     runid::discover_in_walk_order(under, scope)
@@ -73,7 +74,7 @@ fn readable(under: &Path, scope: Scope) -> Vec<(PathBuf, RunRecord)> {
         .filter_map(|entry| match entry {
             Ok(leaf) => Some((leaf.dir, leaf.record)),
             Err(unreadable) => {
-                warn_if_renamed_kind(&unreadable);
+                warn_if_from_an_older_camdl(&unreadable);
                 None
             }
         })

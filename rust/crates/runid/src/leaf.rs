@@ -27,7 +27,10 @@ use std::time::{Duration, SystemTime};
 
 use crate::hash::ContentHash;
 use crate::kind::ArtifactKind;
-use crate::record::{renamed_kind_pair, renamed_kind_sentence, RunRecord};
+use crate::record::{
+    predates_calendar, renamed_kind_pair, renamed_kind_sentence, RunRecord,
+    PREDATES_CALENDAR_SENTENCE,
+};
 use crate::store::{leaf_state, lock_owner, LeafState, LockOwner, ATTEMPTS_DIR};
 
 /// One leaf: its directory, its parsed `run.json`, and the state that record
@@ -65,6 +68,9 @@ pub enum Unreadable {
     /// `run.json` names a `kind` an older camdl wrote and this one has
     /// renamed ([`renamed_kind`](crate::record::renamed_kind)).
     RenamedKind { old: String, new: String },
+    /// `run.json` was written before the `calendar` block became required
+    /// ([`predates_calendar`](crate::record::predates_calendar)).
+    PredatesCalendar,
     /// The directory holds a `.lock` and no `run.json`: a claim between
     /// taking the lock and writing its `Running` record (a live `owner`), or
     /// the debris of one that died there.
@@ -79,6 +85,7 @@ impl std::fmt::Display for Unreadable {
                 write!(f, "its run.json is not a run record: {message}")
             }
             Unreadable::RenamedKind { old, new } => f.write_str(&renamed_kind_sentence(old, new)),
+            Unreadable::PredatesCalendar => f.write_str(PREDATES_CALENDAR_SENTENCE),
             Unreadable::NoRecord { owner } => {
                 f.write_str("it holds a .lock and no run.json")?;
                 match owner {
@@ -457,6 +464,7 @@ fn malformed(dir: &Path, bytes: &[u8], parse_error: Option<serde_json::Error>) -
     let header = run_header(bytes);
     let reason = match renamed_kind_pair(bytes) {
         Some((old, new)) => Unreadable::RenamedKind { old: old.into(), new: new.into() },
+        None if predates_calendar(bytes) => Unreadable::PredatesCalendar,
         None => Unreadable::Malformed {
             message: match parse_error {
                 Some(e) => e.to_string(),
