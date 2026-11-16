@@ -35,6 +35,10 @@ pub enum RunNote {
     /// number of multipliers than the trajectory recorded at a substep: the
     /// divergence detector between that walk and the transition density's.
     GammaIndexMismatch { substep: usize, tracked: usize, recorded: usize },
+    /// A forcing was evaluated outside the range on which it is defined and
+    /// its end value was held ([`crate::forcing_range`]). The command decides
+    /// whether that is an error or a warning.
+    ForcingOutsideRange(crate::forcing_range::OutsideRange),
 }
 
 impl RunNote {
@@ -45,6 +49,7 @@ impl RunNote {
             RunNote::NonIntegerNormalObservation { .. } => "non-integer-normal-observation",
             RunNote::NotPositiveDefinite(_) => "not-positive-definite",
             RunNote::GammaIndexMismatch { .. } => "gamma-index-mismatch",
+            RunNote::ForcingOutsideRange(_) => "forcing-outside-range",
         }
     }
 
@@ -55,6 +60,11 @@ impl RunNote {
                 format!("{}\u{0}{}\u{0}{}", n.effect, n.declared.to_bits(), n.fires_at.to_bits())
             }
             RunNote::NonIntegerNormalObservation { .. } => String::new(),
+            // One note per forcing and side, whichever time the first
+            // compiled copy of it met first.
+            RunNote::ForcingOutsideRange(o) => {
+                format!("{}\u{0}{:?}\u{0}{}\u{0}{}", o.forcing, o.side, o.lo.to_bits(), o.hi.to_bits())
+            }
             other => other.to_string(),
         }
     }
@@ -80,6 +90,7 @@ impl std::fmt::Display for RunNote {
                 "gamma index mismatch at substep {}: tracked {} but trajectory recorded {} gammas",
                 substep, tracked, recorded
             ),
+            RunNote::ForcingOutsideRange(o) => write!(f, "{o}"),
         }
     }
 }
