@@ -11755,6 +11755,9 @@ let check_quadratic_coupling ctx =
               (`every`, `from`, `until`). In anchored mode, a
               calendar-classified duration in any of those is an
               E3xx.
+      E360:   arithmetic an instant does not have (Instant + Instant,
+              k · Instant, Duration − Instant, Instant ± bare number),
+              at every position Rule 1 walks (gh#1070).
 
     All anchored-mode rules are vacuous when no `origin` is
     declared (proposal §1.1, decision of record). The unanchored
@@ -11854,6 +11857,22 @@ let check_surface_time_typing ctx =
           ~hint:(Time_typing.hint_calendar_plus_instant
                   ~exact_fn:(Time_typing.calendar_exact_fn bad)
                   (calendar_span_days bad))
+          ());
+    (* E360 (gh#1070): the arithmetic an instant does not have —
+       Instant + Instant, k · Instant, Duration − Instant, and an
+       instant moved by a bare number. Every site that is Rule-1-walked
+       is walked for these too, so the two refusals cover the same
+       positions. *)
+    if anchored then
+      Time_typing.walk_instant_misuse env e ~on_hit:(fun misuse node ->
+        Diagnostics.error ctx.diags
+          ~code:"E360"
+          ~loc
+          ~message:(Printf.sprintf
+            "`%s` %s in %s; that has no meaning as a time"
+            (Time_typing.show_short node)
+            (Time_typing.describe_instant_misuse misuse) context)
+          ~hint:(Time_typing.hint_instant_misuse misuse)
           ())
   in
 
@@ -11877,14 +11896,8 @@ let check_surface_time_typing ctx =
 
   (* Helper: warn on bare numeric in a time position (W324 for
      simulate, W325 for `at [...]` schedules). *)
-  let is_bare_numeric (e : expr) : bool =
-    match e with
-    | EConst _ -> true
-    | EUnOp (Neg, EConst _) -> true
-    | _ -> false
-  in
   let warn_bare_numeric ~loc ~code ~field ~hint e =
-    if anchored && is_bare_numeric e then
+    if anchored && Time_typing.is_bare_number e then
       Diagnostics.warning ctx.diags
         ~code
         ~loc
