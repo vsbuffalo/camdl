@@ -338,6 +338,19 @@ for the day-labelled file, and the row is then scored on the day its label
 names. Say which kind of file you have; do not shift the time column, or
 `origin`, to make a form fit.
 
+**Which rows train under a holdout cutoff.** A fit config's
+`holdout_after = "2026-07-25"` is the instant 25 July begins, and a row trains
+if the _end_ of what it measures is at or before it. A `day(time)` row labelled
+`2026-07-24` covers 24 July, ends at the start of the 25th and trains; the row
+labelled `2026-07-25` covers the 25th and is held out, which the key's name
+alone could hide, so the fit prints each stream's first held-out row. A
+`closing_at` row ends at its label, so the row labelled `2026-07-25` trains. A
+week-starting row labelled `2026-07-21` covers 21–27 July, ends after the cutoff
+and is held out, although its label is before it. `last_obs` in a model anchor
+(`simulate { to = last_obs + 2 'weeks }`) is likewise the end of the latest
+observed training row, not its label: for a `day(time)` stream it is one day
+after the last training row's date.
+
 ## Anchored vs unanchored models
 
 camdl models come in two modes, distinguished by a single bit: whether

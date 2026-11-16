@@ -60,30 +60,40 @@ because that level hashes the problem alone.
 model, each mapped to a TSV path.
 
 `[data.holdout]` (same shape) and `holdout_after = <time>` (under `[data]`) are
-**applied at fit load** (gh#585): `holdout_after` truncates training to
-`t ≤ <time>` (it accepts a model-time number, a date under a calendar-anchored
-model, or `last_obs - 6 weeks`); `[data.holdout]` files must lie strictly after
-each stream's last training time (tail-only). The applied training window is
-recorded in `fit.meta.json`, and `camdl compare` scores such fits held-out by
-default (`--in-sample` opts out). For a fit that predates the split being
-applied, score the **full** series with
-`camdl pfilter --save-prequential --score-from <time>`, summing the `log_score`
-of the `{STEM}.tsv` rows (the joint score per step), with `<time>` the split
-time. For a stream labelled by the start of its period (`covers = day(time)`,
-`starting_on`, `ending_on`) the last training row is scored at its period's
-close, after the split time, so pass that close as `<time>` instead; `compare`
-draws this boundary itself. Scoring the full series matters: scoring the
-held-out file on its own starts the filter from the prior with nothing
-assimilated from the training window, which is a different (and unfairly harsh)
-quantity. The recipe is spelled out under "Out-of-sample validation" in
-`camdl docs inference`.
+**applied at fit load** (gh#585). Under `holdout_after` a row trains if the
+_end_ of what it measures is at or before the cutoff. The cutoff is a model-time
+number, a date under a calendar-anchored model (the instant that day begins), or
+an anchored form such as `last_obs - 6 weeks`, where `last_obs` is the latest
+end of an observed row over the full files. For a `closing_at` or window-column
+stream the end is the row's label, so the row labelled with the cutoff trains.
+For a stream labelled by the start of its period (`covers = day(time)`,
+`starting_on`, `ending_on`) the end is later than the label: under
+`holdout_after = 10` the `day(time)` row labelled 10 covers day 10, ends at 11
+and is held out. Every bound stream must keep a training row and some row must
+be held out. Under `[data.holdout]` every row of the training files trains, and
+every row of the holdout files must end strictly after the training extent, the
+latest end among the training rows of every stream (tail-only).
+
+Every fit records which rows it trained on in `fit.meta.json` as
+`training_partition`: per stream the number of leading rows that trained and
+their row digest, and the training extent. The fit prints the rows trained, the
+extent and the first held-out row of each stream. `camdl compare` scores a
+holdout fit held-out by default (`--in-sample` opts out): every row that did not
+train and ends after the training extent. To score a held-out window by hand,
+score the **full** series with
+`camdl pfilter --save-prequential --score-from <extent>`, summing the
+`log_score` of the `{STEM}.tsv` rows (the joint score per step). Scoring the
+full series matters: scoring the held-out file on its own starts the filter from
+the prior with nothing assimilated from the training window, which is a
+different (and unfairly harsh) quantity. The recipe is spelled out under
+"Out-of-sample validation" in `camdl docs inference`.
 
 `camdl profile --fit` applies the holdout as `fit run` does, through the same
 function, whether its data come from `--data` or from the config: under
-`holdout_after` every cell fits only the rows at or before the cutoff, and a
-`[data.holdout]` config's training files are fitted whole, its holdout files
-checked against the bound training data by the same tail-only rule.
-`camdl survey --fit` likewise scores only the rows at or before a
+`holdout_after` every cell fits only the rows that end at or before the cutoff,
+and a `[data.holdout]` config's training files are fitted whole, its holdout
+files checked against the bound training data by the same tail-only rule.
+`camdl survey --fit` likewise scores only the rows that end at or before a
 `holdout_after` cutoff, and checks `[data.holdout]` files by the same rule.
 
 `[synthetic]` may stand beside `[data]`: `fit run` then fits the real data, and

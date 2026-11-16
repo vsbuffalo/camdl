@@ -70,9 +70,9 @@ weekly_cases = "data/london_cases.tsv"
 
 # Optional: holdout data. Keys must match [data] keys.
 # Applied at fit load (gh#585): [data.holdout] files bind as the held-out
-# tail (every held-out time strictly after the stream's last training
-# time), and holdout_after = <time> truncates training to t <= <time>.
-# The applied window is recorded in fit.meta.json, and `camdl compare`
+# tail (every held-out row ending strictly after the latest training row),
+# and holdout_after = <time> trains the rows ending at or before <time>.
+# The training partition is recorded in fit.meta.json, and `camdl compare`
 # scores such fits held-out by default (stamped hold_out_tail after a
 # non-leakage check; --in-sample opts out).
 # [data.holdout]

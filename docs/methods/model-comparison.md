@@ -352,18 +352,20 @@ week before forecasting the next. Errors do not compound; each scored term is a
 genuine forecast of an observation the parameters never saw. `--in-sample`
 forces the old full-series in-sample comparison, clearly stamped.
 
-The boundary is drawn on the time each row is scored at, not on its label. A row
-that counts events over a period is scored when the period closes: under
-`covers = day(time)` the row labelled 10 covers [10, 11) and is scored at t
-= 11. The fit withholds rows by label, so `compare` starts scoring after the
-latest scoring time of any row the fit trained on. With `holdout_after = 10` and
-that daily stream, the row labelled 10 is assimilated and not scored, and the
-first scored row is the one labelled 11. A `closing_at` stream is scored at its
-labels, so for it the boundary is the holdout time itself. With several streams
-there is one boundary, the latest over all of them: a held-out row of one stream
-that is scored at or before another stream's last training row is assimilated
-without being scored. A held-out score can leave out a held-out row this way,
-but it never includes a training row.
+The boundary is drawn on the end of what each row measures, not on its label. A
+row that counts events over a period ends, and is scored, when the period
+closes: under `covers = day(time)` the row labelled 10 covers [10, 11) and ends
+at t = 11. A row trains if it ends at or before the cutoff, so with
+`holdout_after = 10` and that daily stream the rows labelled 1–9 train and the
+row labelled 10 is held out and scored. A `closing_at` stream ends at its
+labels, so for it the row labelled 10 trains. The fit records, per stream, how
+many leading rows trained and their row digest, and the training extent, the
+latest end among them. `compare` scores every row that did not train and ends
+after the training extent; under `holdout_after` that is every row that did not
+train. Under `[data.holdout]`, with training files that end at different times,
+the extent also leaves out a held-out row that ends before the latest training
+data, whose future the parameters would otherwise have seen. A held-out score
+never includes a training row.
 
 ### 6.3 The non-leakage guarantee, and its limit
 
