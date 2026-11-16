@@ -1,7 +1,8 @@
 //! The `bspline` forcing kind end to end (proposal
 //! 2026-10-27-estimable-bsplines §4.3, §4.4, §9 Stage 2): through `camdlc` for
 //! the unit handling, and through the `camdl` binary for observation anchors in
-//! the window and the `spline-held-past-window` notice.
+//! the window and a run past the window (refused, or held under
+//! `--allow-forcing-extrapolation`).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -115,7 +116,7 @@ fn date_breakpoints_compile_to_model_days() {
     assert_eq!(forcing_at(&model, 80.0), forcing_at(&model, 59.0), "held past the last breakpoint");
 }
 
-// ── Through the binary: anchored windows and the notice ─────────────────────
+// ── Through the binary: anchored windows and a run past the window ──────────
 
 /// SIR scaled by a bspline whose window is `window`, observed weekly.
 fn anchored_model(dir: &Path, window: &str) -> PathBuf {
@@ -211,8 +212,9 @@ thin       = 1
     toml
 }
 
-/// Run `camdl simulate`; returns (success, stderr, CAS root).
-fn simulate(dir: &Path, model: &Path, fit: Option<&Path>) -> (bool, String, PathBuf) {
+/// Run `camdl simulate` with `extra` arguments; returns (success, stderr, CAS
+/// root).
+fn simulate(dir: &Path, model: &Path, fit: Option<&Path>, extra: &[&str]) -> (bool, String, PathBuf) {
     let params = dir.join("params.toml");
     std::fs::write(&params, "beta = 0.12\ngamma = 0.1\nrho = 0.6\n").unwrap();
     let cas = dir.join("cas");
@@ -222,6 +224,7 @@ fn simulate(dir: &Path, model: &Path, fit: Option<&Path>) -> (bool, String, Path
         .arg(model)
         .args(["--backend", "chain_binomial", "--seed", "1", "--dt", "1"])
         .args(["--params", params.to_str().unwrap()])
+        .args(extra)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_IR_CACHE_DIR", dir.join("irc"))
         .env("CAMDL_OUTPUT_DIR", &cas);
@@ -232,8 +235,8 @@ fn simulate(dir: &Path, model: &Path, fit: Option<&Path>) -> (bool, String, Path
     (o.status.success(), String::from_utf8_lossy(&o.stderr).into_owned(), cas)
 }
 
-/// Every `notices` record in the committed run.json files under `cas`.
-fn recorded_notice_codes(cas: &Path) -> Vec<String> {
+/// The forcings every committed run.json under `cas` records as held.
+fn recorded_holds(cas: &Path) -> Vec<String> {
     let mut out = Vec::new();
     let mut stack = vec![cas.to_path_buf()];
     while let Some(d) = stack.pop() {
@@ -244,31 +247,42 @@ fn recorded_notice_codes(cas: &Path) -> Vec<String> {
                 stack.push(p);
             } else if p.file_name().is_some_and(|n| n == "run.json") {
                 let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-                let notices = v.pointer("/inputs/notices").and_then(|n| n.as_array()).cloned().unwrap_or_default();
-                out.extend(notices.iter().filter_map(|n| n["code"].as_str().map(str::to_string)));
+                let held = v.pointer("/inputs/forcing_extrapolation/held").and_then(|n| n.as_array()).cloned().unwrap_or_default();
+                out.extend(held.iter().filter_map(|n| n["forcing"].as_str().map(str::to_string)));
             }
         }
     }
     out
 }
 
-const NOTICE_CODE: &str = "spline-held-past-window";
+const OVERRIDE: &str = "--allow-forcing-extrapolation";
+
+/// The warning a run held past the window `[0, end]` prints.
+fn held_warning(end: u32) -> String {
+    format!(
+        "warning: forcing `mult` is defined on t = 0 to t = {end} (its window); the run evaluated it after the \
+         end of its window, first at t = {}, and its value at t = {end} is held from t = {end} to the end of the run",
+        end + 1
+    )
+}
 
 /// A window ending at `last_obs - 2 'weeks` resolves against the bound data
-/// (last_obs = 35, so b = 21), and the run past it carries the pinned notice,
-/// on stderr and in the run's record.
+/// (last_obs = 35, so b = 21). A run past it is refused; under the override
+/// it holds, says so once, and the run's record names the forcing held.
 #[test]
-fn anchored_window_resolves_and_the_hold_is_noticed() {
+fn anchored_window_resolves_and_the_hold_is_refused_or_warned() {
     let tmp = tempfile::tempdir().unwrap();
     let model = anchored_model(tmp.path(), "[0 'days, last_obs - 2 'weeks]");
     let fit = fit_toml(tmp.path(), &model);
-    let (ok, stderr, cas) = simulate(tmp.path(), &model, Some(&fit));
-    assert!(ok, "simulate must succeed:\n{stderr}");
+    let (ok, stderr, _) = simulate(tmp.path(), &model, Some(&fit), &[]);
+    assert!(!ok, "a run past the window must be refused:\n{stderr}");
     assert!(stderr.contains("forcing 'mult'") && stderr.contains("t = 21"), "resolved window end announced:\n{stderr}");
-    let line = "info: forcing `mult` is held at its value at t = 21 from t = 21 to the horizon t = 120; \
-                its window ends at last_obs - 14";
-    assert_eq!(stderr.matches(line).count(), 1, "the notice, once:\n{stderr}");
-    assert_eq!(recorded_notice_codes(&cas), vec![NOTICE_CODE.to_string()], "the notice is recorded with the run");
+    assert!(stderr.contains("error: forcing `mult` was evaluated at t = 22, after the end of its window"), "{stderr}");
+
+    let (ok, stderr, cas) = simulate(tmp.path(), &model, Some(&fit), &[OVERRIDE]);
+    assert!(ok, "simulate under the override must succeed:\n{stderr}");
+    assert_eq!(stderr.matches(&held_warning(21)).count(), 1, "the warning, once:\n{stderr}");
+    assert_eq!(recorded_holds(&cas), vec!["mult".to_string()], "the hold is recorded with the run");
 }
 
 /// An anchored window that inverts under this data vintage is refused, naming
@@ -278,7 +292,7 @@ fn an_inverted_anchored_window_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let model = anchored_model(tmp.path(), "[30 'days, last_obs - 2 'weeks]");
     let fit = fit_toml(tmp.path(), &model);
-    let (ok, stderr, _) = simulate(tmp.path(), &model, Some(&fit));
+    let (ok, stderr, _) = simulate(tmp.path(), &model, Some(&fit), &[OVERRIDE]);
     assert!(!ok, "an inverted window must be refused:\n{stderr}");
     assert!(
         stderr.contains("forcing 'mult' has its window or breakpoints out of order after resolving its \
@@ -287,48 +301,62 @@ fn an_inverted_anchored_window_is_refused() {
     );
 }
 
-/// A literal window: the notice fires when the horizon (120) passes the window
-/// end, without the anchor clause, and not when the window covers the run.
+/// A literal window: a run whose horizon (120) passes the window end is
+/// refused without the override and warned under it; a window covering the
+/// run gets neither.
 #[test]
-fn the_notice_fires_only_past_the_window() {
+fn only_a_run_past_the_window_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let model = anchored_model(tmp.path(), "[0 'days, 50 'days]");
-    let (ok, stderr, cas) = simulate(tmp.path(), &model, None);
+    let (ok, stderr, _) = simulate(tmp.path(), &model, None, &[]);
+    assert!(!ok, "{stderr}");
+    let (ok, stderr, cas) = simulate(tmp.path(), &model, None, &[OVERRIDE]);
     assert!(ok, "{stderr}");
-    let line = "info: forcing `mult` is held at its value at t = 50 from t = 50 to the horizon t = 120\n";
-    assert_eq!(stderr.matches(line).count(), 1, "{stderr}");
-    assert_eq!(recorded_notice_codes(&cas), vec![NOTICE_CODE.to_string()]);
+    assert_eq!(stderr.matches(&held_warning(50)).count(), 1, "{stderr}");
+    assert_eq!(recorded_holds(&cas), vec!["mult".to_string()]);
 
     let tmp = tempfile::tempdir().unwrap();
     let model = anchored_model(tmp.path(), "[0 'days, 150 'days]");
-    let (ok, stderr, cas) = simulate(tmp.path(), &model, None);
+    let (ok, stderr, cas) = simulate(tmp.path(), &model, None, &[]);
     assert!(ok, "{stderr}");
-    assert!(!stderr.contains("is held at its value"), "a window covering the run gets no notice:\n{stderr}");
-    assert!(recorded_notice_codes(&cas).is_empty());
+    assert!(!stderr.contains("forcing `mult`"), "a window covering the run says nothing:\n{stderr}");
+    assert!(recorded_holds(&cas).is_empty());
 }
 
-/// `pfilter`, `profile` and `survey` resolve the same anchored window and
-/// print the same notice, once each, as `simulate` does.
+/// `pfilter`, `profile` and `survey` resolve the same anchored window and,
+/// with the data running past it, refuse the run without the override and
+/// warn once each under it.
 #[test]
-fn pfilter_profile_and_survey_notice_the_hold() {
+fn pfilter_profile_and_survey_refuse_or_warn_the_hold() {
     let tmp = tempfile::tempdir().unwrap();
     let model = anchored_model(tmp.path(), "[0 'days, last_obs - 2 'weeks]");
     let fit = fit_toml(tmp.path(), &model);
     let params = tmp.path().join("params.toml");
     std::fs::write(&params, "beta = 0.12\ngamma = 0.1\nrho = 0.6\n").unwrap();
-    let line = "info: forcing `mult` is held at its value at t = 21 from t = 21 to the horizon t = 120; \
-                its window ends at last_obs - 14";
+    // The first time past the window is the next step on the chain-binomial
+    // grid (t = 22), and an RK4 midpoint (t = 21.5) for survey's ODE
+    // skeleton, so the lines are matched up to it.
+    let line = "warning: forcing `mult` is defined on t = 0 to t = 21 (its window); the run evaluated it after \
+                the end of its window, first at t = ";
     let run = |label: &str, args: Vec<String>| {
-        let o = Command::new(bin()).env_remove("CLICOLOR_FORCE")
-            .args(&args)
-            .env("CAMDL_SKIP_VERSION_CHECK", "1")
-            .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
-            .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas"))
-            .output()
-            .expect("spawn");
-        let stderr = String::from_utf8_lossy(&o.stderr).into_owned();
-        assert!(o.status.success(), "{label} must run:\n{stderr}");
-        assert_eq!(stderr.matches(line).count(), 1, "{label}: the notice, once:\n{stderr}");
+        let go = |extra: &[&str]| {
+            let o = Command::new(bin()).env_remove("CLICOLOR_FORCE")
+                .args(&args)
+                .args(extra)
+                .env("CAMDL_SKIP_VERSION_CHECK", "1")
+                .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
+                .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas"))
+                .output()
+                .expect("spawn");
+            (o.status.success(), String::from_utf8_lossy(&o.stderr).into_owned())
+        };
+        let (ok, stderr) = go(&[]);
+        assert!(!ok, "{label} must be refused without the override:\n{stderr}");
+        assert!(stderr.contains("error: forcing `mult` was evaluated at t = 2")
+            && stderr.contains("after the end of its window (it is defined on t = 0 to t = 21"), "{label}:\n{stderr}");
+        let (ok, stderr) = go(&[OVERRIDE]);
+        assert!(ok, "{label} must run under the override:\n{stderr}");
+        assert_eq!(stderr.matches(line).count(), 1, "{label}: the warning, once:\n{stderr}");
     };
     let s = |x: &Path| x.to_str().unwrap().to_string();
     let m = s(&model);

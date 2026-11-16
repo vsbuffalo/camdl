@@ -123,16 +123,11 @@ pub fn fit_window(
     Ok(ObsAnchorTimes { first, last })
 }
 
-/// Also prints the `spline-held-past-window` notice against the model's
-/// resolved horizon, anchored or not, so the three commands that resolve
-/// through here (`pfilter`, `profile`, `survey`) report a hold exactly as
-/// `simulate` and `fit` do.
 fn resolve_with(
     out: &crate::out::Out, model: &mut ir::Model,
     read_window: impl FnOnce(&ir::Model) -> Result<(f64, f64), String>,
 ) -> Result<bool, String> {
     if !model_is_anchored(model) {
-        out.notices(&spline_hold_notices(model, &[], model.simulation.t_end));
         return Ok(false);
     }
     let (first, last) = read_window(model).map_err(|e| {
@@ -144,7 +139,6 @@ fn resolve_with(
     })?;
     let moved = substitute(model, ObsAnchorTimes { first, last })?;
     report(out, &moved, model);
-    out.notices(&spline_hold_notices(model, &moved, model.simulation.t_end));
     Ok(true)
 }
 
@@ -492,68 +486,6 @@ fn forcing_exprs_mut(k: &mut ir::time_func::TimeFuncKind) -> Vec<&mut Expr> {
             knots.into_iter().chain(b.coefs.exprs_mut()).collect()
         }
     }
-}
-
-/// The notice code for a `bspline` forcing held past its window (proposal
-/// 2026-10-27-estimable-bsplines §4.3, D4).
-pub const SPLINE_HELD_PAST_WINDOW: &str = "spline-held-past-window";
-
-/// One info notice for each `bspline` forcing whose window ends before the
-/// run's horizon (proposal §4.3, D4). Past its window end b a bspline holds its
-/// value at b (evaluated at t − lag), so a forecast there carries the curve's
-/// last value rather than an extrapolated trend; this says so, once per job.
-///
-/// `model` is the run's model with its anchors already substituted, `anchors`
-/// what [`substitute`] returned for it (empty when it had none), and `horizon`
-/// the run's resolved `t_end`. A window end or lag that is not a constant here
-/// (a parameter lag) cannot be compared, so it gets no notice.
-pub fn spline_hold_notices(
-    model: &ir::Model,
-    anchors: &[ResolvedAnchor],
-    horizon: f64,
-) -> crate::out::notice::Notices {
-    let cal = |t: f64| {
-        model
-            .origin
-            .as_deref()
-            .and_then(|o| ir::caltime::internal_to_date(o, t, &model.time_unit).ok())
-            .map(|d| format!(" ({d})"))
-            .unwrap_or_default()
-    };
-    model
-        .time_functions
-        .iter()
-        .filter_map(|tf| {
-            let ir::time_func::TimeFuncKind::BSpline(b) = &tf.kind else { return None };
-            let end = const_value(bspline_knot_exprs(&b.knots).last()?)?;
-            let lag = match &tf.lag {
-                None => 0.0,
-                Some(e) => const_value(e)?,
-            };
-            let from = end + lag;
-            // NaN on either side means the comparison is undecidable: no notice.
-            if horizon.is_nan() || from.is_nan() || horizon <= from {
-                return None;
-            }
-            let site = tf_name(&tf.name);
-            let anchored = anchors
-                .iter()
-                .find(|a| a.site == site && a.resolved == end)
-                .map(|a| format!("; its window ends at {}", a.anchor))
-                .unwrap_or_default();
-            Some(crate::out::notice::Notice::info(
-                SPLINE_HELD_PAST_WINDOW,
-                format!(
-                    "forcing `{}` is held at its value at t = {end}{} from t = {from}{} to the \
-                     horizon t = {horizon}{}{anchored}",
-                    tf.name,
-                    cal(end),
-                    cal(from),
-                    cal(horizon)
-                ),
-            ))
-        })
-        .collect()
 }
 
 /// The stderr line every resolving command prints, so a reader of the log can

@@ -403,6 +403,9 @@ pub fn check_reuse(
         return Ok(ReuseVerdict::MustRun);
     }
     Ok(match found {
+        // A leaf that held a forcing past its range under the override does
+        // not answer for a run without it: run, and be refused.
+        Some(dir) if crate::forcing_extrapolation::leaf_held_without_override(&dir) => ReuseVerdict::MustRun,
         Some(dir) => ReuseVerdict::CacheHit { dir },
         None => ReuseVerdict::MustRun,
     })
@@ -499,7 +502,8 @@ impl ResolvedClaim {
     /// Commit Running → Completed, writing the post-run `display_inputs` into
     /// `run.json.inputs`. (`StreamClaim::finalize` flips status and builds the
     /// exact-set manifest from the streamed files.)
-    pub fn finalize(mut self, display_inputs: serde_json::Value) -> Result<PathBuf, CasError> {
+    pub fn finalize(mut self, mut display_inputs: serde_json::Value) -> Result<PathBuf, CasError> {
+        crate::forcing_extrapolation::record_in(&mut display_inputs);
         self.record.inputs = display_inputs;
         self.claim.finalize(self.record)
     }
@@ -515,6 +519,10 @@ impl ResolvedClaim {
 /// Assemble the `RunRecord` for `resolved` + `meta` at `status`. The single
 /// record-construction site — every CAS write routes through here.
 fn build_record(resolved: &ResolvedArtifact, meta: &RecordMeta, status: RunStatus) -> RunRecord {
+    // Display-only, never hashed: a run made under
+    // `--allow-forcing-extrapolation` says so, and names what it held.
+    let mut inputs = resolved.display_inputs.clone();
+    crate::forcing_extrapolation::record_in(&mut inputs);
     RunRecord {
         format_version: FORMAT_VERSION,
         kind: resolved.kind,
@@ -529,7 +537,7 @@ fn build_record(resolved: &ResolvedArtifact, meta: &RecordMeta, status: RunStatu
         artifacts: Default::default(),
         output_schema: meta.output_schema.clone(),
         children: meta.children.clone(),
-        inputs: resolved.display_inputs.clone(),
+        inputs,
         provenance: Provenance {
             argv: std::env::args().collect(),
             label: meta.label.clone(),

@@ -211,6 +211,21 @@ pub struct OutputView {
     pub columns: Vec<String>,
 }
 
+/// The override for a forcing evaluated outside the range it is defined on,
+/// shared by every command that runs a model.
+#[derive(Args, Clone, Default)]
+pub struct ForcingExtrapolationArg {
+    /// Let the run evaluate a forcing outside the range it is defined on —
+    /// an `interpolated` forcing before its first or after its last data
+    /// point, a `bspline` outside its window — holding its end value there,
+    /// with one warning per forcing naming its range and the span held, and
+    /// the override recorded in `run.json`. Without it such a run is an
+    /// error. A fit config sets it as `[config] allow_forcing_extrapolation =
+    /// true`.
+    #[arg(long, default_value_t = false)]
+    pub allow_forcing_extrapolation: bool,
+}
+
 /// Core inference knobs shared by pfilter / profile
 #[derive(Args, Clone)]
 pub struct InferenceCore {
@@ -236,6 +251,9 @@ pub struct InferenceCore {
     /// either mode so you can see how often the path fired.
     #[arg(long, default_value_t = false)]
     pub allow_degenerate_rates: bool,
+
+    #[command(flatten)]
+    pub forcing_extrapolation: ForcingExtrapolationArg,
 
     /// Time-column format for `--data`: `auto` (detect numeric-vs-date over
     /// the whole column), `numeric` (force `f64`), or `date` (force ISO
@@ -335,6 +353,9 @@ pub struct SimulateArgs {
     /// the legacy zero-rate behaviour rather than fix the model.
     #[arg(long, default_value_t = false)]
     pub allow_degenerate_rates: bool,
+
+    #[command(flatten)]
+    pub forcing_extrapolation: ForcingExtrapolationArg,
 
     #[command(flatten)]
     pub model_overrides: ModelOverrides,
@@ -706,6 +727,11 @@ Priors (Bayesian methods: PGAS, PMMH):
 pub struct FitRunArgs {
     /// Fit configuration file (v2 TOML)
     pub config: PathBuf,
+
+    // Sets the config's `[config] allow_forcing_extrapolation = true`, so it
+    // keys the fit as the config line does.
+    #[command(flatten)]
+    pub forcing_extrapolation: ForcingExtrapolationArg,
 
     /// Where the method's chains begin, overriding the file's `starts`. A
     /// rule name — `uniform_unconstrained`, `lhs`, `uniform`, `from_prior`,
@@ -1174,6 +1200,10 @@ the file is a superset of the pooled one — and composes with
 --exclude-chains 3,5 writes predictive-excl3,5/ with a `chain` column, and the
 ids there are the fit's own numbering with 3 and 5 simply absent."))]
 pub struct FitPredictArgs {
+    // Also on when the fit's own config set it.
+    #[command(flatten)]
+    pub forcing_extrapolation: ForcingExtrapolationArg,
+
     /// The fit, by handle: `@label`, a run-id or fit-level hash prefix, a run's
     /// leaf directory or a fit results directory, or a `fit.toml` config (the
     /// run made from it). A handle that maps to several runs errors and lists
@@ -2179,6 +2209,9 @@ pub struct SurveyArgs {
     /// IR JSON or .camdl model file
     pub model: PathBuf,
 
+    #[command(flatten)]
+    pub forcing_extrapolation: ForcingExtrapolationArg,
+
     /// fit.toml supplying [estimate] bounds and [data] (fit-aware mode).
     /// The model scored is MODEL; the config's [model] is not read. A
     /// `[data] holdout_after` removes every row after the cutoff from every
@@ -2302,6 +2335,9 @@ Examples:
 pub struct EvalArgs {
     /// IR JSON or .camdl model file
     pub model: PathBuf,
+
+    #[command(flatten)]
+    pub forcing_extrapolation: ForcingExtrapolationArg,
 
     #[command(flatten)]
     pub model_overrides: ModelOverrides,
@@ -2795,6 +2831,11 @@ pub struct CompareArgs {
     /// trajectory run from t_start at θ (basis `ode_free_forward`, gh#312).
     /// A filtered row and an ODE row are never differenced.
     pub paths: Vec<String>,
+
+    // Also on for a fit whose own config set it, when this command derives
+    // its prequential.
+    #[command(flatten)]
+    pub forcing_extrapolation: ForcingExtrapolationArg,
 
     /// Print the model-comparison methods guide and exit — what elpd, LR,
     /// se(Δ), the Jeffreys tiers, the within-noise gate and the conditioning

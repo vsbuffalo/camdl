@@ -17,6 +17,7 @@ mod quantile; // shared quantile reduction + numeric formatting (proposal 2026-0
 mod quantities_file; // `--quantities FILE`: a separable reporting vocabulary + its artifact key
 mod quantity_output; // generated-quantities banding + tidy-TSV rendering (shared by fit predict + simulate)
 mod obs_anchor;     // gh#616: runtime resolution of a model's observation anchors
+mod forcing_extrapolation; // a forcing evaluated outside its range: refuse, or hold under the override
 mod obs_emit;       // gh#833: what `simulate --obs` writes per stream, and over which period
 mod emit_every;     // gh#656: `--emit-every`, the per-stream emission-cadence override
 mod run_paths;      // canonical output-path helpers
@@ -800,6 +801,7 @@ fn run_simulate(a: &args::SimulateArgs) {
     let out = crate::out::Out::new(false);
     let _eval_stats_guard = crate::util::EvalStatsReportGuard::start();
     sim::eval_stats::set_allow_degenerate_rates(a.allow_degenerate_rates);  // gh#audit-C6
+    crate::forcing_extrapolation::set_allowed(a.forcing_extrapolation.allow_forcing_extrapolation);
     // ── Extract typed args into locals that match the rest of the function ─
     let ir_path          = a.model.to_string_lossy().into_owned();
     // Compile `.camdl` → IR EXACTLY ONCE for the whole command. Every
@@ -3036,7 +3038,7 @@ fn build_simulate_cas_sink(
     // change no hashed field, and two vintages would share a `run_id` while
     // reporting different numbers. Whoever lands F23 must key the resolved
     // anchor EXPLICITLY; no model field will do it for them.
-    let (base_model, base_anchors) = util::load_run_model_and_anchors(run)?;
+    let base_model = util::load_run_model(run)?;
 
     // Resolve each simulate scenario into the hash-relevant delta. A name
     // matching a model preset reads its effective delta via
@@ -3106,7 +3108,6 @@ fn build_simulate_cas_sink(
         model_path: display_path.to_string(),
         model_stem,
         base_model,
-        base_anchors,
         backend: run.backend,
         dt: run.dt,
         allow_degenerate_rates,
