@@ -1022,12 +1022,14 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             trace.warnings.push(
                 score::trace::PrequentialWarning::SamplesNotSaved);
         }
-        crate::prequential_out::write_prequential_outputs(stem, &trace).unwrap_or_else(|e| {
+        let calendar = ir::caltime::CalendarAxis::from_model(&model)
+            .unwrap_or_else(|e| out.fail(format!("error: {e}")));
+        crate::prequential_out::write_prequential_outputs(stem, &trace, &calendar).unwrap_or_else(|e| {
             out.fail(format!("error writing prequential: {}", e));
         });
         out.say(format_args!("prequential trace written: {}",
             crate::prequential_out::summary_line(&trace)));
-        out.say_raw(format_args!("{}", crate::prequential_out::surprise_table(&trace)));
+        out.say_raw(format_args!("{}", crate::prequential_out::surprise_table(&trace, &calendar)));
     }
 
     // Save filtering marginals (--save-filtering PATH): per-step
