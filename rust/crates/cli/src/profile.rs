@@ -144,14 +144,14 @@ struct ProfileBaseLevel<'a> {
     /// keeps its key.
     #[serde(skip_serializing_if = "crate::fit::config_v2::LikelihoodObjective::is_full")]
     objective: crate::fit::config_v2::LikelihoodObjective,
-    /// The resolved cutoff of the fit config's `[data] holdout_after`: every
-    /// cell is fitted to the rows at or before it, so it changes each stored
-    /// loglik and is identity. The bound files' bytes and the config's bytes
-    /// are keyed already; this is what says the rows were cut. Omitted without
-    /// `holdout_after`, so every other profile keeps its key. (`[data.holdout]`
-    /// files leave the training data whole and add nothing here.)
+    /// The training rows the fit config's `[data] holdout_after` leaves each
+    /// stream (by stream name): every cell is fitted to those rows, so they
+    /// change each stored loglik and are identity. The bound files' bytes and
+    /// the config's bytes are keyed already; this is what says the rows were
+    /// cut. Omitted without `holdout_after`. (`[data.holdout]` files leave the
+    /// training data whole and add nothing here.)
     #[serde(skip_serializing_if = "Option::is_none")]
-    holdout_after: Option<f64>,
+    training_rows: Option<&'a [(String, usize)]>,
 }
 
 /// The `method` level's identity: the METHOD, i.e. how each cell is fitted.
@@ -829,7 +829,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // deferred: it has no horizon at all, so nothing later can be computed from
     // it. An unanchored model falls through untouched.
     let moved_any_anchor = match &bound_streams {
-        Some(bound) => crate::obs_anchor::resolve_from_bindings(&out, &mut model_pre, bound, dt)
+        Some(bound) => crate::obs_anchor::resolve_from_bindings(&out, &mut model_pre, bound, dt,
+            fit_holdout_after.as_ref())
             .unwrap_or_else(|e| { out.fail(format!("error: {e}")); }),
         None => {
             if let Some(msg) =
@@ -997,16 +998,17 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     ).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
     // The fit config's holdout, applied to the bound data (`--data` or the
     // config's own) by the function `fit run` applies it with, so every cell
-    // fits the rows the fit fits: `holdout_after` removes every row after the
-    // cutoff, and `[data.holdout]` files leave the training rows whole and must
-    // lie after them.
-    let training_window = crate::fit::runner::apply_holdout_declaration(
+    // fits the rows the fit fits: `holdout_after` keeps the rows ending at or
+    // before the cutoff, and `[data.holdout]` files leave the training rows
+    // whole and must end after them.
+    let training_partition = crate::fit::runner::apply_holdout_declaration(
         &mut streams, fit_holdout_after.as_ref(), &fit_holdout_files, &model,
-        compiled.model.simulation.t_start, &time_opts,
+        &time_opts,
     ).unwrap_or_else(|e| { out.fail(format!("error: --fit config: {e}")); });
-    // The cutoff `holdout_after` resolved to, for the base identity.
-    let holdout_after_cutoff: Option<f64> = fit_holdout_after.as_ref()
-        .and(training_window.map(|w| w.train_end));
+    // The training rows a `holdout_after` cutoff left, for the base identity.
+    let holdout_training_rows: Option<Vec<(String, usize)>> = fit_holdout_after.as_ref()
+        .map(|_| training_partition.streams().iter()
+            .map(|p| (p.stream.clone(), p.rows)).collect());
     let streams = streams;
 
     if streams.len() > 1 {
@@ -1648,7 +1650,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         fit_toml: &fit_toml_hash,
         priors: &priors_blob,
         objective,
-        holdout_after: holdout_after_cutoff,
+        training_rows: holdout_training_rows.as_deref(),
     }, &[]).unwrap_or_else(|e| {
         out.fail(format!("error: profile base identity: {e}"));
     });
@@ -1833,7 +1835,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                         .find(|o| &o.param == n).map(|o| o.model.clone()) })
                 .collect(),
             parameters_provenance: parameters_provenance.clone(),
-            training_window,
+            training_partition: Some(training_partition.record(model.origin.as_deref(), &model.time_unit)),
             ..Default::default()
         };
         // Archive the producing `fit.toml` (best-effort; `write_fit_sidecar`
@@ -2555,7 +2557,7 @@ mod tests {
             fit_toml: &fit_toml,
             priors: &priors,
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
-            holdout_after: None,
+            training_rows: None,
         }).unwrap();
         let base_literal = serde_json::json!({
             "base_params": "bp-hash",
@@ -2577,7 +2579,7 @@ mod tests {
             fit_toml: &fit_toml,
             priors: &priors,
             objective: crate::fit::config_v2::LikelihoodObjective::ConditionalOnFirstObservation,
-            holdout_after: None,
+            training_rows: None,
         }).unwrap();
         let mut conditional_literal = base_literal.clone();
         conditional_literal["objective"] =
@@ -2594,10 +2596,10 @@ mod tests {
             fit_toml: &fit_toml,
             priors: &priors,
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
-            holdout_after: Some(35.0),
+            training_rows: Some(&[("cases".to_string(), 3)][..]),
         }).unwrap();
         let mut held_out_literal = base_literal.clone();
-        held_out_literal["holdout_after"] = serde_json::json!(35.0);
+        held_out_literal["training_rows"] = serde_json::json!([["cases", 3]]);
         assert_eq!(held_out, held_out_literal,
             "a holdout_after cutoff must enter the base level");
 
@@ -2667,7 +2669,7 @@ mod tests {
             fit_toml: &fit_toml,
             priors: &priors,
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
-            holdout_after: None,
+            training_rows: None,
         }, &[]).unwrap().into_inner().to_hex();
         let rw_sd: Vec<(&str, Option<f64>)> = vec![("beta", None)];
         let uniform = crate::fit::starts::ChainStarts::Spread(crate::fit::starts::Spread::Uniform);

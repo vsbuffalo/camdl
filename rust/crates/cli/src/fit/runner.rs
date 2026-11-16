@@ -19,7 +19,11 @@ use sim::{
     },
     rng::StatefulRng,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+
+use super::observed_rows::ObservedRow;
+use super::training_partition::{observed_window, PartitionError, PartitionRule, TrainingPartition};
+use crate::caltime_load::TemporalCell;
 use std::sync::Arc;
 
 /// Everything needed to run IF2 chains, built from fit.toml + optional prior state.
@@ -53,41 +57,44 @@ pub struct ObsStream {
     /// so a row's window and its scoring boundary cannot come from two
     /// different places.
     pub times: sim::inference::StreamTimes,
+    /// The rows themselves, as the one row reader read them and the loader
+    /// filtered them; `data`, `cells`, `aux` and `times` are their columns.
+    /// The training partition is built from these.
+    pub rows: Vec<super::observed_rows::ObservedRow>,
 }
 
 impl ObsStream {
-    /// Keep the rows where `keep[i]`, across EVERY per-row vector at once.
+    /// Keep the first `n` rows, across EVERY per-row vector at once: the
+    /// training prefix a [`super::training_partition::TrainingPartition`]
+    /// records.
     ///
-    /// A stream carries four vectors indexed by the same row — `data`,
-    /// `cells`, `aux` and `times` — and `bind` rejects any disagreement in
-    /// their lengths. Holdout truncation used to filter three of them by hand,
-    /// which silently went stale when `times` was added (gh#833) and surfaced
-    /// as an internal binder length mismatch. Mutating them through one method
-    /// makes updating a subset impossible rather than merely discouraged.
-    pub(crate) fn retain_rows(&mut self, keep: &[bool]) {
-        debug_assert_eq!(keep.len(), self.data.len(), "keep mask must cover every row");
-        let filtered = |n: usize| -> Vec<usize> {
-            (0..n).filter(|&i| keep.get(i).copied().unwrap_or(false)).collect()
-        };
-        let idx = filtered(self.data.len());
-        self.data = idx.iter().map(|&i| self.data[i].clone()).collect();
-        self.cells = idx.iter().map(|&i| self.cells[i]).collect();
-        self.aux = idx.iter().map(|&i| self.aux[i].clone()).collect();
-        self.times = retain_stream_times(&self.times, &idx);
+    /// A stream carries five vectors indexed by the same row — `rows`,
+    /// `data`, `cells`, `aux` and `times` — and `bind` rejects any
+    /// disagreement in their lengths. Holdout truncation used to filter some
+    /// of them by hand, which silently went stale when `times` was added
+    /// (gh#833) and surfaced as an internal binder length mismatch. Mutating
+    /// them through one method makes updating a subset impossible rather than
+    /// merely discouraged.
+    pub(crate) fn truncate_rows(&mut self, n: usize) {
+        self.rows.truncate(n);
+        self.data.truncate(n);
+        self.cells.truncate(n);
+        self.aux.truncate(n);
+        self.times = truncate_stream_times(&self.times, n);
     }
 }
 
-/// The rows `idx` of a stream's per-row times, in order: what a row filter
-/// keeps of the windows (or instants) the rows cover.
-pub(crate) fn retain_stream_times(
+/// The first `n` of a stream's per-row times: what a training prefix keeps of
+/// the windows (or instants) the rows cover.
+pub(crate) fn truncate_stream_times(
     times: &sim::inference::StreamTimes,
-    idx: &[usize],
+    n: usize,
 ) -> sim::inference::StreamTimes {
     match times {
         sim::inference::StreamTimes::Intervals(ps) =>
-            sim::inference::StreamTimes::Intervals(idx.iter().map(|&i| ps[i]).collect()),
+            sim::inference::StreamTimes::Intervals(ps[..n.min(ps.len())].to_vec()),
         sim::inference::StreamTimes::Instants(ts) =>
-            sim::inference::StreamTimes::Instants(idx.iter().map(|&i| ts[i]).collect()),
+            sim::inference::StreamTimes::Instants(ts[..n.min(ts.len())].to_vec()),
     }
 }
 
@@ -130,10 +137,10 @@ pub struct FitRunConfig {
     /// §Proposal 3). Same per-method override semantics as `loglik_eval`.
     /// Consumed by Step 8.
     pub gate: super::config_v2::GateConfig,
-    /// The applied training window (gh#585): `Some` iff the fit declared a
-    /// holdout and `build` actually truncated/validated training against
-    /// it. Recorded into `fit.meta.json` as the §3.7.3(b) proof.
-    pub applied_training_window: Option<TrainingWindow>,
+    /// Which rows the streams above were cut to: decided by `build` from the
+    /// fit's holdout declaration (every row, without one). Recorded into
+    /// `fit.meta.json` as the §3.7.3(b) proof.
+    pub training_partition: TrainingPartition,
 }
 
 /// Result of running multiple IF2 chains.
@@ -468,12 +475,11 @@ impl FitRunConfig {
         // truncation happens at the callsite — here, and in `profile --fit`
         // — never inside `resolve_and_load_obs_streams`, whose other callers
         // (pfilter, compare's holdout scoring) must see the full series.
-        let applied_training_window = apply_holdout_declaration(
+        let training_partition = apply_holdout_declaration(
             &mut streams,
             fit.data.as_ref().and_then(|d| d.holdout_after.as_ref()),
             bindings.holdout_by_source(),
             &model,
-            compiled.model.simulation.t_start,
             &time_opts,
         )?;
 
@@ -604,7 +610,7 @@ impl FitRunConfig {
             ic_free,
             loglik_eval: super::config_v2::LoglikEvalConfig::default(),
             gate: super::config_v2::GateConfig::default(),
-            applied_training_window,
+            training_partition,
         };
         // The one place bound observation data can be refused. Every later
         // `build_obs_model` (per chain, per filter call) binds the same
@@ -1626,7 +1632,7 @@ pub(crate) fn load_observations(
 /// missing values; and the auxiliary values. The placeholder view is never
 /// scored.
 pub(crate) fn observation_columns(
-    rows: Vec<super::observed_rows::ObservedRow>,
+    rows: &[super::observed_rows::ObservedRow],
 ) -> (Vec<Observation>, Vec<Option<sim::inference::ObsCell>>, Vec<Vec<(String, f64)>>) {
     let observations = rows.iter()
         .map(|r| Observation {
@@ -1637,7 +1643,7 @@ pub(crate) fn observation_columns(
             },
         })
         .collect();
-    let (cells, aux) = rows.into_iter().map(|r| (r.cell, r.aux)).unzip();
+    let (cells, aux) = rows.iter().map(|r| (r.cell, r.aux.clone())).unzip();
     (observations, cells, aux)
 }
 
@@ -1784,7 +1790,7 @@ pub(crate) fn resolve_and_load_obs_streams(
 
         let times =
             crate::pfilter::stream_times_of_rows(&obs_model, &rows, data_path, time_opts)?;
-        let (obs, cells, aux) = observation_columns(rows);
+        let (obs, cells, aux) = observation_columns(&rows);
         streams.push(ObsStream {
             name: stream_name,
             projection,
@@ -1793,6 +1799,7 @@ pub(crate) fn resolve_and_load_obs_streams(
             cells,
             aux,
             times,
+            rows,
         });
     }
     Ok(streams)
@@ -1876,206 +1883,275 @@ pub(crate) fn stream_specs_from_obs_streams(
         .collect()
 }
 
-pub use crate::run_meta::TrainingWindow;
-
-/// Resolve the fit's holdout declaration and apply it to the loaded
-/// training streams (gh#585, Stage 3.1).
+/// Decide the fit's training partition from its holdout declaration, apply it
+/// to the loaded training streams, and say what it decided (D38;
+/// `docs/dev/temporal-architecture.md` §4.1).
 ///
-/// - `holdout_after = τ` (bare model time, a date, or `last_obs - N unit`
-///   through the shared gh#626 grammar; anchors resolve over the union of
-///   the bound streams' times): every loaded observation row with
-///   `t > τ` is removed from training — data, cells, and aux stay
-///   parallel. τ must cut strictly inside the observed range: at or
-///   before the first observation there is nothing to train on, at or
-///   after the last there is nothing withheld and the declaration would
-///   be inert again — both hard errors.
-/// - `[data.holdout]` explicit files: the training streams are left
-///   whole, and `train_end` is the latest training time over *every* bound
-///   stream, whether or not it has a holdout file. Each holdout file is
-///   loaded (same loader, same checks) and all its rows must lie strictly
-///   after that `train_end` — tail-only in v1 (decision 6); an interleaved
-///   holdout names the h-block follow-up (§3.9.2). Streams may end training
-///   at different times, but no stream may train on a time that `compare`
-///   then scores as held out (`--score-from train_end`): a stream with no
-///   holdout file whose training runs past another stream's held-out rows
-///   is a hard error.
+/// - `holdout_after = τ` (bare model time, a date, or `first_obs`/`last_obs`
+///   ± N unit through the shared gh#626 grammar; the anchors resolve over the
+///   full files, [`resolve_holdout_cutoff`]): a row trains if the end of what
+///   it measures is at or before τ. Every stream must keep a training row and
+///   some row must be held out; both are hard errors otherwise.
+/// - `[data.holdout]` files: every row of the training files trains, and
+///   every row of each holdout file must end strictly after the training
+///   extent, the latest end among the training rows of every bound stream
+///   ([`check_holdout_files`]); otherwise the fit is refused.
+/// - Neither: every row trains.
 ///
-/// Called by the commands that fit a config's training data
-/// (`FitRunConfig::build`, and `profile --fit` on its bound data) — never
-/// from the shared loading seam, which `pfilter` and compare's holdout
-/// scoring also use and which must see the full series.
+/// Each stream keeps its training prefix. Called by the commands that fit a
+/// config's training data (`FitRunConfig::build`, `profile --fit` on its
+/// bound data) — never from the shared loading seam, which `pfilter` and
+/// compare's holdout scoring also use and which must see the full series.
 pub(crate) fn apply_holdout_declaration(
     streams: &mut [ObsStream],
     holdout_after: Option<&super::config_v2::TimeSpecToml>,
     holdout_files: &indexmap::IndexMap<String, String>,
     model: &ir::Model,
-    t_start: f64,
     time_opts: &crate::caltime_load::TimeOpts,
-) -> Result<Option<TrainingWindow>, String> {
-    if let Some(spec) = holdout_after {
-        let all_times = || streams.iter().flat_map(|s| s.data.iter().map(|o| o.time));
-        let tau = resolve_holdout_cutoff(spec, all_times(), model)?;
-        let mut withheld = 0usize;
-        for s in streams.iter_mut() {
-            let keep: Vec<bool> = s.data.iter().map(|o| within_training(o.time, tau)).collect();
-            withheld += keep.iter().filter(|k| !**k).count();
-            s.retain_rows(&keep);
+) -> Result<TrainingPartition, String> {
+    use super::training_partition::WholeFiles;
+    let rows: BTreeMap<String, Vec<ObservedRow>> =
+        streams.iter().map(|s| (s.name.clone(), s.rows.clone())).collect();
+    let mut held_out_file_rows = 0usize;
+    let partition = match holdout_after {
+        Some(spec) => cutoff_partition(spec, &rows, model)?,
+        None if !holdout_files.is_empty() => {
+            let p = whole_partition(&rows, WholeFiles::SeparateHoldoutFiles)?;
+            let obs: Vec<&ir::observation::ObservationModel> =
+                streams.iter().map(|s| &s.obs_model_ir).collect();
+            held_out_file_rows =
+                check_holdout_files(&p, &rows, &obs, holdout_files, model, time_opts)?;
+            p
         }
-        say_holdout_after_applied(t_start, tau, withheld);
-        return Ok(Some(TrainingWindow { train_end: tau }));
+        None => whole_partition(&rows, WholeFiles::NoHoldout)?,
+    };
+    say_partition(&partition, &rows, held_out_file_rows, time_opts);
+    for s in streams.iter_mut() {
+        s.truncate_rows(partition.rows(&s.name));
     }
-
-    let training: Vec<TrainingStream<'_>> = streams.iter()
-        .map(|s| TrainingStream {
-            obs: &s.obs_model_ir,
-            last_train: s.data.iter().map(|o| o.time).fold(f64::NEG_INFINITY, f64::max),
-        })
-        .collect();
-    check_holdout_files(&training, holdout_files, model, t_start, time_opts)
+    Ok(partition)
 }
 
-/// One bound training stream, as [`check_holdout_files`] reads it: its
-/// observation model and the time of its last training row.
-pub(crate) struct TrainingStream<'a> {
-    pub obs: &'a ir::observation::ObservationModel,
-    pub last_train: f64,
+/// The partition `holdout_after = spec` makes of `rows`: the cutoff resolved
+/// by [`resolve_holdout_cutoff`], each stream's rows ending at or before it.
+/// The one place a `holdout_after` declaration becomes training rows: `fit
+/// run`, `profile --fit`, `survey --fit` and the model's observation anchors
+/// all cut through it.
+pub(crate) fn cutoff_partition(
+    spec: &super::config_v2::TimeSpecToml,
+    rows: &BTreeMap<String, Vec<ObservedRow>>,
+    model: &ir::Model,
+) -> Result<TrainingPartition, String> {
+    let at = resolve_holdout_cutoff(spec, rows, model)?;
+    TrainingPartition::from_cutoff(rows, at)
+        .map_err(|e| partition_error(e, Some((&spec.raw(), at))))
 }
 
-/// Check the `[data.holdout]` files against the training streams: the
-/// training streams are left whole, and `train_end` is the latest training
-/// time over *every* bound stream, whether or not it has a holdout file.
-/// Each holdout file is loaded (same loader, same checks) and all its rows
-/// must lie strictly after that `train_end` (tail-only, v1). `None` when
-/// there are no holdout files. `fit run` and `profile` reach it through
-/// [`apply_holdout_declaration`]; `survey`, which loads its streams with its
-/// own reader, calls it directly.
+/// The partition in which every row of `rows` trains (no holdout, or
+/// `[data.holdout]` files), with its refusal worded for the user.
+pub(crate) fn whole_partition(
+    rows: &BTreeMap<String, Vec<ObservedRow>>,
+    files: super::training_partition::WholeFiles,
+) -> Result<TrainingPartition, String> {
+    TrainingPartition::whole(rows, files).map_err(|e| partition_error(e, None))
+}
+
+/// The refusal for a partition that cannot be built; `cutoff` is the
+/// `holdout_after` value as written and the time it resolved to.
+fn partition_error(e: PartitionError, cutoff: Option<(&str, f64)>) -> String {
+    let declared = |raw: &str, at: f64| format!("holdout_after = \"{raw}\" resolves to t = {at}");
+    match (e, cutoff) {
+        (PartitionError::NoTrainingRows { stream }, Some((raw, at))) => format!(
+            "{}, but no row of stream '{stream}' ends at or before it — no training data \
+             would remain for that stream. A row trains when the end of what it measures is \
+             at or before the cutoff, and every bound stream must keep a training row.",
+            declared(raw, at)),
+        (PartitionError::NothingHeldOut, Some((raw, at))) => format!(
+            "{}, at or after the end of every observation row — nothing would be withheld \
+             and the declaration would be inert. Some row must end after the cutoff.",
+            declared(raw, at)),
+        (PartitionError::NotAPrefix { stream, position }, _) => format!(
+            "internal error: the training rows of stream '{stream}' are not a prefix \
+             (row {position} trains after a row that does not)."),
+        (PartitionError::NoRows, _) => "the bound observation streams contain no rows, \
+             so there is nothing to train on.".to_string(),
+        (PartitionError::Digest(e), _) => e,
+        (PartitionError::NoTrainingRows { stream }, None) => format!(
+            "internal error: stream '{stream}' has no training row without a cutoff"),
+        (PartitionError::NothingHeldOut, None) =>
+            "internal error: nothing held out without a cutoff".to_string(),
+    }
+}
+
+/// Check the `[data.holdout]` files against the training rows: each holdout
+/// file is loaded (same loader, same checks) and every row of it must end
+/// strictly after the training extent, the latest end among the training rows
+/// of *every* bound stream, whether or not it has a holdout file — otherwise
+/// a stream with no holdout file that trained past another stream's held-out
+/// rows would have those rows scored as held out. Tail-only, v1. Returns the
+/// number of held-out rows the files hold.
 pub(crate) fn check_holdout_files(
-    streams: &[TrainingStream<'_>],
+    partition: &TrainingPartition,
+    rows: &BTreeMap<String, Vec<ObservedRow>>,
+    streams: &[&ir::observation::ObservationModel],
     holdout_files: &indexmap::IndexMap<String, String>,
     model: &ir::Model,
-    t_start: f64,
     time_opts: &crate::caltime_load::TimeOpts,
-) -> Result<Option<TrainingWindow>, String> {
-    if !holdout_files.is_empty() {
-        let sources: Vec<&str> =
-            streams.iter().map(|s| s.obs.source.as_str()).collect();
-        // Over every bound stream, not only those with a holdout file:
-        // `compare` scores everything after `train_end` as held out, so a
-        // stream that trained past it would be scored in-sample under the
-        // held-out stamp.
-        let train_end = streams.iter()
-            .map(|s| s.last_train).fold(f64::NEG_INFINITY, f64::max);
-        let mut n_holdout = 0usize;
-        for (source, path) in holdout_files {
-            let Some(s) = streams.iter()
-                .find(|s| s.obs.source == *source) else {
-                return Err(format!(
-                    "[data.holdout] names stream '{source}', which is not a \
-                     bound observation stream (bound: {}).",
-                    sources.join(", ")));
-            };
-            let siblings: Vec<&ir::observation::ObservationModel> =
-                model.observations.iter()
-                    .filter(|o| o.source == *source)
-                    .collect();
-            let hold_rows = load_observations(path, s.obs, &siblings, time_opts)?;
-            let first_hold = hold_rows.iter()
-                .map(|r| r.label()).fold(f64::INFINITY, f64::min);
-            if first_hold <= train_end + TIME_TIE_EPS {
-                // The streams whose training reaches the first held-out row.
-                let mut late: Vec<String> = Vec::new();
-                for t in streams.iter() {
-                    let last = t.last_train;
-                    let entry = format!(
-                        "'{}' (training runs to t = {last})", t.obs.source);
-                    if last + TIME_TIE_EPS >= first_hold && !late.contains(&entry) {
-                        late.push(entry);
-                    }
+) -> Result<usize, String> {
+    let extent = partition.extent();
+    let sources: Vec<&str> = streams.iter().map(|s| s.source.as_str()).collect();
+    let mut n_holdout = 0usize;
+    for (source, path) in holdout_files {
+        let Some(obs) = streams.iter().find(|s| s.source == *source) else {
+            return Err(format!(
+                "[data.holdout] names stream '{source}', which is not a \
+                 bound observation stream (bound: {}).",
+                sources.join(", ")));
+        };
+        let siblings: Vec<&ir::observation::ObservationModel> =
+            model.observations.iter().filter(|o| o.source == *source).collect();
+        let hold_rows = load_observations(path, obs, &siblings, time_opts)?;
+        let first_hold = hold_rows.iter()
+            .map(|r| r.measures.end()).fold(f64::INFINITY, f64::min);
+        if first_hold <= extent + TIME_TIE_EPS {
+            // The streams whose training reaches the first held-out row.
+            let mut late: Vec<String> = Vec::new();
+            for s in streams {
+                let last = rows.get(&s.name)
+                    .and_then(|r| r[..partition.rows(&s.name)].last())
+                    .map_or(f64::NEG_INFINITY, |r| r.measures.end());
+                let entry = format!("'{}' (training runs to t = {last})", s.source);
+                if last + TIME_TIE_EPS >= first_hold && !late.contains(&entry) {
+                    late.push(entry);
                 }
-                return Err(format!(
-                    "[data.holdout] for stream '{source}': its held-out rows \
-                     start at t = {first_hold}, but the training data of \
-                     stream {} reaches that time. Every held-out row must lie \
-                     strictly after the latest training time of every bound \
-                     stream (here t = {train_end}); otherwise the fit trains \
-                     on observations that `camdl compare` would score as held \
-                     out.\n  Either give every stream a [data.holdout] file \
-                     whose rows start after all training data, or declare one \
-                     cutoff for all streams with `holdout_after`. v1 supports \
-                     tail-only holdouts (decision 6 of the 2026-08-29 \
-                     proposal); an interior/interleaved holdout is the \
-                     h-block follow-up (§3.9.2).",
-                    late.join(", ")));
             }
-            n_holdout += hold_rows.len();
+            return Err(format!(
+                "[data.holdout] for stream '{source}': its held-out rows \
+                 end from t = {first_hold}, but the training data of \
+                 stream {} reaches that time. Every held-out row must end \
+                 strictly after the latest training row of every bound \
+                 stream (here t = {extent}); otherwise the fit trains \
+                 on observations that `camdl compare` would score as held \
+                 out.\n  Either give every stream a [data.holdout] file \
+                 whose rows end after all training data, or declare one \
+                 cutoff for all streams with `holdout_after`. v1 supports \
+                 tail-only holdouts (decision 6 of the 2026-08-29 \
+                 proposal); an interior/interleaved holdout is the \
+                 h-block follow-up (§3.9.2).",
+                late.join(", ")));
         }
-        crate::out::detached().say(format_args!(
-            "  {h} training window [{t_start}, {train_end}]; \
-             {n_holdout} held-out observation row(s) bound as the tail \
-             (scored out-of-sample by `camdl compare`)",
-            h = crate::out::paint::stderr().paint("holdout:", Style::Info)));
-        return Ok(Some(TrainingWindow { train_end }));
+        n_holdout += hold_rows.len();
     }
-
-    Ok(None)
+    Ok(n_holdout)
 }
 
-/// The model time a `holdout_after` spec cuts training at, resolved over
-/// `times`, the observation times of every bound stream (the anchors
-/// `first_obs`/`last_obs` fold over their union). The cutoff must lie strictly
-/// inside the observed range: at or before the first observation nothing
-/// would be left to train on, at or after the last nothing would be withheld.
+/// The `holdout_after` cutoff: the model time `spec` names, with the anchors
+/// `first_obs` and `last_obs` resolved over `rows`, the full files (D40): the
+/// earliest start and the latest end of an observed row across every bound
+/// stream, rows whose value is `NA` counting toward neither. Whether the
+/// cutoff leaves a training row in every stream and some row held out is the
+/// partition's check ([`TrainingPartition::from_cutoff`]).
 pub(crate) fn resolve_holdout_cutoff(
     spec: &super::config_v2::TimeSpecToml,
-    times: impl Iterator<Item = f64> + Clone,
+    rows: &BTreeMap<String, Vec<ObservedRow>>,
     model: &ir::Model,
 ) -> Result<f64, String> {
     let raw = spec.raw();
-    let first_obs = times.clone().fold(f64::INFINITY, f64::min);
-    let last_obs = times.fold(f64::NEG_INFINITY, f64::max);
-    let tau = match parse_time_spec(
-        "holdout_after", &raw, model.origin.as_deref(), &model.time_unit)? {
-        TimeSpec::Absolute(v) => v,
+    match parse_time_spec("holdout_after", &raw, model.origin.as_deref(), &model.time_unit)? {
+        TimeSpec::Absolute(v) => Ok(v),
         TimeSpec::Anchored(a) => {
-            let anchor_time = match a.anchor {
+            let (first_obs, last_obs) = observed_window(rows.values().flatten())
+                .ok_or_else(|| format!(
+                    "holdout_after = \"{raw}\" is anchored to the observed data, but no \
+                     bound row carries an observed value."))?;
+            Ok(a.resolve(match a.anchor {
                 ObsAnchor::First => first_obs,
                 ObsAnchor::Last => last_obs,
-            };
-            a.resolve(anchor_time)
+            }))
         }
+    }
+}
+
+/// The startup lines saying which rows trained: the count and the extent,
+/// what was withheld, the first held-out row of each stream as the file
+/// writes it (a date cutoff on a `day(time)` stream holds out that day's row,
+/// which the key's name alone could hide), and a note naming any stream whose
+/// last observation is more than one of its own periods before `last_obs`.
+/// `held_out_file_rows` is the number of `[data.holdout]` rows, for that rule.
+pub(crate) fn say_partition(
+    partition: &TrainingPartition,
+    rows: &BTreeMap<String, Vec<ObservedRow>>,
+    held_out_file_rows: usize,
+    time_opts: &crate::caltime_load::TimeOpts,
+) {
+    let out = crate::out::detached();
+    let h = crate::out::paint::stderr().paint("holdout:", Style::Info);
+    let trained: usize = partition.streams().iter().map(|p| p.rows).sum();
+    let total: usize = rows.values().map(Vec::len).sum();
+    let dated = rows.values().flatten()
+        .any(|r| r.temporal.iter().any(|c| matches!(c, TemporalCell::Date(_))));
+    let q = |t: f64| match dated {
+        true => crate::caltime_load::quote_time(t, true, time_opts),
+        false => format!("t = {t}"),
     };
-    if tau <= first_obs + TIME_TIE_EPS {
-        return Err(format!(
-            "holdout_after = \"{raw}\" resolves to t = {tau}, at or before \
-             the first observation (t = {first_obs}) — no training data \
-             would remain. The boundary must cut strictly inside the \
-             observed range: first_obs < holdout_after < last_obs."));
+    match partition.rule() {
+        PartitionRule::All => {}
+        PartitionRule::Cutoff { at } => {
+            out.say(format_args!(
+                "  {h} trained on {trained} row(s) through {}; {} observation row(s) \
+                 ending after {} withheld from training (scored out-of-sample by \
+                 `camdl compare`)",
+                q(partition.extent()), total - trained, q(at)));
+            for (stream, rs) in rows {
+                if let Some(r) = rs.get(partition.rows(stream)) {
+                    let written: Vec<String> = r.temporal.iter().map(|c| match c {
+                        TemporalCell::Number(x) => format!("{x}"),
+                        TemporalCell::Date(d) => d.clone(),
+                    }).collect();
+                    let measures = match r.measures {
+                        super::observed_rows::Measures::Instant(t) => format!("read at {}", q(t)),
+                        super::observed_rows::Measures::Period(p) =>
+                            format!("measures {} to {}", q(p.start()), q(p.stop())),
+                    };
+                    out.say(format_args!(
+                        "  {h} first held-out row of '{stream}': {} ({measures})",
+                        written.join(" to ")));
+                }
+            }
+        }
+        PartitionRule::SeparateFiles => {
+            out.say(format_args!(
+                "  {h} trained on {trained} row(s) through {}; {held_out_file_rows} \
+                 held-out observation row(s) bound as the tail (scored out-of-sample by \
+                 `camdl compare`)",
+                q(partition.extent())));
+        }
     }
-    if tau >= last_obs - TIME_TIE_EPS {
-        return Err(format!(
-            "holdout_after = \"{raw}\" resolves to t = {tau}, at or after \
-             the last observation (t = {last_obs}) — nothing would be \
-             withheld and the declaration would be inert. The boundary \
-             must cut strictly inside the observed range: \
-             first_obs < holdout_after < last_obs."));
+
+    // A stream that stopped reporting well before the others.
+    let training = |s: &str| &rows[s][..partition.rows(s)];
+    let Some((_, last_obs)) = observed_window(rows.keys().flat_map(|s| training(s))) else {
+        return;
+    };
+    for stream in rows.keys() {
+        let observed: Vec<&ObservedRow> =
+            training(stream).iter().filter(|r| r.cell.is_some()).collect();
+        let Some(last) = observed.last() else { continue };
+        let period = match last.measures {
+            super::observed_rows::Measures::Period(p) => p.stop() - p.start(),
+            super::observed_rows::Measures::Instant(t) => match observed.len() {
+                n if n >= 2 => t - observed[n - 2].measures.end(),
+                _ => continue,
+            },
+        };
+        if last_obs - last.measures.end() > period + TIME_TIE_EPS {
+            out.say(format_args!(
+                "  note: stream '{stream}' has its last observation at {}, more than one of \
+                 its periods before the latest observation of the fit ({})",
+                q(last.measures.end()), q(last_obs)));
+        }
     }
-    Ok(tau)
 }
-
-/// Whether an observation at `time` is a training row under the cutoff `tau`.
-pub(crate) fn within_training(time: f64, tau: f64) -> bool {
-    time <= tau + TIME_TIE_EPS
-}
-
-/// The startup line saying what a `holdout_after` cutoff withheld.
-pub(crate) fn say_holdout_after_applied(t_start: f64, tau: f64, withheld: usize) {
-    crate::out::detached().say(format_args!(
-        "  {h} training window [{t_start}, {tau}]; \
-         {withheld} observation row(s) at t > {tau} withheld from \
-         training (scored out-of-sample by `camdl compare`)",
-        h = crate::out::paint::stderr().paint("holdout:", Style::Info)));
-}
-
 /// Tolerance for "the same observation time" comparisons at the holdout
 /// boundary — float noise from a date→time conversion must not move a row
 /// across the training/held-out cut.
@@ -3032,7 +3108,6 @@ pub struct MethodConvergence {
     frozen: Vec<ChainIndex>,
 }
 
-use std::collections::BTreeMap;
 use sim::inference::convergence::RankConvergence;
 use score::convergence::{ConvergenceError, RhatRefusal};
 
@@ -6521,7 +6596,8 @@ dt = 1.0
     /// for the fit.meta.json proof.
     mod holdout_build {
         use crate::fit::config_v2::Problem;
-        use crate::fit::runner::{FitRunConfig, TrainingWindow};
+        use crate::fit::runner::FitRunConfig;
+        use crate::fit::training_partition::PartitionRule;
 
         /// Minimal v2 fit.toml against the seir_observations golden IR:
         /// weekly_cases at t = 7, 14, 21, 28, 35; dt = 1; optional
@@ -6619,17 +6695,20 @@ dt = 1.0
                 assert_eq!(s.cells.len(), 3, "cells stay parallel to data");
                 assert_eq!(s.aux.len(), 3, "aux stays parallel to data");
             }
-            assert_eq!(config.applied_training_window,
-                Some(TrainingWindow { train_end: 21.0 }),
-                "the applied window must ride on the run config");
+            let p = &config.training_partition;
+            assert_eq!(p.rule(), PartitionRule::Cutoff { at: 21.0 });
+            assert_eq!(p.extent(), 21.0, "the partition must ride on the run config");
+            assert_eq!(p.rows("weekly_cases"), 3);
         }
 
         #[test]
-        fn no_declaration_applies_no_window() {
+        fn no_declaration_trains_every_row() {
             let dir = test_dir("none");
             let fit = fixture(&dir, None, None);
             let config = build(&fit).expect("plain fit must build");
-            assert_eq!(config.applied_training_window, None);
+            assert_eq!(config.training_partition.rule(), PartitionRule::All);
+            assert_eq!(config.training_partition.rows("weekly_cases"), 5);
+            assert_eq!(config.training_partition.extent(), 35.0);
             assert_eq!(config.observations.len(), 5, "nothing truncated");
         }
 
@@ -6642,9 +6721,10 @@ dt = 1.0
             let err = match build(&fit) { Err(e) => e, Ok(_) => panic!("inert holdout_after must error") };
             assert!(err.contains("inert") || err.contains("withheld"),
                 "must say nothing would be withheld: {err}");
-            // At/before the first observation: no training data.
+            // Before the end of the first row (days 0–6, ending at 7): no
+            // training data. A cutoff at 7 trains that row.
             let dir = test_dir("early");
-            let fit = fixture(&dir, Some("7.0"), None);
+            let fit = fixture(&dir, Some("6.0"), None);
             let err = match build(&fit) { Err(e) => e, Ok(_) => panic!("empty-training holdout_after must error") };
             assert!(err.contains("no training data"),
                 "must say no training data would remain: {err}");
@@ -6656,21 +6736,21 @@ dt = 1.0
             let dir = test_dir("anchored");
             let fit = fixture(&dir, Some("\"last_obs - 1 week\""), None);
             let config = build(&fit).expect("anchored holdout_after must build");
-            assert_eq!(config.applied_training_window,
-                Some(TrainingWindow { train_end: 28.0 }));
+            assert_eq!(config.training_partition.rule(), PartitionRule::Cutoff { at: 28.0 });
+            assert_eq!(config.training_partition.extent(), 28.0);
             assert_eq!(config.observations.len(), 4, "t = 7..28 remain");
         }
 
         #[test]
         fn explicit_holdout_must_be_tail_only() {
             // A holdout file strictly after the training tail binds; the
-            // window records the last TRAINING time.
+            // partition's extent is the end of the last TRAINING row.
             let dir = test_dir("tail");
             let fit = fixture(&dir, None,
                 Some("time\tweekly_cases\n42\t6\n49\t7\n"));
             let config = build(&fit).expect("tail holdout files must build");
-            assert_eq!(config.applied_training_window,
-                Some(TrainingWindow { train_end: 35.0 }));
+            assert_eq!(config.training_partition.rule(), PartitionRule::SeparateFiles);
+            assert_eq!(config.training_partition.extent(), 35.0);
             assert_eq!(config.observations.len(), 5,
                 "training streams are left whole");
 

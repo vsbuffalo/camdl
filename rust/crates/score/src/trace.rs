@@ -112,7 +112,8 @@ pub enum Conditioning {
     /// model in differences.
     #[default]
     InSample,
-    /// θ from a fit sealed at `train_end` (gh#585): every scored step
+    /// θ from a fit sealed at `train_end`, the fit's training extent (the
+    /// latest end among the rows it trained on; gh#585, D38): every scored step
     /// satisfies `t > train_end`, and the filter assimilates held-out
     /// observations as it scores them (one-step-ahead mode, §3.7.1).
     /// Honest in θ — the only leak channel the stamp certifies.

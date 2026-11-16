@@ -2290,22 +2290,29 @@ fn load_trace(
 ///
 /// - (a) the fit's sealed config — hashed into its identity — declares a
 ///   holdout (`holdout_after` or `[data.holdout]`);
-/// - (b) `fit.meta.json` carries the *applied* training window, the
-///   positive proof written by the engine that actually truncated
-///   training. A version predicate cannot serve here (the recorded
-///   `camdl_version`'s git-hash suffix is unordered); the record can —
-///   a pre-gh#585 fit parsed the declaration without applying it, so it
-///   can never carry the record, and is refused with the re-run fix.
+/// - (b) `fit.meta.json` carries the training partition, the positive proof
+///   written by the engine that decided which rows trained. A version
+///   predicate cannot serve here (the recorded `camdl_version`'s git-hash
+///   suffix is unordered); the record can — a fit recorded before the
+///   partition existed is refused with the re-run fix.
 ///
 /// (c) — no scored value is a training row — is checked on the derived
 /// trace before stamping ([`check_no_training_row_scored`]).
 struct SealedHoldout {
-    train_end: f64,
+    /// Which rows the fit trained on, as it recorded them.
+    partition: crate::run_meta::TrainingPartitionRecord,
     /// source → holdout file path for explicit `[data.holdout]` fits; the
     /// scored series is training ∪ holdout, merged per source. Empty for
     /// temporal `holdout_after` fits, whose training files already carry
     /// the full series (truncation happened at fit load, not in the file).
     holdout_files: Vec<(String, String)>,
+}
+
+impl SealedHoldout {
+    /// The training extent: the latest end among the fit's training rows.
+    fn train_end(&self) -> f64 {
+        self.partition.extent.t
+    }
 }
 
 fn detect_sealed_holdout(
@@ -2319,52 +2326,40 @@ fn detect_sealed_holdout(
     if !declares {
         return Ok(None);
     }
-    let window = crate::run_meta::read_fit_sidecar(&resolved.segment)?
-        .and_then(|s| s.training_window);
-    let Some(window) = window else {
+    let partition = crate::run_meta::read_fit_sidecar(&resolved.segment)?
+        .and_then(|s| s.training_partition);
+    let Some(partition) = partition else {
         return Err(format!(
             "the fit at {} declares a holdout, but its fit.meta.json carries \
-             no applied training window: there is no record proving which \
+             no training partition: there is no record proving which \
              observations its θ̂ was fitted to, so `compare` cannot certify a \
              score of the rows past the boundary as held out.\n  Re-run the fit \
-             with `camdl fit run`, which records the window, or pass \
+             with `camdl fit run`, which records the partition, or pass \
              --in-sample to score it in-sample.",
             resolved.segment.display()));
     };
     let holdout_files = bindings.holdout_by_source().iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    Ok(Some(SealedHoldout { train_end: window.train_end, holdout_files }))
+    Ok(Some(SealedHoldout { partition, holdout_files }))
 }
 
-/// Leaf name → the scoring time of the last row the fit trained on for that
-/// leaf, or `None` for a bound leaf with no training row. Every bound leaf
-/// has an entry. Built by [`training_scoring_ends`].
+/// Leaf name → the end of the last row the fit trained on for that leaf.
+/// Every bound leaf has an entry. Built by [`training_scoring_ends`].
 type TrainingScoringEnds = std::collections::BTreeMap<String, Option<f64>>;
 
 /// Read each bound leaf's training file through the fit's own loader and
-/// return, per leaf, the scoring time of the last row the fit trained on
-/// (gh#1062).
+/// return, per leaf, the end of the last row the fit trained on (gh#1062):
+/// row `rows − 1` of the prefix the fit recorded. A row is scored at its end
+/// ([`crate::pfilter::stream_times_of_rows`]), which for a period-start
+/// label (`day(time)`, `starting_on`, `ending_on`) is after the label.
 ///
-/// A training row is one whose LABEL time is `<= train_end` (with the fit's
-/// `TIME_TIE_EPS`): the cut `apply_holdout_declaration` made. Its scoring
-/// time is the close of the period the stream's `covers` declaration assigns
-/// it ([`crate::pfilter::stream_times_of_rows`], over the rows the fit and
-/// `pfilter` loaders read), which for a period-start label (`day(time)`,
-/// `starting_on`, `ending_on`) is after the label: the row labelled 10 under
-/// `day(time)` covers [10, 11) and is scored at t = 11. The labels and the
-/// periods are read through the fit's loader, so dates, holes and long-form
-/// rows resolve as the fit resolved them.
-///
-/// For an explicit `[data.holdout]` fit this also refuses the `HoldOutTail`
-/// stamp if any bound training file has an observation after the recorded
-/// `train_end`: such a row — data θ̂ was fitted to — lies inside the window
-/// `compare` scores as held out. A fit run before `train_end` covered every
-/// bound stream records exactly this shape (a stream without a holdout file
-/// training past another stream's held-out rows), and so does a training
-/// file extended after the fit. A `holdout_after` fit is exempt from that
-/// refusal: its training files legitimately run past the cutoff, which the
-/// fit applied at load.
+/// Refuses the `HoldOutTail` stamp when the leading rows of a training file
+/// no longer digest to the prefix the fit recorded (an edited fitted row is
+/// changed data, so the fit's θ̂ was not fitted to it), and, for an explicit
+/// `[data.holdout]` fit, when a training file has rows past the prefix: such
+/// rows lie inside the window `compare` scores as held out although they sit
+/// in the file the fit trains on.
 fn training_scoring_ends(
     h: &SealedHoldout,
     bindings: &StreamBindings,
@@ -2372,7 +2367,6 @@ fn training_scoring_ends(
     dt: f64,
     segment: &Path,
 ) -> Result<TrainingScoringEnds, String> {
-    let eps = crate::fit::runner::TIME_TIE_EPS;
     let time_opts = crate::caltime_load::TimeOpts {
         origin: model.origin.as_deref(),
         time_unit: &model.time_unit,
@@ -2381,7 +2375,7 @@ fn training_scoring_ends(
         format: crate::caltime_load::TimeFormat::Auto,
     };
     let mut late: Vec<String> = Vec::new();
-    let mut loaded = Vec::new();
+    let mut ends = TrainingScoringEnds::new();
     for (leaf, source) in bindings.leaves() {
         let path = &bindings.training_by_source()[source];
         let Some(obs) = model.observations.iter().find(|o| o.name == leaf) else { continue };
@@ -2389,61 +2383,44 @@ fn training_scoring_ends(
             .filter(|o| o.source == obs.source)
             .collect();
         let rows = crate::fit::runner::load_observations(path, obs, &siblings, &time_opts)?;
-        let labels: Vec<f64> = rows.iter().map(|r| r.label()).collect();
-        let last = labels.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let entry = format!("'{}' (training data runs to t = {last})", obs.source);
-        if !h.holdout_files.is_empty() && last > h.train_end + eps && !late.contains(&entry) {
-            late.push(entry);
+        let Some(prefix) = h.partition.prefix(&obs.name) else {
+            return Err(format!(
+                "the fit at {} binds stream '{}', but its training partition records no \
+                 rows for it, so which of its rows trained cannot be checked.\n  Re-run \
+                 the fit, or pass --in-sample.", segment.display(), obs.name));
+        };
+        let unchanged = rows.len() >= prefix.rows
+            && crate::fit::training_partition::row_digest(&rows[..prefix.rows])?.to_hex()
+                == prefix.digest;
+        if !unchanged {
+            return Err(format!(
+                "the fit at {} trained on the first {} row(s) of stream '{}', but those \
+                 rows of {} are not the rows it trained on (their row digest differs): \
+                 the data changed after the fit, so its θ̂ was not fitted to them.\n  \
+                 Re-run the fit on the current data, or pass --in-sample.",
+                segment.display(), prefix.rows, obs.name, path));
         }
-        loaded.push((obs, path, rows, labels));
+        if !h.holdout_files.is_empty() && rows.len() > prefix.rows {
+            let entry = format!("'{}' (training data runs to t = {})", obs.source,
+                rows.last().map_or(f64::NAN, |r| r.measures.end()));
+            if !late.contains(&entry) {
+                late.push(entry);
+            }
+        }
+        ends.insert(obs.name.clone(),
+            prefix.rows.checked_sub(1).map(|i| rows[i].measures.end()));
     }
-    // Refused before the periods are built: a training file extended past
-    // `train_end` can also break the period lowering (a gap under a uniform
-    // form), and this is the message that names the cause.
     if !late.is_empty() {
         return Err(format!(
             "the fit at {} trained on data inside the window `compare` would \
-             score as held out: its recorded training window ends at t = {}, but \
-             stream {} has training observations after that time. Scoring it \
-             would present in-sample scores as held-out.\n  Re-run the fit (it \
-             now requires every held-out row to lie after the training data of \
-             every stream), or pass --in-sample to score it as the in-sample \
-             trace it is.",
-            segment.display(), h.train_end, late.join(", ")));
-    }
-    let mut ends = TrainingScoringEnds::new();
-    for (obs, path, rows, labels) in loaded {
-        let times = crate::pfilter::stream_times_of_rows(obs, &rows, path, &time_opts)?;
-        let last_training_close = labels.iter().zip(times.closes())
-            .filter(|(&label, _)| label <= h.train_end + eps)
-            .map(|(_, close)| close)
-            .reduce(f64::max);
-        ends.insert(obs.name.clone(), last_training_close);
+             score as held out: its training rows end at t = {}, but stream {} \
+             has training observations after them. Scoring it would present \
+             in-sample scores as held-out.\n  Re-run the fit (it requires every \
+             held-out row to end after the training data of every stream), or \
+             pass --in-sample to score it as the in-sample trace it is.",
+            segment.display(), h.train_end(), late.join(", ")));
     }
     Ok(ends)
-}
-
-/// The time `compare` passes to `pfilter --score-from`: the latest scoring
-/// time of any training row, over every bound leaf (gh#1062). `pfilter`
-/// assimilates every step at or before it without scoring it, so no
-/// training row of any leaf is scored.
-///
-/// It is one boundary for all leaves, so a held-out row of one leaf whose
-/// scoring time falls at or before another leaf's last training close is
-/// assimilated and not scored either: with a `day(time)` stream (row 10
-/// scored at t = 11) beside a `closing_at` stream (row 11 scored at t = 11)
-/// under `holdout_after = 10`, the `closing_at` row 11 is dropped from the
-/// score. That is the intended direction — a held-out score may omit a
-/// held-out row, never include a training one.
-///
-/// For streams scored at their label (`closing_at`, per-row windows,
-/// instant readings) the boundary is the last training label, which is
-/// `train_end` itself for a `[data.holdout]` fit.
-fn heldout_scoring_boundary(ends: &TrainingScoringEnds, segment: &Path) -> Result<f64, String> {
-    ends.values().flatten().copied().reduce(f64::max).ok_or_else(|| format!(
-        "internal error: the fit at {} declares a holdout but none of its bound \
-         streams has a training row at or before its recorded training window's \
-         end, so there is no boundary to score after.", segment.display()))
 }
 
 /// The `HoldOutTail` stamp's non-leakage check on the derived trace
@@ -2472,8 +2449,8 @@ fn check_no_training_row_scored(
                 if step.t <= end + eps {
                     return Err(format!(
                         "fit at {}: refusing the hold_out_tail stamp — stream '{}' \
-                         is scored at t = {}, but its last training row (label at or \
-                         before train_end = {}) is scored at t = {}, so this scored \
+                         is scored at t = {}, but its last training row (the fit trained through \
+                         t = {}) is scored at t = {}, so this scored \
                          value is a row the fit trained on.",
                         segment.display(), ss.stream, step.t, train_end, end));
                 }
@@ -2736,16 +2713,16 @@ fn derive_prequential(
     let base = std::env::temp_dir()
         .join(format!("camdl_compare_{}_{}", std::process::id(), seg_slug));
 
-    // gh#1062: the fit cut training by label, the filter cuts scoring by
-    // scoring time; the boundary is taken on the scoring axis, from the
-    // fit's own training rows.
+    // D38: a held-out score scores every row that did not train and ends
+    // after the training extent, the latest end among the fit's training
+    // rows; `pfilter --score-from` assimilates every step at or before it
+    // without scoring it. Each leaf's own last training end is kept for the
+    // non-leakage check on the derived trace.
     let training_ends = match &holdout {
         Some(h) => Some(training_scoring_ends(h, &bindings, &model, fitted_dt, segment)?),
         None => None,
     };
-    let score_from = training_ends.as_ref()
-        .map(|ends| heldout_scoring_boundary(ends, segment))
-        .transpose()?;
+    let score_from = holdout.as_ref().map(SealedHoldout::train_end);
 
     // Explicit `[data.holdout]` fits: the scored series is training ∪
     // holdout, merged per stream into a temp file (temporal `holdout_after`
@@ -2812,7 +2789,7 @@ fn derive_prequential(
             cmd.arg("--disable").arg(name);
         }
         // gh#585 (Stage 3.4): score only past the sealed training boundary,
-        // on the scoring axis (gh#1062; `heldout_scoring_boundary`).
+        // the training extent (D38).
         if let Some(t) = score_from {
             cmd.arg("--score-from").arg(t.to_string());
         }
@@ -2967,12 +2944,12 @@ fn derive_prequential(
                 "fit at {}: the held-out window (t > {}) contains no scored \
                  observations — nothing lies past the training boundary in \
                  the bound data.",
-                segment.display(), h.train_end));
+                segment.display(), h.train_end()));
         }
-        check_no_training_row_scored(&trace, ends, h.train_end, segment)?;
-        // The stamp records the fit's own (label-axis) boundary.
+        check_no_training_row_scored(&trace, ends, h.train_end(), segment)?;
+        // The stamp records the fit's training extent.
         trace.conditioning = Conditioning::HoldOutTail {
-            train_end: h.train_end,
+            train_end: h.train_end(),
             theta_source: segment.file_name()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| segment.display().to_string()),
@@ -2995,7 +2972,7 @@ fn derive_prequential(
 /// Every draw is scored with the same observation-sample seed and the same
 /// window, so components differ only in θ, as the filter path's do. A held-out
 /// fit is scored past `score_from`, the scoring-axis boundary the filter path
-/// passes to `camdl pfilter --score-from` ([`heldout_scoring_boundary`],
+/// passes to `camdl pfilter --score-from` (the training extent, D38;
 /// gh#1062), by the index rule `--score-from` applies
 /// ([`crate::fit::runner::first_scored_index`]), and the trace records that
 /// boundary as the filter's does; the caller verifies and stamps the window
@@ -5795,9 +5772,6 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         let unknown = row_with_streams("a", &[12.0], &["other"]);
         assert!(check_no_training_row_scored(&unknown.trace, &ends, 10.0, seg)
             .unwrap_err().contains("'other'"));
-
-        // The boundary is the latest training scoring time over the leaves.
-        assert_eq!(heldout_scoring_boundary(&ends, seg).unwrap(), 11.0);
     }
 
     /// gh#833. Equal times and equal stream sets still permit two traces to

@@ -1,17 +1,20 @@
-//! gh#1062: a held-out `compare` scores no row the fit trained on, whatever
-//! the stream's `covers` form.
+//! gh#1062, D38: a held-out `compare` scores exactly the rows the fit did not
+//! train on, whatever the stream's `covers` form.
 //!
-//! The fit cuts training by a row's LABEL (`holdout_after = τ` keeps the rows
-//! labelled `≤ τ`; `[data.holdout]` keeps the training file). A stream that
-//! accumulates over a period is SCORED at the period's close, which for a
-//! period-start label (`day(time)`, `starting_on`, `ending_on`) is after the
-//! label: the row labelled 10 under `day(time)` covers [10, 11) and is scored
-//! at t = 11. A scoring cut at the label boundary (`t > 10`) therefore scored
-//! that training row as held out.
+//! A row trains if the END of what it measures is at or before the cutoff
+//! (`holdout_after = τ`); under `[data.holdout]` every row of the training
+//! file trains. A stream that accumulates over a period is scored at the
+//! period's close, which for a period-start label (`day(time)`,
+//! `starting_on`, `ending_on`) is after the label: the row labelled 10 under
+//! `day(time)` covers [10, 11), ends at 11 and so does not train under
+//! `holdout_after = 10`. A held-out score scores every row that did not
+//! train and ends after the training extent.
 //!
 //! Each test fits a one- or two-stream closed SIR to daily rows labelled 1 to
-//! 16 with distinct observed values, holds out the rows labelled 11 to 16, and
-//! reads which rows `compare` scored: the scored times come from
+//! 16 with distinct observed values, cut at 10 (the rows labelled 11 to 16
+//! held out where the label is the period's end, 10 to 16 where the period
+//! opens at the label), and reads which rows `compare` scored: the scored
+//! times come from
 //! `compare --pointwise`, and the observed value at each scored time from a
 //! full-series `camdl pfilter --save-prequential` of the same data (the
 //! observed value at a step is the data, independent of θ). Most fits run
@@ -203,11 +206,40 @@ fn camdl(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
     out
 }
 
-/// What `compare` scored for the first fit: its `t_score`, and per stream the
-/// observed values it scored, in time order.
+/// What `compare` scored for the first fit: its `t_score`, the training
+/// extent its `hold_out_tail` stamp records, and per stream the observed
+/// values it scored, in time order.
 struct Scored {
     t_score: u64,
+    train_end: f64,
     values: BTreeMap<String, Vec<u64>>,
+}
+
+/// Whether a row of this `covers` form measures a period that opens at its
+/// label (and so ends one day after it), rather than one that ends there.
+fn opens_at_label(covers: &str) -> bool {
+    ["day(", "starting_on(", "ending_on("].iter().any(|f| covers.starts_with(f))
+}
+
+/// The index into the values of the first row that does not train: under
+/// `holdout_after = 10` the row labelled 10 when its period opens at the
+/// label (it ends at 11), the row labelled 11 otherwise; under
+/// `[data.holdout]` the first row of the holdout file, labelled 11.
+fn first_withheld(covers: &str, form: Form) -> usize {
+    match (form, opens_at_label(covers)) {
+        (Form::HoldoutAfter, true) => TAU as usize - 1,
+        _ => TAU as usize,
+    }
+}
+
+/// The training extent, the latest end among the training rows: 10 under
+/// `holdout_after = 10` whatever the form, and under `[data.holdout]` the end
+/// of the training file's last row, labelled 10.
+fn extent(covers: &str, form: Form) -> f64 {
+    match (form, opens_at_label(covers)) {
+        (Form::HoldoutFiles, true) => TAU as f64 + 1.0,
+        _ => TAU as f64,
+    }
 }
 
 /// Fit two configs (differing only in a fixed `rho`) under `form`, compare
@@ -240,8 +272,8 @@ fn heldout_scored(slug: &str, streams: &[Stream], form: Form, backend: Backend) 
         .find(|r| r["name"] == "a.toml")
         .unwrap_or_else(|| panic!("no a.toml row:\n{v}"))
         .clone();
-    assert_eq!(row["conditioning"]["hold_out_tail"]["train_end"], serde_json::json!(TAU as f64),
-        "the row is stamped held-out at the fit's train_end: {row}");
+    let train_end = row["conditioning"]["hold_out_tail"]["train_end"].as_f64()
+        .unwrap_or_else(|| panic!("the row is stamped held-out: {row}"));
     let t_score = row["t_score"].as_u64().expect("t_score");
 
     // Observed value at each (stream, scoring time), from a full-series
@@ -284,7 +316,7 @@ fn heldout_scored(slug: &str, streams: &[Stream], form: Form, backend: Backend) 
             .unwrap_or_else(|| panic!("no observed value for {key:?} in the full trace"));
         values.entry(f[c_stream].to_string()).or_default().push(y);
     }
-    Scored { t_score, values }
+    Scored { t_score, train_end, values }
 }
 
 /// The one-stream assertions: exactly the withheld rows are scored, starting
@@ -300,13 +332,16 @@ fn assert_backend_scores_only_the_withheld_rows(
     let streams = [Stream { name: "cases", covers, flow: "infection", values: &CASES }];
     let got = heldout_scored(slug, &streams, form, backend);
     let scored = &got.values["cases"];
-    let withheld: Vec<u64> = CASES[TAU as usize..].to_vec();
+    let first = first_withheld(covers, form);
+    let withheld: Vec<u64> = CASES[first..].to_vec();
+    assert_eq!(got.train_end, extent(covers, form),
+        "covers = {covers}: the stamp records the training extent");
     assert_eq!(got.t_score, withheld.len() as u64,
         "covers = {covers}: one scored step per withheld row; scored values {scored:?}");
     assert_eq!(scored.first(), withheld.first(),
         "covers = {covers}: the first scored value is the first withheld row's; \
          scored values {scored:?}");
-    let last_training = CASES[TAU as usize - 1];
+    let last_training = CASES[first - 1];
     assert!(!scored.contains(&last_training),
         "covers = {covers}: the last training row (value {last_training}) is scored \
          as held out; scored values {scored:?}");
@@ -349,13 +384,11 @@ fn window_columns_holdout_after_scores_only_withheld_rows() {
 }
 
 /// Two streams under one `holdout_after = 10`: `cases` by `day(time)` (row
-/// labelled D scored at D + 1) and `deaths` by `closing_at` (row labelled D
-/// scored at D). The training rows close at t = 11 (`cases`) and t = 10
-/// (`deaths`), so scoring starts after t = 11. No training row of either
-/// stream is scored. `cases` scores all six withheld rows (labels 11–16);
-/// `deaths` scores labels 12–16: its first withheld row, labelled 11, closes
-/// at t = 11 and is assimilated without being scored — the conservative
-/// side of a single scoring boundary.
+/// labelled D ends at D + 1) and `deaths` by `closing_at` (row labelled D
+/// ends at D). `cases` trains rows 1–9 and `deaths` rows 1–10; both end by
+/// t = 10, the training extent. Every row that did not train ends after it,
+/// so each stream scores all of its held-out rows: `cases` labels 10–16,
+/// `deaths` labels 11–16. No training row of either stream is scored.
 #[test]
 fn two_streams_score_no_training_row_of_either() {
     let streams = [
@@ -364,23 +397,21 @@ fn two_streams_score_no_training_row_of_either() {
                  values: &DEATHS },
     ];
     let got = heldout_scored("two", &streams, Form::HoldoutAfter, Backend::Filter);
-    for (name, values) in [("cases", &CASES), ("deaths", &DEATHS)] {
+    assert_eq!(got.train_end, TAU as f64, "the stamp records the training extent");
+    for (name, values, first) in [("cases", &CASES, TAU as usize - 1), ("deaths", &DEATHS, TAU as usize)] {
         let scored = &got.values[name];
-        for training in &values[..TAU as usize] {
+        for training in &values[..first] {
             assert!(!scored.contains(training),
                 "{name}: training value {training} scored as held out; scored {scored:?}");
         }
+        assert_eq!(scored, &values[first..].to_vec(), "{name} scores every held-out row");
     }
-    assert_eq!(got.values["cases"], CASES[TAU as usize..].to_vec(),
-        "cases scores its six withheld rows");
-    assert_eq!(got.values["deaths"], DEATHS[TAU as usize + 1..].to_vec(),
-        "deaths scores its withheld rows after the first, which closes at the boundary");
 }
 
-/// The ODE path (gh#312) cuts on the same scoring-axis boundary: two ODE+MH
-/// fits of a `day(time)` stream are compared on the withheld rows labelled
-/// 11 to 16, and not on the training row labelled 10, which closes at
-/// t = 11.
+/// The ODE path (gh#312) cuts on the same boundary: two ODE+MH fits of a
+/// `day(time)` stream are compared on the rows labelled 10 to 16, which end
+/// after the cutoff, and not on the training row labelled 9, which ends at
+/// t = 10.
 #[test]
 fn ode_day_holdout_after_scores_only_withheld_rows() {
     assert_backend_scores_only_the_withheld_rows("day(time)", Form::HoldoutAfter, Backend::Ode,
