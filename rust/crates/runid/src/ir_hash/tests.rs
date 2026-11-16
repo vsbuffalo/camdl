@@ -305,7 +305,9 @@ fn model_golden_hash() {
     // gone) and the version moved with it.
     // HASH_VERSION 3 -> 4 (D43): the version alone; the model encoding is
     // unchanged.
-    const GOLDEN: &str = "aeb9253a0d8a07e84bf5067f77cc28b8ac2aeac7eed7c428c36781f56e77504e";
+    // HASH_VERSION 4 -> 5 (temporal-architecture Stage 2, D58): the version
+    // alone.
+    const GOLDEN: &str = "5b69f516a6865f16951b8da098bb890264f91253dd3f831a514f89a25b6c5241";
     let got = representative_model().content_hash().to_hex();
     assert_eq!(got, GOLDEN, "ir Model golden hash changed (got {got})");
 }
@@ -1178,27 +1180,27 @@ fn projection_variant_hashes_are_pinned() {
     // hashed unconditionally), and at SV=4 (the model name out of identity),
     // each time for the same header reason — no projection's own encoding
     // changed. And once more at HASH_VERSION 1 -> 2 (gh#1018), which every
-    // root hash folds, and at 2 -> 3 (gh#1046) and 3 -> 4 (D43) for the same
-    // reason.
+    // root hash folds, and at 2 -> 3 (gh#1046), 3 -> 4 (D43) and 4 -> 5
+    // (temporal Stage 2) for the same reason.
     assert_eq!(
         hex(Projection::CumulativeFlow("x".into())),
-        "3147854297297b810cbbe944073f4350fdecab83e13f27430c953f23342846d7"
+        "7ae030e5e15ad5841d731d2f093940b89388849f6882a5d22c3bc36fed7062c8"
     );
     assert_eq!(
         hex(Projection::CurrentPop("x".into())),
-        "7ac8e3fa29c73dcf574eaab4109a49c2e37c51d371871b46c92cc5ff77f3aaeb"
+        "1123fef05620f746084b518b02a1e470fe00c1b151280b2c20c4bfcb361aaa94"
     );
     assert_eq!(
         hex(Projection::CurrentPopSum(vec!["x".into()])),
-        "afb07b0efe132575ea5e60103e6468db310ab1498297646f2d03a6ba899b57bc"
+        "b40d2e2155b4acf127c8a07e15ca1092db9a6296781f54a04d1bb213e82fc061"
     );
     assert_eq!(
         hex(Projection::DerivedExpr(Expr::const_(1.0))),
-        "40377008ced15f0fe69ffeefa2e84c18b84dafa7a9b27d5257422855b0ae485d"
+        "b099e7551d145628ab7c76e3ce07fb99c6fa744ef3b92aa7ff7711b5f1f3c318"
     );
     assert_eq!(
         hex(Projection::CumulativeFlowSum(vec!["x".into()])),
-        "8d0ada879515377f14f9a6f2b2c163f73a63ca39f37be3225bc84053bfd65166"
+        "3436b060b4e4bdbde6a3b80e5c6cad990de954901e746def3737b9e041cb4461"
     );
     // Proposal 2026-09-09 (proportion of flows over a window): appended at 5.
     // The five pins above are unchanged by the addition — that is the
@@ -1208,7 +1210,7 @@ fn projection_variant_hashes_are_pinned() {
             numerator: vec!["x".into()],
             denominator: vec!["x".into(), "y".into()],
         }),
-        "5bb4dad1a5f58911c706ac11df6e7998b30d7928babc9f217e18ef03d9f38855"
+        "543381da0a5107fe21715d5590bafa1595dfc4b164723e45bc979fd5b4a04bd1"
     );
     // The two sides are hashed in order, so swapping them is a different
     // projection — `a / (a + b)` and `(a + b) / a` must not share a run_id.
