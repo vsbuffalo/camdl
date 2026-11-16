@@ -502,9 +502,8 @@ An intervention that repeats (a campaign every quarter) would otherwise need its
 dates written out one by one. `date_range(...)` generates them at compile time.
 In an intervention's `at [...]` list it splices its entries into the list in
 place. It needs an anchored model: `origin` as `start` and a calendar cadence
-are both **E327** without one. Write an `origin` before using any form. A
-`date(...)` start with an `every` cadence in an unanchored model is not rejected
-today and puts every entry at time 0 (gh#1123).
+are both **E327** without one, and a `date(...)` start is **E220**, as a bare
+`date(...)` is. Write an `origin` before using any form.
 
 A call has a `start`, a way to say where the list stops, and one cadence.
 
@@ -546,9 +545,9 @@ date_range(date("2020-02-29"), count = 4, calendar_years = 1)
 ```
 
 The start-and-end form gives the same entries as the count form would, cut off
-at `end`: it keeps every entry that is on or before `end`. An `every` cadence
-steps a fixed number of days, so for it the question of where to count from does
-not arise.
+at `end`: it keeps every entry that is on or before `end` (strictly before it
+with `inclusive_end = false`, below). An `every` cadence steps a fixed number of
+days, so for it the question of where to count from does not arise.
 
 **An `end` that is not on the cadence is not added.** The range stops at the
 last entry on or before `end`, and the compiler warns with **W328** that the
@@ -563,11 +562,14 @@ date_range(date("2020-01-01"), date("2020-02-01"), every = 2 'weeks)
 If you wanted `2020-02-01` in the list, write it next to the call:
 `at [date_range(...), date("2020-02-01")]`.
 
-`inclusive_end = false` silences W328, and that is all it does today: an `end`
-that is on the cadence is still the last entry, whichever way `inclusive_end` is
-set (gh#1100). Setting `inclusive_end` to either value also currently draws a
-spurious **W203** from the compiler, which does not affect the compiled model
-(gh#1116).
+`inclusive_end = false` stops the list at the last boundary strictly before
+`end`: an `end` on the cadence is dropped, and W328 is not raised for an `end`
+off it. With `end = start` the list is empty.
+
+```camdl
+date_range(date("2020-01-01"), date("2020-01-29"), every = 7 'days, inclusive_end = false)
+    # 2020-01-01  2020-01-08  2020-01-15  2020-01-22
+```
 
 The errors are **E328** for an argument that does not fit the shapes above
 (missing `start`, no cadence or two, both `end` and `count`, `every` in
