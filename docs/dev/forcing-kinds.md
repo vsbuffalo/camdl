@@ -42,8 +42,9 @@ there).
 ### Estimable, aperiodic
 
 `bspline`: a clamped B-spline over a window — uniform knots from
-`window = [a, b]` and `n_basis`, or explicit `breakpoints` — held at its end
-values outside it, optionally `link = log` for a positive rate. Use for a
+`window = [a, b]` and `n_basis`, or explicit `breakpoints` — optionally
+`link = log` for a positive rate. A run outside the window is an error unless
+overridden ([below](#outside-the-range-a-forcing-is-defined-on)). Use for a
 transmission rate that moves smoothly through an outbreak on no known date.
 Window ends may be observation anchors (`last_obs - 2 'weeks`). Coefficients may
 be parameters and carry an emitted gradient (a `forcing_basis` node), so NUTS
@@ -65,11 +66,46 @@ estimable.
 
 `interpolated`: load `times[]` and `values[]` from a TSV (or inline);
 interpolate with `method = linear | spline | constant` (a bare enum). Common
-use: demographic covariates (pop(t), birthrate(t)) from census data.
+use: demographic covariates (pop(t), birthrate(t)) from census data. The data
+must cover the run ([below](#outside-the-range-a-forcing-is-defined-on)).
 
 `piecewise`: inline step-function with explicit `breakpoints[]` and `values[]`.
 Use when the schedule is short enough to fit in the model file and a covariate
 file would be overkill.
+
+## Outside the range a forcing is defined on
+
+Two kinds are defined only on a range: an `interpolated` forcing, read linearly,
+as a cubic spline or piecewise-constant, from its first data point to its last,
+and a `bspline` over its window. The others — `sinusoidal`, `fourier`,
+`periodic`, `periodic_spline` and `piecewise`, whose first and last values
+extend before its first and after its last breakpoint — are defined for all
+time.
+
+A run that evaluates a ranged forcing outside its range is an error. The error
+names the forcing, its range and the first time outside it:
+
+```
+error: forcing `mult` was evaluated at t = 51, after its last data point (it is defined on t = 0 to t = 50, its data).
+```
+
+The run gives three ways out: extend the data (or the window) to cover the run,
+end the run within the range, or pass `--allow-forcing-extrapolation` (in a fit
+config, `[config] allow_forcing_extrapolation = true`). Under the override the
+forcing holds its end value there, exactly as it did before the check existed,
+the run prints one warning per forcing naming its range and the span held, and
+each `run.json` the command writes records the override and the forcings held
+(`inputs.forcing_extrapolation`). In a fit config the setting is part of the
+fit's identity, so a fit stored under it is not reused by a run without it.
+
+The check reads the times the run actually evaluated, with the forcing's `lag`
+applied, not the run's span. A forcing read only under a condition that is false
+past its range is never evaluated there and raises nothing. The engine records
+the first time outside the range in a set-once slot per forcing and side
+(`sim::forcing_range`), so a particle filter's threads do not contend on it, and
+the command decides whether that is an error or a warning
+(`cli::forcing_extrapolation`). The design is in
+`docs/dev/temporal-architecture.md` §4.6.
 
 ## Dimensional units
 
