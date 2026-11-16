@@ -2188,7 +2188,7 @@ mod tests {
         assert_eq!(fmt_implied_n(f64::INFINITY), "inf");
     }
 
-    // ── holes × output-mode compatibility guard ─────────────────────────
+    // ── test data files ─────────────────────────────────────────────────
 
     fn write_temp_tsv(name: &str, content: &str) -> String {
         let path = std::env::temp_dir().join(format!("camdl_test_{}.tsv", name));

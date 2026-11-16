@@ -2044,10 +2044,10 @@ impl MultiStreamObsModel {
     /// (`at_union == None`) or a hole (`observations[local] == None`)
     /// contributes nothing; mirrors [`score_streams`]'s union/hole handling so
     /// the recorded observation and the scored predictive share one convention.
-    /// Holes never actually reach here — `--save-prequential` / `--trace` are
-    /// hard-rejected when the data has any hole (`check_holes_output_compat`),
-    /// so on this path scheduled ⇔ observed and the sum is exact. The returned
-    /// vector has length `self.obs_times.len()`.
+    /// At a step where some streams hold a hole the value is the sum over the
+    /// present streams only; at a step where none is present it is 0, which
+    /// the `--trace` writer prints as `NA` by asking [`per_stream_observed`]
+    /// (gh#636). The returned vector has length `self.obs_times.len()`.
     pub fn joint_observed(&self) -> Vec<f64> {
         (0..self.obs_times.len())
             .map(|union_idx| {
