@@ -226,6 +226,53 @@ fn fit_run_refuses_each_kind_past_its_range() {
     }
 }
 
+/// A refused fit does not leave its claim open: the method's `run.json` is
+/// marked `failed`, with the refusal as its failure, and no lock is left
+/// behind, for each method that holds a claim while it runs.
+#[test]
+fn a_refused_fit_marks_its_claim_failed() {
+    for algorithm in ["pgas", "pmmh"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = model(tmp.path(), "linear", &ROWS_TO_50);
+        let toml = fit_toml(tmp.path(), &m, "");
+        let src = std::fs::read_to_string(&toml).unwrap().replace("algorithm = \"pgas\"", &format!("algorithm = \"{algorithm}\""));
+        let src = if algorithm == "pmmh" { src.replace("sweeps = 4", "iterations = 4") } else { src };
+        std::fs::write(&toml, src).unwrap();
+        let o = camdl(tmp.path(), &["fit", "run", toml.to_str().unwrap()]);
+        let err = stderr(&o);
+        assert!(!o.status.success(), "{algorithm}: refused:\n{err}");
+        assert!(err.contains("--allow-forcing-extrapolation"), "{algorithm}: the refusal:\n{err}");
+        let records = statuses(&tmp.path().join("results"));
+        let method: Vec<_> = records.iter().filter(|(_, v)| v["kind"] != "fit").collect();
+        assert!(!method.is_empty(), "{algorithm}: the method leaf was claimed: {records:?}");
+        for (path, v) in &method {
+            assert_eq!(v["status"], "failed", "{algorithm}: {} must be failed, not left open:\n{v:#}", path.display());
+            let failure = v.pointer("/failure/message").and_then(|m| m.as_str()).unwrap_or_default();
+            assert!(failure.contains("forcing `mult`"), "{algorithm}: the failure records the refusal:\n{v:#}");
+            assert!(!path.with_file_name(".lock").exists(), "{algorithm}: no lock left at {}", path.display());
+        }
+    }
+}
+
+/// Every `run.json` under `root`, with its path.
+fn statuses(root: &Path) -> Vec<(PathBuf, serde_json::Value)> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.file_name().is_some_and(|n| n == "run.json") {
+                let v = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+                out.push((p, v));
+            }
+        }
+    }
+    out
+}
+
 /// Under `--allow-forcing-extrapolation` each kind runs, says so once, and
 /// records the override in the run's `run.json`.
 #[test]

@@ -7,7 +7,10 @@
 //! that it did, as a run note ([`sim::forcing_range`]). This module is the
 //! policy. By default the note is an error: the command says which forcing,
 //! its range and the side it was evaluated on, and exits before it commits
-//! anything. Under `--allow-forcing-extrapolation` (or a fit config's
+//! anything. A command that holds a store claim while its model runs (`fit
+//! run`, `survey`) takes the refusal itself ([`defer_while_claimed`]), so the
+//! claim is failed through its own error path rather than left `running` by
+//! an exit from the engine's worker thread. Under `--allow-forcing-extrapolation` (or a fit config's
 //! `[config] allow_forcing_extrapolation = true`) the note is said once as a
 //! warning, and every `run.json` the command writes records the override and
 //! the forcings it held.
@@ -22,6 +25,12 @@ pub const CODE: &str = "forcing-outside-range";
 
 static ALLOWED: AtomicBool = AtomicBool::new(false);
 static HELD: Mutex<Vec<OutsideRange>> = Mutex::new(Vec::new());
+/// A command holds a store claim and fails it itself on a refusal.
+static DEFERRED: AtomicBool = AtomicBool::new(false);
+/// A refusal was kept for the claim-holding command ([`refused`]); the
+/// message is in [`REFUSAL`].
+static REFUSED: AtomicBool = AtomicBool::new(false);
+static REFUSAL: Mutex<Option<String>> = Mutex::new(None);
 
 /// Set the policy for this process, before the command evaluates its model.
 pub fn set_allowed(allowed: bool) {
@@ -34,9 +43,19 @@ pub fn allowed() -> bool {
 }
 
 /// Said by the run-note reporter for each new [`OutsideRange`]: under the
-/// override a warning, otherwise the error that ends the command.
+/// override a warning, otherwise the error that ends the command. While a
+/// command holds a claim ([`defer_while_claimed`]) the error is kept for it
+/// to report instead ([`refused`]); otherwise nothing is committed yet, and
+/// the command ends here.
 pub fn report(o: &OutsideRange) {
     if !allowed() {
+        if DEFERRED.load(Ordering::Relaxed) {
+            if let Ok(mut r) = REFUSAL.lock() {
+                r.get_or_insert_with(|| refusal(o));
+            }
+            REFUSED.store(true, Ordering::Release);
+            return;
+        }
         crate::out::detached().fail(refusal(o));
     }
     if let Ok(mut held) = HELD.lock() {
@@ -47,6 +66,34 @@ pub fn report(o: &OutsideRange) {
         code: CODE,
         message: o.to_string(),
     });
+}
+
+/// While the guard lives, a refusal does not end the process: it is kept for
+/// the command, which holds a store claim, to fail that claim with
+/// ([`refused`]). Taken right after the claim, dropped after its finalize.
+pub fn defer_while_claimed() -> DeferredRefusal {
+    DEFERRED.store(true, Ordering::Relaxed);
+    DeferredRefusal(())
+}
+
+/// The guard [`defer_while_claimed`] returns.
+pub struct DeferredRefusal(());
+
+impl Drop for DeferredRefusal {
+    fn drop(&mut self) {
+        DEFERRED.store(false, Ordering::Relaxed);
+    }
+}
+
+/// The refusal kept while a claim was held, if the run evaluated a forcing
+/// outside its range without the override. A relaxed-cheap check: one atomic
+/// load when nothing was refused, so a method's progress callback may poll it
+/// every iteration.
+pub fn refused() -> Option<String> {
+    if !REFUSED.load(Ordering::Acquire) {
+        return None;
+    }
+    REFUSAL.lock().ok().and_then(|r| r.clone())
 }
 
 /// The error for a run that evaluated a forcing outside its range without

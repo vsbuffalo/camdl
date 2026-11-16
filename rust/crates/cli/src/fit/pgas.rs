@@ -1050,6 +1050,7 @@ pub fn run_method(
                 // fetch_max across the parallel chains; phase derived from
                 // burn_in). Cheap atomic — no I/O on the sweep path.
                 heartbeat.bump(sweep as u64);
+                super::stop_if_refused(out);
             };
 
             // gh#887: a spread start the sampler refuses at its first sweep
