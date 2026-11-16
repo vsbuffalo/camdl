@@ -2431,7 +2431,7 @@ mod tests {
             artifacts: Default::default(),
             output_schema: Default::default(),
             children: Default::default(),
-            calendar: None,
+            calendar: ir::caltime::CalendarAxis::parse("days", None).unwrap(),
             inputs: serde_json::Value::Null,
             provenance: runid::Provenance::default(),
         };

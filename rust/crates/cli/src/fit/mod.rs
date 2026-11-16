@@ -937,7 +937,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // segment.
     let fit_dir = announced_fit_dir.clone();
 
-    let fit_sidecar = build_fit_sidecar(&config, &fit_path, Some(&model), &fit_data_digests)
+    let fit_sidecar = build_fit_sidecar(&config, &fit_path, &model, &fit_data_digests)
         .unwrap_or_else(|e| out.fail(format!("error: {e}")));
     // gh#896: the identity of the config this run was read from, recorded on
     // every leaf it writes or reuses (`inputs.config_identities`), so a
@@ -1536,8 +1536,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             run_id: resolved.run_id,
             display_inputs: run_inputs.clone(),
         };
+        let calendar = ir::caltime::CalendarAxis::from_model(&model)
+            .unwrap_or_else(|e| out.fail(format!("error: {e}")));
         let meta = crate::resolve::RecordMeta::new(
-            &ir_version_str, &sweep_config.model.camdl, validated_label.clone())
+            &ir_version_str, &sweep_config.model.camdl, validated_label.clone(), calendar)
             .with_deps(deps.clone());
         // Reuse decision through the one policy seam. A resumed run is no
         // exception: its identity carries the longer chain's length and a dep
@@ -2774,14 +2776,13 @@ fn unpartitioned_role_fields(
 /// The readable provenance projection is written once per fit segment.
 ///
 /// `model` is the compiled, expanded IR model. It resolves per-parameter prior
-/// provenance (`fit_toml / model_ir / flat_explicit`) and the observation
-/// schema ([`crate::run_meta::ObsSchema`]); pass `None` when no model is in
-/// scope (`fit where` doesn't load the IR for a path-only resolution), in which
-/// case `resolved_priors` is empty and `schema` is `None`.
+/// provenance (`fit_toml / model_ir / flat_explicit`), the observation schema
+/// ([`crate::run_meta::ObsSchema`]) and the calendar axis every sidecar
+/// carries.
 fn build_fit_sidecar(
     config: &config_v2::FitConfig,
     fit_path: &str,
-    model: Option<&ir::Model>,
+    model: &ir::Model,
     data: &stream_bindings::BoundDataDigests,
 ) -> Result<crate::run_meta::FitSidecar, String> {
     let problem = &config.problem;
@@ -2810,38 +2811,33 @@ fn build_fit_sidecar(
     // A sampler's `validate_priors_present` refuses an implicit flat prior
     // before it starts, so `flat_fallback` appears only on a problem no
     // sampler could run on.
-    let resolved_priors: Vec<crate::run_meta::ResolvedPriorEntry> = match model {
-        Some(model) => {
-            let names: Vec<String> = problem.estimate.keys().cloned().collect();
-            let overrides = crate::fit::priors_precedence::prior_overrides(
-                &names, &problem.estimate, model,
-            );
-            crate::fit::priors_precedence::resolve_priors_with_precedence(
-                &names, &problem.estimate, model,
-            )
-            .into_iter()
-            .map(|r| {
-                let source = match r.source {
-                    crate::fit::priors_precedence::PriorSource::FitToml      => "fit_toml",
-                    crate::fit::priors_precedence::PriorSource::ModelIr      => "model_ir",
-                    crate::fit::priors_precedence::PriorSource::FlatExplicit => "flat_explicit",
-                    crate::fit::priors_precedence::PriorSource::FlatFallback => "flat_fallback",
-                };
-                // gh#369: the model prior the fit toml displaced, if any.
-                let overridden_model_prior = overrides.iter()
-                    .find(|o| o.param == r.param).map(|o| o.model.clone());
-                crate::run_meta::ResolvedPriorEntry {
-                    param:  r.param,
-                    source: source.to_string(),
-                    overridden_model_prior,
-                }
-            })
-            .collect()
-        }
-        None => Vec::new(),
-    };
-    let calendar = model.map(ir::caltime::CalendarAxis::from_model).transpose()
-        .map_err(|e| e.to_string())?;
+    let names: Vec<String> = problem.estimate.keys().cloned().collect();
+    let overrides = crate::fit::priors_precedence::prior_overrides(
+        &names, &problem.estimate, model,
+    );
+    let resolved_priors: Vec<crate::run_meta::ResolvedPriorEntry> =
+        crate::fit::priors_precedence::resolve_priors_with_precedence(
+            &names, &problem.estimate, model,
+        )
+        .into_iter()
+        .map(|r| {
+            let source = match r.source {
+                crate::fit::priors_precedence::PriorSource::FitToml      => "fit_toml",
+                crate::fit::priors_precedence::PriorSource::ModelIr      => "model_ir",
+                crate::fit::priors_precedence::PriorSource::FlatExplicit => "flat_explicit",
+                crate::fit::priors_precedence::PriorSource::FlatFallback => "flat_fallback",
+            };
+            // gh#369: the model prior the fit toml displaced, if any.
+            let overridden_model_prior = overrides.iter()
+                .find(|o| o.param == r.param).map(|o| o.model.clone());
+            crate::run_meta::ResolvedPriorEntry {
+                param:  r.param,
+                source: source.to_string(),
+                overridden_model_prior,
+            }
+        })
+        .collect();
+    let calendar = ir::caltime::CalendarAxis::from_model(model).map_err(|e| e.to_string())?;
     Ok(crate::run_meta::FitSidecar {
         // A fit's label is its run's, on the leaf (gh#896); the sidecar
         // describes the problem.
@@ -2868,7 +2864,7 @@ fn build_fit_sidecar(
         // The observation/dimension schema — a pure fold over the model's
         // expanded observation leaves; emitted for every fit (not gated on
         // Bayesian-ness — an IF2 fit's streams/dims are just as describable).
-        schema: model.map(crate::run_meta::ObsSchema::from_model),
+        schema: Some(crate::run_meta::ObsSchema::from_model(model)),
         // gh#585: recorded post-load by `record_training_partition` (the proof
         // must come from the code path that applied the declaration); sticky
         // across cache-hit reruns in `write_fit_sidecar`.
@@ -2876,8 +2872,8 @@ fn build_fit_sidecar(
         // The simulator the segment's runs integrate on. `config.dt` is the
         // step the dt rule resolved before this is built (`cmd_fit_run_v2`);
         // `resolved_dt` gives the same answer for a config read without it.
-        dt: model.map(|m| crate::dt_rule::resolved_dt(m.simulation.dt, problem.config.dt)),
-        integrator: model.map(|m| m.simulation.integrator.clone()),
+        dt: Some(crate::dt_rule::resolved_dt(model.simulation.dt, problem.config.dt)),
+        integrator: Some(model.simulation.integrator.clone()),
         calendar,
         // The `#'` doc dictionary (presentation metadata), loaded from the same
         // compiled IR. Empty when the model documents nothing.
@@ -3821,7 +3817,7 @@ mod tests {
         let config = config_v2::FitConfig::from_toml_str(&toml_src).unwrap();
         let model = golden_model("ocaml/golden/sir_two_patch_long_obs.ir.json");
         let data = read_data_digests(config.problem.data_spec().unwrap(), &model).unwrap();
-        let sidecar = build_fit_sidecar(&config, fit_path.to_str().unwrap(), Some(&model), &data).unwrap();
+        let sidecar = build_fit_sidecar(&config, fit_path.to_str().unwrap(), &model, &data).unwrap();
         assert_eq!(sidecar.data_hashes.keys().collect::<Vec<_>>(), vec!["cases"],
             "one entry, keyed by the source both leaves read: {:?}", sidecar.data_hashes);
     }
@@ -3847,7 +3843,7 @@ mod tests {
         let mut model = golden_model("ocaml/golden/sir_two_patch_long_obs.ir.json");
         model.origin = Some("2020-03-01".into());
         let data = read_data_digests(config.problem.data_spec().unwrap(), &model).unwrap();
-        let sidecar = build_fit_sidecar(&config, fit_path.to_str().unwrap(), Some(&model), &data).unwrap();
+        let sidecar = build_fit_sidecar(&config, fit_path.to_str().unwrap(), &model, &data).unwrap();
         let seg = tmp.path().join("seg");
         std::fs::create_dir_all(&seg).unwrap();
         crate::run_meta::store_fit_sidecar(&seg, &sidecar).unwrap();
@@ -3881,7 +3877,7 @@ mod tests {
         let config = config_v2::FitConfig::from_toml_str(&toml_src).unwrap();
         let model = golden_model("ocaml/golden/sir_two_patch_long_obs.ir.json");
         let data = read_data_digests(config.problem.data_spec().unwrap(), &model).unwrap();
-        let sidecar = build_fit_sidecar(&config, fit_path.to_str().unwrap(), Some(&model), &data).unwrap();
+        let sidecar = build_fit_sidecar(&config, fit_path.to_str().unwrap(), &model, &data).unwrap();
         let sha = |p: &std::path::Path| crate::hashing::sha256_hex(&std::fs::read(p).unwrap());
         assert_eq!(sidecar.data_hashes, std::collections::BTreeMap::from([("cases".into(), sha(&train))]));
         assert_eq!(sidecar.holdout_hashes, std::collections::BTreeMap::from([("cases".into(), sha(&holdout))]));
@@ -3938,7 +3934,7 @@ cooling = 0.7
 
         let data = read_data_digests(config.problem.data_spec().unwrap(), &model).unwrap();
         let sidecar = build_fit_sidecar(
-            &config, fit_path.to_str().unwrap(), Some(&model), &data).unwrap();
+            &config, fit_path.to_str().unwrap(), &model, &data).unwrap();
 
         let expected = crate::hashing::sha256_hex(&std::fs::read(&data_path).unwrap());
         assert_eq!(
@@ -3986,7 +3982,7 @@ N0 = 1000
             let config = config_v2::FitConfig::from_toml_str(&toml_src)
                 .expect("fixture fit.toml should parse");
             // The data digests are not under test here.
-            build_fit_sidecar(&config, fit_path.to_str().unwrap(), Some(&model),
+            build_fit_sidecar(&config, fit_path.to_str().unwrap(), &model,
                 &Default::default()).unwrap()
         };
         let pmmh = sidecar_for(

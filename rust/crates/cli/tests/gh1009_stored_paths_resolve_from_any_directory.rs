@@ -83,7 +83,7 @@ burn_in    = 100
     let seg_a = only(&fits, "a-");
     let meta: serde_json::Value =
         serde_json::from_slice(&std::fs::read(seg_a.join("fit.meta.json")).unwrap()).unwrap();
-    assert_eq!(meta["schema_version"], 2, "{meta}");
+    assert_eq!(meta["schema_version"], 3, "{meta}");
     assert_eq!(meta["source_config"], "../../../fits/a.toml", "relative to the fit folder: {meta}");
     assert_eq!(meta["source_model"], "../../../model.ir.json", "relative to the fit folder: {meta}");
     assert!(meta.get("fit_toml_path").is_none() && meta.get("model_path").is_none(), "{meta}");

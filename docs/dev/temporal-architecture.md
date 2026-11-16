@@ -774,28 +774,27 @@ over the full file), come with the forecast plan in Phase B.
 ### 5.2 Invariants and who enforces them
 
 "Static" means a violating value cannot be constructed; "checked" means a
-constructor refuses it. The one row marked "by convention" is not yet enforced
-by a type.
+constructor refuses it.
 
-| Invariant                                                                              | Owner                                                    | Kind                                                                      |
-| -------------------------------------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------- |
-| A calendar duration shifts an instant only through `add_calendar_*`, in every position | `ocaml/lib/compiler/time_typing.ml`                      | static                                                                    |
-| Instant arithmetic follows `docs/dates.md`, "Three concepts"                           | `time_typing.ml`                                         | static                                                                    |
-| `date_range` calendar stepping is computed from its start                              | `ocaml/lib/compiler/expander.ml`                         | static                                                                    |
-| A period has finite, increasing endpoints                                              | `Period::new`                                            | checked (exists)                                                          |
-| A row's period is computed in one place                                                | `observed_rows`                                          | static (only producer)                                                    |
-| Training is decided on periods, never labels                                           | `TrainingPartition::from_cutoff`                         | static (no label input)                                                   |
-| Training rows are a prefix of each stream                                              | `TrainingPartition`                                      | checked                                                                   |
-| A held-out score's fitted rows digest to the fit's prefix                              | `compare` (`training_scoring_ends`)                      | checked                                                                   |
-| Targets end after the origin, do not overlap, and stay within the horizon (Phase B)    | `ForecastPlan::new`                                      | checked                                                                   |
-| Every running total read for a prediction belongs to a period the plan declared        | `ForecastPlan::new` and the forecast driver              | static (the driver declares the periods before filtering; callers cannot) |
-| No observed row ending after the origin reaches the filter                             | forecast driver                                          | checked (a likelihood increment after the origin fails a test)            |
-| A restart never emits a period that began before it                                    | `simulate --init-state`                                  | checked (refusal)                                                         |
-| Conditioning fields come from the fit record and the filter, not a caller              | `ForecastPlan` constructor visibility                    | static                                                                    |
-| A period is never moved to fit a step grid                                             | alignment check                                          | checked (refusal)                                                         |
-| A time function outside its range is an error unless overridden                        | `sim::forcing_range`, `cli::forcing_extrapolation`       | checked                                                                   |
-| A rendered date parses back to the same model time                                     | `CalendarAxis`                                           | checked (property test, `ir/tests/calendar_axis_roundtrip.rs`)            |
-| Every artifact carrying a model time carries the calendar axis                         | record builders (`with_calendar`, `FitSidecar.calendar`) | by convention: an optional field, not enforced by the type                |
+| Invariant                                                                              | Owner                                              | Kind                                                                      |
+| -------------------------------------------------------------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------- |
+| A calendar duration shifts an instant only through `add_calendar_*`, in every position | `ocaml/lib/compiler/time_typing.ml`                | static                                                                    |
+| Instant arithmetic follows `docs/dates.md`, "Three concepts"                           | `time_typing.ml`                                   | static                                                                    |
+| `date_range` calendar stepping is computed from its start                              | `ocaml/lib/compiler/expander.ml`                   | static                                                                    |
+| A period has finite, increasing endpoints                                              | `Period::new`                                      | checked (exists)                                                          |
+| A row's period is computed in one place                                                | `observed_rows`                                    | static (only producer)                                                    |
+| Training is decided on periods, never labels                                           | `TrainingPartition::from_cutoff`                   | static (no label input)                                                   |
+| Training rows are a prefix of each stream                                              | `TrainingPartition`                                | checked                                                                   |
+| A held-out score's fitted rows digest to the fit's prefix                              | `compare` (`training_scoring_ends`)                | checked                                                                   |
+| Targets end after the origin, do not overlap, and stay within the horizon (Phase B)    | `ForecastPlan::new`                                | checked                                                                   |
+| Every running total read for a prediction belongs to a period the plan declared        | `ForecastPlan::new` and the forecast driver        | static (the driver declares the periods before filtering; callers cannot) |
+| No observed row ending after the origin reaches the filter                             | forecast driver                                    | checked (a likelihood increment after the origin fails a test)            |
+| A restart never emits a period that began before it                                    | `simulate --init-state`                            | checked (refusal)                                                         |
+| Conditioning fields come from the fit record and the filter, not a caller              | `ForecastPlan` constructor visibility              | static                                                                    |
+| A period is never moved to fit a step grid                                             | alignment check                                    | checked (refusal)                                                         |
+| A time function outside its range is an error unless overridden                        | `sim::forcing_range`, `cli::forcing_extrapolation` | checked                                                                   |
+| A rendered date parses back to the same model time                                     | `CalendarAxis`                                     | checked (property test, `ir/tests/calendar_axis_roundtrip.rs`)            |
+| Every artifact carrying a model time carries the calendar axis                         | `RecordMeta::new`, `FitSidecar.calendar`           | static: a required constructor argument and field                         |
 
 ### 5.3 Artifact contracts
 
@@ -803,7 +802,7 @@ Every artifact that carries a model time carries the `CalendarAxis` once, and
 names each instant as `{t, date}`, with `date` recorded or explicitly "not
 recorded" for a model without an origin.
 
-- **Simulation record** (`run.json`): gains `calendar` (built).
+- **Run record** (`run.json`, every kind): carries `calendar` (built).
 - **Fit record** (`fit.meta.json`): `training_partition` replaces
   `training_window`; gains `calendar` (built).
 - **Predictive artifacts** (not yet built, Phase B) (`fit predict`,

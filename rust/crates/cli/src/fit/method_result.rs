@@ -1551,7 +1551,7 @@ mod tests {
             "format_version": 1,
             "kind": "fit_method",
             "run_id": "deadbeef".repeat(8),
-            "hash_version": 1,
+            "hash_version": 1, "calendar": {"days_per_unit": 1.0, "origin": null, "time_unit": "days"},
             "ir_version": "0.7",
             "engine_version": "0.1.0+test",
             "levels": [
@@ -1716,7 +1716,8 @@ mod tests {
         let tmp = tempdir("theta_hat_fixed");
         let seg = tmp.path();
         std::fs::write(seg.join("fit.meta.json"),
-            serde_json::json!({"schema_version": 2, "estimated": ["R0", "sigma"]}).to_string()).unwrap();
+            serde_json::json!({"schema_version": 3, "estimated": ["R0", "sigma"],
+                "calendar": {"days_per_unit": 1.0, "origin": null, "time_unit": "days"}}).to_string()).unwrap();
         let dir = seg.join("if2-abcd").join("seed_1-ef01");
         std::fs::create_dir_all(&dir).unwrap();
         write_method_run(&dir, crate::run_meta::FitAlgorithm::If2, 1,

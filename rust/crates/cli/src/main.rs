@@ -3238,7 +3238,10 @@ fn write_sim_ensemble(
         run_id: resolved.run_id,
         display_inputs: inputs,
     };
-    let meta = crate::resolve::RecordMeta::new(ir::IR_VERSION.trim(), &cas.model_path, label)
+    let calendar = ir::caltime::CalendarAxis::from_model(&cas.base_model)
+        .unwrap_or_else(|e| out.fail(format!("error: {e}")));
+    let meta = crate::resolve::RecordMeta::new(
+        ir::IR_VERSION.trim(), &cas.model_path, label, calendar)
         .with_deps(deps);
 
     let mut artifacts = runid::Artifacts::new();

@@ -716,7 +716,9 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             run_id: resolved_id.run_id,
             display_inputs: serde_json::Value::Null,
         };
-        let meta = crate::resolve::RecordMeta::new(&ir_version_str, &ir_path, None);
+        let calendar = ir::caltime::CalendarAxis::from_model(&model)
+            .unwrap_or_else(|e| out.fail(format!("error: {e}")));
+        let meta = crate::resolve::RecordMeta::new(&ir_version_str, &ir_path, None, calendar);
         let write = match crate::resolve::begin_resolved_write(
             &store, &root, &resolved_artifact, &meta, crate::resolve::WriteMode::Streaming,
         ) {

@@ -232,7 +232,7 @@ mod tests {
                 "format_version": 1,
                 "kind": "{kind}",
                 "run_id": "{run_id}",
-                "hash_version": 1,
+                "hash_version": 1,"calendar":{{"days_per_unit":1.0,"origin":null,"time_unit":"days"}},
                 "ir_version": "0.7",
                 "engine_version": "0.1.0+test",
                 "levels": [

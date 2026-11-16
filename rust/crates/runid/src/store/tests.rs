@@ -46,7 +46,7 @@ fn record(run_id: ContentHash) -> RunRecord {
         artifacts: BTreeMap::new(),
         output_schema: BTreeMap::new(),
         children: BTreeMap::new(),
-        calendar: None,
+        calendar: ir::caltime::CalendarAxis::parse("days", None).unwrap(),
         inputs: serde_json::Value::Null,
         provenance: Provenance::default(),
     }

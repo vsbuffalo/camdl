@@ -576,7 +576,8 @@ mod tests {
                 run_id: h(run),
                 display_inputs: serde_json::Value::Null,
             };
-            let meta = crate::resolve::RecordMeta::new("0.0", "m.camdl", None);
+            let meta = crate::resolve::RecordMeta::new("0.0", "m.camdl", None,
+                ir::caltime::CalendarAxis::parse("days", None).unwrap());
             match crate::resolve::begin_resolved_write(&store, root.path(), &artifact, &meta,
                 crate::resolve::WriteMode::Streaming).unwrap()
             {
