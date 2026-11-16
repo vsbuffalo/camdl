@@ -119,6 +119,7 @@ struct ResolvedSurveyInputs {
 // ─── cmd_survey entry point ──────────────────────────────────────────────────
 
 pub fn cmd_survey(a: &crate::args::SurveyArgs) {
+    crate::forcing_extrapolation::set_allowed(a.forcing_extrapolation.allow_forcing_extrapolation);
     // survey has no `--no-color`: its painters follow the environment and
     // whether each stream is a terminal.
     let mut out = crate::out::Out::new(false);

@@ -92,6 +92,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     let out = crate::out::Out::new(false);
     let _eval_stats_guard = crate::util::EvalStatsReportGuard::start();  // gh#audit-H5
     sim::eval_stats::set_allow_degenerate_rates(a.inference.allow_degenerate_rates);  // gh#audit-C6
+    crate::forcing_extrapolation::set_allowed(a.inference.forcing_extrapolation.allow_forcing_extrapolation);
     let ir_path = a.model.to_string_lossy().into_owned();
     let n_particles = a.particles;
     let seed = a.inference.seed;
@@ -267,7 +268,6 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             if let Some(msg) = crate::obs_anchor::refuse_without_data(&model_in, PFILTER_SUPPLY) {
                 out.fail(format!("error: {msg}"));
             }
-            out.notices(&crate::obs_anchor::spline_hold_notices(&model_in, &[], model_in.simulation.t_end));
         }
     }
 

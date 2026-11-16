@@ -387,6 +387,7 @@ pub(crate) fn profile_if2_config(
 }
 
 pub fn cmd_profile(a: &crate::args::ProfileArgs) {
+    crate::forcing_extrapolation::set_allowed(a.inference.forcing_extrapolation.allow_forcing_extrapolation);
     // profile has no `--no-color`: its painters follow the environment and
     // whether each stream is a terminal.
     let out = crate::out::Out::new(false);
@@ -836,7 +837,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             {
                 out.fail(format!("error: {msg}"));
             }
-            out.notices(&crate::obs_anchor::spline_hold_notices(&model_pre, &[], model_pre.simulation.t_end));
             false
         }
     };

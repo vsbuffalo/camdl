@@ -64,6 +64,17 @@ print(s[0]['name'] if s else '')
         fi
     fi
 
+    # These goldens' bspline windows end before their horizons on purpose,
+    # to exercise the hold past the window (bspline_uniform's header says
+    # so): a run past a forcing's range is refused without the override,
+    # and editing the models would move their goldens. Every other golden
+    # runs without it, so a new one that outruns its forcing data fails.
+    extrapolation_flag=""
+    case "$name" in
+        bspline_explicit_dated|bspline_loglink|bspline_param_coefs|bspline_uniform)
+            extrapolation_flag="--allow-forcing-extrapolation" ;;
+    esac
+
     ok=1
     for backend in gillespie chain_binomial; do
         tmperr=$(mktemp /tmp/camdl_err_XXXXXX)
@@ -77,7 +88,7 @@ print(s[0]['name'] if s else '')
         # by sim/tests/expr_eval.rs::test_*_errors_by_default.
         # shellcheck disable=SC2086
         if ! "$CAMDL" simulate "$tmpir" $params_flag --backend "$backend" \
-                --seed 42 --allow-degenerate-rates > /dev/null 2>"$tmperr"; then
+                --seed 42 --allow-degenerate-rates $extrapolation_flag > /dev/null 2>"$tmperr"; then
             # Expected: model needs features this backend doesn't support, so
             # the backend cleanly REFUSES it. Two refusal classes:
             #  - capability gate (e.g. overdispersed() → OVERDISPERSION, which
