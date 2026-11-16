@@ -50,6 +50,33 @@ pub(crate) fn renamed_kind_sentence(old: &str, new: &str) -> String {
     )
 }
 
+/// The sentence a reader gives for a record [`predates_calendar`] recognises.
+pub(crate) const PREDATES_CALENDAR_SENTENCE: &str =
+    "its run.json was written before the calendar axis was recorded, and is not \
+     read; re-run it with this camdl";
+
+/// Whether a `run.json` that fails to deserialize was written before the
+/// `calendar` block became required (D59): it lacks `calendar`, and with the
+/// block supplied it would be a record. Any other defect is not this one, so
+/// a record that is broken in some other way as well is not misnamed.
+///
+/// Like [`renamed_kind`], this only lets a reader say why it skips the
+/// record; the record is still refused.
+pub fn predates_calendar(bytes: &[u8]) -> bool {
+    let Ok(serde_json::Value::Object(mut map)) = serde_json::from_slice(bytes) else {
+        return false;
+    };
+    if map.contains_key("calendar") {
+        return false;
+    }
+    let placeholder = ir::caltime::CalendarAxis::parse("days", None)
+        .ok()
+        .and_then(|axis| serde_json::to_value(axis).ok());
+    let Some(placeholder) = placeholder else { return false };
+    map.insert("calendar".into(), placeholder);
+    serde_json::from_value::<RunRecord>(serde_json::Value::Object(map)).is_ok()
+}
+
 /// Run lifecycle state, as the record states it. Wire form is the
 /// snake-case string (`"running"`/`"completed"`/`"failed"`), matching the
 /// `run.json` example.
