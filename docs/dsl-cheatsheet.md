@@ -165,10 +165,12 @@ durations) is all of those, and it remains fully legal.
 refinement on `[T]`: `'days`/`'weeks` are **Exact**; `'months`/`'years` are
 **Calendar**. The refinement propagates by LUB through arithmetic. In anchored
 mode, `Instant ± Calendar`-duration is **E321** with a hint at `add_calendar_*`
-(calendar-exact) or a `'days` literal (affine offset). Parameter references with
-`[T]` dimension are always Exact — a `'months`-spelled _bound_ on a
-`duration`-kind parameter is a length, not a step-from-a-date, and never
-contaminates uses.
+(calendar-exact) or a `'days` literal (affine offset). An instant moves only by
+a duration, and `Instant − Instant` is a duration; `Instant + Instant`,
+`k * Instant`, `Duration − Instant` and `Instant + <bare number>` are **E360**.
+Parameter references with `[T]` dimension are always Exact — a `'months`-spelled
+_bound_ on a `duration`-kind parameter is a length, not a step-from-a-date, and
+never contaminates uses.
 
 **Calendar arithmetic primitives** (anchored mode, DSL constant positions only):
 
@@ -316,6 +318,7 @@ The compiler issues E-codes with source locations and fix-hints.
 | E321 | time     | `Instant ± Calendar`-duration (`date(...) + 6 'months`); a calendar `covers` width under an origin               |
 | E322 | time     | calendar cadence in anchored recurring schedule (`every = 1 'months`)                                            |
 | E323 | time     | bare-numeric `on=[...]` in anchored periodic forcing                                                             |
+| E360 | time     | instant arithmetic with no meaning: `date(a) + date(b)`, `2 * date(a)`, `7 'days - date(a)`, `date(a) + 5`       |
 | E327 | time     | `add_calendar_*` / `origin` / calendar-cadence `date_range` in unanchored model                                  |
 | E328 | time     | argument-shape error in `add_calendar_*` / `date_range`                                                          |
 | E329 | time     | zero/negative cadence or `count < 1` in `date_range`                                                             |
