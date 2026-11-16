@@ -1775,19 +1775,24 @@ pub(crate) fn resolve_and_load_obs_streams(
         // scored — a silent wrong answer. Hard error at load. gh#174: reject a
         // positive incidence observation at the model origin (zero-width first
         // window → -Inf masquerading as filter degeneracy).
+        // The decision reads what each row measures: an instant here, and a
+        // period's start in `stream_times_of_rows`, which refuses a period
+        // opening before the run in those terms. A row AT the origin is a
+        // reading of the initial state.
         {
-            let obs_times: Vec<f64> = rows.iter().map(|r| r.label).collect();
+            let instants: Vec<f64> = rows.iter()
+                .filter_map(|r| match r.measures {
+                    super::observed_rows::Measures::Instant(t) => Some(t),
+                    super::observed_rows::Measures::Period(_) => None,
+                })
+                .collect();
             crate::util::check_obs_before_origin(
                 &stream_name,
                 compiled.model.simulation.t_start,
-                &obs_times,
+                &instants,
                 super::observed_rows::rows_were_dated(&rows),
                 time_opts,
             )?;
-            // A row AT the origin is judged by `stream_times_of_rows` from what it
-            // covers: an incidence row there has a period opening before the
-            // run and is refused in those terms; an instant row is a reading
-            // of the initial state.
         }
 
         let times =
@@ -1827,7 +1832,9 @@ pub(crate) fn refuse_periods_off_the_grid(
         return Ok(());
     }
     for s in streams {
-        for (i, label) in s.data.iter().map(|o| o.time).enumerate() {
+        for (i, row) in s.rows.iter().enumerate() {
+            // The row is named by its time cell as the file wrote it.
+            let label = row.temporal.last().map(ToString::to_string).unwrap_or_default();
             let (what, boundaries) = match &s.times {
                 sim::inference::StreamTimes::Intervals(ps) => {
                     let p = ps[i];
@@ -2110,10 +2117,7 @@ pub(crate) fn partition_lines(
                 q(partition.extent()), total - trained, q(at)));
             for (stream, rs) in rows {
                 if let Some(r) = rs.get(partition.rows(stream)) {
-                    let written: Vec<String> = r.temporal.iter().map(|c| match c {
-                        TemporalCell::Number(x) => format!("{x}"),
-                        TemporalCell::Date(d) => d.clone(),
-                    }).collect();
+                    let written: Vec<String> = r.temporal.iter().map(ToString::to_string).collect();
                     let measures = match r.measures {
                         super::observed_rows::Measures::Instant(t) => format!("read at {}", q(t)),
                         super::observed_rows::Measures::Period(p) =>
