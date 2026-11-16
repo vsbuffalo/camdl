@@ -404,6 +404,83 @@ threads.
 the run within the range; pass the override only when holding the end value is
 what the run means.
 
+### `chain-binomial-coarse-step` — the step is large against a compartment's exit rate
+
+Before a fit; its post-fit counterpart is the dt audit, `dt-convergence at θ̂`,
+below.
+
+A warning emitted by the `camdl` runtime, not the compiler, so it has no `Wxxx`
+code.
+
+**Fires when:** a forward `chain_binomial` run (`camdl simulate`, and any other
+command that runs the forward chain-binomial driver) takes a step on which
+`dt × h > 0.1` for one or more compartments, where `h` is that compartment's total
+per-capita exit rate: the sum, over the transitions leaving it, of the
+transition's rate divided by the compartment's count, before any gamma noise.
+The threshold is `sim::chain_binomial::COARSE_STEP_THRESHOLD`. The engine keeps
+each compartment's largest `dt × h` of the run (`StepScratch`, arithmetic only,
+no draw) and records one run note `chain-binomial-coarse-step`
+(`sim::chain_binomial::CoarseStep`) at the end, listing every compartment over
+the threshold with its largest rate, `dt × h`, the time it was first reached
+and the lengthening of its mean stay, then the advice once. It is said once
+per step size and set of compartments in a process, so replicates and sweep
+cells do not repeat it.
+
+**Why:** in one step a member leaves with probability `1 − exp(−h·dt)`, and
+anyone who enters a compartment during a step cannot leave it before the next
+one, so the stay is a whole number of steps with mean `dt / (1 − e^{−h·dt})`
+instead of `1/h`: longer by about `h·dt / 2`, 5% at the threshold. A forced
+system can turn that per-stage bias into a qualitatively different trajectory.
+The seasonally forced SEIR in `rust/crates/sim/tests/step_size_deterministic_limit.rs`
+(latent 5 days, infectious 4 days), run at a population of 3.3 × 10¹⁰ so that
+chance plays no part, has annual epidemics under the ODE but
+alternates large and small years at `dt = 1`. The relative L2 error of its
+weekly incidence against the ODE is 1.41 at `dt = 1`, 0.15 at `dt = 0.25` and
+0.03 at `dt = 0.05`.
+
+```
+warning: chain_binomial step dt = 1 is large against the per-capita exit rate of 2 compartments (dt x rate above 0.1):
+  `I`: up to 0.250 per day, dt x rate = 0.25, reached at t = 0; mean stay about 13% too long
+  `E`: up to 0.200 per day, dt x rate = 0.20, reached at t = 0; mean stay about 10% too long
+Within a step nobody who enters a compartment can leave it, which lengthens each stay, so the stochastic approximation may not reproduce the intended continuous-time dynamics. Check dt-convergence: rerun at dt = 0.5 and dt = 0.25 and compare. For an if2, mh or nl-* fit, the post-fit Richardson dt-convergence check (`[method.dt_check]`, on unless `--no-dt-check`) does this at the fitted parameters.
+```
+
+**Limits of the check:** the rate is read along the trajectory the run actually
+took, so a compartment that stays empty is never measured and a forced or
+state-dependent rate is read only where the run went. Mass-action exits are
+covered (the per-capita rate of infection is the force of infection, which is
+largest near an epidemic peak). An overdispersed exit's gamma noise can make the
+effective rate much larger than the one reported. Inflows (births, importation)
+have no source compartment and are not checked. The inference filters, which
+step through the same kernel, do not record it. Passing the check is not
+evidence of convergence: the SEIR above is still 0.15 off at `dt = 0.25`,
+where `dt × h = 0.06`.
+
+**Fix / silence:** rerun at `dt/2` and `dt/4` and compare the quantities that
+matter; choose the largest `dt` at which they stop changing, or keep `dt` and
+state the step size as part of the model. For a fit, the dt audit below does
+the comparison at the fitted parameters, but only for `if2`, `mh` and `nl-*`
+methods; fits with other methods (`pmmh`, `pgas`) are not audited (gh#1154).
+
+### `dt-convergence at θ̂` — the post-fit Richardson dt-convergence check
+
+Printed by `camdl fit run` (`rust/crates/cli/src/fit/dt_check.rs`), not a
+compiler diagnostic, so it has no `Wxxx` code. Configured by
+`[method.dt_check]` and the flags `--no-dt-check`, `--dt-check-halvings` and
+`--dt-check-strict` (run spec, `[method]` keys and "The dt audit").
+
+**Fires when:** after an `if2`, `mh` or `nl-*` fit, the log-likelihood at the
+fitted parameters, re-scored at `dt`, `dt/2`, `dt/4`, still moves by more than
+its threshold (2.0 nats for `chain_binomial`, 0.5 for `ode_rk4` by default). It
+reports `MARGINAL` or `FAIL` with the ladder; a `FAIL` says the estimate is
+discretization-dependent and to refit at the finest `dt` evaluated.
+
+**Relation to the coarse-step warning:** the `chain-binomial-coarse-step`
+warning (above) is the cheap, rate-based signal a forward run gives before anything is
+fitted; this check is the measurement, at the parameters that matter, of
+whether the step changes the answer. Fits with methods other than `if2`, `mh`
+and `nl-*` get only the former (gh#1154).
+
 ## Info
 
 | Code | Severity | Category    | Summary                                                                                                                                                                                                                                                                                                                                |

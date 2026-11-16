@@ -46,6 +46,108 @@ pub struct Resume<'a> {
 /// density mismatch.
 pub const RATE_EPSILON: f64 = 1e-15;
 
+/// The largest `dt × (per-capita exit rate)` a forward chain-binomial run
+/// accepts without a [`CoarseStep`] warning.
+///
+/// In one step a member of a compartment leaves with probability
+/// `p = 1 − exp(−h·dt)` for a per-capita exit rate `h`, and anyone who enters
+/// during a step cannot leave before the next one, so the stay is a whole
+/// number of steps with mean `dt / p` instead of `1/h`: longer by the factor
+/// `x / (1 − e^{−x})`, `x = h·dt`, which is about `1 + x/2`. At `x = 0.1` the
+/// mean stay is 5% too long. That is a per-stage bias; a forced system can
+/// amplify it into a much larger change in the trajectory (the seasonal SEIR
+/// in `tests/step_size_deterministic_limit.rs` has a relative L2 error of 0.15
+/// in weekly incidence against the ODE at `x = 0.06`), so passing this check
+/// is not evidence that `dt` is small enough.
+pub const COARSE_STEP_THRESHOLD: f64 = 0.1;
+
+/// A forward chain-binomial run whose step was coarse for one or more
+/// compartments: `dt × (per-capita exit rate)` exceeded
+/// [`COARSE_STEP_THRESHOLD`].
+///
+/// Each rate is a compartment's total per-capita exit hazard, the sum over its
+/// exits of `rate / count`, without the gamma noise, at the state the run
+/// actually visited. So it covers mass-action exits (infection, whose
+/// per-capita rate is the force of infection) as well as linear ones, but only
+/// where the realized trajectory went: a compartment that stays empty is never
+/// measured, a rate is read only at the times the run passed through, and an
+/// overdispersed exit's noise can push the effective rate well above what is
+/// reported. Inflows (births, importation) have no source and are not checked.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CoarseStep {
+    /// The nominal step of the run.
+    pub dt: f64,
+    /// Every compartment over the threshold, largest `dt × rate` first.
+    pub compartments: Vec<CoarseCompartment>,
+    /// The model's time unit, for the message.
+    pub time_unit: String,
+}
+
+/// One compartment over the coarse-step threshold.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CoarseCompartment {
+    pub compartment: String,
+    /// Its largest total per-capita exit rate in the run, per unit of model
+    /// time.
+    pub exit_rate: f64,
+    /// `dt × exit_rate` on the step where it was reached.
+    pub rate_times_dt: f64,
+    /// The start of the first step on which it was reached.
+    pub t: f64,
+}
+
+impl CoarseCompartment {
+    /// How much longer than `1/h` the mean stay is under the step,
+    /// `x / (1 − e^{−x}) − 1` with `x = dt × h`.
+    pub fn stay_lengthening(&self) -> f64 {
+        let x = self.rate_times_dt;
+        x / -(-x).exp_m1() - 1.0
+    }
+}
+
+impl std::fmt::Display for CoarseStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let unit = self.time_unit.strip_suffix('s').unwrap_or(&self.time_unit);
+        let n = self.compartments.len();
+        write!(
+            f,
+            "chain_binomial step dt = {} is large against the per-capita exit rate of {} \
+             (dt x rate above {}):",
+            self.dt,
+            if n == 1 { "1 compartment".to_string() } else { format!("{n} compartments") },
+            COARSE_STEP_THRESHOLD,
+        )?;
+        for c in &self.compartments {
+            write!(
+                f,
+                "\n  `{}`: up to {:.3} per {unit}, dt x rate = {:.2}, reached at t = {}; \
+                 mean stay about {:.0}% too long",
+                c.compartment, c.exit_rate, c.rate_times_dt, c.t, c.stay_lengthening() * 100.0,
+            )?;
+        }
+        write!(
+            f,
+            "\nWithin a step nobody who enters a compartment can leave it, which lengthens \
+             each stay, so the stochastic approximation may not reproduce the intended \
+             continuous-time dynamics. Check dt-convergence: rerun at dt = {} and \
+             dt = {} and compare. For an if2, mh or nl-* fit, the post-fit Richardson \
+             dt-convergence check (`[method.dt_check]`, on unless `--no-dt-check`) does \
+             this at the fitted parameters.",
+            self.dt / 2.0,
+            self.dt / 4.0,
+        )
+    }
+}
+
+/// The largest `dt × (per-capita exit rate)` `step_one` has met for one
+/// source compartment with this scratch, and where.
+#[derive(Clone, Copy, Debug, Default)]
+struct ExitRatePeak {
+    rate_times_dt: f64,
+    exit_rate: f64,
+    t: f64,
+}
+
 /// Pre-allocated scratch buffers for `step_one`, eliminating per-call heap
 /// allocations. Allocate one per particle (or per thread) and reuse across
 /// all time steps.
@@ -75,6 +177,11 @@ pub struct StepScratch {
     /// (intervention_idx) stages. Reused across substeps (one batch per particle)
     /// — no per-step allocation on the inference hot path.
     pub effect_batch: crate::schedule::EffectBatch,
+    /// The largest `dt × (per-capita exit rate)` over the steps taken with
+    /// this scratch, per entry of `model.source_groups` ([`CoarseStep`]). Read
+    /// by the forward driver at the end of a run; it consumes no randomness
+    /// and changes no draw.
+    exit_rate_peaks: Vec<ExitRatePeak>,
 }
 
 /// How event counts are drawn — resolved from the IR at step start.
@@ -97,7 +204,36 @@ impl StepScratch {
             event_deltas: crate::effects::EffectDeltas::default(),
             effect_batch: crate::schedule::EffectBatch::default(),
             probs: Vec::with_capacity(n_tr),
+            exit_rate_peaks: vec![ExitRatePeak::default(); model.source_groups.len()],
         }
+    }
+
+    /// The coarse step met so far, if `dt × (per-capita exit rate)` exceeded
+    /// [`COARSE_STEP_THRESHOLD`] for any compartment on any step taken with
+    /// this scratch; every such compartment is listed.
+    pub fn coarse_step(&self, model: &CompiledModel, dt: f64) -> Option<CoarseStep> {
+        // A relative margin so a rate sitting exactly on the threshold
+        // (`gamma = 0.1` at `dt = 1`) does not flip on the rounding of
+        // `(gamma·I)/I`.
+        let over = COARSE_STEP_THRESHOLD * (1.0 + 1e-9);
+        let mut compartments: Vec<CoarseCompartment> = model
+            .source_groups
+            .iter()
+            .zip(&self.exit_rate_peaks)
+            .filter(|(_, p)| p.rate_times_dt > over)
+            .map(|(&(src_local, _), p)| CoarseCompartment {
+                compartment: model.int_compartment_name(src_local),
+                exit_rate: p.exit_rate,
+                rate_times_dt: p.rate_times_dt,
+                t: p.t,
+            })
+            .collect();
+        compartments.sort_by(|a, b| b.rate_times_dt.total_cmp(&a.rate_times_dt));
+        (!compartments.is_empty()).then(|| CoarseStep {
+            dt,
+            compartments,
+            time_unit: model.model.time_unit.clone(),
+        })
     }
 }
 
@@ -520,6 +656,12 @@ pub fn run_chain_binomial_with_observer(
         traj.reactive_log = Some(a.into_firings());
     }
 
+    // Tell the user once if the step was coarse for some compartment's exits
+    // (`COARSE_STEP_THRESHOLD`). Recorded, not printed: the command says it.
+    if let Some(coarse) = scratch.coarse_step(model, cfg.dt) {
+        crate::run_notes::record(crate::run_notes::RunNote::CoarseStep(coarse));
+    }
+
     // gh#322 start-from-state seam: hand this run's FINAL RNG to the caller. The
     // splice-invariant test feeds the head run's final RNG into the resumed
     // tail, which is what makes the spliced continuation byte-identical.
@@ -699,7 +841,7 @@ pub fn step_one(
     // Σ(1-exp(-r_i*dt)) > 1-exp(-Σr_i*dt) (subadditivity of 1-exp).
     // The old algorithm systematically over-counted total exits, causing
     // particle trajectories to drift and ESS to degrade over long runs.
-    for &(src_local, ref group) in &model.source_groups {
+    for (g_idx, &(src_local, ref group)) in model.source_groups.iter().enumerate() {
         let n_src = counts[src_local].max(0);
         if n_src == 0 {
             for &tr_idx in group { scratch.handled[tr_idx] = true; }
@@ -709,10 +851,14 @@ pub fn step_one(
         // Step 1: compute effective per-capita rates
         scratch.probs.clear(); // reuse as (tr_idx, effective_rate) pairs
         let mut total_rate = 0.0_f64;
+        // The source's total per-capita exit rate before any gamma noise, for
+        // the coarse-step check (`CoarseStep`). Arithmetic only: no draw.
+        let mut exit_rate = 0.0_f64;
         for &tr_idx in group {
             let rate = scratch.propensities[tr_idx];
             if rate <= RATE_EPSILON { scratch.handled[tr_idx] = true; continue; }
             let per_capita = rate / n_src as f64;
+            exit_rate += per_capita;
             if let ResolvedDraw::Deterministic = &scratch.draws[tr_idx] {
                 // gh#122: a sole-exit deterministic source transition FIRES
                 // `round(rate*dt)`, capped by source availability for
@@ -744,6 +890,14 @@ pub fn step_one(
             };
             total_rate += effective;
             scratch.probs.push((tr_idx, effective));
+        }
+        if let Some(peak) = scratch.exit_rate_peaks.get_mut(g_idx) {
+            // A relative margin, so a constant rate whose `(k·n)/n` rounds
+            // differently from step to step keeps the time it was first
+            // reached instead of a later step's last-bit excess.
+            if exit_rate * dt > peak.rate_times_dt * (1.0 + 1e-12) {
+                *peak = ExitRatePeak { rate_times_dt: exit_rate * dt, exit_rate, t };
+            }
         }
 
         if total_rate <= 0.0 || scratch.probs.is_empty() {

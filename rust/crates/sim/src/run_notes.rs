@@ -39,6 +39,9 @@ pub enum RunNote {
     /// its end value was held ([`crate::forcing_range`]). The command decides
     /// whether that is an error or a warning.
     ForcingOutsideRange(crate::forcing_range::OutsideRange),
+    /// A forward chain-binomial run's step was large against some
+    /// compartment's per-capita exit rate ([`crate::chain_binomial::CoarseStep`]).
+    CoarseStep(crate::chain_binomial::CoarseStep),
 }
 
 impl RunNote {
@@ -50,6 +53,7 @@ impl RunNote {
             RunNote::NotPositiveDefinite(_) => "not-positive-definite",
             RunNote::GammaIndexMismatch { .. } => "gamma-index-mismatch",
             RunNote::ForcingOutsideRange(_) => "forcing-outside-range",
+            RunNote::CoarseStep(_) => "chain-binomial-coarse-step",
         }
     }
 
@@ -63,6 +67,13 @@ impl RunNote {
             // One note per forcing and side.
             RunNote::ForcingOutsideRange(o) => {
                 format!("{}\u{0}{:?}\u{0}{}\u{0}{}", o.forcing, o.side, o.lo.to_bits(), o.hi.to_bits())
+            }
+            // One note per step size and set of compartments: replicates and
+            // sweep cells at one `dt` say it once, whatever rates each met.
+            RunNote::CoarseStep(c) => {
+                let mut names: Vec<&str> = c.compartments.iter().map(|x| x.compartment.as_str()).collect();
+                names.sort_unstable();
+                format!("{}\u{0}{}", c.dt.to_bits(), names.join("\u{0}"))
             }
             other => other.to_string(),
         }
@@ -90,6 +101,7 @@ impl std::fmt::Display for RunNote {
                 substep, tracked, recorded
             ),
             RunNote::ForcingOutsideRange(o) => write!(f, "{o}"),
+            RunNote::CoarseStep(c) => write!(f, "{c}"),
         }
     }
 }
