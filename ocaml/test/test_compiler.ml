@@ -11460,6 +11460,160 @@ let test_gh1100_exclusive_end_equal_to_start () =
               calendar_months = 1, inclusive_end = false)"
     ~expected:[]
 
+(* gh#1093: pins `date_range` output for both cadences against a spec
+   written independently of the expander's generator. Entry i of a range
+   is `offset i`, measured from the start: `start + i·D` days for
+   `every = D`, and `add_calendar_*(start, i·k)` for a calendar cadence
+   (the oracle compiles that call, a separate expander path). On top of
+   the offset: the count form yields i = 0..N; the start–end form yields
+   every entry ≤ end; an end off the cadence raises W328 when
+   `inclusive_end = true`, and an end on it is dropped when
+   `inclusive_end = false`. The grid covers month-end and leap-day
+   starts, cadences that cross month and year boundaries, a `'weeks`
+   duration and a fractional `'days` duration that rounds. *)
+type dr_cadence =
+  | DrEvery of string * int  (* literal as written, its whole-day value *)
+  | DrMonths of int
+  | DrYears of int
+
+type dr_form =
+  | DrCount of int
+  | DrUntil of string * bool option  (* end, `inclusive_end` if written *)
+
+let dr_at_expr start cadence form =
+  let kw = match cadence with
+    | DrEvery (lit, _) -> "every = " ^ lit
+    | DrMonths k -> Printf.sprintf "calendar_months = %d" k
+    | DrYears k -> Printf.sprintf "calendar_years = %d" k
+  in
+  match form with
+  | DrCount n ->
+    Printf.sprintf "date_range(date(%S), count = %d, %s)" start n kw
+  | DrUntil (e, inc) ->
+    Printf.sprintf "date_range(date(%S), date(%S), %s%s)" start e kw
+      (match inc with
+       | None -> ""
+       | Some b -> Printf.sprintf ", inclusive_end = %b" b)
+
+let dr_day_of iso =
+  match at_times_of_first_intervention
+          (anchored_at_src ~at_expr:(Printf.sprintf "date(%S)" iso)) with
+  | [t] -> t
+  | _ -> Alcotest.failf "day_of %s: expected one fire time" iso
+
+(* `offset i` for i = 0..h, from the oracle. *)
+let dr_offsets start cadence h =
+  match cadence with
+  | DrEvery (_, d) ->
+    let s = dr_day_of start in
+    List.init (h + 1) (fun i -> s +. float_of_int (i * d))
+  | DrMonths k | DrYears k ->
+    let fn = match cadence with
+      | DrMonths _ -> "add_calendar_months" | _ -> "add_calendar_years" in
+    let calls = List.init (h + 1) (fun i ->
+        Printf.sprintf "%s(date(%S), %d)" fn start (i * k)) in
+    let ts = at_times_of_first_intervention
+        (anchored_at_src ~at_expr:(String.concat ", " calls)) in
+    Alcotest.(check int) "oracle length" (h + 1) (List.length ts);
+    ts
+
+let test_gh1093_date_range_pinned_grid () =
+  let n_w328 = ref 0 and n_dropped = ref 0 and n_count = ref 0 in
+  let check start cadence form =
+    let at_expr = dr_at_expr start cadence form in
+    let src = anchored_at_src ~at_expr in
+    let expected, expect_w328 =
+      match form with
+      | DrCount n -> incr n_count; dr_offsets start cadence n, false
+      | DrUntil (e, inc) ->
+        let inclusive = Option.value inc ~default:true in
+        let e_day = dr_day_of e in
+        (* A horizon past `end` for any cadence in the grid (≥ 1 day). *)
+        let h = int_of_float (e_day -. dr_day_of start) + 1 in
+        let offs = dr_offsets start cadence h in
+        Alcotest.(check bool) (at_expr ^ ": oracle horizon passes end")
+          true (List.nth offs h > e_day);
+        let kept = List.filter (fun t -> t <= e_day) offs in
+        let last = List.nth kept (List.length kept - 1) in
+        let aligned = last = e_day in
+        if aligned && not inclusive then begin
+          incr n_dropped;
+          (List.filteri (fun i _ -> i < List.length kept - 1) kept, false)
+        end else
+          (kept, (not aligned) && inclusive)
+    in
+    if expect_w328 then incr n_w328;
+    Alcotest.(check (list (float 1e-9))) at_expr expected
+      (at_times_of_first_intervention src);
+    Alcotest.(check int) (at_expr ^ ": W328 count")
+      (if expect_w328 then 1 else 0) (w328_count src)
+  in
+  let every_cadences =
+    [ DrEvery ("1 'days", 1); DrEvery ("3 'days", 3);
+      DrEvery ("7 'days", 7); DrEvery ("30 'days", 30);
+      DrEvery ("2 'weeks", 14); DrEvery ("1.5 'days", 2) ] in
+  let every_starts = ["2020-01-01"; "2020-01-31"; "2020-02-29";
+                      "2020-12-31"; "2021-02-28"] in
+  List.iter (fun s ->
+    List.iter (fun c ->
+      List.iter (fun n -> check s c (DrCount n)) [1; 5; 40];
+      List.iter (fun e ->
+        List.iter (fun inc -> check s c (DrUntil (e, inc)))
+          [None; Some true; Some false])
+        [s; "2021-03-01"; "2021-03-03"]) every_cadences) every_starts;
+  let cal_cadences = [DrMonths 1; DrMonths 3; DrMonths 13;
+                      DrYears 1; DrYears 4] in
+  let cal_starts = ["2020-01-01"; "2020-01-31"; "2020-02-29";
+                    "2020-03-31"; "2020-08-31"; "2020-12-31"] in
+  List.iter (fun s ->
+    List.iter (fun c ->
+      List.iter (fun n -> check s c (DrCount n)) [1; 5];
+      List.iter (fun e ->
+        List.iter (fun inc -> check s c (DrUntil (e, inc)))
+          [None; Some false])
+        [s; "2021-02-28"; "2021-12-31"; "2022-02-28"]) cal_cadences)
+    cal_starts;
+  (* The grid reached the branches it is meant to pin. *)
+  Alcotest.(check bool) "grid reached W328" true (!n_w328 > 0);
+  Alcotest.(check bool) "grid reached an exclusive on-cadence drop" true
+    (!n_dropped > 0);
+  Alcotest.(check bool) "grid reached the count form" true (!n_count > 0);
+  (* Literal anchors, so a wrong oracle cannot pass silently: monthly
+     from Jan 31 2020 lands on month ends (gh#1068), and 7-day steps
+     from Feb 29 2020 cross into March on day 66. *)
+  Alcotest.(check (list (float 1e-9))) "monthly from Jan 31"
+    [30.0; 59.0; 90.0; 120.0]
+    (at_times_of_first_intervention (anchored_at_src
+       ~at_expr:(dr_at_expr "2020-01-31" (DrMonths 1) (DrCount 3))));
+  Alcotest.(check (list (float 1e-9))) "weekly from Feb 29"
+    [59.0; 66.0; 73.0]
+    (at_times_of_first_intervention (anchored_at_src
+       ~at_expr:(dr_at_expr "2020-02-29" (DrEvery ("7 'days", 7))
+                   (DrCount 2))))
+
+(* gh#1093: the affine cadence converts `start + i·D` back to a date
+   with `ymd_of_days`, the closed-form inverse of `days_of_date`. Check
+   it on every day from 1600-01-01 through 2600-12-31: consecutive day
+   numbers map to consecutive calendar dates, and back. *)
+let test_gh1093_ymd_of_days_inverts_days_of_date () =
+  let n = ref 0 in
+  for y = 1600 to 2600 do
+    for m = 1 to 12 do
+      for d = 1 to Expander.days_in_month y m do
+        let dn = Expander.days_of_date y m d in
+        let (y', m', d') = Expander.ymd_of_days dn in
+        if (y', m', d') <> (y, m, d) then
+          Alcotest.failf "ymd_of_days %d = %04d-%02d-%02d, expected \
+                          %04d-%02d-%02d" dn y' m' d' y m d;
+        if !n > 0 then
+          Alcotest.(check int) "consecutive day numbers"
+            (Expander.days_of_date 1600 1 1 + !n) dn;
+        incr n
+      done
+    done
+  done;
+  Alcotest.(check bool) "covered 1001 years" true (!n > 365_000)
+
 let test_phase2_date_range_zero_cadence_errors () =
   expect_error_code
     ~code:"E329"
@@ -16832,6 +16986,10 @@ let () =
         `Quick test_gh1100_exclusive_end_calendar;
       Alcotest.test_case "gh#1100 inclusive_end = false with end = start is empty"
         `Quick test_gh1100_exclusive_end_equal_to_start;
+      Alcotest.test_case "gh#1093 date_range pinned against an offset-from-start spec"
+        `Quick test_gh1093_date_range_pinned_grid;
+      Alcotest.test_case "gh#1093 ymd_of_days inverts days_of_date over 1600-2600"
+        `Quick test_gh1093_ymd_of_days_inverts_days_of_date;
       Alcotest.test_case "E329 every = 0 rejected as non-positive"
         `Quick test_phase2_date_range_zero_cadence_errors;
       Alcotest.test_case "E329 calendar_months = -1 rejected as non-positive"

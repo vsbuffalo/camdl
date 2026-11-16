@@ -332,6 +332,22 @@ let days_of_date y m d =
   let m' = if m <= 2 then m + 12 else m in
   365 * y' + y'/4 - y'/100 + y'/400 + (153*(m'+1))/5 + d - 694025
 
+(** Inverse of [days_of_date]: the `(year, month, day)` of a day number.
+    Howard Hinnant's `civil_from_days`, shifted to [days_of_date]'s
+    epoch; mirrors `date_from_rata_die` in
+    `rust/crates/ir/src/caltime.rs`. *)
+let ymd_of_days dn =
+  let z = dn - days_of_date 1970 1 1 + 719_468 in
+  let era = (if z >= 0 then z else z - 146_096) / 146_097 in
+  let doe = z - era * 146_097 in
+  let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365 in
+  let y = yoe + era * 400 in
+  let doy = doe - (365 * yoe + yoe / 4 - yoe / 100) in
+  let mp = (5 * doy + 2) / 153 in
+  let d = doy - (153 * mp + 2) / 5 + 1 in
+  let m = if mp < 10 then mp + 3 else mp - 9 in
+  ((if m <= 2 then y + 1 else y), m, d)
+
 (* `is_leap_year` / `days_in_month` are defined here (ahead of
    `parse_iso_date`) so the date-literal parser can range-check the day
    leap-aware. They mirror `rust/crates/ir/src/caltime.rs`:
@@ -3210,9 +3226,9 @@ let expand_date_range_to_consts ctx (args : (string * expr) list) : expr list =
   let leq_ymd a b = cmp_ymd a b <= 0 in
   let _ = leq_ymd in
   (* gh#1118: an `end` before `start` is refused here, once, for every
-     cadence. Both start–end loops below seed their list with `start`
-     unconditionally, so a reversed pair would otherwise compile to a
-     single entry lying after `end`. `end = start` is not reversed. *)
+     cadence, so the start–end generator below only sees `start ≤ end`
+     and its entry 0, `start`, is always kept. `end = start` is not
+     reversed. *)
   let reversed = match start_ymd, end_ymd with
     | Some s, Some e -> cmp_ymd e s < 0
     | _ -> false
@@ -3229,7 +3245,12 @@ let expand_date_range_to_consts ctx (args : (string * expr) list) : expr list =
              from `start`" ();
     []
   | Some s_ymd ->
-    let entries_ymd =
+    (* Each cadence is one `offset i`: entry i computed from the start,
+       never from the previous entry, whose day may have been clamped
+       to a shorter month's end (gh#1068: Jan 31 → Feb 29 → Mar 31, not
+       Mar 29). `None` after an error. The count form, the start–end
+       form and W328 are generated once, below, on top of it (gh#1093). *)
+    let offset =
       if Option.is_some every_kw then begin
         (* Affine cadence. `every` is a duration expr in 'days or
            'weeks. We need its value in DAYS (calendar arithmetic
@@ -3259,104 +3280,25 @@ let expand_date_range_to_consts ctx (args : (string * expr) list) : expr list =
             None
         in
         match every_days with
-        | None -> []
+        | None -> None
         | Some d when d <= 0.0 ->
           err "E329"
             (Printf.sprintf
               "date_range: `every` must be positive (got %g)" d) ();
-          []
+          None
         | Some step_days_f ->
-          (* Step the affine cadence in proleptic-Gregorian day
-             indices. Convert start to absolute day-of-epoch via
-             [days_of_date], step, and convert back. We round
-             step_days_f to an integer (sub-day steps are not
-             supported per docs/dates.md). *)
+          (* Step in proleptic-Gregorian day numbers: entry i is
+             `start + i·D` days. We round step_days_f to an integer
+             (sub-day steps are not supported per docs/dates.md). *)
           let step_days = int_of_float (Float.round step_days_f) in
           if step_days <= 0 then begin
             err "E329"
               "date_range: `every` rounds to zero days — must be ≥ 1 day" ();
-            []
+            None
           end else
             let (sy, sm, sd) = s_ymd in
             let start_dn = days_of_date sy sm sd in
-            (* Convert a day-number back to (y,m,d) by linear search
-               anchored at start: incrementally add step_days. We
-               don't need a general inverse — we just step forward
-               from a known (y,m,d). *)
-            let step_ymd ymd k_days =
-              (* Add k_days to (y,m,d) by walking days_in_month. *)
-              let (y, m, d) = ymd in
-              let rec walk y m d k =
-                if k = 0 then (y, m, d)
-                else if k > 0 then
-                  let dim = days_in_month y m in
-                  if d + k <= dim then (y, m, d + k)
-                  else
-                    let remaining = k - (dim - d + 1) in
-                    let y', m' =
-                      if m = 12 then (y + 1, 1) else (y, m + 1)
-                    in
-                    walk y' m' 1 remaining
-                else
-                  (* k < 0 *)
-                  if d + k >= 1 then (y, m, d + k)
-                  else
-                    let y', m' =
-                      if m = 1 then (y - 1, 12) else (y, m - 1)
-                    in
-                    let dim' = days_in_month y' m' in
-                    walk y' m' dim' (k + d)
-              in
-              walk y m d k_days
-            in
-            (* Generate boundaries. *)
-            let entries = ref [s_ymd] in
-            (match end_ymd, count_int with
-             | _, Some n ->
-               (* Count form: produces count + 1 entries. *)
-               let cur = ref s_ymd in
-               for _ = 1 to n do
-                 cur := step_ymd !cur step_days;
-                 entries := !cur :: !entries
-               done;
-               List.rev !entries
-             | Some e_ymd, None ->
-               (* Start–end form. Step until > end. *)
-               let (ey, em, ed) = e_ymd in
-               let end_dn = days_of_date ey em ed in
-               let cur = ref s_ymd in
-               let cur_dn = ref start_dn in
-               let aligned = ref true in
-               while !cur_dn + step_days <= end_dn do
-                 cur := step_ymd !cur step_days;
-                 cur_dn := !cur_dn + step_days;
-                 entries := !cur :: !entries
-               done;
-               if !cur_dn <> end_dn then aligned := false;
-               (* Every entry is ≤ end. With `inclusive_end = true` an
-                  end on a boundary is kept and an end off one raises
-                  W328; with `false` the range stops strictly before
-                  end, so an on-boundary end — the head of the
-                  reversed list — is dropped (gh#1100). *)
-               if (not !aligned) && inclusive_end then begin
-                 warn "W328"
-                   (Printf.sprintf
-                     "date_range: `end = %s` does not land on a cadence \
-                      boundary from `start = %s`; last produced entry \
-                      is %s"
-                     (format_iso_date e_ymd)
-                     (format_iso_date s_ymd)
-                     (format_iso_date !cur))
-                   ~hint:"list `end` explicitly or set \
-                          `inclusive_end = false` to make the \
-                          truncation explicit"
-                   ()
-               end;
-               if !aligned && not inclusive_end then
-                 List.rev (List.tl !entries)
-               else
-                 List.rev !entries
-             | None, None -> [s_ymd])
+            Some (fun i -> ymd_of_days (start_dn + i * step_days))
       end
       else begin
         (* Calendar cadence: months or years. *)
@@ -3370,7 +3312,7 @@ let expand_date_range_to_consts ctx (args : (string * expr) list) : expr list =
                    the file, or use `every = N 'days` for an affine \
                    cadence"
             ();
-          []
+          None
         end else
           let n_step, step_fn =
             if Option.is_some cmonths_kw then
@@ -3391,38 +3333,38 @@ let expand_date_range_to_consts ctx (args : (string * expr) list) : expr list =
               (Printf.sprintf
                 "date_range: calendar cadence must be positive (got %d)"
                 k_step) ();
-            []
+            None
           end else
-            (* Entry i is `step_fn start (i·k)`, computed from the
-               start — never from the previous entry, whose day may
-               have been clamped to a shorter month's end (gh#1068:
-               Jan 31 → Feb 29 → Mar 31, not Mar 29). *)
-            let entry i = step_fn s_ymd (i * k_step) in
-            let entries = ref [s_ymd] in
-            (match end_ymd, count_int with
-             | _, Some n ->
-               for i = 1 to n do
-                 entries := entry i :: !entries
-               done;
-               List.rev !entries
-             | Some e_ymd, None ->
-               (* Step until the next entry would exceed end. Entries
-                  are strictly increasing in i (k_step > 0, and a
-                  clamp never moves a date past its month), so the
-                  first one past end ends the range. *)
-               let cur = ref s_ymd in
-               let i = ref 1 in
-               let stop = ref false in
-               while not !stop do
-                 let nxt = entry !i in
-                 if cmp_ymd nxt e_ymd <= 0 then begin
-                   cur := nxt;
-                   entries := nxt :: !entries;
-                   incr i
-                 end else
-                   stop := true
-               done;
-               let aligned = cmp_ymd !cur e_ymd = 0 in
+            Some (fun i -> step_fn s_ymd (i * k_step))
+      end
+    in
+    let entries_ymd =
+      match offset with
+      | None -> []
+      | Some offset ->
+        (match end_ymd, count_int with
+         | _, Some n ->
+           (* Count form: produces count + 1 entries. *)
+           List.init (n + 1) offset
+         | Some e_ymd, None ->
+           (* Start–end form. `offset 0` is `start`, which is ≤ end (a
+              reversed pair is refused above), and entries strictly
+              increase in i (a step is ≥ 1 day or ≥ 1 calendar month,
+              and a clamp never moves a date past its month), so the
+              first entry past end ends the range. *)
+           let rec upto i acc =
+             let x = offset i in
+             if cmp_ymd x e_ymd <= 0 then upto (i + 1) (x :: acc) else acc
+           in
+           (match upto 0 [] with
+            | [] -> []  (* start > end: refused as E329 above *)
+            | last :: _ as rev_entries ->
+               let aligned = cmp_ymd last e_ymd = 0 in
+               (* Every entry is ≤ end. With `inclusive_end = true` an end
+                  on a boundary is kept and an end off one raises W328; with
+                  `false` the range stops strictly before end, so an
+                  on-boundary end — the head of the reversed list — is
+                  dropped (gh#1100). *)
                if (not aligned) && inclusive_end then
                  warn "W328"
                    (Printf.sprintf
@@ -3431,19 +3373,16 @@ let expand_date_range_to_consts ctx (args : (string * expr) list) : expr list =
                       is %s"
                      (format_iso_date e_ymd)
                      (format_iso_date s_ymd)
-                     (format_iso_date !cur))
+                     (format_iso_date last))
                    ~hint:"list `end` explicitly or set \
                           `inclusive_end = false` to make the \
                           truncation explicit"
                    ();
-               (* As in the fixed-day form: `inclusive_end = false`
-                  drops an end that lands on the cadence (gh#1100). *)
                if aligned && not inclusive_end then
-                 List.rev (List.tl !entries)
+                 List.rev (List.tl rev_entries)
                else
-                 List.rev !entries
-             | None, None -> [s_ymd])
-      end
+                 List.rev rev_entries)
+         | None, None -> [s_ymd])
     in
     List.map (fun ymd -> EConst (ymd_to_float ymd)) entries_ymd
 
