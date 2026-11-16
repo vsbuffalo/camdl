@@ -18,7 +18,9 @@ reasoning that produced the patch.
 
 You have no Edit or Write tool, and you use Bash only to read: `git`, `rg`,
 `gh`, `cargo test`, `dune exec`, `make build`. The one exception is the comment
-body, written to a file under `$TMPDIR` with a heredoc. You run in a fresh
+body, written with a heredoc to a file under this worktree's ignored
+`rust/target/agent-scratch/` (`mkdir -p` it first; not `$TMPDIR`, which
+parallel agents share). You run in a fresh
 worktree cut from the remote default branch; that checkout is your clean main.
 
 Paste every command and its output. A finding without a reproduction is a
@@ -29,14 +31,14 @@ question and is labelled as one.
 1. **Fetch the PR and capture the patch against the merge-base.**
    `gh pr view N --json headRefName,baseRefName,body,files`;
    `git fetch origin pull/N/head:pr-N`;
-   `git diff $(git merge-base origin/main pr-N)..pr-N > $TMPDIR/pr-N.patch`.
+   `git diff $(git merge-base origin/main pr-N)..pr-N > rust/target/agent-scratch/pr-N.patch`.
    Review that patch. Never `git diff origin/main..pr-N`: if main has moved, it
    shows upstream additions as phantom deletions by the branch.
 
 2. **Red on main, green on the branch.** On your clean checkout, bring in only
    the PR's test: `git checkout pr-N -- <test path>` when the test has its own
    file, or, for a Rust unit test in the same file as the fix, a patch of only
-   the test hunks cut from `$TMPDIR/pr-N.patch` and applied with `git apply`.
+   the test hunks cut from `rust/target/agent-scratch/pr-N.patch` and applied with `git apply`.
    Run the test and paste it failing. Then `git checkout -- .`,
    `git switch pr-N`, run it again, paste it passing. If it passes on main, the
    test does not exercise the bug: that is a **blocker** finding.
@@ -61,7 +63,7 @@ question and is labelled as one.
    by severity, each with claim, severity, where, evidence, independent or
    entangled, and disposition; then a **Design calls** block for anything that
    needs the maintainer. Post it:
-   `gh pr comment N --body-file $TMPDIR/review-N.md`. Do not use
+   `gh pr comment N --body-file rust/target/agent-scratch/review-N.md`. Do not use
    `gh pr review --approve` or `--request-changes`.
 
 `gh` may fail TLS verification inside the command sandbox
