@@ -46,6 +46,7 @@ fn record(run_id: ContentHash) -> RunRecord {
         artifacts: BTreeMap::new(),
         output_schema: BTreeMap::new(),
         children: BTreeMap::new(),
+        calendar: None,
         inputs: serde_json::Value::Null,
         provenance: Provenance::default(),
     }

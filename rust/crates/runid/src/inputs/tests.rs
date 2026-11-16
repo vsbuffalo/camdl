@@ -112,7 +112,9 @@ fn canonical_encoding_is_pinned() {
         // gh#833: `SimConfig` schema_version 4 -> 5 — the sim leaf's
         // `traj.tsv` gained `t_start`/`t_stop`, so the bytes under an
         // unchanged key changed; the key follows. `run_id(Sim)` moves with it.
-        ("SimConfig", "ebf06850c33af74a9a3584663a69c0cbb8e581f083ddb9992c7e62a70aabf5dd"),
+        // Temporal-architecture Stage 4: `SimConfig` schema_version 5 -> 6 —
+        // the sim leaf's `run.json` gained `calendar`, by the same rule.
+        ("SimConfig", "37e30668fd6fa06b41d4f69c44deffdb410c364420e04eefb03a82cfc24e4131"),
         ("ResolvedParams", "19f9e34254a010d99eb24fc2fba9cac1031bf5bbdac0ebd0d6cc279db5a871dd"),
         // gh#573: `ResolvedScenario` schema_version 1 -> 2 — added `scale`
         // (the fixture now carries one factor, so the encoding of a non-empty
@@ -124,7 +126,7 @@ fn canonical_encoding_is_pinned() {
         // its domain tag. Same fields, same bytes, new tag; `run_id(FitMethod)`
         // moves with it. Nothing else here moves.
         ("MethodConfig", "447711b971bdd6d914f8f0be4c789f1d75f256749d83b98a62bde0f8c7796aeb"),
-        ("run_id(Sim)", "ac925f0a80eb20b21aea05c94654230aafc00ea1f54ed7c72f77383814e94d36"),
+        ("run_id(Sim)", "004c8954e569b0a77ca5f966c1ee03c4ee7e215d18ce182fa808be13e9728f3f"),
         ("run_id(FitMethod)", "759a540bbd3f0fd82d7f736f9d7dba5691f49daf9657b2dfc15e2188c6f7d1f7"),
     ];
     let actual = golden_fixtures();

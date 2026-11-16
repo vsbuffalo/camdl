@@ -2431,6 +2431,7 @@ mod tests {
             artifacts: Default::default(),
             output_schema: Default::default(),
             children: Default::default(),
+            calendar: None,
             inputs: serde_json::Value::Null,
             provenance: runid::Provenance::default(),
         };
