@@ -1642,7 +1642,7 @@ pub(crate) fn observation_columns(
 ) -> (Vec<Observation>, Vec<Option<sim::inference::ObsCell>>, Vec<Vec<(String, f64)>>) {
     let observations = rows.iter()
         .map(|r| Observation {
-            time: r.label(),
+            time: r.label,
             value: match r.cell {
                 Some(sim::inference::ObsCell::Scalar(v)) => v,
                 None => 0.0,
@@ -1776,7 +1776,7 @@ pub(crate) fn resolve_and_load_obs_streams(
         // positive incidence observation at the model origin (zero-width first
         // window → -Inf masquerading as filter degeneracy).
         {
-            let obs_times: Vec<f64> = rows.iter().map(|r| r.label()).collect();
+            let obs_times: Vec<f64> = rows.iter().map(|r| r.label).collect();
             crate::util::check_obs_before_origin(
                 &stream_name,
                 compiled.model.simulation.t_start,
