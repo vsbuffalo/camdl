@@ -161,3 +161,56 @@ fn design_from_draws_each_row_from_the_state_where_it_is_scored() {
             label + 7.0);
     }
 }
+
+/// `fit predict`'s free-forward band draws each row from the state, and with
+/// the time, where the row is scored: its period's stop. The rows themselves,
+/// and the table's time column, are unchanged.
+#[test]
+fn fit_predict_evaluates_each_row_where_it_is_scored() {
+    let tmp = tempdir("predict");
+    let dir = &tmp.0;
+    let (_, i_at) = setup(dir);
+    write_data(dir, &i_at);
+    std::fs::write(dir.join("fit.toml"),
+        "[model]\ncamdl = \"m.ir.json\"\n[data.observations]\ncases = \"cases.tsv\"\n\
+         [estimate]\nsd = { bounds = [0.0001, 0.001], start = 0.0005, \
+         prior = { uniform = { lower = 0.0001, upper = 0.001 } } }\n\
+         [fixed]\nbeta = 0.6\ngamma = 0.2\n\
+         [method]\nalgorithm = \"mh\"\nbackend = \"ode\"\nchains = 2\niterations = 40\nburn_in = 10\n")
+        .unwrap();
+    ok(camdl(dir, &["fit", "run", "fit.toml"]), "fit run");
+    ok(camdl(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward",
+        "--n-draws", "4"]), "fit predict");
+
+    let find = |root: &Path, tail: &str| -> PathBuf {
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() { stack.push(p) } else if p.to_string_lossy().ends_with(tail) { return p }
+            }
+        }
+        panic!("no {tail} under {}", root.display())
+    };
+    let text = std::fs::read_to_string(find(&dir.join("results"), "predictive/cases.tsv")).unwrap();
+    let mut lines = text.lines();
+    let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+    let col = |name: &str| header.iter().position(|c| *c == name).unwrap();
+    let (tc, qc) = (col("time"), col("q50"));
+    let rows: Vec<(f64, f64)> = lines.map(|l| {
+        let f: Vec<&str> = l.split('\t').collect();
+        (f[tc].parse().unwrap(), f[qc].parse().unwrap())
+    }).collect();
+    let times: Vec<f64> = rows.iter().map(|r| r.0).collect();
+    assert_eq!(times, vec![0.0, 7.0, 14.0, 21.0, 28.0, 35.0, 42.0],
+        "the observed rows under their labels, then the weekly forecast");
+    // Every row whose period closes inside the trajectory read above.
+    for (t, q50) in rows.into_iter().filter(|(t, _)| *t + 7.0 <= 42.0) {
+        let stop = t as usize + 7;
+        let expected = mean_at(&i_at, stop);
+        assert!((q50 - expected).abs() < 0.01,
+            "the row labelled {t} measures [{t}, {stop}) and is drawn from the state \
+             and time at its stop: expected I·t = {expected}, got {q50} (at the label \
+             it is {})", mean_at(&i_at, t as usize));
+    }
+}

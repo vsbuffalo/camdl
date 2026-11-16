@@ -1192,22 +1192,35 @@ impl crate::engine::RunSink for PredictiveSink {
                 &cell.traj, obs_ir, model, &self.leaf_coverages[si],
             )?;
             let leaf_aux = &self.leaf_aux[si];
+            // Where each row is scored: its period's stop, or the instant it
+            // reads. The state and the time its likelihood arguments are
+            // evaluated at are read there, as the fit scores it, never at the
+            // row's label (a `starting_on` row labelled 21 is scored at 28).
+            let scored_at: Vec<f64> = self.leaf_coverages[si].iter()
+                .map(|&(t, cov)| match cov {
+                    score::trace::Coverage::Interval { stop, .. } => stop,
+                    score::trace::Coverage::Instant
+                    | score::trace::Coverage::Unrecorded => t,
+                })
+                .collect();
             let mut stream_vals: Vec<f64> = Vec::with_capacity(times.len());
             let mut stream_means: Vec<f64> = Vec::with_capacity(times.len());
-            for (ti, &t) in times.iter().enumerate() {
-                let snap = crate::snap_at(&cell.traj, t);
+            for (ti, &at) in scored_at.iter().enumerate() {
+                let snap = crate::snap_at(&cell.traj, at);
                 // Carry the OBSERVED aux (survey denominator) at this obs time
                 // into the draw; `&[]` when the leaf has no aux (aligned 1:1 with
                 // `times`, so a wrong index is impossible).
                 let aux: &[(String, f64)] = leaf_aux.get(ti).map(|v| v.as_slice()).unwrap_or(&[]);
-                let y = sampler(projected[ti], t, &snap.int_state.counts, aux, &mut obs_rng);
+                let y = sampler(projected[ti], at, &snap.int_state.counts, aux, &mut obs_rng);
                 stream_vals.push(y);
-                stream_means.push(meaner(projected[ti], t, &snap.int_state.counts, aux));
+                stream_means.push(meaner(projected[ti], at, &snap.int_state.counts, aux));
             }
             if want_obs {
                 // Key by the stream's declared `name` — what `observations.<name>`
                 // in the DSL references (v1.1 is unstratified, so name == base).
-                obs_set.streams.insert(obs_ir.name.clone(), (times.clone(), stream_vals.clone()));
+                // Each draw sits where it was evaluated, as `simulate`'s
+                // series for the same quantity does.
+                obs_set.streams.insert(obs_ir.name.clone(), (scored_at, stream_vals.clone()));
             }
             leaf_y[si] = stream_vals;
             leaf_mean[si] = stream_means;
