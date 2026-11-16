@@ -296,7 +296,7 @@ relative to a date. Use `add_calendar_months` / `add_calendar_years` (§2.3) for
 calendar-exact stepping, or an explicit `'days` literal for an affine offset.
 
 An `Instant` moves by a duration, and the difference of two Instants is an
-Exact duration. In anchored mode the compiler refuses five forms on a
+Exact duration. In anchored mode the compiler refuses six forms on a
 **definite** Instant — one built from `date(...)`, `origin`, `add_calendar_*`,
 `instant`-kind parameters and `let`s of those, moved by durations. Each is
 **E360**:
@@ -307,7 +307,10 @@ Exact duration. In anchored mode the compiler refuses five forms on a
 - `Duration − Instant`;
 - an Instant moved by a constant with no unit: `date("2020-03-01") + 5`, or
   `+ 5 * 2`. The offset is judged by its dimension, not its spelling, and would
-  otherwise be read silently in `time_unit`; write `5 'days`.
+  otherwise be read silently in `time_unit`; write `5 'days`;
+- a conditional whose one branch is an Instant and the other a duration:
+  `if c then date(a) else 5 'days`. Put the conditional on the duration
+  instead, `origin + (if c then 5 'days else 7 'days)`.
 
 An expression that is not a definite Instant is not checked. Model time `t` is
 not one, so a rate term such as `k * (t0 - t)` is not refused, and neither is a
@@ -323,6 +326,7 @@ function call other than `date(...)` and `add_calendar_*`, such as
 | `7 'days - date(a)`                   | **E360**                   |
 | `date(a) + 5`, `date(a) + 5 * 2`      | **E360**                   |
 | `sum(i in d, t0[i])` (`t0` an instant)| **E360**                   |
+| `if c then date(a) else 5 'days`      | **E360**                   |
 
 In **unanchored mode** (no `origin`) the refinement is inactive: no calendar
 reference exists, so `5 'months` as an affine span is fine, including in rate
@@ -6801,7 +6805,7 @@ authoritative list is whatever `ocaml/lib/compiler/` and `ocaml/lib/ir/` emit.
 | E357 | Error   | `prevalence(of = …, among = …)`: the numerator reads a compartment cell the denominator does not (§12.1) |
 | E358 | Error   | `prevalence(of = …, among = …)`: the two sides collapse different dimensions (§12.1) |
 | E359 | Error   | `prevalence(of = …, among = …)` reads a flow on one side (§12.1) |
-| E360 | Error   | Arithmetic with no meaning on a definite instant: `Instant + Instant`, a `sum` of instants, `k * Instant`, `Duration − Instant`, `Instant +` a unitless constant (§2.1) |
+| E360 | Error   | Arithmetic with no meaning on a definite instant: `Instant + Instant`, a `sum` of instants, `k * Instant`, `Duration − Instant`, `Instant +` a unitless constant, a conditional choosing between an Instant and a duration (§2.1) |
 | W103 | Warning | Let binding name shadows a stratum value in some dimension                                |
 
 Diagnostics can be emitted as structured JSON by passing `--json-errors` to

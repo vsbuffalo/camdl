@@ -10589,6 +10589,51 @@ let test_e360_one_diagnostic_per_malformed_term () =
     Alcotest.(check bool) "the one names the bare number" true
       (contains_substring ~needle:"bare number" e)
 
+(* gh#1096: `value_at`'s time argument is a time position, so E360 and
+   E321 reach it as they reach an `at [...]` entry. Before the fix the
+   `quantities { }` block was not walked, and each of these compiled. *)
+let value_at_model time =
+  Printf.sprintf {|
+    time_unit = 'days
+    origin = date("2020-01-01")
+    compartments { S, I, R }
+    parameters { beta : rate  gamma : rate }
+    transitions {
+      infection : S --> I @ beta * S * I / (S + I + R)
+      recovery  : I --> R @ gamma * I
+    }
+    init { S = 990  I = 10 }
+    quantities { q = value_at(I, %s) }
+    simulate { from = date("2020-01-01")  to = date("2021-01-01") }
+  |} time
+
+let test_gh1096_value_at_time_is_typed () =
+  let _ = compile_expect_ok (value_at_model {|date("2020-03-01") + 7 'days|}) in
+  expect_error_code ~code:"E360" ~contains:"adds two instants"
+    (value_at_model {|date("2020-03-01") + date("2020-04-01")|});
+  expect_error_code ~code:"E360" ~contains:"scales an instant"
+    (value_at_model {|2 * date("2020-03-01")|});
+  expect_error_code ~code:"E360" ~contains:"bare number"
+    (value_at_model {|date("2020-03-01") + 5|});
+  expect_error_code ~code:"E321" ~contains:"quantity 'q'"
+    (value_at_model {|date("2020-03-01") + 6 'months|})
+
+(* gh#1096: a conditional in a time position must not mix an instant and a
+   duration. Taking the upper bound of the two branches reported an
+   instant and let the form through. Two instants, or two durations, are
+   legal. *)
+let test_gh1096_conditional_mixes_instant_and_duration () =
+  let _ = compile_expect_ok
+    (instant_arith_model
+       {|if 1 > 0 then date("2020-03-01") else date("2020-04-01")|}) in
+  let _ = compile_expect_ok
+    (instant_arith_model {|origin + (if 1 > 0 then 5 'days else 7 'days)|}) in
+  expect_error_code ~code:"E360" ~contains:"an instant and a duration"
+    (instant_arith_model
+       {|if 1 > 0 then date("2020-03-01") else 5 'days|});
+  expect_error_code ~code:"E360" ~contains:"an instant and a duration"
+    (value_at_model {|if 1 > 0 then 5 'days else date("2020-03-01")|})
+
 let test_typed_time_e320_time_unit_months_with_origin_rejected () =
   expect_error_code
     ~code:"E320"
@@ -16372,6 +16417,10 @@ let () =
         `Quick test_e360_sum_of_instants;
       Alcotest.test_case "E360 one diagnostic per malformed term (gh#1070)"
         `Quick test_e360_one_diagnostic_per_malformed_term;
+      Alcotest.test_case "gh#1096 value_at's time argument is time-typed"
+        `Quick test_gh1096_value_at_time_is_typed;
+      Alcotest.test_case "gh#1096 a conditional may not mix instant and duration"
+        `Quick test_gh1096_conditional_mixes_instant_and_duration;
       (* Rule 2 (E320): time_unit = 'months/'years with origin. *)
       Alcotest.test_case "E320 time_unit = 'months with origin rejected"
         `Quick test_typed_time_e320_time_unit_months_with_origin_rejected;

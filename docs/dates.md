@@ -481,11 +481,12 @@ bare number. The asymmetry is tracked in gh#844.
 **An Instant moves by a duration.** `date(b) - date(a)` is an Exact duration and
 `origin + 30 'days` is an Instant. On a definite Instant — one built from
 `date(...)`, `origin`, `add_calendar_*`, `instant`-kind parameters and `let`s of
-those — five forms are **E360**: `date(a) + date(b)`; a `sum(...)` of instants;
-`2 * date(a)` (and `/`, `^`, negation); `7 'days - date(a)`; and an offset with
-no unit, such as `date(a) + 5` or `date(a) + 5 * 2`, which would be read
-silently in `time_unit` (write `5 'days`). Expressions that are not definite
-Instants are not checked: `k * (t0 - t)` with model time `t`, and
+those — six forms are **E360**: `date(a) + date(b)`; a `sum(...)` of instants;
+`2 * date(a)` (and `/`, `^`, negation); `7 'days - date(a)`; an offset with no
+unit, such as `date(a) + 5` or `date(a) + 5 * 2`, which would be read silently
+in `time_unit` (write `5 'days`); and a conditional whose branches are an
+instant and a duration, `if c then date(a) else 5 'days`. Expressions that are
+not definite Instants are not checked: `k * (t0 - t)` with model time `t`, and
 `max(date(a), date(b))`, compile.
 
 `origin` is a compile-time constant, not a runtime value, so it cannot appear

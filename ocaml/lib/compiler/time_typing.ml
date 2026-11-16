@@ -37,8 +37,9 @@
    classify recursively through the binding's body.
 
    E360 (gh#1070) refuses the arithmetic an Instant does not have:
-   Instant + Instant, k · Instant, Duration − Instant, and an Instant
-   moved by a bare number. See `walk_instant_misuse`.
+   Instant + Instant, k · Instant, Duration − Instant, an Instant
+   moved by a bare number, and a conditional whose branches are an
+   Instant and a duration (gh#1096). See `walk_instant_misuse`.
 
    In unanchored mode (no `origin` declared) the rules are vacuous:
    we never emit a diagnostic, because the torsor refinement is
@@ -260,6 +261,7 @@ type instant_misuse =
   | ScaledInstant            (* k · Instant, Instant / k, Instant ^ k, −Instant *)
   | DurationMinusInstant     (* Duration − Instant *)
   | InstantPlusBareNumber    (* Instant ± 5, Instant + 5 * 2, 5 + Instant *)
+  | InstantOrDuration        (* if c then Instant else Duration (gh#1096) *)
 
 (* A numeric literal as spelled, for the W324/W325 warnings, which are
    about how a time position is written. E360 judges by dimension
@@ -306,6 +308,14 @@ let instant_misuse_at env ~unitless (e : expr) : instant_misuse option =
     Some ScaledInstant
   | EUnOp (Neg, a) when definite a -> Some ScaledInstant
   | ESum (_, _, _, body, _) when definite body -> Some SumOfInstants
+  (* `classify` takes the upper bound of a conditional's branches, so an
+     Instant on one side and a duration on the other reports TInstant and
+     passes every rule above (gh#1096). The two branches must be the same
+     kind of time. *)
+  | ECond (_, a, b)
+    when (definite a && is_classified_duration (classify env b))
+         || (definite b && is_classified_duration (classify env a)) ->
+    Some InstantOrDuration
   | _ -> None
 
 let rec walk_instant_misuse env ~unitless ~on_hit (e : expr) : unit =
@@ -320,6 +330,7 @@ let describe_instant_misuse = function
   | ScaledInstant         -> "scales an instant"
   | DurationMinusInstant  -> "subtracts an instant from a duration"
   | InstantPlusBareNumber -> "moves an instant by a bare number"
+  | InstantOrDuration     -> "chooses between an instant and a duration"
 
 let hint_instant_misuse = function
   | InstantPlusInstant | SumOfInstants ->
@@ -337,6 +348,11 @@ let hint_instant_misuse = function
   | InstantPlusBareNumber ->
     "a bare number has no unit, so the offset would silently be read in \
      the model's time_unit. State the unit: date(\"2020-03-01\") + 5 'days."
+  | InstantOrDuration ->
+    "the branches of a conditional must be the same kind of time: both \
+     instants (if c then date(a) else date(b)) or both durations. To move \
+     an instant by a chosen span, put the conditional on the duration: \
+     origin + (if c then 5 'days else 7 'days)."
 
 (* ── Public diagnostic hints ────────────────────────────────────────── *)
 
@@ -484,4 +500,6 @@ let rec show_short (e : expr) : string =
   | EUnOp (Neg, a) -> "-" ^ show_short a
   | EUnOp (_, a)   -> show_short a
   | EFuncCall (n, _) -> n ^ "(…)"
+  | ECond (_, a, b) ->
+    Printf.sprintf "(if … then %s else %s)" (show_short a) (show_short b)
   | _ -> "…"

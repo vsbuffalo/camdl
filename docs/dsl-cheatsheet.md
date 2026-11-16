@@ -168,11 +168,11 @@ mode, `Instant ± Calendar`-duration is **E321** with a hint at `add_calendar_*`
 (calendar-exact) or a `'days` literal (affine offset). An instant moves by a
 duration, and `Instant − Instant` is a duration. On a definite instant (built
 from `date`, `origin`, `add_calendar_*`, `instant` params and their `let`s),
-`Instant + Instant`, a `sum` of instants, `k * Instant`, `Duration − Instant`
-and `Instant +` a unitless constant (`5`, `5 * 2`) are **E360**. Parameter
-references with `[T]` dimension are always Exact — a `'months`-spelled _bound_
-on a `duration`-kind parameter is a length, not a step-from-a-date, and never
-contaminates uses.
+`Instant + Instant`, a `sum` of instants, `k * Instant`, `Duration − Instant`,
+`Instant +` a unitless constant (`5`, `5 * 2`) and a conditional choosing
+between an instant and a duration are **E360**. Parameter references with `[T]`
+dimension are always Exact — a `'months`-spelled _bound_ on a `duration`-kind
+parameter is a length, not a step-from-a-date, and never contaminates uses.
 
 **Calendar arithmetic primitives** (anchored mode, DSL constant positions only):
 
