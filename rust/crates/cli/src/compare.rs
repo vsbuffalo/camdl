@@ -2388,7 +2388,7 @@ fn training_scoring_ends(
         let siblings: Vec<&ir::observation::ObservationModel> = model.observations.iter()
             .filter(|o| o.source == obs.source)
             .collect();
-        let rows = crate::fit::runner::load_observations(path, obs, &siblings, dt, &time_opts)?;
+        let rows = crate::fit::runner::load_observations(path, obs, &siblings, &time_opts)?;
         let labels: Vec<f64> = rows.iter().map(|r| r.label()).collect();
         let last = labels.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         let entry = format!("'{}' (training data runs to t = {last})", obs.source);

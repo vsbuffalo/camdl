@@ -4042,7 +4042,7 @@ fn simulate_on_bound_design(
         format: crate::caltime_load::TimeFormat::Auto,
     };
     let streams = fit::runner::resolve_and_load_obs_streams(
-        &model, &compiled, &effective, dt, &time_opts,
+        &model, &compiled, &effective, &time_opts,
     )?;
     // A dataset meant to be read back is checked for the round trip; projections
     // are never bound back as data, so they use the plans alone.
@@ -4168,7 +4168,7 @@ pub(crate) fn obs_anchors_from_bindings(
             .filter(|o| o.source == obs_model.source)
             .collect();
         let rows = crate::fit::runner::load_observations(
-            data_path, obs_model, &siblings, dt, &time_opts,
+            data_path, obs_model, &siblings, &time_opts,
         )?;
         for r in &rows {
             first = first.min(r.label());

@@ -362,8 +362,9 @@ pub(crate) fn resolve_fit_parameters(
 
 impl FitRunConfig {
     /// Build from a problem. `algorithm` is the method that will run on it,
-    /// for the checks that depend on it — `None` skips them, for callers that
-    /// build a config with no method in hand.
+    /// for the checks that depend on it (a grid-only method refuses a period
+    /// boundary off its grid) — `None` skips them, for callers that build a
+    /// config with no method in hand.
     ///
     /// `cooling_target_iters` is IF2-specific — for non-IF2 methods
     /// (PGAS / PMMH / PFilter), passing `n_iterations` matches the
@@ -453,7 +454,15 @@ impl FitRunConfig {
         // and profile also route through (multi-cadence: each stream keeps its
         // OWN times + cells; `bind` merges to the union below).
         let mut streams =
-            resolve_and_load_obs_streams(&model, &compiled, effective, dt, &time_opts)?;
+            resolve_and_load_obs_streams(&model, &compiled, effective, &time_opts)?;
+
+        // Once the method is known: a method that steps only on its grid
+        // refuses a period boundary off it, rather than scoring the row on a
+        // different period (D43). Every row is checked, held-out ones too.
+        if let Some(algorithm) = algorithm {
+            refuse_periods_off_the_grid(
+                algorithm.method_kind(), &streams, compiled.model.simulation.t_start, dt)?;
+        }
 
         // gh#585 / Stage 3.1: the declared holdout, applied. Training
         // truncation happens at the callsite — here, and in `profile --fit`
@@ -465,7 +474,6 @@ impl FitRunConfig {
             bindings.holdout_by_source(),
             &model,
             compiled.model.simulation.t_start,
-            dt,
             &time_opts,
         )?;
 
@@ -1572,16 +1580,17 @@ fn simplex_member_default_step(transform: &Transform) -> f64 {
     }
 }
 
-/// Load one leaf's observation rows from TSV, validating time alignment with
-/// dt.
+/// Load one leaf's observation rows from TSV.
 ///
 /// The rows are [`observed_rows`]'s: each with what it measures, its value (a
 /// hole, `None`, for the missing-value token `NA`, whose time stays in the
 /// grid so the incidence accumulator still resets at its index) and its
 /// auxiliary values. The run-dependent filtering is applied here: a hole whose
-/// period opens before the run is dropped, and every remaining label must lie
-/// on the `dt` grid. [`observation_columns`] gives the dense placeholder view
-/// the diagnostics and time-axis callers read, and
+/// period opens before the run is dropped. Nothing here judges a row against
+/// the integration step: whether a method can place a period's boundaries off
+/// its grid is the method's to say, once it is known
+/// ([`refuse_periods_off_the_grid`]). [`observation_columns`] gives the dense
+/// placeholder view the diagnostics and time-axis callers read, and
 /// [`crate::pfilter::stream_times_of_rows`] the stream's periods.
 ///
 /// [`observed_rows`]: super::observed_rows::observed_rows
@@ -1589,7 +1598,6 @@ pub(crate) fn load_observations(
     path: &str,
     obs_model: &ir::observation::ObservationModel,
     siblings: &[&ir::observation::ObservationModel],
-    dt: f64,
     opts: &crate::caltime_load::TimeOpts,
 ) -> Result<Vec<super::observed_rows::ObservedRow>, String> {
     let mut rows = super::observed_rows::observed_rows(path, obs_model, siblings, opts)?;
@@ -1605,21 +1613,6 @@ pub(crate) fn load_observations(
     if let (Some(covers), true) = (&obs_model.covers, opts.t_start.is_finite()) {
         if !matches!(covers, ir::observation::Covers::WindowColumns) {
             rows.retain(|r| !(r.cell.is_none() && r.measures.start() < opts.t_start - 1e-9));
-        }
-    }
-    // Validate time alignment (holes keep their time, so this is unaffected by
-    // missing values).
-    for row in &rows {
-        let time = row.label();
-        let remainder = time % dt;
-        let aligned = remainder.abs() < 1e-9 || (dt - remainder.abs()).abs() < 1e-9;
-        if !aligned {
-            return Err(format!(
-                "observation at t={} is not a multiple of dt={}.\n\
-                 The chain-binomial state only exists at step boundaries.\n\
-                 Adjust observation times or dt to align.",
-                time, dt
-            ));
         }
     }
     Ok(rows)
@@ -1734,7 +1727,6 @@ pub(crate) fn resolve_and_load_obs_streams(
     model: &ir::Model,
     compiled: &CompiledModel,
     effective: &indexmap::IndexMap<String, String>,
-    dt: f64,
     time_opts: &crate::caltime_load::TimeOpts,
 ) -> Result<Vec<ObsStream>, String> {
     let mut obs_blocks: Vec<&ir::observation::ObservationModel> =
@@ -1759,7 +1751,7 @@ pub(crate) fn resolve_and_load_obs_streams(
         let siblings: Vec<&ir::observation::ObservationModel> = model.observations.iter()
             .filter(|o| o.source == obs_model.source)
             .collect();
-        let rows = load_observations(data_path, obs_model, &siblings, dt, time_opts)?;
+        let rows = load_observations(data_path, obs_model, &siblings, time_opts)?;
         let obs_model: ir::observation::ObservationModel = (*obs_model).clone();
         let projection = sim::inference::multi_stream_obs::StreamProjection::from_ir(
             &obs_model.projection, compiled, &stream_name,
@@ -1804,6 +1796,55 @@ pub(crate) fn resolve_and_load_obs_streams(
         });
     }
     Ok(streams)
+}
+
+/// Refuse a run whose method steps only on the grid `t_start + k·dt`
+/// ([`PeriodBoundaries::OnGrid`], PGAS) when any row's period starts or ends
+/// off that grid, or any instant read lies off it — holes included, since a
+/// hole's period still resets its stream's running total. The first such row
+/// is named with the two grid times either side of its boundary. A method
+/// that steps exactly to any boundary is not checked: its schedule lands on
+/// every one (`docs/dev/temporal-architecture.md` §4.5, D43).
+///
+/// [`PeriodBoundaries::OnGrid`]: crate::fit::methods::PeriodBoundaries::OnGrid
+pub(crate) fn refuse_periods_off_the_grid(
+    algorithm: crate::run_meta::FitAlgorithm,
+    streams: &[ObsStream],
+    t_start: f64,
+    dt: f64,
+) -> Result<(), String> {
+    use crate::fit::methods::{off_grid_neighbours, period_boundaries, PeriodBoundaries};
+    if period_boundaries(algorithm) != PeriodBoundaries::OnGrid {
+        return Ok(());
+    }
+    for s in streams {
+        for (i, label) in s.data.iter().map(|o| o.time).enumerate() {
+            let (what, boundaries) = match &s.times {
+                sim::inference::StreamTimes::Intervals(ps) => {
+                    let p = ps[i];
+                    (format!("covers [{}, {})", p.start(), p.stop()),
+                     vec![("start", p.start()), ("end", p.stop())])
+                }
+                sim::inference::StreamTimes::Instants(ts) =>
+                    (format!("is read at {}", ts[i]), vec![("time", ts[i])]),
+            };
+            for (name, t) in boundaries {
+                if let Some((below, above)) = off_grid_neighbours(t, t_start, dt) {
+                    return Err(format!(
+                        "{algorithm} steps only on its grid t_start + k·dt (t_start = {t_start}, \
+                         dt = {dt}), and stream `{stream}` row {row} (time = {label}) {what}: \
+                         its {name}, {t}, lies between grid times {below} and {above}, so it \
+                         would score the row on a different period.\n  \
+                         Choose a dt for which every period's start and end is t_start plus a \
+                         whole number of steps, or fit with if2 or pmmh, which step exactly to \
+                         any period boundary.",
+                        stream = s.name, row = i + 1,
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Map loaded [`ObsStream`]s to the [`StreamSpec`]s that
@@ -1869,7 +1910,6 @@ pub(crate) fn apply_holdout_declaration(
     holdout_files: &indexmap::IndexMap<String, String>,
     model: &ir::Model,
     t_start: f64,
-    dt: f64,
     time_opts: &crate::caltime_load::TimeOpts,
 ) -> Result<Option<TrainingWindow>, String> {
     if let Some(spec) = holdout_after {
@@ -1891,7 +1931,7 @@ pub(crate) fn apply_holdout_declaration(
             last_train: s.data.iter().map(|o| o.time).fold(f64::NEG_INFINITY, f64::max),
         })
         .collect();
-    check_holdout_files(&training, holdout_files, model, t_start, dt, time_opts)
+    check_holdout_files(&training, holdout_files, model, t_start, time_opts)
 }
 
 /// One bound training stream, as [`check_holdout_files`] reads it: its
@@ -1914,7 +1954,6 @@ pub(crate) fn check_holdout_files(
     holdout_files: &indexmap::IndexMap<String, String>,
     model: &ir::Model,
     t_start: f64,
-    dt: f64,
     time_opts: &crate::caltime_load::TimeOpts,
 ) -> Result<Option<TrainingWindow>, String> {
     if !holdout_files.is_empty() {
@@ -1939,7 +1978,7 @@ pub(crate) fn check_holdout_files(
                 model.observations.iter()
                     .filter(|o| o.source == *source)
                     .collect();
-            let hold_rows = load_observations(path, s.obs, &siblings, dt, time_opts)?;
+            let hold_rows = load_observations(path, s.obs, &siblings, time_opts)?;
             let first_hold = hold_rows.iter()
                 .map(|r| r.label()).fold(f64::INFINITY, f64::min);
             if first_hold <= train_end + TIME_TIE_EPS {
