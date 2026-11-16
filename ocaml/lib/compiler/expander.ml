@@ -3013,7 +3013,10 @@ let detect_round_trip ~primitive_name ~outer_n ~inner =
     - `date_range(start, count = N, calendar_months = N)` — calendar count
     - same with `calendar_years` instead of `calendar_months`.
 
-    `inclusive_end : Bool = true` defaults to true.
+    `inclusive_end : Bool = true` applies to the start–end forms. With
+    `true`, an `end` on the cadence is the last entry and an `end` off
+    it raises W328; with `false`, the range stops at the last boundary
+    strictly before `end` (so `end = start` gives no entries).
 
     Errors and warnings are emitted on [ctx.diags] and the partial
     list is returned (compilation continues to collect more diags).
@@ -3289,8 +3292,11 @@ let expand_date_range_to_consts ctx (args : (string * expr) list) : expr list =
                  entries := !cur :: !entries
                done;
                if !cur_dn <> end_dn then aligned := false;
-               (* inclusive_end semantics: end is appended ONLY when
-                  it equals a boundary; otherwise W328 fires. *)
+               (* Every entry is ≤ end. With `inclusive_end = true` an
+                  end on a boundary is kept and an end off one raises
+                  W328; with `false` the range stops strictly before
+                  end, so an on-boundary end — the head of the
+                  reversed list — is dropped (gh#1100). *)
                if (not !aligned) && inclusive_end then begin
                  warn "W328"
                    (Printf.sprintf
@@ -3305,7 +3311,10 @@ let expand_date_range_to_consts ctx (args : (string * expr) list) : expr list =
                           truncation explicit"
                    ()
                end;
-               List.rev !entries
+               if !aligned && not inclusive_end then
+                 List.rev (List.tl !entries)
+               else
+                 List.rev !entries
              | None, None -> [s_ymd])
       end
       else begin
@@ -3372,7 +3381,8 @@ let expand_date_range_to_consts ctx (args : (string * expr) list) : expr list =
                  end else
                    stop := true
                done;
-               if cmp_ymd !cur e_ymd <> 0 && inclusive_end then
+               let aligned = cmp_ymd !cur e_ymd = 0 in
+               if (not aligned) && inclusive_end then
                  warn "W328"
                    (Printf.sprintf
                      "date_range: `end = %s` does not land on a cadence \
@@ -3385,7 +3395,12 @@ let expand_date_range_to_consts ctx (args : (string * expr) list) : expr list =
                           `inclusive_end = false` to make the \
                           truncation explicit"
                    ();
-               List.rev !entries
+               (* As in the fixed-day form: `inclusive_end = false`
+                  drops an end that lands on the cadence (gh#1100). *)
+               if aligned && not inclusive_end then
+                 List.rev (List.tl !entries)
+               else
+                 List.rev !entries
              | None, None -> [s_ymd])
       end
     in
