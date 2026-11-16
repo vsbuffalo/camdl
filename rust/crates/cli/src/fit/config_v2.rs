@@ -250,13 +250,6 @@ pub struct ModelRef {
 pub struct FitBackendConfig {
     #[serde(default = "default_dt")]
     pub dt: f64,
-    /// How observation times relate to the `dt` grid. `None` = "exact where the
-    /// algorithm supports it" (today's behaviour). Gated per algorithm by
-    /// `crate::fit::methods::resolve_obs_alignment`. See the unified-timeline
-    /// proposal (Algorithm 2). `skip_serializing_if None` keeps it OUT of the fit
-    /// identity hash when unset, so existing fits' `run_id`s are unchanged.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub obs_alignment: Option<crate::fit::methods::ObsAlignment>,
     /// gh#audit-C6 / S1. Treat a numerical collapse in a rate expression
     /// (div-by-zero, `Pow`→NaN/Inf, `Sqrt` of a negative, any unary→NaN) as
     /// `0.0` instead of a hard error. Genuinely semantic — it changes the
@@ -289,7 +282,6 @@ impl Default for FitBackendConfig {
     fn default() -> Self {
         FitBackendConfig {
             dt: default_dt(),
-            obs_alignment: None,
             allow_degenerate_rates: false,
             allow_forcing_extrapolation: false,
         }
@@ -2328,6 +2320,29 @@ fn detect_removed_estimate_transform(contents: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Refuse the removed `[config] obs_alignment` key (D43,
+/// `docs/dev/temporal-architecture.md` §4.5) before the strict parse, so the
+/// user is told the setting is gone and why, rather than a bare serde
+/// "unknown field". Where a period's boundaries may lie relative to the step
+/// grid is a capability of the method, not a choice.
+fn detect_removed_obs_alignment(contents: &str) -> Result<(), String> {
+    let value: toml::Value = match toml::from_str(contents) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+    if value.get("config").and_then(|c| c.get("obs_alignment")).is_some() {
+        return Err(
+            "[config] `obs_alignment` was removed: how an observed period relates to the \
+             step grid is not a setting. if2, pfilter and pmmh step exactly to every \
+             period's start and end; pgas steps only on its grid t_start + k·dt and \
+             refuses a period whose start or end lies off it. Delete the line. See \
+             `camdl docs fit-toml`."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 /// The `[stages]` rejection (proposal 2026-09-08-workflow-first-fit-config,
 /// §5). A file that still carries the method map is refused at load with the
 /// rewrite spelled out: the last-declared method becomes the file's `[method]`,
@@ -2695,6 +2710,7 @@ impl FitConfig {
         detect_relocated_config_backend(contents)?;
         detect_removed_condition_from(contents)?;
         detect_removed_estimate_transform(contents)?;
+        detect_removed_obs_alignment(contents)?;
         detect_nuts_algorithm(contents)?;
         let wire: FitConfigWire = toml::from_str(contents)
             .map_err(|e| format!("parse error: {}", e))?;
@@ -4754,6 +4770,24 @@ cooling = 0.7
             refuse_inert_method_keys_in(&src, &cfg.inference.method.unwrap())
                 .unwrap_or_else(|e| panic!("`{extra}` is a live setting: {e}"));
         }
+    }
+
+    #[test]
+    fn an_obs_alignment_key_in_config_says_it_was_removed() {
+        let base = "[model]\ncamdl = \"models/sir.camdl\"\n\
+                    [data.observations]\nweekly_cases = \"data/cases.tsv\"\n\
+                    [estimate]\nbeta = { bounds = [0.01, 2.0] }\n[fixed]\nN0 = 1000000\n\
+                    [method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
+                    chains = 8\nparticles = 1000\niterations = 80\ncooling = 0.70\n";
+        for value in ["exact", "snap"] {
+            let stale = format!("{base}[config]\ndt = 1.0\nobs_alignment = \"{value}\"\n");
+            let err = FitConfig::from_toml_str(&stale).expect_err("`obs_alignment` is not a key");
+            assert!(err.contains("`obs_alignment` was removed") && err.contains("Delete the line"),
+                "must say the key was removed and to delete the line; got: {err}");
+        }
+        let without = format!("{base}[config]\ndt = 1.0\n");
+        assert!(FitConfig::from_toml_str(&without).is_ok(),
+            "the same file without the key must parse: {:?}", FitConfig::from_toml_str(&without).err());
     }
 
     #[test]

@@ -64,7 +64,6 @@ fn golden_fixtures() -> Vec<(&'static str, ContentHash)> {
         obs_block: String::new(),
         flow_indices: vec![],
         target_length: 50,
-        obs_alignment: ResolvedObsAlignment::Snap,
     };
     let sim_levels = vec![
         model.content_hash(),
@@ -77,7 +76,6 @@ fn golden_fixtures() -> Vec<(&'static str, ContentHash)> {
     vec![
         ("Backend::ChainBinomial", Backend::ChainBinomial.content_hash()),
         ("CalendarMode::Numeric", CalendarMode::Numeric.content_hash()),
-        ("ResolvedObsAlignment::Snap", ResolvedObsAlignment::Snap.content_hash()),
         ("Seed", seed.content_hash()),
         ("ModelDigest", model.content_hash()),
         ("SimConfig", config.content_hash()),
@@ -103,31 +101,35 @@ fn canonical_encoding_is_pinned() {
     // reason. With the version held at 2 and the gh#1046 change applied, every
     // pin here was unchanged (checked when the bump was made): the change is
     // to how a model is hashed, and no fixture here holds a model.
+    //
+    // HASH_VERSION 3 -> 4 (D43): `MethodConfig` lost its resolved
+    // `obs_alignment` field. With the version held at 3 and the field removed,
+    // only `MethodConfig` and `run_id(FitMethod)` moved (checked when the bump
+    // was made); with the bump, every pin moved once more.
     let expected: &[(&str, &str)] = &[
-        ("Backend::ChainBinomial", "4943ea94898fc001104e4b2f968861e8068fbda8f76ffee7ea51f6c48173c33d"),
-        ("CalendarMode::Numeric", "e0f8ae12dd9cd4e72340532a29aa3c1d795877d64971f4a5b190932edc10523a"),
-        ("ResolvedObsAlignment::Snap", "cad3b6ea8ef9fb012a0e78b049c6617f24315e5c25bb4b94514b3d9dc942e7ce"),
-        ("Seed", "47f60c5e88753bc6aae1d3a47495e6a163fb0a2934dd3039af4c0f520cb7a571"),
-        ("ModelDigest", "bbf529ac5237a416e4012e33987032a5f2720fe5ef87bcbedf41df2d8de2d095"),
+        ("Backend::ChainBinomial", "7f38dc070da7620b801c7ff73a90d569dc5449cdebcaa69d82c59ef59f2a212e"),
+        ("CalendarMode::Numeric", "187e86436d452bc42edec1a3aa4f8695a0463be91ad5e03673a2c5b7ced1aff8"),
+        ("Seed", "7a72919ddcd444a60d10dcbe9a5e4aa33828c2aeca6819455c9ff70bd3122bd3"),
+        ("ModelDigest", "0599581b3f4a51455f9d638bc26aa9d60ef753675c6311cf22573e73a6bcee9a"),
         // gh#833: `SimConfig` schema_version 4 -> 5 — the sim leaf's
         // `traj.tsv` gained `t_start`/`t_stop`, so the bytes under an
         // unchanged key changed; the key follows. `run_id(Sim)` moves with it.
         // Temporal-architecture Stage 4: `SimConfig` schema_version 5 -> 6 —
         // the sim leaf's `run.json` gained `calendar`, by the same rule.
-        ("SimConfig", "37e30668fd6fa06b41d4f69c44deffdb410c364420e04eefb03a82cfc24e4131"),
-        ("ResolvedParams", "19f9e34254a010d99eb24fc2fba9cac1031bf5bbdac0ebd0d6cc279db5a871dd"),
+        ("SimConfig", "6997980acb61ea81388f3de73c539dcbff2d4f849b29f8437ac0f33efabd7926"),
+        ("ResolvedParams", "daf5e1e3450903fcb82d16b246cba7badae0c30a958bc11e84cad329367bcd82"),
         // gh#573: `ResolvedScenario` schema_version 1 -> 2 — added `scale`
         // (the fixture now carries one factor, so the encoding of a non-empty
         // scale is pinned too). `run_id(Sim)` moves with it.
-        ("ResolvedScenario", "d34448c790890f894a4efa234aa8364d757652eacf8dca2f2946998ef697ca0d"),
-        ("FitDigest", "ccd46101fe79988d365b58da851fb1dfb9f7a13983e3458c59632374c2f66f74"),
+        ("ResolvedScenario", "f7a4240bb413856fb314aadb79d7c0650b4c0b8f6502dcfd3a37a5ec888b3750"),
+        ("FitDigest", "673ee48a6c00cfccc9a050675f8b73907e79d323959565f6cae1e93ba129c023"),
         // The `[stages]` -> `[method]` rename: the type is `MethodConfig`, not
         // `StageConfig`, and the derive hashes the fully-qualified type name as
         // its domain tag. Same fields, same bytes, new tag; `run_id(FitMethod)`
         // moves with it. Nothing else here moves.
-        ("MethodConfig", "447711b971bdd6d914f8f0be4c789f1d75f256749d83b98a62bde0f8c7796aeb"),
-        ("run_id(Sim)", "004c8954e569b0a77ca5f966c1ee03c4ee7e215d18ce182fa808be13e9728f3f"),
-        ("run_id(FitMethod)", "759a540bbd3f0fd82d7f736f9d7dba5691f49daf9657b2dfc15e2188c6f7d1f7"),
+        ("MethodConfig", "e2edc6ed1b519bffe43aafa7ece970b189b18966f8a434c1e642b0c606b6f3e3"),
+        ("run_id(Sim)", "cd945e30badd19f4ac8a993dca7bf3d91b6a591b990ef98159c79ea4bf33197f"),
+        ("run_id(FitMethod)", "7cff96ec54e7cf4c9bf7f4a80a799664ca75dbf572c5f9d3521802ce5d32373e"),
     ];
     let actual = golden_fixtures();
     assert_eq!(actual.len(), expected.len(), "fixture/expected count drift");
@@ -242,29 +244,6 @@ fn fit_digest_holdout_content_is_keyed() {
     );
 
     // No spurious sensitivity: identical holdout content → identical hash.
-    assert_eq!(base.content_hash(), base.clone().content_hash());
-}
-
-#[test]
-fn method_config_obs_alignment_is_keyed() {
-    // gh#189: the resolved obs alignment (snap vs exact) drives the posterior,
-    // so two otherwise-identical method configs differing only in it must get
-    // distinct method hashes — exact and snap cannot collide in the CAS store.
-    let base = MethodConfig {
-        config: ContentHash::from_bytes([7; 32]),
-        obs_block: String::new(),
-        flow_indices: vec![],
-        target_length: 50,
-        obs_alignment: ResolvedObsAlignment::Snap,
-    };
-    let mut flipped = base.clone();
-    flipped.obs_alignment = ResolvedObsAlignment::Exact;
-    assert_ne!(
-        base.content_hash(),
-        flipped.content_hash(),
-        "the resolved obs_alignment must be folded into the method identity (gh#189) — \
-         a snap fit and an exact fit at the same config must not collide"
-    );
     assert_eq!(base.content_hash(), base.clone().content_hash());
 }
 
