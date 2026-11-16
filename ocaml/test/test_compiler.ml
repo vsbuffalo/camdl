@@ -10759,6 +10759,45 @@ let test_gh1088_exact_output_cadence_ok () =
   let _ = compile_expect_ok (output_every_src ~origin:"" "1 'months") in
   ()
 
+(* gh#1120: an `every … at_day …` offset is a fixed span from the start of
+   each period, folded to one number. Under an origin `at_day 1 'months`
+   would otherwise compile to 30.436875 days (longer than a 30-day period)
+   with no diagnostic. It is a recurring-schedule field like `every`/`from`/
+   `to`, so it is E322. *)
+let at_day_src ?(origin = {|origin = date("2020-01-01")|}) ?(lets = "") day =
+  Printf.sprintf {|
+    time_unit = 'days
+    %s
+    %s
+    compartments { S, I, R }
+    parameters { beta : rate  gamma : rate  N0 : count  I0 : count }
+    let N = S + I + R
+    transitions {
+      infection : S --> I @ beta * S * I / N
+      recovery  : I --> R @ gamma * I
+    }
+    interventions {
+      boost : add(I, 5) every 30 'days at_day %s
+    }
+    init { S = N0 - I0  I = I0 }
+    simulate { from = 0 'days  to = 365 'days }
+  |} origin lets day
+
+let test_gh1120_calendar_at_day_rejected () =
+  List.iter (fun day ->
+    expect_error_code ~code:"E322" ~contains:"at_day" (at_day_src day))
+    [ "1 'months"; "1 'years" ];
+  (* The laundered form is caught too: `classify` follows `let`. *)
+  expect_error_code ~code:"E322" ~contains:"at_day"
+    (at_day_src ~lets:"let d = 1 'months" "d")
+
+let test_gh1120_exact_at_day_ok () =
+  (* A fixed offset under an origin still compiles, and without an origin
+     a calendar offset is fine (Rule 7 is vacuous unanchored). *)
+  let _ = compile_expect_ok (at_day_src "5 'days") in
+  let _ = compile_expect_ok (at_day_src ~origin:"" "1 'months") in
+  ()
+
 (* gh#1069: a `covers` width is a fixed span, so a calendar width
    (`'months`/`'years`) under an origin would attribute every row the same
    30.436875 (or 365.2425) days whatever month it falls in. Each form is
@@ -16717,6 +16756,10 @@ let () =
         `Quick test_gh1088_calendar_output_cadence_rejected;
       Alcotest.test_case "gh#1088 fixed output cadence, or unanchored, still compiles"
         `Quick test_gh1088_exact_output_cadence_ok;
+      Alcotest.test_case "gh#1120 E322 calendar at_day under origin rejected"
+        `Quick test_gh1120_calendar_at_day_rejected;
+      Alcotest.test_case "gh#1120 fixed at_day, or unanchored, still compiles"
+        `Quick test_gh1120_exact_at_day_ok;
       Alcotest.test_case "gh#1069 E321 calendar width in any covers form rejected"
         `Quick test_gh1069_calendar_covers_width_rejected;
       Alcotest.test_case "gh#1069 fixed covers width, or unanchored, still compiles"

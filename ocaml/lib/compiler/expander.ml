@@ -11952,7 +11952,8 @@ let check_surface_time_typing ctx =
 
   (* Helper: classify a duration-typed expression and fire E322 if
      it ends up Calendar (used for Rule 7: every/from/until). *)
-  let check_recurring_cadence ~loc ~field e =
+  let check_recurring_cadence
+      ?(hint = Time_typing.hint_calendar_cadence_in_recurring) ~loc ~field e =
     if anchored then begin
       match Time_typing.classify env e with
       | Time_typing.TCalendar ->
@@ -11962,7 +11963,7 @@ let check_surface_time_typing ctx =
           ~message:(Printf.sprintf
             "calendar duration `%s` in recurring schedule `%s = ...`"
             (Time_typing.show_short e) field)
-          ~hint:Time_typing.hint_calendar_cadence_in_recurring
+          ~hint
           ()
       | _ -> ()
     end
@@ -12095,7 +12096,12 @@ let check_surface_time_typing ctx =
        | SEveryAtDay (period, day) ->
          walk_expr_rule1 ~loc ~context:(label ^ ".every") period;
          walk_expr_rule1 ~loc ~context:(label ^ ".at_day") day;
-         check_recurring_cadence ~loc ~field:"every" period)
+         check_recurring_cadence ~loc ~field:"every" period;
+         (* gh#1120: `at_day` is folded to one offset from the start of
+            each period, so a calendar duration would become the average
+            month or year. *)
+         check_recurring_cadence ~loc ~field:"at_day"
+           ~hint:Time_typing.hint_calendar_offset_in_at_day day)
     ) ivs
   in
   check_iv_list ctx.interv_decls ~label:"intervention";
