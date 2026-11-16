@@ -101,7 +101,7 @@ Three schedule types (`ir::observation::ObservationSchedule`):
 | Per-family likelihood/sampling   | `rust/crates/sim/src/inference/obs_model.rs`                                                      |
 | Log-pmf/pdf numerics             | `rust/crates/sim/src/inference/obs_loglik.rs`                                                     |
 | Projection evaluation            | `rust/crates/sim/src/inference/multi_stream_obs.rs` (`StreamProjection::eval`)                    |
-| Data-TSV loader (inference)      | `rust/crates/cli/src/pfilter.rs` (`load_data_tsv`, `load_data_tsv_column`)                        |
+| Data-TSV loader (inference)      | `rust/crates/cli/src/fit/observed_rows.rs` (`observed_rows`)                                      |
 | Synthetic-obs emitter (simulate) | `rust/crates/cli/src/main.rs` (the `--obs` / `--obs-dir` / `--obs-only` branch in `run_simulate`) |
 
 ## 4. Flow through the system
@@ -137,7 +137,7 @@ calls the per-stream `sample(...)` method seeded from
 process RNG, and writes the resulting value to TSV.
 
 For **pfilter / fit** (including IF2 methods): observed data is loaded from
-`--data FILE.tsv` via `load_data_tsv_column`; the filter calls
+`--data FILE.tsv` via `observed_rows`; the filter calls
 `MultiStreamObsModel::log_likelihood(state, obs_idx, params)` at each
 observation time to score particles.
 
