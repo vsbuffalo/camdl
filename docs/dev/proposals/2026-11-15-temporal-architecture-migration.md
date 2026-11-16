@@ -364,6 +364,19 @@ Each item is one GitHub issue, one branch and one commit.
     observation is more than one of its own periods before `last_obs`.
   - Fit identity: fold the partition rule version and the per-stream training
     row digests into `FitDigest`.
+- **Carried from the Stage 1 review (#1103).**
+  - Move `survey`'s row reading (`load_observations_from_tsv`,
+    `load_aux_from_tsv` in `cli/src/survey.rs`) onto `observed_rows` first,
+    refusing `NA` cells there to keep survey's no-holes rule, so every partition
+    is built from the same rows.
+  - The row digest hashes a numeric time cell by value (`TemporalCell::Number`
+    stores the parsed number, so `7`, `7.0` and `07` hash alike), which is what
+    the score-artifact proposal's row digest specifies; a date cell is hashed as
+    written.
+  - Stage 1 keeps the row's label private behind `label()` for the sites Stages
+    2 and 3 rewrite (the holdout cut and anchors in Stage 2; the `dt` alignment
+    check in Stage 3). Stage 2 removes the label's uses it owns; the label field
+    itself goes when Stage 3 lands.
 - **Rules pinned for the implementer.**
   - Under `[data.holdout]`, a holdout row that does not end after the training
     extent is refused at fit time, as today (`check_holdout_files`); scoring
@@ -476,6 +489,15 @@ Each item is one GitHub issue, one branch and one commit.
     behaviour, including the doc comment naming the removed
     `check_holes_output_compat` (`multi_stream_obs.rs`);
   - any `#[allow(dead_code)]` added during Phase A.
+  - from Stage 1: the two `#[cfg(test)]` adapters that keep the old shapes of
+    `load_data_tsv_column_cells` and `load_long_form_stream` (port their tests
+    to `observed_rows`; clippy does not flag test-only callers), the private
+    label behind `label()` and its remaining readers (`check_obs_before_origin`,
+    the `Observation.time` built by `observation_columns`), and the
+    `expect(dead_code)` attributes on `ObservedRow.position` and `temporal` once
+    Stage 2 reads them;
+  - from Stage 4: `stream_cells_were_dated`, which re-reads a time column that
+    `ObservedRow.temporal` already records.
 - **How to find them.** For each symbol the spec names as superseded, search the
   tree (`rg`) and confirm zero hits outside history; run `cargo clippy` for the
   workspace with dead-code warnings visible; search `docs/` and `.claude/` for
