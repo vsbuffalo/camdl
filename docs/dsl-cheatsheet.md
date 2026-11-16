@@ -323,7 +323,7 @@ The compiler issues E-codes with source locations and fix-hints.
 | E360 | time     | instant arithmetic with no meaning: `date(a) + date(b)`, `2 * date(a)`, `7 'days - date(a)`, `date(a) + 5`       |
 | E327 | time     | `add_calendar_*` / `origin` / calendar-cadence `date_range` in unanchored model                                  |
 | E328 | time     | argument-shape error in `add_calendar_*` / `date_range`                                                          |
-| E329 | time     | zero/negative cadence or `count < 1` in `date_range`                                                             |
+| E329 | time     | zero/negative cadence, `count < 1`, or `end` before `start` in `date_range`                                      |
 | W301 | forcing  | periodic range not aligned to step size                                                                          |
 | W324 | time     | bare-numeric `simulate.from/to/dt` in anchored mode                                                              |
 | W325 | time     | bare-numeric `at [k, ...]` schedule in anchored mode                                                             |

@@ -3209,9 +3209,25 @@ let expand_date_range_to_consts ctx (args : (string * expr) list) : expr list =
   in
   let leq_ymd a b = cmp_ymd a b <= 0 in
   let _ = leq_ymd in
+  (* gh#1118: an `end` before `start` is refused here, once, for every
+     cadence. Both start–end loops below seed their list with `start`
+     unconditionally, so a reversed pair would otherwise compile to a
+     single entry lying after `end`. `end = start` is not reversed. *)
+  let reversed = match start_ymd, end_ymd with
+    | Some s, Some e -> cmp_ymd e s < 0
+    | _ -> false
+  in
   (* Now branch on cadence flavor. *)
   match start_ymd with
   | None -> []
+  | Some s_ymd when reversed ->
+    err "E329"
+      (Printf.sprintf
+         "date_range: `end = %s` is before `start = %s`"
+         (format_iso_date (Option.get end_ymd)) (format_iso_date s_ymd))
+      ~hint:"swap the two dates, or use `count = N` to step forward \
+             from `start`" ();
+    []
   | Some s_ymd ->
     let entries_ymd =
       if Option.is_some every_kw then begin

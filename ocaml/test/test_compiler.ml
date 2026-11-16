@@ -11408,6 +11408,43 @@ let test_phase2_date_range_count_zero_errors () =
     (anchored_at_src
        ~at_expr:"date_range(date(\"2020-01-01\"), count = 0, every = 7 'days)")
 
+(* gh#1118: an `end` before `start` is refused. Before the fix both
+   start–end loops seeded the list with `start` unconditionally, so a
+   reversed pair compiled to a single entry lying after `end`. *)
+let test_gh1118_date_range_end_before_start_affine () =
+  expect_error_code
+    ~code:"E329"
+    ~contains:"is before `start = "
+    (anchored_at_src
+       ~at_expr:"date_range(date(\"2020-02-01\"), date(\"2020-01-29\"), \
+                 every = 7 'days)")
+
+let test_gh1118_date_range_end_before_start_affine_exclusive () =
+  expect_error_code
+    ~code:"E329"
+    ~contains:"is before `start = "
+    (anchored_at_src
+       ~at_expr:"date_range(date(\"2020-02-01\"), date(\"2020-01-29\"), \
+                 every = 7 'days, inclusive_end = false)")
+
+let test_gh1118_date_range_end_before_start_calendar () =
+  expect_error_code
+    ~code:"E329"
+    ~contains:"is before `start = "
+    (anchored_at_src
+       ~at_expr:"date_range(date(\"2020-06-01\"), date(\"2020-05-01\"), \
+                 calendar_months = 1, inclusive_end = false)")
+
+let test_gh1118_date_range_end_equals_start_ok () =
+  (* The boundary: `end = start` is not reversed and still yields the
+     single entry `start` under the default `inclusive_end = true`. *)
+  Alcotest.(check (list (float 1e-9))) "end = start gives [start]"
+    [31.0]
+    (at_times_of_first_intervention
+       (anchored_at_src
+          ~at_expr:"date_range(date(\"2020-02-01\"), date(\"2020-02-01\"), \
+                    every = 7 'days)"))
+
 let test_phase2_date_range_calendar_in_unanchored_errors () =
   expect_error_code
     ~code:"E327"
@@ -16720,6 +16757,14 @@ let () =
         `Quick test_phase2_date_range_negative_calendar_cadence_errors;
       Alcotest.test_case "E329 count = 0 rejected"
         `Quick test_phase2_date_range_count_zero_errors;
+      Alcotest.test_case "gh#1118 E329 end before start rejected (every)"
+        `Quick test_gh1118_date_range_end_before_start_affine;
+      Alcotest.test_case "gh#1118 E329 end before start rejected (every, exclusive)"
+        `Quick test_gh1118_date_range_end_before_start_affine_exclusive;
+      Alcotest.test_case "gh#1118 E329 end before start rejected (calendar_months)"
+        `Quick test_gh1118_date_range_end_before_start_calendar;
+      Alcotest.test_case "gh#1118 end = start still gives [start]"
+        `Quick test_gh1118_date_range_end_equals_start_ok;
       Alcotest.test_case "E327 calendar cadence in unanchored model"
         `Quick test_phase2_date_range_calendar_in_unanchored_errors;
       Alcotest.test_case "gh#1123 E220 date() start + every + count in unanchored model"
