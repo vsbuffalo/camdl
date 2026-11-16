@@ -183,7 +183,8 @@ fn warnings(stderr: &str) -> usize {
 }
 
 /// Each kind, past its range under `simulate`, is refused: a non-zero exit
-/// naming the forcing, its range, the first time outside it and the override.
+/// naming the forcing, its range, the side it was evaluated on and the
+/// override.
 #[test]
 fn simulate_refuses_each_kind_past_its_range() {
     for kind in KINDS {
@@ -194,7 +195,11 @@ fn simulate_refuses_each_kind_past_its_range() {
         assert!(!o.status.success(), "{kind}: a run past the forcing's range must be refused:\n{err}");
         assert!(err.contains("forcing `mult`"), "{kind}: names the forcing:\n{err}");
         assert!(err.contains("t = 0 to t = 50"), "{kind}: names the range:\n{err}");
-        assert!(err.contains("at t = 51"), "{kind}: names the first time outside it:\n{err}");
+        assert!(err.contains("after its last data point") || err.contains("after the end of its window"),
+            "{kind}: names the side it was evaluated on:\n{err}");
+        // No time outside the range is named: which one a multi-threaded run
+        // meets first depends on its threads.
+        assert!(!err.contains("t = 51"), "{kind}: names no time outside the range:\n{err}");
         assert!(err.contains("--allow-forcing-extrapolation"), "{kind}: names the override:\n{err}");
         assert!(!tmp.path().join("traj.tsv").exists(), "{kind}: a refused run writes no trajectory");
     }
@@ -234,6 +239,7 @@ fn the_override_holds_with_one_warning_per_function() {
         assert_eq!(warnings(&err), 1, "{kind}: exactly one warning:\n{err}");
         assert!(err.contains(WARNING) || err.contains("warning"), "{kind}: it is a warning:\n{err}");
         assert!(err.contains("held from t = 50 to the end of the run"), "{kind}: names the span held:\n{err}");
+        assert!(!err.contains("t = 51"), "{kind}: names no time outside the range:\n{err}");
         let recorded = recorded_overrides(&tmp.path().join("cas"));
         assert_eq!(recorded, vec![true], "{kind}: the override is recorded in run.json");
     }
@@ -322,7 +328,7 @@ fn a_run_before_the_first_data_point_is_refused() {
     let o = simulate(tmp.path(), &m, &[]);
     let err = stderr(&o);
     assert!(!o.status.success(), "{err}");
-    assert!(err.contains("before its first data point") && err.contains("at t = 0"), "{err}");
+    assert!(err.contains("before its first data point") && err.contains("t = 10 to t = 100"), "{err}");
 }
 
 /// The check reads the times evaluated, not the run's span: a forcing read

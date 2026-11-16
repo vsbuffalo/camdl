@@ -83,10 +83,10 @@ extend before its first and after its last breakpoint — are defined for all
 time.
 
 A run that evaluates a ranged forcing outside its range is an error. The error
-names the forcing, its range and the first time outside it:
+names the forcing, its range and the side it was evaluated on:
 
 ```
-error: forcing `mult` was evaluated at t = 51, after its last data point (it is defined on t = 0 to t = 50, its data).
+error: forcing `mult` was evaluated after its last data point (it is defined on t = 0 to t = 50, its data).
 ```
 
 The run gives three ways out: extend the data (or the window) to cover the run,
@@ -101,7 +101,7 @@ fit's identity, so a fit stored under it is not reused by a run without it.
 The check reads the times the run actually evaluated, with the forcing's `lag`
 applied, not the run's span. A forcing read only under a condition that is false
 past its range is never evaluated there and raises nothing. The engine records
-the first time outside the range in a set-once slot per forcing and side
+that the range was left in a set-once flag per forcing and side
 (`sim::forcing_range`), so a particle filter's threads do not contend on it, and
 the command decides whether that is an error or a warning
 (`cli::forcing_extrapolation`). The design is in

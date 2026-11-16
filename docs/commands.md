@@ -375,7 +375,7 @@ in §7 of `camdl docs model-comparison`.
   `bspline` outside its window, is refused by every command that runs a model
   (`simulate`, `fit run`, `fit predict`, `pfilter`, `profile`, `survey`,
   `compare` when it derives a prequential, `dev eval`). The error names the
-  forcing, its range and the first time outside it.
+  forcing, its range and the side it was evaluated on.
   `--allow-forcing-extrapolation` on any of them (in a fit config,
   `[config] allow_forcing_extrapolation = true`) holds the forcing's end value
   instead, prints one warning per forcing naming its range and the span held,
