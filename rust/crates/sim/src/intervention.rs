@@ -170,9 +170,8 @@ pub fn guard_attimesexpr_exact(
                 "exact obs-alignment does not support a parametric `at [<param>]` \
                  schedule on scheduled intervention '{}': the cursor-keyed effect \
                  firing registers one shared set of fire times per filter run, but a \
-                 parametric schedule resolves to per-particle fire times. Use \
-                 `obs_alignment = \"snap\"`, or a constant `at [..]` / `recurring` \
-                 schedule.",
+                 parametric schedule resolves to per-particle fire times. Write the \
+                 fire times as a constant `at [..]` or a `recurring` schedule.",
                 iv.name,
             )));
         }

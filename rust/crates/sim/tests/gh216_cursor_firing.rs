@@ -526,8 +526,10 @@ fn if2_rejects_at_times_expr_under_exact() {
         run_if2(&process, &obs, &params, &if2_params, &config, 42),
         "a parametric at[..] schedule under Exact IF2 must be rejected",
     );
-    assert!(msg.contains("parametric") && (msg.contains("snap") || msg.contains("obs_alignment")),
-        "guard must name the parametric-schedule limit and the snap migration, got: {msg}");
+    assert!(msg.contains("parametric") && msg.contains("constant `at [..]`")
+            && !msg.contains("obs_alignment"),
+        "guard must name the parametric-schedule limit and the constant-schedule remedy, \
+         never the removed obs_alignment setting, got: {msg}");
 }
 
 // ── PGAS plumbing (single prevalence stream on M) ───────────────────────────

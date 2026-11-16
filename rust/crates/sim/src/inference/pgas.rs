@@ -72,12 +72,12 @@ pub struct PGASConfig {
     /// sampling is the bottleneck. Each extra CSMC sweep renovates
     /// more of the trajectory before the next NUTS step.
     pub csmc_sweeps_per_nuts: usize,
-    /// Observation-time alignment for the substep grid (Stage 3).
-    /// `Snap` (default): round observation times onto the uniform `dt` grid
-    /// — the historical PGAS behavior. `Exact`: tile each observation window
-    /// with full-`dt` steps plus a shortened remainder landing exactly on the
-    /// obs time (`build_substep_grid`). The CLI keeps this `Snap` until the
-    /// exact path's recovery evidence lands and the default is flipped.
+    /// Observation-time alignment for the substep grid.
+    /// `Snap` (default): the uniform `dt` grid, each observation scored on the
+    /// grid time nearest it. `Exact`: tile each observation window with
+    /// full-`dt` steps plus a shortened remainder landing exactly on the obs
+    /// time (`build_substep_grid`). The CLI runs `Snap`, and refuses data
+    /// whose period boundaries lie off the grid, so nothing is moved.
     pub step_policy: StepPolicy,
     /// Run the ancestor-sampling move (default `true`). `false` is plain
     /// particle Gibbs without AS — a valid kernel in its own right (ADH 2010;
@@ -1258,10 +1258,10 @@ pub fn build_obs_at_substep(
             if let Some(prev) = map.at_origin() {
                 return Err(crate::error::SimError::Validation(format!(
                     "observation times {} and {} are closer than dt = {} to t_start = {}; \
-                     under snap obs-alignment both are scored at t_start and one would be \
-                     silently dropped from the likelihood. Use a dt finer than the \
-                     smallest observation gap, run with --obs-alignment exact, or remove \
-                     the closer observation.",
+                     PGAS steps only on its grid t_start + k·dt, so both would be scored \
+                     at t_start and one silently dropped from the likelihood. Choose a dt \
+                     for which every observation time is t_start plus a whole number of \
+                     steps, or a dt finer than the smallest gap between observations.",
                     observations[prev].time, obs.time, dt, t_start
                 )));
             }
@@ -1270,10 +1270,11 @@ pub fn build_obs_at_substep(
             if let Some(prev_time) = claimant.insert(s - 1, obs.time) {
                 return Err(crate::error::SimError::Validation(format!(
                     "observation times {} and {} are closer than dt = {} and round \
-                     to the same substep ({}); under snap obs-alignment they collide \
-                     and one observation would be silently dropped from the \
-                     likelihood. Use a dt finer than the smallest observation gap, \
-                     run with --obs-alignment exact, or remove the closer observation.",
+                     to the same substep ({}); PGAS steps only on its grid \
+                     t_start + k·dt, so they collide and one observation would be \
+                     silently dropped from the likelihood. Choose a dt for which every \
+                     observation time is t_start plus a whole number of steps, or a dt \
+                     finer than the smallest gap between observations.",
                     prev_time, obs.time, dt, s - 1
                 )));
             }
@@ -2057,7 +2058,9 @@ pub(crate) fn fill_producer_batch(
 /// step `s + 1`: `t0 = t_start + s·dt`, full `dt`. Exact obs-alignment re-tiles
 /// the substeps at an off-grid observation and breaks that, so an effect-bearing
 /// model on such a grid is refused here, for every producer at once. (The CLI
-/// never runs PGAS under exact alignment: `fit/methods.rs` refuses it.)
+/// runs PGAS only under `StepPolicy::Snap`, and refuses data whose period
+/// boundaries lie off its grid: `cli/src/fit/runner.rs`,
+/// `refuse_periods_off_the_grid`.)
 pub fn pgas_effect_plan(
     model: &CompiledModel,
     params: &[f64],
@@ -2082,7 +2085,8 @@ pub fn pgas_effect_plan(
         return Err(SimError::Validation(
             "pgas: scheduled effects (interventions or events) need the substeps on the dt \
              grid, and exact obs-alignment re-tiles them at an off-grid observation. Use \
-             obs_alignment = \"snap\", or place the observations on the dt grid."
+             the snap step policy (`StepPolicy::Snap`), or place the observations on the \
+             dt grid."
                 .into(),
         ));
     }
@@ -4926,6 +4930,22 @@ mod grid_tests {
             result.is_err(),
             "Snap grid must reject sub-dt-colliding observation times"
         );
+    }
+
+    /// gh#1073: both collision messages name a remedy that exists (a dt that
+    /// puts the times on the grid, or one finer than the smallest gap), never
+    /// the `--obs-alignment` flag, which does not exist.
+    #[test]
+    fn collision_messages_name_a_remedy_that_exists() {
+        for (times, what) in [(&[3.0, 3.4][..], "two times on one substep"),
+                              (&[0.0, 0.3][..], "two times at the origin")] {
+            let err = build_obs_at_substep(&obs(times), 0.0, 1.0)
+                .expect_err(what).to_string();
+            assert!(!err.contains("obs-alignment") && !err.contains("obs_alignment"),
+                "{what}: names a setting that does not exist: {err}");
+            assert!(err.contains("whole number of steps") && err.contains("finer than the smallest gap"),
+                "{what}: must name the dt remedies: {err}");
+        }
     }
 
     #[test]
