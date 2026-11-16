@@ -1744,10 +1744,11 @@ Two numbers not to mis-read:
 
 - the loglik `pfilter` prints covers the whole series, training window included.
   It is not a held-out score.
-- the emitted trace is stamped `conditioning = "in_sample"` whatever window you
-  score; the stamp is hardcoded in the trace builder today, and gh#585's fix is
-  what adds an honest one. The row subset is the honest number, not the trace's
-  own label.
+- the trace `pfilter --save-prequential` emits is stamped
+  `conditioning = "in_sample"` whatever window you score; the stamp is fixed in
+  its trace builder. Only `camdl compare` stamps a trace held-out, and only for
+  a fit that recorded its training partition. The row subset is the honest
+  number, not the trace's own label.
 
 ### Prediction quantiles
 
