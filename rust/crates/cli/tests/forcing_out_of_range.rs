@@ -321,25 +321,15 @@ fn the_held_trajectory_is_the_extended_data_trajectory() {
     }
 }
 
-/// A stored run made under the override does not answer for the same run
-/// without it: the second run is refused, not served the held values.
-#[test]
-fn a_stored_held_run_is_not_served_without_the_override() {
-    let tmp = tempfile::tempdir().unwrap();
-    let m = model(tmp.path(), "linear", &ROWS_TO_50);
-    let o = simulate(tmp.path(), &m, &["--allow-forcing-extrapolation"]);
-    assert!(o.status.success(), "{}", stderr(&o));
-    std::fs::remove_file(tmp.path().join("traj.tsv")).unwrap();
-    let o = simulate(tmp.path(), &m, &[]);
-    let err = stderr(&o);
-    assert!(!o.status.success(), "the stored held run must not be served:\n{err}");
-    assert!(err.contains("--allow-forcing-extrapolation"), "{err}");
-}
-
 /// The override is identity: a run under it and the same run without it are
 /// two runs, so a stored run is never served to the other, whether or not it
 /// held a forcing. Here the forcing covers the run, so both runs succeed and
-/// the second must be a cache miss, not a hit on the first one's leaf.
+/// the second must be a cache miss, not a hit on the first one's leaf; a run
+/// past the range without the override is refused before the store is read,
+/// so it could not test identity (`simulate_refuses_each_kind_past_its_range`
+/// covers that refusal). Profile's identity is tested by
+/// `a_stored_held_profile_point_is_not_served_without_the_override`, whose
+/// refusal comes from its cache scan.
 #[test]
 fn the_override_is_in_the_run_identity() {
     let tmp = tempfile::tempdir().unwrap();
@@ -373,6 +363,23 @@ fn the_override_is_in_the_run_identity() {
     assert!(o.status.success(), "{}", stderr(&o));
     assert_eq!(run_ids(&tmp.path().join("cas")).len(), before + 2,
         "pfilter: the run without the override is a cache miss on the run with it");
+
+    let toml = fit_toml(tmp.path(), &m, "");
+    let survey = |extra: &[&str]| {
+        let mut args = vec![
+            "survey", m.to_str().unwrap(), "--fit", toml.to_str().unwrap(), "--n-points", "4", "--eval", "simulate",
+            "--seed", "1",
+        ];
+        args.extend_from_slice(extra);
+        camdl(tmp.path(), &args)
+    };
+    let before = run_ids(&tmp.path().join("cas")).len();
+    let o = survey(&["--allow-forcing-extrapolation"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let o = survey(&[]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(run_ids(&tmp.path().join("cas")).len(), before + 2,
+        "survey: the run without the override is a cache miss on the run with it");
 }
 
 /// The distinct `run_id`s of the committed `run.json`s under `cas`.
