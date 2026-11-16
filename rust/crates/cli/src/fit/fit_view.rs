@@ -421,6 +421,7 @@ mod tests {
             training_window: None,
             dt: None,
             integrator: None,
+            calendar: None,
         };
         // The model file two levels above the fit folder (`<root>/sir.camdl`
         // for `<root>/fits/<stem>-<h8>/`). No fit.toml on disk → the archive

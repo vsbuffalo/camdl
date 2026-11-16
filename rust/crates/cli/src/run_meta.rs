@@ -776,6 +776,13 @@ pub struct FitSidecar {
     /// being read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integrator: Option<ir::model::Integrator>,
+    /// The model's calendar axis (`docs/dev/temporal-architecture.md` §5.3):
+    /// its time unit and the date of `t = 0`, so the fit's model times — the
+    /// estimates' instants, the training window — can be dated without the
+    /// model source. `origin` is null for a model that has none. `None` in a
+    /// sidecar written without a model in hand or before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calendar: Option<ir::caltime::CalendarAxis>,
     /// The model's `#'` documentation dictionary ([`ir::ModelDocs`]): the
     /// model's own header block (`docs.model`, gh#750) plus params /
     /// compartments / transitions / observations / dimensions / quantities →
