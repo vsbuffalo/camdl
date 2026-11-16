@@ -1503,11 +1503,10 @@ pub(crate) fn load_window_starts_if_windowed(
 /// cover, per its `covers` declaration (gh#833).
 ///
 /// `label_times` are the already-converted values of the stream's own label
-/// column — the `: time` column, or `window_stop` for a windowed stream. This
-/// is for a caller whose rows come from a reader other than
-/// [`crate::fit::observed_rows::observed_rows`] (the survey command's dense
-/// reader); a caller holding those rows uses [`stream_times_of_rows`], which
-/// does not read the file again. Both lower labels through the one
+/// column — the `: time` column, or `window_stop` for a windowed stream. The
+/// lowering tests' view of [`stream_times_of_rows`]: every loader reads its
+/// rows through [`crate::fit::observed_rows::observed_rows`] and uses that.
+/// Both lower labels through the one
 /// [`crate::fit::observed_rows::measures_of`].
 ///
 /// An instant stream reads at its labels. An interval stream gets the periods
@@ -1516,6 +1515,7 @@ pub(crate) fn load_window_starts_if_windowed(
 /// label, which is the correction this exists to make. An interval stream
 /// with no declaration is an IR the compiler cannot have produced (E350), and
 /// is refused rather than read under a convention the file never stated.
+#[cfg(test)]
 pub fn stream_times_for(
     obs: &ir::observation::ObservationModel,
     projection: &sim::inference::multi_stream_obs::StreamProjection,
@@ -1645,9 +1645,10 @@ fn stream_times_of_measures(
 /// and `column` (the value) must match header fields exactly — no positional
 /// fallback for either (the by-name-time flip; 2026-06-10 §6.2).
 ///
-/// DENSE path: a hole (`NA`) is an error here — callers on this path
-/// (survey, profile, fit) do not yet support holes. The sparse/holes pfilter
-/// path uses [`load_data_tsv_column_cells_as_written`].
+/// A hole (`NA`) is an error here. The column-reader tests' dense view of
+/// [`load_data_tsv_column_cells_as_written`], which every loader reads
+/// through, via [`crate::fit::observed_rows::observed_rows`].
+#[cfg(test)]
 pub fn load_data_tsv_column(
     path: &str,
     time_column: &str,

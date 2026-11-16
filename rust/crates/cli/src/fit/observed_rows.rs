@@ -50,8 +50,6 @@ impl Measures {
 #[derive(Debug, Clone)]
 pub(crate) struct ObservedRow {
     /// The row's index among this leaf's rows, in file order.
-    #[cfg_attr(not(test), expect(dead_code, reason = "foundation for the temporal-architecture \
-        migration; read by Stage 2's training partition"))]
     pub position: usize,
     /// The instant or period the row measures, from the stream's `covers`
     /// declaration or its window columns.
@@ -167,8 +165,8 @@ pub(crate) fn observed_rows(
 /// declaration is an IR the compiler cannot produce (E350) and is refused.
 ///
 /// The one lowering from labels to what rows measure: [`observed_rows`] and
-/// `pfilter::stream_times_for` (which is handed labels by readers that do not
-/// go through [`observed_rows`]) both call it.
+/// `pfilter::stream_times_for` (the lowering tests' view, handed labels
+/// directly) both call it.
 pub(crate) fn measures_of(
     obs: &ObservationModel,
     kind: TemporalKind,
