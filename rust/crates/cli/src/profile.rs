@@ -993,7 +993,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let effective = crate::fit::runner::data_bindings_to_effective(&model, &bound_streams)
         .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
     let mut streams = crate::fit::runner::resolve_and_load_obs_streams(
-        &model, &compiled, &effective, dt, &time_opts,
+        &model, &compiled, &effective, &time_opts,
     ).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
     // The fit config's holdout, applied to the bound data (`--data` or the
     // config's own) by the function `fit run` applies it with, so every cell
@@ -1002,7 +1002,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // lie after them.
     let training_window = crate::fit::runner::apply_holdout_declaration(
         &mut streams, fit_holdout_after.as_ref(), &fit_holdout_files, &model,
-        compiled.model.simulation.t_start, dt, &time_opts,
+        compiled.model.simulation.t_start, &time_opts,
     ).unwrap_or_else(|e| { out.fail(format!("error: --fit config: {e}")); });
     // The cutoff `holdout_after` resolved to, for the base identity.
     let holdout_after_cutoff: Option<f64> = fit_holdout_after.as_ref()

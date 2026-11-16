@@ -1034,7 +1034,7 @@ mod tests {
             format: crate::caltime_load::TimeFormat::Auto,
         };
         crate::fit::runner::resolve_and_load_obs_streams(
-            &model, &compiled, &effective(data_path), run.dt, &opts,
+            &model, &compiled, &effective(data_path), &opts,
         ).unwrap()
     }
 
