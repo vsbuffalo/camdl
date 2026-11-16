@@ -2274,14 +2274,16 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // --save-prequential` (gh#650).
                 if let Some(ref trace) = preq_trace {
                     let stem = format!("{}/prequential", method_dir.display());
-                    crate::prequential_out::write_prequential_outputs(&stem, trace)
+                    let calendar = ir::caltime::CalendarAxis::from_model(&run_config.model)
+                        .unwrap_or_else(|e| abandon_method(&out, format!("error: {e}")));
+                    crate::prequential_out::write_prequential_outputs(&stem, trace, &calendar)
                         .unwrap_or_else(|e| {
                             abandon_method(&out, format!("error writing prequential: {e}"),
                             )
                         });
                     out.say(format_args!("  prequential: {}",
                         crate::prequential_out::summary_line(trace)));
-                    out.say_raw(format_args!("{}", crate::prequential_out::surprise_table(trace)));
+                    out.say_raw(format_args!("{}", crate::prequential_out::surprise_table(trace, &calendar)));
                 }
                 method_best_loglik = Some(result.ll_mean);
             }
