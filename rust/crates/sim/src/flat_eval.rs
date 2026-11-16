@@ -479,6 +479,7 @@ unsafe fn run(
                     Some(lag) => ctx.t - eval_resolved(lag, ctx),
                     None => ctx.t,
                 };
+                tf.note_evaluated_at(t_eff);
                 let v = eval_forcing(&tf.kind, t_eff, ctx);
                 push!(v);
             }

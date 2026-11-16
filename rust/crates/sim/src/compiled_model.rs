@@ -203,6 +203,12 @@ impl CompiledBSpline {
         self.knots.n_intervals() + self.degree
     }
 
+    /// The window [a, b] the curve is defined on; it holds its end values
+    /// outside it.
+    pub fn window(&self) -> (f64, f64) {
+        self.knots.window()
+    }
+
     /// The smooth form's whitening, when it has one.
     pub fn whitening(&self) -> Option<&crate::spline_penalty::Whitening> {
         match &self.coefs {
@@ -358,6 +364,49 @@ pub struct CompiledTimeFunc {
     /// or arithmetic over them), already in model time units, so the subtraction
     /// is direct. `None` ⇒ no shift.
     pub lag: Option<ResolvedExpr>,
+    /// The range the forcing is defined on, for the kinds that have one (a
+    /// data table's first to last time, a `bspline` window); `None` for the
+    /// periodic kinds and `piecewise`, which are defined for all time. Every
+    /// evaluation notes its time against it ([`Self::note_evaluated_at`]).
+    pub range: Option<std::sync::Arc<crate::forcing_range::DefinedRange>>,
+}
+
+impl CompiledTimeFunc {
+    /// Record an evaluation at `t` (already shifted by the lag) when it falls
+    /// outside the forcing's range. Reads one slot per side and writes it at
+    /// most once ([`crate::forcing_range`]); the value evaluated is unchanged.
+    #[inline]
+    pub fn note_evaluated_at(&self, t: f64) {
+        if let Some(r) = &self.range {
+            r.note(t);
+        }
+    }
+
+    /// The defined range of `kind`, for the kinds that hold an end value
+    /// outside one.
+    fn defined_range(
+        name: &str,
+        kind: &CompiledTimeFuncKind,
+        lagged: bool,
+    ) -> Option<std::sync::Arc<crate::forcing_range::DefinedRange>> {
+        use crate::forcing_range::{DefinedRange, RangeKind};
+        let (range_kind, lo, hi) = match kind {
+            CompiledTimeFuncKind::Interpolated { times, .. } | CompiledTimeFuncKind::Constant { times, .. } => {
+                (RangeKind::DataTable, *times.first()?, *times.last()?)
+            }
+            CompiledTimeFuncKind::CubicSpline(s) => (RangeKind::DataTable, *s.xs.first()?, *s.xs.last()?),
+            CompiledTimeFuncKind::BSpline(b) => {
+                let (a, z) = b.window();
+                (RangeKind::Window, a, z)
+            }
+            CompiledTimeFuncKind::Sinusoidal { .. }
+            | CompiledTimeFuncKind::Piecewise { .. }
+            | CompiledTimeFuncKind::Periodic { .. }
+            | CompiledTimeFuncKind::Fourier { .. }
+            | CompiledTimeFuncKind::PeriodicSpline(_) => return None,
+        };
+        Some(std::sync::Arc::new(DefinedRange::new(name, range_kind, lo, hi, lagged)))
+    }
 }
 
 /// Recursively collect integer compartment local indices referenced in an expression.
@@ -2198,7 +2247,8 @@ impl CompiledModel {
                 None => None,
                 Some(e) => Some(resolve_coeff(e, &param_index, &const_values)?),
             };
-            time_func_cache.push(CompiledTimeFunc { kind, lag });
+            let range = CompiledTimeFunc::defined_range(&tf.name, &kind, lag.is_some());
+            time_func_cache.push(CompiledTimeFunc { kind, lag, range });
         }
 
         // Precompute fire **times** (continuous, dt-invariant) for all

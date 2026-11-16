@@ -240,6 +240,7 @@ pub fn eval_expr(expr: &Expr, ctx: &EvalCtx<'_>) -> Result<f64, SimError> {
                 Some(lag) => ctx.t - eval_resolved(lag, ctx),
                 None => ctx.t,
             };
+            tf.note_evaluated_at(t_eff);
             Ok(eval_forcing(&tf.kind, t_eff, ctx))
         }
 
@@ -252,6 +253,7 @@ pub fn eval_expr(expr: &Expr, ctx: &EvalCtx<'_>) -> Result<f64, SimError> {
                 Some(lag) => ctx.t - eval_resolved(lag, ctx),
                 None => ctx.t,
             };
+            tf.note_evaluated_at(t_eff);
             Ok(eval_forcing_basis(&tf.kind, t_eff, w.forcing_basis.index as usize, w.forcing_basis.space))
         }
 
