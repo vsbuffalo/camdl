@@ -947,6 +947,22 @@ mod tests {
             "explicit allow_degenerate_rates=false must match the default (no re-key)");
     }
 
+    /// `[config] allow_forcing_extrapolation` lets a fit hold a forcing past
+    /// its range, which changes the values the run reads, so `true` re-keys
+    /// the fit; an explicit `false` is the default and hashes as the absent
+    /// key does, so a fit config that predates the key keeps its identity.
+    #[test]
+    fn allow_forcing_extrapolation_false_is_the_absent_key() {
+        let absent = fit_config_blob_hash(&minimal_config("")).unwrap();
+        let explicit_false = fit_config_blob_hash(
+            &minimal_config("[config]\nallow_forcing_extrapolation = false\n")).unwrap();
+        assert_eq!(absent, explicit_false,
+            "explicit allow_forcing_extrapolation=false must match the absent key (no re-key)");
+        let on = fit_config_blob_hash(
+            &minimal_config("[config]\nallow_forcing_extrapolation = true\n")).unwrap();
+        assert_ne!(absent, on, "allow_forcing_extrapolation=true must fold into the fit identity");
+    }
+
     /// gh#241 PR F: input-surface differential for the fit-method identity path.
     /// The identity guarantee made executable, complementing the per-field
     /// sensitivity tests above with the PRESENTATION-inert half: a semantic
