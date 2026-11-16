@@ -342,10 +342,10 @@ Each item is one GitHub issue, one branch and one commit.
 
 - **Goal.** Training membership is decided once from periods and recorded as a
   per-stream prefix with a digest (D38, D40).
-- **Depends on:** Stage 1. Its identity change lands in the shared
-  `HASH_VERSION` 4 bump (D47), so Stage 2 is developed on the identity
-  integration branch together with Stage 3 and the score-artifact proposal's
-  identity steps, and lands with them.
+- **Depends on:** Stage 1. Its identity change is its own `HASH_VERSION` bump, 4
+  to 5 (D58): each stage bumps the version when it re-keys, so Stage 2 lands
+  after Stage 3's bump to 4 and before the score-artifact proposal's identity
+  step, which re-keys separately.
 - **Changes.**
   - Add `TrainingPartition` and `RowPrefix` (spec §3.2) with the two
     constructors; rule per spec §4.1.
@@ -361,9 +361,19 @@ Each item is one GitHub issue, one branch and one commit.
     anchor (`main.rs:4139-4176`, `fit/predict.rs:1791-1803`,
     `pfilter.rs:975-990`).
   - Stale-stream note: `fit` prints a note naming any stream whose last
-    observation is more than one of its own periods before `last_obs`.
-  - Fit identity: fold the partition rule version and the per-stream training
-    row digests into `FitDigest`.
+    observation is more than one of its own periods before `last_obs`, once per
+    fit. The same note in `fit predict`, and `fit predict`'s free-forward grid,
+    whose `last_obs` is still the largest label over the full file
+    (`fit/predict.rs`), belong to Phase B's forecast plan (Stage 5), not to this
+    stage.
+  - Fit identity (D58): fold the partition rule version
+    (`PARTITION_RULE_VERSION`) into `FitDigest`, so a later change to the rule
+    re-keys every fit without a `HASH_VERSION` bump. The fit identity keeps the
+    whole-file data digests and the `[data.holdout]` file digests for now: those
+    files, `holdout_after` in the config blob and the rule version determine the
+    partition, so no stored fit can answer for another partition. Replacing them
+    with the per-stream training row digests is the score-artifact proposal's
+    identity step, not this stage's.
 - **Carried from the Stage 1 review (#1103).**
   - Move `survey`'s row reading (`load_observations_from_tsv`,
     `load_aux_from_tsv` in `cli/src/survey.rs`) onto `observed_rows` first,
@@ -815,10 +825,10 @@ in a fixed parameter; `camdl compare`.
   and `obs_alignment` is refused, atomically. A fit record written before Stage
   2 cannot be scored held-out; the refusal says to re-run the fit, which the
   hash bump requires anyway.
-- **Identity.** Stages 2 and 3 and the score-artifact identity steps share one
-  `HASH_VERSION` bump to 4 (D47); every stored fit re-keys once and old results
-  stay readable by path. Stage 4 bumps `SimConfig`'s schema version. No stage
-  changes `ir/VERSION`.
+- **Identity.** Each stage bumps `HASH_VERSION` when it re-keys (D58): Stage 3
+  to 4, Stage 2 to 5, and the score-artifact identity step separately. Each bump
+  re-keys every stored run once and old results stay readable by path. Stage 4
+  bumps `SimConfig`'s schema version. No stage changes `ir/VERSION`.
 - **Fitted numbers move** in Stage 2 for `holdout_after` fits on start- or
   day-labelled streams. This corrects the record; the release notes name the
   `covers` forms affected.
@@ -857,7 +867,7 @@ Recorded in the maintainer's docket; each is reflected in the spec and above.
   proposal.
 - **D46.** Generated observation times count from `simulate.from`; the document
   is corrected.
-- **D47.** One `HASH_VERSION` 4 bump with the score artifact.
+- **D47.** One `HASH_VERSION` 4 bump with the score artifact. Superseded by D58.
 - **D48.** D44's rule covers every time function outside its range, B-spline
   windows included.
 - **D49.** A forecast runs to the latest end among its targets, past
@@ -881,6 +891,13 @@ Recorded in the maintainer's docket; each is reflected in the spec and above.
 - **D57.** Conditioning the state on rows after the fit is deferred: the
   forecast origin is the training extent and the state is conditioned on the
   training rows only. Rolling forecast dates (D35) wait for it.
+- **D58.** Each stage bumps `HASH_VERSION` when it changes identity, rather than
+  one shared bump (supersedes D47): Stage 3 to 4, Stage 2 to 5, the
+  score-artifact identity step on its own. A shared bump holds every
+  identity-changing stage on one integration branch until the last is ready. The
+  fit identity carries the partition rule version, and keeps whole-file and
+  holdout-file digests until the score-artifact step replaces them with row
+  digests.
 
 ## Part 9. Documents this plan changes
 
