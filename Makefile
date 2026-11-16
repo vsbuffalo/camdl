@@ -292,7 +292,7 @@ test-install:
 
 # ── Golden file management ────────────────────────────────────────────────────
 
-.PHONY: update-golden update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden update-quantities-golden check-quantities-golden update-contrasts-golden check-contrasts-golden update-gradient-golden update-bspline-inference-golden update-declared-names-golden check-declared-names-golden update-hoisted-identity-golden check-hoisted-identity-golden update-diff-pairs-golden check-diff-pairs-golden
+.PHONY: update-golden update-ocaml-golden update-corner-golden update-step-size-golden update-regression-golden update-reactive-golden update-quantities-golden check-quantities-golden update-contrasts-golden check-contrasts-golden update-gradient-golden update-bspline-inference-golden update-declared-names-golden check-declared-names-golden update-hoisted-identity-golden check-hoisted-identity-golden update-diff-pairs-golden check-diff-pairs-golden
 
 # Recompile all DSL fixtures → ocaml/golden/*.ir.json
 update-ocaml-golden: build-ocaml
@@ -303,7 +303,7 @@ update-ocaml-golden: build-ocaml
 		$(CAMDLC) "$$src" > "$$out"; \
 	done
 
-update-golden: update-ocaml-golden update-corner-golden update-regression-golden update-reactive-golden update-quantities-golden update-contrasts-golden update-gradient-golden update-bspline-inference-golden update-declared-names-golden update-hoisted-identity-golden update-diff-pairs-golden
+update-golden: update-ocaml-golden update-corner-golden update-step-size-golden update-regression-golden update-reactive-golden update-quantities-golden update-contrasts-golden update-gradient-golden update-bspline-inference-golden update-declared-names-golden update-hoisted-identity-golden update-diff-pairs-golden
 
 # Recompile the corner-case fixtures (params baked via --set) →
 # tests/fixtures/corner_cases/ir/*.ir.json. These pin the off-grid /
@@ -328,6 +328,17 @@ update-corner-golden: build-ocaml
 	@$(CAMDLC) $(CORNER_DIR)/recurring_default_from.camdl      --set k=0.0 -o $(CORNER_DIR)/ir/recurring_default_from.ir.json
 	@$(CAMDLC) $(CORNER_DIR)/offset_origin.camdl               --set k=0.0 -o $(CORNER_DIR)/ir/offset_origin.ir.json
 	@$(CAMDLC) $(CORNER_DIR)/inflow_drain_origin.camdl         --set k=0.0 -o $(CORNER_DIR)/ir/inflow_drain_origin.ir.json
+
+# Recompile the step-size fixtures (params baked via --set) →
+# tests/fixtures/step_size/ir/*.ir.json, read by the sim tests
+# step_size_noise_scaling.rs (gamma-noise scaling with dt) and
+# step_size_deterministic_limit.rs (chain-binomial vs ODE as dt shrinks).
+STEP_SIZE_DIR := tests/fixtures/step_size
+update-step-size-golden: build-ocaml
+	@echo "Recompiling step-size fixtures..."
+	@mkdir -p $(STEP_SIZE_DIR)/ir
+	@$(CAMDLC) $(STEP_SIZE_DIR)/death_overdispersed.camdl  --set mu=0.5 --set sigma_sq=0.25 --set X0=1000000000 -o $(STEP_SIZE_DIR)/ir/death_overdispersed.ir.json
+	@$(CAMDLC) $(STEP_SIZE_DIR)/seir_seasonal_births.camdl --set beta=4.25 --set sigma=0.2 --set gamma=0.25 --set mu=0.0000548 --set alpha=0.04 --set N0=33000000000 -o $(STEP_SIZE_DIR)/ir/seir_seasonal_births.ir.json
 
 # Recompile the gradient regression fixtures → tests/fixtures/gradient/ir/*.ir.json.
 # These exercise the compiler-emitted rate_grad on hard cases (a lagged forcing

@@ -2,6 +2,7 @@
 # Source: the committed *.ir.json files under ocaml/golden and tests/fixtures/*/ir (primary).
 # Recorded at commit: 044bd734e
 # Regenerate: make update-golden-model-hashes
+# Rows added at commit af7f9d17: tests/fixtures/step_size/ir/death_overdispersed.ir.json, tests/fixtures/step_size/ir/seir_seasonal_births.ir.json
 file	model_ir_hash
 ocaml/golden/bimolecular.ir.json	e2c2f4a1af9741ac790295534dddbe67af752f170a9ec016e5a460beb99a3e14
 ocaml/golden/branching_si_symp_asym.ir.json	a587813f65000b85ea074a610f2c92e0494a7823f9dc199aeaf15f98b8e185d6
@@ -121,3 +122,5 @@ tests/fixtures/quantities/ir/quantities_showcase.ir.json	e9cbe0550fc017368549a6c
 tests/fixtures/reactive/ir/reactive_indexed_patch_sia.ir.json	27ea8fd2eb5dff0f79341fd93ce6aea04a7d7954ac6eb1a8ea18e46cc3f0a7ba
 tests/fixtures/reactive/ir/reactive_sir_observed_threshold.ir.json	f6b167fe834b20f4fdf455c20597aee380f276b1ff00a406ed96dc571ee6f887
 tests/fixtures/regression/ir/gh208_sparse_negative_rate.ir.json	c645d860c1d2add0f4efd1e9fbc6cee717064fcd5085dfdb07c52aa879029aaa
+tests/fixtures/step_size/ir/death_overdispersed.ir.json	5bd3ae076d25d0706a8198d107d872e7866074deda6107d81428eb5264579c47
+tests/fixtures/step_size/ir/seir_seasonal_births.ir.json	cf53c0f15524ce4eb8aa8114826148d0086e2d9dea9d19100a94e1e22220f9ba

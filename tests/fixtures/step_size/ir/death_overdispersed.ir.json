@@ -1,0 +1,21 @@
+{"ir_version":"0.44","validated_by":"ocaml-compiler-v0.44","model":{"name":"death_overdispersed","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"name":"X","kind":"integer"},
+{"name":"D","kind":"integer"}
+],"transitions":[
+{"name":"death","stoichiometry":[["X",-1],["D",1]],"rate":{"bin_op":{"op":"mul","left":{"param":"mu"},"right":{"pop":"X"}}},"metadata":{"origin_kind":"intrinsic","source_compartment":"X","dest_compartment":"D"},"draw_method":{"overdispersed":{"param":"sigma_sq"},"overdispersed_grad":{"sigma_sq":{"grad":{"const":1.0}}}},"rate_grad":{"mu":{"grad":{"pop":"X"}}},"rate_state_grad":{"X":{"grad":{"param":"mu"}}}}
+],"ode_equations":[],"time_functions":[],"tables":[],"interventions":[],"observations":[],"parameters":[
+{"name":"mu","value":{"mode":"fixed","value":0.5},"param_kind":"rate","param_dim":null},
+{"name":"sigma_sq","value":{"mode":"fixed","value":0.25},"param_kind":"positive","param_dim":[0,1]},
+{"name":"X0","value":{"mode":"fixed","value":1000000000.0},"param_kind":"count","param_dim":null}
+],"initial_conditions":{"X":{"deterministic":{"param":"X0"}}},"ic_grad":{"X":{"X0":{"grad":{"const":1.0}}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":1.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[],"model_structure":{"dimensions":[],"compartment_dims":{"X":[],"D":[]},"base_compartments":["X","D"],"transmission_transitions":[],"infectious_compartments":[]}},"declared":{"schema_version":1,"compile_inputs":{"set_values":[{"name":"mu","value":0.5},{"name":"sigma_sq","value":0.25},{"name":"X0","value":1000000000.0}],"files":[]},"time_unit":"days","description":null,"origin":null,"dimensions":[],"compartments":[
+{"name":"X","kind":"integer","dims":[],"expands_to":["X"],"source_text":"X"},
+{"name":"D","kind":"integer","dims":[],"expands_to":["D"],"source_text":"D"}
+],"stratify":[],"parameters":[
+{"name":"mu","dims":[],"kind":"rate","dim":null,"bounds":{"lo":{"tree":{"const":{"value":0.0}},"katex":"0","katex_loss":[],"reads":[]},"hi":{"tree":{"const":{"value":5.0}},"katex":"5","katex_loss":[],"reads":[]}},"prior":null,"source_text":"mu       : rate              in [0.0, 5.0]"},
+{"name":"sigma_sq","dims":[],"kind":"positive","dim":{"population":0,"time":1},"bounds":{"lo":{"tree":{"const":{"value":0.0}},"katex":"0","katex_loss":[],"reads":[]},"hi":{"tree":{"const":{"value":5.0}},"katex":"5","katex_loss":[],"reads":[]}},"prior":null,"source_text":"sigma_sq : positive dim T    in [0.0, 5.0]"},
+{"name":"X0","dims":[],"kind":"count","dim":null,"bounds":null,"prior":null,"source_text":"X0       : count"}
+],"definitions":[],"tables":[],"time_inputs":[],"timepoints":[],"transitions":[
+{"name":"death","indices":[],"from":[{"compartment":"X","indices":[]}],"to":{"sum":{"compartments":[{"compartment":"D","indices":[]}]}},"dynamics":{"rate":{"rate":{"tree":{"call":{"function":"overdispersed","args":[{"name":"","value":{"bin_op":{"op":"mul","lhs":{"ident":{"name":{"name":"mu","kind":"parameter"}}},"rhs":{"ident":{"name":{"name":"X","kind":"compartment"}}}}}},{"name":"","value":{"ident":{"name":{"name":"sigma_sq","kind":"parameter"}}}}]}},"katex":"\\mathrm{overdispersed}\\!\\left(\\mu\\,X,\\, \\sigma_{sq}\\right)","katex_loss":[],"reads":[{"name":"mu","kind":"parameter"},{"name":"X","kind":"compartment"},{"name":"sigma_sq","kind":"parameter"}]}}},"guard":null,"lineage":false,"expands_to":["death"],"source_text":"death : X --> D  @ overdispersed(mu * X, sigma_sq)"}
+],"ode_equations":[],"balance":[],"initial":[
+{"compartment":"X","indices":[],"bindings":[],"value":{"expr":{"value":{"tree":{"ident":{"name":{"name":"X0","kind":"parameter"}}},"katex":"X_{0}","katex_loss":[],"reads":[{"name":"X0","kind":"parameter"}]}}},"source_text":"X = X0"}
+],"observations":[],"interventions":[],"events":[],"reactive_interventions":[],"scenarios":[],"simulation":{"from":{"tree":{"unit":{"value":0.0,"unit":"days"}},"katex":"0","katex_loss":["unit_dropped"],"reads":[]},"to":{"tree":{"unit":{"value":1.0,"unit":"days"}},"katex":"1","katex_loss":["unit_dropped"],"reads":[]},"dt":null,"integrator":null,"atol":null,"rtol":null,"source_text":"simulate {\n  from = 0 'days\n  to   = 1 'days\n}"},"output":null,"quantities":[],"contrasts":[]}}

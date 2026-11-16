@@ -1,0 +1,37 @@
+# A pure-death process with gamma environmental noise on its rate, used to
+# pin how that noise scales with the chain-binomial step size.
+#
+# What this model is: members of X die (X -> D) at the per-capita rate mu,
+# multiplied in each step by a unit-mean gamma variable G whose variance is
+# sigma_sq / dt. Over a span T the survivors are X(T) = X(0) exp(-mu W(T)),
+# up to binomial noise, where W(T) = sum of G dt over the steps is the
+# integrated noise. That is Gamma(shape T / sigma_sq, scale sigma_sq) at every
+# dt, so its mean is T and its variance sigma_sq T: the noise intensity per
+# unit of time does not depend on the step (Breto et al. 2009, gamma white
+# noise). With X(0) large the binomial noise is negligible and
+# -log(X(T) / X(0)) / mu reads W(T) off the run.
+#
+# It is fitted to nothing: it is a simulation fixture, compiled with its
+# parameters baked in by `make update-step-size-golden`.
+time_unit = 'days
+
+compartments { X, D }
+
+parameters {
+  mu       : rate              in [0.0, 5.0]   # per-capita death rate
+  sigma_sq : positive dim T    in [0.0, 5.0]   # noise intensity per unit time
+  X0       : count                             # initial size of X
+}
+
+transitions {
+  death : X --> D  @ overdispersed(mu * X, sigma_sq)
+}
+
+init {
+  X = X0
+}
+
+simulate {
+  from = 0 'days
+  to   = 1 'days
+}

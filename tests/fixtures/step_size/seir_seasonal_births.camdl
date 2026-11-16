@@ -1,0 +1,66 @@
+# A seasonally forced SEIR with births and deaths and short stages (latent
+# 5 days, infectious 4 days) and R0 = 17. Used to pin how the
+# chain-binomial step size changes the run's deterministic limit: at a very
+# large population the chain-binomial run is close to its own deterministic
+# map, which converges to the ODE as dt shrinks but differs from it at dt = 1.
+#
+# What this model is: susceptibles (S) are infected (S -> E) at a frequency-
+# dependent rate forced by a sinusoid with a one-year period; the exposed (E)
+# become infectious (I) at rate sigma; the infectious recover (R) at rate
+# gamma. Births enter S at mu * N, so the population is constant in
+# expectation, and every compartment dies at the per-capita rate mu.
+#
+# The initial state is near the unforced endemic equilibrium (S = N/R0, the
+# exposed and infectious at their equilibrium shares), so a few years of
+# burn-in carry the run onto its seasonal attractor.
+#
+# It is fitted to nothing: it is a simulation fixture, compiled with its
+# parameters baked in by `make update-step-size-golden`.
+time_unit = 'days
+
+compartments { S, E, I, R }
+
+let N = S + E + I + R
+
+parameters {
+  beta  : rate        in [0.0, 50.0]   # transmission rate; R0 = beta / gamma
+  sigma : rate        in [0.0, 5.0]    # E -> I; 1/sigma is the mean latent period
+  gamma : rate        in [0.0, 5.0]    # I -> R; 1/gamma is the mean infectious period
+  mu    : rate        in [0.0, 0.01]   # per-capita birth and death rate
+  alpha : probability in [0.0, 1.0]    # seasonal amplitude of transmission
+  N0    : count                        # population size
+}
+
+forcing {
+  seasonal : sinusoidal 'ratio {
+    amplitude = alpha
+    period    = 365.25
+    phase     = 0.0
+    baseline  = 1.0
+  }
+}
+
+transitions {
+  birth       :        --> S  @ mu * N
+  infection   : S --> E       @ beta * seasonal(t) * S * I / N
+  progression : E --> I       @ sigma * E
+  recovery    : I --> R       @ gamma * I
+  death_S     : S -->         @ mu * S
+  death_E     : E -->         @ mu * E
+  death_I     : I -->         @ mu * I
+  death_R     : R -->         @ mu * R
+}
+
+init {
+  S = floor(N0 * gamma / beta)
+  E = floor(N0 * mu * (1 - gamma / beta) / sigma)
+  I = floor(N0 * mu * (1 - gamma / beta) / gamma)
+  R = N0 - floor(N0 * gamma / beta) - floor(N0 * mu * (1 - gamma / beta) / sigma) - floor(N0 * mu * (1 - gamma / beta) / gamma)
+}
+
+output { trajectories { every = 7 'days } }
+
+simulate {
+  from = 0 'days
+  to   = 5479 'days
+}
