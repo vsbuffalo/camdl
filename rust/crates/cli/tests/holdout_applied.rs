@@ -168,13 +168,13 @@ dt = 1.0
     let meta_path = find_fit_meta(&fit_a.join("results")).unwrap();
     let mut meta: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
-    meta.as_object_mut().unwrap().remove("training_window");
+    meta.as_object_mut().unwrap().remove("training_partition");
     std::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap()).unwrap();
     let out = compare(&["a/fit.toml", "b/fit.toml"], &[]);
     assert!(!out.status.success(),
         "a fit without the applied-window proof must be refused");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("no applied training window"),
+    assert!(stderr.contains("no training partition"),
         "must name the missing proof and the fix:\n{stderr}");
 }
 
@@ -332,7 +332,7 @@ dt = 1.0
         .expect("fit run wrote a fit.meta.json under results/");
     let meta: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
-    assert_eq!(meta["training_window"]["train_end"], serde_json::json!(21.0),
+    assert_eq!(meta["training_partition"]["extent"]["t"], serde_json::json!(21.0),
         "fit.meta.json must record the applied training window: {meta}");
 
     // An all-cache-hit rerun rewrites the sidecar without re-loading data —
@@ -342,7 +342,7 @@ dt = 1.0
         String::from_utf8_lossy(&out2.stderr));
     let meta2: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
-    assert_eq!(meta2["training_window"]["train_end"], serde_json::json!(21.0),
+    assert_eq!(meta2["training_partition"]["extent"]["t"], serde_json::json!(21.0),
         "a cache-hit rerun must not erase the recorded training window");
 }
 
@@ -438,7 +438,7 @@ fn partial_holdout_refuses_training_data_inside_the_held_out_window() {
     let meta_path = find_fit_meta(&ok.join("results")).unwrap();
     let meta: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
-    assert_eq!(meta["training_window"]["train_end"], serde_json::json!(21.0),
+    assert_eq!(meta["training_partition"]["extent"]["t"], serde_json::json!(21.0),
         "train_end is the latest training time over all streams: {meta}");
 }
 
@@ -571,7 +571,7 @@ dt = 1.0
             .unwrap_or_else(|| panic!("{name}: no fit.meta.json under results/"));
         let meta: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
-        assert_eq!(meta["training_window"]["train_end"], serde_json::json!(21.0),
+        assert_eq!(meta["training_partition"]["extent"]["t"], serde_json::json!(21.0),
             "{name}: fit.meta.json must record the applied training window: {meta}");
     }
 }
@@ -638,13 +638,13 @@ dt = 1.0
     };
     // What a fit stored before its method recorded the window looks like.
     let mut meta = read();
-    meta.as_object_mut().unwrap().remove("training_window");
+    meta.as_object_mut().unwrap().remove("training_partition");
     std::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap()).unwrap();
 
     let out = run();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "rerun failed:\n{stderr}");
     assert!(stderr.contains("cache hit"), "the rerun reuses the stored run:\n{stderr}");
-    assert_eq!(read()["training_window"]["train_end"], serde_json::json!(21.0),
+    assert_eq!(read()["training_partition"]["extent"]["t"], serde_json::json!(21.0),
         "the cache-hit rerun must record the missing training window");
 }

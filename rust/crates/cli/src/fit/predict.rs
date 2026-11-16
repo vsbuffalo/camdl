@@ -1803,10 +1803,17 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     // The run's resolved observation window (gh#694). ONE window for the whole
     // command: the ordinary `quantities/` sidecar and the contrast arms both
     // fold through it, so they cannot disagree about what `last_obs` meant for
-    // this fit. `None` iff no leaf carries an observation time — the callers
-    // below then have nothing to anchor to and say so.
+    // this fit. It is the fit's own window, read by the reader the model's
+    // anchors use (`obs_anchor::fit_window`): the observed window of the
+    // training rows (D40), so held-out rows appended to the file move no
+    // `value_at(..., last_obs)`. `None` iff no leaf carries an observation
+    // time — the callers below then have nothing to anchor to and say so.
     let quantity_obs_anchors: Option<sim::quantity::ObsAnchorTimes> =
-        sim::quantity::ObsAnchorTimes::of_times(leaf_times.iter().flatten().copied());
+        match leaf_times.iter().all(Vec::is_empty) {
+            true => None,
+            false => Some(crate::obs_anchor::fit_window(&model, &config).map_err(|e| format!(
+                "resolving the observed window `last_obs` / `first_obs` refer to: {e}"))?),
+        };
 
     // What refused. Non-empty ⇒ the artifact this run writes is incomplete, the
     // failures are named in `report.json`, and the exit status is 1 — but every
@@ -3028,7 +3035,7 @@ fn load_leaf_obs(
         )?;
         let stream_times =
             crate::pfilter::stream_times_of_rows(obs_model, &rows, data_path, &time_opts)?;
-        let (obs, cells, aux) = crate::fit::runner::observation_columns(rows);
+        let (obs, cells, aux) = crate::fit::runner::observation_columns(&rows);
         let times: Vec<f64> = obs.iter().map(|o| o.time).collect();
         let observed: Vec<Option<f64>> = cells
             .iter()
@@ -3794,7 +3801,7 @@ fn one_step_bands(
             crate::fit::runner::load_observations(data_path, obs_model, &siblings, &time_opts)?;
         let projection = StreamProjection::from_ir(&obs_model.projection, &compiled, &obs_model.name)?;
         let times = crate::pfilter::stream_times_of_rows(obs_model, &rows, data_path, &time_opts)?;
-        let (obs, cells, aux) = crate::fit::runner::observation_columns(rows);
+        let (obs, cells, aux) = crate::fit::runner::observation_columns(&rows);
         obs_streams.push(ObsStream {
             name: obs_model.name.clone(),
             projection,
@@ -3803,6 +3810,7 @@ fn one_step_bands(
             cells,
             aux,
             times,
+            rows,
         });
         bound_leaves.push(obs_model);
     }

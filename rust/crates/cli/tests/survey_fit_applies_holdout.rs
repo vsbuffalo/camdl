@@ -150,7 +150,7 @@ fn a_holdout_after_is_left_out_of_every_point() {
     assert!(out.status.success(), "survey of a holdout_after config failed:\n{err}");
     assert_eq!(logliks(&tmp.0.join("res")), reference,
         "every point must score the training rows only");
-    assert!(err.contains("2 observation row(s) at t > 4 withheld from training"),
+    assert!(err.contains("2 observation row(s) ending after t = 4 withheld from training"),
         "the run must say what the holdout withheld:\n{err}");
 }
 

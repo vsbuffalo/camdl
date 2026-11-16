@@ -56,9 +56,7 @@ pub(crate) struct ObservedRow {
     pub measures: Measures,
     /// The row's time cells as the file wrote them: `[window_start, time]` for a
     /// stream with per-row windows (where the time column is `window_stop`),
-    /// `[time]` otherwise.
-    #[cfg_attr(not(test), expect(dead_code, reason = "foundation for the temporal-architecture \
-        migration; read by the row digest"))]
+    /// `[time]` otherwise. Hashed by the row digest; never compared.
     pub temporal: Vec<TemporalCell>,
     /// The observed value; `None` is an `NA` row (a hole), which keeps its
     /// period.

@@ -4083,9 +4083,9 @@ fn simulate_on_bound_design(
 /// paths resolve against the segment — co-located data only, the same limit
 /// `fit predict <run-dir>` has). Streams load through the same shared seam as
 /// pfilter/profile, so dated time columns, long-form families, and holes
-/// resolve exactly as at fit time; anchors fold over the raw streams. Hole
-/// rows count as observation times, matching `fit predict`'s `value_at`
-/// anchor.
+/// resolve exactly as at fit time; anchors fold over the training rows the
+/// config's `holdout_after` leaves, and rows whose value is `NA` count
+/// toward neither anchor (D40).
 fn o_source(o: &ir::observation::ObservationModel) -> String { o.source.clone() }
 
 fn resolve_simulate_obs_anchors(
@@ -4129,7 +4129,8 @@ pub(crate) fn obs_anchors_from_config(
     let bound: Vec<(String, std::path::PathBuf)> = effective_pairs.iter()
         .map(|(k, v)| (k.clone(), std::path::PathBuf::from(v)))
         .collect();
-    obs_anchors_from_bindings(model, &bound, dt)
+    obs_anchors_from_bindings(model, &bound, dt,
+        config.data.as_ref().and_then(|d| d.holdout_after.as_ref()))
 }
 
 /// The fold itself, over `(binding key → file)` pairs a command has ALREADY
@@ -4137,10 +4138,18 @@ pub(crate) fn obs_anchors_from_config(
 /// come from `--data` flags as often as from a fit toml, and re-deriving the
 /// window from a config they may not have would be a second reader that could
 /// disagree with the one they score against.
+///
+/// The anchors are the observed window of the training rows (D40,
+/// `docs/dev/temporal-architecture.md` §4.7): `first_obs` the earliest start
+/// and `last_obs` the latest end of a row that carries a value, across every
+/// bound stream. Under `holdout_after` the training rows are the ones the fit
+/// trains on (the cutoff's own anchors resolve over the full files), so rows
+/// appended after the cutoff move no anchor; without one every row trains.
 pub(crate) fn obs_anchors_from_bindings(
     model: &ir::Model,
     bound: &[(String, std::path::PathBuf)],
     dt: f64,
+    holdout_after: Option<&crate::fit::config_v2::TimeSpecToml>,
 ) -> Result<(f64, f64), String> {
     if bound.is_empty() {
         return Err("no observation stream is bound — nothing to anchor \
@@ -4153,33 +4162,31 @@ pub(crate) fn obs_anchors_from_bindings(
         t_start: model.simulation.t_start,
         format: crate::caltime_load::TimeFormat::Auto,
     };
-    // Only the observation TIMES are needed, so the streams load through
-    // `load_observations` directly (the same reader the shared seam wraps) —
-    // no CompiledModel, so a model whose estimated params carry no values
-    // still anchors. Conditioning is NOT applied (anchors fold over the raw
-    // streams), and hole rows count as observation times, both matching
-    // `fit predict`'s value_at anchor.
+    // The rows load through `load_observations` directly (the same reader the
+    // shared seam wraps) — no CompiledModel, so a model whose estimated params
+    // carry no values still anchors.
     let effective = crate::fit::runner::data_bindings_to_effective(model, bound)?;
-    let mut first = f64::INFINITY;
-    let mut last = f64::NEG_INFINITY;
+    let mut rows: std::collections::BTreeMap<String, Vec<crate::fit::observed_rows::ObservedRow>> =
+        std::collections::BTreeMap::new();
     for obs_model in model.observations.iter().filter(|o| effective.contains_key(&o.source)) {
         let data_path = &effective[&o_source(obs_model)];
         let siblings: Vec<&ir::observation::ObservationModel> = model.observations.iter()
             .filter(|o| o.source == obs_model.source)
             .collect();
-        let rows = crate::fit::runner::load_observations(
+        rows.insert(obs_model.name.clone(), crate::fit::runner::load_observations(
             data_path, obs_model, &siblings, &time_opts,
-        )?;
-        for r in &rows {
-            first = first.min(r.label());
-            last = last.max(r.label());
+        )?);
+    }
+    let training: Vec<&crate::fit::observed_rows::ObservedRow> = match holdout_after {
+        Some(spec) => {
+            let partition = crate::fit::runner::cutoff_partition(spec, &rows, model)?;
+            rows.iter().flat_map(|(s, rs)| &rs[..partition.rows(s)]).collect()
         }
-    }
-    if !first.is_finite() || !last.is_finite() {
-        return Err("the bound observation streams contain no rows — nothing \
-                    to anchor last_obs/first_obs to.".into());
-    }
-    Ok((first, last))
+        None => rows.values().flatten().collect(),
+    };
+    crate::fit::training_partition::observed_window(training).ok_or_else(||
+        "the bound observation streams contain no observed row — nothing \
+         to anchor last_obs/first_obs to.".to_string())
 }
 
 /// Generate observation times from an IR schedule, confined to `t_end`.
