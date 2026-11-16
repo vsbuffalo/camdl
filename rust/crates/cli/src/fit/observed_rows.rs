@@ -51,6 +51,13 @@ impl Measures {
 pub(crate) struct ObservedRow {
     /// The row's index among this leaf's rows, in file order.
     pub position: usize,
+    /// The row's time cell (`window_stop` for a stream with per-row windows)
+    /// in model time: what the file labels the row with, not what it
+    /// measures. Read where the file's own time is the answer: writing the
+    /// time column back (`obs_emit`), the time column of `fit predict`'s
+    /// tables, the refusal of a row labelled before the run starts
+    /// (`check_obs_before_origin`), and the row a refusal names.
+    pub label: f64,
     /// The instant or period the row measures, from the stream's `covers`
     /// declaration or its window columns.
     pub measures: Measures,
@@ -64,22 +71,6 @@ pub(crate) struct ObservedRow {
     /// The auxiliary values the likelihood reads (a binomial denominator, an
     /// offset). Empty for a hole.
     pub aux: Vec<(String, f64)>,
-    /// The row's time cell converted to model time, before `covers` gives it a
-    /// period. Private: only the label-keyed sites that Stage 2 of the
-    /// temporal-architecture migration replaces read it, through
-    /// [`ObservedRow::label`], and Stage 2 removes it.
-    label: f64,
-}
-
-impl ObservedRow {
-    /// The row's time cell in model time — not what the row measures. Read by
-    /// the sites that still compare labels (the holdout cut, observation
-    /// anchors) until Stage 2 of the
-    /// temporal-architecture migration moves them onto [`Self::measures`] and
-    /// removes this accessor.
-    pub(crate) fn label(&self) -> f64 {
-        self.label
-    }
 }
 
 /// Whether the file wrote `rows`' time cells as ISO dates. Read off each row's
@@ -159,7 +150,7 @@ pub(crate) fn observed_rows(
                 Some(start) => vec![start, written],
                 None => vec![written],
             };
-            ObservedRow { position, measures, temporal, cell, aux, label }
+            ObservedRow { position, label, measures, temporal, cell, aux }
         })
         .collect())
 }
@@ -304,7 +295,7 @@ mod tests {
             assert_eq!(rows.iter().map(|r| r.measures.end()).collect::<Vec<_>>(),
                 expected.iter().map(|&(_, stop)| stop).collect::<Vec<_>>(),
                 "{form}: a period row ends at its period's stop");
-            assert_eq!(rows.iter().map(|r| r.label()).collect::<Vec<_>>(), vec![21.0, 28.0],
+            assert_eq!(rows.iter().map(|r| r.label).collect::<Vec<_>>(), vec![21.0, 28.0],
                 "{form}: the label is the time cell, whatever the form");
             assert_eq!(rows.iter().map(|r| r.position).collect::<Vec<_>>(), vec![0, 1]);
             assert_eq!(rows[0].temporal, vec![TemporalCell::Number(21.0)], "{form}");
@@ -332,7 +323,7 @@ mod tests {
         let rows = observed_rows(&path, &obs, &[&obs], &numeric_opts()).unwrap();
         assert_eq!(periods(&rows), vec![(14.0, 21.0), (24.0, 28.0)]);
         assert_eq!(rows[1].temporal, vec![TemporalCell::Number(24.0), TemporalCell::Number(28.0)]);
-        assert_eq!(rows[1].label(), 28.0, "the label of a windowed row is its window_stop");
+        assert_eq!(rows[1].label, 28.0, "the label of a windowed row is its window_stop");
     }
 
     /// A state read (no `covers`, a prevalence projection) measures the
