@@ -123,6 +123,17 @@ pub enum TemporalCell {
     Date(String),
 }
 
+/// The cell as the file wrote it: a number in Rust's shortest form, a date as
+/// its text.
+impl std::fmt::Display for TemporalCell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TemporalCell::Number(x) => write!(f, "{x}"),
+            TemporalCell::Date(d) => f.write_str(d),
+        }
+    }
+}
+
 /// The cells of one temporal column, already converted to `times` by
 /// [`convert_time_column`], as written. A column [`cells_are_dated`] calls
 /// dated gives each cell's trimmed text; a numeric one gives each cell's
