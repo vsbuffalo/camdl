@@ -115,6 +115,30 @@ fn positive_incidence_at_origin_is_named_error() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// A row labelled before the run is refused for what it measures, not for its
+/// label: the refusal names the period that opens before `t_start`, the same
+/// one a row labelled at the origin earns. A label is only the row's name, so
+/// the before-origin decision reads the period (D59).
+#[test]
+fn a_period_row_labelled_before_the_run_is_refused_by_its_period() {
+    let camdl = camdl_bin();
+    let tmp = tempdir("prelabel");
+    let model = seed_timing_ir();
+
+    // `closing_at(time, 1 'days)`: the row labelled -2 measures [-3, -2).
+    let data = tmp.join("pre.tsv");
+    std::fs::write(&data, "time\tcases\n-2\t11\n-1\t11\n0\t11\n1\t75\n").unwrap();
+
+    let out = pfilter(&camdl, &model, &data);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "a pre-run period must be refused; stderr:\n{stderr}");
+    assert!(
+        stderr.contains("first declared period opens at -3") && stderr.contains("t_start = 0"),
+        "the refusal must name the period the row measures; got:\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// An `NA` at the origin is not an observation: its period `[-1, 0)` precedes
 /// the run, but there is nothing to score there and no reset the run could
 /// reach, so the loader drops the row rather than refusing the file. This is
