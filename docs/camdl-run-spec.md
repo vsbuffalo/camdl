@@ -2888,8 +2888,9 @@ scoring see the full series.
 The fit prints the rows it trained on, the training extent and what was withheld
 (for example
 `holdout: trained on 9 row(s) through t = 10; 7
-observation row(s) ending after t = 10 withheld from training`),
-and the first held-out row of each stream as the file writes it, and records the
+observation row(s) ending after t = 10 withheld from training`,
+followed by a note that `camdl compare` scores them out of sample), and the
+first held-out row of each stream as the file writes it, and records the
 partition in `fit.meta.json` (`training_partition`). `camdl compare` scores such
 a fit out of sample on every row that did not train and ends after the training
 extent (stamped `held-out tail`, with `train_end` the extent), after checking
@@ -4670,7 +4671,7 @@ over-invalidation.
 
 One pinned function and encoding, in `rust/crates/runid/src/hash.rs`:
 
-- SHA-256, recorded by `HASH_VERSION` (currently `4`), folded into every root
+- SHA-256, recorded by `HASH_VERSION` (currently `5`), folded into every root
   hash so the whole store migrates on a single bump.
 - **Domain separation.** Every named type writes its fully-qualified type name
   (length-prefixed) then its `SCHEMA_VERSION` before any field.
@@ -6755,14 +6756,17 @@ factor.
 Getting this wrong changes what your data means, so it is stated per-path rather
 than per-backend.
 
-**Inference (particle filter, IF2, PGAS, PMMH) — exact landing at `t`.** The
-filter builds an `Exact`-policy timeline (`ExactInferenceTimeline::build`,
+**Inference (particle filter, IF2, PMMH) — exact landing at `t`.** The filter
+builds an `Exact`-policy timeline (`ExactInferenceTimeline::build`,
 `intervention.rs`, called from `particle_filter.rs`) whose substep is
 `dt.min(next_boundary − t)`, so the walk lands **exactly on the observation
 time** even when it is off the `dt` grid. There is no snapping to a step
-boundary. Scoring happens after the window walk completes, at the landed state.
-A scheduled effect whose fire time is off the `dt` grid is refused loudly at
-timeline construction rather than being silently re-tiled.
+boundary. PGAS steps only on its grid, so the run is refused before it starts if
+any period boundary lies off it (§6.5); a boundary it accepts is on a grid time,
+so it too is scored at the time the row measures. Scoring happens after the
+window walk completes, at the landed state. A scheduled effect whose fire time
+is off the `dt` grid is refused loudly at timeline construction rather than
+being silently re-tiled.
 
 **ODE inference — the recorded output snapshot must land on the obs time.** The
 deterministic likelihood (`compute_ode_loglik`, `inference/ode_loglik.rs`)
