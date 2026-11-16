@@ -688,6 +688,7 @@ pub fn eval_resolved(expr: &ResolvedExpr, ctx: &EvalCtx<'_>) -> f64 {
                 Some(lag) => ctx.t - eval_resolved(lag, ctx),
                 None => ctx.t,
             };
+            tf.note_evaluated_at(t_eff);
             eval_forcing(&tf.kind, t_eff, ctx)
         }
 
@@ -699,6 +700,7 @@ pub fn eval_resolved(expr: &ResolvedExpr, ctx: &EvalCtx<'_>) -> f64 {
                 Some(lag) => ctx.t - eval_resolved(lag, ctx),
                 None => ctx.t,
             };
+            tf.note_evaluated_at(t_eff);
             crate::propensity::eval_forcing_basis(&tf.kind, t_eff, *index as usize, *space)
         }
 
