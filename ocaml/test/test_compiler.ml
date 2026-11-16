@@ -11249,6 +11249,67 @@ let test_phase2_date_range_non_aligned_end_w328 () =
   let d = expect_diag ~severity:Diagnostics.Warning ~code:"W328" src in
   assert_hint_contains ~needle:"inclusive_end" d
 
+(* gh#1100: `inclusive_end = false` stops at the last boundary strictly
+   before `end` (proposal 2026-05-22 §4), so an end that lands on the
+   cadence is dropped. With the default `true` the same end is kept. *)
+let w328_count src =
+  match compile_with_diags src with
+  | Error e -> Alcotest.failf "compile failed: %s" e
+  | Ok d ->
+    List.length (List.filter (fun (x : Diagnostics.diagnostic) ->
+        x.code = "W328") (diags_of_detail d))
+
+let check_date_range ~label ~at_expr ~expected =
+  let src = anchored_at_src ~at_expr in
+  Alcotest.(check (list (float 1e-9))) label expected
+    (at_times_of_first_intervention src);
+  Alcotest.(check int) (label ^ ": no W328") 0 (w328_count src)
+
+let test_gh1100_exclusive_end_fixed_day () =
+  (* Jan 29 is day 28, on the weekly cadence from Jan 1. *)
+  check_date_range ~label:"exclusive drops on-cadence end"
+    ~at_expr:"date_range(date(\"2020-01-01\"), date(\"2020-01-29\"), \
+              every = 7 'days, inclusive_end = false)"
+    ~expected:[0.0; 7.0; 14.0; 21.0];
+  check_date_range ~label:"inclusive keeps on-cadence end"
+    ~at_expr:"date_range(date(\"2020-01-01\"), date(\"2020-01-29\"), \
+              every = 7 'days, inclusive_end = true)"
+    ~expected:[0.0; 7.0; 14.0; 21.0; 28.0];
+  check_date_range ~label:"exclusive, off-cadence end unchanged"
+    ~at_expr:"date_range(date(\"2020-01-01\"), date(\"2020-01-30\"), \
+              every = 7 'days, inclusive_end = false)"
+    ~expected:[0.0; 7.0; 14.0; 21.0; 28.0]
+
+let test_gh1100_exclusive_end_calendar () =
+  (* May 1 is day 121, on the monthly cadence from Jan 1. *)
+  check_date_range ~label:"exclusive drops on-cadence end"
+    ~at_expr:"date_range(date(\"2020-01-01\"), date(\"2020-05-01\"), \
+              calendar_months = 1, inclusive_end = false)"
+    ~expected:[0.0; 31.0; 60.0; 91.0];
+  check_date_range ~label:"inclusive keeps on-cadence end"
+    ~at_expr:"date_range(date(\"2020-01-01\"), date(\"2020-05-01\"), \
+              calendar_months = 1)"
+    ~expected:[0.0; 31.0; 60.0; 91.0; 121.0];
+  check_date_range ~label:"exclusive, off-cadence end unchanged"
+    ~at_expr:"date_range(date(\"2020-01-01\"), date(\"2020-05-02\"), \
+              calendar_months = 1, inclusive_end = false)"
+    ~expected:[0.0; 31.0; 60.0; 91.0; 121.0];
+  check_date_range ~label:"exclusive, calendar_years"
+    ~at_expr:"date_range(date(\"2020-01-01\"), date(\"2022-01-01\"), \
+              calendar_years = 1, inclusive_end = false)"
+    ~expected:[0.0; 366.0]
+
+let test_gh1100_exclusive_end_equal_to_start () =
+  (* [start, start) is empty: `start` is itself the end, so it goes. *)
+  check_date_range ~label:"fixed-day, end = start"
+    ~at_expr:"date_range(date(\"2020-01-01\"), date(\"2020-01-01\"), \
+              every = 7 'days, inclusive_end = false)"
+    ~expected:[];
+  check_date_range ~label:"calendar, end = start"
+    ~at_expr:"date_range(date(\"2020-01-01\"), date(\"2020-01-01\"), \
+              calendar_months = 1, inclusive_end = false)"
+    ~expected:[]
+
 let test_phase2_date_range_zero_cadence_errors () =
   expect_error_code
     ~code:"E329"
@@ -16444,6 +16505,12 @@ let () =
         `Quick test_gh1068_date_range_leap_day_calendar_years;
       Alcotest.test_case "W328 non-aligned end fires with inclusive_end hint"
         `Quick test_phase2_date_range_non_aligned_end_w328;
+      Alcotest.test_case "gh#1100 inclusive_end = false drops an on-cadence end (every)"
+        `Quick test_gh1100_exclusive_end_fixed_day;
+      Alcotest.test_case "gh#1100 inclusive_end = false drops an on-cadence end (calendar)"
+        `Quick test_gh1100_exclusive_end_calendar;
+      Alcotest.test_case "gh#1100 inclusive_end = false with end = start is empty"
+        `Quick test_gh1100_exclusive_end_equal_to_start;
       Alcotest.test_case "E329 every = 0 rejected as non-positive"
         `Quick test_phase2_date_range_zero_cadence_errors;
       Alcotest.test_case "E329 calendar_months = -1 rejected as non-positive"
