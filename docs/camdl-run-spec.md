@@ -4798,9 +4798,11 @@ different models (the `model` level; `config` is unchanged).
 - `fit` — `FitDigest`: the `ModelDigest`; the content digest of each resolved
   _training_ stream; the content digest of each `[data.holdout]` stream; the
   digest of the whole canonicalized fit.toml **less** `method`, `fit_seeds` and
-  `output_dir`; and the engine version. The fit level hashes the problem alone,
-  so two files that differ only in `[method]` share it. Model and data _paths_
-  stay in the blob — a rename over-invalidates harmlessly.
+  `output_dir`; the engine version; and the version of the rule that decides
+  which rows train (`PARTITION_RULE_VERSION`, §6.2), so a change to the rule
+  re-keys every fit. The fit level hashes the problem alone, so two files that
+  differ only in `[method]` share it. Model and data _paths_ stay in the blob —
+  a rename over-invalidates harmlessly.
 - `method` — `MethodLevel` = `MethodConfig` folded with `deps`. `MethodConfig`
   carries the digest of `Method::identity_payload()` — the algorithm block and
   the resolved `starts` rule — re-augmented with `n_trajectories`, plus

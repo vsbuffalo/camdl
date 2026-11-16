@@ -3764,6 +3764,34 @@ mod tests {
             "[data.observations]: one training digest per source");
     }
 
+    /// The version of the rule that decides which rows train is part of the
+    /// fit identity. The identity keys the training files' bytes and the
+    /// config, not the rows the rule picks from them, so a change to the rule
+    /// would otherwise serve a stored fit for a run that trains on other rows
+    /// unless someone remembered to bump `HASH_VERSION` by hand.
+    #[test]
+    fn the_partition_rule_version_is_in_the_fit_identity() {
+        use runid::ContentAddressed;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let train = tmp.path().join("cases_long.tsv");
+        std::fs::write(&train, b"time\tpatch\tcases\n7\turban\t12\n7\trural\t3\n").unwrap();
+        let model = golden_model("ocaml/golden/sir_two_patch_long_obs.ir.json");
+        let problem = config_v2::FitConfig::from_toml_str(&format!(
+            "[model]\ncamdl = \"m.ir.json\"\n[data]\nfile = \"{}\"\n\
+             [estimate]\nbeta = {{ bounds = [0.01, 0.5] }}\n[fixed]\nrho = 0.5\n\
+             [method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
+             chains = 1\nparticles = 10\niterations = 1\ncooling = 0.7\n",
+            train.display()))
+            .expect("fixture fit.toml parses").problem;
+        let data = read_data_digests(problem.data_spec().unwrap(), &model).unwrap();
+        let d = cas::fit_level_digest(&model, "pin-ir", "pin-engine", &problem, &data).unwrap();
+        assert_eq!(d.partition_rule_version, training_partition::PARTITION_RULE_VERSION);
+        let mut next_rule = d.clone();
+        next_rule.partition_rule_version += 1;
+        assert_ne!(d.content_hash(), next_rule.content_hash(),
+            "a new partition rule must re-key the fit");
+    }
+
     /// `fit.meta.json`'s `data_hashes` is keyed by source in every `[data]`
     /// form. Under the one-file shorthand it was keyed by leaf, so a model
     /// whose `cases[p in patch]` block expands to `cases_urban`/`cases_rural`

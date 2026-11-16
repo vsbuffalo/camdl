@@ -808,9 +808,11 @@ fn cas_identity_pins() {
         // in the sim, pfilter, profile and survey identities. Off, as here, it
         // is omitted from the pfilter, survey and profile config levels; the
         // `sim` and `sim_ensemble` config level (`SimConfig`) carries it as a
-        // field, so their bytes change beyond the version.
+        // field, so their bytes change beyond the version. `fit` also gained
+        // the partition rule version in its `fit` level (`FitDigest`); no
+        // other kind hashes a `FitDigest`.
         ("sim", "98f90aa0798e73f95c33fb4f13d5e51ca7b8904151f3a73cff4967c8e39524d0"),
-        ("fit", "d8c38bba7d9776fba17ce7ef9c5bfb606753d9affbf46d57d02aeca3bebde077"),
+        ("fit", "c4d6ce8fda76c8487717be55413205d4c7dccad72b379ffe3c05ea1a9ee1bd8d"),
         ("pfilter", "c879beec599b79f161181ea9da27737c3599eec7bcd332e9ce77cdde5e4cac58"),
         ("survey", "436c5bde01f453c1dd503bebc936fb9d2b6ae38685e5fe6f60878a999cfa20ee"),
         ("sim_ensemble", "9e383b95adc5647a6f8ecb86e6bfa40e9b3a9266373c24745df0e7deb4eee7a8"),
