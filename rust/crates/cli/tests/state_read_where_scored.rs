@@ -227,6 +227,34 @@ fn fit_predict_evaluates_each_row_where_it_is_scored() {
          (the row scored at 7 is {})", mean_at(&i_at, 14), mean_at(&i_at, 7));
 }
 
+/// `simulate --obs` draws each row from the state, and with the time, where
+/// the row is scored, and writes it under its label.
+#[test]
+fn obs_draws_each_row_from_the_state_where_it_is_scored() {
+    let tmp = tempdir("obs");
+    let dir = &tmp.0;
+    let (_, i_at) = setup(dir);
+    ok(camdl(dir, &["simulate", "m.ir.json", "--params", "truth.toml", "--backend", "ode",
+        "--seed", "3", "--obs", "obs.tsv"]), "simulate --obs");
+    let text = std::fs::read_to_string(dir.join("obs.tsv")).unwrap();
+    let mut lines = text.lines();
+    let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+    let (tc, vc) = (header.iter().position(|c| *c == "time").unwrap(),
+        header.iter().position(|c| *c == "cases").unwrap());
+    let rows: Vec<(f64, f64)> = lines.map(|l| {
+        let f: Vec<&str> = l.split('\t').collect();
+        (f[tc].parse().unwrap(), f[vc].parse().unwrap())
+    }).collect();
+    assert_eq!(rows.iter().map(|r| r.0).collect::<Vec<_>>(), vec![0.0, 7.0, 14.0, 21.0, 28.0, 35.0],
+        "weekly rows under their labels; the one whose period passes the horizon is not written");
+    for (label, v) in rows {
+        let stop = label as usize + 7;
+        assert!((v - mean_at(&i_at, stop)).abs() < 0.01,
+            "row labelled {label} is scored at {stop}: expected I·t = {}, got {v} (at the \
+             label it is {})", mean_at(&i_at, stop), mean_at(&i_at, label as usize));
+    }
+}
+
 /// A quantity over `observations.<stream>` names each draw by its row's label,
 /// as the `--obs` file does, so the two agree about which row is at time T.
 /// The stream is pure incidence (`poisson(rate = projected)`), so nothing in
