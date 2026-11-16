@@ -301,6 +301,16 @@ pub(crate) fn write_diagnostics_then_fail(
 /// backstop cannot see these paths. Routing every fatal exit of a running
 /// method through this one function is what makes "a method always leaves a
 /// terminal record" true rather than nearly true.
+/// Stop a method whose run was refused for evaluating a forcing outside its
+/// range ([`crate::forcing_extrapolation::refused`]): its claim is failed with
+/// the refusal. Polled once per iteration by the samplers' progress callbacks
+/// and once before the finalize, which covers every method.
+pub(crate) fn stop_if_refused(out: &crate::out::Out) {
+    if let Some(message) = crate::forcing_extrapolation::refused() {
+        abandon_method(out, message);
+    }
+}
+
 pub(crate) fn abandon_method(out: &crate::out::Out, message: String) -> ! {
     let message = match out.method_leaf() {
         Some(leaf) => write_diagnostics_then_fail(&out.collector(), leaf, message),
@@ -1635,6 +1645,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // runners and the chain workers, and each `out.fail` — marks the
         // leaf `failed` before the process exits (`Out::error`).
         out.hold_claim(write, method_name);
+        // A forcing refused from here on fails this claim, through `out`.
+        let _refusal_deferred = crate::forcing_extrapolation::defer_while_claimed();
 
         // gh#147 (M3.2): seed the resumed leaf with the base chain's files —
         // its resume state and the rows it has written — copied from the
@@ -2334,6 +2346,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             inputs_json[resumed_chain::RESUME_KEY] = serde_json::to_value(&lineage)
                 .unwrap_or_else(|e| abandon_method(&out, format!("error: --resume lineage: {e}")));
         }
+        stop_if_refused(&out);
         let mut write = out.take_claim().expect("the claim is held from the claim to here");
         // A run that completes under `--label L` is stamped as it completes,
         // under the store's label lock, and so becomes `@L`; the holder it
