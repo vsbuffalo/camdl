@@ -11862,9 +11862,12 @@ let check_surface_time_typing ctx =
        Instant + Instant, k · Instant, Duration − Instant, and an
        instant moved by a bare number. Every site that is Rule-1-walked
        is walked for these too, so the two refusals cover the same
-       positions. *)
+       positions. A unitless offset is judged by `const_expr_dim`, the
+       rule the observation-anchor offsets use (`classify_anchor`). *)
     if anchored then
-      Time_typing.walk_instant_misuse env e ~on_hit:(fun misuse node ->
+      Time_typing.walk_instant_misuse env e
+        ~unitless:(fun off -> const_expr_dim off = Some (0, 0))
+        ~on_hit:(fun misuse node ->
         Diagnostics.error ctx.diags
           ~code:"E360"
           ~loc
