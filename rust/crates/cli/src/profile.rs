@@ -1841,7 +1841,9 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                         .find(|o| &o.param == n).map(|o| o.model.clone()) })
                 .collect(),
             parameters_provenance: parameters_provenance.clone(),
-            training_partition: Some(training_partition.record(model.origin.as_deref(), &model.time_unit)),
+            training_partition: Some(training_partition.record(
+                &ir::caltime::CalendarAxis::from_model(&model)
+                    .unwrap_or_else(|e| out.fail(format!("error: {e}"))))),
             ..Default::default()
         };
         // Archive the producing `fit.toml` (best-effort; `write_fit_sidecar`
