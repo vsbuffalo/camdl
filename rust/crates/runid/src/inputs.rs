@@ -440,6 +440,12 @@ pub struct FitDigest {
     /// Content digest of the whole canonicalized fit.toml document.
     pub fit_toml: ContentHash,
     pub engine: EngineVersion,
+    /// The version of the rule that decides which rows train
+    /// (`cli` `fit::training_partition::PARTITION_RULE_VERSION`). The fields
+    /// above key the training files and the config, not the rows the rule
+    /// picks from them, so a change to the rule re-keys every fit here rather
+    /// than through a `HASH_VERSION` bump someone has to remember.
+    pub partition_rule_version: u16,
 }
 
 /// One method's config (the `method` level): the whole canonicalized `Method`

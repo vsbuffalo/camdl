@@ -59,6 +59,7 @@ fn golden_fixtures() -> Vec<(&'static str, ContentHash)> {
         holdout_data: vec![DataDigest(ContentHash::from_bytes([2; 32]))],
         fit_toml: ContentHash::from_bytes([3; 32]),
         engine: EngineVersion("0.3.0".into()),
+        partition_rule_version: 1,
     };
     let method = MethodConfig {
         config: ContentHash::from_bytes([7; 32]),
@@ -111,7 +112,9 @@ fn canonical_encoding_is_pinned() {
     // HASH_VERSION 4 -> 5 (temporal-architecture Stage 2, D58): every pin
     // moved once more for the version. `SimConfig` also gained
     // `allow_forcing_extrapolation` (false here), so its bytes and
-    // `run_id(Sim)` change beyond the version.
+    // `run_id(Sim)` change beyond the version, and `FitDigest` gained
+    // `partition_rule_version` (1 here), so its bytes and `run_id(FitMethod)`
+    // do too.
     let expected: &[(&str, &str)] = &[
         ("Backend::ChainBinomial", "ae1fc9f6ffcc50b05d072dd11749b66b1019d2cebea8792b2820c91b5f79051d"),
         ("CalendarMode::Numeric", "77cdf1d32162b8ec7afa291c00683fc91864762ceea4d7e944b8e3a0d220997f"),
@@ -128,14 +131,14 @@ fn canonical_encoding_is_pinned() {
         // (the fixture now carries one factor, so the encoding of a non-empty
         // scale is pinned too). `run_id(Sim)` moves with it.
         ("ResolvedScenario", "ca0347c70143df811707b4d5b579522536933c674ff713e12e7dbcf646c1f2fa"),
-        ("FitDigest", "dbbcd2a4f51f55b9b0dcef80a2a9b783d499cbe6f02eede48f6b0a7ba7b21319"),
+        ("FitDigest", "4c628f3f532743d0f29eff7d52e65ef15c7a3d527e252634f3cee57a221fca44"),
         // The `[stages]` -> `[method]` rename: the type is `MethodConfig`, not
         // `StageConfig`, and the derive hashes the fully-qualified type name as
         // its domain tag. Same fields, same bytes, new tag; `run_id(FitMethod)`
         // moves with it. Nothing else here moves.
         ("MethodConfig", "72b3454e9ccd6eb83482c8e2fdf8a7d190ede689bf1e6d347c21ca51f1d19a69"),
         ("run_id(Sim)", "222827403759aee9a9cb5e06249cf12d541048c8e7c0dc6e8d0683c4514733b8"),
-        ("run_id(FitMethod)", "38895dc1b5c29ed3c29c6c555fbdf27a38a36b413d6cf5b20accdf001559579e"),
+        ("run_id(FitMethod)", "d216925be3ab4e4b6fb14ee43c0db06874d49133907e15566a57d548777b15f6"),
     ];
     let actual = golden_fixtures();
     assert_eq!(actual.len(), expected.len(), "fixture/expected count drift");
@@ -237,6 +240,7 @@ fn fit_digest_holdout_content_is_keyed() {
         holdout_data: vec![DataDigest(ContentHash::from_bytes([2; 32]))],
         fit_toml: ContentHash::from_bytes([3; 32]),
         engine: EngineVersion("0.3.0".into()),
+        partition_rule_version: 1,
     };
     // Only the holdout stream's content digest differs (same training data,
     // same fit.toml blob → same holdout *path*).

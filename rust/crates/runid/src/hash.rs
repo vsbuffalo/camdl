@@ -62,9 +62,12 @@ use sha2::{Digest, Sha256};
 ///      `holdout_after` fit on a `day`, `starting_on` or `ending_on` stream
 ///      no longer trains the row whose period straddles the cutoff, and a
 ///      model anchored at `last_obs` resolves it to the latest end of an
-///      observed training row (D40). The fit identity's inputs are unchanged
-///      (model, training-file bytes, the config blob), so without this bump
-///      a stored fit would answer for a run that now trains on other rows.
+///      observed training row (D40). The fit identity's inputs (model,
+///      training-file bytes, the config blob) do not name the rows, so
+///      without this bump a stored fit would answer for a run that now trains
+///      on other rows. `FitDigest` now also carries the rule's version
+///      (`partition_rule_version`), so the next change to the rule re-keys
+///      every fit without a bump here.
 ///   2. *The forcing-extrapolation override is identity* for `simulate`,
 ///      `pfilter`, `profile` and `survey` (a fit already keys it through its
 ///      config blob). A run under `--allow-forcing-extrapolation` may hold a

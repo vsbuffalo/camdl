@@ -22,8 +22,9 @@ use super::observed_rows::ObservedRow;
 use crate::caltime_load::TemporalCell;
 
 /// The version of the rule that decides which rows train. Recorded with every
-/// partition; a change to the rule bumps it (and re-keys through
-/// `HASH_VERSION`).
+/// partition and folded into the fit identity
+/// (`runid::inputs::FitDigest::partition_rule_version`), so a change to the
+/// rule bumps it and re-keys every fit with no `HASH_VERSION` bump.
 pub(crate) const PARTITION_RULE_VERSION: u16 = 1;
 
 /// The version of the row digest's encoding (the score-artifact proposal's row

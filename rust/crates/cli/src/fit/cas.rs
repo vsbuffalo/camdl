@@ -493,6 +493,7 @@ pub fn fit_level_digest(
         holdout_data: data.identity_holdout(),
         fit_toml: fit_config_blob_hash(problem)?,
         engine: EngineVersion(engine_version.to_string()),
+        partition_rule_version: super::training_partition::PARTITION_RULE_VERSION,
     })
 }
 
