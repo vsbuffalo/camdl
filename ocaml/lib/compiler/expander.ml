@@ -11771,8 +11771,9 @@ let check_quadratic_coupling ctx =
               calendar-classified duration in any of those is an
               E3xx.
       E360:   arithmetic an instant does not have (Instant + Instant,
-              k · Instant, Duration − Instant, Instant ± bare number),
-              at every position Rule 1 walks (gh#1070).
+              k · Instant, Duration − Instant, Instant ± bare number,
+              a conditional choosing between an instant and a duration),
+              at every position Rule 1 walks (gh#1070, gh#1096).
 
     All anchored-mode rules are vacuous when no `origin` is
     declared (proposal §1.1, decision of record). The unanchored
@@ -12153,6 +12154,17 @@ let check_surface_time_typing ctx =
      walk_expr_rule1 ~loc ~context:"output trajectories.every" e;
      check_recurring_cadence ~loc ~field:"every" e
    | _ -> ());
+
+  (* ── quantities: `value_at`'s time argument (gh#1096) ───────────────────
+     The time is resolved as an ordinary expression, not folded through
+     `resolve_time_expr`, so nothing else refuses `date(a) + date(b)` or
+     `date(a) + 6 'months` there. The whole body is walked, as a `let`
+     body is; the reductions' other arguments are states and thresholds,
+     which classify TOther and are not judged. *)
+  List.iter (fun (qd : quantity_decl) ->
+    walk_expr_rule1 ~loc:(diag_loc_of_ast_ctx ctx qd.qd_loc)
+      ~context:(Printf.sprintf "quantity '%s'" qd.qd_name) qd.qd_body
+  ) ctx.quantity_decls;
 
   ()
 
