@@ -19,9 +19,9 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 data point to its last, and a `bspline` on its window. A run that evaluated one
 outside that range held its end value silently (a `bspline` printed the info
 notice `spline-held-past-window`). Such a run is now refused by every command
-that runs a model, naming the forcing, its range and the first time outside it.
-The check reads the times actually evaluated, with `lag` applied. `piecewise`
-and the periodic kinds are unaffected.
+that runs a model, naming the forcing, its range and the side it was evaluated
+on. The check reads the times actually evaluated, with `lag` applied.
+`piecewise` and the periodic kinds are unaffected.
 
 **Migration.** Extend the forcing's data or window to cover the run, or end the
 run within it. Where holding the end value is what the run means (a forecast
@@ -33,8 +33,8 @@ are exactly the values held before, with one warning per forcing, and `run.json`
 records the override.
 
 **Diagnostic.**
-``error: forcing `beta_t` was evaluated at t = 121, after the
-end of its window (it is defined on t = 0 to t = 120, its window).``
+``error: forcing `beta_t` was evaluated after the end of its
+window (it is defined on t = 0 to t = 120, its window).``
 
 ---
 

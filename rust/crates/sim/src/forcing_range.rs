@@ -12,13 +12,14 @@
 //!
 //! The record reads the times actually evaluated, not the run's span: a
 //! forcing read only under a condition that is false past its range records
-//! nothing. Each side of the range has one set-once slot holding the first
-//! time evaluated beyond it. A clamped evaluation loads the slot and writes it
-//! only while it is unset, so the slot is written once per process for each
-//! compiled forcing and particle threads never contend on it; a counter would
-//! be written on every clamped evaluation.
+//! nothing. Each side of the range has one set-once flag: a clamped evaluation
+//! loads it and sets it only while it is clear, so it is written once per
+//! process for each compiled forcing and particle threads never contend on it;
+//! a counter would be written on every clamped evaluation. The record names
+//! the side, not a time: which time outside the range a run over many threads
+//! meets first depends on its threads.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::schedule::output_tol;
 
@@ -38,7 +39,7 @@ pub enum Side {
     After,
 }
 
-/// A forcing evaluated outside its range: the first such time on one side.
+/// A forcing evaluated outside its range, on one side.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutsideRange {
     pub forcing: String,
@@ -47,9 +48,8 @@ pub struct OutsideRange {
     pub lo: f64,
     pub hi: f64,
     pub side: Side,
-    /// The first time the run evaluated it beyond `side` of the range. For a
-    /// forcing with a `lag` this is the forcing's argument, `t − lag`.
-    pub at: f64,
+    /// Whether the forcing has a `lag`: its range bounds its argument,
+    /// `t − lag`, not the run's time.
     pub lagged: bool,
 }
 
@@ -99,14 +99,13 @@ impl std::fmt::Display for OutsideRange {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "forcing `{}` is defined on t = {} to t = {} ({}); the run evaluated it {}, first at \
-             t = {}, and its value at t = {} is {}{}",
+            "forcing `{}` is defined on t = {} to t = {} ({}); the run evaluated it {}, and its \
+             value at t = {} is {}{}",
             self.forcing,
             self.lo,
             self.hi,
             self.range_phrase(),
             self.side_phrase(),
-            self.at,
             self.held_end(),
             self.held_span(),
             self.lag_clause(),
@@ -114,12 +113,7 @@ impl std::fmt::Display for OutsideRange {
     }
 }
 
-/// A slot no time has been written to. Every finite or infinite time's bits
-/// differ from it (it is one NaN pattern, and a NaN time is never outside a
-/// range: both comparisons are false).
-const UNSET: u64 = u64::MAX;
-
-/// The range a compiled forcing is defined on, with one set-once slot per
+/// The range a compiled forcing is defined on, with one set-once flag per
 /// side. Shared (through `Arc`) by every clone of the compiled model, so a run
 /// over many threads records each side once.
 #[derive(Debug)]
@@ -129,8 +123,8 @@ pub struct DefinedRange {
     lo: f64,
     hi: f64,
     lagged: bool,
-    before: AtomicU64,
-    after: AtomicU64,
+    before: AtomicBool,
+    after: AtomicBool,
 }
 
 impl DefinedRange {
@@ -141,43 +135,43 @@ impl DefinedRange {
             lo,
             hi,
             lagged,
-            before: AtomicU64::new(UNSET),
-            after: AtomicU64::new(UNSET),
+            before: AtomicBool::new(false),
+            after: AtomicBool::new(false),
         }
     }
 
     /// Note an evaluation at `t` (the forcing's argument): if `t` is outside
-    /// the range, record the first such time on that side. A time within
+    /// the range, record that it was evaluated on that side (once per side).
+    /// A NaN time is never outside: both comparisons are false. A time within
     /// [`output_tol`] of an end is the end, not past it: it absorbs the
     /// rounding of a time built by additions of `dt`, and the held value at
     /// such a time equals the value at the end.
     #[inline]
     pub fn note(&self, t: f64) {
         if t < self.lo - output_tol(self.lo) {
-            self.first_outside(Side::Before, t);
+            self.outside(Side::Before);
         } else if t > self.hi + output_tol(self.hi) {
-            self.first_outside(Side::After, t);
+            self.outside(Side::After);
         }
     }
 
     #[cold]
     #[inline(never)]
-    fn first_outside(&self, side: Side, t: f64) {
-        let slot = match side {
+    fn outside(&self, side: Side) {
+        let flag = match side {
             Side::Before => &self.before,
             Side::After => &self.after,
         };
-        if slot.load(Ordering::Relaxed) != UNSET {
+        if flag.load(Ordering::Relaxed) {
             return;
         }
-        if slot.compare_exchange(UNSET, t.to_bits(), Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+        if !flag.swap(true, Ordering::Relaxed) {
             crate::run_notes::record(crate::run_notes::RunNote::ForcingOutsideRange(OutsideRange {
                 forcing: self.forcing.clone(),
                 kind: self.kind,
                 lo: self.lo,
                 hi: self.hi,
                 side,
-                at: t,
                 lagged: self.lagged,
             }));
         }
