@@ -3116,6 +3116,31 @@ let expand_date_range_to_consts ctx (args : (string * expr) list) : expr list =
     | None -> None
     | Some e ->
       (match try_eval_const_instant_ymd ctx e with
+       | Ok _ when not origin_set && Option.is_some every_kw ->
+         (* gh#1123: a `date(...)` or `add_calendar_*` start resolves to
+            a calendar triple without consulting `origin`, and the
+            `every` cadence has no anchoring check of its own (the
+            calendar cadences raise E327 below), so an unanchored model
+            must be rejected here; otherwise every entry converts to
+            0.0. Codes match the same start written bare: E327 for
+            `add_calendar_*`, E220 for `date`. *)
+         (match e with
+          | EFuncCall (("add_calendar_months" | "add_calendar_years")
+                       as fname, _) ->
+            err "E327"
+              (Printf.sprintf
+                "`date_range` with `start = %s(...)` requires an \
+                 anchored model (calendar stepping is only meaningful \
+                 with a calendar origin)" fname)
+              ~hint:"add `origin = date(\"YYYY-MM-DD\")` at the top of \
+                     the file" ()
+          | _ ->
+            err "E220"
+              "date_range: a `date(...)` start requires a top-level \
+               origin declaration, e.g. origin = date(\"2020-01-01\")"
+              ~hint:"add `origin = date(\"YYYY-MM-DD\")` at the top of \
+                     the file, or list bare numeric times instead" ());
+         None
        | Ok ymd -> Some ymd
        | Error "_unanchored" ->
          err "E327"
