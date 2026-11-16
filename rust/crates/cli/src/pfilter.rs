@@ -598,6 +598,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             obs_block: "",
             flow_indices: &flow_indices,
             objective,
+            allow_forcing_extrapolation: crate::forcing_extrapolation::allowed(),
             seed,
         };
         let resolved_id = match crate::pfilter_cas::resolve_pfilter(&ctx) {

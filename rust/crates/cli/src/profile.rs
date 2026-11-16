@@ -152,6 +152,10 @@ struct ProfileBaseLevel<'a> {
     /// training data whole and add nothing here.)
     #[serde(skip_serializing_if = "Option::is_none")]
     training_rows: Option<&'a [(String, usize)]>,
+    /// `--allow-forcing-extrapolation`: every cell may hold a forcing's end
+    /// value outside its range (D44), so it is identity. Omitted when off.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    allow_forcing_extrapolation: bool,
 }
 
 /// The `method` level's identity: the METHOD, i.e. how each cell is fitted.
@@ -1651,6 +1655,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         priors: &priors_blob,
         objective,
         training_rows: holdout_training_rows.as_deref(),
+        allow_forcing_extrapolation: crate::forcing_extrapolation::allowed(),
     }, &[]).unwrap_or_else(|e| {
         out.fail(format!("error: profile base identity: {e}"));
     });
@@ -1849,16 +1854,14 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         }
     }
 
-    // Cache scan: a job is cached when its leaf already exists, unless the
-    // leaf held a forcing under `--allow-forcing-extrapolation` and this run
-    // is not under it: that job runs, and is refused. `cached` / `remaining`
-    // hold indices into `resolved_jobs`.
+    // Cache scan: a job is cached when its leaf already exists. `cached` /
+    // `remaining` hold indices into `resolved_jobs`.
     let mut cached: Vec<usize> = Vec::new();
     let mut remaining: Vec<usize> = Vec::new();
     for (ji, (_, _, _, resolved, cas_path)) in resolved_jobs.iter().enumerate() {
         if matches!(
             store.lookup(cas_path, &runid::LeafIdentity::new(resolved.run_id)),
-            runid::Lookup::Hit(r) if !crate::forcing_extrapolation::held_without_override(&r)
+            runid::Lookup::Hit(_)
         ) {
             cached.push(ji);
         } else {
@@ -2558,6 +2561,7 @@ mod tests {
             priors: &priors,
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
             training_rows: None,
+            allow_forcing_extrapolation: false,
         }).unwrap();
         let base_literal = serde_json::json!({
             "base_params": "bp-hash",
@@ -2580,6 +2584,7 @@ mod tests {
             priors: &priors,
             objective: crate::fit::config_v2::LikelihoodObjective::ConditionalOnFirstObservation,
             training_rows: None,
+            allow_forcing_extrapolation: false,
         }).unwrap();
         let mut conditional_literal = base_literal.clone();
         conditional_literal["objective"] =
@@ -2597,6 +2602,7 @@ mod tests {
             priors: &priors,
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
             training_rows: Some(&[("cases".to_string(), 3)][..]),
+            allow_forcing_extrapolation: false,
         }).unwrap();
         let mut held_out_literal = base_literal.clone();
         held_out_literal["training_rows"] = serde_json::json!([["cases", 3]]);
@@ -2670,6 +2676,7 @@ mod tests {
             priors: &priors,
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
             training_rows: None,
+            allow_forcing_extrapolation: false,
         }, &[]).unwrap().into_inner().to_hex();
         let rw_sd: Vec<(&str, Option<f64>)> = vec![("beta", None)];
         let uniform = crate::fit::starts::ChainStarts::Spread(crate::fit::starts::Spread::Uniform);

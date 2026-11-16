@@ -56,6 +56,24 @@ use sha2::{Digest, Sha256};
 ///
 /// ## History
 ///
+/// - **4** (temporal-architecture migration, Stage 2; D58) — one deliberate
+///   re-key for two changes to what a run computes from its inputs:
+///   1. *Training rows are decided by period, not label* (D38). A
+///      `holdout_after` fit on a `day`, `starting_on` or `ending_on` stream
+///      no longer trains the row whose period straddles the cutoff, and a
+///      model anchored at `last_obs` resolves it to the latest end of an
+///      observed training row (D40). The fit identity's inputs are unchanged
+///      (model, training-file bytes, the config blob), so without this bump
+///      a stored fit would answer for a run that now trains on other rows.
+///   2. *The forcing-extrapolation override is identity* for `simulate`,
+///      `pfilter`, `profile` and `survey` (a fit already keys it through its
+///      config blob). A run under `--allow-forcing-extrapolation` may hold a
+///      forcing's end value, so it and the same run without the override are
+///      two runs; the store no longer reads a leaf's `run.json` to decide
+///      whether a held leaf may answer.
+///
+///   Leaves written at version 3 stay readable; they are never served as a
+///   cache hit for a version-4 run.
 /// - **3** (gh#1046) — a model's hash no longer depends on how the compiler's
 ///   hoisting pass numbered a hoisted subtree. A reference to a hoisted
 ///   subtree (`Expr::PerEvalRef`) is hashed as the digest of the subtree it
@@ -86,7 +104,7 @@ use sha2::{Digest, Sha256};
 ///   still parses, `fit summary` and the browsers read them); they are never
 ///   served as a cache hit for a version-2 run.
 /// - **1** — the initial encoding.
-pub const HASH_VERSION: u16 = 3;
+pub const HASH_VERSION: u16 = 4;
 
 // ─── ContentHash ─────────────────────────────────────────────────────────────
 

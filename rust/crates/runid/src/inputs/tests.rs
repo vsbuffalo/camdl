@@ -38,6 +38,7 @@ fn golden_fixtures() -> Vec<(&'static str, ContentHash)> {
         output: ResolvedOutputSchedule::Regular { start: fid(0), step: fid(1) },
         calendar: CalendarMode::Numeric,
         allow_degenerate_rates: false,
+        allow_forcing_extrapolation: false,
         no_flows: false,
         columns: BTreeSet::new(),
         init_state: None,
@@ -281,6 +282,7 @@ fn trajectory_input_display_is_provenance() {
         output: ResolvedOutputSchedule::Regular { start: fid(0), step: fid(1) },
         calendar: CalendarMode::Numeric,
         allow_degenerate_rates: false,
+        allow_forcing_extrapolation: false,
         no_flows: false,
         columns: BTreeSet::new(),
         init_state: None,
@@ -323,6 +325,12 @@ fn trajectory_input_display_is_provenance() {
     let mut flipped = base.clone();
     flipped.config.allow_degenerate_rates = true;
     assert_ne!(base.content_hash(), flipped.content_hash());
+
+    // So does the forcing-extrapolation override (D44): the run may hold a
+    // forcing's end value, so it is a different run.
+    let mut held = base.clone();
+    held.config.allow_forcing_extrapolation = true;
+    assert_ne!(base.content_hash(), held.content_hash());
 }
 
 #[test]
@@ -338,6 +346,7 @@ fn output_view_is_keyed_into_config() {
         output: ResolvedOutputSchedule::Regular { start: fid(0), step: fid(1) },
         calendar: CalendarMode::Numeric,
         allow_degenerate_rates: false,
+        allow_forcing_extrapolation: false,
         no_flows: false,
         columns: BTreeSet::new(),
         init_state: None,
@@ -376,6 +385,7 @@ fn init_state_is_keyed_into_config() {
         output: ResolvedOutputSchedule::Regular { start: fid(0), step: fid(1) },
         calendar: CalendarMode::Numeric,
         allow_degenerate_rates: false,
+        allow_forcing_extrapolation: false,
         no_flows: false,
         columns: BTreeSet::new(),
         init_state: None,

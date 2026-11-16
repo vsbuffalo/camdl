@@ -259,6 +259,11 @@ pub struct SimConfig {
     /// (hard-error → silent-zero), which changes trajectory values. A
     /// control-looking flag that is genuinely semantic.
     pub allow_degenerate_rates: bool,
+    /// Semantic: `--allow-forcing-extrapolation` lets the run hold a
+    /// forcing's end value outside the range it is defined on, where without
+    /// it the run is refused (D44). A run under it and the same run without
+    /// it are two runs.
+    pub allow_forcing_extrapolation: bool,
     /// Output view (gh#156): which trajectory columns are written to the leaf.
     /// `--no-flows` / `--columns` change the leaf's *bytes* (a column subset),
     /// so a content-addressed leaf cannot share a `run_id` with the full one —

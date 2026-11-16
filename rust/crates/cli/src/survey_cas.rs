@@ -47,6 +47,9 @@ pub struct SurveyCtx<'a> {
     /// The likelihood each point is scored under (`ic_free` from the fit
     /// config). It changes every stored loglik, so it is identity.
     pub objective: crate::fit::config_v2::LikelihoodObjective,
+    /// `--allow-forcing-extrapolation`: the run may hold a forcing's end value
+    /// outside its range (D44), so it is identity.
+    pub allow_forcing_extrapolation: bool,
     /// Under the fit config's `holdout_after`, how many leading rows of each
     /// stream train (by stream name); every later row was left out of every
     /// point's likelihood, so it is identity.
@@ -78,6 +81,10 @@ struct SurveyConfigLevel<'a> {
     /// Omitted when full, so a survey that never set `ic_free` keeps its key.
     #[serde(skip_serializing_if = "crate::fit::config_v2::LikelihoodObjective::is_full")]
     objective: crate::fit::config_v2::LikelihoodObjective,
+    /// Omitted when off, so the level of a run without the override is the
+    /// one the literal pins.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    allow_forcing_extrapolation: bool,
     /// The training rows a `holdout_after` cutoff leaves each stream. The
     /// data and fixed values are keyed already; this is what says the rows
     /// after them were cut. Omitted without one (gh#1059).
@@ -111,6 +118,7 @@ pub fn resolve_survey(ctx: &SurveyCtx) -> Result<ResolvedSurvey, String> {
         fixed: &fixed_sorted,
         scenario: ctx.scenario,
         objective: ctx.objective,
+        allow_forcing_extrapolation: ctx.allow_forcing_extrapolation,
         training_rows: ctx.training_rows,
     };
 
@@ -186,6 +194,7 @@ mod tests {
             eval_method: "pfilter", eval_particles: 200, eval_replicates: 1,
             data: &data, fixed: &fixed, scenario: None,
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
+            allow_forcing_extrapolation: false,
             training_rows: None,
         };
         assert_eq!(canonical_config_hash(&cfg, &[]).unwrap(),
@@ -211,7 +220,7 @@ mod tests {
         let fixed: Vec<(&str, f64)> = Vec::new();
         let level = |objective| canonical_config_hash(&SurveyConfigLevel {
             eval_method: "pfilter", eval_particles: 200, eval_replicates: 1,
-            data: &data, fixed: &fixed, scenario: None, objective, training_rows: None,
+            data: &data, fixed: &fixed, scenario: None, objective, training_rows: None, allow_forcing_extrapolation: false,
         }, &[]).unwrap();
         let literal = config_level("pfilter", 200, 1, &[("cases", &h1)], None);
         assert_eq!(level(LikelihoodObjective::Full), literal,
@@ -232,6 +241,7 @@ mod tests {
             eval_method: "pfilter", eval_particles: 200, eval_replicates: 1,
             data: &data, fixed: &fixed, scenario: None,
             objective: crate::fit::config_v2::LikelihoodObjective::Full, training_rows,
+            allow_forcing_extrapolation: false,
         }, &[]).unwrap();
         let literal = config_level("pfilter", 200, 1, &[("cases", &h1)], None);
         let four = [("cases".to_string(), 4)];
@@ -239,6 +249,24 @@ mod tests {
         assert_eq!(level(None), literal, "no cutoff must leave the key unchanged");
         assert_ne!(level(Some(&four)), literal, "a cutoff must change the config hash");
         assert_ne!(level(Some(&four)), level(Some(&five)), "the training rows are keyed");
+    }
+
+    /// The forcing-extrapolation override is identity (D44); off, the level
+    /// is the literal.
+    #[test]
+    fn the_forcing_override_rekeys_the_config_level() {
+        let h1 = h(1);
+        let data: Vec<(&str, &str)> = vec![("cases", h1.as_str())];
+        let fixed: Vec<(&str, f64)> = Vec::new();
+        let level = |allow_forcing_extrapolation| canonical_config_hash(&SurveyConfigLevel {
+            eval_method: "pfilter", eval_particles: 200, eval_replicates: 1,
+            data: &data, fixed: &fixed, scenario: None,
+            objective: crate::fit::config_v2::LikelihoodObjective::Full, training_rows: None,
+            allow_forcing_extrapolation,
+        }, &[]).unwrap();
+        let literal = config_level("pfilter", 200, 1, &[("cases", &h1)], None);
+        assert_eq!(level(false), literal, "off leaves the key unchanged");
+        assert_ne!(level(true), literal, "the override must change the config hash");
     }
 
     /// The eval count knobs are identity-bearing — `eval_method`,

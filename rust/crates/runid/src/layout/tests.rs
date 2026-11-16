@@ -30,6 +30,7 @@ fn config(t_end: f64) -> SimConfig {
         output: ResolvedOutputSchedule::Regular { start: fid(0.0), step: fid(1.0) },
         calendar: CalendarMode::Numeric,
         allow_degenerate_rates: false,
+        allow_forcing_extrapolation: false,
         no_flows: false,
         columns: std::collections::BTreeSet::new(),
         init_state: None,

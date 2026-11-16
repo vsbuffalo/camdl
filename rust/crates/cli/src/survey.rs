@@ -346,6 +346,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
         eval_particles:  a.eval_particles as u32,
         eval_replicates: a.eval_replicates as u32,
         objective,
+        allow_forcing_extrapolation: crate::forcing_extrapolation::allowed(),
         training_rows:   resolved.training_rows.as_deref(),
         bounds:          &bounds_vec,
         fixed:           &fixed_vec,

@@ -80,6 +80,7 @@ fn ctx<'a>(
         t_end,
         output,
         allow_degenerate_rates: false,
+        allow_forcing_extrapolation: false,
         no_flows: false,
         columns: columns_empty(),
         params,
@@ -372,6 +373,7 @@ impl SimInputs {
             t_end: self.t_end,
             output: &self.output,
             allow_degenerate_rates: self.allow_degenerate_rates,
+            allow_forcing_extrapolation: false,
             no_flows: self.no_flows,
             columns: &self.columns,
             params: &self.base_params,
@@ -537,6 +539,7 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
         obs_block: "",
         flow_indices: &[],
         objective: crate::fit::config_v2::LikelihoodObjective::Full,
+        allow_forcing_extrapolation: false,
         seed: 7,
     })
     .expect("pfilter");
@@ -555,6 +558,7 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
         eval_particles: 100,
         eval_replicates: 1,
         objective: crate::fit::config_v2::LikelihoodObjective::Full,
+        allow_forcing_extrapolation: false,
         training_rows: None,
         bounds: &bounds,
         fixed: &fixed,
@@ -788,12 +792,20 @@ fn cas_identity_pins() {
         // reason. It declares one change to what feeds identity: a model is
         // hashed by the bodies of its hoisted subtrees, not by their numbering,
         // and the table of them is no longer hashed as a list.
-        ("sim", "ce602a8a41db29645966ec3bf3c5eeb86dfeb4cf78140e0fb76d5fe8c75442e1"),
-        ("fit", "51df9e46ed9511e119be748660283e43dea87aa5a4034a3d596a9179f61bf1c9"),
-        ("pfilter", "52a07fe8e86619237540ab68d094a8361e0b32aa352d8d7064d3d9653088e65b"),
-        ("survey", "e32b7b97d01649235526e4004e8a63bf00fb493762b8ac2d6fce9640a7ab9d77"),
-        ("sim_ensemble", "39740d040018803edaa6bf50cf13a5ebfb6b586a0d2a2de766399caf91a5ed01"),
-        ("profile", "3c71af9c4b7e89e70e77a7254f7de3744061fa3e43b443636ad7b7e6bef0d2c7"),
+        //
+        // HASH_VERSION 3 -> 4 (temporal-architecture Stage 2, D58) moved
+        // EVERY kind again. It declares two changes: training rows decided by
+        // period end (D38, D40), and the forcing-extrapolation override keyed
+        // in the sim, pfilter, profile and survey identities. Off, as here, it
+        // is omitted from the pfilter, survey and profile config levels; the
+        // `sim` and `sim_ensemble` config level (`SimConfig`) carries it as a
+        // field, so their bytes change beyond the version.
+        ("sim", "693d18b92635b52553ce5948906bd44cbd79c638e2555e0dfa45220b38a08fb0"),
+        ("fit", "efb5fbf5150b879a2093008726f6900e98aade324b9a44fba08422d9b6d596d0"),
+        ("pfilter", "606668b07de8270df2d2b5cad61a9bea514486110820051844dd91eebdf5629e"),
+        ("survey", "3e0fdf3353daf0d28ab756778c63d3addfb778f93d25cf3455de6808a3142a52"),
+        ("sim_ensemble", "179992379aba805e49918dc2b6fd8ddbd7b94a71bc69db25ff4ca584669a4f76"),
+        ("profile", "9161010e745acf3bbc1f7faaea502047f9f515a1aa402133aad71bfd1784a5ae"),
     ];
     // Compared as whole lists so a failure reports EVERY kind that moved, not
     // just the first — the re-key scope is the thing under review.
