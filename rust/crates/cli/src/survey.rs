@@ -36,7 +36,7 @@ use rayon::prelude::*;
 use sim::{
     compiled_model::CompiledModel,
     inference::{
-        particle_filter::{bootstrap_filter, Observation, PFilterResult},
+        particle_filter::{bootstrap_filter, PFilterResult},
         BoundObs, ChainBinomialProcess, MultiStreamObsModel, StreamTimes,
         multi_stream_obs::{StreamProjection, StreamSpec},
         traits::{ObservationModel, SMCConfig},
@@ -78,11 +78,11 @@ struct ResolvedSurveyInputs {
     /// survey scores against ALL of them simultaneously (matches the
     /// fit-side multi-stream loglik convention).
     obs_models: Vec<ir::observation::ObservationModel>,
-    /// Per-stream observations, aligned to `obs_models`.
-    per_stream_obs: Vec<Vec<Observation>>,
-    /// Per-stream, per-row auxiliary data columns (a binomial `n = tested`),
-    /// aligned to `per_stream_obs`; empty rows for a stream that reads none.
-    per_stream_aux: Vec<Vec<Vec<(String, f64)>>>,
+    /// Per-stream rows, aligned to `obs_models`, as the one row reader
+    /// (`fit::observed_rows::observed_rows`) read them: each row's value, its
+    /// auxiliary values (a binomial `n = tested`) and what it measures. Survey
+    /// scores every row, so none is a hole.
+    per_stream_rows: Vec<Vec<crate::fit::observed_rows::ObservedRow>>,
     /// What each stream's rows cover, aligned to `obs_models` — the periods
     /// its `covers` declaration assigns, or its instants (gh#833). Every
     /// stream's schedule (`closes()`) is required to be identical; the shared
@@ -482,20 +482,20 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     // pfilter path.
     let obs_model: Arc<MultiStreamObsModel> = {
         let mut stream_specs = Vec::with_capacity(resolved.obs_models.len());
-        for (((obs, stream_obs), times), stream_aux) in resolved.obs_models.iter()
-            .zip(resolved.per_stream_obs.iter())
+        for ((obs, rows), times) in resolved.obs_models.iter()
+            .zip(resolved.per_stream_rows.iter())
             .zip(resolved.per_stream_times.iter())
-            .zip(resolved.per_stream_aux.iter())
         {
             let projection = StreamProjection::from_ir(
                 &obs.projection, &resolved.compiled, &obs.name,
             ).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
             // survey is dense: an `NA` in the scored column or in an aux
-            // column is refused at load, so every row carries every aux value.
-            let observations = sim::inference::dense_cells(
-                stream_obs.iter().map(|o| o.value).collect());
+            // column is refused at load, so every row carries a value and
+            // every aux value.
+            let observations: Vec<Option<sim::inference::ObsCell>> =
+                rows.iter().map(|r| r.cell).collect();
             stream_specs.push(StreamSpec {
-                aux: stream_aux.clone(),
+                aux: rows.iter().map(|r| r.aux.clone()).collect(),
                 projection,
                 ir_model: obs.clone(),
                 observations,
@@ -972,8 +972,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
         entries.sort_by_key(|(k, _)| k.as_str());
 
         let mut obs_models = Vec::new();
-        let mut per_stream_obs = Vec::new();
-        let mut per_stream_aux = Vec::new();
+        let mut per_stream_rows = Vec::new();
         let mut per_stream_times = Vec::new();
         let mut data_hashes: HashMap<String, String> = HashMap::new();
         let mut canonical_times: Option<Vec<f64>> = None;
@@ -989,39 +988,34 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
                 .find(|o| o.name == **stream_name).cloned()
                 .ok_or_else(|| format!(
                     "no observation block named '{}' in model", stream_name))?;
-            let (observations, times, aux) =
-                load_stream_from_tsv(data_path, &obs_model_ir, &compiled, &time_opts)?;
+            let (rows, times) =
+                load_stream_rows(data_path, &obs_model_ir, &model, &compiled, &time_opts)?;
             check_shared_schedule(&mut canonical_times, &times, stream_name)?;
             let bytes = std::fs::read(data_path)
                 .map_err(|e| format!("cannot read data file '{}': {}", data_path, e))?;
             data_hashes.insert((*stream_name).clone(), crate::hashing::sha256_hex(&bytes));
             obs_models.push(obs_model_ir);
-            per_stream_obs.push(observations);
-            per_stream_aux.push(aux);
+            per_stream_rows.push(rows);
             per_stream_times.push(times);
         }
 
         // The fit's `holdout_after`, applied as `fit run` applies it: every row
         // after the cutoff, resolved over the union of the bound streams'
-        // times by the same function, leaves every stream's observations,
-        // aux and windows. The streams share one schedule, so they still do.
+        // times by the same function, leaves every stream's rows and windows.
+        // The streams share one schedule, so they still do.
         let holdout_after: Option<f64> = match config.data.as_ref()
             .and_then(|d| d.holdout_after.as_ref())
         {
             Some(spec) => {
-                let all_times = per_stream_obs.iter().flatten().map(|o| o.time);
+                let all_times = per_stream_rows.iter().flatten().map(|r| r.label());
                 let tau = crate::fit::runner::resolve_holdout_cutoff(spec, all_times, &model)?;
                 let mut withheld = 0usize;
-                for ((obs, aux), times) in per_stream_obs.iter_mut()
-                    .zip(per_stream_aux.iter_mut())
-                    .zip(per_stream_times.iter_mut())
-                {
-                    let idx: Vec<usize> = (0..obs.len())
-                        .filter(|&i| crate::fit::runner::within_training(obs[i].time, tau))
+                for (rows, times) in per_stream_rows.iter_mut().zip(per_stream_times.iter_mut()) {
+                    let idx: Vec<usize> = (0..rows.len())
+                        .filter(|&i| crate::fit::runner::within_training(rows[i].label(), tau))
                         .collect();
-                    withheld += obs.len() - idx.len();
-                    *obs = idx.iter().map(|&i| obs[i].clone()).collect();
-                    *aux = idx.iter().map(|&i| aux[i].clone()).collect();
+                    withheld += rows.len() - idx.len();
+                    *rows = idx.iter().map(|&i| rows[i].clone()).collect();
                     *times = crate::fit::runner::retain_stream_times(times, &idx);
                 }
                 crate::fit::runner::say_holdout_after_applied(
@@ -1036,10 +1030,10 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
         // (every held-out row after the latest training row).
         {
             let training: Vec<crate::fit::runner::TrainingStream<'_>> = obs_models.iter()
-                .zip(&per_stream_obs)
+                .zip(&per_stream_rows)
                 .map(|(obs, rows)| crate::fit::runner::TrainingStream {
                     obs,
-                    last_train: rows.iter().map(|o| o.time).fold(f64::NEG_INFINITY, f64::max),
+                    last_train: rows.iter().map(|r| r.label()).fold(f64::NEG_INFINITY, f64::max),
                 })
                 .collect();
             crate::fit::runner::check_holdout_files(
@@ -1058,8 +1052,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
             base_params,
             estimated,
             obs_models,
-            per_stream_obs,
-            per_stream_aux,
+            per_stream_rows,
             per_stream_times,
             data_hashes,
             fixed: fixed_resolved.into_iter().collect(),
@@ -1220,8 +1213,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
                 an observation block to score against.".into());
         }
         let mut obs_models = Vec::new();
-        let mut per_stream_obs = Vec::new();
-        let mut per_stream_aux = Vec::new();
+        let mut per_stream_rows = Vec::new();
         let mut per_stream_times = Vec::new();
         let mut data_hashes: HashMap<String, String> = HashMap::new();
         let bytes = std::fs::read(&data_path)
@@ -1242,13 +1234,12 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
             format: crate::caltime_load::TimeFormat::Auto,
         };
         for obs in sorted_obs {
-            let (observations, times, aux) =
-                load_stream_from_tsv(&data_path, obs, &compiled, &time_opts)?;
+            let (rows, times) =
+                load_stream_rows(&data_path, obs, &model, &compiled, &time_opts)?;
             check_shared_schedule(&mut canonical_times, &times, &obs.name)?;
             data_hashes.insert(obs.name.clone(), data_hash.clone());
             obs_models.push(obs.clone());
-            per_stream_obs.push(observations);
-            per_stream_aux.push(aux);
+            per_stream_rows.push(rows);
             per_stream_times.push(times);
         }
 
@@ -1258,8 +1249,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
             base_params,
             estimated,
             obs_models,
-            per_stream_obs,
-            per_stream_aux,
+            per_stream_rows,
             per_stream_times,
             data_hashes,
             fixed: fixed_map,
@@ -1325,63 +1315,35 @@ fn survey_roles(d: SurveyRoleDecls<'_>) -> Result<crate::roles::Partition, Strin
     .map_err(|e| e.to_string())
 }
 
-/// Load (time, value) pairs from a TSV by NAME — the declared `time` column is
-/// the axis (by-name-time flip), and `scored` is the value column. Both must
-/// match the file header exactly. There is no positional fallback (G1): a
-/// typo'd/wrong-cased header is a located error, not a silent bind.
-fn load_observations_from_tsv(
+/// One stream's rows and what they cover, read by the one row reader the fit
+/// and `pfilter` loaders use (`fit::observed_rows::observed_rows`), so a survey
+/// scores each row over exactly the window the fit will (gh#833) and a
+/// training partition is built from the same rows everywhere.
+///
+/// Survey scores every row, so a row with `NA` in its scored column or in an
+/// auxiliary column it reads (which the fit loaders keep as a hole) is
+/// refused, naming the row.
+fn load_stream_rows(
     path: &str,
     obs: &ir::observation::ObservationModel,
-    opts: &crate::caltime_load::TimeOpts,
-) -> Result<Vec<Observation>, String> {
-    let time_col = crate::pfilter::obs_time_column(obs)?;
-    let domain = crate::pfilter::CellDomain::of(obs, &obs.scored);
-    let raw = crate::pfilter::load_data_tsv_column(path, time_col, &obs.scored, domain, opts)?;
-    Ok(raw.into_iter().map(|o| Observation { time: o.time, value: o.value }).collect())
-}
-
-/// One stream's rows and what they cover: the values under the scored column,
-/// and the periods (or instants) the stream's declaration assigns to the rows'
-/// labels — the same lowering the fit and pfilter loaders use
-/// (`pfilter::stream_times_for`), so a survey scores each row over exactly
-/// the window the fit will (gh#833).
-fn load_stream_from_tsv(
-    path: &str,
-    obs: &ir::observation::ObservationModel,
+    model: &ir::Model,
     compiled: &CompiledModel,
     opts: &crate::caltime_load::TimeOpts,
-) -> Result<(Vec<Observation>, StreamTimes, Vec<Vec<(String, f64)>>), String> {
-    let observations = load_observations_from_tsv(path, obs, opts)?;
-    let aux = load_aux_from_tsv(path, obs, observations.len())?;
-    let projection = StreamProjection::from_ir(&obs.projection, compiled, &obs.name)?;
-    let labels: Vec<f64> = observations.iter().map(|o| o.time).collect();
-    let times = crate::pfilter::stream_times_for(obs, &projection, &labels, path, opts)?;
-    Ok((observations, times, aux))
-}
-
-/// The aux columns the stream's likelihood reads (a binomial `n = tested`),
-/// one name-to-value list per row, each column read in its own `CellDomain`
-/// (a trial count is a non-negative integer). Survey scores every row, so a
-/// row whose aux cell is `NA` — which the fit loaders turn into a hole — is
-/// refused here, naming the row.
-fn load_aux_from_tsv(
-    path: &str,
-    obs: &ir::observation::ObservationModel,
-    n_rows: usize,
-) -> Result<Vec<Vec<(String, f64)>>, String> {
-    let aux_cols: Vec<(String, crate::pfilter::CellDomain)> =
-        crate::pfilter::stream_aux_columns(obs).into_iter()
-            .map(|c| { let d = crate::pfilter::CellDomain::of(obs, &c); (c, d) })
-            .collect();
-    let (aux, force_hole) = crate::pfilter::load_stream_aux(path, &aux_cols, n_rows)?;
-    if let Some(r) = force_hole.iter().position(|&h| h) {
+) -> Result<(Vec<crate::fit::observed_rows::ObservedRow>, StreamTimes), String> {
+    let siblings: Vec<&ir::observation::ObservationModel> =
+        model.observations.iter().filter(|o| o.source == obs.source).collect();
+    let rows = crate::fit::observed_rows::observed_rows(path, obs, &siblings, opts)?;
+    if let Some(r) = rows.iter().find(|r| r.cell.is_none()) {
+        let mut read: Vec<String> = vec![obs.scored.clone()];
+        read.extend(crate::pfilter::stream_aux_columns(obs));
         return Err(format!(
-            "{path}: data row {} has `NA` in a column that stream '{}' reads \
+            "{path}: data row {} of stream '{}' has `NA` in a column the stream reads \
              ({}); survey scores every row, so write the row's value or remove the row",
-            r + 1, obs.name,
-            aux_cols.iter().map(|(c, _)| c.as_str()).collect::<Vec<_>>().join(", ")));
+            r.position + 1, obs.name, read.join(", ")));
     }
-    Ok(aux)
+    StreamProjection::from_ir(&obs.projection, compiled, &obs.name)?;
+    let times = crate::pfilter::stream_times_of_rows(obs, &rows, path, opts)?;
+    Ok((rows, times))
 }
 
 /// Survey v1 evaluates every stream on one schedule. The first stream's
