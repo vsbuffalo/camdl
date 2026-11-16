@@ -788,12 +788,17 @@ fn cas_identity_pins() {
         // reason. It declares one change to what feeds identity: a model is
         // hashed by the bodies of its hoisted subtrees, not by their numbering,
         // and the table of them is no longer hashed as a list.
-        ("sim", "ce602a8a41db29645966ec3bf3c5eeb86dfeb4cf78140e0fb76d5fe8c75442e1"),
-        ("fit", "51df9e46ed9511e119be748660283e43dea87aa5a4034a3d596a9179f61bf1c9"),
-        ("pfilter", "52a07fe8e86619237540ab68d094a8361e0b32aa352d8d7064d3d9653088e65b"),
-        ("survey", "e32b7b97d01649235526e4004e8a63bf00fb493762b8ac2d6fce9640a7ab9d77"),
-        ("sim_ensemble", "39740d040018803edaa6bf50cf13a5ebfb6b586a0d2a2de766399caf91a5ed01"),
-        ("profile", "3c71af9c4b7e89e70e77a7254f7de3744061fa3e43b443636ad7b7e6bef0d2c7"),
+        //
+        // HASH_VERSION 3 -> 4 (D43) moved EVERY kind once more. It declares one
+        // change to what feeds identity: a fit's method level no longer carries
+        // a resolved observation alignment. With the version held at 3 that
+        // change moved `fit` alone (checked when the bump was made).
+        ("sim", "a5ddd16f9ac71055fcc504cfd123827b0e29ec535a9652a791b4535fc417b15f"),
+        ("fit", "2f09f066e88c1d81a53bfe389d676d502998ccde7bf5a163c84b22ad6381e660"),
+        ("pfilter", "606668b07de8270df2d2b5cad61a9bea514486110820051844dd91eebdf5629e"),
+        ("survey", "3e0fdf3353daf0d28ab756778c63d3addfb778f93d25cf3455de6808a3142a52"),
+        ("sim_ensemble", "179992379aba805e49918dc2b6fd8ddbd7b94a71bc69db25ff4ca584669a4f76"),
+        ("profile", "9161010e745acf3bbc1f7faaea502047f9f515a1aa402133aad71bfd1784a5ae"),
     ];
     // Compared as whole lists so a failure reports EVERY kind that moved, not
     // just the first — the re-key scope is the thing under review.

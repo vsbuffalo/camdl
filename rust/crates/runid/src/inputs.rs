@@ -50,23 +50,6 @@ pub enum CalendarMode {
     Calendar,
 }
 
-/// Resolved observation-time alignment: how observation times relate to the
-/// integrator `dt` grid for an inference method (`crate` mirror of the CLI's
-/// `fit::methods::ObsAlignment`). The *resolved* value — not the requested
-/// `[config] obs_alignment` — drives the posterior: exact stepping and grid
-/// snapping produce different chains at the same config, and the default a
-/// given algorithm resolves to can flip across engine versions (gh#189). So
-/// the resolved value is folded into the method identity by content, not left
-/// to ride only on the optional, skip-when-unset request field in the
-/// fit.toml blob.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, RunInput)]
-pub enum ResolvedObsAlignment {
-    /// Step exactly to each observation time (shortened final substep).
-    Exact,
-    /// Round observation times onto the `dt` grid (uniform stepping).
-    Snap,
-}
-
 /// A resolved output schedule: concrete cadence/times over [`FiniteF64`].
 #[derive(Debug, Clone, PartialEq, RunInput)]
 pub enum ResolvedOutputSchedule {
@@ -459,13 +442,6 @@ pub struct MethodConfig {
     pub flow_indices: Vec<u32>,
     /// Resume target length — a resumed run is a distinct artifact.
     pub target_length: u64,
-    /// The *resolved* observation-time alignment for this method (gh#189).
-    /// Resolution is per-method — a function of the method algorithm and the
-    /// fit-wide requested `[config] obs_alignment` — and it changes the
-    /// posterior, so it is keyed at the method level (where the algorithm
-    /// lives), not buried in the optional fit.toml request field that is
-    /// skipped from the blob when unset.
-    pub obs_alignment: ResolvedObsAlignment,
 }
 
 /// `fit` method leaf (M3). A sourced start's lineage lives in `deps`: a

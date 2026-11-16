@@ -475,80 +475,6 @@ fn append_matrix_footer(out: &mut String) {
     );
 }
 
-/// Verify the compiled model's required capabilities are supported by
-/// the requested backend. Returns a structured error pointing at the
-/// right alternative when the model needs more than the backend
-/// provides.
-///
-/// `validate_combo` is structural-only — it knows the (algorithm,
-/// backend) registry but not the model. This helper closes the
-/// model-capability gap: a model with `overdispersed(rate, σ²)`
-/// transitions running on the deterministic ODE backend silently
-/// produces the deterministic-skeleton likelihood (ignoring σ²)
-/// and was the bug that motivated this check (see `camdl simulate
-/// --backend ode` which already enforces the same gate via
-/// `util::run_simulation`).
-///
-/// Call from every dispatch site that resolves a (algorithm, backend,
-/// model) triple. For backends whose capability set covers everything
-/// the model needs, this is a no-op.
-/// How observation times relate to the integrator's `dt` grid — the
-/// `obs_alignment` choice (`fit.toml [backend]`, alongside `dt`). See
-/// docs/dev/proposals/2026-06-05-unified-timeline-effect-architecture.md.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ObsAlignment {
-    /// Step exactly to each observation time (shortened final substep).
-    Exact,
-    /// Round observation times onto the `dt` grid (uniform stepping).
-    Snap,
-}
-
-/// The single `(algorithm × obs-alignment)` support gate at the fit-dispatch seam.
-/// Returns the resolved alignment, or a clean error for an unsupported
-/// combination — converting a *silent* fallback into a loud error: `exact` +
-/// PGAS silently snaps to a uniform grid. The threading of the resolved
-/// alignment into the filters' `Schedule` policy, and the unimplemented modes
-/// (PF-snap, PGAS-exact), are Stage 3; today this is the validation seam.
-///
-/// * `requested = None` is the default: "exact where the algorithm supports it".
-pub fn resolve_obs_alignment(
-    algorithm: FitAlgorithm,
-    requested: Option<ObsAlignment>,
-) -> Result<ObsAlignment, String> {
-    use FitAlgorithm as A;
-    use ObsAlignment::{Exact, Snap};
-    match algorithm {
-        // Exact-steppers: land exactly on any obs. No `snap` inference path
-        // exists. PMMH is one too — its likelihood is the bootstrap PF.
-        A::If2 | A::Pfilter | A::Pmmh => match requested {
-            None | Some(Exact) => Ok(Exact),
-            Some(Snap) => Err(format!(
-                "{algorithm}: obs_alignment = \"snap\" is not implemented — it steps \
-                 exactly to observation times. Use \"exact\" (the default)."
-            )),
-        },
-        // PGAS uses a uniform grid; exact-PGAS is planned but not yet built.
-        A::Pgas => match requested {
-            None | Some(Snap) => Ok(Snap),
-            Some(Exact) => Err(
-                "pgas: obs_alignment = \"exact\" is not yet implemented (PGAS uses a \
-                 uniform grid; exact-PGAS is planned). Use \"snap\", or algorithm = \
-                 if2 / pfilter for exact alignment."
-                    .into(),
-            ),
-        },
-        // ODE-backend algorithms never reach here — both call sites gate on the
-        // PF algorithms (if2/pgas/pmmh/pfilter). The arm exists for exhaustiveness;
-        // obs alignment is a particle-filter concept (ODE scores on the integrator
-        // grid), so it is a clear error rather than a panic.
-        A::NlSbplx | A::NlBobyqa | A::NlLbfgs | A::Mh => Err(format!(
-            "obs_alignment does not apply to the ODE algorithm '{algorithm}' — \
-             observations are scored on the integrator grid."
-        )),
-    }
-}
-
 /// Does the model's `init { }` DRAW any compartment from a law
 /// (`I ~ poisson(rate = I0)`), rather than computing every one of them from an
 /// expression?
@@ -661,6 +587,23 @@ pub fn validate_ic_free(
     }
 }
 
+/// Verify the compiled model's required capabilities are supported by
+/// the requested backend. Returns a structured error pointing at the
+/// right alternative when the model needs more than the backend
+/// provides.
+///
+/// `validate_combo` is structural-only — it knows the (algorithm,
+/// backend) registry but not the model. This helper closes the
+/// model-capability gap: a model with `overdispersed(rate, σ²)`
+/// transitions running on the deterministic ODE backend silently
+/// produces the deterministic-skeleton likelihood (ignoring σ²)
+/// and was the bug that motivated this check (see `camdl simulate
+/// --backend ode` which already enforces the same gate via
+/// `util::run_simulation`).
+///
+/// Call from every dispatch site that resolves a (algorithm, backend,
+/// model) triple. For backends whose capability set covers everything
+/// the model needs, this is a no-op.
 pub fn check_model_capabilities(
     backend: InferenceBackend,
     compiled: &sim::CompiledModel,
@@ -1192,31 +1135,6 @@ mod tests {
                 "expected ({a}, {b}) in METHODS"
             );
         }
-    }
-
-    #[test]
-    fn obs_alignment_exact_steppers_any_obs() {
-        use ObsAlignment::{Exact, Snap};
-        // if2/pfilter/pmmh are exact on any obs; default and explicit exact
-        // both ok.
-        for algo in [FitAlgorithm::If2, FitAlgorithm::Pfilter, FitAlgorithm::Pmmh] {
-            assert_eq!(resolve_obs_alignment(algo, None), Ok(Exact));
-            assert_eq!(resolve_obs_alignment(algo, Some(Exact)), Ok(Exact));
-            // snap is not implemented for the exact-steppers.
-            assert!(resolve_obs_alignment(algo, Some(Snap)).is_err());
-        }
-    }
-
-    #[test]
-    fn obs_alignment_pgas_snap_only_exact_is_clean_error() {
-        use ObsAlignment::{Exact, Snap};
-        // PGAS defaults to snap (its only mode today)...
-        assert_eq!(resolve_obs_alignment(FitAlgorithm::Pgas, None), Ok(Snap));
-        assert_eq!(resolve_obs_alignment(FitAlgorithm::Pgas, Some(Snap)), Ok(Snap));
-        // ...and exact is a CLEAN ERROR (was a silent snap), naming the fix.
-        let err = resolve_obs_alignment(FitAlgorithm::Pgas, Some(Exact)).unwrap_err();
-        assert!(err.contains("not yet implemented"), "should name exact-PGAS as unimplemented: {err}");
-        assert!(err.contains("if2") || err.contains("snap"), "should suggest a fix: {err}");
     }
 
     // ── ic_free / conditioning support check (F1) ──────────────────────────

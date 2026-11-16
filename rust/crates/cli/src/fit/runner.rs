@@ -362,8 +362,8 @@ pub(crate) fn resolve_fit_parameters(
 
 impl FitRunConfig {
     /// Build from a problem. `algorithm` is the method that will run on it,
-    /// for the observation-alignment check (gh#189) — `None` skips that
-    /// check, for callers that build a config with no method in hand.
+    /// for the checks that depend on it — `None` skips them, for callers that
+    /// build a config with no method in hand.
     ///
     /// `cooling_target_iters` is IF2-specific — for non-IF2 methods
     /// (PGAS / PMMH / PFilter), passing `n_iterations` matches the
@@ -473,9 +473,9 @@ impl FitRunConfig {
         // scores along — every stream's scoring boundaries plus every declared
         // period's opening boundary inside the run (multi-cadence, proposal
         // 2026-06-10 §3.3; periods, gh#833). This feeds the filter's substep
-        // grid, `n_observations`, the obs-alignment gate and the single-stream
-        // output labels, and the PGAS / ODE / NUTS drivers index the obs model
-        // by position along it — so it is taken FROM `bind`, the one place the
+        // grid, `n_observations` and the single-stream output labels, and the
+        // PGAS / ODE / NUTS drivers index the obs model by position along it —
+        // so it is taken FROM `bind`, the one place the
         // axis is built, never rebuilt from the rows' labels: a label list
         // agrees with the boundaries only when every period closes at its label
         // (`closing_at`), and under `day(time)` it is one entry short. The
@@ -489,28 +489,6 @@ impl FitRunConfig {
             ).map_err(|report| format!("observation data invalid:\n{}", report.render()))?;
             bound.times().iter().map(|&time| Observation { time, value: 0.0 }).collect()
         };
-
-        // (algorithm × obs-alignment) support gate — the fit-dispatch seam.
-        // Converts a SILENT fallback into a clean error: `exact` + PGAS would
-        // silently snap to a uniform grid. For valid runs the default resolves
-        // to today's behaviour ("exact where supported"), so nothing changes;
-        // threading the resolved policy into the filters is Stage 3. (Fires per
-        // build; cheap.)
-        {
-            use crate::run_meta::FitAlgorithm;
-            if let Some(algorithm) = algorithm {
-                if matches!(
-                    algorithm.method_kind(),
-                    FitAlgorithm::If2 | FitAlgorithm::Pgas | FitAlgorithm::Pmmh | FitAlgorithm::Pfilter
-                ) {
-                    crate::fit::methods::resolve_obs_alignment(
-                        algorithm.method_kind(),
-                        fit.config.obs_alignment,
-                    )
-                    .map_err(|e| format!("{} method: {e}", algorithm.method_name()))?;
-                }
-            }
-        }
 
         if streams.len() > 1 {
             crate::out::detached().say(format_args!("  {} observation streams: {}",
