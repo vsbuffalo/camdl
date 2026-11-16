@@ -139,7 +139,8 @@ fn at(rows: &[(f64, f64)], t: f64) -> f64 {
 
 /// Weekly rows labelled by the last day they cover, the reported shape:
 /// `ending_on(time, 7 'days)` on labels 7, 14, …, 161, an
-/// observation-anchored horizon eight weeks past the last of them (t = 217),
+/// observation-anchored horizon 55 days past the end of the last of them
+/// (`last_obs` is the end of row 161's period, 162; the horizon is t = 217),
 /// and a daily trajectory grid. The forecast tail continues the weekly cadence
 /// to 217, and that row covers `[211, 218)`.
 const MODEL_ENDING_ON: &str = r#"
@@ -160,7 +161,7 @@ init { A = N0  B = 0 }
 
 simulate {
   from = 0 'days
-  to   = last_obs + 8 'weeks
+  to   = last_obs + 55 'days
   dt   = 1 'days
 }
 
