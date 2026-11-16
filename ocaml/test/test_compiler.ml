@@ -10840,6 +10840,40 @@ let test_typed_time_e323_bare_numeric_on_periodic_anchored () =
       simulate { from = 0 'days  to = 120 'days }
     |}
 
+(* gh#1135: a range-form periodic forcing whose `on` range is reversed
+   (lo > hi) used to compile to a forcing that is 0 in every bin. *)
+let gh1135_periodic_on_model on =
+  Printf.sprintf {|
+    time_unit = 'days
+    compartments { S, I }
+    parameters { beta : rate  N0 : count }
+    forcing {
+      school : periodic 'ratio {
+        period = 365 'days
+        step   = 1 'days
+        on     = [%s]
+      }
+    }
+    transitions { inf : S --> I @ beta * school * S }
+    init { S = N0 }
+    simulate { from = 0 'days  to = 30 'days }
+  |} on
+
+let test_gh1135_periodic_on_reversed_range_rejected () =
+  compile_expect_error_code ~code:"E406" ~contains:"100:7"
+    (gh1135_periodic_on_model "100 'days : 7 'days")
+
+let test_gh1135_periodic_on_single_bin_range_ok () =
+  (* lo = hi is a one-bin range, not a reversed one. *)
+  let m = compile_expect_ok
+      (gh1135_periodic_on_model "7 'days : 7 'days, 20 'days : 22 'days") in
+  match (List.hd m.time_functions).kind with
+  | Ir.Periodic p ->
+    let on_bins =
+      List.filter (function Ir.Const 1.0 -> true | _ -> false) p.values in
+    Alcotest.(check int) "bins on" 4 (List.length on_bins)
+  | _ -> Alcotest.fail "expected a periodic forcing"
+
 let test_typed_time_w324_bare_numeric_simulate_warning () =
   let src = {|
     time_unit = 'days
@@ -16690,6 +16724,10 @@ let () =
       (* Rule 4 (E323): bare-numeric on=[] in anchored periodic. *)
       Alcotest.test_case "E323 bare-numeric on=[7:100] in anchored periodic rejected"
         `Quick test_typed_time_e323_bare_numeric_on_periodic_anchored;
+      Alcotest.test_case "gh#1135 E406 reversed periodic on range rejected"
+        `Quick test_gh1135_periodic_on_reversed_range_rejected;
+      Alcotest.test_case "gh#1135 one-bin periodic on range still compiles"
+        `Quick test_gh1135_periodic_on_single_bin_range_ok;
       (* Rule 5 (W324, W325): bare-numeric in time positions. *)
       Alcotest.test_case "W324 bare-numeric simulate.from/to warns under origin"
         `Quick test_typed_time_w324_bare_numeric_simulate_warning;
