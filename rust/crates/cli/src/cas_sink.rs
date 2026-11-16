@@ -1058,7 +1058,13 @@ pub(crate) fn obs_subtree_hash(
 /// The obs-file format the CAS subtree is written in — bumped whenever the
 /// bytes written for an unchanged model would change (the count-in-the-key
 /// rule).
-const OBS_FILE_FORMAT: &str = "\nobs-file-format:2";
+///
+/// 3 (D59): a row's value is drawn from the state, and with the time, where
+/// the row is scored (its instant, or its period's stop), not at its label.
+/// For a stream whose label is not its scoring time (`day`, `starting_on`,
+/// `ending_on`) whose likelihood reads the state or `t`, the stored draws
+/// change, so a subtree written before must not answer for one written now.
+const OBS_FILE_FORMAT: &str = "\nobs-file-format:3";
 
 /// The directory a leaf's observation subtree lives in:
 /// `<leaf>/obs/<hash8>-<obs_seed>/`, the `hash8` being the first eight hex
