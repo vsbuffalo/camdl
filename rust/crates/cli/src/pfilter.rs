@@ -1333,8 +1333,8 @@ fn parse_column_cells_raw<'a>(
 /// number), and so is a value outside `domain` — a negative or fractional
 /// count. Strict by-name column binding, no positional fallback (G1).
 ///
-/// Shared core of [`load_data_tsv_column`] (which rejects holes for the dense
-/// callers) and [`load_data_tsv_column_cells_as_written`] (the sparse/holes path).
+/// The core of [`load_data_tsv_column_cells_as_written`] (the value column)
+/// and [`load_stream_aux`] (the covariate columns).
 fn parse_column_cells<'a>(
     content: &'a str,
     path: &str,
@@ -1646,65 +1646,14 @@ fn stream_times_of_measures(
     Ok(StreamTimes::Intervals(periods))
 }
 
-/// Load observations from a TSV by NAME: both `time_column` (the time axis)
-/// and `column` (the value) must match header fields exactly — no positional
-/// fallback for either (the by-name-time flip; 2026-06-10 §6.2).
-///
-/// A hole (`NA`) is an error here. The column-reader tests' dense view of
-/// [`load_data_tsv_column_cells_as_written`], which every loader reads
-/// through, via [`crate::fit::observed_rows::observed_rows`].
-#[cfg(test)]
-pub fn load_data_tsv_column(
-    path: &str,
-    time_column: &str,
-    column: &str,
-    domain: CellDomain,
-    opts: &TimeOpts,
-) -> Result<Vec<Observation>, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("{}: {}", path, e))?;
-    let (time_cells, cells, rows) =
-        parse_column_cells(&content, path, time_column, ColumnPurpose::Time, column, domain)?;
-    // Reject holes on the dense path with a located message.
-    let mut values: Vec<f64> = Vec::with_capacity(cells.len());
-    for (i, c) in cells.iter().enumerate() {
-        match c {
-            Some(v) => values.push(*v),
-            None => return Err(format!(
-                "line {} (t='{}'): missing value `NA` in column '{}' is not supported \
-                 on this path. Holes (NA) are only handled by `camdl pfilter`.",
-                rows[i], time_cells[i].trim(), column)),
-        }
-    }
-    finalize_observations(&time_cells, values, rows, opts)
-}
-
-/// Sparse/holes-aware load of one named TSV column for `camdl pfilter`.
-/// Returns the converted observation `times` and the per-row cell vector,
-/// where `None` is a hole (the `NA` token): its time stays in the grid (so
-/// the incidence accumulator still resets there) but it carries no value (no
-/// likelihood term). Same time-conversion + grid/ordering checks as
-/// [`load_data_tsv_column`]; only the value column may contain `NA`.
-///
-/// The column-reader tests' view of [`load_data_tsv_column_cells_as_written`];
-/// the loaders read through that, via
+/// Load one wide stream's rows from a TSV by NAME: both `time_column` (the
+/// time axis) and `column` (the value) must match header fields exactly, with
+/// no positional fallback for either. Returns the converted observation
+/// `times`, the time cells as written, and the per-row cells, where `None` is
+/// a hole (the `NA` token): its time stays in the grid (so the incidence
+/// accumulator still resets there) but it carries no value (no likelihood
+/// term). Only the value column may contain `NA`. Read through
 /// [`crate::fit::observed_rows::observed_rows`].
-#[cfg(test)]
-pub fn load_data_tsv_column_cells(
-    path: &str,
-    time_column: &str,
-    column: &str,
-    domain: CellDomain,
-    opts: &TimeOpts,
-) -> Result<(Vec<f64>, Vec<Option<sim::inference::ObsCell>>), String> {
-    let (times, _written, cells) =
-        load_data_tsv_column_cells_as_written(path, time_column, column, domain, opts)?;
-    Ok((times, cells))
-}
-
-/// The observation `times`, the time cells as written, and the per-row cells
-/// (`None` a hole) of one named TSV column, as described at
-/// [`load_data_tsv_column_cells`].
 pub(crate) fn load_data_tsv_column_cells_as_written(
     path: &str,
     time_column: &str,
@@ -1778,29 +1727,10 @@ fn dim_column_names(obs: &ir::observation::ObservationModel) -> Vec<&str> {
 /// valid level set per dim. A row whose level for some dim is absent from
 /// every sibling's stratum is a hard error (E281) — never silently remapped.
 ///
-/// Returns `(union_times, cells, aux)` in the SAME shape the wide cells loader
-/// produces, so nothing downstream of the loader changes.
-///
-/// The column-reader tests' view of [`load_long_form_stream_as_written`]; the
-/// loaders read through that, via
+/// Returns `(times, written, cells, aux)` in the shape the wide loader
+/// ([`load_data_tsv_column_cells_as_written`]) produces, with this leaf's time
+/// cells as written beside their converted times. Read through
 /// [`crate::fit::observed_rows::observed_rows`].
-#[cfg(test)]
-pub fn load_long_form_stream(
-    path: &str,
-    obs_block: &ir::observation::ObservationModel,
-    siblings: &[&ir::observation::ObservationModel],
-    opts: &TimeOpts,
-) -> Result<
-    (Vec<f64>, Vec<Option<sim::inference::ObsCell>>, Vec<Vec<(String, f64)>>),
-    String,
-> {
-    let (times, _written, cells, aux) =
-        load_long_form_stream_as_written(path, obs_block, siblings, opts)?;
-    Ok((times, cells, aux))
-}
-
-/// [`load_long_form_stream`], with this leaf's time cells as written beside
-/// their converted times.
 pub(crate) fn load_long_form_stream_as_written(
     path: &str,
     obs_block: &ir::observation::ObservationModel,
@@ -2326,6 +2256,25 @@ mod tests {
         }
     }
 
+    /// A state stream reading a `time` column and a `cases` value column: no
+    /// `covers`, so each row measures the instant of its time cell.
+    fn state_stream() -> ir::observation::ObservationModel {
+        let mut obs = daily_incidence_stream();
+        obs.covers = None;
+        obs.projection = ir::observation::Projection::CurrentPop("I".into());
+        obs
+    }
+
+    /// The `(time, value)` of each row [`crate::fit::observed_rows::observed_rows`]
+    /// reads from `path` for [`state_stream`]; a hole's value is `None`.
+    fn read_state_stream(path: &str, opts: &TimeOpts) -> Result<Vec<(f64, Option<f64>)>, String> {
+        let obs = state_stream();
+        let rows = crate::fit::observed_rows::observed_rows(path, &obs, &[&obs], opts)?;
+        Ok(rows.iter().map(|r| (r.measures.end(), r.cell.map(|c| match c {
+            sim::inference::ObsCell::Scalar(v) => v,
+        }))).collect())
+    }
+
     // ── gh#833: a gap under a UNIFORM covers form is a missing row ───────
 
     /// An incidence stream declaring `covers = day(time)` in its lowered form
@@ -2600,7 +2549,7 @@ mod tests {
     #[test]
     fn load_data_rejects_out_of_order() {
         let path = write_temp_tsv("out_of_order", "time\tcases\n7\t10\n14\t20\n10\t15\n21\t30\n");
-        let result = load_data_tsv_column(&path, "time", "cases", CellDomain::Real, &numeric_opts());
+        let result = read_state_stream(&path, &numeric_opts());
         assert!(result.is_err(), "should reject out-of-order times");
         let err = result.err().unwrap();
         assert!(err.contains("not in chronological order"), "error message: {}", err);
@@ -2612,7 +2561,7 @@ mod tests {
     fn load_data_accepts_equal_times() {
         // Equal times are valid (multi-stream observations at same time point)
         let path = write_temp_tsv("equal_times", "time\tcases\n7\t10\n7\t5\n14\t20\n");
-        let result = load_data_tsv_column(&path, "time", "cases", CellDomain::Real, &numeric_opts());
+        let result = read_state_stream(&path, &numeric_opts());
         assert!(result.is_ok(), "equal times should be accepted: {:?}", result.err());
         let obs = result.unwrap();
         assert_eq!(obs.len(), 3);
@@ -2622,7 +2571,7 @@ mod tests {
     #[test]
     fn load_data_accepts_sorted() {
         let path = write_temp_tsv("sorted", "time\tcases\n7\t10\n14\t20\n21\t30\n");
-        let result = load_data_tsv_column(&path, "time", "cases", CellDomain::Real, &numeric_opts());
+        let result = read_state_stream(&path, &numeric_opts());
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 3);
         std::fs::remove_file(&path).ok();
@@ -2638,12 +2587,12 @@ mod tests {
     // with exit 0.
 
     #[test]
-    fn load_data_tsv_column_rejects_miscased_name_in_2col_file() {
+    fn row_reader_rejects_miscased_name_in_2col_file() {
         // Header column is `Cases` (capital C); model asks for `cases`.
         // Pre-fix: 2-column fallback binds column 1 and loads. Post-fix:
         // located error naming the requested column + available headers.
         let path = write_temp_tsv("miscased_2col", "time\tCases\n7\t10\n14\t20\n");
-        let result = load_data_tsv_column(&path, "time", "cases", CellDomain::Real, &numeric_opts());
+        let result = read_state_stream(&path, &numeric_opts());
         assert!(result.is_err(),
             "a mis-cased column name must NOT silently bind by position; got Ok({:?})",
             result.as_ref().ok());
@@ -2656,12 +2605,12 @@ mod tests {
     }
 
     #[test]
-    fn load_data_tsv_column_rejects_renamed_name_in_wide_file() {
+    fn row_reader_rejects_renamed_name_in_wide_file() {
         // Multi-column file, requested name absent. (This path already
         // errored pre-fix, but pin the located-message quality.)
         let path = write_temp_tsv("renamed_wide",
             "time\tcase_count\tdeaths\n7\t10\t1\n14\t20\t2\n");
-        let result = load_data_tsv_column(&path, "time", "cases", CellDomain::Real, &numeric_opts());
+        let result = read_state_stream(&path, &numeric_opts());
         assert!(result.is_err(), "absent column name must error");
         let err = result.err().unwrap();
         assert!(err.contains("cases"), "error must name requested column: {}", err);
@@ -2676,10 +2625,10 @@ mod tests {
     /// declared `time` column wasn't found and the fit failed with a confusing
     /// "Headers present: [# ...]" error.
     #[test]
-    fn load_data_tsv_column_skips_leading_comment_header() {
+    fn row_reader_skips_leading_comment_header() {
         let path = write_temp_tsv("comment_header",
             "# Crude all-age prevalence, village 408\ntime\tcases\n7\t10\n14\t20\n");
-        let result = load_data_tsv_column(&path, "time", "cases", CellDomain::Real, &numeric_opts());
+        let result = read_state_stream(&path, &numeric_opts());
         assert!(result.is_ok(),
             "a leading `#` comment must be skipped, not treated as the header; got {:?}",
             result.as_ref().err());
@@ -2693,9 +2642,9 @@ mod tests {
     // Post-fix: located error (file path implied by caller, column, row).
 
     #[test]
-    fn load_data_tsv_column_rejects_nan_value() {
+    fn row_reader_rejects_nan_value() {
         let path = write_temp_tsv("nan_value", "time\tcases\n7\t10\n14\tNaN\n21\t30\n");
-        let result = load_data_tsv_column(&path, "time", "cases", CellDomain::Real, &numeric_opts());
+        let result = read_state_stream(&path, &numeric_opts());
         assert!(result.is_err(),
             "a NaN observation value must be rejected at load; got Ok({:?})",
             result.as_ref().ok());
@@ -2707,9 +2656,9 @@ mod tests {
     }
 
     #[test]
-    fn load_data_tsv_column_rejects_inf_value() {
+    fn row_reader_rejects_inf_value() {
         let path = write_temp_tsv("inf_value", "time\tcases\n7\t10\n14\tinf\n21\t30\n");
-        let result = load_data_tsv_column(&path, "time", "cases", CellDomain::Real, &numeric_opts());
+        let result = read_state_stream(&path, &numeric_opts());
         assert!(result.is_err(),
             "an infinite observation value must be rejected at load; got Ok({:?})",
             result.as_ref().ok());
@@ -2726,35 +2675,30 @@ mod tests {
     // file. This is the happy path that must remain byte-identical.
 
     #[test]
-    fn load_data_tsv_column_happy_path_loads_named_column() {
+    fn row_reader_happy_path_loads_named_column() {
         // Wide file: `cases` is column 2 (not column 1). By-name binding
         // must pick column 2's values, not deaths in column 1.
         let path = write_temp_tsv("happy_wide",
             "time\tdeaths\tcases\n7\t1\t10\n14\t2\t20\n21\t3\t30\n");
-        let obs = load_data_tsv_column(&path, "time", "cases", CellDomain::Real, &numeric_opts())
+        let obs = read_state_stream(&path, &numeric_opts())
             .expect("well-formed named column must load");
         assert_eq!(obs.len(), 3);
-        assert_eq!(obs[0].value, 10.0);
-        assert_eq!(obs[1].value, 20.0);
-        assert_eq!(obs[2].value, 30.0);
-        assert_eq!(obs[0].time, 7.0);
+        assert_eq!(obs, vec![(7.0, Some(10.0)), (14.0, Some(20.0)), (21.0, Some(30.0))]);
         std::fs::remove_file(&path).ok();
     }
 
     #[test]
-    fn load_data_tsv_column_happy_path_2col_named_file() {
+    fn row_reader_happy_path_2col_named_file() {
         // The happy single-stream case: a `time\tcases` file binds the
         // `cases` column *because it is named* `cases` (which happens to
         // be column 1), not by position. Values must round-trip exactly —
         // this is the legacy single-stream schema, unchanged by the
         // fallback deletion.
         let path = write_temp_tsv("happy_2col", "time\tcases\n7\t10\n14\t20\n21\t30\n");
-        let obs = load_data_tsv_column(&path, "time", "cases", CellDomain::Real, &numeric_opts())
+        let obs = read_state_stream(&path, &numeric_opts())
             .expect("named single-stream load");
         assert_eq!(obs.len(), 3);
-        assert_eq!(obs[0], Observation { time: 7.0, value: 10.0 });
-        assert_eq!(obs[1], Observation { time: 14.0, value: 20.0 });
-        assert_eq!(obs[2], Observation { time: 21.0, value: 30.0 });
+        assert_eq!(obs, vec![(7.0, Some(10.0)), (14.0, Some(20.0)), (21.0, Some(30.0))]);
         std::fs::remove_file(&path).ok();
     }
 
@@ -2769,8 +2713,8 @@ mod tests {
         let numeric = write_temp_tsv("dated_num", "time\tcases\n0\t10\n7\t20\n14\t30\n");
         let mut o = numeric_opts();
         o.origin = Some("2020-03-01");
-        let from_dates = load_data_tsv_column(&dated, "time", "cases", CellDomain::Real, &o).unwrap();
-        let from_nums = load_data_tsv_column(&numeric, "time", "cases", CellDomain::Real, &numeric_opts()).unwrap();
+        let from_dates = read_state_stream(&dated, &o).unwrap();
+        let from_nums = read_state_stream(&numeric, &numeric_opts()).unwrap();
         assert_eq!(from_dates, from_nums);
         std::fs::remove_file(&dated).ok();
         std::fs::remove_file(&numeric).ok();
@@ -2780,23 +2724,24 @@ mod tests {
     //
     // The missing-value token `NA` becomes a hole (`None`) whose TIME stays
     // in the grid (the row is kept). NaN/inf are still rejected as garbage.
-    // The dense `load_data_tsv_column` rejects `NA` (holes are pfilter-only).
 
     #[test]
     fn cells_loader_treats_na_as_a_hole_with_time_retained() {
         use sim::inference::ObsCell;
         // Three weekly rows; the middle one is NA (a hole).
         let path = write_temp_tsv("na_hole", "time\tcases\n7\t10\n14\tNA\n21\t30\n");
-        let (times, cells) = load_data_tsv_column_cells(&path, "time", "cases", CellDomain::Real, &numeric_opts())
+        let obs = state_stream();
+        let rows = crate::fit::observed_rows::observed_rows(&path, &obs, &[&obs], &numeric_opts())
             .expect("NA must load as a hole, not error");
+        let times: Vec<f64> = rows.iter().map(|r| r.measures.end()).collect();
 
         // All three grid times are retained — the hole's time stays.
         assert_eq!(times, vec![7.0, 14.0, 21.0],
             "the hole row's TIME must stay in the grid; got {:?}", times);
         // The middle cell is a hole; the others are observed scalars.
-        assert_eq!(cells[0], Some(ObsCell::Scalar(10.0)));
-        assert_eq!(cells[1], None, "the NA cell must be a hole (None)");
-        assert_eq!(cells[2], Some(ObsCell::Scalar(30.0)));
+        assert_eq!(rows[0].cell, Some(ObsCell::Scalar(10.0)));
+        assert_eq!(rows[1].cell, None, "the NA cell must be a hole (None)");
+        assert_eq!(rows[2].cell, Some(ObsCell::Scalar(30.0)));
         std::fs::remove_file(&path).ok();
     }
 
@@ -2808,26 +2753,13 @@ mod tests {
             ("cells_inf", "time\tcases\n7\t10\n14\tinf\n21\t30\n"),
         ] {
             let path = write_temp_tsv(name, body);
-            let result = load_data_tsv_column_cells(&path, "time", "cases", CellDomain::Real, &numeric_opts());
+            let result = read_state_stream(&path, &numeric_opts());
             assert!(result.is_err(),
                 "non-finite values must still be rejected on the cells path ({name})");
             let err = result.err().unwrap();
             assert!(err.contains("cases"), "error must name the column: {}", err);
             std::fs::remove_file(&path).ok();
         }
-    }
-
-    #[test]
-    fn dense_loader_rejects_na_token() {
-        // The dense path (survey/profile/fit) does not support holes yet — an
-        // `NA` there is a located error, not a silent placeholder.
-        let path = write_temp_tsv("dense_na", "time\tcases\n7\t10\n14\tNA\n21\t30\n");
-        let result = load_data_tsv_column(&path, "time", "cases", CellDomain::Real, &numeric_opts());
-        assert!(result.is_err(), "dense loader must reject NA");
-        let err = result.err().unwrap();
-        assert!(err.contains("NA") && err.contains("cases"),
-            "error must name the NA token and the column: {}", err);
-        std::fs::remove_file(&path).ok();
     }
 
     // ── §4.2 long-form by-name level matching ───────────────────────────
@@ -2853,12 +2785,23 @@ mod tests {
             emit_schedule: None,
             stratum: vec![StratumKey { dim: "patch".into(), level: level.into() }],
             covers: None,
-            projection: Projection::CumulativeFlow(format!("infection_{level}")),
+            projection: Projection::CurrentPop(format!("I_{level}")),
             projection_state_grad: Default::default(),
             likelihood: Likelihood::Poisson(PoissonLikelihood {
                 rate: ir::Diffable::new(ir::expr::Expr::Projected(ir::expr::ProjectedExpr { projected: () })),
             }),
         }
+    }
+
+    /// The times and cells [`crate::fit::observed_rows::observed_rows`] reads
+    /// for the leaf `obs` of a long-form file.
+    fn read_leaf(
+        path: &str,
+        obs: &ir::observation::ObservationModel,
+        siblings: &[&ir::observation::ObservationModel],
+    ) -> Result<(Vec<f64>, Vec<Option<sim::inference::ObsCell>>), String> {
+        let rows = crate::fit::observed_rows::observed_rows(path, obs, siblings, &numeric_opts())?;
+        Ok(rows.iter().map(|r| (r.measures.end(), r.cell)).unzip())
     }
 
     #[test]
@@ -2873,10 +2816,8 @@ mod tests {
         let path = write_temp_tsv("lf_route",
             "time\tpatch\tcases\n7\tp1\t10\n7\tp2\t99\n14\tp1\t20\n14\tp2\t88\n");
 
-        let (t1, c1, _a1) = load_long_form_stream(&path, &p1, &siblings, &numeric_opts())
-            .expect("p1 leaf loads");
-        let (t2, c2, _a2) = load_long_form_stream(&path, &p2, &siblings, &numeric_opts())
-            .expect("p2 leaf loads");
+        let (t1, c1) = read_leaf(&path, &p1, &siblings).expect("p1 leaf loads");
+        let (t2, c2) = read_leaf(&path, &p2, &siblings).expect("p2 leaf loads");
 
         assert_eq!(t1, vec![7.0, 14.0], "union time axis");
         assert_eq!(t2, vec![7.0, 14.0], "union time axis shared across leaves");
@@ -2898,7 +2839,7 @@ mod tests {
         let path = write_temp_tsv("lf_unknown",
             "time\tpatch\tcases\n7\tp1\t10\n7\tp3\t5\n");
 
-        let result = load_long_form_stream(&path, &p1, &siblings, &numeric_opts());
+        let result = read_leaf(&path, &p1, &siblings);
         assert!(result.is_err(), "an unknown level must be a hard error");
         let err = result.err().unwrap();
         assert!(err.contains("E281"), "must be E281: {err}");
@@ -2927,8 +2868,7 @@ mod tests {
              14\tp1\t20\n\
              21\tp1\t30\n21\tp2\t3\n");
 
-        let (t2, c2, _a2) = load_long_form_stream(&path, &p2, &siblings, &numeric_opts())
-            .expect("p2 leaf loads");
+        let (t2, c2) = read_leaf(&path, &p2, &siblings).expect("p2 leaf loads");
         assert_eq!(t2, vec![7.0, 21.0],
             "p2's OWN schedule is {{7,21}} — 14 is a sibling's time, not p2's");
         assert_eq!(c2, vec![Some(ObsCell::Scalar(1.0)), Some(ObsCell::Scalar(3.0))]);
@@ -2952,8 +2892,7 @@ mod tests {
              14\tp1\t20\n14\tp2\tNA\n\
              21\tp1\t30\n21\tp2\t3\n");
 
-        let (t2, c2, _a2) = load_long_form_stream(&path, &p2, &siblings, &numeric_opts())
-            .expect("p2 leaf loads");
+        let (t2, c2) = read_leaf(&path, &p2, &siblings).expect("p2 leaf loads");
         assert_eq!(t2, vec![7.0, 14.0, 21.0], "explicit NA row keeps 14 in p2's schedule");
         assert_eq!(c2, vec![Some(ObsCell::Scalar(1.0)), None, Some(ObsCell::Scalar(3.0))]);
         assert_ne!(c2[1], Some(ObsCell::Scalar(0.0)),
