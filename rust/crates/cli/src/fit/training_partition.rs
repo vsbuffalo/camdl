@@ -133,9 +133,10 @@ pub(crate) struct RowPrefix {
 /// Why a partition cannot be built.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum PartitionError {
-    /// A stream has no row at or before the cutoff.
+    /// A stream has no row with an observed value at or before the cutoff.
     NoTrainingRows { stream: String },
-    /// Every row of every stream trains under the cutoff: nothing is held out.
+    /// No row with an observed value ends after the cutoff, in any stream:
+    /// nothing is held out.
     NothingHeldOut,
     /// No stream has any row, so there is no extent.
     NoRows,
@@ -160,11 +161,15 @@ pub(crate) struct TrainingPartition {
 impl TrainingPartition {
     /// The partition `holdout_after = at` makes: in each stream the rows whose
     /// end is at or before `at` (within [`TIME_TIE_EPS`]). Every stream must
-    /// keep a training row, and some row must be held out.
+    /// keep a training row with an observed value, and some row with an
+    /// observed value must be held out. An `NA` row is still a row: it keeps
+    /// its position in the prefix and is hashed into the digest, but it is no
+    /// observation to train on or to score (D40).
     pub(crate) fn from_cutoff(
         rows: &BTreeMap<String, Vec<ObservedRow>>,
         at: f64,
     ) -> Result<Self, PartitionError> {
+        let observed = |rs: &[ObservedRow]| rs.iter().filter(|r| r.cell.is_some()).count();
         let mut streams = Vec::with_capacity(rows.len());
         let mut held_out = 0usize;
         for (stream, rs) in rows {
@@ -176,10 +181,10 @@ impl TrainingPartition {
                     stream: stream.clone(), position: n + position,
                 });
             }
-            if n == 0 {
+            if observed(&rs[..n]) == 0 {
                 return Err(PartitionError::NoTrainingRows { stream: stream.clone() });
             }
-            held_out += rs.len() - n;
+            held_out += observed(&rs[n..]);
             streams.push(prefix(stream, &rs[..n])?);
         }
         if held_out == 0 {
@@ -359,6 +364,34 @@ mod tests {
             Err(PartitionError::NoTrainingRows { stream: "cases".into() }));
         assert_eq!(TrainingPartition::from_cutoff(&rows, 14.0),
             Err(PartitionError::NothingHeldOut));
+    }
+
+    /// A stream whose rows at or before the cutoff are all `NA` keeps no
+    /// observed value to train on, so it is refused like a stream with no row
+    /// there at all.
+    #[test]
+    fn a_stream_whose_training_rows_are_all_holes_is_refused() {
+        let rows = one(rows_of("holes_train", DAY, "time\tcases\n1\tNA\n2\tNA\n20\t5\n21\t6\n"));
+        assert_eq!(TrainingPartition::from_cutoff(&rows, 10.0),
+            Err(PartitionError::NoTrainingRows { stream: "cases".into() }));
+    }
+
+    /// A cutoff whose only held-out row is `NA` holds out nothing `compare`
+    /// could score, so it is refused as nothing held out.
+    #[test]
+    fn a_cutoff_whose_only_held_out_row_is_a_hole_holds_out_nothing() {
+        let rows = one(rows_of("holes_held", DAY, "time\tcases\n1\t1\n2\t2\n20\tNA\n"));
+        assert_eq!(TrainingPartition::from_cutoff(&rows, 10.0),
+            Err(PartitionError::NothingHeldOut));
+    }
+
+    /// The holes still count as rows: positions and the digest cover them.
+    #[test]
+    fn holes_keep_their_positions_in_the_prefix() {
+        let rows = one(rows_of("holes_pos", DAY, "time\tcases\n1\tNA\n2\t3\n20\t5\n"));
+        let p = TrainingPartition::from_cutoff(&rows, 10.0).unwrap();
+        assert_eq!(p.rows("cases"), 2, "the leading hole is row 0 of the prefix");
+        assert_eq!(p.streams()[0].digest, row_digest(&rows["cases"][..2]).unwrap());
     }
 
     /// `whole` trains every row; its extent is the latest end, an `NA` row

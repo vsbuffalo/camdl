@@ -454,6 +454,12 @@ before the cutoff. Under `[data.holdout]`, every row of the training files
 trains, and every holdout row must end after the training extent or the fit is
 refused. The partition is decided once, at fit time, and recorded (§3.2).
 
+An `NA` row is a row: it keeps its position in its stream's training prefix and
+is hashed into the row digest. It is not an observation, so under
+`holdout_after` a stream whose training rows are all `NA` is refused as having
+no training rows, and a cutoff whose held-out rows are all `NA` is refused as
+holding out nothing.
+
 For `closing_at` and window-column streams the label is the period's end, so
 this rule trains exactly the rows today's label rule trains, and their fits are
 unchanged. For `day`, `starting_on` and `ending_on` streams the row whose period

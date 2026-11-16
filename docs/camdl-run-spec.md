@@ -2876,8 +2876,10 @@ scoring see the full series.
   latest end of a row with a value, across every bound stream; an `NA` row
   counts toward neither. A row trains if the end of what it measures (its
   instant, or its period's end) is at or before the cutoff, so each stream
-  trains a prefix of its rows. Every bound stream must keep a training row and
-  some row must be held out; either failing is a hard error.
+  trains a prefix of its rows. Every bound stream must keep a training row with
+  a value and some row with a value must be held out; either failing is a hard
+  error. An `NA` row keeps its position in the prefix and in its row digest, but
+  counts toward neither check.
 - `[data.holdout]` names a stream and a file of held-out rows. Every row of the
   training files trains, and every held-out row must end strictly after the
   training extent, the latest end among the training rows of every bound stream.

@@ -69,10 +69,12 @@ stream the end is the row's label, so the row labelled with the cutoff trains.
 For a stream labelled by the start of its period (`covers = day(time)`,
 `starting_on`, `ending_on`) the end is later than the label: under
 `holdout_after = 10` the `day(time)` row labelled 10 covers day 10, ends at 11
-and is held out. Every bound stream must keep a training row and some row must
-be held out. Under `[data.holdout]` every row of the training files trains, and
-every row of the holdout files must end strictly after the training extent, the
-latest end among the training rows of every stream (tail-only).
+and is held out. Every bound stream must keep a training row with a value, and
+some row with a value must be held out: an `NA` row keeps its place among the
+rows but is no observation to train on or to score. Under `[data.holdout]` every
+row of the training files trains, and every row of the holdout files must end
+strictly after the training extent, the latest end among the training rows of
+every stream (tail-only).
 
 Every fit records which rows it trained on in `fit.meta.json` as
 `training_partition`: per stream the number of leading rows that trained and
