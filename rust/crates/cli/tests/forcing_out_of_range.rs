@@ -144,6 +144,12 @@ fn simulate(dir: &Path, model: &Path, extra: &[&str]) -> Output {
 /// A tiny PGAS `fit run` of `model` on weekly counts over days 7–70, past the
 /// forcing's range, with `config_extra` appended to `[config]`.
 fn fit_run(dir: &Path, model: &Path, config_extra: &str) -> Output {
+    let toml = fit_toml(dir, model, config_extra);
+    camdl(dir, &["fit", "run", toml.to_str().unwrap()])
+}
+
+/// The fit config [`fit_run`] runs, written to `fit.toml` in `dir`.
+fn fit_toml(dir: &Path, model: &Path, config_extra: &str) -> PathBuf {
     let data = dir.join("cases.tsv");
     let mut body = String::from("time\tcases\n");
     for w in 1..=10 {
@@ -166,7 +172,7 @@ fn fit_run(dir: &Path, model: &Path, config_extra: &str) -> Output {
         ),
     )
     .unwrap();
-    camdl(dir, &["fit", "run", toml.to_str().unwrap()])
+    toml
 }
 
 /// The one line of the warning a held forcing gets, by its code.
@@ -274,6 +280,36 @@ fn a_stored_held_run_is_not_served_without_the_override() {
     let o = simulate(tmp.path(), &m, &[]);
     let err = stderr(&o);
     assert!(!o.status.success(), "the stored held run must not be served:\n{err}");
+    assert!(err.contains("--allow-forcing-extrapolation"), "{err}");
+}
+
+/// The same under `profile`: a profile point stored under the override is not
+/// served, as a cached start, to the same profile without it.
+#[test]
+fn a_stored_held_profile_point_is_not_served_without_the_override() {
+    let tmp = tempfile::tempdir().unwrap();
+    let m = model(tmp.path(), "linear", &ROWS_TO_50);
+    let toml = fit_toml(tmp.path(), &m, "");
+    let prof = tmp.path().join("prof");
+    let args = |extra: &'static [&'static str]| {
+        let mut v: Vec<String> = [
+            "profile", m.to_str().unwrap(), "--fit", toml.to_str().unwrap(), "--sweep", "gamma=0.1,0.2",
+            "--particles", "8", "--iterations", "2", "--n-starts", "1", "--seed", "1", "-o",
+            prof.to_str().unwrap(),
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        v.extend(extra.iter().map(|s| s.to_string()));
+        v
+    };
+    let with: Vec<String> = args(&["--allow-forcing-extrapolation"]);
+    let o = camdl(tmp.path(), &with.iter().map(String::as_str).collect::<Vec<_>>());
+    assert!(o.status.success(), "the override lets the profile run:\n{}", stderr(&o));
+    let without: Vec<String> = args(&[]);
+    let o = camdl(tmp.path(), &without.iter().map(String::as_str).collect::<Vec<_>>());
+    let err = stderr(&o);
+    assert!(!o.status.success(), "the stored held profile points must not be served:\n{err}");
     assert!(err.contains("--allow-forcing-extrapolation"), "{err}");
 }
 

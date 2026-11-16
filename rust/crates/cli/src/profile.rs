@@ -1847,14 +1847,16 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         }
     }
 
-    // Cache scan: a job is cached when its leaf already exists. `cached` /
-    // `remaining` hold indices into `resolved_jobs`.
+    // Cache scan: a job is cached when its leaf already exists, unless the
+    // leaf held a forcing under `--allow-forcing-extrapolation` and this run
+    // is not under it: that job runs, and is refused. `cached` / `remaining`
+    // hold indices into `resolved_jobs`.
     let mut cached: Vec<usize> = Vec::new();
     let mut remaining: Vec<usize> = Vec::new();
     for (ji, (_, _, _, resolved, cas_path)) in resolved_jobs.iter().enumerate() {
         if matches!(
             store.lookup(cas_path, &runid::LeafIdentity::new(resolved.run_id)),
-            runid::Lookup::Hit(_)
+            runid::Lookup::Hit(r) if !crate::forcing_extrapolation::held_without_override(&r)
         ) {
             cached.push(ji);
         } else {
