@@ -148,6 +148,14 @@ pub(crate) enum PartitionError {
     Digest(String),
 }
 
+/// Whether `row` trains under `holdout_after = at`: the end of what it
+/// measures is at or before `at` (within [`TIME_TIE_EPS`]). The one statement
+/// of the cutoff rule; [`TrainingPartition::from_cutoff`] and `pfilter
+/// --save-final-state` (gh#1084) both read it.
+pub(crate) fn trains_under_cutoff(row: &ObservedRow, at: f64) -> bool {
+    row.measures.end() <= at + TIME_TIE_EPS
+}
+
 /// Which rows of each stream the parameters were fitted to (spec §3.2).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TrainingPartition {
@@ -173,8 +181,7 @@ impl TrainingPartition {
         let mut streams = Vec::with_capacity(rows.len());
         let mut held_out = 0usize;
         for (stream, rs) in rows {
-            let trains: Vec<bool> =
-                rs.iter().map(|r| r.measures.end() <= at + TIME_TIE_EPS).collect();
+            let trains: Vec<bool> = rs.iter().map(|r| trains_under_cutoff(r, at)).collect();
             let n = trains.iter().take_while(|&&t| t).count();
             if let Some(position) = trains[n..].iter().position(|&t| t) {
                 return Err(PartitionError::NotAPrefix {
