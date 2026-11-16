@@ -1796,6 +1796,12 @@ camdl simulate model.camdl --params mle.toml \
     --to "last_obs + 8 weeks" --fit fit.toml
 ```
 
+Under a fit config that declares `holdout_after`, `pfilter --fit` still scores
+every bound row, but `--save-final-state` is refused while any bound row with a
+value ends after the cutoff: a state filtered through the held-out rows has
+already seen the data its forecast is scored against. Bind the training rows
+alone with `--data NAME=FILE` and the state is saved at their end.
+
 The file is a TSV with a `# camdl-final-state v1  t=<time>` header, then one row
 per particle and one column per integer compartment — nothing else. The header's
 `t` is the forecast origin and becomes the run's `t_start`; `--to` sets the
