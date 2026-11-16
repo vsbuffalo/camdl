@@ -80,6 +80,7 @@ fn ctx<'a>(
         t_end,
         output,
         allow_degenerate_rates: false,
+        allow_forcing_extrapolation: false,
         no_flows: false,
         columns: columns_empty(),
         params,
@@ -372,6 +373,7 @@ impl SimInputs {
             t_end: self.t_end,
             output: &self.output,
             allow_degenerate_rates: self.allow_degenerate_rates,
+            allow_forcing_extrapolation: false,
             no_flows: self.no_flows,
             columns: &self.columns,
             params: &self.base_params,
@@ -537,6 +539,7 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
         obs_block: "",
         flow_indices: &[],
         objective: crate::fit::config_v2::LikelihoodObjective::Full,
+        allow_forcing_extrapolation: false,
         seed: 7,
     })
     .expect("pfilter");
@@ -555,6 +558,7 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
         eval_particles: 100,
         eval_replicates: 1,
         objective: crate::fit::config_v2::LikelihoodObjective::Full,
+        allow_forcing_extrapolation: false,
         training_rows: None,
         bounds: &bounds,
         fixed: &fixed,
@@ -797,12 +801,20 @@ fn cas_identity_pins() {
         // change to what feeds identity: a fit's method level no longer carries
         // a resolved observation alignment. With the version held at 3 that
         // change moved `fit` alone (checked when the bump was made).
-        ("sim", "51b4d279126c231e2368bf7c717a2ae2cb6085743180b4c652cebefac3659f62"),
-        ("fit", "2f09f066e88c1d81a53bfe389d676d502998ccde7bf5a163c84b22ad6381e660"),
-        ("pfilter", "606668b07de8270df2d2b5cad61a9bea514486110820051844dd91eebdf5629e"),
-        ("survey", "3e0fdf3353daf0d28ab756778c63d3addfb778f93d25cf3455de6808a3142a52"),
-        ("sim_ensemble", "179992379aba805e49918dc2b6fd8ddbd7b94a71bc69db25ff4ca584669a4f76"),
-        ("profile", "9161010e745acf3bbc1f7faaea502047f9f515a1aa402133aad71bfd1784a5ae"),
+        //
+        // HASH_VERSION 4 -> 5 (temporal-architecture Stage 2, D58) moved
+        // EVERY kind again. It declares two changes: training rows decided by
+        // period end (D38, D40), and the forcing-extrapolation override keyed
+        // in the sim, pfilter, profile and survey identities. Off, as here, it
+        // is omitted from the pfilter, survey and profile config levels; the
+        // `sim` and `sim_ensemble` config level (`SimConfig`) carries it as a
+        // field, so their bytes change beyond the version.
+        ("sim", "98f90aa0798e73f95c33fb4f13d5e51ca7b8904151f3a73cff4967c8e39524d0"),
+        ("fit", "d8c38bba7d9776fba17ce7ef9c5bfb606753d9affbf46d57d02aeca3bebde077"),
+        ("pfilter", "c879beec599b79f161181ea9da27737c3599eec7bcd332e9ce77cdde5e4cac58"),
+        ("survey", "436c5bde01f453c1dd503bebc936fb9d2b6ae38685e5fe6f60878a999cfa20ee"),
+        ("sim_ensemble", "9e383b95adc5647a6f8ecb86e6bfa40e9b3a9266373c24745df0e7deb4eee7a8"),
+        ("profile", "9877ff38894742400b3283ae14b99c8cb54e2dee2505cea3661ed694e16dfc18"),
     ];
     // Compared as whole lists so a failure reports EVERY kind that moved, not
     // just the first — the re-key scope is the thing under review.

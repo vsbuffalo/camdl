@@ -236,6 +236,10 @@ pub struct ResolvedScenario {
 /// and seed differ from those an earlier camdl stored; by the gh#833 rule the
 /// format enters the key. Every stored sim leaf re-keys once and is
 /// recomputed on next use.
+///
+/// `allow_forcing_extrapolation` (temporal-architecture migration, Stage 2,
+/// D44) was added under the store-wide `HASH_VERSION` 5 bump, which re-keys
+/// every sim leaf on its own, so the schema version did not move with it.
 #[derive(Debug, Clone, PartialEq, RunInput)]
 #[run_input(schema_version = 6)]
 pub struct SimConfig {
@@ -249,6 +253,11 @@ pub struct SimConfig {
     /// (hard-error → silent-zero), which changes trajectory values. A
     /// control-looking flag that is genuinely semantic.
     pub allow_degenerate_rates: bool,
+    /// Semantic: `--allow-forcing-extrapolation` lets the run hold a
+    /// forcing's end value outside the range it is defined on, where without
+    /// it the run is refused (D44). A run under it and the same run without
+    /// it are two runs.
+    pub allow_forcing_extrapolation: bool,
     /// Output view (gh#156): which trajectory columns are written to the leaf.
     /// `--no-flows` / `--columns` change the leaf's *bytes* (a column subset),
     /// so a content-addressed leaf cannot share a `run_id` with the full one —

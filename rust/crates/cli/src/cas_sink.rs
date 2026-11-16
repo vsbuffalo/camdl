@@ -306,6 +306,7 @@ impl CasSink {
             t_end: resolved.t_end.unwrap_or(self.base_model.simulation.t_end),
             output: &self.base_model.output.times,
             allow_degenerate_rates: self.allow_degenerate_rates,
+            allow_forcing_extrapolation: crate::forcing_extrapolation::allowed(),
             no_flows: self.output_cols.no_flows,
             columns: &self.output_cols.allow,
             params: &params,
@@ -465,11 +466,6 @@ impl CasSink {
         let Some(dir) = runid::find_leaf(&self.root(), runid::ArtifactKind::Sim, &rt.levels) else {
             return Ok(None);
         };
-        // A leaf that held a forcing under `--allow-forcing-extrapolation`
-        // does not answer for a run without it: the cell runs, and is refused.
-        if crate::forcing_extrapolation::leaf_held_without_override(&dir) {
-            return Ok(None);
-        }
         if self.obs_enabled && !self.base_model.observations.is_empty() {
             let model = crate::util::resolve_run_ir(&spec.sim_run)?;
             let obs_dir = obs_subtree_dir(
