@@ -172,6 +172,21 @@ hard aborts:
 
 Not bypassable on either real entry point.
 
+**What each method can do with an observed period** is also recorded here, as
+the entry's `period_boundaries` (`PeriodBoundaries`, decision D43 of
+`docs/dev/temporal-architecture.md` §4.5). It is a capability of the method, not
+a user setting:
+
+| `PeriodBoundaries` | methods                                   | a period start or end off the grid `t_start + k·dt`                                                                                  |
+| ------------------ | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `Anywhere`         | `if2`, `pfilter`, `pmmh`                  | stepped to exactly, with a shortened step (`Schedule::exact_inference`)                                                              |
+| `OnGrid`           | `pgas`                                    | refused before the run, naming the stream, row, period and the two grid times either side (`runner::refuse_periods_off_the_grid`)    |
+| `AtOutputTimes`    | `nl-sbplx`, `nl-bobyqa`, `nl-lbfgs`, `mh` | read from the ODE trajectory at its output times; a boundary with no output time is refused by the trajectory walk (`ode_loglik.rs`) |
+
+`FitRunConfig::build` reads it once the method is known, over every row of every
+bound stream, held-out rows included. The `[config] obs_alignment` key that used
+to present this as a choice is removed, and refused at load.
+
 ## Axis 3 — model-feature × algorithm (ad-hoc, not a system)
 
 This axis is real but has **no unifying mechanism** — it is a scatter of checks,
@@ -275,8 +290,7 @@ Out of scope for this doc, listed so the map is complete:
   fit-layer perturbation schedule, not an IR property).
 - **CLI-flag × {algorithm, obs-structure}** — `--flow`×multi-stream
   (`pfilter.rs`/`profile.rs`), `--resume`×algorithm (`fit/mod.rs`),
-  `--init`×companion-path (`args/mod.rs`), `obs_alignment`×algorithm
-  (`fit/methods.rs`).
+  `--init`×companion-path (`args/mod.rs`).
 - **version / format handshakes** — IR version match (`ir/src/envelope.rs`),
   camdlc↔camdl git-hash guard (`util.rs`; see CLAUDE.md "camdlc version
   mismatch").
