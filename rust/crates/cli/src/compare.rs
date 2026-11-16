@@ -791,11 +791,11 @@ fn for_stream(leaf: &str, refusal: String) -> String {
 
 /// Whether two held-out rows sealed training at the same boundary.
 ///
-/// A `train_end` is an observation time read back from each fit's sidecar,
-/// so two fits cut at the same observation can differ by float noise (a
-/// date resolved through a different path, a value round-tripped through
-/// text). The holdout code decides "the same observation time at the
-/// boundary" with [`crate::fit::runner::TIME_TIE_EPS`]; this uses the same
+/// A `train_end` is a fit's training extent (the latest end among its
+/// training rows) read back from its sidecar, so two fits whose training
+/// ends at the same row can differ by float noise (a date resolved through
+/// a different path, a value round-tripped through text). The holdout code
+/// decides "the same time at the boundary" with [`crate::fit::runner::TIME_TIE_EPS`]; this uses the same
 /// tolerance, so a cohort the fits treat as one window is not refused here
 /// as two.
 fn same_sealed_boundary(a: f64, b: f64) -> bool {
