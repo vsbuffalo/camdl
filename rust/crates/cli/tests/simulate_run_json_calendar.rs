@@ -99,42 +99,43 @@ fn an_undated_simulation_record_says_it_has_no_origin() {
     );
 }
 
-/// Every record carries the axis, not only a simulation's (D59): a fit
-/// method's `run.json` and its segment's `fit.meta.json` both record it.
-#[test]
-fn a_fit_records_its_calendar_in_run_json_and_fit_meta() {
-    let dir = tempfile::tempdir().unwrap();
+/// Fit a dated model with if2 in `dir`, writing `results/fits/…`.
+fn run_dated_fit(dir: &Path) {
     let src = model(r#"origin = date("2020-03-01")"#).replace(
         "simulate {",
         "observations {\n  cases {\n    columns { time : time, cases : count }\n    \
          covers = closing_at(time, 1 'days)\n    projected = incidence(infection)\n    \
          cases ~ poisson(rate = projected)\n  }\n}\n\nsimulate {",
     );
-    std::fs::write(dir.path().join("m.camdl"), src).unwrap();
-    std::fs::write(dir.path().join("cases.tsv"),
+    std::fs::write(dir.join("m.camdl"), src).unwrap();
+    std::fs::write(dir.join("cases.tsv"),
         "time\tcases\n2020-03-02\t3\n2020-03-03\t4\n2020-03-04\t6\n").unwrap();
-    std::fs::write(dir.path().join("fit.toml"),
+    std::fs::write(dir.join("fit.toml"),
         "[model]\ncamdl = \"m.camdl\"\n[data.observations]\ncases = \"cases.tsv\"\n\
          [estimate]\nbeta = { bounds = [0.01, 5.0], start = 0.4 }\n[fixed]\ngamma = 0.2\n\
          [method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\nchains = 1\n\
          particles = 10\niterations = 1\ncooling = 0.7\n").unwrap();
-    let out = Command::new(binary())
+    let out = camdl(dir, &["fit", "run", "fit.toml", "--seed", "1"]);
+    assert!(out.status.success(), "fit run failed:\n{}", String::from_utf8_lossy(&out.stderr));
+}
+
+fn camdl(dir: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(binary())
         .env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .current_dir(dir.path())
-        .args(["fit", "run", "fit.toml", "--seed", "1"])
+        .current_dir(dir)
+        .args(args)
         .output()
-        .expect("spawn camdl");
-    assert!(out.status.success(), "fit run failed:\n{}", String::from_utf8_lossy(&out.stderr));
+        .expect("spawn camdl")
+}
 
-    let expected = serde_json::json!({"days_per_unit": 1.0, "origin": "2020-03-01", "time_unit": "days"});
-    let (mut runs, mut metas) = (Vec::new(), Vec::new());
-    let mut stack = vec![dir.path().join("results").join("fits")];
+/// Every file named `name` under `root`.
+fn files_named(root: &Path, name: &str) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
     while let Some(d) = stack.pop() {
-        for (name, found) in [("run.json", &mut runs), ("fit.meta.json", &mut metas)] {
-            if d.join(name).is_file() {
-                found.push(std::fs::read_to_string(d.join(name)).unwrap());
-            }
+        if d.join(name).is_file() {
+            found.push(d.join(name));
         }
         for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
             if e.path().is_dir() {
@@ -142,9 +143,50 @@ fn a_fit_records_its_calendar_in_run_json_and_fit_meta() {
             }
         }
     }
+    found
+}
+
+/// Every record carries the axis, not only a simulation's (D59): a fit
+/// method's `run.json` and its segment's `fit.meta.json` both record it.
+#[test]
+fn a_fit_records_its_calendar_in_run_json_and_fit_meta() {
+    let dir = tempfile::tempdir().unwrap();
+    run_dated_fit(dir.path());
+    let expected = serde_json::json!({"days_per_unit": 1.0, "origin": "2020-03-01", "time_unit": "days"});
+    let fits = dir.path().join("results").join("fits");
+    let (runs, metas) = (files_named(&fits, "run.json"), files_named(&fits, "fit.meta.json"));
     assert!(!runs.is_empty() && !metas.is_empty(), "a fit writes both records");
-    for text in runs.iter().chain(&metas) {
-        let v: serde_json::Value = serde_json::from_str(text).unwrap();
-        assert_eq!(v["calendar"], expected, "{v:#}");
+    for path in runs.iter().chain(&metas) {
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(v["calendar"], expected, "{}: {v:#}", path.display());
     }
+}
+
+/// A `run.json` written before the calendar block was required is named as
+/// such: `camdl list` warns once and skips it, and `camdl show` refuses it
+/// with the same sentence instead of a parse error.
+#[test]
+fn a_record_written_before_the_calendar_block_is_named_by_list_and_show() {
+    let dir = tempfile::tempdir().unwrap();
+    run_dated_fit(dir.path());
+    let runs = files_named(&dir.path().join("results").join("fits"), "run.json");
+    assert_eq!(runs.len(), 1, "one fit method leaf: {runs:?}");
+    // The shape an older camdl wrote: the same record with no `calendar`.
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&runs[0]).unwrap()).unwrap();
+    v.as_object_mut().unwrap().remove("calendar").expect("the block was there");
+    std::fs::write(&runs[0], serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+    let sentence = "written before the calendar axis was recorded";
+
+    let out = camdl(dir.path(), &["list", "results"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(stderr.matches(sentence).count(), 1, "list names the record once:\n{stderr}");
+    let rel = runs[0].strip_prefix(dir.path()).unwrap();
+    assert!(stderr.contains(&rel.display().to_string()), "and its path:\n{stderr}");
+
+    let leaf = runs[0].parent().unwrap();
+    let out = camdl(dir.path(), &["show", leaf.to_str().unwrap()]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "show refuses it:\n{stderr}");
+    assert!(stderr.contains(sentence) && !stderr.contains("missing field"),
+        "show names why, not the parse error:\n{stderr}");
 }

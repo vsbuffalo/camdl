@@ -84,7 +84,7 @@ pub use leaf::{
     UnreadableLeaf,
 };
 pub use record::{
-    renamed_kind, Failure, FileChecksum, LevelId, Provenance, RecordedOutcome, RunRecord,
+    predates_calendar, renamed_kind, Failure, FileChecksum, LevelId, Provenance, RecordedOutcome, RunRecord,
     RunStatus, FORMAT_VERSION,
 };
 pub use runid_derive::RunInput;
