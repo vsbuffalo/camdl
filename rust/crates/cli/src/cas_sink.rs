@@ -1127,7 +1127,7 @@ fn write_obs_into_cas(
             obs_ir, &times, run_start, model.simulation.t_end,
             emit.and_then(|e| e.resolve_for(&obs_ir.source)),
         )?;
-        crate::project_coverages(traj, obs_ir, model, &plan.coverages())?;
+        crate::project_coverages(traj, obs_ir, model, &plan.scored())?;
         plans.push(plan);
     }
 
@@ -1152,13 +1152,14 @@ fn write_obs_into_cas(
         // moved `model.simulation.t_end`) bounded the plan, so the CAS `obs/`
         // subtree never carries rows past the end of the trajectory beside it
         // (gh#561).
-        let rows = plan.coverages();
+        let rows = plan.scored();
         let projected = crate::project_coverages(traj, obs_ir, model, &rows)?;
 
+        // Each row's state and time are read where it is scored.
         let draws: Vec<f64> = rows.iter().enumerate()
-            .map(|(ti, &(obs_t, _))| {
-                let snap = crate::snap_at(traj, obs_t);
-                sampler(projected[ti], obs_t, &snap.int_state.counts, &[], &mut obs_rng)
+            .map(|(ti, &(at, _))| {
+                let snap = crate::snap_at(traj, at);
+                sampler(projected[ti], at, &snap.int_state.counts, &[], &mut obs_rng)
             })
             .collect();
         // The declared columns, so the file re-loads under its own model
