@@ -188,46 +188,4 @@ impl DefinedRange {
             }));
         }
     }
-
-    /// The first time evaluated beyond `side`, if any.
-    pub fn first_at(&self, side: Side) -> Option<f64> {
-        let bits = match side {
-            Side::Before => self.before.load(Ordering::Relaxed),
-            Side::After => self.after.load(Ordering::Relaxed),
-        };
-        (bits != UNSET).then(|| f64::from_bits(bits))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Evaluations inside the range, at its ends and within the end
-    /// tolerance record nothing; the first time past each end is kept and
-    /// later ones do not replace it.
-    #[test]
-    fn the_first_time_past_each_end_is_kept() {
-        let r = DefinedRange::new("f", RangeKind::DataTable, 0.0, 50.0, false);
-        for t in [0.0, 25.0, 50.0, 50.0 + 1e-12, -1e-13] {
-            r.note(t);
-        }
-        assert_eq!(r.first_at(Side::After), None);
-        assert_eq!(r.first_at(Side::Before), None);
-        r.note(51.0);
-        r.note(52.0);
-        r.note(-3.0);
-        r.note(-4.0);
-        assert_eq!(r.first_at(Side::After), Some(51.0));
-        assert_eq!(r.first_at(Side::Before), Some(-3.0));
-    }
-
-    /// A NaN time is never outside the range.
-    #[test]
-    fn a_nan_time_records_nothing() {
-        let r = DefinedRange::new("f", RangeKind::Window, 0.0, 1.0, false);
-        r.note(f64::NAN);
-        assert_eq!(r.first_at(Side::After), None);
-        assert_eq!(r.first_at(Side::Before), None);
-    }
 }
