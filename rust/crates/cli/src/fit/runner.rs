@@ -141,6 +141,11 @@ pub struct FitRunConfig {
     /// fit's holdout declaration (every row, without one). Recorded into
     /// `fit.meta.json` as the §3.7.3(b) proof.
     pub training_partition: TrainingPartition,
+    /// The startup lines saying which rows trained, decided with the
+    /// partition. `build` does not print them: a fit builds its config more
+    /// than once (to record the partition, then in the method's runner), and
+    /// `fit run` says them once, where it records the partition.
+    pub partition_lines: PartitionLines,
 }
 
 /// Result of running multiple IF2 chains.
@@ -475,7 +480,7 @@ impl FitRunConfig {
         // truncation happens at the callsite — here, and in `profile --fit`
         // — never inside `resolve_and_load_obs_streams`, whose other callers
         // (pfilter, compare's holdout scoring) must see the full series.
-        let training_partition = apply_holdout_declaration(
+        let (training_partition, partition_lines) = apply_holdout_declaration(
             &mut streams,
             fit.data.as_ref().and_then(|d| d.holdout_after.as_ref()),
             bindings.holdout_by_source(),
@@ -611,6 +616,7 @@ impl FitRunConfig {
             loglik_eval: super::config_v2::LoglikEvalConfig::default(),
             gate: super::config_v2::GateConfig::default(),
             training_partition,
+            partition_lines,
         };
         // The one place bound observation data can be refused. Every later
         // `build_obs_model` (per chain, per filter call) binds the same
@@ -1898,7 +1904,9 @@ pub(crate) fn stream_specs_from_obs_streams(
 ///   ([`check_holdout_files`]); otherwise the fit is refused.
 /// - Neither: every row trains.
 ///
-/// Each stream keeps its training prefix. Called by the commands that fit a
+/// Each stream keeps its training prefix. Returns the partition and the
+/// startup lines that describe it ([`partition_lines`]), which the caller
+/// says once. Called by the commands that fit a
 /// config's training data (`FitRunConfig::build`, `profile --fit` on its
 /// bound data) — never from the shared loading seam, which `pfilter` and
 /// compare's holdout scoring also use and which must see the full series.
@@ -1908,7 +1916,7 @@ pub(crate) fn apply_holdout_declaration(
     holdout_files: &indexmap::IndexMap<String, String>,
     model: &ir::Model,
     time_opts: &crate::caltime_load::TimeOpts,
-) -> Result<TrainingPartition, String> {
+) -> Result<(TrainingPartition, PartitionLines), String> {
     use super::training_partition::WholeFiles;
     let rows: BTreeMap<String, Vec<ObservedRow>> =
         streams.iter().map(|s| (s.name.clone(), s.rows.clone())).collect();
@@ -1925,11 +1933,11 @@ pub(crate) fn apply_holdout_declaration(
         }
         None => whole_partition(&rows, WholeFiles::NoHoldout)?,
     };
-    say_partition(&partition, &rows, held_out_file_rows, time_opts);
+    let lines = partition_lines(&partition, &rows, held_out_file_rows, time_opts);
     for s in streams.iter_mut() {
         s.truncate_rows(partition.rows(&s.name));
     }
-    Ok(partition)
+    Ok((partition, lines))
 }
 
 /// The partition `holdout_after = spec` makes of `rows`: the cutoff resolved
@@ -2080,13 +2088,13 @@ pub(crate) fn resolve_holdout_cutoff(
 /// which the key's name alone could hide), and a note naming any stream whose
 /// last observation is more than one of its own periods before `last_obs`.
 /// `held_out_file_rows` is the number of `[data.holdout]` rows, for that rule.
-pub(crate) fn say_partition(
+pub(crate) fn partition_lines(
     partition: &TrainingPartition,
     rows: &BTreeMap<String, Vec<ObservedRow>>,
     held_out_file_rows: usize,
     time_opts: &crate::caltime_load::TimeOpts,
-) {
-    let out = crate::out::detached();
+) -> PartitionLines {
+    let mut lines = Vec::new();
     let h = crate::out::paint::stderr().paint("holdout:", Style::Info);
     let trained: usize = partition.streams().iter().map(|p| p.rows).sum();
     let total: usize = rows.values().map(Vec::len).sum();
@@ -2099,7 +2107,7 @@ pub(crate) fn say_partition(
     match partition.rule() {
         PartitionRule::All => {}
         PartitionRule::Cutoff { at } => {
-            out.say(format_args!(
+            lines.push(format!(
                 "  {h} trained on {trained} row(s) through {}; {} observation row(s) \
                  ending after {} withheld from training (scored out-of-sample by \
                  `camdl compare`)",
@@ -2115,14 +2123,14 @@ pub(crate) fn say_partition(
                         super::observed_rows::Measures::Period(p) =>
                             format!("measures {} to {}", q(p.start()), q(p.stop())),
                     };
-                    out.say(format_args!(
+                    lines.push(format!(
                         "  {h} first held-out row of '{stream}': {} ({measures})",
                         written.join(" to ")));
                 }
             }
         }
         PartitionRule::SeparateFiles => {
-            out.say(format_args!(
+            lines.push(format!(
                 "  {h} trained on {trained} row(s) through {}; {held_out_file_rows} \
                  held-out observation row(s) bound as the tail (scored out-of-sample by \
                  `camdl compare`)",
@@ -2133,7 +2141,7 @@ pub(crate) fn say_partition(
     // A stream that stopped reporting well before the others.
     let training = |s: &str| &rows[s][..partition.rows(s)];
     let Some((_, last_obs)) = observed_window(rows.keys().flat_map(|s| training(s))) else {
-        return;
+        return PartitionLines(lines);
     };
     for stream in rows.keys() {
         let observed: Vec<&ObservedRow> =
@@ -2147,13 +2155,42 @@ pub(crate) fn say_partition(
             },
         };
         if last_obs - last.measures.end() > period + TIME_TIE_EPS {
-            out.say(format_args!(
+            lines.push(format!(
                 "  note: stream '{stream}' has its last observation at {}, more than one of \
                  its periods before the latest observation of the fit ({})",
                 q(last.measures.end()), q(last_obs)));
         }
     }
+    PartitionLines(lines)
 }
+
+/// The startup lines of a training partition ([`partition_lines`]): rendered
+/// when the partition is decided, said once by the caller that owns the
+/// command's startup output.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct PartitionLines(Vec<String>);
+
+impl PartitionLines {
+    /// Print each line to stderr.
+    pub(crate) fn say(&self) {
+        let out = crate::out::detached();
+        for line in &self.0 {
+            out.say(format_args!("{line}"));
+        }
+    }
+}
+
+/// Say the startup lines of `partition` now ([`partition_lines`]), for a
+/// command that decides its partition once.
+pub(crate) fn say_partition(
+    partition: &TrainingPartition,
+    rows: &BTreeMap<String, Vec<ObservedRow>>,
+    held_out_file_rows: usize,
+    time_opts: &crate::caltime_load::TimeOpts,
+) {
+    partition_lines(partition, rows, held_out_file_rows, time_opts).say();
+}
+
 /// Tolerance for "the same observation time" comparisons at the holdout
 /// boundary — float noise from a date→time conversion must not move a row
 /// across the training/held-out cut.

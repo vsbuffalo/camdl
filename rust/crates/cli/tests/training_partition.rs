@@ -314,3 +314,30 @@ fn appending_held_out_rows_leaves_a_last_obs_end_time_unchanged() {
     assert!(short.ends_with("→ t = 17"), "last_obs is the latest training end, 10: {short}");
     assert_eq!(short, long, "appending held-out rows moved the end time");
 }
+
+/// A stream that stopped reporting well before the others gets one note,
+/// naming it, per fit, and each `holdout:` startup line is printed once,
+/// although the fit decides its partition twice (once to record it, once in
+/// the method's runner). `deaths` ends at day 5; `cases` trains to day 12.
+#[test]
+fn a_stopped_stream_is_noted_once_per_fit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let streams = [
+        Stream { name: "cases", covers: "day(time)", flow: "infection" },
+        Stream { name: "deaths", covers: "day(time)", flow: "recovery" },
+    ];
+    std::fs::write(dir.join("model.camdl"), model_src(&streams, "20 'days")).unwrap();
+    std::fs::write(dir.join("cases.tsv"), rows_tsv("cases", 0..=15)).unwrap();
+    std::fs::write(dir.join("deaths.tsv"), rows_tsv("deaths", 0..=4)).unwrap();
+    std::fs::write(dir.join("fit.toml"),
+        fit_toml(&streams, "holdout_after = 12.0", 0.5, "results")).unwrap();
+    let (_, stderr) = fit_partition(dir, "fit.toml", "results");
+    let count = |needle: &str| stderr.lines().filter(|l| l.contains(needle)).count();
+    assert_eq!(count("note: stream 'deaths' has its last observation at t = 5"), 1,
+        "one note for the stopped stream:\n{stderr}");
+    assert_eq!(count("note: stream 'cases'"), 0, "cases did not stop:\n{stderr}");
+    assert_eq!(count("holdout: trained on"), 1, "the holdout line once:\n{stderr}");
+    assert_eq!(count("holdout: first held-out row of 'cases'"), 1,
+        "the first held-out row once:\n{stderr}");
+}

@@ -1566,6 +1566,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             if let Ok(window_config) = runner::FitRunConfig::build(
                 &sweep_config, Some(&method.algorithm), 1, 1, 1, 1.0, 1, seed, false,
             ) {
+                // The one place `fit run` says which rows train: the method's
+                // own build below decides the same partition silently.
+                window_config.partition_lines.say();
                 crate::run_meta::record_training_partition(
                     seg, window_config.training_partition.record(
                         window_config.model.origin.as_deref(), &window_config.model.time_unit));
