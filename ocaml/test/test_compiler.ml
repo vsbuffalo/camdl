@@ -10682,6 +10682,38 @@ let test_typed_time_e322_unanchored_months_cadence_ok () =
   |} in
   ()
 
+(* gh#1088: the output block's `every` is a recurring cadence too. Under
+   an origin `every = 1 'months` would otherwise fold to a fixed
+   30.436875-day step whose grid drifts off the month boundaries. *)
+let output_every_src ?(origin = {|origin = date("2020-01-01")|}) every =
+  Printf.sprintf {|
+    time_unit = 'days
+    %s
+    compartments { S, I, R }
+    parameters { beta : rate  gamma : rate  N0 : count  I0 : count }
+    let N = S + I + R
+    transitions {
+      infection : S --> I @ beta * S * I / N
+      recovery  : I --> R @ gamma * I
+    }
+    init { S = N0 - I0  I = I0 }
+    simulate { from = 0 'days  to = 365 'days }
+    output { trajectories { every = %s } }
+  |} origin every
+
+let test_gh1088_calendar_output_cadence_rejected () =
+  List.iter (fun every ->
+    expect_error_code ~code:"E322" ~contains:"calendar"
+      (output_every_src every))
+    [ "1 'months"; "1 'years" ]
+
+let test_gh1088_exact_output_cadence_ok () =
+  (* A fixed cadence under an origin still compiles, and without an
+     origin a calendar cadence is fine (Rule 7 is vacuous unanchored). *)
+  let _ = compile_expect_ok (output_every_src "7 'days") in
+  let _ = compile_expect_ok (output_every_src ~origin:"" "1 'months") in
+  ()
+
 (* gh#1069: a `covers` width is a fixed span, so a calendar width
    (`'months`/`'years`) under an origin would attribute every row the same
    30.436875 (or 365.2425) days whatever month it falls in. Each form is
@@ -16521,6 +16553,10 @@ let () =
         `Quick test_typed_time_e322_calendar_cadence_in_recurring;
       Alcotest.test_case "E322 unanchored every = 1 'months is fine (vacuous rule)"
         `Quick test_typed_time_e322_unanchored_months_cadence_ok;
+      Alcotest.test_case "gh#1088 E322 calendar output cadence under origin rejected"
+        `Quick test_gh1088_calendar_output_cadence_rejected;
+      Alcotest.test_case "gh#1088 fixed output cadence, or unanchored, still compiles"
+        `Quick test_gh1088_exact_output_cadence_ok;
       Alcotest.test_case "gh#1069 E321 calendar width in any covers form rejected"
         `Quick test_gh1069_calendar_covers_width_rejected;
       Alcotest.test_case "gh#1069 fixed covers width, or unanchored, still compiles"
