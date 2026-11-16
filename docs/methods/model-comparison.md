@@ -362,25 +362,25 @@ labels, so for it the row labelled 10 trains. The fit records, per stream, how
 many leading rows trained and their row digest, and the training extent, the
 latest end among them. `compare` scores every row that did not train and ends
 after the training extent; under `holdout_after` that is every row that did not
-train. Under `[data.holdout]`, with training files that end at different times,
-the extent also leaves out a held-out row that ends before the latest training
-data, whose future the parameters would otherwise have seen. A held-out score
-never includes a training row.
+train. Under `[data.holdout]` the fit refuses a held-out row that ends at or
+before the training extent, so there too every held-out row is scored. A
+held-out score never includes a training row.
 
 ### 6.3 The non-leakage guarantee, and its limit
 
 "Held out" is verified, not asserted. A fit's identity seals the training data
 (by content digest) and the holdout declaration; applying the split writes the
-training window into the fit's metadata at the moment the rows are withheld.
+training partition into the fit's metadata at the moment the rows are withheld.
 `compare` refuses the `hold_out_tail` label unless the fit carries that
-applied-window record, the declared window covers every scored time, and no
-scored observation is a row the fit trained on, checked stream by stream on the
-time each row is scored at. A fit that carries no record — one produced before
-camdl enforced the split, or a PMMH, PGAS, MH or NLopt fit stored before those
-methods recorded it — is refused the label, since nothing proves which
-observations its θ was fitted to. Re-running it with `camdl fit run` writes the
-record (a fit that predates enforcement re-trains; one whose method only failed
-to record it is reused from the cache and gains the record).
+partition record, each stream's leading rows still digest to the rows the fit
+recorded, and no scored observation is a row the fit trained on, checked stream
+by stream on the time each row is scored at. A fit that carries no record — one
+produced before camdl enforced the split, or a PMMH, PGAS, MH or NLopt fit
+stored before those methods recorded it — is refused the label, since nothing
+proves which observations its θ was fitted to. Re-running it with
+`camdl fit run` writes the record (a fit that predates enforcement re-trains;
+one whose method only failed to record it is reused from the cache and gains the
+record).
 
 The guarantee is exactly "no data leakage into $\theta$." It cannot certify that
 the _modeler_ chose the model family without having seen the full curve — that
