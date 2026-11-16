@@ -1005,10 +1005,11 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // fits the rows the fit fits: `holdout_after` keeps the rows ending at or
     // before the cutoff, and `[data.holdout]` files leave the training rows
     // whole and must end after them.
-    let training_partition = crate::fit::runner::apply_holdout_declaration(
+    let (training_partition, partition_lines) = crate::fit::runner::apply_holdout_declaration(
         &mut streams, fit_holdout_after.as_ref(), &fit_holdout_files, &model,
         &time_opts,
     ).unwrap_or_else(|e| { out.fail(format!("error: --fit config: {e}")); });
+    partition_lines.say();
     // The training rows a `holdout_after` cutoff left, for the base identity.
     let holdout_training_rows: Option<Vec<(String, usize)>> = fit_holdout_after.as_ref()
         .map(|_| training_partition.streams().iter()
