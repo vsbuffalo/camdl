@@ -1445,27 +1445,6 @@ fn read_boundary_column<'a>(
     Ok((cells, rows))
 }
 
-/// Whether the file at `path` wrote stream `obs`'s temporal cells as ISO
-/// dates. Read off the stream's own label column — `window_stop` for a
-/// windowed stream, its `: time` column otherwise — through the same predicate
-/// the loader applies when it decides a column was dated
-/// ([`crate::caltime_load::cells_are_dated`]).
-///
-/// The design-preserving emitter asks this so it can write the boundaries back
-/// in the representation the modeller published them in (gh#882). A windowed
-/// stream's two boundary columns are one representation: both are read by the
-/// same conversion, so the closing boundary settles the pair.
-pub(crate) fn stream_cells_were_dated(
-    obs: &ir::observation::ObservationModel,
-    path: &str,
-    opts: &TimeOpts,
-) -> Result<bool, String> {
-    let column = obs_time_column(obs)?;
-    let content = std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path, e))?;
-    let (cells, _rows) = read_boundary_column(&content, path, column)?;
-    Ok(crate::caltime_load::cells_are_dated(&cells, opts))
-}
-
 /// The error for an interval stream whose IR carries no `covers`: the compiler
 /// refuses to produce one (E350), so the IR was hand-edited or predates the
 /// rule. There is no reading to fall back on — the same label means different
@@ -1520,6 +1499,10 @@ pub(crate) fn load_window_starts_if_windowed(
 /// label, which is the correction this exists to make. An interval stream
 /// with no declaration is an IR the compiler cannot have produced (E350), and
 /// is refused rather than read under a convention the file never stated.
+///
+/// Labels handed in directly carry no written form, so a refusal quotes them
+/// as model time; the tests of dated quoting read through
+/// [`crate::fit::observed_rows::observed_rows`].
 #[cfg(test)]
 pub fn stream_times_for(
     obs: &ir::observation::ObservationModel,
@@ -1536,7 +1519,7 @@ pub fn stream_times_for(
         window_starts.as_ref().map(|(starts, _)| starts.as_slice()),
         path,
     )?;
-    stream_times_of_measures(obs, &measures, path, opts)
+    stream_times_of_measures(obs, &measures, || false, path, opts)
 }
 
 /// Build the [`StreamTimes`] for one stream from the rows
@@ -1549,14 +1532,18 @@ pub(crate) fn stream_times_of_rows(
     opts: &TimeOpts,
 ) -> Result<sim::inference::StreamTimes, String> {
     let measures: Vec<_> = rows.iter().map(|r| r.measures).collect();
-    stream_times_of_measures(obs, &measures, path, opts)
+    stream_times_of_measures(
+        obs, &measures, || crate::fit::observed_rows::rows_were_dated(rows), path, opts)
 }
 
 /// The [`StreamTimes`] of rows that measure `measures`, refused when a period
-/// opens before the run starts or, under a uniform form, leaves a gap.
+/// opens before the run starts or, under a uniform form, leaves a gap. `dated`
+/// says whether the file wrote the rows' times as dates, so a refusal quotes
+/// them that way; it is asked only on a refusal.
 fn stream_times_of_measures(
     obs: &ir::observation::ObservationModel,
     measures: &[crate::fit::observed_rows::Measures],
+    dated: impl Fn() -> bool,
     path: &str,
     opts: &TimeOpts,
 ) -> Result<sim::inference::StreamTimes, String> {
@@ -1583,9 +1570,7 @@ fn stream_times_of_measures(
     if opts.t_start.is_finite() {
         if let Some(first) = periods.first() {
             if first.start() < opts.t_start - 1e-9 {
-                // Only on the error path: how the file spells its times costs
-                // a re-read, which is not worth spending on every load.
-                let dated = stream_cells_were_dated(obs, path, opts).unwrap_or(false);
+                let dated = dated();
                 let q = |t: f64| crate::caltime_load::quote_time(t, dated, opts);
                 // On a dated file the run's start is quoted as the date it is,
                 // and the fix names the anchor that moves it. On a numeric one
@@ -1629,7 +1614,7 @@ fn stream_times_of_measures(
         // label and the previous stop are the same boundary a few ulps apart.
         let eps = sim::inference::multi_stream_obs::BOUNDARY_EPS;
         if let Some(w) = periods.windows(2).find(|w| w[1].start() > w[0].stop() + eps) {
-            let dated = stream_cells_were_dated(obs, path, opts).unwrap_or(false);
+            let dated = dated();
             let q = |t: f64| crate::caltime_load::quote_time(t, dated, opts);
             return Err(format!(
                 "observation stream '{}' ({}): consecutive rows cover [{}, {}) and \
@@ -2358,6 +2343,16 @@ mod tests {
         (write_temp_tsv(tag, &body), as_internal(dates, opts))
     }
 
+    /// [`stream_times_of_rows`] over the rows the row reader reads from `path`.
+    fn stream_times_of_file(
+        obs: &ir::observation::ObservationModel,
+        path: &str,
+        opts: &TimeOpts,
+    ) -> Result<sim::inference::StreamTimes, String> {
+        let rows = crate::fit::observed_rows::observed_rows(path, obs, &[obs], opts)?;
+        stream_times_of_rows(obs, &rows, path, opts)
+    }
+
     /// A period that opens before the run does is refused, and on a dated file
     /// the refusal quotes the dates. A modeller whose every other time is a
     /// calendar date should not have to convert `3` and `4` back by hand to
@@ -2365,13 +2360,12 @@ mod tests {
     #[test]
     fn a_period_before_t_start_on_a_dated_file_is_reported_in_dates() {
         let obs = daily_incidence_stream();
-        let proj = sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]);
         let mut opts = dated_opts();
         let (path, labels) =
             dated_daily_file("gh842_before_origin", &["2026-07-04", "2026-07-05"], &opts);
         // The run starts the day after the first row's window opens.
         opts.t_start = labels[1];
-        let err = stream_times_for(&obs, &proj, &labels, &path, &opts)
+        let err = stream_times_of_file(&obs, &path, &opts)
             .expect_err("a period opening before the run starts must be refused");
         assert!(err.contains("opens at 2026-07-04") && err.contains("2026-07-05"),
             "both the offending boundary and the run's start are dates: {err}");
@@ -2386,13 +2380,12 @@ mod tests {
     #[test]
     fn a_gap_on_a_dated_file_names_the_dates_either_side() {
         let obs = daily_incidence_stream();
-        let proj = sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]);
         let opts = dated_opts();
         // Labels 4, 5 and 7 July under `day(time)`: the 6th is missing, so
         // [6 Jul, 7 Jul) is covered by neither of the rows either side.
-        let (path, labels) = dated_daily_file(
+        let (path, _labels) = dated_daily_file(
             "gh842_gap", &["2026-07-04", "2026-07-05", "2026-07-07"], &opts);
-        let err = stream_times_for(&obs, &proj, &labels, &path, &opts)
+        let err = stream_times_of_file(&obs, &path, &opts)
             .expect_err("a missing row under a uniform form must be refused");
         assert!(err.contains("[2026-07-05, 2026-07-06)")
                 && err.contains("[2026-07-07, 2026-07-08)"),

@@ -333,7 +333,7 @@ pub(crate) fn plans_for_bound_streams(
         .map(|s| {
             let obs = &s.obs_model_ir;
             let labels: Vec<f64> = s.data.iter().map(|o| o.time).collect();
-            let format = bound_temporal_format(obs, files, time_opts)?;
+            let format = bound_temporal_format(obs, &s.rows, files, time_opts);
             Ok(StreamPlan {
                 name: obs.name.clone(),
                 source: obs.source.clone(),
@@ -343,24 +343,27 @@ pub(crate) fn plans_for_bound_streams(
         .collect()
 }
 
-/// How the file bound to `obs` spelled its temporal cells. Dated only when the
-/// file's cells were dates *and* the model carries the `origin` that renders
-/// them — without an anchor there is no date to write, and the loader could
-/// not have read one either.
+/// How the file bound to `obs` spelled its temporal cells, read off the rows
+/// it loaded ([`crate::fit::observed_rows::rows_were_dated`]), so the
+/// boundaries are written back in the representation the modeller published
+/// them in (gh#882). Dated only when the file's cells were dates *and* the
+/// model carries the `origin` that renders them — without an anchor there is
+/// no date to write, and the loader could not have read one either.
 fn bound_temporal_format(
     obs: &ObservationModel,
+    rows: &[crate::fit::observed_rows::ObservedRow],
     files: &indexmap::IndexMap<String, String>,
     time_opts: &crate::caltime_load::TimeOpts<'_>,
-) -> Result<TemporalFormat, String> {
-    let (Some(path), Some(origin)) = (files.get(&obs.source), time_opts.origin) else {
-        return Ok(TemporalFormat::Numeric);
+) -> TemporalFormat {
+    let (Some(_), Some(origin)) = (files.get(&obs.source), time_opts.origin) else {
+        return TemporalFormat::Numeric;
     };
-    match crate::pfilter::stream_cells_were_dated(obs, path, time_opts)? {
-        true => Ok(TemporalFormat::Dated {
+    match crate::fit::observed_rows::rows_were_dated(rows) {
+        true => TemporalFormat::Dated {
             origin: origin.to_string(),
             time_unit: time_opts.time_unit.to_string(),
-        }),
-        false => Ok(TemporalFormat::Numeric),
+        },
+        false => TemporalFormat::Numeric,
     }
 }
 
