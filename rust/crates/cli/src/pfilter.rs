@@ -1327,7 +1327,7 @@ fn parse_column_cells_raw<'a>(
 /// count. Strict by-name column binding, no positional fallback (G1).
 ///
 /// Shared core of [`load_data_tsv_column`] (which rejects holes for the dense
-/// callers) and [`load_data_tsv_column_cells`] (the sparse/holes pfilter path).
+/// callers) and [`load_data_tsv_column_cells_as_written`] (the sparse/holes path).
 fn parse_column_cells<'a>(
     content: &'a str,
     path: &str,
@@ -1473,11 +1473,40 @@ pub(crate) fn missing_covers_error(obs: &ir::observation::ObservationModel) -> S
     )
 }
 
-/// Build the [`StreamTimes`] for one stream: what its rows cover, per its
-/// `covers` declaration (gh#833).
+/// The `window_start` cells of every row of `path`, in model time and as
+/// written, for a stream declared with per-row windows; `None` for any other
+/// stream, which has no such column to read.
+pub(crate) fn load_window_starts_if_windowed(
+    obs: &ir::observation::ObservationModel,
+    path: &str,
+    opts: &TimeOpts,
+) -> Result<Option<(Vec<f64>, Vec<crate::caltime_load::TemporalCell>)>, String> {
+    if obs.covers != Some(ir::observation::Covers::WindowColumns) {
+        return Ok(None);
+    }
+    let start_col = column_with_role(obs, &ir::observation::ColumnRole::WindowStart)
+        .ok_or_else(|| format!(
+            "observation stream '{}' is declared with per-row windows but has no \
+             `window_start` column", obs.name))?;
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("{}: {}", path, e))?;
+    let (raw, rows) = read_boundary_column(&content, path, start_col)?;
+    let row_offset = rows.first().copied().unwrap_or(2);
+    let starts = convert_time_column(&raw, opts, row_offset)?;
+    let written = crate::caltime_load::cells_as_written(&raw, &starts, opts);
+    Ok(Some((starts, written)))
+}
+
+/// Build the [`StreamTimes`] for one stream from its labels: what its rows
+/// cover, per its `covers` declaration (gh#833).
 ///
 /// `label_times` are the already-converted values of the stream's own label
-/// column — the `: time` column, or `window_stop` for a windowed stream.
+/// column — the `: time` column, or `window_stop` for a windowed stream. This
+/// is for a caller whose rows come from a reader other than
+/// [`crate::fit::observed_rows::observed_rows`] (the survey command's dense
+/// reader); a caller holding those rows uses [`stream_times_of_rows`], which
+/// does not read the file again. Both lower labels through the one
+/// [`crate::fit::observed_rows::measures_of`].
 ///
 /// An instant stream reads at its labels. An interval stream gets the periods
 /// its declaration assigns, and its scoring boundary follows them — for a
@@ -1492,66 +1521,51 @@ pub fn stream_times_for(
     path: &str,
     opts: &TimeOpts,
 ) -> Result<sim::inference::StreamTimes, String> {
-    stream_times_of_kind(obs, projection.temporal_kind(), label_times, path, opts)
+    let window_starts = load_window_starts_if_windowed(obs, path, opts)?;
+    let measures = crate::fit::observed_rows::measures_of(
+        obs,
+        projection.temporal_kind(),
+        label_times,
+        window_starts.as_ref().map(|(starts, _)| starts.as_slice()),
+        path,
+    )?;
+    stream_times_of_measures(obs, &measures, path, opts)
 }
 
-/// [`stream_times_for`], given the stream's [`TemporalKind`] instead of its
-/// resolved projection — the projection is consulted for nothing else. For a
-/// caller that holds the IR but no compiled model: `compare` reading a stored
-/// fit's training rows passes `obs.projection.temporal_kind()`, which agrees
-/// by construction with the resolved projection's
-/// ([`sim::inference::multi_stream_obs::StreamProjection::temporal_kind`]).
-///
-/// [`TemporalKind`]: ir::observation::TemporalKind
-pub fn stream_times_of_kind(
+/// Build the [`StreamTimes`] for one stream from the rows
+/// [`crate::fit::observed_rows::observed_rows`] read: the periods (or
+/// instants) the rows already carry, checked against the run.
+pub(crate) fn stream_times_of_rows(
     obs: &ir::observation::ObservationModel,
-    kind: ir::observation::TemporalKind,
-    label_times: &[f64],
+    rows: &[crate::fit::observed_rows::ObservedRow],
     path: &str,
     opts: &TimeOpts,
 ) -> Result<sim::inference::StreamTimes, String> {
-    use ir::observation::{Covers, TemporalKind};
-    use sim::inference::{Period, StreamTimes};
+    let measures: Vec<_> = rows.iter().map(|r| r.measures).collect();
+    stream_times_of_measures(obs, &measures, path, opts)
+}
 
+/// The [`StreamTimes`] of rows that measure `measures`, refused when a period
+/// opens before the run starts or, under a uniform form, leaves a gap.
+fn stream_times_of_measures(
+    obs: &ir::observation::ObservationModel,
+    measures: &[crate::fit::observed_rows::Measures],
+    path: &str,
+    opts: &TimeOpts,
+) -> Result<sim::inference::StreamTimes, String> {
+    use crate::fit::observed_rows::Measures;
+    use ir::observation::Covers;
+    use sim::inference::StreamTimes;
+
+    // `measures_of` gives every row of a stream without `covers` an instant,
+    // and every row of a stream with one a period.
     let Some(covers) = &obs.covers else {
-        return match kind {
-            TemporalKind::Instant => Ok(StreamTimes::Instants(label_times.to_vec())),
-            TemporalKind::Interval => Err(missing_covers_error(obs)),
-        };
+        return Ok(StreamTimes::Instants(measures.iter().map(Measures::end).collect()));
     };
-
-    let periods = match covers {
-        Covers::From { .. } | Covers::Until { .. } => {
-            label_times.iter().map(|&t| {
-                let (start, stop) = covers.period_of(t)
-                    .expect("a uniform form assigns every label a period");
-                Period::new(start, stop)
-            }).collect::<Result<Vec<_>, _>>()
-        }
-        Covers::WindowColumns => {
-            let start_col = column_with_role(obs, &ir::observation::ColumnRole::WindowStart)
-                .ok_or_else(|| format!(
-                    "observation stream '{}' is declared with per-row windows but has no \
-                     `window_start` column", obs.name))?;
-            let content = std::fs::read_to_string(path)
-                .map_err(|e| format!("{}: {}", path, e))?;
-            let (raw, rows) = read_boundary_column(&content, path, start_col)?;
-            let row_offset = rows.first().copied().unwrap_or(2);
-            let starts = convert_time_column(&raw, opts, row_offset)?;
-            if starts.len() != label_times.len() {
-                return Err(format!(
-                    "observation stream '{}': '{}' has {} data rows but the window_stop \
-                     column has {}", obs.name, start_col, starts.len(), label_times.len()));
-            }
-            starts.iter().zip(label_times).map(|(&a, &b)| Period::new(a, b))
-                .collect::<Result<Vec<_>, _>>()
-        }
-    };
-
-    // `Period::new` reports one bad row; name the stream so the message says
-    // which file to look in.
-    let periods = periods.map_err(|e| format!(
-        "observation stream '{}' ({}): {}", obs.name, path, e))?;
+    let periods: Vec<_> = measures.iter().map(|m| match m {
+        Measures::Period(p) => *p,
+        Measures::Instant(_) => unreachable!("a stream that declares `covers` measures periods"),
+    }).collect();
 
     // A period may not open before the run does: time before `t_start` is
     // never simulated, so the period would be scored against flow that does
@@ -1631,7 +1645,7 @@ pub fn stream_times_of_kind(
 ///
 /// DENSE path: a hole (`NA`) is an error here — callers on this path
 /// (survey, profile, fit) do not yet support holes. The sparse/holes pfilter
-/// path uses [`load_data_tsv_column_cells`].
+/// path uses [`load_data_tsv_column_cells_as_written`].
 pub fn load_data_tsv_column(
     path: &str,
     time_column: &str,
@@ -1654,7 +1668,7 @@ pub fn load_data_tsv_column(
                 rows[i], time_cells[i].trim(), column)),
         }
     }
-    finalize_observations(time_cells, values, rows, opts)
+    finalize_observations(&time_cells, values, rows, opts)
 }
 
 /// Sparse/holes-aware load of one named TSV column for `camdl pfilter`.
@@ -1663,6 +1677,11 @@ pub fn load_data_tsv_column(
 /// the incidence accumulator still resets there) but it carries no value (no
 /// likelihood term). Same time-conversion + grid/ordering checks as
 /// [`load_data_tsv_column`]; only the value column may contain `NA`.
+///
+/// The column-reader tests' view of [`load_data_tsv_column_cells_as_written`];
+/// the loaders read through that, via
+/// [`crate::fit::observed_rows::observed_rows`].
+#[cfg(test)]
 pub fn load_data_tsv_column_cells(
     path: &str,
     time_column: &str,
@@ -1670,6 +1689,24 @@ pub fn load_data_tsv_column_cells(
     domain: CellDomain,
     opts: &TimeOpts,
 ) -> Result<(Vec<f64>, Vec<Option<sim::inference::ObsCell>>), String> {
+    let (times, _written, cells) =
+        load_data_tsv_column_cells_as_written(path, time_column, column, domain, opts)?;
+    Ok((times, cells))
+}
+
+/// The observation `times`, the time cells as written, and the per-row cells
+/// (`None` a hole) of one named TSV column, as described at
+/// [`load_data_tsv_column_cells`].
+pub(crate) fn load_data_tsv_column_cells_as_written(
+    path: &str,
+    time_column: &str,
+    column: &str,
+    domain: CellDomain,
+    opts: &TimeOpts,
+) -> Result<
+    (Vec<f64>, Vec<crate::caltime_load::TemporalCell>, Vec<Option<sim::inference::ObsCell>>),
+    String,
+> {
     use sim::inference::ObsCell;
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("{}: {}", path, e))?;
@@ -1683,13 +1720,14 @@ pub fn load_data_tsv_column_cells(
     // for time conversion + grid checks; the placeholder is then discarded and
     // the authoritative cells are returned.
     let placeholder_values: Vec<f64> = cells.iter().map(|c| c.unwrap_or(0.0)).collect();
-    let observations = finalize_observations(time_cells, placeholder_values, rows, opts)?;
+    let observations = finalize_observations(&time_cells, placeholder_values, rows, opts)?;
 
     let times: Vec<f64> = observations.iter().map(|o| o.time).collect();
+    let written = crate::caltime_load::cells_as_written(&time_cells, &times, opts);
     let obs_cells: Vec<Option<ObsCell>> = cells.iter()
         .map(|c| c.map(ObsCell::Scalar))
         .collect();
-    Ok((times, obs_cells))
+    Ok((times, written, obs_cells))
 }
 
 /// Is this stream's data in LONG (stratified) form? True iff its declared
@@ -1734,7 +1772,11 @@ fn dim_column_names(obs: &ir::observation::ObservationModel) -> Vec<&str> {
 ///
 /// Returns `(union_times, cells, aux)` in the SAME shape the wide cells loader
 /// produces, so nothing downstream of the loader changes.
-#[allow(clippy::type_complexity)]
+///
+/// The column-reader tests' view of [`load_long_form_stream_as_written`]; the
+/// loaders read through that, via
+/// [`crate::fit::observed_rows::observed_rows`].
+#[cfg(test)]
 pub fn load_long_form_stream(
     path: &str,
     obs_block: &ir::observation::ObservationModel,
@@ -1742,6 +1784,27 @@ pub fn load_long_form_stream(
     opts: &TimeOpts,
 ) -> Result<
     (Vec<f64>, Vec<Option<sim::inference::ObsCell>>, Vec<Vec<(String, f64)>>),
+    String,
+> {
+    let (times, _written, cells, aux) =
+        load_long_form_stream_as_written(path, obs_block, siblings, opts)?;
+    Ok((times, cells, aux))
+}
+
+/// [`load_long_form_stream`], with this leaf's time cells as written beside
+/// their converted times.
+pub(crate) fn load_long_form_stream_as_written(
+    path: &str,
+    obs_block: &ir::observation::ObservationModel,
+    siblings: &[&ir::observation::ObservationModel],
+    opts: &TimeOpts,
+) -> Result<
+    (
+        Vec<f64>,
+        Vec<crate::caltime_load::TemporalCell>,
+        Vec<Option<sim::inference::ObsCell>>,
+        Vec<Vec<(String, f64)>>,
+    ),
     String,
 > {
     use sim::inference::ObsCell;
@@ -1925,10 +1988,11 @@ pub fn load_long_form_stream(
     // + substep/off-grid/ordering checks, with the leaf's REAL file-row line
     // numbers in any diagnostic — not synthetic union positions).
     let placeholder = vec![0.0_f64; own_raw.len()];
-    let own_obs = finalize_observations(own_raw, placeholder, own_file_rows, opts)?;
+    let own_obs = finalize_observations(&own_raw, placeholder, own_file_rows, opts)?;
     let own_times: Vec<f64> = own_obs.iter().map(|o| o.time).collect();
+    let written = crate::caltime_load::cells_as_written(&own_raw, &own_times, opts);
 
-    Ok((own_times, cells, aux))
+    Ok((own_times, written, cells, aux))
 }
 
 /// The aux column names a stream's likelihood references (`Expr::ObsColumnRef`):
@@ -2018,14 +2082,14 @@ pub fn load_stream_aux(
 /// Shared back-half: convert the raw time column, run the distinct-substep +
 /// off-grid checks, validate chronological order, and zip into `Observation`s.
 fn finalize_observations(
-    time_cells: Vec<&str>,
+    time_cells: &[&str],
     values: Vec<f64>,
     rows: Vec<usize>,
     opts: &TimeOpts,
 ) -> Result<Vec<Observation>, String> {
     let row_offset = rows.first().copied().unwrap_or(2);
-    let times = convert_time_column(&time_cells, opts, row_offset)?;
-    let was_dated = crate::caltime_load::cells_are_dated(&time_cells, opts);
+    let times = convert_time_column(time_cells, opts, row_offset)?;
+    let was_dated = crate::caltime_load::cells_are_dated(time_cells, opts);
     check_substeps_and_grid(&times, &rows, opts, was_dated)?;
 
     let observations: Vec<Observation> = times

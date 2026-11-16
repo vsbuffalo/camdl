@@ -2348,8 +2348,8 @@ type TrainingScoringEnds = std::collections::BTreeMap<String, Option<f64>>;
 /// A training row is one whose LABEL time is `<= train_end` (with the fit's
 /// `TIME_TIE_EPS`): the cut `apply_holdout_declaration` made. Its scoring
 /// time is the close of the period the stream's `covers` declaration assigns
-/// it ([`crate::pfilter::stream_times_of_kind`], the lowering the fit and
-/// `pfilter` loaders use), which for a period-start label (`day(time)`,
+/// it ([`crate::pfilter::stream_times_of_rows`], over the rows the fit and
+/// `pfilter` loaders read), which for a period-start label (`day(time)`,
 /// `starting_on`, `ending_on`) is after the label: the row labelled 10 under
 /// `day(time)` covers [10, 11) and is scored at t = 11. The labels and the
 /// periods are read through the fit's loader, so dates, holes and long-form
@@ -2387,15 +2387,14 @@ fn training_scoring_ends(
         let siblings: Vec<&ir::observation::ObservationModel> = model.observations.iter()
             .filter(|o| o.source == obs.source)
             .collect();
-        let (rows, _cells, _aux) =
-            crate::fit::runner::load_observations(path, obs, &siblings, dt, &time_opts)?;
-        let labels: Vec<f64> = rows.iter().map(|o| o.time).collect();
+        let rows = crate::fit::runner::load_observations(path, obs, &siblings, dt, &time_opts)?;
+        let labels: Vec<f64> = rows.iter().map(|r| r.label()).collect();
         let last = labels.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         let entry = format!("'{}' (training data runs to t = {last})", obs.source);
         if !h.holdout_files.is_empty() && last > h.train_end + eps && !late.contains(&entry) {
             late.push(entry);
         }
-        loaded.push((obs, path, labels));
+        loaded.push((obs, path, rows, labels));
     }
     // Refused before the periods are built: a training file extended past
     // `train_end` can also break the period lowering (a gap under a uniform
@@ -2412,9 +2411,8 @@ fn training_scoring_ends(
             segment.display(), h.train_end, late.join(", ")));
     }
     let mut ends = TrainingScoringEnds::new();
-    for (obs, path, labels) in loaded {
-        let times = crate::pfilter::stream_times_of_kind(
-            obs, obs.projection.temporal_kind(), &labels, path, &time_opts)?;
+    for (obs, path, rows, labels) in loaded {
+        let times = crate::pfilter::stream_times_of_rows(obs, &rows, path, &time_opts)?;
         let last_training_close = labels.iter().zip(times.closes())
             .filter(|(&label, _)| label <= h.train_end + eps)
             .map(|(_, close)| close)

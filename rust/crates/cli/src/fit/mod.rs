@@ -59,6 +59,7 @@ pub mod loglik;  // gh#280: LoglikType — the single typed source for loglik cl
 pub mod state;
 pub(crate) mod stream_bindings; // which leaves a fit's [data] binds, by source, and to which files
 pub mod provenance;
+pub(crate) mod observed_rows; // one leaf's data rows, each with the instant or period it measures
 pub mod runner;
 pub mod priors_precedence;  // gh#75: shared prior-resolution chain for fit run + profile
 pub mod fit_tree;

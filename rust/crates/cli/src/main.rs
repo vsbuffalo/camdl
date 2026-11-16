@@ -4165,12 +4165,12 @@ pub(crate) fn obs_anchors_from_bindings(
         let siblings: Vec<&ir::observation::ObservationModel> = model.observations.iter()
             .filter(|o| o.source == obs_model.source)
             .collect();
-        let (obs, _cells, _aux) = crate::fit::runner::load_observations(
+        let rows = crate::fit::runner::load_observations(
             data_path, obs_model, &siblings, dt, &time_opts,
         )?;
-        for o in &obs {
-            first = first.min(o.time);
-            last = last.max(o.time);
+        for r in &rows {
+            first = first.min(r.label());
+            last = last.max(r.label());
         }
     }
     if !first.is_finite() || !last.is_finite() {

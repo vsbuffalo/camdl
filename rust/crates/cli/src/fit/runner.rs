@@ -1594,88 +1594,45 @@ fn simplex_member_default_step(transform: &Transform) -> f64 {
     }
 }
 
-/// Load observations from TSV, validating time alignment with dt.
+/// Load one leaf's observation rows from TSV, validating time alignment with
+/// dt.
 ///
-/// Sparse/holes: the value column may contain the missing-value token `NA`,
-/// loaded as a HOLE — its time stays in the grid (so the incidence accumulator
-/// still resets at its index) but it carries no value. Returns both the
-/// authoritative per-grid-time cells (`None` = hole) and a dense placeholder
-/// view of `Observation`s (a hole shows as value 0) for the diagnostics and
-/// time-axis callers, where a hole's value is not load-bearing. The cells are
-/// threaded into the obs model so the already hole-correct scoring seam handles
-/// missing values; the placeholder view is never scored.
+/// The rows are [`observed_rows`]'s: each with what it measures, its value (a
+/// hole, `None`, for the missing-value token `NA`, whose time stays in the
+/// grid so the incidence accumulator still resets at its index) and its
+/// auxiliary values. The run-dependent filtering is applied here: a hole whose
+/// period opens before the run is dropped, and every remaining label must lie
+/// on the `dt` grid. [`observation_columns`] gives the dense placeholder view
+/// the diagnostics and time-axis callers read, and
+/// [`crate::pfilter::stream_times_of_rows`] the stream's periods.
+///
+/// [`observed_rows`]: super::observed_rows::observed_rows
 pub(crate) fn load_observations(
     path: &str,
     obs_model: &ir::observation::ObservationModel,
     siblings: &[&ir::observation::ObservationModel],
     dt: f64,
     opts: &crate::caltime_load::TimeOpts,
-) -> Result<
-    (Vec<Observation>, Vec<Option<sim::inference::ObsCell>>, Vec<Vec<(String, f64)>>),
-    String,
-> {
-    // DISPATCH: a stratified (long-form) stream — its `columns { }` declares at
-    // least one `: dim` column — loads via the long-form router (routes file
-    // rows to the matching stratum leaf BY NAME, builds the partial-coverage
-    // union axis). An unstratified stream keeps the existing wide/by-name path.
-    let (mut times, mut cells, mut aux) = if crate::pfilter::is_long_form_stream(obs_model) {
-        crate::pfilter::load_long_form_stream(path, obs_model, siblings, opts)?
-    } else {
-        // Bind the file columns BY NAME: the declared `Time`-role column is the
-        // time axis (the by-name-time flip — no positional "column 0 is time"),
-        // and `scored` is the value column.
-        let time_col = crate::pfilter::obs_time_column(obs_model)?;
-        let value_col = &obs_model.scored;
-        let domain = crate::pfilter::CellDomain::of(obs_model, value_col);
-        let (times, cells) =
-            crate::pfilter::load_data_tsv_column_cells(path, time_col, value_col, domain, opts)?;
-        // Per-observation auxiliary data (binomial `n = tested`, person-time
-        // offset; §3, §6.1). A row where the scored value OR any referenced aux
-        // is `NA` is a hole (present-together-or-hole).
-        let aux_cols: Vec<(String, crate::pfilter::CellDomain)> =
-            crate::pfilter::stream_aux_columns(obs_model).into_iter()
-                .map(|c| { let d = crate::pfilter::CellDomain::of(obs_model, &c); (c, d) })
-                .collect();
-        let (aux, force_hole) =
-            crate::pfilter::load_stream_aux(path, &aux_cols, cells.len())?;
-        let mut cells = cells;
-        for r in 0..cells.len() {
-            if force_hole[r] {
-                cells[r] = None;
-            }
-        }
-        (times, cells, aux)
-    };
-    for r in 0..cells.len() {
-        if cells[r].is_none() {
-            aux[r].clear();
-        }
-    }
+) -> Result<Vec<super::observed_rows::ObservedRow>, String> {
+    let mut rows = super::observed_rows::observed_rows(path, obs_model, siblings, opts)?;
     // A HOLE whose declared period opens before the run carries nothing the
     // run could have said anything about — no value to score, and a reset at
     // a time the run never reaches — so it is dropped rather than refused
     // (gh#833). The shape arises naturally: a wide synthetic file carries an
     // `NA` for an incidence stream at the run's start, where its instant
     // siblings have a row. A row WITH a value there stays, for
-    // `stream_times_for` to refuse: that is data the run cannot score. Only a
-    // uniform form can be judged from the label; per-row windows are read from
-    // the file later and judged there.
+    // `stream_times_of_rows` to refuse: that is data the run cannot score.
+    // Only a uniform form is judged here; a row with a per-row window is
+    // judged with the stream's other periods.
     if let (Some(covers), true) = (&obs_model.covers, opts.t_start.is_finite()) {
-        let keep: Vec<bool> = times.iter().zip(&cells).map(|(&t, cell)| {
-            !(cell.is_none()
-                && covers.period_of(t).is_some_and(|(start, _)| start < opts.t_start - 1e-9))
-        }).collect();
-        if keep.iter().any(|k| !k) {
-            let retain = |k: &mut usize| { let keep_this = keep[*k]; *k += 1; keep_this };
-            let (mut i, mut j, mut l) = (0usize, 0usize, 0usize);
-            times.retain(|_| retain(&mut i));
-            cells.retain(|_| retain(&mut j));
-            aux.retain(|_| retain(&mut l));
+        if !matches!(covers, ir::observation::Covers::WindowColumns) {
+            rows.retain(|r| !(r.cell.is_none() && r.measures.start() < opts.t_start - 1e-9));
         }
     }
     // Validate time alignment (holes keep their time, so this is unaffected by
     // missing values).
-    for &time in &times {
+    for row in &rows {
+        let time = row.label();
         let remainder = time % dt;
         let aligned = remainder.abs() < 1e-9 || (dt - remainder.abs()).abs() < 1e-9;
         if !aligned {
@@ -1687,31 +1644,30 @@ pub(crate) fn load_observations(
             ));
         }
     }
-    // Dense placeholder view (holes → 0.0) for diagnostics/time.
-    let observations: Vec<Observation> = times.iter().zip(cells.iter())
-        .map(|(&time, cell)| Observation {
-            time,
-            value: match cell {
-                Some(sim::inference::ObsCell::Scalar(v)) => *v,
+    Ok(rows)
+}
+
+/// The columns an [`ObsStream`] holds, from [`load_observations`]'s rows: a
+/// dense placeholder view of `Observation`s at each row's label (a hole shows
+/// as value 0) for the diagnostics and time-axis callers, where a hole's value
+/// is not load-bearing; the authoritative cells (`None` a hole), which are
+/// threaded into the obs model so the hole-correct scoring seam handles
+/// missing values; and the auxiliary values. The placeholder view is never
+/// scored.
+pub(crate) fn observation_columns(
+    rows: Vec<super::observed_rows::ObservedRow>,
+) -> (Vec<Observation>, Vec<Option<sim::inference::ObsCell>>, Vec<Vec<(String, f64)>>) {
+    let observations = rows.iter()
+        .map(|r| Observation {
+            time: r.label(),
+            value: match r.cell {
+                Some(sim::inference::ObsCell::Scalar(v)) => v,
                 None => 0.0,
             },
         })
         .collect();
-    Ok((observations, cells, aux))
-}
-
-/// What one stream's rows cover, from its `covers` declaration and its own
-/// file (gh#833). Split from [`load_observations`] rather than folded into its
-/// return tuple because the long-form (stratified) path builds its times a
-/// different way, and both need this same lowering.
-pub(crate) fn load_stream_times(
-    path: &str,
-    obs_model: &ir::observation::ObservationModel,
-    projection: &sim::inference::multi_stream_obs::StreamProjection,
-    label_times: &[f64],
-    opts: &crate::caltime_load::TimeOpts,
-) -> Result<sim::inference::StreamTimes, String> {
-    crate::pfilter::stream_times_for(obs_model, projection, label_times, path, opts)
+    let (cells, aux) = rows.into_iter().map(|r| (r.cell, r.aux)).unzip();
+    (observations, cells, aux)
 }
 
 /// Convert a resolved data-binding list (`resolve_data_specs` for the CLI
@@ -1825,8 +1781,7 @@ pub(crate) fn resolve_and_load_obs_streams(
         let siblings: Vec<&ir::observation::ObservationModel> = model.observations.iter()
             .filter(|o| o.source == obs_model.source)
             .collect();
-        let (obs, cells, aux) =
-            load_observations(data_path, obs_model, &siblings, dt, time_opts)?;
+        let rows = load_observations(data_path, obs_model, &siblings, dt, time_opts)?;
         let obs_model: ir::observation::ObservationModel = (*obs_model).clone();
         let projection = sim::inference::multi_stream_obs::StreamProjection::from_ir(
             &obs_model.projection, compiled, &stream_name,
@@ -1839,7 +1794,7 @@ pub(crate) fn resolve_and_load_obs_streams(
         // positive incidence observation at the model origin (zero-width first
         // window → -Inf masquerading as filter degeneracy).
         {
-            let obs_times: Vec<f64> = obs.iter().map(|o| o.time).collect();
+            let obs_times: Vec<f64> = rows.iter().map(|r| r.label()).collect();
             crate::util::check_obs_before_origin(
                 &stream_name,
                 compiled.model.simulation.t_start,
@@ -1851,19 +1806,15 @@ pub(crate) fn resolve_and_load_obs_streams(
                     .unwrap_or(false),
                 time_opts,
             )?;
-            // A row AT the origin is judged by `stream_times_for` from what it
+            // A row AT the origin is judged by `stream_times_of_rows` from what it
             // covers: an incidence row there has a period opening before the
             // run and is refused in those terms; an instant row is a reading
             // of the initial state.
         }
 
-        let times = load_stream_times(
-            data_path,
-            &obs_model,
-            &projection,
-            &obs.iter().map(|o| o.time).collect::<Vec<f64>>(),
-            time_opts,
-        )?;
+        let times =
+            crate::pfilter::stream_times_of_rows(&obs_model, &rows, data_path, time_opts)?;
+        let (obs, cells, aux) = observation_columns(rows);
         streams.push(ObsStream {
             name: stream_name,
             projection,
@@ -2010,10 +1961,9 @@ pub(crate) fn check_holdout_files(
                 model.observations.iter()
                     .filter(|o| o.source == *source)
                     .collect();
-            let (hold_obs, _cells, _aux) =
-                load_observations(path, s.obs, &siblings, dt, time_opts)?;
-            let first_hold = hold_obs.iter()
-                .map(|o| o.time).fold(f64::INFINITY, f64::min);
+            let hold_rows = load_observations(path, s.obs, &siblings, dt, time_opts)?;
+            let first_hold = hold_rows.iter()
+                .map(|r| r.label()).fold(f64::INFINITY, f64::min);
             if first_hold <= train_end + TIME_TIE_EPS {
                 // The streams whose training reaches the first held-out row.
                 let mut late: Vec<String> = Vec::new();
@@ -2040,7 +1990,7 @@ pub(crate) fn check_holdout_files(
                      h-block follow-up (§3.9.2).",
                     late.join(", ")));
             }
-            n_holdout += hold_obs.len();
+            n_holdout += hold_rows.len();
         }
         crate::out::detached().say(format_args!(
             "  {h} training window [{t_start}, {train_end}]; \
