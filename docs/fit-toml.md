@@ -127,6 +127,17 @@ A `dt` written at the top level of the file is a typo, not a setting. (The
 forward backend for synthetic-data generation is `[synthetic].backend`, not a
 `[config]` setting — gh#241; the method declares its own `backend`.)
 
+`allow_forcing_extrapolation = true` lets the fit evaluate a forcing outside the
+range it is defined on — an `interpolated` forcing before its first or after its
+last data point, a `bspline` outside its window — holding its end value there.
+Without it such a fit is refused, naming the forcing, its range and the first
+time outside it. Under it each such forcing gets one warning naming its range
+and the span held, and the fit's `run.json` records the override. The setting is
+part of the fit's identity (a fit made under it and one refused without it are
+different computations), and `fit run
+--allow-forcing-extrapolation` sets it.
+`fit predict` of such a fit runs under it too.
+
 ## How paths resolve
 
 **Every path written in the `fit.toml` is relative to the `fit.toml` itself** —

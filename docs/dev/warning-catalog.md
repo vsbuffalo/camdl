@@ -362,6 +362,46 @@ and hint text live in `ocaml/lib/compiler/expander.ml` (`warn_bare_numeric`) and
 `ocaml/lib/compiler/time_typing.ml` (`hint_bare_numeric_simulate` /
 `hint_bare_numeric_at_schedule`).
 
+### `forcing-outside-range` — a forcing evaluated outside the range it is defined on
+
+A runtime error by default, a warning under the override; emitted by the `camdl`
+runtime, not the compiler, so it has no `Wxxx` code.
+
+**Fires when:** a run evaluates an `interpolated` forcing (read linearly, as a
+cubic spline or piecewise-constant) before its first or after its last data
+point, or a `bspline` outside its window, with the forcing's `lag` applied. The
+check reads the times actually evaluated: the engine records the first time
+outside the range per forcing and side (`sim::forcing_range`, recorded once as
+the run note `forcing-outside-range`), and the command's reporter decides
+(`cli::forcing_extrapolation`). The periodic kinds and `piecewise` are defined
+for all time and never fire.
+
+**Why:** past its data the lookup holds the end value, and a forecast or a fit
+run on a held covariate reads as a plausible answer while resting on a value
+nobody supplied (spec `docs/dev/temporal-architecture.md` §4.6, D44 and D48).
+
+**As an error** (the default), followed by the three fixes; the command exits 1
+before it commits anything, and a stored run that held a forcing is not served
+to it:
+
+```
+error: forcing `mult` was evaluated at t = 51, after its last data point (it is defined on t = 0 to t = 50, its data).
+```
+
+**As a warning** (`--allow-forcing-extrapolation`, or a fit config's
+`[config] allow_forcing_extrapolation = true`), once per forcing and side:
+
+```
+warning: forcing `mult` is defined on t = 0 to t = 50 (its data); the run evaluated it after its last data point, first at t = 51, and its value at t = 50 is held from t = 50 to the end of the run
+```
+
+Each `run.json` the command writes records `inputs.forcing_extrapolation`
+(`allowed`, and each forcing held with its range, side and first time).
+
+**Fix / silence:** extend the forcing's data or window to cover the run, or end
+the run within the range; pass the override only when holding the end value is
+what the run means.
+
 ## Info
 
 | Code | Severity | Category    | Summary                                                                                                                                                                                                                                                                                                                                |

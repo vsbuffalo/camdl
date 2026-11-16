@@ -13,6 +13,31 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-11-15 — a forcing evaluated outside its range is an error
+
+**What.** An `interpolated` forcing (any `method`) is defined from its first
+data point to its last, and a `bspline` on its window. A run that evaluated one
+outside that range held its end value silently (a `bspline` printed the info
+notice `spline-held-past-window`). Such a run is now refused by every command
+that runs a model, naming the forcing, its range and the first time outside it.
+The check reads the times actually evaluated, with `lag` applied. `piecewise`
+and the periodic kinds are unaffected.
+
+**Migration.** Extend the forcing's data or window to cover the run, or end the
+run within it. Where holding the end value is what the run means (a forecast
+past a `bspline` window anchored on `last_obs`, say), pass
+`--allow-forcing-extrapolation`, or set
+`[config] allow_forcing_extrapolation =
+true` in the fit config: the values held
+are exactly the values held before, with one warning per forcing, and `run.json`
+records the override.
+
+**Diagnostic.**
+``error: forcing `beta_t` was evaluated at t = 121, after the
+end of its window (it is defined on t = 0 to t = 120, its window).``
+
+---
+
 ## 2026-11-09 — an unknown name in a `where` guard is an error
 
 **What.** A `where` guard compares index variables with each other or with a
