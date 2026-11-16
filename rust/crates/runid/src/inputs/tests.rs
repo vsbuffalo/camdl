@@ -104,29 +104,34 @@ fn canonical_encoding_is_pinned() {
     // reason. With the version held at 2 and the gh#1046 change applied, every
     // pin here was unchanged (checked when the bump was made): the change is
     // to how a model is hashed, and no fixture here holds a model.
+    //
+    // HASH_VERSION 3 -> 4 (temporal-architecture Stage 2, D58): every pin
+    // moved once more for the version. `SimConfig` also gained
+    // `allow_forcing_extrapolation` (false here), so its bytes and
+    // `run_id(Sim)` change beyond the version.
     let expected: &[(&str, &str)] = &[
-        ("Backend::ChainBinomial", "4943ea94898fc001104e4b2f968861e8068fbda8f76ffee7ea51f6c48173c33d"),
-        ("CalendarMode::Numeric", "e0f8ae12dd9cd4e72340532a29aa3c1d795877d64971f4a5b190932edc10523a"),
-        ("ResolvedObsAlignment::Snap", "cad3b6ea8ef9fb012a0e78b049c6617f24315e5c25bb4b94514b3d9dc942e7ce"),
-        ("Seed", "47f60c5e88753bc6aae1d3a47495e6a163fb0a2934dd3039af4c0f520cb7a571"),
-        ("ModelDigest", "bbf529ac5237a416e4012e33987032a5f2720fe5ef87bcbedf41df2d8de2d095"),
+        ("Backend::ChainBinomial", "7f38dc070da7620b801c7ff73a90d569dc5449cdebcaa69d82c59ef59f2a212e"),
+        ("CalendarMode::Numeric", "187e86436d452bc42edec1a3aa4f8695a0463be91ad5e03673a2c5b7ced1aff8"),
+        ("ResolvedObsAlignment::Snap", "5ecd676164aab1b9bdc14d45b17aa0d810f4d428f84fd02be772b8995c07779f"),
+        ("Seed", "7a72919ddcd444a60d10dcbe9a5e4aa33828c2aeca6819455c9ff70bd3122bd3"),
+        ("ModelDigest", "0599581b3f4a51455f9d638bc26aa9d60ef753675c6311cf22573e73a6bcee9a"),
         // gh#833: `SimConfig` schema_version 4 -> 5 — the sim leaf's
         // `traj.tsv` gained `t_start`/`t_stop`, so the bytes under an
         // unchanged key changed; the key follows. `run_id(Sim)` moves with it.
-        ("SimConfig", "ebf06850c33af74a9a3584663a69c0cbb8e581f083ddb9992c7e62a70aabf5dd"),
-        ("ResolvedParams", "19f9e34254a010d99eb24fc2fba9cac1031bf5bbdac0ebd0d6cc279db5a871dd"),
+        ("SimConfig", "2409bd9f3b8a3fbbc4fef401f4c398e02d5cdd0da97b2b86c272ecddb544ea58"),
+        ("ResolvedParams", "daf5e1e3450903fcb82d16b246cba7badae0c30a958bc11e84cad329367bcd82"),
         // gh#573: `ResolvedScenario` schema_version 1 -> 2 — added `scale`
         // (the fixture now carries one factor, so the encoding of a non-empty
         // scale is pinned too). `run_id(Sim)` moves with it.
-        ("ResolvedScenario", "d34448c790890f894a4efa234aa8364d757652eacf8dca2f2946998ef697ca0d"),
-        ("FitDigest", "ccd46101fe79988d365b58da851fb1dfb9f7a13983e3458c59632374c2f66f74"),
+        ("ResolvedScenario", "f7a4240bb413856fb314aadb79d7c0650b4c0b8f6502dcfd3a37a5ec888b3750"),
+        ("FitDigest", "673ee48a6c00cfccc9a050675f8b73907e79d323959565f6cae1e93ba129c023"),
         // The `[stages]` -> `[method]` rename: the type is `MethodConfig`, not
         // `StageConfig`, and the derive hashes the fully-qualified type name as
         // its domain tag. Same fields, same bytes, new tag; `run_id(FitMethod)`
         // moves with it. Nothing else here moves.
-        ("MethodConfig", "447711b971bdd6d914f8f0be4c789f1d75f256749d83b98a62bde0f8c7796aeb"),
-        ("run_id(Sim)", "ac925f0a80eb20b21aea05c94654230aafc00ea1f54ed7c72f77383814e94d36"),
-        ("run_id(FitMethod)", "759a540bbd3f0fd82d7f736f9d7dba5691f49daf9657b2dfc15e2188c6f7d1f7"),
+        ("MethodConfig", "12f94f42e348faa6aebaee83589a8b8f057bb079ae573409cd309bd8a0e1a37a"),
+        ("run_id(Sim)", "2a5be551cf6a8a2fd06d92f90d7af30f4c3b93b8bedeb2845e30fd45c06e0963"),
+        ("run_id(FitMethod)", "3f7340da1f31034418a2fd3b4dc979c20ced5ae52701c1d7fa2440456c788d43"),
     ];
     let actual = golden_fixtures();
     assert_eq!(actual.len(), expected.len(), "fixture/expected count drift");
