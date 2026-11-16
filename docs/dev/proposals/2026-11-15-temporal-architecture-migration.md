@@ -862,9 +862,10 @@ Recorded in the maintainer's docket; each is reflected in the spec and above.
 
 ## Part 9. Documents this plan changes
 
-- **Archived** (`671be6ef3`): the June interval model, its overview and runbook,
-  the burn-in conditioning window, the two observation-anchor proposals, the
-  June observation system, the conditioned-scenario predictive.
+- **Archived** (the commit "archive the closed time and observation proposals"):
+  the June interval model, its overview and runbook, the burn-in conditioning
+  window, the two observation-anchor proposals, the June observation system, the
+  conditioned-scenario predictive.
 - **Amended now:** `2026-11-14-score-artifact.md` (status line naming the
   sections this plan changes: its `ObservedRow`, `train_end`, held-out rule,
   trace schema number and lead-time type);
