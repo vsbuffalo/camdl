@@ -936,7 +936,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // segment.
     let fit_dir = announced_fit_dir.clone();
 
-    let fit_sidecar = build_fit_sidecar(&config, &fit_path, Some(&model), &fit_data_digests);
+    let fit_sidecar = build_fit_sidecar(&config, &fit_path, Some(&model), &fit_data_digests)
+        .unwrap_or_else(|e| out.fail(format!("error: {e}")));
     // gh#896: the identity of the config this run was read from, recorded on
     // every leaf it writes or reuses (`inputs.config_identities`), so a
     // `fit.toml` handle names the runs made from the file as it now reads, not
@@ -2772,7 +2773,7 @@ fn build_fit_sidecar(
     fit_path: &str,
     model: Option<&ir::Model>,
     data: &stream_bindings::BoundDataDigests,
-) -> crate::run_meta::FitSidecar {
+) -> Result<crate::run_meta::FitSidecar, String> {
     let problem = &config.problem;
     // Prefer the pre-compiled IR (set by `cmd_fit_run_v2`); `load_model`
     // re-invokes camdlc when handed a raw `.camdl`. The resolved model identity
@@ -2829,7 +2830,9 @@ fn build_fit_sidecar(
         }
         None => Vec::new(),
     };
-    crate::run_meta::FitSidecar {
+    let calendar = model.map(ir::caltime::CalendarAxis::from_model).transpose()
+        .map_err(|e| e.to_string())?;
+    Ok(crate::run_meta::FitSidecar {
         // A fit's label is its run's, on the leaf (gh#896); the sidecar
         // describes the problem.
         label: None,
@@ -2865,10 +2868,11 @@ fn build_fit_sidecar(
         // `resolved_dt` gives the same answer for a config read without it.
         dt: model.map(|m| crate::dt_rule::resolved_dt(m.simulation.dt, problem.config.dt)),
         integrator: model.map(|m| m.simulation.integrator.clone()),
+        calendar,
         // The `#'` doc dictionary (presentation metadata), loaded from the same
         // compiled IR. Empty when the model documents nothing.
         docs: crate::util::load_model_docs(model_src).unwrap_or_default(),
-    }
+    })
 }
 
 /// One side of `camdl fit diff`: what a config resolves to outside its text.
@@ -3779,9 +3783,43 @@ mod tests {
         let config = config_v2::FitConfig::from_toml_str(&toml_src).unwrap();
         let model = golden_model("ocaml/golden/sir_two_patch_long_obs.ir.json");
         let data = read_data_digests(config.problem.data_spec().unwrap(), &model).unwrap();
-        let sidecar = build_fit_sidecar(&config, fit_path.to_str().unwrap(), Some(&model), &data);
+        let sidecar = build_fit_sidecar(&config, fit_path.to_str().unwrap(), Some(&model), &data).unwrap();
         assert_eq!(sidecar.data_hashes.keys().collect::<Vec<_>>(), vec!["cases"],
             "one entry, keyed by the source both leaves read: {:?}", sidecar.data_hashes);
+    }
+
+    /// `fit.meta.json` carries the model's calendar axis
+    /// (`docs/dev/temporal-architecture.md` §5.3), so the fit's model times can
+    /// be dated without the model source.
+    #[test]
+    fn sidecar_records_the_models_calendar() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data_path = tmp.path().join("cases_long.tsv");
+        std::fs::write(&data_path, b"time\tpatch\tcases\n7\turban\t12\n7\trural\t3\n").unwrap();
+        let fit_path = tmp.path().join("fit.toml");
+        let toml_src = format!(
+            "[model]\ncamdl = \"no-such-model.ir.json\"\n\
+             [data]\nfile = \"{}\"\n\
+             [estimate]\nbeta = {{ bounds = [0.01, 0.5] }}\n[fixed]\nrho = 0.5\n\
+             [method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
+             chains = 1\nparticles = 10\niterations = 1\ncooling = 0.7\n",
+            data_path.display());
+        std::fs::write(&fit_path, &toml_src).unwrap();
+        let config = config_v2::FitConfig::from_toml_str(&toml_src).unwrap();
+        let mut model = golden_model("ocaml/golden/sir_two_patch_long_obs.ir.json");
+        model.origin = Some("2020-03-01".into());
+        let data = read_data_digests(config.problem.data_spec().unwrap(), &model).unwrap();
+        let sidecar = build_fit_sidecar(&config, fit_path.to_str().unwrap(), Some(&model), &data).unwrap();
+        let seg = tmp.path().join("seg");
+        std::fs::create_dir_all(&seg).unwrap();
+        crate::run_meta::store_fit_sidecar(&seg, &sidecar).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(seg.join("fit.meta.json")).unwrap()).unwrap();
+        assert_eq!(
+            written["calendar"],
+            serde_json::json!({"days_per_unit": 1.0, "origin": "2020-03-01", "time_unit": model.time_unit}),
+            "fit.meta.json: {written:#}"
+        );
     }
 
     /// `fit.meta.json` records the full SHA-256 of every bound file, training
@@ -3805,7 +3843,7 @@ mod tests {
         let config = config_v2::FitConfig::from_toml_str(&toml_src).unwrap();
         let model = golden_model("ocaml/golden/sir_two_patch_long_obs.ir.json");
         let data = read_data_digests(config.problem.data_spec().unwrap(), &model).unwrap();
-        let sidecar = build_fit_sidecar(&config, fit_path.to_str().unwrap(), Some(&model), &data);
+        let sidecar = build_fit_sidecar(&config, fit_path.to_str().unwrap(), Some(&model), &data).unwrap();
         let sha = |p: &std::path::Path| crate::hashing::sha256_hex(&std::fs::read(p).unwrap());
         assert_eq!(sidecar.data_hashes, std::collections::BTreeMap::from([("cases".into(), sha(&train))]));
         assert_eq!(sidecar.holdout_hashes, std::collections::BTreeMap::from([("cases".into(), sha(&holdout))]));
@@ -3862,7 +3900,7 @@ cooling = 0.7
 
         let data = read_data_digests(config.problem.data_spec().unwrap(), &model).unwrap();
         let sidecar = build_fit_sidecar(
-            &config, fit_path.to_str().unwrap(), Some(&model), &data);
+            &config, fit_path.to_str().unwrap(), Some(&model), &data).unwrap();
 
         let expected = crate::hashing::sha256_hex(&std::fs::read(&data_path).unwrap());
         assert_eq!(
@@ -3911,7 +3949,7 @@ N0 = 1000
                 .expect("fixture fit.toml should parse");
             // The data digests are not under test here.
             build_fit_sidecar(&config, fit_path.to_str().unwrap(), Some(&model),
-                &Default::default())
+                &Default::default()).unwrap()
         };
         let pmmh = sidecar_for(
             "algorithm = \"pmmh\"\nbackend = \"chain_binomial\"\nchains = 1\n\
