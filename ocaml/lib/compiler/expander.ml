@@ -7839,6 +7839,10 @@ let expand_time_function_one ctx fname (env : (string * string) list)
                     ~hint:"Use a numeric literal, e.g. 7:100"
                     ();
                   0 in
+              (* The last whole time unit inside the period, in the model-time
+                 units `lo` and `hi` are written in (364 for a 365-day period).
+                 With 1-unit steps this is also the last bin. *)
+              let last = int_of_float (Float.ceil period_f) - 1 in
               (* gh#1135: a reversed range would run the fill loop below zero
                  times and leave the forcing 0 in every bin. *)
               if lo > hi then
@@ -7851,8 +7855,36 @@ let expand_time_function_one ctx fname (env : (string * string) list)
                   ~hint:(Printf.sprintf
                     "write the range low to high, e.g. %d:%d; a window that \
                      spans the end of the period is two ranges, %d:%d and 0:%d"
-                    hi lo lo (n_bins - 1) hi)
-                  ();
+                    hi lo lo last hi)
+                  ()
+              (* gh#1139 (D66): a range past the end of the period is refused,
+                 not read modulo the period. The fill loop below clamps at the
+                 last bin, so wholly past it switched on no bins and partly
+                 past it was silently cut at the period end. *)
+              else if hi > last then begin
+                let effect =
+                  if lo > last then "so it would switch on no bins"
+                  else Printf.sprintf "so it would be cut to %d:%d" lo last in
+                let wrapped = hi - (last + 1) in
+                let hint =
+                  if lo <= last && wrapped < lo then
+                    Printf.sprintf
+                      "the period runs 0:%d; a window that spans the end of \
+                       the period is two ranges, %d:%d and 0:%d"
+                      last lo last wrapped
+                  else
+                    Printf.sprintf
+                      "the period runs 0:%d; check the period and the unit of \
+                       the range. A window that spans the end of the period is \
+                       two ranges, e.g. %d:%d, 0:7"
+                      last (max 0 (last - 7)) last in
+                Diagnostics.error ctx.diags ~code:"E406" ~loc:Diagnostics.no_loc
+                  ~message:(Printf.sprintf
+                    "periodic time function '%s': `on` range %d:%d runs past \
+                     the end of the period, which covers 0:%d, %s"
+                    fname lo hi last effect)
+                  ~hint ()
+              end;
               let step_int = int_of_float step_f in
               if step_int > 1 && (lo mod step_int <> 0 || (hi + 1) mod step_int <> 0) then
                 Diagnostics.warning ctx.diags ~code:"W301" ~loc:Diagnostics.no_loc

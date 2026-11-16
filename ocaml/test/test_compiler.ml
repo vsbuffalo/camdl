@@ -10913,6 +10913,34 @@ let test_gh1135_periodic_on_single_bin_range_ok () =
     Alcotest.(check int) "bins on" 4 (List.length on_bins)
   | _ -> Alcotest.fail "expected a periodic forcing"
 
+(* gh#1139: a range-form periodic `on` range past the end of the period
+   (365 days with 1-day steps, so the period runs 0:364) used to compile:
+   wholly past, the forcing was 0 in every bin; partly past, the range was
+   silently cut at the last bin. *)
+let test_gh1139_periodic_on_range_wholly_past_period_rejected () =
+  compile_expect_error_code ~code:"E406" ~contains:"400:500"
+    (gh1135_periodic_on_model "400 'days : 500 'days")
+
+let test_gh1139_periodic_on_range_partly_past_period_rejected () =
+  (* The hint names the two-range form of the window that wraps. *)
+  compile_expect_error_code ~code:"E406" ~contains:"300:364 and 0:135"
+    (gh1135_periodic_on_model "300 'days : 500 'days")
+
+let test_gh1139_periodic_on_range_ending_at_last_bin_ok () =
+  (* Positive control: a range ending exactly at the last bin (364) and the
+     two-range form of a window spanning the period end both compile. *)
+  let m = compile_expect_ok
+      (gh1135_periodic_on_model "0 'days : 7 'days, 300 'days : 364 'days") in
+  match (List.hd m.time_functions).kind with
+  | Ir.Periodic p ->
+    Alcotest.(check int) "bin count" 365 (List.length p.values);
+    let on_bins =
+      List.filter (function Ir.Const 1.0 -> true | _ -> false) p.values in
+    Alcotest.(check int) "bins on" (8 + 65) (List.length on_bins);
+    Alcotest.(check bool) "last bin on" true
+      (List.nth p.values 364 = Ir.Const 1.0)
+  | _ -> Alcotest.fail "expected a periodic forcing"
+
 let test_typed_time_w324_bare_numeric_simulate_warning () =
   let src = {|
     time_unit = 'days
@@ -16771,6 +16799,12 @@ let () =
         `Quick test_gh1135_periodic_on_reversed_range_rejected;
       Alcotest.test_case "gh#1135 one-bin periodic on range still compiles"
         `Quick test_gh1135_periodic_on_single_bin_range_ok;
+      Alcotest.test_case "gh#1139 E406 periodic on range wholly past the period"
+        `Quick test_gh1139_periodic_on_range_wholly_past_period_rejected;
+      Alcotest.test_case "gh#1139 E406 periodic on range partly past the period"
+        `Quick test_gh1139_periodic_on_range_partly_past_period_rejected;
+      Alcotest.test_case "gh#1139 periodic on range ending at the last bin compiles"
+        `Quick test_gh1139_periodic_on_range_ending_at_last_bin_ok;
       (* Rule 5 (W324, W325): bare-numeric in time positions. *)
       Alcotest.test_case "W324 bare-numeric simulate.from/to warns under origin"
         `Quick test_typed_time_w324_bare_numeric_simulate_warning;
