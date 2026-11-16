@@ -130,8 +130,8 @@ forward backend for synthetic-data generation is `[synthetic].backend`, not a
 `allow_forcing_extrapolation = true` lets the fit evaluate a forcing outside the
 range it is defined on — an `interpolated` forcing before its first or after its
 last data point, a `bspline` outside its window — holding its end value there.
-Without it such a fit is refused, naming the forcing, its range and the first
-time outside it. Under it each such forcing gets one warning naming its range
+Without it such a fit is refused, naming the forcing, its range and the side it
+was evaluated on. Under it each such forcing gets one warning naming its range
 and the span held, and the fit's `run.json` records the override. The setting is
 part of the fit's identity (a fit made under it and one refused without it are
 different computations), and `fit run

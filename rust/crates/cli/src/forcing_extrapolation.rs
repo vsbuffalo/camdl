@@ -3,10 +3,10 @@
 //! D48): a data-table forcing before its first or after its last data point,
 //! or a `bspline` outside its window.
 //!
-//! The engine holds the end value and records the first such time per
-//! forcing and side as a run note ([`sim::forcing_range`]). This module is the
+//! The engine holds the end value and records, once per forcing and side,
+//! that it did, as a run note ([`sim::forcing_range`]). This module is the
 //! policy. By default the note is an error: the command says which forcing,
-//! its range and the first time outside it, and exits before it commits
+//! its range and the side it was evaluated on, and exits before it commits
 //! anything. Under `--allow-forcing-extrapolation` (or a fit config's
 //! `[config] allow_forcing_extrapolation = true`) the note is said once as a
 //! warning, and every `run.json` the command writes records the override and
@@ -57,12 +57,11 @@ pub fn refusal(o: &OutsideRange) -> String {
         sim::forcing_range::Side::Before => format!("start the run at or after t = {}", o.lo),
     };
     format!(
-        "error: forcing `{}` was evaluated at t = {}, {} (it is defined on t = {} to t = {}, {}){}.\n  \
+        "error: forcing `{}` was evaluated {} (it is defined on t = {} to t = {}, {}){}.\n  \
          camdl does not extend a forcing past its range silently. Extend {} to cover the run, {}, \
          or pass --allow-forcing-extrapolation (in a fit config, `[config] \
          allow_forcing_extrapolation = true`) to hold its value at t = {}.",
         o.forcing,
-        o.at,
         o.side_phrase(),
         o.lo,
         o.hi,
@@ -118,7 +117,6 @@ pub fn record_in(inputs: &mut serde_json::Value) {
                             sim::forcing_range::Side::Before => "before",
                             sim::forcing_range::Side::After => "after",
                         },
-                        "first_at": o.at,
                         "held_value_at": o.held_end(),
                     })
                 })

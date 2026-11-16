@@ -60,8 +60,7 @@ impl RunNote {
                 format!("{}\u{0}{}\u{0}{}", n.effect, n.declared.to_bits(), n.fires_at.to_bits())
             }
             RunNote::NonIntegerNormalObservation { .. } => String::new(),
-            // One note per forcing and side, whichever time the first
-            // compiled copy of it met first.
+            // One note per forcing and side.
             RunNote::ForcingOutsideRange(o) => {
                 format!("{}\u{0}{:?}\u{0}{}\u{0}{}", o.forcing, o.side, o.lo.to_bits(), o.hi.to_bits())
             }

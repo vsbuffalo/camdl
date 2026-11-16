@@ -1690,8 +1690,8 @@ The knots take one of two forms, and exactly one must be given:
 The basis is **clamped**: the window ends are repeated knots, so the curve
 starts exactly at its first coefficient at a and ends exactly at its last at b.
 **The forcing is defined on its window.** A run that evaluates it outside the
-window is an error, naming the forcing, the window and the first time outside
-it, unless the run is given `--allow-forcing-extrapolation` (in a fit config,
+window is an error, naming the forcing, the window and the side it was
+evaluated on, unless the run is given `--allow-forcing-extrapolation` (in a fit config,
 `[config] allow_forcing_extrapolation = true`). Under that override the forcing
 holds: for t before a it is its value at a, after b its value at b, so a run
 past the window carries the curve's last value rather than an extrapolated
@@ -1699,7 +1699,7 @@ trend, and the run says so once per forcing with the warning
 `forcing-outside-range`:
 
 ```
-warning: forcing `beta_t` is defined on t = 0 to t = 120 (its window); the run evaluated it after the end of its window, first at t = 121, and its value at t = 120 is held from t = 120 to the end of the run
+warning: forcing `beta_t` is defined on t = 0 to t = 120 (its window); the run evaluated it after the end of its window, and its value at t = 120 is held from t = 120 to the end of the run
 ```
 
 With `lag = ℓ` the forcing is evaluated at t − ℓ, so the hold starts at b + ℓ;
@@ -1976,7 +1976,7 @@ time columns and `instant`/`duration` table cells follow (see
 
 An `interpolated` forcing is defined from its first data point to its last,
 whatever its `method`. A run that evaluates it outside that range is an error
-naming the forcing, its range and the first time outside it, unless the run is
+naming the forcing, its range and the side it was evaluated on, unless the run is
 given `--allow-forcing-extrapolation` (in a fit config,
 `[config] allow_forcing_extrapolation = true`), under which it holds its first
 or last value there with one warning, as a `bspline` does outside its window.

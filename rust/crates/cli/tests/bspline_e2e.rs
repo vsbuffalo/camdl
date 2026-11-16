@@ -261,8 +261,7 @@ const OVERRIDE: &str = "--allow-forcing-extrapolation";
 fn held_warning(end: u32) -> String {
     format!(
         "warning: forcing `mult` is defined on t = 0 to t = {end} (its window); the run evaluated it after the \
-         end of its window, first at t = {}, and its value at t = {end} is held from t = {end} to the end of the run",
-        end + 1
+         end of its window, and its value at t = {end} is held from t = {end} to the end of the run"
     )
 }
 
@@ -277,7 +276,7 @@ fn anchored_window_resolves_and_the_hold_is_refused_or_warned() {
     let (ok, stderr, _) = simulate(tmp.path(), &model, Some(&fit), &[]);
     assert!(!ok, "a run past the window must be refused:\n{stderr}");
     assert!(stderr.contains("forcing 'mult'") && stderr.contains("t = 21"), "resolved window end announced:\n{stderr}");
-    assert!(stderr.contains("error: forcing `mult` was evaluated at t = 22, after the end of its window"), "{stderr}");
+    assert!(stderr.contains("error: forcing `mult` was evaluated after the end of its window"), "{stderr}");
 
     let (ok, stderr, cas) = simulate(tmp.path(), &model, Some(&fit), &[OVERRIDE]);
     assert!(ok, "simulate under the override must succeed:\n{stderr}");
@@ -333,11 +332,7 @@ fn pfilter_profile_and_survey_refuse_or_warn_the_hold() {
     let fit = fit_toml(tmp.path(), &model);
     let params = tmp.path().join("params.toml");
     std::fs::write(&params, "beta = 0.12\ngamma = 0.1\nrho = 0.6\n").unwrap();
-    // The first time past the window is the next step on the chain-binomial
-    // grid (t = 22), and an RK4 midpoint (t = 21.5) for survey's ODE
-    // skeleton, so the lines are matched up to it.
-    let line = "warning: forcing `mult` is defined on t = 0 to t = 21 (its window); the run evaluated it after \
-                the end of its window, first at t = ";
+    let line = held_warning(21);
     let run = |label: &str, args: Vec<String>| {
         let go = |extra: &[&str]| {
             let o = Command::new(bin()).env_remove("CLICOLOR_FORCE")
@@ -352,11 +347,11 @@ fn pfilter_profile_and_survey_refuse_or_warn_the_hold() {
         };
         let (ok, stderr) = go(&[]);
         assert!(!ok, "{label} must be refused without the override:\n{stderr}");
-        assert!(stderr.contains("error: forcing `mult` was evaluated at t = 2")
-            && stderr.contains("after the end of its window (it is defined on t = 0 to t = 21"), "{label}:\n{stderr}");
+        assert!(stderr.contains("error: forcing `mult` was evaluated after the end of its window (it is defined \
+                                 on t = 0 to t = 21"), "{label}:\n{stderr}");
         let (ok, stderr) = go(&[OVERRIDE]);
         assert!(ok, "{label} must run under the override:\n{stderr}");
-        assert_eq!(stderr.matches(line).count(), 1, "{label}: the warning, once:\n{stderr}");
+        assert_eq!(stderr.matches(&line).count(), 1, "{label}: the warning, once:\n{stderr}");
     };
     let s = |x: &Path| x.to_str().unwrap().to_string();
     let m = s(&model);
