@@ -1392,18 +1392,18 @@ time	cases
 `time` in model time units (days for He et al.). One value column named to match
 the observation projection output.
 
-**Observation times must be exact multiples of dt.** A time that does not fall
-on a step boundary is a hard error:
+**A period is never moved to fit the step grid.** Silent snapping would change
+which flows accumulate into the projected quantity, altering the likelihood.
+`if2`, `pfilter` and `pmmh` step exactly to every period's start and end, with a
+shortened step where one falls between grid times, so observation times need not
+be multiples of `dt`. `pgas` steps only on its grid `t_start + k·dt` and refuses
+a run in which any period starts or ends off it:
 
 ```
-error: observation at t=7.5 is not a multiple of dt=1.0.
-  The chain-binomial state only exists at step boundaries.
-  Adjust observation times or dt to align.
+pgas steps only on its grid t_start + k·dt (t_start = 0.5, dt = 1), and stream
+`cases` row 1 (time = 3) covers [1, 3): its start, 1, lies between grid times
+0.5 and 1.5, so it would score the row on a different period.
 ```
-
-Silent snapping would change which flows accumulate into the projected quantity,
-altering the likelihood. This is a user error that must be caught, not papered
-over.
 
 ### 10.2 Multi-Stream
 

@@ -138,6 +138,14 @@ different computations), and `fit run
 --allow-forcing-extrapolation` sets it.
 `fit predict` of such a fit runs under it too.
 
+Observation times need not lie on the grid `t_start + k·dt`. `if2`, `pfilter`
+and `pmmh` step exactly to every observed period's start and end; `pgas` steps
+only on its grid and refuses a run in which any period starts or ends off it,
+naming the row and the two grid times either side — choose a `dt` that puts
+every boundary on the grid, or fit with `if2` or `pmmh`. There is no setting for
+this: `[config] obs_alignment` is removed, and a file that carries it is
+refused.
+
 ## How paths resolve
 
 **Every path written in the `fit.toml` is relative to the `fit.toml` itself** —
