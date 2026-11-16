@@ -81,11 +81,17 @@ pub fn refusal(o: &OutsideRange) -> String {
 /// in its config and never reaches this; a simulate leaf's identity does not
 /// carry it.)
 pub fn leaf_held_without_override(leaf: &std::path::Path) -> bool {
+    let Ok(Some(l)) = runid::read_leaf(leaf) else { return false };
+    held_without_override(&l.record)
+}
+
+/// [`leaf_held_without_override`] for a record already read, as a store
+/// lookup returns it.
+pub fn held_without_override(record: &runid::record::RunRecord) -> bool {
     if allowed() {
         return false;
     }
-    let Ok(Some(l)) = runid::read_leaf(leaf) else { return false };
-    l.record
+    record
         .inputs
         .pointer("/forcing_extrapolation/held")
         .and_then(|h| h.as_array())
