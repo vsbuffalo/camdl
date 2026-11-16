@@ -67,9 +67,11 @@ observations {
     columns   { time : time, cases : real }
     covers    = starting_on(time, 7 'days)
     projected = incidence(infection)
+    emit_schedule = every 7 'days
     cases     ~ normal(mean = 0 * projected + I * t / (1 'days), sd = sd)
   }
 }
+quantities { at7 = value_at(observations.cases, 7 'days) }
 init { S = 990  I = 10  R = 0 }
 simulate { from = 0 'days  to = 42 'days  dt = 1 'days }
 "#;
@@ -213,4 +215,55 @@ fn fit_predict_evaluates_each_row_where_it_is_scored() {
              and time at its stop: expected I·t = {expected}, got {q50} (at the label \
              it is {})", mean_at(&i_at, t as usize));
     }
+    // The `observations.cases` series names each draw by its row's label, as
+    // the table does: `value_at(…, 7)` is the row labelled 7, drawn at 14.
+    let q = std::fs::read_to_string(find(&dir.join("results"), "quantities/at7.tsv")).unwrap();
+    let mut ql = q.lines();
+    let qh: Vec<&str> = ql.next().unwrap().split('\t').collect();
+    let q50: f64 = ql.next().unwrap().split('\t')
+        .nth(qh.iter().position(|c| *c == "q50").unwrap()).unwrap().parse().unwrap();
+    assert!((q50 - mean_at(&i_at, 14)).abs() < 0.01,
+        "value_at(observations.cases, 7) is the row labelled 7: expected {}, got {q50} \
+         (the row scored at 7 is {})", mean_at(&i_at, 14), mean_at(&i_at, 7));
+}
+
+/// A quantity over `observations.<stream>` names each draw by its row's label,
+/// as the `--obs` file does, so the two agree about which row is at time T.
+/// The stream is pure incidence (`poisson(rate = projected)`), so nothing in
+/// its draws depends on where the state is read.
+#[test]
+fn an_observation_quantity_names_each_draw_by_its_label() {
+    let tmp = tempdir("obs_quantity");
+    let dir = &tmp.0;
+    let src = MODEL
+        .replace("columns   { time : time, cases : real }", "columns   { time : time, cases : count }")
+        .replace("cases     ~ normal(mean = 0 * projected + I * t / (1 'days), sd = sd)",
+            "cases     ~ poisson(rate = projected)")
+        .replace("quantities { at7 = value_at(observations.cases, 7 'days) }",
+            "quantities {\n  at14   = value_at(observations.cases, 14 'days)\n  \
+             peak_t = time_of_max(observations.cases)\n}");
+    assert!(src.contains("poisson") && src.contains("peak_t"), "fixture rewrite applied");
+    std::fs::write(dir.join("q.camdl"), &src).unwrap();
+    let out = Command::new(camdlc_bin()).env_remove("CLICOLOR_FORCE").arg(dir.join("q.camdl"))
+        .output().unwrap();
+    assert!(out.status.success(), "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
+    std::fs::write(dir.join("q.ir.json"), &out.stdout).unwrap();
+    std::fs::write(dir.join("p.toml"), "beta = 0.6\ngamma = 0.2\nsd = 0.0001\n").unwrap();
+    ok(camdl(dir, &["simulate", "q.ir.json", "--params", "p.toml", "--backend", "ode",
+        "--seed", "1", "--obs", "obs.tsv", "--quantities-out", "qd"]), "simulate --obs --quantities-out");
+
+    let obs: Vec<(f64, f64)> = std::fs::read_to_string(dir.join("obs.tsv")).unwrap()
+        .lines().skip(1)
+        .map(|l| { let f: Vec<&str> = l.split('\t').collect(); (f[0].parse().unwrap(), f[1].parse().unwrap()) })
+        .collect();
+    let scalar = |name: &str| -> f64 {
+        std::fs::read_to_string(dir.join(format!("qd/quantities/{name}.tsv"))).unwrap()
+            .lines().nth(1).unwrap().trim().parse().unwrap()
+    };
+    let row_at = |t: f64| obs.iter().find(|r| r.0 == t).map(|r| r.1).unwrap();
+    assert_eq!(scalar("at14"), row_at(14.0),
+        "value_at(observations.cases, 14) is the row the --obs file writes under 14: {obs:?}");
+    let peak = obs.iter().cloned().fold((f64::NAN, f64::NEG_INFINITY), |a, r| if r.1 > a.1 { r } else { a });
+    assert_eq!(scalar("peak_t"), peak.0,
+        "time_of_max names the largest row by the label the --obs file gives it: {obs:?}");
 }
