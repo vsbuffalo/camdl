@@ -1543,8 +1543,9 @@ built-in types cover real-world needs:
   `n_basis`, `coefs` — a list of exactly `n_basis` coefficients — plus optional
   `degree`, default 3, at most 5 and less than `n_basis`, and optional
   `link = identity | log`), for flexible smooth seasonality (gh#59)
-- `bspline` — a clamped B-spline over a window, held at its end values outside
-  it, for a smooth rate that changes through time without repeating; see
+- `bspline` — a clamped B-spline over a window, an error to evaluate outside it
+  unless overridden, for a smooth rate that changes through time without
+  repeating; see
   [B-spline forcing](#b-spline-forcing-bspline) below
 
 <!-- camdl-doctest-preamble: forcing-demo
