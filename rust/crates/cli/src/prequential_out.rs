@@ -51,23 +51,34 @@ pub fn streams_sibling(path: &Path) -> PathBuf {
 pub fn write_prequential_outputs(
     stem: &str,
     trace: &score::trace::PrequentialTrace,
+    calendar: &ir::caltime::CalendarAxis,
 ) -> std::io::Result<()> {
     let tsv_path = format!("{}.tsv", stem);
     let streams_path = streams_sibling(Path::new(&tsv_path));
     let json_path = format!("{}.json", stem);
+    // On a model with an origin, a `date` column follows `t`: the step's
+    // instant as `CalendarAxis::date_of` writes it, which the loader reads
+    // back to the same `t`. An undated model's files keep their columns.
+    let dated = calendar.origin.is_some();
+    let time_cells = |t: f64| match calendar.date_of(t) {
+        Some(date) => format!("{t}\t{date}"),
+        None if dated => format!("{t}\tNA"),
+        None => format!("{t}"),
+    };
+    let time_header = if dated { "t\tdate" } else { "t" };
     let mut tsv = std::io::BufWriter::new(std::fs::File::create(&tsv_path)?);
-    writeln!(tsv, "t\tlog_score\tess")?;
+    writeln!(tsv, "{time_header}\tlog_score\tess")?;
     for s in &trace.steps {
-        writeln!(tsv, "{}\t{:.6}\t{:.2}", s.t, s.log_score, s.ess)?;
+        writeln!(tsv, "{}\t{:.6}\t{:.2}", time_cells(s.t), s.log_score, s.ess)?;
     }
     drop(tsv);
     let mut tsv = std::io::BufWriter::new(std::fs::File::create(&streams_path)?);
-    writeln!(tsv, "t\tstream\ty_obs\ty_pred_q05\ty_pred_q25\ty_pred_q50\ty_pred_q75\ty_pred_q95\tlog_score\tcrps\tpit")?;
+    writeln!(tsv, "{time_header}\tstream\ty_obs\ty_pred_q05\ty_pred_q25\ty_pred_q50\ty_pred_q75\ty_pred_q95\tlog_score\tcrps\tpit")?;
     for s in &trace.steps {
         for ss in &s.per_stream {
             let iv = &ss.interval;
             writeln!(tsv, "{}\t{}\t{}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}",
-                s.t, ss.stream, ss.y_obs, iv.q05, iv.q25, iv.q50, iv.q75, iv.q95,
+                time_cells(s.t), ss.stream, ss.y_obs, iv.q05, iv.q25, iv.q50, iv.q75, iv.q95,
                 ss.log_score, ss.crps, ss.pit)?;
         }
     }
@@ -120,7 +131,7 @@ pub const SURPRISE_ROWS: usize = 5;
 /// trace) shows `—` for the stream's columns.
 ///
 /// Empty when the trace scored nothing.
-pub fn surprise_table(trace: &score::trace::PrequentialTrace) -> String {
+pub fn surprise_table(trace: &score::trace::PrequentialTrace, calendar: &ir::caltime::CalendarAxis) -> String {
     let worst = trace.worst_scored(SURPRISE_ROWS);
     if worst.is_empty() {
         return String::new();
@@ -162,9 +173,19 @@ pub fn surprise_table(trace: &score::trace::PrequentialTrace) -> String {
         share(top_ls),
         num(elpd),
     );
+    // On a model with an origin each row names its date beside `t`, so the
+    // row can be found in a dated data file (M3).
+    let date_col = |t: f64| -> String {
+        match (calendar.origin.is_some(), calendar.date_of(t)) {
+            (false, _) => String::new(),
+            (true, Some(d)) => format!(" {:<10}", d.as_str()),
+            (true, None) => format!(" {:<10}", "—"),
+        }
+    };
+    let date_head = if calendar.origin.is_some() { format!(" {:<10}", "date") } else { String::new() };
     out.push_str(&format!(
-        "    {:>8} {:<14} {:>9} {:>17} {:>14} {:>7} {:>5} {:>8}\n",
-        "t", "stream", "y_obs", "pred q05–q95", "log_score", "share", "pit", "ess"
+        "    {:>8}{} {:<14} {:>9} {:>17} {:>14} {:>7} {:>5} {:>8}\n",
+        "t", date_head, "stream", "y_obs", "pred q05–q95", "log_score", "share", "pit", "ess"
     ));
     for s in &worst {
         // The row a reader can look up: the worst stream's own numbers. The
@@ -181,8 +202,9 @@ pub fn surprise_table(trace: &score::trace::PrequentialTrace) -> String {
             None => ("—", "—".to_string(), "—".to_string(), num(s.log_score), "—".to_string()),
         };
         out.push_str(&format!(
-            "    {:>8} {:<14} {:>9} {:>17} {:>14} {:>7} {:>5} {:>8.1}\n",
+            "    {:>8}{} {:<14} {:>9} {:>17} {:>14} {:>7} {:>5} {:>8.1}\n",
             crate::quantile::fmt_time(s.t),
+            date_col(s.t),
             stream,
             y_obs,
             band,
@@ -216,6 +238,14 @@ mod tests {
         }
     }
 
+    fn undated() -> ir::caltime::CalendarAxis {
+        ir::caltime::CalendarAxis::parse("days", None).unwrap()
+    }
+
+    fn dated() -> ir::caltime::CalendarAxis {
+        ir::caltime::CalendarAxis::parse("days", Some("2020-03-01")).unwrap()
+    }
+
     fn trace(steps: Vec<PrequentialStep>) -> PrequentialTrace {
         PrequentialTrace {
             schema_version: 3, t0: 0, provenance: Provenance::PlugIn,
@@ -234,7 +264,7 @@ mod tests {
             step(14.0, -30.0, 3.0, &[("cases", 0.0, -30.0)]),
             step(21.0, -6.0, 90.0, &[("cases", 2.0, -6.0)]),
         ]);
-        let s = surprise_table(&t);
+        let s = surprise_table(&t, &undated());
         let lines: Vec<&str> = s.lines().collect();
         assert_eq!(lines[0],
             "  worst-scored observations (3 of 3 scored; together 100.0% of elpd -40.0):");
@@ -255,7 +285,7 @@ mod tests {
             .collect();
         steps[3].log_score = f64::NEG_INFINITY;
         let t = trace(steps);
-        let s = surprise_table(&t);
+        let s = surprise_table(&t, &undated());
         let lines: Vec<&str> = s.lines().collect();
         assert_eq!(lines.len(), 2 + SURPRISE_ROWS, "header, columns, five rows:\n{s}");
         assert!(lines[0].starts_with("  worst-scored observations (5 of 8 scored; together — of elpd -inf)"),
@@ -277,7 +307,7 @@ mod tests {
         big.per_stream[0].interval = PredInterval { q05: 261.0, q25: 0.0, q50: 0.0, q75: 0.0, q95: 843.85 };
         let mut small = step(2.0, -2.0, 100.0, &[("prop", 0.05, -2.0)]);
         small.per_stream[0].interval = PredInterval { q05: 0.0234, q25: 0.0, q50: 0.0, q75: 0.0, q95: 9.996 };
-        let s = surprise_table(&trace(vec![big, small]));
+        let s = surprise_table(&trace(vec![big, small]), &undated());
         let lines: Vec<&str> = s.lines().collect();
         assert!(lines[2].contains("[261, 844]"), "{}", lines[2]);
         assert!(lines[3].contains("[0.02, 10]"), "{}", lines[3]);
@@ -287,7 +317,7 @@ mod tests {
     /// PIT to show: its row names the joint score and nothing else.
     #[test]
     fn a_step_without_a_stream_breakdown_shows_no_stream_figures() {
-        let s = surprise_table(&trace(vec![step(7.0, -4.0, 100.0, &[])]));
+        let s = surprise_table(&trace(vec![step(7.0, -4.0, 100.0, &[])]), &undated());
         let row = s.lines().nth(2).unwrap();
         assert!(row.starts_with("           7 —"), "{row}");
         assert!(row.contains("-4.0") && !row.contains("0.50"), "{row}");
@@ -295,7 +325,7 @@ mod tests {
 
     #[test]
     fn an_empty_trace_prints_nothing() {
-        assert_eq!(surprise_table(&trace(vec![])), "");
+        assert_eq!(surprise_table(&trace(vec![]), &undated()), "");
     }
 
     #[test]
@@ -316,7 +346,7 @@ mod tests {
             step(7.0, -4.0, 100.0, &[("cases", 3.0, -2.5), ("deaths", 1.0, -1.0)]),
             step(14.0, -3.0, 80.0, &[("cases", 2.0, -3.0)]),
         ]);
-        write_prequential_outputs(&stem.to_string_lossy(), &t).unwrap();
+        write_prequential_outputs(&stem.to_string_lossy(), &t, &undated()).unwrap();
         let joint = std::fs::read_to_string(dir.path().join("preq.tsv")).unwrap();
         assert_eq!(joint, "t\tlog_score\tess\n7\t-4.000000\t100.00\n14\t-3.000000\t80.00\n");
         let streams = std::fs::read_to_string(dir.path().join("preq.streams.tsv")).unwrap();
@@ -329,5 +359,42 @@ mod tests {
         let back: PrequentialTrace = serde_json::from_str(
             &std::fs::read_to_string(dir.path().join("preq.json")).unwrap()).unwrap();
         assert_eq!(back.n_scored(), 2);
+    }
+
+    /// M3: on a model with an origin, each row of both TSVs carries the date
+    /// beside the model time, as the loader would read it back.
+    #[test]
+    fn a_dated_trace_writes_the_date_beside_each_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let stem = dir.path().join("preq");
+        let t = trace(vec![
+            step(7.0, -4.0, 100.0, &[("cases", 3.0, -2.5)]),
+            step(7.5, -3.0, 80.0, &[("cases", 2.0, -3.0)]),
+        ]);
+        write_prequential_outputs(&stem.to_string_lossy(), &t, &dated()).unwrap();
+        let joint = std::fs::read_to_string(dir.path().join("preq.tsv")).unwrap();
+        assert_eq!(joint,
+            "t	date	log_score	ess
+7	2020-03-08	-4.000000	100.00
+7.5	2020-03-08+0.5d	-3.000000	80.00
+");
+        let streams = std::fs::read_to_string(dir.path().join("preq.streams.tsv")).unwrap();
+        let lines: Vec<&str> = streams.lines().collect();
+        assert!(lines[0].starts_with("t	date	stream	"), "{}", lines[0]);
+        assert!(lines[1].starts_with("7	2020-03-08	cases	"), "{}", lines[1]);
+    }
+
+    /// M3: the worst-scored table names each step's date beside its time.
+    #[test]
+    fn a_dated_surprise_table_shows_the_date() {
+        let t = trace(vec![
+            step(7.0, -4.0, 100.0, &[("cases", 3.0, -4.0)]),
+            step(14.0, -30.0, 3.0, &[("cases", 0.0, -30.0)]),
+        ]);
+        let s = surprise_table(&t, &dated());
+        let lines: Vec<&str> = s.lines().collect();
+        assert!(lines[1].contains(" date "), "a date column: {}", lines[1]);
+        assert!(lines[2].contains("14 2020-03-15"), "{}", lines[2]);
+        assert!(lines[3].contains("7 2020-03-08"), "{}", lines[3]);
     }
 }
