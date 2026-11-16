@@ -13538,6 +13538,80 @@ let test_reactive_negative_window_rejected () =
        \  action = transfer(fraction = cov, from = S, to = V)\n\
        }")
 
+(* gh#1101: a trigger's `window` is a fixed span and `after`/`cooldown` are
+   offsets from a firing instant, all folded to one number at compile time.
+   Under an origin a calendar duration there would silently mean the average
+   month or year (30.436875 / 365.2425 days), so each is refused with E321;
+   without an origin it stays an average length, as for every other
+   anchored-only calendar rule. *)
+let reactive_anchored_with ?(origin = {|origin = date("2024-01-01")|})
+    ?(lets = "") body =
+  let src = reactive_model_with body in
+  (* Insert the origin and any `let`s right after the `time_unit` line. *)
+  let marker = "time_unit = 'days\n" in
+  let i = String.length marker in
+  assert (String.sub src 1 i = marker);
+  String.sub src 0 (1 + i) ^ origin ^ "\n" ^ lets ^ "\n"
+  ^ String.sub src (1 + i) (String.length src - 1 - i)
+
+let test_gh1101_calendar_trigger_durations_rejected () =
+  List.iter (fun (lets, body, contains) ->
+    expect_error_code ~code:"E321" ~contains
+      (reactive_anchored_with ~lets body))
+    [ "",
+      "sia : when sum_observed(weekly, window = 1 'months) >= thr {\n\
+       \  action = transfer(fraction = cov, from = S, to = V)\n\
+       }",
+      "as `window`";
+      "",
+      "sia : when sum_observed(weekly, window = 1 'years) >= thr {\n\
+       \  action = transfer(fraction = cov, from = S, to = V)\n\
+       }",
+      "as `window`";
+      (* A window inside a compound predicate is still found. *)
+      "",
+      "sia : when observed(weekly) >= thr and \
+       sum_observed(weekly, window = 2 'months) >= thr {\n\
+       \  action = transfer(fraction = cov, from = S, to = V)\n\
+       }",
+      "as `window`";
+      "",
+      "sia : when observed(weekly) >= thr {\n\
+       \  after = 1 'months\n\
+       \  action = transfer(fraction = cov, from = S, to = V)\n\
+       }",
+      "as `after`";
+      "",
+      "sia : when observed(weekly) >= thr {\n\
+       \  action = transfer(fraction = cov, from = S, to = V)\n\
+       \  once = false\n\
+       \  cooldown = 1 'months\n\
+       }",
+      "as `cooldown`";
+      (* Laundered through a `let`: the classifier follows the binding. *)
+      "let lag = 1 'months",
+      "sia : when observed(weekly) >= thr {\n\
+       \  after = lag\n\
+       \  action = transfer(fraction = cov, from = S, to = V)\n\
+       }",
+      "as `after`" ]
+
+let test_gh1101_fixed_trigger_durations_ok () =
+  let body ~window ~after ~cooldown = Printf.sprintf
+    "sia : when sum_observed(weekly, window = %s) >= thr {\n\
+     \  after = %s\n\
+     \  action = transfer(fraction = cov, from = S, to = V)\n\
+     \  once = false\n\
+     \  cooldown = %s\n\
+     }" window after cooldown in
+  (* Fixed spans under an origin compile. *)
+  let _ = compile_expect_ok (reactive_anchored_with
+    (body ~window:"28 'days" ~after:"3 'weeks" ~cooldown:"30 'days")) in
+  (* Without an origin a calendar duration is an average length. *)
+  let _ = compile_expect_ok (reactive_anchored_with ~origin:""
+    (body ~window:"1 'months" ~after:"1 'months" ~cooldown:"1 'months")) in
+  ()
+
 let test_reactive_rolling_method_unsupported () =
   (* `.rolling(...)` method syntax does not exist in the DSL — a bare syntax
      error (E001), i.e. unsupported, not a reactive-specific diagnostic. *)
@@ -15920,6 +15994,10 @@ let () =
         `Quick test_reactive_negative_after_rejected;
       Alcotest.test_case "E274 negative window is rejected"
         `Quick test_reactive_negative_window_rejected;
+      Alcotest.test_case "gh#1101 E321 calendar window/after/cooldown under an origin"
+        `Quick test_gh1101_calendar_trigger_durations_rejected;
+      Alcotest.test_case "gh#1101 fixed trigger durations, or unanchored, still compile"
+        `Quick test_gh1101_fixed_trigger_durations_ok;
       Alcotest.test_case "E273 non-comparison when is rejected"
         `Quick test_reactive_non_comparison_when_rejected;
       Alcotest.test_case "E001 .rolling() method syntax is unsupported"

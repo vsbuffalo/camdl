@@ -317,7 +317,7 @@ The compiler issues E-codes with source locations and fix-hints.
 | E316 | dim      | a prior argument's or a bound's unit literal disagrees with its dimension                                        |
 | E317 | dim      | quantity threshold not its series' dimension, or `value_at` time not T                                           |
 | E320 | time     | `time_unit = 'months/'years` with `origin` declared                                                              |
-| E321 | time     | `Instant ± Calendar`-duration (`date(...) + 6 'months`); a calendar `covers` width under an origin               |
+| E321 | time     | `Instant ± Calendar`-duration; under an origin, a calendar `covers` width or trigger `window`/`after`/`cooldown` |
 | E322 | time     | calendar cadence in anchored recurring schedule (`every = 1 'months`)                                            |
 | E323 | time     | bare-numeric `on=[...]` in anchored periodic forcing                                                             |
 | E360 | time     | instant arithmetic with no meaning: `date(a) + date(b)`, `2 * date(a)`, `7 'days - date(a)`, `date(a) + 5`       |
