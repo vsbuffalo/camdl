@@ -20,6 +20,8 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::schedule::output_tol;
+
 /// What bounds the range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RangeKind {
@@ -117,17 +119,6 @@ impl std::fmt::Display for OutsideRange {
 /// range: both comparisons are false).
 const UNSET: u64 = u64::MAX;
 
-/// Relative tolerance on a range end, in units of `max(|end|, 1)`: a time
-/// within it of the end is the end, not past it. It absorbs the rounding of a
-/// time built by a few additions of `dt` (the scale of
-/// [`crate::schedule::output_tol`]); the held value at such a time equals the
-/// value at the end, so nothing is recorded for it.
-pub const RANGE_END_TOL: f64 = 1e-12;
-
-fn end_tol(end: f64) -> f64 {
-    RANGE_END_TOL * end.abs().max(1.0)
-}
-
 /// The range a compiled forcing is defined on, with one set-once slot per
 /// side. Shared (through `Arc`) by every clone of the compiled model, so a run
 /// over many threads records each side once.
@@ -156,12 +147,15 @@ impl DefinedRange {
     }
 
     /// Note an evaluation at `t` (the forcing's argument): if `t` is outside
-    /// the range, record the first such time on that side.
+    /// the range, record the first such time on that side. A time within
+    /// [`output_tol`] of an end is the end, not past it: it absorbs the
+    /// rounding of a time built by additions of `dt`, and the held value at
+    /// such a time equals the value at the end.
     #[inline]
     pub fn note(&self, t: f64) {
-        if t < self.lo - end_tol(self.lo) {
+        if t < self.lo - output_tol(self.lo) {
             self.first_outside(Side::Before, t);
-        } else if t > self.hi + end_tol(self.hi) {
+        } else if t > self.hi + output_tol(self.hi) {
             self.first_outside(Side::After, t);
         }
     }
