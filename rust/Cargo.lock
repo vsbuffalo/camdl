@@ -1188,6 +1188,7 @@ dependencies = [
  "declared",
  "differentiate-derive",
  "indexmap",
+ "proptest",
  "serde",
  "serde_json",
  "thiserror",

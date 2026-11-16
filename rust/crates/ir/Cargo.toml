@@ -17,3 +17,4 @@ declared = { path = "../declared" }
 
 [dev-dependencies]
 boon = "0.6.1"
+proptest = "1"
