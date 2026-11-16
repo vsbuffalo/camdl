@@ -1689,18 +1689,23 @@ The knots take one of two forms, and exactly one must be given:
 
 The basis is **clamped**: the window ends are repeated knots, so the curve
 starts exactly at its first coefficient at a and ends exactly at its last at b.
-**Outside the window the forcing holds**: for t before a it is its value at a,
-after b its value at b, so a run past the window carries the curve's last value
-rather than an extrapolated trend. When a run's horizon passes the window end,
-every command that runs the model says so once, with the info notice
-`spline-held-past-window`:
+**The forcing is defined on its window.** A run that evaluates it outside the
+window is an error, naming the forcing, the window and the first time outside
+it, unless the run is given `--allow-forcing-extrapolation` (in a fit config,
+`[config] allow_forcing_extrapolation = true`). Under that override the forcing
+holds: for t before a it is its value at a, after b its value at b, so a run
+past the window carries the curve's last value rather than an extrapolated
+trend, and the run says so once per forcing with the warning
+`forcing-outside-range`:
 
 ```
-info: forcing `beta_t` is held at its value at t = 120 from t = 120 to the horizon t = 160
+warning: forcing `beta_t` is defined on t = 0 to t = 120 (its window); the run evaluated it after the end of its window, first at t = 121, and its value at t = 120 is held from t = 120 to the end of the run
 ```
 
-(with calendar dates under an `origin`, and the anchor when the end is one).
-With `lag = ℓ` the forcing is evaluated at t − ℓ, so the hold starts at b + ℓ.
+With `lag = ℓ` the forcing is evaluated at t − ℓ, so the hold starts at b + ℓ;
+the times in the message are those of the argument t − ℓ. The check reads the
+times the run evaluated, so a forcing read only under a condition that is false
+past the window is never refused.
 
 **Window ends and breakpoints are times**, read like `piecewise` breakpoints: a
 duration literal, a `date(...)` under an `origin`, or an observation anchor.
@@ -1968,6 +1973,14 @@ time via `origin` + `time_unit` at expand time, the same rule observation-data
 time columns and `instant`/`duration` table cells follow (see
 [`docs/dates.md`](dates.md)). A date-valued `time_col` in an unanchored model
 (no `origin`) is a hard error (E209), never a silent fall-through to zero.
+
+An `interpolated` forcing is defined from its first data point to its last,
+whatever its `method`. A run that evaluates it outside that range is an error
+naming the forcing, its range and the first time outside it, unless the run is
+given `--allow-forcing-extrapolation` (in a fit config,
+`[config] allow_forcing_extrapolation = true`), under which it holds its first
+or last value there with one warning, as a `bspline` does outside its window.
+`piecewise` and the periodic kinds are defined for all time.
 
 Unit-literal choices for forcings in practice:
 

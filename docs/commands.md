@@ -370,6 +370,18 @@ in §7 of `camdl docs model-comparison`.
 
 ## The boundaries, stated plainly
 
+- **A forcing is not extended past its range silently.** A run that evaluates an
+  `interpolated` forcing before its first or after its last data point, or a
+  `bspline` outside its window, is refused by every command that runs a model
+  (`simulate`, `fit run`, `fit predict`, `pfilter`, `profile`, `survey`,
+  `compare` when it derives a prequential, `dev eval`). The error names the
+  forcing, its range and the first time outside it.
+  `--allow-forcing-extrapolation` on any of them (in a fit config,
+  `[config] allow_forcing_extrapolation = true`) holds the forcing's end value
+  instead, prints one warning per forcing naming its range and the span held,
+  and records the override in each `run.json` the command writes. A stored run
+  that held a forcing is not served to a run without the override.
+
 - **`simulate` goes forward; `fit` goes backward.** Simulation maps parameters →
   data; fitting maps data → parameters. A sweep is many forward runs, never an
   inference.
