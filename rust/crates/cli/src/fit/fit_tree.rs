@@ -153,7 +153,7 @@ mod tests {
         std::fs::create_dir_all(seg).unwrap();
         std::fs::write(
             seg.join("fit.meta.json"),
-            r#"{"source_model":"sir.camdl","model_identity":"f00d","schema_version":2,"source_config":"fit.toml"}"#,
+            r#"{"source_model":"sir.camdl","model_identity":"f00d","schema_version":3,"calendar":{"days_per_unit":1.0,"origin":null,"time_unit":"days"},"source_config":"fit.toml"}"#,
         )
         .unwrap();
     }
@@ -165,7 +165,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let run_id = format!("{:0<64}", format!("ae{ord:06x}"));
         let rec = format!(
-            r#"{{"format_version":1,"kind":"fit_method","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"fit","hash":"deadbeef00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"method","label":"{name}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_{seed}","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"{method}","backend":"chain_binomial","seed":{seed},"n_chains":2,"best_loglik":-100.0,"best_chain":1}},"provenance":{{"created_at":"2026-04-27T00:00:00Z","argv":["camdl","fit","run"]}}}}"#
+            r#"{{"format_version":1,"kind":"fit_method","run_id":"{run_id}","hash_version":1,"calendar":{{"days_per_unit":1.0,"origin":null,"time_unit":"days"}},"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"fit","hash":"deadbeef00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"method","label":"{name}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_{seed}","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"{method}","backend":"chain_binomial","seed":{seed},"n_chains":2,"best_loglik":-100.0,"best_chain":1}},"provenance":{{"created_at":"2026-04-27T00:00:00Z","argv":["camdl","fit","run"]}}}}"#
         );
         std::fs::write(dir.join("run.json"), rec).unwrap();
     }
@@ -180,12 +180,12 @@ mod tests {
         let fit_hash = format!("{fit_h8}{}", "0".repeat(64 - fit_h8.len()));
         let run_id = format!("{:0<64}", format!("{fit_h8}01"));
         let rec = format!(
-            r#"{{"format_version":1,"kind":"fit_method","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"fit","hash":"{fit_hash}","schema_version":1}},{{"name":"method","label":"if2","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"if2","backend":"chain_binomial","seed":1,"n_chains":2}},"provenance":{{"created_at":"2026-04-27T00:00:00Z","argv":["camdl","fit","run"]}}}}"#
+            r#"{{"format_version":1,"kind":"fit_method","run_id":"{run_id}","hash_version":1,"calendar":{{"days_per_unit":1.0,"origin":null,"time_unit":"days"}},"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"fit","hash":"{fit_hash}","schema_version":1}},{{"name":"method","label":"if2","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"if2","backend":"chain_binomial","seed":1,"n_chains":2}},"provenance":{{"created_at":"2026-04-27T00:00:00Z","argv":["camdl","fit","run"]}}}}"#
         );
         std::fs::write(leaf.join("run.json"), rec).unwrap();
         std::fs::write(
             seg.join("fit.meta.json"),
-            r#"{"model_identity":"f00d","source_model":"sir.camdl","schema_version":2,"source_config":"fit.toml"}"#,
+            r#"{"model_identity":"f00d","source_model":"sir.camdl","schema_version":3,"calendar":{"days_per_unit":1.0,"origin":null,"time_unit":"days"},"source_config":"fit.toml"}"#,
         )
         .unwrap();
     }

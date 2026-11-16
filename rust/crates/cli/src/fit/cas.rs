@@ -1190,7 +1190,7 @@ mod tests {
         std::fs::write(
             b.path().join("run.json"),
             format!(
-                r#"{{"format_version":1,"kind":"fit_method","run_id":"{leaf_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[],"status":"completed","artifacts":{{}},"inputs":null,"provenance":{{}}}}"#
+                r#"{{"format_version":1,"kind":"fit_method","run_id":"{leaf_id}","hash_version":1,"calendar":{{"days_per_unit":1.0,"origin":null,"time_unit":"days"}},"ir_version":"0.7","engine_version":"0.1.0+test","levels":[],"status":"completed","artifacts":{{}},"inputs":null,"provenance":{{}}}}"#
             ),
         )
         .unwrap();
@@ -1248,7 +1248,7 @@ mod tests {
         std::fs::write(dir.join("draws.tsv"), "chain\tdraw\tbeta\n0\t0\t0.4\n").unwrap();
         let leaf_id = "cd".repeat(32);
         std::fs::write(dir.join("run.json"), format!(
-            r#"{{"format_version":1,"kind":"fit_method","run_id":"{leaf_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[],"status":"completed","artifacts":{{}},"inputs":null,"provenance":{{}}}}"#
+            r#"{{"format_version":1,"kind":"fit_method","run_id":"{leaf_id}","hash_version":1,"calendar":{{"days_per_unit":1.0,"origin":null,"time_unit":"days"}},"ir_version":"0.7","engine_version":"0.1.0+test","levels":[],"status":"completed","artifacts":{{}},"inputs":null,"provenance":{{}}}}"#
         )).unwrap();
         let dep = cas_leaf_file_dep(dir, "draws.tsv").unwrap().unwrap();
         assert_eq!(dep.run_id.to_hex(), leaf_id);

@@ -423,8 +423,10 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     // end (a crash leaves no finalized landscape.tsv). The running record
     // carries Null inputs (the landscape summary is a post-run result); the
     // final inputs are supplied to `finalize`.
+    let calendar = ir::caltime::CalendarAxis::from_model(&resolved.compiled.model)
+        .unwrap_or_else(|e| crate::out::detached().fail(format!("error: {e}")));
     let meta = crate::resolve::RecordMeta::new(
-        &ir_version_str, &model_path_str, label_arg.clone());
+        &ir_version_str, &model_path_str, label_arg.clone(), calendar);
     let write = match crate::resolve::begin_resolved_write(
         &store, &output_root, &resolved_artifact, &meta,
         crate::resolve::WriteMode::Streaming,

@@ -980,7 +980,13 @@ cooling = 0.7
         std::fs::write(seg.join("fit.meta.json"),
             r#"{"model_path":"sir.camdl","fit_toml_path":"fits/a.toml"}"#).unwrap();
         let err = resolve_fit(&seg.to_string_lossy()).err().expect("an old record").to_string();
-        assert!(err.contains("schema version 1") && err.contains("reads version 2"), "{err}");
+        assert!(err.contains("schema version 1") && err.contains("reads version 3"), "{err}");
+        // A version-2 record could omit the calendar axis; it is refused by
+        // name too, not read with the axis missing (D59).
+        std::fs::write(seg.join("fit.meta.json"),
+            r#"{"schema_version":2,"source_model":"sir.camdl","source_config":"fit.toml"}"#).unwrap();
+        let err = resolve_fit(&seg.to_string_lossy()).err().expect("a v2 record").to_string();
+        assert!(err.contains("schema version 2") && err.contains("reads version 3"), "{err}");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1020,7 +1026,7 @@ cooling = 0.7
         };
         let rec = serde_json::json!({
             "format_version": 1, "kind": "fit_method", "run_id": "ab".repeat(32),
-            "hash_version": 1, "ir_version": "0.7", "engine_version": crate::version::VERSION_SHORT,
+            "hash_version": 1, "calendar": {"days_per_unit": 1.0, "origin": null, "time_unit": "days"}, "ir_version": "0.7", "engine_version": crate::version::VERSION_SHORT,
             "levels": [], "status": "completed", "artifacts": {}, "inputs": inputs,
         });
         std::fs::write(leaf.join("run.json"), rec.to_string()).unwrap();
@@ -1209,7 +1215,7 @@ cooling    = 0.70
     fn leaf_with(method: char, seed: char, dir: &str) -> crate::cas_read::Leaf {
         let h = |c: char| c.to_string().repeat(64);
         let record: runid::RunRecord = serde_json::from_str(&format!(
-            r#"{{"format_version":1,"kind":"fit_method","run_id":"{run}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"demo","hash":"{fit}","schema_version":1}},{{"name":"method","label":"if2","hash":"{m}","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"{s}","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"if2","n_chains":2}},"provenance":{{}}}}"#,
+            r#"{{"format_version":1,"kind":"fit_method","run_id":"{run}","hash_version":1,"calendar":{{"days_per_unit":1.0,"origin":null,"time_unit":"days"}},"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"demo","hash":"{fit}","schema_version":1}},{{"name":"method","label":"if2","hash":"{m}","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"{s}","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"if2","n_chains":2}},"provenance":{{}}}}"#,
             run = format!("{method}{seed}").repeat(32),
             fit = h('0'),
             m = h(method),
@@ -1259,7 +1265,7 @@ cooling    = 0.70
             &seg, Path::new("nonexistent.toml"), Path::new(""), &crate::run_meta::FitSidecar::default()).unwrap();
         let rec = serde_json::json!({
             "format_version": 1, "kind": "fit_method", "run_id": format!("abcd9{}", "0".repeat(59)),
-            "hash_version": 1, "ir_version": "0.7", "engine_version": "0.1.0+test",
+            "hash_version": 1, "calendar": {"days_per_unit": 1.0, "origin": null, "time_unit": "days"}, "ir_version": "0.7", "engine_version": "0.1.0+test",
             "levels": [
                 {"name": "fit", "label": "demo", "hash": format!("abcd0{}", "0".repeat(59)), "schema_version": 1},
                 {"name": "method", "label": "if2", "hash": "1".repeat(64), "schema_version": 1},

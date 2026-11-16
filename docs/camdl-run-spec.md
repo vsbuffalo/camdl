@@ -540,8 +540,8 @@ else 1.0) and `integrator` (the ODE integrator the model declares,
 with), which a replay of the fit's parameters runs on by default (§3.4; a
 sidecar written before these were recorded lacks them, and a replay recovers
 them from the archived config and model), `calendar` (the model's calendar axis,
-§2.2.2's block, so the fit's model times can be dated without the model; absent
-from a sidecar written before it was recorded), `schema` (the
+§2.2.2's block, so the fit's model times can be dated without the model;
+required, and a profile's sidecar carries it too), `schema` (the
 observation/dimension schema below), and `docs` (the model's `#'` documentation
 dictionary, keyed by declaration name, so a consumer can label any output
 column).
@@ -873,10 +873,10 @@ the chains it drops: on a six-chain fit `--chains 0,1,2,4` and
 names every chain of the fit selects nothing and is refused.
 
 **Calendar semantics travel with the artifact.** `predictive.json`,
-`observed.json`, `quantities.json`, the per-chain `trajectories.json`, a
-simulation leaf's `run.json` (§9.5) and `fit.meta.json` each carry a top-level
-`calendar` block, written through one type (`ir::caltime::CalendarAxis`) so
-every artifact agrees:
+`observed.json`, `quantities.json`, the per-chain `trajectories.json`, every
+leaf's `run.json` (§9.5) and `fit.meta.json` each carry a top-level `calendar`
+block, written through one type (`ir::caltime::CalendarAxis`) so every artifact
+agrees:
 
 ```jsonc
 "calendar": { "time_unit": "days", "origin": "1910-01-01", "days_per_unit": 1.0 }
@@ -5130,9 +5130,10 @@ A real `sims/` leaf record (hashes and paths abbreviated):
 }
 ```
 
-A `sims/` leaf always carries `calendar`, the model's calendar axis (§2.2.2):
-with it, the `t` column of `traj.tsv` maps to dates without the model source,
-and a model with no `origin` records `"origin": null`. Other kinds omit it.
+Every leaf carries `calendar`, the model's calendar axis (§2.2.2): with it, the
+`t` column of a `sims/` leaf's `traj.tsv`, and every model time another kind
+stores, maps to dates without the model source, and a model with no `origin`
+records `"origin": null`. The record cannot be built without it.
 
 A `fits/` method leaf adds `deps` (when its `starts` consumed a source), nests
 artifact keys (`chain_0/trace.tsv`), keys per-chain schema entries under a `{n}`

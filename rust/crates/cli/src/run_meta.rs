@@ -678,7 +678,9 @@ impl TrainingPartitionRecord {
 /// folder that holds the sidecar, replacing v1's `fit_toml_path`, which was
 /// relative to whatever directory `fit run` was started from and so resolved
 /// wrongly from anywhere else (gh#1009).
-pub const FIT_META_SCHEMA_VERSION: u32 = 2;
+///
+/// v3: `calendar` is required (D59); a v2 record could omit it.
+pub const FIT_META_SCHEMA_VERSION: u32 = 3;
 
 /// The fit-level provenance sidecar (`fits/{stem}-{h8}/fit.meta.json`). A CAS
 /// fit's fit level is a path segment with no `RunRecord`; this sidecar is the
@@ -695,11 +697,12 @@ pub const FIT_META_SCHEMA_VERSION: u32 = 2;
 /// `fit table`, the config a run handle recovers, and — canonicalised at lookup
 /// time — what a `fit.toml` handle is matched against (gh#653).
 ///
-/// Every field except `resolved_priors`-class provenance defaults, so partial
-/// sidecars (test fixtures) round-trip; [`crate::fit::fit_view::FitView`]
+/// Every field except `calendar` and `resolved_priors`-class provenance
+/// defaults, so partial sidecars round-trip; [`crate::fit::fit_view::FitView`]
 /// enforces that a Bayesian fit's `resolved_priors` is present (no silent
-/// default).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// default). `calendar` is required: no sidecar is written without the
+/// model's axis, so there is no production `Default`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FitSidecar {
     /// [`FIT_META_SCHEMA_VERSION`], stamped by [`write_fit_sidecar`] whatever
     /// the caller set; [`read_fit_sidecar`] refuses any other.
@@ -818,10 +821,9 @@ pub struct FitSidecar {
     /// The model's calendar axis (`docs/dev/temporal-architecture.md` §5.3):
     /// its time unit and the date of `t = 0`, so the fit's model times — the
     /// estimates' instants, the training window — can be dated without the
-    /// model source. `origin` is null for a model that has none. `None` in a
-    /// sidecar written without a model in hand or before it was recorded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub calendar: Option<ir::caltime::CalendarAxis>,
+    /// model source. `origin` is null for a model that has none. Required
+    /// (D59).
+    pub calendar: ir::caltime::CalendarAxis,
     /// The model's `#'` documentation dictionary ([`ir::ModelDocs`]): the
     /// model's own header block (`docs.model`, gh#750) plus params /
     /// compartments / transitions / observations / dimensions / quantities →
@@ -833,6 +835,35 @@ pub struct FitSidecar {
     /// the model documents nothing.
     #[serde(default, skip_serializing_if = "ir::ModelDocs::is_empty")]
     pub docs: ir::ModelDocs,
+}
+
+/// Test fixtures build partial sidecars; the axis they carry is a numeric
+/// day axis, which no production path can reach through this impl.
+#[cfg(test)]
+impl Default for FitSidecar {
+    fn default() -> Self {
+        FitSidecar {
+            schema_version: 0,
+            label: None,
+            source_model: None,
+            model_identity: String::new(),
+            source_config: None,
+            fit_toml_hash: String::new(),
+            data_hashes: BTreeMap::new(),
+            holdout_hashes: BTreeMap::new(),
+            estimated: Vec::new(),
+            fixed: BTreeMap::new(),
+            partition: None,
+            resolved_priors: Vec::new(),
+            parameters_provenance: BTreeMap::new(),
+            schema: None,
+            training_partition: None,
+            dt: None,
+            integrator: None,
+            calendar: ir::caltime::CalendarAxis::parse("days", None).expect("a known unit"),
+            docs: ir::ModelDocs::default(),
+        }
+    }
 }
 
 /// The producing config's archived copy inside a fit folder.
@@ -991,9 +1022,10 @@ pub fn read_fit_sidecar(fit_segment: &std::path::Path) -> Result<Option<FitSidec
     if version != u64::from(FIT_META_SCHEMA_VERSION) {
         return Err(format!(
             "{} is fit.meta.json schema version {version}; this camdl reads version \
-             {FIT_META_SCHEMA_VERSION} only (version 2 records the source config relative to \
-             the fit folder, where version 1 recorded it relative to the directory the fit \
-             was run from). Re-run the fit with this camdl.",
+             {FIT_META_SCHEMA_VERSION} only (version 3 always records the model's calendar \
+             axis; version 2 records the source config relative to the fit folder, where \
+             version 1 recorded it relative to the directory the fit was run from). Re-run \
+             the fit with this camdl.",
             path.display()));
     }
     serde_json::from_value(value).map(Some).map_err(|e| format!("{}: {e}", path.display()))
@@ -1446,7 +1478,7 @@ mod tests {
         // sidecar to carry resolved_priors.
         std::fs::write(
             leaf.join("run.json"),
-            r#"{"format_version":1,"kind":"fit_method","run_id":"abc1234500000000000000000000000000000000000000000000000000000000","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{"name":"fit","label":"demo","hash":"abc123450000000000000000000000000000000000000000000000000000000a","schema_version":1},{"name":"method","label":"pgas","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1},{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}],"status":"completed","artifacts":{},"inputs":{"method":"pgas","backend":"chain_binomial","seed":1,"n_chains":2},"provenance":{"created_at":"2026-04-19T12:00:00Z","argv":["camdl","fit","run"]}}"#,
+            r#"{"format_version":1,"kind":"fit_method","run_id":"abc1234500000000000000000000000000000000000000000000000000000000","hash_version":1,"calendar":{"days_per_unit":1.0,"origin":null,"time_unit":"days"},"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{"name":"fit","label":"demo","hash":"abc123450000000000000000000000000000000000000000000000000000000a","schema_version":1},{"name":"method","label":"pgas","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1},{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}],"status":"completed","artifacts":{},"inputs":{"method":"pgas","backend":"chain_binomial","seed":1,"n_chains":2},"provenance":{"created_at":"2026-04-19T12:00:00Z","argv":["camdl","fit","run"]}}"#,
         )
         .unwrap();
 

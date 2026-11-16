@@ -1826,8 +1826,15 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             profile_roles.as_ref().map(|p| p.record(&resolved)).map_err(String::clone),
             || (resolved_priors_kv.iter().map(|(n, _)| n.clone()).collect(), Default::default()),
         );
+        let calendar = ir::caltime::CalendarAxis::from_model(&model)
+            .unwrap_or_else(|e| out.fail(format!("error: {e}")));
         let sidecar = crate::run_meta::FitSidecar {
+            // Stamped by `write_fit_sidecar`.
+            schema_version: crate::run_meta::FIT_META_SCHEMA_VERSION,
             label: label_arg.clone(),
+            // Recorded by `write_fit_sidecar`, relative to the segment.
+            source_model: None,
+            source_config: None,
             model_identity: model_identity.clone(),
             fit_toml_hash: fit_toml_hash.clone().unwrap_or_default(),
             data_hashes: data_hashes.iter().cloned().collect(),
@@ -1841,10 +1848,13 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                         .find(|o| &o.param == n).map(|o| o.model.clone()) })
                 .collect(),
             parameters_provenance: parameters_provenance.clone(),
-            training_partition: Some(training_partition.record(
-                &ir::caltime::CalendarAxis::from_model(&model)
-                    .unwrap_or_else(|e| out.fail(format!("error: {e}"))))),
-            ..Default::default()
+            training_partition: Some(training_partition.record(&calendar)),
+            holdout_hashes: Default::default(),
+            schema: None,
+            dt: None,
+            integrator: None,
+            calendar,
+            docs: Default::default(),
         };
         // Archive the producing `fit.toml` (best-effort; `write_fit_sidecar`
         // skips when the path isn't a file, i.e. a CLI-only profile).
@@ -2192,7 +2202,9 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             run_id: resolved_pt_id.run_id,
             display_inputs: serde_json::Value::Null,
         };
-        let meta = crate::resolve::RecordMeta::new(&ir_version_str, &ir_path, None)
+        let calendar = ir::caltime::CalendarAxis::from_model(&model)
+            .unwrap_or_else(|e| out.fail(format!("error: {e}")));
+        let meta = crate::resolve::RecordMeta::new(&ir_version_str, &ir_path, None, calendar)
             .with_deps(profile_deps.clone());
         let write = match crate::resolve::begin_resolved_write(
             &store, &root, &resolved_artifact, &meta,

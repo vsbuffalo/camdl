@@ -611,10 +611,9 @@ impl crate::engine::RunSink for CasSink {
         let calendar = ir::caltime::CalendarAxis::from_model(&self.base_model)
             .map_err(|e| e.to_string())?;
         let mut meta = crate::resolve::RecordMeta::new(
-            ir::IR_VERSION.trim(), self.model_path.clone(), self.label.clone())
+            ir::IR_VERSION.trim(), self.model_path.clone(), self.label.clone(), calendar)
             .with_deps(self.fit_dep.clone())
-            .with_children(children.clone())
-            .with_calendar(calendar);
+            .with_children(children.clone());
 
         let mut artifacts = runid::Artifacts::new();
         artifacts.insert("traj.tsv", traj_bytes);
@@ -1203,7 +1202,7 @@ mod tests {
         std::fs::create_dir_all(&leaf).unwrap();
         let mut rec = serde_json::json!({
             "format_version": 1, "kind": "fit_method", "run_id": "ab".repeat(32),
-            "hash_version": 1, "ir_version": "0.7", "engine_version": "0.1.0+test",
+            "hash_version": 1, "calendar": {"days_per_unit": 1.0, "origin": null, "time_unit": "days"}, "ir_version": "0.7", "engine_version": "0.1.0+test",
             "levels": [], "status": "completed", "artifacts": {}, "inputs": {"method": "if2"},
             "provenance": {},
         });
