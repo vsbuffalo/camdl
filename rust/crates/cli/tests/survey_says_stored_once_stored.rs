@@ -23,6 +23,31 @@ fn line_of(stderr: &str, needle: &str) -> usize {
         .unwrap_or_else(|| panic!("no line containing {needle:?}:\n{stderr}"))
 }
 
+/// The line index of the first plain progress line of the survey bar:
+/// `survey <pos>/8`, optionally followed by the best-loglik metric.
+fn progress_line_of(stderr: &str) -> Option<usize> {
+    stderr.lines().position(|l| {
+        l.strip_prefix("survey ")
+            .and_then(|rest| rest.split_whitespace().next())
+            .is_some_and(|count| {
+                count.strip_suffix("/8").is_some_and(|n| n.parse::<u32>().is_ok())
+            })
+    })
+}
+
+/// A plain progress line carries the best loglik so far when a worker has
+/// set one before the line is rendered, so the count is not always the last
+/// token. The closing `8/8` line is always printed, and always carries it
+/// here: that is the stderr this test must still recognise.
+#[test]
+fn a_progress_line_is_recognised_with_or_without_its_metric() {
+    let with_metric = "survey 1/8  best ll=-286.8\nsurvey 8/8  best ll=-286.8\nstored x\n";
+    assert_eq!(progress_line_of(with_metric), Some(0));
+    let bare_first = "survey 1/8\nsurvey 8/8  best ll=-286.8\n";
+    assert_eq!(progress_line_of(bare_first), Some(0));
+    assert_eq!(progress_line_of("survey: wrote results/x/8\n"), None);
+}
+
 #[test]
 fn stored_follows_the_evaluation_and_the_landscape() {
     let bin = binary();
@@ -51,9 +76,7 @@ fn stored_follows_the_evaluation_and_the_landscape() {
     let stored = line_of(&stderr, "stored ");
     // The plain progress line is throttled, so which counts print varies;
     // any of them is a point being evaluated.
-    let progress = stderr
-        .lines()
-        .position(|l| l.starts_with("survey ") && l.ends_with("/8"))
+    let progress = progress_line_of(&stderr)
         .unwrap_or_else(|| panic!("no progress line:\n{stderr}"));
     let landscape = line_of(&stderr, "landscape.tsv (8 rows)");
     assert!(
