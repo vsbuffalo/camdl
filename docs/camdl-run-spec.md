@@ -2868,7 +2868,12 @@ data through the same function, and `survey --fit` keeps the rows a
 `[data.holdout]` files by the same rule (`check_holdout_files`); the training
 rows a cutoff leaves each stream enter the profile's base identity and the
 survey's `config` level, omitted without one. `pfilter` and `compare`'s holdout
-scoring see the full series.
+scoring see the full series. The one exception is `pfilter --save-final-state`
+under `holdout_after`: it is refused while a bound row with a value ends after
+the cutoff, since the saved state would be a forecast origin filtered through
+held-out rows (gh#1084). The cutoff is judged by the training rule below; an
+anchored cutoff resolves over the fit config's own files, so binding only the
+training rows with `--data` saves the state at their end.
 
 - `holdout_after` is a bare model time, a date (the instant that day begins), or
   an observation-anchored expression (`last_obs - 6 weeks`). Its anchors resolve
@@ -7231,7 +7236,9 @@ camdl fit predict [FIT]
 --trace FILE                per-observation diagnostics TSV ("-" for stdout)
 --pf-health FILE            per-obs ESS + Snyder τ², with the implied
                             particles-to-avoid-collapse estimate exp(τ²/2)
---save-final-state FILE     final particle states
+--save-final-state FILE     final particle states; refused under the --fit
+                            config's holdout_after while a bound row with a
+                            value ends after the cutoff (gh#1084)
 --save-paths FILE           smoothing-distribution trajectory samples
 --n-paths N                 how many, for --save-paths (default 1)
 --save-filtering FILE       per-step particle states and log-weights

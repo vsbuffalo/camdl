@@ -1764,8 +1764,8 @@ pub struct PfilterArgs {
     pub output: Option<PathBuf>,
 
     /// Write final particle states to this TSV. Refused under a `--fit`
-    /// config's `holdout_after` while a bound row ends after the cutoff
-    /// (gh#1084); bind the training rows alone with `--data`.
+    /// config's `holdout_after` while a bound row with a value ends after the
+    /// cutoff (gh#1084); bind the training rows alone with `--data`.
     #[arg(long)]
     pub save_final_state: Option<PathBuf>,
 
