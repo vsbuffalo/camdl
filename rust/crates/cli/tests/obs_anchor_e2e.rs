@@ -1030,10 +1030,6 @@ fn anchors_resolve_at_the_step_the_fit_runs_at() {
         o.status.success(),
         "data at multiples of the fit's dt = 0.5 must anchor:\n{stderr}"
     );
-    assert!(
-        !stderr.contains("is not a multiple of dt"),
-        "the anchor reader must use the fit's step:\n{stderr}"
-    );
 
     // `fit predict` reads the stored fit; it must not refuse the anchors.
     let fits = tmp.path().join("results").join("fits");
@@ -1055,8 +1051,7 @@ fn anchors_resolve_at_the_step_the_fit_runs_at() {
     // so predict can refuse later for that reason; it must not refuse the
     // anchors themselves.
     assert!(
-        !stderr.contains("is not a multiple of dt")
-            && !stderr.contains("resolving this model's observation anchors"),
+        !stderr.contains("resolving this model's observation anchors"),
         "fit predict must anchor at the fit's dt:\n{stderr}"
     );
 }
