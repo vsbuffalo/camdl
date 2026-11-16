@@ -12084,6 +12084,18 @@ let check_surface_time_typing ctx =
      walk_expr_rule1 ~loc:Diagnostics.no_loc
        ~context:(Printf.sprintf "balance '%s'" bd.bcomp) bd.bexpr
    | None -> ());
+  (* gh#1088: the trajectory grid is a recurring cadence like an
+     observation's `emit_schedule`, and lowers to one fixed step, so a
+     calendar `every` under an origin would drift off the month or year
+     boundaries. The `at = [...]` arm needs no walk here: its entries
+     must fold to constants, which already refuses
+     `date(...) + 1 'months` (E401). *)
+  (match ctx.output_decl with
+   | Some { out_trajectories = Some { otschedule = SchedEvery e; _ }; out_span } ->
+     let loc = diag_loc_of_ast_ctx ctx out_span in
+     walk_expr_rule1 ~loc ~context:"output trajectories.every" e;
+     check_recurring_cadence ~loc ~field:"every" e
+   | _ -> ());
 
   ()
 

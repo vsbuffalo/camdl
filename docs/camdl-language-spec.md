@@ -4790,6 +4790,12 @@ regular cadence **or** `at = [t1, t2, ...]` for an explicit list of output times
 field parses but is currently inert: the writer always emits wide TSV. (`format`
 is stripped before run hashing, so it never affects cached results.)
 
+**In anchored mode**, `every` must be classified `Exact`, as for an
+intervention's `every` (§13.2): a regular schedule has one fixed step, so
+`every = 1 'months` would place snapshots 30.436875 days apart and drift off the
+month boundaries. It is **E322**; write `every = 30 'days`, or list
+calendar-aligned times as `at = [date("2020-02-01"), date("2020-03-01"), ...]`.
+
 ```camdl
 output { trajectories { at = [0, 30, 60, 90] } }   # snapshot only at these times
 ```
