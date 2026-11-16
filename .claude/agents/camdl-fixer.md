@@ -35,8 +35,9 @@ final report and into the PR body. A step without pasted output did not happen.
    with the command and output that show the correct behaviour.
 
    Before editing anything, capture the clippy baseline for the files you expect
-   to touch:
-   `cd rust && cargo clippy --all-targets -p <crate> --message-format=short 2>&1 | grep -E '<file1>|<file2>' > $TMPDIR/clippy-before.txt`.
+   to touch, into this worktree's own ignored `rust/target/agent-scratch/`
+   (not `$TMPDIR`, which parallel agents share and overwrite):
+   `cd rust && mkdir -p target/agent-scratch && cargo clippy --all-targets -p <crate> --message-format=short 2>&1 | grep -E '<file1>|<file2>' > target/agent-scratch/clippy-before.txt`.
 
 3. **Red test first.** Write the test that asserts the correct behaviour, run
    it, and paste it failing. A test that passes on unfixed code is not
@@ -47,9 +48,9 @@ final report and into the PR body. A step without pasted output did not happen.
      (`--bin camdl` for `cli`, which has no library target), one `--test`
      target, or one `dune exec` binary. Paste it.
    - Clippy on the touched files only: rerun the baseline command into
-     `$TMPDIR/clippy-after.txt` and paste
-     `diff $TMPDIR/clippy-before.txt $TMPDIR/clippy-after.txt` (must add
-     nothing).
+     `target/agent-scratch/clippy-after.txt` (from `rust/`) and paste
+     `diff target/agent-scratch/clippy-before.txt target/agent-scratch/clippy-after.txt`
+     (must add nothing).
    - `make update-golden`, then
      `git status --porcelain -- ir/golden ocaml/golden 'tests/fixtures/*/ir'`
      must print nothing. Paste both.
