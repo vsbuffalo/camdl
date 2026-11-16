@@ -249,8 +249,8 @@ pub fn internal_to_date(origin: &str, t: f64, time_unit: &str) -> Result<String,
 /// with the timepoint** (gh#108): [`CalendarAxis::date_of`] on the axis that
 /// `origin` and `time_unit` name.
 pub fn internal_to_date_hires(origin: &str, t: f64, time_unit: &str) -> Result<String, CalError> {
-    let axis = CalendarAxis { time_unit: TimeUnit::parse(time_unit)?, origin: Some(IsoDate::parse(origin)?) };
-    axis.date_of(t)
+    CalendarAxis::parse(time_unit, Some(origin))?
+        .date_of(t)
         .map(RenderedInstant::into_string)
         .ok_or_else(|| CalError::BadFormat(format!("{t}")))
 }
@@ -380,9 +380,14 @@ pub struct CalendarAxis {
 impl CalendarAxis {
     /// The axis a compiled model declares.
     pub fn from_model(m: &crate::Model) -> Result<Self, CalError> {
+        Self::parse(&m.time_unit, m.origin.as_deref())
+    }
+
+    /// The axis a `time_unit` and an optional ISO origin name.
+    pub fn parse(time_unit: &str, origin: Option<&str>) -> Result<Self, CalError> {
         Ok(CalendarAxis {
-            time_unit: TimeUnit::parse(&m.time_unit)?,
-            origin: m.origin.as_deref().map(IsoDate::parse).transpose()?,
+            time_unit: TimeUnit::parse(time_unit)?,
+            origin: origin.map(IsoDate::parse).transpose()?,
         })
     }
 
@@ -456,10 +461,11 @@ fn days_to_time(days: f64, unit: TimeUnit) -> f64 {
     days / unit.days()
 }
 
-/// Whether `s` is a calendar instant [`CalendarAxis::parse_instant`] reads:
-/// a bare date, or a date with the fractional-day suffix.
-pub fn is_instant(s: &str) -> bool {
-    split_instant(s.trim()).is_ok()
+/// Whether `s` is a calendar instant [`CalendarAxis::parse_instant`] reads
+/// — a bare date, or a date with the fractional-day suffix — and if not, why.
+/// Needs no origin: it is the shape of the text, not its time.
+pub fn check_instant(s: &str) -> Result<(), CalError> {
+    split_instant(s.trim()).map(|_| ())
 }
 
 /// The fraction of a day in a `+0.<digits>d` suffix, kept as its decimal

@@ -80,11 +80,12 @@ fn is_numeric_cell(cell: &str) -> bool {
     cell.trim().parse::<f64>().is_ok()
 }
 
-/// Whether a cell parses as a bare ISO civil date. A cell carrying a timezone
-/// offset is *not* a date cell (gh#846) — it fails detection and is reported
-/// by `detect_kind` with its own diagnostic.
+/// Whether a cell is a calendar instant: an ISO civil date, or one with camdl's
+/// fractional-day suffix (`2020-01-01+0.25d`, gh#839). A cell carrying a
+/// timezone offset is *not* a date cell (gh#846) — it fails detection and is
+/// reported by `detect_kind` with its own diagnostic.
 fn is_date_cell(cell: &str) -> bool {
-    ir::caltime::parse_iso_date(cell.trim()).is_ok()
+    ir::caltime::check_instant(cell).is_ok()
 }
 
 /// Detected column kind after whole-column scan.
@@ -174,14 +175,17 @@ fn detect_kind(cells: &[&str], row_offset: usize) -> Result<ColKind, String> {
         } else {
             // Neither numeric nor a valid date: surface the date parse
             // error (the more informative of the two) at this row.
-            let why = ir::caltime::parse_iso_date(c);
+            let why = ir::caltime::check_instant(c);
             // A timezone offset is a well-formed date carrying a component
             // camdl does not model, so "neither a number nor an ISO date"
             // would misdescribe it. Its own message already names the cell,
             // the offset and the remedy — locate it and pass it through, so
             // detection and the `--time-format date` path (which reaches the
-            // same error via `date_to_internal`) read identically (gh#846).
-            if let Err(e @ ir::caltime::CalError::ZoneUnsupported { .. }) = why {
+            // same error via `parse_instant`) read identically (gh#846). A
+            // malformed fractional-day suffix is likewise camdl's own form, and
+            // its message names that form (gh#839).
+            if let Err(e @ (ir::caltime::CalError::ZoneUnsupported { .. }
+                | ir::caltime::CalError::BadSubDay(_))) = why {
                 return Err(format!("line {}: {}", row_offset + i, e));
             }
             let why = why
@@ -293,9 +297,11 @@ pub fn convert_time_column(
                  Add `origin = date(\"YYYY-MM-DD\")` to the model, or supply numeric times."
                     .to_string()
             })?;
+            let axis = ir::caltime::CalendarAxis::parse(opts.time_unit, Some(origin))
+                .map_err(|e| e.to_string())?;
             let mut out = Vec::with_capacity(cells.len());
             for (i, &c) in cells.iter().enumerate() {
-                let t = ir::caltime::date_to_internal(origin, c.trim(), opts.time_unit)
+                let t = axis.parse_instant(c)
                     .map_err(|e| format!("line {}: {}", row_offset + i, e))?;
                 out.push(t);
             }
@@ -479,19 +485,38 @@ mod tests {
         }
     }
 
-    /// gh#846 must not widen to gh#839. `+0.25d` is camdl's own fractional-day
-    /// `--dates` suffix, not a zone designator; the loader already rejects it
-    /// (that rejection is gh#839's subject). Pin that it keeps its own
-    /// diagnostic rather than being mislabelled a timezone offset — the two
-    /// issues want opposite eventual outcomes, so the messages must not merge.
+    /// gh#839: `+0.25d` is camdl's own fractional-day `--dates` suffix, and the
+    /// loader reads what the renderer writes. The column is dated, and each
+    /// cell lands on the model time `CalendarAxis::date_of` rendered it from.
     #[test]
-    fn fractional_day_suffix_is_not_reported_as_a_timezone() {
-        let cells = ["2020-03-01", "2020-03-08+0.25d"];
+    fn fractional_day_suffix_loads_as_the_time_it_renders() {
+        let cells = ["2020-03-01", "2020-03-08+0.25d", "2020-02-29+0.75d"];
+        let o = opts_days(Some("2020-03-01"));
+        let t = convert_time_column(&cells, &o, 2).unwrap();
+        assert_eq!(t, vec![0.0, 7.25, -0.25]);
+        assert!(cells_are_dated(&cells, &o), "a suffixed column is a dated column");
+        // An hourly grid, written by the renderer and read back.
+        let axis = ir::caltime::CalendarAxis {
+            time_unit: ir::caltime::TimeUnit::Days,
+            origin: Some(ir::caltime::IsoDate::parse("2020-03-01").unwrap()),
+        };
+        let times: Vec<f64> = (0..48).map(|k| k as f64 / 24.0).collect();
+        let written: Vec<String> =
+            times.iter().map(|&t| axis.date_of(t).unwrap().to_string()).collect();
+        let cells: Vec<&str> = written.iter().map(String::as_str).collect();
+        assert_eq!(convert_time_column(&cells, &o, 2).unwrap(), times);
+    }
+
+    /// A malformed suffix is reported as camdl's sub-day form, not as a
+    /// time-of-day (gh#839's second defect) and not as a timezone (gh#846).
+    #[test]
+    fn malformed_fractional_day_suffix_names_the_form() {
+        let cells = ["2020-03-01", "2020-03-08+1.25d"];
         let o = opts_days(Some("2020-03-01"));
         let err = convert_time_column(&cells, &o, 2).unwrap_err();
-        assert!(!err.contains("timezone"),
-            "a fractional-day suffix is not a zone designator (gh#839): {err}");
-        assert!(err.contains("line 3"), "must still locate the row: {err}");
+        assert!(err.contains("line 3"), "must locate the row: {err}");
+        assert!(err.contains("YYYY-MM-DD+<frac>d"), "must name the form: {err}");
+        assert!(!err.contains("time-of-day") && !err.contains("timezone"), "{err}");
     }
 
     #[test]
