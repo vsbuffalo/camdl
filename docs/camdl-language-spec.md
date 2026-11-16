@@ -295,15 +295,24 @@ from an `Instant` (**E321**), because calendar months/years are non-invertible
 relative to a date. Use `add_calendar_months` / `add_calendar_years` (§2.3) for
 calendar-exact stepping, or an explicit `'days` literal for an affine offset.
 
-An `Instant` moves only by a duration, and the difference of two Instants is an
-Exact duration. Every other arithmetic on an Instant is **E360** in anchored
-mode: `Instant + Instant`, `k * Instant` (likewise `/`, `^` and negation),
-`Duration − Instant`, and an Instant moved by a bare number
-(`date("2020-03-01") + 5`, whose offset would silently be read in `time_unit`;
-write `5 'days`). The check judges only a definite Instant — one built from
-`date(...)`, `origin`, `add_calendar_*`, `instant`-kind parameters and `let`s of
-those, moved by durations — so a rate term such as `k * (t0 - t)`, with model
-time `t`, is not refused.
+An `Instant` moves by a duration, and the difference of two Instants is an
+Exact duration. In anchored mode the compiler refuses five forms on a
+**definite** Instant — one built from `date(...)`, `origin`, `add_calendar_*`,
+`instant`-kind parameters and `let`s of those, moved by durations. Each is
+**E360**:
+
+- `Instant + Instant`;
+- a `sum(...)` whose body is an Instant;
+- `k * Instant`, and likewise `/`, `^` and negation;
+- `Duration − Instant`;
+- an Instant moved by a constant with no unit: `date("2020-03-01") + 5`, or
+  `+ 5 * 2`. The offset is judged by its dimension, not its spelling, and would
+  otherwise be read silently in `time_unit`; write `5 'days`.
+
+An expression that is not a definite Instant is not checked. Model time `t` is
+not one, so a rate term such as `k * (t0 - t)` is not refused, and neither is a
+function call other than `date(...)` and `add_calendar_*`, such as
+`max(date(a), date(b))`.
 
 | Expression                            | Result                     |
 | ------------------------------------- | -------------------------- |
@@ -312,7 +321,8 @@ time `t`, is not refused.
 | `date(a) + date(b)`                   | **E360**                   |
 | `2 * date(a)`, `date(a) / 2`          | **E360**                   |
 | `7 'days - date(a)`                   | **E360**                   |
-| `date(a) + 5`                         | **E360**                   |
+| `date(a) + 5`, `date(a) + 5 * 2`      | **E360**                   |
+| `sum(i in d, t0[i])` (`t0` an instant)| **E360**                   |
 
 In **unanchored mode** (no `origin`) the refinement is inactive: no calendar
 reference exists, so `5 'months` as an affine span is fine, including in rate
@@ -6777,7 +6787,7 @@ authoritative list is whatever `ocaml/lib/compiler/` and `ocaml/lib/ir/` emit.
 | E357 | Error   | `prevalence(of = …, among = …)`: the numerator reads a compartment cell the denominator does not (§12.1) |
 | E358 | Error   | `prevalence(of = …, among = …)`: the two sides collapse different dimensions (§12.1) |
 | E359 | Error   | `prevalence(of = …, among = …)` reads a flow on one side (§12.1) |
-| E360 | Error   | Arithmetic with no meaning on an instant: `Instant + Instant`, `k * Instant`, `Duration − Instant`, `Instant + <bare number>` (§2.1) |
+| E360 | Error   | Arithmetic with no meaning on a definite instant: `Instant + Instant`, a `sum` of instants, `k * Instant`, `Duration − Instant`, `Instant +` a unitless constant (§2.1) |
 | W103 | Warning | Let binding name shadows a stratum value in some dimension                                |
 
 Diagnostics can be emitted as structured JSON by passing `--json-errors` to
