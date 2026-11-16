@@ -4,9 +4,11 @@
 the maintainer's docket). The staged plan that implements it is
 `docs/dev/proposals/2026-11-15-temporal-architecture-migration.md` (the
 migration plan). Its Phase A (row periods, the training partition, alignment
-judged by the method, dated artifacts) is implemented; the forecast plan and
-forecast scoring (its Stages 5 and 6) are not. Part 1 describes the code before
-Phase A.
+judged by the method, the forcing-range error, dated artifacts) is implemented
+and the type sketches below are reconciled with it. Phase B, the forecast plan
+and forecast scoring (the plan's Stages 5 and 6), is not built: each section
+that describes it is marked "Not yet built (Phase B)". Part 1 describes the code
+before Phase A.
 
 **Reader.** A contributor who needs to know how camdl represents time from a
 data file through a fit to a forecast and its score, and which code owns each
@@ -145,6 +147,9 @@ row whose end is after the training extent (§4.2).
 
 ### 2.4 Two information sets
 
+_Not yet built (Phase B)._ No code records a state set or a forecast origin; the
+training partition (§3.2) is the parameter set.
+
 A prediction depends on two different sets of observations, recorded separately
 because they legitimately differ:
 
@@ -193,6 +198,9 @@ What the state set means depends on the backend:
   migration plan's Stage 5.
 
 ### 2.5 Forecast origin, targets, horizon and lead time
+
+_Not yet built (Phase B)._ Nothing in the code computes a target, horizon or
+lead time; `fit predict` still builds its own grid.
 
 The **forecast origin** is the instant after which a forecast sees no data. By
 default it is the latest end among the rows of the state set. A user may set a
@@ -256,6 +264,9 @@ horizon 0.
 
 ### 2.6 Three independent axes of a prediction
 
+_Not yet built (Phase B)._ The plan's `mode` does not exist; the `Provenance`
+and `basis` rows of the table describe existing score-trace fields.
+
 | Axis                                        | Values                                                                                                                                                                                                                                                                                                                   | Recorded as                                                       |
 | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------- |
 | **Mode**: what the prediction conditions on | in-sample (parameters fitted to the predicted rows); one step ahead (parameters exclude the predicted row; state filtered through every earlier row, so its lead is the time since the last assimilated row of any stream, which varies); fixed origin (state conditioned up to the forecast origin, free-running after) | the plan's `mode`                                                 |
@@ -284,28 +295,38 @@ Field names are illustrative; the meanings are normative.
 ### 3.1 `ObservedRow`: one data row, with what it measures
 
 ```rust
-pub struct ObservedRow {
+// rust/crates/cli/src/fit/observed_rows.rs (crate-private)
+pub(crate) struct ObservedRow {
     pub position: usize,             // index among this stream's rows (§2.2)
+    pub label: f64,                  // the row's time cell in model time; never compared
     pub measures: Measures,          // the one temporal fact later code reads
     pub temporal: Vec<TemporalCell>, // the time cells as written; hashed, never compared
     pub cell: Option<ObsCell>,       // None is an NA row
     pub aux: Vec<(String, f64)>,     // e.g. a binomial denominator
 }
 
-pub enum Measures { Instant(f64), Period(Period) }  // Period is the existing type
+pub(crate) enum Measures { Instant(f64), Period(Period) }  // Period is the existing type
 impl Measures { pub fn start(&self) -> f64; pub fn end(&self) -> f64; }
 ```
 
-- **Removes:** any comparison of a label with a cutoff, because no field holds
-  the label as a time.
+- **Removes:** any comparison of a label with a cutoff. `label` is a plain
+  field, the time cell in model time, and is read only where the file's own time
+  is the answer: writing the time column back to a file, the time column of
+  `fit predict`'s tables, naming the row in a refusal, and the check that no row
+  is labelled before the run starts. No training, scoring or anchoring decision
+  reads it; those read `measures`.
 - **Why the existing types do not suffice:** `StreamTimes` holds periods per
   stream but is built after the training cut, from rows whose only time is the
   label.
-- **Built by:** `observed_rows(...)`, the one reader, once per stream; it is the
+- **Built by:** `observed_rows(...)`, the one reader, once per leaf; it is the
   score-artifact proposal's `observed_rows` with `measures` in place of its
-  `time`.
-- **Read by:** the likelihood loader, the training partition, the row digest,
-  the forecast plan.
+  `time`. `measures_of` is the one lowering from labels to what rows measure; a
+  stream with no `covers` declaration reads each label as an instant, and an
+  accumulating stream with no declaration is an IR the compiler cannot produce
+  (E350).
+- **Read by:** the likelihood loader (`runner::load_observations`), the stream's
+  periods (`pfilter::stream_times_of_rows`), the training partition, the row
+  digest. The forecast plan will (Phase B).
 - **Stored:** in memory only.
 
 ### 3.2 `TrainingPartition`: which rows the parameters were fitted to
@@ -326,10 +347,24 @@ pub enum PartitionRule { All, Cutoff { at: f64 }, SeparateFiles }
 impl TrainingPartition {
     pub fn from_cutoff(rows: &BTreeMap<String, Vec<ObservedRow>>, at: f64)
         -> Result<Self, PartitionError>;
-    pub fn whole(rows: &BTreeMap<String, Vec<ObservedRow>>) -> Self;
-    pub fn trained(&self, stream: &str, position: usize) -> bool;
+    pub fn whole(rows: &BTreeMap<String, Vec<ObservedRow>>, files: WholeFiles)
+        -> Result<Self, PartitionError>;
+    pub fn rows(&self, stream: &str) -> usize;   // 0 for a stream the fit did not bind
+    pub fn rule(&self) -> PartitionRule;
+    pub fn extent(&self) -> f64;
+    pub fn streams(&self) -> &[RowPrefix];
+    pub fn record(&self, calendar: &CalendarAxis) -> TrainingPartitionRecord;
 }
+pub enum WholeFiles { NoHoldout, SeparateHoldoutFiles }  // picks the rule `whole` records
+pub enum PartitionError { NoTrainingRows { stream }, NothingHeldOut, NoRows,
+                          NotAPrefix { stream, position }, Digest(String) }
 ```
+
+Types are in `rust/crates/cli/src/fit/training_partition.rs` (crate-private).
+`whole` returns a `Result` because it digests the rows, and a stream set with no
+rows has no extent. There is no `trained(stream, position)`: with prefixes,
+membership is `position < rows(stream)`, and the partition is the only thing
+that answers it.
 
 - **Removes:** a fit recording a training window it did not use; the two holdout
   forms recording different things; later commands re-deriving membership by a
@@ -342,12 +377,20 @@ impl TrainingPartition {
 - **Invariant:** for each stream the training rows are a prefix. Ends increase
   strictly, so the rule in §4.1 always yields a prefix; the constructor checks
   it rather than assuming it.
-- **Built by:** `fit run`, `profile`, `survey`, through the two constructors
-  only. **Read by:** `compare`, `camdl score`, `fit predict`, the forecast plan.
-- **Stored:** in `fit.meta.json`, for every fit, replacing `training_window`:
+- **Built by:** `fit run`, `profile --fit` and `survey --fit`, through the two
+  constructors only (`runner::cutoff_partition` and `runner::whole_partition`
+  wrap them and word the refusals). **Read by:** `compare`, which checks each
+  stream's recorded prefix digest against the data it reads and scores the rows
+  past the prefix. `fit predict` and the forecast plan will read it (Phase B);
+  there is no `camdl score` command yet.
+- **Stored:** in `fit.meta.json`, for every fit, replacing `training_window`
+  (`TrainingPartitionRecord`, `run_meta.rs`). `rule_version` is
+  `PARTITION_RULE_VERSION`, the version of the rule that decides membership
+  (§5.4); a `date` is present when the model has an `origin`:
 
 ```json
 "training_partition": {
+  "rule_version": 1,
   "rule": {"kind": "cutoff", "at": {"t": 24.0, "date": "2026-07-25"}},
   "extent": {"t": 24.0, "date": "2026-07-25"},
   "streams": [{"stream": "cases", "rows": 3, "digest": "9f2c…"}]
@@ -355,6 +398,9 @@ impl TrainingPartition {
 ```
 
 ### 3.3 `ForecastPlan`: what is to be predicted
+
+_Not yet built (Phase B)._ None of these types exists; the sketch is the design
+the plan's Stage 5 builds. `StateConditioning` holds `RowPrefix` (§3.2).
 
 ```rust
 pub struct ForecastPlan {
@@ -419,10 +465,21 @@ pub struct CalendarAxis {            // in ir::caltime
     pub origin: Option<IsoDate>,     // None: the model has no origin
 }
 impl CalendarAxis {
-    pub fn date_of(&self, t: f64) -> Option<RenderedInstant>;
-    pub fn parse_instant(&self, s: &str) -> Result<f64, ParseError>;
+    pub fn from_model(m: &Model) -> Result<Self, CalError>;
+    pub fn parse(time_unit: &str, origin: Option<&str>) -> Result<Self, CalError>;
+    pub fn days_per_unit(&self) -> f64;
+    pub fn date_of(&self, t: f64) -> Option<RenderedInstant>;      // None: no origin, or t not finite
+    pub fn parse_instant(&self, s: &str) -> Result<f64, CalError>;
+    pub fn to_json(&self) -> serde_json::Value;
 }
 ```
+
+`date_of` writes `YYYY-MM-DD` for a time on a whole day and `YYYY-MM-DD+<frac>d`
+inside a day (`2020-01-01+0.25d`); `parse_instant` reads both forms. The
+renderer tries neighbouring doubles so the text reads back to the same `f64`.
+Under a `weeks` time unit a double that is not a quotient of any double by 7 has
+no exact reading; the renderer then writes the date that reads back closest, one
+double away.
 
 - **Removes:** artifacts that cannot be dated without the model source; a
   rendered date that cannot be read back.
@@ -430,7 +487,12 @@ impl CalendarAxis {
   axis, so each consumer reassembles it from the IR. One type gives every
   artifact the same block and owns the render/parse pair, so a rendered date
   parses back to the same model time by construction.
-- **Stored:** a `calendar` block in every artifact that carries a model time.
+- **Stored:** a `calendar` block in the artifacts listed in §5.3, written as
+  `{"days_per_unit", "origin", "time_unit"}` (`origin` null for a model without
+  one). `days_per_unit` is derived from the unit, written so a consumer needs no
+  unit table, and not read back. The IR's `origin_rata_die` is deliberately not
+  exported: it is keyed to an internal epoch and would mislead a consumer that
+  took it for a standard day number.
 
 ### 3.5 What is deliberately not a type
 
@@ -451,8 +513,11 @@ impl CalendarAxis {
 
 Under `holdout_after`, a row trains if the end of what it measures is at or
 before the cutoff. Under `[data.holdout]`, every row of the training files
-trains, and every holdout row must end after the training extent or the fit is
-refused. The partition is decided once, at fit time, and recorded (§3.2).
+trains, and every holdout row must end after the training extent, the latest end
+among the training rows of every bound stream, or the fit is refused. "At or
+before" tolerates float noise of `1e-9` (`TIME_TIE_EPS`), so a date converted to
+model time cannot move a row across the cutoff. The partition is decided once,
+at fit time, and recorded (§3.2).
 
 An `NA` row is a row: it keeps its position in its stream's training prefix and
 is hashed into the row digest. It is not an observation, so under
@@ -472,14 +537,20 @@ of the data it reads digest to the fit's recorded prefix. It then scores every
 row that did not train and whose end is after the training extent. Under
 `holdout_after` every untrained row ends after the cutoff, so this is simply
 every row that did not train, and the scored set of one stream does not depend
-on which other streams the fit binds. Under `[data.holdout]` with training files
-that end at different times, the extent also excludes a held-out row that ends
-before the latest training data, which the parameters would otherwise have seen
-the future of. A row whose period overlaps another stream's training days is
-scored: the row itself was never fitted, and overlap with other streams' data is
-the ordinary condition of every multi-stream score.
+on which other streams the fit binds. Under `[data.holdout]` the fit refuses a
+holdout row that ends at or before the training extent (§4.1), so the extent
+condition removes no row there either. A `[data.holdout]` fit whose training
+file has rows past its recorded prefix is refused, since those rows lie in the
+window the score treats as held out. `compare` is the one reader of the
+partition; `--in-sample` scores the fit as the in-sample trace it is. A row
+whose period overlaps another stream's training days is scored: the row itself
+was never fitted, and overlap with other streams' data is the ordinary condition
+of every multi-stream score.
 
 ### 4.3 Where targets come from
+
+_Not yet built (Phase B)._ There is no forecast plan, target list or
+fixed-origin driver in the code.
 
 For each stream, the targets after the forecast origin are, in order:
 
@@ -507,6 +578,9 @@ must use window columns and is refused a forecast tail; a 30-day step would be a
 different target.
 
 ### 4.4 Computing a target's value
+
+_Not yet built (Phase B)._ There is no forecast plan, target list or
+fixed-origin driver in the code.
 
 **Stochastic models (chain-binomial, under PMMH or PGAS).** For each posterior
 parameter draw, the forecast driver runs the existing bootstrap particle filter
@@ -588,52 +662,90 @@ writing a partial total. Forecasts do not go through it.
 
 ### 4.5 Alignment with a step grid (D43)
 
-A method that can step exactly (if2, pfilter, pmmh) steps to every start and end
-of every observed and target period. A method that cannot (PGAS) requires every
-start and end to lie on the grid `t_start + k·dt`, within the named grid
-tolerance, and otherwise refuses the run, naming the row and the nearest grid
-times. A period is never moved to a different period to fit a grid. This is a
+Whether a period's start and end may lie between steps is a capability of the
+method, recorded once per method in `fit::methods::METHODS` as
+`PeriodBoundaries`:
+
+- `Anywhere` (if2, pfilter, pmmh): steps exactly to every start and end of every
+  observed period, shortening the step where a boundary falls between grid times
+  (`sim::schedule::Schedule::exact_inference`).
+- `OnGrid` (PGAS): requires every start and end to lie on the grid
+  `t_start + k·dt`, within `sim::schedule::GRID_TOL` steps, and otherwise
+  refuses the run before it starts, naming the stream, the row, the boundary and
+  the two grid times either side (`runner::refuse_periods_off_the_grid`).
+- `AtOutputTimes` (the ODE methods: nl-sbplx, nl-bobyqa, nl-lbfgs, mh): reads
+  the integrated trajectory at its output snapshots; a boundary with no snapshot
+  is refused by the trajectory walk (`sim::inference::ode_loglik`), naming the
+  time.
+
+A period is never moved to a different period to fit a grid. This is a
 capability of the method, not a user setting; the `[config] obs_alignment` key
-is removed. The check runs once the method is known, measured from the run's
-start.
+is removed, and a config that carries it is refused with a message saying so
+(`config_v2::detect_removed_obs_alignment`). The check runs once the method is
+known, measured from the run's start.
 
 ### 4.6 Time functions outside their range, and future covariates (D44, D48)
 
 A time function evaluated outside the range on which it is defined is an error,
-unless the run is given an override flag (named in the migration plan). This
-covers forcings built from a data table (interpolated, cubic, piecewise) past
-their first or last data point, and B-spline forcings past their declared
-window. Under the override the function holds its end value, the run prints a
-warning naming the function, its range and the span held, and the override is
-recorded in the run's and the score's artifacts. Formulas defined for all time
-and periodic forms are unaffected.
+unless the run is given the override `--allow-forcing-extrapolation` (in a fit
+config, `[config] allow_forcing_extrapolation = true`). The commands that run a
+model take it (`args::ForcingExtrapolationArg`). This covers forcings built from
+a data table (interpolated, cubic, piecewise) before their first or after their
+last data point, and B-spline forcings outside their declared window. Under the
+override the function holds its end value and the run says so once per forcing
+and side, as a warning with notice code `forcing-outside-range` naming the
+function, its range, the side evaluated and the span held. Formulas defined for
+all time and periodic forms are unaffected.
 
-The check reads the values the run actually evaluated, through a set-once flag
-in the lookup's clamp branch, not the run's time span: a forcing referenced only
-under a condition that is never true past its range does not trigger it. The
-flag costs one load per clamped evaluation and is never written twice, so it
-adds no contention between particle threads.
+The override is identity: a `simulate`, `pfilter`, `profile` or `survey` run
+under it keys differently from the same run without it (`SimConfig` and the
+`pfilter`, `profile` and `survey` configs carry `allow_forcing_extrapolation`; a
+fit keys it through its config blob), and every `run.json` such a command writes
+records it as `forcing_extrapolation: {allowed: true, held: [...]}`, each held
+entry giving the forcing, the range it is defined on, the side and the value
+held. A run without the override records nothing: it held nothing, or it was
+refused before it committed. The score artifact will record it too (Phase B).
+
+The check reads the values the run actually evaluated, not the run's time span:
+a forcing referenced only under a condition that is never true past its range
+does not trigger it. The engine owns the record, not the policy.
+`sim::forcing_range::DefinedRange` holds one set-once flag per side of each
+compiled forcing, shared by every clone of the compiled model; a clamped
+evaluation loads the flag and writes it only while it is clear, so it is written
+once per process and particle threads never contend. A time within the rounding
+tolerance of an end counts as the end, not past it. The first evaluation on a
+side emits a `RunNote::ForcingOutsideRange` (`sim::run_notes`), and the
+command's reporter (`cli::forcing_extrapolation::report`) turns it into the
+error or the warning. Because the flag records a side and not a time, the
+message names the side; which time outside the range a multi-threaded run meets
+first depends on its threads. A command that holds a store claim while its model
+runs (`fit run`, `survey`) defers the error so the claim is failed through its
+own path. For a forcing with a `lag`, the range bounds its argument, `t − lag`,
+and the message says so.
 
 Separately, a forecast that reads a data-table forcing's values after the
 forecast origin uses covariate values that would not have been known at the
 origin, if they are observations rather than a scenario. camdl cannot tell
-which. The plan records a note naming the forcing and the span, and the artifact
-carries it, so a reader can tell a scenario forecast from one that used realised
-future covariates.
+which. _Not yet built (Phase B):_ the plan will record a note naming the forcing
+and the span, and the artifact will carry it, so a reader can tell a scenario
+forecast from one that used realised future covariates.
 
 ### 4.7 `last_obs` (D40)
 
-`last_obs` is the latest end of an observed period, one value per fit across all
-bound streams. For `holdout_after = "last_obs - …"` it is computed over the full
-data files, because it defines the split; for every other anchor
+`last_obs` is the latest end of an observed period, and `first_obs` the earliest
+start, one value per fit across all bound streams. An `NA` row counts toward
+neither. For `holdout_after = "last_obs - …"` (and `first_obs`) they are
+computed over the full data files, because they define the split
+(`runner::resolve_holdout_cutoff`); for every other anchor
 (`simulate { to
 = last_obs + … }`, breakpoints, `value_at`) over the training
 rows only, so appending held-out rows never changes a fit's end time or its
 identity. A fit prints a note, once, naming any stream whose last observation is
-more than one of its own periods before `last_obs`, so a stream that stopped
-reporting is visible. The same note for a forecast, and `fit predict`'s
-free-forward grid (whose `last_obs` is still the largest label over the full
-file), come with the forecast plan in Phase B.
+more than one of its own periods before `last_obs` (`runner::partition_lines`),
+so a stream that stopped reporting is visible. The same note for a forecast, and
+`fit
+predict`'s free-forward grid (whose `last_obs` is still the largest label
+over the full file), come with the forecast plan in Phase B.
 
 ## Part 5. Boundaries, artifacts and identity
 
@@ -649,11 +761,11 @@ file), come with the forecast plan in Phase B.
   lowers every temporal expression to model time.
 - **The IR** already carries what the runtime needs: the calendar axis
   (`time_unit`, `origin`, `origin_rata_die`), each stream's `covers`, column
-  roles, emit schedules and forcing knot times. This design changes no IR field;
-  the calendar `covers` forms (D45) are the next IR change.
+  roles, emit schedules and forcing knot times. Phase A changed no IR field; the
+  calendar `covers` forms (D45) are the next IR change.
 - **The runtime** owns everything about data, fits and forecasts. Each runtime
   type is built at one boundary, and the engines receive `f64` vectors. The CLI
-  time grammar (`parse_time_spec`, `rust/crates/cli/src/fit/runner.rs:2162`)
+  time grammar (`parse_time_spec`, `rust/crates/cli/src/fit/runner.rs:2240`)
   stays the runtime's one parser for times a user types, including
   `--horizon
   "4 weeks"`; its months and years are affine spans, as the IR's
@@ -662,27 +774,28 @@ file), come with the forecast plan in Phase B.
 ### 5.2 Invariants and who enforces them
 
 "Static" means a violating value cannot be constructed; "checked" means a
-constructor refuses it. No invariant is left to a comment.
+constructor refuses it. The one row marked "by convention" is not yet enforced
+by a type.
 
-| Invariant                                                                              | Owner                                       | Kind                                                                      |
-| -------------------------------------------------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------- |
-| A calendar duration shifts an instant only through `add_calendar_*`, in every position | `ocaml/lib/compiler/time_typing.ml`         | static                                                                    |
-| Instant arithmetic follows `docs/dates.md`, "Three concepts"                           | `time_typing.ml`                            | static                                                                    |
-| `date_range` calendar stepping is computed from its start                              | `ocaml/lib/compiler/expander.ml`            | static                                                                    |
-| A period has finite, increasing endpoints                                              | `Period::new`                               | checked (exists)                                                          |
-| A row's period is computed in one place                                                | `observed_rows`                             | static (only producer)                                                    |
-| Training is decided on periods, never labels                                           | `TrainingPartition::from_cutoff`            | static (no label input)                                                   |
-| Training rows are a prefix of each stream                                              | `TrainingPartition`                         | checked                                                                   |
-| A held-out score's fitted rows digest to the fit's prefix                              | `score` preflight                           | checked                                                                   |
-| Targets end after the origin, do not overlap, and stay within the horizon              | `ForecastPlan::new`                         | checked                                                                   |
-| Every running total read for a prediction belongs to a period the plan declared        | `ForecastPlan::new` and the forecast driver | static (the driver declares the periods before filtering; callers cannot) |
-| No observed row ending after the origin reaches the filter                             | forecast driver                             | checked (a likelihood increment after the origin fails a test)            |
-| A restart never emits a period that began before it                                    | `simulate --init-state`                     | checked (refusal)                                                         |
-| Conditioning fields come from the fit record and the filter, not a caller              | `ForecastPlan` constructor visibility       | static                                                                    |
-| A period is never moved to fit a step grid                                             | alignment check                             | checked (refusal)                                                         |
-| A time function outside its range is an error unless overridden                        | lookup clamp branch, run setup              | checked                                                                   |
-| A rendered date parses back to the same model time                                     | `CalendarAxis`                              | checked (property test)                                                   |
-| Every artifact carrying a model time carries the calendar axis                         | artifact constructors                       | static (constructor argument)                                             |
+| Invariant                                                                              | Owner                                                    | Kind                                                                      |
+| -------------------------------------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------- |
+| A calendar duration shifts an instant only through `add_calendar_*`, in every position | `ocaml/lib/compiler/time_typing.ml`                      | static                                                                    |
+| Instant arithmetic follows `docs/dates.md`, "Three concepts"                           | `time_typing.ml`                                         | static                                                                    |
+| `date_range` calendar stepping is computed from its start                              | `ocaml/lib/compiler/expander.ml`                         | static                                                                    |
+| A period has finite, increasing endpoints                                              | `Period::new`                                            | checked (exists)                                                          |
+| A row's period is computed in one place                                                | `observed_rows`                                          | static (only producer)                                                    |
+| Training is decided on periods, never labels                                           | `TrainingPartition::from_cutoff`                         | static (no label input)                                                   |
+| Training rows are a prefix of each stream                                              | `TrainingPartition`                                      | checked                                                                   |
+| A held-out score's fitted rows digest to the fit's prefix                              | `compare` (`training_scoring_ends`)                      | checked                                                                   |
+| Targets end after the origin, do not overlap, and stay within the horizon (Phase B)    | `ForecastPlan::new`                                      | checked                                                                   |
+| Every running total read for a prediction belongs to a period the plan declared        | `ForecastPlan::new` and the forecast driver              | static (the driver declares the periods before filtering; callers cannot) |
+| No observed row ending after the origin reaches the filter                             | forecast driver                                          | checked (a likelihood increment after the origin fails a test)            |
+| A restart never emits a period that began before it                                    | `simulate --init-state`                                  | checked (refusal)                                                         |
+| Conditioning fields come from the fit record and the filter, not a caller              | `ForecastPlan` constructor visibility                    | static                                                                    |
+| A period is never moved to fit a step grid                                             | alignment check                                          | checked (refusal)                                                         |
+| A time function outside its range is an error unless overridden                        | `sim::forcing_range`, `cli::forcing_extrapolation`       | checked                                                                   |
+| A rendered date parses back to the same model time                                     | `CalendarAxis`                                           | checked (property test, `ir/tests/calendar_axis_roundtrip.rs`)            |
+| Every artifact carrying a model time carries the calendar axis                         | record builders (`with_calendar`, `FitSidecar.calendar`) | by convention: an optional field, not enforced by the type                |
 
 ### 5.3 Artifact contracts
 
@@ -690,40 +803,47 @@ Every artifact that carries a model time carries the `CalendarAxis` once, and
 names each instant as `{t, date}`, with `date` recorded or explicitly "not
 recorded" for a model without an origin.
 
-- **Simulation record** (`run.json`): gains `calendar`.
+- **Simulation record** (`run.json`): gains `calendar` (built).
 - **Fit record** (`fit.meta.json`): `training_partition` replaces
-  `training_window`; gains `calendar`.
-- **Predictive artifacts** (`fit predict`, `simulate --init-state`): the plan
-  (mode, forecast origin, horizon, both information sets, notes) in the JSON;
-  per row in the TSV, a `role` (`trained`, `held_out`, `target`), the period
-  (`t_start`, `t_stop`, and dates when the model has an origin), and for targets
-  `horizon` and `lead`.
-- **Score artifact** (`2026-11-14-score-artifact.md`): its lead-time type gains
-  a fixed-origin variant carrying the forecast origin; each scored target
-  records its horizon and lead; scores are kept per forecast date and horizon
-  and never pooled across horizons (D35); the fit's conditioning travels with
-  the score.
+  `training_window`; gains `calendar` (built).
+- **Predictive artifacts** (not yet built, Phase B) (`fit predict`,
+  `simulate --init-state`): the plan (mode, forecast origin, horizon, both
+  information sets, notes) in the JSON; per row in the TSV, a `role` (`trained`,
+  `held_out`, `target`), the period (`t_start`, `t_stop`, and dates when the
+  model has an origin), and for targets `horizon` and `lead`.
+- **Score artifact** (`2026-11-14-score-artifact.md`; not yet built, Phase B):
+  its lead-time type gains a fixed-origin variant carrying the forecast origin;
+  each scored target records its horizon and lead; scores are kept per forecast
+  date and horizon and never pooled across horizons (D35); the fit's
+  conditioning travels with the score.
 
 ### 5.4 Identity
 
 The training rule is part of a fit's identity: a `holdout_after` fit on a start-
 or day-labelled stream trains on different rows after this change, so it must
-re-key. Each change to identity bumps `HASH_VERSION` on its own (D58, which
+re-key. Each change to identity bumped `HASH_VERSION` (`runid::hash`; D58, which
 supersedes D47's single shared bump): the removal of `obs_alignment` from the
-fit identity is the bump from 3 to 4, the training partition the bump from 4 to
-5, and the score-artifact proposal's identity step a later one.
+fit identity is the bump from 3 to 4, and the bump from 4 to 5 covers two
+changes together, the training rule (rows decided by period, `last_obs` read
+over training rows) and the forcing-extrapolation override entering the identity
+of `simulate`, `pfilter`, `profile` and `survey` runs. The score-artifact
+proposal's identity step will be a later bump.
 
-`FitDigest` carries the partition rule's version, so a change to the rule
-re-keys every fit with no `HASH_VERSION` bump. It keeps the whole-file digests
-of the training files and the digests of the `[data.holdout]` files: with
-`holdout_after` in the config and the rule version, they determine the
-partition, so a stored fit never answers for another one. Replacing them with
-the per-stream training row digests, and dropping the holdout files from fit
-identity, is the score-artifact proposal's identity step. A forecast plan's
-mode, origin, horizon and target list are identity for any stored predictive or
-score result; its notes are presentation.
+`FitDigest` carries the partition rule's version (`partition_rule_version`, set
+from `PARTITION_RULE_VERSION`), so a change to the rule re-keys every fit with
+no `HASH_VERSION` bump. It keeps the whole-file digests of the training files
+and the digests of the `[data.holdout]` files: with `holdout_after` in the
+config and the rule version, they determine the partition, so a stored fit never
+answers for another one. Replacing them with the per-stream training row
+digests, and dropping the holdout files from fit identity, is the score-artifact
+proposal's identity step. A forecast plan's mode, origin, horizon and target
+list will be identity for any stored predictive or score result; its notes are
+presentation (Phase B).
 
 ### 5.5 Names
+
+Forecast origin, horizon and lead time name Phase B concepts; the code has no
+such types yet.
 
 | Concept                                                                     | Name                                         | Not to be called                                          |
 | --------------------------------------------------------------------------- | -------------------------------------------- | --------------------------------------------------------- |
@@ -752,40 +872,43 @@ train (ends 1–24); weekly rows 7, 14 and 21 train (ends at or before 24). The
 extent is 24. Weekly row 28, covering days 21–27, did not train and is scored,
 like every daily row from 24 on.
 
-**A monthly series.** Window-column rows ending at days 31, 59, 90, 120, 151 and
-181, no `emit_schedule`. A forecast is refused: "stream 'cases' states its
-periods per row and declares no `emit_schedule`; forecast targets need a
-declared rhythm". Today `fit predict` predicts at 211, 241, … where the
-month-ends are 212, 243, ….
+**A monthly series** (not yet built, Phase B). Window-column rows ending at days
+31, 59, 90, 120, 151 and 181, no `emit_schedule`. A forecast is refused: "stream
+'cases' states its periods per row and declares no `emit_schedule`; forecast
+targets need a declared rhythm". Today `fit predict` predicts at 211, 241, …
+where the month-ends are 212, 243, ….
 
-**A forecast origin before conditioned data (invalid).** The state was filtered
-through rows ending at day 40, and the user asks for a forecast origin of
-day 35. Refused: "the forecast origin, day 35, is earlier than data the state
+**A forecast origin before conditioned data (invalid; Phase B).** The state was
+filtered through rows ending at day 40, and the user asks for a forecast origin
+of day 35. Refused: "the forecast origin, day 35, is earlier than data the state
 was conditioned on (through day 40)".
 
 **A period moved by a grid (invalid).** PGAS, `simulate { from = 0.5 'days }`,
 `dt = 1 'days`, a `closing_at(time, 2 'days)` stream with labels 3, 5, 7. The
 first period, days 1–3, does not lie on the grid 0.5, 1.5, 2.5, …. Refused,
-naming row 3 and the grid times 2.5 and 3.5.
+naming row 1 (time = 3), its start, 1, and the grid times 0.5 and 1.5. The same
+data under if2 or pmmh runs, stepping to the boundaries.
 
 **A forcing past its data.** An interpolated temperature forcing with data
-through day 100, a run to day 130: an error naming the forcing and the span
-100–130, unless the override is given, in which case the run warns and records
-it. A forecast from origin day 60 additionally records that the forcing's values
-over days 60–100 were read after the forecast origin.
+through day 100, a run to day 130: an error naming the forcing, its range (up to
+day 100) and that the run evaluated it after its last data point, unless
+`--allow-forcing-extrapolation` is given, in which case the run warns, naming
+the span held (from day 100 to the end of the run), and records it in
+`run.json`. A forecast from origin day 60 will additionally record that the
+forcing's values over days 60–100 were read after the forecast origin (Phase B).
 
 ## Part 7. Deferred, and why this design does not block it
 
-| Later work                                                            | What it adds                                                                                            | Why nothing here is rewritten                                                                                                |
-| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| Calendar `covers` forms (D45, the immediate follow-up)                | `month(time)`, `iso_week(time)`, `mmwr_week(time)`; a load-time check that labels fall on the right day | a calendar width is one more declared tiling (§4.3, case 2); one IR variant                                                  |
-| Aggregated targets                                                    | weekly targets from a daily stream                                                                      | a target is a stream and a period; an aggregate is a new target kind beside it                                               |
-| Observation identity across datasets                                  | a key per row independent of position                                                                   | consumers read membership only through `RowPrefix` and `trained`; a key set can replace the count behind the same method     |
-| Data vintages and `as_of` reconstruction                              | "the data as known at the forecast origin"                                                              | the two information sets are already separate; a vintage becomes one more field of `RowPrefix`                               |
-| Hubverse import and export                                            | external forecasts scored on camdl targets                                                              | a target's stream, end date and horizon are a hub's join key; the score artifact stores the hubs' 23 quantile levels         |
-| A per-forcing extrapolation declaration                               | `extrapolate = hold` in the model                                                                       | replaces the run-level override for that forcing; the error remains the default                                              |
-| Conditioning the state on rows after the fit (rolling forecast dates) | D35's per-date state conditioning without a refit                                                       | the plan already records the parameter and state sets separately; the driver filters further rows with fixed parameter draws |
-| Forecasts from single-estimate fits (IF2, NLopt)                      | one plug-in draw, labelled                                                                              | the driver runs per draw; a plug-in fit is one draw                                                                          |
-| Filtering once and forking scenarios at the origin                    | scenario arms without repeating the historical filtering                                                | running totals live in each particle in memory, so the swarm can be copied per arm                                           |
-| Standalone external-forecast scoring                                  | scoring hub files against hub target data with no camdl fit                                             | a target is a stream, an interval and an observed value; a target-data reader supplies them instead of a fit                 |
-| Restarts that continue a period under way                             | `simulate --init-state` carrying running totals                                                         | a new saved-state version with each total's stream and period start; forecasts never depend on it                            |
+| Later work                                                            | What it adds                                                                                            | Why nothing here is rewritten                                                                                                            |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Calendar `covers` forms (D45, the immediate follow-up)                | `month(time)`, `iso_week(time)`, `mmwr_week(time)`; a load-time check that labels fall on the right day | a calendar width is one more declared tiling (§4.3, case 2); one IR variant                                                              |
+| Aggregated targets                                                    | weekly targets from a daily stream                                                                      | a target is a stream and a period; an aggregate is a new target kind beside it                                                           |
+| Observation identity across datasets                                  | a key per row independent of position                                                                   | consumers read membership only through `RowPrefix` and `TrainingPartition::rows`; a key set can replace the count behind the same method |
+| Data vintages and `as_of` reconstruction                              | "the data as known at the forecast origin"                                                              | the two information sets are already separate; a vintage becomes one more field of `RowPrefix`                                           |
+| Hubverse import and export                                            | external forecasts scored on camdl targets                                                              | a target's stream, end date and horizon are a hub's join key; the score artifact stores the hubs' 23 quantile levels                     |
+| A per-forcing extrapolation declaration                               | `extrapolate = hold` in the model                                                                       | replaces the run-level override for that forcing; the error remains the default                                                          |
+| Conditioning the state on rows after the fit (rolling forecast dates) | D35's per-date state conditioning without a refit                                                       | the plan already records the parameter and state sets separately; the driver filters further rows with fixed parameter draws             |
+| Forecasts from single-estimate fits (IF2, NLopt)                      | one plug-in draw, labelled                                                                              | the driver runs per draw; a plug-in fit is one draw                                                                                      |
+| Filtering once and forking scenarios at the origin                    | scenario arms without repeating the historical filtering                                                | running totals live in each particle in memory, so the swarm can be copied per arm                                                       |
+| Standalone external-forecast scoring                                  | scoring hub files against hub target data with no camdl fit                                             | a target is a stream, an interval and an observed value; a target-data reader supplies them instead of a fit                             |
+| Restarts that continue a period under way                             | `simulate --init-state` carrying running totals                                                         | a new saved-state version with each total's stream and period start; forecasts never depend on it                                        |
