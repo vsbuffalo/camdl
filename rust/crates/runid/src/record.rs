@@ -269,6 +269,13 @@ pub struct RunRecord {
     /// by the exact-set check; validated recursively on their *own* lookup.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub children: BTreeMap<String, Vec<ContentHash>>,
+    /// The model's calendar axis (`docs/dev/temporal-architecture.md` §5.3):
+    /// its time unit and the date of `t = 0`, so a stored trajectory's `t` can
+    /// be dated without the model source. Written on every simulation leaf,
+    /// with a null `origin` for a model that has none; absent on the other
+    /// kinds. Recorded, not hashed — the model level already hashes both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calendar: Option<ir::caltime::CalendarAxis>,
     /// Resolved-input summary for display/audit — provenance, not hashed.
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub inputs: serde_json::Value,
@@ -338,6 +345,7 @@ mod output_schema_tests {
             artifacts: BTreeMap::new(),
             output_schema: BTreeMap::new(),
             children: BTreeMap::new(),
+            calendar: None,
             inputs: serde_json::Value::Null,
             provenance: Provenance::default(),
         };
@@ -365,6 +373,7 @@ mod output_schema_tests {
             artifacts: BTreeMap::new(),
             output_schema: BTreeMap::new(),
             children: BTreeMap::new(),
+            calendar: None,
             inputs: serde_json::Value::Null,
             provenance: Provenance::default(),
         };
