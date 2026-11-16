@@ -788,7 +788,12 @@ fn cas_identity_pins() {
         // reason. It declares one change to what feeds identity: a model is
         // hashed by the bodies of its hoisted subtrees, not by their numbering,
         // and the table of them is no longer hashed as a list.
-        ("sim", "ce602a8a41db29645966ec3bf3c5eeb86dfeb4cf78140e0fb76d5fe8c75442e1"),
+        //
+        // The temporal-architecture migration's Stage 4 then moved `sim`
+        // ALONE: `SimConfig` schema_version 5 -> 6, because the sim leaf's
+        // `run.json` gained the model's `calendar` block. Only `sim` hashes a
+        // `SimConfig` and records one; the other five stay.
+        ("sim", "866c0361259d8ef760ebe26454408d788e6d0fdc27422e8c3e17ee3653e63322"),
         ("fit", "51df9e46ed9511e119be748660283e43dea87aa5a4034a3d596a9179f61bf1c9"),
         ("pfilter", "52a07fe8e86619237540ab68d094a8361e0b32aa352d8d7064d3d9653088e65b"),
         ("survey", "e32b7b97d01649235526e4004e8a63bf00fb493762b8ac2d6fce9640a7ab9d77"),

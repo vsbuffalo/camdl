@@ -70,6 +70,7 @@ fn record(kind: ArtifactKind, run_id: ContentHash, status: RunStatus) -> RunReco
         artifacts: BTreeMap::new(),
         output_schema: BTreeMap::new(),
         children: BTreeMap::new(),
+        calendar: None,
         inputs: serde_json::Value::Null,
         provenance: Provenance::default(),
     }

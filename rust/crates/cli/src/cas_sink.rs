@@ -616,10 +616,15 @@ impl crate::engine::RunSink for CasSink {
             // scenario and seed), so `camdl show` can say what this leaf ran.
             display_inputs: rt.display_inputs.clone(),
         };
+        // The base model's axis: a scenario or sweep changes parameters, never
+        // the time unit or the origin.
+        let calendar = ir::caltime::CalendarAxis::from_model(&self.base_model)
+            .map_err(|e| e.to_string())?;
         let mut meta = crate::resolve::RecordMeta::new(
             ir::IR_VERSION.trim(), self.model_path.clone(), self.label.clone())
             .with_deps(self.fit_dep.clone())
-            .with_children(children.clone());
+            .with_children(children.clone())
+            .with_calendar(calendar);
 
         let mut artifacts = runid::Artifacts::new();
         artifacts.insert("traj.tsv", traj_bytes);

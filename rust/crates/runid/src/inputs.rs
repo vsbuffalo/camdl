@@ -246,8 +246,15 @@ pub struct ResolvedScenario {
 /// is the artifact its key names; a key that stayed put would name an
 /// artifact a recompute no longer reproduces. The format enters the key by
 /// this bump, exactly as the obs-file format enters the `obs/` subtree key.
+///
+/// `schema_version = 6` (temporal-architecture migration, Stage 4): no field
+/// changed — the leaf's `run.json` did. It now carries the model's
+/// `calendar` block, so the bytes a leaf holds for an unchanged model, config
+/// and seed differ from those an earlier camdl stored; by the gh#833 rule the
+/// format enters the key. Every stored sim leaf re-keys once and is
+/// recomputed on next use.
 #[derive(Debug, Clone, PartialEq, RunInput)]
-#[run_input(schema_version = 5)]
+#[run_input(schema_version = 6)]
 pub struct SimConfig {
     pub backend: Backend,
     pub dt: FiniteF64,
