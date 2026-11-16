@@ -213,7 +213,7 @@ fn a_holdout_after_is_applied_as_fit_run_applies_it() {
         assert_ok(&o, what);
         assert_eq!(cells(tmp.path()), reference,
             "{what}: every cell must fit the training rows only");
-        assert!(stderr(&o).contains("3 observation row(s) at t > 35 withheld from training"),
+        assert!(stderr(&o).contains("3 observation row(s) ending after t = 35 withheld from training"),
             "{what}: the run must say what the holdout withheld:\n{}", stderr(&o));
     }
 }
