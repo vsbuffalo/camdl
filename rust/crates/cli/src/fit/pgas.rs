@@ -1246,7 +1246,7 @@ pub fn run_method(
                     // file isn't produced by `fit`, so none is recorded here.
                     // (`simulate --obs` on the posterior draws would produce it.)
                     predictive_obs_file: None,
-                    calendar: traj_calendar.clone(),
+                    calendar: traj_calendar,
                 };
                 let _ = manifest.write(&chain_dir.join("trajectories.json"));
             }
