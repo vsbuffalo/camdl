@@ -82,12 +82,17 @@ pub fn model_is_anchored(model: &ir::Model) -> bool {
 /// keys the run by. When the model IS anchored and the bindings yield no
 /// observation times, the error names each anchored construct — "resolve it" is
 /// not actionable without knowing which construct needs the data.
+///
+/// `holdout_after` is the fit config's cutoff when the command fits that
+/// config's training rows (`profile --fit`): the anchors are then the
+/// observed window of the training rows (D40). `None` reads every row.
 pub fn resolve_from_bindings(
     out: &crate::out::Out, model: &mut ir::Model,
     bound: &[(String, std::path::PathBuf)],
     dt: f64,
+    holdout_after: Option<&crate::fit::config_v2::TimeSpecToml>,
 ) -> Result<bool, String> {
-    resolve_with(out, model, |m| crate::obs_anchors_from_bindings(m, bound, dt))
+    resolve_with(out, model, |m| crate::obs_anchors_from_bindings(m, bound, dt, holdout_after))
 }
 
 /// As [`resolve_from_bindings`], for a command holding a fit config rather than

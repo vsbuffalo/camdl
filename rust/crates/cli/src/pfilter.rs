@@ -260,7 +260,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // computed from it. An unanchored model falls through untouched.
     match &bound_streams {
         Some(bound) => {
-            if let Err(e) = crate::obs_anchor::resolve_from_bindings(&out, &mut model_in, bound, dt) {
+            if let Err(e) = crate::obs_anchor::resolve_from_bindings(&out, &mut model_in, bound, dt, None) {
                 out.fail(format!("error: {e}"));
             }
         }
@@ -487,6 +487,10 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     let compiled = std::sync::Arc::new(compiled);
     let process = ChainBinomialProcess::new(compiled.clone());
     let stream_specs = crate::fit::runner::stream_specs_from_obs_streams(&streams);
+    // The observed window `--score-from first_obs/last_obs` anchors to (D40):
+    // the earliest start and the latest end of a row with a value.
+    let observed_window =
+        crate::fit::training_partition::observed_window(streams.iter().flat_map(|s| &s.rows));
     let (bound, report) = BoundObs::bind(compiled.model.simulation.t_start, stream_specs)
         .unwrap_or_else(|report| {
         out.fail(format!("error: observation data invalid:\n{}", report.render()));
@@ -973,8 +977,8 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         let (t0, score_from_time) = match &a.score_from {
             None => (0usize, None),
             Some(raw) => {
-                let first = recorded.obs_times.first().copied().unwrap_or(0.0);
                 let last = recorded.obs_times.last().copied().unwrap_or(0.0);
+                let (first_obs, last_obs) = observed_window.unwrap_or((0.0, last));
                 let spec = crate::fit::runner::parse_time_spec(
                     "--score-from", raw, model.origin.as_deref(), &model.time_unit,
                 ).unwrap_or_else(|e| {
@@ -984,8 +988,8 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
                     crate::fit::runner::TimeSpec::Absolute(v) => v,
                     crate::fit::runner::TimeSpec::Anchored(at) => {
                         let anchor = match at.anchor {
-                            crate::fit::runner::ObsAnchor::First => first,
-                            crate::fit::runner::ObsAnchor::Last => last,
+                            crate::fit::runner::ObsAnchor::First => first_obs,
+                            crate::fit::runner::ObsAnchor::Last => last_obs,
                         };
                         at.resolve(anchor)
                     }

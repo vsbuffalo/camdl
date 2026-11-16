@@ -58,6 +58,7 @@ pub mod state;
 pub(crate) mod stream_bindings; // which leaves a fit's [data] binds, by source, and to which files
 pub mod provenance;
 pub(crate) mod observed_rows; // one leaf's data rows, each with the instant or period it measures
+pub(crate) mod training_partition; // which rows trained: per stream a prefix and its row digest
 pub mod runner;
 pub mod priors_precedence;  // gh#75: shared prior-resolution chain for fit run + profile
 pub mod fit_tree;
@@ -1548,15 +1549,15 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         } else {
             crate::resolve::WritePolicy::Reuse
         };
-        // gh#585: the applied training window — the §3.7.3(b) proof `compare`
+        // gh#585: the training partition — the §3.7.3(b) proof `compare`
         // requires before it stamps a score `hold_out_tail` — recorded into the
         // fit-level sidecar written above, for every method, and on a cache hit
         // as well as a fresh run. Each method's runner builds its config with
         // `FitRunConfig::build` from this same problem, and that build is where
-        // the declaration is applied; this is the same build, run once here so
+        // the partition is decided; this is the same build, run once here so
         // that no method can leave the record out, and before the reuse check
         // so that re-running a stored fit that predates the record (a cache hit
-        // when the engine version is unchanged) writes it: the window is a
+        // when the engine version is unchanged) writes it: the partition is a
         // function of the problem the stored run's identity seals. Without the
         // record `compare` cannot certify a score as held out. A build that
         // fails here fails again in the method's own runner, which reports it.
@@ -1564,8 +1565,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             if let Ok(window_config) = runner::FitRunConfig::build(
                 &sweep_config, Some(&method.algorithm), 1, 1, 1, 1.0, 1, seed, false,
             ) {
-                crate::run_meta::record_training_window(
-                    seg, window_config.applied_training_window);
+                crate::run_meta::record_training_partition(
+                    seg, window_config.training_partition.record(
+                        window_config.model.origin.as_deref(), &window_config.model.time_unit));
             }
         }
 
@@ -2856,10 +2858,10 @@ fn build_fit_sidecar(
         // expanded observation leaves; emitted for every fit (not gated on
         // Bayesian-ness — an IF2 fit's streams/dims are just as describable).
         schema: model.map(crate::run_meta::ObsSchema::from_model),
-        // gh#585: recorded post-load by `record_training_window` (the proof
+        // gh#585: recorded post-load by `record_training_partition` (the proof
         // must come from the code path that applied the declaration); sticky
         // across cache-hit reruns in `write_fit_sidecar`.
-        training_window: None,
+        training_partition: None,
         // The simulator the segment's runs integrate on. `config.dt` is the
         // step the dt rule resolved before this is built (`cmd_fit_run_v2`);
         // `resolved_dt` gives the same answer for a config read without it.

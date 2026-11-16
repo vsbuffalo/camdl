@@ -418,7 +418,7 @@ mod tests {
             parameters_provenance: std::collections::BTreeMap::new(),
             schema: None,
             docs: Default::default(),
-            training_window: None,
+            training_partition: None,
             dt: None,
             integrator: None,
         };

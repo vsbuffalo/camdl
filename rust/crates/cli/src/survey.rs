@@ -110,10 +110,11 @@ struct ResolvedSurveyInputs {
     /// (`ic_free`, through `Problem::likelihood_objective`), so the landscape
     /// ranks starts on the objective the fit maximises. Full in inline mode.
     objective: crate::fit::config_v2::LikelihoodObjective,
-    /// The cutoff the fit config's `[data] holdout_after` resolved to: every
-    /// row after it was removed before scoring, as `fit run` removes it from
-    /// training (gh#1059). `None` without one, and in inline mode.
-    holdout_after: Option<f64>,
+    /// The training rows of each stream under the fit config's `[data]
+    /// holdout_after`, by stream name: every later row was removed before
+    /// scoring, as `fit run` removes it from training (gh#1059). `None`
+    /// without one, and in inline mode.
+    training_rows: Option<Vec<(String, usize)>>,
 }
 
 // ─── cmd_survey entry point ──────────────────────────────────────────────────
@@ -345,7 +346,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
         eval_particles:  a.eval_particles as u32,
         eval_replicates: a.eval_replicates as u32,
         objective,
-        holdout_after:   resolved.holdout_after,
+        training_rows:   resolved.training_rows.as_deref(),
         bounds:          &bounds_vec,
         fixed:           &fixed_vec,
         scenario:        resolved.scenario.as_deref(),
@@ -999,48 +1000,48 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
             per_stream_times.push(times);
         }
 
-        // The fit's `holdout_after`, applied as `fit run` applies it: every row
-        // after the cutoff, resolved over the union of the bound streams'
-        // times by the same function, leaves every stream's rows and windows.
-        // The streams share one schedule, so they still do.
-        let holdout_after: Option<f64> = match config.data.as_ref()
+        // The fit's training partition, decided as `fit run` decides it, by
+        // the same functions: under `holdout_after` each stream keeps the rows
+        // ending at or before the cutoff (with its windows); `[data.holdout]`
+        // files leave the training files whole and must end after them. The
+        // streams share one schedule, so they still do.
+        let rows_by_stream: std::collections::BTreeMap<String, Vec<crate::fit::observed_rows::ObservedRow>> =
+            obs_models.iter().zip(&per_stream_rows)
+                .map(|(o, rows)| (o.name.clone(), rows.clone()))
+                .collect();
+        let training_rows: Option<Vec<(String, usize)>> = match config.data.as_ref()
             .and_then(|d| d.holdout_after.as_ref())
         {
             Some(spec) => {
-                let all_times = per_stream_rows.iter().flatten().map(|r| r.label());
-                let tau = crate::fit::runner::resolve_holdout_cutoff(spec, all_times, &model)?;
-                let mut withheld = 0usize;
-                for (rows, times) in per_stream_rows.iter_mut().zip(per_stream_times.iter_mut()) {
-                    let idx: Vec<usize> = (0..rows.len())
-                        .filter(|&i| crate::fit::runner::within_training(rows[i].label(), tau))
-                        .collect();
-                    withheld += rows.len() - idx.len();
-                    *rows = idx.iter().map(|&i| rows[i].clone()).collect();
-                    *times = crate::fit::runner::retain_stream_times(times, &idx);
+                let partition = crate::fit::runner::cutoff_partition(spec, &rows_by_stream, &model)
+                    .map_err(|e| format!("--fit config: {e}"))?;
+                crate::fit::runner::say_partition(&partition, &rows_by_stream, 0, &time_opts);
+                for ((obs, rows), times) in obs_models.iter()
+                    .zip(per_stream_rows.iter_mut()).zip(per_stream_times.iter_mut())
+                {
+                    let n = partition.rows(&obs.name);
+                    rows.truncate(n);
+                    *times = crate::fit::runner::truncate_stream_times(times, n);
                 }
-                crate::fit::runner::say_holdout_after_applied(
-                    compiled.model.simulation.t_start, tau, withheld);
-                Some(tau)
+                Some(partition.streams().iter().map(|p| (p.stream.clone(), p.rows)).collect())
             }
-            None => None,
+            None => {
+                if !bindings.holdout_by_source().is_empty() {
+                    let partition = crate::fit::runner::whole_partition(
+                        &rows_by_stream,
+                        crate::fit::training_partition::WholeFiles::SeparateHoldoutFiles,
+                    ).map_err(|e| format!("--fit config: {e}"))?;
+                    let obs: Vec<&ir::observation::ObservationModel> = obs_models.iter().collect();
+                    let held_out = crate::fit::runner::check_holdout_files(
+                        &partition, &rows_by_stream, &obs, bindings.holdout_by_source(), &model,
+                        SURVEY_DT, &time_opts,
+                    ).map_err(|e| format!("--fit config: {e}"))?;
+                    crate::fit::runner::say_partition(
+                        &partition, &rows_by_stream, held_out, &time_opts);
+                }
+                None
+            }
         };
-        // `[data.holdout]` files leave the training files whole, as in
-        // `fit run`, so the rows scored above are the fit's; the files are
-        // checked against them by the function `fit run` and `profile` use
-        // (every held-out row after the latest training row).
-        {
-            let training: Vec<crate::fit::runner::TrainingStream<'_>> = obs_models.iter()
-                .zip(&per_stream_rows)
-                .map(|(obs, rows)| crate::fit::runner::TrainingStream {
-                    obs,
-                    last_train: rows.iter().map(|r| r.label()).fold(f64::NEG_INFINITY, f64::max),
-                })
-                .collect();
-            crate::fit::runner::check_holdout_files(
-                &training, bindings.holdout_by_source(), &model,
-                compiled.model.simulation.t_start, SURVEY_DT, &time_opts,
-            ).map_err(|e| format!("--fit config: {e}"))?;
-        }
 
         // Capture [estimate].start for the start-rank diagnostic.
         let estimate_starts: HashMap<String, f64> = sampled.iter()
@@ -1058,7 +1059,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
             fixed: fixed_resolved.into_iter().collect(),
             scenario: scenario_opt,
             objective: config.likelihood_objective(),
-            holdout_after,
+            training_rows,
             parameters_provenance,
             notices,
             roles,
@@ -1084,7 +1085,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
             .map(|o| (o.name.clone(), std::path::PathBuf::from(&data_path)))
             .collect();
         let moved_any_anchor = crate::obs_anchor::resolve_from_bindings(out,
-            &mut model_pre, &inline_bindings, SURVEY_DT,
+            &mut model_pre, &inline_bindings, SURVEY_DT, None,
         )?;
         let model_ir_json = if moved_any_anchor {
             ir::reemit_with_model(&model_ir_json, &model_pre)
@@ -1261,7 +1262,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
             estimate_starts: None,
             // Inline mode has no `ic_free` key: every observation is scored.
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
-            holdout_after: None,
+            training_rows: None,
         })
     }
 }

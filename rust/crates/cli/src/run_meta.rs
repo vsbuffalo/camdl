@@ -618,15 +618,56 @@ impl ObsSchema {
 /// (`resolved_priors` = gh#75 per-parameter prior source,
 /// `estimated`/`fixed`/`data_hashes`, `model_identity`, paths).
 ///
-/// The applied training window (gh#585): training excluded every
-/// observation with `t > train_end`. Value type for
-/// [`FitSidecar::training_window`]; produced by
-/// `fit::runner::apply_holdout_declaration`.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct TrainingWindow {
-    /// Last model time included in training; observations strictly after
-    /// it were withheld.
-    pub train_end: f64,
+/// Which rows the fit trained on (`docs/dev/temporal-architecture.md` §3.2,
+/// D38): per stream the number of leading rows that trained and their row
+/// digest, the training extent, and the rule that decided it. The record of
+/// a `fit::training_partition::TrainingPartition`, value type for
+/// [`FitSidecar::training_partition`]; produced by
+/// `fit::runner::apply_holdout_declaration` for every fit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrainingPartitionRecord {
+    /// `fit::training_partition::PARTITION_RULE_VERSION` when recorded.
+    pub rule_version: u16,
+    pub rule: PartitionRuleRecord,
+    /// The latest end among the training rows of every stream.
+    pub extent: TimePoint,
+    /// Sorted by stream name.
+    pub streams: Vec<RowPrefixRecord>,
+}
+
+/// How a partition was decided.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PartitionRuleRecord {
+    /// No holdout declared: every row trained.
+    All,
+    /// `holdout_after`: a row trained if its end is at or before `at`.
+    Cutoff { at: TimePoint },
+    /// `[data.holdout]`: every row of the training files trained.
+    SeparateFiles,
+}
+
+/// A model time, and the date it falls on when the model has an `origin`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TimePoint {
+    pub t: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+}
+
+/// One stream's training rows: rows `[0, rows)`, and their row digest (hex).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RowPrefixRecord {
+    pub stream: String,
+    pub rows: usize,
+    pub digest: String,
+}
+
+impl TrainingPartitionRecord {
+    /// The recorded prefix of `stream`, if the fit bound it.
+    pub fn prefix(&self, stream: &str) -> Option<&RowPrefixRecord> {
+        self.streams.iter().find(|p| p.stream == stream)
+    }
 }
 
 /// The `schema_version` [`write_fit_sidecar`] stamps on `fit.meta.json`, and
@@ -749,17 +790,15 @@ pub struct FitSidecar {
     /// `fixed` above are the single source of truth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<ObsSchema>,
-    /// The applied training window (gh#585, Stage 3.1 of the 2026-08-29
-    /// honest-predictive-evaluation proposal): present iff the fit's
-    /// holdout declaration was actually applied at load — training
-    /// truncated at `holdout_after`, or `[data.holdout]` files validated
-    /// tail-only. Its *presence* is the §3.7.3(b) positive proof `camdl
-    /// compare`'s non-leakage gate reads; a fit produced by an engine that
-    /// parsed a holdout declaration without applying it (pre-gh#585) can
-    /// never carry it. Sticky like `label`: recorded after the data load,
-    /// and a rerun that skips the load (all-cache-hit) must not erase it.
+    /// Which rows the fit trained on ([`TrainingPartitionRecord`]), recorded
+    /// for every fit by the engine that applied it at load. Under a holdout
+    /// its *presence* is the positive proof `camdl compare`'s non-leakage
+    /// check reads (§3.7.3(b) of the 2026-08-29 honest-predictive-evaluation
+    /// proposal): a fit recorded without it is not scored held out. Sticky
+    /// like `label`: recorded after the data load, and a rerun that skips the
+    /// load (all-cache-hit) must not erase it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub training_window: Option<TrainingWindow>,
+    pub training_partition: Option<TrainingPartitionRecord>,
     /// The integration step every run in this segment ran at: the one dt
     /// rule's answer (`crate::dt_rule`) over the model's declared
     /// `simulate { dt }` and the config's `[config] dt`. A replay of the fit's
@@ -851,12 +890,12 @@ pub fn write_fit_sidecar(
 /// [`write_fit_sidecar`]). Archives nothing and records `source_config` as
 /// given: the call for rewriting a sidecar that was read back.
 pub fn store_fit_sidecar(fit_segment: &std::path::Path, sidecar: &FitSidecar) -> std::io::Result<()> {
-    // gh#29: keep a profile's label sticky. gh#585: the applied training window is
+    // gh#29: keep a profile's label sticky. gh#585: the training partition is
     // sticky the same way — it is recorded after the data load, and a rerun
     // that never loads (all-cache-hit short-circuit) writes the sidecar with
     // `None`, which must not erase the recorded proof. A record of an older
     // schema carries nothing forward: it is replaced whole.
-    let on_disk = if sidecar.label.is_none() || sidecar.training_window.is_none() {
+    let on_disk = if sidecar.label.is_none() || sidecar.training_partition.is_none() {
         read_fit_sidecar(fit_segment).ok().flatten()
     } else {
         None
@@ -865,8 +904,8 @@ pub fn store_fit_sidecar(fit_segment: &std::path::Path, sidecar: &FitSidecar) ->
     merged.schema_version = FIT_META_SCHEMA_VERSION;
     merged.label = sidecar.label.clone()
         .or_else(|| on_disk.as_ref().and_then(|s| s.label.clone()));
-    merged.training_window = sidecar.training_window
-        .or(on_disk.as_ref().and_then(|s| s.training_window));
+    merged.training_partition = sidecar.training_partition.clone()
+        .or_else(|| on_disk.and_then(|s| s.training_partition));
     let bytes = serde_json::to_vec_pretty(&merged).map_err(std::io::Error::other)?;
     std::fs::write(fit_segment.join("fit.meta.json"), bytes)
 }
@@ -891,38 +930,38 @@ pub(crate) fn relative_path(from: &std::path::Path, to: &std::path::Path) -> std
     Ok(rel.to_string_lossy().into_owned())
 }
 
-/// gh#585: record the applied training window into an existing fit
-/// sidecar. Called after `FitRunConfig::build` applied the fit's holdout
-/// declaration — the per-segment sidecar write happens before the data
-/// load, so the §3.7.3(b) proof lands as this update. No-op when `window`
-/// is `None` or the sidecar already carries the same value; a missing
-/// sidecar or failed write is surfaced as a warning (the fit itself must
-/// not die for it — `compare` will simply refuse the `HoldOutTail` label
-/// without the record).
-pub fn record_training_window(
+/// Record the training partition into an existing fit sidecar. Called after
+/// `FitRunConfig::build` decided it at load — the per-segment sidecar write
+/// happens before the data load, so the record lands as this update. No-op
+/// when the sidecar already carries the same value; a missing sidecar or
+/// failed write is surfaced as a warning (the fit itself must not die for it
+/// — `compare` will simply refuse the `HoldOutTail` label without the
+/// record).
+pub fn record_training_partition(
     fit_segment: &std::path::Path,
-    window: Option<TrainingWindow>,
+    partition: TrainingPartitionRecord,
 ) {
-    let Some(window) = window else { return };
     let mut sidecar = match read_fit_sidecar(fit_segment) {
         Ok(Some(s)) => s,
         Ok(None) => {
             crate::out::detached().say(format_args!(
-                "warning: cannot record training window: no fit.meta.json under {}",
+                "warning: cannot record the training partition: no fit.meta.json under {}",
                 fit_segment.display()));
             return;
         }
         Err(e) => {
-            crate::out::detached().say(format_args!("warning: cannot record training window: {e}"));
+            crate::out::detached().say(format_args!(
+                "warning: cannot record the training partition: {e}"));
             return;
         }
     };
-    if sidecar.training_window == Some(window) {
+    if sidecar.training_partition.as_ref() == Some(&partition) {
         return;
     }
-    sidecar.training_window = Some(window);
+    sidecar.training_partition = Some(partition);
     if let Err(e) = store_fit_sidecar(fit_segment, &sidecar) {
-        crate::out::detached().say(format_args!("warning: cannot record training window: {e}"));
+        crate::out::detached().say(format_args!(
+            "warning: cannot record the training partition: {e}"));
     }
 }
 
@@ -1016,45 +1055,43 @@ mod tests {
         assert!(why.contains("v99") && why.contains(FIT_SUMMARY_SCHEMA), "{why}");
     }
 
-    /// gh#585: the recorded training window is the §3.7.3(b) proof, and a
-    /// rerun that skips the data load (all-cache-hit) rewrites the sidecar
-    /// with `training_window: None` — the sticky merge must preserve the
+    /// The recorded training partition is the §3.7.3(b) proof, and a rerun
+    /// that skips the data load (all-cache-hit) rewrites the sidecar with
+    /// `training_partition: None` — the sticky merge must preserve the
     /// recorded value, exactly as `label` is preserved (gh#29).
     #[test]
-    fn training_window_is_sticky_across_sidecar_rewrites() {
+    fn training_partition_is_sticky_across_sidecar_rewrites() {
         let dir = std::env::temp_dir().join(format!(
-            "camdl_trainwin_{}_{}", std::process::id(),
+            "camdl_trainpart_{}_{}", std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::create_dir_all(&dir).unwrap();
+        let record = TrainingPartitionRecord {
+            rule_version: 1,
+            rule: PartitionRuleRecord::Cutoff { at: TimePoint { t: 24.0, date: None } },
+            extent: TimePoint { t: 21.0, date: None },
+            streams: vec![RowPrefixRecord { stream: "cases".into(), rows: 3, digest: "ab".into() }],
+        };
 
         let bare = FitSidecar::default();
         write_fit_sidecar(&dir, std::path::Path::new("nonexistent.toml"), std::path::Path::new(""), &bare)
             .unwrap();
-        assert_eq!(read_fit_sidecar(&dir).unwrap().unwrap().training_window, None);
+        assert_eq!(read_fit_sidecar(&dir).unwrap().unwrap().training_partition, None);
 
-        // The post-load recording (from the build that applied the window).
-        record_training_window(&dir, Some(TrainingWindow { train_end: 21.0 }));
-        assert_eq!(
-            read_fit_sidecar(&dir).unwrap().unwrap().training_window,
-            Some(TrainingWindow { train_end: 21.0 }));
+        record_training_partition(&dir, record.clone());
+        assert_eq!(read_fit_sidecar(&dir).unwrap().unwrap().training_partition,
+            Some(record.clone()));
 
-        // A cache-hit rerun's sidecar write carries no window — the recorded
-        // proof must survive.
+        // A cache-hit rerun's sidecar write carries no partition — the
+        // recorded proof must survive.
         write_fit_sidecar(&dir, std::path::Path::new("nonexistent.toml"), std::path::Path::new(""), &bare)
             .unwrap();
-        assert_eq!(
-            read_fit_sidecar(&dir).unwrap().unwrap().training_window,
-            Some(TrainingWindow { train_end: 21.0 }),
-            "a windowless rewrite must not erase the recorded training window");
+        assert_eq!(read_fit_sidecar(&dir).unwrap().unwrap().training_partition,
+            Some(record.clone()),
+            "a rewrite without a partition must not erase the recorded one");
 
-        // Idempotent re-record is a no-op; a changed window overwrites.
-        record_training_window(&dir, Some(TrainingWindow { train_end: 21.0 }));
-        record_training_window(&dir, None);
-        assert_eq!(
-            read_fit_sidecar(&dir).unwrap().unwrap().training_window,
-            Some(TrainingWindow { train_end: 21.0 }));
-
+        let json = serde_json::to_value(&record).unwrap();
+        assert_eq!(json["rule"], serde_json::json!({"kind": "cutoff", "at": {"t": 24.0}}));
         std::fs::remove_dir_all(&dir).ok();
     }
 

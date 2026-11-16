@@ -555,7 +555,7 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
         eval_particles: 100,
         eval_replicates: 1,
         objective: crate::fit::config_v2::LikelihoodObjective::Full,
-        holdout_after: None,
+        training_rows: None,
         bounds: &bounds,
         fixed: &fixed,
         scenario: None,
