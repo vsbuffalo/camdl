@@ -120,6 +120,11 @@ pub(crate) struct EmitRow {
     pub label: f64,
     /// An instant at `label`, or the flow over `[start, stop)`.
     pub coverage: Coverage,
+    /// When the row is scored: the instant it reads, or its period's stop
+    /// (`StreamTimes::closes`). The state and the time a likelihood argument
+    /// is evaluated at are read here, where the fit scores the row, never at
+    /// the label: a `starting_on` row labelled 21 is scored at 28.
+    pub at: f64,
     /// `false` for a row the design has as a hole: its period is written and
     /// its value is the loader's `NA` token. Dropping the row instead would
     /// hand the next row a wider window than the fit sees, so a hole is a row.
@@ -142,12 +147,10 @@ pub(crate) struct EmitPlan {
 }
 
 impl EmitPlan {
-    pub fn labels(&self) -> Vec<f64> {
-        self.rows.iter().map(|r| r.label).collect()
-    }
-
-    pub fn coverages(&self) -> Vec<(f64, Coverage)> {
-        self.rows.iter().map(|r| (r.label, r.coverage)).collect()
+    /// Each row's scoring time and what it covers: what the projection and
+    /// the observation sampler read.
+    pub fn scored(&self) -> Vec<(f64, Coverage)> {
+        self.rows.iter().map(|r| (r.at, r.coverage)).collect()
     }
 }
 
@@ -189,7 +192,7 @@ pub(crate) fn plan_emission(
         // A state read at each instant; a declaration on it does not compile.
         (TemporalKind::Instant, _) => emit_times
             .iter()
-            .map(|&t| EmitRow { label: t, coverage: Coverage::Instant, observed: true })
+            .map(|&t| EmitRow { label: t, coverage: Coverage::Instant, at: t, observed: true })
             .collect(),
         // An accumulating stream with no declaration is an IR the compiler
         // cannot have produced (E350); there is no reading to write under.
@@ -212,6 +215,7 @@ pub(crate) fn plan_emission(
                     rows.push(EmitRow {
                         label: t,
                         coverage: Coverage::Interval { start, stop },
+                        at: stop,
                         observed: true,
                     });
                 }
@@ -229,6 +233,7 @@ pub(crate) fn plan_emission(
                     rows.push(EmitRow {
                         label: t,
                         coverage: Coverage::Interval { start: prev, stop: t },
+                        at: t,
                         observed: true,
                     });
                 }
@@ -276,10 +281,12 @@ pub(crate) fn plan_bound_rows(
             obs.name, times.temporal_kind(), obs.projection.temporal_kind()
         ));
     }
+    let closes = times.closes();
     let rows = (0..times.len())
         .map(|k| EmitRow {
             label: labels[k],
             coverage: times.coverage(k),
+            at: closes[k],
             observed: cells[k].is_some(),
         })
         .collect();
@@ -598,12 +605,12 @@ pub(crate) fn simulate_dataset(
     let mut denominators: Vec<Option<(String, Vec<f64>)>> = Vec::with_capacity(plans.len());
     for sp in &plans {
         let obs = declaration(&sp.name)?;
-        projected.push(crate::project_coverages(&traj, obs, &model, &sp.plan.coverages())?);
+        projected.push(crate::project_coverages(&traj, obs, &model, &sp.plan.scored())?);
         denominators.push(match model_denominator_column(obs) {
             Some((col, flows)) => {
                 let indices = crate::flow_indices_of(&model, &flows);
                 let n = crate::incidence_over_rows(
-                    &traj, &obs.name, &indices, &sp.plan.coverages(),
+                    &traj, &obs.name, &indices, &sp.plan.scored(),
                 )?;
                 Some((col, n.into_iter().map(f64::round).collect()))
             }
@@ -628,7 +635,7 @@ pub(crate) fn simulate_dataset(
         let sampler = sim::inference::obs_model::compile_obs_sample_pf(
             obs, compiled.clone(), &params,
         ).map_err(|e| e.to_string())?;
-        // gh#6: the compartment state at each row's label, so likelihood arg
+        // gh#6: the compartment state where the row is scored, so likelihood arg
         // expressions (`p = projected / N`) resolve. The aux slice is the row's
         // model denominator for a ratio stream and empty otherwise — a stream
         // needing any other data column was refused above (gh#829). A row
@@ -636,11 +643,11 @@ pub(crate) fn simulate_dataset(
         // when fitted back.
         let values: Vec<f64> = sp.plan.rows.iter().enumerate()
             .map(|(ti, row)| {
-                let snap = crate::snap_at(&traj, row.label);
+                let snap = crate::snap_at(&traj, row.at);
                 let aux: Vec<(String, f64)> = denominator.as_ref()
                     .map(|(col, n)| vec![(col.clone(), n[ti])])
                     .unwrap_or_default();
-                sampler(projected[ti], row.label, &snap.int_state.counts, &aux, &mut obs_rng)
+                sampler(projected[ti], row.at, &snap.int_state.counts, &aux, &mut obs_rng)
             })
             .collect();
         let path = out_dir.join(format!("{}.tsv", sp.name));
@@ -675,7 +682,7 @@ pub(crate) fn write_projected_dataset(
         let obs = model.observations.iter().find(|o| o.name == sp.name).ok_or_else(|| format!(
             "the observation design names stream '{}', which the model this run \
              simulated does not declare", sp.name))?;
-        projected.push(crate::project_coverages(&traj, obs, &model, &sp.plan.coverages())?);
+        projected.push(crate::project_coverages(&traj, obs, &model, &sp.plan.scored())?);
     }
     std::fs::create_dir_all(out_dir)
         .map_err(|e| format!("cannot create {}: {}", out_dir.display(), e))?;
@@ -835,6 +842,11 @@ fn temporal_columns(obs: &ObservationModel) -> Result<TemporalColumns, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each planned row's label and what it covers: what the planner assigns.
+    fn labelled(plan: &EmitPlan) -> Vec<(f64, Coverage)> {
+        plan.rows.iter().map(|r| (r.label, r.coverage)).collect()
+    }
     use ir::observation::{Likelihood, ObsColumn, ObservationSchedule, PoissonLikelihood, Projection};
 
     fn stream(projection: Projection, covers: Option<Covers>, columns: Vec<ObsColumn>) -> ObservationModel {
@@ -887,7 +899,7 @@ mod tests {
         let plan = plan_emission(&s, &[0.0, 7.0, 14.0], 0.0, 14.0, None).unwrap();
         assert_eq!(plan.columns, TemporalColumns::Time("day".into()));
         assert_eq!(plan.scored, "n_cases", "the value goes under the SCORED column, not the stream name");
-        assert_eq!(plan.coverages(), vec![(7.0, iv(0.0, 7.0)), (14.0, iv(7.0, 14.0))]);
+        assert_eq!(labelled(&plan), vec![(7.0, iv(0.0, 7.0)), (14.0, iv(7.0, 14.0))]);
     }
 
     #[test]
@@ -896,7 +908,7 @@ mod tests {
         // label 5 would cover [5, 6), past the horizon.
         let s = stream(incidence(), Some(Covers::From { offset: 0.0, span: 1.0 }), time_cols());
         let plan = plan_emission(&s, &[3.0, 4.0, 5.0], 0.0, 5.0, None).unwrap();
-        assert_eq!(plan.coverages(), vec![(3.0, iv(3.0, 4.0)), (4.0, iv(4.0, 5.0))]);
+        assert_eq!(labelled(&plan), vec![(3.0, iv(3.0, 4.0)), (4.0, iv(4.0, 5.0))]);
     }
 
     #[test]
@@ -909,7 +921,7 @@ mod tests {
         let s = stream(incidence(), Some(Covers::WindowColumns), cols);
         let plan = plan_emission(&s, &[0.0, 7.0, 14.0], 0.0, 14.0, None).unwrap();
         assert_eq!(plan.columns, TemporalColumns::Window { start: "from".into(), stop: "until".into() });
-        assert_eq!(plan.coverages(), vec![(7.0, iv(0.0, 7.0)), (14.0, iv(7.0, 14.0))],
+        assert_eq!(labelled(&plan), vec![(7.0, iv(0.0, 7.0)), (14.0, iv(7.0, 14.0))],
             "the emit time at t_start would be a zero-width window and is not a row");
     }
 
@@ -922,11 +934,11 @@ mod tests {
     fn an_emit_every_override_rewidens_a_uniform_window_to_its_cadence() {
         let s = stream(incidence(), Some(Covers::Until { offset: 0.0, span: 1.0 }), time_cols());
         let plan = plan_emission(&s, &[0.0, 7.0, 14.0], 0.0, 14.0, Some(7.0)).unwrap();
-        assert_eq!(plan.coverages(), vec![(7.0, iv(0.0, 7.0)), (14.0, iv(7.0, 14.0))]);
+        assert_eq!(labelled(&plan), vec![(7.0, iv(0.0, 7.0)), (14.0, iv(7.0, 14.0))]);
         // `day(t)`: a row still opens at its label.
         let s = stream(incidence(), Some(Covers::From { offset: 0.0, span: 1.0 }), time_cols());
         let plan = plan_emission(&s, &[0.0, 7.0], 0.0, 14.0, Some(7.0)).unwrap();
-        assert_eq!(plan.coverages(), vec![(0.0, iv(0.0, 7.0)), (7.0, iv(7.0, 14.0))]);
+        assert_eq!(labelled(&plan), vec![(0.0, iv(0.0, 7.0)), (7.0, iv(7.0, 14.0))]);
     }
 
     /// gh#589 × gh#833: an emit time BEFORE the run's start is a declared
@@ -939,17 +951,17 @@ mod tests {
         // The run starts at 10; the list declares 0. The label 20 is inside the
         // run but its period [0, 20) is not, so that row is simply not written.
         let plan = plan_emission(&s, &[0.0, 20.0, 40.0], 10.0, 40.0, None).unwrap();
-        assert_eq!(plan.labels(), vec![0.0, 40.0], "the out-of-window label survives");
+        assert_eq!(plan.rows.iter().map(|r| r.label).collect::<Vec<_>>(), vec![0.0, 40.0], "the out-of-window label survives");
         // Whereas a label AT the start whose period precedes the run is dropped.
         let plan = plan_emission(&s, &[10.0, 30.0], 10.0, 40.0, None).unwrap();
-        assert_eq!(plan.labels(), vec![30.0]);
+        assert_eq!(plan.rows.iter().map(|r| r.label).collect::<Vec<_>>(), vec![30.0]);
     }
 
     #[test]
     fn an_instant_stream_emits_every_time_with_no_span() {
         let s = stream(Projection::CurrentPop("I".into()), None, time_cols());
         let plan = plan_emission(&s, &[0.0, 7.0], 0.0, 7.0, None).unwrap();
-        assert_eq!(plan.coverages(), vec![(0.0, Coverage::Instant), (7.0, Coverage::Instant)]);
+        assert_eq!(labelled(&plan), vec![(0.0, Coverage::Instant), (7.0, Coverage::Instant)]);
     }
 
     // ── The design-preserving simulate (gh#831) ────────────────────────────

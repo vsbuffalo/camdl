@@ -2709,8 +2709,9 @@ fn materialize_obs_for_quantities(
             obs_ir, &times, run_start_of(traj, model), model.simulation.t_end,
             emit.and_then(|e| e.resolve_for(&obs_ir.source)),
         )?;
-        let projected = project_coverages(traj, obs_ir, model, &plan.coverages())?;
-        let times = plan.labels();
+        let projected = project_coverages(traj, obs_ir, model, &plan.scored())?;
+        // The series axis is when each row is scored, where its state is read.
+        let times: Vec<f64> = plan.rows.iter().map(|r| r.at).collect();
         let mut vals = Vec::with_capacity(times.len());
         for (ti, &t) in times.iter().enumerate() {
             let snap = snap_at(traj, t);
@@ -3643,19 +3644,19 @@ impl engine::RunSink for StreamSink {
                 let sampler = sim::inference::obs_model::compile_obs_sample_pf(
                     obs_ir, compiled.clone(), &params,
                 ).map_err(|e| e.to_string())?;
-                let rows = self.obs_plans[si].coverages();
-                let projected_values = project_coverages(traj, obs_ir, model, &rows)?;
-                for (ti, &(obs_t, coverage)) in rows.iter().enumerate() {
-                    // GH #6 fix: pass the actual compartment state at the obs
-                    // time so the likelihood p/mean expressions can resolve
+                let plan = &self.obs_plans[si];
+                let projected_values = project_coverages(traj, obs_ir, model, &plan.scored())?;
+                for (ti, row) in plan.rows.iter().enumerate() {
+                    // GH #6 fix: pass the actual compartment state where the row
+                    // is scored so the likelihood p/mean expressions can resolve
                     // references like `N = S + I + R`.
-                    let snap = snap_at(traj, obs_t);
+                    let snap = snap_at(traj, row.at);
                     let draw = sampler(
-                        projected_values[ti], obs_t, &snap.int_state.counts, &[], &mut obs_rng,
+                        projected_values[ti], row.at, &snap.int_state.counts, &[], &mut obs_rng,
                     );
                     self.obs_data[si].push(ObsRow {
-                        time: obs_t,
-                        coverage,
+                        time: row.label,
+                        coverage: row.coverage,
                         coords: coords.clone(),
                         value: ObsValue::Drawn(draw),
                     });
@@ -3817,7 +3818,8 @@ impl StreamSink {
                 self.ensure_obs_streams(model, run_start, init_origin)?;
             }
             for si in 0..self.obs_plans.len() {
-                let rows = self.obs_plans[si].coverages();
+                let rows: Vec<(f64, score::trace::Coverage)> = self.obs_plans[si].rows.iter()
+                    .map(|r| (r.label, r.coverage)).collect();
                 let values = cell.obs.get(si).ok_or_else(|| format!(
                     "stored cell holds no values for stream '{}'", self.obs_stream_names[si]))?;
                 if values.len() != rows.len() {
