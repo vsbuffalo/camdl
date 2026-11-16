@@ -57,6 +57,9 @@ pub struct PfilterCtx<'a> {
     /// The likelihood scored: the `--fit` config's `ic_free`, or full without
     /// `--fit`. It changes the stored loglik, so it is identity.
     pub objective: crate::fit::config_v2::LikelihoodObjective,
+    /// `--allow-forcing-extrapolation`: the run may hold a forcing's end value
+    /// outside its range (D44), so it is identity.
+    pub allow_forcing_extrapolation: bool,
     /// The resolved pfilter seed (the `seed` level hashes this).
     pub seed: u64,
 }
@@ -83,6 +86,10 @@ struct PfilterConfigLevel<'a> {
     /// Omitted when full, so a pfilter that never set `ic_free` keeps its key.
     #[serde(skip_serializing_if = "crate::fit::config_v2::LikelihoodObjective::is_full")]
     objective: crate::fit::config_v2::LikelihoodObjective,
+    /// Omitted when off, so the level of a run without the override is the
+    /// one the literal pins.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    allow_forcing_extrapolation: bool,
 }
 
 /// Resolve a pfilter-eval leaf's identity: the four factored levels and the
@@ -113,6 +120,7 @@ pub fn resolve_pfilter(ctx: &PfilterCtx) -> Result<ResolvedPfilter, String> {
         flow_indices: ctx.flow_indices,
         data: &data_sorted,
         objective: ctx.objective,
+        allow_forcing_extrapolation: ctx.allow_forcing_extrapolation,
     };
 
     let model_digest = ModelDigest::from_model(
@@ -191,6 +199,7 @@ mod tests {
             particles: 100, replicates: 1, dt: 1.0,
             obs_block: "", flow_indices: &flow, data: &data,
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
+            allow_forcing_extrapolation: false,
         };
         // The literal, verbatim from before the rewrite.
         let literal = serde_json::json!({
@@ -219,12 +228,32 @@ mod tests {
         let level = |objective| canonical_config_hash(&PfilterConfigLevel {
             particles: 100, replicates: 1, dt: 1.0,
             obs_block: "", flow_indices: &flow, data: &data, objective,
+            allow_forcing_extrapolation: false,
         }, &[]).unwrap();
         let literal = config_level(100, 1, 1.0, "", &[("cases", hh.as_str())]);
         assert_eq!(level(LikelihoodObjective::Full), literal,
             "the full objective must leave the key unchanged");
         assert_ne!(level(LikelihoodObjective::ConditionalOnFirstObservation), literal,
             "the conditional objective must change the config hash");
+    }
+
+    /// The forcing-extrapolation override is identity (D44): a run under it
+    /// may hold a forcing's end value, so it must not share a leaf with the
+    /// same run without it. Off, the level is the literal.
+    #[test]
+    fn the_forcing_override_rekeys_the_config_level() {
+        let hh = h(1);
+        let data: Vec<(&str, &str)> = vec![("cases", hh.as_str())];
+        let flow: Vec<u32> = Vec::new();
+        let level = |allow_forcing_extrapolation| canonical_config_hash(&PfilterConfigLevel {
+            particles: 100, replicates: 1, dt: 1.0,
+            obs_block: "", flow_indices: &flow, data: &data,
+            objective: crate::fit::config_v2::LikelihoodObjective::Full,
+            allow_forcing_extrapolation,
+        }, &[]).unwrap();
+        let literal = config_level(100, 1, 1.0, "", &[("cases", hh.as_str())]);
+        assert_eq!(level(false), literal, "off leaves the key unchanged");
+        assert_ne!(level(true), literal, "the override must change the config hash");
     }
 
     /// A non-finite scored value must be REFUSED, not hashed. `json!` maps

@@ -59,6 +59,9 @@ pub struct TrajectoryCtx<'a> {
     pub t_end: f64,
     pub output: &'a ir::model::OutputSchedule,
     pub allow_degenerate_rates: bool,
+    /// `--allow-forcing-extrapolation`: the run may hold a forcing's end value
+    /// outside its range (D44), so it is identity.
+    pub allow_forcing_extrapolation: bool,
     /// Output view (gh#156): the trajectory column filter, folded into the
     /// `config` level so a column-subset leaf re-keys. `--output-every` is NOT
     /// here — it is lowered into `output` (the schedule) upstream.
@@ -215,6 +218,7 @@ pub fn resolve_trajectory(ctx: &TrajectoryCtx) -> Result<ResolvedTrajectory, Res
         // produces a concrete mode (M2 decision: minimal, provisional).
         calendar: CalendarMode::Numeric,
         allow_degenerate_rates: ctx.allow_degenerate_rates,
+        allow_forcing_extrapolation: ctx.allow_forcing_extrapolation,
         no_flows: ctx.no_flows,
         columns: ctx.columns.clone(),
         init_state: ctx.init_state.clone(),
@@ -412,9 +416,6 @@ pub fn check_reuse(
         return Ok(ReuseVerdict::MustRun);
     }
     Ok(match found {
-        // A leaf that held a forcing past its range under the override does
-        // not answer for a run without it: run, and be refused.
-        Some(dir) if crate::forcing_extrapolation::leaf_held_without_override(&dir) => ReuseVerdict::MustRun,
         Some(dir) => ReuseVerdict::CacheHit { dir },
         None => ReuseVerdict::MustRun,
     })

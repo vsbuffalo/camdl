@@ -336,6 +336,66 @@ fn a_stored_held_run_is_not_served_without_the_override() {
     assert!(err.contains("--allow-forcing-extrapolation"), "{err}");
 }
 
+/// The override is identity: a run under it and the same run without it are
+/// two runs, so a stored run is never served to the other, whether or not it
+/// held a forcing. Here the forcing covers the run, so both runs succeed and
+/// the second must be a cache miss, not a hit on the first one's leaf.
+#[test]
+fn the_override_is_in_the_run_identity() {
+    let tmp = tempfile::tempdir().unwrap();
+    let m = model(tmp.path(), "bspline", &[(0, 1.0), (100, 1.0)]);
+    let o = simulate(tmp.path(), &m, &["--allow-forcing-extrapolation"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let o = simulate(tmp.path(), &m, &[]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(run_ids(&tmp.path().join("cas")).len(), 2,
+        "simulate: the run without the override is a cache miss on the run with it");
+
+    let data = tmp.path().join("cases.tsv");
+    let mut body = String::from("time\tcases\n");
+    for w in 1..=10 {
+        body.push_str(&format!("{}\t{}\n", 7 * w, 10 + 3 * w));
+    }
+    std::fs::write(&data, body).unwrap();
+    let params = tmp.path().join("params.toml");
+    let pfilter = |extra: &[&str]| {
+        let mut args = vec![
+            "pfilter", m.to_str().unwrap(), "--data", data.to_str().unwrap(),
+            "--params", params.to_str().unwrap(), "--particles", "500", "--seed", "1", "--dt", "1",
+        ];
+        args.extend_from_slice(extra);
+        camdl(tmp.path(), &args)
+    };
+    let before = run_ids(&tmp.path().join("cas")).len();
+    let o = pfilter(&["--allow-forcing-extrapolation"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let o = pfilter(&[]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(run_ids(&tmp.path().join("cas")).len(), before + 2,
+        "pfilter: the run without the override is a cache miss on the run with it");
+}
+
+/// The distinct `run_id`s of the committed `run.json`s under `cas`.
+fn run_ids(cas: &Path) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let mut stack = vec![cas.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.file_name().is_some_and(|n| n == "run.json") {
+                let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+                if let Some(id) = v.get("run_id").and_then(|i| i.as_str()) {
+                    out.insert(id.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The same under `profile`: a profile point stored under the override is not
 /// served, as a cached start, to the same profile without it.
 #[test]

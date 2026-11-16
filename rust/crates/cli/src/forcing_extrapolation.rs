@@ -120,30 +120,6 @@ pub fn refusal(o: &OutsideRange) -> String {
     )
 }
 
-/// Whether a stored leaf may not answer for this run: the leaf was made under
-/// the override and held a forcing, and this run is not under it. Such a leaf
-/// is a cache miss, so the run evaluates its model and is refused as a fresh
-/// one would be, rather than served the held values. (A fit keys the override
-/// in its config and never reaches this; a simulate leaf's identity does not
-/// carry it.)
-pub fn leaf_held_without_override(leaf: &std::path::Path) -> bool {
-    let Ok(Some(l)) = runid::read_leaf(leaf) else { return false };
-    held_without_override(&l.record)
-}
-
-/// [`leaf_held_without_override`] for a record already read, as a store
-/// lookup returns it.
-pub fn held_without_override(record: &runid::record::RunRecord) -> bool {
-    if allowed() {
-        return false;
-    }
-    record
-        .inputs
-        .pointer("/forcing_extrapolation/held")
-        .and_then(|h| h.as_array())
-        .is_some_and(|h| !h.is_empty())
-}
-
 /// Record the override, and the forcings held so far, in a `run.json`'s
 /// display inputs. Nothing is added when the override is off: such a run held
 /// nothing, or it was refused before it committed.
