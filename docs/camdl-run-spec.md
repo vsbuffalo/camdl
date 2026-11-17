@@ -448,9 +448,11 @@ one fit hash and are separated on disk only by their stems, and editing a
 
 Data files enter by **content**, not path: rewriting a holdout or training TSV
 in place re-keys the fit, so a stale held-out score cannot be reused. The same
-holds for chain-start sources — a `from_posterior` source's `draws.tsv`, a
-`from_mle` source's `fit_state.toml`, and a `from_params` TOML all fold their
-file digest into the method's `deps`.
+holds for chain-start sources — a `from_posterior` source's `draws.tsv` and a
+`from_params` TOML fold their file digest into the method's `deps`, and a
+`from_mle` source the digest of the `start_values` its `fit_state.toml` records.
+A fit's result files carry no time or path (below), so refitting a source with
+identical inputs leaves those digests, and every fit started from it, unchanged.
 
 **Method levels and lineage.** The method level hashes the method's identity
 payload (the algorithm block and the resolved `starts` rule), the number of
@@ -461,6 +463,68 @@ leaf its `from_mle = "@scout"` names, so regenerating the scout re-keys the
 posterior. The method's path label is the algorithm's name (`if2-<h8>`,
 `pgas-<h8>`); there is no execution order among methods and nothing for an
 ordinal to encode.
+
+**A leaf's result, apart from its executions.** A leaf's _stored bytes_ — the
+files its `run.json` manifest checksums — are a function of its computation. An
+_execution_ is one attempt to perform that computation: the first run, a run
+killed and re-run, a run on another host. Everything about an execution rather
+than its result is kept beside the leaf and outside its manifest, in three
+per-attempt records:
+
+| file             | what it records                                                                                                                                                                                                            |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `execution.json` | the execution record (`camdl.execution/v1`): `started_at`, `finished_at`, the method's `wall_time_seconds`, `pid`, `host`, `threads`; PMMH and `mh` add `cost`, PGAS `sampling_seconds`; a resumed leaf `earlier_segments` |
+| `progress.json`  | the liveness heartbeat, rewritten on a wall-clock timer while the method runs (§10.10)                                                                                                                                     |
+| `events.jsonl`   | the event log, one line per event the run reports (§10.11)                                                                                                                                                                 |
+
+The run writes `execution.json` when it claims the leaf and again, with its
+finish, before the commit, so an attempt that dies still records when and where
+it ran. A re-run that reclaims a dead attempt's leaf moves that attempt's
+`run.json` (as `attempt.json`) and its records into `.attempts/<n>/` before
+recomputing, so a leaf keeps one set of records per attempt; the set at the leaf
+root belongs to the attempt that wrote the result. `fit summary`'s ESS per
+second and the end-of-run `complete in` line read wall time from
+`execution.json`; a leaf without one reports none.
+
+Byte reproducibility — two executions of one computation writing identical
+stored bytes — is promised where it is tested: on the committed fixture
+(`rust/crates/cli/tests/fit_leaf_byte_reproducible.rs`), PMMH, PGAS, IF2 and
+`nl-sbplx` each write identical manifests (path, length and SHA-256 of every
+file, method leaf and child leaves) when run twice uninterrupted into fresh
+stores, when run into a store at another location relative to the model and
+data, and when killed mid-method and re-run. A fit extended with `--resume`
+(below) is not byte-identical to an uninterrupted fit of the same length: on the
+same fixture, PMMH extended from 300 to 500 steps and PGAS from 200 to 300
+sweeps reproduce the base segment's rows exactly and diverge after the resume
+boundary, because the chain state a resume continues from does not carry the
+random-number stream. An extension is statistically, not byte, reproducible
+against the uninterrupted fit. These tests are regression evidence on one model,
+not proof: a model that reaches a different parallel reduction, scheduling path
+or platform mathematics routine may not reproduce its bytes, and the guarantee
+is stated for one machine image.
+
+**A resumed or extended fit.** PMMH, `mh` and PGAS can be extended:
+`fit run --resume <base>` with a longer `iterations` / `sweeps` continues each
+chain of `<base>` from its checkpoint. Four things are distinct:
+
+- the _computation's identity_ includes its target length: the extended fit is a
+  different computation, with its own `run_id` (the target length is folded into
+  the method level, and the base into `deps`);
+- a _checkpoint_ — `chain_N/resume_state.bin`, the chain state at the end of the
+  base — is a state a longer computation can start from. It records the base's
+  identity with the target length taken out (`cas::resume_guard`), and a resume
+  is admitted only when the extension's matches, so only the target may differ.
+  A checkpoint is never served as a completed result: a resume toward a target
+  the base has already reached is refused before any leaf is claimed, since the
+  leaf it addressed would hold the base's whole, longer chain under the shorter
+  computation's identity; at the base's own target, the base is the result;
+- a _completed result_ at a target length is an ordinary leaf. Extending it
+  reads the base and writes a new leaf: the base's leaf is unchanged, is found
+  under its own `run_id`, and reports its own length
+  (`rust/crates/cli/tests/fit_extension_is_its_own_computation.rs`);
+- the _executions_ that produce or extend them are recorded per leaf, in
+  `execution.json`; a resumed leaf's lists the earlier segments of its chain
+  with their wall times, which sum to the wall time behind its draws.
 
 **Leaf contents by method.** An IF2 leaf holds `fit_state.toml`,
 `mle_params.toml`, `final_params.toml`, `chain_starts.tsv`,
@@ -473,17 +537,16 @@ post-warm-up cloud), `diagnostics.json`, and per chain `chain_N/trace.tsv`,
 
 `mle_params.toml` is written params-first with a trailing `[provenance]` table,
 so a bare `toml` reader still sees the parameters at the top level. The block
-records `camdl_version`, `timestamp`, `content_hash` (a tamper hash over the
-numeric values only, at 12-decimal precision, so editing a provenance field does
-not invalidate it), `fit_hash`, `backend`, `dt`, `source_model`,
-`model_identity`, per-source `[provenance.data]` entries of `source` and `hash`
-(the full SHA-256 of each training file, the digest the fit's identity folds),
-`seed`, `method`, `chain` (counted from 0, §2), `log_likelihood`, `loglik_sd`,
-`n_particles`, and optional `ess_mean`/`ess_min`. `source_model` and each data
-`source` are paths relative to the fit folder (`fits/<stem>-<h8>/`, two levels
-above the leaf holding the file), by the rule `fit.meta.json`'s `source_model`
-follows (§2.2.1), so neither depends on the directory the fit was run from; each
-is absent when its file did not exist when the fit ran. For IF2,
+records `camdl_version`, `content_hash` (a tamper hash over the numeric values
+only, at 12-decimal precision, so editing a provenance field does not invalidate
+it), `fit_hash`, `backend`, `dt`, `model_identity`, per-stream
+`[provenance.data.<stream>]` entries of `hash` (the full SHA-256 of each
+training file, the digest the fit's identity folds), `seed`, `method`, `chain`
+(counted from 0, §2), `log_likelihood`, `loglik_sd`, `n_particles`, and optional
+`ess_mean`/`ess_min`. It records the model and the data by content and holds no
+time and no path: the file is part of the leaf's stored bytes, and a path
+relative to the store would change with where the store is. The model's file is
+in the fit folder's `fit.meta.json` (`source_model`, §2.2.1). For IF2,
 `log_likelihood` is the loglik-eval re-score of the winning chain, so
 `loglik_sd` is that re-score's Monte Carlo standard error (the `±` on the stderr
 line), `n_particles` its particles per replicate (not the IF2 swarm's size), and
@@ -1100,13 +1163,14 @@ its own identity (failed, interrupted, or stale) first moves the prior attempt's
 leaf-root files into `.attempts/<n>/` inside the leaf, `n` counting attempts in
 the order they were preserved: its `run.json` (renamed `attempt.json`, so no
 walk of the store finds a second leaf of one identity), `events.jsonl`,
-`diagnostics.json`, `progress.json`, `chain_starts.tsv` and any other file at
-the leaf root. Its directories (`chain_N/`, `trajectories/`) are bulk output,
-not the record of the attempt, and are cleared with the rest. A leaf keeps at
-most three attempts (`MAX_PRESERVED_ATTEMPTS`); preserving a fourth deletes the
-oldest. `.attempts/` is outside the exact-set manifest and the orphan scan, so a
-retry that completes is a clean `Completed` leaf, a cache hit, beside its
-preserved attempts. `--force` quarantines the whole leaf, attempts included.
+`execution.json`, `progress.json`, `diagnostics.json`, `chain_starts.tsv` and
+any other file at the leaf root. Its directories (`chain_N/`, `trajectories/`)
+are bulk output, not the record of the attempt, and are cleared with the rest. A
+leaf keeps at most three attempts (`MAX_PRESERVED_ATTEMPTS`); preserving a
+fourth deletes the oldest. `.attempts/` is outside the exact-set manifest and
+the orphan scan, so a retry that completes is a clean `Completed` leaf, a cache
+hit, beside its preserved attempts. `--force` quarantines the whole leaf,
+attempts included.
 
 **Cache semantics.** `lookup` reports one of four outcomes for a path against an
 expected identity: `Hit` (identity matches, status `Completed`, file manifest
@@ -5090,7 +5154,7 @@ Because the key is the run's identity, it covers every input that re-keys a fit
 `run.json` is the API between camdl and everything that reads its output
 (`camdl list/show/cat`, viewers, notebooks). The on-disk schema is
 `runid::record::RunRecord` (`rust/crates/runid/src/record.rs`); `FORMAT_VERSION`
-is `1`. **The record itself is never hashed** — identity comes only from the
+is `2`. **The record itself is never hashed** — identity comes only from the
 levels — which is why declaring an `obs/` child cannot change the trajectory's
 `run_id`.
 
@@ -5098,7 +5162,7 @@ A real `sims/` leaf record (hashes and paths abbreviated):
 
 ```json
 {
-  "format_version": 1,
+  "format_version": 2,
   "kind": "sim",
   "run_id": "467417eb…0258",
   "hash_version": 1,
@@ -5186,8 +5250,9 @@ A `fits/` method leaf adds `deps` (when its `starts` consumed a source), nests
 artifact keys (`chain_0/trace.tsv`), keys per-chain schema entries under a `{n}`
 wildcard, and carries a populated `inputs`. A fit leaf's `inputs` are written
 with its claim — what the run was asked to do — so a failed or running leaf
-carries them too; `finalize` adds the three only the run can tell
-(`best_loglik`, `best_chain`, `wall_time_seconds`):
+carries them too; `finalize` adds the two only the run can tell (`best_loglik`,
+`best_chain`). The run's wall time is the execution's, in `execution.json`
+(§2.2):
 
 ```json
 "inputs": {
@@ -5203,8 +5268,7 @@ carries them too; `finalize` adds the three only the run can tell
   "n_chains": 2,
   "seed": 1,
   "starts": "from_prior",
-  "starts_source": null,
-  "wall_time_seconds": 25.255000542
+  "starts_source": null
 }
 ```
 
@@ -5263,7 +5327,7 @@ only: the `path_renewal` and `filter_ess` summary blocks with `filter_ess.tsv`,
 and the conditional-SMC findings in `diagnostics.json`
 (`degenerate_ancestor_sampling`, `low_trajectory_renewal`,
 `filter_weight_collapse`, `path_renewal_coalesced`, `filter_starved`). The
-`cost` block of either summary is this execution's.
+sampling cost in the resumed leaf's `execution.json` is this execution's.
 
 `inputs.resume` records the lineage, and is absent on a fresh run:
 
@@ -5272,8 +5336,8 @@ and the conditional-SMC findings in `diagnostics.json`
   "parent_run_id": "f2aea3c8…ad4f",
   "index_column": "step",
   "segments": [
-    { "run_id": "f2aea3c8…ad4f", "first_index": [0, 0],   "wall_time_seconds": 0.257 },
-    { "run_id": "2673d934…e150", "first_index": [60, 60], "wall_time_seconds": 0.252 }
+    { "run_id": "f2aea3c8…ad4f", "first_index": [0, 0] },
+    { "run_id": "2673d934…e150", "first_index": [60, 60] }
   ]
 }
 ```
@@ -5284,8 +5348,10 @@ index is `i` — `index_column` in `chain_c/trace.tsv`, `draw` in
 `trajectories.tsv`, the sweep in PGAS's `draws.tsv` — belongs to the last
 segment whose `first_index[c] <= i`, so the last segment's `first_index` is the
 resume boundary. A leaf resumed from a resumed leaf copies its parent's segments
-forward. PMMH's `draws.tsv` carries no step: draw `k` of chain `c` is the `k`-th
-retained row of `chain_c/trace.tsv`, which carries it.
+forward. How long each segment took is in the resumed leaf's `execution.json`
+(`earlier_segments`, then its own `wall_time_seconds`). PMMH's `draws.tsv`
+carries no step: draw `k` of chain `c` is the `k`-th retained row of
+`chain_c/trace.tsv`, which carries it.
 
 **Fields.**
 
@@ -5664,7 +5730,9 @@ checked):
 
 Per method leaf, alongside `run.json`. The set is method-dependent; every file
 present is listed in `run.json.artifacts` and subject to the exact-set gate,
-except `events.jsonl`, which the run appends to after the leaf commits (§10.11).
+except the records of the attempt — `execution.json`, `progress.json` and
+`events.jsonl` (§2.2) — which are not a function of the computation (the run
+appends to `events.jsonl` after the leaf commits, §10.11).
 
 Common to both families:
 
@@ -5673,18 +5741,19 @@ Common to both families:
 | `fit_state.toml`   | θ̂ + run state, with `method` naming the algorithm that wrote it, `best_chain` as the number of the `chain_N/` directory that won, plus `chain_init_source` and `chain_starts_kind`; the artifact a `from_mle` start consumes as a `deps` edge |
 | `chain_starts.tsv` | one row per start attempt — the point each chain ran from, and every draw a retry rejected with its `ess` and `reason` — under a header naming the `starts` rule, its kind and the rejected count (§6.6)                                      |
 | `progress.json`    | the run's liveness/progress heartbeat, written live, and the terminal state it ends on; every method but `pfilter` writes it (§10.10)                                                                                                         |
+| `execution.json`   | the execution record: when this attempt started and finished, its wall time, process, host and threads, and a sampler's cost (§2.2); outside the manifest                                                                                     |
 | `events.jsonl`     | what the run reported — its checks, chain progress, findings and end-of-run report — one JSON line per event, as it happened; every method writes it; outside the manifest and the run's identity (§10.11)                                    |
 
 An optimizer leaf (IF2, NLopt) additionally holds:
 
-| file                           | content                                                                                                                                                                                                                                                   |
-| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mle_params.toml`              | flat `name = value` params plus a `[provenance]` block (camdl version, timestamp, tamper `content_hash`, `fit_hash`, backend, dt, model + `model_identity`, per-stream data hashes, seed, method, chain, log-likelihood, `loglik_sd`, `n_particles`, ESS) |
-| `final_params.toml`            | the selected parameter vector                                                                                                                                                                                                                             |
-| `chain_N/final_params.toml`    | per-chain endpoint                                                                                                                                                                                                                                        |
-| `chain_N/parameter_traces.tsv` | per-chain trace (§10.4)                                                                                                                                                                                                                                   |
-| `chain_evaluations.tsv`        | per-chain loglik evaluation summary                                                                                                                                                                                                                       |
-| `diagnostics.tsv`              | per-parameter convergence diagnostics                                                                                                                                                                                                                     |
+| file                           | content                                                                                                                                                                                                                                |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mle_params.toml`              | flat `name = value` params plus a `[provenance]` block (camdl version, tamper `content_hash`, `fit_hash`, backend, dt, `model_identity`, per-stream data hashes, seed, method, chain, log-likelihood, `loglik_sd`, `n_particles`, ESS) |
+| `final_params.toml`            | the selected parameter vector                                                                                                                                                                                                          |
+| `chain_N/final_params.toml`    | per-chain endpoint                                                                                                                                                                                                                     |
+| `chain_N/parameter_traces.tsv` | per-chain trace (§10.4)                                                                                                                                                                                                                |
+| `chain_evaluations.tsv`        | per-chain loglik evaluation summary                                                                                                                                                                                                    |
+| `diagnostics.tsv`              | per-parameter convergence diagnostics                                                                                                                                                                                                  |
 
 A sampler leaf (PGAS, PMMH, MH) additionally holds:
 
@@ -6008,7 +6077,7 @@ writes it, `pfilter` included, from the moment the method begins.
 | `begin`         | first, as the method starts                                                       | `method`; `header`, the run's opening block (`config`, `method`, `model`, `estimate`, `fixed`, `starts`, `output`), which no other file in the leaf holds until the leaf commits; `acceptance`, the healthy band the method's acceptance diagnostics apply (`kernel`, `band_lo`, `band_hi`), or `null` for a method without them           |
 | `check`         | as each check before sampling is shown                                            | `check`, tagged by `kind`: `obs_stream` (`name`, `carrier`, `family`), `filter_noise` (`check`: `n_particles`, `pairs`, `sigma`, `s`, `ll_mean`), `method_caveat` (`method`, `note`, `series_len`), `starts` (`mode`, `params`, `note`)                                                                                                    |
 | `progress`      | per chain, at its first step, then at most every 30 seconds, and at its last step | `chain`; `step` of `of`, the chain's progress bar's count, which is the chain's own step (a chain resumed from step 2000 of 2500 reports 2001 first); `loglik` (`value`, and `kind`: `marginal`, `if2`, `ode_marginal` or `complete_data` — PGAS's, not comparable with the others) or `null`; `accept` or `null`                          |
-| `finding`       | as each finding is pushed                                                         | `finding`, the record `diagnostics.json` holds for it (`kind`, tagged by `type`; `severity`; `message`; `method`; `timestamp`)                                                                                                                                                                                                             |
+| `finding`       | as each finding is pushed                                                         | `finding`, the record `diagnostics.json` holds for it (`kind`, tagged by `type`; `severity`; `message`; `method`)                                                                                                                                                                                                                          |
 | `method_report` | last, as the end-of-run block is shown                                            | `outcome`: `completed`, with `report`, the method's report: the object `fit summary --format json` gives for it under `methods`, built from the run's memory rather than its files, with non-finite numbers spelled as that document spells them (`"NaN"`, `"inf"`, `"-inf"`); or `failed`, with `error`, the sentence the command printed |
 
 `progress` is written whatever `--progress` says; the display mode governs only
