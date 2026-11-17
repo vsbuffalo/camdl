@@ -174,17 +174,20 @@ between an instant and a duration are **E360**. Parameter references with `[T]`
 dimension are always Exact — a `'months`-spelled _bound_ on a `duration`-kind
 parameter is a length, not a step-from-a-date, and never contaminates uses.
 
-**Date positions refuse calendar durations.** Under an origin, a position that
-holds a date (`simulate { from, to }`, a scenario's `to`, `at` lists, a
-recurring `from`/`to`, `value_at`'s time, `breakpoints`, a bspline `window`,
-interpolated `times`, an `instant` parameter's bounds and the values given to it
-in a scenario `set` or a prior's `mu`/`lower`/`upper`, the value compared with
-`t` or `t ± d`) reads a bare duration as `origin + D`, so `to = 2 'years` is
-**E321**. Write the calendar step (`to = add_calendar_years(origin, 2)`) or a
-span in days (`730 'days`); the hint names both. A calendar cadence
-(`every = 1 'months`) is **E322**; list the dates with
+**Date positions follow the one-step calendar rule.** Under an origin, a
+position that holds a date (`simulate { from, to }`, a scenario's `to`, `at`
+lists, a recurring `from`/`to`, `value_at`'s time, `breakpoints`, a bspline
+`window`, interpolated `times`, an `instant` parameter's bounds and the values
+given to it in a scenario `set` or a prior's `mu`/`lower`/`upper`, the value
+compared with `t` or `t ± d`) reads a bare duration as `origin + D`, and one
+whole-number calendar step from a known date there is its calendar date:
+`to = 2 'years` is `add_calendar_years(origin, 2)` (2022-01-01 from 2020-01-01).
+A fractional month, a step mixed with days, two steps, or a step from `t`, an
+`instant` parameter or `last_obs` is **E321**, and the hint names the explicit
+form. A calendar cadence (`every = 1 'months`) is **E322**; list the dates with
 `date_range(start, end, calendar_months = 1)` in an `at` list. `dt`, `period`,
-`lag` and other lengths keep the average month.
+`lag` and other lengths keep the average month. See "The one-step calendar rule"
+in `docs/dates.md`.
 
 **Calendar arithmetic primitives** (anchored mode, DSL constant positions only):
 
@@ -329,7 +332,7 @@ The compiler issues E-codes with source locations and fix-hints.
 | E316 | dim      | a prior argument's or a bound's unit literal disagrees with its dimension                                                                                                                    |
 | E317 | dim      | quantity threshold not its series' dimension, or `value_at` time not T                                                                                                                       |
 | E320 | time     | `time_unit = 'months/'years` with `origin` declared                                                                                                                                          |
-| E321 | time     | under an origin, a calendar duration in a date position (`to = 2 'years`, `at [6 'months]`), `Instant ± Calendar`-duration, a calendar `covers` width or trigger `window`/`after`/`cooldown` |
+| E321 | time     | under an origin, a date-position calendar duration other than a single step (`0.5 'months`), `Instant ± Calendar`-duration, a calendar `covers` width or trigger `window`/`after`/`cooldown` |
 | E322 | time     | calendar cadence under an origin (`every = 1 'months`); hint names `date_range(..., calendar_months = k)`                                                                                    |
 | E323 | time     | bare-numeric `on=[...]` in anchored periodic forcing                                                                                                                                         |
 | E360 | time     | instant arithmetic with no meaning: `date(a) + date(b)`, `2 * date(a)`, `7 'days - date(a)`, `date(a) + 5`                                                                                   |

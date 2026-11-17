@@ -92,13 +92,16 @@ let school_quarter = date_range(origin, date("2025-01-01"), calendar_months = 3)
 simulate { from = origin to = add_calendar_years(origin, 5) }
 ```
 
-`add_calendar_months` / `add_calendar_years` are the _only_ way to step a date
-by calendar months/years; month-end clamping is canonical
-(`date("2021-01-31") + 1 month = date("2021-02-28")`). Direct
-`date(...) + N 'months` is a hard error (**E321**) — the language forbids the
-silent affine-drift that would produce. So is a bare month or year in any date
-position, which reads as a step from the origin: `simulate { to = 2 'years }` is
-**E321**, and its hint names `add_calendar_years(origin, 2)`.
+`add_calendar_months` / `add_calendar_years` step a date by calendar
+months/years; month-end clamping is canonical
+(`date("2021-01-31") + 1 month = date("2021-02-28")`). In a date position a
+single step can be written with the unit literal instead, by the one-step
+calendar rule: `simulate { to = 2 'years }` is `add_calendar_years(origin, 2)`,
+and `at [date("2020-03-01") - 1 'months]` is 2020-02-01. Composed steps
+(`origin + 6 'months + 6 'months`), a step mixed with days, a fractional month
+and `date(...) + N 'months` inside a `let` or another expression are a hard
+error (**E321**), whose hint names the explicit form — the language forbids the
+silent affine drift they would produce.
 
 In an anchored model, write absolute-time positions as `date(...)` rather than
 as bare numbers — not only `simulate { from / to }` but the `at = [...]`

@@ -13,6 +13,72 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-11-17 — the one-step calendar rule: a single month or year step in a date position is its calendar date
+
+**What.** Under `origin = date(...)`, one calendar step of a whole number of
+months (or years, as twelve months) from a date the compiler knows (`origin`, a
+`date(...)` literal, or a `let` of one) in a date position is now that calendar
+date, as `add_calendar_months` computes it: _the one-step calendar rule_. The
+spellings refused by the previous entry compile again, to the calendar date. A
+model that compiled under the previous entry contains none of them, so no such
+model changes value; a model last compiled before it does, by the change shown
+(values from a 2020-01-01 origin; the "before" column is the average month,
+365.2425/12 = 30.436875 days):
+
+| spelling                                                   | compiled to before the previous entry | compiles to now                                |
+| ---------------------------------------------------------- | ------------------------------------- | ---------------------------------------------- |
+| `simulate { to = 2 'years }`                               | `t_end = 730.485` (2021-12-31 11:38)  | `t_end = 731` (2022-01-01)                     |
+| `simulate { to = 18 'months }`, `to = 1.5 'years`          | `t_end = 547.86375`                   | `t_end = 547` (2021-07-01)                     |
+| `simulate { from = 6 'months }`                            | `t_start = 182.62125`                 | `t_start = 182` (2020-07-01)                   |
+| scenario `simulate { to = 30 'months }`                    | `t_end = 913.10625`                   | `t_end = 912` (2022-07-01)                     |
+| `at [6 'months]` (interventions, events)                   | fires at 182.62125                    | fires at 182                                   |
+| `trajectories { at = [6 'months] }`, emit `at`             | output time 182.62125                 | 182                                            |
+| `value_at(I, 6 'months)`                                   | reads t = 182.62125                   | reads t = 182                                  |
+| `breakpoints = [6 'months]`                                | breakpoint 182.62125                  | 182                                            |
+| bspline `window = [0 'days, 6 'months]`                    | upper knot 182.62125                  | 182                                            |
+| interpolated `times = [0 'days, 6 'months]`                | sample time 182.62125                 | 182                                            |
+| `tau : instant in [0 'days, 6 'months]`                    | upper bound 182.62125                 | 182                                            |
+| `if t >= 6 'months then … else …`, `t + 7 'days >= …`      | switches at 182.62125                 | 182                                            |
+| scenario `set = { tau = 6 'months }` (`tau` an `instant`)  | `tau = 182.62125`                     | 182                                            |
+| `tau : instant ~ normal(mu = 6 'months, sigma = 10 'days)` | prior mean 182.62125                  | 182; a scale such as `sigma` keeps the average |
+| `simulate { to = 600 'months }`, origin 1891-01-01         | `t_end = 18262.125`                   | `t_end = 18262` (1941-01-01)                   |
+| `at [date("2020-03-01") - 1 'months]`                      | E321                                  | 31 (2020-02-01)                                |
+| `simulate { to = origin + 2 'years }`                      | E321                                  | 731                                            |
+
+**Still refused (E321)**, each hint naming the rule and the explicit form: a
+fractional month (`0.5 'months`); a calendar step mixed with days
+(`date("2020-02-26") + 1 'years + 3 'days`, whose two orders give 2021-03-01 and
+2021-02-28; the note shows both); two calendar steps
+(`origin + 6 'months + 6 'months`, or
+`add_calendar_months(origin, 6) + 1 'months`; the note shows a base where the
+readings differ); a step from a date known only at run time (`t - 1 'months`,
+`tau + 1 'months` with `tau` an `instant` parameter, `last_obs + 6 'months`); a
+`let` whose body moves a date by a calendar duration
+(`let landmark = origin + 6 'months`), which is an ordinary expression, not a
+date position. A calendar cadence (`every = 1 'months`) is still **E322**.
+Lengths keep the average month, as before. Without an origin nothing changes. On
+the command line, `--to "last_obs + 6 months"` (and `holdout_after`) on an
+anchored model is now refused with the same hint; it folded the average month.
+
+**Migration.** None for a model that compiles under the previous entry. A
+refused spelling's hint names its replacement: one step (`origin + 12 'months`),
+the nested steps you mean
+(`add_calendar_months(add_calendar_months(origin, 6), 6)`), the order you mean
+(`add_calendar_years(date("2020-02-26"), 1) + 3 'days`), or a span in days
+(`tau + 30 'days`). On the command line, write the day count:
+`--to "last_obs + 183 days"`.
+
+**Diagnostic.**
+``error[E321]: `origin + 6 'months + 6 'months` in simulate.to takes two calendar
+steps, and two steps of 6 months are not one step of 12``,
+note
+`from 2020-01-01 both give 2021-01-01, but from 2020-08-31 two steps give 2021-08-28 and one step gives 2021-08-31`,
+hint
+``the one-step calendar rule resolves a single calendar step. Write one step,
+`origin + 12 'months`, or nest the steps you mean:
+`add_calendar_months(add_calendar_months(origin, 6), 6)`.``
+See "The one-step calendar rule" in `camdl docs dates`.
+
 ## 2026-11-16 — under an origin, a month or year in a date position is refused
 
 **What.** Under `origin = date(...)`, a position that holds a date reads a bare

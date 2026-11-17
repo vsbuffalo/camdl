@@ -394,9 +394,10 @@ two kinds — a static, type-level property tracked by the dimensional checker:
 
 **The principle:** `Calendar` arises _only_ from `'months`/`'years` literals;
 everything else is `Exact`. A `Calendar`-classified duration **cannot translate
-an `Instant`** in anchored mode — that's a hard error (**E321**) with the hint
-pointing at `add_calendar_months` for calendar-exact stepping or an explicit
-`'days` literal for an affine offset.
+an `Instant`** inside an ordinary expression in anchored mode (a `let`, a rate,
+a quantity's body) — that's a hard error (**E321**) with the hint pointing at
+`add_calendar_months` for calendar-exact stepping or an explicit `'days` literal
+for an affine offset.
 
 **Date positions.** Some places in a model hold a date rather than a length:
 `simulate { from, to }`, a scenario's `simulate { to }`, an `at [...]` entry, a
@@ -407,29 +408,16 @@ bounds of an `instant` parameter and any value given to one (a scenario's `set`,
 a prior's `mu`, `mean`, `lower` or `upper`; a prior's scale, such as `sigma`, is
 a length), and the value compared with model time `t` or with `t ± d`. Under an
 origin a bare duration there denotes `origin + D`, so `to = 2 'years` means
-`origin + 2 'years`, and any `'months` or `'years` literal there is **E321**.
-The hint names the explicit form, computed from your own base and count:
-
-| refused under an origin                 | write instead                                                                                                 |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `simulate { to = 2 'years }`            | `to = add_calendar_years(origin, 2)` (or `730 'days`)                                                         |
-| `simulate { to = 18 'months }`          | `to = add_calendar_months(origin, 18)` (or `548 'days`)                                                       |
-| `simulate { to = 1.5 'years }`          | `to = add_calendar_months(origin, 18)`                                                                        |
-| `at [date("2020-03-01") - 1 'months]`   | `at [add_calendar_months(date("2020-03-01"), -1)]`                                                            |
-| `breakpoints = [6 'months]`             | `breakpoints = [add_calendar_months(origin, 6)]` (or `183 'days`)                                             |
-| `tau : instant in [0 'days, 6 'months]` | `tau : instant in [0 'days, 183 'days]`                                                                       |
-| `if t >= 6 'months then … else …`       | `if t >= add_calendar_months(origin, 6) then … else …`                                                        |
-| `if t - 1 'months > tau then … else …`  | `if t - 30 'days > tau then … else …` (no calendar form exists: `t`'s date is known only when the model runs) |
-
-The same refusal from a base known only at run time (`t`, an `instant`
-parameter, `last_obs` or `first_obs`) says why no calendar form exists there and
-offers the span in days. A calendar duration as a cadence (`every = 1 'months`)
-is **E322**, whose hint names `date_range(<start>, <end>, calendar_months = 1)`
-in an `at` list. A **length** keeps the average month by design: `dt`, a
-forcing's `period`, `step` and `lag`, a sinusoidal `phase`, a `via` mean, the
-bounds of a `duration` parameter, and every unit literal in an ordinary
-expression. Without an origin none of this applies: there is no calendar, and
-every month literal is the average.
+`origin + 2 'years`. A single whole-number calendar step there is its calendar
+date, and every other calendar duration there is **E321**:
+[the one-step calendar rule](#the-one-step-calendar-rule) below states what
+resolves, to what, and what is refused. A calendar duration as a cadence
+(`every = 1 'months`) is **E322**, whose hint names
+`date_range(<start>, <end>, calendar_months = 1)` in an `at` list. A **length**
+keeps the average month by design: `dt`, a forcing's `period`, `step` and `lag`,
+a sinusoidal `phase`, a `via` mean, the bounds of a `duration` parameter, and
+every unit literal in an ordinary expression. Without an origin none of this
+applies: there is no calendar, and every month literal is the average.
 
 See the proposal's
 [§3](dev/proposals/archive/post-alpha/2026-05-22-typed-time-and-dsl-ergonomics.md#3-the-two-rules)
@@ -469,11 +457,14 @@ add_calendar_years(d, n)    # step Instant d by n calendar years
 `origin` identifier, or a nested `add_calendar_*` call. `n` is a compile-time
 integer (positive or negative).
 
-These are the **only** way to advance a date by calendar months or years in the
-language: a month or year literal in a date position is refused (E321), and its
-hint names the call to write. They do real `(year, month, day)` arithmetic via
-the proleptic-Gregorian calendar and never touch the `30.4369` average-month
-factor.
+They do real `(year, month, day)` arithmetic via the proleptic-Gregorian
+calendar and never touch the `30.4369` average-month factor. In a date position
+a single step may also be written with a unit literal, `at [6 'months]` for
+`at [add_calendar_months(origin, 6)]`, and the two compile to the same date
+([the one-step calendar rule](#the-one-step-calendar-rule)). Composed steps, and
+any step inside an ordinary expression such as a `let`, are written with these
+functions, because there the order of the steps changes the date and a reader
+needs to see it.
 
 **Month-end clamping** is canonical: if the source day-of-month doesn't exist in
 the target month, the result clamps to that month's last day.
@@ -495,6 +486,149 @@ In unanchored mode, a call to `add_calendar_months` or `add_calendar_years` is
 wanted an affine offset on the abstract axis — using a duration literal like
 `30 'days`.
 
+## The one-step calendar rule
+
+A month written in a model means different things in different places. As the
+length of a time step it is a fixed number of days; as a step from a date it is
+a move along the calendar, to the same day of a later month. The compiler knows
+which of these each position is, so under an origin it settles the question by
+position, with one rule:
+
+> **The one-step calendar rule.** Under `origin = date(...)`, one calendar step
+> of a whole number of months (or years, as twelve months) from a date the
+> compiler knows is that calendar date, as `add_calendar_months` computes it.
+> Any other use of a calendar duration in a date or schedule position is
+> refused, with a hint naming the explicit form.
+
+"A date the compiler knows" is `origin`, a `date(...)` literal, or a `let` of
+one; a bare duration in a date position is a step from `origin`. "One step" is
+one `'months` or `'years` amount, written once: `1 'years + 6 'months` is a
+single step of 18 months, and `1.5 'years` is too, but `0.5 'months` is no whole
+number of months. The examples below use `time_unit = 'days` and
+`origin = date("2020-01-01")`, so `t` is the number of days after 1 January
+2020. Without an origin none of this applies: there is no calendar, and every
+month is the average month, 365.2425 / 12 = 30.436875 days.
+
+### What resolves: one step from a known date, in a date position
+
+Every date position listed under
+[Exact vs Calendar duration kinds](#exact-vs-calendar-duration-kinds) resolves a
+single calendar step to its date:
+
+| the model line                                    | means                                                   | date       | `t` |
+| ------------------------------------------------- | ------------------------------------------------------- | ---------- | --- |
+| `simulate { to = 2 'years }`                      | `add_calendar_years(origin, 2)`                         | 2022-01-01 | 731 |
+| `simulate { to = 18 'months }`                    | `add_calendar_months(origin, 18)`                       | 2021-07-01 | 547 |
+| `simulate { to = 1.5 'years }`                    | 18 whole months, `add_calendar_months(origin, 18)`      | 2021-07-01 | 547 |
+| `simulate { from = 6 'months }`                   | `add_calendar_months(origin, 6)`                        | 2020-07-01 | 182 |
+| `at [6 'months]`                                  | `add_calendar_months(origin, 6)`                        | 2020-07-01 | 182 |
+| `at [date("2020-01-31") + 1 'months]`             | `add_calendar_months(date("2020-01-31"), 1)`            | 2020-02-29 | 59  |
+| `at [date("2020-03-01") - 1 'months]`             | `add_calendar_months(date("2020-03-01"), -1)`           | 2020-02-01 | 31  |
+| `breakpoints = [6 'months]`                       | a breakpoint on 2020-07-01                              | 2020-07-01 | 182 |
+| `value_at(I, 6 'months)`                          | `I` on 2020-07-01                                       | 2020-07-01 | 182 |
+| `tau : instant in [0 'days, 6 'months]`           | `tau` between 2020-01-01 and 2020-07-01                 | 2020-07-01 | 182 |
+| `if t >= 6 'months then 0.5 else 1.0` (in a rate) | the rate switches on 2020-07-01                         | 2020-07-01 | 182 |
+| `let d = 6 'months` and then `at [origin + d]`    | a `let` of a duration is one step where it moves a date | 2020-07-01 | 182 |
+
+A step that lands on a day the month does not have clamps to the month's last
+day, as `add_calendar_months` does: from 31 January, one month is 29 February in
+2020 and 28 February in 2021. The value is the explicit form's value; the
+compiled model carries the day count.
+
+In a rate, write the step: `t >= add_calendar_months(origin, 6)` there is
+refused with a misleading E302, as `t >= date(...)` is (gh#1163), while
+`t >= 6 'months` compiles to the switch on 2020-07-01.
+
+### What is refused in a date position, and what to write instead
+
+Each refusal is **E321**, and its hint names the explicit form for your own base
+and count.
+
+**A fractional month.** `simulate { to = 0.5 'months }` is refused: a calendar
+step is a whole number of months, and half a month from a date has no calendar
+meaning. Write a whole number of months, or the offset in days:
+`to = origin + 15 'days` is 2020-01-16.
+
+**A calendar step mixed with days.**
+`at [date("2020-02-26") + 1 'years + 3 'days]` is refused, because which comes
+first changes the date: a year and then 3 days is 2021-03-01, 3 days and then a
+year is 2021-02-28. Write the order you mean:
+`add_calendar_years(date("2020-02-26"), 1) + 3 'days` takes the year first, and
+`add_calendar_years(date("2020-02-29"), 1)` the days first. The refusal stands
+even where the two orders happen to agree: from 2020-01-01, `1 'years + 3 'days`
+is 2021-01-04 either way, but a model whose `origin` is edited must not change
+meaning silently, and the note shows a base where they differ.
+
+**Two calendar steps.** `simulate { to = origin + 6 'months + 6 'months }` is
+refused, because two steps of six months are not one step of twelve: from
+2020-08-31, two steps give 2021-08-28 (the first lands on 28 February) and one
+step gives 2021-08-31. Write one step, `origin + 12 'months` (which is the same
+as `origin + (6 'months + 6 'months)`), or nest the steps you mean:
+`add_calendar_months(add_calendar_months(origin, 6), 6)`. A step on an
+`add_calendar_*` result, `add_calendar_months(origin, 6) + 1 'months`, is two
+steps in the same way.
+
+**A step from a date known only at run time.** `if t >= tau + 1 'months` with
+`tau` an `instant` parameter, `if t - 1 'months > tau`, and
+`simulate { to = last_obs + 6 'months }` are refused: the date being moved is
+known only when the model runs, so the compiler cannot step it along the
+calendar. State the offset in days: `tau + 30 'days`, `t - 30 'days`,
+`last_obs + 183 'days`. The command line refuses the same spelling the same way:
+`--to "last_obs + 6 months"` on an anchored model asks for
+`"last_obs + 183 days"`.
+
+**A step inside an ordinary expression.** `let landmark = origin + 6 'months` is
+refused at the `let`: a `let` is an ordinary expression, not a date position,
+and the same `let` used inside other arithmetic would fold the average month.
+Write the step in the date position itself, `at [origin + 6 'months]`, or the
+`let` as a duration, `let d = 6 'months`, moved where it is used.
+
+### The other kinds of position
+
+**Schedules (cadences): refused for now.** `every = 1 'months` in a recurring
+intervention, an output's `trajectories { every }` or an
+`emit_schedule = every …` is **E322**: the rule resolves one step to a date, not
+a repeating schedule, and a calendar cadence counts whole months from its start,
+which one fixed step cannot represent. List the calendar dates instead,
+`at [date_range(date("2020-01-31"), date("2020-06-30"), calendar_months = 1)]`,
+which fires on 31 January, 29 February, 31 March, 30 April, 31 May and 30 June;
+or write a fixed cadence, `every = 30 'days`, which drifts off the month within
+a quarter.
+
+**Offsets from a run-time instant: refused.** A reactive intervention's
+`after = 1 'months` or `cooldown = 1 'months` is E321: the trigger's firing time
+is known only during the run. Write `after = 30 'days`.
+
+**Spans: refused.** A `covers = ending_on(time, 1 'months)` width, or a
+trigger's `sum_observed(…, window = 1 'months)`, is E321: a month ending on a
+row's date is 28 to 31 days depending on the row. For calendar periods give the
+file `window_start` and `window_stop` columns; for a fixed span write the width
+in days or weeks.
+
+**Phases.** An `every … at_day 1 'months` offset is E322, since it is one fixed
+offset from the start of each period. A periodic forcing's `on` endpoints are
+model time, binned by `step`; a month endpoint is the average month, truncated
+to a whole unit of `time_unit` (refusing an endpoint that is not a whole unit is
+gh#1155). A sinusoidal `phase = 2 'months` keeps the average month, 60.87375
+days, because it is an offset within a period of average length.
+
+**Lengths: the average month, by design.** A length is a fixed number of days
+and is never stepped along the calendar, so a month there is the average month:
+`simulate { dt = 1 'months }` is 30.436875 days, a forcing's `period = 1 'years`
+is 365.2425 days and `lag = 1 'months` 30.436875 days, and so are a `via`
+delay's mean and the bounds of a `duration` parameter.
+
+::: {.feedback title="Does the one-step calendar rule match what you mean?"}
+
+The rule above decides what a month means in each position of an anchored model.
+Check it against your own models: in a date position, is the calendar date the
+one you meant; in a schedule, should `every = 1 'months` count whole calendar
+months from its start; and is a refused case one you would rather resolve? Quote
+the model line and the date you expected in
+[gh#1184](https://github.com/vsbuffalo/camdl/issues/1184).
+
+:::
+
 ## `origin` as a referenceable identifier
 
 In anchored mode, `origin` is a **reserved read-only identifier** of type
@@ -514,7 +648,8 @@ simulate { from = origin
 to }`, a scenario's `to` and an output or emit `at` list fold
 it at compile time as an `at [...]` list does: `to = origin + 90 'days` is 90,
 and `to = date("2020-03-01") + 7 'days` is 67 from a 2020-01-01 origin.
-`to = origin + 5 'years` is **E321**; write `add_calendar_years(origin, 5)`.
+`to = origin + 5 'years` is `add_calendar_years(origin, 5)`, by
+[the one-step calendar rule](#the-one-step-calendar-rule).
 
 **An Instant moves by a duration.** `date(b) - date(a)` is an Exact duration and
 `origin + 30 'days` is an Instant. On a definite Instant — one built from
@@ -923,8 +1058,10 @@ way.
 own unit literal — converts correctly. `1 'months` as a length keeps working
 (it's an affine span of ≈ 30.44 days regardless of axis), and so does a rate
 literal such as `0.2 'per_month`. A month or year literal in a date position is
-refused under the origin (E321), so `to = 600 'months` is rewritten, as option 1
-below says.
+a calendar step under the origin
+([the one-step calendar rule](#the-one-step-calendar-rule)), so
+`to = 600 'months` keeps its meaning as the date 600 calendar months after the
+origin, as option 1 below says.
 
 **What does not.** A parameter has no scale of its own: its value is always read
 in the model's `time_unit`. After the switch, the value you supply for a rate
@@ -986,11 +1123,11 @@ interventions {
 **Three options for each bare-numeric site.** At each `simulate { from/to/dt }`,
 `at [...]` schedule, and `--data` time column, you have a choice:
 
-1. **Write the calendar step**: `to = add_calendar_months(origin, 600)`, the
-   date 600 calendar months after the origin (1941-01-01 from 1891-01-01).
-   Smallest diff from the original that keeps its meaning. `to = 600 'months` is
-   refused under an origin (E321), and its hint names this form. For an
-   intervention list, `at [add_calendar_months(origin, 180)]`.
+1. **Write the calendar step**: `to = 600 'months`, the date 600 calendar months
+   after the origin (1941-01-01 from 1891-01-01, `t = 18262`), which is
+   `add_calendar_months(origin, 600)` by the one-step calendar rule. Smallest
+   diff from the original that keeps its meaning. For an intervention list,
+   `at [180 'months]`.
 2. **Use a date literal**: `to = date("1940-12-01")`. Explicit calendar instant.
    Best for new code and for anything a reader needs to verify against a
    calendar.
@@ -1003,27 +1140,32 @@ interventions {
 For new models, prefer dates. For migrations, option 1 (the calendar step) is
 the smallest diff.
 
-## Why `'months` is fine in some places and forbidden in others
+## Why `'months` is a length in some places and a calendar step in others
 
-A natural confusion reading the rules above: `5 'months` works in a table value
-or a `duration` parameter's bound, `0.2 'per_month` works in any rate
-expression, but `date + 6 'months` and `simulate { to = 6 'months }` are hard
-errors. That looks contradictory. It isn't.
+A natural confusion reading the rules above: `5 'months` in a table value or a
+`duration` parameter's bound is 152.2 days, `0.2 'per_month` works in any rate
+expression, `simulate { to = 6 'months }` is the calendar date six months after
+the origin, and `let landmark = date(...) + 6 'months` is a hard error. That
+looks contradictory. It isn't.
 
 The principle: **a calendar month is unambiguous as a _length_ and unambiguous
-as a _rate denominator_. It is ambiguous only as a _step from a date_.** A
-length is "≈ 30.44 days," period — fine as a table value, parameter bound, or
-multiplicand in a rate expression. A rate denominator is "per ≈ 30.44 days" —
-fine, the expander converts to per-axis-unit. Neither length nor rate ever
-translates an instant, so neither produces a calendar-vs-affine question. Only
-`date + 6 'months` does — does it mean "the 24th of the month six months later"
-(calendar-exact, clamped) or "182 days later" (affine)? — and that's where the
-rule fires.
+as a _rate denominator_. As a _step from a date_ it has one meaning only when it
+is a single step from a date the compiler knows.** A length is "≈ 30.44 days,"
+period — fine as a table value, parameter bound, or multiplicand in a rate
+expression. A rate denominator is "per ≈ 30.44 days" — fine, the expander
+converts to per-axis-unit. Neither length nor rate ever translates an instant,
+so neither produces a calendar-vs-affine question. `date + 6 'months` does —
+does it mean "the same day of the month six months later" (calendar-exact,
+clamped) or "182 days later" (affine)? In a date position the answer is the
+calendar date, by [the one-step calendar rule](#the-one-step-calendar-rule);
+inside an ordinary expression, or once steps are composed, the position does not
+settle it and the compiler refuses.
 
-Stated in one line: **Rule 1 isn't "calendar units are dangerous," it's "you
-can't add a calendar duration to a date."** A date position adds its value to
-the origin, so a month there is a step from a date too. Rates aren't durations;
-lengths and table values don't get added to dates. They all stay legal.
+Stated in one line: **Rule 1 isn't "calendar units are dangerous," it's "a
+calendar duration moves a date only as one calendar step, in a position that
+holds a date."** A date position adds its value to the origin, so a month there
+is a step from a date too. Rates aren't durations; lengths and table values
+don't get added to dates. They all stay legal.
 
 ## Seasonal forcing: the same days every year, or this year's dates
 

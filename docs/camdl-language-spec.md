@@ -290,10 +290,13 @@ touching a `'months`/`'years` literal becomes Calendar.
 
 The refinement is load-bearing in **anchored mode** (when `origin =
 date(...)`
-is declared): a `Calendar`-classified duration cannot be added to or subtracted
-from an `Instant` (**E321**), because calendar months/years are non-invertible
-relative to a date. Use `add_calendar_months` / `add_calendar_years` (§2.3) for
+is declared): inside an ordinary expression (a `let`, a rate, a quantity's
+body) a `Calendar`-classified duration cannot be added to or subtracted from an
+`Instant` (**E321**), because calendar months/years are non-invertible relative
+to a date. Use `add_calendar_months` / `add_calendar_years` (§2.3) for
 calendar-exact stepping, or an explicit `'days` literal for an affine offset.
+In a date position, below, a single step is resolved by the one-step calendar
+rule.
 
 **Date positions.** A position that holds a date is an _instant position_:
 `simulate { from, to }`, a scenario's `simulate { to }`, an `at [...]` entry of
@@ -304,14 +307,24 @@ interpolated forcing's `times`, the bounds of an `instant`-kind parameter and
 a value given to one (a scenario's `set`, a prior's `mu`, `mean`, `lower` or
 `upper`; a prior's scale such as `sigma` is a length), and the operand compared
 with model time `t`, or with `t ± d`, in any expression. In anchored mode a
-bare duration there denotes `origin + D`, so a `'months`/`'years` literal in an
-instant position, directly or through a `let`, is **E321**:
-`simulate { to = 2 'years }` is refused, and its hint names
-`add_calendar_years(origin, 2)` and the span `730 'days`. An offset added to or
-subtracted from `t` (`t - 1 'months`) is refused the same way, since the date
-`t` stands for is known only when the model runs. A calendar duration as a
-cadence (a recurring `every`, an output or emit `every`) is **E322**, whose hint
-names `date_range(<start>, <end>, calendar_months = k)` in an `at` list. A
+bare duration there denotes `origin + D`, and a calendar duration there,
+directly or through a `let`, follows **the one-step calendar rule**: one
+calendar step of a whole number of months (or years, as twelve months) from a
+date the compiler knows (`origin`, a `date(...)` literal, or a `let` of one) is
+that calendar date, as `add_calendar_months` computes it. So
+`simulate { to = 2 'years }` from `origin = date("2020-01-01")` is
+`add_calendar_years(origin, 2)`, 2022-01-01 (`t = 731`), `at [6 'months]` is
+2020-07-01 (`t = 182`), and `1.5 'years` and `1 'years + 6 'months` are each one
+step of 18 months. Any other calendar duration in an instant position is
+**E321**, with a hint naming the explicit form: a fractional month
+(`0.5 'months`); a calendar step mixed with days
+(`date("2020-02-26") + 1 'years + 3 'days`, whose two orders give 2021-03-01 and
+2021-02-28); two calendar steps (`origin + 6 'months + 6 'months`, or a step on
+an `add_calendar_*` result); and a step from a date known only when the model
+runs (model time `t`, as in `t - 1 'months`, an `instant` parameter, or an
+observation anchor). A calendar duration as a cadence (a recurring `every`, an
+output or emit `every`) is **E322**, whose hint names
+`date_range(<start>, <end>, calendar_months = k)` in an `at` list. A
 _length_ keeps the average: `dt`, a forcing's `period`, `step` and `lag`, a
 sinusoidal `phase`, a `via` mean, a `duration` parameter's bounds, and a unit
 literal in an ordinary expression. Instant positions accept instant arithmetic
@@ -4011,8 +4024,10 @@ classified `Exact` (§2.1) — a `Calendar`-classified duration (e.g. `every = 1
 'months`) is
 **E322**, with a hint naming `date_range(<start>, <end>, calendar_months = 1)`
 in an `at` list for month-aligned recurrence, or `every = 30 'days` for a fixed
-cadence. `from` and `to` are instant positions (§2.1): a calendar duration there
-is **E321**, whose hint names `add_calendar_months(origin, k)`. In unanchored
+cadence. `from` and `to` are instant positions (§2.1): a single calendar step
+there is its calendar date by the one-step calendar rule (`from = 6 'months` is
+`add_calendar_months(origin, 6)`), and any other calendar duration is **E321**.
+In unanchored
 mode the classifier is inactive and `every = 1 'months` is fine.
 
 **When a scheduled time fires.** Every schedule form resolves to a list of
@@ -4491,7 +4506,9 @@ state. That includes `t_start`.
 > available in expressions. Full timepoint support is not yet implemented. The
 > built-in reserved identifiers `t_start` and `t_end` are always available
 > regardless. Each entry is an instant position (§2.1) and is checked as one:
-> under an origin `peak = origin + 6 'months` is **E321**.
+> under an origin `peak = origin + 6 'months` is the calendar date six months
+> after the origin (the one-step calendar rule), and
+> `peak = origin + 6 'months + 6 'months` is **E321**.
 
 ```camdl
 timepoints {
@@ -4850,7 +4867,8 @@ intervention's `every` (§13.2): a regular schedule has one fixed step, so
 month boundaries. It is **E322**; list calendar-aligned times as
 `at = [date_range(origin, add_calendar_years(origin, 1), calendar_months = 1)]`,
 or write `every = 30 'days`. The `at` entries are instant positions (§2.1): a
-calendar duration in one is **E321**.
+single calendar step in one is its calendar date (the one-step calendar rule),
+and any other calendar duration is **E321**.
 
 ```camdl
 output { trajectories { at = [0, 30, 60, 90] } }   # snapshot only at these times
@@ -4998,8 +5016,9 @@ is meaningless inside a per-step propensity.
 at the last output time at or before `TIME` (the state *as of* `TIME`; values
 are never interpolated). `TIME` is an instant position (§2.1): a constant time
 expression — `date("2026-08-10")` under a declared `origin` (where a bare number
-draws **W325**, as an `at [...]` entry does, and a `'months`/`'years` literal is
-**E321**), or a number in model time —
+draws **W325**, as an `at [...]` entry does, and a `'months`/`'years` literal
+follows the one-step calendar rule: `value_at(I, 6 'months)` reads `I` six
+calendar months after the origin), or a number in model time —
 **or an observation anchor**: `last_obs` (the end of observed data),
 `first_obs` (its start), each optionally plus or minus a constant duration.
 
@@ -5022,7 +5041,9 @@ for is known only when the model runs, and a calendar month from a date depends
 on which date it is, so the resolved time would move with the data. Note that camdl writes durations with a leading tick
 (`1 'weeks`); a bare word (`1 weeks`) is **E115**, which names the tick form.
 The command line takes the opposite convention (`--to "last_obs + 8 weeks"`,
-bare words), because a tick is a shell-quoting hazard.
+bare words), because a tick is a shell-quoting hazard; under a declared
+`origin` it refuses a month or year offset the same way
+(`--to "last_obs + 6 months"` asks for `"last_obs + 183 days"`).
 
 An anchor is legal **only** as the whole time argument, optionally `±` a
 constant duration; folding it into a larger expression (`2 * last_obs`) is
