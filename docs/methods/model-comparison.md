@@ -327,7 +327,7 @@ weekly_cases = "cases.tsv" # the FULL series; rows past the boundary
 # are withheld from training automatically
 ```
 
-or, when the split already exists as files (e.g. from `camdl data split`):
+or, when the held-out rows are supplied as their own file:
 
 ```toml
 [data.observations]

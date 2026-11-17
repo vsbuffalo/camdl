@@ -1969,7 +1969,7 @@ pub(crate) fn whole_partition(
 
 /// The refusal for a partition that cannot be built; `cutoff` is the
 /// `holdout_after` value as written and the time it resolved to.
-fn partition_error(e: PartitionError, cutoff: Option<(&str, f64)>) -> String {
+pub(crate) fn partition_error(e: PartitionError, cutoff: Option<(&str, f64)>) -> String {
     let declared = |raw: &str, at: f64| format!("holdout_after = \"{raw}\" resolves to t = {at}");
     match (e, cutoff) {
         (PartitionError::NoTrainingRows { stream }, Some((raw, at))) => format!(

@@ -35,7 +35,6 @@ mod pfilter;        // used internally by fit runner for data loading
 mod prequential_out; // the one prequential.tsv/.json writer (gh#650)
 mod pfilter_cas;    // gh#147 (M3.3): pfilter-eval CAS identity (model/config/params/seed)
 mod caltime_load;   // dated-data loader: column detection + date→internal-time (2026-05-22)
-mod data;
 mod docs;           // `camdl docs <topic>` — embedded, version-locked usage docs
 mod fit;
 mod compare;
@@ -176,10 +175,6 @@ pub(crate) enum Command {
     /// See `camdl survey --help` for full notes on when to trust
     /// the output and the known limitations.
     Survey(args::SurveyArgs),
-
-    /// Data utilities
-    #[command(subcommand)]
-    Data(DataCmd),
 
     /// Browse cached runs as a table
     List(args::ListArgs),
@@ -379,20 +374,6 @@ pub(crate) enum FitCmd {
     Methods,
 }
 
-#[derive(Subcommand)]
-#[command(arg_required_else_help = true,
-          after_help = colored_help!("\
-Examples:
-  # Split a data TSV into training + holdout sets
-  camdl data split cases.tsv --at-time 100 \\
-      --train train.tsv --holdout holdout.tsv
-
-See `camdl data split --help` for full options."))]
-pub(crate) enum DataCmd {
-    /// Split a data TSV into train and holdout sets
-    Split(args::DataSplitArgs),
-}
-
 /// Offline lineage commands. `realize` replays an event log (from `camdl
 /// simulate --event-log`) into a line list; the projections are pure functions
 /// over a realized line list — no simulation re-run.
@@ -550,7 +531,6 @@ fn main() {
         Command::If2(a)                 => if2::cmd_if2(&a),
         Command::Profile(a)             => profile::cmd_profile(&a),
         Command::Survey(a)              => survey::cmd_survey(&a),
-        Command::Data(DataCmd::Split(a))=> data::cmd_data_split(&a),
         Command::Lineage(LineageCmd::Realize(a)) => lineage::cmd_lineage_realize(&a),
         Command::Lineage(LineageCmd::Tree(a)) => lineage::cmd_lineage_tree(&a),
         Command::Lineage(LineageCmd::Sojourn(a)) => lineage::cmd_lineage_sojourn(&a),

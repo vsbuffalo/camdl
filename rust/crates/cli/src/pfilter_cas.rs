@@ -60,6 +60,11 @@ pub struct PfilterCtx<'a> {
     /// `--allow-forcing-extrapolation`: the run may hold a forcing's end value
     /// outside its range (D44), so it is identity.
     pub allow_forcing_extrapolation: bool,
+    /// Under `--save-final-state` and the `--fit` config's `holdout_after`,
+    /// how many leading rows of each stream were bound (by stream name); every
+    /// later row was left out of the stored log-likelihood, so it is identity
+    /// (gh#1138). `None` when every bound row was scored.
+    pub training_rows: Option<&'a [(String, usize)]>,
     /// The resolved pfilter seed (the `seed` level hashes this).
     pub seed: u64,
 }
@@ -90,6 +95,11 @@ struct PfilterConfigLevel<'a> {
     /// one the literal pins.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     allow_forcing_extrapolation: bool,
+    /// The training rows a `--save-final-state` run under `holdout_after`
+    /// bound. The data is keyed already; this is what says the rows after
+    /// them were cut. Omitted without a cut, so every other run keeps its key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    training_rows: Option<&'a [(String, usize)]>,
 }
 
 /// Resolve a pfilter-eval leaf's identity: the four factored levels and the
@@ -121,6 +131,7 @@ pub fn resolve_pfilter(ctx: &PfilterCtx) -> Result<ResolvedPfilter, String> {
         data: &data_sorted,
         objective: ctx.objective,
         allow_forcing_extrapolation: ctx.allow_forcing_extrapolation,
+        training_rows: ctx.training_rows,
     };
 
     let model_digest = ModelDigest::from_model(
@@ -199,7 +210,7 @@ mod tests {
             particles: 100, replicates: 1, dt: 1.0,
             obs_block: "", flow_indices: &flow, data: &data,
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
-            allow_forcing_extrapolation: false,
+            allow_forcing_extrapolation: false, training_rows: None,
         };
         // The literal, verbatim from before the rewrite.
         let literal = serde_json::json!({
@@ -228,7 +239,7 @@ mod tests {
         let level = |objective| canonical_config_hash(&PfilterConfigLevel {
             particles: 100, replicates: 1, dt: 1.0,
             obs_block: "", flow_indices: &flow, data: &data, objective,
-            allow_forcing_extrapolation: false,
+            allow_forcing_extrapolation: false, training_rows: None,
         }, &[]).unwrap();
         let literal = config_level(100, 1, 1.0, "", &[("cases", hh.as_str())]);
         assert_eq!(level(LikelihoodObjective::Full), literal,
@@ -249,11 +260,34 @@ mod tests {
             particles: 100, replicates: 1, dt: 1.0,
             obs_block: "", flow_indices: &flow, data: &data,
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
-            allow_forcing_extrapolation,
+            allow_forcing_extrapolation, training_rows: None,
         }, &[]).unwrap();
         let literal = config_level(100, 1, 1.0, "", &[("cases", hh.as_str())]);
         assert_eq!(level(false), literal, "off leaves the key unchanged");
         assert_ne!(level(true), literal, "the override must change the config hash");
+    }
+
+    /// The training rows a `--save-final-state` run under `holdout_after`
+    /// bound are identity: its stored log-likelihood covers fewer rows than
+    /// the same filter over the same files without the cut. Without a cut the
+    /// level is the literal (gh#1138).
+    #[test]
+    fn a_training_cut_rekeys_the_config_level() {
+        let hh = h(1);
+        let data: Vec<(&str, &str)> = vec![("cases", hh.as_str())];
+        let flow: Vec<u32> = Vec::new();
+        let level = |training_rows| canonical_config_hash(&PfilterConfigLevel {
+            particles: 100, replicates: 1, dt: 1.0,
+            obs_block: "", flow_indices: &flow, data: &data,
+            objective: crate::fit::config_v2::LikelihoodObjective::Full,
+            allow_forcing_extrapolation: false, training_rows,
+        }, &[]).unwrap();
+        let literal = config_level(100, 1, 1.0, "", &[("cases", hh.as_str())]);
+        let six = [("cases".to_string(), 6)];
+        let seven = [("cases".to_string(), 7)];
+        assert_eq!(level(None), literal, "no cut must leave the key unchanged");
+        assert_ne!(level(Some(&six)), literal, "a cut must change the config hash");
+        assert_ne!(level(Some(&six)), level(Some(&seven)), "the training rows are keyed");
     }
 
     /// A non-finite scored value must be REFUSED, not hashed. `json!` maps
