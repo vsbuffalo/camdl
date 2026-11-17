@@ -194,40 +194,119 @@ let is_comparison = function
   | Lt | Le | Gt | Ge | Eq | Neq -> true
   | Add | Sub | Mul | Div | Pow -> false
 
-(* Model time `t`, or `t` shifted by an offset (`t ± d`, `d + t`): the side of
-   a comparison that makes the other side a date. Returns the location of `t`. *)
-let model_time_side (e : expr) : loc option =
+(* [a ⋈ b] is [b ⋈' a]. *)
+let flip_comparison = function
+  | Lt -> Gt | Gt -> Lt | Le -> Ge | Ge -> Le
+  | (Eq | Neq | Add | Sub | Mul | Div | Pow) as op -> op
+
+(* Which names hold an instant. The census reads it from the declarations and
+   the expander from its context, so the two make the same positions. *)
+type instant_env = {
+  instant_name : string -> bool;     (* an `instant`-kind parameter *)
+  let_body     : string -> expr option;
+}
+
+(* Does [e] denote an instant (a point on the axis, not a duration)? `origin`,
+   `date(...)`, `add_calendar_*`, model time `t`, an observation anchor, an
+   `instant` parameter, a `let` of one, and an instant moved by a duration. *)
+let is_instant_operand (env : instant_env) (e : expr) : bool =
+  let rec go depth e =
+    depth < 32 &&
+    match e with
+    | EIdent (("origin" | "t" | "first_obs" | "last_obs"), _) -> true
+    | EIdent (n, _) | EIndex (n, _, _) ->
+      env.instant_name n
+      || (match env.let_body n with Some b -> go (depth + 1) b | None -> false)
+    | EFuncCall (("date" | "add_calendar_months" | "add_calendar_years"), _) -> true
+    | EBinOp (Add, a, b) -> go (depth + 1) a || go (depth + 1) b
+    | EBinOp (Sub, a, b) -> go (depth + 1) a && not (go (depth + 1) b)
+    | EUnOp (Total, a) -> go (depth + 1) a
+    | ECond (_, a, b) -> go (depth + 1) a && go (depth + 1) b
+    | EConst _ | EUnit _ | EBinOp _ | EUnOp _ | ESum _ | EFuncCall _ | EList _
+    | ERange _ | EObsAccess _ | ERunMember _ -> false
+  in
+  go 0 e
+
+(* How one operand of a comparison holds model time `t`, and so what the other
+   operand is.
+   - [Shifted]: `t`, or `t` moved by a duration (`t ± d`, `d + t`). The other
+     operand is a date.
+   - [Elapsed]: the time since an instant `X`, `t - X` (or `-(X - t)`). The
+     other operand is a duration `D`, and `t - X ⋈ D` is `t ⋈ X + D`.
+   - [Remaining]: the time until an instant `X`, `X - t` (or `-(t - X)`).
+     `X - t ⋈ D` is `t ⋈' X - D`, with the comparison flipped. *)
+type time_side =
+  | Shifted of loc
+  | Elapsed of { since : expr; tloc : loc }
+  | Remaining of { until : expr; tloc : loc }
+
+let time_side env (e : expr) : time_side option =
+  let inst = is_instant_operand env in
   match e with
-  | EIdent ("t", l) -> Some l
-  | EBinOp ((Add | Sub), EIdent ("t", l), _) | EBinOp (Add, _, EIdent ("t", l)) -> Some l
+  | EIdent ("t", l) -> Some (Shifted l)
+  | EBinOp (Sub, EIdent ("t", l), x)
+  | EUnOp (Neg, EBinOp (Sub, x, EIdent ("t", l))) when inst x ->
+    Some (Elapsed { since = x; tloc = l })
+  | EBinOp (Sub, x, EIdent ("t", l))
+  | EUnOp (Neg, EBinOp (Sub, EIdent ("t", l), x)) when inst x ->
+    Some (Remaining { until = x; tloc = l })
+  | EBinOp ((Add | Sub), EIdent ("t", l), _) | EBinOp (Add, _, EIdent ("t", l)) -> Some (Shifted l)
   | EConst _ | EUnit _ | EIdent _ | EIndex _ | EBinOp _ | EUnOp _ | ESum _
   | ECond _ | EFuncCall _ | EList _ | ERange _ | EObsAccess _ | ERunMember _ -> None
 
-(* The positions a node itself makes, with their sub-expression:
-   `t <op> e` / `e <op> t`, and the same with `t ± d` in place of `t`, makes
-   [e] an instant position; `t ± d` / `d + t` makes [d] a runtime offset.
-   Syntactic: `t` is the reserved model-time name (`reserved_time_names` in the
-   expander), so no binding can shadow it. *)
-let node_positions (e : expr) : Time_pos.any list =
+(* A comparison with model time, read as a comparison of `t` with a date: the
+   date (an instant position), the location of `t`, and the comparison with
+   the date replaced by a lowered expression for it. For a [Shifted] side the
+   date is the other operand as written, and the comparison keeps its shape;
+   for an elapsed or remaining time it is `X + D` or `X - D`, and the
+   comparison becomes `t ⋈ date`. *)
+type time_comparison = { date : expr; tloc : loc; with_date : expr -> expr }
+
+let time_comparison env (e : expr) : time_comparison option =
   match e with
   | EBinOp (op, l, r) when is_comparison op ->
-    (match model_time_side l, model_time_side r with
-     | Some tl, _ -> [Time_pos.Any (Time_pos.make Time_pos.Instant r tl)]
-     | None, Some tl -> [Time_pos.Any (Time_pos.make Time_pos.Instant l tl)]
-     | None, None -> [])
-  | EBinOp ((Add | Sub), EIdent ("t", l), d) | EBinOp (Add, d, EIdent ("t", l)) ->
-    [Time_pos.Any (Time_pos.make Time_pos.Runtime_offset d l)]
+    (* [side] holds `t`, [other] is what it is compared with, and [op'] is the
+       comparison read with [side] on the left. *)
+    let read side other op' rebuild_shifted =
+      match time_side env side with
+      | Some (Shifted tloc) -> Some { date = other; tloc; with_date = rebuild_shifted }
+      | Some (Elapsed { since; tloc }) ->
+        Some { date = EBinOp (Add, since, other); tloc;
+               with_date = (fun d -> EBinOp (op', EIdent ("t", tloc), d)) }
+      | Some (Remaining { until; tloc }) ->
+        Some { date = EBinOp (Sub, until, other); tloc;
+               with_date = (fun d -> EBinOp (flip_comparison op', EIdent ("t", tloc), d)) }
+      | None -> None
+    in
+    (match read l r op (fun d -> EBinOp (op, l, d)) with
+     | Some c -> Some c
+     | None -> read r l (flip_comparison op) (fun d -> EBinOp (op, d, r)))
   | EConst _ | EUnit _ | EIdent _ | EIndex _ | EBinOp _ | EUnOp _ | ESum _
-  | ECond _ | EFuncCall _ | EList _ | ERange _ | EObsAccess _ | ERunMember _ -> []
+  | ECond _ | EFuncCall _ | EList _ | ERange _ | EObsAccess _ | ERunMember _ -> None
+
+(* The positions a node itself makes, with their sub-expression: a comparison
+   with model time makes its date an instant position ([time_comparison]);
+   `t ± d` / `d + t` makes [d] a runtime offset. Syntactic: `t` is the
+   reserved model-time name (`reserved_time_names` in the expander), so no
+   binding can shadow it. *)
+let node_positions env (e : expr) : Time_pos.any list =
+  match time_comparison env e with
+  | Some { date; tloc; _ } -> [Time_pos.Any (Time_pos.make Time_pos.Instant date tloc)]
+  | None ->
+    (match e with
+     | EBinOp ((Add | Sub), EIdent ("t", l), d) | EBinOp (Add, d, EIdent ("t", l)) ->
+       [Time_pos.Any (Time_pos.make Time_pos.Runtime_offset d l)]
+     | EConst _ | EUnit _ | EIdent _ | EIndex _ | EBinOp _ | EUnOp _ | ESum _
+     | ECond _ | EFuncCall _ | EList _ | ERange _ | EObsAccess _ | ERunMember _ -> [])
 
 (* The direct sub-expressions of a node that are NOT time positions: the
    children the walks over ordinary expressions (E321 Rule 1, E360) descend
    into. A position's own expression is judged by its [Lower] function, so the
    walk must not judge it a second time. *)
-let ordinary_children (e : expr) : expr list =
+let ordinary_children env (e : expr) : expr list =
   match e with
-  | EBinOp (op, l, _) when is_comparison op && model_time_side l <> None -> [l]
-  | EBinOp (op, _, r) when is_comparison op && model_time_side r <> None -> [r]
+  | EBinOp (op, l, _) when is_comparison op && time_side env l <> None -> [l]
+  | EBinOp (op, _, r) when is_comparison op && time_side env r <> None -> [r]
   | EBinOp ((Add | Sub), (EIdent ("t", _) as t), _) | EBinOp (Add, _, (EIdent ("t", _) as t)) -> [t]
   | EFuncCall (fn, args) ->
     (match reduction_of_name fn with
@@ -246,8 +325,8 @@ let ordinary_children (e : expr) : expr list =
 
 (* Every `t`-comparison and `t`-offset position in an expression, at any depth
    (a position's own expression is searched too). *)
-let rec expression_positions (e : expr) : Time_pos.any list =
-  node_positions e @ List.concat_map expression_positions (Time_typing.subexprs e)
+let rec expression_positions env (e : expr) : Time_pos.any list =
+  node_positions env e @ List.concat_map (expression_positions env) (Time_typing.subexprs e)
 
 (* The time arguments of every reduction in an expression, at any depth. *)
 let rec reduction_positions ~loc (e : expr) : Time_pos.any list =
@@ -294,6 +373,14 @@ let instant_param_names (decls : declaration list) : string list =
           if pkind = PInstant then Some pname else None) ps
     | _ -> []) decls
 
+(* Which names hold an instant, from the declarations. *)
+let instant_env_of (decls : declaration list) : instant_env =
+  let instant_params = instant_param_names decls in
+  let lets = List.filter_map (fun d ->
+      match d with DLet lb -> Some (lb.lname, lb.lbody) | _ -> None) decls in
+  { instant_name = (fun n -> List.mem n instant_params);
+    let_body = (fun n -> List.assoc_opt n lets) }
+
 (* ── The census (§3.3) ─────────────────────────────────────────────────────── *)
 
 (* From here on, a fragile match (4) or a record pattern that omits a field (9)
@@ -305,13 +392,15 @@ let instant_param_names (decls : declaration list) : string list =
 
 (* What a declaration holds: [lowered], the positions an expansion site lowers
    through its kind's [Lower] function (declaration fields, forcing keywords,
-   reduction arguments, trigger windows); and [in_expr], the `t`-comparisons
-   and `t`-offsets inside ordinary expressions, which no site folds on its own
-   (the enclosing expression is lowered whole), so the expander judges them
-   from this list. *)
+   reduction arguments, trigger windows); and [in_expr], the ordinary
+   expressions whose `t`-comparisons and `t`-offsets are positions. No site
+   folds those on its own (the enclosing expression is lowered whole), so the
+   expander judges them from the census; which they are depends on which names
+   hold an instant ([instant_env]), so they are found once the whole model has
+   been read. *)
 type found = {
   lowered : Time_pos.any list;
-  in_expr : Time_pos.any list;
+  in_expr : expr list;
   (* A value given to an `instant` parameter (a scenario's `set`, a prior's
      location argument), with the name diagnostics give it. Resolved as an
      ordinary expression where it is used, so, like [in_expr], judged from
@@ -328,7 +417,7 @@ let any p = Time_pos.Any p
 let field p = { lowered = [any p]; in_expr = []; values = [] }
 let fields ps = { lowered = List.map any ps; in_expr = []; values = [] }
 let opt f = function None -> none | Some x -> f x
-let in_exprs es = { lowered = []; in_expr = List.concat_map expression_positions es; values = [] }
+let in_exprs es = { lowered = []; in_expr = es; values = [] }
 
 let action_exprs (a : action_decl) : expr list =
   match a with
@@ -477,14 +566,17 @@ let found_of (decls : declaration list) : found =
   let instant_params = instant_param_names decls in
   cat (List.map (decl_found ~instant_params) decls)
 
+let in_expr_positions decls (f : found) =
+  List.concat_map (expression_positions (instant_env_of decls)) f.in_expr
+
 (* Every time position in the model. *)
 let census (decls : declaration list) : Time_pos.any list =
   let f = found_of decls in
-  f.lowered @ f.in_expr @ List.map (fun (_, p) -> any p) f.values
+  f.lowered @ in_expr_positions decls f @ List.map (fun (_, p) -> any p) f.values
 
 (* The `t`-comparison and `t`-offset positions alone. *)
 let in_expression_positions (decls : declaration list) : Time_pos.any list =
-  (found_of decls).in_expr
+  in_expr_positions decls (found_of decls)
 
 (* The values given to `instant` parameters, with their names. *)
 let value_positions (decls : declaration list) : (string * Time_pos.instant Time_pos.t) list =
