@@ -666,15 +666,15 @@ JSON manifest for each that records the full `run_id`. Two runs of one problem
 keep separate predictives, and each file is attributable to the run it replays.
 
 The directory is also keyed by the predict options that shape its output —
-`--mode`, `--horizon`, `--n-draws`, `--seed`, `--stream`, `--scenario`/`--enable`/
-`--disable`, `--sweep`, `--by-chain` — resolved to the values used: the defaults
-write `predict/<run_id12>/`, any other set `predict/<run_id12>-<opts8>/` (the
-first 8 hex of the SHA-256 of the options' JSON), and `predictive.json` /
-`observed.json` record them under `options`. Two predicts of one run with
-different options are two artifacts, so neither overwrites the other, and
-`fit table --quantity` reads the address its own free-forward derivation writes.
-`--exclude-chains` and `--quantities` key sub-addresses inside the directory
-(`predictive-excl3/`, `quantities-<key8>/`).
+`--mode`, `--horizon`, `--n-draws`, `--seed`, `--stream`,
+`--scenario`/`--enable`/ `--disable`, `--sweep`, `--by-chain` — resolved to the
+values used: the defaults write `predict/<run_id12>/`, any other set
+`predict/<run_id12>-<opts8>/` (the first 8 hex of the SHA-256 of the options'
+JSON), and `predictive.json` / `observed.json` record them under `options`. Two
+predicts of one run with different options are two artifacts, so neither
+overwrites the other, and `fit table --quantity` reads the address its own
+free-forward derivation writes. `--exclude-chains` and `--quantities` key
+sub-addresses inside the directory (`predictive-excl3/`, `quantities-<key8>/`).
 
 The free-forward replay projects each row off its own recorded trajectories, so
 it records a snapshot at every time a row reads — each data time and each
@@ -842,8 +842,8 @@ it does not do is discard the objects that computed. Two kinds are recorded:
 - `evaluation_failed`, at `"free_forward"` — the tail as a whole refused. The
   one-step-ahead band is data-conditioned and never reaches the forecast
   horizon, so it cannot be invalidated by this: it is written, the tail's
-  failure is recorded, and the run exits 1. `--mode one_step` remains the way
-  to ask for that half alone — and because such a run never builds a tail, a
+  failure is recorded, and the run exits 1. `--mode one_step` remains the way to
+  ask for that half alone — and because such a run never builds a tail, a
   scenario it could not have honoured is a plain usage error there, refused
   outright.
 - `non_finite`, at `{"quantity": "<name>"}` with the `draw` that produced it —
