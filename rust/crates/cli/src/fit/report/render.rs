@@ -699,12 +699,8 @@ pub(crate) fn if2_block(version_lead: bool, report: &MethodReport, if2: &If2Run)
         headline.push_str("  (loglik-eval, max across chains)");
     }
     out.push(plain(headline));
-    if let Some(ref v) = state.camdl_version {
-        if v != crate::version::VERSION_SHORT {
-            out.push(indented("                ",
-                format!("⚠ stale: produced by {}, current is {}", v, crate::version::VERSION_SHORT),
-                Style::Warn));
-        }
+    if let Some(note) = state.camdl_version.as_deref().and_then(|v| crate::version::build_note(v, str::to_string)) {
+        out.push(indented("                ", format!("⚠ {note}"), Style::Warn));
     }
     out.push(Line::default());
 

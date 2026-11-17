@@ -615,14 +615,20 @@ order, and the spelling of a float all discarded, `[estimate]` /
 run records that identity for each config it was written or reused from, in its
 `run.json` as `inputs.config_identities`, and a `fit.toml` handle names the run
 whose list holds the file's identity as the file now reads — not the run the
-problem folder's `fit.toml.original` (the latest run's config) describes.
-Several such runs (several fit seeds, a `--starts` override, older camdl builds)
-are narrowed to the runs this camdl build wrote; if that leaves one, it is
-named, and otherwise the runs are listed. A run stored before runs recorded the
-identity cannot be matched by file and is named by its directory or `run_id`.
-Reflowing a comment changes `fit_toml_hash` and leaves the lookup identity
-alone; changing a particle count or a data path changes the identity and the
-config no longer resolves to that run.
+problem folder's `fit.toml.original` (the latest run's config) describes. The
+match is exact: the run named is the one this camdl build made (its
+`engine_version` is this binary's engine identity), the run `camdl fit run` of
+the file would reuse. A run another build made — another commit, or the same
+commit with other uncommitted changes — is never used in its place: when only
+other builds' runs match, the verb refuses and lists them, each with how its
+build differs ("stale" for another commit, "built from uncommitted changes" for
+the same one) and how to name it, by its run-id prefix or leaf directory.
+Several runs by this build (several fit seeds, a `--starts` override) are
+listed. A run stored before runs recorded the identity cannot be matched by file
+and is named by its directory or `run_id`. Reflowing a comment changes
+`fit_toml_hash` and leaves the lookup identity alone; changing a particle count
+or a data path changes the identity and the config no longer resolves to that
+run.
 
 The `schema` block lets a consumer facet any stream and label panels with no DSL
 parsing:
