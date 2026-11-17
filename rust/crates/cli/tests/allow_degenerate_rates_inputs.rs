@@ -172,3 +172,64 @@ fn profile_applies_the_fit_configs_allow_degenerate_rates() {
     assert!(!ll.is_empty() && ll.iter().all(|l| l.is_finite()),
         "`[config] allow_degenerate_rates = true` must reach every cell, got {ll:?}\n{}", text(&on));
 }
+
+// ── pfilter ─────────────────────────────────────────────────────────────────
+
+/// Every stored pfilter leaf under `<dir>/out/pfilters/`: its run id and the
+/// loglik its record holds.
+fn pfilter_leaves(dir: &Path) -> Vec<(String, f64)> {
+    fn walk(d: &Path, out: &mut Vec<(String, f64)>) {
+        if let Ok(b) = std::fs::read_to_string(d.join("run.json")) {
+            let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+            if v["kind"] == "pfilter" {
+                out.push((v["run_id"].as_str().unwrap().to_string(),
+                          v["inputs"]["loglik"].as_f64().unwrap()));
+            }
+        }
+        for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
+            if e.path().is_dir() { walk(&e.path(), out) }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&dir.join("out/pfilters"), &mut out);
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// Over ten days some particles reach `S + I = 0` and some do not, so the
+/// filter scores both with and without the flag, to different values. They are
+/// two computations and must be two leaves. Before the fix the flag was not in
+/// pfilter's identity: the second run printed its own loglik and reported the
+/// first's leaf as "cached", so the store held one value for both.
+#[test]
+fn pfilter_keys_allow_degenerate_rates() {
+    let tmp = tempdir("pfilter");
+    std::fs::write(tmp.0.join("model.camdl"), model(10, 0.1)).unwrap();
+    std::fs::write(tmp.0.join("cases.tsv"), cases(10)).unwrap();
+    let run = |extra: &[&str]| {
+        let mut args = vec![
+            "pfilter", "model.camdl", "--param", "beta=1", "--param", "gamma=1",
+            "--data", "cases.tsv", "--particles", "50", "--seed", "1",
+        ];
+        args.extend_from_slice(extra);
+        let o = camdl(&tmp.0, &args);
+        assert!(o.status.success(), "{}", text(&o));
+        String::from_utf8_lossy(&o.stdout).trim().parse::<f64>().unwrap()
+    };
+    let without = run(&[]);
+    let with = run(&["--allow-degenerate-rates"]);
+    assert!((without - with).abs() > 1e-6,
+        "the control: the flag changes this filter's loglik ({without} vs {with})");
+
+    let leaves = pfilter_leaves(&tmp.0);
+    assert_eq!(leaves.len(), 2,
+        "a run with --allow-degenerate-rates and one without must be two leaves, got {leaves:?}");
+    let mut stored: Vec<f64> = leaves.iter().map(|l| l.1).collect();
+    stored.sort_by(f64::total_cmp);
+    let mut printed = vec![without, with];
+    printed.sort_by(f64::total_cmp);
+    for (s, p) in stored.iter().zip(&printed) {
+        assert!((s - p).abs() < 1e-3,
+            "each leaf holds its own run's loglik: stored {stored:?}, printed {printed:?}");
+    }
+}

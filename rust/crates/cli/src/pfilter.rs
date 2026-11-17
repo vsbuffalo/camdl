@@ -729,6 +729,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             flow_indices: &flow_indices,
             objective,
             allow_forcing_extrapolation: crate::forcing_extrapolation::allowed(),
+            allow_degenerate_rates: sim::eval_stats::allow_degenerate_rates(),
             training_rows: training_cut.as_ref().and_then(TrainingCut::identity),
             binomial: smc_config.binomial,
             seed,
