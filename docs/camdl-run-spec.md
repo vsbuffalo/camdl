@@ -5092,7 +5092,7 @@ A real `sims/` leaf record (hashes and paths abbreviated):
   "run_id": "467417eb…0258",
   "hash_version": 1,
   "ir_version": "0.30",
-  "engine_version": "0.1.0+<git>",
+  "engine_version": "<32-hex engine id>",
   "levels": [
     {
       "name": "model",
@@ -5160,7 +5160,7 @@ A real `sims/` leaf record (hashes and paths abbreviated):
       "1"
     ],
     "created_at": "2026-08-12T03:52:48Z",
-    "camdl_version": "0.1.0+<git>",
+    "camdl_version": "0.1.0+<git>[.dirty-<8-hex>]",
     "source_paths": ["<model>.camdl"]
   }
 }
@@ -5285,7 +5285,7 @@ retained row of `chain_c/trace.tsv`, which carries it.
 | `run_id`         | 64-hex                                     | the leaf address; the identity gate on every lookup                                            |
 | `hash_version`   | u16                                        | `HASH_VERSION` of the encoding that produced the hashes                                        |
 | `ir_version`     | string                                     | `ir/VERSION` at write time (e.g. `"0.30"`)                                                     |
-| `engine_version` | string                                     | `"{pkg_version}+{git-hash}"`                                                                   |
+| `engine_version` | string                                     | the engine's build fingerprint (`ENGINE_ID`, 32 hex); `provenance.camdl_version` is readable   |
 | `levels`         | `[{name, label, hash, schema_version}]`    | the factored identity in path order                                                            |
 | `deps`           | `[{run_id, kind, artifact, digest}]`       | consumed upstreams; omitted when empty                                                         |
 | `status`         | `"running"` \| `"completed"` \| `"failed"` | a plain string, not an object                                                                  |

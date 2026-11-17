@@ -2,6 +2,10 @@
 name = "sim"
 version = "0.1.0"
 edition = "2021"
+# `links` carries no native library: it is how `build.rs` hands sim's resolved
+# features to cli's build script (`DEP_CAMDL_SIM_FEATURES`), which folds them
+# into the engine's build fingerprint.
+links = "camdl-sim"
 
 # Four clippy lints are allowed crate-wide because each one asks for a change
 # this engine must not make. They are declared here, rather than as per-site

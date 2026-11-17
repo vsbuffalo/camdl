@@ -1,6 +1,8 @@
 mod args;
 #[cfg(test)]
 mod test_support;   // collision-free unique_temp_dir for unit tests (gh#153)
+#[cfg(test)]
+mod engine_fingerprint; // ENGINE_ID's fingerprint, also compiled into build.rs; tested here
 mod util;
 mod params_resolver;  // unified parameter-value resolver (2026-05-25 CLI UX rev 2)
 mod cas_read;       // generic RunRecord reader (new-format sims); transitional alongside run_meta (gh#147)
@@ -3177,7 +3179,7 @@ fn write_sim_ensemble(
     let ctx = crate::sim_ensemble_cas::EnsembleCtx {
         model: &cas.base_model,
         ir_version: ir::IR_VERSION.trim(),
-        engine_version: version::VERSION_SHORT,
+        engine_version: version::ENGINE_ID,
         stem: cas.model_stem.as_deref().unwrap_or("model"),
         backend: cas.backend,
         dt: cas.dt,

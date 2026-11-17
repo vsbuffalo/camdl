@@ -464,7 +464,7 @@ fn show_sim_record(out: &crate::out::Out, leaf: &cas_read::Leaf, rel_path: &str,
     out.report_line(format_args!("  {}  ({})",
         rec.provenance.created_at.as_deref().unwrap_or("?"),
         fmt_relative_time(created, SystemTime::now())));
-    out.report_line(format_args!("{}", style::stdout().paint("engine", Style::Dim))); out.report_line(format_args!("  {}", rec.engine_version));
+    out.report_line(format_args!("{}", style::stdout().paint("engine", Style::Dim))); out.report_line(format_args!("  {}", engine_line(rec)));
     out.report_line(format_args!("{}", style::stdout().paint("argv", Style::Dim)));
     out.report_line(format_args!("  {}", rec.provenance.argv.join(" ")));
 }
@@ -706,7 +706,7 @@ fn show_profile_record(out: &crate::out::Out, leaf: &cas_read::Leaf, rel_path: &
     out.report_line(format_args!("  {}  ({})",
         rec.provenance.created_at.as_deref().unwrap_or("?"),
         fmt_relative_time(created, SystemTime::now())));
-    out.report_line(format_args!("{}", style::stdout().paint("engine", Style::Dim))); out.report_line(format_args!("  {}", rec.engine_version));
+    out.report_line(format_args!("{}", style::stdout().paint("engine", Style::Dim))); out.report_line(format_args!("  {}", engine_line(rec)));
 }
 
 /// Render a new-format (`RunRecord`) pfilter-eval leaf: the four factored
@@ -754,7 +754,7 @@ fn show_pfilter_record(out: &crate::out::Out, leaf: &cas_read::Leaf, rel_path: &
     out.report_line(format_args!("  {}  ({})",
         rec.provenance.created_at.as_deref().unwrap_or("?"),
         fmt_relative_time(created, SystemTime::now())));
-    out.report_line(format_args!("{}", style::stdout().paint("engine", Style::Dim))); out.report_line(format_args!("  {}", rec.engine_version));
+    out.report_line(format_args!("{}", style::stdout().paint("engine", Style::Dim))); out.report_line(format_args!("  {}", engine_line(rec)));
 }
 
 /// Render a new-format (`RunRecord`) survey leaf: the four factored levels
@@ -817,7 +817,7 @@ fn show_survey_record(out: &crate::out::Out, leaf: &cas_read::Leaf, rel_path: &s
     out.report_line(format_args!("  {}  ({})",
         rec.provenance.created_at.as_deref().unwrap_or("?"),
         fmt_relative_time(created, SystemTime::now())));
-    out.report_line(format_args!("{}", style::stdout().paint("engine", Style::Dim))); out.report_line(format_args!("  {}", rec.engine_version));
+    out.report_line(format_args!("{}", style::stdout().paint("engine", Style::Dim))); out.report_line(format_args!("  {}", engine_line(rec)));
 }
 
 /// Render a new-format (`RunRecord`) `SimEnsemble` leaf: the four factored
@@ -872,7 +872,7 @@ fn show_sim_ensemble_record(out: &crate::out::Out, leaf: &cas_read::Leaf, rel_pa
     out.report_line(format_args!("  {}  ({})",
         rec.provenance.created_at.as_deref().unwrap_or("?"),
         fmt_relative_time(created, SystemTime::now())));
-    out.report_line(format_args!("{}", style::stdout().paint("engine", Style::Dim))); out.report_line(format_args!("  {}", rec.engine_version));
+    out.report_line(format_args!("{}", style::stdout().paint("engine", Style::Dim))); out.report_line(format_args!("  {}", engine_line(rec)));
 }
 
 // ── cmd_cat ──────────────────────────────────────────────────────────────────
@@ -2330,6 +2330,17 @@ fn print_fit_runs_table(out: &crate::out::Out, folders: &[FitFolder], rows: &[Fi
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
+
+/// The `engine` line of a record: the readable version that ran it and the
+/// engine's build fingerprint (`run.json`'s `engine_version`), e.g.
+/// `0.4.0+abc1234.dirty-3f9c21e0 (engine 9514b53cefba5cfc…)`.
+fn engine_line(rec: &runid::RunRecord) -> String {
+    let id = &rec.engine_version;
+    match rec.provenance.camdl_version.as_deref() {
+        Some(v) if v != id => format!("{v} (engine {})", id),
+        _ => id.clone(),
+    }
+}
 
 #[cfg(test)]
 mod tests {

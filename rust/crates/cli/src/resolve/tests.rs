@@ -1015,3 +1015,42 @@ fn golden_run_ids_match_the_reference_table() {
         );
     }
 }
+
+/// Fail closed (proposal 2026-11-17 §1a): a build whose engine fingerprint is
+/// incomplete may share its `ENGINE_ID` with another build's code, so it never
+/// serves a stored leaf. It computes, and the leaf it would have read is set
+/// aside in `.quarantine/`, never deleted.
+#[test]
+fn a_build_with_an_incomplete_engine_identity_never_reads_a_stored_leaf() {
+    use crate::version::EngineReuse;
+    let m = tiny_model();
+    let out = m.output.times.clone();
+    let rt = resolve_trajectory(&ctx(&m, &out, params_empty(), 100.0, 1, 1)).unwrap();
+    let artifact = ResolvedArtifact {
+        kind: ArtifactKind::Sim,
+        levels: rt.levels.clone(),
+        run_id: rt.run_id,
+        display_inputs: rt.display_inputs.clone(),
+    };
+    let root = crate::test_support::unique_temp_dir("fail_closed_reuse");
+    let store = FsCasStore::new(&root);
+    let calendar = ir::caltime::CalendarAxis::parse("days", None).unwrap();
+    let meta = RecordMeta::new("0.7", "sir.camdl", None, calendar);
+    let mut files = runid::Artifacts::new();
+    files.insert("traj.tsv", b"time\n0\n".to_vec());
+    begin_resolved_write(&store, &root, &artifact, &meta, WriteMode::Atomic(files)).unwrap();
+
+    let reusable = check_reuse_with(&store, &root, &artifact, WritePolicy::Reuse, EngineReuse::Reusable).unwrap();
+    assert!(matches!(reusable, ReuseVerdict::CacheHit { .. }), "a determined build reuses the stored leaf");
+
+    let unreusable = EngineReuse::Unreusable { missing: "rustc" };
+    assert_eq!(engine_write_policy(WritePolicy::Reuse, unreusable), WritePolicy::Force);
+    let verdict = check_reuse_with(&store, &root, &artifact, WritePolicy::Reuse, unreusable).unwrap();
+    assert!(matches!(verdict, ReuseVerdict::MustRun), "an undetermined build computes");
+    assert!(
+        runid::find_leaf(&root, ArtifactKind::Sim, &artifact.levels).is_none(),
+        "the stored leaf is no longer servable"
+    );
+    assert!(root.join(".quarantine").read_dir().unwrap().next().is_some(), "it was quarantined, not deleted");
+    let _ = std::fs::remove_dir_all(&root);
+}

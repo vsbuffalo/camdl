@@ -1814,7 +1814,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         crate::profile_cas::resolve_profile_point(&crate::profile_cas::ProfilePointCtx {
             model: &model,
             ir_version: &ir_version_str,
-            engine_version: crate::version::VERSION_SHORT,
+            engine_version: crate::version::ENGINE_ID,
             stem: &stem_label,
             method_name: &algorithm,
             data: &data_hashes,
@@ -1964,11 +1964,18 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // `remaining` hold indices into `resolved_jobs`.
     let mut cached: Vec<usize> = Vec::new();
     let mut remaining: Vec<usize> = Vec::new();
+    // A build whose identity is incomplete reuses no stored point: each is
+    // displaced (quarantined) and recomputed (`engine_write_policy`).
+    let reuse = crate::resolve::engine_write_policy(crate::resolve::WritePolicy::Reuse, crate::version::ENGINE_REUSE)
+        == crate::resolve::WritePolicy::Reuse;
     for (ji, (_, _, _, resolved, cas_path)) in resolved_jobs.iter().enumerate() {
-        if matches!(
-            store.lookup(cas_path, &runid::LeafIdentity::new(resolved.run_id)),
-            runid::Lookup::Hit(_)
-        ) {
+        let id = runid::LeafIdentity::new(resolved.run_id);
+        if !reuse {
+            if let Err(e) = store.displace(cas_path, &id) {
+                out.fail(format!("error: cannot displace stored profile point {}: {e}", cas_path.display()));
+            }
+        }
+        if reuse && matches!(store.lookup(cas_path, &id), runid::Lookup::Hit(_)) {
             cached.push(ji);
         } else {
             remaining.push(ji);

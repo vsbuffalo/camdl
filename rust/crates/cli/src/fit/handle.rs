@@ -772,7 +772,7 @@ fn resolve_config(path: &Path) -> Result<(LeafRef, FitConfig), ResolveError> {
     if matches.len() > 1 {
         let (this_build, other): (Vec<_>, Vec<_>) = matches
             .into_iter()
-            .partition(|l| l.record.engine_version == crate::version::VERSION_SHORT);
+            .partition(|l| l.record.engine_version == crate::version::ENGINE_ID);
         if this_build.len() == 1 {
             crate::out::detached().say(format_args!(
                 "note: {} also matches {} run(s) by other camdl builds; using this build's",
@@ -1026,7 +1026,7 @@ cooling = 0.7
         };
         let rec = serde_json::json!({
             "format_version": 1, "kind": "fit_method", "run_id": "ab".repeat(32),
-            "hash_version": 1, "calendar": {"days_per_unit": 1.0, "origin": null, "time_unit": "days"}, "ir_version": "0.7", "engine_version": crate::version::VERSION_SHORT,
+            "hash_version": 1, "calendar": {"days_per_unit": 1.0, "origin": null, "time_unit": "days"}, "ir_version": "0.7", "engine_version": crate::version::ENGINE_ID,
             "levels": [], "status": "completed", "artifacts": {}, "inputs": inputs,
         });
         std::fs::write(leaf.join("run.json"), rec.to_string()).unwrap();

@@ -92,8 +92,13 @@ fn cas_first_run_writes_cache_and_metadata() {
     assert_eq!(level_label(&meta, "seed"), "seed_42");
     assert_eq!(level_label(&meta, "scenario"), "baseline");
     assert!(meta["provenance"]["argv"].as_array().unwrap().len() >= 4);
-    assert!(meta["engine_version"].as_str().unwrap().contains('+'),
-        "engine_version should include git hash suffix");
+    // `engine_version` is the engine's build fingerprint (ENGINE_ID, 128
+    // bits of hex); the readable `<release>+<commit>` is provenance.
+    let engine = meta["engine_version"].as_str().unwrap();
+    assert!(engine.len() == 32 && engine.bytes().all(|b| b.is_ascii_hexdigit()),
+        "engine_version is the build fingerprint: {engine}");
+    assert!(meta["provenance"]["camdl_version"].as_str().unwrap().contains('+'),
+        "provenance.camdl_version is the readable version with its commit");
     assert!(meta["provenance"]["created_at"].as_str().is_some());
 }
 

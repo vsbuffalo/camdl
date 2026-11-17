@@ -718,7 +718,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         let ctx = crate::pfilter_cas::PfilterCtx {
             model: &model,
             ir_version: &ir_version_str,
-            engine_version: crate::version::VERSION_SHORT,
+            engine_version: crate::version::ENGINE_ID,
             stem: &stem,
             data: &data_hashes,
             params: &scored,
