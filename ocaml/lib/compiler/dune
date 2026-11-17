@@ -8,6 +8,11 @@
  (flags (:standard -w @8))
  (libraries ir yojson fmt unix))
 
+; index.mld: the compiler's overview page, for odoc and for the site's
+; internals index (make docs-internals).
+(documentation
+ (package camdl))
+
 (ocamllex (modules lexer))
 
 (menhir (modules parser))
