@@ -295,7 +295,7 @@ fn a_row_closing_past_the_horizon_is_forecast_not_refused() {
     let bin = skip_if_missing_binary();
     let tmp = setup("ending_on", MODEL_ENDING_ON, CASES);
 
-    let out = fit_then_predict(&bin, &tmp, &["--horizon", "free_forward"]);
+    let out = fit_then_predict(&bin, &tmp, &["--mode", "free_forward"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         out.status.success(),
@@ -357,7 +357,7 @@ fn a_windowed_tail_closes_at_its_label_and_widens_nothing() {
     let bin = skip_if_missing_binary();
     let tmp = setup("windowed", MODEL_WINDOWED, CASES_WINDOWED);
 
-    let out = fit_then_predict(&bin, &tmp, &["--horizon", "free_forward"]);
+    let out = fit_then_predict(&bin, &tmp, &["--mode", "free_forward"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         out.status.success(),
@@ -462,7 +462,7 @@ fn fit_predict_on_the_real_shaped_record_emits_through_the_horizon() {
         .expect("the model states its horizon in days");
     assert!(horizon > last_obs, "the fixture must have a forecast tail to emit");
 
-    let out = fit_then_predict(&bin, &tmp, &["--horizon", "free_forward"]);
+    let out = fit_then_predict(&bin, &tmp, &["--mode", "free_forward"]);
     assert!(
         out.status.success(),
         "fit predict must run on the real-shaped record:\nstdout={}\nstderr={}",
@@ -507,7 +507,7 @@ fn the_quantities_sidecar_stops_at_the_declared_horizon() {
     let bin = skip_if_missing_binary();
     let tmp = setup("quantities", &model_with_quantities(), CASES);
 
-    let out = fit_then_predict(&bin, &tmp, &["--horizon", "free_forward"]);
+    let out = fit_then_predict(&bin, &tmp, &["--mode", "free_forward"]);
     assert!(
         out.status.success(),
         "fit predict failed:\nstdout={}\nstderr={}",
