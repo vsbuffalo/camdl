@@ -222,7 +222,9 @@ pub(crate) fn run_forecast(
     }).map_err(|f| f.to_string())?;
 
     let mut written = write_tables(&fc, model, job.schema, job.out_dir)?;
-    written.push(write_manifest(&fc, &job, &record, raw)?);
+    let refused: Vec<crate::fit::forecast_plan::StreamRefusal> =
+        fc.plan.refusals().iter().chain(&unbound).cloned().collect();
+    written.push(write_manifest(&fc, &job, &record, raw, &refused)?);
     out.say(format_args!(
         "fit predict: forecast from t = {} (the end of the training rows) to t = {}: {} \
          target(s) on {} stream(s), {} draws × {} particles",
@@ -315,6 +317,7 @@ fn write_manifest(
     job: &ForecastJob,
     record: &crate::run_meta::TrainingPartitionRecord,
     reach_as_written: &str,
+    refused: &[crate::fit::forecast_plan::StreamRefusal],
 ) -> Result<PathBuf, String> {
     let point = |t: f64| serde_json::json!({
         "t": t,
@@ -359,7 +362,7 @@ fn write_manifest(
         "target_sources": fc.plan.sources().iter()
             .map(|(s, src)| serde_json::json!({ "stream": s, "source": src.describe() }))
             .collect::<Vec<_>>(),
-        "refused": fc.plan.refusals().iter().map(|r| r.to_string()).collect::<Vec<_>>(),
+        "refused": refused.iter().map(|r| r.to_string()).collect::<Vec<_>>(),
         "n_draws": fc.n_draws,
         "n_particles": fc.n_particles,
         "samples_per_draw": FORECAST_SAMPLES_PER_DRAW.min(fc.n_particles),
