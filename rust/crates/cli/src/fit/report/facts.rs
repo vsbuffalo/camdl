@@ -102,8 +102,9 @@ pub struct SamplingPlan {
     pub proposal_sd: BTreeMap<String, f64>,
 }
 
-/// What a PMMH or `mh` method's sampling cost. Recorded in its summary JSON
-/// under `cost`; the values the `complete in` line prints.
+/// What a PMMH or `mh` method's sampling cost. Recorded in the leaf's
+/// execution record (`execution.json`) under `cost`, not in the result: these
+/// are wall times. The values the `complete in` line prints.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SamplingCost {
     /// Wall time of the chains, start of the first to end of the last.
@@ -231,7 +232,7 @@ pub fn verdict(result: &crate::fit::method_result::MethodResult) -> Verdict {
 pub struct Stored {
     /// The leaf directory, for display ([`display_path`]).
     pub leaf: String,
-    /// Wall time of the whole method, `run.json`'s `inputs.wall_time_seconds`.
+    /// Wall time of the whole method, the execution record's `wall_time_seconds` (`execution.json`).
     pub total_seconds: Option<f64>,
 }
 

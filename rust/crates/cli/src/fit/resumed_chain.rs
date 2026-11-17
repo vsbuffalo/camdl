@@ -9,7 +9,8 @@
 //!
 //! The lineage itself is recorded, not inferred: run.json `inputs.resume`
 //! ([`ResumeLineage`]) names the parent and the index at which every segment
-//! of the chain begins.
+//! of the chain begins. How long each segment took is the execution's, and is
+//! in the leaf's execution record (`fit::execution`).
 
 use std::path::Path;
 
@@ -206,9 +207,6 @@ pub(crate) struct Segment {
     /// Per chain, indexed by chain number: the index of the segment's first
     /// row.
     pub first_index: Vec<usize>,
-    /// The run's method wall time (its run.json `inputs.wall_time_seconds`);
-    /// `null` when that record has none.
-    pub wall_time_seconds: Option<f64>,
 }
 
 impl ResumeLineage {
@@ -220,7 +218,6 @@ impl ResumeLineage {
         index_column: &str,
         run_id: &str,
         boundary: Vec<usize>,
-        wall_time_seconds: f64,
     ) -> Result<Self, String> {
         let rec = crate::leaf_use::read(parent)?
             .ok_or_else(|| format!("{} holds no run.json", parent.display()))?
@@ -231,13 +228,11 @@ impl ResumeLineage {
             None => vec![Segment {
                 run_id: parent_run_id.clone(),
                 first_index: vec![0; boundary.len()],
-                wall_time_seconds: rec.inputs.get("wall_time_seconds").and_then(|v| v.as_f64()),
             }],
         };
         segments.push(Segment {
             run_id: run_id.to_string(),
             first_index: boundary,
-            wall_time_seconds: Some(wall_time_seconds),
         });
         Ok(ResumeLineage { parent_run_id, index_column: index_column.to_string(), segments })
     }
@@ -252,29 +247,10 @@ impl ResumeLineage {
                 .map_err(|e| format!("run.json inputs.{RESUME_KEY}: {e}")),
         }
     }
-
-    /// The whole chain's method wall time: the sum over its segments, `None`
-    /// when any segment's is unknown.
-    pub fn wall_time_seconds(&self) -> Option<f64> {
-        self.segments.iter().map(|s| s.wall_time_seconds).sum()
-    }
 }
 
 /// The run.json `inputs` key [`ResumeLineage`] is recorded under.
 pub(crate) const RESUME_KEY: &str = "resume";
-
-/// The method wall time behind every draw a leaf holds — the denominator of
-/// ESS per second. A fresh run's `inputs.wall_time_seconds`; for a resumed
-/// leaf, whose draws span every segment, the segments' total (`None` when one
-/// is unknown, rather than one segment's time set against the whole chain's
-/// ESS).
-pub(crate) fn chain_wall_time_seconds(inputs: &serde_json::Value) -> Option<f64> {
-    match ResumeLineage::read(inputs) {
-        Ok(Some(l)) => l.wall_time_seconds(),
-        Ok(None) => inputs.get("wall_time_seconds").and_then(|v| v.as_f64()),
-        Err(_) => None,
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -341,20 +317,5 @@ mod tests {
             0\t4\t0\n0\t4\t1\n0\t9\t0\n0\t9\t1\n0\t14\t0\n").unwrap();
         assert_eq!(inherited_saved_sweeps(&p, 12).unwrap(), vec![4, 9]);
         assert!(inherited_saved_sweeps(&d.join("absent.tsv"), 12).unwrap().is_empty());
-    }
-
-    #[test]
-    fn the_chain_wall_time_sums_every_segment() {
-        let seg = |w: Option<f64>| Segment { run_id: "r".into(), first_index: vec![0], wall_time_seconds: w };
-        let l = ResumeLineage {
-            parent_run_id: "p".into(), index_column: "step".into(),
-            segments: vec![seg(Some(2.0)), seg(Some(3.0))],
-        };
-        let inputs = serde_json::json!({ "wall_time_seconds": 3.0, RESUME_KEY: l });
-        assert_eq!(chain_wall_time_seconds(&inputs), Some(5.0));
-        let l = ResumeLineage { segments: vec![seg(None), seg(Some(3.0))], ..l };
-        let inputs = serde_json::json!({ "wall_time_seconds": 3.0, RESUME_KEY: l });
-        assert_eq!(chain_wall_time_seconds(&inputs), None, "an unknown segment leaves it unknown");
-        assert_eq!(chain_wall_time_seconds(&serde_json::json!({ "wall_time_seconds": 4.0 })), Some(4.0));
     }
 }

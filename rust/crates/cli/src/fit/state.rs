@@ -31,7 +31,6 @@ pub struct FitState {
     /// `method` store level the file sits under.
     pub method: String,
     pub seed: u64,
-    pub timestamp: String,
     /// Input hash identifying the computation that produced this state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_hash: Option<String>,
@@ -329,7 +328,6 @@ mod tests {
         FitState {
             method: "scout".into(),
             seed: 42,
-            timestamp: "2026-04-24T00:00:00Z".into(),
             input_hash: Some("deadbeef".into()),
             camdl_version: Some("0.1.0+test".into()),
             best_loglik: -123.45,

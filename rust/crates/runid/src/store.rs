@@ -1499,8 +1499,9 @@ fn lock_contents() -> String {
     format!("{}\n{}\n", std::process::id(), this_host())
 }
 
-/// This machine's host name, as a lock records it.
-fn this_host() -> &'static str {
+/// This machine's host name, as a lock records it (and a fit's execution
+/// record); empty when it cannot be read.
+pub fn this_host() -> &'static str {
     static HOST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     HOST.get_or_init(host_name)
 }

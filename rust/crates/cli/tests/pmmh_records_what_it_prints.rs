@@ -141,7 +141,9 @@ fn every_new_pmmh_record_matches_the_line_the_run_printed() {
             plan["n_chains"], plan["n_steps"], plan["n_particles"], plan["burn_in"], plan["thin"], plan["adapt"]),
         stderr.lines().find(|l| l.starts_with("pmmh: ")).unwrap());
     assert_eq!(plan["proposal_sd"]["beta"], 0.25);
-    let cost = &summary["cost"];
+    // The cost is wall time, so it is the execution's: `execution.json`.
+    let execution = json(&dir.join("execution.json"));
+    let cost = &execution["cost"];
     assert!(after(&stderr, "pmmh complete in").contains(&format!("({} PF evaluations,", cost["evaluations"])));
     assert!(after(&stderr, "pmmh complete in")
         .starts_with(&format!("{:.1}s", cost["sampling_seconds"].as_f64().unwrap())));

@@ -1089,7 +1089,6 @@ decibans_failed = true
         FitState {
             method: "scout".into(),
             seed: 1,
-            timestamp: "2026-04-19T00:00:00Z".into(),
             input_hash: None, camdl_version: None,
             best_loglik,
             initial_loglik: f64::NEG_INFINITY,

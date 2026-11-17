@@ -1082,7 +1082,8 @@ fn load_method_facts(
     }
     let stored = Some(crate::fit::report::Stored {
         leaf: crate::fit::report::display_path(dir),
-        total_seconds: inputs.get("wall_time_seconds").and_then(|v| v.as_f64()),
+        total_seconds: crate::fit::execution::Execution::read(dir).ok().flatten()
+            .and_then(|e| e.wall_time_seconds),
     });
     Ok(MethodFacts {
         name: resolved.name.clone(),
@@ -1525,7 +1526,6 @@ mod tests {
         FitState {
             method: "scout".into(),
             seed: 42,
-            timestamp: "2026-04-25T00:00:00Z".into(),
             input_hash: Some("deadbeef".into()),
             camdl_version: Some(version::VERSION_SHORT.into()),
             best_loglik: -3804.9,
