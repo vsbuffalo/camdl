@@ -1250,12 +1250,23 @@ pub fn print_preflight(
     let schedule = config.if2_config.cooling;
     let (frac, target_iters) = (schedule.fraction, schedule.target_iters);
     let iters = config.if2_config.n_iterations;
-    let n_obs = config.observations.len();
+    // IF2 perturbs and cools once per assimilation event — a union index where
+    // some stream holds a value (D72) — not once per stop of the union axis,
+    // which also holds `NA` rows and declared period starts. Count them the
+    // way the run does, from the same bind. A bind that fails here already
+    // failed when `config.observations` was built, so it cannot be reached;
+    // fall back to the stop count rather than panicking in a print.
+    let n_obs = sim::inference::BoundObs::bind(
+        config.compiled.model.simulation.t_start,
+        stream_specs_from_obs_streams(&config.streams),
+    )
+    .map(|(bound, _)| bound.n_assimilation_events())
+    .unwrap_or(config.observations.len());
 
     let rw_at = |iter: usize| schedule.multiplier_at_iter(n_obs, iter);
 
     out.say(format_args!(
-        "\ncooling: cf50={:.2}, reached at iter {} (target), over a {}-iteration run × {} observations",
+        "\ncooling: cf50={:.2}, reached at iter {} (target), over a {}-iteration run × {} observed times",
         frac, target_iters, iters, n_obs
     ));
     out.say(format_args!("  iter {:3}: rw_sd at {:.1}%", 1, rw_at(1) * 100.0));

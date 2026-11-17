@@ -1388,6 +1388,20 @@ impl BoundObs {
         &self.times
     }
 
+    /// How many union indices are assimilation events: some stream scheduled
+    /// there holds a value (not a hole). The same rule as
+    /// [`ObservationModel::assimilates_at`](super::traits::ObservationModel::assimilates_at)
+    /// on the bound model (D72); IF2 perturbs and cools once per such event,
+    /// so this is the count its cooling schedule is sized from.
+    pub fn n_assimilation_events(&self) -> usize {
+        (0..self.times.len())
+            .filter(|&u| self.streams.iter().any(|s| match s.at_union[u] {
+                Some(local) => s.cells[local].is_some(),
+                None => false,
+            }))
+            .count()
+    }
+
     /// What stream `stream_idx`'s observations are — the declared periods, if
     /// it declared any. The scoring window a consumer needs to label a flow
     /// column, decide a reset schedule, or refuse a `t`-referencing likelihood
