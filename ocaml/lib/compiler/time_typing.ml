@@ -10,7 +10,11 @@
     One written in ['months] or ['years] is calendar-valued: the compiler
     converts it to an average length (a month is 365.2425/12 days), which is
     not the distance from one calendar date to the same date a month later,
-    so moving an instant by it gives a date the author did not mean.
+    so moving an instant by it would give a date the author did not mean.
+    The one exception is a date position, such as [simulate { to }] or an
+    [at] entry, where one calendar step from a known date is that calendar
+    date; there the expander's [Calendar_reading] decides, in place of
+    {!walk_rule1}.
 
     {@camdl[
       time_unit = 'days
@@ -25,14 +29,15 @@
     These distinctions are made on the syntax tree, where an instant is
     still visible: name resolution turns [date(...)] and [origin] into plain
     numbers of time units since the origin, so in the IR an instant cannot be
-    told from a duration. So
-    [Expander.check_surface_time_typing] runs this module's checks inside
-    expansion, after the declaration and [let]-cycle checks and before any
-    expression is resolved. It builds an {!env}, calls the classifier and the
-    walks below on every expression in a time position (simulation bounds,
-    schedules, recurring cadences, observation windows, reactive triggers,
-    transition rates, initial values and others), and emits the diagnostics
-    itself. This module emits nothing: it supplies {!classify}, which assigns
+    told from a duration. The expander uses this module in two places, and
+    emits the diagnostics itself. [Expander.check_surface_time_typing] runs
+    the walks below over every ordinary expression (transition rates, ODE
+    derivatives, [let] bodies, initial values, actions, priors and others)
+    after the declaration and [let]-cycle checks and before any expression is
+    resolved, skipping the time positions inside them through the walks'
+    [children] argument. The lowering function of each time position in
+    [Expander.Lower] calls the classifier and the walks on its own position
+    when it judges it. This module emits nothing: it supplies {!classify}, which assigns
     an expression a {!tclass}; {!walk_rule1}, which finds an instant moved by
     a calendar duration (E321); {!walk_instant_misuse}, which finds the
     arithmetic an instant does not have (E360, an {!instant_misuse}); and the
@@ -223,7 +228,9 @@ let subexprs (e : expr) : expr list =
 
    The walk descends through Cond branches, ESum bodies, BinOp
    sub-arms, etc. — anywhere a sub-expression may itself be an
-   Instant±Duration expression. *)
+   Instant±Duration expression. [children] chooses the sub-expressions it
+   descends into, all of them by default; the expander passes one that
+   skips the time positions inside an ordinary expression. *)
 let rec walk_rule1 ?(children = subexprs) env ~on_hit (e : expr) : unit =
   (match e with
    | EBinOp ((Add | Sub) as _op, l, r) ->
