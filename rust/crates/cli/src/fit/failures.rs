@@ -24,7 +24,7 @@ use serde::Serialize;
 /// The schema tag of `report.json`. Bumped by any change to the failure shape,
 /// since it is the only thing telling a consumer what contract the file was
 /// written under.
-pub const REPORT_SCHEMA: &str = "camdl.predict-report/v1";
+pub const REPORT_SCHEMA: &str = "camdl.predict-report/v2";
 
 /// Where a deterministic failure occurred.
 ///
@@ -41,9 +41,14 @@ pub enum Site {
     /// every stream artifact are unaffected by it and are still written.
     Quantity(String),
     /// One stream's forecast, by its leaf name: the stream was refused a
-    /// forecast (no declared rhythm, a data column its likelihood reads). The
-    /// other streams' forecasts are still written.
+    /// forecast (no declared rhythm, a data column its likelihood reads), or
+    /// was asked for by `--stream` and cannot be forecast. The other streams'
+    /// forecasts are still written.
     ForecastStream(String),
+    /// One stream's free-forward or one-step predictive, by its leaf name:
+    /// asked for by `--stream` and cannot be produced. The other streams are
+    /// still written.
+    Stream(String),
 }
 
 impl Site {
@@ -53,6 +58,15 @@ impl Site {
             Site::FreeForward => "the free-forward tail".to_string(),
             Site::Quantity(name) => format!("quantity `{name}`"),
             Site::ForecastStream(name) => format!("the forecast of stream `{name}`"),
+            Site::Stream(name) => format!("stream `{name}`"),
+        }
+    }
+
+    /// The stream this site names, when it is one stream.
+    pub fn stream(&self) -> Option<&str> {
+        match self {
+            Site::ForecastStream(s) | Site::Stream(s) => Some(s),
+            Site::FreeForward | Site::Quantity(_) => None,
         }
     }
 }
@@ -88,20 +102,100 @@ impl DeterministicFailure {
     }
 }
 
+impl DeterministicFailure {
+    fn site(&self) -> &Site {
+        match self {
+            DeterministicFailure::EvaluationFailed { at, .. }
+            | DeterministicFailure::NonFinite { at, .. } => at,
+        }
+    }
+
+    fn reason(&self) -> &str {
+        match self {
+            DeterministicFailure::EvaluationFailed { reason, .. }
+            | DeterministicFailure::NonFinite { reason, .. } => reason,
+        }
+    }
+}
+
+/// Why a stream the model declares was left out of a predictive without
+/// failing it (D76). A skipped stream was never eligible, so it is named and
+/// the exit status is unaffected. A stream that was eligible, or was asked for
+/// by `--stream`, and cannot be produced is a [`DeterministicFailure`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipReason {
+    /// The fit bound no data file to the stream's source, so the stream has
+    /// no observed rows to condition on, compare against or continue.
+    NoBoundData,
+    /// Forecast mode: no period of the stream ends within the forecast's
+    /// reach, so it has no target.
+    NoTargetWithinHorizon,
+}
+
+impl SkipReason {
+    /// The reason's name, as `report.json` and the manifests spell it.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SkipReason::NoBoundData => "no_bound_data",
+            SkipReason::NoTargetWithinHorizon => "no_target_within_horizon",
+        }
+    }
+
+    /// The clause this reason takes on stderr.
+    pub fn describe(&self) -> &'static str {
+        match self {
+            SkipReason::NoBoundData => "the fit bound no data to it",
+            SkipReason::NoTargetWithinHorizon => "none of its periods ends within the forecast's reach",
+        }
+    }
+}
+
+/// A stream left out of a predictive, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SkippedStream {
+    /// The leaf (observation block) name.
+    pub stream: String,
+    pub reason: SkipReason,
+}
+
+impl SkippedStream {
+    /// The one line this skip prints on stderr.
+    pub fn describe(&self) -> String {
+        format!("skipped stream `{}` ({}): {}", self.stream, self.reason.as_str(), self.reason.describe())
+    }
+}
+
+/// The `failed` list of a predictive's manifest: each failure sited at one
+/// stream, as `{"stream", "reason"}`. A failure of the free-forward tail or of
+/// a quantity names no stream and is in `report.json` only.
+pub fn failed_streams(failures: &[DeterministicFailure]) -> Vec<serde_json::Value> {
+    failures
+        .iter()
+        .filter_map(|f| {
+            f.site().stream().map(|s| serde_json::json!({ "stream": s, "reason": f.reason() }))
+        })
+        .collect()
+}
+
 /// Write `report.json` beside the predictive artifacts and return its path.
 ///
 /// Written on every run, not only a failing one: `"failures": []` is the
 /// statement that the run computed everything it set out to, and a consumer
 /// that has to distinguish "no failures" from "no report" by the file's
 /// absence cannot tell either from a run that crashed before writing.
+/// `skipped` names the streams left out without failing the run (D76), and is
+/// written when empty for the same reason.
 pub fn write_report(
     segment: &Path,
     name: &str,
     failures: &[DeterministicFailure],
+    skipped: &[SkippedStream],
 ) -> Result<PathBuf, String> {
     let doc = serde_json::json!({
         "schema": REPORT_SCHEMA,
         "failures": failures,
+        "skipped": skipped,
     });
     let path = segment.join(format!("{name}.json"));
     let text = serde_json::to_string_pretty(&doc)
@@ -118,7 +212,7 @@ mod tests {
     fn a_clean_run_writes_an_empty_failure_list() {
         let dir = crate::test_support::unique_temp_dir("predict_report_clean");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = write_report(&dir, "report", &[]).unwrap();
+        let path = write_report(&dir, "report", &[], &[]).unwrap();
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v["schema"], REPORT_SCHEMA);
@@ -145,7 +239,7 @@ mod tests {
                 reason: "3 of 200 draws non-finite".to_string(),
             },
         ];
-        let path = write_report(&dir, "report", &failures).unwrap();
+        let path = write_report(&dir, "report", &failures, &[]).unwrap();
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v["failures"][0]["kind"], "evaluation_failed");

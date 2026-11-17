@@ -126,7 +126,7 @@ fn a_forecast_starts_at_the_training_extent_and_counts_each_streams_own_periods(
 
     let manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(fdir.join("forecast.json")).unwrap()).unwrap();
-    assert_eq!(manifest["schema"], "camdl.forecast/v1");
+    assert_eq!(manifest["schema"], "camdl.forecast/v2");
     assert_eq!(manifest["mode"], "fixed_origin");
     assert_eq!(manifest["origin"]["t"], 24.0, "the origin is the training extent");
     assert_eq!(manifest["horizon"]["duration"], 28.0);
@@ -221,29 +221,6 @@ cooling = 0.7"#, "");
                          "--sweep", "rho=0.4,0.6"]);
     assert!(!out.status.success());
     assert!(stderr(&out).contains("cannot be combined with --mode forecast"), "{}", stderr(&out));
-}
-
-/// A stream the fit bound no data to (here the weekly reports of a
-/// daily-only fit) is refused a forecast and named in `report.json`; the
-/// daily forecast is still written and the exit status is 1.
-#[test]
-fn a_stream_with_no_bound_data_is_refused_and_named() {
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path();
-    fit_bound(dir, PMMH, "", "daily_cases = \"daily_cases.tsv\"");
-    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "1 weeks", "--n-draws", "4"]);
-    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
-    let fdir = forecast_dir(dir);
-    assert!(fdir.join("forecast/daily_cases.tsv").is_file());
-    assert!(!fdir.join("forecast/weekly_cases.tsv").exists());
-    let report = std::fs::read_to_string(fdir.join("report.json")).unwrap();
-    assert!(report.contains("weekly_cases") && report.contains("binds no rows"), "{report}");
-    // forecast.json names it too: the artifact says what it left out.
-    let manifest: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(fdir.join("forecast.json")).unwrap()).unwrap();
-    let refused = manifest["refused"].as_array().unwrap();
-    assert!(refused.iter().any(|r| r.as_str().unwrap().contains("'weekly_cases'")
-        && r.as_str().unwrap().contains("binds no rows")), "{refused:?}");
 }
 
 /// A held-out row is named by its file and its position within that file

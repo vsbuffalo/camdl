@@ -1003,12 +1003,22 @@ Recorded in the maintainer's docket; each is reflected in the spec and above.
   `docs/dates.md` separates the fixed days of each year (periodic `on` ranges,
   as in He et al. 2010) from this year's real dates (piecewise forcing with date
   breakpoints), and states the drift of each year length (#1169).
+- **D76** (2026-11-18). Every `fit predict` mode follows one stream contract. A
+  stream the fit bound data to is eligible and produced. A stream with no bound
+  data that `--stream` did not name is skipped with the reason `no_bound_data`,
+  not refused, since it was never eligible: it is named on stderr and in
+  `report.json`, and the exit status is 0. The exit status is 1 when `--stream`
+  names a stream with no bound data, when any of several named streams cannot be
+  produced, when no stream is eligible, and when an eligible stream fails.
+  `forecast.json` and `predictive.json` list `produced`, `skipped` (each with
+  its reason) and `failed`, so completeness is read off the artifact; free
+  forward's silent skip of an unbound stream becomes the same named skip.
+  `--stream` becomes repeatable to make several named streams expressible.
 
-Open, not yet decided in the docket: D76, whether a forecast command fails when
-the model declares an observation stream the fit never bound data to; D77,
-whether the particle filter also skips resampling whenever all particle weights
-are exactly equal, as PGAS does; D78, whether the one-step-ahead band draws with
-the binomial sampler the fit ran, as the forecast now does.
+Open, not yet decided in the docket: D77, whether the particle filter also skips
+resampling whenever all particle weights are exactly equal, as PGAS does; D78,
+whether the one-step-ahead band draws with the binomial sampler the fit ran, as
+the forecast now does.
 
 ## Part 9. Documents this plan changes
 

@@ -1227,10 +1227,14 @@ pub struct FitPredictArgs {
     #[arg(value_name = "FIT", conflicts_with = "fit_flag")]
     pub fit_pos: Option<String>,
 
-    /// Restrict to one logical stream. Accepts the logical name (`onset`) or an
-    /// expanded leaf name (`onset_Bo`), which maps up to its logical stream.
+    /// Restrict to the named streams (repeatable). Each is a logical name
+    /// (`onset`, every one of its leaves) or an expanded leaf name (`onset_Bo`).
+    /// Without it, every stream the fit bound data to is predicted and a stream
+    /// with no bound data is skipped and named; a named stream that cannot be
+    /// produced (no bound data, or refused) makes the exit status 1, with the
+    /// other streams still written.
     #[arg(long, value_name = "STREAM")]
-    pub stream: Option<String>,
+    pub stream: Vec<String>,
 
     /// Prospective scenario overlay (repeatable; conflicts with --enable/--disable).
     /// Each `--scenario NAME` selects a model `scenarios {}` preset; the free-forward
