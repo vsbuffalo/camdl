@@ -299,31 +299,51 @@ fn a_zero_denominator_runs_and_warns_rather_than_refusing() {
          than zero-effort:\n{stderr}");
 }
 
-/// gh#812: a zero-effort row and a missing row contribute identically, so the
-/// two fits must agree — bit-identically, which is why the kernel
-/// short-circuits to a literal 0.0 rather than letting the general formula
-/// reach 0 to lgamma round-off.
+/// gh#812: a zero-effort row and a missing row contribute identically — a
+/// likelihood term of exactly zero, which is why the kernel short-circuits to
+/// a literal 0.0 rather than letting the general formula reach 0 to lgamma
+/// round-off.
+///
+/// The two are not the same run end to end. A row holding a value (`0` of `0`)
+/// is an assimilation event, so the filter resamples there (on equal weights);
+/// an `NA` row is not, so it does not (D72). The resampling draw spent at the
+/// zero-effort row moves every later draw, so the two filters agree exactly up
+/// to and including that row and are different, equally valid realisations
+/// after it. This pins the part that is the claim: same seed, the per-step
+/// log-likelihood increments agree at t = 1 and are exactly zero at t = 2.
 #[test]
 fn a_zero_denominator_scores_exactly_as_a_hole_does() {
     let camdl = camdl_bin();
     let tmp = tempdir("zero_vs_na");
     let ir = write_model(tmp.path());
+    let zero = write_zero_denom_data(tmp.path());
+    let na = write_zero_as_na_data(tmp.path());
 
-    let zero = write_if2_toml(tmp.path(), &ir, &write_zero_denom_data(tmp.path()));
-    let na_dir = tmp.path().join("na");
-    std::fs::create_dir_all(&na_dir).unwrap();
-    let ir2 = write_model(&na_dir);
-    let na = write_if2_toml(&na_dir, &ir2, &write_zero_as_na_data(&na_dir));
-
-    let o1 = run_fit(&camdl, &zero, "1");
-    let o2 = run_fit(&camdl, &na, "1");
-    let ll1 = best_loglik(&String::from_utf8_lossy(&o1.stdout), &String::from_utf8_lossy(&o1.stderr));
-    let ll2 = best_loglik(&String::from_utf8_lossy(&o2.stdout), &String::from_utf8_lossy(&o2.stderr));
-
-    assert!(ll1.is_some() && ll2.is_some(), "both fits must produce a loglik");
-    assert_eq!(ll1, ll2,
-        "a zero-effort row and a missing row must score identically — got \
-         {ll1:?} (n = 0) vs {ll2:?} (NA)");
+    let trace = |data: &Path, tag: &str| -> Vec<(String, String)> {
+        let path = tmp.path().join(format!("{tag}.trace.tsv"));
+        let out = Command::new(&camdl).env_remove("CLICOLOR_FORCE")
+            .arg("pfilter").arg(&ir)
+            .args(["--scenario", "baseline", "--particles", "200", "--seed", "1"])
+            .arg("--data").arg(data)
+            .arg("--trace").arg(&path)
+            .args(["--no-store", "--no-progress"])
+            .env("CAMDL_SKIP_VERSION_CHECK", "1")
+            .output().unwrap();
+        assert!(out.status.success(), "pfilter {tag}: {}", String::from_utf8_lossy(&out.stderr));
+        std::fs::read_to_string(&path).unwrap().lines().skip(1)
+            .map(|l| {
+                let c: Vec<&str> = l.split('\t').collect();
+                (c[0].to_string(), c[1].to_string())
+            })
+            .collect()
+    };
+    let z = trace(&zero, "zero");
+    let n = trace(&na, "na");
+    assert_eq!(z[0], n[0], "t = 1: the step before the row must agree exactly");
+    assert_eq!(z[1], ("2".to_string(), "0.0000".to_string()),
+        "the zero-effort row contributes exactly zero: {z:?}");
+    assert_eq!(n[1], ("2".to_string(), "0.0000".to_string()),
+        "the missing row contributes exactly zero: {n:?}");
 }
 
 /// gh#812 does not relax the half of the check that matters: a positive count
