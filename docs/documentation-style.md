@@ -582,7 +582,190 @@ authored, not assembled.
 statistical interpretations, limitations, and the difference between evidence
 and convenience. Correctness has priority over elegance.
 
-## 10. Final editorial checklist
+## 10. Documenting the code itself
+
+The site's internals pages describe the compiler's types and the runtime's
+types, and they are generated from the source. Nobody writes them by hand: a
+generator reads each module, prints every type declaration, and sets the type's
+doc comment beside it. Their readers are a developer opening the code for the
+first time, who needs to know what each type represents before reading the
+functions that use it, and a reviewer looking for a type that represents its
+data badly. The comments in the source are therefore published prose, and
+everything earlier in this guide applies to them.
+
+### Two kinds of comment, and only one is published
+
+A **doc comment** says what a type, field, constructor, module or function _is_:
+what a value of it means, what it guarantees, and what it is for. In OCaml it is
+written `(** ... *)`; in Rust it is `///` on an item and `//!` at the top of a
+module. The generator publishes doc comments and nothing else.
+
+An **implementation comment** says why a line of code is written as it is, when
+the code cannot say so itself. In OCaml it is written `(* ... *)`; in Rust it is
+`//`. The generator drops it, so it appears nowhere on the site, and the
+declarations on the internals pages show no implementation comments at all.
+
+The distinction matters because the two comments answer different questions for
+different readers. Someone deciding whether `destination_form` is the right type
+needs to know what its constructors represent, not how the expander lowers them.
+A comment of the wrong kind is either missing from the page or puts lowering
+details in front of a reader who asked what the type means.
+
+### What a doc comment says
+
+The first sentence is a summary that stands alone, because it is what the index
+of a module shows. It names what the thing represents in the model or the
+program, not its shape: "A transition's destination: one or more compartments,
+or a probabilistic choice between them", not "A list of stoichiometry
+references". The declaration printed beside it already gives the shape.
+
+After the summary, a doc comment adds only what the declaration cannot show:
+
+- **What the value means**, in camdl's terms: which part of a model it comes
+  from, and what each constructor or field stands for.
+- **An invariant the type does not enforce**: a list that is never empty,
+  indices that are in range, names that are already resolved. Every invariant
+  stated in prose is one a reader must take on trust, so it is also a question
+  worth asking about the design: could the type hold it instead?
+- **Units, scales and time conventions**, where a number carries them: per day
+  or per year, a probability or a rate, an instant or a duration.
+- **An example**, preferably the camdl source that produces the value. A short
+  model fragment says more about an AST constructor than a paragraph does.
+
+A doc comment that needs more than a short paragraph is describing a design, and
+the design belongs in a document the comment links to. Link to a published page,
+such as a section of the language specification, when the type implements what
+that page specifies.
+
+### What a doc comment never says
+
+A doc comment describes the code as it is. It never narrates how the code came
+to be: no issue numbers, no proposal section numbers, no "previously", "now",
+"no longer", "the new …" or "superseded by", no names of the work stream or
+milestone in which a feature arrived. Git history and the documents under
+`docs/dev/` hold that record, and a doc comment that repeats it grows stale the
+day the code changes again.
+
+It also does not restate the declaration ("a list of pairs of strings"), list
+which functions call it, or describe the comment's author's reasoning. Write
+emphasis as you would in prose, never in capitals.
+
+**Instead of:**
+
+```ocaml
+(** Transition destination form.
+    - [DstSum] is the ordinary case: a `+`-separated list of destination
+      compartments, each contributing +1 to stoichiometry. Singleton =
+      classic, ≥ 2 = multi-dest (wave 1 / malaria #1).
+    - [DstBranch] (wave 2 / malaria #2) is a probabilistic branch:
+      `X --> { A : w_A, B : w_B } @ rate`. The expander desugars each
+      branch into its own IR transition with rate `w_i * rate`. The
+      existing chain-binomial source-grouping machinery
+      then performs the correct multinomial split at firing time. *)
+type destination_form =
+  | DstSum    of stoich_ref list
+  | DstBranch of (stoich_ref * expr) list
+```
+
+**Write:**
+
+```ocaml
+(** Where a transition sends the individuals it moves.
+
+    {@camdl[
+      infection : S --> I @ beta * S * I / N              # DstSum [I]
+      split     : I --> R + Q @ gamma * I                 # DstSum [R; Q]
+      recovery  : I --> { R : 0.9, D : 0.1 } @ gamma * I  # DstBranch
+    ]} *)
+type destination_form =
+  | DstSum of stoich_ref list
+      (** Every listed compartment gains one individual per firing. The empty
+          list means the transition has no arrow target, and each branch of
+          its [via] law names its own destination. *)
+  | DstBranch of (stoich_ref * expr) list
+      (** One flow per branch, at the branch's weight times the transition's
+          rate. The weights are not normalised: they are branch probabilities
+          only when they sum to one. *)
+```
+
+The first version mixes three things: what the type means, how the expander
+lowers it, and when each constructor was added. The second keeps only the first,
+and lets three lines of camdl show what the constructors are. The lowering is
+still worth explaining, and an implementation comment at the expander's lowering
+code is the place for it.
+
+Writing the second version also surfaces two facts the first one hid.
+`DstSum
+[]` is a sentinel for "no destination", which a reader of the type would
+not guess, and the weights of a `DstBranch` are not checked to sum to one. Both
+are honest documentation of the code as it stands, and both are design
+questions: a sentinel could be its own constructor, and a missing check is a
+hole in the language. Saying plainly what a type does is how a reader finds out
+whether it should.
+
+**Instead of:**
+
+```rust
+/// Deserialise a `Model` from a JSON string. gh#audit-C8: enforces
+/// the `IrEnvelope` wrapper with version handshake. Returns
+/// `IrError::VersionMismatch` if the envelope's `ir_version` doesn't
+/// match the `IR_VERSION` baked from `ir/VERSION` at compile time.
+pub fn from_str(s: &str) -> Result<Model, IrError> {
+```
+
+**Write:**
+
+```rust
+/// Reads a compiled model from the JSON `camdlc` writes.
+///
+/// The input must be a whole `IrEnvelope`, not a bare model. An envelope
+/// whose `ir_version` differs from [`IR_VERSION`], the version this runtime
+/// reads, is refused with [`IrError::VersionMismatch`].
+pub fn from_str(s: &str) -> Result<Model, IrError> {
+```
+
+### Implementation comments are short and local
+
+An implementation comment earns its place by stopping a careful reader from
+"fixing" something that is correct, or by naming a fact the code depends on that
+the code cannot show: an ordering that matters, a numerical hazard, a property
+of the input that a check upstream established. One or two sentences, next to
+the line in question. Delete a comment that restates the code below it, narrates
+the change that introduced it, or reasons aloud. Issue numbers belong in tests
+(a regression test names the issue it reproduces) and in commit messages; code
+names one only when it is a workaround for an outside defect that the issue
+documents.
+
+### Examples in doc comments are compiled
+
+An example in a doc comment is code, and it is checked like the examples on
+every other page. A camdl example is marked `{@camdl[ ... ]}` in OCaml and
+fenced as `camdl` in Rust; the documentation build compiles each one and fails
+if it does not compile. A Rust example fenced as `rust` is a doctest, run by
+`cargo test`. Write examples that are complete enough to check, and mark a
+fragment that cannot stand alone as such, rather than letting an uncompiled
+example drift from the language.
+
+### What the internals pages show a reviewer
+
+Each type on a generated page appears with its full declaration, its doc
+comment, the documentation of each constructor or field, the other types it
+refers to, and the types that refer to it. The generator also marks, visibly and
+without judgment:
+
+- a type, constructor or field with no doc comment;
+- a doc comment that contains history: an issue or proposal reference, or a
+  phrase such as "previously" or "no longer";
+- a record with several `bool` or `option` fields, where a variant type might
+  rule out combinations that cannot occur;
+- a `string` field whose values come from a fixed set, where a variant type
+  would let the compiler check them.
+
+These marks are prompts for a reviewer, not errors. Some records do need three
+independent flags. The marks exist so that the question gets asked where a
+reader can see the answer.
+
+## 11. Final editorial checklist
 
 Before submitting documentation, an agent should be able to answer _yes_ to
 these questions:
