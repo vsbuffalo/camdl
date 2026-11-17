@@ -16464,6 +16464,20 @@ simulate { from = 0  to = 600 }
     if contains_substring ~needle:"(e.g. to = 600 'months)" h then
       Alcotest.failf "E320 hint still recommends `to = 600 'months`:\n%s" h
 
+(* A `let` whose body moves an instant by a calendar duration is reported
+   once, at the `let` (the ordinary-expression walk); a date position that uses
+   it does not report it again. A `let` of a bare duration is reported where
+   it moves a date. *)
+let test_tp_let_reported_once () =
+  let count src = List.length (List.filter (fun (d : Diagnostics.diagnostic) ->
+    d.code = "E321") (tp_diags src)) in
+  Alcotest.(check int) "instant let: one E321" 1
+    (count (tp_model ~extra:"let landmark = origin + 6 'months\n\
+                              interventions { b : add(S, 10) at [landmark] }" ()));
+  Alcotest.(check int) "duration let: one E321" 1
+    (count (tp_model ~extra:"let d = 6 'months\n\
+                              interventions { b : add(S, 10) at [origin + d] }" ()))
+
 let stage_1a_tests = [
   "simulate to = 2 'years refused", test_tp_refuse_simulate_to_years;
   "simulate from = 6 'months refused", test_tp_refuse_simulate_from_months;
@@ -16486,6 +16500,7 @@ let stage_1a_tests = [
   "hint: years mixed with days offers days only", test_tp_hint_mixed;
   "recurring from is an instant (E321, not E322)", test_tp_recurring_from_is_instant;
   "unanchored spellings keep the average", test_tp_unanchored_unchanged;
+  "a calendar let is reported once", test_tp_let_reported_once;
   "value_at(I, 60) draws W325 (gh#1128)", test_tp_value_at_bare_w325;
   "simulate to = origin + 90 'days is 90 (gh#1129)", test_tp_instant_arithmetic_simulate_to;
   "scenario to = date + 7 'days is 67 (gh#1129)", test_tp_instant_arithmetic_scenario_to;
