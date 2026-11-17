@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::model::{Input, Language, Module};
+use crate::model::{Input, Language, Module, SourceFile, Target};
 use crate::overview::Overview;
 
 /// The file name, without extension, of the index page. No module page may
@@ -95,9 +95,37 @@ pub struct Site<'a> {
     pub order: i64,
     pub modules: Vec<ModuleEntry<'a>>,
     pub pages: Vec<Page>,
+    /// The source files, one page each, in input order.
+    pub sources: Vec<SourceEntry<'a>>,
     by_name: BTreeMap<&'a str, usize>,
     defining: BTreeMap<&'a str, Vec<usize>>,
     used_by: BTreeMap<TypeId, Vec<TypeId>>,
+    source_by_path: BTreeMap<&'a str, usize>,
+}
+
+/// The directory, below the output directory, the source pages are written
+/// to. They are reached by links and are not in the sidebar.
+pub const SOURCE_DIR: &str = "src";
+
+/// A source file shown on a page of its own.
+#[derive(Debug)]
+pub struct SourceEntry<'a> {
+    pub file: &'a SourceFile,
+    /// The file name of its page, without extension: the file's name without
+    /// its extension, unique among the sources.
+    pub slug: String,
+    /// The page of the modules the file defines.
+    pub page: usize,
+}
+
+/// Where a link is written from, for the links in raw HTML, which Quarto
+/// does not rewrite: they name the rendered `.html` files.
+#[derive(Debug, Clone, Copy)]
+pub enum From {
+    /// A module page, by its position in [`Site::pages`].
+    Page(usize),
+    /// A source page, one directory below the module pages.
+    Source,
 }
 
 /// The top-level module a module path belongs to: the part before the first dot.
@@ -278,28 +306,28 @@ impl<'a> Site<'a> {
                 defining.entry(n).or_default().push(i);
             }
         }
+        let (sources, source_by_path) = place_sources(inputs, &modules)?;
         let mut site = Site {
             overview,
             order,
             modules,
             pages,
+            sources,
             by_name,
             defining,
             used_by: BTreeMap::new(),
+            source_by_path,
         };
+        site.check_targets()?;
 
         let mut used_by: BTreeMap<TypeId, Vec<TypeId>> = BTreeMap::new();
         for (mi, e) in site.modules.iter().enumerate() {
-            for (ti, t) in e.module.types.iter().enumerate() {
+            for ti in 0..e.module.types.len() {
                 let me = TypeId { module: mi, ty: ti };
-                for r in &t.refs {
-                    if let Some(target) = site.resolve_type(mi, r) {
-                        if target != me {
-                            let users = used_by.entry(target).or_default();
-                            if users.last() != Some(&me) {
-                                users.push(me);
-                            }
-                        }
+                for target in site.refers_to(me) {
+                    let users = used_by.entry(target).or_default();
+                    if users.last() != Some(&me) {
+                        users.push(me);
                     }
                 }
             }
@@ -468,6 +496,88 @@ impl<'a> Site<'a> {
         }
     }
 
+    /// The declaration a span's target names: the declaration of that name
+    /// in that module, the last when there are several, as for a qualified
+    /// path. Exact: no scope search and no guessing.
+    pub fn find_target(&self, t: &Target) -> Option<TypeId> {
+        self.by_name
+            .get(t.module.as_str())
+            .and_then(|&m| self.find_in(m, &t.ty))
+    }
+
+    /// Fails, naming the first, when a span's target names no declaration
+    /// of the inputs: the extractor emits targets only for the declarations
+    /// it reports, so one that resolves to nothing is a fault, not a type
+    /// to leave unlinked.
+    fn check_targets(&self) -> Result<(), String> {
+        let decls = self
+            .modules
+            .iter()
+            .flat_map(|e| {
+                e.module
+                    .types
+                    .iter()
+                    .map(move |t| (e.module.path.as_str(), t))
+            })
+            .flat_map(|(path, t)| t.decl_spans.iter().map(move |s| (path, t.line, s)));
+        let files = self.sources.iter().flat_map(|s| {
+            s.file
+                .spans
+                .iter()
+                .map(move |sp| (s.file.path.as_str(), 0, sp))
+        });
+        for (path, decl_line, s) in decls.chain(files) {
+            if let Some(t) = &s.target {
+                if self.find_target(t).is_none() {
+                    let at = if decl_line == 0 {
+                        format!("line {}", s.line)
+                    } else {
+                        format!("the declaration at line {decl_line}")
+                    };
+                    return Err(format!(
+                        "{path}, {at}: a span links to {}.{}, which no input declares",
+                        t.module, t.ty
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The declarations a type's declaration names, in the order it names
+    /// them, without repeats and without the type itself: the targets of its
+    /// [`crate::model::TypeDecl::decl_spans`], which the extractor resolved.
+    pub fn refers_to(&self, id: TypeId) -> Vec<TypeId> {
+        let t = &self.modules[id.module].module.types[id.ty];
+        let mut out = Vec::new();
+        for target in t.decl_spans.iter().filter_map(|s| s.target.as_ref()) {
+            // Site::build checked that every target resolves.
+            if let Some(found) = self.find_target(target) {
+                if found != id && !out.contains(&found) {
+                    out.push(found);
+                }
+            }
+        }
+        out
+    }
+
+    /// The source page of a module's file.
+    pub fn source_of(&self, m: usize) -> &SourceEntry<'a> {
+        // Site::build refuses a module whose file has no source entry.
+        &self.sources[self.source_by_path[self.modules[m].module.path.as_str()]]
+    }
+
+    /// The link target, in rendered HTML, of a type's documentation.
+    pub fn type_href_html(&self, from: From, id: TypeId) -> String {
+        let e = &self.modules[id.module];
+        let anchor = &e.anchors[id.ty];
+        match from {
+            From::Page(p) if p == e.page => format!("#{anchor}"),
+            From::Page(_) => format!("{}.html#{anchor}", self.pages[e.page].slug),
+            From::Source => format!("../{}.html#{anchor}", self.pages[e.page].slug),
+        }
+    }
+
     /// A type's name as a reader of `from_page` should see it: qualified by
     /// its nested module on its own page, by its full module path elsewhere.
     pub fn type_display(&self, from_page: usize, id: TypeId) -> String {
@@ -483,6 +593,54 @@ impl<'a> Site<'a> {
     }
 }
 
+/// Gives each source file its page. Fails when a module's file has no
+/// source entry, when a file is listed twice or defines no module, or when
+/// two files would share a page name.
+fn place_sources<'a>(
+    inputs: &'a [Input],
+    modules: &[ModuleEntry<'a>],
+) -> Result<(Vec<SourceEntry<'a>>, BTreeMap<&'a str, usize>), String> {
+    let mut sources = Vec::new();
+    let mut by_path = BTreeMap::new();
+    let mut slugs: BTreeMap<String, &str> = BTreeMap::new();
+    for file in inputs.iter().flat_map(|i| &i.sources) {
+        let path = file.path.as_str();
+        if by_path.contains_key(path) {
+            return Err(format!("source file listed more than once: {path}"));
+        }
+        let Some(page) = modules
+            .iter()
+            .find(|e| e.module.path == path)
+            .map(|e| e.page)
+        else {
+            return Err(format!(
+                "source file defines no module of the input: {path}"
+            ));
+        };
+        let name = path.rsplit('/').next().unwrap_or(path);
+        let slug = name.split('.').next().unwrap_or(name).to_string();
+        if let Some(other) = slugs.insert(slug.clone(), path) {
+            return Err(format!(
+                "source files {other} and {path} would both be shown on {SOURCE_DIR}/{slug}.qmd"
+            ));
+        }
+        by_path.insert(path, sources.len());
+        sources.push(SourceEntry { file, slug, page });
+    }
+    let missing: BTreeSet<&str> = modules
+        .iter()
+        .map(|e| e.module.path.as_str())
+        .filter(|p| !by_path.contains_key(p))
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "module files with no source entry in the input: {}",
+            join(&missing)
+        ));
+    }
+    Ok((sources, by_path))
+}
+
 fn join(names: &BTreeSet<&str>) -> String {
     names.iter().copied().collect::<Vec<_>>().join(", ")
 }
@@ -495,19 +653,47 @@ mod tests {
         serde_json::from_str(json).unwrap()
     }
 
-    fn ty(name: &str, refs: &[&str]) -> String {
+    /// A type whose declaration mentions `refs` as written, and whose typed
+    /// spans link to `targets`, each `Module.type`. Span positions are not
+    /// checked by the site, only rendered.
+    fn ty(name: &str, refs: &[&str], targets: &[&str]) -> String {
+        let spans: Vec<String> = targets
+            .iter()
+            .map(|t| {
+                let (m, n) = t.rsplit_once('.').unwrap();
+                format!(
+                    r#"{{"line":1,"col":0,"len":1,"class":"type","target":{{"module":"{m}","type":"{n}"}}}}"#
+                )
+            })
+            .collect();
         format!(
             r#"{{"name":"{name}","line":1,"kind":"alias","params":[],"recursive_group":null,
-               "decl":"type {name} = int","doc":null,"members":[],"refs":{}}}"#,
+               "decl":"type {name} = int","decl_spans":[{}],"doc":null,"members":[],"refs":{}}}"#,
+            spans.join(","),
             serde_json::to_string(refs).unwrap()
         )
     }
 
+    /// A module in the file named after its top-level module.
     fn module(name: &str, types: &[String]) -> String {
         format!(
-            r#"{{"name":"{name}","path":"x.ml","doc":null,"types":[{}]}}"#,
+            r#"{{"name":"{name}","path":"{}.ml","doc":null,"types":[{}]}}"#,
+            top_of(name).to_lowercase(),
             types.join(",")
         )
+    }
+
+    /// An input of `modules`, with an empty source entry for each file.
+    fn ocaml(modules: &[String], files: &[&str]) -> Input {
+        let sources: Vec<String> = files
+            .iter()
+            .map(|f| format!(r#"{{"path":"{f}.ml","lines":1,"bytes":1,"spans":[]}}"#))
+            .collect();
+        input(&format!(
+            r#"{{"language":"ocaml","modules":[{}],"sources":[{}]}}"#,
+            modules.join(","),
+            sources.join(",")
+        ))
     }
 
     fn overview(groups: &[&[&str]]) -> Overview {
@@ -519,19 +705,38 @@ mod tests {
     }
 
     fn sample() -> Vec<Input> {
-        vec![input(&format!(
-            r#"{{"language":"ocaml","modules":[{},{},{},{}]}}"#,
-            module(
-                "Ast",
-                &[
-                    ty("expr", &["expr", "Ir.expr", "Yojson.Safe.t", "int"]),
-                    ty("only_here", &[])
-                ]
-            ),
-            module("Ast.Loc", &[ty("t", &["expr"]), ty("u", &["t"])]),
-            module("Ir", &[ty("expr", &[]), ty("t", &[])]),
-            module("Util", &[ty("w", &["only_here", "Loc.t", "Camdl.Ir.t"])]),
-        ))]
+        vec![ocaml(
+            &[
+                module(
+                    "Ast",
+                    &[
+                        ty(
+                            "expr",
+                            &["expr", "Ir.expr", "Yojson.Safe.t", "int"],
+                            &["Ast.expr", "Ir.expr"],
+                        ),
+                        ty("only_here", &[], &[]),
+                    ],
+                ),
+                module(
+                    "Ast.Loc",
+                    &[
+                        ty("t", &["expr"], &["Ast.expr"]),
+                        ty("u", &["t"], &["Ast.Loc.t"]),
+                    ],
+                ),
+                module("Ir", &[ty("expr", &[], &[]), ty("t", &[], &[])]),
+                module(
+                    "Util",
+                    &[ty(
+                        "w",
+                        &["only_here", "Loc.t", "Camdl.Ir.t"],
+                        &["Ast.only_here", "Ast.Loc.t", "Ir.t"],
+                    )],
+                ),
+            ],
+            &["ast", "ir", "util"],
+        )]
     }
 
     #[test]
@@ -669,11 +874,63 @@ mod tests {
     }
 
     #[test]
+    fn targets_resolve_exactly_by_module_and_name() {
+        // Mutation check: resolving a target by its type name alone (as
+        // resolve_type does for an unqualified path) makes `expr` ambiguous
+        // between Ast and Ir and fails the first two assertions.
+        let inputs = sample();
+        let m = overview(&[&["Ast", "Ir"], &["Util"]]);
+        let site = Site::build(&m, 10, &inputs).unwrap();
+        let target = |m: &str, t: &str| Target {
+            module: m.to_string(),
+            ty: t.to_string(),
+        };
+        let id = |module, ty| Some(TypeId { module, ty });
+        assert_eq!(site.find_target(&target("Ast", "expr")), id(0, 0));
+        assert_eq!(site.find_target(&target("Ir", "expr")), id(2, 0));
+        assert_eq!(site.find_target(&target("Ast.Loc", "t")), id(1, 0));
+        assert_eq!(site.find_target(&target("Ast", "t")), None);
+        assert_eq!(site.find_target(&target("Loc", "t")), None);
+        assert_eq!(
+            site.type_href_html(From::Source, TypeId { module: 2, ty: 0 }),
+            "../ir.html#t-expr"
+        );
+        assert_eq!(
+            site.type_href_html(From::Page(0), TypeId { module: 2, ty: 0 }),
+            "ir.html#t-expr"
+        );
+        assert_eq!(
+            site.type_href_html(From::Page(0), TypeId { module: 1, ty: 0 }),
+            "#t-Loc-t"
+        );
+        assert_eq!(site.source_of(1).slug, "ast");
+    }
+
+    #[test]
+    fn a_target_naming_no_declaration_fails() {
+        let inputs = vec![ocaml(
+            &[module("Ast", &[ty("e", &[], &["Ast.gone"])])],
+            &["ast"],
+        )];
+        let m = overview(&[&["Ast"]]);
+        let err = Site::build(&m, 10, &inputs).unwrap_err();
+        assert_eq!(
+            err,
+            "ast.ml, the declaration at line 1: a span links to Ast.gone, which no input declares"
+        );
+    }
+
+    #[test]
+    fn every_module_file_needs_a_source_entry() {
+        let inputs = vec![ocaml(&[module("Ast", &[]), module("Ir", &[])], &["ast"])];
+        let m = overview(&[&["Ast", "Ir"]]);
+        let err = Site::build(&m, 10, &inputs).unwrap_err();
+        assert_eq!(err, "module files with no source entry in the input: ir.ml");
+    }
+
+    #[test]
     fn a_module_named_index_is_refused() {
-        let inputs = vec![input(&format!(
-            r#"{{"language":"ocaml","modules":[{}]}}"#,
-            module("Index", &[])
-        ))];
+        let inputs = vec![ocaml(&[module("Index", &[])], &["index"])];
         let m = overview(&[&["Index"]]);
         let err = Site::build(&m, 10, &inputs).unwrap_err();
         assert!(err.contains("index page"), "{err}");

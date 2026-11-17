@@ -794,6 +794,14 @@ These marks are prompts for a reviewer, not errors. Some records do need three
 independent flags. The marks exist so that the question gets asked where a
 reader can see the answer.
 
+Each source file is also shown whole, on a page of its own reached from the
+type's source link. There, and in the declarations on the module pages, every
+type name links to the documentation of the type it names. Which type that is
+comes from the compiler's own record of the program, never from the name alone:
+two modules both define `expr`, and a module that opens `Ast` means `Ast.expr`
+when it writes `expr`. A name the generator cannot attribute exactly is left
+unlinked, because a wrong link is worse than none.
+
 ### Checklist for documenting a module
 
 Before handing in doc comments for a module, its author, human or agent, should

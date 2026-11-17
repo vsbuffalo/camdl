@@ -842,20 +842,26 @@ docs-site-preview: docs-internals
 # and its doc comments; the renderer (rust/crates/typedoc) turns it into
 # docs/internals/compiler/*.qmd. The index page's title, prose and module
 # groups come from the odoc page ocaml/lib/compiler/index.mld, which must list
-# every module once. Source links are pinned to HEAD's commit, so their line
-# numbers stay right; uncommitted edits still link to HEAD's lines.
+# every module once. Each source file is also shown whole, on
+# docs/internals/compiler/src/<file>.qmd, its type names linked to their
+# documentation; which declaration a name refers to is read from the .cmt
+# files the build writes (TYPEDOC_CMT), never guessed from the name. Those
+# pages show the working tree; the "on GitHub" links are pinned to HEAD's
+# commit, so uncommitted edits still link to HEAD's lines there.
 # docs/internals/ is generated, never committed. Docs:
 # docs/documentation-style.md, section 10.
 .PHONY: docs-internals
 TYPEDOC_OCAML     := ocaml/_build/default/tools/typedoc/typedoc_ocaml.exe
 TYPEDOC           := rust/target/release/typedoc
+TYPEDOC_CMT       := --cmt-dir ocaml/_build/default/lib/compiler/.compiler.objs/byte \
+                     --cmt-dir ocaml/_build/default/lib/ir/.ir.objs/byte
 COMPILER_OVERVIEW := ocaml/lib/compiler/index.mld
 # ir_version_generated.ml is written by the build, not authored; leave it out.
 COMPILER_ML   := $(sort $(filter-out %/ir_version_generated.ml, \
                    $(wildcard ocaml/lib/compiler/*.ml) $(wildcard ocaml/lib/ir/*.ml)))
 docs-internals: build $(COMPILER_OVERVIEW)
 	mkdir -p docs/internals
-	$(TYPEDOC_OCAML) $(COMPILER_ML) > docs/internals/compiler.json
+	$(TYPEDOC_OCAML) $(TYPEDOC_CMT) $(COMPILER_ML) > docs/internals/compiler.json
 	$(TYPEDOC) render --overview $(COMPILER_OVERVIEW) \
 	  --input docs/internals/compiler.json --out docs/internals/compiler \
 	  --commit $(shell git rev-parse HEAD)

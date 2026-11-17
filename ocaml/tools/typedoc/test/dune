@@ -1,12 +1,36 @@
+; The fixture modules are compiled, so the extractor can read their typed
+; trees from the .cmt files the compiler writes. Warnings are off: the
+; fixtures declare types nothing uses.
+(library
+ (name typedoc_fixture)
+ (wrapped false)
+ (modules fixture other user)
+ (flags (:standard -w -a)))
+
 ; Runs typedoc_ocaml on the fixture and diffs against the committed JSON.
 ; Accept a deliberate change with `dune promote`.
 (rule
  (alias runtest)
- (deps fixture.ml fixture.mli)
+ (deps
+  fixture.ml
+  fixture.mli
+  other.ml
+  user.ml
+  .typedoc_fixture.objs/byte/fixture.cmt
+  .typedoc_fixture.objs/byte/other.cmt
+  .typedoc_fixture.objs/byte/user.cmt)
  (action
   (with-stdout-to
    fixture.actual
-   (run ../typedoc_ocaml.exe --root . fixture.ml))))
+   (run
+    ../typedoc_ocaml.exe
+    --root
+    .
+    --cmt-dir
+    .typedoc_fixture.objs/byte
+    fixture.ml
+    other.ml
+    user.ml))))
 
 (rule
  (alias runtest)

@@ -4,14 +4,18 @@
 
 use std::fmt::Write as _;
 
+use std::collections::BTreeMap;
+
+use crate::code::{self, Highlighted};
 use crate::markdown::{
     code_span, escape_text, fence, first_sentence, indent, rustdoc_to_markdown,
     split_first_sentence, yaml_string,
 };
 use crate::marks::{self, Mark};
+use crate::model::Target;
 use crate::model::{Kind, Language, Member};
 use crate::odoc;
-use crate::site::{Site, TypeId, INDEX_SLUG};
+use crate::site::{From, Site, SourceEntry, TypeId, INDEX_SLUG, SOURCE_DIR};
 
 /// Where source links point: a repository on GitHub, at one commit, so that
 /// a link's line number names the line the page was generated from.
@@ -51,15 +55,24 @@ impl SourceLinks {
     }
 }
 
-/// A generated page: its file name in the output directory, and its text.
+/// A generated page: its path relative to the output directory, and its
+/// text.
 pub struct PageFile {
     pub file_name: String,
     pub text: String,
 }
 
 /// Renders every page of the site: the index first, then the module pages in
-/// overview order.
-pub fn render(site: &Site, source: &SourceLinks) -> Vec<PageFile> {
+/// overview order, then one page per source file. `texts` holds each source
+/// file's text by [`crate::model::SourceFile::path`].
+///
+/// Fails when a source text is missing or differs in size from the one the
+/// extractor read, or when a span does not fit its text.
+pub fn render(
+    site: &Site,
+    source: &SourceLinks,
+    texts: &BTreeMap<String, String>,
+) -> Result<Vec<PageFile>, String> {
     let mut files = vec![PageFile {
         file_name: format!("{INDEX_SLUG}.qmd"),
         text: index_page(site),
@@ -67,10 +80,70 @@ pub fn render(site: &Site, source: &SourceLinks) -> Vec<PageFile> {
     for (p, page) in site.pages.iter().enumerate() {
         files.push(PageFile {
             file_name: format!("{}.qmd", page.slug),
-            text: module_page(site, source, p),
+            text: module_page(site, source, p)?,
         });
     }
-    files
+    for s in &site.sources {
+        let path = &s.file.path;
+        let text = texts
+            .get(path)
+            .ok_or_else(|| format!("{path}: no text given for the source file"))?;
+        files.push(PageFile {
+            file_name: format!("{SOURCE_DIR}/{}.qmd", s.slug),
+            text: source_page(site, source, s, text)?,
+        });
+    }
+    Ok(files)
+}
+
+/// The page of one source file: the whole text, highlighted, every line
+/// anchored `#L<n>`, and every type name the extractor resolved linked to
+/// its documentation.
+fn source_page(
+    site: &Site,
+    links: &SourceLinks,
+    s: &SourceEntry,
+    text: &str,
+) -> Result<String, String> {
+    let path = &s.file.path;
+    let lines = text.lines().count();
+    if text.len() != s.file.bytes || lines != s.file.lines {
+        return Err(format!(
+            "{path}: the file has {} bytes in {lines} lines, but the extractor read {} bytes in {} \
+             lines; extract again",
+            text.len(),
+            s.file.bytes,
+            s.file.lines
+        ));
+    }
+    let h = Highlighted::new(text, &s.file.spans).map_err(|e| format!("{path}: {e}"))?;
+    let href = |t: &Target| {
+        site.find_target(t)
+            .map(|id| site.type_href_html(From::Source, id))
+    };
+    let page = &site.pages[s.page];
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let mut out = String::new();
+    out.push_str("---\n");
+    let _ = writeln!(out, "title: {}", yaml_string(name));
+    // Reached by links from the module pages and kept out of the sidebar by
+    // docs/_quarto.yml; kept out of the search index too, which would
+    // otherwise match every identifier in the source.
+    out.push_str("search: false\ntoc: false\n");
+    out.push_str("body-classes: td-page td-source-page\n");
+    out.push_str("---\n\n");
+    let _ = writeln!(
+        out,
+        "The text of {}, documented on [{}](../{}.qmd). Type names link to their \
+         documentation. [On GitHub]({}){{.td-source}}\n",
+        code_span(path),
+        escape_text(&page.name),
+        page.slug,
+        links.url(path, None)
+    );
+    let block = code::block(&h.lines_html(&href), "td-src", true);
+    let _ = writeln!(out, "{}", fence("{=html}", &block));
+    Ok(out)
 }
 
 /// Converts a doc comment written in module `m` to Markdown for page `page`,
@@ -277,7 +350,7 @@ question is asked where the answer can be seen.
   such fields and marks some that hold free text.
 ";
 
-fn module_page(site: &Site, source: &SourceLinks, p: usize) -> String {
+fn module_page(site: &Site, source: &SourceLinks, p: usize) -> Result<String, String> {
     let page = &site.pages[p];
     let top = page.modules[0];
     let top_entry = &site.modules[top];
@@ -289,8 +362,10 @@ fn module_page(site: &Site, source: &SourceLinks, p: usize) -> String {
     let path = &top_entry.module.path;
     let _ = writeln!(
         out,
-        "Source: [{}]({}){{.td-source}}\n",
+        "Source: [{}]({}/{}.qmd){{.td-source}} · [on GitHub]({}){{.td-source}}\n",
         code_span(path),
+        SOURCE_DIR,
+        site.source_of(top).slug,
         source.url(path, None)
     );
 
@@ -343,13 +418,13 @@ fn module_page(site: &Site, source: &SourceLinks, p: usize) -> String {
             "###"
         };
         for ty in 0..e.module.types.len() {
-            type_section(&mut out, site, source, p, TypeId { module: m, ty }, level);
+            type_section(&mut out, site, source, p, TypeId { module: m, ty }, level)?;
         }
     }
     let trimmed = out.trim_end().len();
     out.truncate(trimmed);
     out.push('\n');
-    out
+    Ok(out)
 }
 
 /// A module's marks and converted doc comment.
@@ -371,7 +446,7 @@ fn type_section(
     p: usize,
     id: TypeId,
     level: &str,
-) {
+) -> Result<(), String> {
     let e = &site.modules[id.module];
     let t = &e.module.types[id.ty];
     let anchor = &e.anchors[id.ty];
@@ -388,7 +463,7 @@ fn type_section(
     if let Some(doc) = present(&t.doc) {
         let _ = writeln!(out, "{}\n", convert_doc(site, id.module, p, doc));
     }
-    let _ = writeln!(out, "{}\n", fence(e.language.fence(), &t.decl));
+    let _ = writeln!(out, "{}\n", declaration(site, p, id)?);
 
     if !t.members.is_empty() {
         let noun = t.kind.member_noun();
@@ -447,9 +522,32 @@ fn type_section(
 
     let _ = writeln!(
         out,
-        "[source]({}){{.td-source}}\n",
+        "[source]({}/{}.qmd#L{}){{.td-source}} · [on GitHub]({}){{.td-source}}\n",
+        SOURCE_DIR,
+        site.source_of(id.module).slug,
+        t.line,
         source.url(&e.module.path, Some(t.line))
     );
+    Ok(())
+}
+
+/// A type's declaration as a highlighted block, each type name in it linked
+/// to that type's documentation, except the type's own name.
+fn declaration(site: &Site, p: usize, id: TypeId) -> Result<String, String> {
+    let e = &site.modules[id.module];
+    let t = &e.module.types[id.ty];
+    let h = Highlighted::new(&t.decl, &t.decl_spans)
+        .map_err(|err| format!("{}: declaration of {}: {err}", e.module.path, t.name))?;
+    let href = |target: &Target| {
+        site.find_target(target)
+            .filter(|&other| other != id)
+            .map(|other| site.type_href_html(From::Page(p), other))
+    };
+    let class = format!("td-decl {}", e.language.fence());
+    Ok(fence(
+        "{=html}",
+        &code::block(&h.lines_html(&href), &class, false),
+    ))
 }
 
 /// A type's name applied to its parameters, as the language writes it:
@@ -472,31 +570,44 @@ fn link(site: &Site, p: usize, id: TypeId) -> String {
     )
 }
 
-/// The "Refers to" entries of a type: a link for each path that resolves to
-/// another declaration, and a code span for each that resolves to nothing
-/// and is not one of the language's own types. Paths naming the type itself
-/// are left out, as are repeats.
+/// The "Refers to" entries of a type: a link for each other declaration its
+/// declaration names, as the extractor resolved it ([`Site::refers_to`]),
+/// shown as written; then a code span for each path it mentions that names
+/// no declaration and is not one of the language's own types, such as
+/// `Yojson.Safe.t`. Repeats are left out.
 fn refers_to(site: &Site, p: usize, id: TypeId) -> Vec<String> {
     let t = &site.modules[id.module].module.types[id.ty];
-    let mut seen_ids = Vec::new();
+    let decl_lines: Vec<&str> = t.decl.lines().collect();
+    // The text of each span that links, with what it links to. Site::build
+    // and declaration() checked that every span fits the text.
+    let linked: Vec<(String, Option<TypeId>)> = t
+        .decl_spans
+        .iter()
+        .filter_map(|s| {
+            let target = s.target.as_ref()?;
+            let line = decl_lines.get(s.line.checked_sub(1)?)?;
+            let text = line.get(s.col..s.col + s.len)?;
+            Some((text.split_whitespace().collect(), site.find_target(target)))
+        })
+        .collect();
+    let mut out: Vec<String> = site
+        .refers_to(id)
+        .into_iter()
+        .map(|target| {
+            let written = linked
+                .iter()
+                .find(|(_, found)| *found == Some(target))
+                .map_or(String::new(), |(text, _)| text.clone());
+            format!("[{}]({})", code_span(&written), site.type_href(p, target))
+        })
+        .collect();
     let mut seen_text: Vec<&str> = Vec::new();
-    let mut out = Vec::new();
     for r in &t.refs {
         let r = r.trim();
-        match site.resolve_type(id.module, r) {
-            Some(target) if target == id => {}
-            Some(target) => {
-                if !seen_ids.contains(&target) {
-                    seen_ids.push(target);
-                    out.push(format!("[{}]({})", code_span(r), site.type_href(p, target)));
-                }
-            }
-            None => {
-                if !site.is_predefined(id.module, r) && !seen_text.contains(&r) {
-                    seen_text.push(r);
-                    out.push(code_span(r));
-                }
-            }
+        let resolved = linked.iter().any(|(text, _)| text == r);
+        if !resolved && !site.is_predefined(id.module, r) && !seen_text.contains(&r) {
+            seen_text.push(r);
+            out.push(code_span(r));
         }
     }
     out
