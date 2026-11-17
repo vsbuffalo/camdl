@@ -3010,11 +3010,16 @@ impl FitConfig {
     /// callers run both.
     ///
     /// **What the parameter values are for.** `preflight_gradient_ode` reads
-    /// `params` in exactly one place: to ask whether the model has any
-    /// scheduled effect (`EffectTimes::from_model`). That is a question about
-    /// the model's structure, not about where the optimizer will end up, so the
-    /// declared/`[fixed]`/`[estimate].start` values seeded below answer it as
-    /// well as the fitted ones would.
+    /// `params` in exactly one place: to place the model's scheduled effects
+    /// (`EffectPlan::build`), i.e. to resolve a parametric `at [t_seed]` fire
+    /// time. That is a question about the model's structure, not about where
+    /// the optimizer will end up — and a fire time that reads an *estimated*
+    /// parameter is refused by name whatever its value — so any finite value
+    /// serves an estimated parameter here: its `start`, the midpoint of its fit
+    /// or model box, else a placeholder. The gate must not be skipped for want
+    /// of a value: a fit that restates no `bounds` or `start` for a parameter
+    /// the model declares with `in [lo, hi]` is the common case, and skipping
+    /// it here pushed the refusal into every chain at run time.
     ///
     /// **What it does NOT do** is re-report parameter-resolution problems. If a
     /// value is still missing, or the model does not compile, this returns `Ok`
@@ -3281,10 +3286,17 @@ impl FitConfig {
                 .get(&p.name)
                 .copied()
                 .or_else(|| spec.and_then(|s| s.start))
-                .or_else(|| spec.and_then(|s| s.bounds).map(|(lo, hi)| 0.5 * (lo + hi)));
+                .or_else(|| spec.and_then(|s| s.bounds).map(|(lo, hi)| 0.5 * (lo + hi)))
+                // The model's own `in [lo, hi]`, which a fit.toml need not restate.
+                .or_else(|| p.value.bounds().map(|(lo, hi)| 0.5 * (lo + hi)))
+                // An estimated parameter with no box anywhere: the value only
+                // places fire times, and a fire time that reads an estimated
+                // parameter is refused by name whatever the value is.
+                .or_else(|| spec.map(|_| 0.5));
             match v {
                 Some(v) => p.value = p.value.with_value(v),
-                // Unresolved: not this check's error to report.
+                // A fixed parameter the resolver has not placed: its error to
+                // report, in its own words.
                 None => return Ok(()),
             }
         }
@@ -5041,12 +5053,15 @@ cooling = 0.7
     /// The gate sees the model the run will integrate, not the model as
     /// written. Toggleable interventions default OFF (spec §14.4), so a fit
     /// that never enables a declared `interventions { }` block has no scheduled
-    /// effect in its trajectory and must NOT be refused for one; the same fit
-    /// with `enable` must be.
+    /// effect in its trajectory; one that enables it has — and the gate then
+    /// judges that effect on its own terms (gh#275 §1g): the fixed-fraction
+    /// SIA the fixture declares is one the sensitivity crosses, so the enabled
+    /// fit is admitted; the same intervention rewritten as a fixed-count
+    /// transfer is refused, by name.
     ///
-    /// Without the filter the first case is a false refusal — a method rejected
-    /// for a feature the run would not have used, with no way for the user to
-    /// tell the difference from a real limitation.
+    /// Without the filter the first case would be judged on an effect the run
+    /// would not have used, with no way for the user to tell the difference
+    /// from a real limitation.
     #[test]
     fn the_gradient_gate_sees_interventions_as_the_run_will_resolve_them() {
         let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
@@ -5078,14 +5093,72 @@ cooling = 0.7
             "a declared-but-not-enabled intervention is not in the fitted \
              trajectory, so it cannot be a reason to refuse the gradient",
         );
-
-        let err = cfg("enable = [\"sia_round_1\"]\n\n")
-            .validate_gradient_capability(&model)
-            .expect_err("an enabled intervention IS a scheduled effect");
-        assert!(
-            err.contains("intervention") || err.contains("event"),
-            "the refusal must name the scheduled effect; got: {err}"
+        cfg("enable = [\"sia_round_1\"]\n\n").validate_gradient_capability(&model).expect(
+            "an enabled fixed-fraction transfer at fixed times is a jump the \
+             sensitivity crosses (gh#275 §1g); it must be admitted",
         );
+
+        // The same intervention as a fixed-count transfer: its jump is
+        // min(count, source), which is not differentiable — refused by name,
+        // and only when enabled.
+        let mut counted = model.clone();
+        for iv in &mut counted.interventions {
+            if iv.name == "sia_round_1" {
+                iv.actions = vec![ir::intervention::Action::AbsoluteTransfer(
+                    ir::intervention::AbsoluteTransfer {
+                        src: "S".into(), dst: "V".into(), count: ir::expr::Expr::const_(500.0),
+                    },
+                )];
+            }
+        }
+        cfg("").validate_gradient_capability(&counted)
+            .expect("a disabled fixed-count transfer is not in the trajectory");
+        let err = cfg("enable = [\"sia_round_1\"]\n\n")
+            .validate_gradient_capability(&counted)
+            .expect_err("an enabled fixed-count transfer cannot be crossed by the sensitivity");
+        assert!(
+            err.contains("sia_round_1") && err.contains("transfer(count"),
+            "the refusal must name the intervention and the construct; got: {err}"
+        );
+        assert!(err.contains("nl-sbplx"), "the refusal must name the alternative; got: {err}");
+    }
+
+    /// The gate must run when the estimated parameter has a box only in the
+    /// model (`beta : rate in [0.001, 0.5]`) and the fit.toml restates neither
+    /// `bounds` nor `start` — the common shape. The gate needs a value for
+    /// every parameter only to place fire times, and it used to return `Ok`
+    /// when it could not find one, which let an unsupported effect through to
+    /// fail every chain at run time instead of being refused here.
+    #[test]
+    fn the_gradient_gate_runs_when_an_estimated_parameter_has_only_model_bounds() {
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let path = std::path::PathBuf::from(&manifest)
+            .join("../../../ocaml/golden/seir_vaccine.ir.json");
+        let mut model: ir::Model = ir::from_str(
+            &std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read golden: {e}")),
+        )
+        .unwrap_or_else(|e| panic!("parse golden: {e}"));
+        let beta = model.parameters.iter().find(|p| p.name == "beta").unwrap();
+        assert!(beta.value.bounds().is_some(), "the fixture declares beta's box in the model");
+        for iv in &mut model.interventions {
+            iv.actions = vec![ir::intervention::Action::AbsoluteTransfer(
+                ir::intervention::AbsoluteTransfer {
+                    src: "S".into(), dst: "V".into(), count: ir::expr::Expr::const_(500.0),
+                },
+            )];
+        }
+        let toml_str = "enable = [\"sia_round_1\"]\n\n\
+             [model]\ncamdl = \"models/seir_vaccine.camdl\"\n\n\
+             [data.observations]\ncases = \"data/cases.tsv\"\n\n\
+             [estimate]\nbeta = {}\n\n\
+             [fixed]\nsigma = 0.2\ngamma = 0.1\nomega = 0.003\n\
+             vacc_frac = 0.8\nN0 = 100000\nI0 = 10\n\n\
+             [method]\nalgorithm = \"nl-lbfgs\"\nbackend = \"ode\"\nchains = 1\n";
+        let cfg = FitConfig::from_toml_str(toml_str).unwrap_or_else(|e| panic!("parse: {e}"));
+        let err = cfg
+            .validate_gradient_capability(&model)
+            .expect_err("the gate must run, and refuse, without a fit.toml start or bounds");
+        assert!(err.contains("transfer(count"), "got: {err}");
     }
 
     /// A three-stage `[stages]` file — the shape the split retires — is refused

@@ -216,6 +216,28 @@ pub fn run_method(
     // reached.
     write_per_chain_files(method_dir, &chain_outcomes, &est_names)?;
 
+    // A chain that FAILED (the gradient could not be taken, or the cell was
+    // mis-configured) reports `-inf` without having scored anything, so when
+    // every chain failed the cause is the failure, not the starting values. Say
+    // the chains' own reason — a refusal the gradient gate deferred to run time
+    // (a scenario fit), or a gradient that is not computable at the start —
+    // rather than the impossible-region diagnosis below, which is about chains
+    // that did evaluate the likelihood.
+    if sim::inference::no_finite_anchor(winner.loglik)
+        && chain_outcomes.iter().all(|(_, c)| c.failure.is_some())
+    {
+        let reasons: Vec<&String> = chain_outcomes.iter().filter_map(|(_, c)| c.failure.as_ref()).collect();
+        let distinct: std::collections::BTreeSet<&String> = reasons.iter().copied().collect();
+        return Err(format!(
+            "{method_name}: all {n_chains} chain(s) failed before reaching an optimum, so there \
+             is none to report. {}:\n  {}\nPer-chain results: {}.",
+            if distinct.len() == 1 { "Every chain gave the same reason".to_string() }
+            else { format!("The first chain's reason ({} distinct in all)", distinct.len()) },
+            reasons[0].trim_end_matches('.'),
+            method_dir.join("chain_results.tsv").display()
+        ));
+    }
+
     // gh#226 / gh#916. Whole-fit backstop, as in the PGAS, PMMH and IF2
     // drivers: the winner is the maximum over every chain, so a non-finite
     // winner means not one chain scored a finite point. Without this the
@@ -415,6 +437,11 @@ struct ChainOutcome {
     loglik: f64,
     status: OptStatus,
     n_evals: usize,
+    /// Why the chain produced no optimum (`status == Failed`): the gradient
+    /// could not be taken, or the cell was mis-configured. Carried so the
+    /// method's own failure names this reason instead of inferring one from
+    /// the `-inf` log-likelihood a failed chain reports.
+    failure: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -457,6 +484,7 @@ fn run_one_chain(
             loglik: r.loglik,
             status: r.status,
             n_evals: r.n_evals,
+            failure: None,
         },
         Err(e) => {
             // Either the cell was mis-configured (dimension / bounds) or the
@@ -470,6 +498,7 @@ fn run_one_chain(
                 loglik: f64::NEG_INFINITY,
                 status: OptStatus::Failed,
                 n_evals: 0,
+                failure: Some(e),
             }
         }
     }
@@ -1245,7 +1274,7 @@ mod tests {
     }
 
     fn outcome(loglik: f64, params: Vec<f64>, status: OptStatus) -> ChainOutcome {
-        ChainOutcome { loglik, params, status, n_evals: 1 }
+        ChainOutcome { loglik, params, status, n_evals: 1, failure: None }
     }
 
     fn names(n: usize) -> Vec<String> {
