@@ -1,5 +1,5 @@
-left   base.ir.json  model 7b67b0e4bcb7148d
-right  constant_let_renamed.ir.json  model f48d17794495b1b9
+left   base.ir.json  model 1dd91f83b9234d83
+right  constant_let_renamed.ir.json  model d67a84a7df1bd642
 
 Model: different.
 Reported quantities and contrasts: identical.
