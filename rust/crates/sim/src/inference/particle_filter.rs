@@ -1,9 +1,12 @@
 //! Bootstrap particle filter (Gordon, Salmond & Smith 1993).
 //!
 //! Estimates log p(y_{1:T} | θ) via sequential importance sampling
-//! with systematic resampling. Uses the ProcessModel trait to
-//! advance particles — any simulation backend works (chain-binomial,
-//! ODE, etc.).
+//! with systematic resampling at each assimilation event — a stop where some
+//! stream holds an observed value (D72). The filter also stops where nothing
+//! is observed (an all-`NA` row, a declared period's start) so the
+//! accumulators fold and reset there; it does not weight or resample there.
+//! Uses the ProcessModel trait to advance particles — any simulation backend
+//! works (chain-binomial, ODE, etc.).
 
 use std::time::Instant;
 
@@ -44,13 +47,17 @@ pub struct PredictionDiag {
 pub struct PFilterResult {
     /// Estimated log p(y_{1:T} | θ).
     pub log_likelihood: f64,
-    /// ESS at each observation time.
+    /// ESS at each stop of the observation axis. At a stop that does not
+    /// assimilate (D72) it is the ESS of the weights the swarm carries there:
+    /// equal, except for particles that died since the last resample.
     pub ess_trace: Vec<f64>,
     /// Snyder τ² — variance of the per-particle incremental log-weights at
     /// each observation time. The high-dimensional degeneracy predictor: the
     /// particle count needed to avoid collapse scales as `exp(τ²/2)`.
     pub logw_var_trace: Vec<f64>,
-    /// Log-likelihood increment at each observation time.
+    /// Log-likelihood increment at each stop of the observation axis; exactly
+    /// `0.0` at a stop that does not assimilate (D72), whose window's lost
+    /// weight is counted at the next assimilation event.
     pub ll_increments: Vec<f64>,
     /// One-step-ahead prediction diagnostics at each observation time.
     /// Only populated when obs model supports sample/mean.
@@ -348,6 +355,12 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
     // filter applies, rather than a second, subtly-different copy here.
     let mut deaths = DeathMask::new(n_particles);
 
+    // The ESS at each assimilation event, and only there: the history the
+    // collapse check reads (D72). `ess_trace` keeps one entry per stop for
+    // the caller's per-time outputs; a stop with no observation must not
+    // enter, or break, a run of collapsed windows.
+    let mut assimilation_ess: Vec<f64> = Vec::with_capacity(n_obs);
+
     // D1: the effects at t_start act on every particle's starting state, before
     // the first substep and before an observation at t_start is scored. A
     // particle the origin batch leaves negative dies like one a step would.
@@ -456,13 +469,26 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
             });
         }
 
+        // D72: assimilate only where some stream holds an observed value. A
+        // stop with none (every row there `NA`, or only a declared period
+        // opening) is here so the accumulators fold and reset; it scores
+        // nothing, opens no collapse-check window and does not resample, so
+        // the resampling stream and the ancestry are where they would be
+        // without the stop. The weights it carries are the ones the last
+        // resample left (equal), with the particles that died since at −∞;
+        // the death mask carries those to the next assimilation event, whose
+        // weights then hold the product of both windows' incremental weights.
+        let assimilates = obs_model.assimilates_at(obs_idx);
+
         // Compute log-weights via observation model. Dead particles
         // (gh#audit-C5/C6) get −Inf so resampling discards them.
         for (i, state) in swarm.states.iter().enumerate() {
             swarm.log_weights[i] = if deaths.is_dead(i) {
                 f64::NEG_INFINITY
-            } else {
+            } else if assimilates {
                 obs_model.log_likelihood(state, obs_idx, params)
+            } else {
+                0.0
             };
         }
 
@@ -472,7 +498,7 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
         // observation IC-free inference leaves out of the log-likelihood is
         // not the reason a log-likelihood is `-inf`, so it is not recorded.
         let counted = !(config.skip_first_obs_from_loglik && Some(obs_idx) == first_observation_idx);
-        if collapse.is_none() && counted && n_particles > 0
+        if assimilates && collapse.is_none() && counted && n_particles > 0
             && !swarm.log_weights.iter().any(|w| w.is_finite())
         {
             let live: Vec<&ParticleState> = swarm.states.iter().enumerate()
@@ -576,8 +602,14 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
         // normally, giving the conditional likelihood
         //   log L_c(θ | y_1) = Σ_{t=2}^{T} log p(y_t | y_{1:t-1}).
         // See docs/dev/proposals/archive/pre-alpha/2026-04-18-ic-free-inference.md.
-        let ll_increment = log_sum_exp(&swarm.log_weights) - (n_particles as f64).ln();
-        if !(config.skip_first_obs_from_loglik && Some(obs_idx) == first_observation_idx) {
+        // A stop that does not assimilate contributes no term: the weight
+        // its window lost to deaths is counted at the next assimilation event.
+        let ll_increment = if assimilates {
+            log_sum_exp(&swarm.log_weights) - (n_particles as f64).ln()
+        } else {
+            0.0
+        };
+        if assimilates && counted {
             total_loglik += ll_increment;
         }
         ll_increments.push(ll_increment);
@@ -592,36 +624,53 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
         // deterministic). `obs_idx` + a display-only elapsed are captured
         // into the error so the diagnostic can surface where the bail
         // happened — elapsed never gates the bail.
-        if let Some(kind) = check_pf_degeneracy(&ess_trace, deaths.count(), n_particles) {
+        // At a stop that does not assimilate only the every-particle-dead
+        // case is checked (an empty ESS history makes the check exactly
+        // that): there is nothing left to propagate.
+        let window: &[f64] = if assimilates {
+            assimilation_ess.push(swarm.ess());
+            &assimilation_ess
+        } else {
+            &[]
+        };
+        if let Some(kind) = check_pf_degeneracy(window, deaths.count(), n_particles) {
             return Err(super::degeneracy::pf_bail_error(
                 kind, obs_idx, t0_call.elapsed().as_secs_f64(),
             ));
         }
 
-        // Resample via double-buffer
-        let indices = systematic_resample(&swarm.log_weights, &mut resample_rng);
-        for (i, &src) in indices.iter().enumerate() {
-            states_buf[i].counts.copy_from_slice(&swarm.states[src].counts);
-            states_buf[i].flow_accumulators.copy_from_slice(&swarm.states[src].flow_accumulators);
-            // Phase 2a: the per-stream `acc` bins travel with the particle, so
-            // an ancestor swap carries the right partial bins for streams not
-            // observed at this union index.
-            states_buf[i].acc.copy_from_slice(&swarm.states[src].acc);
-        }
-        std::mem::swap(&mut swarm.states, &mut states_buf);
+        // Resample via double-buffer, at an assimilation event only. The call
+        // is skipped, not left to uniform weights: it would draw from the
+        // resampling stream either way.
+        let indices: Option<Vec<usize>> = if assimilates {
+            let indices = systematic_resample(&swarm.log_weights, &mut resample_rng);
+            for (i, &src) in indices.iter().enumerate() {
+                states_buf[i].counts.copy_from_slice(&swarm.states[src].counts);
+                states_buf[i].flow_accumulators.copy_from_slice(&swarm.states[src].flow_accumulators);
+                // Phase 2a: the per-stream `acc` bins travel with the particle, so
+                // an ancestor swap carries the right partial bins for streams not
+                // observed at this union index.
+                states_buf[i].acc.copy_from_slice(&swarm.states[src].acc);
+            }
+            std::mem::swap(&mut swarm.states, &mut states_buf);
 
-        // gh#audit-C5/C6: clear the death mask after resampling. Any
-        // particle that survived the systematic resample had finite
-        // weight, so it can't be dead. Clearing is correct because
-        // resampling shuffles particles by index, invalidating the
-        // pre-resample dead vector anyway.
-        deaths.clear();
+            // gh#audit-C5/C6: clear the death mask after resampling. Any
+            // particle that survived the systematic resample had finite
+            // weight, so it can't be dead. Clearing is correct because
+            // resampling shuffles particles by index, invalidating the
+            // pre-resample dead vector anyway.
+            deaths.clear();
+            Some(indices)
+        } else {
+            None
+        };
 
         // Record the resampling indices as the ancestor map for the
-        // NEXT step. Not needed after the last observation (no step
-        // t+1 to map into), so we skip recording on the final pass.
+        // NEXT step — the identity where the stop did not resample. Not
+        // needed after the last observation (no step t+1 to map into), so
+        // we skip recording on the final pass.
         if config.record_ancestry && obs_idx + 1 < n_obs {
-            history_ancestors.push(indices);
+            history_ancestors.push(indices.unwrap_or_else(|| (0..n_particles).collect()));
         }
 
         // Reset flow accumulators for next observation interval.

@@ -4067,7 +4067,7 @@ transforms (chain 1 of 4; chains start at different points — see chain_starts.
 
   ⚠ 2/2 parameters using auto rw_sd. Check traces and set explicit values.
 
-cooling: cf50=0.70, reached at iter 50 (target), over a 10-iteration run × 12 observations
+cooling: cf50=0.70, reached at iter 50 (target), over a 10-iteration run × 12 observed times
   iter   1: rw_sd at 99.3%
   iter  50: rw_sd at 70.0% (cf50 reached)
   iter  10: rw_sd at 93.1% (run end)

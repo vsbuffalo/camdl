@@ -181,7 +181,9 @@ impl CoolingSchedule {
     /// Per-filtering-step factor `c`: the SD at global step `s` is
     /// `initial · c^s`. Each iteration consumes `(1 + n_obs)` steps — one t=0
     /// perturbation plus one per observation (gh#audit-M2) — so `c` is chosen
-    /// to reach `fraction` after `target_iters · (1 + n_obs)` steps.
+    /// to reach `fraction` after `target_iters · (1 + n_obs)` steps. `n_obs`
+    /// counts assimilation events (union indices where some stream holds a
+    /// value, D72), not the filter's stops.
     pub fn per_step_factor(&self, n_obs: usize) -> f64 {
         let total_target_steps = self.target_iters as f64 * (1 + n_obs) as f64;
         self.fraction.powf(1.0 / total_target_steps)
@@ -339,9 +341,32 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
         }
     }
 
+    // D72: the filter assimilates only at a union index where some stream
+    // holds an observed value. A stop with none (a row every stream holds as
+    // `NA`, a declared period's start) folds and resets the accumulators and
+    // does nothing else: no weight, no diagnostic, no collapse-check window, no
+    // resampling, and no parameter perturbation.
+    //
+    // Ionides et al. (2015, PNAS 112(3):719–724) Algorithm 1 perturbs θ once
+    // per observation of y*_{1:N}, immediately before the process step that
+    // carries the swarm to it, and once at t = 0. So the perturbation for an
+    // assimilation event is drawn at the start of the first segment of its
+    // interval — the segment that follows the previous assimilation event (or
+    // t_start) — and a segment after the last assimilation event, which leads
+    // to no observation, gets none. A stop the data do not observe therefore
+    // moves neither the perturbation draws (each particle's stream carries the
+    // perturbation and the process, in that order, exactly as without the stop)
+    // nor the cooling count.
+    let assimilation: Vec<bool> = (0..n_obs).map(|i| obs_model.assimilates_at(i)).collect();
+    let n_assimilations = assimilation.iter().filter(|&&a| a).count();
+    let opens_interval: Vec<bool> = (0..n_obs)
+        .map(|k| (k == 0 || assimilation[k - 1]) && assimilation[k..].iter().any(|&a| a))
+        .collect();
+
     // Per-filtering-step cooling factor — the one `CoolingSchedule`, shared with
-    // the preflight preview and `camdl profile` so they can't drift.
-    let per_step_cooling = config.cooling.per_step_factor(n_obs);
+    // the preflight preview and `camdl profile` so they can't drift. A step is a
+    // perturbation: one at t = 0 and one per assimilation event.
+    let per_step_cooling = config.cooling.per_step_factor(n_assimilations);
 
     let mut iterations = Vec::with_capacity(config.n_iterations);
     let mut global_step: u64 = 0; // total filtering steps across all iterations
@@ -493,7 +518,11 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
         // The step IC-free inference leaves out of the log-likelihood: the
         // first index that carries an observation, not necessarily 0 (gh#833).
         let first_observation_idx = obs_model.first_observation_idx();
+        // The SD the current interval's perturbation was drawn at; read by the
+        // per-parameter diagnostics at the interval's assimilation event.
+        let mut cooling_now = per_step_cooling.powf(global_step as f64);
         for obs_idx in 0..n_obs {
+            let assimilates = assimilation[obs_idx];
             // PERTURB — Ionides et al. (2015) Algorithm 1, first line of the
             // inner loop. This runs BEFORE the process step so the SAME
             // Θ^P_n drives the simulation of X_n AND the measurement density
@@ -512,21 +541,24 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
             // are always initial-state parameters).
             //
             // `cooling_now` is also read by the per-parameter diagnostics
-            // after the weighting; the `global_step` accounting is unchanged
-            // (one t=0 step plus one per observation), so the SD applied at
-            // observation k is still `per_step_cooling^(k+1)`.
-            let cooling_now = per_step_cooling.powf(global_step as f64);
-            for i in 0..n {
-                for spec in if2_params {
-                    if spec.perturb_only_at_t0 || simplex_member_indices.contains(&spec.index) { continue; }
-                    let current = particle_params[i][spec.index];
-                    let sd = spec.rw_sd * cooling_now;
-                    let z = spec.to_transformed(current);
-                    let new_val = spec.from_transformed(z + rngs[i].normal() * sd);
-                    particle_params[i][spec.index] = new_val;
+            // after the weighting; the `global_step` accounting is one t=0
+            // step plus one per assimilation event, so the SD applied for the
+            // k-th assimilation event is `per_step_cooling^(k+1)`. Only the
+            // first segment of an assimilation interval perturbs (D72, above).
+            if opens_interval[obs_idx] {
+                cooling_now = per_step_cooling.powf(global_step as f64);
+                for i in 0..n {
+                    for spec in if2_params {
+                        if spec.perturb_only_at_t0 || simplex_member_indices.contains(&spec.index) { continue; }
+                        let current = particle_params[i][spec.index];
+                        let sd = spec.rw_sd * cooling_now;
+                        let z = spec.to_transformed(current);
+                        let new_val = spec.from_transformed(z + rngs[i].normal() * sd);
+                        particle_params[i][spec.index] = new_val;
+                    }
                 }
+                global_step += 1;
             }
-            global_step += 1;
 
             // Propagate — batched parallel dispatch per observation interval.
             let obs_time = obs_model.obs_time(obs_idx);
@@ -585,92 +617,98 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
                 obs_model.fold_into_acc(&s.flow_accumulators, &mut s.acc);
             }
 
-            // Weight by observation likelihood — at the SAME θ that drove the
-            // step above (gh#365).
-            for i in 0..n {
-                log_weights[i] = obs_model.log_likelihood(&states[i], obs_idx, &particle_params[i]);
-            }
-
-            // Per-parameter diagnostics (before resampling, using continuous weights):
-            //
-            // weighted_var_ratio: Var_w(θ_k) / Var(θ_k post-perturbation)
-            //   where Var_w uses normalized importance weights.
-            //   Measures selection pressure without resampling noise.
-            //
-            // q_k: rw_sd_effective / sd(θ_k before perturbation)
-            //   Perturbation-to-cloud width ratio.
-            {
-                let weights = normalize_log_weights(&log_weights);
-
-                for (pi, spec) in if2_params.iter().enumerate() {
-                    let nf = n as f64;
-
-                    // Unweighted variance (post-perturbation cloud)
-                    let mean_u = particle_params.iter().map(|pp| pp[spec.index]).sum::<f64>() / nf;
-                    let var_u = particle_params.iter()
-                        .map(|pp| (pp[spec.index] - mean_u).powi(2)).sum::<f64>() / nf;
-
-                    // Weighted variance (what the weights "want" the cloud to look like)
-                    let mean_w = particle_params.iter().zip(&weights)
-                        .map(|(pp, &w)| pp[spec.index] * w).sum::<f64>();
-                    let var_w = particle_params.iter().zip(&weights)
-                        .map(|(pp, &w)| w * (pp[spec.index] - mean_w).powi(2)).sum::<f64>();
-
-                    let wvr = if var_u > 1e-30 { var_w / var_u } else { 1.0 };
-                    wvr_accum[pi] += wvr;
-
-                    // q_k: effective perturbation / cloud width
-                    let sd_u = var_u.sqrt();
-                    let eff_sd = spec.rw_sd * cooling_now;
-                    let q = if sd_u > 1e-30 { eff_sd / sd_u } else { 0.0 };
-                    q_k_accum[pi] += q;
-
-                    diag_count[pi] += 1;
+            // Score, check and resample at an assimilation event only (D72).
+            // The weights stay 0 at a stop that does not assimilate; the
+            // resampling call is skipped, not left to equal weights, because
+            // it would draw from the resampling stream either way.
+            if assimilates {
+                // Weight by observation likelihood — at the SAME θ that drove the
+                // step above (gh#365).
+                for i in 0..n {
+                    log_weights[i] = obs_model.log_likelihood(&states[i], obs_idx, &particle_params[i]);
                 }
-            }
 
-            // Log-likelihood increment. Under IC-free inference
-            // (`config.skip_first_obs_from_loglik`), the first
-            // observation still reweights and resamples (that's the
-            // pinning of x₀ given y₁) but is dropped from the
-            // accumulated log-likelihood. See
-            // docs/dev/proposals/archive/pre-alpha/2026-04-18-ic-free-inference.md.
-            let ll_inc = log_sum_exp(&log_weights) - (n as f64).ln();
-            if !(config.skip_first_obs_from_loglik && Some(obs_idx) == first_observation_idx) {
-                if ll_inc.is_finite() {
-                    total_loglik += ll_inc;
-                } else {
-                    n_skipped_obs += 1;
+                // Per-parameter diagnostics (before resampling, using continuous weights):
+                //
+                // weighted_var_ratio: Var_w(θ_k) / Var(θ_k post-perturbation)
+                //   where Var_w uses normalized importance weights.
+                //   Measures selection pressure without resampling noise.
+                //
+                // q_k: rw_sd_effective / sd(θ_k before perturbation)
+                //   Perturbation-to-cloud width ratio.
+                {
+                    let weights = normalize_log_weights(&log_weights);
+
+                    for (pi, spec) in if2_params.iter().enumerate() {
+                        let nf = n as f64;
+
+                        // Unweighted variance (post-perturbation cloud)
+                        let mean_u = particle_params.iter().map(|pp| pp[spec.index]).sum::<f64>() / nf;
+                        let var_u = particle_params.iter()
+                            .map(|pp| (pp[spec.index] - mean_u).powi(2)).sum::<f64>() / nf;
+
+                        // Weighted variance (what the weights "want" the cloud to look like)
+                        let mean_w = particle_params.iter().zip(&weights)
+                            .map(|(pp, &w)| pp[spec.index] * w).sum::<f64>();
+                        let var_w = particle_params.iter().zip(&weights)
+                            .map(|(pp, &w)| w * (pp[spec.index] - mean_w).powi(2)).sum::<f64>();
+
+                        let wvr = if var_u > 1e-30 { var_w / var_u } else { 1.0 };
+                        wvr_accum[pi] += wvr;
+
+                        // q_k: effective perturbation / cloud width
+                        let sd_u = var_u.sqrt();
+                        let eff_sd = spec.rw_sd * cooling_now;
+                        let q = if sd_u > 1e-30 { eff_sd / sd_u } else { 0.0 };
+                        q_k_accum[pi] += q;
+
+                        diag_count[pi] += 1;
+                    }
                 }
-            }
 
-            // gh#110 degeneracy watchdog. ESS via the single-sourced
-            // `ess_from_log_weights` (IF2's per-iter PF loop holds a
-            // `Vec<f64>` of log-weights, not a `ParticleSwarm`). dead_count = 0
-            // because IF2 does NOT mark per-particle deaths — `process.step`
-            // errors propagate immediately, so AllParticlesDead is unreachable
-            // here; ESS collapse or wall-clock fires first.
-            let ess_now = ess_from_log_weights(&log_weights);
-            ess_history.push(ess_now);
-            if let Some(kind) = check_pf_degeneracy(&ess_history, 0, n) {
-                // Statistical pathology (ESS collapse / all dead) → PFDegenerate.
-                // elapsed is a display-only diagnostic, never the bail trigger.
-                return Err(super::degeneracy::pf_bail_error(
-                    kind, obs_idx, t0_if2.elapsed().as_secs_f64(),
-                ));
-            }
+                // Log-likelihood increment. Under IC-free inference
+                // (`config.skip_first_obs_from_loglik`), the first
+                // observation still reweights and resamples (that's the
+                // pinning of x₀ given y₁) but is dropped from the
+                // accumulated log-likelihood. See
+                // docs/dev/proposals/archive/pre-alpha/2026-04-18-ic-free-inference.md.
+                let ll_inc = log_sum_exp(&log_weights) - (n as f64).ln();
+                if !(config.skip_first_obs_from_loglik && Some(obs_idx) == first_observation_idx) {
+                    if ll_inc.is_finite() {
+                        total_loglik += ll_inc;
+                    } else {
+                        n_skipped_obs += 1;
+                    }
+                }
 
-            // Resample states AND parameters jointly via double-buffer (no allocation)
-            let indices = systematic_resample(&log_weights, &mut resample_rng);
-            for (i, &src) in indices.iter().enumerate() {
-                states_buf[i].counts.copy_from_slice(&states[src].counts);
-                states_buf[i].flow_accumulators.copy_from_slice(&states[src].flow_accumulators);
-                // Phase 2a: the per-stream `acc` bins travel with the particle.
-                states_buf[i].acc.copy_from_slice(&states[src].acc);
-                params_buf[i].copy_from_slice(&particle_params[src]);
+                // gh#110 degeneracy watchdog. ESS via the single-sourced
+                // `ess_from_log_weights` (IF2's per-iter PF loop holds a
+                // `Vec<f64>` of log-weights, not a `ParticleSwarm`). dead_count = 0
+                // because IF2 does NOT mark per-particle deaths — `process.step`
+                // errors propagate immediately, so AllParticlesDead is unreachable
+                // here; ESS collapse or wall-clock fires first.
+                let ess_now = ess_from_log_weights(&log_weights);
+                ess_history.push(ess_now);
+                if let Some(kind) = check_pf_degeneracy(&ess_history, 0, n) {
+                    // Statistical pathology (ESS collapse / all dead) → PFDegenerate.
+                    // elapsed is a display-only diagnostic, never the bail trigger.
+                    return Err(super::degeneracy::pf_bail_error(
+                        kind, obs_idx, t0_if2.elapsed().as_secs_f64(),
+                    ));
+                }
+
+                // Resample states AND parameters jointly via double-buffer (no allocation)
+                let indices = systematic_resample(&log_weights, &mut resample_rng);
+                for (i, &src) in indices.iter().enumerate() {
+                    states_buf[i].counts.copy_from_slice(&states[src].counts);
+                    states_buf[i].flow_accumulators.copy_from_slice(&states[src].flow_accumulators);
+                    // Phase 2a: the per-stream `acc` bins travel with the particle.
+                    states_buf[i].acc.copy_from_slice(&states[src].acc);
+                    params_buf[i].copy_from_slice(&particle_params[src]);
+                }
+                std::mem::swap(&mut states, &mut states_buf);
+                std::mem::swap(&mut particle_params, &mut params_buf);
             }
-            std::mem::swap(&mut states, &mut states_buf);
-            std::mem::swap(&mut particle_params, &mut params_buf);
 
             // Reset. `flow_accumulators` blanket (unchanged); the per-stream
             // `acc` bins per-stream — only Interval streams scheduled at THIS
@@ -693,9 +731,9 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
         }
 
         // Per-parameter diagnostics for this iteration
-        // Diagnostic SD at end of `iter`: use (1 + n_obs) steps/iter to match the
-        // actual global-step accounting (the perturbation loop), not `n_obs`.
-        let cooling_at_iter = config.cooling.multiplier_at_iter(n_obs, iter);
+        // Diagnostic SD at end of `iter`: use (1 + n_assimilations) steps/iter
+        // to match the actual global-step accounting (the perturbation loop).
+        let cooling_at_iter = config.cooling.multiplier_at_iter(n_assimilations, iter);
         let param_diag: Vec<ParamIterDiag> = if2_params.iter().enumerate().map(|(pi, spec)| {
             let cnt = diag_count[pi].max(1) as f64;
             ParamIterDiag {
@@ -724,7 +762,7 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
                 "if2 iter {}: skipped {}/{} observations with non-finite log-lik \
                  increment (typically early-exploration particles hit \
                  impossible states)",
-                iter, n_skipped_obs, n_obs);
+                iter, n_skipped_obs, n_assimilations);
         }
 
     }
