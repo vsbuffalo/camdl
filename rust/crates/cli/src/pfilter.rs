@@ -88,13 +88,24 @@ fn collapse_message(result: &sim::inference::particle_filter::PFilterResult) -> 
 
 /// The rows a `--save-final-state` run under the fit's `holdout_after` binds
 /// (gh#1138): the cutoff it resolved to, the training extent (the latest end
-/// among the kept rows, where the state is saved) and how many leading rows of
-/// each stream it kept, by stream name (identity: the rows after them were
-/// left out of the stored log-likelihood).
+/// among the kept rows, where the state is saved), how many leading rows of
+/// each stream it kept, by stream name, and whether that dropped any row.
 struct TrainingCut {
     at: f64,
     extent: f64,
     rows: Vec<(String, usize)>,
+    dropped: bool,
+}
+
+impl TrainingCut {
+    /// The training rows the stored leaf keys: `Some` only when the cut
+    /// dropped a row from some stream, since only then does the stored
+    /// log-likelihood differ from the same evaluation without the cut. A run
+    /// bound to its training rows alone keeps the run_id it has without
+    /// `--save-final-state`.
+    fn identity(&self) -> Option<&[(String, usize)]> {
+        self.dropped.then_some(self.rows.as_slice())
+    }
 }
 
 /// Keep only the rows the fit trains on under `holdout_after` (resolved to
@@ -111,6 +122,7 @@ fn cut_to_training_rows(
     use crate::fit::training_partition::PartitionError;
     let refuse = |e| crate::fit::runner::partition_error(e, Some((raw, at)));
     let mut rows = Vec::with_capacity(streams.len());
+    let mut dropped = false;
     for s in streams.iter_mut() {
         let n = crate::fit::training_partition::cutoff_prefix(&s.rows, at)
             .map_err(|position| refuse(PartitionError::NotAPrefix {
@@ -119,6 +131,7 @@ fn cut_to_training_rows(
         if !s.rows[..n].iter().any(|r| r.cell.is_some()) {
             return Err(refuse(PartitionError::NoTrainingRows { stream: s.name.clone() }));
         }
+        dropped |= n < s.rows.len();
         s.truncate_rows(n);
         rows.push((s.name.clone(), n));
     }
@@ -127,7 +140,7 @@ fn cut_to_training_rows(
         .flat_map(|s| s.rows.iter().map(|r| r.measures.end()))
         .reduce(f64::max)
         .ok_or_else(|| refuse(PartitionError::NoRows))?;
-    Ok(TrainingCut { at, extent, rows })
+    Ok(TrainingCut { at, extent, rows, dropped })
 }
 
 pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
@@ -698,7 +711,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             flow_indices: &flow_indices,
             objective,
             allow_forcing_extrapolation: crate::forcing_extrapolation::allowed(),
-            training_rows: training_cut.as_ref().map(|c| c.rows.as_slice()),
+            training_rows: training_cut.as_ref().and_then(TrainingCut::identity),
             seed,
         };
         let resolved_id = match crate::pfilter_cas::resolve_pfilter(&ctx) {
