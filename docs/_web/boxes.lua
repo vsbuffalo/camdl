@@ -1,4 +1,4 @@
--- The five semantic boxes of docs/documentation-style.md, section 5.
+-- The six semantic boxes of docs/documentation-style.md, section 5.
 --
 --   ::: {.practice title="Checking a fit without reading its full log"}
 --   ...
@@ -13,11 +13,12 @@
 --   .internals   orange  Under the hood:   caution       collapsed
 --   .warning     red     Warning:          important     always open
 --   .agents      slate   For AI agents:    note          collapsed
+--   .feedback    violet  Feedback:         note          open
 --
--- `collapse="false"` shows a practice, modeling, internals or agents box open (it can
--- still be closed). A `.warning` box is never collapsible: any `collapse` on
--- it is ignored, because a warning that changes whether to trust a result
--- belongs in the reading path.
+-- `collapse="false"` shows a practice, modeling, internals or agents box open
+-- (it can still be closed); `collapse="true"` starts a feedback box closed. A
+-- `.warning` box is never collapsible: any `collapse` on it is ignored, because
+-- a warning that changes whether to trust a result belongs in the reading path.
 --
 -- The label is written into the visible title, so the kind of box never rests
 -- on colour alone; a title that already starts with it is left as it is. A box
@@ -34,6 +35,7 @@ local KINDS = {
   internals = { type = "caution", label = "Under the hood:", collapsible = true },
   warning = { type = "important", label = "Warning:", collapsible = false },
   agents = { type = "note", label = "For AI agents:", collapsible = true },
+  feedback = { type = "note", label = "Feedback:", collapsible = true, open = true },
 }
 
 local function kind_of(div)
@@ -79,7 +81,7 @@ local function box(div)
 
   local collapse = nil
   if spec.collapsible then
-    local requested = div.attributes["collapse"] or "true"
+    local requested = div.attributes["collapse"] or (spec.open and "false" or "true")
     if requested ~= "true" and requested ~= "false" then
       error("boxes: collapse must be \"true\" or \"false\", got " .. requested)
     end
