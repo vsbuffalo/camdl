@@ -56,6 +56,29 @@ use sha2::{Digest, Sha256};
 ///
 /// ## History
 ///
+/// - **7** (D77) — three changes to what the particle filters compute from a
+///   run's inputs:
+///   1. *No resample on exactly equal weights.* Where every normalised log
+///      weight is equal, neither filter resamples. The filtering distribution
+///      is unchanged, but the resampling stream is not drawn there, so every
+///      later resample, and IF2's parameter ancestry, differs from a
+///      version-6 run with the same inputs and seed.
+///   2. *A binomial or beta-binomial `0` of `0` is a hole.* A row with zero
+///      trials read from the data and a count of 0 is bound as missing, so it
+///      is no assimilation event; at version 6 it resampled, and IF2 perturbed
+///      and cooled for it.
+///   3. *PGAS uses the same equal-weight rule.* The conditional sweep and its
+///      initialisation pass skipped a resample wherever every log weight was
+///      within 1e-10 of the first; they now skip only on exactly equal
+///      normalised log weights, so a PGAS run whose weights fall in that band
+///      resamples there.
+///
+///   A `pfilter`, `survey`, `profile` or fit run that meets any of these
+///   cases stores a different, equally valid realisation, so it must not be
+///   served the leaf a version-6 run stored. Runs meeting none of them
+///   re-key with the version alone. Leaves written at
+///   version 6 stay readable; they are never served as a cache hit for a
+///   version-7 run.
 /// - **6** (D72) — an invariance fix (bootstrap filter) and an algorithm
 ///   correction (IF2) to what the particle filters compute from a run's
 ///   inputs. The bootstrap filter and IF2 assimilate only at a
@@ -128,7 +151,7 @@ use sha2::{Digest, Sha256};
 ///   still parses, `fit summary` and the browsers read them); they are never
 ///   served as a cache hit for a version-2 run.
 /// - **1** — the initial encoding.
-pub const HASH_VERSION: u16 = 6;
+pub const HASH_VERSION: u16 = 7;
 
 // ─── ContentHash ─────────────────────────────────────────────────────────────
 
