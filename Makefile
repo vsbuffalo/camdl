@@ -116,7 +116,7 @@ dev-camdlc: build-ocaml
 
 # ── Test ──────────────────────────────────────────────────────────────────────
 
-.PHONY: test lint test-ocaml test-rust test-inference test-integration test-docs test-cli-docs test-data-spec test-install
+.PHONY: test lint test-ocaml test-rust test-inference test-integration test-docs test-cli-docs test-data-spec test-dates-doc test-install
 
 # `make test` runs the full surface. The Rust suite is split into two groups so
 # CI can run and badge them independently (see .github/workflows/): test-rust =
@@ -276,6 +276,20 @@ test-cli-docs: build-rust
 test-data-spec: build
 	cd rust && CAMDL_SKIP_VERSION_CHECK=1 $(CARGO_WRAP) \
 	  cargo test --release -p cli --test data_spec_examples
+
+# Run every `simulate` output table printed in docs/dates.md and compare its
+# time and date columns with what the command prints (gh#1089). Each table's
+# fence names its fixture model and command; count columns are seed-dependent
+# and not compared. A Rust harness rather than `camdlc doctest`: the check runs
+# the Rust runtime, and the OCaml doctest builds without it.
+#
+# Like test-data-spec, the harness is a cargo test, so `make test-rust` (and
+# so `make test` and ci.yml) already run it. This target exists so a DOC-ONLY
+# change is gated too: ci.yml ignores docs/**. Mirrored by
+# .github/workflows/dates-doc.yml.
+test-dates-doc: build
+	cd rust && CAMDL_SKIP_VERSION_CHECK=1 $(CARGO_WRAP) \
+	  cargo test --release -p cli --test dates_doc_examples
 
 # install.sh fast tier: shellcheck (if present) + offline unit tests
 # (version_ge, the cmake>=3.13 gate, cmake_plat, and the no-sudo contract — a
@@ -799,7 +813,8 @@ install-nvim-ts:
 # Renders docs/*.md (the same files `camdl docs` embeds) plus the tutorial
 # pages docs/guide/*.qmd to docs/_site/ with Quarto; config in
 # docs/_quarto.yml. The reference pages execute nothing (their examples are
-# gated by test-docs / test-cli-docs / test-data-spec). The tutorial pages run
+# gated by test-docs / test-cli-docs / test-data-spec /
+# test-dates-doc). The tutorial pages run
 # their `camdl` commands at render time (docs/_web/camdl-run.lua) against this
 # checkout's own build, so the output shown is the output of the code being
 # documented. Deployed to GitHub Pages by .github/workflows/docs-site.yml.

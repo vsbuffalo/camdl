@@ -256,16 +256,16 @@ to different things:
 | trajectory flow (`flow_*`)                                    | the total over `[t_start, t_stop)`, which the row states beside `t` — `t_stop` is `t`, `t_start` the previous row's          |
 | observation `incidence(...)`                                  | the total over the period the stream's `covers` assigns to the label — `[D−Δ, D)` under `closing_at`, `[D, D+1)` under `day` |
 
-```
+```tsv dates-example=trajectory-rows model=daily_trajectory cmd="simulate --dates --backend ode" excerpt
 t  t_start  t_stop  date        date_start  date_stop   S      I    flow_infection
-4  3        4       2026-07-05  2026-07-04  2026-07-05  9931   49    24.2009
-5  4        5       2026-07-06  2026-07-05  2026-07-06  9895   73    35.8401
-6  5        6       2026-07-07  2026-07-06  2026-07-07  9842  108    52.8828
+4  3        4       2026-07-05  2026-07-04  2026-07-05  9914   73    34.3868
+5  4        5       2026-07-06  2026-07-05  2026-07-06  9858  120    56.1248
+6  5        6       2026-07-07  2026-07-06  2026-07-07  9767  195    91.0209
 ```
 
 The flow column is what happened _between_ two rows; `S` and `I` are counts _at_
 each one. This is not a wrinkle to fix — it is what stocks and flows are, and
-the row says so: `flow_infection = 52.8828` on the row dated 7 July is the flow
+the row says so: `flow_infection = 91.0209` on the row dated 7 July is the flow
 over `[6 July, 7 July)` — the infections of **6 July** — and `date_start` /
 `date_stop` state exactly that, so a reader never has to infer it from the row
 above. The initial-condition row, having no interval before it, writes the empty
@@ -645,21 +645,21 @@ calendar rule. A generated grid counts its steps from the start of the
 simulation, `simulate { from }`. With `origin = date("2026-07-01")`, a
 Wednesday, and `from = origin`, every weekly row falls on a Wednesday:
 
-```
-t   date        cases
-7   2026-07-08  7012
-14  2026-07-15  6998
+```tsv dates-example=weekly-wednesday model=weekly_from_origin cmd="simulate --obs --dates"
+time  date        cases
+7     2026-07-08    88
+14    2026-07-15  1356
 ```
 
 Keep the same `origin` but start the simulation two days earlier, on Monday 29
 June (`from = date("2026-06-29")`, which is `t = -2`), and every weekly row
 falls on a Monday instead:
 
-```
-t   date
-5   2026-07-06
-12  2026-07-13
-19  2026-07-20
+```tsv dates-example=weekly-monday model=weekly_from_monday cmd="simulate --obs --dates"
+time  date
+5     2026-07-06
+12    2026-07-13
+19    2026-07-20
 ```
 
 `origin` played no part in that shift. It only names the calendar date of

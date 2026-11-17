@@ -404,6 +404,9 @@ workflows, on push to `main` and on PRs:
   covers; the harness is `rust/crates/cli/tests/data_spec_examples.rs`, so
   `ci.yml` runs it too — this workflow exists because `ci.yml` ignores
   `docs/**`)
+- `dates-doc.yml` — `make test-dates-doc` (runs every `simulate` output table in
+  `docs/dates.md` and compares its time and date columns; the harness is
+  `rust/crates/cli/tests/dates_doc_examples.rs`, so `ci.yml` runs it too)
 - `release.yml` — release artifacts (Linux / macOS / Windows)
 
 Statistical `#[ignore]` tests are **not** in CI yet. Run manually before
