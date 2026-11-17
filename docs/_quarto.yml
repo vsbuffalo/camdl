@@ -158,9 +158,14 @@ website:
             href: documentation-style.md
       # Generated from the source: the pages' `order` front matter sets the
       # sequence, in the order ocaml/lib/compiler/index.mld lists the modules.
-      - section: "The compiler"
+      - section: "Internals"
         contents:
-          - auto: "internals/compiler/*.qmd"
+          - section: "Compiler (OCaml)"
+            href: internals/compiler/index.qmd
+            contents:
+              - text: "Overview"
+                href: internals/compiler/index.qmd
+              - auto: "internals/compiler/*.qmd"
   page-footer:
     left: "Originally created by Vince Buffalo at the Institute for Disease Modeling, Gates Foundation. [MIT License](https://github.com/vsbuffalo/camdl/blob/main/LICENSE)."
     center: "Drafted largely with an LLM"
