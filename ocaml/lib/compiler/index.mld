@@ -126,13 +126,17 @@ the Rust side it needs the type in [rust/crates/ir/src/expr.rs], an entry in
 [ir/schema.json], and an evaluator in [rust/crates/sim]. Both OCaml libraries
 are compiled with a non-exhaustive match as an error, and {!Autodiff} and
 {!Dim_sites} match on every constructor without a catch-all, so the build
-itself lists the places a new constructor must be handled. Any change to the
+itself lists the places a new constructor must be handled. A new declaration,
+or a new field of a declaration's record, is listed the same way by
+{!Time_census}, which matches every declaration and every field it reads with
+no catch-all and fails the build until it says whether the new thing holds a
+time, and of which kind. Any change to the
 shape of {!Ir.model} or its JSON changes [ir/VERSION] and every golden IR file
 together. A new check of the expanded model belongs in [run_analysis], so that
 [camdlc check] and a compile both run it.
 
 Two facts about the shape of the code help in reading it. The expander is one
-module of about 13,000 lines with no interface file, and most of the
+module of about 14,000 lines with no interface file, and most of the
 language's semantics is there. And both libraries are unwrapped, so their
 modules are top-level names ([Ast], [Ir], [Validate]) rather than members of a
 [compiler] or [ir] namespace.
@@ -219,12 +223,25 @@ its levels and rejects duplicate or clashing names, including clashes between
 expanded names. It then checks for [let]s defined in terms of themselves,
 shadowed names, cycles among hierarchical priors, and guards that read
 anything other than dimension levels. The surface time-typing rules of
-{!Time_typing} run at this point, because they need to tell an instant (a
-[date(...)], or [origin]) from a duration, and resolution turns both into plain
-numbers in the model's time unit. Only then are tables,
-compartments, transitions and the remaining blocks expanded, each family over
-the product of its dimensions, and every expression resolved against the
-context.
+{!Time_typing} run at this point over every ordinary expression, because they
+need to tell an instant (a [date(...)], or [origin]) from a duration, and
+resolution turns both into plain numbers in the model's time unit. Only then
+are tables, compartments, transitions and the remaining blocks expanded, each
+family over the product of its dimensions, and every expression resolved
+against the context.
+
+A time written in a declaration field, such as [simulate { to }] or an
+intervention's [every], is not checked by that walk. The parser stores it as
+an {!Ast.Time_pos.t}, tagged with one of six kinds (an instant, a cadence, a
+run-time offset, a span, a phase or a length), because the kind decides what a
+calendar duration means there: in a model with an [origin], [to = 6 'months] is
+the date six calendar months after the origin, while [every = 1 'months] is
+refused, since one fixed step cannot follow the calendar. The expander lowers
+each position with the function of its kind in [Expander.Lower], which applies
+the kind's rule the first time the position is lowered and records that it
+did. {!Time_census} lists every time position of a model, including those
+inside forcing arguments and expressions, and a test checks that each one
+went through [Lower].
 
 The output of expansion has four properties every later stage relies on.
 Every stratified declaration is one entry per cell. Every name in an
@@ -248,7 +265,7 @@ the [ir] library because it reads IR expressions. {!Sha256} hashes the data
 files expansion reads, so that the compiled model can record which file
 contents it was built from.
 
-{!modules: Expander Time_typing Lineage Sha256}
+{!modules: Expander Time_typing Time_census Lineage Sha256}
 
 {1 The intermediate representation}
 
