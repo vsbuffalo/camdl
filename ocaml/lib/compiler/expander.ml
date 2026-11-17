@@ -5785,9 +5785,14 @@ let rec mentions_calendar_duration ctx (e : expr) : bool =
   | EUnit (_, (Months | Years)) -> true
   | EConst _ | EUnit _ | EObsAccess _ | ERunMember _ -> false
   | EIdent (n, _) | EIndex (n, _, _) ->
+    (* A `let` whose body is itself an instant moved by a calendar duration is
+       refused at the `let` (the ordinary-expression walk); only a `let` of a
+       duration carries its calendar literal into the position that uses it. *)
     (not (Hashtbl.mem ctx.cyclic_lets n))
     && (match Hashtbl.find_opt ctx.let_tbl n with
-        | Some lb -> go lb.lbody
+        | Some lb ->
+          Time_typing.classify (time_env ctx) lb.lbody <> Time_typing.TInstant
+          && go lb.lbody
         | None -> false)
   | EFuncCall ("date", _) -> false
   | EFuncCall (("add_calendar_months" | "add_calendar_years"), args) ->
