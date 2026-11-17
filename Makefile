@@ -828,14 +828,30 @@ DOCS_SITE_ENV  := PATH="$(CURDIR)/rust/target/release:$$PATH" CAMDLC="$(CURDIR)/
 # Quarto logs a Lua filter's error and keeps going, exiting 0, so a broken
 # executed example (docs/_web/camdl-run.lua) would not fail the build. Keep the
 # log and fail on any ERROR line in it.
-docs-site: build
+docs-site: docs-internals
 	cd docs && $(DOCS_SITE_ENV) bash -o pipefail -c 'quarto render 2>&1 | tee .render.log'
 	@if grep -q 'ERROR' docs/.render.log; then \
 	  echo "docs-site: the render logged errors (docs/.render.log):" >&2; \
 	  grep 'ERROR' docs/.render.log >&2; exit 1; fi
 
-docs-site-preview: build
+docs-site-preview: docs-internals
 	cd docs && $(DOCS_SITE_ENV) quarto preview --port $(DOCS_SITE_PORT) --host 0.0.0.0 --no-browser
+
+# Internals pages: the compiler's types, generated from the source. The OCaml
+# extractor (ocaml/tools/typedoc) writes one JSON description of every type
+# and its doc comments; the renderer (rust/crates/typedoc) turns it into
+# docs/internals/compiler/*.qmd, grouped and ordered by
+# docs/_web/internals/compiler.toml. docs/internals/ is generated, never
+# committed. Docs: docs/documentation-style.md, section 10.
+.PHONY: docs-internals
+TYPEDOC_OCAML := ocaml/_build/default/tools/typedoc/typedoc_ocaml.exe
+TYPEDOC       := rust/target/release/typedoc
+COMPILER_ML   := $(sort $(wildcard ocaml/lib/compiler/*.ml) $(wildcard ocaml/lib/ir/*.ml))
+docs-internals: build
+	mkdir -p docs/internals
+	$(TYPEDOC_OCAML) $(COMPILER_ML) > docs/internals/compiler.json
+	$(TYPEDOC) render --manifest docs/_web/internals/compiler.toml \
+	  --input docs/internals/compiler.json --out docs/internals/compiler
 
 # The camdl-scope screenshots on guide/first-fit.qmd need a running viewer, so
 # they are committed images rather than render output. Re-run after a change

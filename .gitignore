@@ -89,3 +89,6 @@ target/book/
 docs/_site/
 docs/.render.log
 docs/.quarto/
+
+# Internals pages generated from the source (make docs-internals)
+docs/internals/
