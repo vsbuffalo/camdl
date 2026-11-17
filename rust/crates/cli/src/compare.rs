@@ -2590,6 +2590,12 @@ fn derive_prequential(
     // The run θ̂ comes from: the leaf the handle named, else the folder's.
     let run_dir = resolved.run_dir();
     let config = &resolved.config.problem;
+    // The fit's `allow_degenerate_rates` (keyed in its identity): a rate that
+    // collapsed to 0 in the fit collapses to 0 when it is scored. Set here for
+    // the in-process ODE scorer, and passed to the `camdl pfilter` child below.
+    // Fits are derived one at a time, so each is scored under its own setting.
+    let allow_degenerate_rates = config.config.allow_degenerate_rates;
+    sim::eval_stats::set_allow_degenerate_rates(allow_degenerate_rates);
 
     // gh#729 / gh#312: the score must come from the forward process the fit
     // ran on. The θ̂ below comes from the fit's method leaf (both
@@ -2787,6 +2793,9 @@ fn derive_prequential(
         }
         for name in &base_disable {
             cmd.arg("--disable").arg(name);
+        }
+        if allow_degenerate_rates {
+            cmd.arg("--allow-degenerate-rates");
         }
         // gh#585 (Stage 3.4): score only past the sealed training boundary,
         // the training extent (D38).

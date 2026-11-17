@@ -233,3 +233,76 @@ fn pfilter_keys_allow_degenerate_rates() {
             "each leaf holds its own run's loglik: stored {stored:?}, printed {printed:?}");
     }
 }
+
+// ── replaying a stored fit ──────────────────────────────────────────────────
+
+/// A PGAS fit under `[config] allow_degenerate_rates = true` of the model with
+/// `beta, gamma ∈ [2, 5]`, where every trajectory reaches `S + I = 0` within
+/// the 40 observed days. Returns the work dir and the fit's leaf.
+fn degenerate_fit(tag: &str) -> (Tmp, String) {
+    let tmp = tempdir(tag);
+    std::fs::write(tmp.0.join("model.camdl"), model(40, 2.0)).unwrap();
+    std::fs::write(tmp.0.join("cases.tsv"), cases(40)).unwrap();
+    std::fs::write(tmp.0.join("fit.toml"), r#"output_dir = "results"
+
+[model]
+camdl = "model.camdl"
+
+[data.observations]
+cases = "cases.tsv"
+
+[config]
+allow_degenerate_rates = true
+
+[estimate]
+beta  = { bounds = [2.0, 5.0], start = 3.0 }
+gamma = { bounds = [2.0, 5.0], start = 3.0 }
+
+[fixed]
+
+[method]
+algorithm = "pgas"
+backend = "chain_binomial"
+chains = 2
+particles = 50
+sweeps = 30
+burn_in = 10
+thin = 1
+"#).unwrap();
+    let o = camdl(&tmp.0, &["fit", "run", "fit.toml", "--seed", "1", "--progress", "none"]);
+    assert!(o.status.success(), "fit run: {}", text(&o));
+    let fits = tmp.0.join("results/fits");
+    let seg = std::fs::read_dir(&fits).unwrap().flatten().map(|e| e.path())
+        .find(|p| p.is_dir()).expect("a fit segment");
+    let method = std::fs::read_dir(&seg).unwrap().flatten().map(|e| e.path())
+        .find(|p| p.file_name().unwrap().to_string_lossy().starts_with("pgas-")).expect("a pgas dir");
+    let leaf = std::fs::read_dir(&method).unwrap().flatten().map(|e| e.path())
+        .find(|p| p.join("run.json").is_file()).expect("a leaf");
+    (tmp, leaf.to_string_lossy().into_owned())
+}
+
+/// `fit predict` replays the fit's model forward from each draw. The fit was
+/// made under `allow_degenerate_rates`, so the replay must be too; before the
+/// fix it ran without it and the free-forward horizon failed with
+/// `NumericalCollapse`.
+#[test]
+fn fit_predict_replays_the_fits_allow_degenerate_rates() {
+    let (tmp, leaf) = degenerate_fit("predict");
+    let o = camdl(&tmp.0, &["fit", "predict", &leaf, "--mode", "free_forward"]);
+    let all = text(&o);
+    assert!(!all.contains("NumericalCollapse"), "the replay must not collapse:\n{all}");
+    assert!(o.status.success(), "{all}");
+}
+
+/// `compare` scores a chain-binomial fit by a particle filter at its posterior
+/// draws, run as a `camdl pfilter` child. Every particle collapses without the
+/// fit's `allow_degenerate_rates`, so before the fix the child failed with
+/// `AllParticlesDead` and the fit could not be scored.
+#[test]
+fn compare_replays_the_fits_allow_degenerate_rates() {
+    let (tmp, leaf) = degenerate_fit("compare");
+    let o = camdl(&tmp.0, &["compare", &leaf, &leaf]);
+    let all = text(&o);
+    assert!(!all.contains("AllParticlesDead"), "the scoring filter must not collapse:\n{all}");
+    assert!(o.status.success(), "{all}");
+}
