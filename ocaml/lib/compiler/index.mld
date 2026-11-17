@@ -1,0 +1,372 @@
+{0 The compiler}
+
+[camdlc] reads a [.camdl] model, expands it into a flat list of compartments,
+transitions and expressions with every name resolved, checks it, attaches
+symbolic gradients, and writes it as JSON for the Rust runtime. The compiler is
+two OCaml libraries and one executable. The library [compiler]
+([ocaml/lib/compiler/]) holds everything that knows the surface language: the
+lexer, the parser, the syntax tree {!Ast}, and the expander. The library [ir]
+([ocaml/lib/ir/]) holds the intermediate representation {!Ir}, its JSON codec,
+and every pass that works on the expanded model; it does not depend on the
+surface language. The executable [ocaml/bin/camdlc.ml] parses the command line
+and calls [Compiler.compile_with_declared]. The Rust command [camdl] does not
+link the compiler: it runs [camdlc] as a subprocess and reads the JSON it
+writes.
+
+A compile runs these stages, in this order:
+
+{v
+  model.camdl
+      |   Lexer (lexer.mll), Parser (parser.mly, Menhir)
+      v
+  Ast.declaration list ---------------> Declared_emit: the model as written
+      |   Expander.expand_detail
+      |     declaration and name checks, surface time typing,
+      |     `via` lowering, expansion of families over dimensions,
+      |     name resolution, unit conversion
+      v
+  Ir.model, expanded
+      |   Validate -> Dimcheck -> Lint       report diagnostics only
+      |   Autodiff                           fills the gradient fields
+      |   Constant_fold -> Licm              rewrite, preserving values
+      v
+  Ir.model, final
+      |   camdlc: apply --set overrides
+      |   Serde.model_to_channel
+      v
+  { "ir_version", "validated_by", "model", "docs", "declared" }
+v}
+
+The page is organised by these stages. Each section below says what a stage
+receives, what it hands on, and what the next stage may rely on.
+
+{2 One model through the pipeline}
+
+The model below has three compartments stratified by one dimension, [patch],
+with two levels. It compiles as written:
+
+{@camdl[
+time_unit = 'days
+
+dimensions { patch = [urban, rural] }
+
+compartments { S, I, R }
+stratify(by = patch)
+
+parameters {
+  beta : rate in [0.01, 2.0]
+}
+
+let N[p in patch] = S[p] + I[p] + R[p]
+
+transitions {
+  infection[p in patch] : S[p] --> I[p] @ beta * S[p] * I[p] / N[p]
+  recovery[p in patch]  : I[p] --> R[p] @ I[p] / (1 'weeks)
+}
+
+init {
+  S[urban] = 990   I[urban] = 10
+  S[rural] = 500
+}
+]}
+
+In the syntax tree, [recovery[p in patch]] is one transition declaration with
+an index binder; [N] is one [let] whose body mentions [S[p]]; and [1 'weeks] is
+a number with a unit attached. The compiled model has none of these. It has six
+compartments, [S_urban], [S_rural], [I_urban], [I_rural], [R_urban] and
+[R_rural], and four transitions, [infection_urban], [infection_rural],
+[recovery_urban] and [recovery_rural]: each family became one transition per
+level, named by joining the base name to the level with [_]. This is
+[recovery_urban] as [camdlc --pretty] writes it, with whitespace compacted and
+the fields [metadata] and [rate_state_grad] left out:
+
+{@json[
+{
+  "name": "recovery_urban",
+  "stoichiometry": [["I_urban", -1], ["R_urban", 1]],
+  "rate": {"bin_op": {"op": "div",
+                      "left": {"pop": "I_urban"},
+                      "right": {"unit_literal": {"value": 7.0, "dim": [0, 1],
+                                                 "unit": "weeks"}}}}
+}
+]}
+
+The index [p] is gone, [I[p]] has become a reference to the concrete
+compartment [I_urban], and the week has become [7.0], its length in the
+model's time unit of days; the node keeps its dimension (time to the first
+power, population to the zeroth) and the unit as written, for display. The
+[let] took a different route. Its body reads only compartments, so the
+expander lowered it once per level into the model's shared bindings, and the
+infection rates refer to it by name:
+
+{@json[
+{"name": "N_urban", "expr": {"pop_sum": ["S_urban", "I_urban", "R_urban"] } }
+]}
+
+The rate of [infection_urban] is [beta * S_urban * I_urban / N_urban], with
+[N_urban] serialised as [{"binding_ref": "N_urban"}], and the compiled
+transition also carries [rate_grad], the derivative of its rate with respect to
+[beta], which {!Autodiff} wrote. The envelope around the model reads
+[ir_version] ["0.44"] (the contents of [ir/VERSION]) and [validated_by]
+["ocaml-compiler-v0.44"], and its [declared] section holds the model as the
+author wrote it.
+
+{2 Where a change lands}
+
+A new surface construct usually touches every stage. A new kind of
+expression, for example, needs a token in the lexer if it has new syntax, a
+grammar rule, a constructor of {!Ast.expr}, its resolution in the expander, a
+constructor of {!Ir.expr}, its JSON in {!Serde}, its derivative in
+{!Autodiff}, its dimension rule in {!Dimcheck} and {!Dim_sites}, and its
+treatment in each pass that walks expressions ({!Validate}, {!Constant_fold},
+{!Licm}, {!Init_order}, {!Lint}, {!Lineage}, {!Expr_analysis}, {!Pp_expr}). On
+the Rust side it needs the type in [rust/crates/ir/src/expr.rs], an entry in
+[ir/schema.json], and an evaluator in [rust/crates/sim]. Both OCaml libraries
+are compiled with a non-exhaustive match as an error, and {!Autodiff} and
+{!Dim_sites} match on every constructor without a catch-all, so the build
+itself lists the places a new constructor must be handled. Any change to the
+shape of {!Ir.model} or its JSON changes [ir/VERSION] and every golden IR file
+together. A new check of the expanded model belongs in [run_analysis], so that
+[camdlc check] and a compile both run it.
+
+Two facts about the shape of the code help in reading it. The expander is one
+module of about 13,000 lines with no interface file, and most of the
+language's semantics is there. And both libraries are unwrapped, so their
+modules are top-level names ([Ast], [Ir], [Validate]) rather than members of a
+[compiler] or [ir] namespace.
+
+{1 Driving a compile}
+
+{!Compiler} is the driver: it owns the order of the stages and the rule for
+when a compile stops. Its front end, [front_end_collect], parses and expands
+and collects every diagnostic without rendering any. [compile_detail_result]
+stops there if the front end reported an error. Otherwise [run_analysis] runs
+the checks of the expanded model: {!Validate}, then {!Dimcheck} and {!Lint},
+then the differentiation of transition rates. It stops after validation if
+validation found anything, and after the dimension check and lint, or after
+rate differentiation, if an error has been reported by then. [finish_compile]
+then differentiates the rest of the model, writes the dimensions the dimension
+checker resolved back onto the generated quantities, and applies the two
+rewriting passes. [camdlc check] runs the same [run_analysis] through
+[collect_detail] and keeps only the diagnostics; it skips the state Jacobian,
+which no check reads. Because both commands call one function, a check added
+to [run_analysis] runs in both.
+
+Every stage reports problems as values of {!Diagnostics.diagnostic}: a
+severity (error, warning or info), a code, a source location, a message, and an
+optional hint and machine-applicable fix. Only an error stops a compile; a
+lint is a warning and an undetermined dimension is an info. The code does not
+always identify the stage: [E001] is a lexing or syntax error, codes from
+[E500] are {!Validate}'s, [E600] is a rate that cannot be differentiated and
+[L4xx] are lints, but the expander and the dimension checker share the
+[E2xx] and [E3xx] ranges. The passes
+over the IR cannot point at source text, because the IR has no locations, so
+each tags its diagnostic with the construct it concerns (a transition, a
+parameter, an observation) and the driver looks up that construct's
+declaration in the expander's context. {!Source_cache} holds the text of each
+compilation unit so the renderer can quote the offending line; under
+[--json-errors] diagnostics are written to standard error as a JSON array
+instead. {!Passtime} records how long each stage takes when
+[CAMDL_TIME_PASSES] is set, and writes nothing otherwise.
+
+Three switches change what a compile does. [--no-dim-check] skips the
+dimension checker; [--no-state-grad] leaves out the derivatives of rates and
+projections with respect to compartments, which only gradient fits on the ODE
+backend read; and the environment variables [CAMDL_NO_CONSTANT_FOLD] and
+[CAMDL_NO_LICM] turn off the two rewriting passes. The switches are held in
+mutable references in {!Compiler} ([no_dim_check], [no_state_grad],
+[constant_fold]) or read from the environment at the call site.
+
+{!modules: Compiler Diagnostics Source_cache Passtime}
+
+{1 Reading the source}
+
+The lexer ([lexer.mll], built by ocamllex) and the parser ([parser.mly], built
+by Menhir) turn the source into a list of {!Ast.declaration}s, one per block
+or top-level statement. Their generated modules, [Lexer] and [Parser], have no
+page here. The parser stops at the first syntax error, which becomes [E001]
+(or [E115] when the cause is a duration written without its tick, such as
+[80 days] for [80 'days]). Errors found inside a parser action, such as an
+unknown likelihood name, do not stop parsing: the action records them in
+{!Parser_errors} and returns a placeholder, and the driver turns them into
+diagnostics after expansion. Lexer warnings, such as inconsistent digit
+grouping, are collected the same way. {!Param_annot} checks what follows a
+parameter's kind, a size bracket and a [dim] clause, and is called from parser
+actions.
+
+The tree {!Ast} stays close to what was written. Names are unresolved strings;
+an indexed family such as [infection[p in patch]] is one node; a [let] is a
+declaration in its own right; a number with a unit is an [EUnit] node that
+remembers the unit. Most declarations carry two spans: one for diagnostics to
+point at, and one for the declared-model section to quote. The [--quantities]
+flag adds a second compilation unit, whose [quantities] block replaces the
+model's own before expansion.
+
+{!modules: Ast Param_annot Parser_errors}
+
+{1 Expanding the model}
+
+{!Expander.expand_detail} takes the declaration list and returns the expanded
+{!Ir.model}, together with its working context ({!Expander.context}), which
+the later stages use to map a construct back to its source location. Expansion
+is a fixed sequence of steps. It first collects the declarations into the
+context and checks the observation projections as written. It then lowers each
+[via] transition into explicit stage compartments and chain transitions, so
+that nothing downstream sees [via]. It resolves the [dimensions] block into
+its levels and rejects duplicate or clashing names, including clashes between
+expanded names. It then checks for [let]s defined in terms of themselves,
+shadowed names, cycles among hierarchical priors, and guards that read
+anything other than dimension levels. The surface time-typing rules of
+{!Time_typing} run at this point, because they need to see whether a duration came from a
+calendar unit such as ['months] or an exact one such as ['days], and that
+distinction is lost once units become numbers. Only then are tables,
+compartments, transitions and the remaining blocks expanded, each family over
+the product of its dimensions, and every expression resolved against the
+context.
+
+The output of expansion has four properties every later stage relies on.
+Every stratified declaration is one entry per cell. Every name in an
+expression refers to an entry of the model: a compartment, a parameter, a
+constant, a table, a forcing, or a binding. Every unit literal holds its value
+in the model's [time_unit]. And there is no surface construct left: no index
+binder, no [via], no unresolved identifier. A [let] can end in three places. A
+[let] with a declared kind and a constant body ([let omega : rate = 0.01])
+becomes a model constant, referred to by name. A [let] whose body reads no
+parameter, directly or through another [let], a table or a forcing, and whose
+indices are all bound by the [let] itself, becomes one shared binding per
+cell, as [N] did above. Every other [let] is substituted into each expression
+that uses it. The parameter test exists because {!Autodiff} treats a binding
+as having zero derivative with respect to every parameter, and {!Validate}
+rejects a binding that reads a parameter.
+
+{!Lineage} is the expander's check for transitions marked [#[lineage]]: their
+rate must be linear in every compartment they read other than their source,
+and it computes the per-parent weights the runtime samples from. It lives in
+the [ir] library because it reads IR expressions. {!Sha256} hashes the data
+files expansion reads, so that the compiled model can record which file
+contents it was built from.
+
+{!modules: Expander Time_typing Lineage Sha256}
+
+{1 The intermediate representation}
+
+{!Ir.model} is the contract between the compiler and the runtime. The module
+documentation of {!Ir} states what it guarantees. {!Serde} writes it, and reads
+it back for tests and tools, as JSON. The serialiser is written by hand rather
+than derived, so that every field name and tag is visible in one place, and
+it streams to a channel rather than building the whole string, since a large
+spatial model produces a large file. The output is an envelope with the keys
+[ir_version], [validated_by], [model], an optional [docs] (the model's [#']
+documentation) and an optional [declared]. The [docs] and [declared] sections
+sit outside [model] because the runtime does not simulate or fit from them,
+and so they are outside every identity the runtime computes from a model.
+
+The Rust crate [rust/crates/ir] reads the same JSON into its own types. It
+refuses an envelope whose [ir_version] differs from the [ir/VERSION] it was
+built with; OCaml reads the same file through a generated module, so a version
+change reaches both sides on the next build. [ir/schema.json] is a JSON Schema
+for the [model] object; a Rust test validates every committed golden IR file
+against it. The goldens, [ocaml/golden/*.camdl] beside their compiled
+[*.ir.json], pin the exact output of the compiler.
+
+The two central types are distinct and both are named [expr]. {!Ast.expr} is
+an expression as written, with unresolved names, index binders and units;
+{!Ir.expr} is an expression the runtime evaluates, with none of these. The
+modules that work on one or the other open its module ([open Ast] in the
+expander, [open Ir] in the passes), and the expander names the IR type as
+[Ir.expr] explicitly.
+
+{!modules: Ir Serde}
+
+{1 Checking the expanded model}
+
+Three checks read the expanded model and change nothing in it. {!Validate}
+checks its structure: no duplicate names, no reference to an undeclared
+compartment, parameter, constant, table or forcing, an equation for every
+compartment of real kind, no transition that lists a compartment with a net
+change of zero, no binding that reads a parameter, no cycle among
+initial conditions (computed by {!Init_order}, which also orders the
+initial-condition entries for the gradient of the initial state). It runs
+first because the dimension checker assumes every name exists. The Rust
+runtime repeats a structural validation when it loads a model.
+
+{!Dimcheck} assigns every expression a physical dimension, a pair of integer
+exponents of population and time, and reports where they disagree: a rate
+added to a count, a transition rate that is not a population per unit time.
+It treats the whole model as one system of linear equations. {!Dim_sites}
+lists every position in the model that holds an expression, together with the
+dimension that position requires, and is compiled with warnings that make an
+unlisted IR field or constructor a build error. {!Dim_solve} solves the
+equations exactly over the integers and explains each contradiction. A
+dimension it cannot determine is reported as an info, not an error.
+
+{!Lint} reports models that are valid but probably mistaken, such as a
+compartment that no rate, observation or initial value refers to, or two
+observation streams that
+measure the same quantity. Its diagnostics are warnings and never stop a
+compile.
+
+{!modules: Validate Init_order Dimcheck Dim_sites Dim_solve Lint}
+
+{1 Transforming the IR}
+
+{!Autodiff} differentiates symbolically: it turns an {!Ir.expr} into the
+{!Ir.expr} of its derivative. The driver applies it to every transition rate
+with respect to every parameter ([rate_grad]) and every compartment
+([rate_state_grad]), then to the overdispersion variances, the likelihood
+arguments of each observation, the projections, the initial state and the
+arguments of initial-state distributions. A rate that a parameter drives
+through something without a derivative (a non-constant table index, the knots
+of a forcing) is an error, [E600]. A coefficient the differentiator does not
+yet cover is left out of the gradient map; the runtime then refuses a
+gradient-based fit that depends on it, while simulation and gradient-free
+fitting still work. The derivatives are not simplified.
+
+The last two passes rewrite expressions without changing their values.
+{!Constant_fold} replaces a lookup into a table written inline with the cell's
+value, applies identities such as [0 * x = 0], and drops zero terms from sums.
+Its purpose is spatial coupling: a sparse coupling matrix turns a sum over all
+patches into a sum over the nonzero entries. It does nothing when the model
+has no inline table. {!Licm} (loop-invariant code motion) then moves
+subexpressions that depend only on parameters and tables out of the
+transition rates, their parameter gradients and the ODE equations, into
+per-evaluation bindings, so that a subexpression which is constant along a
+trajectory is written once. The runtime evaluates a per-evaluation binding
+where it is referenced; it does not yet cache the value across steps. It is
+the last pass, so no other pass meets the reference node it introduces.
+
+{!modules: Autodiff Constant_fold Licm}
+
+{1 The declared model}
+
+Expansion keeps the meaning of a model and loses its form. The [declared]
+section of the envelope keeps the form: every declaration as written, each
+expression as its parsed tree without locations, rendered for display, with
+the names it reads classified. {!Declared_emit} builds it from the declaration
+list the parser produced, not from the expander's context, because the [via]
+lowering has rewritten that context by the time expansion ends; it asks the
+expander only what each name is and what each dimension's levels are. A name
+it cannot classify is warning [W203], and the compiled model is unaffected.
+{!Declared} defines the section's types and codec. The Rust crate
+[rust/crates/declared] is the authority for its format, and one shared JSON
+fixture is read by tests on both sides. [camdlc] adds what only the command
+line knows, the [--set] overrides and the [--quantities] file, before writing
+it.
+
+{!modules: Declared Declared_emit}
+
+{1 Presenting a model}
+
+These modules show a model to a person and are not part of the compile.
+{!Inspect} implements [camdlc inspect] (a summary of compartments,
+transitions, parameters, tables and forcings) and [camdlc check].
+{!Expr_analysis} classifies what an IR expression depends on, from constants
+up to compartments, for the inspector. {!Pp_expr} prints an {!Ir.expr} in
+camdl syntax, turning [S_urban] back into [S[urban]]. {!Latex} renders the
+model as mathematics from the syntax tree, where index variables and sums
+still exist; it implements [camdlc render] and supplies the rendering in the
+declared section. {!Term_style} decides when terminal output is coloured.
+{!Doctest} implements [camdlc doctest], which compiles the camdl blocks of a
+Markdown document against the real compiler.
+
+{!modules: Inspect Expr_analysis Pp_expr Latex Term_style Doctest}
