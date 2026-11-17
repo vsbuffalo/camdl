@@ -1650,6 +1650,11 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     if config.config.allow_forcing_extrapolation {
         crate::forcing_extrapolation::set_allowed(true);
     }
+    // …and under its `allow_degenerate_rates`: a rate that collapsed to 0 in
+    // the fit collapses to 0 in every replay of it (the one-step filters, the
+    // free-forward replay, the forecast, the contrast forks), rather than
+    // failing the replay of a model the fit ran.
+    sim::eval_stats::set_allow_degenerate_rates(config.config.allow_degenerate_rates);
     // One calendar block for every sidecar manifest this run writes
     // (predictive / observed / quantities), read once off the model.
     let calendar = ir::caltime::CalendarAxis::from_model(&model).map_err(|e| e.to_string())?;
