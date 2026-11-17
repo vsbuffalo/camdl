@@ -2816,11 +2816,16 @@ impl ObservationModel<ParticleState> for MultiStreamObsModel {
     /// puts a reset-only boundary first, and a stream's own leading rows may
     /// be holes (gh#833).
     fn first_observation_idx(&self) -> Option<usize> {
-        (0..self.obs_times.len()).find(|&union_idx| {
-            self.streams.iter().any(|s| match s.at_union[union_idx] {
-                Some(local) => s.observations[local].is_some(),
-                None => false,
-            })
+        (0..self.obs_times.len()).find(|&union_idx| self.assimilates_at(union_idx))
+    }
+
+    /// Some stream scheduled at `union_idx` holds a value there (not a hole).
+    /// A reset-only boundary (a declared period's start) schedules no stream;
+    /// a row every stream holds as `NA` schedules them all and observes none.
+    fn assimilates_at(&self, union_idx: usize) -> bool {
+        self.streams.iter().any(|s| match s.at_union[union_idx] {
+            Some(local) => s.observations[local].is_some(),
+            None => false,
         })
     }
 
