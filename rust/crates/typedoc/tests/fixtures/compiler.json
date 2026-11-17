@@ -8,11 +8,83 @@
       "types": [
         {
           "name": "destination_form",
-          "line": 188,
+          "line": 14,
           "kind": "variant",
           "params": [],
           "recursive_group": null,
           "decl": "type destination_form =\n  | DstSum    of stoich_ref list\n  | DstBranch of (stoich_ref * expr) list",
+          "decl_spans": [
+            {
+              "line": 1,
+              "col": 0,
+              "len": 4,
+              "class": "keyword"
+            },
+            {
+              "line": 1,
+              "col": 5,
+              "len": 16,
+              "class": "type",
+              "target": {
+                "module": "Ast",
+                "type": "destination_form"
+              }
+            },
+            {
+              "line": 2,
+              "col": 14,
+              "len": 2,
+              "class": "keyword"
+            },
+            {
+              "line": 2,
+              "col": 17,
+              "len": 10,
+              "class": "type",
+              "target": {
+                "module": "Ast",
+                "type": "stoich_ref"
+              }
+            },
+            {
+              "line": 2,
+              "col": 28,
+              "len": 4,
+              "class": "builtin_type"
+            },
+            {
+              "line": 3,
+              "col": 14,
+              "len": 2,
+              "class": "keyword"
+            },
+            {
+              "line": 3,
+              "col": 18,
+              "len": 10,
+              "class": "type",
+              "target": {
+                "module": "Ast",
+                "type": "stoich_ref"
+              }
+            },
+            {
+              "line": 3,
+              "col": 31,
+              "len": 4,
+              "class": "type",
+              "target": {
+                "module": "Ast",
+                "type": "expr"
+              }
+            },
+            {
+              "line": 3,
+              "col": 37,
+              "len": 4,
+              "class": "builtin_type"
+            }
+          ],
           "doc": "Where a transition sends the individuals it moves.\n\n    {@camdl[\n      infection : S --> I @ beta * S * I / N\n      recovery  : I --> { R : 0.9, D : 0.1 } @ gamma * I\n    ]}\n\n    The two forms:\n    - [DstSum [I]] is a sum of compartments;\n    - [DstBranch] is a probabilistic branch.\n\n    Compare {!Ir.expr}.",
           "members": [
             {
@@ -28,63 +100,220 @@
               "doc": "(wave 2 / malaria #2) One flow per branch; see gh#616."
             }
           ],
-          "refs": ["stoich_ref", "expr", "destination_form"]
+          "refs": [
+            "stoich_ref",
+            "expr",
+            "destination_form"
+          ]
         },
         {
           "name": "expr",
-          "line": 40,
+          "line": 9,
           "kind": "variant",
           "params": [],
           "recursive_group": 1,
           "decl": "type expr =\n  | Num of float\n  | Call of call",
+          "decl_spans": [
+            {
+              "line": 1,
+              "col": 0,
+              "len": 4,
+              "class": "keyword"
+            },
+            {
+              "line": 1,
+              "col": 5,
+              "len": 4,
+              "class": "type",
+              "target": {
+                "module": "Ast",
+                "type": "expr"
+              }
+            },
+            {
+              "line": 3,
+              "col": 9,
+              "len": 2,
+              "class": "keyword"
+            },
+            {
+              "line": 3,
+              "col": 12,
+              "len": 4,
+              "class": "type",
+              "target": {
+                "module": "Ast",
+                "type": "call"
+              }
+            }
+          ],
           "doc": "An expression as written. This is used ONLY before lowering.",
           "members": [
-            { "name": "Num", "type": "float", "mutable": false, "doc": "A literal." },
-            { "name": "Call", "type": "call", "mutable": false, "doc": null }
+            {
+              "name": "Num",
+              "type": "float",
+              "mutable": false,
+              "doc": "A literal."
+            },
+            {
+              "name": "Call",
+              "type": "call",
+              "mutable": false,
+              "doc": null
+            }
           ],
-          "refs": ["call", "expr"]
+          "refs": [
+            "call",
+            "expr"
+          ]
         },
         {
           "name": "call",
-          "line": 44,
+          "line": 12,
           "kind": "record",
           "params": [],
           "recursive_group": 1,
           "decl": "and call = { fn : string; args : expr list }",
+          "decl_spans": [
+            {
+              "line": 1,
+              "col": 0,
+              "len": 3,
+              "class": "keyword"
+            },
+            {
+              "line": 1,
+              "col": 4,
+              "len": 4,
+              "class": "type",
+              "target": {
+                "module": "Ast",
+                "type": "call"
+              }
+            },
+            {
+              "line": 1,
+              "col": 33,
+              "len": 4,
+              "class": "type",
+              "target": {
+                "module": "Ast",
+                "type": "expr"
+              }
+            },
+            {
+              "line": 1,
+              "col": 38,
+              "len": 4,
+              "class": "builtin_type"
+            }
+          ],
           "doc": null,
           "members": [
-            { "name": "fn", "type": "string", "mutable": false, "doc": null },
-            { "name": "args", "type": "expr list", "mutable": false, "doc": null }
+            {
+              "name": "fn",
+              "type": "string",
+              "mutable": false,
+              "doc": null
+            },
+            {
+              "name": "args",
+              "type": "expr list",
+              "mutable": false,
+              "doc": null
+            }
           ],
-          "refs": ["expr"]
+          "refs": [
+            "expr"
+          ]
         },
         {
           "name": "stoich_ref",
-          "line": 30,
+          "line": 7,
           "kind": "alias",
           "params": [],
           "recursive_group": null,
           "decl": "type stoich_ref = Located.t",
+          "decl_spans": [
+            {
+              "line": 1,
+              "col": 0,
+              "len": 4,
+              "class": "keyword"
+            },
+            {
+              "line": 1,
+              "col": 5,
+              "len": 10,
+              "class": "type",
+              "target": {
+                "module": "Ast",
+                "type": "stoich_ref"
+              }
+            },
+            {
+              "line": 1,
+              "col": 18,
+              "len": 9,
+              "class": "type",
+              "target": {
+                "module": "Ast.Located",
+                "type": "t"
+              }
+            }
+          ],
           "doc": "A compartment named on the right of an arrow.",
           "members": [],
-          "refs": ["Located.t"]
+          "refs": [
+            "Located.t"
+          ]
         },
         {
           "name": "settings",
-          "line": 300,
+          "line": 18,
           "kind": "record",
           "params": [],
           "recursive_group": null,
           "decl": "type settings = {\n  verbose : bool;\n  strict : bool;\n  mutable cache : bool;\n  backend_kind : string;\n  out : Yojson.Safe.t;\n}",
+          "decl_spans": [],
           "doc": "Compiler switches.",
           "members": [
-            { "name": "verbose", "type": "bool", "mutable": false, "doc": "Print each pass." },
-            { "name": "strict", "type": "bool", "mutable": false, "doc": "Refuse warnings." },
-            { "name": "cache", "type": "bool", "mutable": true, "doc": "Reuse parsed files." },
-            { "name": "backend_kind", "type": "string", "mutable": false, "doc": "Which backend." },
-            { "name": "out", "type": "Yojson.Safe.t", "mutable": false, "doc": "Where to write." }
+            {
+              "name": "verbose",
+              "type": "bool",
+              "mutable": false,
+              "doc": "Print each pass."
+            },
+            {
+              "name": "strict",
+              "type": "bool",
+              "mutable": false,
+              "doc": "Refuse warnings."
+            },
+            {
+              "name": "cache",
+              "type": "bool",
+              "mutable": true,
+              "doc": "Reuse parsed files."
+            },
+            {
+              "name": "backend_kind",
+              "type": "string",
+              "mutable": false,
+              "doc": "Which backend."
+            },
+            {
+              "name": "out",
+              "type": "Yojson.Safe.t",
+              "mutable": false,
+              "doc": "Where to write."
+            }
           ],
-          "refs": ["Yojson.Safe.t", "bool", "string"]
+          "refs": [
+            "Yojson.Safe.t",
+            "bool",
+            "string"
+          ]
         }
       ]
     },
@@ -95,17 +324,49 @@
       "types": [
         {
           "name": "t",
-          "line": 12,
+          "line": 4,
           "kind": "record",
-          "params": ["'a"],
+          "params": [
+            "'a"
+          ],
           "recursive_group": null,
           "decl": "type 'a t = { value : 'a; loc : Loc.t }",
+          "decl_spans": [
+            {
+              "line": 1,
+              "col": 0,
+              "len": 4,
+              "class": "keyword"
+            },
+            {
+              "line": 1,
+              "col": 8,
+              "len": 1,
+              "class": "type",
+              "target": {
+                "module": "Ast.Located",
+                "type": "t"
+              }
+            }
+          ],
           "doc": "A located value.",
           "members": [
-            { "name": "value", "type": "'a", "mutable": false, "doc": "The value." },
-            { "name": "loc", "type": "Loc.t", "mutable": false, "doc": "Where it was read." }
+            {
+              "name": "value",
+              "type": "'a",
+              "mutable": false,
+              "doc": "The value."
+            },
+            {
+              "name": "loc",
+              "type": "Loc.t",
+              "mutable": false,
+              "doc": "Where it was read."
+            }
           ],
-          "refs": ["Loc.t"]
+          "refs": [
+            "Loc.t"
+          ]
         }
       ]
     },
@@ -116,28 +377,313 @@
       "types": [
         {
           "name": "expr",
-          "line": 7,
+          "line": 1,
           "kind": "abstract",
           "params": [],
           "recursive_group": null,
           "decl": "type expr",
+          "decl_spans": [
+            {
+              "line": 1,
+              "col": 0,
+              "len": 4,
+              "class": "keyword"
+            },
+            {
+              "line": 1,
+              "col": 5,
+              "len": 4,
+              "class": "type",
+              "target": {
+                "module": "Ir",
+                "type": "expr"
+              }
+            }
+          ],
           "doc": "A resolved expression, as the runtime reads it.",
           "members": [],
           "refs": []
         },
         {
           "name": "transition",
-          "line": 20,
+          "line": 3,
           "kind": "record",
           "params": [],
           "recursive_group": null,
           "decl": "type transition = { rate : expr; dst : Ast.destination_form }",
+          "decl_spans": [
+            {
+              "line": 1,
+              "col": 0,
+              "len": 4,
+              "class": "keyword"
+            },
+            {
+              "line": 1,
+              "col": 5,
+              "len": 10,
+              "class": "type",
+              "target": {
+                "module": "Ir",
+                "type": "transition"
+              }
+            },
+            {
+              "line": 1,
+              "col": 27,
+              "len": 4,
+              "class": "type",
+              "target": {
+                "module": "Ir",
+                "type": "expr"
+              }
+            },
+            {
+              "line": 1,
+              "col": 39,
+              "len": 20,
+              "class": "type",
+              "target": {
+                "module": "Ast",
+                "type": "destination_form"
+              }
+            }
+          ],
           "doc": "One transition. Previously a pair.",
           "members": [
-            { "name": "rate", "type": "expr", "mutable": false, "doc": "Its rate, per day." },
-            { "name": "dst", "type": "Ast.destination_form", "mutable": false, "doc": "Its destinations." }
+            {
+              "name": "rate",
+              "type": "expr",
+              "mutable": false,
+              "doc": "Its rate, per day."
+            },
+            {
+              "name": "dst",
+              "type": "Ast.destination_form",
+              "mutable": false,
+              "doc": "Its destinations."
+            }
           ],
-          "refs": ["expr", "Ast.destination_form"]
+          "refs": [
+            "expr",
+            "Ast.destination_form"
+          ]
+        }
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "path": "ocaml/lib/compiler/ast.ml",
+      "lines": 26,
+      "bytes": 528,
+      "spans": [
+        {
+          "line": 1,
+          "col": 0,
+          "len": 67,
+          "class": "doc"
+        },
+        {
+          "line": 3,
+          "col": 0,
+          "len": 6,
+          "class": "keyword"
+        },
+        {
+          "line": 4,
+          "col": 2,
+          "len": 4,
+          "class": "keyword"
+        },
+        {
+          "line": 4,
+          "col": 10,
+          "len": 1,
+          "class": "type",
+          "target": {
+            "module": "Ast.Located",
+            "type": "t"
+          }
+        },
+        {
+          "line": 5,
+          "col": 0,
+          "len": 3,
+          "class": "keyword"
+        },
+        {
+          "line": 7,
+          "col": 0,
+          "len": 4,
+          "class": "keyword"
+        },
+        {
+          "line": 7,
+          "col": 5,
+          "len": 10,
+          "class": "type",
+          "target": {
+            "module": "Ast",
+            "type": "stoich_ref"
+          }
+        },
+        {
+          "line": 7,
+          "col": 18,
+          "len": 9,
+          "class": "type",
+          "target": {
+            "module": "Ast.Located",
+            "type": "t"
+          }
+        },
+        {
+          "line": 14,
+          "col": 0,
+          "len": 4,
+          "class": "keyword"
+        },
+        {
+          "line": 14,
+          "col": 5,
+          "len": 16,
+          "class": "type",
+          "target": {
+            "module": "Ast",
+            "type": "destination_form"
+          }
+        },
+        {
+          "line": 15,
+          "col": 14,
+          "len": 2,
+          "class": "keyword"
+        },
+        {
+          "line": 15,
+          "col": 17,
+          "len": 10,
+          "class": "type",
+          "target": {
+            "module": "Ast",
+            "type": "stoich_ref"
+          }
+        },
+        {
+          "line": 15,
+          "col": 28,
+          "len": 4,
+          "class": "builtin_type"
+        },
+        {
+          "line": 16,
+          "col": 14,
+          "len": 2,
+          "class": "keyword"
+        },
+        {
+          "line": 16,
+          "col": 18,
+          "len": 10,
+          "class": "type",
+          "target": {
+            "module": "Ast",
+            "type": "stoich_ref"
+          }
+        },
+        {
+          "line": 16,
+          "col": 31,
+          "len": 4,
+          "class": "type",
+          "target": {
+            "module": "Ast",
+            "type": "expr"
+          }
+        },
+        {
+          "line": 16,
+          "col": 37,
+          "len": 4,
+          "class": "builtin_type"
+        },
+        {
+          "line": 26,
+          "col": 0,
+          "len": 3,
+          "class": "keyword"
+        },
+        {
+          "line": 26,
+          "col": 12,
+          "len": 5,
+          "class": "string"
+        },
+        {
+          "line": 26,
+          "col": 18,
+          "len": 20,
+          "class": "comment"
+        }
+      ]
+    },
+    {
+      "path": "ocaml/lib/ir/ir.ml",
+      "lines": 3,
+      "bytes": 73,
+      "spans": [
+        {
+          "line": 1,
+          "col": 0,
+          "len": 4,
+          "class": "keyword"
+        },
+        {
+          "line": 1,
+          "col": 5,
+          "len": 4,
+          "class": "type",
+          "target": {
+            "module": "Ir",
+            "type": "expr"
+          }
+        },
+        {
+          "line": 3,
+          "col": 0,
+          "len": 4,
+          "class": "keyword"
+        },
+        {
+          "line": 3,
+          "col": 5,
+          "len": 10,
+          "class": "type",
+          "target": {
+            "module": "Ir",
+            "type": "transition"
+          }
+        },
+        {
+          "line": 3,
+          "col": 27,
+          "len": 4,
+          "class": "type",
+          "target": {
+            "module": "Ir",
+            "type": "expr"
+          }
+        },
+        {
+          "line": 3,
+          "col": 39,
+          "len": 20,
+          "class": "type",
+          "target": {
+            "module": "Ast",
+            "type": "destination_form"
+          }
         }
       ]
     }

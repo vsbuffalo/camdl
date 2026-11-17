@@ -9,6 +9,7 @@
 //! and a link to its source at one commit. The output is the same, byte for
 //! byte, for the same inputs and commit.
 
+mod code;
 mod markdown;
 mod marks;
 mod model;
@@ -17,7 +18,7 @@ mod overview;
 mod render;
 mod site;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -62,6 +63,11 @@ enum Command {
         /// right after the files change.
         #[arg(long)]
         commit: String,
+        /// The directory the inputs' source paths are relative to: the
+        /// repository root. Each source file is read from it and shown whole
+        /// on a page of its own.
+        #[arg(long, default_value = ".")]
+        source_root: PathBuf,
     },
 }
 
@@ -75,6 +81,7 @@ struct RenderArgs<'a> {
     out: &'a Path,
     order: i64,
     source: render::SourceLinks,
+    source_root: &'a Path,
 }
 
 fn run_render(args: &RenderArgs) -> Result<usize, String> {
@@ -87,11 +94,17 @@ fn run_render(args: &RenderArgs) -> Result<usize, String> {
         .collect::<Result<_, String>>()?;
     let site = site::Site::build(&overview, args.order, &inputs)
         .map_err(|e| format!("{}: {e}", args.overview.display()))?;
-    let files = render::render(&site, &args.source);
+    let mut texts = BTreeMap::new();
+    for s in &site.sources {
+        let path = &s.file.path;
+        texts.insert(path.clone(), read(&args.source_root.join(path))?);
+    }
+    let files = render::render(&site, &args.source, &texts)?;
 
     let out = args.out;
-    fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
-    let written: BTreeSet<&str> = files.iter().map(|f| f.file_name.as_str()).collect();
+    let src_dir = out.join(site::SOURCE_DIR);
+    fs::create_dir_all(&src_dir).map_err(|e| format!("{}: {e}", src_dir.display()))?;
+    let written: BTreeSet<PathBuf> = files.iter().map(|f| out.join(&f.file_name)).collect();
     for f in &files {
         let path = out.join(&f.file_name);
         let unchanged = fs::read(&path).is_ok_and(|old| old == f.text.as_bytes());
@@ -99,13 +112,16 @@ fn run_render(args: &RenderArgs) -> Result<usize, String> {
             fs::write(&path, &f.text).map_err(|e| format!("{}: {e}", path.display()))?;
         }
     }
-    let entries = fs::read_dir(out).map_err(|e| format!("{}: {e}", out.display()))?;
-    for entry in entries {
-        let path = entry.map_err(|e| format!("{}: {e}", out.display()))?.path();
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if path.extension().is_some_and(|x| x == "qmd") && path.is_file() && !written.contains(name)
-        {
-            fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    for dir in [out, src_dir.as_path()] {
+        let entries = fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        for entry in entries {
+            let path = entry.map_err(|e| format!("{}: {e}", dir.display()))?.path();
+            if path.extension().is_some_and(|x| x == "qmd")
+                && path.is_file()
+                && !written.contains(&path)
+            {
+                fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            }
         }
     }
     Ok(files.len())
@@ -121,6 +137,7 @@ fn main() -> ExitCode {
             order,
             repo,
             commit,
+            source_root,
         } => {
             let result = render::SourceLinks::new(&repo, &commit).and_then(|source| {
                 run_render(&RenderArgs {
@@ -129,6 +146,7 @@ fn main() -> ExitCode {
                     out: &out,
                     order,
                     source,
+                    source_root: &source_root,
                 })
             });
             match result {

@@ -19,6 +19,83 @@ pub struct Input {
     pub language: Language,
     /// The modules, in the order the extractor visited them.
     pub modules: Vec<Module>,
+    /// One entry per source file the modules come from, carrying the markup
+    /// of its text. Every [`Module::path`] must have one.
+    pub sources: Vec<SourceFile>,
+}
+
+/// The markup of one source file, which the renderer shows whole on a page
+/// of its own. The text is not in the JSON: the renderer reads it from
+/// [`SourceFile::path`] and refuses it when its size differs from what the
+/// extractor read.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceFile {
+    /// The file, relative to the repository root, as [`Module::path`] names it.
+    pub path: String,
+    /// The number of lines: the count of newlines, plus one when the text
+    /// does not end with a newline.
+    pub lines: usize,
+    /// The file's size in bytes.
+    pub bytes: usize,
+    /// The parts of the text that get markup, in text order; text between
+    /// them is shown plain. Lines count from 1, as in the file.
+    pub spans: Vec<Span>,
+}
+
+/// A run of text on one line that gets markup: a class, and a link when it
+/// names a documented type. Spans never overlap and never cross a line end;
+/// one that would is split into one span per line.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Span {
+    /// The line, counting from 1.
+    pub line: usize,
+    /// The start, in bytes from the start of the line, counting from 0.
+    pub col: usize,
+    /// The length in bytes.
+    pub len: usize,
+    /// What the text is.
+    pub class: SpanClass,
+    /// The documented type the text names. Absent for a span that does not
+    /// link. The extractor resolves it from the language's own analysis, so
+    /// it is exact: a name resolved by guessing never gets one.
+    #[serde(default)]
+    pub target: Option<Target>,
+}
+
+/// What a span of source text is, for highlighting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpanClass {
+    /// A keyword of the language: `type`, `let`, `match`.
+    Keyword,
+    /// An implementation comment.
+    Comment,
+    /// A doc comment.
+    Doc,
+    /// A string literal.
+    String,
+    /// A character literal.
+    Char,
+    /// A number literal.
+    Number,
+    /// A type the language itself provides: `int`, `list`, `option`.
+    BuiltinType,
+    /// The name of a type at a use or at its definition. It links when it
+    /// carries a [`Span::target`].
+    Type,
+}
+
+/// A documented type, named by its module's path ([`Module::name`]) and its
+/// name ([`TypeDecl::name`]). The extractor emits it only for the
+/// declaration that module binds the name to last, so the pair is unique.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Target {
+    pub module: String,
+    #[serde(rename = "type")]
+    pub ty: String,
 }
 
 /// A source language the extractors support.
@@ -76,6 +153,10 @@ pub struct TypeDecl {
     pub recursive_group: Option<u32>,
     /// The declaration's source text with every comment removed.
     pub decl: String,
+    /// The markup of [`TypeDecl::decl`], as in [`SourceFile::spans`] but
+    /// placed in the declaration's own text: line 1 is its first line, and
+    /// columns count after the indentation was removed.
+    pub decl_spans: Vec<Span>,
     /// The type's doc comment, as raw markup of [`Input::language`].
     pub doc: Option<String>,
     /// The constructors of a variant or enum, or the fields of a record or

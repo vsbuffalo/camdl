@@ -16,7 +16,7 @@ type loc = {
   col : int;
 }
 
-type 'a pair = 'a * Ir.expr list
+type 'a pair = 'a * Other.expr list
 
 type opaque
 
@@ -35,7 +35,7 @@ type ext = ..
 
 type derived = { d : int } [@@deriving show]
 
-type gadt = G : int -> int gadt | H : gadt
+type _ gadt = G : int -> int gadt | H : unit gadt
 
 (** Falls back to the interface. *)
 type documented_in_mli = { x : int }

@@ -13,6 +13,25 @@
           "params": [],
           "recursive_group": null,
           "decl": "type shape =\n  | Circle of float\n  | Rect of float * float\n  | Pt\n  | Box of { w : float; mutable h : float }",
+          "decl_spans": [
+            { "line": 1, "col": 0, "len": 4, "class": "keyword" },
+            {
+              "line": 1,
+              "col": 5,
+              "len": 5,
+              "class": "type",
+              "target": { "module": "Fixture", "type": "shape" }
+            },
+            { "line": 2, "col": 11, "len": 2, "class": "keyword" },
+            { "line": 2, "col": 14, "len": 5, "class": "builtin_type" },
+            { "line": 3, "col": 9, "len": 2, "class": "keyword" },
+            { "line": 3, "col": 12, "len": 5, "class": "builtin_type" },
+            { "line": 3, "col": 20, "len": 5, "class": "builtin_type" },
+            { "line": 5, "col": 8, "len": 2, "class": "keyword" },
+            { "line": 5, "col": 17, "len": 5, "class": "builtin_type" },
+            { "line": 5, "col": 24, "len": 7, "class": "keyword" },
+            { "line": 5, "col": 36, "len": 5, "class": "builtin_type" }
+          ],
           "doc": "A variant with per-constructor docs.",
           "members": [
             {
@@ -49,6 +68,20 @@
           "params": [],
           "recursive_group": null,
           "decl": "type loc = {\n  file : string;\n  mutable line : int;\n  col : int;\n}",
+          "decl_spans": [
+            { "line": 1, "col": 0, "len": 4, "class": "keyword" },
+            {
+              "line": 1,
+              "col": 5,
+              "len": 3,
+              "class": "type",
+              "target": { "module": "Fixture", "type": "loc" }
+            },
+            { "line": 2, "col": 9, "len": 6, "class": "builtin_type" },
+            { "line": 3, "col": 2, "len": 7, "class": "keyword" },
+            { "line": 3, "col": 17, "len": 3, "class": "builtin_type" },
+            { "line": 4, "col": 8, "len": 3, "class": "builtin_type" }
+          ],
           "doc": "A record with a mutable field.",
           "members": [
             {
@@ -68,10 +101,28 @@
           "kind": "alias",
           "params": [ "'a" ],
           "recursive_group": null,
-          "decl": "type 'a pair = 'a * Ir.expr list",
+          "decl": "type 'a pair = 'a * Other.expr list",
+          "decl_spans": [
+            { "line": 1, "col": 0, "len": 4, "class": "keyword" },
+            {
+              "line": 1,
+              "col": 8,
+              "len": 4,
+              "class": "type",
+              "target": { "module": "Fixture", "type": "pair" }
+            },
+            {
+              "line": 1,
+              "col": 20,
+              "len": 10,
+              "class": "type",
+              "target": { "module": "Other", "type": "expr" }
+            },
+            { "line": 1, "col": 31, "len": 4, "class": "builtin_type" }
+          ],
           "doc": null,
           "members": [],
-          "refs": [ "Ir.expr" ]
+          "refs": [ "Other.expr" ]
         },
         {
           "name": "opaque",
@@ -80,6 +131,16 @@
           "params": [],
           "recursive_group": null,
           "decl": "type opaque",
+          "decl_spans": [
+            { "line": 1, "col": 0, "len": 4, "class": "keyword" },
+            {
+              "line": 1,
+              "col": 5,
+              "len": 6,
+              "class": "type",
+              "target": { "module": "Fixture", "type": "opaque" }
+            }
+          ],
           "doc": null,
           "members": [],
           "refs": []
@@ -91,6 +152,31 @@
           "params": [],
           "recursive_group": 1,
           "decl": "type tree =\n  | Leaf\n  | Node of tree * forest",
+          "decl_spans": [
+            { "line": 1, "col": 0, "len": 4, "class": "keyword" },
+            {
+              "line": 1,
+              "col": 5,
+              "len": 4,
+              "class": "type",
+              "target": { "module": "Fixture", "type": "tree" }
+            },
+            { "line": 3, "col": 9, "len": 2, "class": "keyword" },
+            {
+              "line": 3,
+              "col": 12,
+              "len": 4,
+              "class": "type",
+              "target": { "module": "Fixture", "type": "tree" }
+            },
+            {
+              "line": 3,
+              "col": 19,
+              "len": 6,
+              "class": "type",
+              "target": { "module": "Fixture", "type": "forest" }
+            }
+          ],
           "doc": null,
           "members": [
             { "name": "Leaf", "type": "", "mutable": false, "doc": null },
@@ -110,6 +196,24 @@
           "params": [],
           "recursive_group": 1,
           "decl": "and forest = tree list",
+          "decl_spans": [
+            { "line": 1, "col": 0, "len": 3, "class": "keyword" },
+            {
+              "line": 1,
+              "col": 4,
+              "len": 6,
+              "class": "type",
+              "target": { "module": "Fixture", "type": "forest" }
+            },
+            {
+              "line": 1,
+              "col": 13,
+              "len": 4,
+              "class": "type",
+              "target": { "module": "Fixture", "type": "tree" }
+            },
+            { "line": 1, "col": 18, "len": 4, "class": "builtin_type" }
+          ],
           "doc": "Mutually recursive with [tree].",
           "members": [],
           "refs": [ "tree" ]
@@ -121,6 +225,24 @@
           "params": [],
           "recursive_group": null,
           "decl": "type nonrec t = Other.t = A | B",
+          "decl_spans": [
+            { "line": 1, "col": 0, "len": 4, "class": "keyword" },
+            { "line": 1, "col": 5, "len": 6, "class": "keyword" },
+            {
+              "line": 1,
+              "col": 12,
+              "len": 1,
+              "class": "type",
+              "target": { "module": "Fixture", "type": "t" }
+            },
+            {
+              "line": 1,
+              "col": 16,
+              "len": 7,
+              "class": "type",
+              "target": { "module": "Other", "type": "t" }
+            }
+          ],
           "doc": null,
           "members": [
             { "name": "A", "type": "", "mutable": false, "doc": null },
@@ -135,6 +257,16 @@
           "params": [],
           "recursive_group": null,
           "decl": "type ext = ..",
+          "decl_spans": [
+            { "line": 1, "col": 0, "len": 4, "class": "keyword" },
+            {
+              "line": 1,
+              "col": 5,
+              "len": 3,
+              "class": "type",
+              "target": { "module": "Fixture", "type": "ext" }
+            }
+          ],
           "doc": null,
           "members": [],
           "refs": []
@@ -146,6 +278,17 @@
           "params": [],
           "recursive_group": null,
           "decl": "type derived = { d : int } [@@deriving show]",
+          "decl_spans": [
+            { "line": 1, "col": 0, "len": 4, "class": "keyword" },
+            {
+              "line": 1,
+              "col": 5,
+              "len": 7,
+              "class": "type",
+              "target": { "module": "Fixture", "type": "derived" }
+            },
+            { "line": 1, "col": 21, "len": 3, "class": "builtin_type" }
+          ],
           "doc": null,
           "members": [
             { "name": "d", "type": "int", "mutable": false, "doc": null }
@@ -156,9 +299,36 @@
           "name": "gadt",
           "line": 38,
           "kind": "variant",
-          "params": [],
+          "params": [ "_" ],
           "recursive_group": null,
-          "decl": "type gadt = G : int -> int gadt | H : gadt",
+          "decl": "type _ gadt = G : int -> int gadt | H : unit gadt",
+          "decl_spans": [
+            { "line": 1, "col": 0, "len": 4, "class": "keyword" },
+            {
+              "line": 1,
+              "col": 7,
+              "len": 4,
+              "class": "type",
+              "target": { "module": "Fixture", "type": "gadt" }
+            },
+            { "line": 1, "col": 18, "len": 3, "class": "builtin_type" },
+            { "line": 1, "col": 25, "len": 3, "class": "builtin_type" },
+            {
+              "line": 1,
+              "col": 29,
+              "len": 4,
+              "class": "type",
+              "target": { "module": "Fixture", "type": "gadt" }
+            },
+            { "line": 1, "col": 40, "len": 4, "class": "builtin_type" },
+            {
+              "line": 1,
+              "col": 45,
+              "len": 4,
+              "class": "type",
+              "target": { "module": "Fixture", "type": "gadt" }
+            }
+          ],
           "doc": null,
           "members": [
             {
@@ -167,7 +337,12 @@
               "mutable": false,
               "doc": null
             },
-            { "name": "H", "type": " : gadt", "mutable": false, "doc": null }
+            {
+              "name": "H",
+              "type": " : unit gadt",
+              "mutable": false,
+              "doc": null
+            }
           ],
           "refs": [ "gadt" ]
         },
@@ -178,6 +353,17 @@
           "params": [],
           "recursive_group": null,
           "decl": "type documented_in_mli = { x : int }",
+          "decl_spans": [
+            { "line": 1, "col": 0, "len": 4, "class": "keyword" },
+            {
+              "line": 1,
+              "col": 5,
+              "len": 17,
+              "class": "type",
+              "target": { "module": "Fixture", "type": "documented_in_mli" }
+            },
+            { "line": 1, "col": 31, "len": 3, "class": "builtin_type" }
+          ],
           "doc": "Falls back to the interface.",
           "members": [
             {
@@ -203,6 +389,17 @@
           "params": [],
           "recursive_group": null,
           "decl": "type item = { name : string }",
+          "decl_spans": [
+            { "line": 1, "col": 0, "len": 4, "class": "keyword" },
+            {
+              "line": 1,
+              "col": 5,
+              "len": 4,
+              "class": "type",
+              "target": { "module": "Fixture.Inner", "type": "item" }
+            },
+            { "line": 1, "col": 21, "len": 6, "class": "builtin_type" }
+          ],
           "doc": "An inner type.",
           "members": [
             {
@@ -214,6 +411,606 @@
           ],
           "refs": []
         }
+      ]
+    },
+    {
+      "name": "Other",
+      "path": "other.ml",
+      "doc": "The module the others open: its [expr] shares a name with [User.expr].",
+      "types": [
+        {
+          "name": "expr",
+          "line": 3,
+          "kind": "variant",
+          "params": [],
+          "recursive_group": null,
+          "decl": "type expr = Lit of int | Neg of expr",
+          "decl_spans": [
+            { "line": 1, "col": 0, "len": 4, "class": "keyword" },
+            {
+              "line": 1,
+              "col": 5,
+              "len": 4,
+              "class": "type",
+              "target": { "module": "Other", "type": "expr" }
+            },
+            { "line": 1, "col": 16, "len": 2, "class": "keyword" },
+            { "line": 1, "col": 19, "len": 3, "class": "builtin_type" },
+            { "line": 1, "col": 29, "len": 2, "class": "keyword" },
+            {
+              "line": 1,
+              "col": 32,
+              "len": 4,
+              "class": "type",
+              "target": { "module": "Other", "type": "expr" }
+            }
+          ],
+          "doc": null,
+          "members": [
+            { "name": "Lit", "type": "int", "mutable": false, "doc": null },
+            { "name": "Neg", "type": "expr", "mutable": false, "doc": null }
+          ],
+          "refs": [ "expr" ]
+        },
+        {
+          "name": "t",
+          "line": 5,
+          "kind": "variant",
+          "params": [],
+          "recursive_group": null,
+          "decl": "type t = A | B",
+          "decl_spans": [
+            { "line": 1, "col": 0, "len": 4, "class": "keyword" },
+            {
+              "line": 1,
+              "col": 5,
+              "len": 1,
+              "class": "type",
+              "target": { "module": "Other", "type": "t" }
+            }
+          ],
+          "doc": null,
+          "members": [
+            { "name": "A", "type": "", "mutable": false, "doc": null },
+            { "name": "B", "type": "", "mutable": false, "doc": null }
+          ],
+          "refs": []
+        }
+      ]
+    },
+    {
+      "name": "User",
+      "path": "user.ml",
+      "doc": "Opens [Other], then declares an [expr] of its own. A name written\nbefore the declaration means [Other.expr]; after it, [User.expr].",
+      "types": [
+        {
+          "name": "expr",
+          "line": 8,
+          "kind": "variant",
+          "params": [],
+          "recursive_group": null,
+          "decl": "type expr = Wrap of Other.expr | Twice of expr",
+          "decl_spans": [
+            { "line": 1, "col": 0, "len": 4, "class": "keyword" },
+            {
+              "line": 1,
+              "col": 5,
+              "len": 4,
+              "class": "type",
+              "target": { "module": "User", "type": "expr" }
+            },
+            { "line": 1, "col": 17, "len": 2, "class": "keyword" },
+            {
+              "line": 1,
+              "col": 20,
+              "len": 10,
+              "class": "type",
+              "target": { "module": "Other", "type": "expr" }
+            },
+            { "line": 1, "col": 39, "len": 2, "class": "keyword" },
+            {
+              "line": 1,
+              "col": 42,
+              "len": 4,
+              "class": "type",
+              "target": { "module": "User", "type": "expr" }
+            }
+          ],
+          "doc": null,
+          "members": [
+            {
+              "name": "Wrap",
+              "type": "Other.expr",
+              "mutable": false,
+              "doc": null
+            },
+            {
+              "name": "Twice",
+              "type": "expr",
+              "mutable": false,
+              "doc": null
+            }
+          ],
+          "refs": [ "Other.expr", "expr" ]
+        },
+        {
+          "name": "pair",
+          "line": 10,
+          "kind": "record",
+          "params": [],
+          "recursive_group": null,
+          "decl": "type pair = { a :  expr; b : Other.expr }",
+          "decl_spans": [
+            { "line": 1, "col": 0, "len": 4, "class": "keyword" },
+            {
+              "line": 1,
+              "col": 5,
+              "len": 4,
+              "class": "type",
+              "target": { "module": "User", "type": "pair" }
+            },
+            {
+              "line": 1,
+              "col": 19,
+              "len": 4,
+              "class": "type",
+              "target": { "module": "User", "type": "expr" }
+            },
+            {
+              "line": 1,
+              "col": 29,
+              "len": 10,
+              "class": "type",
+              "target": { "module": "Other", "type": "expr" }
+            }
+          ],
+          "doc": null,
+          "members": [
+            { "name": "a", "type": "expr", "mutable": false, "doc": null },
+            {
+              "name": "b",
+              "type": "Other.expr",
+              "mutable": false,
+              "doc": null
+            }
+          ],
+          "refs": [ "expr", "Other.expr" ]
+        },
+        {
+          "name": "labelled",
+          "line": 21,
+          "kind": "alias",
+          "params": [],
+          "recursive_group": null,
+          "decl": "type labelled = I.t * Inner.t * (int, int) Stdlib.Hashtbl.t",
+          "decl_spans": [
+            { "line": 1, "col": 0, "len": 4, "class": "keyword" },
+            {
+              "line": 1,
+              "col": 5,
+              "len": 8,
+              "class": "type",
+              "target": { "module": "User", "type": "labelled" }
+            },
+            {
+              "line": 1,
+              "col": 16,
+              "len": 3,
+              "class": "type",
+              "target": { "module": "User.Inner", "type": "t" }
+            },
+            {
+              "line": 1,
+              "col": 22,
+              "len": 7,
+              "class": "type",
+              "target": { "module": "User.Inner", "type": "t" }
+            },
+            { "line": 1, "col": 33, "len": 3, "class": "builtin_type" },
+            { "line": 1, "col": 38, "len": 3, "class": "builtin_type" }
+          ],
+          "doc": null,
+          "members": [],
+          "refs": [ "I.t", "Inner.t", "Stdlib.Hashtbl.t" ]
+        }
+      ]
+    },
+    {
+      "name": "User.Inner",
+      "path": "user.ml",
+      "doc": null,
+      "types": [
+        {
+          "name": "t",
+          "line": 16,
+          "kind": "record",
+          "params": [],
+          "recursive_group": null,
+          "decl": "type t = { label : string }",
+          "decl_spans": [
+            { "line": 1, "col": 0, "len": 4, "class": "keyword" },
+            {
+              "line": 1,
+              "col": 5,
+              "len": 1,
+              "class": "type",
+              "target": { "module": "User.Inner", "type": "t" }
+            },
+            { "line": 1, "col": 19, "len": 6, "class": "builtin_type" }
+          ],
+          "doc": null,
+          "members": [
+            {
+              "name": "label",
+              "type": "string",
+              "mutable": false,
+              "doc": null
+            }
+          ],
+          "refs": []
+        }
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "path": "fixture.ml",
+      "lines": 48,
+      "bytes": 1070,
+      "spans": [
+        { "line": 1, "col": 0, "len": 61, "class": "doc" },
+        { "line": 3, "col": 12, "len": 5, "class": "string" },
+        { "line": 5, "col": 0, "len": 43, "class": "doc" },
+        { "line": 6, "col": 0, "len": 4, "class": "keyword" },
+        {
+          "line": 6,
+          "col": 5,
+          "len": 5,
+          "class": "type",
+          "target": { "module": "Fixture", "type": "shape" }
+        },
+        { "line": 7, "col": 11, "len": 2, "class": "keyword" },
+        { "line": 7, "col": 14, "len": 5, "class": "builtin_type" },
+        { "line": 7, "col": 21, "len": 30, "class": "doc" },
+        { "line": 8, "col": 9, "len": 2, "class": "keyword" },
+        { "line": 8, "col": 12, "len": 5, "class": "builtin_type" },
+        { "line": 8, "col": 20, "len": 5, "class": "builtin_type" },
+        { "line": 8, "col": 27, "len": 42, "class": "comment" },
+        { "line": 9, "col": 8, "len": 17, "class": "doc" },
+        { "line": 10, "col": 8, "len": 2, "class": "keyword" },
+        { "line": 10, "col": 17, "len": 5, "class": "builtin_type" },
+        { "line": 10, "col": 24, "len": 7, "class": "keyword" },
+        { "line": 10, "col": 36, "len": 5, "class": "builtin_type" },
+        { "line": 10, "col": 45, "len": 21, "class": "doc" },
+        { "line": 12, "col": 0, "len": 37, "class": "doc" },
+        { "line": 13, "col": 0, "len": 4, "class": "keyword" },
+        {
+          "line": 13,
+          "col": 5,
+          "len": 3,
+          "class": "type",
+          "target": { "module": "Fixture", "type": "loc" }
+        },
+        { "line": 14, "col": 9, "len": 6, "class": "builtin_type" },
+        { "line": 14, "col": 18, "len": 16, "class": "doc" },
+        { "line": 15, "col": 2, "len": 7, "class": "keyword" },
+        { "line": 15, "col": 17, "len": 3, "class": "builtin_type" },
+        { "line": 15, "col": 24, "len": 15, "class": "comment" },
+        { "line": 16, "col": 8, "len": 3, "class": "builtin_type" },
+        { "line": 19, "col": 0, "len": 4, "class": "keyword" },
+        {
+          "line": 19,
+          "col": 8,
+          "len": 4,
+          "class": "type",
+          "target": { "module": "Fixture", "type": "pair" }
+        },
+        {
+          "line": 19,
+          "col": 20,
+          "len": 10,
+          "class": "type",
+          "target": { "module": "Other", "type": "expr" }
+        },
+        { "line": 19, "col": 31, "len": 4, "class": "builtin_type" },
+        { "line": 21, "col": 0, "len": 4, "class": "keyword" },
+        {
+          "line": 21,
+          "col": 5,
+          "len": 6,
+          "class": "type",
+          "target": { "module": "Fixture", "type": "opaque" }
+        },
+        { "line": 23, "col": 0, "len": 38, "class": "comment" },
+        { "line": 24, "col": 0, "len": 4, "class": "keyword" },
+        {
+          "line": 24,
+          "col": 5,
+          "len": 4,
+          "class": "type",
+          "target": { "module": "Fixture", "type": "tree" }
+        },
+        { "line": 25, "col": 2, "len": 18, "class": "comment" },
+        { "line": 27, "col": 9, "len": 2, "class": "keyword" },
+        {
+          "line": 27,
+          "col": 12,
+          "len": 4,
+          "class": "type",
+          "target": { "module": "Fixture", "type": "tree" }
+        },
+        {
+          "line": 27,
+          "col": 19,
+          "len": 6,
+          "class": "type",
+          "target": { "module": "Fixture", "type": "forest" }
+        },
+        { "line": 27, "col": 28, "len": 19, "class": "comment" },
+        { "line": 29, "col": 0, "len": 38, "class": "doc" },
+        { "line": 30, "col": 0, "len": 3, "class": "keyword" },
+        {
+          "line": 30,
+          "col": 4,
+          "len": 6,
+          "class": "type",
+          "target": { "module": "Fixture", "type": "forest" }
+        },
+        {
+          "line": 30,
+          "col": 13,
+          "len": 4,
+          "class": "type",
+          "target": { "module": "Fixture", "type": "tree" }
+        },
+        { "line": 30, "col": 18, "len": 4, "class": "builtin_type" },
+        { "line": 32, "col": 0, "len": 4, "class": "keyword" },
+        { "line": 32, "col": 5, "len": 6, "class": "keyword" },
+        {
+          "line": 32,
+          "col": 12,
+          "len": 1,
+          "class": "type",
+          "target": { "module": "Fixture", "type": "t" }
+        },
+        {
+          "line": 32,
+          "col": 16,
+          "len": 7,
+          "class": "type",
+          "target": { "module": "Other", "type": "t" }
+        },
+        { "line": 34, "col": 0, "len": 4, "class": "keyword" },
+        {
+          "line": 34,
+          "col": 5,
+          "len": 3,
+          "class": "type",
+          "target": { "module": "Fixture", "type": "ext" }
+        },
+        { "line": 36, "col": 0, "len": 4, "class": "keyword" },
+        {
+          "line": 36,
+          "col": 5,
+          "len": 7,
+          "class": "type",
+          "target": { "module": "Fixture", "type": "derived" }
+        },
+        { "line": 36, "col": 21, "len": 3, "class": "builtin_type" },
+        { "line": 38, "col": 0, "len": 4, "class": "keyword" },
+        {
+          "line": 38,
+          "col": 7,
+          "len": 4,
+          "class": "type",
+          "target": { "module": "Fixture", "type": "gadt" }
+        },
+        { "line": 38, "col": 18, "len": 3, "class": "builtin_type" },
+        { "line": 38, "col": 25, "len": 3, "class": "builtin_type" },
+        {
+          "line": 38,
+          "col": 29,
+          "len": 4,
+          "class": "type",
+          "target": { "module": "Fixture", "type": "gadt" }
+        },
+        { "line": 38, "col": 40, "len": 4, "class": "builtin_type" },
+        {
+          "line": 38,
+          "col": 45,
+          "len": 4,
+          "class": "type",
+          "target": { "module": "Fixture", "type": "gadt" }
+        },
+        { "line": 40, "col": 0, "len": 35, "class": "doc" },
+        { "line": 41, "col": 0, "len": 4, "class": "keyword" },
+        {
+          "line": 41,
+          "col": 5,
+          "len": 17,
+          "class": "type",
+          "target": { "module": "Fixture", "type": "documented_in_mli" }
+        },
+        { "line": 41, "col": 31, "len": 3, "class": "builtin_type" },
+        { "line": 43, "col": 0, "len": 6, "class": "keyword" },
+        { "line": 43, "col": 15, "len": 6, "class": "keyword" },
+        { "line": 44, "col": 2, "len": 24, "class": "doc" },
+        { "line": 46, "col": 2, "len": 21, "class": "doc" },
+        { "line": 47, "col": 2, "len": 4, "class": "keyword" },
+        {
+          "line": 47,
+          "col": 7,
+          "len": 4,
+          "class": "type",
+          "target": { "module": "Fixture.Inner", "type": "item" }
+        },
+        { "line": 47, "col": 23, "len": 6, "class": "builtin_type" },
+        { "line": 48, "col": 0, "len": 3, "class": "keyword" }
+      ]
+    },
+    {
+      "path": "other.ml",
+      "lines": 5,
+      "bytes": 132,
+      "spans": [
+        { "line": 1, "col": 0, "len": 77, "class": "doc" },
+        { "line": 3, "col": 0, "len": 4, "class": "keyword" },
+        {
+          "line": 3,
+          "col": 5,
+          "len": 4,
+          "class": "type",
+          "target": { "module": "Other", "type": "expr" }
+        },
+        { "line": 3, "col": 16, "len": 2, "class": "keyword" },
+        { "line": 3, "col": 19, "len": 3, "class": "builtin_type" },
+        { "line": 3, "col": 29, "len": 2, "class": "keyword" },
+        {
+          "line": 3,
+          "col": 32,
+          "len": 4,
+          "class": "type",
+          "target": { "module": "Other", "type": "expr" }
+        },
+        { "line": 5, "col": 0, "len": 4, "class": "keyword" },
+        {
+          "line": 5,
+          "col": 5,
+          "len": 1,
+          "class": "type",
+          "target": { "module": "Other", "type": "t" }
+        }
+      ]
+    },
+    {
+      "path": "user.ml",
+      "lines": 23,
+      "bytes": 559,
+      "spans": [
+        { "line": 1, "col": 0, "len": 69, "class": "doc" },
+        { "line": 2, "col": 0, "len": 72, "class": "doc" },
+        { "line": 4, "col": 0, "len": 4, "class": "keyword" },
+        { "line": 6, "col": 0, "len": 3, "class": "keyword" },
+        {
+          "line": 6,
+          "col": 15,
+          "len": 4,
+          "class": "type",
+          "target": { "module": "Other", "type": "expr" }
+        },
+        {
+          "line": 6,
+          "col": 23,
+          "len": 1,
+          "class": "type",
+          "target": { "module": "Other", "type": "t" }
+        },
+        { "line": 6, "col": 27, "len": 5, "class": "keyword" },
+        { "line": 6, "col": 35, "len": 4, "class": "keyword" },
+        { "line": 8, "col": 0, "len": 4, "class": "keyword" },
+        {
+          "line": 8,
+          "col": 5,
+          "len": 4,
+          "class": "type",
+          "target": { "module": "User", "type": "expr" }
+        },
+        { "line": 8, "col": 17, "len": 2, "class": "keyword" },
+        {
+          "line": 8,
+          "col": 20,
+          "len": 10,
+          "class": "type",
+          "target": { "module": "Other", "type": "expr" }
+        },
+        { "line": 8, "col": 39, "len": 2, "class": "keyword" },
+        {
+          "line": 8,
+          "col": 42,
+          "len": 4,
+          "class": "type",
+          "target": { "module": "User", "type": "expr" }
+        },
+        { "line": 10, "col": 0, "len": 4, "class": "keyword" },
+        {
+          "line": 10,
+          "col": 5,
+          "len": 4,
+          "class": "type",
+          "target": { "module": "User", "type": "pair" }
+        },
+        { "line": 10, "col": 18, "len": 9, "class": "comment" },
+        {
+          "line": 10,
+          "col": 28,
+          "len": 4,
+          "class": "type",
+          "target": { "module": "User", "type": "expr" }
+        },
+        {
+          "line": 10,
+          "col": 38,
+          "len": 10,
+          "class": "type",
+          "target": { "module": "Other", "type": "expr" }
+        },
+        { "line": 12, "col": 0, "len": 3, "class": "keyword" },
+        {
+          "line": 12,
+          "col": 14,
+          "len": 4,
+          "class": "type",
+          "target": { "module": "User", "type": "expr" }
+        },
+        {
+          "line": 12,
+          "col": 22,
+          "len": 10,
+          "class": "type",
+          "target": { "module": "Other", "type": "expr" }
+        },
+        { "line": 13, "col": 2, "len": 5, "class": "keyword" },
+        { "line": 13, "col": 10, "len": 4, "class": "keyword" },
+        { "line": 13, "col": 44, "len": 1, "class": "number" },
+        { "line": 15, "col": 0, "len": 6, "class": "keyword" },
+        { "line": 15, "col": 15, "len": 6, "class": "keyword" },
+        { "line": 16, "col": 2, "len": 4, "class": "keyword" },
+        {
+          "line": 16,
+          "col": 7,
+          "len": 1,
+          "class": "type",
+          "target": { "module": "User.Inner", "type": "t" }
+        },
+        { "line": 16, "col": 21, "len": 6, "class": "builtin_type" },
+        { "line": 17, "col": 0, "len": 3, "class": "keyword" },
+        { "line": 19, "col": 0, "len": 6, "class": "keyword" },
+        { "line": 21, "col": 0, "len": 4, "class": "keyword" },
+        {
+          "line": 21,
+          "col": 5,
+          "len": 8,
+          "class": "type",
+          "target": { "module": "User", "type": "labelled" }
+        },
+        {
+          "line": 21,
+          "col": 16,
+          "len": 3,
+          "class": "type",
+          "target": { "module": "User.Inner", "type": "t" }
+        },
+        {
+          "line": 21,
+          "col": 22,
+          "len": 7,
+          "class": "type",
+          "target": { "module": "User.Inner", "type": "t" }
+        },
+        { "line": 21, "col": 33, "len": 3, "class": "builtin_type" },
+        { "line": 21, "col": 38, "len": 3, "class": "builtin_type" },
+        { "line": 23, "col": 0, "len": 3, "class": "keyword" },
+        { "line": 23, "col": 8, "len": 11, "class": "string" }
       ]
     }
   ]

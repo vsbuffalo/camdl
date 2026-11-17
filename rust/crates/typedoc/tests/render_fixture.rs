@@ -24,6 +24,8 @@ fn render(overview: &Path, out: &Path) -> std::process::Output {
         .arg(out)
         .arg("--commit")
         .arg(SHA)
+        .arg("--source-root")
+        .arg(fixture("repo"))
         .output()
         .expect("typedoc runs")
 }
@@ -50,7 +52,11 @@ fn listing(dir: &Path) -> Vec<String> {
 fn writes_one_page_per_module_and_an_index() {
     let dir = tempfile::tempdir().unwrap();
     render_ok(dir.path());
-    assert_eq!(listing(dir.path()), ["ast.qmd", "index.qmd", "ir.qmd"]);
+    assert_eq!(
+        listing(dir.path()),
+        ["ast.qmd", "index.qmd", "ir.qmd", "src"]
+    );
+    assert_eq!(listing(&dir.path().join("src")), ["ast.qmd", "ir.qmd"]);
 
     let index = read(dir.path(), "index.qmd");
     let ast_row =
@@ -95,20 +101,27 @@ fn writes_one_page_per_module_and_an_index() {
     for line in [
         "title: \"Ast\"",
         "order: 101",
-        "Source: [`ocaml/lib/compiler/ast.ml`](https://github.com/vsbuffalo/camdl/blob/78b0a4af4e1f2c3d4b5a69788796a5b4c3d2e1f0/ocaml/lib/compiler/ast.ml){.td-source}",
+        "Source: [`ocaml/lib/compiler/ast.ml`](src/ast.qmd){.td-source} · [on GitHub](https://github.com/vsbuffalo/camdl/blob/78b0a4af4e1f2c3d4b5a69788796a5b4c3d2e1f0/ocaml/lib/compiler/ast.ml){.td-source}",
         // The odoc doc: a camdl example, code, a list, a cross-module reference.
         "## destination_form {#t-destination_form}",
         "```camdl\ninfection : S --> I @ beta * S * I / N",
         "The two forms:\n\n- `DstSum [I]` is a sum of compartments;\n- `DstBranch` is a probabilistic branch.",
         "Compare [`Ir.expr`](ir.qmd#t-expr).",
-        "```ocaml\ntype destination_form =\n  | DstSum    of stoich_ref list",
+        // The declaration, its type names linked; its own name is not.
+        concat!(
+            "```{=html}\n<div class=\"sourceCode td-code td-decl ocaml\"><pre class=\"sourceCode\"><code class=\"sourceCode\">",
+            "<span class=\"td-line\"><span class=\"kw\">type</span> destination_form =</span>\n",
+            "<span class=\"td-line\">  | DstSum    <span class=\"kw\">of</span> <a class=\"td-ref\" href=\"#t-stoich_ref\">stoich_ref</a> <span class=\"dt\">list</span></span>\n",
+            "<span class=\"td-line\">  | DstBranch <span class=\"kw\">of</span> (<a class=\"td-ref\" href=\"#t-stoich_ref\">stoich_ref</a> * <a class=\"td-ref\" href=\"#t-expr\">expr</a>) <span class=\"dt\">list</span></span>",
+            "</code></pre></div>\n```"
+        ),
         // Member docs, with the history mark on the one that narrates history.
         "`DstSum of stoich_ref list`\n:   Every listed compartment gains one individual per firing.",
         "`DstBranch of (stoich_ref * expr) list`\n:   [history: wave 2, malaria #2, gh#616]{.td-mark .td-history}",
         // Cross-references, with the self reference dropped.
         "**Refers to:** [`stoich_ref`](#t-stoich_ref), [`expr`](#t-expr)\n",
         "**Used by:** [`Ir.transition`](ir.qmd#t-transition)",
-        "[source](https://github.com/vsbuffalo/camdl/blob/78b0a4af4e1f2c3d4b5a69788796a5b4c3d2e1f0/ocaml/lib/compiler/ast.ml#L188){.td-source}",
+        "[source](src/ast.qmd#L14){.td-source} · [on GitHub](https://github.com/vsbuffalo/camdl/blob/78b0a4af4e1f2c3d4b5a69788796a5b4c3d2e1f0/ocaml/lib/compiler/ast.ml#L14){.td-source}",
         // The `and` group.
         "**Defined together with:** [`call`](#t-call)",
         "**Defined together with:** [`expr`](#t-expr)",
@@ -137,6 +150,73 @@ fn writes_one_page_per_module_and_an_index() {
     assert!(ir.contains(
         "**Refers to:** [`expr`](#t-expr), [`Ast.destination_form`](ast.qmd#t-destination_form)"
     ));
+    // A link to another page, in a declaration, names the rendered file.
+    assert!(ir.contains(
+        "<a class=\"td-ref\" href=\"ast.html#t-destination_form\">Ast.destination_form</a>"
+    ));
+}
+
+#[test]
+fn source_pages_show_the_whole_file_with_anchors_and_exact_links() {
+    let dir = tempfile::tempdir().unwrap();
+    render_ok(dir.path());
+    let ast = read(&dir.path().join("src"), "ast.qmd");
+    for piece in [
+        "title: \"ast.ml\"\nsearch: false\ntoc: false\nbody-classes: td-page td-source-page\n",
+        "documented on [Ast](../ast.qmd)",
+        "[On GitHub](https://github.com/vsbuffalo/camdl/blob/78b0a4af4e1f2c3d4b5a69788796a5b4c3d2e1f0/ocaml/lib/compiler/ast.ml){.td-source}",
+        // Every line is anchored, blank ones too.
+        "<span class=\"td-line\" id=\"L2\"></span>\n",
+        // A definition links to its documentation; uses link to theirs.
+        "<span class=\"td-line\" id=\"L14\"><span class=\"kw\">type</span> <a class=\"td-ref\" href=\"../ast.html#t-destination_form\">destination_form</a> =</span>",
+        "(<a class=\"td-ref\" href=\"../ast.html#t-stoich_ref\">stoich_ref</a> * <a class=\"td-ref\" href=\"../ast.html#t-expr\">expr</a>)",
+        "<a class=\"td-ref\" href=\"../ast.html#t-Located-t\">Located.t</a>",
+        // Text is escaped, inside spans and between them.
+        "<span class=\"td-line\" id=\"L26\"><span class=\"kw\">let</span> arrow = <span class=\"st\">&quot;--&gt;&quot;</span> <span class=\"co\">(* &lt;b&gt; &amp; &quot;quoted&quot; *)</span></span></code></pre></div>",
+    ] {
+        assert!(ast.contains(piece), "src/ast.qmd lacks:\n{piece}\n---\n{ast}");
+    }
+    assert_eq!(ast.matches("class=\"td-line\"").count(), 26);
+    // `expr` in ir.ml is Ir.expr, not the Ast.expr of the same name.
+    let ir = read(&dir.path().join("src"), "ir.qmd");
+    assert!(
+        ir.contains("<a class=\"td-ref\" href=\"../ir.html#t-expr\">expr</a>; dst : <a class=\"td-ref\" href=\"../ast.html#t-destination_form\">Ast.destination_form</a>"),
+        "{ir}"
+    );
+}
+
+#[test]
+fn a_source_file_that_changed_since_extraction_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    for f in ["ocaml/lib/compiler/ast.ml", "ocaml/lib/ir/ir.ml"] {
+        let to = root.join(f);
+        fs::create_dir_all(to.parent().unwrap()).unwrap();
+        fs::copy(fixture("repo").join(f), &to).unwrap();
+    }
+    fs::write(root.join("ocaml/lib/ir/ir.ml"), "type expr\n").unwrap();
+    let out = dir.path().join("out");
+    let o = Command::new(env!("CARGO_BIN_EXE_typedoc"))
+        .arg("render")
+        .arg("--overview")
+        .arg(fixture("compiler.mld"))
+        .arg("--input")
+        .arg(fixture("compiler.json"))
+        .arg("--out")
+        .arg(&out)
+        .arg("--commit")
+        .arg(SHA)
+        .arg("--source-root")
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(!o.status.success());
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        err.contains("ocaml/lib/ir/ir.ml: the file has 10 bytes in 1 lines"),
+        "{err}"
+    );
+    assert!(!out.exists(), "nothing is written when the check fails");
 }
 
 #[test]
@@ -146,7 +226,12 @@ fn rendering_twice_gives_identical_bytes() {
     render_ok(a.path());
     render_ok(b.path());
     render_ok(b.path());
-    for name in listing(a.path()) {
+    let pages = listing(a.path()).into_iter().filter(|n| n != "src").chain(
+        listing(&a.path().join("src"))
+            .into_iter()
+            .map(|n| format!("src/{n}")),
+    );
+    for name in pages {
         assert_eq!(
             fs::read(a.path().join(&name)).unwrap(),
             fs::read(b.path().join(&name)).unwrap(),
@@ -161,10 +246,14 @@ fn stale_pages_are_deleted_and_other_files_kept() {
     fs::write(dir.path().join("gone.qmd"), "old").unwrap();
     fs::write(dir.path().join("notes.txt"), "keep").unwrap();
     render_ok(dir.path());
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/gone.qmd"), "old").unwrap();
+    render_ok(dir.path());
     assert_eq!(
         listing(dir.path()),
-        ["ast.qmd", "index.qmd", "ir.qmd", "notes.txt"]
+        ["ast.qmd", "index.qmd", "ir.qmd", "notes.txt", "src"]
     );
+    assert_eq!(listing(&dir.path().join("src")), ["ast.qmd", "ir.qmd"]);
 }
 
 #[test]

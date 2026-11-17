@@ -1,15 +1,24 @@
 (* Prints a JSON description of every type declaration, with its doc
-   comments, in the OCaml source files given on the command line. Usage:
+   comments, in the OCaml source files given on the command line, and the
+   markup of each file's text: keywords, literals, comments, and every type
+   name that refers to one of the declarations. Usage:
 
-     typedoc_ocaml [--root DIR] FILE.ml ...
+     typedoc_ocaml [--root DIR] --cmt-dir DIR [--cmt-dir DIR ...] FILE.ml ...
 
-   Paths in the output are relative to DIR, by default the enclosing git
+   Paths in the output are relative to --root, by default the enclosing git
    checkout (the nearest ancestor of the working directory with a `.git`).
 
    Implementation comments and doc comments are cut out of each
    declaration's source text; doc comments are reported separately in `doc`
-   fields. Doc comments missing in `foo.ml` fall back to `foo.mli`. The JSON
-   contract is described in docs/documentation-style.md, section 10. *)
+   fields. Doc comments missing in `foo.ml` fall back to `foo.mli`.
+
+   Which declaration a type name refers to is read from the compiler's typed
+   tree, in the `foo.cmt` that compiling `foo.ml` wrote into one of the
+   --cmt-dir directories, never guessed from the name: with `open Ast` in
+   scope, `expr` means `Ast.expr`, and in `ir.ml` it means `Ir.expr`. A file
+   with no .cmt, or whose .cmt was compiled from other text, is an error.
+
+   The JSON contract is documented in rust/crates/typedoc/src/model.rs. *)
 
 open Parsetree
 
@@ -162,35 +171,430 @@ type cuts = (int * int) list (* byte offsets [lo, hi) *)
 
 let cnum (p : Lexing.position) = p.pos_cnum
 
-let strip_comments src (cuts : cuts) lo hi col =
-  let b = Buffer.create (hi - lo + 16) in
-  Buffer.add_string b (String.make col ' ');
+(* A declaration's source text with its comments cut out, blank lines
+   dropped and the common indentation removed, and where each byte of it
+   came from: [origin] maps the source offset of every byte that survives to
+   its line (from 1) and byte column (from 0) in [text]. *)
+type stripped = { text : string; origin : (int, int * int) Hashtbl.t }
+
+let strip_comments src (cuts : cuts) lo hi col : stripped =
+  (* The kept bytes, each with its source offset; -1 for the padding that
+     stands in for the text before the declaration on its first line, so
+     the first line's indentation compares with the others'. *)
+  let kept = ref [] in
+  for _ = 1 to col do
+    kept := (' ', -1) :: !kept
+  done;
+  let keep a z =
+    for k = a to z - 1 do
+      kept := (src.[k], k) :: !kept
+    done
+  in
   let pos = ref lo in
   List.iter
     (fun (a, z) ->
       if z > !pos && a < hi then begin
-        if a > !pos then Buffer.add_string b (String.sub src !pos (a - !pos));
+        if a > !pos then keep !pos a;
         pos := max !pos (min z hi)
       end)
     (List.sort compare cuts);
-  if !pos < hi then Buffer.add_string b (String.sub src !pos (hi - !pos));
-  let rstrip l =
-    let n = ref (String.length l) in
-    while
-      !n > 0 && (l.[!n - 1] = ' ' || l.[!n - 1] = '\t' || l.[!n - 1] = '\r')
-    do
-      decr n
-    done;
-    String.sub l 0 !n
-  in
+  if !pos < hi then keep !pos hi;
   let lines =
-    String.split_on_char '\n' (Buffer.contents b)
-    |> List.map rstrip
-    |> List.filter (fun l -> l <> "")
+    List.fold_left
+      (fun (cur, acc) c ->
+        match c with
+        | '\n', _ -> ([], List.rev cur :: acc)
+        | c -> (c :: cur, acc))
+      ([], []) (List.rev !kept)
+    |> fun (cur, acc) -> List.rev (List.rev cur :: acc)
   in
-  let m = List.fold_left (fun m l -> min m (indent_of l)) max_int lines in
+  let is_space c = c = ' ' || c = '\t' || c = '\r' in
+  let rstrip l =
+    let rec go = function (c, _) :: t when is_space c -> go t | l -> l in
+    List.rev (go (List.rev l))
+  in
+  let lines = List.map rstrip lines |> List.filter (fun l -> l <> []) in
+  let rec indent n = function
+    | (c, _) :: t when c = ' ' || c = '\t' -> indent (n + 1) t
+    | _ -> n
+  in
+  let m = List.fold_left (fun m l -> min m (indent 0 l)) max_int lines in
   let m = if m = max_int then 0 else m in
-  String.concat "\n" (List.map (drop m) lines)
+  let rec drop_n n l =
+    match l with _ :: t when n > 0 -> drop_n (n - 1) t | l -> l
+  in
+  let lines = List.map (drop_n m) lines in
+  let origin = Hashtbl.create 256 in
+  List.iteri
+    (fun k l ->
+      List.iteri
+        (fun j (_, o) -> if o >= 0 then Hashtbl.replace origin o (k + 1, j))
+        l)
+    lines;
+  let text_of l = String.of_seq (List.to_seq (List.map fst l)) in
+  { text = String.concat "\n" (List.map text_of lines); origin }
+
+(* ---- errors ---- *)
+
+let fail fmt =
+  Printf.ksprintf
+    (fun s ->
+      prerr_endline ("typedoc_ocaml: " ^ s);
+      exit 1)
+    fmt
+
+(* ---- spans: the parts of a source file that get markup ---- *)
+
+(* The documented type a span links to: the module's full path and the
+   type's name, both as the JSON names them. *)
+type target = { t_module : string; t_type : string }
+
+type span_class =
+  | Keyword
+  | Comment
+  | Doc
+  | String_lit
+  | Char_lit
+  | Number
+  | Builtin_type  (* a type the language predefines: int, list, option *)
+  | Type  (* a type constructor that resolves to a documented type *)
+
+let class_name = function
+  | Keyword -> "keyword"
+  | Comment -> "comment"
+  | Doc -> "doc"
+  | String_lit -> "string"
+  | Char_lit -> "char"
+  | Number -> "number"
+  | Builtin_type -> "builtin_type"
+  | Type -> "type"
+
+(* A span in byte offsets [lo, hi) of the file; may cross lines. *)
+type span = { lo : int; hi : int; cls : span_class; target : target option }
+
+(* One line's part of a span: the form the JSON carries. *)
+type piece = {
+  off : int;  (* byte offset in the file *)
+  line : int;  (* from 1 *)
+  col : int;  (* byte column, from 0 *)
+  len : int;  (* bytes *)
+  p_cls : span_class;
+  p_target : target option;
+}
+
+let keywords =
+  [ "and"; "as"; "assert"; "asr"; "begin"; "class"; "constraint"; "do";
+    "done"; "downto"; "else"; "end"; "exception"; "external"; "false"; "for";
+    "fun"; "function"; "functor"; "if"; "in"; "include"; "inherit";
+    "initializer"; "land"; "lazy"; "let"; "lor"; "lsl"; "lsr"; "lxor";
+    "match"; "method"; "mod"; "module"; "mutable"; "new"; "nonrec"; "object";
+    "of"; "open"; "or"; "private"; "rec"; "sig"; "struct"; "then"; "to";
+    "true"; "try"; "type"; "val"; "virtual"; "when"; "while"; "with" ]
+
+(* Keywords, literals and comments, from OCaml's own lexer. *)
+let lex_spans path src : span list =
+  let lexbuf = Lexing.from_string src in
+  Location.init lexbuf path;
+  Lexer.init ();
+  let acc = ref [] in
+  let add lo hi cls =
+    if hi > lo then acc := { lo; hi; cls; target = None } :: !acc
+  in
+  let of_loc (l : Location.t) cls = add (cnum l.loc_start) (cnum l.loc_end) cls in
+  let rec go () =
+    match Lexer.token_with_comments lexbuf with
+    | Parser.EOF -> ()
+    | tok ->
+        let lo = cnum lexbuf.lex_start_p and hi = cnum lexbuf.lex_curr_p in
+        (match tok with
+         | Parser.COMMENT (_, loc) -> of_loc loc Comment
+         | DOCSTRING d -> of_loc (Docstrings.docstring_loc d) Doc
+         | STRING _ | QUOTED_STRING_EXPR _ | QUOTED_STRING_ITEM _ ->
+             add lo hi String_lit
+         | CHAR _ -> add lo hi Char_lit
+         | INT _ | FLOAT _ -> add lo hi Number
+         | LIDENT _ | UIDENT _ | EOL -> ()
+         | _ ->
+             if List.mem (String.sub src lo (hi - lo)) keywords then
+               add lo hi Keyword);
+        go ()
+  in
+  (try go ()
+   with Lexer.Error (_, loc) ->
+     fail "%s:%d: the lexer refused the file" path loc.loc_start.pos_lnum);
+  List.rev !acc
+
+(* ---- the typed tree: which declaration each type name refers to ---- *)
+
+module SSet = Set.Make (String)
+
+(* One file's compiled form, read from the .cmt dune writes beside the
+   bytecode. Idents are only meaningful within the file they come from, so
+   these tables are per file. *)
+type typed = {
+  ty_unit : string;  (* the file's module: Ast *)
+  ty_fname : string;  (* the file name the compiler recorded in locations *)
+  ty_str : Typedtree.structure;
+  type_ids : (string * string) Ident.Tbl.t;
+      (* a documented declaration's ident -> module path, type name *)
+  mod_ids : string Ident.Tbl.t;  (* a documented module's ident -> path *)
+  aliases : Path.t Ident.Tbl.t;  (* module L = Located *)
+  mutable decls : (string * string * int) list;
+      (* module path, type name, line: checked against the parse *)
+}
+
+(* Shared by every file: the module paths of the inputs, and for each
+   (module path, type name) the ident of the declaration a reader of that
+   module sees under that name -- [None] when that name is bound last by
+   something other than a documented declaration, such as an [include]. *)
+type world = {
+  units : SSet.t;
+  mutable modules : SSet.t;
+  final : (string * string, (string * Ident.t) option) Hashtbl.t;
+      (* the ident, with the unit it belongs to *)
+}
+
+let rec tstruct_of_mod (me : Typedtree.module_expr) =
+  match me.mod_desc with
+  | Tmod_structure s -> Some s
+  | Tmod_constraint (m, _, _, _) -> tstruct_of_mod m
+  | _ -> None
+
+(* Records the declarations and modules of a structure, mirroring [walk]:
+   a nested module is documented when it is a structure, possibly under a
+   signature constraint. *)
+let rec register world t modname (str : Typedtree.structure) =
+  world.modules <- SSet.add modname world.modules;
+  List.iter
+    (fun (item : Typedtree.structure_item) ->
+      match item.str_desc with
+      | Tstr_type (_, tds) ->
+          List.iter
+            (fun (td : Typedtree.type_declaration) ->
+              let name = td.typ_name.txt in
+              Ident.Tbl.replace t.type_ids td.typ_id (modname, name);
+              Hashtbl.replace world.final (modname, name)
+                (Some (t.ty_unit, td.typ_id));
+              t.decls <-
+                (modname, name, td.typ_loc.loc_start.pos_lnum) :: t.decls)
+            tds
+      | Tstr_include incl ->
+          List.iter
+            (function
+              | Types.Sig_type (id, _, _, _) ->
+                  Hashtbl.replace world.final (modname, Ident.name id) None
+              | _ -> ())
+            incl.incl_type
+      | Tstr_module { mb_id = Some id; mb_name = { txt = Some n; _ }; mb_expr; _ }
+        -> (
+          match tstruct_of_mod mb_expr with
+          | Some s ->
+              let full = modname ^ "." ^ n in
+              Ident.Tbl.replace t.mod_ids id full;
+              register world t full s
+          | None -> (
+              match mb_expr.mod_desc with
+              | Tmod_ident (p, _) -> Ident.Tbl.replace t.aliases id p
+              | _ -> ()))
+      | _ -> ())
+    str.str_items
+
+(* The documented module a module path names, if any. *)
+let rec module_of_path world t (p : Path.t) =
+  match p with
+  | Pident id when Ident.persistent id ->
+      let n = Ident.name id in
+      if SSet.mem n world.units then Some n else None
+  | Pident id -> (
+      match Ident.Tbl.find_opt t.mod_ids id with
+      | Some n -> Some n
+      | None ->
+          Option.bind (Ident.Tbl.find_opt t.aliases id) (module_of_path world t))
+  | Pdot (q, s) ->
+      Option.bind (module_of_path world t q) (fun m ->
+          let n = m ^ "." ^ s in
+          if SSet.mem n world.modules then Some n else None)
+  | Papply _ | Pextra_ty _ -> None
+
+(* The documented declaration a type path names, if any. A local name
+   counts only when it is the declaration its module finally binds that name
+   to, since a target names a type by module and name alone. *)
+let target_of_path world t (p : Path.t) =
+  let final m n = Hashtbl.find_opt world.final (m, n) |> Option.join in
+  match p with
+  | Pident id -> (
+      match Ident.Tbl.find_opt t.type_ids id with
+      | Some (m, n) -> (
+          match final m n with
+          | Some (u, last) when u = t.ty_unit && Ident.same last id ->
+              Some { t_module = m; t_type = n }
+          | _ -> None)
+      | None -> None)
+  | Pdot (q, s) -> (
+      match module_of_path world t q with
+      | Some m when final m s <> None -> Some { t_module = m; t_type = s }
+      | _ -> None)
+  | Papply _ | Pextra_ty _ -> None
+
+let squeeze s =
+  String.concat "" (String.split_on_char ' ' s)
+  |> String.split_on_char '\n' |> String.concat ""
+  |> String.split_on_char '\t' |> String.concat ""
+
+(* Every type constructor written in the file that is predefined or names a
+   documented declaration, and the name of each documented declaration
+   where it is defined. A location must lie in the file itself, not be
+   compiler-generated, and cover exactly the name the tree records, or the
+   file is refused: a link at the wrong place is worse than none. *)
+let typed_spans world t path src : span list =
+  let acc = ref [] in
+  let record (loc : Location.t) expected cls target =
+    if (not loc.loc_ghost) && loc.loc_start.pos_fname = t.ty_fname then begin
+      let lo = cnum loc.loc_start and hi = cnum loc.loc_end in
+      if lo < 0 || hi > String.length src || hi <= lo then
+        fail "%s:%d: a type's location lies outside the file" path
+          loc.loc_start.pos_lnum;
+      let text = String.sub src lo (hi - lo) in
+      if squeeze text <> expected then
+        fail "%s:%d: the typed tree puts %S where the source has %S" path
+          loc.loc_start.pos_lnum expected text;
+      acc := { lo; hi; cls; target } :: !acc
+    end
+  in
+  let flatten lid =
+    match Longident.flatten lid with
+    | parts -> Some (String.concat "." parts)
+    | exception _ -> None
+  in
+  let it =
+    { Tast_iterator.default_iterator with
+      typ =
+        (fun self ct ->
+          (match ct.ctyp_desc with
+           | Ttyp_constr (p, lid, _) -> (
+               match flatten lid.txt with
+               | None -> ()
+               | Some expected -> (
+                   match p with
+                   | Pident id when Ident.is_predef id ->
+                       record lid.loc expected Builtin_type None
+                   | _ -> (
+                       match target_of_path world t p with
+                       | Some tg -> record lid.loc expected Type (Some tg)
+                       | None -> ())))
+           | _ -> ());
+          Tast_iterator.default_iterator.typ self ct);
+      type_declaration =
+        (fun self td ->
+          (match target_of_path world t (Pident td.typ_id) with
+           | Some tg -> record td.typ_name.loc td.typ_name.txt Type (Some tg)
+           | None -> ());
+          Tast_iterator.default_iterator.type_declaration self td) }
+  in
+  it.structure it t.ty_str;
+  (* The typer can visit one written type twice (a [let x : t = e] is
+     checked as a pattern constraint and an expression constraint). Keep one
+     of each; two different readings of one place get no link. *)
+  let sorted = List.sort_uniq compare !acc in
+  let rec dedupe = function
+    | a :: b :: rest when a.lo = b.lo && a.hi = b.hi ->
+        let rest =
+          List.filter (fun s -> not (s.lo = a.lo && s.hi = a.hi)) rest
+        in
+        Printf.eprintf
+          "typedoc_ocaml: %s: two readings of the type at byte %d; not linked\n"
+          path a.lo;
+        dedupe rest
+    | a :: rest -> a :: dedupe rest
+    | [] -> []
+  in
+  dedupe sorted
+
+(* All spans of a file, sorted. Spans never overlap: a type name is no
+   keyword, literal or comment. *)
+let file_spans world t path src =
+  let spans =
+    List.sort
+      (fun a b -> compare (a.lo, a.hi) (b.lo, b.hi))
+      (lex_spans path src @ typed_spans world t path src)
+  in
+  let rec check = function
+    | a :: (b :: _ as rest) ->
+        if b.lo < a.hi then
+          fail "%s: spans overlap at bytes %d-%d and %d-%d" path a.lo a.hi b.lo
+            b.hi;
+        check rest
+    | _ -> ()
+  in
+  check spans;
+  spans
+
+(* Splits spans at line ends, so each piece lies on one line. *)
+let pieces src (spans : span list) : piece array =
+  let n = String.length src in
+  let starts =
+    let acc = ref [ 0 ] in
+    String.iteri (fun i c -> if c = '\n' && i + 1 <= n then acc := (i + 1) :: !acc) src;
+    Array.of_list (List.rev !acc)
+  in
+  let line_of off =
+    (* the last start <= off *)
+    let lo = ref 0 and hi = ref (Array.length starts - 1) in
+    while !lo < !hi do
+      let mid = (!lo + !hi + 1) / 2 in
+      if starts.(mid) <= off then lo := mid else hi := mid - 1
+    done;
+    !lo
+  in
+  let out = ref [] in
+  List.iter
+    (fun s ->
+      let pos = ref s.lo in
+      while !pos < s.hi do
+        let l = line_of !pos in
+        let eol = match String.index_from_opt src !pos '\n' with Some e -> e | None -> n in
+        let stop = min eol s.hi in
+        if stop > !pos then
+          out :=
+            { off = !pos; line = l + 1; col = !pos - starts.(l);
+              len = stop - !pos; p_cls = s.cls; p_target = s.target }
+            :: !out;
+        pos := eol + 1
+      done)
+    spans;
+  Array.of_list (List.rev !out)
+
+(* A span's JSON: [target] is present only on a span that links. *)
+let piece_json ~line ~col (p : piece) =
+  let target =
+    match p.p_target with
+    | None -> []
+    | Some t ->
+        [ ( "target",
+            `Assoc [ ("module", `String t.t_module); ("type", `String t.t_type) ]
+          ) ]
+  in
+  `Assoc
+    ([ ("line", `Int line); ("col", `Int col); ("len", `Int p.len);
+       ("class", `String (class_name p.p_cls)) ]
+    @ target)
+
+(* The pieces inside source bytes [lo, hi), placed in a declaration's
+   stripped text. A piece in a cut comment drops out whole; a piece that
+   survives only in part would be a fault in the cutting. *)
+let decl_spans path (all : piece array) lo hi (st : stripped) =
+  Array.to_list all
+  |> List.filter (fun p -> p.off >= lo && p.off + p.len <= hi)
+  |> List.filter_map (fun p ->
+         let places = List.init p.len (fun k -> Hashtbl.find_opt st.origin (p.off + k)) in
+         match places with
+         | Some (line, col) :: _
+           when List.for_all2
+                  (fun k pl -> pl = Some (line, col + k))
+                  (List.init p.len Fun.id) places ->
+             Some (piece_json ~line ~col p)
+         | _ when List.for_all Option.is_none places -> None
+         | _ -> fail "%s:%d: a span survives comment cutting only in part" path p.line)
 
 (* ---- the .mli doc index ---- *)
 
@@ -236,10 +640,14 @@ let parse_with f path =
 (* ---- per-file extraction ---- *)
 
 type ctx = {
+  path : string;  (* as the JSON names it *)
   src : string;
   cuts : cuts;
+  pieces : piece array;
   mli : (string * string, mli_entry) Hashtbl.t;
   mutable group : int;
+  mutable seen : (string * string * int) list;
+      (* module path, type name, line of each declaration documented *)
 }
 
 let jstr_opt = function None -> `Null | Some s -> `String s
@@ -253,7 +661,8 @@ let type_json ctx modname ~group (td : type_declaration) =
   let loc = td.ptype_loc in
   let lo = cnum loc.loc_start and hi = cnum loc.loc_end in
   let col = loc.loc_start.pos_cnum - loc.loc_start.pos_bol in
-  let decl = strip_comments ctx.src ctx.cuts lo hi col in
+  let stripped = strip_comments ctx.src ctx.cuts lo hi col in
+  ctx.seen <- (modname, td.ptype_name.txt, loc.loc_start.pos_lnum) :: ctx.seen;
   let mli = Hashtbl.find_opt ctx.mli (modname, td.ptype_name.txt) in
   let doc =
     match doc_of_attrs td.ptype_attributes with
@@ -317,7 +726,8 @@ let type_json ctx modname ~group (td : type_declaration) =
         `List (List.map (fun (t, _) -> `String (print_type t)) td.ptype_params)
       );
       ("recursive_group", match group with None -> `Null | Some g -> `Int g);
-      ("decl", `String decl);
+      ("decl", `String stripped.text);
+      ("decl_spans", `List (decl_spans ctx.path ctx.pieces lo hi stripped));
       ("doc", jstr_opt doc);
       ("members", `List members);
       ("refs", `List (List.map (fun s -> `String s) refs)) ]
@@ -370,7 +780,54 @@ let rec walk ctx path modname (str : structure) : Yojson.Safe.t list =
       ("types", `List (List.rev !types)) ]
   :: List.concat (List.rev !nested)
 
-let process root file =
+let unit_of file =
+  String.capitalize_ascii (Filename.remove_extension (Filename.basename file))
+
+(* The .cmt of a source file: [foo.ml] compiles to [foo.cmt], which must be
+   in exactly one of the directories and must have been compiled from the
+   file as it is now. *)
+let load_cmt cmt_dirs file : Cmt_format.cmt_infos =
+  let name = String.uncapitalize_ascii (Filename.remove_extension (Filename.basename file)) ^ ".cmt" in
+  let found =
+    List.filter Sys.file_exists (List.map (fun d -> Filename.concat d name) cmt_dirs)
+  in
+  let cmt =
+    match found with
+    | [ c ] -> c
+    | [] ->
+        fail "%s: no %s in any --cmt-dir (%s); build the library first" file name
+          (String.concat ", " cmt_dirs)
+    | cs -> fail "%s: %s is in several --cmt-dir: %s" file name (String.concat ", " cs)
+  in
+  let infos = Cmt_format.read_cmt cmt in
+  (match infos.cmt_source_digest with
+   | Some d when d = Digest.file file -> ()
+   | Some _ ->
+       fail "%s: %s was compiled from another version of the file; rebuild" file cmt
+   | None -> fail "%s: %s records no source digest" file cmt);
+  infos
+
+let read_typed world cmt_dirs file =
+  let infos = load_cmt cmt_dirs file in
+  let str =
+    match infos.cmt_annots with
+    | Implementation s -> s
+    | _ -> fail "%s: its .cmt holds no implementation" file
+  in
+  let fname =
+    match infos.cmt_sourcefile with
+    | Some f -> f
+    | None -> fail "%s: its .cmt names no source file" file
+  in
+  let t =
+    { ty_unit = unit_of file; ty_fname = fname; ty_str = str;
+      type_ids = Ident.Tbl.create 64; mod_ids = Ident.Tbl.create 8;
+      aliases = Ident.Tbl.create 8; decls = [] }
+  in
+  register world t t.ty_unit str;
+  t
+
+let process root world (t : typed) file =
   let src, str = parse_with Parse.implementation file in
   let comment_cuts =
     List.map
@@ -389,31 +846,69 @@ let process root file =
           Ast_iterator.default_iterator.attribute self a) }
   in
   it.structure it str;
-  let base =
-    String.capitalize_ascii (Filename.remove_extension (Filename.basename file))
-  in
+  let base = unit_of file in
   let mli = Hashtbl.create 16 in
   let mli_path = Filename.remove_extension file ^ ".mli" in
   if Sys.file_exists mli_path then begin
     let _, sg = parse_with Parse.interface mli_path in
     index_sig mli base sg
   end;
-  let ctx = { src; cuts = comment_cuts @ !doc_cuts; mli; group = 0 } in
-  walk ctx (relativize root file) base str
+  let path = relativize root file in
+  let spans = file_spans world t path src in
+  let ctx =
+    { path; src; cuts = comment_cuts @ !doc_cuts; pieces = pieces src spans; mli;
+      group = 0; seen = [] }
+  in
+  let modules = walk ctx path base str in
+  (* The parse and the typed tree must agree on what is declared where, or
+     the typed tree's answers would be attached to the wrong declarations. *)
+  if List.sort compare ctx.seen <> List.sort compare t.decls then
+    fail "%s: the parse and the .cmt disagree on the type declarations" path;
+  let lines =
+    let n = String.length src in
+    let nl = ref 0 in
+    String.iter (fun c -> if c = '\n' then incr nl) src;
+    if n > 0 && src.[n - 1] <> '\n' then !nl + 1 else !nl
+  in
+  let source =
+    `Assoc
+      [ ("path", `String path); ("lines", `Int lines);
+        ("bytes", `Int (String.length src));
+        ( "spans",
+          `List
+            (Array.to_list
+               (Array.map (fun p -> piece_json ~line:p.line ~col:p.col p) ctx.pieces)) ) ]
+  in
+  (modules, source)
+
+let usage =
+  "usage: typedoc_ocaml [--root DIR] --cmt-dir DIR [--cmt-dir DIR ...] FILE.ml ..."
 
 let () =
   let args = List.tl (Array.to_list Sys.argv) in
-  let rec parse root files = function
-    | "--root" :: d :: rest -> parse (Some (absolute d)) files rest
-    | f :: rest -> parse root (f :: files) rest
-    | [] -> (root, List.rev files)
+  let rec parse root dirs files = function
+    | "--root" :: d :: rest -> parse (Some (absolute d)) dirs files rest
+    | "--cmt-dir" :: d :: rest -> parse root (d :: dirs) files rest
+    | ("--root" | "--cmt-dir") :: [] -> fail "%s" usage
+    | f :: rest -> parse root dirs (f :: files) rest
+    | [] -> (root, List.rev dirs, List.rev files)
   in
-  let root, files = parse None [] args in
+  let root, cmt_dirs, files = parse None [] [] args in
+  if cmt_dirs = [] then fail "no --cmt-dir given\n%s" usage;
   let root =
     match root with Some _ -> root | None -> find_git_root (Sys.getcwd ())
   in
-  let modules = List.concat_map (process root) files in
+  let world =
+    { units = SSet.of_list (List.map unit_of files); modules = SSet.empty;
+      final = Hashtbl.create 256 }
+  in
+  let typed = List.map (read_typed world cmt_dirs) files in
+  let results = List.map2 (process root world) typed files in
+  let modules = List.concat_map fst results in
+  let sources = List.map snd results in
   print_string
     (Yojson.Safe.pretty_to_string
-       (`Assoc [ ("language", `String "ocaml"); ("modules", `List modules) ]));
+       (`Assoc
+         [ ("language", `String "ocaml"); ("modules", `List modules);
+           ("sources", `List sources) ]));
   print_newline ()

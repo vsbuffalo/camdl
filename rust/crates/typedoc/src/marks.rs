@@ -337,6 +337,7 @@ mod tests {
             params: vec![],
             recursive_group: None,
             decl: String::new(),
+            decl_spans: vec![],
             doc: Some("A record.".into()),
             members,
             refs: vec![],
