@@ -139,8 +139,10 @@ forcing {
 ```
 
 Four ranges, one line. The compiler produces 365 bins with exactly 277 school
-days (fraction = 0.7589). If you use `step = 7 'days` with day-granularity
-ranges, the compiler warns that endpoints don't align to the step size (W301).
+days (fraction = 0.7589). Range endpoints are model time (days here), not bin
+indices. With `step = 7 'days` each range must start on a bin edge (0, 7, 14, …)
+and end on the last day of a bin (6, 13, 20, …); a range that does not is an
+error (E406) whose hint names the bins that hold it.
 
 Use `school(t)` in rate expressions — the `(t)` makes the time dependency
 explicit. Bare `school` also works.
@@ -493,8 +495,8 @@ error[E100]: parameter name 't' is reserved for simulation time
 error[E332]: 'sex' is not a dimension of table 'C_age'
   = hint: its dimensions are: age, age
 
-warning[W301]: periodic range 7:100 is not aligned to step size 7
-  = hint: use step = 1 for exact boundaries
+error[E406]: periodic time function 'school': `on` range 7:100 does not line up with the forcing's bins, so it would switch on part of a bin
+  = hint: bins are 7 days wide, so ranges start at 0, 7, 14, … and end at 6, 13, 20, …; the bins that hold this range are 7:104
 ```
 
 Dimension mismatches, missing indices, wrong function arities, reserved name

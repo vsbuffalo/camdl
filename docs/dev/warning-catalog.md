@@ -168,7 +168,7 @@ documented at each emit site in `ocaml/lib/compiler/`.)
 | E359      | expander       | `prevalence(of = …, among = …)` reads a flow — `incidence(...)` in `of` or `among`, directly or through a `let` (§9 D4). A proportion of a stock is read at an instant and a flow accumulates over the window, so the ratio has no representation; the hint points at the pooled count with the denominator in the likelihood, and at the ratio of two flow sums                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | E360      | calendar       | arithmetic with no meaning on an instant under a calendar origin: `Instant + Instant`, a `sum(...)` of instants, `k * Instant` (also `/`, `^` and negation), `Duration − Instant`, an instant moved by a constant with no unit, judged by dimension (`date(...) + 5`, `date(...) + 5 * 2`), or a conditional whose branches are an instant and a duration (gh#1096). `Instant − Instant` stays a duration. Only a definite instant is judged — one built from `date(...)`, `origin`, `add_calendar_*`, `instant` parameters and `let`s of those — so `k * (t0 - t)` with model time `t` is not refused (gh#1070). Covers `value_at`'s time argument in `quantities { }` (gh#1096)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | E401      | schedule       | recurring block missing required field                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| E403–E408 | schedule       | recurring/periodic block validation (period, on-list, alignment; E406 also refuses a reversed `on` range such as `100:7`, gh#1135, and one that runs past the end of the period such as `400:500` or `300:500` for a 365-day period, gh#1139); E408 also covers spline forcing shape — `bspline` given both or neither knot form, a `window` that is not `[a, b]`, `n_basis` with `breakpoints`, `n_basis ≤ degree`, degree above 5 (both spline kinds), a coefficient count that disagrees with the knots                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| E403–E408 | schedule       | recurring/periodic block validation (period, on-list, alignment; E406 also refuses a reversed `on` range such as `100:7`, gh#1135, and one that runs past the end of the period such as `400:500` or `300:500` for a 365-day period, gh#1139, and one that does not start on a bin edge or end on the last unit of a bin, such as `8:13` or `7:14` with `step = 7 'days`, since endpoints are model time converted to bins by `step`, gh#1148); E408 also covers spline forcing shape — `bspline` given both or neither knot form, a `window` that is not `[a, b]`, `n_basis` with `breakpoints`, `n_basis ≤ degree`, degree above 5 (both spline kinds), a coefficient count that disagrees with the knots                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | E409      | forcing        | forcing block has an unrecognized keyword argument for its kind (e.g. `value_column` for `value_col`); each kind accepts a fixed set plus `lag` (no loose semantics — a dropped kwarg is rejected, not silently ignored)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | E410      | forcing        | a file selector (`data`, `time_col`, `value_col`, `key_col`) was given a bare word; it must be a quoted string naming a data file / file column (gh#423 — quoted = outside the model)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | E411      | forcing        | a bare closed-enum forcing argument was quoted or given an unknown value — `method` (`linear`, `constant`, `spline`; gh#423) or a spline `link` (`identity`, `log`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
@@ -215,7 +215,6 @@ documented at each emit site in `ocaml/lib/compiler/`.)
 | W201 | Warning  | IR         | suspicious IR shape                                                                                                                                                  |
 | W202 | Warning  | IR         | a restricted reduction's `where` predicate selected no levels at some instantiation (aggregated per site)                                                            |
 | W203 | Warning  | IR         | a name the declared-model section could not classify (tagged `unresolved`); the compile succeeds and `camdl diff` reports that declaration's dependencies as unknown |
-| W301 | Warning  | covariate  | periodic range not aligned to step size                                                                                                                              |
 | W310 | Warning  | covariate  | covariate / interpolation issue                                                                                                                                      |
 | W311 | Warning  | covariate  | covariate / interpolation issue                                                                                                                                      |
 | W324 | Warning  | calendar   | bare number in `simulate.from`/`.to` with a calendar origin declared                                                                                                 |
@@ -414,29 +413,29 @@ code.
 
 **Fires when:** a forward `chain_binomial` run (`camdl simulate`, and any other
 command that runs the forward chain-binomial driver) takes a step on which
-`dt × h > 0.1` for one or more compartments, where `h` is that compartment's total
-per-capita exit rate: the sum, over the transitions leaving it, of the
+`dt × h > 0.1` for one or more compartments, where `h` is that compartment's
+total per-capita exit rate: the sum, over the transitions leaving it, of the
 transition's rate divided by the compartment's count, before any gamma noise.
 The threshold is `sim::chain_binomial::COARSE_STEP_THRESHOLD`. The engine keeps
 each compartment's largest `dt × h` of the run (`StepScratch`, arithmetic only,
 no draw) and records one run note `chain-binomial-coarse-step`
 (`sim::chain_binomial::CoarseStep`) at the end, listing every compartment over
-the threshold with its largest rate, `dt × h`, the time it was first reached
-and the lengthening of its mean stay, then the advice once. It is said once
-per step size and set of compartments in a process, so replicates and sweep
-cells do not repeat it.
+the threshold with its largest rate, `dt × h`, the time it was first reached and
+the lengthening of its mean stay, then the advice once. It is said once per step
+size and set of compartments in a process, so replicates and sweep cells do not
+repeat it.
 
 **Why:** in one step a member leaves with probability `1 − exp(−h·dt)`, and
 anyone who enters a compartment during a step cannot leave it before the next
 one, so the stay is a whole number of steps with mean `dt / (1 − e^{−h·dt})`
 instead of `1/h`: longer by about `h·dt / 2`, 5% at the threshold. A forced
 system can turn that per-stage bias into a qualitatively different trajectory.
-The seasonally forced SEIR in `rust/crates/sim/tests/step_size_deterministic_limit.rs`
-(latent 5 days, infectious 4 days), run at a population of 3.3 × 10¹⁰ so that
-chance plays no part, has annual epidemics under the ODE but
-alternates large and small years at `dt = 1`. The relative L2 error of its
-weekly incidence against the ODE is 1.41 at `dt = 1`, 0.15 at `dt = 0.25` and
-0.03 at `dt = 0.05`.
+The seasonally forced SEIR in
+`rust/crates/sim/tests/step_size_deterministic_limit.rs` (latent 5 days,
+infectious 4 days), run at a population of 3.3 × 10¹⁰ so that chance plays no
+part, has annual epidemics under the ODE but alternates large and small years at
+`dt = 1`. The relative L2 error of its weekly incidence against the ODE is 1.41
+at `dt = 1`, 0.15 at `dt = 0.25` and 0.03 at `dt = 0.05`.
 
 ```
 warning: chain_binomial step dt = 1 is large against the per-capita exit rate of 2 compartments (dt x rate above 0.1):
@@ -453,21 +452,21 @@ largest near an epidemic peak). An overdispersed exit's gamma noise can make the
 effective rate much larger than the one reported. Inflows (births, importation)
 have no source compartment and are not checked. The inference filters, which
 step through the same kernel, do not record it. Passing the check is not
-evidence of convergence: the SEIR above is still 0.15 off at `dt = 0.25`,
-where `dt × h = 0.06`.
+evidence of convergence: the SEIR above is still 0.15 off at `dt = 0.25`, where
+`dt × h = 0.06`.
 
 **Fix / silence:** rerun at `dt/2` and `dt/4` and compare the quantities that
 matter; choose the largest `dt` at which they stop changing, or keep `dt` and
-state the step size as part of the model. For a fit, the dt audit below does
-the comparison at the fitted parameters, but only for `if2`, `mh` and `nl-*`
+state the step size as part of the model. For a fit, the dt audit below does the
+comparison at the fitted parameters, but only for `if2`, `mh` and `nl-*`
 methods; fits with other methods (`pmmh`, `pgas`) are not audited (gh#1154).
 
 ### `dt-convergence at θ̂` — the post-fit Richardson dt-convergence check
 
 Printed by `camdl fit run` (`rust/crates/cli/src/fit/dt_check.rs`), not a
-compiler diagnostic, so it has no `Wxxx` code. Configured by
-`[method.dt_check]` and the flags `--no-dt-check`, `--dt-check-halvings` and
-`--dt-check-strict` (run spec, `[method]` keys and "The dt audit").
+compiler diagnostic, so it has no `Wxxx` code. Configured by `[method.dt_check]`
+and the flags `--no-dt-check`, `--dt-check-halvings` and `--dt-check-strict`
+(run spec, `[method]` keys and "The dt audit").
 
 **Fires when:** after an `if2`, `mh` or `nl-*` fit, the log-likelihood at the
 fitted parameters, re-scored at `dt`, `dt/2`, `dt/4`, still moves by more than
@@ -476,10 +475,10 @@ reports `MARGINAL` or `FAIL` with the ladder; a `FAIL` says the estimate is
 discretization-dependent and to refit at the finest `dt` evaluated.
 
 **Relation to the coarse-step warning:** the `chain-binomial-coarse-step`
-warning (above) is the cheap, rate-based signal a forward run gives before anything is
-fitted; this check is the measurement, at the parameters that matter, of
-whether the step changes the answer. Fits with methods other than `if2`, `mh`
-and `nl-*` get only the former (gh#1154).
+warning (above) is the cheap, rate-based signal a forward run gives before
+anything is fitted; this check is the measurement, at the parameters that
+matter, of whether the step changes the answer. Fits with methods other than
+`if2`, `mh` and `nl-*` get only the former (gh#1154).
 
 ## Info
 

@@ -7778,10 +7778,20 @@ let expand_time_function_one ctx fname (env : (string * string) list)
                     ~hint:"Use a numeric literal, e.g. 7:100"
                     ();
                   0 in
-              (* The last whole time unit inside the period, in the model-time
-                 units `lo` and `hi` are written in (364 for a 365-day period).
-                 With 1-unit steps this is also the last bin. *)
-              let last = int_of_float (Float.ceil period_f) - 1 in
+              (* gh#1148 (D70 a): `lo` and `hi` are model time, in whole
+                 units and inclusive, so `lo:hi` covers [lo, hi + 1). Bin i
+                 covers [i * step, (i + 1) * step), so the range is bins
+                 lo / step to (hi + 1) / step - 1, and it must start and end
+                 on bin edges. With 1-unit steps an endpoint is its bin. *)
+              let on_bin_edge t =
+                let b = t /. step_f in
+                Float.abs (b -. Float.round b) < 1e-9 in
+              let bin_at t = int_of_float (Float.round (t /. step_f)) in
+              (* The last whole time unit covered by the bins, in model time:
+                 the end of the last bin (364 for a 365-day period with 1-day
+                 steps, 363 for a 364-day period with 7-day steps). *)
+              let last =
+                int_of_float (Float.round (float_of_int n_bins *. step_f)) - 1 in
               (* gh#1135: a reversed range would run the fill loop below zero
                  times and leave the forcing 0 in every bin. *)
               if lo > hi then
@@ -7811,31 +7821,57 @@ let expand_time_function_one ctx fname (env : (string * string) list)
                       "the period runs 0:%d; a window that spans the end of \
                        the period is two ranges, %d:%d and 0:%d"
                       last lo last wrapped
-                  else
+                  else begin
+                    (* The example is one bin at each end when bins are wider
+                       than a unit, so it is itself aligned (gh#1148). *)
+                    let (a, b) =
+                      if step_f > 1.0 then
+                        (last + 1 - int_of_float step_f, int_of_float step_f - 1)
+                      else (max 0 (last - 7), 7) in
                     Printf.sprintf
                       "the period runs 0:%d; check the period and the unit of \
                        the range. A window that spans the end of the period is \
-                       two ranges, e.g. %d:%d, 0:7"
-                      last (max 0 (last - 7)) last in
+                       two ranges, e.g. %d:%d, 0:%d"
+                      last a last b
+                  end in
                 Diagnostics.error ctx.diags ~code:"E406" ~loc:Diagnostics.no_loc
                   ~message:(Printf.sprintf
                     "periodic time function '%s': `on` range %d:%d runs past \
                      the end of the period, which covers 0:%d, %s"
                     fname lo hi last effect)
                   ~hint ()
-              end;
-              let step_int = int_of_float step_f in
-              if step_int > 1 && (lo mod step_int <> 0 || (hi + 1) mod step_int <> 0) then
-                Diagnostics.warning ctx.diags ~code:"W301" ~loc:Diagnostics.no_loc
+              end
+              (* gh#1148 (D70 a): a range that does not start on a bin edge
+                 or does not end on the last unit of a bin would switch on
+                 part of a bin, which a binned forcing cannot represent. *)
+              else if not (on_bin_edge (float_of_int lo)
+                           && on_bin_edge (float_of_int (hi + 1))) then begin
+                let tu = unit_lit_to_string ctx.time_unit in
+                let g = Printf.sprintf "%g" in
+                let edges f = String.concat ", " (List.map (fun k -> g (f k)) [0.; 1.; 2.]) in
+                let covering_lo = Float.floor (float_of_int lo /. step_f) *. step_f in
+                let covering_hi =
+                  Float.ceil (float_of_int (hi + 1) /. step_f) *. step_f -. 1.0 in
+                Diagnostics.error ctx.diags ~code:"E406" ~loc:Diagnostics.no_loc
                   ~message:(Printf.sprintf
-                    "periodic range %d:%d is not aligned to step size %d; \
-                     school fraction may differ from intended value"
-                    lo hi step_int)
-                  ~hint:"use step = 1 for exact boundaries, or adjust ranges to multiples of step"
-                  ();
-              for i = lo to (min hi (n_bins - 1)) do
-                arr.(i) <- 1.0
-              done
+                    "periodic time function '%s': `on` range %d:%d does not \
+                     line up with the forcing's bins, so it would switch on \
+                     part of a bin"
+                    fname lo hi)
+                  ~hint:(Printf.sprintf
+                    "bins are %s %s wide, so ranges start at %s, … and end at \
+                     %s, …; the bins that hold this range are %s:%s"
+                    (g step_f) tu
+                    (edges (fun k -> k *. step_f))
+                    (edges (fun k -> (k +. 1.0) *. step_f -. 1.0))
+                    (g covering_lo) (g covering_hi))
+                  ()
+              end
+              else
+                for i = max 0 (bin_at (float_of_int lo))
+                    to min (n_bins - 1) (bin_at (float_of_int (hi + 1)) - 1) do
+                  arr.(i) <- 1.0
+                done
             | _ ->
               Diagnostics.error ctx.diags ~code:"E406" ~loc:Diagnostics.no_loc
                 ~message:(Printf.sprintf "periodic time function '%s': 'on' elements must be ranges (lo:hi)" fname)

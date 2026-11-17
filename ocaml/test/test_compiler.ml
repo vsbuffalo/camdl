@@ -10941,6 +10941,92 @@ let test_gh1139_periodic_on_range_ending_at_last_bin_ok () =
       (List.nth p.values 364 = Ir.Const 1.0)
   | _ -> Alcotest.fail "expected a periodic forcing"
 
+(* gh#1148 (D70 a): `on` endpoints are model time, converted to bins by the
+   forcing's `step`. With weekly bins, the range 7:13 is bin 1; the expander
+   used to read the endpoints as bin indices and switch on bins 7..13 (days
+   49..97). *)
+let gh1148_weekly_model ?(period = "364 'days") on =
+  Printf.sprintf {|
+    time_unit = 'days
+    compartments { S, I }
+    parameters { beta : rate  N0 : count }
+    forcing {
+      school : periodic 'ratio {
+        period = %s
+        step   = 7 'days
+        on     = [%s]
+      }
+    }
+    transitions { inf : S --> I @ beta * school * S }
+    init { S = N0 }
+    simulate { from = 0 'days  to = 30 'days }
+  |} period on
+
+let periodic_on_bins (m : Ir.model) =
+  match (List.hd m.time_functions).kind with
+  | Ir.Periodic p ->
+    (List.length p.values,
+     List.mapi (fun i v -> (i, v)) p.values
+     |> List.filter_map (fun (i, v) ->
+         if v = Ir.Const 1.0 then Some i else None))
+  | _ -> Alcotest.fail "expected a periodic forcing"
+
+let test_gh1148_weekly_range_switches_on_its_bin () =
+  let m = compile_expect_ok (gh1148_weekly_model "7 'days : 13 'days") in
+  let (n, on) = periodic_on_bins m in
+  Alcotest.(check int) "bin count" 52 n;
+  Alcotest.(check (list int)) "bins on" [1] on
+
+let test_gh1148_weekly_multi_bin_ranges () =
+  (* Positive control: aligned ranges spanning several bins, including the
+     first and the last bin (357:363). *)
+  let m = compile_expect_ok
+      (gh1148_weekly_model "0 'days : 13 'days, 28 'days : 41 'days, \
+                            357 'days : 363 'days") in
+  let (_, on) = periodic_on_bins m in
+  Alcotest.(check (list int)) "bins on" [0; 1; 4; 5; 51] on
+
+let test_gh1148_unitless_endpoints_are_model_time () =
+  (* Bare endpoints are model time too (days here), not bin indices. *)
+  let m = compile_expect_ok (gh1148_weekly_model "7:13") in
+  let (_, on) = periodic_on_bins m in
+  Alcotest.(check (list int)) "bins on" [1] on
+
+let test_gh1148_misaligned_start_rejected () =
+  compile_expect_error_code ~code:"E406"
+    ~contains:"bins are 7 days wide, so ranges start at 0, 7, 14"
+    (gh1148_weekly_model "8 'days : 13 'days")
+
+let test_gh1148_misaligned_end_rejected () =
+  compile_expect_error_code ~code:"E406" ~contains:"end at 6, 13, 20"
+    (gh1148_weekly_model "7 'days : 14 'days")
+
+let test_gh1148_past_period_bound_is_last_bin_end () =
+  (* The period 364 'days holds 52 weekly bins, the last covering 357:363. *)
+  compile_expect_error_code ~code:"E406" ~contains:"covers 0:363"
+    (gh1148_weekly_model "357 'days : 370 'days")
+
+let test_gh1148_past_period_bound_fractional_period () =
+  (* `period = 365.25 'days, step = 1 'days` holds 365 bins, covering 0:364.
+     Day 365 is past the last bin; the bound used to be ceil(period) - 1 =
+     365, and the fill silently cut the range at bin 364. *)
+  compile_expect_error_code ~code:"E406" ~contains:"covers 0:364"
+    ({|
+      time_unit = 'days
+      compartments { S, I }
+      parameters { beta : rate  N0 : count }
+      forcing {
+        school : periodic 'ratio {
+          period = 365.25 'days
+          step   = 1 'days
+          on     = [300 'days : 365 'days]
+        }
+      }
+      transitions { inf : S --> I @ beta * school * S }
+      init { S = N0 }
+      simulate { from = 0 'days  to = 30 'days }
+    |})
+
 let test_typed_time_w324_bare_numeric_simulate_warning () =
   let src = {|
     time_unit = 'days
@@ -16959,6 +17045,20 @@ let () =
         `Quick test_gh1139_periodic_on_range_partly_past_period_rejected;
       Alcotest.test_case "gh#1139 periodic on range ending at the last bin compiles"
         `Quick test_gh1139_periodic_on_range_ending_at_last_bin_ok;
+      Alcotest.test_case "gh#1148 weekly periodic on range switches on its bin"
+        `Quick test_gh1148_weekly_range_switches_on_its_bin;
+      Alcotest.test_case "gh#1148 weekly periodic multi-bin aligned ranges"
+        `Quick test_gh1148_weekly_multi_bin_ranges;
+      Alcotest.test_case "gh#1148 unitless periodic on endpoints are model time"
+        `Quick test_gh1148_unitless_endpoints_are_model_time;
+      Alcotest.test_case "gh#1148 E406 periodic on range off a bin start"
+        `Quick test_gh1148_misaligned_start_rejected;
+      Alcotest.test_case "gh#1148 E406 periodic on range off a bin end"
+        `Quick test_gh1148_misaligned_end_rejected;
+      Alcotest.test_case "gh#1148 E406 past-period bound is the last bin end"
+        `Quick test_gh1148_past_period_bound_is_last_bin_end;
+      Alcotest.test_case "gh#1148 E406 past-period bound with a fractional period"
+        `Quick test_gh1148_past_period_bound_fractional_period;
       (* Rule 5 (W324, W325): bare-numeric in time positions. *)
       Alcotest.test_case "W324 bare-numeric simulate.from/to warns under origin"
         `Quick test_typed_time_w324_bare_numeric_simulate_warning;
