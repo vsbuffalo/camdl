@@ -296,13 +296,27 @@ fn the_week_under_way_matches_the_importance_sampling_reference() {
     reference_check(40, 1000, 100_000);
 }
 
-/// The same comparison at a combined Monte Carlo error of about 0.15 on the
-/// mean (`docs/dev/notes/2026-11-16-stage5-forecast-plan.md`).
+/// Where [`the_measurement_table`] writes the figures the Stage 5 note
+/// quotes. Tests may not print (the print lint), so the measurement is a file.
+const MEASUREMENT_FILE: &str = "camdl-stage5-forecast-measurement.txt";
+
+/// The measurement the Stage 5 note records
+/// (`docs/dev/notes/2026-11-16-stage5-forecast-plan.md`): the reference
+/// comparison at high precision (a combined Monte Carlo error of about 0.15 on
+/// the mean) and at the default test's, and what the unconditioned prior and
+/// an undeclared week give. Every comparison is asserted as in the default
+/// tests; the figures are written to `$TMPDIR/` + [`MEASUREMENT_FILE`].
 #[test]
-#[ignore = "costly: ~1 minute in release; run with `cargo test --release -p cli --bin camdl \
-            the_week_under_way_matches_at_high_precision -- --ignored`"]
-fn the_week_under_way_matches_at_high_precision() {
-    reference_check(800, 1000, 1_000_000);
+#[ignore = "costly: ~1.5 minutes in release; run with `cargo test --release -p cli --bin camdl \
+            the_measurement_table -- --ignored`, then read $TMPDIR/camdl-stage5-forecast-measurement.txt"]
+fn the_measurement_table() {
+    let report = [
+        format!("high precision: {}", reference_check(800, 1000, 1_000_000)),
+        format!("default test precision: {}", reference_check(40, 1000, 100_000)),
+        format!("what the reference rules out: {}", conditioning_check(50_000)),
+    ].join("\n\n") + "\n";
+    let path = std::env::temp_dir().join(MEASUREMENT_FILE);
+    std::fs::write(&path, report).unwrap();
 }
 
 fn fixture_setup(through: usize, tag: &str) -> Setup {
@@ -422,16 +436,23 @@ fn the_run_extends_past_its_end_and_a_later_intervention_fires() {
 /// the conditioned week by many Monte Carlo errors.
 #[test]
 fn the_conditioning_and_the_declaration_each_move_the_week_by_many_errors() {
+    conditioning_check(50_000);
+}
+
+/// The comparison of [`the_conditioning_and_the_declaration_each_move_the_week_by_many_errors`]
+/// over `m` reference simulations each; returns its figures.
+fn conditioning_check(m: usize) -> String {
     let s = fixture_setup(24, "measure");
     let daily = daily_values(24);
-    let ((week, se_week), _, _) = is_reference(&s.compiled, &s.params(), &daily, 21, 28, 50_000);
+    let ((week, se_week), _, _) = is_reference(&s.compiled, &s.params(), &daily, 21, 28, m);
     let ((prior, se_prior), (prior_var, _), _) =
-        is_reference(&s.compiled, &s.params(), &[], 21, 28, 50_000);
-    let ((undeclared, se_und), _, _) = is_reference(&s.compiled, &s.params(), &daily, 14, 28, 50_000);
+        is_reference(&s.compiled, &s.params(), &[], 21, 28, m);
+    let ((undeclared, se_und), _, _) = is_reference(&s.compiled, &s.params(), &daily, 14, 28, m);
     let measured = format!("week [21,28): conditioned {week:.2} ± {se_week:.2}; prior {prior:.2} ± {se_prior:.2} \
                (sd {:.2}); no reset at 21, [14,28): {undeclared:.2} ± {se_und:.2}", prior_var.sqrt());
     assert!((prior - week).abs() > 10.0 * se_week.hypot(se_prior), "{measured}");
     assert!((undeclared - week).abs() > 10.0 * se_week.hypot(se_und), "{measured}");
+    format!("{measured}; {m} simulations each")
 }
 
 /// What declaring a target does to the filter over the observed rows. The
