@@ -1,0 +1,220 @@
+{
+  "language": "ocaml",
+  "modules": [
+    {
+      "name": "Fixture",
+      "path": "fixture.ml",
+      "doc": "The fixture module: exercises every declaration shape.",
+      "types": [
+        {
+          "name": "shape",
+          "line": 6,
+          "kind": "variant",
+          "params": [],
+          "recursive_group": null,
+          "decl": "type shape =\n  | Circle of float\n  | Rect of float * float\n  | Pt\n  | Box of { w : float; mutable h : float }",
+          "doc": "A variant with per-constructor docs.",
+          "members": [
+            {
+              "name": "Circle",
+              "type": "float",
+              "mutable": false,
+              "doc": "A circle with a radius."
+            },
+            {
+              "name": "Rect",
+              "type": "float * float",
+              "mutable": false,
+              "doc": null
+            },
+            {
+              "name": "Pt",
+              "type": "",
+              "mutable": false,
+              "doc": "The point."
+            },
+            {
+              "name": "Box",
+              "type": "{ w : float; mutable h : float }",
+              "mutable": false,
+              "doc": "Inline record."
+            }
+          ],
+          "refs": []
+        },
+        {
+          "name": "loc",
+          "line": 13,
+          "kind": "record",
+          "params": [],
+          "recursive_group": null,
+          "decl": "type loc = {\n  file : string;\n  mutable line : int;\n  col : int;\n}",
+          "doc": "A record with a mutable field.",
+          "members": [
+            {
+              "name": "file",
+              "type": "string",
+              "mutable": false,
+              "doc": "The file."
+            },
+            { "name": "line", "type": "int", "mutable": true, "doc": null },
+            { "name": "col", "type": "int", "mutable": false, "doc": null }
+          ],
+          "refs": []
+        },
+        {
+          "name": "pair",
+          "line": 19,
+          "kind": "alias",
+          "params": [ "'a" ],
+          "recursive_group": null,
+          "decl": "type 'a pair = 'a * Ir.expr list",
+          "doc": null,
+          "members": [],
+          "refs": [ "Ir.expr" ]
+        },
+        {
+          "name": "opaque",
+          "line": 21,
+          "kind": "abstract",
+          "params": [],
+          "recursive_group": null,
+          "decl": "type opaque",
+          "doc": null,
+          "members": [],
+          "refs": []
+        },
+        {
+          "name": "tree",
+          "line": 24,
+          "kind": "variant",
+          "params": [],
+          "recursive_group": 1,
+          "decl": "type tree =\n  | Leaf\n  | Node of tree * forest",
+          "doc": null,
+          "members": [
+            { "name": "Leaf", "type": "", "mutable": false, "doc": null },
+            {
+              "name": "Node",
+              "type": "tree * forest",
+              "mutable": false,
+              "doc": null
+            }
+          ],
+          "refs": [ "tree", "forest" ]
+        },
+        {
+          "name": "forest",
+          "line": 30,
+          "kind": "alias",
+          "params": [],
+          "recursive_group": 1,
+          "decl": "and forest = tree list",
+          "doc": "Mutually recursive with [tree].",
+          "members": [],
+          "refs": [ "tree" ]
+        },
+        {
+          "name": "t",
+          "line": 32,
+          "kind": "variant",
+          "params": [],
+          "recursive_group": null,
+          "decl": "type nonrec t = Other.t = A | B",
+          "doc": null,
+          "members": [
+            { "name": "A", "type": "", "mutable": false, "doc": null },
+            { "name": "B", "type": "", "mutable": false, "doc": null }
+          ],
+          "refs": [ "Other.t" ]
+        },
+        {
+          "name": "ext",
+          "line": 34,
+          "kind": "extensible",
+          "params": [],
+          "recursive_group": null,
+          "decl": "type ext = ..",
+          "doc": null,
+          "members": [],
+          "refs": []
+        },
+        {
+          "name": "derived",
+          "line": 36,
+          "kind": "record",
+          "params": [],
+          "recursive_group": null,
+          "decl": "type derived = { d : int } [@@deriving show]",
+          "doc": null,
+          "members": [
+            { "name": "d", "type": "int", "mutable": false, "doc": null }
+          ],
+          "refs": []
+        },
+        {
+          "name": "gadt",
+          "line": 38,
+          "kind": "variant",
+          "params": [],
+          "recursive_group": null,
+          "decl": "type gadt = G : int -> int gadt | H : gadt",
+          "doc": null,
+          "members": [
+            {
+              "name": "G",
+              "type": "int : int gadt",
+              "mutable": false,
+              "doc": null
+            },
+            { "name": "H", "type": " : gadt", "mutable": false, "doc": null }
+          ],
+          "refs": [ "gadt" ]
+        },
+        {
+          "name": "documented_in_mli",
+          "line": 41,
+          "kind": "record",
+          "params": [],
+          "recursive_group": null,
+          "decl": "type documented_in_mli = { x : int }",
+          "doc": "Falls back to the interface.",
+          "members": [
+            {
+              "name": "x",
+              "type": "int",
+              "mutable": false,
+              "doc": "The x coordinate."
+            }
+          ],
+          "refs": []
+        }
+      ]
+    },
+    {
+      "name": "Fixture.Inner",
+      "path": "fixture.ml",
+      "doc": "Inner module doc.",
+      "types": [
+        {
+          "name": "item",
+          "line": 47,
+          "kind": "record",
+          "params": [],
+          "recursive_group": null,
+          "decl": "type item = { name : string }",
+          "doc": "An inner type.",
+          "members": [
+            {
+              "name": "name",
+              "type": "string",
+              "mutable": false,
+              "doc": null
+            }
+          ],
+          "refs": []
+        }
+      ]
+    }
+  ]
+}
