@@ -16361,7 +16361,7 @@ let test_tp_hint_fractional_months () =
 
 let test_tp_hint_mixed () =
   tp_expect ~code:"E321"
-    ~message:(tp_instant_message "(1 'years + 3 'days)" "simulate.to")
+    ~message:(tp_instant_message "1 'years" "simulate.to")
     ~hint:"write each calendar step with `add_calendar_months(d, n)` or \
            `add_calendar_years(d, n)` from a date `d`, or state the offset as a fixed \
            span: `368 'days` (≈ (1 'years + 3 'days))."
@@ -16500,6 +16500,16 @@ let test_tp_instant_prior_scale_is_length () =
   tp_expect_no ~code:"E321"
     (tp_model ~params:"tau : instant ~ normal(mu = 100 'days, sigma = 1 'months)" ())
 
+(* Finding 5: a refused expression that is not one step names its first
+   calendar literal. *)
+let test_tp_shown_first_literal () =
+  tp_expect ~code:"E321"
+    ~message:(tp_instant_message "1 'months" "intervention at-time")
+    ~hint:"write each calendar step with `add_calendar_months(d, n)` or \
+           `add_calendar_years(d, n)` from a date `d`, or state the offset as a fixed \
+           span in 'days or 'weeks."
+    (tp_model ~extra:"interventions { b : add(S, 10) at [origin + 1 'months + 2 'months] }" ())
+
 let stage_1a_tests = [
   "simulate to = 2 'years refused", test_tp_refuse_simulate_to_years;
   "simulate from = 6 'months refused", test_tp_refuse_simulate_from_months;
@@ -16527,6 +16537,7 @@ let stage_1a_tests = [
   "scenario set of an instant parameter refused", test_tp_refuse_scenario_set_instant;
   "instant prior location refused", test_tp_refuse_instant_prior_location;
   "instant prior scale keeps the average", test_tp_instant_prior_scale_is_length;
+  "a compound refusal names its first calendar literal", test_tp_shown_first_literal;
   "value_at(I, 60) draws W325 (gh#1128)", test_tp_value_at_bare_w325;
   "simulate to = origin + 90 'days is 90 (gh#1129)", test_tp_instant_arithmetic_simulate_to;
   "scenario to = date + 7 'days is 67 (gh#1129)", test_tp_instant_arithmetic_scenario_to;
