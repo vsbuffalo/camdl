@@ -8,19 +8,27 @@ files, versions and tests a change touches. What a user sees of the system, from
 the command line, is
 [When does camdl run a model again?](../guide/run-identity.qmd).
 
-## A stored result answers two questions, and only one of them is identity
+## Identity and provenance
 
-Anything camdl keeps can be asked two different things. The first is whether it
-is the result of _this_ computation: the same model, configuration, parameters,
-scenario and seed, so that serving it in place of a fresh run gives the same
-bytes. That is **identity**, and it decides where the result is stored and
-whether it is reused. The second is how it was asked for: the command line, the
-time, the host, the label someone gave it, the file name the model was read
-from. That is **provenance**. It is recorded beside the result, in the leaf's
-`run.json`, and never decides anything.
+Every input to a run falls into one of three kinds, and the kind decides what
+the input does to the stored result:
 
-Two commands make the distinction concrete. These are the same run, and the
-second finds the first's result:
+- **Identity** is whatever changes the bytes camdl stores: the model, the
+  configuration, the parameters, the scenario and the seed. It is hashed, and
+  the hash is where the result is stored and how it is found again. For example,
+  `--seed 7` draws a different trajectory, and `--no-flows` stores fewer
+  columns, so each makes a new run.
+- **Presentation** is a different way of writing the same values, such as how
+  times are formatted in the output. It is stripped before hashing, so changing
+  it finds the same run. For example, the model's `output.format` changes how a
+  trajectory is written out, not which numbers it holds.
+- **Provenance** is how a run was asked for: the command line, the time, the
+  host, a `--label`, the file name the model was read from, the thread count. It
+  is recorded beside the result, in the run's `run.json`, and never hashed. For
+  example, `--parallel 4` changes how fast the cells are computed, not what they
+  contain.
+
+So these two commands are the same run, and the second finds the first's result:
 
 ```bash
 # illustrative command lines
@@ -28,9 +36,7 @@ camdl simulate sir.camdl --params p.toml --seeds 1:3
 camdl simulate sir.camdl --params p.toml --seeds 1:3 --parallel 4 -o seeds.tsv --label rerun
 ```
 
-The thread count changes how fast the cells are computed, not what they contain;
-the `-o` file is a copy of the stored result written somewhere else; the label
-is a name. These are new runs:
+And these are new runs:
 
 ```bash
 # illustrative command lines
@@ -38,13 +44,10 @@ camdl simulate sir.camdl --params p.toml --seeds 1:3 --no-flows   # other column
 camdl simulate sir.camdl --params p.toml --seed 7                 # another trajectory
 ```
 
-`--no-flows` changes which columns the stored trajectory holds, so the stored
-bytes differ; `--seed 7` draws another trajectory. The rule the rest of the page
-applies is the one in `.claude/rules/run-identity.md`: a field that changes the
-stored bytes is identity; a re-encoding of the same values is presentation and
-is stripped before hashing; a field that is only displayed is provenance.
+The rest of the page is about the first kind: how identity is computed, and what
+keeps an input that belongs to it from being left out.
 
-## The store is a memo table over resolved inputs
+## The store
 
 A run is treated as a pure function of a complete, typed set of inputs, and the
 store as the table that remembers its values. The key is the hash of the inputs
@@ -101,7 +104,7 @@ in `.quarantine/`. Since runs are seeded and deterministic, that error means an
 input that changes the output is missing from the identity, or the run is not
 deterministic.
 
-## One hash function, with the float policy chosen by type
+## The hash function
 
 Every hash in the store goes through one encoder,
 [`CanonicalHasher`](rust:runid::hash::CanonicalHasher), driven by one trait,
@@ -144,7 +147,7 @@ two IR fields that only say how a result is rendered (`output.format` and
 [`ModelDigest::from_model`](rust:runid::inputs::ModelDigest::from_model), which
 calls it, so no artifact kind can key on `--format`.
 
-## The `RunInput` derive includes every field unless told otherwise
+## The `RunInput` derive
 
 The run-input types (the level digests and the leaf inputs in
 [`runid::inputs`](rust:runid::inputs)) do not implement `ContentAddressed` by
@@ -212,7 +215,7 @@ thinks about a new field. The price is turnover: a field added to a derived
 struct contributes bytes even at its default, so it re-keys every stored leaf
 that embeds the struct, and that is scheduled with a version bump (below).
 
-## From a command-line flag to the hash, each step is a hand copy
+## From a command-line flag to the hash
 
 The derive guarantees that every field of `SimConfig` reaches the hash. Nothing
 guarantees that a command-line flag reaches `SimConfig`. For `simulate` a flag
@@ -286,7 +289,7 @@ configuration), carry it through each step above, add a case to the differential
 test, and write the end-to-end test that runs camdl with and without the flag
 and finds two leaves.
 
-## The fit configuration is hashed as canonical JSON, and defaults the other way
+## How a fit is hashed
 
 A fit's identity has a second path. The fit configuration is a serde type, not a
 `RunInput` type, and enters the `fit` level as the digest of its JSON:
@@ -332,7 +335,7 @@ the derive. The tests `allow_degenerate_rates_changes_the_fit_identity` and
 hash of the same file and is not run identity: it is how a `fit.toml` handle is
 matched to the stored fit it produced, and includes the `[method]` table.
 
-## Each version re-keys a different set of leaves
+## Versions
 
 A change that alters the bytes being hashed re-keys some set of stored leaves.
 Which set is chosen by which version moves, and each move is deliberate:

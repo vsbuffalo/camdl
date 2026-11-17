@@ -86,6 +86,14 @@ personality out of the writing. An occasional concrete comparison, well-chosen
 observation, or candid sentence about a method's limitations can make technical
 prose memorable.
 
+A section heading names its topic in a few words: “Identity and provenance,”
+“The hash function,” “Forcing a run to be computed again.” Do not write a
+heading as a sentence that argues for or sums up its section, such as “A stored
+result answers two questions, and only one of them is identity.” A heading like
+that is long, reads as a slogan, and states the conclusion before the reader has
+the terms to follow it. Put the point in the section's opening sentences
+instead. Box titles are different: they are editorial sentences (section 5).
+
 Prefer US English for consistency. Use sentence-case headings. Write `camdl` and
 `camdlc` exactly as the programs are named. Use `camdl ’scope` only where that
 is the project's intended product name; use `camdl-scope` for the executable.
