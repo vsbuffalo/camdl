@@ -11,8 +11,9 @@
 //!   with that text.
 //! - `{ul {li a} {li b}}` and `{ol ...}` become lists, as do lines starting
 //!   `- ` (unordered) or `+ ` (ordered).
-//! - `{0 ...}` to `{5 ...}` become bold paragraphs, since a doc comment sits
-//!   under the page's own headings.
+//! - `{0 ...}` to `{5 ...}` become bold paragraphs in a doc comment, which
+//!   sits under the page's own headings, and Markdown headings one level
+//!   deeper (`{1}` is `##`) in a standalone page ([`page_to_markdown`]).
 //! - Markdown code spans written with backticks, and `*emphasis*`, pass
 //!   through unchanged.
 //!
@@ -26,11 +27,22 @@ pub type Resolver<'a> = dyn Fn(&str) -> Option<String> + 'a;
 
 /// Converts one odoc doc comment to Markdown.
 pub fn to_markdown(src: &str, resolve: &Resolver) -> String {
+    convert(src, resolve, false)
+}
+
+/// Converts the text of an odoc standalone page (`.mld`) to Markdown, where
+/// headings are the page's own: `{1 ...}` becomes `##`, `{2 ...}` `###`.
+pub fn page_to_markdown(src: &str, resolve: &Resolver) -> String {
+    convert(src, resolve, true)
+}
+
+fn convert(src: &str, resolve: &Resolver, page: bool) -> String {
     let text = dedent(src);
     let mut conv = Conv {
         s: text.chars().collect(),
         i: 0,
         resolve,
+        page,
     };
     tidy(&conv.seq(false).finish())
 }
@@ -92,6 +104,9 @@ struct Conv<'a> {
     s: Vec<char>,
     i: usize,
     resolve: &'a Resolver<'a>,
+    /// Whether the text is a standalone page, whose headings are Markdown
+    /// headings, rather than a doc comment.
+    page: bool,
 }
 
 impl Conv<'_> {
@@ -307,6 +322,19 @@ impl Conv<'_> {
             out.raw(&format!("<{}>", url.trim()));
         } else {
             let name = self.tag_name();
+            if let Some((level, label)) = heading_level(&name) {
+                self.i += 1 + name.len();
+                let inner = self.seq(true).finish();
+                if self.page {
+                    // A Markdown heading is one line.
+                    let inner = inner.split_whitespace().collect::<Vec<_>>().join(" ");
+                    let anchor = label.map_or(String::new(), |l| format!(" {{#{l}}}"));
+                    out.block(&format!("{} {inner}{anchor}", "#".repeat(level + 1)));
+                } else {
+                    out.block(&format!("**{}**", inner.trim()));
+                }
+                return;
+            }
             match name.as_str() {
                 "b" | "i" | "e" => {
                     self.i += 1 + name.len();
@@ -321,11 +349,6 @@ impl Conv<'_> {
                     self.i += 1 + name.len();
                     let list = self.list(name == "ol");
                     out.block(&list);
-                }
-                "0" | "1" | "2" | "3" | "4" | "5" => {
-                    self.i += 1 + name.len();
-                    let inner = self.seq(true).finish();
-                    out.block(&format!("**{}**", inner.trim()));
                 }
                 "" => {
                     // A `{` that opens no tag is literal.
@@ -402,6 +425,20 @@ impl Conv<'_> {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+}
+
+/// The level and label of a heading tag's name: `1` is level 1, and
+/// `1:intro` is level 1 labelled `intro`. `None` for any other name.
+fn heading_level(name: &str) -> Option<(usize, Option<&str>)> {
+    let (digit, label) = match name.split_once(':') {
+        Some((d, l)) if !l.is_empty() => (d, Some(l)),
+        Some(_) => return None,
+        None => (name, None),
+    };
+    match digit {
+        "0" | "1" | "2" | "3" | "4" | "5" => Some((digit.parse().ok()?, label)),
+        _ => None,
     }
 }
 
@@ -590,6 +627,16 @@ mod tests {
     fn unknown_tags_keep_content() {
         assert_eq!(conv("{custom kept [x]} text"), "kept `x` text");
         assert_eq!(conv("{1 Heading}\nBody."), "**Heading**\n\nBody.");
+    }
+
+    #[test]
+    fn page_headings_are_markdown_headings() {
+        let resolve = |_: &str| None;
+        assert_eq!(
+            page_to_markdown("Intro.\n{2 A {b part}}\nBody.\n{3:deep Deeper}", &resolve),
+            "Intro.\n\n### A **part**\n\nBody.\n\n#### Deeper {#deep}"
+        );
+        assert_eq!(conv("{2:x Sub}\nBody."), "**Sub**\n\nBody.");
     }
 
     #[test]

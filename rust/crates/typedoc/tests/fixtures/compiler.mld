@@ -1,0 +1,24 @@
+{0 The compiler}
+
+How camdlc turns a .camdl file into the IR the runtime reads, described by
+its types. It reads the source into {!Ast}, then lowers it to {!Ir.expr}.
+
+{@camdl[
+  infection : S --> I @ beta * S * I / N
+]}
+
+{1:syntax Syntax tree}
+
+The parser's output.
+
+{!modules: Ast}
+
+{2 What the tree keeps}
+
+Every node keeps its location.
+
+{1 Intermediate representation}
+
+{!modules: Ir}
+
+What the runtime reads.

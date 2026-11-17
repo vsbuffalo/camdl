@@ -154,7 +154,7 @@ website:
           - text: "Writing the documentation"
             href: documentation-style.md
       # Generated from the source: the pages' `order` front matter sets the
-      # sequence, from docs/_web/internals/compiler.toml.
+      # sequence, in the order ocaml/lib/compiler/index.mld lists the modules.
       - section: "The compiler"
         contents:
           - auto: "internals/compiler/*.qmd"

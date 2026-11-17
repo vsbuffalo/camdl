@@ -840,20 +840,25 @@ docs-site-preview: docs-internals
 # Internals pages: the compiler's types, generated from the source. The OCaml
 # extractor (ocaml/tools/typedoc) writes one JSON description of every type
 # and its doc comments; the renderer (rust/crates/typedoc) turns it into
-# docs/internals/compiler/*.qmd, grouped and ordered by
-# docs/_web/internals/compiler.toml. docs/internals/ is generated, never
-# committed. Docs: docs/documentation-style.md, section 10.
+# docs/internals/compiler/*.qmd. The index page's title, prose and module
+# groups come from the odoc page ocaml/lib/compiler/index.mld, which must list
+# every module once. Source links are pinned to HEAD's commit, so their line
+# numbers stay right; uncommitted edits still link to HEAD's lines.
+# docs/internals/ is generated, never committed. Docs:
+# docs/documentation-style.md, section 10.
 .PHONY: docs-internals
-TYPEDOC_OCAML := ocaml/_build/default/tools/typedoc/typedoc_ocaml.exe
-TYPEDOC       := rust/target/release/typedoc
+TYPEDOC_OCAML     := ocaml/_build/default/tools/typedoc/typedoc_ocaml.exe
+TYPEDOC           := rust/target/release/typedoc
+COMPILER_OVERVIEW := ocaml/lib/compiler/index.mld
 # ir_version_generated.ml is written by the build, not authored; leave it out.
 COMPILER_ML   := $(sort $(filter-out %/ir_version_generated.ml, \
                    $(wildcard ocaml/lib/compiler/*.ml) $(wildcard ocaml/lib/ir/*.ml)))
-docs-internals: build
+docs-internals: build $(COMPILER_OVERVIEW)
 	mkdir -p docs/internals
 	$(TYPEDOC_OCAML) $(COMPILER_ML) > docs/internals/compiler.json
-	$(TYPEDOC) render --manifest docs/_web/internals/compiler.toml \
-	  --input docs/internals/compiler.json --out docs/internals/compiler
+	$(TYPEDOC) render --overview $(COMPILER_OVERVIEW) \
+	  --input docs/internals/compiler.json --out docs/internals/compiler \
+	  --commit $(shell git rev-parse HEAD)
 
 # The camdl-scope screenshots on guide/first-fit.qmd need a running viewer, so
 # they are committed images rather than render output. Re-run after a change

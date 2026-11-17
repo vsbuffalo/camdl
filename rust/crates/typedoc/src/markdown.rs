@@ -188,17 +188,29 @@ pub fn tidy(s: &str) -> String {
 /// part of `e.g.` or `i.e.`. `None` when the text opens with a code block or
 /// a list, which has no first sentence.
 pub fn first_sentence(md: &str) -> Option<String> {
-    let para: Vec<&str> = md
-        .lines()
+    split_first_sentence(md).map(|(head, _)| head)
+}
+
+/// The first sentence of converted Markdown, as [`first_sentence`] finds it,
+/// and the Markdown that follows it: the rest of the first paragraph, on one
+/// line, then the remaining blocks unchanged.
+pub fn split_first_sentence(md: &str) -> Option<(String, String)> {
+    let lines: Vec<&str> = md.lines().collect();
+    let para: Vec<&str> = lines
+        .iter()
+        .copied()
         .take_while(|l| !l.trim().is_empty() && fence_marker(l).is_none())
         .collect();
     if para.is_empty() || is_list_item(para[0]) {
         return None;
     }
+    let following = lines[para.len()..].join("\n");
+    let following = following.trim_start_matches('\n');
     let text = para.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ");
     let chars: Vec<char> = text.chars().collect();
     let mut ticks = 0usize;
     let mut i = 0;
+    let mut end = chars.len();
     while i < chars.len() {
         let c = chars[i];
         if c == '`' {
@@ -218,15 +230,22 @@ pub fn first_sentence(md: &str) -> Option<String> {
             && chars.get(i + 1).is_none_or(|n| n.is_whitespace())
             && !(i > 0 && chars[i - 1] == '\\');
         if ends {
-            let head: String = chars[..=i].iter().collect();
-            let lower = head.to_lowercase();
+            let lower: String = chars[..=i].iter().collect::<String>().to_lowercase();
             if !(lower.ends_with("e.g.") || lower.ends_with("i.e.")) {
-                return Some(head);
+                end = i + 1;
+                break;
             }
         }
         i += 1;
     }
-    Some(text)
+    let head: String = chars[..end].iter().collect();
+    let tail: String = chars[end..].iter().collect();
+    let rest = match (tail.trim(), following) {
+        ("", f) => f.to_string(),
+        (t, "") => t.to_string(),
+        (t, f) => format!("{t}\n\n{f}"),
+    };
+    Some((head, rest))
 }
 
 /// Indents every non-blank line of `s` by `n` spaces.
@@ -358,6 +377,23 @@ mod tests {
             Some("No period at all")
         );
         assert_eq!(first_sentence("```ocaml\nx\n```"), None);
+    }
+
+    #[test]
+    fn split_first_sentence_keeps_what_follows() {
+        let split = |s: &str| split_first_sentence(s).unwrap();
+        assert_eq!(
+            split("One here.\nTwo, then\nthree.\n\n## Next\n\nBody."),
+            (
+                "One here.".to_string(),
+                "Two, then three.\n\n## Next\n\nBody.".to_string()
+            )
+        );
+        assert_eq!(
+            split("Only one.\n\nBody."),
+            ("Only one.".to_string(), "Body.".to_string())
+        );
+        assert_eq!(split("Only one."), ("Only one.".to_string(), String::new()));
     }
 
     #[test]

@@ -5,12 +5,51 @@
 use std::fmt::Write as _;
 
 use crate::markdown::{
-    code_span, escape_text, fence, first_sentence, indent, rustdoc_to_markdown, yaml_string,
+    code_span, escape_text, fence, first_sentence, indent, rustdoc_to_markdown,
+    split_first_sentence, yaml_string,
 };
 use crate::marks::{self, Mark};
 use crate::model::{Kind, Language, Member};
 use crate::odoc;
 use crate::site::{Site, TypeId, INDEX_SLUG};
+
+/// Where source links point: a repository on GitHub, at one commit, so that
+/// a link's line number names the line the page was generated from.
+#[derive(Debug, Clone)]
+pub struct SourceLinks {
+    repo: String,
+    commit: String,
+}
+
+impl SourceLinks {
+    /// Source links into `repo` (a repository URL such as
+    /// `https://github.com/vsbuffalo/camdl`) at `commit`, a full or
+    /// abbreviated commit hash. Refuses a commit that is not 7 to 64
+    /// hexadecimal digits, so a failed `git rev-parse` cannot produce links
+    /// to nothing.
+    pub fn new(repo: &str, commit: &str) -> Result<SourceLinks, String> {
+        let ok = (7..=64).contains(&commit.len()) && commit.chars().all(|c| c.is_ascii_hexdigit());
+        if !ok {
+            return Err(format!(
+                "--commit {commit:?} is not a commit hash (7 to 64 hexadecimal digits)"
+            ));
+        }
+        let repo = repo.trim_end_matches('/');
+        if repo.is_empty() {
+            return Err("--repo is empty".to_string());
+        }
+        Ok(SourceLinks {
+            repo: repo.to_string(),
+            commit: commit.to_ascii_lowercase(),
+        })
+    }
+
+    /// The URL of a repository-relative file, at a line when given.
+    pub fn url(&self, path: &str, line: Option<u32>) -> String {
+        let anchor = line.map_or(String::new(), |n| format!("#L{n}"));
+        format!("{}/blob/{}/{path}{anchor}", self.repo, self.commit)
+    }
+}
 
 /// A generated page: its file name in the output directory, and its text.
 pub struct PageFile {
@@ -19,8 +58,8 @@ pub struct PageFile {
 }
 
 /// Renders every page of the site: the index first, then the module pages in
-/// manifest order.
-pub fn render(site: &Site) -> Vec<PageFile> {
+/// overview order.
+pub fn render(site: &Site, source: &SourceLinks) -> Vec<PageFile> {
     let mut files = vec![PageFile {
         file_name: format!("{INDEX_SLUG}.qmd"),
         text: index_page(site),
@@ -28,7 +67,7 @@ pub fn render(site: &Site) -> Vec<PageFile> {
     for (p, page) in site.pages.iter().enumerate() {
         files.push(PageFile {
             file_name: format!("{}.qmd", page.slug),
-            text: module_page(site, p),
+            text: module_page(site, source, p),
         });
     }
     files
@@ -124,51 +163,89 @@ fn percent(part: usize, whole: usize) -> String {
     }
 }
 
+/// Converts overview text to Markdown, resolving its references from the
+/// index page.
+fn convert_overview(site: &Site, text: &str) -> String {
+    let resolve = |path: &str| site.index_href(path);
+    odoc::page_to_markdown(text, &resolve)
+}
+
+/// Converted text on one line, for a title or a heading.
+fn one_line(md: &str) -> String {
+    md.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn index_page(site: &Site) -> String {
-    let manifest = site.manifest;
+    let overview = site.overview;
     let mut out = String::new();
+    let intro = convert_overview(site, &overview.intro);
+    // The opening sentence is the page's description, which Quarto shows
+    // under the title; the body carries on after it rather than printing it
+    // twice. Overview::parse refuses an overview without one.
+    let (description, rest) = split_first_sentence(&intro).unwrap_or_default();
     front_matter(
         &mut out,
-        &manifest.title,
-        Some(&manifest.summary),
-        manifest.order,
+        &one_line(&convert_overview(site, &overview.title)),
+        Some(&description),
+        site.order,
     );
-    // The summary is the page's description, which Quarto shows under the
-    // title; repeating it as the first paragraph would print it twice.
-    for (g, group) in manifest.groups.iter().enumerate() {
-        let _ = writeln!(out, "## {}\n", escape_text(&group.title));
-        out.push_str("| Module | Summary | Types | Documented | History marks |\n");
-        out.push_str("|:--|:--|--:|--:|--:|\n");
-        for (p, page) in site
-            .pages
-            .iter()
-            .enumerate()
-            .filter(|(_, pg)| pg.group == g)
-        {
-            let top = page.modules[0];
-            let entry = &site.modules[top];
-            let summary = if entry.local.is_empty() {
-                summary(site, top, p, &entry.module.doc)
-                    .unwrap_or_else(|| Mark::Undocumented.render())
-            } else {
-                Mark::Undocumented.render()
-            };
-            let stats = page_stats(site, p);
-            let _ = writeln!(
-                out,
-                "| [{}]({}.qmd) | {} | {} | {} | {} |",
-                escape_text(&page.name),
-                page.slug,
-                cell(&summary),
-                stats.types,
-                percent(stats.documented, stats.types),
-                stats.history
-            );
-        }
-        out.push('\n');
+    push_prose(&mut out, &rest);
+    for (g, group) in overview.groups.iter().enumerate() {
+        let anchor = group
+            .label
+            .as_ref()
+            .map_or(String::new(), |l| format!(" {{#{l}}}"));
+        let _ = writeln!(
+            out,
+            "## {}{anchor}\n",
+            one_line(&convert_overview(site, &group.title))
+        );
+        push_prose(&mut out, &convert_overview(site, &group.before));
+        module_table(&mut out, site, g);
+        push_prose(&mut out, &convert_overview(site, &group.after));
     }
     out.push_str(LEGEND);
     out
+}
+
+/// Appends converted prose as its own blocks, when there is any.
+fn push_prose(out: &mut String, md: &str) {
+    let md = md.trim();
+    if !md.is_empty() {
+        let _ = writeln!(out, "{md}\n");
+    }
+}
+
+/// The table of a group's module pages: each module's summary and counts.
+fn module_table(out: &mut String, site: &Site, g: usize) {
+    out.push_str("| Module | Summary | Types | Documented | History marks |\n");
+    out.push_str("|:--|:--|--:|--:|--:|\n");
+    for (p, page) in site
+        .pages
+        .iter()
+        .enumerate()
+        .filter(|(_, pg)| pg.group == g)
+    {
+        let top = page.modules[0];
+        let entry = &site.modules[top];
+        let summary = if entry.local.is_empty() {
+            summary(site, top, p, &entry.module.doc).unwrap_or_else(|| Mark::Undocumented.render())
+        } else {
+            Mark::Undocumented.render()
+        };
+        let stats = page_stats(site, p);
+        let _ = writeln!(
+            out,
+            "| [{}]({}.qmd) | {} | {} | {} | {} |",
+            escape_text(&page.name),
+            page.slug,
+            cell(&summary),
+            stats.types,
+            percent(stats.documented, stats.types),
+            stats.history
+        );
+    }
+    out.push('\n');
 }
 
 /// The legend of the index page: one sentence per mark on what it flags and
@@ -200,7 +277,7 @@ question is asked where the answer can be seen.
   such fields and marks some that hold free text.
 ";
 
-fn module_page(site: &Site, p: usize) -> String {
+fn module_page(site: &Site, source: &SourceLinks, p: usize) -> String {
     let page = &site.pages[p];
     let top = page.modules[0];
     let top_entry = &site.modules[top];
@@ -212,9 +289,9 @@ fn module_page(site: &Site, p: usize) -> String {
     let path = &top_entry.module.path;
     let _ = writeln!(
         out,
-        "Source: [{}]({}{path}){{.td-source}}\n",
+        "Source: [{}]({}){{.td-source}}\n",
         code_span(path),
-        site.manifest.repo_blob
+        source.url(path, None)
     );
 
     // The top-level module's documentation; nested modules carry their own
@@ -266,7 +343,7 @@ fn module_page(site: &Site, p: usize) -> String {
             "###"
         };
         for ty in 0..e.module.types.len() {
-            type_section(&mut out, site, p, TypeId { module: m, ty }, level);
+            type_section(&mut out, site, source, p, TypeId { module: m, ty }, level);
         }
     }
     let trimmed = out.trim_end().len();
@@ -287,7 +364,14 @@ fn module_doc(out: &mut String, site: &Site, m: usize, p: usize) {
     }
 }
 
-fn type_section(out: &mut String, site: &Site, p: usize, id: TypeId, level: &str) {
+fn type_section(
+    out: &mut String,
+    site: &Site,
+    source: &SourceLinks,
+    p: usize,
+    id: TypeId,
+    level: &str,
+) {
     let e = &site.modules[id.module];
     let t = &e.module.types[id.ty];
     let anchor = &e.anchors[id.ty];
@@ -363,8 +447,8 @@ fn type_section(out: &mut String, site: &Site, p: usize, id: TypeId, level: &str
 
     let _ = writeln!(
         out,
-        "[source]({}{}#L{}){{.td-source}}\n",
-        site.manifest.repo_blob, e.module.path, t.line
+        "[source]({}){{.td-source}}\n",
+        source.url(&e.module.path, Some(t.line))
     );
 }
 
@@ -437,5 +521,32 @@ fn member_term(kind: Kind, language: Language, m: &Member) -> String {
             }
         }
         (Language::Rust, false) => format!("{}: {ty}", m.name),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_links_are_pinned_to_the_commit() {
+        let sha = "78b0a4af4e1f2c3d4b5a69788796a5b4c3d2e1f0";
+        let links = SourceLinks::new("https://github.com/vsbuffalo/camdl/", sha).unwrap();
+        assert_eq!(
+            links.url("ocaml/lib/compiler/ast.ml", Some(188)),
+            format!("https://github.com/vsbuffalo/camdl/blob/{sha}/ocaml/lib/compiler/ast.ml#L188")
+        );
+        assert_eq!(
+            links.url("ocaml/lib/compiler/ast.ml", None),
+            format!("https://github.com/vsbuffalo/camdl/blob/{sha}/ocaml/lib/compiler/ast.ml")
+        );
+    }
+
+    #[test]
+    fn a_commit_that_is_not_a_hash_is_refused() {
+        for bad in ["", "main", "HEAD", "abc12", "78b0a4af4 "] {
+            let e = SourceLinks::new("https://github.com/vsbuffalo/camdl", bad).unwrap_err();
+            assert!(e.contains("is not a commit hash"), "{bad:?}: {e}");
+        }
     }
 }
