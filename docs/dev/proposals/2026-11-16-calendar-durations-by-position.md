@@ -1109,16 +1109,28 @@ Lift: small to medium, about 300 lines of OCaml and tests.
   the expander's context. For the same reason `read` takes that context rather
   than a `Time_typing.env`.
 - The rule is `resolve_days : anchor -> reading -> (float, refusal) result`, in
-  days from the origin, and there is no `resolve_instant` in model-time units.
-  Every lowering of a date position replaces a resolved expression with a
-  `'days` literal of that day count (`calendar_instant_expr`) and folds it as it
-  folds any other value. A comparison with `t` needs the literal: the explicit
-  form `t >= add_calendar_months(origin, 6)` is E302 in a rate (§10, gh#1163),
+  days from the origin, and there is no `resolve_instant` in model-time units. A
+  date position (`Lower`) lowers a resolved step to the model-time constant the
+  explicit form lowers to (the day count over the days per `time_unit`, the same
+  division), so `at [6 'months]` and `at [add_calendar_months(origin, 6)]` give
+  the same IR `model` and so the same run identity; only the `declared` section,
+  which records the source as written, differs. A comparison with `t`, a prior's
+  location and a scenario's `set` lower it to a `'days` literal
+  (`calendar_instant_expr`) instead: the explicit form
+  `t >= add_calendar_months(origin, 6)` is E302 in a rate (§10, gh#1163),
   because the call lowers to a dimensionless constant, while `182 'days` keeps
-  dimension T. The literal converts to model time with the same division as
-  `add_calendar_months`, so the two values are bit-identical (test 1 compares
-  them); the IR carries a unit literal where the explicit form carries a
-  constant.
+  dimension T. The values are bit-identical either way (test 1 compares them).
+- A comparison with model time is read as `t ⋈ date` (`time_comparison` in
+  `time_census.ml`): `t - X ⋈ D` and `-(X - t) ⋈ D` are `t ⋈ X + D`, and
+  `X - t ⋈ D` and `-(t - X) ⋈ D` are `t ⋈' X - D`, for `X` an instant (an
+  `instant` parameter, an observation anchor, `t`, `origin`, a date, or a `let`
+  of one). §3.2 made only `t ± d` a shifted `t`, which read `t - tau` as `t`
+  moved by an offset and the duration `D` as a date from the origin (review of
+  #1185, finding 1). The census reads which names hold an instant from the
+  declarations and the expander from its context, through one function.
+- Decision F covers every command-line offset counted from a date known only at
+  run time: `--to`, `holdout_after`, `pfilter --score-from` and a forecast's
+  `--horizon` (counted from the last training observation).
 - `Stepped` records its root and its month counts, so a two-step refusal can
   compute the one-step reading; `Mixed` and `Two_calendar_steps` carry the base
   and counts, and the message computes the dates. There is a fifth refusal,
@@ -1142,7 +1154,9 @@ Lift: small to medium, about 300 lines of OCaml and tests.
   its own, with no change of value, and stays on gh#1133.
 - The feedback box points at gh#1184, opened for it.
 
-Tests, each red on Stage 1a:
+Tests, each red on Stage 1a except the guards 3 and 5 (and the guard that a
+calendar instant `let` is reported once), which pin behaviour Stage 1b must not
+change and so pass on Stage 1a too:
 
 1. Every row of the §4.1 table resolves to the value in its "proposed" column,
    asserted against the IR value of the explicit form compiled in the same test.

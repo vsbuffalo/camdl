@@ -504,10 +504,13 @@ position, with one rule:
 one; a bare duration in a date position is a step from `origin`. "One step" is
 one `'months` or `'years` amount, written once: `1 'years + 6 'months` is a
 single step of 18 months, and `1.5 'years` is too, but `0.5 'months` is no whole
-number of months. The examples below use `time_unit = 'days` and
-`origin = date("2020-01-01")`, so `t` is the number of days after 1 January
-2020. Without an origin none of this applies: there is no calendar, and every
-month is the average month, 365.2425 / 12 = 30.436875 days.
+number of months. A sum of durations is one step from the origin
+(`to = 1 'years + 6 'months` is 18 months after it); a chain of steps on a base
+(`origin + 6 'months + 6 'months`) is several steps, and is refused. The
+examples below use `time_unit = 'days` and `origin = date("2020-01-01")`, so `t`
+is the number of days after 1 January 2020. Without an origin none of this
+applies: there is no calendar, and every month is the average month, 365.2425 /
+12 = 30.436875 days.
 
 ### What resolves: one step from a known date, in a date position
 
@@ -532,12 +535,18 @@ single calendar step to its date:
 
 A step that lands on a day the month does not have clamps to the month's last
 day, as `add_calendar_months` does: from 31 January, one month is 29 February in
-2020 and 28 February in 2021. The value is the explicit form's value; the
-compiled model carries the day count.
+2020 and 28 February in 2021. The compiled model is the one the explicit form
+compiles to, so the two spellings of a schedule are the same run.
 
 In a rate, write the step: `t >= add_calendar_months(origin, 6)` there is
 refused with a misleading E302, as `t >= date(...)` is (gh#1163), while
 `t >= 6 'months` compiles to the switch on 2020-07-01.
+
+**The time since or until a date.** A comparison of `t - X` with a duration, `X`
+an instant, is the comparison of `t` with `X` plus that duration:
+`t - date("2020-01-31") >= 1 'months` is `t >= 59` (2020-02-29), and
+`date("2020-03-31") - t <= 1 'months` is `t >= 59` too (one month before 31
+March). `-(X - t)` reads as `t - X`, and `-(t - X)` as `X - t`.
 
 ### What is refused in a date position, and what to write instead
 
@@ -569,13 +578,17 @@ as `origin + (6 'months + 6 'months)`), or nest the steps you mean:
 steps in the same way.
 
 **A step from a date known only at run time.** `if t >= tau + 1 'months` with
-`tau` an `instant` parameter, `if t - 1 'months > tau`, and
-`simulate { to = last_obs + 6 'months }` are refused: the date being moved is
-known only when the model runs, so the compiler cannot step it along the
-calendar. State the offset in days: `tau + 30 'days`, `t - 30 'days`,
-`last_obs + 183 'days`. The command line refuses the same spelling the same way:
-`--to "last_obs + 6 months"` on an anchored model asks for
-`"last_obs + 183 days"`.
+`tau` an `instant` parameter, the same comparison written as the time since
+`tau` (`if t - tau >= 1 'months`) or until it (`if tau - t <= 1 'months`),
+`if t - 1 'months > tau`, and `simulate { to = last_obs + 6 'months }` are
+refused: the date being moved is known only when the model runs, so the compiler
+cannot step it along the calendar. State the offset in days: `tau + 30 'days`,
+`t - tau >= 30 'days`, `t - 30 'days`, `last_obs + 183 'days`. The command line
+refuses the same spelling the same way on an anchored model:
+`--to "last_obs + 6 months"` (and `holdout_after` and `pfilter --score-from`,
+which take the same form) asks for `"last_obs + 183 days"`, and a forecast's
+`--horizon "6 months"`, counted from the last training observation, asks for
+`"183 days"`.
 
 **A step inside an ordinary expression.** `let landmark = origin + 6 'months` is
 refused at the `let`: a `let` is an ordinary expression, not a date position,
