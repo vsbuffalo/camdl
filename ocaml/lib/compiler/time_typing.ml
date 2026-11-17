@@ -416,17 +416,29 @@ let hint_time_unit_months_with_origin =
    model silently changes meaning to the new axis: \
    simulate { from / to }, at [...] schedules on interventions and events, \
    and the time column of any --data file. \
-   Annotate each with a unit literal (e.g. to = 600 'months) or a date \
-   literal (e.g. to = date(\"1940-12-01\")) to preserve intent. \
+   Annotate each with a date: `to = add_calendar_months(origin, 600)` or \
+   `to = date(\"1940-12-01\")`; a calendar duration such as `600 'months` \
+   in one of these positions is refused (E321). \
    Typed positions are unaffected: rate parameters declared with \
-   'per_month continue to work, and duration values like 1 'months \
-   continue to work as affine spans (≈ 30.44 days)."
+   'per_month continue to work, and lengths such as `dt = 1 'months` \
+   continue to mean the average month (≈ 30.44 days)."
 
-let hint_calendar_cadence_in_recurring =
-  "calendar cadence not allowed in an anchored recurring schedule \
-   (months/years are average lengths, not invertible spans). \
-   Use every = 30 'days for an affine ~monthly recurrence, or list \
-   the calendar-aligned firings explicitly via at = [date(...), ...]."
+(* E322 on a calendar cadence. [months] is its whole number of calendar
+   months, if it has one; [span] its affine day-equivalent, as for E321's
+   hint. The `date_range` form compiles at every cadence position: an
+   intervention's, an output's and an emit schedule's `at` list all splice it. *)
+let hint_calendar_cadence ~(months : int option) (span : (int * string) option) =
+  let months = match months with Some m -> string_of_int m | None -> "n" in
+  let fixed = match span with
+    | Some (days, rendered) ->
+      Printf.sprintf "or write a fixed cadence: `every = %d 'days` (≈ %s)." days rendered
+    | None -> "or write a fixed cadence in 'days or 'weeks."
+  in
+  Printf.sprintf
+    "a calendar cadence counts whole months from its start, which one fixed \
+     step cannot represent. List the calendar dates instead, with \
+     `date_range(<start>, <end>, calendar_months = %s)` in an `at` list, %s"
+    months fixed
 
 let hint_calendar_offset_in_at_day =
   "an `at_day` offset is one fixed span from the start of every period, \
