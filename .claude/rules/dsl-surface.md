@@ -81,10 +81,11 @@ the one that doesn't ask either of them to carry hidden calendar arithmetic,
 ambiguous units, or implicit conventions in their head.
 
 Concretely: prefer explicitly named functions over polymorphic operators where
-the semantics differ (`add_calendar_months(d, 1)` beats `d + 1.month` when the
-operation is non-affine), prefer hard errors with hint text over warnings
-(warnings are noise an agent will suppress and a non-specialist will skim), and
-keep the surface small enough that the entire grammar fits in a head.
+the semantics differ and the position cannot settle them (composed calendar
+steps are written with `add_calendar_months`; a single step from a known date is
+resolved by type), prefer hard errors with hint text over warnings (warnings are
+noise an agent will suppress and a non-specialist will skim), and keep the
+surface small enough that the entire grammar fits in a head.
 
 ## Breaking language changes must signpost the migration
 
