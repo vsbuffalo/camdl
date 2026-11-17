@@ -289,6 +289,42 @@ configuration), carry it through each step above, add a case to the differential
 test, and write the end-to-end test that runs camdl with and without the flag
 and finds two leaves.
 
+## Testing a classification
+
+Calling an input identity, presentation or provenance is a prediction about what
+happens when that input alone is changed, so each classification can be tested.
+Run camdl twice into two fresh stores, changing only that input, and compare the
+stored results (the trajectory, the ensemble, the observation table; not
+`run.json`, which records the time and the command line and always differs). The
+rule is that **the stored bytes change exactly when the `run_id` changes**, and
+it can fail two ways:
+
+- **The bytes change and the `run_id` does not.** The input belongs in identity
+  and is missing from the hash, so the store would serve one result in place of
+  the other. This is the failure the flag path above leaves open, and the
+  dangerous one.
+- **The `run_id` changes and the bytes do not.** The input is hashed but changes
+  nothing. Runs that could have been reused are computed again; no result is
+  wrong.
+
+`--parallel` is tested this way.
+`parallel_runs_are_byte_identical_to_the_serial_run` in
+`rust/crates/cli/tests/simulate_sweep.rs` runs a four-cell sweep into two fresh
+stores with `--parallel 1` and `--parallel 4` and requires the combined
+trajectory file, the observation table and the stored ensemble to be equal byte
+for byte. The claim holds because a cell's seed is a function of its position in
+the grid and cells are merged in a fixed order, so the thread that finishes
+first never reaches the output.
+`a_parallel_run_splices_hits_and_misses_in_canonical_order`, in
+`simulate_store_reuse.rs`, checks the same when some cells are read back from
+the store and the rest are computed.
+
+Most other flags are not tested against the rule. The differential tests in
+`rust/crates/cli/src/resolve/tests.rs` check that the `run_id` moves or holds
+when one `TrajectoryCtx` field changes, but they do not run the simulation, so
+they test the hash and not the bytes, and they begin after the hand copies
+described above.
+
 ## How a fit is hashed
 
 A fit's identity has a second path. The fit configuration is a serde type, not a
