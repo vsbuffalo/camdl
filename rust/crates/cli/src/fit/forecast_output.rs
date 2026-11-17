@@ -34,6 +34,25 @@ pub(crate) const FORECAST_N_PARTICLES: usize = 500;
 /// after the origin), so a stride is a sample of them; the bands use all.
 pub(crate) const FORECAST_SAMPLES_PER_DRAW: usize = 5;
 
+/// A posterior draw the forecast ran: its row of the fit's `draws.tsv` and
+/// the `(chain, draw)` key written there, when the cloud carries one.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DrawRef {
+    pub cloud_row: usize,
+    pub key: Option<(usize, usize)>,
+}
+
+impl DrawRef {
+    /// How a message names the draw.
+    pub(crate) fn describe(&self) -> String {
+        match self.key {
+            Some((c, d)) => format!(
+                "posterior draw (chain {c}, draw {d}), row {} of draws.tsv", self.cloud_row),
+            None => format!("posterior draw at row {} of draws.tsv", self.cloud_row),
+        }
+    }
+}
+
 /// The `schema` tag of `forecast.json`.
 pub(crate) const FORECAST_SCHEMA: &str = "camdl.forecast/v1";
 
@@ -203,6 +222,12 @@ pub(crate) fn run_forecast(
             "fit predict: forecast — subsampling {} of {} posterior draws (raise with --n-draws)",
             idx.len(), job.posterior.n_draws()));
     }
+    let draw_refs: Vec<DrawRef> = idx.iter()
+        .map(|&i| DrawRef {
+            cloud_row: i,
+            key: job.posterior.keys().and_then(|k| k.per_draw[i]),
+        })
+        .collect();
     let param_sets: Vec<Vec<f64>> = idx.iter()
         .map(|&i| {
             let mut p = compiled.default_params.clone();
@@ -219,12 +244,12 @@ pub(crate) fn run_forecast(
         dt: job.dt,
         base_seed: job.seed,
         record_expected: false,
-    }).map_err(|f| f.to_string())?;
+    }).map_err(|f| f.describe(|d| draw_refs[d].describe()))?;
 
-    let mut written = write_tables(&fc, model, job.schema, job.out_dir)?;
+    let mut written = write_tables(&fc, model, job.schema, job.out_dir, &draw_refs)?;
     let refused: Vec<crate::fit::forecast_plan::StreamRefusal> =
         fc.plan.refusals().iter().chain(&unbound).cloned().collect();
-    written.push(write_manifest(&fc, &job, &record, raw, &refused)?);
+    written.push(write_manifest(&fc, &job, &record, raw, &refused, &draw_refs)?);
     out.say(format_args!(
         "fit predict: forecast from t = {} (the end of the training rows) to t = {}: {} \
          target(s) on {} stream(s), {} draws × {} particles",
@@ -248,6 +273,7 @@ fn write_tables(
     model: &ir::Model,
     schema: Option<&crate::run_meta::ObsSchema>,
     out_dir: &std::path::Path,
+    draw_refs: &[DrawRef],
 ) -> Result<Vec<PathBuf>, String> {
     let targets = fc.plan.targets();
     // Logical stream → its targets' indices, in the plan's order.
@@ -292,13 +318,18 @@ fn write_tables(
     // strided; each sample's values across every target are one particle's.
     let n = fc.n_particles;
     let per = FORECAST_SAMPLES_PER_DRAW.min(n);
-    let mut tsv = String::from("sample\tdraw\tparticle\tstream\tt_start\tt_stop\thorizon\tvalue\n");
+    let mut tsv = String::from(
+        "sample\tchain\tdraw\tcloud_row\tparticle\tstream\tt_start\tt_stop\thorizon\tvalue\n");
     let mut sample = 0usize;
-    for d in 0..fc.n_draws {
+    for (d, r) in draw_refs.iter().enumerate().take(fc.n_draws) {
+        let (chain, draw) = match r.key {
+            Some((c, i)) => (c.to_string(), i.to_string()),
+            None => (String::new(), String::new()),
+        };
         for j in 0..per {
             let p = j * n / per;
             for (k, t) in targets.iter().enumerate() {
-                tsv += &format!("{sample}\t{d}\t{p}\t{}\t{}\t{}\t{}\t{}\n", t.stream,
+                tsv += &format!("{sample}\t{chain}\t{draw}\t{}\t{p}\t{}\t{}\t{}\t{}\t{}\n", r.cloud_row, t.stream,
                     fmt_time(t.measures.start()), fmt_time(t.measures.end()), t.horizon,
                     fmt_value(fc.draws[k][d * n + p]));
             }
@@ -318,6 +349,7 @@ fn write_manifest(
     record: &crate::run_meta::TrainingPartitionRecord,
     reach_as_written: &str,
     refused: &[crate::fit::forecast_plan::StreamRefusal],
+    draw_refs: &[DrawRef],
 ) -> Result<PathBuf, String> {
     let point = |t: f64| serde_json::json!({
         "t": t,
@@ -364,6 +396,13 @@ fn write_manifest(
             .collect::<Vec<_>>(),
         "refused": refused.iter().map(|r| r.to_string()).collect::<Vec<_>>(),
         "n_draws": fc.n_draws,
+        // The posterior draws run, in the order of `forecast-samples.tsv`:
+        // each one's row of draws.tsv and its (chain, draw) key there.
+        "draws": draw_refs.iter().map(|r| serde_json::json!({
+            "cloud_row": r.cloud_row,
+            "chain": r.key.map(|k| k.0),
+            "draw": r.key.map(|k| k.1),
+        })).collect::<Vec<_>>(),
         "n_particles": fc.n_particles,
         "samples_per_draw": FORECAST_SAMPLES_PER_DRAW.min(fc.n_particles),
         "targets": targets,
@@ -372,4 +411,23 @@ fn write_manifest(
     let text = serde_json::to_string_pretty(&doc).map_err(|e| format!("serializing forecast.json: {e}"))?;
     std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fit::forecast_driver::ForecastFailure;
+
+    /// A failure names the posterior draw by its row of draws.tsv and its
+    /// (chain, draw) key, not by its place among the parameter sets the
+    /// driver was handed.
+    #[test]
+    fn a_failure_names_the_posterior_draw_by_its_key() {
+        let refs = [DrawRef { cloud_row: 0, key: Some((0, 3)) }, DrawRef { cloud_row: 40, key: Some((1, 7)) }];
+        let f = ForecastFailure { draw: Some(1), time: Some(26.0), cause: "particle 4 died".into() };
+        let msg = f.describe(|d| refs[d].describe());
+        assert!(msg.contains("posterior draw (chain 1, draw 7), row 40 of draws.tsv at t = 26"), "{msg}");
+        let unkeyed = DrawRef { cloud_row: 12, key: None };
+        assert_eq!(unkeyed.describe(), "posterior draw at row 12 of draws.tsv");
+    }
 }
