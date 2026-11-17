@@ -153,7 +153,7 @@ reference:
 | `add_calendar_years(d, n)`                    | yes          | E327                              |
 | `date_range(..., calendar_months/_years = N)` | yes          | E327                              |
 | `instant`-kind param (rendering)              | yes          | works as `[T]`; no date rendering |
-| `5 'months`, `5 'years`                       | **no**       | legal — affine span               |
+| `5 'months`, `5 'years` as a length           | **no**       | legal — affine span               |
 | `0.087 'per_month`                            | **no**       | legal — affine rate               |
 | `time_unit = 'months`/`'years`                | **no**       | legal (E320 only fires anchored)  |
 
@@ -173,6 +173,16 @@ from `date`, `origin`, `add_calendar_*`, `instant` params and their `let`s),
 between an instant and a duration are **E360**. Parameter references with `[T]`
 dimension are always Exact — a `'months`-spelled _bound_ on a `duration`-kind
 parameter is a length, not a step-from-a-date, and never contaminates uses.
+
+**Date positions refuse calendar durations.** Under an origin, a position that
+holds a date (`simulate { from, to }`, a scenario's `to`, `at` lists, a
+recurring `from`/`to`, `value_at`'s time, `breakpoints`, a bspline `window`,
+interpolated `times`, an `instant` parameter's bounds, the value compared with
+`t`) reads a bare duration as `origin + D`, so `to = 2 'years` is **E321**.
+Write the calendar step (`to = add_calendar_years(origin, 2)`) or a span in days
+(`730 'days`); the hint names both. A calendar cadence (`every = 1 'months`) is
+**E322**; list the dates with `date_range(start, end, calendar_months = 1)` in
+an `at` list. `dt`, `period`, `lag` and other lengths keep the average month.
 
 **Calendar arithmetic primitives** (anchored mode, DSL constant positions only):
 
@@ -289,46 +299,46 @@ reduction that never crosses is **right-censored** (reported via
 
 The compiler issues E-codes with source locations and fix-hints.
 
-| Code | Class    | Typical trigger                                                                                                  |
-| ---- | -------- | ---------------------------------------------------------------------------------------------------------------- |
-| E100 | naming   | parameter name shadows reserved (`t`, etc.)                                                                      |
-| E332 | indexing | a named index labels a dimension the thing indexed does not have                                                 |
-| E347 | obs      | a stream declares its temporal columns twice or by half (`: time` plus window columns, half a pair)              |
-| E348 | obs      | `covers` or window columns on a state-reading stream                                                             |
-| E350 | obs      | an `incidence(...)` stream with neither `covers = …` nor `window_start`/`window_stop`                            |
-| E351 | obs      | a side of a ratio of flows names no flow after its `where` guard pruned every level                              |
-| E352 | obs      | `projected` divides transition rates — an instant reading; write the flows or `prevalence(of =, among =)`        |
-| E280 | obs      | a bare name pools a declared stratum where a value meets data — write `sum(I)` / `sum(a in age, I[a])`, or index |
-| E356 | obs      | `prevalence(X)` / `prevalence(X1, X2)` removed — write `X` for the count, or `prevalence(of = X, among = N)`     |
-| E357 | obs      | `prevalence(of =, among =)`: the numerator reads a cell the denominator does not                                 |
-| E358 | obs      | `prevalence(of =, among =)`: the two sides collapse different dimensions                                         |
-| E359 | obs      | `prevalence(of =, among =)` reads a flow (`incidence(...)`) on one side                                          |
-| E220 | date     | `date(...)` without `origin` declared                                                                            |
-| E300 | dim      | transition rate not P·T⁻¹                                                                                        |
-| E301 | dim      | non-dimensionless argument to `exp`/`log`                                                                        |
-| E302 | dim      | addition/subtraction of mismatched dimensions                                                                    |
-| E304 | dim      | `sqrt` of odd-exponent dimension                                                                                 |
-| E305 | dim      | balance expression must have dimension P                                                                         |
-| E306 | dim      | ODE derivative must have dimension P·T⁻¹                                                                         |
-| E308 | dim      | overdispersion σ² must have dimension T (`positive dim T`)                                                       |
-| E309 | dim      | forcing `lag` must be a duration (dimension T)                                                                   |
-| E314 | dim      | intervention `fraction` not dimensionless, or `count`/assigned value not a count                                 |
-| E315 | dim      | intervention or schedule time not T, or trigger threshold not its stream's dimension                             |
-| E316 | dim      | a prior argument's or a bound's unit literal disagrees with its dimension                                        |
-| E317 | dim      | quantity threshold not its series' dimension, or `value_at` time not T                                           |
-| E320 | time     | `time_unit = 'months/'years` with `origin` declared                                                              |
-| E321 | time     | `Instant ± Calendar`-duration; under an origin, a calendar `covers` width or trigger `window`/`after`/`cooldown` |
-| E322 | time     | calendar cadence in anchored recurring schedule (`every = 1 'months`)                                            |
-| E323 | time     | bare-numeric `on=[...]` in anchored periodic forcing                                                             |
-| E360 | time     | instant arithmetic with no meaning: `date(a) + date(b)`, `2 * date(a)`, `7 'days - date(a)`, `date(a) + 5`       |
-| E327 | time     | `add_calendar_*` / `origin` / calendar-cadence `date_range` in unanchored model                                  |
-| E328 | time     | argument-shape error in `add_calendar_*` / `date_range`                                                          |
-| E329 | time     | zero/negative cadence, `count < 1`, or `end` before `start` in `date_range`                                      |
-| W324 | time     | bare-numeric `simulate.from/to/dt` in anchored mode                                                              |
-| W325 | time     | bare-numeric `at [k, ...]` schedule in anchored mode                                                             |
-| W326 | time     | numeric `--data` time column under `origin` (use `--time-format internal-days` to silence)                       |
-| W327 | time     | literal nested `add_calendar_*` round-trip (non-invertible)                                                      |
-| W328 | time     | `date_range` `end` doesn't land on a cadence boundary                                                            |
+| Code | Class    | Typical trigger                                                                                                                                                                              |
+| ---- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| E100 | naming   | parameter name shadows reserved (`t`, etc.)                                                                                                                                                  |
+| E332 | indexing | a named index labels a dimension the thing indexed does not have                                                                                                                             |
+| E347 | obs      | a stream declares its temporal columns twice or by half (`: time` plus window columns, half a pair)                                                                                          |
+| E348 | obs      | `covers` or window columns on a state-reading stream                                                                                                                                         |
+| E350 | obs      | an `incidence(...)` stream with neither `covers = …` nor `window_start`/`window_stop`                                                                                                        |
+| E351 | obs      | a side of a ratio of flows names no flow after its `where` guard pruned every level                                                                                                          |
+| E352 | obs      | `projected` divides transition rates — an instant reading; write the flows or `prevalence(of =, among =)`                                                                                    |
+| E280 | obs      | a bare name pools a declared stratum where a value meets data — write `sum(I)` / `sum(a in age, I[a])`, or index                                                                             |
+| E356 | obs      | `prevalence(X)` / `prevalence(X1, X2)` removed — write `X` for the count, or `prevalence(of = X, among = N)`                                                                                 |
+| E357 | obs      | `prevalence(of =, among =)`: the numerator reads a cell the denominator does not                                                                                                             |
+| E358 | obs      | `prevalence(of =, among =)`: the two sides collapse different dimensions                                                                                                                     |
+| E359 | obs      | `prevalence(of =, among =)` reads a flow (`incidence(...)`) on one side                                                                                                                      |
+| E220 | date     | `date(...)` without `origin` declared                                                                                                                                                        |
+| E300 | dim      | transition rate not P·T⁻¹                                                                                                                                                                    |
+| E301 | dim      | non-dimensionless argument to `exp`/`log`                                                                                                                                                    |
+| E302 | dim      | addition/subtraction of mismatched dimensions                                                                                                                                                |
+| E304 | dim      | `sqrt` of odd-exponent dimension                                                                                                                                                             |
+| E305 | dim      | balance expression must have dimension P                                                                                                                                                     |
+| E306 | dim      | ODE derivative must have dimension P·T⁻¹                                                                                                                                                     |
+| E308 | dim      | overdispersion σ² must have dimension T (`positive dim T`)                                                                                                                                   |
+| E309 | dim      | forcing `lag` must be a duration (dimension T)                                                                                                                                               |
+| E314 | dim      | intervention `fraction` not dimensionless, or `count`/assigned value not a count                                                                                                             |
+| E315 | dim      | intervention or schedule time not T, or trigger threshold not its stream's dimension                                                                                                         |
+| E316 | dim      | a prior argument's or a bound's unit literal disagrees with its dimension                                                                                                                    |
+| E317 | dim      | quantity threshold not its series' dimension, or `value_at` time not T                                                                                                                       |
+| E320 | time     | `time_unit = 'months/'years` with `origin` declared                                                                                                                                          |
+| E321 | time     | under an origin, a calendar duration in a date position (`to = 2 'years`, `at [6 'months]`), `Instant ± Calendar`-duration, a calendar `covers` width or trigger `window`/`after`/`cooldown` |
+| E322 | time     | calendar cadence under an origin (`every = 1 'months`); hint names `date_range(..., calendar_months = k)`                                                                                    |
+| E323 | time     | bare-numeric `on=[...]` in anchored periodic forcing                                                                                                                                         |
+| E360 | time     | instant arithmetic with no meaning: `date(a) + date(b)`, `2 * date(a)`, `7 'days - date(a)`, `date(a) + 5`                                                                                   |
+| E327 | time     | `add_calendar_*` / `origin` / calendar-cadence `date_range` in unanchored model                                                                                                              |
+| E328 | time     | argument-shape error in `add_calendar_*` / `date_range`                                                                                                                                      |
+| E329 | time     | zero/negative cadence, `count < 1`, or `end` before `start` in `date_range`                                                                                                                  |
+| W324 | time     | bare-numeric `simulate.from/to/dt` in anchored mode                                                                                                                                          |
+| W325 | time     | bare-numeric `at [k, ...]` schedule in anchored mode                                                                                                                                         |
+| W326 | time     | numeric `--data` time column under `origin` (use `--time-format internal-days` to silence)                                                                                                   |
+| W327 | time     | literal nested `add_calendar_*` round-trip (non-invertible)                                                                                                                                  |
+| W328 | time     | `date_range` `end` doesn't land on a cadence boundary                                                                                                                                        |
 
 ## Where things live
 

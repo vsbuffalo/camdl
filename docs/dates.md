@@ -396,7 +396,41 @@ two kinds — a static, type-level property tracked by the dimensional checker:
 everything else is `Exact`. A `Calendar`-classified duration **cannot translate
 an `Instant`** in anchored mode — that's a hard error (**E321**) with the hint
 pointing at `add_calendar_months` for calendar-exact stepping or an explicit
-`'days` literal for an affine offset. See the proposal's
+`'days` literal for an affine offset.
+
+**Date positions.** Some places in a model hold a date rather than a length:
+`simulate { from, to }`, a scenario's `simulate { to }`, an `at [...]` entry, a
+recurring schedule's `from` and `to`, an output's `trajectories { at }` and an
+observation's `emit_schedule = at [...]`, `value_at`'s time, a forcing's
+`breakpoints`, a bspline `window` and an interpolated forcing's `times`, the
+bounds of an `instant` parameter, and the value compared with model time `t`.
+Under an origin a bare duration there denotes `origin + D`, so `to = 2 'years`
+means `origin + 2 'years`, and any `'months` or `'years` literal there is
+**E321**. The hint names the explicit form, computed from your own base and
+count:
+
+| refused under an origin                 | write instead                                                                                                 |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `simulate { to = 2 'years }`            | `to = add_calendar_years(origin, 2)` (or `730 'days`)                                                         |
+| `simulate { to = 18 'months }`          | `to = add_calendar_months(origin, 18)` (or `548 'days`)                                                       |
+| `simulate { to = 1.5 'years }`          | `to = add_calendar_months(origin, 18)`                                                                        |
+| `at [date("2020-03-01") - 1 'months]`   | `at [add_calendar_months(date("2020-03-01"), -1)]`                                                            |
+| `breakpoints = [6 'months]`             | `breakpoints = [add_calendar_months(origin, 6)]` (or `183 'days`)                                             |
+| `tau : instant in [0 'days, 6 'months]` | `tau : instant in [0 'days, 183 'days]`                                                                       |
+| `if t >= 6 'months then … else …`       | `if t >= add_calendar_months(origin, 6) then … else …`                                                        |
+| `if t - 1 'months > tau then … else …`  | `if t - 30 'days > tau then … else …` (no calendar form exists: `t`'s date is known only when the model runs) |
+
+The same refusal from a base known only at run time (`t`, an `instant`
+parameter, `last_obs` or `first_obs`) says why no calendar form exists there and
+offers the span in days. A calendar duration as a cadence (`every = 1 'months`)
+is **E322**, whose hint names `date_range(<start>, <end>, calendar_months = 1)`
+in an `at` list. A **length** keeps the average month by design: `dt`, a
+forcing's `period`, `step` and `lag`, a sinusoidal `phase`, a `via` mean, the
+bounds of a `duration` parameter, and every unit literal in an ordinary
+expression. Without an origin none of this applies: there is no calendar, and
+every month literal is the average.
+
+See the proposal's
 [§3](dev/proposals/archive/post-alpha/2026-05-22-typed-time-and-dsl-ergonomics.md#3-the-two-rules)
 for the full statement, including the LUB propagation rule and the
 classifier-from-leaves invariant that keeps a `'months`-spelled parameter
@@ -435,8 +469,10 @@ add_calendar_years(d, n)    # step Instant d by n calendar years
 integer (positive or negative).
 
 These are the **only** way to advance a date by calendar months or years in the
-language. They do real `(year, month, day)` arithmetic via the
-proleptic-Gregorian calendar and never touch the `30.4369` average-month factor.
+language: a month or year literal in a date position is refused (E321), and its
+hint names the call to write. They do real `(year, month, day)` arithmetic via
+the proleptic-Gregorian calendar and never touch the `30.4369` average-month
+factor.
 
 **Month-end clamping** is canonical: if the source day-of-month doesn't exist in
 the target month, the result clamps to that month's last day.
@@ -472,11 +508,12 @@ simulate { from = origin
            to = add_calendar_years(origin, 5) }
 ```
 
-**`simulate { to = }` does not accept arithmetic**, unlike `let` and `at [...]`:
-`to = origin + 90 'days` is **E401** ("expected a constant expression"), and
-`to = origin + 5 'years` is additionally **E321** (a Calendar duration cannot
-translate an Instant). Use `add_calendar_years` / `add_calendar_months`, or a
-bare number. The asymmetry is tracked in gh#844.
+**Instant arithmetic is accepted in every date position.**
+`simulate { from,
+to }`, a scenario's `to` and an output or emit `at` list fold
+it at compile time as an `at [...]` list does: `to = origin + 90 'days` is 90,
+and `to = date("2020-03-01") + 7 'days` is 67 from a 2020-01-01 origin.
+`to = origin + 5 'years` is **E321**; write `add_calendar_years(origin, 5)`.
 
 **An Instant moves by a duration.** `date(b) - date(a)` is an Exact duration and
 `origin + 30 'days` is an Instant. On a definite Instant — one built from
@@ -500,10 +537,12 @@ In unanchored mode, a reference to `origin` is **E327** (same family as
 
 An intervention that repeats (a campaign every quarter) would otherwise need its
 dates written out one by one. `date_range(...)` generates them at compile time.
-In an intervention's `at [...]` list it splices its entries into the list in
-place. It needs an anchored model: `origin` as `start` and a calendar cadence
-are both **E327** without one, and a `date(...)` start is **E220**, as a bare
-`date(...)` is. Write an `origin` before using any form.
+In any `at` list (an intervention's or event's `at [...]`, an output's
+`trajectories { at = [...] }`, an observation's `emit_schedule = at [...]`) it
+splices its entries into the list in place. It needs an anchored model: `origin`
+as `start` and a calendar cadence are both **E327** without one, and a
+`date(...)` start is **E220**, as a bare `date(...)` is. Write an `origin`
+before using any form.
 
 A call has a `start`, a way to say where the list stops, and one cadence.
 
@@ -880,9 +919,11 @@ minutes). Observation data columns and intervention schedules shift the same
 way.
 
 **What survives unchanged.** Any _typed_ position — any value that carries its
-own unit literal — converts correctly. `1 'months` as a duration value keeps
-working (it's an affine span of ≈ 30.44 days regardless of axis), and so does a
-rate literal such as `0.2 'per_month`.
+own unit literal — converts correctly. `1 'months` as a length keeps working
+(it's an affine span of ≈ 30.44 days regardless of axis), and so does a rate
+literal such as `0.2 'per_month`. A month or year literal in a date position is
+refused under the origin (E321), so `to = 600 'months` is rewritten, as option 1
+below says.
 
 **What does not.** A parameter has no scale of its own: its value is always read
 in the model's `time_unit`. After the switch, the value you supply for a rate
@@ -944,10 +985,11 @@ interventions {
 **Three options for each bare-numeric site.** At each `simulate { from/to/dt }`,
 `at [...]` schedule, and `--data` time column, you have a choice:
 
-1. **Annotate with a unit literal**: `to = 600 'months`. The expander converts
-   to the new axis (≈ 18260 days). Smallest diff from the original. Reads as
-   "600 calendar-average months from origin" — affine; for calendar-exact
-   end-of-50-years use a date.
+1. **Write the calendar step**: `to = add_calendar_months(origin, 600)`, the
+   date 600 calendar months after the origin (1941-01-01 from 1891-01-01).
+   Smallest diff from the original that keeps its meaning. `to = 600 'months` is
+   refused under an origin (E321), and its hint names this form. For an
+   intervention list, `at [add_calendar_months(origin, 180)]`.
 2. **Use a date literal**: `to = date("1940-12-01")`. Explicit calendar instant.
    Best for new code and for anything a reader needs to verify against a
    calendar.
@@ -957,14 +999,15 @@ interventions {
    packed integer would otherwise parse as a date. Acceptable for terse
    regression-test fixtures; avoid in models meant to be read.
 
-For new models, prefer dates and unit literals. For migrations, option 1 (the
-unit-literal annotation) is the smallest diff.
+For new models, prefer dates. For migrations, option 1 (the calendar step) is
+the smallest diff.
 
 ## Why `'months` is fine in some places and forbidden in others
 
 A natural confusion reading the rules above: `5 'months` works in a table value
-or a parameter bound, `0.2 'per_month` works in any rate expression, but
-`date + 6 'months` is a hard error. That looks contradictory. It isn't.
+or a `duration` parameter's bound, `0.2 'per_month` works in any rate
+expression, but `date + 6 'months` and `simulate { to = 6 'months }` are hard
+errors. That looks contradictory. It isn't.
 
 The principle: **a calendar month is unambiguous as a _length_ and unambiguous
 as a _rate denominator_. It is ambiguous only as a _step from a date_.** A
@@ -977,8 +1020,9 @@ translates an instant, so neither produces a calendar-vs-affine question. Only
 rule fires.
 
 Stated in one line: **Rule 1 isn't "calendar units are dangerous," it's "you
-can't add a calendar duration to a date."** Rates aren't durations; bounds and
-table values don't get added to dates. They all stay legal.
+can't add a calendar duration to a date."** A date position adds its value to
+the origin, so a month there is a step from a date too. Rates aren't durations;
+lengths and table values don't get added to dates. They all stay legal.
 
 ## Seasonal forcing: the same days every year, or this year's dates
 
@@ -1097,12 +1141,11 @@ should be written only when a 365-day cycle is what the model means.
 The temporal model above is normative. These are places the current release
 behaves differently, each tracked:
 
-| deviation                                                                                                                                                                                                                                        | issue  |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------ |
-| A duration literal in an instant position (`to = 600 'months`) is accepted and read as an origin-relative coordinate, contradicting the Instant/Duration rule stated above. Retained for migration compatibility; do not write it in new models. | gh#847 |
-| The CAS leaf's `traj.tsv` carries no `date` column; its `run.json` carries the `calendar` block that maps `t` to dates.                                                                                                                          | gh#838 |
-| Observation-alignment errors on a dated file report bare model time and suggest numeric fixes.                                                                                                                                                   | gh#842 |
-| `--time-format internal-days` is accepted as an alias for `numeric`, but the name is misleading when `time_unit` is not days, and `--help` omits it.                                                                                             | —      |
+| deviation                                                                                                                                            | issue  |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| The CAS leaf's `traj.tsv` carries no `date` column; its `run.json` carries the `calendar` block that maps `t` to dates.                              | gh#838 |
+| Observation-alignment errors on a dated file report bare model time and suggest numeric fixes.                                                       | gh#842 |
+| `--time-format internal-days` is accepted as an alias for `numeric`, but the name is misleading when `time_unit` is not days, and `--help` omits it. | —      |
 
 ## Reference
 
