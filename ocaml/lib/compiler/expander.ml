@@ -11758,6 +11758,13 @@ let classify_quantity_body ctx env
         | Some (x, _), [time] ->
           (match Lower.instant_expr ctx env
                    ~context:(Printf.sprintf "`value_at`'s time in quantity '%s'" qd_name)
+                   (* gh#1128: a bare number is read in the model's time unit
+                      from the origin, as an `at [...]` entry is. *)
+                   ~bare:(fun e ->
+                     { bw_code = "W325";
+                       bw_subject = Printf.sprintf "`value_at(…, %s)` in quantity '%s'"
+                           (Time_typing.show_short e) qd_name;
+                       bw_hint = Time_typing.hint_bare_numeric_value_at })
                    ~anchor:("`value_at`'s time argument",
                             "`value_at(N0 - S, last_obs - 1 'weeks)`") time with
            | Lower.At_anchor a -> reduced_state (Ir.RValue (Ir.VValueAt (Ir.AObs a))) x

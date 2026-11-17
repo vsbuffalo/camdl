@@ -472,6 +472,12 @@ let hint_bare_numeric_at_schedule =
    Annotate with `'days` or use `date(\"YYYY-MM-DD\")` to make the \
    intent explicit."
 
+let hint_bare_numeric_value_at =
+  "bare number as `value_at`'s time under `origin = date(...)` is \
+   interpreted as the model's `time_unit` from origin. \
+   Annotate with `'days` or use `date(\"YYYY-MM-DD\")` to make the \
+   intent explicit."
+
 let hint_bare_numeric_data_column =
   "the --data time column is numeric and the model declares \
    `origin = date(...)` — values are interpreted as internal-time units \
