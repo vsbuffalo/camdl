@@ -2349,7 +2349,7 @@ pub(crate) fn parse_time_spec(
 /// Normalize a user-written duration unit token to the canonical
 /// [`ir::caltime::days_per_unit`] spelling, accepting common singular/plural
 /// abbreviations so `"1 week"` and `"7 days"` both work.
-fn canonical_duration_unit(tok: &str) -> String {
+pub(crate) fn canonical_duration_unit(tok: &str) -> String {
     match tok.trim().to_lowercase().as_str() {
         "day" | "days" | "d" => "days",
         "week" | "weeks" | "w" => "weeks",

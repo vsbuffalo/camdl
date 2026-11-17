@@ -206,7 +206,7 @@ const CASES_OFF_GRID: &str = "time\tcases\n150\t2470\n";
 const STOCK: &str = "time\tstock\n150\t14888\n200\t19801\n";
 
 /// A chain-binomial fit, so BOTH predictive horizons are reachable
-/// (`--horizon one_step` needs a filterable fit).
+/// (`--mode one_step` needs a filterable fit).
 fn fit_toml(out_dir: &str) -> String {
     format!(
         r#"output_dir = "{out_dir}"
@@ -300,7 +300,7 @@ fn free_forward_first_bin_opens_where_the_declaration_opens_it() {
     let bin = skip_if_missing_binary();
     let tmp = setup("ff", &fit_toml("results"), CASES);
 
-    let out = fit_then_predict(&bin, &tmp, &["--horizon", "free_forward"]);
+    let out = fit_then_predict(&bin, &tmp, &["--mode", "free_forward"]);
     assert!(
         out.status.success(),
         "fit predict failed:\nstdout={}\nstderr={}",
@@ -371,7 +371,7 @@ fn free_forward_first_bin_is_backend_independent() {
     let bin = skip_if_missing_binary();
     let tmp = setup("ode", &ode_fit_toml("results"), CASES);
 
-    let out = fit_then_predict(&bin, &tmp, &["--horizon", "free_forward"]);
+    let out = fit_then_predict(&bin, &tmp, &["--mode", "free_forward"]);
     assert!(
         out.status.success(),
         "fit predict failed:\nstdout={}\nstderr={}",
@@ -409,7 +409,7 @@ fn a_period_boundary_off_the_output_grid_is_recorded_not_snapped() {
     // the silent-wrong gh#702 was about — and would read ~4900 instead of ~2470.
     let tmp = setup_with_model("offgrid", &fit_toml("results"), CASES_OFF_GRID, &model_off_grid());
 
-    let out = fit_then_predict(&bin, &tmp, &["--horizon", "free_forward"]);
+    let out = fit_then_predict(&bin, &tmp, &["--mode", "free_forward"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         out.status.success(),
@@ -438,7 +438,7 @@ fn one_step_first_bin_opens_where_the_declaration_opens_it() {
     let bin = skip_if_missing_binary();
     let tmp = setup("os", &fit_toml("results"), CASES);
 
-    let out = fit_then_predict(&bin, &tmp, &["--horizon", "one_step"]);
+    let out = fit_then_predict(&bin, &tmp, &["--mode", "one_step"]);
     assert!(
         out.status.success(),
         "fit predict failed:\nstdout={}\nstderr={}",

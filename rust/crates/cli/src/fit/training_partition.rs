@@ -236,6 +236,62 @@ impl TrainingPartition {
         Ok(TrainingPartition { rule, extent, streams })
     }
 
+    /// The partition a fit recorded, checked against the rows read now: every
+    /// stream of `rows` must have a recorded prefix, its file must still hold
+    /// at least that many rows, and those rows must digest to the recorded
+    /// digest. A forecast reads its parameter set only through this, so a plan
+    /// can never claim the parameters were fitted to rows that changed after
+    /// the fit (`docs/dev/temporal-architecture.md` §3.3).
+    pub(crate) fn from_record(
+        record: &crate::run_meta::TrainingPartitionRecord,
+        rows: &BTreeMap<String, Vec<ObservedRow>>,
+    ) -> Result<Self, String> {
+        use crate::run_meta::PartitionRuleRecord;
+        if record.rule_version != PARTITION_RULE_VERSION {
+            return Err(format!(
+                "the fit recorded its training rows under partition rule version {}, \
+                 but this camdl decides them under version {PARTITION_RULE_VERSION}; \
+                 re-run the fit so its training rows are recorded by the current rule.",
+                record.rule_version));
+        }
+        let mut streams = Vec::with_capacity(rows.len());
+        for (stream, rs) in rows {
+            let Some(p) = record.prefix(stream) else {
+                return Err(format!(
+                    "the fit's training partition records no rows for stream '{stream}', \
+                     so which of its rows trained cannot be checked; re-run the fit."));
+            };
+            if rs.len() < p.rows {
+                return Err(format!(
+                    "the fit trained on the first {} row(s) of stream '{stream}', but its \
+                     data now holds {} row(s): the data changed after the fit. Re-run the \
+                     fit on the current data.", p.rows, rs.len()));
+            }
+            let digest = row_digest(&rs[..p.rows])?;
+            if digest.to_hex() != p.digest {
+                return Err(format!(
+                    "the first {} row(s) of stream '{stream}' are not the rows the fit \
+                     trained on (their row digest differs): the data changed after the \
+                     fit, so its parameters were not fitted to them. Re-run the fit on \
+                     the current data.", p.rows));
+            }
+            streams.push(RowPrefix { stream: stream.clone(), rows: p.rows, digest });
+        }
+        let rule = match &record.rule {
+            PartitionRuleRecord::All => PartitionRule::All,
+            PartitionRuleRecord::Cutoff { at } => PartitionRule::Cutoff { at: at.t },
+            PartitionRuleRecord::SeparateFiles => PartitionRule::SeparateFiles,
+        };
+        let partition = Self::new(rule, rows, streams).map_err(|e| super::runner::partition_error(e, None))?;
+        if (partition.extent - record.extent.t).abs() > TIME_TIE_EPS {
+            return Err(format!(
+                "the fit recorded its training extent as t = {}, but its recorded \
+                 training rows end at t = {}; the record is inconsistent. Re-run the fit.",
+                record.extent.t, partition.extent));
+        }
+        Ok(partition)
+    }
+
     pub(crate) fn rule(&self) -> PartitionRule {
         self.rule
     }

@@ -292,7 +292,7 @@ fn manifest_chain_selection(seg: &Path, excl: Option<&str>) -> Option<serde_json
 }
 
 fn predict(bin: &Path, tmp: &Path, extra: &[&str]) -> std::process::Output {
-    let mut args = vec!["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"];
+    let mut args = vec!["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"];
     args.extend_from_slice(extra);
     run(bin, tmp, &args)
 }

@@ -245,8 +245,8 @@ fn every_recorded_fact_is_shown() {
     runs.push(("survey.cached", run(&survey)));
     runs.push(("survey.refused", run(&a(&["survey", "sir.camdl", "--estimate", "beta=0:1"]))));
     runs.push(("compare.refused", run(&a(&["compare", "@if2"]))));
-    runs.push(("predict", run(&a(&["fit", "predict", "@converged", "--horizon", "free_forward", "--n-draws", "5"]))));
-    runs.push(("predict.refused", run(&a(&["fit", "predict", "@nope", "--horizon", "free_forward"]))));
+    runs.push(("predict", run(&a(&["fit", "predict", "@converged", "--mode", "free_forward", "--n-draws", "5"]))));
+    runs.push(("predict.refused", run(&a(&["fit", "predict", "@nope", "--mode", "free_forward"]))));
     let sim = |extra: &[&str]| {
         let mut v = a(&["simulate", "sir.camdl", "--params", "truth.toml"]);
         v.extend(a(extra));

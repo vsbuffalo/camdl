@@ -519,7 +519,7 @@ thin = 1
     // about scenario stacking unambiguous).
     let out = run(&bin, &tmp, &[
         "fit", "predict", "--fit", "fit.toml",
-        "--horizon", "free_forward",
+        "--mode", "free_forward",
         "--scenario", "low_rho",
         "--scenario", "high_rho",
     ]);
@@ -734,7 +734,7 @@ thin = 1
     // BOTH the scale scenario and the no-overlay baseline (fitted) in one run.
     let out = run(&bin, &tmp, &[
         "fit", "predict", "--fit", "fit.toml",
-        "--horizon", "free_forward",
+        "--mode", "free_forward",
         "--scenario", "double_rho",
         "--seed", "1",
     ]);
@@ -753,7 +753,7 @@ thin = 1
     // explicit --scenario above suppresses the no-overlay row).
     let out2 = run(&bin, &tmp, &[
         "fit", "predict", "--fit", "fit.toml",
-        "--horizon", "free_forward",
+        "--mode", "free_forward",
         "--seed", "1",
     ]);
     assert!(out2.status.success(),
@@ -871,7 +871,7 @@ thin = 1
     let out = run(
         &bin,
         &tmp,
-        &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"],
+        &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"],
     );
     assert!(
         out.status.success(),
@@ -935,7 +935,7 @@ thin = 1
     assert!(hash8.len() >= 8, "segment hash suffix looks like a hash: {name}");
 
     // (1) Resolve by @label.
-    let out = run(&bin, &tmp, &["fit", "predict", "@jigawa-baseline", "--horizon", "free_forward"]);
+    let out = run(&bin, &tmp, &["fit", "predict", "@jigawa-baseline", "--mode", "free_forward"]);
     assert!(
         out.status.success(),
         "fit predict @label failed:\nstdout={}\nstderr={}",
@@ -948,7 +948,7 @@ thin = 1
     );
 
     // (2) Resolve by hash prefix (positional handle).
-    let out = run(&bin, &tmp, &["fit", "predict", &hash8, "--horizon", "free_forward"]);
+    let out = run(&bin, &tmp, &["fit", "predict", &hash8, "--mode", "free_forward"]);
     assert!(
         out.status.success(),
         "fit predict <hash> failed for prefix {hash8}:\nstdout={}\nstderr={}",
@@ -957,7 +957,7 @@ thin = 1
     );
 
     // (3) An unknown label is a typed not-found error, not a panic.
-    let out = run(&bin, &tmp, &["fit", "predict", "@nope", "--horizon", "free_forward"]);
+    let out = run(&bin, &tmp, &["fit", "predict", "@nope", "--mode", "free_forward"]);
     assert!(!out.status.success(), "unknown @label must error");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("no completed fit run labelled @nope"), "actionable not-found, got: {stderr}");
@@ -1064,7 +1064,7 @@ thin = 1
     // (1) No cap → the default (200) ≥ the cloud, so free-forward replays the
     // whole cloud and reports its full size ( > 10 ). Establishes the baseline
     // and confirms the cloud is bigger than the cap we test with.
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"]);
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
     assert!(out.status.success(), "uncapped predict failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
     let pred = find_artifact(&tmp.join("results"), "predictive", "weekly_cases")
         .expect("predictive/weekly_cases.tsv (uncapped) must be written");
@@ -1075,7 +1075,7 @@ thin = 1
 
     // (2) --n-draws 10 → free-forward replays exactly 10 draws and reports 10.
     let out = run(&bin, &tmp, &[
-        "fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward", "--n-draws", "10",
+        "fit", "predict", "--fit", "fit.toml", "--mode", "free_forward", "--n-draws", "10",
     ]);
     assert!(
         out.status.success(),

@@ -259,10 +259,10 @@ fn fit_predict_emits_deaths_averted_contrast_with_positive_median() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // `--horizon free_forward`: the contrast is a forward counterfactual object;
+    // `--mode free_forward`: the contrast is a forward counterfactual object;
     // this also sidesteps the one-step exact-filter's unrelated limitation with the
     // parametric `at [origin + 4 'weeks]` schedule. Contrasts are horizon-independent.
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"]);
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
     assert!(
         out.status.success(),
         "fit predict failed:\nstdout={}\nstderr={}",
@@ -416,7 +416,7 @@ fn series_minus_scalar_contrast_is_a_located_shape_error() {
 
     // The shape mismatch is a Rust reducer check (the OCaml dim check passes: both
     // operands are counts). `fit predict` fails with a located message.
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"]);
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
     assert!(!out.status.success(), "a series−scalar contrast must fail fit predict");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -487,7 +487,7 @@ fn parameter_only_contrast_skips_with_a_located_note_and_no_file() {
 
     // A param-only contrast has no toggled intervention → the reducer skips it with
     // a note (gh#327) and `fit predict` still succeeds. No contrast file is written.
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"]);
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
     assert!(
         out.status.success(),
         "fit predict must succeed (the contrast is skipped, not a hard error):\nstderr={}",
@@ -600,7 +600,7 @@ I0 = 10
     // ODE is forkable (Deterministic), so the reducer passes the latent gate but
     // hits the ODE-backend deferral: skip-with-note (gh#325), predict succeeds,
     // no file is written.
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"]);
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
     assert!(
         out.status.success(),
         "fit predict must succeed (the contrast is skipped, not a hard error):\nstderr={}",
@@ -684,7 +684,7 @@ fn obs_sourced_contrast_skips_with_gh326_state_sourced_emits() {
     let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
     assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"]);
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
     assert!(
         out.status.success(),
         "fit predict must succeed (the obs-sourced contrast is skipped, not fatal):\nstderr={}",
@@ -798,7 +798,7 @@ k   = 10.0
     let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
     assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"]);
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
     assert!(
         out.status.success(),
         "fit predict failed:\nstderr={}",
@@ -962,7 +962,7 @@ fn contrast_arms_agreeing_on_a_non_model_horizon_are_refused() {
     );
 
     let out =
-        run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"]);
+        run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         !out.status.success(),
@@ -1001,7 +1001,7 @@ fn contrast_arms_with_different_horizons_are_refused() {
     );
 
     let out =
-        run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"]);
+        run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         !out.status.success(),
@@ -1102,7 +1102,7 @@ fn fit_predict_scenario_with_its_own_horizon_is_refused() {
         &bin,
         &tmp,
         &[
-            "fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward", "--scenario",
+            "fit", "predict", "--fit", "fit.toml", "--mode", "free_forward", "--scenario",
             "with_sia",
         ],
     );
@@ -1129,7 +1129,7 @@ fn fit_predict_scenario_with_its_own_horizon_is_refused() {
         &bin,
         &tmp,
         &[
-            "fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward", "--scenario",
+            "fit", "predict", "--fit", "fit.toml", "--mode", "free_forward", "--scenario",
             "no_sia",
         ],
     );
@@ -1230,7 +1230,7 @@ fn anchored_quantity_no_contrast_references_still_predicts() {
     let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
     assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"]);
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         out.status.success(),
@@ -1361,7 +1361,7 @@ fn contrast_over_an_anchored_quantity_resolves_in_both_arms() {
     let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
     assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"]);
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         out.status.success(),
@@ -1474,7 +1474,7 @@ fn an_anchor_before_the_fork_censors_with_a_located_note() {
     let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
     assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"]);
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         out.status.success(),
@@ -1531,7 +1531,7 @@ fn ratio_contrast_with_a_zero_denominator_censors_those_draws() {
     let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
     assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"]);
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         out.status.success(),

@@ -216,7 +216,7 @@ impl Fixture {
     /// the one-step horizon is not what this test is about and it is slower.
     fn predict(&self, bin: &Path, exclude: Option<&str>) -> std::process::Output {
         let seg = self.seg.to_string_lossy().into_owned();
-        let mut args: Vec<&str> = vec!["fit", "predict", &seg, "--horizon", "free_forward"];
+        let mut args: Vec<&str> = vec!["fit", "predict", &seg, "--mode", "free_forward"];
         if let Some(ids) = exclude {
             args.push("--exclude-chains");
             args.push(ids);
@@ -433,7 +433,7 @@ fn two_exclusions_are_two_addresses_and_neither_is_the_pooled_one() {
 
     // …and the name `show` prints is a name `cat --stream` takes, so the
     // discovery loop closes: no keyed artifact is listed but unreachable.
-    // `--horizon free_forward` keys the predict's address (gh#896), so its
+    // `--mode free_forward` keys the predict's address (gh#896), so its
     // files are listed and read under `predict/<dir>/`.
     let prefix = format!(
         "predict/{}/",
@@ -540,7 +540,7 @@ fn chains_and_its_complementary_exclusion_are_one_prediction() {
     let f = setup(&bin, "keep");
     let seg = f.seg.to_string_lossy().into_owned();
     let predict = |flag: &str, ids: &str| {
-        run(&bin, &f.tmp, &["fit", "predict", &seg, "--horizon", "free_forward", flag, ids])
+        run(&bin, &f.tmp, &["fit", "predict", &seg, "--mode", "free_forward", flag, ids])
     };
 
     let kept = predict("--chains", "0,1,2");
@@ -561,7 +561,7 @@ fn chains_and_its_complementary_exclusion_are_one_prediction() {
     assert_eq!(f.read("predictive-excl3/weekly_cases.tsv"), via_keep,
         "the two spellings band the same cloud");
 
-    let both = run(&bin, &f.tmp, &["fit", "predict", &seg, "--horizon", "free_forward",
+    let both = run(&bin, &f.tmp, &["fit", "predict", &seg, "--mode", "free_forward",
         "--chains", "0", "--exclude-chains", "3"]);
     assert!(!both.status.success(), "both flags together are refused");
 
