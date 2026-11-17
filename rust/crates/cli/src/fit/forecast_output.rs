@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use crate::fit::failures::{DeterministicFailure, Site};
 use crate::fit::forecast_driver::{extend_run, fixed_origin_forecast, DriverConfig, Forecast, StateConditioning};
-use crate::fit::forecast_plan::{parse_reach, ForecastPlan, PlanStream};
+use crate::fit::forecast_plan::{parse_reach, ForecastPlan, HeldOut, PlanStream, RowFile};
 use crate::fit::observed_rows::{Measures, ObservedRow};
 use crate::fit::predict::PosteriorDraws;
 use crate::fit::training_partition::TrainingPartition;
@@ -131,13 +131,17 @@ pub(crate) fn run_forecast(
 
     // Rows after each stream's prefix, in its own file or a holdout file:
     // they only name a target's held-out row, and are never filtered.
-    let mut held_out: BTreeMap<String, Vec<ObservedRow>> = BTreeMap::new();
+    let mut held_out: BTreeMap<String, Vec<HeldOut>> = BTreeMap::new();
     for s in &streams {
-        let mut tail: Vec<ObservedRow> = s.rows[partition.rows(&s.name)..].to_vec();
+        let mut tail: Vec<HeldOut> = s.rows[partition.rows(&s.name)..].iter()
+            .map(|r| HeldOut { file: RowFile::Training, row: r.clone() })
+            .collect();
         if let Some(path) = bindings.holdout_by_source().get(&s.obs_model_ir.source) {
             let siblings: Vec<&ir::observation::ObservationModel> =
                 model.observations.iter().filter(|o| o.source == s.obs_model_ir.source).collect();
-            tail.extend(crate::fit::runner::load_observations(path, &s.obs_model_ir, &siblings, &time_opts)?);
+            tail.extend(crate::fit::runner::load_observations(path, &s.obs_model_ir, &siblings, &time_opts)?
+                .into_iter()
+                .map(|row| HeldOut { file: RowFile::Holdout, row }));
         }
         held_out.insert(s.name.clone(), tail);
     }
@@ -254,7 +258,8 @@ fn write_tables(
         let first = leaf(model, &targets[ks[0]].stream);
         let dims = crate::fit::predict::index_dims_for(schema, source, &stratum_of(first).into_iter().map(|(d, _)| d).collect::<Vec<_>>());
         let mut header: Vec<String> = dims.clone();
-        header.extend(["t_start", "t_stop", "horizon", "lead", "held_out_row", "mean"].map(String::from));
+        header.extend(["t_start", "t_stop", "horizon", "lead", "held_out_file", "held_out_row", "mean"]
+            .map(String::from));
         header.extend(QUANTILE_LEVELS.iter().map(|(_, l)| l.to_string()));
         header.push("n_samples".into());
         let mut tsv = header.join("\t") + "\n";
@@ -271,7 +276,8 @@ fn write_tables(
             cells.push(fmt_time(t.measures.end()));
             cells.push(t.horizon.to_string());
             cells.push(fmt_time(t.lead));
-            cells.push(t.observed.map(|p| p.to_string()).unwrap_or_default());
+            cells.push(t.observed.map(|h| h.file.as_str().to_string()).unwrap_or_default());
+            cells.push(t.observed.map(|h| h.position.to_string()).unwrap_or_default());
             cells.push(fmt_value(mean));
             cells.extend(qs.iter().map(|q| fmt_value(*q)));
             cells.push(ys.len().to_string());
@@ -327,7 +333,9 @@ fn write_manifest(
             "end": point(t.measures.end()),
             "horizon": t.horizon,
             "lead": t.lead,
-            "held_out_row": t.observed,
+            "held_out": t.observed.map(|h| serde_json::json!({
+                "file": h.file.as_str(), "position": h.position,
+            })),
         })
     }).collect();
     let doc = serde_json::json!({
