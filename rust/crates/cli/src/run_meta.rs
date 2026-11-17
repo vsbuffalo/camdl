@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, HashMap};
 
 /// The `schema` tag every `<algorithm>_summary.json` carries as its first key,
 /// in the form the predictive manifests use (`camdl.predictive/v3`,
-/// `camdl.predict-report/v1`).
+/// `camdl.predict-report/v2`).
 ///
 /// It exists because two keys of this file changed *meaning* under unchanged
 /// names (gh#728): `rhat` was the classic Gelman–Rubin statistic and is now

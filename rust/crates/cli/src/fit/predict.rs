@@ -23,7 +23,8 @@ use crate::quantile::{band, fmt_time, fmt_value, QUANTILE_LEVELS};
 
 use score::convergence::ChainIndex;
 use crate::chain_selection::{warn_active_selection, ChainSelection, SubsetInfo};
-use crate::fit::failures::{DeterministicFailure, Site};
+use crate::fit::failures::{DeterministicFailure, Site, SkippedStream};
+use crate::fit::predict_streams::{select_streams, StreamSelection};
 use crate::posterior_draws;
 use crate::fit::method_result::PosteriorDiagnostics;
 use score::convergence::MaxRhat;
@@ -1399,6 +1400,9 @@ fn declared_grid_replay(
 struct PredictOutcome {
     written: Vec<PathBuf>,
     failures: Vec<DeterministicFailure>,
+    /// Streams left out without failing the run (D76): named on stderr and in
+    /// `report.json`, and no effect on the exit status.
+    skipped: Vec<SkippedStream>,
 }
 
 /// `camdl fit predict` — write the free-forward posterior predictive artifact.
@@ -1413,6 +1417,11 @@ pub fn cmd_fit_predict(args: &crate::args::FitPredictArgs) {
             // stderr, like every other command's `wrote` lines.
             for p in &outcome.written {
                 out.say(format_args!("wrote {}", p.display()));
+            }
+            // A skipped stream was never eligible: it is named so the reader
+            // knows the artifact leaves it out, and it does not fail the run.
+            for s in &outcome.skipped {
+                out.say(format_args!("fit predict: {}", s.describe()));
             }
             if !outcome.failures.is_empty() {
                 // What failed, then what was written — in that order, because
@@ -1810,10 +1819,26 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
             .map_err(|e| format!("compiling model for prediction: {e:?}"))?,
     );
 
+    // D76: the streams this predict covers. A stream the fit bound data to is
+    // eligible; one with no data is skipped and named unless `--stream` asked
+    // for it, in which case it is a failure. One rule for every mode.
+    let streams_in: StreamSelection = {
+        let data = config.data_spec()
+            .map_err(|e| format!("this fit has no [data] block to read the observed series from: {e}"))?;
+        let bindings = crate::fit::stream_bindings::StreamBindings::resolve(&model, data)
+            .map_err(|e| format!("resolving [data]: {e}"))?;
+        let bound = bindings.training_by_source();
+        let site = match mode {
+            Some(PredictModeArg::Forecast) => Site::ForecastStream,
+            _ => Site::Stream,
+        };
+        select_streams(&model.observations, |o| bound.contains_key(&o.source), &args.stream, site)?
+    };
+
     // The forecast mode: the fixed-origin forecast and nothing else.
     if mode == Some(PredictModeArg::Forecast) {
         let schema = crate::run_meta::read_fit_sidecar(&segment)?.and_then(|s| s.schema);
-        let (mut written, failures) = crate::fit::forecast_output::run_forecast(
+        let (mut written, failures, skipped) = crate::fit::forecast_output::run_forecast(
             out,
             crate::fit::forecast_output::ForecastJob {
                 args,
@@ -1832,24 +1857,22 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
                 dt: one_step_dt,
                 seed: args.seed.unwrap_or(1),
                 binomial: crate::fit::forecast_output::fit_binomial(&run_dir, configured_binomial)?,
+                selection: &streams_in,
             },
         )?;
         written.push(crate::fit::failures::write_report(
             &out_dir,
             &crate::chain_selection::artifact_name("report", posterior.selection()),
             &failures,
+            &skipped,
         )?);
-        return Ok(PredictOutcome { written, failures });
+        return Ok(PredictOutcome { written, failures, skipped });
     }
 
     // 5. Load the observed data per leaf (the cadence, the observed half, and
     // what each row covers — resolved against the compiled model's projections).
-    let leaves = load_leaf_obs(&model, &compiled, &config, dt, args.stream.as_deref())?;
-    if leaves.is_empty() {
-        return Err("no observation streams to predict — check that the model's \
-                    observation sources are bound to data in the fit config, and that \
-                    --stream (if given) names a real stream".into());
-    }
+    // Every eligible leaf is bound, so none is empty here.
+    let leaves = load_leaf_obs(&model, &compiled, &config, dt, &streams_in)?;
 
     let schema = crate::run_meta::read_fit_sidecar(&segment)?.and_then(|s| s.schema);
     let seed = args.seed.unwrap_or(1);
@@ -1900,7 +1923,8 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     // What refused. Non-empty ⇒ the artifact this run writes is incomplete, the
     // failures are named in `report.json`, and the exit status is 1 — but every
     // object that DID compute is still written (proposal §3.5, §8 item 15).
-    let mut failures: Vec<DeterministicFailure> = Vec::new();
+    // A stream `--stream` asked for that cannot be produced is the first entry.
+    let mut failures: Vec<DeterministicFailure> = streams_in.failures.clone();
 
     // The rendered quantity sidecars (per logical quantity, all design cells
     // stacked) + the merged manifest, filled after the free-forward pass.
@@ -2628,7 +2652,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
             // probability `1 - exp(-rate·dt)`, so another dt would be a
             // different process plotted against the data.
             one_step_dt,
-            args.stream.as_deref(),
+            &streams_in,
             fit,
             n_draws_cap,
             seed,
@@ -2859,6 +2883,15 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
             "options": options,
             "calendar": calendar.to_json(),
             "streams": predictive_manifest_entries,
+            // D76: which declared streams (leaves) this artifact holds, which it
+            // left out and why, and which failed, so a reader need not infer
+            // completeness from the exit status.
+            "produced": model.observations.iter()
+                .filter(|o| streams_in.includes(&o.name) && sources.contains(&o.source))
+                .map(|o| o.name.as_str())
+                .collect::<Vec<_>>(),
+            "skipped": &streams_in.skipped,
+            "failed": crate::fit::failures::failed_streams(&failures),
         });
         // Provenance: a chain-subset predictive records the selection alongside
         // the streams, so a chain-subset artifact is never mistakable for a
@@ -2971,6 +3004,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
         &out_dir,
         &crate::chain_selection::artifact_name("report", posterior.selection()),
         &failures,
+        &streams_in.skipped,
     )?);
 
     let method_label = posterior.method.map(|m| m.as_str()).unwrap_or("posterior");
@@ -2993,7 +3027,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
         method_label,
         posterior.name,
     ));
-    Ok(PredictOutcome { written, failures })
+    Ok(PredictOutcome { written, failures, skipped: streams_in.skipped })
 }
 
 /// Compile `vocabulary` against the fit's model SOURCE and return the quantity
@@ -3077,13 +3111,13 @@ fn leaf_matches(o: &ir::observation::ObservationModel, l: &LeafObs) -> bool {
         })
 }
 
-/// Load each (filtered) observation leaf's observed series.
+/// Load the observed series of each leaf `selection` makes eligible.
 fn load_leaf_obs(
     model: &ir::Model,
     compiled: &sim::CompiledModel,
     config: &crate::fit::config_v2::Problem,
     dt: f64,
-    stream_filter: Option<&str>,
+    selection: &StreamSelection,
 ) -> Result<Vec<LeafObs>, String> {
     let data = config
         .data_spec()
@@ -3101,12 +3135,10 @@ fn load_leaf_obs(
 
     let mut out = Vec::new();
     for obs_model in &model.observations {
-        if !stream_selected(obs_model, stream_filter) {
-            continue;
+        if !selection.includes(&obs_model.name) {
+            continue; // not eligible: skipped or failed, and named by the caller (D76)
         }
-        let Some(data_path) = effective.get(&obs_model.source) else {
-            continue; // source not bound to data — skip (e.g. a fit-only diagnostic stream)
-        };
+        let data_path = bound_path(effective, obs_model)?;
         let siblings: Vec<&ir::observation::ObservationModel> =
             model.observations.iter().filter(|o| o.source == obs_model.source).collect();
         let rows =
@@ -3179,13 +3211,15 @@ fn leaf_row_coverages(
     rows
 }
 
-/// Whether a leaf passes the `--stream` filter — matches the logical source or
-/// the expanded leaf name (the proposal's "accepts either name").
-fn stream_selected(o: &ir::observation::ObservationModel, filter: Option<&str>) -> bool {
-    match filter {
-        None => true,
-        Some(name) => o.source == name || o.name == name,
-    }
+/// The data file bound to an eligible leaf's source. An eligible leaf is bound
+/// by construction ([`select_streams`]), so a miss is an internal error.
+fn bound_path<'a>(
+    bound: &'a IndexMap<String, String>,
+    o: &ir::observation::ObservationModel,
+) -> Result<&'a String, String> {
+    bound.get(&o.source).ok_or_else(|| format!(
+        "internal error: stream '{}' was selected as eligible but its source '{}' is bound \
+         to no data", o.name, o.source))
 }
 
 // ── The free-forward forecast grid (gh#696) ────────────────────────────────
@@ -3430,7 +3464,12 @@ pub(crate) struct PredictOptions {
     pub reach: Option<String>,
     pub n_draws: usize,
     pub seed: u64,
-    pub stream: Option<String>,
+    /// `--stream`, as a set. Serialized as `null` when absent and as the bare
+    /// name when there is one, the form every address keyed before `--stream`
+    /// was repeatable has, so those addresses are unchanged; several are a
+    /// list.
+    #[serde(serialize_with = "serialize_streams")]
+    pub stream: Vec<String>,
     pub scenarios: Vec<String>,
     pub enable: Vec<String>,
     pub disable: Vec<String>,
@@ -3446,7 +3485,7 @@ impl PredictOptions {
             reach: None,
             n_draws: DEFAULT_PREDICT_DRAWS,
             seed: 1,
-            stream: None,
+            stream: Vec::new(),
             scenarios: Vec::new(),
             enable: Vec::new(),
             disable: Vec::new(),
@@ -3485,10 +3524,12 @@ impl PredictOptions {
         .normalised()
     }
 
-    /// The options in their canonical form: the scenario, enable and disable
-    /// lists as sets (sorted), so the order they were spelled in does not key
-    /// a different address.
+    /// The options in their canonical form: the stream, scenario, enable and
+    /// disable lists as sets (sorted), so the order they were spelled in does
+    /// not key a different address.
     pub(crate) fn normalised(mut self) -> Self {
+        self.stream.sort();
+        self.stream.dedup();
         self.scenarios.sort();
         self.enable.sort();
         self.disable.sort();
@@ -3504,6 +3545,16 @@ impl PredictOptions {
         }
         let json = serde_json::to_string(self).unwrap_or_default();
         Some(crate::hashing::sha256_hex(json.as_bytes())[..8].to_string())
+    }
+}
+
+/// [`PredictOptions::stream`]: `null`, a bare name, or a list of several.
+fn serialize_streams<S: serde::Serializer>(streams: &[String], s: S) -> Result<S::Ok, S::Error> {
+    use serde::Serialize;
+    match streams {
+        [] => s.serialize_none(),
+        [one] => one.serialize(s),
+        many => many.serialize(s),
     }
 }
 
@@ -3841,7 +3892,7 @@ fn one_step_bands(
     model: &ir::Model,
     config: &crate::fit::config_v2::Problem,
     dt: f64,
-    stream_filter: Option<&str>,
+    selection: &StreamSelection,
     fit: &FilterableFit,
     n_draws_cap: usize,
     base_seed: u64,
@@ -3855,8 +3906,7 @@ fn one_step_bands(
     use crate::fit::runner::ObsStream;
 
     // ── Build the filter obs model ONCE. Resolution here is predict-specific
-    // (skips a fit-only diagnostic stream whose source is unbound; honours the
-    // `--stream` filter; iterates in `model.observations` order so `stream_idx`
+    // (reads only the leaves `selection` makes eligible — D76; iterates in `model.observations` order so `stream_idx`
     // maps back to its IR leaf via `bound_leaves`), so it does NOT route through
     // `resolve_and_load_obs_streams`. But the `ObsStream -> StreamSpec` assembly
     // (the bug-prone shared part) IS routed through the single shared builder
@@ -3881,12 +3931,10 @@ fn one_step_bands(
     let mut bound_leaves: Vec<&ir::observation::ObservationModel> = Vec::new();
     let mut obs_streams: Vec<ObsStream> = Vec::new();
     for obs_model in &model.observations {
-        if !stream_selected(obs_model, stream_filter) {
-            continue;
+        if !selection.includes(&obs_model.name) {
+            continue; // not eligible: skipped or failed, and named by the caller (D76)
         }
-        let Some(data_path) = effective.get(&obs_model.source) else {
-            continue; // source not bound to data — skip (a fit-only diagnostic stream)
-        };
+        let data_path = bound_path(effective, obs_model)?;
         let siblings: Vec<&ir::observation::ObservationModel> =
             model.observations.iter().filter(|o| o.source == obs_model.source).collect();
         let rows =
@@ -4215,6 +4263,9 @@ fn plugin_refusal(method: Option<FitAlgorithm>, leaf: &str) -> String {
 mod tests {
     const FREE_FORWARD_KEY: &str = "195dbcd2";
     const SCENARIOS_AB_KEY: &str = "df45cbda";
+    /// `--stream onset` alone, computed from the options' JSON as it was
+    /// written while `--stream` took one value (`"stream":"onset"`).
+    const STREAM_ONSET_KEY: &str = "59942590";
 
     /// gh#896: a predict's address key is pinned. It names stored outputs, so a
     /// change to it — a reordered or renamed field of `PredictOptions`, a new
@@ -4232,6 +4283,19 @@ mod tests {
         assert_eq!(scen(&["b", "a"]).address_key(), scen(&["a", "b"]).address_key(),
             "the scenario set, not its spelling order, keys the address");
         assert_eq!(scen(&["b", "a"]).address_key().as_deref(), Some(SCENARIOS_AB_KEY));
+        // `--stream` became repeatable (D76). One stream serializes as the
+        // bare name it always did, so an address keyed by one is unchanged:
+        // `--stream onset` keys STREAM_ONSET_KEY before and after.
+        let streams = |names: &[&str]| PredictOptions {
+            stream: names.iter().map(|n| n.to_string()).collect(),
+            ..PredictOptions::defaults()
+        }
+        .normalised();
+        assert!(serde_json::to_string(&streams(&["onset"])).unwrap().contains(r#""stream":"onset""#));
+        assert!(serde_json::to_string(&streams(&[])).unwrap().contains(r#""stream":null"#));
+        assert_eq!(streams(&["onset"]).address_key().as_deref(), Some(STREAM_ONSET_KEY));
+        assert_eq!(streams(&["b", "a"]).address_key(), streams(&["a", "b", "a"]).address_key(),
+            "the stream set, not its spelling, keys the address");
     }
 
     use super::*;
@@ -4263,7 +4327,14 @@ mod tests {
              [method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
              chains = 1\nparticles = 10\niterations = 1\ncooling = 0.7\n",
             data.display())).unwrap().problem;
-        let leaves = load_leaf_obs(&model, &compiled, &config, 1.0, None).unwrap();
+        // The selection the verb builds: both leaves must count as bound.
+        let bindings = crate::fit::stream_bindings::StreamBindings::resolve(
+            &model, config.data_spec().unwrap()).unwrap();
+        let bound = bindings.training_by_source();
+        let streams = select_streams(
+            &model.observations, |o| bound.contains_key(&o.source), &[], Site::Stream).unwrap();
+        assert!(streams.skipped.is_empty(), "{:?}", streams.skipped);
+        let leaves = load_leaf_obs(&model, &compiled, &config, 1.0, &streams).unwrap();
         let read: Vec<(String, Vec<f64>)> = leaves.iter()
             .map(|l| (l.stratum[0].1.clone(), l.times.clone())).collect();
         assert_eq!(read, vec![("urban".to_string(), vec![7.0, 14.0]),
