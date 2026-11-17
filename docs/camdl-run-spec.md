@@ -4776,7 +4776,12 @@ The `ir::Model` fields below are deliberately **not** hashed:
   `rate_state_grad`, `sigma_sq_grad`, `projection_state_grad`, each obs
   `Diffable`'s `grad`/`proj_grad`) — deterministic autodiff of already-hashed
   rates over already-hashed parameters, so model identity is
-  gradient-independent and a `--no-state-grad` compile keys the same.
+  gradient-independent and a `--no-state-grad` compile keys the same. A fit
+  whose method reads them — PGAS with NUTS, `nl-lbfgs`, and an `nl-lbfgs`
+  profile — hashes them in its `method` level instead
+  (`runid::inputs::model_ir_hash_with_gradients`): its result depends on the
+  gradients, and they on the compiler's autodiff, so a compiler that emits other
+  gradients for one forward model re-keys those fits and no other.
 - `quantities` and `contrasts` — reporting-only reductions written to a
   regenerated sidecar outside the leaf (§10.8), never to the leaf itself.
 
