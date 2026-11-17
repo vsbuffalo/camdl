@@ -21,6 +21,9 @@
 //!     resample (Θ, X) jointly
 //! ```
 //!
+//! The resample is skipped where every weight is exactly equal (D77): the
+//! swarm is then already uniformly weighted.
+//!
 //! Three properties are load-bearing and were each once wrong. Θ^{m-1}_j
 //! is the j-th particle of iteration m-1's final swarm, carried forward
 //! whole — not the swarm mean broadcast to every particle, which discards
@@ -48,7 +51,7 @@ use super::degeneracy::{check_pf_degeneracy, check_iteration_budget, window_subs
 use super::traits::{ProcessModel, ObservationModel};
 use super::types::{ParticleState, normalize_log_weights, ess_from_log_weights, LOG_PROB_FLOOR, init_particle_rngs};
 use numerics::log_sum_exp;
-use super::resampling::systematic_resample;
+use super::resampling::{log_weights_all_equal, systematic_resample};
 
 // `Transform` and `EstimatedParam` are defined in `types.rs` (shared by all
 // inference algorithms). Re-exported here so existing import paths via
@@ -697,17 +700,26 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
                     ));
                 }
 
-                // Resample states AND parameters jointly via double-buffer (no allocation)
-                let indices = systematic_resample(&log_weights, &mut resample_rng);
-                for (i, &src) in indices.iter().enumerate() {
-                    states_buf[i].counts.copy_from_slice(&states[src].counts);
-                    states_buf[i].flow_accumulators.copy_from_slice(&states[src].flow_accumulators);
-                    // Phase 2a: the per-stream `acc` bins travel with the particle.
-                    states_buf[i].acc.copy_from_slice(&states[src].acc);
-                    params_buf[i].copy_from_slice(&particle_params[src]);
+                // Resample states AND parameters jointly via double-buffer (no
+                // allocation), unless every weight is exactly equal (D77): the
+                // swarm is then already uniformly weighted, and a resample
+                // would only add Monte Carlo variance and lose distinct
+                // parameter ancestors. Skipping it does not draw from the
+                // resampling stream, so every later resample in this iteration
+                // draws differently and the surviving parameter ancestry
+                // differs from a run that resampled here.
+                if !log_weights_all_equal(&log_weights) {
+                    let indices = systematic_resample(&log_weights, &mut resample_rng);
+                    for (i, &src) in indices.iter().enumerate() {
+                        states_buf[i].counts.copy_from_slice(&states[src].counts);
+                        states_buf[i].flow_accumulators.copy_from_slice(&states[src].flow_accumulators);
+                        // Phase 2a: the per-stream `acc` bins travel with the particle.
+                        states_buf[i].acc.copy_from_slice(&states[src].acc);
+                        params_buf[i].copy_from_slice(&particle_params[src]);
+                    }
+                    std::mem::swap(&mut states, &mut states_buf);
+                    std::mem::swap(&mut particle_params, &mut params_buf);
                 }
-                std::mem::swap(&mut states, &mut states_buf);
-                std::mem::swap(&mut particle_params, &mut params_buf);
             }
 
             // Reset. `flow_accumulators` blanket (unchanged); the per-stream

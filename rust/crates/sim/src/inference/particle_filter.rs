@@ -2,9 +2,11 @@
 //!
 //! Estimates log p(y_{1:T} | θ) via sequential importance sampling
 //! with systematic resampling at each assimilation event — a stop where some
-//! stream holds an observed value (D72). The filter also stops where nothing
-//! is observed (an all-`NA` row, a declared period's start) so the
-//! accumulators fold and reset there; it does not weight or resample there.
+//! stream holds an observed value (D72) — unless the weights there are all
+//! exactly equal (D77), when the swarm is already uniformly weighted. The
+//! filter also stops where nothing is observed (an all-`NA` row, a declared
+//! period's start) so the accumulators fold and reset there; it does not
+//! weight or resample there.
 //! Uses the ProcessModel trait to advance particles — any simulation backend
 //! works (chain-binomial, ODE, etc.).
 
@@ -19,7 +21,7 @@ use super::degeneracy::{check_pf_degeneracy, check_iteration_budget, window_subs
 use super::traits::{ProcessModel, ObservationModel, SMCConfig};
 use super::types::{ParticleState, ParticleSwarm, logw_variance, normalize_log_weights, RESAMPLE_RNG_STREAM, init_particle_rngs};
 use numerics::log_sum_exp;
-use super::resampling::systematic_resample;
+use super::resampling::{log_weights_all_equal, systematic_resample};
 /// Observation: one data point at a specific time.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Observation {
@@ -639,10 +641,16 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
             ));
         }
 
-        // Resample via double-buffer, at an assimilation event only. The call
-        // is skipped, not left to uniform weights: it would draw from the
-        // resampling stream either way.
-        let indices: Option<Vec<usize>> = if assimilates {
+        // Resample via double-buffer, at an assimilation event whose weights
+        // are not all equal. The call is skipped, not left to uniform weights:
+        // it would draw from the resampling stream either way. Equal weights
+        // (D77) are an exactly uniform swarm, which already represents the
+        // filtering distribution; resampling it would add Monte Carlo variance
+        // and lose distinct ancestors for nothing. Skipping is not neutral to
+        // the realisation: the resampling stream is not drawn from, so every
+        // later resample in the run draws differently.
+        let resamples = assimilates && !log_weights_all_equal(&swarm.log_weights);
+        let indices: Option<Vec<usize>> = if resamples {
             let indices = systematic_resample(&swarm.log_weights, &mut resample_rng);
             for (i, &src) in indices.iter().enumerate() {
                 states_buf[i].counts.copy_from_slice(&swarm.states[src].counts);

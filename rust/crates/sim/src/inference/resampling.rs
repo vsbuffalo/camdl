@@ -21,6 +21,38 @@ pub fn systematic_resample(log_weights: &[f64], rng: &mut StatefulRng) -> Vec<us
     systematic_resample_core(&weights, rng.uniform())
 }
 
+/// Whether every normalised log weight is exactly equal — the case in which the
+/// unconditional filters (`particle_filter`, `if2`) do not resample (D77).
+///
+/// Normalised log weights are `lw_i − log Σ_j exp(lw_j)`. When they are all
+/// equal the weight vector is exactly uniform, so resampling it is not needed:
+/// the swarm already represents the filtering distribution with equal weights,
+/// and skipping the draw removes the Monte Carlo variance and the loss of
+/// distinct ancestors a resample adds. Skipping does change a run's
+/// realisation: the resampling stream is not drawn from, so every later
+/// resample in the run draws a different uniform, and IF2's ancestry (which
+/// particles' parameters survive) follows from that.
+///
+/// The comparison is on log weights, never on `exp(lw)`: two weights far below
+/// the smallest positive double (`-1000` and `-1001`) both exponentiate to `0`,
+/// yet one is `e` times the other, and the resample must see that. A vector
+/// whose normaliser is not finite (every particle at `−∞`, or a `+∞`/`NaN`
+/// weight) is never called equal, so those cases keep the resampling call they
+/// had before. A particle at `−∞` beside finite ones is unequal, so a swarm
+/// with dead particles is always resampled and the dead are purged.
+///
+/// Exact equality, not a tolerance: the decision to resample depends only on
+/// whether the weights the filter would resample with are uniform.
+pub fn log_weights_all_equal(log_weights: &[f64]) -> bool {
+    let Some(&first) = log_weights.first() else { return true };
+    let lse = numerics::log_sum_exp(log_weights);
+    if !lse.is_finite() {
+        return false;
+    }
+    let first_norm = first - lse;
+    log_weights.iter().all(|&lw| lw - lse == first_norm)
+}
+
 /// Core systematic-resampling loop over **already-normalized** `weights`, given
 /// a base uniform draw `u0 ∈ [0, 1)`: one uniform, evenly-spaced thresholds,
 /// returning exactly `weights.len()` selected indices.
@@ -132,6 +164,42 @@ mod tests {
         for &c in &counts {
             assert_eq!(c, 1, "uniform weights should give exactly 1 copy per particle");
         }
+    }
+
+    /// D77: equal log weights are recognised whatever their common value,
+    /// including one so small that `exp` of it is 0.
+    #[test]
+    fn equal_log_weights_are_equal_at_any_scale() {
+        for c in [0.0, -3.7, 12.5, -1000.0, -1.0e6] {
+            assert!(log_weights_all_equal(&vec![c; 64]), "64 copies of {c}");
+        }
+        assert!(log_weights_all_equal(&[-2.0]), "one particle");
+        assert!(log_weights_all_equal(&[]), "no particles: nothing to resample");
+    }
+
+    /// D77: weights that differ only where `exp` underflows to 0 are not equal.
+    /// `exp(-1000) == exp(-1001) == 0.0` in f64, but the second weight is `1/e`
+    /// of the first, and a resample must see that.
+    #[test]
+    fn weights_that_differ_beyond_underflow_are_not_equal() {
+        let lw = [-1000.0, -1001.0, -1000.0, -1000.5];
+        assert!(lw.iter().all(|&w| f64::exp(w) == 0.0), "fixture: every exp(w) underflows");
+        assert!(!log_weights_all_equal(&lw));
+        // A one-ulp difference at a deeply underflowed scale is still a difference.
+        let w = -745.5_f64;
+        let next = f64::from_bits(w.to_bits() - 1);
+        assert!(w.exp() == 0.0 && next.exp() == 0.0 && next != w);
+        assert!(!log_weights_all_equal(&[w, w, next]));
+    }
+
+    /// D77: a dead particle (`−∞`) beside live ones is unequal, so the dead are
+    /// purged by a resample; a vector with no finite normaliser is never equal.
+    #[test]
+    fn dead_or_non_finite_weights_are_never_equal() {
+        assert!(!log_weights_all_equal(&[0.0, f64::NEG_INFINITY, 0.0]));
+        assert!(!log_weights_all_equal(&[f64::NEG_INFINITY; 4]));
+        assert!(!log_weights_all_equal(&[f64::INFINITY; 4]));
+        assert!(!log_weights_all_equal(&[0.0, f64::NAN]));
     }
 
     #[test]
