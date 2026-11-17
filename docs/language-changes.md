@@ -52,13 +52,20 @@ fractional month (`0.5 'months`); a calendar step mixed with days
 (`origin + 6 'months + 6 'months`, or
 `add_calendar_months(origin, 6) + 1 'months`; the note shows a base where the
 readings differ); a step from a date known only at run time (`t - 1 'months`,
-`tau + 1 'months` with `tau` an `instant` parameter, `last_obs + 6 'months`); a
-`let` whose body moves a date by a calendar duration
-(`let landmark = origin + 6 'months`), which is an ordinary expression, not a
-date position. A calendar cadence (`every = 1 'months`) is still **E322**.
-Lengths keep the average month, as before. Without an origin nothing changes. On
-the command line, `--to "last_obs + 6 months"` (and `holdout_after`) on an
-anchored model is now refused with the same hint; it folded the average month.
+`tau + 1 'months` with `tau` an `instant` parameter, `last_obs + 6 'months`, and
+the time since or until such a date, `t - tau >= 6 'months` and
+`tau - t <= 6 'months`, read as `t >= tau + 6 'months` and
+`t >= tau - 6 'months`; `tau - t <= 6 'months` and `-(tau - t) >= 6 'months`
+compiled to the average month before); a `let` whose body moves a date by a
+calendar duration (`let landmark = origin + 6 'months`), which is an ordinary
+expression, not a date position. A calendar cadence (`every = 1 'months`) is
+still **E322**. Lengths keep the average month, as before. Without an origin
+nothing changes. On the command line, `--to "last_obs + 6 months"` (and
+`holdout_after` and `pfilter --score-from`, which share its grammar) on an
+anchored model is now refused with the same hint, and so is a forecast's
+`--horizon "6 months"`; each folded the average month. The time since a known
+date now resolves: `t - date("2020-01-31") >= 1 'months` is `t >= 59`
+(2020-02-29), where it was E321 (and `date(...) - t <= …` was E302).
 
 **Migration.** None for a model that compiles under the previous entry. A
 refused spelling's hint names its replacement: one step (`origin + 12 'months`),

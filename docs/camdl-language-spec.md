@@ -307,7 +307,9 @@ interpolated forcing's `times`, the bounds of an `instant`-kind parameter and
 a value given to one (a scenario's `set`, a prior's `mu`, `mean`, `lower` or
 `upper`; a prior's scale such as `sigma` is a length), and the operand compared
 with model time `t`, or with `t ± d`, in any expression. In anchored mode a
-bare duration there denotes `origin + D`, and a calendar duration there,
+bare duration there denotes `origin + D`; a comparison of the time since or
+until an instant `X` with a duration (`t - X ⋈ D`, `X - t ⋈ D`, `-(X - t) ⋈ D`)
+compares `t` with the date `X + D` (or `X - D`). A calendar duration there,
 directly or through a `let`, follows **the one-step calendar rule**: one
 calendar step of a whole number of months (or years, as twelve months) from a
 date the compiler knows (`origin`, a `date(...)` literal, or a `let` of one) is
