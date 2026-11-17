@@ -9,7 +9,6 @@ use score::convergence::ChainIndex;
 use crate::fit::state::FitState;
 use crate::fit::loglik::LoglikType;
 use crate::fit::runner::{FitRunConfig, MethodConvergence};
-use crate::cas::iso8601_utc;
 use sim::inference::{
     if2::EstimatedParam,
     pmmh::Prior,
@@ -1669,9 +1668,13 @@ pub fn run_method(
         })
         .collect();
     let saved_paths = SavedPathCounts::measure(&retained_sweeps, &saved_sweeps);
-    write_summary(method_dir, &all_results, kernel, thin, elapsed.as_secs_f64(), &traj_plan, &saved_paths,
+    write_summary(method_dir, &all_results, kernel, thin, &traj_plan, &saved_paths,
         n_trajectories, &diagnostics, withheld.as_ref(), chain_logliks.as_ref(), path_renewal.as_ref(),
         filter_ess.as_ref().map(|fe| &fe.summary), latent_convergence.as_ref())?;
+    // The chains' wall time is a property of this execution, not of the
+    // result: it goes to the execution record (`fit::execution`), outside the
+    // leaf's manifest, where the end-of-run `pgas complete in …` line reads it.
+    out.record_sampling(super::execution::Sampling::Chains { seconds: elapsed.as_secs_f64() });
 
     // No-op resume: every chain already reached the target sweep count
     // before this invocation. There are no new sweeps to aggregate
@@ -1759,7 +1762,6 @@ pub fn run_method(
     let state = FitState {
         method: method_name.to_string(),
         seed,
-        timestamp: iso8601_utc(std::time::SystemTime::now()),
         input_hash: None,
         camdl_version: Some(crate::version::VERSION_SHORT.into()),
         best_loglik,
@@ -1892,7 +1894,7 @@ pub fn run_method(
         &config, dt, &all_results, chain_final_draw.into_inner().unwrap(), method_dir);
 
     // The completion line and the best sweep's log-likelihood are drawn at
-    // the end of the run from `pgas_summary.json`'s `cost` and
+    // the end of the run from the execution record's `sampling_seconds` and
     // `fit_state.toml`'s `best_loglik` / `best_chain` (`report::render`).
 
     // gh#278: clean terminal — all output (pgas_summary.json with R̂/ESS,
@@ -2306,7 +2308,6 @@ fn write_summary(
     results: &[(usize, Vec<PGASSweep>, Vec<f64>)],
     kernel: sim::inference::diagnostic::AcceptanceKernel,
     thin: usize,
-    sampling_seconds: f64,
     traj_plan: &TrajectoryStridePlan,
     saved_paths: &SavedPathCounts,
     n_trajectories: usize,
@@ -2333,10 +2334,6 @@ fn write_summary(
         // leave no row, so a row's position is not its chain.
         "acceptance_chains": results.iter().map(|(c, _, _)| *c).collect::<Vec<usize>>(),
         "acceptance_kernel": kernel,
-        // What sampling cost: the chains' wall time, which the end of the
-        // run reports (`pgas complete in …`). The key PMMH's `cost` block
-        // opens with, so a consumer reads both alike.
-        "cost": { "sampling_seconds": sampling_seconds },
         // Thinning factor: `n_samples` (kept draws) × `thin` = raw sampling
         // iterations, the thinning-invariant denominator for ESS/iteration.
         "thin": thin,

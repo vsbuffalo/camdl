@@ -36,7 +36,6 @@ pub fn mle_params_tamper_hash(params: &std::collections::BTreeMap<String, f64>) 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MleProvenance {
     pub camdl_version: String,
-    pub timestamp: String,
     /// Tamper-detection hash over the numeric parameter values in the
     /// file below (NOT over this `[provenance]` block). Editing a
     /// parameter invalidates this; editing a provenance field does
@@ -48,15 +47,14 @@ pub struct MleProvenance {
     /// Dynamics fields — load-bearing for the backend-guardrail.
     pub backend: crate::args::types::ForwardBackend,
     pub dt: f64,
-    /// The model file the fit ran on, relative to the fit folder
-    /// (`fits/<stem>-<h8>/`, two levels above the leaf holding this file) by
-    /// the rule `fit.meta.json`'s `source_model` follows; absent when the
-    /// model was not a file, or in a block written before it was recorded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_model: Option<String>,
+    /// The model the fit ran on, by content. Where its file was is not
+    /// recorded here: this file is part of the leaf's stored bytes, which are a
+    /// function of the computation, and a path relative to the store changes
+    /// with where the store is. The fit folder's `fit.meta.json` records the
+    /// model's file (`source_model`).
     pub model_identity: String,
-    /// Per-stream (source, hash). Serialized as a table under
-    /// `[provenance.data]`.
+    /// Per-stream data hash. Serialized as a table under `[provenance.data]`;
+    /// by content, for the reason `model_identity` is.
     #[serde(default)]
     pub data: std::collections::BTreeMap<String, DataEntry>,
     pub seed: u64,
@@ -83,23 +81,7 @@ pub struct MleProvenance {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DataEntry {
-    /// The stream's data file, relative to the fit folder (as
-    /// [`MleProvenance::source_model`]); absent when it was not a file.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
     pub hash: String,
-}
-
-/// `path` relative to `fit_folder`, by the rule `fit.meta.json` records its
-/// `source_*` paths by ([`crate::run_meta::relative_path`]); `None` when it
-/// is not a file. `path` is as the fit read it: a relative path resolves
-/// against the working directory.
-fn relative_to_fit_folder(fit_folder: &std::path::Path, path: &str) -> Option<String> {
-    let p = std::path::Path::new(path);
-    if !p.is_file() {
-        return None;
-    }
-    crate::run_meta::relative_path(fit_folder, p).ok()
 }
 
 /// Wrapper type for the full mle_params.toml file: a `[provenance]`
@@ -142,28 +124,22 @@ pub fn write_mle_params(
         .data_hashes.iter()
         .map(|(name, hash)| {
             // The stored name is either bare ("cases") or
-            // "cases (path/to/cases.tsv)", the path as the fit read it.
-            // Parse out the path if it's in the parenthesized form; else
-            // the stream records no source.
-            let (stream_name, source) = if let Some(open) = name.find(" (") {
-                let close = name.rfind(')').unwrap_or(name.len());
-                (name[..open].to_string(),
-                 relative_to_fit_folder(&metadata.fit_folder, &name[open+2..close]))
-            } else {
-                (name.clone(), None)
+            // "cases (path/to/cases.tsv)", the path as the fit read it; the
+            // block keys the stream by its name alone.
+            let stream_name = match name.find(" (") {
+                Some(open) => name[..open].to_string(),
+                None => name.clone(),
             };
-            (stream_name, DataEntry { source, hash: hash.clone() })
+            (stream_name, DataEntry { hash: hash.clone() })
         })
         .collect();
 
     let prov = MleProvenance {
         camdl_version: version::VERSION_SHORT.to_string(),
-        timestamp: metadata.timestamp.clone(),
         content_hash: content_hash.clone(),
         fit_hash: Some(metadata.input_hash.clone()),
         backend: metadata.backend,
         dt: metadata.dt,
-        source_model: relative_to_fit_folder(&metadata.fit_folder, &metadata.model_path),
         model_identity: metadata.model_identity.clone(),
         data: data_map,
         seed: metadata.seed,
@@ -260,12 +236,6 @@ pub fn verify_content_hash(path: &str, declared: &str) -> Result<ContentVerifica
 
 pub struct MleMetadata {
     pub input_hash: String,
-    /// The fit folder (`fits/<stem>-<h8>/`) the written file's leaf sits in:
-    /// what `source_model` and the data `source`s are recorded relative to.
-    pub fit_folder: std::path::PathBuf,
-    /// The model file as the fit loaded it (relative to the working directory
-    /// when relative); recorded relative to `fit_folder`.
-    pub model_path: String,
     pub model_identity: String,
     pub data_hashes: Vec<(String, String)>,
     pub seed: u64,
@@ -287,7 +257,6 @@ pub struct MleMetadata {
     /// See [`MleProvenance::n_particles`].
     pub n_particles: usize,
     pub ess_at_mle: Option<(f64, f64)>,
-    pub timestamp: String,
 }
 
 #[cfg(test)]
@@ -308,8 +277,6 @@ mod tests {
             [("beta".to_string(), 0.3)].into();
         let meta = MleMetadata {
             input_hash: "deadbeef".into(),
-            fit_folder: dir.clone(),
-            model_path: "sir.camdl".into(),
             model_identity: "f00d".into(),
             data_hashes: vec![("cases".into(), "abc".into())],
             seed: 1,
@@ -321,7 +288,6 @@ mod tests {
             loglik_sd: 0.0,
             n_particles: 100,
             ess_at_mle: None,
-            timestamp: "2026-09-10T00:00:00Z".into(),
         };
         write_mle_params(&path.to_string_lossy(), &params, &meta).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
@@ -336,30 +302,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The model and data paths in `[provenance]` are recorded relative to the
-    /// fit folder, as `fit.meta.json`'s are, never relative to the directory
-    /// the fit ran in: from `<root>/results/fits/<seg>/<method>/<seed>/`, the
-    /// model at `<root>/sir.camdl` is `../../../sir.camdl`.
+    /// The block records the model and the data by content, never by path:
+    /// the file is part of a leaf's stored bytes, which must not change with
+    /// where the store is relative to the files the fit read. The same fit
+    /// written from two directories writes the same block.
     #[test]
-    fn the_provenance_paths_are_relative_to_the_fit_folder() {
-        let root = crate::test_support::unique_temp_dir("mle_params_relative");
-        let fit_folder = root.join("results/fits/sir-abcd1234");
-        let leaf = fit_folder.join("if2-00000000/seed_1-00000000");
-        std::fs::create_dir_all(&leaf).unwrap();
-        std::fs::create_dir_all(root.join("data")).unwrap();
-        std::fs::write(root.join("sir.camdl"), "compartments { S }\n").unwrap();
-        std::fs::write(root.join("data/cases.tsv"), "time\tcases\n").unwrap();
-        let path = leaf.join("mle_params.toml");
+    fn the_provenance_block_records_no_path() {
+        let root = crate::test_support::unique_temp_dir("mle_params_no_path");
         let params: std::collections::BTreeMap<String, f64> = [("beta".to_string(), 0.3)].into();
-        let meta = MleMetadata {
+        let meta = |data: &str| MleMetadata {
             input_hash: "deadbeef".into(),
-            fit_folder: fit_folder.clone(),
-            model_path: root.join("sir.camdl").to_string_lossy().into_owned(),
             model_identity: "f00d".into(),
-            data_hashes: vec![
-                (format!("cases ({})", root.join("data/cases.tsv").display()), "abc".into()),
-                ("gone".into(), "def".into()),
-            ],
+            data_hashes: vec![(format!("cases ({data})"), "abc".into())],
             seed: 1,
             method: "if2".into(),
             best_chain: ChainIndex(0),
@@ -369,15 +323,20 @@ mod tests {
             loglik_sd: 0.0,
             n_particles: 100,
             ess_at_mle: None,
-            timestamp: "2026-09-10T00:00:00Z".into(),
         };
-        write_mle_params(&path.to_string_lossy(), &params, &meta).unwrap();
-        let prov = read_mle_provenance(&path.to_string_lossy()).unwrap().unwrap();
+        let mut written = Vec::new();
+        for (sub, data) in [("a/results/fits/sir-abcd1234/if2-0/seed_1-0", "data/cases.tsv"),
+                            ("b/deeper/results/fits/sir-abcd1234/if2-0/seed_1-0", "../x/cases.tsv")] {
+            let leaf = root.join(sub);
+            std::fs::create_dir_all(&leaf).unwrap();
+            let path = leaf.join("mle_params.toml");
+            write_mle_params(&path.to_string_lossy(), &params, &meta(data)).unwrap();
+            written.push(std::fs::read_to_string(&path).unwrap());
+        }
         let _ = std::fs::remove_dir_all(&root);
-        assert_eq!(prov.source_model.as_deref(), Some("../../../sir.camdl"));
-        assert_eq!(prov.data["cases"].source.as_deref(), Some("../../../data/cases.tsv"));
-        assert_eq!(prov.data["cases"].hash, "abc");
-        assert_eq!(prov.data["gone"].source, None, "a stream with no file records no source");
+        assert_eq!(written[0], written[1], "the block depends on where the fit ran");
+        assert!(!written[0].contains("source") && !written[0].contains("timestamp"), "{}", written[0]);
+        assert!(written[0].contains("[provenance.data.cases]\nhash = \"abc\""), "{}", written[0]);
     }
 
     /// The file a fit writes verifies; a value edited afterwards is reported
@@ -393,8 +352,6 @@ mod tests {
             [("beta".to_string(), 0.3), ("gamma".to_string(), 0.1)].into();
         let meta = MleMetadata {
             input_hash: "deadbeef".into(),
-            fit_folder: dir.clone(),
-            model_path: "sir.camdl".into(),
             model_identity: "f00d".into(),
             data_hashes: vec![],
             seed: 1,
@@ -406,7 +363,6 @@ mod tests {
             loglik_sd: 0.0,
             n_particles: 100,
             ess_at_mle: None,
-            timestamp: "2026-10-24T00:00:00Z".into(),
         };
         write_mle_params(&path_s, &params, &meta).unwrap();
         let prov = read_mle_provenance(&path_s).unwrap().unwrap();
@@ -473,8 +429,6 @@ mod tests {
             [("beta".to_string(), 0.4321098765432_f64), ("gamma".to_string(), 0.2)].into();
         let meta = MleMetadata {
             input_hash: "deadbeef".into(),
-            fit_folder: dir.clone(),
-            model_path: "sir.camdl".into(),
             model_identity: "f00d".into(),
             data_hashes: vec![],
             seed: 1,
@@ -486,7 +440,6 @@ mod tests {
             loglik_sd: 0.0,
             n_particles: 100,
             ess_at_mle: None,
-            timestamp: "2026-10-24T00:00:00Z".into(),
         };
         write_mle_params(&path_s, &params, &meta).unwrap();
         let declared = read_mle_provenance(&path_s).unwrap().unwrap().content_hash;

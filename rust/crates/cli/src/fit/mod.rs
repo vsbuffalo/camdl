@@ -55,6 +55,7 @@ pub mod coeff_guard;  // gh#342 P4: NUTS guard — param reaching a coefficient 
 pub mod config_v2;
 pub mod loglik;  // gh#280: LoglikType — the single typed source for loglik class
 pub mod state;
+pub(crate) mod execution; // execution.json: one attempt's times, process and cost, outside the manifest
 pub(crate) mod stream_bindings; // which leaves a fit's [data] binds, by source, and to which files
 pub mod provenance;
 pub(crate) mod observed_rows; // one leaf's data rows, each with the instant or period it measures
@@ -1687,6 +1688,12 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // read it from the base's chain state; empty for a fresh run.
         let mut resume_boundary: Vec<usize> = Vec::new();
 
+        // This attempt's execution record (`execution.json`), written now so
+        // an attempt that dies still records when and where it ran, and
+        // rewritten with its finish before the commit. Outside the leaf's
+        // manifest: none of it is a function of the computation.
+        let mut attempt = execution::Execution::begin();
+        attempt.write(&method_dir).unwrap_or_else(|e| out.fail(format!("error: {e}")));
         let method_t0 = std::time::Instant::now();
         // Uninitialized on purpose: every dispatch arm must assign a
         // loglik (or exit) — the compiler enforces that no arm can fall
@@ -1896,7 +1903,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 let fit_state = state::FitState {
                     method: method_name.to_string(),
                     seed,
-                    timestamp: crate::cas::iso8601_utc(std::time::SystemTime::now()),
                     input_hash: None,
                     camdl_version: Some(crate::version::VERSION_SHORT.into()),
                     best_loglik: chain_results.best_loglik,
@@ -1977,10 +1983,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     // the model+data+config triple, not just the model.
                     input_hash: parent_fit_hash.clone(),
                     // The leaf is `<fit folder>/<method>-<h8>/seed_<n>-<h8>`.
-                    fit_folder: method_dir.ancestors().nth(2)
-                        .expect("a method leaf sits two levels below its fit folder")
-                        .to_path_buf(),
-                    model_path: sweep_config.model.camdl.clone(),
                     model_identity: model_identity.clone(),
                     data_hashes: data_hashes.clone(),
                     seed,
@@ -2006,7 +2008,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         && rescore.filter_stats.ess_min.is_finite())
                         .then_some((rescore.filter_stats.ess_mean,
                                     rescore.filter_stats.ess_min)),
-                    timestamp: fit_state.timestamp.clone(),
                 };
                 provenance::write_mle_params(&mle_path, &all_params, &metadata)
                     .unwrap_or_else(|e| out.say(format_args!("warning: {}", e)));
@@ -2332,8 +2333,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // through `abandon_method`. The terminal write goes down BEFORE
         // `finalize` below (provisionally: a failure up to the commit replaces
         // it with `failed`, so `progress.json` and `run.json` agree), so the timer thread is stopped before the leaf's
-        // manifest is taken over its files — a `progress.json` rewritten during
-        // the manifest walk would be hashed mid-flight. An event that was not
+        // manifest is taken over its files — the heartbeat's temporary file,
+        // written during the manifest walk, would be taken into it
+        // (`progress.json` itself is a record of the attempt, outside the
+        // manifest: `runid::PER_ATTEMPT_RECORDS`). An event that was not
         // recorded fails the run here, before it is called done.
         if let Err(e) = out.events_result() {
             // Closed first, so the failure is said once, not again as the
@@ -2351,12 +2354,12 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // `inputs` (recorded, never hashed) for show/status.
         let method_elapsed = method_t0.elapsed();
         // The run's inputs, written at the claim, gain what only the run
-        // could tell: its best log-likelihood and chain, and its wall time.
+        // could tell: its best log-likelihood and chain. Its wall time is the
+        // execution's, and goes to the execution record below.
         let mut inputs_json = run_inputs;
         if let Some(fields) = inputs_json.as_object_mut() {
             fields.insert("best_loglik".into(), serde_json::json!(method_best_loglik));
             fields.insert("best_chain".into(), serde_json::json!(method_best_chain));
-            fields.insert("wall_time_seconds".into(), serde_json::json!(method_elapsed.as_secs_f64()));
         }
         // A resumed leaf names its parent and where each segment of the chain
         // it holds begins (`resumed_chain::ResumeLineage`); a fresh run
@@ -2368,11 +2371,17 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             };
             let lineage = resumed_chain::ResumeLineage::extend(
                 base, index_column, &resolved.run_id.to_hex(),
-                std::mem::take(&mut resume_boundary), method_elapsed.as_secs_f64(),
+                std::mem::take(&mut resume_boundary),
             ).unwrap_or_else(|e| abandon_method(&out, format!("error: --resume lineage: {e}")));
+            attempt.earlier_segments = execution::Execution::segments_resuming(base, &lineage.parent_run_id);
             inputs_json[resumed_chain::RESUME_KEY] = serde_json::to_value(&lineage)
                 .unwrap_or_else(|e| abandon_method(&out, format!("error: --resume lineage: {e}")));
         }
+        attempt.finish(method_elapsed.as_secs_f64());
+        if let Some(sampling) = out.sampling() {
+            attempt.record(sampling);
+        }
+        attempt.write(&method_dir).unwrap_or_else(|e| abandon_method(&out, format!("error: {e}")));
         stop_if_refused(&out);
         let mut write = out.take_claim().expect("the claim is held from the claim to here");
         // A run that completes under `--label L` is stamped as it completes,

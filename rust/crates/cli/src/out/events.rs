@@ -254,8 +254,7 @@ mod tests {
 
         let collector = DiagnosticCollector::new("pmmh");
         collector.push(DiagnosticKind::ScaleFarFromOptimum { chain_id: 1, final_scale: f64::NAN });
-        let mut d = collector.snapshot().remove(0);
-        d.timestamp = "2026-11-09T00:00:00Z".into();
+        let d = collector.snapshot().remove(0);
         let mut finding = line(&Event::Finding { finding: &d });
         let message = finding["finding"]["message"].take();
         assert!(message.as_str().is_some_and(|m| !m.is_empty()));
@@ -264,7 +263,6 @@ mod tests {
             "finding": {
                 "kind": { "type": "scale_far_from_optimum", "chain_id": 1, "final_scale": "NaN" },
                 "severity": "warning", "message": null, "method": "pmmh",
-                "timestamp": "2026-11-09T00:00:00Z",
             },
         }));
 
