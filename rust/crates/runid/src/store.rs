@@ -1125,12 +1125,29 @@ fn is_reserved(name: &str) -> bool {
 /// never an input to anything a run computes, and enters no hash.
 pub const EVENT_LOG: &str = "events.jsonl";
 
+/// A fit method leaf's execution record: when this attempt at the leaf's
+/// computation started and finished, how long it took, the process and host
+/// that ran it, and the sampling cost it measured. Two executions of one
+/// computation differ in every one of these, so the record is outside the
+/// exact-set manifest and enters no hash; a leaf's stored bytes are the
+/// result alone.
+pub const EXECUTION_RECORD: &str = "execution.json";
+
+/// The leaf-root files that record one attempt at a leaf's computation rather
+/// than its result: the event log, the liveness heartbeat (`progress.json`,
+/// rewritten on a wall-clock timer, carrying a process id) and the execution
+/// record. The manifest and the orphan scan pass over them, and a reclaim
+/// moves them with the dead attempt's record into the preserved attempts
+/// (`preserve_prior_attempt`), so a leaf keeps one set per attempt.
+pub const PER_ATTEMPT_RECORDS: [&str; 3] = [EVENT_LOG, "progress.json", EXECUTION_RECORD];
+
 /// Leaf-root entries the manifest and the orphan scan pass over: the
-/// reserved files, the event log and the preserved attempts. Unlike the
-/// reserved files, the event log is a dead run's debris, which a reclaim
-/// moves into the preserved attempts (`preserve_prior_attempt`).
+/// reserved files, the records of the attempt and the preserved attempts.
+/// Unlike the reserved files, an attempt's records are a dead run's debris,
+/// which a reclaim moves into the preserved attempts
+/// (`preserve_prior_attempt`).
 fn is_unmanifested(name: &str) -> bool {
-    is_reserved(name) || name == EVENT_LOG || name == ATTEMPTS_DIR
+    is_reserved(name) || PER_ATTEMPT_RECORDS.contains(&name) || name == ATTEMPTS_DIR
 }
 
 /// The leaf-root directory holding earlier attempts at this leaf's identity:
@@ -1286,7 +1303,7 @@ fn rel_key(root: &Path, file: &Path) -> String {
 
 /// The leaf's OWN files must exactly match the manifest — no missing and no
 /// orphan — across its **whole subtree**, EXCEPT the reserved files, the
-/// event log ([`EVENT_LOG`]) and the declared `children` subdirs. A fit method nests per-chain files
+/// records of the attempt ([`PER_ATTEMPT_RECORDS`]) and the declared `children` subdirs. A fit method nests per-chain files
 /// (`chain_1/trace.tsv`) plus method-root outputs (`fit_state.toml`,
 /// `draws.tsv`), so the walk recurses; but it **stops at a declared child**
 /// (`obs/`, `trajectories/`, `dt_check/`) — those are separate artifacts with
@@ -1379,7 +1396,7 @@ fn scan_orphans(
 
 /// Build the exact-set manifest of the leaf's OWN files by walking its whole
 /// subtree (Mode B `finalize`): every file keyed by its `/`-joined relative
-/// path, EXCEPT reserved files, the event log and the contents of declared `children`
+/// path, EXCEPT reserved files, the records of the attempt and the contents of declared `children`
 /// subdirs (separate artifacts, manifested by their own commit).
 fn build_manifest(
     root: &Path,
