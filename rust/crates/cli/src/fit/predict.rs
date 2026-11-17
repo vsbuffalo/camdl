@@ -3537,10 +3537,11 @@ static EMPTY_CHAIN_COUNTS: BTreeMap<usize, usize> = BTreeMap::new();
 
 // ── The one-step-ahead posterior predictive producer ───────────────────────
 
-/// Particle count for the one-step prediction filter. It need not match the
+/// Particle count for the filters `fit predict` runs per posterior draw: the
+/// one-step band's and the fixed-origin forecast's. It need not match the
 /// fit's N — the band pools across draws too, and every particle's `ỹ` is
 /// kept (the recorder retains them), so a modest N yields a dense band cheaply.
-const ONE_STEP_N_PARTICLES: usize = 500;
+pub(crate) const PREDICT_N_PARTICLES: usize = 500;
 
 /// One chain's share of the one-step pool, plus the draw accounting a per-chain
 /// band has to report honestly (gh#794).
@@ -3671,7 +3672,7 @@ fn pool_one_step_draws(
         // base seed so each filter pass has its own RNG stream and the whole
         // run is deterministic given `base_seed`. Keyed on the index, so a
         // skipped draw does not shift the seeds of the draws after it.
-        let seed = base_seed ^ (0x9E37_79B9_7F4A_7C15u64.wrapping_mul(draw_idx as u64 + 1));
+        let seed = crate::fit::forecast_driver::draw_seed(base_seed, draw_idx);
         let result = match run_filter(draw_idx, params, seed) {
             Ok(r) => r,
             Err(e @ sim::SimError::PFDegenerate { .. }) => {
@@ -3957,7 +3958,7 @@ fn one_step_bands(
     };
 
     let smc_config = SMCConfig {
-        n_particles: ONE_STEP_N_PARTICLES,
+        n_particles: PREDICT_N_PARTICLES,
         dt,
         t_start: compiled.model.simulation.t_start,
         skip_first_obs_from_loglik: false,
