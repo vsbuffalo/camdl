@@ -73,6 +73,8 @@ fn front_matter(out: &mut String, title: &str, description: Option<&str>, order:
         let _ = writeln!(out, "description: {}", yaml_string(d));
     }
     let _ = writeln!(out, "order: {order}");
+    // Scopes the internals-only styles in docs/_web/theme.scss.
+    out.push_str("body-classes: td-page\n");
     out.push_str("---\n\n");
 }
 
