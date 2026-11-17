@@ -936,7 +936,7 @@ Recorded in the maintainer's docket; each is reflected in the spec and above.
   #1171).
 - **D63** (2026-11-16). Printed output in `docs/dates.md` is checked by the test
   suite, by extending `camdlc doctest` (which today compiles `camdl` blocks and
-  runs no commands) rather than adding a second harness.
+  runs no commands) rather than adding a second harness (#1168).
 - **D64** (2026-11-16). `--save-final-state` and `--init-state` stay as a
   permanent lower-level tool and are hardened: the saved state carries each
   stream's running period totals so that a restart in the middle of a period is
@@ -951,7 +951,7 @@ Recorded in the maintainer's docket; each is reflected in the spec and above.
 - **D66** (2026-11-16). A periodic forcing whose `on` range runs past the end of
   its period is refused with E406, with a hint to split it into two ranges
   (gh#1139; #1153).
-- **D67** (2026-11-16). `camdl data split` is removed.
+- **D67** (2026-11-16). `camdl data split` is removed (#1168).
   `pfilter --fit
   --save-final-state` on a fit with `holdout_after` applies the
   fit's training cutoff itself and says so, and seven documentation passages are
