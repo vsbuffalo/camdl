@@ -1,43 +1,41 @@
-(* Dependency classification for IR expressions.
+(** The most dynamic thing an IR expression depends on, from a literal up to
+    the projected value of an observation.
 
-   A single source of truth for "what does this expression depend on?",
-   replacing the two ad-hoc one-bit classifiers that exist today (each a
-   projection of this lattice, computed independently per language):
-   - OCaml `autodiff.ml` treats `BindingRef` as param-free (d/dp = 0);
-   - Rust `resolved_expr.rs::references_state` treats `BindingRef` as
-     state-derived.
+    {!dep_of_expr} classifies an {!Ir.expr} into one {!dep}, and
+    {!model_binding_deps} classifies every binding of a model, each from
+    the classes of the bindings it refers to. The classes form a chain,
 
-   The dependency classes form a join-semilattice. `Const` is the least
-   element (a literal depends on nothing); `join` returns the more-dynamic
-   of two classes. The chain is the declaration order below:
+    {v Const < Data < Param < Time < State < Projected v}
 
-     Const  <  Data  <  Param  <  Time  <  State  <  Projected
+    and the class of an expression is the greatest class of its leaves
+    ({!join}): [beta * S] is [State]. Its one user is the cost report of
+    [camdlc inspect], which labels each binding with {!dep_name}.
 
-   so `join` is "the one further along the chain". `references_state` is a
-   clean projection of this lattice:
-     references_state(e)  ≡  dep e ⊒ State   (State or Projected)
+    A class answers "how far does this expression vary", not "what does it
+    read". Because the join keeps only the greatest class, [beta * S] is
+    [State] although it reads the parameter [beta], so the class cannot say
+    whether an expression is free of parameters; that is
+    [Validate.references_param]. The differentiator and the runtime classify
+    expressions for their own purposes with their own functions, and do not
+    use this module.
 
-   NOTE: the lattice does NOT capture "references a param". `join` keeps only
-   the MOST-dynamic class, so `beta * S` classifies as `State` (the `Param` is
-   absorbed) even though it references `beta`. "Param-free" — the hoist/autodiff
-   invariant that a `BindingRef` differentiates to 0 (E512) — is therefore a
-   separate STRUCTURAL check (`Validate.references_param`), NOT a projection of
-   this lattice. Do not use `dep e ≠ Param` to mean param-free; it is not.
+    {!dep_of_expr} names every {!Ir.expr} constructor and has no side
+    effects. It raises [Failure] on an {!Ir.PerEvalRef}, which exists only
+    after the last compiler pass. *)
 
-   Pure and total: every constructor of `Ir.expr` is classified, no
-   exceptions, no side effects. *)
-
-(* NB: we do NOT `open Ir` — this module's [dep] constructors `Const` and
+(* NB: we do not `open Ir` — this module's [dep] constructors `Const` and
    `Param` would shadow `Ir.Const` / `Ir.Param`. IR expression
    constructors are qualified explicitly in the match below. *)
 
+(** How far an expression can vary: the class of the most dynamic quantity
+    it reads. Constructors are listed from least to most dynamic. *)
 type dep =
-  | Const      (* literal: depends on nothing *)
-  | Data       (* compile-time table data (constant-indexed lookups) *)
-  | Param      (* model parameter (estimable / runtime-supplied) *)
-  | Time       (* simulation time, dt, or a time function of them *)
-  | State      (* compartment populations (varies as the system advances) *)
-  | Projected  (* projection output in a likelihood (state-derived) *)
+  | Const      (** A literal, a model constant or a unit literal: fixed when the model is compiled. *)
+  | Data       (** A table cell or an observation's data: fixed once a run's data is bound. A table lookup is [Data] whatever its cells hold, so a lookup into a table of parameters is [Data], not [Param]. *)
+  | Param      (** A model parameter: fixed for one simulation, different between them. *)
+  | Time       (** Simulation time, the step [dt], or a forcing. *)
+  | State      (** A compartment: changes as the system advances. *)
+  | Projected  (** The projected value inside a likelihood argument. *)
 
 (* Position in the chain. join is max-by-rank, which is a valid
    semilattice join precisely because the order is a total chain. *)
@@ -85,11 +83,10 @@ let dep_of_expr ~binding_dep (e : Ir.expr) : dep =
        function of simulator state — classify as Data (like a constant-indexed
        table cell). It is differentiated to 0 (a data constant) in autodiff. *)
     | Ir.ObsColumnRef _ -> Data
-    (* gh#616: an observation anchor is external data supplied by the RUN (the
+    (* An observation anchor is external data supplied by the run (the
        observed window), and it is substituted for a `Const` before evaluation,
        so it classifies as Data — the same class as a table cell. It appears
-       only in a forcing `breakpoints` list, never in a rate, so this arm is
-       reachable only if a future pass walks a forcing body through here. *)
+       only in a forcing `breakpoints` list, never in a rate. *)
     | Ir.ObsAnchor _ -> Data
     | Ir.BinOp b -> join (go b.left) (go b.right)
     | Ir.UnOp u  -> go u.arg

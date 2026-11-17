@@ -1,15 +1,41 @@
-(* Pretty-printer for IR expressions with semantic coloring and
-   precedence-aware parenthesization.
+(** A printer of IR expressions for people: infix arithmetic with the fewest
+    parentheses that keep the tree, each name coloured by its kind, and, on
+    request, compartments shown with their indices.
 
-   Usage:
-     Pp_expr.pp ~mode:Pp_expr.Ir ~split:Pp_expr.no_split ~ascii:false ppf expr
-*)
+    {!pp} prints an {!Ir.expr} to a [Format] formatter. It parenthesises a
+    subexpression only where precedence requires, treating [+] and [-] as
+    left-associative and [^] as right-associative, and colours names
+    through {!Term_style}. [~ascii:true] writes [*] for multiplication
+    rather than [×]. Under [Dsl], a compartment name the {!split_fn}
+    recognises is printed with its levels, [S[child]] for [S_child]; the
+    function comes from {!make_split_map}, which enumerates every
+    expansion of each base compartment. Only compartments are split:
+    parameters and bindings keep their expanded names ([N_a]), and a table
+    lookup shows its flattened index ([W[3]] for [W[b, a]]).
+    {!to_string} prints in [Ir] mode with ASCII and no colour, for the
+    expander's diagnostics; [camdlc inspect] prints in [Dsl] mode.
 
+    The output reads like camdl but is not always camdl that compiles.
+    [min], [max] and [mod] are written infix ([a min b]), where camdl
+    writes [min(a, b)]; a sum is a parenthesised chain of [+]; a number
+    that is not an integer is printed with [%g], six significant digits,
+    so [0.123456789] prints as [0.123457]; a unit literal prints as its
+    value in the model's time unit, without its unit. And an
+    {!Ir.PopSum} is printed as [S + I + R] without parentheses although
+    the printer treats it as an atom, so the rate
+    [beta * S * I / (S + I + R)] is shown by [camdlc inspect --transitions]
+    as [beta × S × I / S + I + R], which reads as a different
+    expression. *)
+
+(** Which names {!pp} prints: [Ir] prints every name as the compiled model
+    holds it ([S_child]); [Dsl] prints a compartment name as the model's
+    author wrote it ([S[child]]), using a {!split_fn}. *)
 type name_mode = Dsl | Ir
 
-(** Split an IR flat compartment name into (base, dimension_values).
-    e.g. "S_child" → Some ("S", ["child"])
-    Used in DSL mode to render S[child] instead of S_child. *)
+(** A way to recover the author's spelling of a compiled compartment name:
+    the base name and its levels, in dimension order, such as
+    [Some ("S", ["child"])] for ["S_child"], and [None] for a name it does
+    not know. {!no_split} knows none. *)
 type split_fn = string -> (string * string list) option
 
 let no_split : split_fn = fun _ -> None
@@ -94,9 +120,7 @@ and pp_inner ~mode ~split ~ascii ppf = function
   | Ir.Const f ->
     (* Integer-valued floats up to 1e15 print as bare integers (no
        decimal point or scientific-notation tail); outside that range,
-       fall back to %g. Prior version had both arms identical, losing
-       the intended integer-literal rendering — reported as m4 in the
-       2026-04-19 compiler review. *)
+       fall back to %g. *)
     if Float.is_integer f && Float.abs f < 1e15 then
       Fmt.pf ppf "%.0f" f
     else

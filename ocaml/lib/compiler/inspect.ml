@@ -1,5 +1,32 @@
-(* camdl inspect — model inspection and pretty-printing.
-   All output goes to the provided ppf (typically Fmt.stdout or Fmt.stderr). *)
+(** [camdlc inspect] and [camdlc check]: a model's structure printed for a
+    person, and the compiler's verdict on it.
+
+    {!run_inspect} compiles a file through the front end only
+    ([Compiler.compile_detail_result]: parsing and expansion), so what it
+    shows is the expanded model before validation, dimension checking,
+    differentiation, constant folding and loop-invariant code motion; the
+    gradient fields are empty, and a model that a full compile would reject
+    can still be inspected. It prints the expansion's warnings to standard
+    error, then one report, chosen by an {!inspect_cmd}, to standard output.
+    It reads two things the IR has lost from the expander's context: the
+    declarations as written (a parameter's [#'] block, a [let] body, a
+    table's source file), and the dimensions of each compartment, through
+    which {!Pp_expr} prints [S_child] as [S[child]]. Each report is one
+    [run_*] function. The [--cost-report] is a measure of where evaluation
+    work lies: expression sizes, how many sum terms {!Constant_fold} would
+    remove, how often each binding is reused, with its {!Expr_analysis}
+    class, and two patterns worth rewriting ([1 - exp(x)], and repeated
+    subexpressions, counted by a hash that can collide).
+
+    {!run_check} runs the whole analysis a compile runs
+    ([Compiler.collect_detail]: through validation, dimension checking,
+    lints and differentiation), so it cannot disagree with a compile about
+    whether a model is valid. It prints the diagnostics and either exits 1
+    on an error or prints a one-line verdict with the number of warnings.
+
+    The command line is parsed in [camdlc.ml], which builds the
+    {!inspect_opts}. When several report flags are given, one wins by a
+    fixed precedence and the others are ignored without a message. *)
 
 open Ast
 
@@ -20,8 +47,8 @@ let make_split ctx =
   (* `inspect` renders a model that already compiled, so an undeclared
      stratify dimension cannot reach here — E214 would have blocked it. These
      five sites therefore render nothing for `None` rather than diagnose; the
-     lookups route through [Expander.dim_values] so the accessor invariant
-     (A1) holds file-wide. *)
+     lookups route through [Expander.dim_values], the one accessor of a
+     dimension's levels. *)
   let dim_vals = List.filter_map (fun sd ->
     Option.map (fun vs -> (sd.sdim, vs)) (Expander.dim_values ctx sd.sdim)
   ) ctx.Expander.stratifies in
@@ -166,7 +193,7 @@ let run_summary ppf (model : Ir.model) ctx (sum : Expander.model_summary) =
   (* Model name in bold blue *)
   Term_style.bold (Term_style.transition Fmt.string) ppf model.name;
   Fmt.pf ppf "@\n";
-  (* The model's own `#'` block (gh#750) — the answer to "what is this model?"
+  (* The model's own `#'` block — the answer to "what is this model?"
      without opening the file. One source line per output line, so a
      `@base`/`@adds`/`@changes` lineage header stays readable. *)
   (match model.doc_index.di_model with
@@ -229,9 +256,8 @@ let run_summary ppf (model : Ir.model) ctx (sum : Expander.model_summary) =
     Fmt.pf ppf " (+ 0 filtered by where)";
   Fmt.pf ppf "@\n";
   (* Parameters — summary groups parameters by declared kind. Full
-     per-parameter listing is available via `camdlc inspect --parameters`.
-     Previously the default dumped all parameters inline, which scaled
-     badly: a Garki model with 17 params wraps to an unreadable blob.
+     per-parameter listing is available via `camdlc inspect --parameters`,
+     because a model with many parameters would not fit on one line here.
      Reports both declarations (source-level) and expanded count (IR
      params after `p[dim]` stratification), matching the
      compartments line's "N base × dim = M expanded" shape. *)
@@ -621,11 +647,8 @@ let run_compartments ppf (model : Ir.model) ctx =
 
 (* ── --parameters ────────────────────────────────────────────────────────── *)
 
-(** Full parameter listing grouped by kind. Shows name, kind, bounds
-    (if declared), and any prior / hierarchical structure. Matches the
-    default's at-a-glance summary with a detailed view suitable for
-    larger models (Garki has 17 params, which wraps the one-line
-    summary's listing unreadably). *)
+(** The [--parameters] report: every parameter, grouped by kind, with its
+    bounds if declared and any prior or hierarchical structure. *)
 let run_parameters ppf (model : Ir.model) (ctx : Expander.context) =
   let kind_of (p : Ir.parameter) =
     match decl_of_param ctx p with
@@ -813,9 +836,8 @@ let run_transition_rate ppf (model : Ir.model) ctx name =
   let arrow = "\xe2\x86\x92" in
   match List.find_opt (fun (t : Ir.transition) -> t.name = name) model.transitions with
   | None ->
-    (* M30 in 2026-04-19 review: previously this printed an error
-       and exited 0, so `camdl inspect --transition foo` with a
-       bogus name failed silently from a CI's POV. Exit 1. *)
+    (* Exit 1, so a script that asks for a name that does not exist
+       sees the failure. *)
     Fmt.epr "error: no transition named '%s'@\n" name;
     exit 1
   | Some t ->
@@ -929,13 +951,10 @@ let run_transition_count ppf (model : Ir.model) ctx (pattern : string option) ~a
       Term_style.dimension Fmt.string ppf dim;
       Fmt.pf ppf "           %d values@\n" count
     ) orig_tr.trindices;
-    (* Combinatorial counts.
-       M25 in the 2026-04-19 review: the prior version computed
-       `all_n = len all_expanded + (len combos - len all_expanded)`
-       which simplifies to `combos_len` — a pointless round-trip.
-       And it labeled filtered combos as "self-loops", but `where`
-       guards can filter on any equality (age == under5, src != dst,
-       …) — only src==dst is a self-loop. Both fixed here. *)
+    (* Combinatorial counts. Combinations a `where` guard removes are
+       reported as filtered, not as self-loops: a guard can test any
+       equality (age == under5, src != dst), and only src == dst is a
+       self-loop. *)
     let combos = Expander.cartesian_product orig_tr.trindices ctx in
     let all_n = List.length combos in
     let kept_n = List.length all_expanded in
@@ -989,7 +1008,7 @@ let run_let ppf ctx name =
       ) dim_names;
       Term_style.dim_style Fmt.string ppf " \xe2\x86\x92 scalar"
     );
-    (* gh#508: the `#'` prose, rendered like the compartment / parameter /
+    (* The `#'` prose, rendered like the compartment / parameter /
        transition listings. This is where a derived quantity says what it
        means — the expression can show `S + E + I` but not whether that is
        the total population or the force-of-infection denominator. *)
@@ -1036,12 +1055,9 @@ let run_let ppf ctx name =
       Term_style.bold Fmt.string ppf (fmt_number n);
       Fmt.pf ppf " entries@\n"
     );
-    (* Referenced by.
-       M24 in the 2026-04-19 review: previously missed references
-       inside EFuncCall / EList / ERange subtrees. A let referenced
-       only inside `incidence(N)` or `prevalence(of = N, …)` (both
-       EFuncCall nodes) didn't show as a reference. Also cleans up
-       a dead `rate_str` allocation (n12). *)
+    (* Referenced by. The walk enters EFuncCall / EList / ERange
+       subtrees, so a let used only inside `incidence(N)` or
+       `prevalence(of = N, …)` counts as a reference. *)
     let refs = List.filter_map (fun (orig_tr : transition_decl) ->
       let rec expr_refs_name e =
         match e with
@@ -1354,24 +1370,27 @@ let run_forcings ppf (model : Ir.model) (pattern : string option) =
 
 (* ── Main entry point ────────────────────────────────────────────────────── *)
 
+(** The report [camdlc inspect] prints, one per run. A pattern is a name,
+    or a glob in which [*] matches any text; [None] means every entry. *)
 type inspect_cmd =
-  | Summary
-  | Compartments
-  | Parameters
-  | Transitions of string option        (* pattern *)
-  | TransitionRate of string
-  | TransitionCount of string option    (* pattern *)
-  | LetBinding of string
-  | Dims
-  | Tables of string option             (* pattern *)
-  | Forcings of string option           (* pattern *)
-  | CostReport
+  | Summary                             (** No flag: counts of compartments, transitions, parameters, tables, bindings, observation streams and interventions, and the dimensions, after the model's [#'] block. *)
+  | Compartments                        (** [--compartments]: each compartment with its kind, its dimensions and its expanded names. *)
+  | Parameters                          (** [--parameters]: the parameters grouped by kind, with bounds and priors where declared. *)
+  | Transitions of string option        (** [--transitions [PATTERN]]: each transition as written, with the expanded transitions and their rates. *)
+  | TransitionRate of string            (** [--transition NAME]: one expanded transition, by its expanded name such as [infection_a], with its stoichiometry, its rate and the [let] definitions the rate uses. *)
+  | TransitionCount of string option    (** [--count]: how many expanded transitions each declaration yields, before and after its [where] filter. The command line never sets the pattern: it would come from [--transitions PATTERN], but [--transitions] takes precedence over [--count], and [--transition NAME] does not set it, so the report always covers every transition. *)
+  | LetBinding of string                (** [--let NAME]: one [let] definition, its expanded entries and the transitions that use it. *)
+  | Dims                                (** [--dims]: the physical dimension inferred for each parameter, such as [T^-1] for a rate; not the model's [dimensions]. *)
+  | Tables of string option             (** [--tables [PATTERN]]: each table's source and values, labelled by level. *)
+  | Forcings of string option           (** [--forcings [PATTERN]]: each forcing and its definition. *)
+  | CostReport                          (** [--cost-report]: where the work of evaluating the rates lies. *)
 
+(** The options of one [camdlc inspect] run. *)
 type inspect_opts = {
-  cmd      : inspect_cmd;
-  ir_mode  : bool;   (* --ir: show flat IR names *)
-  ascii    : bool;   (* --ascii: no Unicode operators *)
-  no_color : bool;   (* --no-color *)
+  cmd      : inspect_cmd;  (** The report to print. *)
+  ir_mode  : bool;   (** [--ir]: meant to print expanded names. It is parsed and stored, but no report reads it, so it has no effect. *)
+  ascii    : bool;   (** [--ascii]: write operators in ASCII, [*] rather than [×]. Only the [--transitions] and [--count] reports read it. *)
+  no_color : bool;   (** [--no-color]: turn colour off, overriding the environment. *)
 }
 
 let run_inspect path opts =
@@ -1415,17 +1434,15 @@ let run_inspect path opts =
      | CostReport ->
        run_cost_report ppf model ctx)
 
-(** Run 'camdl check': the linter. Run the FULL front-end pipeline and report
-    the actionable diagnostics — errors (exit 1), warnings, and lints (L4xx) —
-    plus a verdict. The structural summary is `camdl inspect --summary`.
+(** [camdlc check]: report the diagnostics of a full compile — errors, on
+    which it exits 1, warnings and lints — and a verdict. It prints no
+    structure; that is [camdlc inspect].
 
-    Routed through [Compiler.collect_detail] — the single non-aborting core
-    that [compile] and [collect_diagnostics] also use — so `check` runs the
-    exact same stages as a real compile (lex → parse → expand → validate →
-    dimcheck → lint → autodiff) and can never disagree with it on a model's
-    validity. Two earlier divergences (gh#9: dimcheck skipped; gh#170: Validate
-    skipped) both came from `check` re-deriving a bespoke sub-pipeline; this
-    removes that surface entirely. *)
+    It goes through [Compiler.collect_detail], the non-aborting core that
+    [Compiler.compile] and [Compiler.collect_diagnostics] also use, so it
+    runs the stages a compile runs (parsing, expansion, validation,
+    dimension checking, lints, differentiation) and cannot disagree with a
+    compile about a model's validity. *)
 let run_check path =
   let name = Filename.basename path |> Filename.remove_extension in
   let src  = Compiler.read_file path in
