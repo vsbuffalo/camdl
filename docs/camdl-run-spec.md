@@ -797,7 +797,9 @@ draws it replays and declares, per stream, which columns are join coordinates
 versus band versus per-cell diagnostics, the `value_kind`, and the band's
 quantile levels; it also carries a `chain_selection` block when
 `--exclude-chains` narrowed the cloud, so a chain-subset band is never
-mistakable for a full-cloud one.
+mistakable for a full-cloud one. Its `produced`, `skipped` and `failed` lists
+name the model's observation streams (by leaf name) this artifact holds, leaves
+out and could not produce; they follow the stream contract below.
 
 **The tag is load-bearing, and a stored artifact must be read under its own.**
 The three versions do not carry the same numbers under the same column names:
@@ -817,27 +819,56 @@ in the column name itself. `observed.json` (`camdl.observed/v1`) is its sibling
 for the observed series.
 
 **`report.json` says what the run computed and what refused.** Schema tag
-`camdl.predict-report/v1`, written on every `fit predict`, with a `failures`
-list that is empty when nothing refused:
+`camdl.predict-report/v2`, written on every `fit predict`, with a `failures`
+list that is empty when nothing refused and a `skipped` list that is empty when
+every declared stream was covered:
 
 ```json
 {
-  "schema": "camdl.predict-report/v1",
+  "schema": "camdl.predict-report/v2",
   "failures": [
     {
       "kind": "evaluation_failed",
       "at": "free_forward",
       "reason": "scenario 'longer' declares …"
     }
-  ]
+  ],
+  "skipped": [{ "stream": "weekly_cases", "reason": "no_bound_data" }]
 }
 ```
+
+**Every mode covers the same streams (D76).** A stream is _eligible_ when the
+fit bound data to it. An eligible stream is produced. A stream the model
+declares but the fit bound no data to, and that `--stream` did not name, is
+_skipped_ with the reason `no_bound_data`: it was never eligible, so it is named
+on stderr, in `report.json` and in the manifest, and does not change the exit
+status. `--stream` (repeatable; a logical name selects all of its leaves)
+narrows the run to the named streams, and a named stream that cannot be produced
+is a failure. The exit status follows:
+
+| situation                                                               | exit |
+| ----------------------------------------------------------------------- | ---- |
+| every eligible stream produced                                          | 0    |
+| every eligible stream produced; streams with no data skipped            | 0    |
+| a stream with no bound data named by `--stream`                         | 1    |
+| several streams named by `--stream` and any one not produced            | 1    |
+| no stream eligible (nothing is written)                                 | 1    |
+| an eligible stream fails while it is produced (e.g. refused a forecast) | 1    |
+
+The manifest — `predictive.json` for the free-forward and one-step modes,
+`forecast.json` (`camdl.forecast/v2`) for a forecast — lists `produced` (leaf
+names), `skipped` (`{"stream", "reason"}`) and `failed`
+(`{"stream", "reason"}`), so a consumer reads completeness off the artifact
+rather than the exit status. A forecast also skips an eligible stream none of
+whose periods ends within the reach, with the reason `no_target_within_horizon`,
+and fails it instead when `--stream` named it.
 
 A _deterministic failure_ is a fact about the model as written that holds for
 whatever produced it regardless of how often it occurs — an unresolvable
 horizon, a scenario window this verb cannot honour, a `NaN`/±∞ where a number
 was about to be banded. One occurrence is a defect, so the run exits **1**. What
-it does not do is discard the objects that computed. Two kinds are recorded:
+it does not do is discard the objects that computed. Two kinds are recorded,
+each at the site it refused:
 
 - `evaluation_failed`, at `"free_forward"` — the tail as a whole refused. The
   one-step-ahead band is data-conditioned and never reaches the forecast
@@ -852,6 +883,10 @@ it does not do is discard the objects that computed. Two kinds are recorded:
   written, and the run exits 1. An entry that refused in one design cell is
   dropped from all of them, since the cells share one file and a partial file
   reads as a table over every cell.
+- `evaluation_failed`, at `{"stream": "<leaf>"}` (free-forward and one-step) or
+  `{"forecast_stream": "<leaf>"}` (forecast) — one stream could not be produced:
+  `--stream` named it and the fit bound it no data, or the forecast refused it.
+  Every other stream is written, and the run exits 1.
 
 `simulate` renders the same quantity tables but has no report to write into, so
 a non-finite quantity is an error there, named, with nothing written.

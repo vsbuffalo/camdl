@@ -17,7 +17,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::fit::failures::{DeterministicFailure, Site};
+use crate::fit::failures::{DeterministicFailure, Site, SkipReason, SkippedStream};
+use crate::fit::predict_streams::StreamSelection;
 use crate::fit::forecast_driver::{extend_run, fixed_origin_forecast, DriverConfig, Forecast, StateConditioning};
 use crate::fit::forecast_plan::{parse_reach, ForecastPlan, HeldOut, PlanStream, RowFile};
 use crate::fit::observed_rows::{Measures, ObservedRow};
@@ -50,7 +51,7 @@ impl DrawRef {
 }
 
 /// The `schema` tag of `forecast.json`.
-pub(crate) const FORECAST_SCHEMA: &str = "camdl.forecast/v1";
+pub(crate) const FORECAST_SCHEMA: &str = "camdl.forecast/v2";
 
 /// Refuse what forecast mode does not support, before any work: the backends
 /// and options of the Stage 5 capability matrix that have no forecast yet.
@@ -152,14 +153,17 @@ pub(crate) struct ForecastJob<'a> {
     pub seed: u64,
     /// The binomial sampler the fit's method ran (gh#747).
     pub binomial: sim::rng::BinomialAlgorithm,
+    /// The streams this forecast covers, skips and fails before any work (D76).
+    pub selection: &'a StreamSelection,
 }
 
-/// Run the forecast and write its artifact. Returns the files written and the
-/// streams refused a forecast (recorded in `report.json`).
+/// Run the forecast and write its artifact. Returns the files written, the
+/// streams that failed (asked for and unbound, or refused a forecast) and the
+/// streams skipped; the caller records the last two in `report.json`.
 pub(crate) fn run_forecast(
     out: &crate::out::Out,
     job: ForecastJob,
-) -> Result<(Vec<PathBuf>, Vec<DeterministicFailure>), String> {
+) -> Result<(Vec<PathBuf>, Vec<DeterministicFailure>, Vec<SkippedStream>), String> {
     let model = job.model;
     let raw = job.args.horizon.as_deref().expect("forecast mode carries --horizon");
     let reach = parse_reach(raw, &model.time_unit)?;
@@ -208,38 +212,50 @@ pub(crate) fn run_forecast(
         s.truncate_rows(partition.rows(&s.name));
     }
 
-    // The plan: targets for the streams `--stream` selects; every stream
-    // conditions the state.
-    let selected = |o: &ir::observation::ObservationModel| match job.args.stream.as_deref() {
-        None => true,
-        Some(name) => o.source == name || o.name == name,
-    };
+    // The plan: targets for the eligible streams (D76); every bound stream
+    // conditions the state. A stream with no bound data is not among
+    // `streams` at all: it has no rows to continue and no stop in the filter
+    // where its running total could start, so the selection has already
+    // skipped it or, when `--stream` asked for it, failed it.
+    let selection = job.selection;
     let plan_streams: Vec<PlanStream> = streams.iter()
-        .filter(|s| selected(&s.obs_model_ir))
+        .filter(|s| selection.includes(&s.name))
         .map(|s| PlanStream { obs: &s.obs_model_ir, training: &s.rows, held_out: &held_out[&s.name] })
         .collect();
-    if plan_streams.is_empty() {
-        return Err(format!("--stream {:?} names no bound observation stream",
-            job.args.stream.as_deref().unwrap_or("")));
+    if let Some(o) = model.observations.iter()
+        .find(|o| selection.includes(&o.name) && !streams.iter().any(|s| s.name == o.name))
+    {
+        return Err(format!(
+            "internal error: stream '{}' was selected as eligible but its rows were not loaded",
+            o.name));
     }
     let plan = ForecastPlan::new(partition, reach, &plan_streams).map_err(|e| e.to_string())?;
-    // A stream the fit bound no data to has no rows to continue and no stop
-    // in the filter where its running total could start: refused, and named.
-    let unbound: Vec<crate::fit::forecast_plan::StreamRefusal> = model.observations.iter()
-        .filter(|o| selected(o) && !streams.iter().any(|s| s.name == o.name))
-        .map(|o| crate::fit::forecast_plan::StreamRefusal::NoBoundRows { stream: o.name.clone() })
-        .collect();
-    let failures: Vec<DeterministicFailure> = plan.refusals().iter().chain(&unbound)
-        .map(|r| {
-            let stream = match r {
-                crate::fit::forecast_plan::StreamRefusal::NoRhythm { stream, .. }
-                | crate::fit::forecast_plan::StreamRefusal::NoBoundRows { stream }
-                | crate::fit::forecast_plan::StreamRefusal::ReadsDataColumn { stream, .. }
-                | crate::fit::forecast_plan::StreamRefusal::OverlapsObserved { stream, .. } => stream.clone(),
-            };
-            DeterministicFailure::EvaluationFailed { at: Site::ForecastStream(stream), reason: r.to_string() }
-        })
-        .collect();
+    // An eligible stream the plan refused is a failure; one with no target
+    // within the reach is skipped, unless `--stream` asked for it.
+    let mut failures: Vec<DeterministicFailure> = selection.failures.clone();
+    failures.extend(plan.refusals().iter().map(|r| DeterministicFailure::EvaluationFailed {
+        at: Site::ForecastStream(r.stream().to_string()),
+        reason: r.to_string(),
+    }));
+    let mut skipped: Vec<SkippedStream> = selection.skipped.clone();
+    for p in &plan_streams {
+        let name = &p.obs.name;
+        let produced = plan.sources().iter().any(|(s, _)| s == name);
+        let refused = plan.refusals().iter().any(|r| r.stream() == name);
+        if produced || refused {
+            continue;
+        }
+        if selection.was_requested(name) {
+            failures.push(DeterministicFailure::EvaluationFailed {
+                at: Site::ForecastStream(name.clone()),
+                reason: format!(
+                    "--stream asked for it, but {}; lengthen --horizon to reach its next period",
+                    SkipReason::NoTargetWithinHorizon.describe()),
+            });
+        } else {
+            skipped.push(SkippedStream { stream: name.clone(), reason: SkipReason::NoTargetWithinHorizon });
+        }
+    }
 
     // The fitted model, its run extended to the latest target (D49).
     let mut fitted = job.seeded.clone();
@@ -288,15 +304,13 @@ pub(crate) fn run_forecast(
     }).map_err(|f| f.describe(|d| draw_refs[d].describe()))?;
 
     let mut written = write_tables(&fc, model, job.schema, job.out_dir, &draw_refs)?;
-    let refused: Vec<crate::fit::forecast_plan::StreamRefusal> =
-        fc.plan.refusals().iter().chain(&unbound).cloned().collect();
-    written.push(write_manifest(&fc, &job, &record, raw, &refused, &draw_refs)?);
+    written.push(write_manifest(&fc, &job, &record, raw, &skipped, &failures, &draw_refs)?);
     out.say(format_args!(
         "fit predict: forecast from t = {} (the end of the training rows) to t = {}: {} \
          target(s) on {} stream(s), {} draws × {} particles",
         fc.plan.origin(), fc.plan.origin() + fc.plan.horizon(), fc.plan.targets().len(),
         fc.plan.sources().len(), fc.n_draws, fc.n_particles));
-    Ok((written, failures))
+    Ok((written, failures, skipped))
 }
 
 fn leaf<'m>(model: &'m ir::Model, name: &str) -> &'m ir::observation::ObservationModel {
@@ -389,7 +403,8 @@ fn write_manifest(
     job: &ForecastJob,
     record: &crate::run_meta::TrainingPartitionRecord,
     reach_as_written: &str,
-    refused: &[crate::fit::forecast_plan::StreamRefusal],
+    skipped: &[SkippedStream],
+    failures: &[DeterministicFailure],
     draw_refs: &[DrawRef],
 ) -> Result<PathBuf, String> {
     let point = |t: f64| serde_json::json!({
@@ -435,7 +450,15 @@ fn write_manifest(
         "target_sources": fc.plan.sources().iter()
             .map(|(s, src)| serde_json::json!({ "stream": s, "source": src.describe() }))
             .collect::<Vec<_>>(),
-        "refused": refused.iter().map(|r| r.to_string()).collect::<Vec<_>>(),
+        // D76: every stream this forecast covers is in exactly one of these (all
+        // the declared streams, or those --stream names), so a reader
+        // need not infer completeness from the exit status. `produced` holds
+        // the streams with targets, `skipped` the ones left out without
+        // failing the forecast (each with its reason), `failed` the ones that
+        // make its exit status 1.
+        "produced": fc.plan.sources().iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>(),
+        "skipped": skipped,
+        "failed": crate::fit::failures::failed_streams(failures),
         "n_draws": fc.n_draws,
         // The posterior draws run, in the order of `forecast-samples.tsv`:
         // each one's row of draws.tsv and its (chain, draw) key there.

@@ -192,6 +192,16 @@ applicable horizons (chain-binomial → `free_forward` + `one_step`; ODE →
 `free_forward` only); an optimizer fit (IF2 / NLopt) is refused since it has no
 posterior cloud.
 
+Every mode predicts each stream the fit bound data to. A stream the model
+declares but the fit bound no data to is _skipped_: it is named on stderr and in
+`report.json` with the reason `no_bound_data`, and the exit status stays 0.
+`--stream NAME` (repeatable) restricts the run to the named streams; a named
+stream that cannot be produced — no bound data, or refused — makes the exit
+status 1, and the streams that could be produced are still written. The manifest
+(`predictive.json`, or `forecast.json` for a forecast) lists the streams
+`produced`, `skipped` (each with its reason) and `failed`, so a reader can tell
+what the artifact covers without the exit status.
+
 `fit predict --fit fit.toml --horizon "4 weeks"` (or `--mode forecast`) writes
 the fixed-origin forecast instead: from the end of the fit's training rows (the
 _forecast origin_), the state is filtered through the training rows only and
@@ -201,14 +211,16 @@ from that one (0, 1, …); `lead` is the time from the origin to the target's en
 The targets are the periods the stream declares — a uniform `covers` form
 continues its tiling, window columns use `emit_schedule` — and a stream with
 neither, or whose likelihood reads a data column such as a binomial's `n`, is
-refused a forecast and named in `report.json`. It writes `forecast/<stream>.tsv`
-(one row per target: `t_start`, `t_stop`, `horizon`, `lead`, the held-out row it
-corresponds to, the mean and the `q05…q95` band), `forecast-samples.tsv` (joint
-samples, each one trajectory across every target), and `forecast.json` (the
-origin, the reach, the rows that conditioned the parameters and the state, and
-the calendar). Forecasts are available for chain-binomial posteriors (PMMH,
-PGAS); an ODE posterior, `--scenario`, `--sweep` and `--by-chain` are refused in
-this mode for now.
+refused a forecast: it is listed under `failed`, named in `report.json`, and the
+exit status is 1. A stream none of whose periods ends within the reach is
+skipped with the reason `no_target_within_horizon` (a failure if `--stream`
+named it). It writes `forecast/<stream>.tsv` (one row per target: `t_start`,
+`t_stop`, `horizon`, `lead`, the held-out row it corresponds to, the mean and
+the `q05…q95` band), `forecast-samples.tsv` (joint samples, each one trajectory
+across every target), and `forecast.json` (the origin, the reach, the rows that
+conditioned the parameters and the state, and the calendar). Forecasts are
+available for chain-binomial posteriors (PMMH, PGAS); an ODE posterior,
+`--scenario`, `--sweep` and `--by-chain` are refused in this mode for now.
 
 A resumed fit reads the base run read-only and writes a _new_ run keyed on the
 extended length. It is a distinct deterministic artifact — not bit-identical to

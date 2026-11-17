@@ -114,6 +114,18 @@ pub(crate) enum StreamRefusal {
     OverlapsObserved { stream: String, start: f64, end: f64, row: usize },
 }
 
+impl StreamRefusal {
+    /// The refused stream's leaf name.
+    pub(crate) fn stream(&self) -> &str {
+        match self {
+            StreamRefusal::NoRhythm { stream, .. }
+            | StreamRefusal::NoBoundRows { stream }
+            | StreamRefusal::ReadsDataColumn { stream, .. }
+            | StreamRefusal::OverlapsObserved { stream, .. } => stream,
+        }
+    }
+}
+
 impl std::fmt::Display for StreamRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
