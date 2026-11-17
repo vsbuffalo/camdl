@@ -857,10 +857,10 @@ pub fn run_ode(
     )?;
     crate::effects::apply_origin_batch(
         model, &plan,
-        &mut crate::effects::ContinuousArena { int: &mut state.int, real: &mut state.real },
+        &mut crate::effects::ContinuousArena { int: &mut state.int, real: &mut state.real, sens: None },
         params, cfg.t_start, cfg.dt,
         |a, ivs| crate::effects::apply_interventions_continuous(
-            model, ivs, a.int, a.real, params, cfg.t_start, cfg.dt,
+            model, ivs, a, params, cfg.t_start, cfg.dt,
         ),
     )?;
 
@@ -1014,13 +1014,14 @@ pub fn run_ode(
                 // §13.10: inflow events, then drains and `set` on the
                 // post-inflow state (no transition stage at a boundary), then
                 // interventions in declaration order (gh#985).
+                let mut arena = crate::effects::ContinuousArena {
+                    int: &mut st.int, real: &mut st.real, sens: None,
+                };
                 crate::effects::apply_event_phases(
-                    model, &batch.event_idx,
-                    &mut crate::effects::ContinuousArena { int: &mut st.int, real: &mut st.real },
-                    params, bt, cfg.dt, None,
+                    model, &batch.event_idx, &mut arena, params, bt, cfg.dt, None,
                 )?;
                 crate::effects::apply_interventions_continuous(
-                    model, &batch.intervention_idx, &mut st.int, &mut st.real, params, bt, cfg.dt,
+                    model, &batch.intervention_idx, &mut arena, params, bt, cfg.dt,
                 )
             },
             |st, ot| {
@@ -1103,9 +1104,12 @@ struct AugState {
 /// for one that does. Passed in (not derived here) so the seed computation is
 /// a separate, independently-tested concern.
 ///
-/// Refuses (hard error, §1c/§1h) an adaptive integrator, a `dt`-in-rate
-/// (RUNTIME_DT) model, and any scheduled effect — none of which have a defined
-/// fixed-step forward sensitivity in v1.
+/// Refuses (hard error, §1c/§1h) an adaptive integrator and a `dt`-in-rate
+/// (RUNTIME_DT) model — neither has a defined fixed-step forward sensitivity.
+/// Scheduled effects are applied with their sensitivity jump (§1g); which
+/// effects the jump is defined for is the gradient capability gate's question,
+/// answered before this runs (`preflight_gradient_ode`), so an effect this
+/// function cannot carry is an internal error here, never a silent omission.
 ///
 /// `burnin_dt` is the coarse RK4 step for the *unscored* warm-up
 /// `[t_start, first_obs)` (gh#396 follow-on): when `burnin_dt > cfg.dt` the
@@ -1199,24 +1203,45 @@ pub(crate) fn integrate_obs_sensitivity(
     } else {
         output_times
     };
-    // §1g: fixed-time θ-magnitude event sensitivity is a follow-up, and the
-    // gradient path applies no effect — neither the origin batch nor a later
-    // one — so v1 refuses any effect the run would fire rather than emit a
-    // gradient of the model without it (silent-wrong). Both halves of the plan
-    // count: a model whose only effect is at t_start has no later instant.
+    // Scheduled effects (gh#275 §1g). The same plan `run_ode` builds, applied at
+    // the same instants through the same two passes (`apply_event_phases`, then
+    // the sequential interventions) on the same continuous arena — now carrying
+    // the sensitivities, so each state jump `x⁺ = Φ(x⁻, θ)` is applied together
+    // with its derivative `S⁺ = ∂Φ/∂x·S⁻ + ∂Φ/∂θ` (`effects::SensBlock`). The
+    // effect instants are boundaries of the `Schedule` below, so the RK4 step
+    // is split exactly at each one: the value and the sensitivity cross the
+    // jump at the same substep boundary, and `S` stays the exact derivative of
+    // the discrete computation the likelihood uses. Which effects the
+    // sensitivity can cross is the gradient capability gate's question
+    // (`preflight_gradient_ode`), answered before this runs.
     let plan = crate::effect_plan::EffectPlan::build(
         model, params, cfg.t_start, cfg.t_end,
         crate::effect_plan::FireClock::Exact, crate::effect_plan::Origin::Init,
     )?;
-    if !plan.is_empty() {
+    // Mirror `run_ode`: a coarse warm-up is refused for a model with `events {}`
+    // (it never reaches here from `nl-lbfgs`, which passes `burnin_dt = dt`).
+    if use_coarse && model.model.interventions.iter().any(|i| i.kind.is_event()) {
         return Err(SimError::Validation(
-            "ODE gradient (nl-lbfgs) does not yet support scheduled interventions \
-             or events: their event-jump sensitivity is a follow-up (gh#275 \
-             §1g). Use `nl-sbplx` on `ode`, which needs no gradient, for models \
-             with effects."
+            "coarse burn-in (burnin_dt) is not supported for a model with `events {}`: \
+             an event fires every substep, so a coarse warm-up step would change how \
+             often it fires. Remove burnin_dt (or use the fine step) for this model."
                 .to_string(),
         ));
     }
+    // The effects at t_start apply to the starting state and its seed, before
+    // the t_start row is recorded (D1) — as in `run_ode`.
+    crate::effects::apply_origin_batch(
+        model, &plan,
+        &mut crate::effects::ContinuousArena {
+            int: &mut st.ode.int,
+            real: &mut st.ode.real,
+            sens: Some(crate::effects::SensBlock { state: &mut st.sens.state, param_model_idx }),
+        },
+        params, cfg.t_start, cfg.dt,
+        |a, ivs| crate::effects::apply_interventions_continuous(
+            model, ivs, a, params, cfg.t_start, cfg.dt,
+        ),
+    )?;
     let schedule = Schedule::exact_forward(cfg.dt, cfg.t_end, output_times, plan.effect_times());
     let mut cursor = Cursor::default();
 
@@ -1317,11 +1342,29 @@ pub(crate) fn integrate_obs_sensitivity(
             &stop,
             t,
             &mut st,
-            // The plan is empty (refused above), so no effect boundary exists.
-            |_st, bt, _effect_idx| Err(SimError::Validation(format!(
-                "internal: ODE gradient path reached an effect boundary at t={bt} \
-                 although its effect plan is empty"
-            ))),
+            // The due batch, applied as `run_ode` applies it (§13.10: inflow
+            // events, then drains and `set` on the post-inflow state, then the
+            // interventions in declaration order) with the sensitivities riding
+            // along. Incidence (`flow`, `cum_flow`) and its sensitivity are
+            // untouched: an effect moves state, not transition flow.
+            |st, bt, effect_idx| {
+                let mut batch = crate::schedule::EffectBatch::default();
+                crate::effects::split_due_batch(model, plan.batch(effect_idx), &mut batch);
+                let mut arena = crate::effects::ContinuousArena {
+                    int: &mut st.ode.int,
+                    real: &mut st.ode.real,
+                    sens: Some(crate::effects::SensBlock {
+                        state: &mut st.sens.state,
+                        param_model_idx,
+                    }),
+                };
+                crate::effects::apply_event_phases(
+                    model, &batch.event_idx, &mut arena, params, bt, cfg.dt, None,
+                )?;
+                crate::effects::apply_interventions_continuous(
+                    model, &batch.intervention_idx, &mut arena, params, bt, cfg.dt,
+                )
+            },
             |st, _ot| {
                 for i in 0..n_tr {
                     cum_flow[i] += st.ode.flow[i];
