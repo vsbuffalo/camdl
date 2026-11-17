@@ -220,6 +220,7 @@ fn smc(record: bool) -> SMCConfig {
         record_prequential: record,
         record_predictions: record,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     }
 }
 
@@ -506,6 +507,7 @@ fn if2(compiled: &Arc<CompiledModel>, obs: &MultiStreamObsModel, seed: u64) -> I
         t_start: 0.0,
         skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
     run_if2(&process, obs, &compiled.default_params, &params, &config, seed).unwrap()
 }
