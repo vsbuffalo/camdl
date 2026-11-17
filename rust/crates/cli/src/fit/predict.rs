@@ -2969,7 +2969,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     }
     let scenario_labels: Vec<&str> = scenario_refs.iter().map(|s| s.name()).collect();
     out.say(format_args!(
-        "fit predict: horizon={} treatment=posterior, {} scenario(s) [{}], {} stream(s), \
+        "fit predict: mode={} treatment=posterior, {} scenario(s) [{}], {} stream(s), \
          {} draws from {} method '{}'",
         horizons.join("+"),
         scenario_labels.len(),
