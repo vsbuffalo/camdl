@@ -16718,6 +16718,27 @@ let tau_runtime_refusal src =
     (tp_model ~params:"tau : instant in [0 'days, 100 'days]"
        ~rate:(src ^ " then 0.5 else 1.0") ())
 
+(* Review of #1185, finding 7: the calendar spelling and the explicit form of
+   one schedule compile to the same IR (so the same run identity), not only to
+   the same value: `at [6 'months]` is `at_times [182]`, as
+   `at [add_calendar_months(origin, 6)]` is, and a breakpoint is the same
+   constant. *)
+let test_tp_same_ir_as_explicit () =
+  let fire src = List.map (fun (iv : Ir.intervention) -> iv.Ir.fire)
+      (compile_expect_ok src).Ir.interventions in
+  let at e = tp_model ~extra:(Printf.sprintf "interventions { b : add(S, 10) at [%s] }" e) () in
+  if fire (at "6 'months") <> fire (at "add_calendar_months(origin, 6)") then
+    Alcotest.fail "at [6 'months] and at [add_calendar_months(origin, 6)] lower differently";
+  (match fire (at "6 'months") with
+   | [Ir.Scheduled (Ir.AtTimes [182.0])] -> ()
+   | _ -> Alcotest.fail "expected at_times [182]");
+  let bps e = List.map (fun (tf : Ir.time_function) -> tf.Ir.kind)
+      (compile_expect_ok (tp_model ~rate:"f(t)"
+         ~extra:(Printf.sprintf "forcing { f : piecewise 'ratio { breakpoints = [%s] values = [1.0, 0.5] } }" e) ()))
+      .Ir.time_functions in
+  if bps "6 'months" <> bps "add_calendar_months(origin, 6)" then
+    Alcotest.fail "breakpoints = [6 'months] and its explicit form lower differently"
+
 let elapsed_rows = [
   "t - tau >= 6 'months refused (run-time base)",
   (fun () -> tau_runtime_refusal "if t - tau >= 6 'months");
@@ -16758,6 +16779,7 @@ let elapsed_rows = [
 let stage_1b_tests =
   resolution_rows @ elapsed_rows @ [
   "timepoints origin + 6 'months resolves", test_tp_timepoints_resolve;
+  "a resolved step lowers to the explicit form's IR", test_tp_same_ir_as_explicit;
   "a calendar instant let is reported once", test_tp_let_reported_once;
   "fractional months refused", test_tp_refuse_fractional_months;
   "months mixed with days refused, both orders in the note", test_tp_refuse_mixed;
