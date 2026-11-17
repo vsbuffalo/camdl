@@ -296,7 +296,10 @@ impl Conv<'_> {
             let body = self.until("v}");
             out.block(&fence("", &code_body(&body)));
         } else if self.starts_with("{%") {
-            // Raw markup for one output format: keep its text.
+            // Raw markup for one output format: keep its text. Markup alone
+            // in its paragraph stays alone, so Markdown reads an HTML
+            // comment there as a raw HTML block, the only form in which
+            // docs/_web/figures.lua recognises a figure marker.
             self.i += 2;
             let body = self.until("%}");
             let body = body.split_once(':').map_or(body.as_str(), |(_, b)| b);
@@ -642,6 +645,38 @@ mod tests {
     #[test]
     fn escapes_are_literal() {
         assert_eq!(conv("a \\{b\\} \\[c\\]"), "a {b} \\[c\\]");
+    }
+
+    #[test]
+    fn html_raw_markup_alone_in_its_paragraph_is_a_block() {
+        assert_eq!(
+            conv(
+                "Stages:\n\n{%html:<!-- figure: stages -->%}\n{v\n a -> b\nv}\n\
+                 {%html:<!-- /figure -->%}\n\nAfter."
+            ),
+            "Stages:\n\n<!-- figure: stages -->\n\n```\na -> b\n```\n\n\
+             <!-- /figure -->\n\nAfter."
+        );
+        // At the end of the text, and with only whitespace around it.
+        assert_eq!(
+            conv("Text.\n\n  {%html:<!-- /figure -->%}  "),
+            "Text.\n\n<!-- /figure -->"
+        );
+    }
+
+    #[test]
+    fn raw_markup_in_running_text_stays_inline() {
+        assert_eq!(conv("a {%html:<b>%}b{%html:</b>%} c"), "a <b>b</b> c");
+        // On its own line but inside a paragraph.
+        assert_eq!(
+            conv("First line\n{%html:<br>%}\nlast line."),
+            "First line\n<br>\nlast line."
+        );
+        // Raw markup for another format keeps its text the same way.
+        assert_eq!(
+            conv("Text.\n\n{%latex:\\x%}\n\nMore."),
+            "Text.\n\n\\x\n\nMore."
+        );
     }
 
     #[test]

@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 548" role="img" aria-labelledby="t d">
+  <title id="t">The stages of a compile</title>
+  <desc id="d">A compile runs in this order. The lexer (lexer.mll) and the parser (parser.mly, built by Menhir) turn model.camdl into an Ast.declaration list, from which Declared_emit also builds the model as written. Expander.expand_detail turns the declaration list into the expanded Ir.model: declaration and name checks, surface time typing, via lowering, expansion of families over dimensions, name resolution and unit conversion. On the expanded model, Validate, then Dimcheck, then Lint report diagnostics only; Autodiff fills the gradient fields; and Constant_fold, then Licm, rewrite expressions while preserving their values, giving the final Ir.model. camdlc applies the --set overrides and Serde.model_to_channel writes the envelope, with the keys ir_version, validated_by, model, docs and declared.</desc>
+  <defs>
+    <marker id="ics-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" class="fig-arrow"/>
+    </marker>
+  </defs>
+
+  <!-- what each stage hands on -->
+  <rect x="2" y="4" width="240" height="36" rx="4" class="fig-card s-line"/>
+  <text x="16" y="27" class="t-mono-label fig-ink">model.camdl</text>
+
+  <rect x="2" y="94" width="240" height="36" rx="4" class="fig-card s-line"/>
+  <text x="16" y="117" class="t-mono-label fig-ink">Ast.declaration list</text>
+
+  <rect x="2" y="250" width="240" height="36" rx="4" class="fig-card s-line"/>
+  <text x="16" y="273" class="t-mono-label fig-ink">Ir.model<tspan class="fig-muted">, expanded</tspan></text>
+
+  <rect x="2" y="400" width="240" height="36" rx="4" class="fig-card s-line"/>
+  <text x="16" y="423" class="t-mono-label fig-ink">Ir.model<tspan class="fig-muted">, final</tspan></text>
+
+  <rect x="2" y="508" width="604" height="36" rx="4" class="fig-accent-soft s-accent"/>
+  <text x="16" y="531" class="t-code-label fig-ink">{ "ir_version", "validated_by", "model", "docs", "declared" }</text>
+
+  <!-- the stages between them -->
+  <g class="s-arrow">
+    <line x1="30" y1="41" x2="30" y2="92" marker-end="url(#ics-arrow)"/>
+    <line x1="30" y1="131" x2="30" y2="248" marker-end="url(#ics-arrow)"/>
+    <line x1="30" y1="287" x2="30" y2="398" marker-end="url(#ics-arrow)"/>
+    <line x1="30" y1="437" x2="30" y2="506" marker-end="url(#ics-arrow)"/>
+  </g>
+
+  <g class="t-small fig-ink">
+    <text x="48" y="71">Lexer (<tspan class="t-mono">lexer.mll</tspan>), Parser (<tspan class="t-mono">parser.mly</tspan>, Menhir)</text>
+
+    <text x="48" y="160" class="t-b"><tspan class="t-mono">Expander.expand_detail</tspan></text>
+  </g>
+  <g class="t-small fig-muted">
+    <text x="64" y="182">declaration and name checks, surface time typing,</text>
+    <text x="64" y="202"><tspan class="t-mono">via</tspan> lowering, expansion of families over dimensions,</text>
+    <text x="64" y="222">name resolution, unit conversion</text>
+  </g>
+
+  <!-- passes over the expanded model -->
+  <g class="t-small">
+    <text x="48" y="318" class="fig-ink"><tspan class="t-mono">Validate</tspan> → <tspan class="t-mono">Dimcheck</tspan> → <tspan class="t-mono">Lint</tspan></text>
+    <text x="344" y="318" class="fig-muted">report diagnostics only</text>
+    <text x="48" y="346" class="fig-ink"><tspan class="t-mono">Autodiff</tspan></text>
+    <text x="344" y="346" class="fig-muted">fills the gradient fields</text>
+    <text x="48" y="374" class="fig-ink"><tspan class="t-mono">Constant_fold</tspan> → <tspan class="t-mono">Licm</tspan></text>
+    <text x="344" y="374" class="fig-muted">rewrite, preserving values</text>
+  </g>
+
+  <g class="t-small fig-ink">
+    <text x="48" y="463"><tspan class="t-mono">camdlc</tspan>: apply <tspan class="t-mono">--set</tspan> overrides</text>
+    <text x="48" y="485"><tspan class="t-mono">Serde.model_to_channel</tspan></text>
+  </g>
+
+  <!-- side branch: the declared model -->
+  <line x1="243" y1="112" x2="370" y2="112" class="s-arrow" marker-end="url(#ics-arrow)"/>
+  <rect x="374" y="88" width="232" height="48" rx="4" class="fig-panel s-line"/>
+  <text x="388" y="107" class="t-mono-label fig-ink">Declared_emit</text>
+  <text x="388" y="126" class="t-small fig-muted">the model as written</text>
+</svg>

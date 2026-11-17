@@ -15,6 +15,7 @@ writes.
 
 A compile runs these stages, in this order:
 
+{%html:<!-- figure: internals-compiler-stages -->%}
 {v
   model.camdl
       |   Lexer (lexer.mll), Parser (parser.mly, Menhir)
@@ -36,6 +37,7 @@ A compile runs these stages, in this order:
       v
   { "ir_version", "validated_by", "model", "docs", "declared" }
 v}
+{%html:<!-- /figure -->%}
 
 The page is organised by these stages. Each section below says what a stage
 receives, what it hands on, and what the next stage may rely on.
