@@ -103,8 +103,10 @@ pub(crate) struct DriverConfig {
     pub record_expected: bool,
 }
 
-/// The seed of draw `d`: the one-step band's mixing, so the forecast of a draw
-/// is reproducible from the base seed and the draw's index alone.
+/// The seed of draw `d`, for every filter `fit predict` runs per posterior
+/// draw (the one-step band and the forecast): reproducible from the base seed
+/// and the draw's index alone, and keyed on the index so a skipped draw does
+/// not shift the seeds after it.
 pub(crate) fn draw_seed(base_seed: u64, draw: usize) -> u64 {
     base_seed ^ (0x9E37_79B9_7F4A_7C15u64.wrapping_mul(draw as u64 + 1))
 }

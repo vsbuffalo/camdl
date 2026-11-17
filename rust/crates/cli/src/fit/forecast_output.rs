@@ -25,10 +25,6 @@ use crate::fit::predict::PosteriorDraws;
 use crate::fit::training_partition::TrainingPartition;
 use crate::quantile::{band, fmt_time, fmt_value, QUANTILE_LEVELS};
 
-/// The particles per posterior draw. The forecast pools draws × particles;
-/// the one-step band's count, for the same reason.
-pub(crate) const FORECAST_N_PARTICLES: usize = 500;
-
 /// Joint samples written per posterior draw, evenly strided over its
 /// particles. Every particle is a draw from the same predictive (equal weights
 /// after the origin), so a stride is a sample of them; the bands use all.
@@ -240,7 +236,7 @@ pub(crate) fn run_forecast(
         })
         .collect();
     let fc = fixed_origin_forecast(plan, &streams, compiled, &param_sets, DriverConfig {
-        n_particles: FORECAST_N_PARTICLES,
+        n_particles: crate::fit::predict::PREDICT_N_PARTICLES,
         dt: job.dt,
         base_seed: job.seed,
         record_expected: false,
