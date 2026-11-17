@@ -1014,11 +1014,18 @@ Recorded in the maintainer's docket; each is reflected in the spec and above.
   its reason) and `failed`, so completeness is read off the artifact; free
   forward's silent skip of an unbound stream becomes the same named skip.
   `--stream` becomes repeatable to make several named streams expressible.
+- **D78** (2026-11-18). Every prediction mode inherits the fit's binomial
+  sampler. The one-step band and the free-forward replay (with its `y_rep`
+  draws), like the forecast, draw with the sampler the fit ran (BTPE or BTRS),
+  read from the fit leaf as the forecast reads it, and record it as `binomial`
+  in `predictive.json`; the contrast forks of `fit predict` draw with it too.
+  There is no override flag. The principle, in `docs/camdl-run-spec.md`: unless
+  explicitly overridden, every downstream simulation inherits the stochastic
+  configuration recorded by its parent fit. The guarantee is the same sampler
+  and recorded configuration, not identical realised draws.
 
 Open, not yet decided in the docket: D77, whether the particle filter also skips
-resampling whenever all particle weights are exactly equal, as PGAS does; D78,
-whether the one-step-ahead band draws with the binomial sampler the fit ran, as
-the forecast now does.
+resampling whenever all particle weights are exactly equal, as PGAS does.
 
 ## Part 9. Documents this plan changes
 

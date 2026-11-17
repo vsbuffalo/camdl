@@ -2848,6 +2848,10 @@ pub struct SimRun {
     /// applied to the model's simulation config before compile. `None` → use the
     /// model's declared integrator.
     pub integrator: Option<crate::args::types::IntegratorArg>,
+    /// The chain-binomial backend's binomial sampler (gh#747). BTPE everywhere
+    /// except a replay of a fit (`fit predict`), which draws with the sampler
+    /// the fit ran (D78).
+    pub binomial: sim::rng::BinomialAlgorithm,
 }
 
 /// The forecast origin one cell starts from: one row of a `--init-state`
@@ -3557,6 +3561,7 @@ impl Default for SimRun {
             dt: 1.0,
             seed: 1,
             integrator: None,
+            binomial: sim::rng::BinomialAlgorithm::Btpe,
         }
     }
 }
@@ -3984,7 +3989,7 @@ pub fn simulate_compiled(
             )
         }
         ForwardBackend::ChainBinomial => {
-            let cfg = ChainBinomialConfig { t_start, t_end, dt: run.dt, binomial: sim::rng::BinomialAlgorithm::Btpe };
+            let cfg = ChainBinomialConfig { t_start, t_end, dt: run.dt, binomial: run.binomial };
             sim::chain_binomial::run_chain_binomial_with_observer(
                 compiled, &params, run.seed, &cfg, None, tick_opt.as_deref_mut(),
                 sim::chain_binomial::Resume {
@@ -4170,7 +4175,13 @@ pub fn run_simulation_event_log(
     // The duplication of that seeding convention is checked, not assumed: the
     // assertion after the run compares this x₀ against the trajectory's own
     // t_start snapshot and fails loudly if the two ever diverge.
-    let mut init_rng = sim::rng::StatefulRng::new(run.seed);
+    // Chain-binomial draws it with the run's binomial sampler; Gillespie with
+    // the default one.
+    let init_binomial = match run.backend {
+        ForwardBackend::ChainBinomial => run.binomial,
+        _ => sim::rng::BinomialAlgorithm::default(),
+    };
+    let mut init_rng = sim::rng::StatefulRng::new(run.seed).with_binomial(init_binomial);
     let (initial_int, _initial_real) = compiled
         .initial_state_draw(&params, &mut init_rng)
         .map_err(|e| format!("initial state error: {:?}", e))?;
@@ -4185,7 +4196,7 @@ pub fn run_simulation_event_log(
             )
         }
         ForwardBackend::ChainBinomial => {
-            let cfg = ChainBinomialConfig { t_start, t_end, dt: run.dt, binomial: sim::rng::BinomialAlgorithm::Btpe };
+            let cfg = ChainBinomialConfig { t_start, t_end, dt: run.dt, binomial: run.binomial };
             sim::chain_binomial::run_chain_binomial_with_observer(
                 &compiled, &params, run.seed, &cfg, Some(&mut recorder), None,
                 sim::chain_binomial::Resume::default(),

@@ -200,7 +200,9 @@ stream that cannot be produced — no bound data, or refused — makes the exit
 status 1, and the streams that could be produced are still written. The manifest
 (`predictive.json`, or `forecast.json` for a forecast) lists the streams
 `produced`, `skipped` (each with its reason) and `failed`, so a reader can tell
-what the artifact covers without the exit status.
+what the artifact covers without the exit status. Every mode draws with the
+binomial sampler the fit ran (`btpe` or `btrs`, read from the fit leaf) and
+records it as `binomial` in the manifest.
 
 `fit predict --fit fit.toml --horizon "4 weeks"` (or `--mode forecast`) writes
 the fixed-origin forecast instead: from the end of the fit's training rows (the

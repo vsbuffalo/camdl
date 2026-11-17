@@ -705,8 +705,24 @@ is `free_forward` (run the fitted model forward from the start, `p(y_t | θ)`) o
 draw and pooling over particles × draws); both stack under one header. The two
 horizons walk the step the fit ran at — the model's declared `dt` when it has
 one (the one dt rule), else the fit's `[config] dt` — since either horizon on
-another step would replay a different process than the posterior describes. The
-`treatment` column is `posterior` when the band averages over the whole draw
+another step would replay a different process than the posterior describes.
+
+**A downstream simulation inherits its fit's stochastic configuration (D78).**
+Unless explicitly overridden, every downstream simulation inherits the
+stochastic configuration recorded by its parent fit. For the binomial sampler
+(`btpe` or `btrs`, the `binomial` key of the method), `fit predict` reads the
+sampler from the fit leaf's `run.json` (`inputs.binomial`; for a leaf written
+before that record, `fit run --binomial` from its recorded command line, else
+the method in `fit.toml`), and every simulation it runs draws with it: the
+one-step filters, the free-forward replay and its `y_rep` draws, the forecast's
+filters and the contrast forks. `predictive.json` and `forecast.json` record it
+as `binomial`. `fit predict` has no flag that overrides it. The guarantee is the
+same sampler and the same recorded configuration, not the same random numbers: a
+predict does not reproduce the draws the fit made. `simulate` does not yet
+follow this rule when it replays a fit (`--draws posterior --fit FIT`,
+`--init-state fit`): it draws with BTPE whatever the fit ran.
+
+The `treatment` column is `posterior` when the band averages over the whole draw
 cloud — the only treatment the band-builder accepts today, enforced by typing
 rather than a runtime check, so a posterior-labelled band over a single point
 estimate is unrepresentable — with `plug_in` reserved. `fit_rhat_max`/
@@ -3124,7 +3140,7 @@ restarting mid-schedule is statistically incoherent.
 | `thin`                 | `5`     | Retain every k-th post-burn-in sweep.                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `max_tree_depth`       | `10`    | NUTS tree-depth ceiling for the θ\|X update.                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `trajectory_warmup`    | `0`     | CSMC-only sweeps before parameter updates begin.                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `binomial`             | `btpe`  | Binomial sampler for propagation draws: `btpe`, or `btrs` (faster, exact, not bit-compatible).                                                                                                                                                                                                                                                                                                                                                                         |
+| `binomial`             | `btpe`  | Binomial sampler for propagation draws: `btpe`, or `btrs` (faster, exact, not bit-compatible). `fit predict` draws with the sampler the fit ran (D78).                                                                                                                                                                                                                                                                                                                 |
 | `csmc_sweeps_per_nuts` | `1`     | CSMC trajectory updates per parameter update.                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `n_trajectories`       | `200`   | Posterior trajectories written to disk. Output-shaping, but keyed.                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `dense_mass`           | `true`  | Full-covariance NUTS metric; `false` for diagonal.                                                                                                                                                                                                                                                                                                                                                                                                                     |
