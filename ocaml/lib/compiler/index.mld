@@ -217,9 +217,9 @@ its levels and rejects duplicate or clashing names, including clashes between
 expanded names. It then checks for [let]s defined in terms of themselves,
 shadowed names, cycles among hierarchical priors, and guards that read
 anything other than dimension levels. The surface time-typing rules of
-{!Time_typing} run at this point, because they need to see whether a duration came from a
-calendar unit such as ['months] or an exact one such as ['days], and that
-distinction is lost once units become numbers. Only then are tables,
+{!Time_typing} run at this point, because they need to tell an instant (a
+[date(...)], or [origin]) from a duration, and resolution turns both into plain
+numbers in the model's time unit. Only then are tables,
 compartments, transitions and the remaining blocks expanded, each family over
 the product of its dimensions, and every expression resolved against the
 context.
@@ -286,8 +286,12 @@ compartment, parameter, constant, table or forcing, an equation for every
 compartment of real kind, no transition that lists a compartment with a net
 change of zero, no binding that reads a parameter, no cycle among
 initial conditions (computed by {!Init_order}, which also orders the
-initial-condition entries for the gradient of the initial state). It runs
-first because the dimension checker assumes every name exists. The Rust
+initial-condition entries for the gradient of the initial state). Its
+reference check covers the transition rates, the ODE equations, the
+observation models and the intervention actions; it does not check the names
+in the expressions of initial conditions, bindings, derived projections,
+forcing arguments, overdispersion variances, quantities or contrasts. It runs first, and the driver stops after it when it reports an
+error, so the later checks see only models whose names resolve. The Rust
 runtime repeats a structural validation when it loads a model.
 
 {!Dimcheck} assigns every expression a physical dimension, a pair of integer
@@ -318,9 +322,12 @@ arguments of each observation, the projections, the initial state and the
 arguments of initial-state distributions. A rate that a parameter drives
 through something without a derivative (a non-constant table index, the knots
 of a forcing) is an error, [E600]. A coefficient the differentiator does not
-yet cover is left out of the gradient map; the runtime then refuses a
-gradient-based fit that depends on it, while simulation and gradient-free
-fitting still work. The derivatives are not simplified.
+yet cover is recorded in the gradient map as unsupported; the runtime then
+refuses a gradient-based fit that depends on it, while simulation and
+gradient-free fitting still work. The derivatives are simplified only lightly:
+identities such as [x * 1] are removed and arithmetic on numeric literals is
+folded, but no algebra is done, so the derivative of [I / d] with respect to
+[I] is written [d / (d * d)].
 
 The last two passes rewrite expressions without changing their values.
 {!Constant_fold} replaces a lookup into a table written inline with the cell's
@@ -331,9 +338,10 @@ has no inline table. {!Licm} (loop-invariant code motion) then moves
 subexpressions that depend only on parameters and tables out of the
 transition rates, their parameter gradients and the ODE equations, into
 per-evaluation bindings, so that a subexpression which is constant along a
-trajectory is written once. The runtime evaluates a per-evaluation binding
-where it is referenced; it does not yet cache the value across steps. It is
-the last pass, so no other pass meets the reference node it introduces.
+trajectory is written once. The runtime evaluates the per-evaluation
+bindings once per parameter vector, and each step reads the stored values; one
+path of the ODE integrator evaluates them where they are referenced instead.
+It is the last pass, so no other pass meets the reference node it introduces.
 
 {!modules: Autodiff Constant_fold Licm}
 
@@ -361,8 +369,9 @@ These modules show a model to a person and are not part of the compile.
 {!Inspect} implements [camdlc inspect] (a summary of compartments,
 transitions, parameters, tables and forcings) and [camdlc check].
 {!Expr_analysis} classifies what an IR expression depends on, from constants
-up to compartments, for the inspector. {!Pp_expr} prints an {!Ir.expr} in
-camdl syntax, turning [S_urban] back into [S[urban]]. {!Latex} renders the
+up to compartments, for the inspector. {!Pp_expr} prints an {!Ir.expr} close to
+camdl syntax, turning [S_urban] back into [S[urban]]; [min], [max] and [mod]
+print as infix operators, and numbers print in [%g] format. {!Latex} renders the
 model as mathematics from the syntax tree, where index variables and sums
 still exist; it implements [camdlc render] and supplies the rendering in the
 declared section. {!Term_style} decides when terminal output is coloured.
