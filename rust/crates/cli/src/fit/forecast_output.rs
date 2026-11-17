@@ -162,7 +162,7 @@ pub(crate) fn run_forecast(
 ) -> Result<(Vec<PathBuf>, Vec<DeterministicFailure>), String> {
     let model = job.model;
     let raw = job.args.horizon.as_deref().expect("forecast mode carries --horizon");
-    let reach = parse_reach(raw, &model.time_unit)?;
+    let reach = parse_reach(raw, &model.time_unit, model.origin.as_deref())?;
     let data = job.config.data_spec()
         .map_err(|e| format!("this fit has no [data] block to read its training rows from: {e}"))?;
     let bindings = crate::fit::stream_bindings::StreamBindings::resolve(model, data)
