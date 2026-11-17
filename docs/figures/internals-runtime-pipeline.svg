@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 488" role="img" aria-labelledby="t d">
+  <title id="t">How a camdl command runs</title>
+  <desc id="d">camdlc, the OCaml compiler, run as a subprocess, turns model.camdl into the IR envelope in JSON. The crate ir reads it into ir::envelope and ir::model, the compiled model, and the crate declared reads the model as written. The cli crate parses the command line and resolves parameters and data, and the model becomes sim::compiled_model, with names resolved to indices and expressions compiled. The sim backends (Gillespie, chain-binomial, ODE) and sim::inference (particle filter, PGAS, PMMH, IF2, NUTS) produce the results, which go to runid, the run's identity as a hash of its inputs; io, trajectories as TSV; and score, model comparison.</desc>
+  <defs>
+    <marker id="irp-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" class="fig-arrow"/>
+    </marker>
+  </defs>
+
+  <!-- what each step hands on -->
+  <rect x="2" y="4" width="230" height="36" rx="4" class="fig-card s-line"/>
+  <text x="16" y="27" class="t-mono-label fig-ink">model.camdl</text>
+
+  <rect x="2" y="94" width="230" height="36" rx="4" class="fig-card s-line"/>
+  <text x="16" y="117" class="t-label fig-ink">IR envelope (JSON)</text>
+
+  <rect x="2" y="232" width="230" height="36" rx="4" class="fig-card s-line"/>
+  <text x="16" y="255" class="t-mono-label fig-ink">sim::compiled_model</text>
+  <text x="248" y="255" class="t-small fig-muted">names resolved to indices, expressions compiled</text>
+
+  <rect x="2" y="364" width="230" height="36" rx="4" class="fig-accent-soft s-accent"/>
+  <text x="16" y="387" class="t-label t-b fig-ink">results</text>
+
+  <!-- the steps between them -->
+  <g class="s-arrow">
+    <line x1="30" y1="41" x2="30" y2="92" marker-end="url(#irp-arrow)"/>
+    <line x1="30" y1="131" x2="30" y2="230" marker-end="url(#irp-arrow)"/>
+    <line x1="30" y1="269" x2="30" y2="362" marker-end="url(#irp-arrow)"/>
+  </g>
+  <g class="t-small fig-ink">
+    <text x="48" y="71"><tspan class="t-mono">camdlc</tspan> (OCaml), run as a subprocess</text>
+    <text x="48" y="188"><tspan class="t-mono">cli</tspan>: parse the command line, resolve parameters and data</text>
+    <text x="48" y="304"><tspan class="t-mono">sim</tspan> backends (Gillespie, chain-binomial, ODE)</text>
+    <text x="48" y="328"><tspan class="t-mono">sim::inference</tspan> (particle filter, PGAS, PMMH, IF2, NUTS)</text>
+  </g>
+
+  <!-- side branch: the crates that read the envelope -->
+  <line x1="233" y1="112" x2="338" y2="112" class="s-arrow" marker-end="url(#irp-arrow)"/>
+  <rect x="342" y="70" width="296" height="84" rx="4" class="fig-panel s-line"/>
+  <text x="356" y="92" class="t-mono-label fig-ink">ir::envelope, ir::model</text>
+  <text x="356" y="110" class="t-small fig-muted">the compiled model</text>
+  <text x="356" y="130" class="t-mono-label fig-ink">declared</text>
+  <text x="356" y="148" class="t-small fig-muted">the model as written</text>
+
+  <!-- side branch: the crates that take the results -->
+  <line x1="233" y1="382" x2="338" y2="382" class="s-arrow" marker-end="url(#irp-arrow)"/>
+  <rect x="342" y="356" width="296" height="128" rx="4" class="fig-panel s-line"/>
+  <text x="356" y="378" class="t-mono-label fig-ink">runid</text>
+  <text x="356" y="396" class="t-small fig-muted">the run's identity: a hash of its inputs</text>
+  <text x="356" y="418" class="t-mono-label fig-ink">io</text>
+  <text x="356" y="436" class="t-small fig-muted">trajectories as TSV</text>
+  <text x="356" y="458" class="t-mono-label fig-ink">score</text>
+  <text x="356" y="476" class="t-small fig-muted">model comparison</text>
+</svg>

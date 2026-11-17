@@ -724,6 +724,22 @@ After the table.
         );
     }
 
+    #[test]
+    fn markdown_figure_markers_are_prose_blocks_not_module_lists() {
+        let src = "# T\n\nBody.\n\n<!-- figure: pipeline -->\n\n```\na -> b\n```\n\n\
+                   <!-- /figure -->\n\n## G\n\n<!-- figure: g-only -->\n\n\
+                   <!-- modules: a b -->\n";
+        let o = Overview::parse_markdown(src).unwrap();
+        assert_eq!(o.groups.len(), 1);
+        assert_eq!(o.groups[0].modules, ["a", "b"]);
+        assert_eq!(o.groups[0].before.trim(), "<!-- figure: g-only -->");
+        let intro = crate::markdown::rustdoc_to_markdown(&o.intro, &|_| None);
+        assert_eq!(
+            intro,
+            "Body.\n\n<!-- figure: pipeline -->\n\n```\na -> b\n```\n\n<!-- /figure -->"
+        );
+    }
+
     fn md_err(src: &str) -> String {
         Overview::parse_markdown(src).unwrap_err()
     }

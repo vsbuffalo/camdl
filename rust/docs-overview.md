@@ -8,6 +8,8 @@ crates documented here. The compiler, `camdlc`, is a separate OCaml program that
 
 A command runs these steps:
 
+<!-- figure: internals-runtime-pipeline -->
+
 ```
 model.camdl
     |   camdlc (OCaml), run as a subprocess
@@ -24,6 +26,8 @@ results ------------------> runid   the run's identity: a hash of its inputs
                             io      trajectories as TSV
                             score   model comparison
 ```
+
+<!-- /figure -->
 
 ## The compiled model {#model}
 
