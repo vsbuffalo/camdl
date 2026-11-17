@@ -846,7 +846,9 @@ docs-site-preview: docs-internals
 .PHONY: docs-internals
 TYPEDOC_OCAML := ocaml/_build/default/tools/typedoc/typedoc_ocaml.exe
 TYPEDOC       := rust/target/release/typedoc
-COMPILER_ML   := $(sort $(wildcard ocaml/lib/compiler/*.ml) $(wildcard ocaml/lib/ir/*.ml))
+# ir_version_generated.ml is written by the build, not authored; leave it out.
+COMPILER_ML   := $(sort $(filter-out %/ir_version_generated.ml, \
+                   $(wildcard ocaml/lib/compiler/*.ml) $(wildcard ocaml/lib/ir/*.ml)))
 docs-internals: build
 	mkdir -p docs/internals
 	$(TYPEDOC_OCAML) $(COMPILER_ML) > docs/internals/compiler.json
