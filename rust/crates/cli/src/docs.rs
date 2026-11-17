@@ -288,6 +288,7 @@ const BOX_LABELS: &[(&str, &str)] = &[
     ("internals", "Under the hood:"),
     ("warning", "Warning:"),
     ("agents", "For AI agents:"),
+    ("feedback", "Feedback:"),
 ];
 
 #[derive(Debug, PartialEq)]

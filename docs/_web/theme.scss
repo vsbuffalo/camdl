@@ -254,7 +254,7 @@ div.code-with-filename-file {
   --fig-arrow: #8b929a;
 }
 
-// The four semantic boxes (docs/_web/boxes.lua; docs/documentation-style.md,
+// The six semantic boxes (docs/_web/boxes.lua; docs/documentation-style.md,
 // section 5). Quarto renders each as a callout; these rules give it the
 // guide's palette: a tinted panel, a solid left border and the title in the
 // accent colour, with body text in the page's text colour. Contrast, WCAG
@@ -284,10 +284,14 @@ div.code-with-filename-file {
 .callout.camdl-box-internals { --camdl-box-accent: #b45309; --camdl-box-bg: #fff7ed; }
 .callout.camdl-box-warning { --camdl-box-accent: #b42318; --camdl-box-bg: #fef3f2; }
 .callout.camdl-box-agents { --camdl-box-accent: #475569; --camdl-box-bg: #f1f5f9; }
+// Feedback (violet): title 6.5:1 on its panel, body text above 10:1.
+.callout.camdl-box-feedback { --camdl-box-accent: #6d28d9; --camdl-box-bg: #f5f3ff; }
 body.quarto-dark {
   .callout.camdl-box-practice { --camdl-box-accent: #6fd39b; --camdl-box-bg: #13261c; }
   .callout.camdl-box-modeling { --camdl-box-accent: #ebc35a; --camdl-box-bg: #2a2310; }
   .callout.camdl-box-internals { --camdl-box-accent: #f4a469; --camdl-box-bg: #2d1d12; }
   .callout.camdl-box-warning { --camdl-box-accent: #ff968c; --camdl-box-bg: #301716; }
   .callout.camdl-box-agents { --camdl-box-accent: #a9b8cc; --camdl-box-bg: #172030; }
+  // Feedback (violet): title 9.2:1, body text (#d9dde2) 12.5:1.
+  .callout.camdl-box-feedback { --camdl-box-accent: #c4b5fd; --camdl-box-bg: #1f1833; }
 }
