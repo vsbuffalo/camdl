@@ -1,283 +1,625 @@
-(* declared.ml — the declared model: a camdl model as its author wrote it,
-   before expansion, and its JSON codec.
+(** The declared model: a camdl model as its author wrote it, before
+    expansion, and its JSON codec. It is the [declared] section of the
+    envelope [camdlc] writes beside the compiled model.
 
-   These are the types of the `declared` section of the IR envelope
-   (docs/dev/proposals/2026-11-13-model-structure-diff.md). They mirror the
-   Rust crate `rust/crates/declared`, which is the authority for the wire
-   format: every type, field name and variant tag here is that crate's. The
-   two are pinned to each other by one fixture,
-   `rust/crates/declared/tests/fixtures/all_variants.json`, which
-   `ocaml/test/test_declared.ml` and
-   `rust/crates/declared/tests/ocaml_fixture.rs` both read.
+    Expansion keeps the meaning of a model and loses its form. In the
+    intermediate representation [infection[p in patch]] has become one
+    transition per patch, a [let] may have been inlined into every expression
+    that uses it, and every unit literal has been converted into the model's
+    time unit. The declared model keeps the form. A {!declared_model} holds one
+    entry per declaration, grouped by block, each block's entries in
+    declaration order. Every expression is its parsed tree without source
+    locations, an {!expr_tree}, wrapped in a {!declared_expr} that adds a
+    KaTeX rendering, the ways that rendering falls short of the tree, and the
+    names the tree reads. Every name in a tree is a {!name_ref}: the name and
+    what the compiler resolved it to, so that a parameter and a compartment
+    of the same spelling are told apart. Every declaration also carries its
+    text exactly as written, a {!source_text}. A few declarations record what
+    the compiler resolved and the declaration alone does not state: the levels
+    of a dimension, the dimensions of a compartment, and the expanded names a
+    compartment, transition or observation stream produced. [#'] doc blocks
+    are not recorded.
 
-   Wire conventions (the Rust serde derives):
-   - a record is an object carrying every field; an absent optional is `null`;
-   - an enum without data is its snake_case name as a string;
-   - an enum variant with fields is `{"<tag>": {<fields>}}`; a data-less
-     variant of an enum that has such variants is still a bare string;
-   - an unknown field or tag is refused, in both directions of the mirror: a
-     reader that ignored one could call two different models the same.
+    Numbers and units are as written. In a model whose time unit is weeks,
+    [at [180 'days]] is recorded as the number 180 with the unit days, and
+    its JSON, copied from [camdlc] output, is
 
-   Constructors and record fields carry a per-type prefix, as in `ast.ml`, so
-   the module can be opened beside `Ast` and `Ir` without capture. The
-   parameter kind is `Ir.param_kind`: one definition, shared with the
-   compiled model. *)
+    {@json[
+      {"tree": {"unit": {"value": 180.0, "unit": "days"}}, "katex": "180",
+       "katex_loss": ["unit_dropped"], "reads": []}
+    ]}
+
+    The reader is [camdl diff] ([rust/crates/diff]), which compares two models
+    declaration by declaration. It treats two declarations as the same when
+    their JSON documents are equal once the members that exist only for
+    display ([katex], [katex_loss], [reads], [source_text] and [expands_to])
+    are left out, so two expressions are the same exactly when they parse to
+    the same tree. Nothing is normalised: [beta * S * I] and [S * beta * I]
+    are different trees, while [×] and [*] parse to the same one. Which
+    declarations a change affects is followed through the {!name_ref}s in each
+    declaration, so a name that is not a {!name_ref} (a table named in a
+    [where] predicate, a stream named by [observations.cases]) is a
+    dependency the diff does not see.
+
+    {!Declared_emit} builds the value from a successful compile; this module
+    only defines it and converts it. {!to_json} writes it, and {!of_json}
+    reads it back, refusing anything the Rust reader refuses and any
+    [schema_version] other than {!schema_version}.
+
+    The Rust crate [rust/crates/declared] owns the format: every type, field
+    name and variant tag here mirrors one there, with the OCaml field prefix
+    ([nr_], [dd_], ...) dropped on the wire. The two sides are held together
+    by one committed fixture,
+    [rust/crates/declared/tests/fixtures/all_variants.json], which
+    [ocaml/test/test_declared.ml] and
+    [rust/crates/declared/tests/ocaml_fixture.rs] both read. The wire
+    conventions are those of the Rust serde derives:
+
+    - a record is an object carrying every field, and an absent option is
+      [null];
+    - a constructor without data is its snake_case name as a string, even in
+      a type whose other constructors carry data;
+    - a constructor with data is [{"<tag>": {<fields>}}];
+    - an unknown field or tag is refused on both sides, because a reader that
+      skipped one could call two different models the same.
+
+    Constructors and record fields carry a per-type prefix, as in {!Ast}, so
+    the module can be opened beside [Ast] and [Ir] without capture. A
+    parameter kind is an {!Ir.param_kind}, the type the compiled model
+    uses. *)
 
 (* ── Types ───────────────────────────────────────────────────────────────── *)
 
+(** The schema version this module writes, and the only one {!of_json}
+    reads. *)
 let schema_version = 1
 
+(** A unit written after a number with a leading quote, as in [14 'days] or
+    [0.1 'per_day]; also the model's time unit, the unit on a table's axis
+    and the unit of a forcing's values. One constructor per {!Ast.unit_lit},
+    with the same meaning. *)
 type unit_lit =
   | UDays | UWeeks | UMonths | UYears
   | UPerDay | UPerWeek | UPerMonth | UPerYear
   | UCount | URatio
 
+(** A binary operator of an expression, one per {!Ast.bin_op}. Both [×] and
+    [*] are [BMul]. *)
 type bin_op =
   | BAdd | BSub | BMul | BDiv | BPow
   | BEq | BNeq | BLt | BGt | BLe | BGe
 
+(** A unary operator of an expression, one per {!Ast.un_op}. The parser
+    writes a call such as [exp(x)] as a {!TCall}, so of these only [ONeg]
+    and [OTotal] occur in a compiled model's section. *)
 type un_op =
   | ONeg | OExp | OLog | OSqrt | OAbs | OFloor | OCeil | OSin | OCos | OTanh
-  | OTotal   (* `sum(e)` with no binder *)
+  | OTotal
+      (** [sum(I)] with no binder: the value of its operand, marked as a
+          total the modeller stated. *)
 
+(** Which kind of member a run reference in a contrast names: an entry of
+    the [quantities] block, or an observation stream. *)
 type run_namespace = NsQuantities | NsObservations
 
-(* What a name is, from the compiler's own name resolution
-   (`Expander.classify_name`), plus the names it reads outside that chain. *)
+(** What a name in an expression refers to, as the compiler resolved it at
+    that position.
+
+    The constructors on the first line come from the compiler's own name
+    resolution ([Expander.classify_name]); the others name the things a
+    model reads that are not in that chain. In
+    [infection[p in patch] : S[p] --> I[p] @ beta * season * S[p] * ...],
+    [beta] is a [KParameter], [season] a [KTimeInput] (a forcing), [S] a
+    [KCompartment] and [p] a [KIndexVar]. *)
 type name_kind =
   | KCompartment | KParameter | KDefinition | KTable | KTimeInput
-  | KIndexVar     (* bound by an index binder or a `sum` *)
-  | KLevel        (* a level of a dimension, in an index position *)
-  | KBuiltin      (* t, dt, projected, pi, e, origin, t_start, t_end *)
-  | KDataColumn   (* a data column, inside a likelihood or a `covers` span *)
-  | KQuantity     (* a quantity, inside a quantity or contrast body *)
-  | KStream       (* an observation stream, named by a reporting form *)
-  | KTransition   (* a transition, named by a reporting form *)
-  | KDimension    (* a dimension, named as a forcing argument *)
-  | KObsAnchor    (* first_obs, last_obs: a time read from the data *)
-  | KKeyword      (* a word the enclosing form reads as text, not a name *)
-  | KUnresolved   (* no rule classifies the name at this position *)
+  | KIndexVar
+      (** A variable bound by the declaration's index binders or by an
+          enclosing [sum]. *)
+  | KLevel
+      (** A level of a dimension written in an index position, as [urban] in
+          [S[urban]]. *)
+  | KBuiltin
+      (** A name the language defines: [t], [dt], [projected], [pi], [e],
+          [origin], [t_start] or [t_end]. *)
+  | KDataColumn
+      (** A column of an observation stream's data file, read by its
+          likelihood (the binomial [n = tested]) or by its [covers] span. *)
+  | KQuantity
+      (** An entry of the [quantities] block, named in a quantity or
+          contrast body. *)
+  | KStream
+      (** An observation stream, named in a quantity or contrast body, a
+          projection or a reactive trigger, as in
+          [observed(weekly_cases)]. *)
+  | KTransition
+      (** A transition, or one expanded member of it, named in the same
+          positions, as in [incidence(infection[p])]. *)
+  | KDimension
+      (** A dimension named by a bare word in a forcing argument, as in
+          [time_dim = week]. *)
+  | KObsAnchor
+      (** [first_obs] or [last_obs]: a time read from a run's data, not from
+          the model. *)
+  | KKeyword
+      (** A word the enclosing form reads by its spelling, not as a name:
+          [true] and [false] as a call argument or a [once] value, the [dim]
+          argument of [unchecked_dim(...)], the [label] of a [hyper_erlang]
+          branch, and a bare forcing argument that names nothing declared,
+          such as [method = linear]. *)
+  | KUnresolved
+      (** No rule classifies the name at this position. A compiled model is
+          still correct, but the compiler warns (W203), because a diff cannot
+          follow the dependencies of the declaration that holds it. *)
 
+(** A name in an expression, with what it refers to. Two references are
+    equal only when both the spelling and the kind agree. *)
 type name_ref = { nr_name : string; nr_kind : name_kind }
 
+(** A comparison between a table cell and a number in a [where] predicate,
+    one per {!Ast.relop}. *)
 type rel_op = RLt | RLe | RGt | RGe | REq | RNe
 
+(** The right-hand side of a table-cell comparison in a [where] predicate: a
+    number ([GoNum]), or a bare name ([GoName]). The compiler refuses a bare
+    name (error E284), so a compiled model's section holds only [GoNum]. *)
 type guard_operand = GoNum of float | GoName of string
 
+(** A [where] predicate: a condition on index values that keeps some members
+    of a family or some terms of a [sum], decided by the compiler for each
+    combination of levels. The names in it are plain strings, not
+    {!name_ref}s: an index variable, a level name, or the table of a
+    [GTable].
+
+    {@camdl[
+      waning[p in patch] : R[p] --> S[p] @ 0.01 'per_day * R[p] where p == rural
+    ]} *)
 type guard =
   | GEq    of string * string
+      (** [p == rural]: the two sides name the same level. Each side is an
+          index variable or a level name. *)
   | GNeq   of string * string
+      (** [q != p]. *)
   | GTable of { gt_table : string; gt_indices : string list; gt_op : rel_op;
                 gt_operand : guard_operand }
+      (** [dist[p, q] < 50]: the table, the index variables or level names
+          that select its cell, the comparison and the operand. *)
   | GAnd   of guard * guard
   | GOr    of guard * guard
 
-(* The parsed expression (`Ast.expr`) without source locations. *)
+(** A parsed expression, {!Ast.expr}, without its source locations, and with
+    each name tagged by what it refers to.
+
+    This is the value on which sameness is decided, so it keeps exactly what
+    the parser keeps. [(a * b)] and [a * b] are one tree, because the parser
+    has no node for parentheses; a flat [sum(a in age, p in patch, body)] is
+    two nested [TSum] nodes. *)
 type expr_tree =
   | TConst     of float
+      (** A number literal. [1] and [1.0] are the same constant. *)
   | TUnit      of float * unit_lit
+      (** A number with a unit, [7 'days], unconverted. *)
   | TIdent     of name_ref
+      (** A bare name. *)
   | TIndex     of name_ref * index_item list
+      (** An indexed name, [S[p]] or [C[p, q]]. *)
   | TBinOp     of bin_op * expr_tree * expr_tree
   | TUnOp      of un_op * expr_tree
   | TSum       of { ts_var : string; ts_dim : string; ts_guard : guard option;
                     ts_body : expr_tree }
-  | TCond      of expr_tree * expr_tree * expr_tree   (* pred, then, else *)
+      (** [sum(q in patch where P, body)]: the variable, the dimension, the
+          optional predicate and the body. Inside [ts_body] the variable is a
+          {!KIndexVar}. *)
+  | TCond      of expr_tree * expr_tree * expr_tree
+      (** [if pred then a else b]: the predicate, then the two branches. *)
   | TCall      of string * arg list
+      (** A call by name, [incidence(infection[p])] or
+          [neg_binomial(mean = m, r = 10)]. A positional argument has the
+          name [""]. The function name is a plain string, not a
+          {!name_ref}. *)
   | TList      of expr_tree list
+      (** A bracketed list, [[0.9, 0.1]]; a list of lists is a matrix. *)
   | TRange     of expr_tree * expr_tree
+      (** [7:100], written only as an element of a list. *)
   | TObsAccess of string
-  | TStr       of string   (* a quoted string: a path, a date, a reason *)
+      (** [observations.cases] in a quantity body: the simulated values of
+          the stream named. *)
+  | TStr       of string
+      (** A quoted string: a file path, a date, a label. It is not a name,
+          and is never in a [reads] list. *)
   | TRunMember of { tr_run : string; tr_namespace : run_namespace;
                     tr_member : string }
+      (** [with_sia.quantities.total_deaths] in a contrast body: the run (a
+          scenario name, or [fitted] for the model with no scenario), the
+          namespace and the member. *)
 
+(** One index inside the brackets of a reference: by position, [S[urban]],
+    or by the dimension's name, [S[patch = urban]]. *)
 and index_item =
   | IPositional of expr_tree
-  | INamed      of string * expr_tree   (* dim, value *)
+  | INamed      of string * expr_tree
+      (** The dimension's name, then the index. *)
 
+(** One argument of a call, a distribution, a prior or a [via] law: its
+    keyword, [""] for a positional argument, and its value. *)
 and arg = { a_name : string; a_value : expr_tree }
 
+(** A binder that makes a declaration a family, written in brackets after
+    its name: [p in patch] ([BIn]: the variable, then the dimension),
+    [(a, a_next) in consecutive(age)] ([BConsecutive]: each pair of adjacent
+    levels; the two variables, then the dimension), or [c in compartments]
+    ([BCompartments]: the variable ranges over the integer compartments). *)
 type index_binding =
-  | BIn           of string * string            (* var, dim *)
-  | BConsecutive  of string * string * string   (* var, var_next, dim *)
+  | BIn           of string * string
+  | BConsecutive  of string * string * string
   | BCompartments of string
 
-(* A declaration's text exactly as its author wrote it, from the first token
-   of the declaration to its last (a `#'` doc block above it is not part of
-   it). For display only: two declarations are compared on their parsed
-   trees, never on this text, because the parser reads different spellings as
-   one tree (`×` and `*`). [None] when the compiler had no source text for the
-   declaration; a reader shows that as "not recorded". *)
+(** A declaration's text exactly as its author wrote it, from the first
+    token of the declaration to its last; a [#'] doc block above it is not
+    part of it. It is for display only: declarations are compared on their
+    parsed trees, never on this text, because different spellings parse to
+    one tree.
+
+    [None] means the compiler had no text for the declaration. A
+    declaration the compiler made itself has none; every declaration of
+    every compiled golden model has its text, which a test checks. *)
 type source_text = string option
 
-(* One way the KaTeX rendering of an expression fails to show what its tree
-   holds: something the tree has and the rendering leaves out, or a grouping
-   the rendering does not keep. Computed by `Latex.tex_loss`, beside the
-   renderer it describes. *)
+(** One way the KaTeX rendering of an expression fails to show what its tree
+    holds: something the tree has that the rendering leaves out, or a
+    grouping the rendering does not keep. [Latex.tex_loss] computes it, beside
+    the renderer it describes, and errs towards reporting. *)
 type katex_loss =
-  | LUnitDropped         (* `0.5 'per_day` is rendered `0.5` *)
-  | LNumberRounded       (* the rendered digits do not read back as the number *)
-  | LPlaceholder         (* a list, a range, `observations.x` or a run member
-                            is rendered as a dot *)
-  | LGroupingChanged     (* a product or quotient is regrouped into one
-                            fraction, or an operand is rendered without the
-                            parentheses its position needs *)
-  | LSumRangeDropped     (* a `sum` is rendered without its dimension and
-                            its `where` guard *)
-  | LArgNamesDropped     (* `f(rate = x)` is rendered `f(x)` *)
-  | LIndexDimDropped     (* `S[age = a]` is rendered as `S[a]` is *)
-  | LStringAsName        (* a quoted string is rendered as a name is *)
-  | LSymbolOverride      (* a name is rendered as its `@symbol` *)
+  | LUnitDropped
+      (** [0.5 'per_day] is rendered [0.5]. *)
+  | LNumberRounded
+      (** The rendered digits do not read back as the number. *)
+  | LPlaceholder
+      (** A list, a range, [observations.x] or a run member is rendered as a
+          dot. *)
+  | LGroupingChanged
+      (** A product or quotient is regrouped into one fraction, or an
+          operand is rendered without the parentheses its position needs. *)
+  | LSumRangeDropped
+      (** A [sum] is rendered without its dimension and its [where]
+          predicate. *)
+  | LArgNamesDropped
+      (** [f(rate = x)] is rendered [f(x)]. *)
+  | LIndexDimDropped
+      (** [S[age = a]] is rendered as [S[a]] is. *)
+  | LStringAsName
+      (** A quoted string is rendered as a name is. *)
+  | LSymbolOverride
+      (** A name is rendered as the [@symbol] its doc block gives it. *)
 
-(* A declaration's top-level expression. [de_katex_loss] is empty when the
-   rendering shows the whole tree; otherwise it lists why not, each reason
-   once, in the order of the type above. A reader shows the declaration's
-   text as written beside a rendering that has any. *)
+(** A top-level expression of a declaration: a rate, a bound, a [let] body,
+    or any other expression a declaration holds in a field of its own. The
+    tree is what sameness is decided on; the other three fields are derived
+    from it for display.
+
+    A reader shows the declaration's text as written beside a rendering
+    whose [de_katex_loss] is not empty. The arguments of a call, a prior or a
+    [via] law are bare {!arg} trees inside their parent and carry no
+    rendering of their own. *)
 type declared_expr = {
   de_tree  : expr_tree;
   de_katex : string;
+      (** The expression rendered as KaTeX, as [camdlc render] renders it. *)
   de_katex_loss : katex_loss list;
+      (** Why [de_katex] does not show the whole tree, each reason once, in
+          the order of {!katex_loss}; empty when it does. *)
   de_reads : name_ref list;
+      (** Every {!name_ref} in the tree, each spelling-and-kind pair once, in
+          order of first appearance; index variables included. The names in
+          a [sum]'s predicate, a [TObsAccess] stream and a [TRunMember] are
+          not {!name_ref}s and are not listed. *)
 }
 
+(** One [--set name=value] given to [camdlc]: a parameter pinned to a fixed
+    value for this compile. [camdlc] refuses a name that is not a
+    parameter. *)
 type set_value  = { sv_name : string; sv_value : float }
-(* [fi_sha256] is [None] only when the file could not be re-opened to hash. *)
+
+(** One file the compile read, by its path and the SHA-256 of its bytes.
+
+    [fi_path] is relative to the model file's directory. A data file keeps
+    the path the model wrote, unless the model wrote an absolute path, which
+    is rewritten relative to the model's directory; the [--quantities] file
+    is recorded relative to the model's directory. [fi_sha256] is the
+    lowercase hex digest, and [None] only when the file could not be
+    re-opened to hash it. *)
 type file_input = { fi_path : string; fi_sha256 : string option }
 
+(** What entered the compile from outside the model file. Two compiles of one
+    file that differ here can produce different models. *)
 type compile_inputs = {
   ci_set_values : set_value list;
+      (** The [--set] overrides, in the order given. *)
   ci_files      : file_input list;
+      (** The data files the model read (dimension levels, tables,
+          forcings), each once, in the order first read, then the
+          [--quantities] file when one was given. *)
 }
 
+(** Where a dimension's levels come from: listed inline, or read from a
+    column of a data file, [read("pop.tsv", column = "patch")] with its
+    path and column. *)
 type dim_source =
   | DsInline
   | DsRead of { ds_path : string; ds_column : string }
 
+(** One entry of the [dimensions] block.
+
+    {@camdl[
+      patch = [urban, rural]
+    ]} *)
 type dimension_decl = {
   dd_name   : string;
   dd_source : dim_source;
   dd_levels : string list;
+      (** The levels the compile used, in order: those written, or those
+          read from the file. *)
   dd_text : source_text;
 }
 
+(** Whether a compartment holds whole individuals ([CkInteger], the default)
+    or a continuous quantity ([CkReal], written [W : real]). *)
 type compartment_kind = CkInteger | CkReal
 
+(** One compartment of the [compartments] block, with the stratification the
+    compiler resolved for it.
+
+    {@camdl[
+      compartments { S, I, R, D }
+      stratify(by = patch, only = [S, I, R])
+    ]}
+
+    records [S] with dimensions [["patch"]] expanding to
+    [["S_urban"; "S_rural"]], and [D] with no dimensions expanding to
+    [["D"]]. *)
 type compartment_decl = {
   cd_name       : string;
   cd_kind       : compartment_kind;
   cd_dims       : string list;
+      (** The dimensions the [stratify] declarations apply to this
+          compartment, in declaration order. A stage dimension the compiler
+          adds for a [via] law is not listed. *)
   cd_expands_to : string list option;
+      (** The compartments of the compiled model this declaration produced,
+          in the compiled model's order. For a compartment a [via] law
+          stages, these are the stage compartments ([E_s1], [E_s2], ...).
+          [camdlc] always records it; [None] means a writer did not. *)
   cd_text : source_text;
 }
 
+(** One [stratify(...)] declaration: [st_dim] is the dimension from [by],
+    and [st_only] the compartments from [only], [None] meaning all of
+    them. *)
 type stratify_decl = { st_dim : string; st_only : string list option;
   st_text : source_text }
 
+(** A dimension stated by a [dim] clause, as the exponents of population and
+    of time: [dim P^-1*T^-1] is population [-1], time [-1]. *)
 type dim_annotation = { da_population : int; da_time : int }
 
+(** The interval of a parameter's [in [lo, hi]]. *)
 type bounds = { b_lo : declared_expr; b_hi : declared_expr }
 
+(** A parameter's prior, written after [~]: the distribution's name as
+    written ([pr_family], such as ["log_normal"]), its keyword arguments, and
+    the dimension of a [| age] pooling clause ([pr_pool_over]).
+
+    {@camdl[
+      beta   : rate in [0.01, 2.0] ~ log_normal(mu = -1, sigma = 0.5)
+    ]} *)
 type prior_decl = {
   pr_family    : string;
   pr_args      : arg list;
   pr_pool_over : string option;
 }
 
+(** One entry of the [parameters] block: a value the model reads and a fit
+    can estimate. *)
 type parameter_decl = {
   pd_name   : string;
   pd_dims   : string list;
+      (** The dimensions of an indexed parameter, [k_p[patch]]; empty for a
+          scalar. *)
   pd_kind   : Ir.param_kind;
   pd_dim    : dim_annotation option;
+      (** A [dim] clause; only the [positive] and [real] kinds accept
+          one. *)
   pd_bounds : bounds option;
   pd_prior  : prior_decl option;
   pd_text : source_text;
 }
 
+(** A top-level [let]: a named expression, which may be indexed, typed or
+    shaped. At most one of [df_shape] and [df_kind] is set.
+
+    {@camdl[
+      let N[p in patch] = S[p] + I[p] + R[p]
+      let b0 : positive dim P^-1*T^-1 = 0.0001
+    ]} *)
 type definition_decl = {
   df_name    : string;
   df_indices : index_binding list;
   df_shape   : string list option;
+      (** The dimensions of a shaped literal, [let w : age × patch = ...],
+          whose body is a nested list laid out over them. *)
   df_kind    : Ir.param_kind option;
+      (** The kind of a typed [let], [let b0 : positive = ...]. *)
   df_dim     : dim_annotation option;
   df_body    : declared_expr;
   df_text : source_text;
 }
 
+(** One axis of a table's shape: a dimension and, when written on it, the
+    unit of the table's cells, as in [age 'years]. *)
 type table_dim = { td_dim : string; td_unit : unit_lit option }
 
+(** One entry of the [tables] block: constant data indexed by dimensions,
+    written inline or read from a file.
+
+    {@camdl[
+      C : patch × patch = [[0.9, 0.1], [0.1, 0.9]]
+    ]} *)
 type table_decl = {
   tb_names     : string list;
+      (** Several names, [pop, init_sus : patch = read(...)], declare one
+          table per value column of the file. *)
   tb_dims      : table_dim list;
   tb_cell_kind : Ir.param_kind option;
   tb_value     : declared_expr;
+      (** The data: a list literal, or the call that reads it, such as
+          [read("dist.tsv", default = 1000000.0)]. *)
   tb_text : source_text;
 }
 
+(** The value of one argument of a forcing declaration. A quoted string
+    ([TvStr]) names something outside the model, a data file or one of its
+    columns; an expression ([TvExpr]) names something inside it, or is a word
+    from a fixed set, such as [method = linear], recorded as a {!KKeyword}
+    name. *)
 type time_input_value =
   | TvStr  of string
   | TvExpr of declared_expr
 
+(** One argument of a forcing declaration, by its keyword. *)
 type time_input_arg = { ta_name : string; ta_value : time_input_value }
 
+(** One entry of the [forcing] block: a named function of time supplied to
+    the model, such as a seasonal factor.
+
+    {@camdl[
+      season : sinusoidal 'ratio {
+        baseline  = 1.0
+        amplitude = 0.2
+        period    = 365.25
+        phase     = 0.0
+      }
+    ]} *)
 type time_input_decl = {
   ti_name    : string;
   ti_indices : index_binding list;
   ti_kind    : string;
+      (** The kind as written: ["sinusoidal"], ["piecewise"],
+          ["interpolated"], ["periodic"], ["fourier"], ["periodic_spline"] or
+          ["bspline"]. *)
   ti_unit    : unit_lit;
+      (** The unit of the forcing's values. *)
   ti_args    : time_input_arg list;
   ti_text : source_text;
 }
 
+(** One entry of the [timepoints] block: a named time. The compiler does not
+    use the block, so nothing in the compiled model corresponds to it. *)
 type timepoint_decl = { tp_name : string; tp_time : declared_expr;
   tp_text : source_text }
 
+(** A compartment named on either side of a transition's arrow or in an
+    action, with its indices: [S[p]], [D]. *)
 type stoich_ref = { sr_compartment : string; sr_indices : index_item list }
 
+(** One arm of a branching destination: the compartment and its weight. *)
 type branch_arm = { ba_to : stoich_ref; ba_weight : declared_expr }
 
+(** Where a transition sends the individuals it moves.
+
+    {@camdl[
+      recovery[p in patch]  : I[p] --> { R[p] : 1 - cfr, D : cfr } @ gamma * I[p]
+    ]} *)
 type destination =
   | DstSum    of stoich_ref list
+      (** Every listed compartment gains one individual per firing. The
+          empty list is both a transition whose individuals leave the model
+          and a [via hyper_erlang] transition with no arrow target, whose
+          branches name their own destinations. *)
   | DstBranch of branch_arm list
+      (** One flow per arm, at the arm's weight times the transition's rate.
+          The weights are not checked to sum to one. *)
 
+(** How fast a transition fires: a rate ([DynRate]), or a staged residence,
+    [via erlang(stages = 3, mean = 5 'days)] ([DynVia]: the law's name and
+    its arguments as written, unchecked). *)
 type dynamics =
   | DynRate of declared_expr
-  | DynVia  of string * arg list   (* law, args as written *)
+  | DynVia  of string * arg list
 
+(** One entry of the [transitions] block: a flow of individuals between
+    compartments.
+
+    {@camdl[
+      infection[p in patch] : S[p] --> I[p] @ beta * season * S[p] * sum(q in patch, C[p, q] * I[q] / N[q])
+    ]} *)
 type transition_decl = {
   tn_name       : string;
   tn_indices    : index_binding list;
   tn_from       : stoich_ref list;
+      (** The compartments that each lose one individual per firing; empty
+          for an inflow such as a birth. *)
   tn_to         : destination;
   tn_dynamics   : dynamics;
   tn_guard      : guard option;
+      (** A [where] predicate that drops members of the family. *)
   tn_lineage    : bool;
+      (** [true] when the transition carries the [#[lineage]] attribute. *)
   tn_expands_to : string list option;
+      (** The transitions of the compiled model this declaration produced,
+          in the compiled model's order: one per member of the family
+          ([infection_urban], [infection_rural]), and for a [via] law the
+          stage transitions the compiler made for it. [camdlc] always records
+          it; [None] means a writer did not. *)
   tn_text : source_text;
 }
 
+(** One equation of the [ode] block: the time derivative of a real
+    compartment. *)
 type ode_decl     = { od_compartment : string; od_derivative : declared_expr;
   od_text : source_text }
+
+(** A [balance] declaration: a compartment overwritten after every step with
+    an expression, so that a population identity holds. *)
 type balance_decl = { bl_compartment : string; bl_expr : declared_expr;
   bl_text : source_text }
 
+(** The family of a distribution, one per {!Ast.likelihood_kind}.
+    [zero_inflated(base = neg_binomial(...), pi = z)] is
+    [FZeroInflatedNegBinomial], its arguments flattened. *)
 type family =
   | FNegBinomial | FPoisson | FNormal | FBinomial | FBetaBinomial | FBeta
   | FBernoulli | FZeroInflatedNegBinomial
 
+(** A distribution with its keyword arguments as written: an observation's
+    likelihood, or the law an initial value is drawn from. *)
 type distribution = { di_family : family; di_args : arg list }
 
+(** What a compartment starts at: computed ([IvExpr], [S = N0 - I]), or drawn
+    once at the start of each run ([IvLaw], [I ~ poisson(rate = I0)]). *)
 type initial_value =
   | IvExpr of declared_expr
   | IvLaw  of distribution
 
+(** One entry of the [init] block. At most one of [in_indices] and
+    [in_bindings] is non-empty.
+
+    {@camdl[
+      S[urban] = 990  I[urban] = 10
+    ]} *)
 type initial_decl = {
   in_compartment : string;
   in_indices     : index_item list;
+      (** [S[urban]]: the one stratum the entry sets. *)
   in_bindings    : index_binding list;
+      (** [S[a in age]]: binders, one entry per level. *)
   in_value       : initial_value;
   in_text : source_text;
 }
 
+(** What one column of an observation's data file holds: the row's time
+    ([CrTime]); the levels of the named dimension ([CrDim]); an observed
+    value of a kind ([CrValue]); or the opening and closing boundaries of the
+    period a row covers ([CrWindowStart], [CrWindowStop]). *)
 type column_role =
   | CrTime
   | CrDim   of string
@@ -285,37 +627,79 @@ type column_role =
   | CrWindowStart
   | CrWindowStop
 
+(** One entry of an observation's [columns] block. *)
 type obs_column = { oc_name : string; oc_role : column_role }
 
+(** An observation's measurement model, [weekly_cases ~ neg_binomial(...)]:
+    the data column scored and the distribution it is scored under. *)
 type measurement = { ms_scored : string; ms_likelihood : distribution }
 
+(** The model quantity an observation stream measures, from its
+    [projected = ...] line.
+
+    [camdlc] writes only [PjDerived]: [incidence(infection[p])] is a
+    {!TCall} inside it. [PjIncidence], a transition's flow by name and
+    indices, is part of the format but never written by this compiler. *)
 type projection =
-  | PjIncidence of string * index_item list   (* transition, indices *)
+  | PjIncidence of string * index_item list
   | PjDerived   of declared_expr
 
+(** A set of times, by a regular step ([ScEvery], [every = 7 'days]) or
+    listed ([ScAt], [at = [0, 30, 60]]): when an observation stream emits
+    synthetic rows, or when the [output] block records the state. *)
 type schedule_core =
   | ScEvery of declared_expr
   | ScAt    of declared_expr list
 
+(** An observation's [covers] line: the period each row's count accumulates
+    over, relative to the row's time label. *)
 type covers = {
   cv_form   : string;
+      (** The form as written: ["day"], ["starting_on"], ["ending_on"] or
+          ["closing_at"]. *)
   cv_column : string;
+      (** The time column named in the call. *)
   cv_span   : declared_expr option;
+      (** The duration; [None] for [day(t)]. *)
 }
 
+(** One stream of the [observations] block: the columns of its data file,
+    the model quantity the data measure, and the distribution the data are
+    scored under.
+
+    {@camdl[
+      weekly_cases[p in patch] {
+        columns       { time : time, patch : dim, weekly_cases : count }
+        covers        = closing_at(time, 7 'days)
+        projected     = incidence(infection[p])
+        emit_schedule = every 7 'days
+        weekly_cases  ~ neg_binomial(mean = rho * projected, r = 10)
+      }
+    ]} *)
 type observation_decl = {
   ob_name          : string;
   ob_indices       : index_binding list;
   ob_source        : string option;
+      (** [from label]: the key the data file is supplied under; [None]
+          means the stream's name. *)
   ob_columns       : obs_column list;
   ob_measurement   : measurement;
   ob_projection    : projection;
   ob_emit_schedule : schedule_core option;
+      (** When [simulate --obs] writes synthetic rows. A fit never reads
+          it. *)
   ob_covers        : covers option;
   ob_expands_to    : string list option;
+      (** The observation models of the compiled model this declaration
+          produced, one per member of the family. [camdlc] always records it;
+          [None] means a writer did not. *)
   ob_text : source_text;
 }
 
+(** What an intervention, event or reactive intervention does when it fires:
+    [transfer(...)] with its keyword arguments as written ([AcTransfer]);
+    [I = I + 10] in the block form, setting a compartment ([AcSet]); or
+    [add(I[urban], 5)], adding to one ([AcAdd]). *)
 type action =
   | AcTransfer of arg list
   | AcSet of { as_compartment : string; as_indices : index_item list;
@@ -323,41 +707,76 @@ type action =
   | AcAdd of { aa_compartment : string; aa_indices : index_item list;
                aa_count : declared_expr }
 
+(** When an intervention or event fires: at each listed time
+    ([ShAtTimes], [at [180 'days]]); every period within an optional window
+    ([ShRecurring], [{ every = 30 'days  from = 0 'days  to = 2 'years }]);
+    or once per period at an offset from time zero ([ShEveryAtDay],
+    [every 365 'days at_day 100 'days]). *)
 type schedule =
   | ShAtTimes    of declared_expr list
   | ShRecurring  of { sh_every : declared_expr; sh_from : declared_expr option;
                       sh_to : declared_expr option }
   | ShEveryAtDay of { sh_period : declared_expr; sh_at_day : declared_expr }
 
+(** One entry of an [interventions] or an [events] block; the two blocks
+    share this form and are kept apart in {!declared_model}.
+
+    {@camdl[
+      sia[p in patch] : transfer(fraction = cov, from = S[p], to = R[p]) at [180 'days]
+    ]} *)
 type intervention_decl = {
   iv_name     : string;
   iv_indices  : index_binding list;
   iv_actions  : action list;
+      (** The actions in source order; only the block form holds more than
+          one. *)
   iv_schedule : schedule;
   iv_guard    : guard option;
   iv_text : source_text;
 }
 
+(** The condition of a reactive intervention's [when] clause: comparisons
+    ([TgAtom]) combined with [and], [or] and [not]. *)
 type trigger_pred =
   | TgAtom of declared_expr
   | TgAnd  of trigger_pred * trigger_pred
   | TgOr   of trigger_pred * trigger_pred
   | TgNot  of trigger_pred
 
+(** One entry of the [reactive_interventions] block: an action that fires
+    when a condition on observed data holds.
+
+    {@camdl[
+      mop_up[p in patch] : when sum_observed(weekly_cases[p], window = 28 'days) >= 20 {
+        after    = 14 'days
+        action   = transfer(fraction = cov, from = S[p], to = R[p])
+        once     = true
+      }
+    ]} *)
 type reactive_decl = {
   rc_name     : string;
   rc_indices  : index_binding list;
   rc_when     : trigger_pred;
   rc_after    : declared_expr option;
+      (** The delay from the trigger to the action; [None] means none. *)
   rc_once     : declared_expr option;
+      (** [once = true] or [once = false], each word recorded as a
+          {!KKeyword} name; [None] means [true]. *)
   rc_cooldown : declared_expr option;
+      (** The least time between firings of a repeating policy. *)
   rc_action   : action;
   rc_guard    : guard option;
   rc_text : source_text;
 }
 
+(** [name = value] inside a scenario's [set] or [scale]. *)
 type assign = { an_name : string; an_value : declared_expr }
 
+(** One field of a scenario: a display label ([SfLabel]); interventions to
+    turn on or off ([SfEnable], [SfDisable]); parameter values or factors
+    ([SfSet], [SfScale]); other scenarios applied in sequence ([SfCompose]);
+    the end time, from [simulate { to = ... }] ([SfTEnd]); or a parent to
+    inherit from ([SfExtends]). *)
 type scenario_field =
   | SfLabel   of string
   | SfEnable  of string list
@@ -368,24 +787,41 @@ type scenario_field =
   | SfTEnd    of declared_expr
   | SfExtends of string
 
+(** One scenario of the [scenarios] block, its fields in source order. *)
 type scenario_decl = { sn_name : string; sn_fields : scenario_field list;
   sn_text : source_text }
 
+(** The [simulate] block: the run's time window, step and ODE integrator.
+
+    The parser fills a missing [from] with [0] and a missing [to] with
+    [100], so a block that leaves them out is recorded as if they were
+    written. *)
 type simulation_decl = {
   sm_from       : declared_expr;
   sm_to         : declared_expr;
   sm_dt         : declared_expr option;
   sm_integrator : string option;
+      (** [rk4] or [rk45], as written; [None] means rk4. *)
   sm_atol       : declared_expr option;
   sm_rtol       : declared_expr option;
   sm_text : source_text;
 }
 
+(** The [trajectories] entry of the [output] block: when a simulation records
+    the state, and the format named. The parser fills a missing schedule
+    with [every = 1] and a missing format with ["tsv"]. *)
 type trajectory_output = { to_schedule : schedule_core; to_format : string }
 
+(** The [output] block; [ou_trajectories] is [None] when it has no
+    [trajectories] entry. *)
 type output_decl = { ou_trajectories : trajectory_output option;
   ou_text : source_text }
 
+(** One entry of the [quantities] block: a quantity computed from a run.
+
+    {@camdl[
+      total_deaths = final(D)
+    ]} *)
 type quantity_decl = {
   qd_name    : string;
   qd_indices : index_binding list;
@@ -393,16 +829,34 @@ type quantity_decl = {
   qd_text : source_text;
 }
 
+(** One entry of the [contrasts] block: arithmetic over the quantities or
+    streams of different scenarios' runs.
+
+    {@camdl[
+      averted = fitted.quantities.total_deaths - with_sia.quantities.total_deaths
+    ]} *)
 type contrast_decl = { ct_name : string; ct_body : declared_expr;
   ct_text : source_text }
 
-(* One model, as declared. Every list is in declaration order. *)
+(** One model, as declared: the whole [declared] section.
+
+    Each list holds the entries of one kind of block in declaration order; a
+    block written more than once contributes its entries in order. The
+    single-valued fields ([dm_time_unit], [dm_description], [dm_origin],
+    [dm_simulation], [dm_output]) hold the first declaration of their kind,
+    and [None] when there is none. When a model writes one of these twice,
+    the compiled model uses the last, without a diagnostic, so the two
+    disagree; and [dm_balance] lists every [balance] declaration where the
+    compiled model uses only the last. *)
 type declared_model = {
   dm_schema_version         : int;
   dm_compile_inputs         : compile_inputs;
   dm_time_unit              : unit_lit option;
+      (** [None] when the model does not write one; the compiler then uses
+          days. *)
   dm_description            : string option;
   dm_origin                 : string option;
+      (** The calendar date of time zero, as the text inside [date(...)]. *)
   dm_dimensions             : dimension_decl list;
   dm_compartments           : compartment_decl list;
   dm_stratify               : stratify_decl list;
@@ -424,6 +878,8 @@ type declared_model = {
   dm_output                 : output_decl option;
   dm_quantities             : quantity_decl list;
   dm_contrasts              : contrast_decl list;
+      (** With [--quantities FILE], the [quantities] block is that file's,
+          not the model's. *)
 }
 
 (* ── Codec helpers ───────────────────────────────────────────────────────── *)
@@ -1425,6 +1881,8 @@ let model_fields =
     "reactive_interventions"; "scenarios"; "simulation"; "output";
     "quantities"; "contrasts" ]
 
+(** The section as the JSON the Rust [declared] crate reads. Raises
+    [Invalid_argument] on a non-finite number, which JSON cannot hold. *)
 let to_json (m : declared_model) : json =
   obj
     [ ("schema_version", int m.dm_schema_version);
@@ -1455,8 +1913,10 @@ let to_json (m : declared_model) : json =
       ("quantities", list quantity_to_json m.dm_quantities);
       ("contrasts", list contrast_to_json m.dm_contrasts) ]
 
-(* Raises [Serde.DeserError] on anything the Rust reader would refuse, and on a
-   schema version this code does not write. *)
+(** Reads a section {!to_json} wrote. Raises [Serde.DeserError] on a missing
+    or unknown field or tag, a wrong JSON type, and a [schema_version] other
+    than {!schema_version}. An unknown top-level field is reported before the
+    version is compared. *)
 let of_json (j : json) : declared_model =
   let g = record "declared model" model_fields j in
   let version = as_int (g "schema_version") in

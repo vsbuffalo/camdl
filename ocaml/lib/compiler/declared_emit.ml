@@ -1,51 +1,70 @@
-(* declared_emit.ml — build the declared-model section of the IR envelope
-   (docs/dev/proposals/2026-11-13-model-structure-diff.md) from the parsed
-   declarations of a compile that succeeded.
+(** Builds the declared-model section of a compiled model, a
+    {!Declared.declared_model}, from the parsed declarations of a compile that
+    succeeded.
 
-   Which source: the parsed declarations (`Ast.declaration list`), exactly as
-   the parser produced them. Never the expander's working context, which the
-   staged-residence (`via`) lowering has rewritten by the time expansion ends.
+    The section records a model as its author wrote it (see {!Declared} for
+    what it holds and who reads it). This module converts each
+    {!Ast.declaration} into its declared form, block by block in source
+    order: every expression becomes its parsed tree without source locations,
+    with a KaTeX rendering from {!Latex}, the ways that rendering falls short
+    of the tree, and the names the tree reads; every declaration gets its text
+    as written, sliced from the source by its span.
 
-   What it produces: `Declared.declared_model` — every declaration the author
-   wrote, each expression as its parsed tree with source locations removed,
-   a KaTeX rendering, and the names it reads.
+    It reads the declaration list the parser produced, not the expander's
+    context, because by the end of expansion the [via] lowering has rewritten
+    the context: a compartment that a [via hyper_erlang] transition stages is
+    absent from it under its declared name. From the expander it asks only
+    what the declarations alone do not say: what each name refers to, through
+    the expander's own classifiers ([Expander.classify_name] and
+    [Expander.classify_indexed_name]), so that the section and the compiled
+    model resolve names by one set of rules; the levels of each dimension,
+    including one read from a file; each compartment's dimensions; and the
+    expanded names each compartment, transition and observation stream
+    produced.
 
-   Three things the parsed declarations do not hold come from the expander:
-   - what each name is, from the expander's own classifiers
-     (`Expander.classify_name`, `Expander.classify_indexed_name`), so there is
-     one precedence chain and this module adds none;
-   - the resolved levels of each dimension (`Expander.dim_levels_or_empty`),
-     including a dimension read from a file;
-   - each compartment's dimensions (`Expander.comp_dims`).
+    A name is classified by where it sits as well as by what it spells.
+    Binder variables are checked before the classifier sees a name, because
+    the expander substitutes them before resolution. A name in an index
+    position may be a level. The declared compartment names are consulted
+    when the classifier, which sees the context after lowering, does not know
+    one. Quantities, streams and transitions are names only where a reporting
+    form reads them: a quantity or contrast body, a projection, a reactive
+    trigger. A few positions hold words the compiler reads by their spelling,
+    [true] and [false] as a call argument, the [dim] of [unchecked_dim(...)],
+    the [label] of a [hyper_erlang] branch and a bare forcing argument such as
+    [method = linear]; these are tagged {!Declared.KKeyword}.
 
-   The classifiers see the context as it stands after expansion. A compartment
-   that a `via hyper_erlang` transition staged is no longer in that context
-   under its declared name (lowering replaced it with per-branch stage
-   compartments), so the declared compartment names are carried alongside and
-   consulted when the classifier answers "unresolved".
+    A name no rule classifies is tagged {!Declared.KUnresolved}, and
+    {!build_detail} returns it, as an {!unresolved}, beside the section; the
+    compiler reports each as warning W203. The compiled model never depends
+    on the section, so W203 never fails a compile, and a test fails on any
+    unresolved name in a compiled golden model.
 
-   Names in a few positions are never names to the compiler: the `dim =`
-   keyword of `unchecked_dim(...)` and the bare words of a forcing argument
-   that selects from a closed set. Those are tagged `KKeyword`, by position.
-   A name nothing here classifies is tagged `KUnresolved`; the golden walk in
-   `test_declared_emit.ml` fails on any. Each one is also returned by
-   [build_detail] with the declaration it sits in and its source location, and
-   the compiler reports it as warning W203: an unclassified name is never
-   silent, because `camdl diff` cannot follow that declaration's
-   dependencies. *)
+    {!build_detail} and {!build} take the context of a successful
+    [Expander.expand_detail]; {!Compiler} builds the section lazily, once,
+    after the analysis passes succeed. {!with_compile_inputs} adds what only
+    the command line knows, the [--set] overrides and the [--quantities]
+    file, and [camdlc] calls it before writing the envelope. *)
 
 open Ast
 module D = Declared
 
-(* A name the section could not classify: the declaration it sits in, in words
-   a diagnostic can print ("transition 'infection'"), the name, and where it
-   was written. *)
+(** A name the section could not classify, as warning W203 reports it. *)
 type unresolved = {
   u_site : string;
+      (** The declaration the name sits in, in words a diagnostic can print:
+          ["transition 'infection'"], or ["the simulate block"]. *)
   u_name : string;
   u_loc  : Ast.loc;
+      (** Where the name is written. *)
 }
 
+(** What converting one declaration needs to know about the whole model:
+    the expander's context, the source text, and the declared names of
+    compartments, quantities, streams, transitions, dimensions and levels.
+    [site] names the declaration being converted, and [unresolved]
+    collects, newest first, the names that could not be classified; both
+    are mutated during {!build_detail}. *)
 type env = {
   ctx       : Expander.context;
   source    : Source_cache.t;  (* the text of every unit of this compile *)
@@ -78,9 +97,10 @@ let text env (l : Ast.loc) : D.source_text =
     Source_cache.slice env.source ~file:l.file ~line:l.line ~col:l.col
       ~end_line:l.end_line ~end_col:l.end_col
 
-(* Where an expression sits. The classifiers depend on two pieces of use-site
-   context (the binder set and a likelihood's data columns); the rest selects
-   the position rules documented at the top of the file. *)
+(** Where an expression sits, as far as classifying its names depends on it:
+    the variables bound around it, the data columns a likelihood or a
+    [covers] span may read, and whether it is a reporting position, where a
+    quantity, stream or transition may be named. *)
 type pos = {
   binders  : string list;   (* index-binder and enclosing `sum` variables *)
   aux_cols : string list;   (* a likelihood's auxiliary data columns *)
@@ -225,7 +245,7 @@ let keyword_args = [ ("unchecked_dim", "dim"); ("branch", "label") ]
 (* The Boolean words. The compiler matches them by spelling wherever a
    Boolean is accepted (`date_range`'s `inclusive_end`, a reactive
    intervention's `once`), so a `true` or `false` that is a call argument or a
-   `once` value is a keyword whatever the call (gh#1117). *)
+   `once` value is a keyword whatever the call. *)
 let is_boolean_word = function "true" | "false" -> true | _ -> false
 
 let rec tree env pos (e : expr) : D.expr_tree =
@@ -611,13 +631,14 @@ let files (ctx : Expander.context) : D.file_input list =
 
 (* ── The section ─────────────────────────────────────────────────────────── *)
 
-(** Build the declared-model section, and list every name in it that could not
-    be classified (in source order). [ctx] is the context a successful
-    [Expander.expand_detail] returned for [decls].
-    [source] holds the text the declarations were parsed from, and is where
-    each declaration's text as written is read back. [set_values] and
-    [extra_files] are empty here; `camdlc` adds its `--set` overrides and a
-    `--quantities` vocabulary file with [with_compile_inputs]. *)
+(** Builds the declared-model section, and lists every name in it that could
+    not be classified, in source order. [ctx] is the context a successful
+    [Expander.expand_detail] returned for [decls]. [source] holds the text the
+    declarations were parsed from, and is where each declaration's text as
+    written is read back. The section's compile inputs hold the data files
+    the compile read and no [--set] overrides; {!with_compile_inputs} adds
+    those and the [--quantities] file. It fills [Latex]'s table of [@symbol]
+    overrides from [decls] as a side effect. *)
 let build_detail ~(source : Source_cache.t) (ctx : Expander.context)
     (decls : declaration list)
     : D.declared_model * unresolved list =
