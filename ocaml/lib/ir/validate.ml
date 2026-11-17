@@ -1,37 +1,88 @@
+(** The structural check of an expanded model: duplicate names, references
+    to names the model does not declare, and combinations of declarations the
+    runtime cannot execute.
+
+    {!validate} reads an {!Ir.model} and returns [Ok ()] or every {!error} it
+    found, in the order found; it changes nothing. It is the first check the
+    compiler runs on the expanded model, and the compile stops after it if it
+    reports anything. The compiler turns each error into a diagnostic with a
+    code from E500 to E519 and places it at the declaration of the named
+    construct or, for a reference to a name that does not exist, at the
+    construct that contains the reference ({!site}).
+
+    Almost every check here repeats one the expander makes, with a source
+    location, while it builds the model. This module is the check at the
+    boundary of the IR itself: it also catches an IR that was written by
+    hand, produced by another tool, or built by an expander that has
+    drifted from its own rules. The Rust runtime validates a model again
+    when it loads one ([rust/crates/ir/src/validate.rs]), and the checks of
+    initial-state laws and intervention targets here mirror its.
+
+    The checks are:
+
+    - no two compartments, transitions or parameters share a name;
+    - every name read by a transition rate, an ODE derivative, a likelihood
+      argument or an intervention action's expression is a declared
+      compartment, parameter, constant, table or forcing, and no such
+      expression holds a spline basis function, which only gradient maps may;
+    - every compartment named in a stoichiometry, a projection or an action
+      target exists, every transition named by a projection exists, and a
+      union of flows names no flow twice;
+    - a compartment of real kind appears in no stoichiometry and has an ODE
+      equation, and no other compartment has one (two equations for one
+      compartment are not detected);
+    - no transition changes a compartment by zero;
+    - no shared binding reads a parameter (see {!first_param});
+    - every initial condition names a compartment, its law suits the
+      compartment's kind, no drawn compartment is the balance target, and
+      the initial conditions do not read each other in a cycle
+      ({!Init_order.topo}).
+
+    Some expressions are not walked for references: initial conditions,
+    shared bindings, derived projections, forcing arguments, overdispersion
+    variances, quantities and contrasts. A [BindingRef] is not resolved
+    either; the Rust runtime resolves binding names when it builds the
+    model. Duplicate constants, tables, forcings, observations and bindings
+    are left to the expander. *)
+
 open Ir
 
-(* Where a reference error occurred — the enclosing construct, so the compiler
-   can point the diagnostic at its declaration (the referenced name itself does
-   not exist, so it has no decl loc). *)
+(** The construct that contains a reference, where a diagnostic about a
+    name that does not exist is placed. *)
 type site =
-  | InTransition  of string   (* transition name *)
-  | InOde         of string   (* compartment whose ODE derivative *)
-  | InObservation of string   (* observation name *)
-  | InIntervention of string  (* intervention/event name *)
+  | InTransition  of string   (** A transition, by expanded name. *)
+  | InOde         of string   (** The ODE equation of the named compartment. *)
+  | InObservation of string   (** An observation stream. *)
+  | InIntervention of string  (** An intervention or event. *)
 
+(** One structural defect of an expanded model. The compiler's code for each
+    is given in brackets. *)
 type error =
-  | DuplicateCompartment  of string
-  | DuplicateTransition   of string
-  | DuplicateParameter    of string
-  | UnknownCompartment    of string * site
-  | UnknownParameter      of string * site
-  | UnknownConstant       of string * site
-  | UnknownTable          of string * site
-  | UnknownTimeFunction   of string * site
+  | DuplicateCompartment  of string   (** [E500]. *)
+  | DuplicateTransition   of string   (** [E501]. *)
+  | DuplicateParameter    of string   (** [E502]. *)
+  | UnknownCompartment    of string * site   (** [E503]. *)
+  | UnknownParameter      of string * site   (** [E504]. *)
+  | UnknownConstant       of string * site   (** [E518]. *)
+  | UnknownTable          of string * site   (** [E505]. *)
+  | UnknownTimeFunction   of string * site   (** [E506]: no forcing of that name. *)
   | ForcingBasisOutsideGradient of string * site
-      (* proposal 2026-10-27-estimable-bsplines §5.1: a derivative-only node *)
-  | UnknownTransition     of string * site
-  | DuplicateFlowInUnion  of string * site  (* gh#678: a flow union must be disjoint *)
-  | RealCompartmentInStoichiometry of string * string  (* transition, compartment *)
-  | MissingOdeEquation    of string
-  | OdeForNonRealComp     of string
-  | ZeroDelta             of string * string  (* transition, compartment *)
-  | ParamInBinding        of string * string  (* binding name, param name *)
-  | InitUnknownCompartment of string          (* init key naming no compartment *)
-  | InitDependencyCycle   of string list      (* gh#733: init entries that read each other *)
+      (** [E519]: a model expression holds a basis function of the named
+          forcing, a node only the derivatives autodiff writes may hold. No
+          camdl source produces it. *)
+  | UnknownTransition     of string * site   (** [E507]: a projection names no transition. *)
+  | DuplicateFlowInUnion  of string * site  (** [E514]: a sum or ratio of flows names one flow twice, which would count each of its events twice. *)
+  | RealCompartmentInStoichiometry of string * string  (** [E508]: (transition, compartment); a real compartment changes only by its ODE. *)
+  | MissingOdeEquation    of string   (** [E509]: a real compartment with no ODE equation. *)
+  | OdeForNonRealComp     of string   (** [E510]: an ODE equation for a compartment that is not real, or does not exist. *)
+  | ZeroDelta             of string * string  (** [E511]: (transition, compartment) with a change of zero. *)
+  | ParamInBinding        of string * string  (** [E512]: (binding, parameter) read by it. *)
+  | InitUnknownCompartment of string          (** [E513]: an initial condition for a compartment that does not exist. *)
+  | InitDependencyCycle   of string list      (** [E515]: initial conditions that read each other, listed in the order they close the cycle. *)
   | InitLawKindMismatch   of string * string * string
-      (* compartment, law family, the kind the law seeds *)
-  | InitLawOnBalanceTarget of string          (* compartment drawn AND balanced *)
+      (** [E516]: (compartment, law family, the kind of compartment the law
+          seeds); an integer law on a real compartment or the reverse. *)
+  | InitLawOnBalanceTarget of string          (** [E517]: a compartment both drawn from a law and set by the balance, which overwrites the draw. *)
 
 let error_to_string = function
   | DuplicateCompartment s -> Printf.sprintf "duplicate compartment: %s" s
@@ -70,14 +121,15 @@ let error_to_string = function
 
 module SS = Set.Make(String)
 
-(* Does this expression reach a [Param] node? Used to enforce the
-   hoist/autodiff contract: a hoisted [model.bindings] body must be
-   param-free, because [autodiff.ml] differentiates [BindingRef] to 0.
-   A param leaking into a binding would silently zero its gradient.
-   This is a structural reachability check — it does NOT resolve
-   [BindingRef] transitively (bindings are topo-ordered and each is
-   checked in turn, so a param reachable through an earlier binding
-   surfaces on that binding). *)
+(** The first parameter an expression reads directly, if any.
+
+    A shared binding must read no parameter, because {!Autodiff}
+    differentiates a [BindingRef] to zero: a parameter inside a binding would
+    silently lose its gradient. The walk does not follow a [BindingRef] (each
+    binding is checked on its own, so a parameter read through another
+    binding is reported on that one), nor the cells of a table or the
+    coefficients of a forcing: a parameter reached only through a table or
+    forcing is not found here. *)
 let first_param (e : expr) : string option =
   let rec go = function
     | Param p -> Some p
@@ -136,12 +188,8 @@ let check_expr_refs ~site ~comps ~params ~constants ~tables ~tfs errors e =
 let validate (m : model) : (unit, error list) result =
   let errors = ref [] in
 
-  (* Unique-name checks. The returned sets double as the
-     {comps, params, tables, tfs, tr_set} used by check_expr_refs
-     below — m10 in the 2026-04-19 review. Prior version bound two
-     of these to `_tr_names` / `_param_names` and then rebuilt them
-     via `List.map |> SS.of_list`, doing the walk twice for each
-     list. *)
+  (* Unique-name checks; the returned name sets are reused by the reference
+     checks below. *)
   let comp_names = uniq_check (fun (c: compartment)     -> c.name) m.compartments (fun n -> DuplicateCompartment n) errors in
   let tr_set     = uniq_check (fun (t: transition)      -> t.name) m.transitions  (fun n -> DuplicateTransition  n) errors in
   let params     = uniq_check (fun (p: parameter)       -> p.name) m.parameters   (fun n -> DuplicateParameter   n) errors in
@@ -180,12 +228,10 @@ let validate (m : model) : (unit, error list) result =
   (* observations *)
   List.iter (fun (obs: observation_model) ->
     let here = InObservation obs.name in
-    (* Projection reference check. The compartment arms were missing (gh#478):
-       `CurrentPop`/`CurrentPopSum` fell through the wildcard, so a projection
-       naming no real cell — e.g. `prevalence(I[child])` on a `[age, patch]`
-       family, which lowers to the non-existent `I_child` — passed `camdlc
-       check` and only failed at run time. Transitions were already checked;
-       both sides now are. *)
+    (* Projection reference check: every flow and compartment a projection
+       names must exist. A projection of a partly indexed family, such as
+       `I[child]` on an `[age, patch]` family, lowers to a name like `I_child`
+       that is no compartment. *)
     (match obs.projection with
      | CumulativeFlow tn ->
        if not (SS.mem tn tr_set) then errors := UnknownTransition (tn, here) :: !errors
@@ -193,8 +239,8 @@ let validate (m : model) : (unit, error list) result =
        List.iter (fun tn ->
          if not (SS.mem tn tr_set) then errors := UnknownTransition (tn, here) :: !errors
        ) tns;
-       (* gh#678: covers every producer, including a hand-written or generated
-          IR that never passed through the expander's lowering-site check. *)
+       (* The expander checks this where it lowers a union; this covers an IR
+          from any other producer. *)
        let seen = Hashtbl.create 8 in
        List.iter (fun tn ->
          if Hashtbl.mem seen tn then
@@ -221,14 +267,7 @@ let validate (m : model) : (unit, error list) result =
          if not (SS.mem cn comp_names) then errors := UnknownCompartment (cn, here) :: !errors
        ) cns
      | _ -> ());
-    (* Walk observation-likelihood expressions. The likelihood AST
-       may reference parameters, populations, tables, and the special
-       `Projected` variable; we check every identifier in the
-       distribution's payload so e.g.
-         cases : poisson(rate = bata * Projected)
-       catches the `bata` typo here. m9 in the 2026-04-19 review —
-       previously this branch was commented out, so these checks ran
-       nowhere. *)
+    (* Every name in every likelihood argument. *)
     let chk e = check_expr_r ~site:here e in
     (match obs.likelihood with
      | Poisson      { rate }                    -> chk rate.expr
@@ -242,25 +281,16 @@ let validate (m : model) : (unit, error list) result =
        chk mean.expr; chk dispersion.expr; chk pi.expr)
   ) m.observations;
 
-  (* Hoist/autodiff contract (defensive invariant). Every entry in
-     [m.bindings] must be param-free: [autodiff.ml] differentiates
-     [BindingRef] unconditionally to 0, so a param reachable from a
-     hoisted binding body would silently zero its gradient — an
-     un-estimable parameter with no error (the gh#186 failure class).
-     The expander's [let_is_hoistable] only hoists param-free lets, so
-     on the clean corpus this never fires; it converts a latent
-     silent-wrong-gradient into a loud compile-time failure if that
-     eligibility heuristic ever regresses. *)
+  (* No binding reads a parameter (see [first_param]). The expander hoists
+     only parameter-free lets, so this fires only if that rule breaks. *)
   List.iter (fun (b : binding) ->
     match first_param b.bexpr with
     | Some p -> errors := ParamInBinding (b.bname, p) :: !errors
     | None -> ()
   ) m.bindings;
 
-  (* Initial-condition reference check (gh#114). Every init key must name a
-     real compartment in the (already fully-expanded) IR. The OCaml expander
-     enforces this at the frontend (E277); this is the contract-boundary net
-     so a hand-written or drifted IR cannot start a cell that doesn't exist. *)
+  (* Every initial condition names a compartment of the model. The expander
+     reports the same mistake with a location (E277). *)
   List.iter (fun (k, _) ->
     if not (SS.mem k comp_names)
     then errors := InitUnknownCompartment k :: !errors
@@ -290,7 +320,7 @@ let validate (m : model) : (unit, error list) result =
     then errors := InitLawOnBalanceTarget comp :: !errors
   ) m.initial_conditions;
 
-  (* Initial-condition dependency cycle (gh#733). An init entry may read another
+  (* Initial-condition dependency cycle. An init entry may read another
      compartment's initial value, so the entries are evaluated in topological
      order; `A = B + 1` beside `B = A - 1` has no order to evaluate in and no
      value to report. Rejecting it here is what lets both the runtime and the
@@ -299,7 +329,7 @@ let validate (m : model) : (unit, error list) result =
    | Ok _ -> ()
    | Error cyc -> errors := InitDependencyCycle cyc :: !errors);
 
-  (* Intervention/event action targets (gh#461). A dangling target is a silent
+  (* Intervention/event action targets. A dangling target is a silent
      no-op at best. The expander enforces this at the frontend (E265); this is
      the contract-boundary net, and it mirrors the Rust validator
      (`rust/crates/ir/src/validate.rs`, `check_target`) so the two sides agree

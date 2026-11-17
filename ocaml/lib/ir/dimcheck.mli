@@ -1,25 +1,26 @@
-(** Dimensional analysis of an expanded IR model.
+(** The dimension checker of an expanded model: it infers the physical
+    dimension of every expression and parameter, and reports each place the
+    model's dimensions disagree.
 
-    Every expression-bearing position of the model ([Dim_sites.sites]) is
-    turned into linear equations over integer exponent vectors in two bases
-    (population, time), with one more equation for the dimension its position
-    requires, and the whole system is solved at once by [Dim_solve]. Every
-    contradiction and every integer infeasibility is a diagnostic at the
-    position it surfaces at; a parameter the system leaves free gets I300 with
-    whatever the model does determine about it. The checker records a
-    [subject] on every diagnostic (the IR has no source spans); the compiler
-    resolves that to a declaration location. *)
+    {!check_model} takes the expanded {!Ir.model}, with side inputs from the
+    expander that the IR does not keep, and returns a {!result}: every
+    diagnostic, and the dimensions it resolved for parameters and generated
+    quantities. It changes nothing in the model. How the check works, as one
+    system of linear equations over integer exponents, is described in the
+    implementation's module documentation. *)
 
 open Ir
 
-(** A dimension vector over the fixed base set: [d.(0)] is the population
-    exponent, [d.(1)] the time exponent. Build one with [make], combine with
-    [dim_mul]/[dim_div], compare with [dim_eq], render with
-    [formal_dim]/[display_dim]. *)
+(** A physical dimension, as integer exponents of the two base dimensions:
+    [d.(0)] is the exponent of population (P) and [d.(1)] that of time (T),
+    so [[|1; -1|]] is a number of individuals per unit time. Every value has
+    exactly two entries; the type does not enforce it. Build one with
+    {!make}, combine with {!dim_mul} and {!dim_div}, compare with {!dim_eq},
+    render with {!formal_dim} or {!display_dim}. *)
 type dim_vec = int array
 
 (** [make p t] is the dimension with population exponent [p] and time
-    exponent [t] (e.g. [make 1 (-1)] is a per-capita rate). *)
+    exponent [t] (e.g. [make 0 (-1)] is a per-capita rate). *)
 val make : int -> int -> dim_vec
 
 val dim_mul : dim_vec -> dim_vec -> dim_vec
@@ -32,63 +33,93 @@ val formal_dim : dim_vec -> string
 (** Human-readable rendering, e.g. ["per-capita rate"]. *)
 val display_dim : dim_vec -> string
 
+(** How serious a diagnostic is. An [Error] stops the compile. An [Info]
+    does not: the checker uses it for a parameter whose dimension the model
+    leaves undetermined (I300) and for a suspicious log-normal prior
+    argument (I316). *)
 type severity = Error | Info
 
-(** The construct a diagnostic concerns; the compiler maps it to a source
+(** The construct a diagnostic concerns. The IR carries no source locations,
+    so the compiler looks up the construct's declaration to place the
+    diagnostic; a diagnostic without a subject is printed without a
     location. *)
 type subject = Dim_sites.subject =
-  | STransition  of string
-  | SOde         of string
-  | SObservation of string
-  | SBinding     of string
-  | SContrast    of string
-  | SInit        of string
-  | SParameter   of string   (** a parameter, for a diagnostic about its prior *)
-  | SQuantity    of string
-  | SIntervention of string  (** an intervention, event or reactive trigger *)
-  | SLet         of string   (** a typed `let`, for its annotation *)
+  | STransition  of string   (** A transition, by expanded name. *)
+  | SOde         of string   (** The ODE equation of the named compartment. *)
+  | SObservation of string   (** An observation stream. *)
+  | SBinding     of string   (** A shared binding. The compiler has no location for one. *)
+  | SContrast    of string   (** A contrast between runs. *)
+  | SInit        of string   (** The initial condition of the named compartment. *)
+  | SParameter   of string   (** A parameter, for a diagnostic about its prior or bounds. *)
+  | SQuantity    of string   (** A generated quantity. *)
+  | SIntervention of string  (** An intervention, event or reactive trigger. *)
+  | SLet         of string   (** A typed [let], for its annotation. *)
 
+(** One finding of the checker, before the compiler turns it into a
+    located diagnostic. *)
 type diagnostic = {
   severity : severity;
-  code     : string;
+  code     : string;          (** The diagnostic code, such as ["E300"]. *)
   message  : string;
-  detail   : string option;
-  hint     : string option;
+  detail   : string option;   (** What was expected and what was found. *)
+  hint     : string option;   (** How to fix it. *)
   subject  : subject option;
 }
 
+(** Everything the checker reports about one model. *)
 type result = {
   diagnostics   : diagnostic list;
+  (** The errors from the equations, at most one per subject, code and
+      message; then the findings of the prior check (E316, I316); then one
+      I300 for each undetermined parameter that some model position reads. *)
   param_dims    : (string * dim_vec) list;
+  (** Every parameter and typed constant whose dimension the model
+      determines, by name. *)
   quantity_dims : ((string * (string * string) list) * dim_vec) list;
+  (** Every generated quantity whose dimension the model determines, keyed by
+      its name and the [(dimension, level)] pairs of its cell. The compiler
+      writes these onto the quantities of the compiled model. *)
 }
 
-(** A prior as written, before the expander folds a constant prior's arguments
-    to floats: each argument resolved to an IR expression, unit literals intact
-    (as [UnitLiteral] nodes). *)
+(** A prior or a pair of bounds as written, before the expander folds a
+    constant prior's arguments to numbers: each argument resolved to an IR
+    expression with its unit literals intact, so that the checker can see
+    which unit each one asserted.
+
+    {@camdl[
+      parameters {
+        gamma : rate ~ normal(mu = 0.2 'per_day, sigma = 0.05 'per_day)
+      }
+    ]} *)
 type prior_source = {
   param  : string;
-  family : string;                  (** "normal", "log_normal", ... *)
-  args   : (string * expr) list;
+  family : string;
+  (** The family's name, such as ["normal"] or ["log_normal"], or
+      ["bounds"] for a parameter's [in [lo, hi]] bounds, whose arguments are
+      ["lower"] and ["upper"]. *)
+  args   : (string * expr) list;   (** Each argument, by name. *)
 }
 
 (** Dimensionally check an expanded model, returning every diagnostic plus the
     resolved parameter and generated-quantity dimensions. [prior_args] are the
-    model's priors as written; without them only hierarchical priors, whose
-    arguments the IR keeps, are checked for explicit units. *)
+    model's priors and bounds as written; without them only hierarchical
+    priors, whose arguments the IR keeps, are checked for explicit units. *)
 val check_model :
   ?prior_args:prior_source list -> ?constant_dims:(string * (int * int)) list ->
   ?table_dims:(string * (int * int)) list ->
   ?typed_lets:(string * (int * int) * expr) list -> model -> result
-(** [constant_dims] are the `dim` clauses of typed constants, which the IR's
+(** [constant_dims] are the [dim] clauses of typed constants, which the IR's
     constant record does not carry; [table_dims] the dimensions of tables
     declared with a unit annotation, which the IR's table record does not
-    carry either. [typed_lets] are the expanded bodies of
-    typed, non-constant `let`s with their declared dimension; the IR inlines
-    them, so it keeps no node for the annotation (E318). Both side inputs come from the expander;
-    the compiler and `camdlc inspect` pass them. A model checked without them
-    (an IR reloaded from JSON, a model built in a test) gets weaker results,
-    never contradictory ones: a constant with a `dim` clause is inferred from
-    its use instead of declared, and the unit literals of constant priors are
-    not checked, since the IR no longer holds them. The next IR schema bump
-    puts the clause on the constant record, which removes the first gap. *)
+    carry either. [typed_lets] are the expanded bodies of typed, non-constant
+    [let]s with their declared dimension; the IR substitutes them into the
+    expressions that use them, so it keeps no node for the annotation
+    (E318). All of these come from the expander; the compiler and
+    [camdlc inspect] pass them. A model checked without them (an IR read
+    back from JSON, a model built in a test) gets weaker results, never
+    contradictory ones: a constant with a [dim] clause is inferred from its
+    use instead of declared, and the unit literals of constant priors are not
+    checked, since the IR holds those arguments only as numbers.
+
+    An exponent too large for a native integer gives one error, E310, in
+    place of every other result. *)

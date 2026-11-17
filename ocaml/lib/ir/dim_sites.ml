@@ -1,17 +1,64 @@
-(* Every expression-bearing position of an expanded model, with the dimension
-   its expression must have.
+(** Every position of an expanded model that holds an expression, each with
+    the dimension its expression must have: the list the dimension checker
+    reads, and the only one.
 
-   This module is the list of positions the dimension checker reads, and the
-   only one. [sites] destructures every IR record it visits with a closed
-   pattern and every variant without a catch-all, under warnings 4, 8 and 9 as
-   errors: a new IR field or constructor does not compile here until someone
-   writes its rule or an exemption. The coverage test (ocaml/test/
-   test_dim_sites.ml) checks the other half, that no expression-bearing field
-   is bound to [_]: every expression node of the serialized model must be the
-   expression of some site, or lie under an exempt key.
+    {!sites} turns an {!Ir.model} into a list of {!site}s. A site pairs one
+    expression with an {!obligation}: a fixed dimension ([Has]: a transition
+    rate is [P·T⁻¹], an initial value P, a forcing's period T), the dimension
+    of a name ([Equals]: a Normal likelihood's mean has the dimension of the
+    column it scores; [Defines]: a binding's body gives the binding its
+    dimension), or nothing beyond the operator rules ([Free]). The site also
+    says how bare literals in it are read ({!literals}), which diagnostic
+    code a violation reports, which construct it belongs to, for locating the
+    diagnostic ({!subject}), and which observation stream its [projected]
+    and column references read. {!Dimcheck} turns each site into equations.
+    In
 
-   The rules are those of proposal 2026-11-06-dimension-checking-as-one-
-   constraint-system §5.1. *)
+    {@camdl[
+      time_unit = 'days
+      compartments { S, I, R }
+      parameters {
+        beta  : rate
+        gamma : rate
+      }
+      let N = S + I + R
+      transitions {
+        infection : S --> I @ beta * S * I / N
+        recovery  : I --> R @ gamma * I
+      }
+      init { S = 990  I = 10 }
+    ]}
+
+    the sites are the binding [N] (obligation [Defines (K_binding "N")]), the
+    two rates ([Has P·T⁻¹], code E300, literals as whole terms) and the two
+    initial values ([Has P], code E313).
+
+    The list is complete by construction. {!sites} destructures every IR
+    record it visits with a closed pattern and matches every variant without
+    a catch-all, with warnings 4, 8 and 9 as errors, so an IR field or
+    constructor this module has no rule for is a build error until someone
+    writes its rule or an exemption. A field that holds an expression and is bound to [_] would
+    still slip through; the coverage test [ocaml/test/test_dim_sites.ml]
+    closes that gap by requiring every expression node of the serialized
+    model to be the expression of some site, or to lie under an exempt key
+    (the derivative maps autodiff writes, the lineage weights the expander
+    derives from a checked rate, and the bindings loop-invariant code motion
+    creates after the check).
+
+    Sites are listed bindings first, then transitions, ODE equations,
+    forcings, tables, interventions, observations, parameter priors, initial
+    conditions, the balance expression, quantities and contrasts. The order
+    matters: the solver refuses the later of two equations that disagree,
+    and a binding's definition should not be the one blamed for a mistake in
+    a use of it.
+
+    Some positions are deliberately not checked. A forcing argument or an
+    inline table cell that is a constant expression is read in the forcing's
+    or table's own declared unit, so it is [Exempt]. A hierarchical prior's
+    argument is listed with strength [Checked] and enters no equation;
+    {!Dimcheck} checks the unit literals of every prior separately. Schedule
+    times, trigger windows, cooldowns and similar times are numbers in the
+    IR, not expressions, so they have no site here. *)
 
 [@@@warning "@4@8@9"]
 (* 4: a [_] catch-all over a variant is an error, so a new constructor cannot
@@ -22,74 +69,89 @@
 
 open Ir
 
+(** A dimension as exponents of population and time; the same
+    representation as {!Dimcheck.dim_vec}, which this module cannot name
+    because {!Dimcheck} depends on it. *)
 type dim_vec = int array
 
-(* The construct a diagnostic concerns; the compiler maps it to a source
-   location (the IR carries no spans). *)
+(** The construct a diagnostic concerns. The IR carries no source locations,
+    so the compiler looks up the construct's declaration to place the
+    diagnostic. A site without a subject (a forcing argument, a table cell,
+    the balance expression) yields a diagnostic with no location. *)
 type subject =
-  | STransition  of string
-  | SOde         of string   (* compartment whose ODE derivative *)
-  | SObservation of string
-  | SBinding     of string
-  | SContrast    of string
-  | SInit        of string   (* compartment whose initial condition *)
-  | SParameter   of string   (* parameter whose prior *)
-  | SQuantity    of string
-  | SIntervention of string   (* intervention, event or reactive trigger *)
-  | SLet         of string   (* a typed `let`, for its annotation *)
+  | STransition  of string   (** A transition, by expanded name. *)
+  | SOde         of string   (** The ODE equation of the named compartment. *)
+  | SObservation of string   (** An observation stream. *)
+  | SBinding     of string   (** A shared binding. The compiler has no location for one. *)
+  | SContrast    of string   (** A contrast between runs. *)
+  | SInit        of string   (** The initial condition of the named compartment. *)
+  | SParameter   of string   (** A parameter, for a diagnostic about its prior or bounds. *)
+  | SQuantity    of string   (** A generated quantity. *)
+  | SIntervention of string   (** An intervention, event or reactive trigger. *)
+  | SLet         of string   (** A typed [let], for its annotation. *)
 
-(* Things whose dimension other positions refer to. *)
+(** A name whose dimension positions of the model refer to: each key is one
+    unknown of the dimension checker's system. *)
 type key =
-  | K_param    of string   (* a parameter or a typed constant *)
-  | K_table    of string   (* a table's cell dimension *)
-  | K_binding  of string
-  | K_stream   of string   (* an observation stream's projected dimension *)
-  | K_column   of string * string   (* (stream, column) *)
-  | K_quantity of string   (* a generated quantity's reported dimension *)
-  | K_series   of string   (* the series a quantity reduces *)
+  | K_param    of string   (** A parameter or a typed constant. *)
+  | K_table    of string   (** The dimension of a table's cells. *)
+  | K_binding  of string   (** A shared binding. *)
+  | K_stream   of string   (** The dimension of an observation stream's projection, what [projected] reads. *)
+  | K_column   of string * string   (** A column of an observation stream, as (stream, column). *)
+  | K_quantity of string   (** The dimension a generated quantity reports. *)
+  | K_series   of string   (** The series a reduced quantity reduces, by the quantity's name. *)
 
+(** The expression at a site, in whichever of the IR's expression languages
+    the position uses. *)
 type site_expr =
-  | E        of expr
-  | Scalar   of scalar_expr     (* a derived quantity's body *)
-  | Contrast of contrast_expr
+  | E        of expr               (** A model expression. *)
+  | Scalar   of scalar_expr     (** A derived quantity's body: arithmetic over other quantities and parameters. *)
+  | Contrast of contrast_expr      (** A contrast's body: arithmetic over the members of runs. *)
 
+(** Why a position is not read by the checker. *)
 type exemption =
-  | Constant_argument   (* a forcing argument fixed at compile time is read
-                           in the forcing's own unit *)
+  | Constant_argument   (** A forcing argument or inline table cell fixed at
+                            compile time is read in the forcing's or table's
+                            own declared unit. *)
 
+(** What a site requires of its expression's dimension. *)
 type obligation =
-  | Has     of dim_vec   (* a fixed dimension: P·T⁻¹, P, 1, T, ... *)
-  | Equals  of key       (* the dimension of [key] *)
-  | Equals_t of key      (* the T exponent of [key]'s; P unconstrained, and
-                            only the T components of the expression's own
-                            equations hold (count noise, §5.6) *)
-  | Defines of key       (* this expression's dimension is [key]'s *)
-  | Free                 (* operator rules only; nothing required of the value *)
-  | Exempt  of exemption (* not read *)
+  | Has     of dim_vec   (** A fixed dimension: [P·T⁻¹] for a rate, P for a count, T for a time, a pure number for a probability. *)
+  | Equals  of key       (** The dimension of [key], which other positions may also determine. *)
+  | Equals_t of key      (** The T exponent of [key]'s dimension, with P unconstrained. Every equation the expression generates holds on T alone, except those requiring a function's argument to be a pure number. Used for the [sd] of a Normal likelihood on a [count] column. *)
+  | Defines of key       (** The expression gives [key] its dimension: a binding's body, a derived projection, a quantity. The checker treats it as [Equals]; the difference is one of reading. *)
+  | Free                 (** Nothing beyond the operator rules inside the expression. *)
+  | Exempt  of exemption (** The expression is not read at all. *)
 
-(* A literal is dimensionless, except zero, which takes any dimension, and a
-   literal that is an entire additive term of a [Whole_terms] position, which
-   takes the position's dimension (§5.2). *)
+(** How bare numeric literals in a site's expression are read. Zero takes
+    any dimension in either case. *)
 type literals =
-  | Literals_dimensionless
-  | Whole_terms              (* `I = 10`, `S = N0 - 50`, `rate = 100`,
-                                `count = 50`, `at [t_seed + 7]` *)
+  | Literals_dimensionless   (** Every other literal is a pure number. *)
+  | Whole_terms              (** A literal, or a constant expression of
+                                literals, that is a whole additive term of
+                                the expression takes the position's
+                                dimension: [I = 10], [S = N0 - 50],
+                                [beta * S * I / N + 0.5] as a rate. Inside a
+                                product, quotient or function it is still a
+                                pure number. *)
 
+(** Whether a site's equations enter the solve. *)
 type strength =
-  | Binding   (* a model position: its equations enter the solve *)
-  | Checked   (* a prior argument: never constrains the model (§5.9) *)
+  | Binding   (** A model position: its equations enter the solve. *)
+  | Checked   (** A hierarchical prior's argument: listed so the coverage test sees it, and never turned into equations. *)
 
+(** One position of the model that holds an expression, with what its
+    dimension must be. *)
 type site = {
   subject    : subject option;
-  role       : string;           (* "transition 'infection' rate", ... *)
+  role       : string;           (** The position in words, for messages: ["transition 'infection' rate"]. *)
   expr       : site_expr;
   obligation : obligation;
   literals   : literals;
-  code       : string;           (* the code a violated obligation reports *)
+  code       : string;           (** The diagnostic code a violation reports. *)
   strength   : strength;
-  stream     : string option;    (* the observation whose Projected and
-                                    column references this expression reads *)
-  note       : string option;    (* guidance a violation's diagnostic carries *)
+  stream     : string option;    (** The observation whose [projected] and column references this expression reads. *)
+  note       : string option;    (** Guidance carried as the hint of the diagnostic when the expression breaks a [Has] obligation. *)
 }
 
 let dimensionless = [| 0; 0 |]
@@ -112,6 +174,7 @@ let rec is_constant_expr (e : expr) : bool =
 
 (* ── Building sites ────────────────────────────────────────────────────── *)
 
+(** The sites found so far while walking a model, newest first. *)
 type acc = { mutable out : site list }
 
 let add acc ?(subject : subject option) ?(literals = Literals_dimensionless) ?(strength = Binding)
@@ -132,7 +195,7 @@ let transition_sites acc (tr : transition) =
    | DrawOverdispersed { sigma_sq; sigma_sq_grad = _ (* derivative map *) } ->
      (* The runtime draws a unit-mean Gamma multiplier with shape dt/σ² and
         scale σ²/dt (rng.rs), Bretó et al. (2009) gamma white noise: a shape
-        is a pure number, so σ² has the dimension of dt (§5.7). *)
+        is a pure number, so σ² has the dimension of dt. *)
      add acc ~subject ~role:(Printf.sprintf "overdispersion sigma^2 in '%s'" name)
        ~code:"E308"
        ~note:"σ² is the variance of the integrated noise per unit time; with \
@@ -224,8 +287,8 @@ let forcing_sites acc (tf : time_function) =
         | Link_identity ->
           (* w = level + slope·(t − t_m) + (scale/κ)·M·z is the forcing's value:
              the penalty Ω integrates B''² over t, so M (MᵀΩM = I) and
-             κ = √(K − 2)·per^{3/2} are both T^{3/2} and cancel (§5.8,
-             spline_penalty.rs, compiled_model.rs). *)
+             κ = √(K − 2)·per^{3/2} are both T^{3/2} and cancel
+             (spline_penalty.rs, compiled_model.rs). *)
           add acc ?subject ~role:(role "level") ~code:"E312" (Has value_dim) (E level);
           add acc ?subject ~role:(role "slope") ~code:"E312"
             (Has (Array.mapi (fun i x -> x + per_time.(i)) value_dim)) (E slope);
@@ -364,7 +427,7 @@ let parameter_sites acc (p : parameter) =
      | Hierarchical { hkind = _; hargs; hpool_over = _ } ->
        List.iter (fun (arg, e) ->
          (* Checked after the solve by [Dimcheck]'s prior pass, from every
-            prior's arguments; never an equation (§5.9). *)
+            prior's arguments; never an equation. *)
          add acc ~subject:(SParameter name) ~strength:Checked ~code:"E316"
            ~role:(Printf.sprintf "prior of '%s' `%s`" name arg) Free (E e))
          hargs)

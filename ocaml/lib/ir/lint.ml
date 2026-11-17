@@ -1,47 +1,102 @@
-(* Model linter for camdl IR.
+(** The linter of an expanded model: warnings for a model that is valid and
+    runs, but is probably not what its author meant.
 
-   Lints catch semantically valid but discouraged patterns — a model that
-   compiles and runs but is likely a mistake. They emit at Warning
-   severity (see ocaml/lib/compiler/diagnostics.ml `has_errors`, which
-   blocks only on Error), so a lint renders with a hint but never fails
-   the build.
+    {!check_model} reads an {!Ir.model} and returns a {!result} holding a
+    list of {!diagnostic}s, all of severity [Warning]; it changes nothing.
+    The compiler runs it right after the dimension check, in both a compile
+    and [camdlc check], and turns each diagnostic into a warning placed at
+    the declaration its {!subject} names. A warning never stops a compile.
 
-   Structure mirrors Dimcheck: `check_model : model -> result`, where
-   `result` carries a list of this module's own `diagnostic` records.
-   `compiler.ml`'s `run_lint` maps each onto `Diagnostics.warning`.
+    Two lints are implemented here, each a function from the model to its
+    diagnostics, listed in [checks]:
 
-   `check_model` runs a LIST of individual lint-check functions, so a
-   future lint (unused-parameter, dead-transition) is a one-line append.
-   Today: the dead-compartment check (L402) and the shared-measurement
-   check (L404). *)
+    - [L402], a dead compartment: a compartment that nothing in the model
+      reads or writes, neither a transition (its stoichiometry, rate,
+      overdispersion or lineage weights), an ODE equation, an intervention
+      action, an observation's projection or likelihood, a shared binding,
+      an initial condition, the balance, the identity-tracked list nor a
+      forcing's arguments. Quantities and contrasts are not consulted, so a
+      compartment read only by a quantity is reported.
+    - [L404], one measurement scored twice: two or more observation streams
+      with the same projection, compared after expansion, and the same
+      scored column name. The joint log-likelihood is a sum over streams, so
+      data bound to both counts the same evidence twice and the posterior is
+      too narrow, with no diagnostic of a fit to show it. Streams sharing a
+      projection but scoring different columns, such as cases and deaths
+      off one flow, are two observation processes on one latent quantity,
+      and are not reported.
+
+    {@camdl[
+      time_unit = 'days
+      compartments { S, I, R, Q }
+      parameters {
+        beta  : rate
+        gamma : rate
+        rho   : probability
+        k     : positive
+      }
+      let N = S + I + R
+      transitions {
+        infection : S --> I @ beta * S * I / N
+        recovery  : I --> R @ gamma * I
+      }
+      observations {
+        cases {
+          columns       { time : time, cases : count }
+          covers        = closing_at(time, 7 'days)
+          projected     = incidence(infection)
+          emit_schedule = every 7 'days
+          cases ~ neg_binomial(mean = rho * projected, r = k)
+        }
+        cases_again {
+          columns       { time : time, cases : count }
+          covers        = closing_at(time, 7 'days)
+          projected     = incidence(infection)
+          emit_schedule = every 7 'days
+          cases ~ poisson(rate = rho * projected)
+        }
+      }
+      init { S = 990  I = 10 }
+    ]}
+
+    gives [compartment 'Q' is declared but never used] (L402) and
+    [observation streams 'cases' and 'cases_again' score the same quantity
+    'cases'] (L404).
+
+    Other lints live elsewhere: the expander reports L401 (a fixed time
+    literal inside an Euler-correction pattern in a rate) and L403 (a rate
+    forcing divided by a time-conversion constant), because they need the
+    syntax tree, and {!Dimcheck} reports I316 about log-normal priors. *)
 
 open Ir
 
 (* ── Diagnostic results ─────────────────────────────────────────────────── *)
 
-(* Lints are always Warning severity (never blocking). The single-
-   constructor `severity` keeps the type parallel to Dimcheck's and lets
-   the compiler-side mapping pattern-match exhaustively. *)
+(** How serious a lint is: always a warning, which never stops a compile.
+    The type has one constructor so that it reads like {!Dimcheck.severity}
+    and the compiler's mapping of it is an exhaustive match. *)
 type severity = Warning
 
-(* The declaration a lint concerns, so the compiler can resolve it back to a
-   source loc — Lint runs on the IR, which has no spans. Mirrors
-   [Dimcheck.subject], which serves the same purpose for the dimension pass;
-   one variant per declaration kind a lint can point at, so a lint cannot name
-   a compartment and a stream at once. *)
+(** The declaration a lint concerns. The IR carries no source locations, so
+    the compiler looks up the declaration to place the warning. *)
 type subject =
-  | SCompartment of string
-  | SObservation of string
+  | SCompartment of string   (** A compartment, by expanded name. *)
+  | SObservation of string   (** An observation stream; for a stratified stream the compiler places the warning at its family's declaration. *)
 
+(** One finding of the linter, before the compiler turns it into a located
+    warning. *)
 type diagnostic = {
   severity : severity;
-  code     : string;
+  code     : string;          (** The lint's code, [L402] or [L404]. *)
   message  : string;
-  detail   : string option;
-  hint     : string option;
+  detail   : string option;   (** Why the pattern is probably a mistake. *)
+  hint     : string option;   (** What to do about it. *)
   subject  : subject option;
 }
 
+(** Every finding of the linter for one model: the [L402]s, sorted by
+    compartment name, then the [L404]s, in the order of each group's first
+    stream. *)
 type result = {
   diagnostics : diagnostic list;
 }
@@ -73,7 +128,7 @@ let rec pops_in_expr (acc : string list) (e : expr) : string list =
     pops_in_expr acc arg
   | Cond { pred; then_; else_ } ->
     pops_in_expr (pops_in_expr (pops_in_expr acc pred) then_) else_
-  (* TableLookup's first field is the table NAME, not a compartment; the
+  (* TableLookup's first field is the table name, not a compartment; the
      index expressions can reference compartments (e.g. dynamic strata). *)
   | TableLookup (_name, idx_exprs) ->
     List.fold_left pops_in_expr acc idx_exprs
@@ -85,12 +140,11 @@ let rec pops_in_expr (acc : string list) (e : expr) : string list =
 (* ── Reference collection across the whole model ────────────────────────── *)
 
 (* Build the set of compartment names referenced anywhere in [m]. A
-   compartment is "referenced" if it appears in ANY of: transition
+   compartment is referenced if it appears in any of: transition
    stoichiometry / metadata source-dest / rate, ODE equations, intervention
    actions, observation projections + likelihoods, model-level bindings,
    initial conditions, the balance constraint, the identity-tracked list, or
-   time-function definitions. A name appearing in any of these is live —
-   only a name in NONE of them is dead. *)
+   time-function definitions. Only a name in none of them is dead. *)
 let referenced_compartments (m : model) : (string, unit) Hashtbl.t =
   let refs = Hashtbl.create 64 in
   let add name = Hashtbl.replace refs name () in
@@ -140,8 +194,8 @@ let referenced_compartments (m : model) : (string, unit) Hashtbl.t =
   ) m.interventions;
 
   (* Observations: projection targets + likelihood-parameter exprs.
-     CumulativeFlow's string is a FLOW/transition name, NOT a compartment —
-     excluded deliberately. *)
+     CumulativeFlow's string is a flow (transition) name, not a compartment,
+     and is excluded deliberately. *)
   List.iter (fun (obs : observation_model) ->
     (match obs.projection with
      | CumulativeFlow _flow -> ()   (* transition name, not a compartment *)
@@ -222,55 +276,34 @@ let check_dead_compartments (m : model) : diagnostic list =
 
 (* ── Lint L404: two streams scoring one measurement ─────────────────────── *)
 
-(* The joint observation log-likelihood is a plain sum over bound streams, so
-   two streams that read the same underlying measurements contribute that
-   evidence twice. Nothing else notices: the counts are never doubled, so the
-   posterior simply concentrates as though there were twice the data, and
-   every convergence diagnostic reads clean.
+(* A shared projection alone is not the condition: driving cases and deaths
+   off one confirmation flow, with their own multipliers and dispersions, is
+   ordinary multi-stream modelling, and a lint keyed on the projection alone
+   fires on such models. The condition is a shared projection and a shared
+   scored column. `scored` is the `~` left-hand side, the value column the
+   likelihood consumes; that name is the quantity being measured.
 
-   A shared PROJECTION alone is not that condition, and keying on it is far too
-   broad: driving cases and deaths off one confirmation flow, with their own
-   multipliers and their own dispersion, is ordinary multi-stream modelling.
-   Measured on a 98-model surveillance corpus, a projection-only key fired on
-   58 models / 63 collision groups, and not ONE of those groups repeated a
-   scored column name — every one was a false positive. A lint that fires on
-   three models in five teaches people to ignore its code.
+   The check runs on the expanded model because two spellings of one flow
+   become one name only there: `resolve_index_order` puts named indices in
+   declared order, so `die[child, north]` and `die[patch = north, age =
+   child]` are one flow, and a stratified stream whose projection ignores its
+   binder expands to leaves that all name one flow. *)
 
-   The condition is a shared projection AND a shared SCORED COLUMN. `scored` is
-   the `~` LHS, the declared value column the likelihood consumes; that name is
-   the quantity being measured, not merely the latent state behind it. Two
-   streams scoring the same named quantity off one projection are reading one
-   measurement twice; two streams scoring DIFFERENT named quantities off one
-   projection are two observation processes on one latent state, which is
-   correct and common.
-
-   This runs on the EXPANDED model — after stratification expansion, index
-   resolution and binder substitution — because two different SPELLINGS become
-   one concrete projection strictly later. `resolve_index_order` normalises
-   named indices to declared order and drops the `INamed` label, so
-   `die[child, north]` and `die[patch = north, age = child]` are one flow by
-   the time we see them; and `index_item_to_str env` substitutes the stream's
-   own binder, so a stratified stream whose projection ignores its binder
-   expands to N leaves all naming ONE flow. A syntactic check on what the
-   modeller wrote sees none of this (the reasoning gh#678 established for the
-   within-projection case). *)
-
-(* A projection's identity for the "same latent quantity?" question. The two
-   sum variants are canonicalised — sorted (a sum is commutative, so the term
-   order is not part of the quantity) and collapsed to the scalar form at
-   length one — so the comparison is over the quantity, not the spelling.
-   `KExpr` compares derived projections structurally, which is exact for the
-   spellings the expander produces and conservative otherwise: it can miss a
-   commuted rewrite, never invent a collision. *)
+(** The latent quantity an observation stream's projection reads, in a form
+    where two spellings of one quantity compare equal. A sum of flows or of
+    compartments is sorted, since a sum's order is not part of the quantity,
+    and a single flow or compartment is a sum of one. A derived projection is
+    compared as an expression, structurally: two streams can be missed when
+    one commutes the other's expression, but two different quantities never
+    compare equal. *)
 type projection_key =
-  | KFlow  of string list      (* accumulated flows, sorted *)
-  | KPop   of string list      (* compartments read at the instant, sorted *)
-  | KExpr  of expr             (* a derived function of the state *)
-  (* A fraction of accumulated flows, each side sorted. Its own key, so a
-     ratio stream and a count stream over its denominator — the joint
-     `p(n | x) · p(k | n, x)` the proposal recommends — are two measurements,
-     never one. *)
+  | KFlow  of string list      (** Accumulated flows, sorted. *)
+  | KPop   of string list      (** Compartments read at an instant, sorted. *)
+  | KExpr  of expr             (** A derived function of the state. *)
   | KRatio of string list * string list
+  (** A fraction of accumulated flows, numerator and denominator each
+      sorted. It is its own key, so a ratio stream and a count stream on its
+      denominator are two measurements, never one. *)
 
 let projection_key (p : projection) : projection_key =
   let canon names = List.sort String.compare names in
@@ -282,10 +315,9 @@ let projection_key (p : projection) : projection_key =
   | DerivedExpr e        -> KExpr e
   | FlowRatio { numerator; denominator } -> KRatio (canon numerator, canon denominator)
 
-(* A stream's measurement identity: the latent quantity its projection reads,
-   paired with the name of the column its likelihood scores. Both halves are
-   load-bearing — see the header comment for why the projection alone is not
-   the condition. *)
+(** What an observation stream measures: the latent quantity its projection
+    reads, paired with the name of the column its likelihood scores. Two
+    streams with one key are reported by [L404]. *)
 type measurement_key = projection_key * string
 
 let measurement_key (o : observation_model) : measurement_key =
@@ -314,7 +346,7 @@ let stream_list (names : string list) : string =
     String.concat ", " (List.rev rev_init) ^ " and " ^ last
 
 (* Group the streams by measurement identity and report every group of two or
-   more — ONE diagnostic per group, naming all its streams, so three streams
+   more, one diagnostic per group, naming all its streams, so three streams
    on one measurement give one report rather than three pairs. Groups are keyed
    by an association list rather than a hashtable because the key carries an
    `expr`, and iteration follows declaration order, so the output is
