@@ -116,12 +116,12 @@ fn edits_in_cli_and_new_source_files_change_the_engine_id_and_a_commit_changes_i
     let root = tree.path();
     let clean = build_of(root);
 
-    write(root, "rust/crates/cli/src/main.rs", "fn main() { println!(); }\n");
+    write(root, "rust/crates/cli/src/main.rs", "fn main() { let _ = 1; }\n");
     let cli_edit = build_of(root);
     assert_ne!(cli_edit.engine_id, clean.engine_id, "an edit to cli/src");
 
     // Two different uncommitted states are two identities.
-    write(root, "rust/crates/cli/src/main.rs", "fn main() { eprintln!(); }\n");
+    write(root, "rust/crates/cli/src/main.rs", "fn main() { let _ = 2; }\n");
     assert_ne!(build_of(root).engine_id, cli_edit.engine_id, "a second edit");
     write(root, "rust/crates/cli/src/main.rs", "fn main() {}\n");
 
