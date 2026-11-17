@@ -93,6 +93,7 @@ fn sir_model_at(
             src: "S".into(),
             dst: "V".into(),
             fraction: Expr::Const(ConstExpr { value: frac }),
+            fraction_grad: Default::default(),
         })],
     };
 

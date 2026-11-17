@@ -124,6 +124,7 @@ fn representative_model() -> Model {
             actions: vec![Action::Set(SetAction {
                 compartment: "I".into(),
                 value: Expr::const_(0.0),
+                value_grad: Default::default(),
             })],
             kind: ir::intervention::InterventionKind::Scenario,
         }],

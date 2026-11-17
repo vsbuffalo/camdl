@@ -3487,6 +3487,7 @@ mod tests {
                 src: "S".into(),
                 dst: "R".into(),
                 fraction: Expr::const_(0.7),
+                fraction_grad: Default::default(),
             })],
             kind: InterventionKind::Scenario,
         });

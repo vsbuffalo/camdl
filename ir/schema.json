@@ -1017,7 +1017,8 @@
               "properties": {
                 "src": { "type": "string" },
                 "dst": { "type": "string" },
-                "fraction": { "$ref": "#/definitions/expr" }
+                "fraction": { "$ref": "#/definitions/expr" },
+                "fraction_grad": { "$ref": "#/definitions/grad_map", "description": "∂fraction/∂θ — the event-jump sensitivity source term (gh#275 §1g); absent when empty" }
               },
               "additionalProperties": false
             }
@@ -1048,7 +1049,8 @@
               "required": ["compartment", "value"],
               "properties": {
                 "compartment": { "type": "string" },
-                "value": { "$ref": "#/definitions/expr" }
+                "value": { "$ref": "#/definitions/expr" },
+                "value_grad": { "$ref": "#/definitions/grad_map", "description": "∂value/∂θ — the event-jump sensitivity source term (gh#275 §1g); absent when empty" }
               },
               "additionalProperties": false
             }
@@ -1063,7 +1065,8 @@
               "required": ["compartment", "count"],
               "properties": {
                 "compartment": { "type": "string" },
-                "count": { "$ref": "#/definitions/expr" }
+                "count": { "$ref": "#/definitions/expr" },
+                "count_grad": { "$ref": "#/definitions/grad_map", "description": "∂count/∂θ — the event-jump sensitivity source term (gh#275 §1g); absent when empty" }
               },
               "additionalProperties": false
             }

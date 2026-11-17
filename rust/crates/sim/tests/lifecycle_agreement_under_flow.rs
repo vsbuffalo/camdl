@@ -92,6 +92,7 @@ fn flow_model() -> CompiledModel {
                 actions: vec![Action::Add(AddAction {
                     compartment: "V".into(),
                     count: Expr::const_(100.0),
+                    count_grad: Default::default(),
                 })],
                 kind: ir::intervention::InterventionKind::Event,
             },
@@ -103,6 +104,7 @@ fn flow_model() -> CompiledModel {
                 actions: vec![Action::Set(SetAction {
                     compartment: "V".into(),
                     value: Expr::const_(50.0),
+                    value_grad: Default::default(),
                 })],
                 kind: ir::intervention::InterventionKind::Scenario,
             },

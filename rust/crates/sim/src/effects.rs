@@ -1310,11 +1310,11 @@ mod tests {
     #[test]
     fn coincident_set_index_matches_scan_for_ordered_batches() {
         let actions = [
-            Action::Set(SetAction { compartment: "S".into(), value: Expr::const_(1.0) }),
-            Action::Set(SetAction { compartment: "I".into(), value: Expr::const_(1.0) }),
-            Action::Set(SetAction { compartment: "W".into(), value: Expr::const_(1.0) }),
-            Action::Add(AddAction { compartment: "S".into(), count: Expr::const_(1.0) }),
-            Action::FractionTransfer(FractionTransfer { src: "S".into(), dst: "I".into(), fraction: Expr::const_(0.5) }),
+            Action::Set(SetAction { compartment: "S".into(), value: Expr::const_(1.0), value_grad: Default::default() }),
+            Action::Set(SetAction { compartment: "I".into(), value: Expr::const_(1.0), value_grad: Default::default() }),
+            Action::Set(SetAction { compartment: "W".into(), value: Expr::const_(1.0), value_grad: Default::default() }),
+            Action::Add(AddAction { compartment: "S".into(), count: Expr::const_(1.0), count_grad: Default::default() }),
+            Action::FractionTransfer(FractionTransfer { src: "S".into(), dst: "I".into(), fraction: Expr::const_(0.5), fraction_grad: Default::default() }),
             Action::AbsoluteTransfer(AbsoluteTransfer { src: "I".into(), dst: "S".into(), count: Expr::const_(1.0) }),
         ];
         let mut m = model_with(vec![]);
@@ -1346,8 +1346,8 @@ mod tests {
 
     fn set_then_add() -> CompiledModel {
         model_with(vec![
-            Action::Set(SetAction { compartment: "I".into(), value: Expr::const_(5.0) }),
-            Action::Add(AddAction { compartment: "I".into(), count: Expr::const_(10.0) }),
+            Action::Set(SetAction { compartment: "I".into(), value: Expr::const_(5.0), value_grad: Default::default() }),
+            Action::Add(AddAction { compartment: "I".into(), count: Expr::const_(10.0), count_grad: Default::default() }),
         ])
     }
 
@@ -1357,8 +1357,9 @@ mod tests {
                 src: "I".into(),
                 dst: "S".into(),
                 fraction: Expr::const_(0.5),
+                fraction_grad: Default::default(),
             }),
-            Action::Add(AddAction { compartment: "I".into(), count: Expr::const_(10.0) }),
+            Action::Add(AddAction { compartment: "I".into(), count: Expr::const_(10.0), count_grad: Default::default() }),
         ])
     }
 
@@ -1413,11 +1414,12 @@ mod tests {
         // From S = 10, `set S = 5` and a half drain of S used to add to S = 0, a
         // value neither event names; it is refused, in either order, on the
         // integer and the continuous arena.
-        let set = Action::Set(SetAction { compartment: "S".into(), value: Expr::const_(5.0) });
+        let set = Action::Set(SetAction { compartment: "S".into(), value: Expr::const_(5.0), value_grad: Default::default() });
         let drain = Action::FractionTransfer(FractionTransfer {
             src: "S".into(),
             dst: "I".into(),
             fraction: Expr::const_(0.5),
+            fraction_grad: Default::default(),
         });
         for actions in [vec![set.clone(), drain.clone()], vec![drain, set]] {
             let m = model_with(actions);
@@ -1439,7 +1441,7 @@ mod tests {
         // `fraction = p` with p = 1 beside a 0.5 drain of S: the sum (1.5) is
         // known only once p is evaluated at fire time, and is refused on the
         // integer and the continuous arena alike.
-        let frac = |f: Expr| Action::FractionTransfer(FractionTransfer { src: "S".into(), dst: "I".into(), fraction: f });
+        let frac = |f: Expr| Action::FractionTransfer(FractionTransfer { src: "S".into(), dst: "I".into(), fraction: f, fraction_grad: Default::default() });
         let m = model_with(vec![frac(Expr::param("p")), frac(Expr::const_(0.5))]);
         let want = "`transfer` fractions from compartment 'S' sum to 1.5 (1 + 0.5) at t=1";
         let (mut int_s, mut real_s) = states();
@@ -1461,6 +1463,7 @@ mod tests {
         let m = model_with(vec![Action::Set(SetAction {
             compartment: "S".into(),
             value: Expr::const_(-1.0),
+            value_grad: Default::default(),
         })]);
         let mut int_vals = vec![100.0, 0.0];
         let mut real_vals = vec![50.0];
@@ -1481,7 +1484,7 @@ mod tests {
         // give S = 0 here; a `set` alone on its compartment must give exactly 1,
         // even with another action on a different compartment in the phase.
         let m = model_with(vec![
-            Action::Set(SetAction { compartment: "S".into(), value: Expr::const_(1.0) }),
+            Action::Set(SetAction { compartment: "S".into(), value: Expr::const_(1.0), value_grad: Default::default() }),
             Action::AbsoluteTransfer(AbsoluteTransfer {
                 src: "I".into(),
                 dst: "I".into(),
@@ -1533,7 +1536,7 @@ mod tests {
 
     #[test]
     fn add_int_rounds_and_emits_positive_delta() {
-        let m = model_with(vec![Action::Add(AddAction { compartment: "I".into(), count: Expr::const_(3.6) })]);
+        let m = model_with(vec![Action::Add(AddAction { compartment: "I".into(), count: Expr::const_(3.6), count_grad: Default::default() })]);
         let d = resolve(&m);
         assert_eq!(d.int, vec![IntDelta { idx: 1, delta: 4 }]); // round(3.6)=4 to I(local 1)
         assert!(d.real.is_empty());
@@ -1541,7 +1544,7 @@ mod tests {
 
     #[test]
     fn add_real_is_exact_f64() {
-        let m = model_with(vec![Action::Add(AddAction { compartment: "W".into(), count: Expr::const_(2.5) })]);
+        let m = model_with(vec![Action::Add(AddAction { compartment: "W".into(), count: Expr::const_(2.5), count_grad: Default::default() })]);
         let d = resolve(&m);
         assert_eq!(d.real, vec![RealDelta { idx: 0, delta: 2.5 }]); // exact, no round
         assert!(d.int.is_empty());
@@ -1549,7 +1552,7 @@ mod tests {
 
     #[test]
     fn add_negative_is_hard_error_on_any_path() {
-        let m = model_with(vec![Action::Add(AddAction { compartment: "I".into(), count: Expr::const_(-1.0) })]);
+        let m = model_with(vec![Action::Add(AddAction { compartment: "I".into(), count: Expr::const_(-1.0), count_grad: Default::default() })]);
         let (int_s, real_s) = states();
         let mut out = EffectDeltas::default();
         let err = resolve_intervention(&m, 0, &m.model.interventions[0], snap(&int_s, &real_s),
@@ -1570,6 +1573,7 @@ mod tests {
         let m = model_with(vec![Action::Add(AddAction {
             compartment: "I".into(),
             count: Expr::const_(-0.3),
+            count_grad: Default::default(),
         })]);
         let (int_s, real_s) = states();
         let mut out = EffectDeltas::default();
@@ -1590,6 +1594,7 @@ mod tests {
         let m = model_with(vec![Action::Add(AddAction {
             compartment: "W".into(),
             count: Expr::const_(-0.3),
+            count_grad: Default::default(),
         })]);
         let (int_s, real_s) = states();
         let mut out = EffectDeltas::default();
@@ -1612,6 +1617,7 @@ mod tests {
         let m = model_with(vec![Action::Add(AddAction {
             compartment: "W".into(),
             count: Expr::const_(-0.3),
+            count_grad: Default::default(),
         })]);
         let mut int_vals = vec![100.0_f64, 0.0];
         let mut real_vals = vec![50.0_f64];
@@ -1633,6 +1639,7 @@ mod tests {
         let m = model_with(vec![Action::Add(AddAction {
             compartment: "I".into(),
             count: Expr::const_(0.4),
+            count_grad: Default::default(),
         })]);
         let d = resolve(&m);
         assert_eq!(d.int, vec![IntDelta { idx: 1, delta: 0 }], "round(0.4)=0 is a no-op, not an error");
@@ -1640,7 +1647,7 @@ mod tests {
 
     #[test]
     fn set_int_emits_snapshot_relative_delta() {
-        let m = model_with(vec![Action::Set(SetAction { compartment: "S".into(), value: Expr::const_(70.4) })]);
+        let m = model_with(vec![Action::Set(SetAction { compartment: "S".into(), value: Expr::const_(70.4), value_grad: Default::default() })]);
         let d = resolve(&m);
         // round(70.4)=70, snapshot S=100 → delta -30 → S ends at 70.
         assert_eq!(d.int, vec![IntDelta { idx: 0, delta: 70 - 100 }]);
@@ -1648,7 +1655,7 @@ mod tests {
 
     #[test]
     fn set_real_is_exact() {
-        let m = model_with(vec![Action::Set(SetAction { compartment: "W".into(), value: Expr::const_(12.5) })]);
+        let m = model_with(vec![Action::Set(SetAction { compartment: "W".into(), value: Expr::const_(12.5), value_grad: Default::default() })]);
         let d = resolve(&m);
         assert_eq!(d.real, vec![RealDelta { idx: 0, delta: 12.5 - 50.0 }]);
     }
@@ -1660,7 +1667,7 @@ mod tests {
     /// resolver must now reject it at the action site.
     #[test]
     fn set_real_negative_is_hard_error() {
-        let m = model_with(vec![Action::Set(SetAction { compartment: "W".into(), value: Expr::const_(-5.0) })]);
+        let m = model_with(vec![Action::Set(SetAction { compartment: "W".into(), value: Expr::const_(-5.0), value_grad: Default::default() })]);
         let (int_s, real_s) = states();
         let mut out = EffectDeltas::default();
         let err = resolve_intervention(&m, 0, &m.model.interventions[0], snap(&int_s, &real_s),
@@ -1680,7 +1687,7 @@ mod tests {
     /// batch errors instead of writing -5 into the reservoir.
     #[test]
     fn continuous_set_real_negative_is_hard_error() {
-        let m = model_with(vec![Action::Set(SetAction { compartment: "W".into(), value: Expr::const_(-5.0) })]);
+        let m = model_with(vec![Action::Set(SetAction { compartment: "W".into(), value: Expr::const_(-5.0), value_grad: Default::default() })]);
         let mut int_vals = vec![100.0_f64, 0.0];
         let mut real_vals = vec![50.0_f64];
         let err = apply_boundary_effects_continuous(&m, &mut int_vals, &mut real_vals, &m.default_params, 1.0, 1.0)
@@ -1697,6 +1704,7 @@ mod tests {
         // 0.337 * 100 = 33.7 → floor 33.
         let m = model_with(vec![Action::FractionTransfer(FractionTransfer {
             src: "S".into(), dst: "I".into(), fraction: Expr::const_(0.337),
+            fraction_grad: Default::default(),
         })]);
         let d = resolve(&m);
         assert_eq!(d.int, vec![IntDelta { idx: 0, delta: -33 }, IntDelta { idx: 1, delta: 33 }]);
@@ -1715,9 +1723,11 @@ mod tests {
         let m = model_with(vec![
             Action::FractionTransfer(FractionTransfer {
                 src: "S".into(), dst: "I".into(), fraction: Expr::const_(0.25),
+                fraction_grad: Default::default(),
             }),
             Action::Add(AddAction {
                 compartment: "I".into(), count: Expr::const_(7.0),
+                count_grad: Default::default(),
             }),
         ]);
         let d = resolve(&m);
@@ -1747,6 +1757,7 @@ mod tests {
     fn mixed_arena_transfer_errors() {
         let m = model_with(vec![Action::FractionTransfer(FractionTransfer {
             src: "S".into(), dst: "W".into(), fraction: Expr::const_(0.5),
+            fraction_grad: Default::default(),
         })]);
         let (int_s, real_s) = states();
         let mut out = EffectDeltas::default();
@@ -1810,6 +1821,7 @@ mod tests {
     fn continuous_fraction_transfer_is_exact() {
         let m = model_with(vec![Action::FractionTransfer(FractionTransfer {
             src: "S".into(), dst: "I".into(), fraction: Expr::const_(0.5),
+            fraction_grad: Default::default(),
         })]);
         let mut int_vals = vec![704.69_f64, 0.0]; // S (local int 0), I (local int 1)
         let mut real_vals = vec![50.0_f64];        // W
@@ -1824,6 +1836,7 @@ mod tests {
     fn continuous_set_int_is_exact() {
         let m = model_with(vec![Action::Set(SetAction {
             compartment: "S".into(), value: Expr::const_(70.4),
+            value_grad: Default::default(),
         })]);
         let mut int_vals = vec![100.0_f64, 0.0];
         let mut real_vals = vec![50.0_f64];
@@ -1933,11 +1946,13 @@ mod tests {
             src: "W1".into(),
             dst: "W2".into(),
             fraction: Expr::const_(0.21),
+            fraction_grad: Default::default(),
         });
         let frac = Action::FractionTransfer(FractionTransfer {
             src: "W1".into(),
             dst: "W2".into(),
             fraction: Expr::const_(0.11),
+            fraction_grad: Default::default(),
         });
         // A third fraction, not a count: a count beside another drain of W1 is
         // refused (`refuse_overdrawing_drains`).
@@ -1945,6 +1960,7 @@ mod tests {
             src: "W1".into(),
             dst: "W2".into(),
             fraction: Expr::const_(0.13),
+            fraction_grad: Default::default(),
         });
         let fwd = real_phase(vec![frac2.clone(), frac.clone(), frac3.clone()]).unwrap();
         let rev = real_phase(vec![frac3, frac, frac2]).unwrap();
@@ -1960,11 +1976,12 @@ mod tests {
     #[test]
     fn continuous_real_set_beside_a_transfer_into_it_is_refused() {
         let res = real_phase(vec![
-            Action::Set(SetAction { compartment: "W2".into(), value: Expr::const_(1.0) }),
+            Action::Set(SetAction { compartment: "W2".into(), value: Expr::const_(1.0), value_grad: Default::default() }),
             Action::FractionTransfer(FractionTransfer {
                 src: "W1".into(),
                 dst: "W2".into(),
                 fraction: Expr::const_(0.5),
+                fraction_grad: Default::default(),
             }),
         ]);
         assert!(
@@ -2004,6 +2021,7 @@ mod tests {
     fn continuous_fraction_transfer_real_source_is_exact() {
         let m = model_two_real(vec![Action::FractionTransfer(FractionTransfer {
             src: "W1".into(), dst: "W2".into(), fraction: Expr::const_(0.337),
+            fraction_grad: Default::default(),
         })]);
         let mut int_vals = vec![100.0_f64, 0.0];
         let mut real_vals = vec![10.0_f64, 0.0]; // W1=10, W2=0
@@ -2032,6 +2050,7 @@ mod tests {
             actions: vec![Action::Set(SetAction {
                 compartment: "I".into(),
                 value: Expr::const_(1.0),
+                value_grad: Default::default(),
             })],
             kind: if always { ir::intervention::InterventionKind::Event } else { ir::intervention::InterventionKind::Scenario },
         };
@@ -2129,6 +2148,7 @@ mod tests {
             actions: vec![Action::Set(SetAction {
                 compartment: "I".into(),
                 value: Expr::const_(1.0),
+                value_grad: Default::default(),
             })],
             kind: if always { ir::intervention::InterventionKind::Event } else { ir::intervention::InterventionKind::Scenario },
         };

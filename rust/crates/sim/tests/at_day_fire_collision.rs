@@ -66,6 +66,7 @@ fn model_with_schedule(schedule: InterventionSchedule, end: f64) -> CompiledMode
             actions: vec![Action::Add(AddAction {
                 compartment: "S".into(),
                 count: Expr::Const(ConstExpr { value: 1.0 }),
+                count_grad: Default::default(),
             })],
             kind: InterventionKind::Scenario,
         }],

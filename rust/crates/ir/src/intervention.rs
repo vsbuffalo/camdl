@@ -33,12 +33,27 @@ pub enum InterventionSchedule {
 }
 
 // ── Actions ───────────────────────────────────────────────────────────────────
+//
+// The three smooth-jump actions carry `∂amount/∂θ` (`*_grad`, a
+// [`ParamGradMap`](crate::deriv::ParamGradMap)): the source term of the
+// event-jump sensitivity `S⁺ = ∂Φ/∂x·S⁻ + ∂Φ/∂θ` the ODE gradient path applies
+// when the effect fires (gh#275 §1g). The `rate_grad` analogue for an action's
+// amount: emitted by the compiler's `differentiate_action`, keyed by parameter
+// name, an absent key a genuine zero, a live-but-undifferentiated coefficient a
+// serialized `DerivEntry::Unsupported` the gradient gate refuses on. Omitted on
+// the wire when empty (a constant amount). `AbsoluteTransfer` carries none: its
+// jump `min(count, source)` is nonsmooth, so the gate refuses it rather than
+// differentiate it. Not run identity (gradient maps are compiler-derived;
+// `runid::ir_hash`, SV = 2).
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FractionTransfer {
     pub src:      String,
     pub dst:      String,
     pub fraction: Expr,
+    /// `∂fraction/∂θ` (see the module note above).
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub fraction_grad: crate::deriv::ParamGradMap,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -52,12 +67,18 @@ pub struct AbsoluteTransfer {
 pub struct SetAction {
     pub compartment: String,
     pub value:       Expr,
+    /// `∂value/∂θ` (see the module note above).
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub value_grad:  crate::deriv::ParamGradMap,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AddAction {
     pub compartment: String,
     pub count:       Expr,
+    /// `∂count/∂θ` (see the module note above).
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub count_grad:  crate::deriv::ParamGradMap,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -308,6 +329,46 @@ mod reactive_serde_tests {
         let reser = serde_json::to_string(&iv).expect("re-serialize");
         let iv2: Intervention = serde_json::from_str(&reser).expect("re-deserialize");
         assert_eq!(iv, iv2, "reactive intervention must round-trip");
+    }
+
+    /// Pins the OCaml→Rust wire contract for an action's `∂amount/∂θ` (gh#275
+    /// §1g): the keys `camdlc` emits (`count_grad`, `value_grad`,
+    /// `fraction_grad`) must land in the fields the ODE gradient path reads. A
+    /// key mismatch between the two serde implementations would not fail
+    /// deserialization — `#[serde(default)]` would silently leave the map
+    /// empty, and the event jump would carry a zero source term.
+    #[test]
+    fn action_amount_grad_round_trips_camdlc_wire_shape() {
+        use crate::deriv::DerivEntry;
+        let json = r#"{"name":"importation","fire":{"scheduled":{"at_times":[200.0]}},"actions":[{"add":{"compartment":"I","count":{"param":"seed"},"count_grad":{"seed":{"grad":{"const":1.0}}}}},{"set":{"compartment":"V","value":{"param":"v0"},"value_grad":{"v0":{"grad":{"const":1.0}}}}},{"fraction_transfer":{"src":"S","dst":"V","fraction":{"param":"cov"},"fraction_grad":{"cov":{"grad":{"const":1.0}}}}},{"absolute_transfer":{"src":"S","dst":"V","count":{"const":5.0}}}],"kind":"event"}"#;
+        let iv: Intervention = serde_json::from_str(json).expect("deserialize");
+        let one = DerivEntry::Grad(Expr::const_(1.0));
+        match &iv.actions[0] {
+            Action::Add(a) => assert_eq!(a.count_grad.get("seed"), Some(&one)),
+            other => panic!("expected add, got {other:?}"),
+        }
+        match &iv.actions[1] {
+            Action::Set(s) => assert_eq!(s.value_grad.get("v0"), Some(&one)),
+            other => panic!("expected set, got {other:?}"),
+        }
+        match &iv.actions[2] {
+            Action::FractionTransfer(ft) => assert_eq!(ft.fraction_grad.get("cov"), Some(&one)),
+            other => panic!("expected fraction_transfer, got {other:?}"),
+        }
+        let reser = serde_json::to_string(&iv).expect("re-serialize");
+        assert!(reser.contains("\"count_grad\"") && reser.contains("\"value_grad\"")
+            && reser.contains("\"fraction_grad\""), "{reser}");
+        let iv2: Intervention = serde_json::from_str(&reser).expect("re-deserialize");
+        assert_eq!(iv, iv2, "action gradients must round-trip");
+
+        // An empty map is omitted on the wire (golden-neutral for a constant amount).
+        let plain = Action::Add(AddAction {
+            compartment: "I".into(),
+            count: Expr::const_(5.0),
+            count_grad: Default::default(),
+        });
+        let s = serde_json::to_string(&plain).unwrap();
+        assert!(!s.contains("count_grad"), "an empty amount gradient must be omitted: {s}");
     }
 
     /// The compound predicate variants (and/or/not) and the other reducers /

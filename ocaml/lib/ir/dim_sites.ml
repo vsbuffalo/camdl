@@ -319,11 +319,11 @@ let action_sites acc ?subject ~role:what (a : action) =
     add acc ?subject ~role:(role field) ~code:"E314" ~literals:Whole_terms
       (Has population) (E e) in
   match a with
-  | FractionTransfer { src = _; dst = _; fraction } ->
+  | FractionTransfer { src = _; dst = _; fraction; _ } ->
     add acc ?subject ~role:(role "fraction") ~code:"E314" (Has dimensionless) (E fraction)
   | AbsoluteTransfer { src = _; dst = _; count = c } -> count "count" c
-  | Set { compartment = _; value } -> count "value" value
-  | AddAction { add_compartment = _; add_count } -> count "count" add_count
+  | Set { compartment = _; value; _ } -> count "value" value
+  | AddAction { add_compartment = _; add_count; _ } -> count "count" add_count
 
 (* A threshold is compared with the observed values of a stream, so it has
    the dimension of that stream's scored column; a literal threshold is read

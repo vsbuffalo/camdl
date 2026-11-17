@@ -9869,7 +9869,7 @@ let resolve_intervention_action ctx env ~name ~family ~loc ~binders (action : ac
               cell — exactly the spec §25.10 expansion. *)
            let fraction = resolve_expr ctx env fe in
            List.map (fun (src, dst) ->
-             Ir.FractionTransfer { Ir.src; Ir.dst; Ir.fraction }) pairs
+             Ir.FractionTransfer { Ir.src; Ir.dst; Ir.fraction; Ir.fraction_grad = [] }) pairs
          | TCount _ when List.length pairs > 1 ->
            (* A count is ABSOLUTE. Fanning it out would move `count` people out
               of EVERY stratum, multiplying the intended total by the number of
@@ -9901,13 +9901,15 @@ let resolve_intervention_action ctx env ~name ~family ~loc ~binders (action : ac
      | None -> []
      | Some (base, concrete) ->
        check_action_target ctx ~name ~loc ~verb:"sets" ~base ~concrete;
-       [Ir.Set { Ir.compartment = concrete; Ir.value = resolve_expr ctx env expr }])
+       [Ir.Set { Ir.compartment = concrete; Ir.value = resolve_expr ctx env expr;
+               Ir.value_grad = [] }])
   | AAdd (comp, idxs, expr) ->
     (match resolve_action_target ctx ~name ~loc ~verb:"adds to" env comp idxs with
      | None -> []
      | Some (base, concrete) ->
        check_action_target ctx ~name ~loc ~verb:"adds to" ~base ~concrete;
-       [Ir.AddAction { Ir.add_compartment = concrete; Ir.add_count = resolve_expr ctx env expr }])
+       [Ir.AddAction { Ir.add_compartment = concrete; Ir.add_count = resolve_expr ctx env expr;
+                     Ir.add_count_grad = [] }])
 
 (** gh#482: an indexed effect family (scheduled intervention, event, or reactive
     policy) must expand to instances that differ from one another. Two instances

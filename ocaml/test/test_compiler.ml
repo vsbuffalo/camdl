@@ -4792,6 +4792,66 @@ let test_ic_grad_constant_dropped () =
   let grads = Autodiff.differentiate_ic (Ir.Const 10.0) [ "N0"; "I0" ] [] [] in
   Alcotest.(check (list string)) "constant IC → no ic_grad entries" [] (List.map fst grads)
 
+(* ── gh#275 §1g: ∂amount/∂θ on scheduled actions (the event-jump source term) ── *)
+
+let test_action_grad_emitted_per_smooth_action () =
+  (* add(I, seed) → count_grad = {seed: 1}; transfer(fraction = cov * eff)
+     → fraction_grad = {cov: eff, eff: cov}; set V = v0 → value_grad = {v0: 1}.
+     A parameter the amount does not read (beta) is dropped; a constant amount
+     emits nothing; AbsoluteTransfer is passed through untouched (its min jump
+     is nonsmooth — the gradient gate refuses it, nothing to emit). *)
+  let params = [ "seed"; "cov"; "eff"; "v0"; "beta" ] in
+  let d = Autodiff.differentiate_action params [] [] in
+  let keys = function
+    | Ir.AddAction a -> List.map fst a.Ir.add_count_grad
+    | Ir.Set s -> List.map fst s.Ir.value_grad
+    | Ir.FractionTransfer ft -> List.map fst ft.Ir.fraction_grad
+    | Ir.AbsoluteTransfer _ -> []
+  in
+  let add = d (Ir.AddAction { Ir.add_compartment = "I"; Ir.add_count = Ir.Param "seed";
+                              Ir.add_count_grad = [] }) in
+  Alcotest.(check (list string)) "add(I, seed) differentiates in seed only" [ "seed" ] (keys add);
+  (match add with
+   | Ir.AddAction { Ir.add_count_grad = [ ("seed", Ir.DEGrad (Ir.Const 1.0)) ]; _ } -> ()
+   | _ -> Alcotest.fail "∂seed/∂seed must be the constant 1");
+  let ft = d (Ir.FractionTransfer
+                { Ir.src = "S"; Ir.dst = "V";
+                  Ir.fraction = Ir.BinOp { op = Ir.Mul; left = Ir.Param "cov"; right = Ir.Param "eff" };
+                  Ir.fraction_grad = [] }) in
+  Alcotest.(check (list string)) "a product fraction differentiates in both factors"
+    [ "cov"; "eff" ] (keys ft);
+  (match ft with
+   | Ir.FractionTransfer { Ir.fraction_grad = [ ("cov", Ir.DEGrad (Ir.Param "eff"));
+                                                 ("eff", Ir.DEGrad (Ir.Param "cov")) ]; _ } -> ()
+   | _ -> Alcotest.fail "∂(cov·eff)/∂cov = eff and ∂/∂eff = cov");
+  let set = d (Ir.Set { Ir.compartment = "V"; Ir.value = Ir.Param "v0"; Ir.value_grad = [] }) in
+  Alcotest.(check (list string)) "set V = v0 differentiates in v0" [ "v0" ] (keys set);
+  let const_add = d (Ir.AddAction { Ir.add_compartment = "I"; Ir.add_count = Ir.Const 10.0;
+                                    Ir.add_count_grad = [] }) in
+  Alcotest.(check (list string)) "a constant amount emits no gradient" [] (keys const_add);
+  let abs_in = Ir.AbsoluteTransfer { Ir.src = "S"; Ir.dst = "V"; Ir.count = Ir.Param "seed" } in
+  Alcotest.(check bool) "AbsoluteTransfer is passed through unchanged" true (d abs_in = abs_in)
+
+let test_action_grad_reaches_the_ir () =
+  (* End to end through the compiler: the golden `seir_vaccine` declares
+     `transfer(fraction = vacc_frac, from = S, to = V)`; its IR must carry
+     fraction_grad = {vacc_frac: 1}, and the wire key must be the one the Rust
+     reader expects (`fraction_grad`). *)
+  let src = read_file (Filename.concat golden_dir "seir_vaccine.camdl") in
+  match Compiler.compile ~name:"seir_vaccine" src with
+  | Error e -> Alcotest.failf "compile failed: %s" e
+  | Ok m ->
+    let iv = List.find (fun (iv : Ir.intervention) -> iv.Ir.name = "sia_round_1") m.Ir.interventions in
+    (match iv.Ir.actions with
+     | [ Ir.FractionTransfer { Ir.fraction_grad = [ ("vacc_frac", Ir.DEGrad (Ir.Const 1.0)) ]; _ } ] -> ()
+     | _ -> Alcotest.fail "sia_round_1 must carry fraction_grad = {vacc_frac: 1}");
+    let json = Serde.model_to_string m in
+    Alcotest.(check bool) "the wire key is fraction_grad" true
+      (let needle = "\"fraction_grad\"" in
+       let rec find i = i + String.length needle <= String.length json
+                        && (String.sub json i (String.length needle) = needle || find (i + 1)) in
+       find 0)
+
 let test_ic_grad_floor_param_is_genuine_zero () =
   (* floor(I0): ∂/∂I0 = 0 a.e. w.r.t. a PARAMETER (the deliberate WrtParam Floor
      rule — same as a rate), so differentiate_ic drops it (an absent key is a
@@ -17486,6 +17546,8 @@ let () =
       Alcotest.test_case "projection_state_grad: linear projection emits nothing (gh#275 §1h)" `Quick test_differentiate_projection_linear_is_empty;
       Alcotest.test_case "ic_grad: ∂init/∂θ emits nonzero params (gh#275)" `Quick test_ic_grad_parameterized;
       Alcotest.test_case "ic_grad: constant IC has no entries (gh#275)" `Quick test_ic_grad_constant_dropped;
+      Alcotest.test_case "action grad: ∂amount/∂θ per smooth action (gh#275 §1g)" `Quick test_action_grad_emitted_per_smooth_action;
+      Alcotest.test_case "action grad: reaches the IR with the Rust wire key (gh#275 §1g)" `Quick test_action_grad_reaches_the_ir;
       Alcotest.test_case "ic_grad: floor(param) is a genuine zero, dropped (gh#275)" `Quick test_ic_grad_floor_param_is_genuine_zero;
       Alcotest.test_case "autodiff emits rate_grad for a Fourier coef" `Quick test_fourier_autodiff_emitted;
       Alcotest.test_case "periodic step-value param compiles, gradient is a coded refusal (gh#342)" `Quick test_periodic_forcing_coeff_omitted;

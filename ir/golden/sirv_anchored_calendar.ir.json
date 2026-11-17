@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.44",
-  "validated_by": "ocaml-compiler-v0.44",
+  "ir_version": "0.45",
+  "validated_by": "ocaml-compiler-v0.45",
   "model": {
     "name": "sirv_anchored_calendar",
     "version": "0.3",
