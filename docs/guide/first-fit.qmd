@@ -273,7 +273,7 @@ band, the longest run of consecutive rejected proposals in each chain, and the
 effective sample size of each parameter by chain. The longest run of rejections
 is the one to watch in a PMMH fit. A chain whose likelihood estimate once came
 out far too high rejects everything after it, and an average acceptance rate
-can hide such a stall. Here the longest is 14 steps.
+can hide such a stall. Here the longest is 20 steps, in chain 0.
 
 ![Diagnostics tab of the `r0` fit.](first-fit/img/scope-r0-diagnostics.png)
 

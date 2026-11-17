@@ -99,8 +99,8 @@ camdl fit summary @negbin
 The two models give nearly the same epidemic. The posterior mean of $R_0$ is
 3.73 here against 3.81 for the Poisson model on the first page, and of
 $\gamma$ 0.51 against 0.49. The dispersion $k$ has a posterior mean of about
-46, above the prior's median of 20: at 300 boys in bed that makes the standard
-deviation of a count about $\sqrt{1 + 300/46}\approx2.7$ times the Poisson
+49, above the prior's median of 20: at 300 boys in bed that makes the standard
+deviation of a count about $\sqrt{1 + 300/49}\approx2.7$ times the Poisson
 one, a modest amount of extra scatter. What differs is how much a day's count may scatter, and the predictive
 check shows the consequence:
 
@@ -140,7 +140,7 @@ model, `@r0`), and `se(Δ)` the standard error of that difference across days.
 lower being better. `PIT_cov90` is the fraction of days whose count fell inside
 the model's one-day-ahead 90% interval.
 
-The difference in elpd is 0.3, with a standard error of 2.2, so the counts do
+The difference in elpd is −0.4, with a standard error of 2.5, so the counts do
 not prefer either model, and camdl says so (`within noise`). The coverage is
 where they differ. The Poisson model's one-day-ahead 90% intervals contain 71%
 of the counts, 10 of the 14 days; the negative binomial's contain 93%. The
@@ -173,7 +173,7 @@ Less than its standard error suggests, for three reasons, each of which camdl
 reports. First, `se(Δ)` treats the fourteen daily differences in log score as
 the data, and a normal approximation to their sum is rough with so few. camdl
 corrects for the differences being correlated from day to day, and prints the
-lag-one autocorrelation it corrected for (+0.25 here), but no correction makes
+lag-one autocorrelation it corrected for (+0.29 here), but no correction makes
 fourteen days into many. Read `se(Δ)` as a description of scatter, not as a
 test. Second, each elpd is itself a Monte Carlo estimate from particle
 filters; the `filter-noise MC SE` note puts that noise at a few hundredths of a
@@ -198,8 +198,8 @@ head results/fits/fit_*/predict/*/quantities/attack_rate.tsv
 ```
 
 Both models infer that nearly the whole school was infected: the posterior
-median of `attack_rate` (`q50`) is 97% for the negative binomial and 98% for
-the Poisson model, and even the 5% quantiles (`q05`) are 93% and 95%. The BMJ note counts 512 of 763 boys ill, 67%.
+median of `attack_rate` (`q50`) is 97.5% for both the negative binomial and
+the Poisson model, and even the 5% quantiles (`q05`) are 94% and 95%. The BMJ note counts 512 of 763 boys ill, 67%.
 
 The fit had no way to notice. The daily counts record how many boys were in bed,
 never how many escaped, and the model reconciles the counts with an epidemic in
