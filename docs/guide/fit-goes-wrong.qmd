@@ -10,8 +10,8 @@ prior was placed on the basic reproduction number $R_0$. The more obvious
 choice is to put it on the parameter that appears in the infection rate, the
 transmission rate $\beta$, and to make it vague because we know little about
 $\beta$. This page makes that choice and follows the consequences: a prior that
-looks harmless implies epidemics nobody believes, two of four chains stop
-moving, and the diagnostics say so. We'll work out why the chains stopped, see
+looks harmless implies epidemics nobody believes, one of four chains stops
+moving, and the diagnostics say so. We'll work out why the chain stopped, see
 why the remedy the fit suggests does not cure it, and then check the fix on
 simulated data where we know the answer.
 
@@ -61,26 +61,37 @@ each chain starts from a draw from the prior.
 
 ## The fit fails, and says so
 
-```{.camdl-run show-match="log L̂ mean|acceptance ceiling|Raise particles| 1/3000|3000/3000|NOT converged|max R̂|chain  acceptance|% ✓|% ✗|by -"}
+```{.camdl-run show-match="log L̂ mean|acceptance ceiling|Raise particles| 1/3000|3000/3000|NOT converged|max R̂|log-likelihoods compared|chain  acceptance|% ✓|% ✗"}
 camdl fit run fit-beta.toml --label beta --seed 4
 ```
 
-The fit runs to the end and then reports that it has not converged. Chains 0
-and 1 accepted 0.05% and 0.1% of their proposals, a handful of moves in 3000
-steps, while chains 2 and 3 accepted about 40%. $\hat R$ is 2.25 for $\beta$
-and 3.3 for $\gamma$, far above camdl's threshold of 1.05. The progress lines
-give each chain's log-likelihood at its first and last step: chains 0 and 1
-started at −1362 and −320, at parameter values whose epidemics look nothing
-like the data, and ended at −758 and −228, while chains 2 and 3 ended near −60.
-The traces in camdl ’scope show the same thing:
+The fit runs to the end and then reports that it has not converged. Chain 0
+accepted 0.05% of its proposals, a single move in the 2000 steps after
+burn-in, while chains 1, 2 and 3 accepted 35% to 38%. $\hat R$ is 1.56 for
+$\beta$ and 1.25 for $\gamma$, far above camdl's threshold of 1.05. The
+progress lines give each chain's log-likelihood at its first and last step:
+chain 0 started at −1363, at parameter values whose epidemics look nothing
+like the data, and ended at −742, while chains 1, 2 and 3 started between −323
+and −110 and ended near −59.
 
-![The `beta` fit in camdl ’scope, Traces tab, after burn-in. Chains 2 and 3 (orange and red) move over the same band, with $\beta$ near 1.9 and $\gamma$ near 0.49. Chain 1 (green) sits flat at $\beta \approx 0.64$, $\gamma \approx 0.33$, and chain 0 (grey) flat at the bottom of the $\beta$ panel, each for the whole run; their log-likelihoods (bottom panels) stay far below those of chains 2 and 3.](first-fit/img/scope-beta-traces.png)
+One line of the verdict needs reading with care: "3 of 4 chains'
+log-likelihoods compared, none differs". camdl compares each chain's mean
+log-likelihood with the others' only when the chain has enough effective draws
+to estimate the Monte Carlo error of that mean, and chain 0, which barely
+moved, has fewer than four. So the comparison leaves chain 0 out (`camdl fit
+summary` says why), and "none differs" is about the three chains that mixed.
+The stuck chain is caught by its acceptance rate and by $\hat R$. The traces in
+camdl ’scope show the same thing:
 
-The flat chains are not exploring a second answer. They did not move, and their
-log-likelihoods are hundreds of units below the moving chains'; even if there
-were a second mode where they sit, a gap that size would leave it a negligible
-share of the posterior. Both sit at a transmission rate well
-below the value of about 1.9 per day on which the moving chains agree.
+![The `beta` fit in camdl ’scope, Traces tab, after burn-in. Chains 1, 2 and 3 (teal, orange and red) move over the same band, with $\beta$ near 1.9 and $\gamma$ near 0.49. Chain 0 (grey) sits flat at the bottom of the $\beta$ panel, at $\beta \approx 0.38$ and $\gamma \approx 0.46$, for the whole run, apart from one small move near step 1600; its log-posterior and log-likelihood (bottom panels) stay near −750, far below those of the other chains.](first-fit/img/scope-beta-traces.png)
+
+The flat chain is not exploring a second answer. It did not move, and its
+log-likelihood is about 680 units below the moving chains'; even if there were
+a second mode where it sits, a gap that size would leave it a negligible share
+of the posterior. It sits at a transmission rate of about 0.38 per day, well
+below the value of about 1.9 per day on which the moving chains agree, and at
+$R_0 = \beta/\gamma \approx 0.83$: one of the draws below 1 that the prior
+predictive check warned about, where the epidemic should die out.
 
 ::: {.warning title="Do not report an unconverged fit, or rerun it until it passes"}
 
@@ -115,14 +126,16 @@ How likely such a lucky number is depends on how noisy the estimate is, and
 that depends on where the chain is. `camdl pfilter` runs the particle filter at
 fixed parameters, and with `--replicates` it runs it repeatedly and reports the
 mean and standard deviation of the log-likelihood estimates. First, near where
-chains 2 and 3 mix:
+chains 1, 2 and 3 mix:
 
 ```{.camdl-run show-match="loglik ="}
 camdl pfilter sir-beta.camdl --fit fit-beta.toml --particles 4000 --replicates 20 \
   --param beta=1.87 --param gamma=0.49 --param N0=763 --param I0=3
 ```
 
-Then at the point where chain 1 sits, read off the traces:
+Then partway between there and chain 0, at $\beta = 0.64$ and $\gamma = 0.33$,
+where $R_0 \approx 1.9$ but a mean of three days infected makes the epidemic
+too slow for the counts:
 
 ```{.camdl-run show-match="loglik ="}
 camdl pfilter sir-beta.camdl --fit fit-beta.toml --particles 4000 --replicates 20 \
@@ -130,9 +143,9 @@ camdl pfilter sir-beta.camdl --fit fit-beta.toml --particles 4000 --replicates 2
 ```
 
 Both use four times the fit's 1000 particles. Near the posterior, twenty
-estimates agree to within a fraction of a log unit. At chain 1's point, where
+estimates agree to within a fraction of a log unit. At the second point, where
 almost every simulated epidemic is improbable under the counts and a few carry
-all the weight, they scatter by about 19 units around −292. With the fit's own
+all the weight, they scatter by about 16 units around −290. With the fit's own
 1000 particles, the filter at that point cannot even finish twenty runs: one
 of them puts all its weight on a single simulated epidemic (`EssCollapsed`),
 where the estimate is undefined, and `pfilter` stops.
@@ -142,16 +155,29 @@ camdl pfilter sir-beta.camdl --fit fit-beta.toml --particles 1000 --replicates 2
   --param beta=0.64 --param gamma=0.33 --param N0=763 --param I0=3
 ```
 
-Chain 1 holds an estimate of −228.5, made with 1000 particles. That is more
-than three of the 4000-particle standard deviations above their mean: a lucky
-outlier. Its proposals, which are close to where it is, get fresh estimates
-from a distribution at least this wide, and almost none come out higher.
+At the point where chain 0 sits, read off the traces, the filter fails even
+with 4000 particles:
+
+```{.camdl-run expect="fail" show-match="EssCollapsed"}
+camdl pfilter sir-beta.camdl --fit fit-beta.toml --particles 4000 --replicates 20 \
+  --param beta=0.38 --param gamma=0.46 --param N0=763 --param I0=3
+```
+
+There, with $R_0$ below 1, the simulated epidemics fizzle out while the school
+recorded hundreds of boys in bed, and the filter's weight collapses within the
+first week. Chain 0 holds an estimate of −742, made with 1000 particles in one
+of the runs that happened to survive. Its proposals, which are close to where
+it is, get fresh runs of the same filter. Some of those collapse, and a run
+that collapses gives the sampler a log-likelihood of $-\infty$, so the
+proposal is rejected. The rest come from a filter too noisy to finish twenty
+runs even with 4000 particles, and almost none come out above the estimate
+the chain is holding.
 
 The rest follows. A chain whose proposals are all rejected looks to the
 sampler like a chain whose steps are too big, so during burn-in it shrinks the
 proposal scale toward its target acceptance rate. Smaller steps change nothing,
 and the scale falls to its floor ($\lambda = 4.5\times10^{-5}$ in the
-acceptance table) and stays there. Chain 0 sits further out still, at −758.
+acceptance table) and stays there.
 
 ::: {.internals title="How noisy can the likelihood estimate be before PMMH stops mixing?"}
 
@@ -161,8 +187,8 @@ likelihood barely changes, a move is accepted only when the fresh noise beats
 the noise held at the current value, and the acceptance rate tends to
 $2\Phi(-\sigma/\sqrt2)$ (Sherlock et al. 2015, "On the efficiency of
 pseudo-marginal random walk Metropolis algorithms", *Annals of Statistics*
-43(1):238–275). At $\sigma = 1$ that is 48%; at $\sigma = 19$ it is about
-$4\times10^{-41}$. Doucet et al. (2015, "Efficient implementation of Markov chain
+43(1):238–275). At $\sigma = 1$ that is 48%; at $\sigma = 16$ it is about
+$10^{-29}$. Doucet et al. (2015, "Efficient implementation of Markov chain
 Monte Carlo when using an unbiased likelihood estimator", *Biometrika*
 102(2):295–313) recommend choosing the particle count so that $\sigma$ is
 between about 1 and 1.7 near the posterior.
@@ -182,26 +208,28 @@ its effective sample size.
 
 Before sampling, the fit ran the particle filter twenty times at the `start`
 values and at a nearby proposal; the first lines of the excerpt above are its
-report. It found a standard deviation of about 2 log units at the `start`
+report. It found a standard deviation of about 2.4 log units at the `start`
 values ($\beta = 1.5$, $\gamma = 0.4$), and a spread $s$ of the difference
 between two estimates large enough that its ceiling on the acceptance rate,
 $2\Phi(-s/2)$, is far below the 33.7% target. Its advice was to raise the
 particle count.
 
-That advice is about the point the check measured, not the points where chains
-0 and 1 stuck. More particles do reduce the noise everywhere, roughly as one
-over the square root of their number, but the `pfilter` runs above show what
-four times as many leave at chain 1's point: a standard deviation of 19 log
-units, where PMMH needs about 1. The same fit with 4000 particles:
+That advice is about the point the check measured, not the point where chain
+0 stuck. More particles do reduce the noise everywhere, roughly as one over
+the square root of their number, but the `pfilter` runs above show what four
+times as many leave away from the posterior: a standard deviation of 16 log
+units at the point between, where PMMH needs about 1, and no estimate at all
+at chain 0's point. The same fit with 4000 particles:
 
 ```{.camdl-run show-match="log L̂ mean|NOT converged|max R̂|chain  acceptance|% ✓|% ✗"}
 camdl fit run fit-beta-4000.toml --label beta-4000 --seed 4
 ```
 
-At the `start` values the noise check now finds a standard deviation of about
-1, half the 1000-particle figure, as one over the square root predicts. Yet one
-chain still sticks, accepting 0.3% of its proposals, and $\hat R$ is still far
-above 1.05; the fit costs four times as much. The chains that mixed
+At the `start` values the noise check now finds a standard deviation of 1.3,
+a little more than half the 1000-particle figure, close to what one over the
+square root predicts. Yet one chain still sticks, accepting 0.05% of its
+proposals, and $\hat R$ is still far above 1.05; the fit costs four times as
+much. The chains that mixed
 in the first fit did so with 1000 particles, so the particle count was never
 the limit near the posterior. The starts are the problem, and the starts come
 from the prior.
@@ -273,12 +301,12 @@ the data that the particle filter's weight collapsed onto one or two particles
 (`EssCollapsed`), the condition under which the estimate is useless. camdl
 refuses such a start and draws another, which keeps the worst starts out of
 the chains without hiding that it happened. All four chains then accept about a
-third of their proposals, and $\hat R$ is at most 1.004.
+third of their proposals, and $\hat R$ is at most 1.002.
 
 ![The synthetic fit in camdl ’scope, Posterior tab: the marginal posterior of each parameter, with its median, 90% interval, $\hat R$ and ESS.](first-fit/img/scope-synthetic-posterior.png)
 
 The true values lie inside both 90% intervals: $R_0 = 3.75$ against an
-interval of 3.22 to 4.12, and $\gamma = 0.4$ against 0.391 to 0.456. The fit
+interval of 3.24 to 4.08, and $\gamma = 0.4$ against 0.393 to 0.460. The fit
 recovers what it should. This shows that the sampler, the particle filter and
 the configuration work when the model is right; it says nothing about whether
 the model is right for the real school, because the simulated data came from
@@ -295,13 +323,13 @@ Finally, the real counts, with the seed whose `beta` fit failed:
 camdl fit run fit-r0.toml --label r0 --seed 4
 ```
 
-All four chains now accept 34% to 38% of their proposals and every $\hat R$ is
+All four chains now accept 33% to 36% of their proposals and every $\hat R$ is
 within 0.01 of 1. They started from prior draws at log-likelihoods between
-about −700 and −110, and all of them found their way to the posterior.
+about −272 and −113, and all of them found their way to the posterior.
 
-The noise check still fires, with an even lower ceiling than before. The
-`start` values are the same point as before, so the noise there is the same;
-what differs is the proposal the check happened to draw. The chains did not
+The noise check still fires, with the same ceiling of under 0.1%. The
+`start` values are the same point as before, so the noise there is the same,
+and the check reports the same standard deviation, 2.4. The chains did not
 stay at that point, and their acceptance rates, measured on the run itself,
 are what to believe. That is the general lesson of this page: the pre-run check
 is a diagnosis at one point, and the end-of-run diagnostics, acceptance per
