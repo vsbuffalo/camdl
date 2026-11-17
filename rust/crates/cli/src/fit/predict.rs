@@ -1464,6 +1464,16 @@ fn predict_mode(args: &crate::args::FitPredictArgs)
     -> Result<Option<crate::args::types::PredictModeArg>, String>
 {
     use crate::args::types::PredictModeArg;
+    // `--horizon` once named the mode; answer that spelling with the flag
+    // that does it now, rather than with a malformed-duration error.
+    if let Some(h) = args.horizon.as_deref() {
+        let mode = h.trim().replace('-', "_");
+        if matches!(mode.as_str(), "free_forward" | "one_step" | "forecast") {
+            return Err(format!(
+                "--horizon sets a forecast's reach (a duration such as \"4 weeks\"); the \
+                 predictive mode is chosen with --mode {mode}."));
+        }
+    }
     match (args.mode, args.horizon.as_deref()) {
         (None, Some(_)) => Ok(Some(PredictModeArg::Forecast)),
         (Some(PredictModeArg::Forecast), None) => Err(
