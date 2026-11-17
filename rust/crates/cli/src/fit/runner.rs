@@ -2252,8 +2252,10 @@ pub(crate) enum TimeSpec {
 /// ```
 ///
 /// `what` names the surface in every message (`"--to"` / `"holdout_after"`).
-/// Months and years are fixed spans (`days_per_unit`), not calendar
-/// arithmetic. Deliberate rejections, each with a hint: the commuted
+/// Without an origin, months and years are fixed spans (`days_per_unit`);
+/// under a calendar origin a month or year offset is refused, as the DSL
+/// refuses `last_obs + 6 'months` (a calendar step from a date known only
+/// when the model runs). Deliberate rejections, each with a hint: the commuted
 /// `8 weeks + last_obs` order and the DSL tick spelling (`8 'weeks`) — the
 /// canonical form is `ANCHOR ± N UNIT` with a plain unit word.
 pub(crate) fn parse_time_spec(
@@ -2319,6 +2321,26 @@ pub(crate) fn parse_time_spec(
             .map_err(|_| format!(
                 "{what} = \"{raw}\": unknown unit '{unit_tok}'. \
                  Use days / weeks / months / years."))?;
+        // Under a calendar origin a month or year from an anchor is a calendar
+        // step from a date known only when the model runs, which the DSL
+        // refuses (E321, the one-step calendar rule); the same spelling must
+        // not mean the average span here (decision F of
+        // docs/dev/proposals/2026-11-16-calendar-durations-by-position.md).
+        if origin.is_some() && (unit == "months" || unit == "years") {
+            let sign_str = if sign > 0.0 { "+" } else { "-" };
+            let days = span_days.round();
+            let fix = if days >= 1.0 {
+                format!("in days: \"{head} {sign_str} {days} days\" (≈ {n_tok} {unit_tok})")
+            } else {
+                "in days or weeks, which are fixed spans".to_string()
+            };
+            return Err(format!(
+                "{what} = \"{raw}\": calendar duration `{n_tok} {unit_tok}` cannot move \
+                 `{head}`, an observation anchor, whose date is known only when the model \
+                 runs. A calendar month from a date depends on which date it is, and the \
+                 one-step calendar rule resolves a step only from a date known when the \
+                 model compiles. State the offset {fix}."));
+        }
         let model_unit_days = ir::caltime::days_per_unit(time_unit)
             .map_err(|e| format!("{what}: model time_unit: {e}"))?;
         return Ok(TimeSpec::Anchored(ir::anchor::AnchoredTime {
@@ -6900,6 +6922,30 @@ dt = 1.0
         assert!(parse_time_spec("--to", "last_obs + 8 fortnights", None, "days").is_err());
         assert!(parse_time_spec("--to", "last_obs + 8 weeks extra", None, "days").is_err());
         assert!(parse_time_spec("--to", "last_obs + -8 weeks", None, "days").is_err());
+    }
+
+    // Decision F (proposal 2026-11-16-calendar-durations-by-position.md): under
+    // a calendar origin a month or year offset from an observation anchor is
+    // refused with the DSL's hint, since the DSL refuses
+    // `to = last_obs + 6 'months` (E321); without an origin it stays the
+    // average span, as in the DSL.
+    #[test]
+    fn time_spec_calendar_offset_from_an_anchor_is_refused_under_an_origin() {
+        let err = parse_time_spec("--to", "last_obs + 6 months", Some("2020-01-01"), "days")
+            .unwrap_err();
+        assert_eq!(err,
+            "--to = \"last_obs + 6 months\": calendar duration `6 months` cannot move \
+             `last_obs`, an observation anchor, whose date is known only when the model \
+             runs. A calendar month from a date depends on which date it is, and the \
+             one-step calendar rule resolves a step only from a date known when the \
+             model compiles. State the offset in days: \"last_obs + 183 days\" \
+             (≈ 6 months).");
+        let err = parse_time_spec("holdout_after", "first_obs - 1 year", Some("2020-01-01"), "days")
+            .unwrap_err();
+        assert!(err.contains("\"first_obs - 365 days\" (≈ 1 year)"), "{err}");
+        assert_eq!(parse_time_spec("--to", "last_obs + 1 months", None, "days").unwrap(),
+                   TimeSpec::Anchored(ir::anchor::AnchoredTime {
+                       anchor: ObsAnchor::Last, offset: 365.2425 / 12.0 }));
     }
 
     // ── Support-keyed transforms: near-bound report (D10) and the notice
