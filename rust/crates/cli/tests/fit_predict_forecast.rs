@@ -214,6 +214,12 @@ fn a_stream_with_no_bound_data_is_refused_and_named() {
     assert!(!fdir.join("forecast/weekly_cases.tsv").exists());
     let report = std::fs::read_to_string(fdir.join("report.json")).unwrap();
     assert!(report.contains("weekly_cases") && report.contains("binds no rows"), "{report}");
+    // forecast.json names it too: the artifact says what it left out.
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(fdir.join("forecast.json")).unwrap()).unwrap();
+    let refused = manifest["refused"].as_array().unwrap();
+    assert!(refused.iter().any(|r| r.as_str().unwrap().contains("'weekly_cases'")
+        && r.as_str().unwrap().contains("binds no rows")), "{refused:?}");
 }
 
 /// A held-out row is named by its file and its position within that file
