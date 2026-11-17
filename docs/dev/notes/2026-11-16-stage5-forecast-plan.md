@@ -28,19 +28,34 @@ of the chain-binomial process, each weighted by the Poisson likelihood of the
 five daily counts, computed by hand in the test rather than by camdl's
 likelihood code (effective sample size 4,918).
 
-**Result** (test `the_week_under_way_matches_the_importance_sampling_reference`,
-40 draws × 1,000 particles; Monte Carlo errors from the spread of the 40
-per-draw estimates):
+**Pass rule, stated before measuring.** Each comparison passes at |z| < 3, where
+z is the difference over the combined Monte Carlo error (the driver's from the
+spread of its per-draw estimates, the reference's from the weighted sample).
 
-| Quantity                                                      | Mean            | Variance        |
-| ------------------------------------------------------------- | --------------- | --------------- |
-| W, importance-sampling reference                              | 170.868 ± 0.381 | 1180.20 ± 18.97 |
-| W, the fixed-origin driver                                    | 169.863 ± 0.470 | 1193.77 ± 26.87 |
-| Reported weekly count, driver                                 | 84.950 ± 0.246  | 1129.70 ± 10.83 |
-| Reported weekly count, implied by the reference (ρ, k as set) | 85.434          | 1139.88         |
+**Result at high precision** (test
+`the_week_under_way_matches_at_high_precision`, ignored by default; about one
+minute in release: 800 draws × 1,000 particles against 1,000,000 reference
+simulations, effective sample size 52,559; combined error on the mean 0.156):
 
-The reported count's implied moments are ρ·E[W] and ρ²·Var[W] + E[ρW + (ρW)²/k];
-both agree within four Monte Carlo errors, as the test requires.
+| Quantity                              | Driver          | Reference       | z     |
+| ------------------------------------- | --------------- | --------------- | ----- |
+| Mean of W                             | 170.410 ± 0.101 | 170.456 ± 0.119 | −0.30 |
+| Variance of W                         | 1162.91 ± 6.33  | 1177.76 ± 6.01  | −1.70 |
+| Mean of the reported weekly count     | 85.221 ± 0.061  | 85.228 ± 0.060  | −0.08 |
+| Variance of the reported weekly count | 1131.49 ± 3.48  | 1135.50 ± 1.65  | −1.04 |
+
+The reported count's reference moments are those implied by the reference's W
+and the declared noise: ρ·E[W] and ρ²·Var[W] + E[ρW + (ρW)²/k].
+
+**Result at the default test's precision** (test
+`the_week_under_way_matches_the_importance_sampling_reference`, run by
+`make test`: 40 draws × 1,000 particles, 100,000 simulations, effective sample
+size 4,918): mean of W 169.863 ± 0.470 against 170.868 ± 0.381 (z = −1.66);
+variance 1193.77 ± 26.87 against 1180.20 ± 18.97 (z = 0.41); reported mean
+84.950 ± 0.246 against 85.434 ± 0.190 (z = −1.56); reported variance 1129.70 ±
+10.83 against 1139.88 ± 5.22 (z = −0.85). The gap of 1.0 in the mean at this
+precision does not persist at four times the precision (0.05, z = −0.30), so it
+was Monte Carlo error rather than an edge or origin error.
 
 **What the existing method gives on the same question** (test
 `the_conditioning_and_the_declaration_each_move_the_week_by_many_errors`, 50,000
