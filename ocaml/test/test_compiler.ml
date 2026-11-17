@@ -16397,6 +16397,34 @@ let test_tp_value_at_bare_w325 () =
      `origin = date(...)` declared — interpreted as internal-time units from origin"
     d.message
 
+(* gh#1129: instant arithmetic in `simulate { to }`, a scenario's `to` and an
+   output `at`, as in an intervention `at [...]` list. *)
+let test_tp_instant_arithmetic_simulate_to () =
+  let m = compile_expect_ok (tp_model ~to_:"origin + 90 'days" ()) in
+  Alcotest.(check (float 1e-9)) "t_end" 90.0 m.Ir.simulation.Ir.t_end
+
+let test_tp_instant_arithmetic_scenario_to () =
+  let m = compile_expect_ok (tp_model
+      ~extra:"scenarios { late { simulate { to = date(\"2020-03-01\") + 7 'days } } }" ()) in
+  match m.Ir.presets with
+  | [p] -> Alcotest.(check (option (float 1e-9))) "preset t_end" (Some 67.0) p.Ir.preset_t_end
+  | _ -> Alcotest.fail "expected one preset"
+
+let test_tp_instant_arithmetic_output_at () =
+  let m = compile_expect_ok (tp_model
+      ~extra:"output { trajectories { at = [date(\"2020-03-01\") + 7 'days] } }" ()) in
+  match m.Ir.output.Ir.times with
+  | Ir.OutAtTimes ts -> Alcotest.(check (list (float 1e-9))) "at" [67.0] ts
+  | _ -> Alcotest.fail "expected an at-list output schedule"
+
+let test_tp_output_at_date_range () =
+  let m = compile_expect_ok (tp_model
+      ~extra:"output { trajectories { at = [date_range(origin, count = 3, calendar_months = 1)] } }" ()) in
+  match m.Ir.output.Ir.times with
+  (* `count = 3` is three steps after the start: four dates. *)
+  | Ir.OutAtTimes ts -> Alcotest.(check (list (float 1e-9))) "at" [0.0; 31.0; 60.0; 91.0] ts
+  | _ -> Alcotest.fail "expected an at-list output schedule"
+
 let stage_1a_tests = [
   "simulate to = 2 'years refused", test_tp_refuse_simulate_to_years;
   "simulate from = 6 'months refused", test_tp_refuse_simulate_from_months;
@@ -16420,6 +16448,10 @@ let stage_1a_tests = [
   "recurring from is an instant (E321, not E322)", test_tp_recurring_from_is_instant;
   "unanchored spellings keep the average", test_tp_unanchored_unchanged;
   "value_at(I, 60) draws W325 (gh#1128)", test_tp_value_at_bare_w325;
+  "simulate to = origin + 90 'days is 90 (gh#1129)", test_tp_instant_arithmetic_simulate_to;
+  "scenario to = date + 7 'days is 67 (gh#1129)", test_tp_instant_arithmetic_scenario_to;
+  "output at = [date + 7 'days] is 67 (gh#1129)", test_tp_instant_arithmetic_output_at;
+  "output at splices date_range", test_tp_output_at_date_range;
 ]
 
 let () =
