@@ -1,184 +1,392 @@
-(* Expander: AST declarations → Ir.model *)
+(** The lowering of a parsed model to the intermediate representation: it
+    checks the declarations, expands every family over its dimensions,
+    resolves every name, converts every unit, and returns an {!Ir.model}.
+
+    {!expand_detail} takes the declaration list the parser produced and
+    returns the expanded model, the {!context} it built while expanding, and
+    a {!model_summary}. The driver, {!Compiler}, keeps the context: the
+    passes after expansion report against the IR, which has no source
+    positions, and the context maps an expanded name back to its
+    declaration ([compartment_loc], [transition_loc], [param_loc],
+    [obs_loc], [interv_loc], [let_loc], [quantity_loc], [contrast_loc]). It
+    also carries what the dimension checker needs and the IR does not keep
+    ([prior_sources], [constant_dims], [table_unit_dims], [typed_let_uses]),
+    and the data files the compile read ([reads], [file_sha256]).
+
+    {2 The phases of expansion}
+
+    [expand_detail] runs a fixed sequence of steps over one {!context}. The
+    first group works on the syntax tree and changes nothing but the
+    context.
+
+    + [collect_declarations] sorts the declarations into the context by
+      kind, in source order, and refuses reserved names and a [time_unit]
+      that is not a duration.
+    + [check_observation_surface] checks each observation's [projected] as
+      written, before the compiler adds any structure of its own: the
+      removed [prevalence] forms, a flow read inside [prevalence], the two
+      sides of a proportion collapsing different dimensions, and a bare
+      name that pools a population stratum (E280). [apply_via_rewrite]
+      then drops the [sum(X)] markers those checks read.
+    + [lower_via_transitions] rewrites each [via] transition into explicit
+      stage compartments, a stage dimension and the chain of transitions
+      between stages, so no later step sees [via].
+    + [check_origin] validates the origin date; [resolve_dimensions] builds
+      the dimension registry from the [dimensions] block;
+      [check_table_dimensions] reports a table over an undeclared
+      dimension; [check_declaration_names] refuses duplicate names within
+      a kind and the same name in two kinds, comparing expanded cell names
+      as well as declared ones.
+    + [build_lookup_tables] builds the name tables that resolution reads.
+    + Checks that need those tables and must run before any expression is
+      resolved: [check_let_cycles] (a [let] defined in terms of itself,
+      E201, which would otherwise make resolution recurse without end),
+      [check_shadowing] and [check_no_shadowing] (a [let] or a binder that
+      hides a level or an enclosing index), [check_quadratic_coupling] (the
+      one-transition-per-pair coupling pattern), [check_hierarchical_cycles]
+      (priors that depend on themselves), [check_guards] (a guard that reads
+      anything but levels and indices), [check_surface_time_typing] and
+      [check_expression_positions]. The last two apply the time rules that
+      need to tell an instant such as [date(...)] from a duration,
+      a difference resolution erases by turning both into numbers.
+      [check_surface_time_typing] refuses a calendar [time_unit] under an
+      origin (E320), walks every ordinary expression (rates, derivatives,
+      value bounds, priors, [let] bodies, initial values, actions, forcing
+      values, [balance], quantities) for arithmetic on instants (E321,
+      E360), and judges the [timepoints]. [check_expression_positions]
+      judges the time positions inside those expressions that
+      {!Time_census} lists: a value compared with [t], an offset from [t],
+      and a value given to an [instant] parameter.
+
+    The second group builds the IR, each family once per cell of the product
+    of its dimensions and every expression through [resolve_expr]:
+    [expand_tables] (whose values [build_table_index] makes readable to
+    conditions in later expressions), [expand_compartments],
+    [expand_transitions_counted] (including the {!Lineage} analysis of each
+    [#[lineage]] transition, in [resolve_lineage]), the model structure,
+    and [expand_time_functions]. The remaining blocks are expanded as the
+    fields of the model record: [expand_ode_equations],
+    [expand_interventions] (scheduled, events and reactive),
+    [expand_observations],
+    [expand_parameters] (with their priors), [expand_constants],
+    [expand_init], [expand_output], [expand_simulate], [expand_scenarios],
+    the [balance] expression, [expand_quantities] and [expand_contrasts].
+    OCaml does not specify the order in which a record's fields are
+    evaluated, so the order these run in, and with it the order in which
+    they register shared bindings, is not the order written. Last, the
+    shared bindings collected during resolution become the model's
+    [bindings], lint L403 and the reactive-stream check run over the built
+    model, and [flush_site_tallies] reports the checks tallied per source
+    site ({!site_check}).
+
+    {2 Resolving an expression}
+
+    [resolve_expr ctx env e] turns an {!Ast.expr} into an {!Ir.expr}. [env]
+    binds each index variable in scope to a level, as [[("p", "urban")]]
+    while the [urban] cell of [infection[p in patch]] is expanded;
+    [cartesian_product] enumerates these environments for a declaration's
+    binders and [eval_guard] filters them. A name is classified by
+    [classify_name] ({!name_class}) and an indexed reference by
+    [classify_indexed_name] ({!indexed_name_class}), in one precedence
+    order. An indexed compartment or parameter becomes the cell name formed
+    by joining the base name and the levels with [_], [S[urban]] to
+    [S_urban]. A unit literal becomes its value in the model's time unit,
+    keeping its dimension. A [let] ends in one of three forms: a typed
+    [let] with a constant body is a model constant, read through
+    {!Ir.ConstRef}; a [let] that reads no parameter is a shared binding,
+    registered once per cell and read through {!Ir.BindingRef}; any other
+    [let] is inlined at each use. The binding rule exists because
+    {!Autodiff} differentiates a binding reference to zero.
+
+    {2 Lowering a time}
+
+    A declaration field that holds a time is an {!Ast.Time_pos.t}, tagged
+    with the kind of time its position holds, and the module [Lower] has
+    the lowering functions for each kind: [instant_const],
+    [instant_horizon], [instant_expr], [instant_list_expr] and
+    [instant_list_const] for instants, [cadence] for a cadence, [runtime_offset] for a run-time
+    offset, [trigger_window] and [covers_width] for spans, [at_day],
+    [phase_expr] and [on_endpoint] for phases, [length] and [length_expr]
+    for lengths, and [bounds] for a parameter's bounds. Each judges its
+    position the first time it is lowered, with its kind's rule, and
+    records the judgment in the context's [lowered] table, so a position
+    read by several lowerings is reported once. It returns a value even
+    when it refuses, so a model with several mistakes reports them all.
+
+    In a model with an origin, an instant written as one whole calendar
+    step from a date the compiler knows, [to = 6 'months] or an [at] entry
+    [d - 1 'months] for a [let d = date(...)], is that calendar date, as
+    [add_calendar_months] would compute it. {!Calendar_reading} reads the
+    expression before any unit is folded, while it still shows the month,
+    and decides; the function that judges the position and the function
+    that lowers it both ask it, so they cannot disagree about which
+    expressions resolve. Any other calendar duration in an instant is
+    refused (E321), with the explicit form to write instead. A test
+    compiles models and checks that every position {!Time_census.census}
+    lists is in [lowered], so no time is folded outside [Lower].
+
+    {2 How errors are reported}
+
+    A problem is reported where it is found, with
+    [Diagnostics.error ctx.diags] (or [warning], [info]), a code and the
+    location of the declaration or expression concerned. The function then
+    returns a placeholder (the constant [0], an empty list, [None]) and
+    expansion continues, so one compile reports every independent problem.
+    A model returned with errors in [ctx.diags] is not meaningful, and the
+    driver discards it. Where a later check would only restate an earlier
+    error, the code compares error counts before and after ([count_errors])
+    and stops. An exception that escapes expansion, such as a [Failure]
+    raised for a broken internal invariant or a stack overflow, is caught
+    by the driver and reported as E001 with no location. *)
 
 open Ast
 
 (* ── Context ─────────────────────────────────────────────────────────────── *)
 
-(* Per-source-site tally of a check that is evaluated once per instantiation
-   but reported once per site (aggregation-semantics proposal §6 A3, §9 D5).
-
-   A construct is resolved once per enclosing index combination — a reduction
-   once per outer binding, an observation projection once per stream row — so a
-   check run at resolution time sees the same source site many times. A
-   per-instantiation diagnostic would print one line per stratum for a single
-   mistake. The tally counts instantiations and hits per site and
-   [flush_site_tallies] emits one diagnostic per site at the end of expansion,
-   naming the first affected binding.
-
-   - [Empty_reduction] (A3, W202): a restricted reduction whose `where` selected
-     no levels. Emptiness is a property of the instantiation, not of the site —
-     an isolated patch legitimately couples to nobody — so it is a warning.
-   - [Proportion_outside] (D2, E357): a `prevalence(of = …, among = …)` whose
-     numerator reads a cell its denominator does not contain. *)
+(** A check whose result belongs to a place in the source, though it is
+    evaluated once for each instantiation of that place. A reduction is
+    resolved once per binding of its enclosing indices and an observation's
+    projection once per stream row, so a check made at resolution time meets
+    the same source site many times; it is tallied in a {!site_tally} and
+    reported once per site by [flush_site_tallies] at the end of expansion. *)
 type site_check =
   | Empty_reduction of { var : string; dim : string }  (* the binder `q`, axis `patch` *)
+      (** A restricted reduction, [sum(q in patch where ..., ...)], whose
+          condition selected no level for some instantiation: warning W202.
+          [var] is the binder and [dim] the dimension it ranges over. A
+          single empty instantiation can be legitimate, as for an isolated
+          patch that couples to no other, so this is a warning. *)
   | Proportion_outside of { stream : string }
+      (** A [prevalence(of = ..., among = ...)] in observation [stream] whose
+          numerator counts a compartment cell its denominator does not
+          contain: error E357. *)
 
+(** The running count for one source site of a {!site_check}. *)
 type site_tally = {
   st_check         : site_check;
+      (** The check being tallied. *)
   mutable st_total : int;                             (* instantiations resolved *)
+      (** How many instantiations of the site have been resolved. *)
   mutable st_hits  : int;                             (* …of which the check fired *)
-  (* env of the first hit, innermost-first, and what it found (the cells
-     outside the denominator; empty for [Empty_reduction]). *)
+      (** How many of them the check fired on. *)
   mutable st_first : ((string * string) list * string list) option;
+      (** The first instantiation the check fired on, as its index bindings
+          (innermost first), and what it found there: the cells outside the
+          denominator for [Proportion_outside], nothing for
+          [Empty_reduction]. [None] while the check has not fired, and then
+          nothing is reported for the site. *)
 }
 
 let site_check_code = function
   | Empty_reduction _ -> "W202"
   | Proportion_outside _ -> "E357"
 
+(** Everything the expander knows about the model it is expanding, threaded
+    through every function of the module and returned to the driver.
+
+    It holds four kinds of state. The declarations, grouped by kind in
+    source order, are filled by [collect_declarations]; the [via] lowering
+    then rewrites [transitions], [comp_decls], [stratifies] and [dim_decls]
+    in place. The lookup tables ([dim_registry], [let_tbl], [comp_tbl] and
+    the other [*_tbl] fields) are built once the dimensions are resolved and
+    read by name resolution. The accumulators ([diags], [reads],
+    [hoisted_rev], [prior_sources], [typed_let_uses], [site_tallies] and the
+    expansion records) grow as declarations are expanded. And a few fields
+    are scoped switches that a function sets while it resolves one
+    construct and restores afterwards ([suppress_hoist], [obs_aux_cols]).
+
+    After expansion the driver keeps the context: {!Compiler} maps an
+    expanded name back to its declaration's location through it ([*_loc]
+    functions), {!Dimcheck} reads the dimension facts recorded in it, and
+    {!Declared_emit} reads the declarations and the expansion records. *)
 type context = {
   mutable time_unit       : unit_lit;
+      (** The model's time unit, from [time_unit = ...]; ['days] when the
+          model declares none, or when it declares a unit that is not a
+          duration (which is E228). Every unit literal is converted to it. *)
   mutable description     : string option;
-  (* The file-header `#'` block documenting the model (gh#750). Distinct from
-     [description]: that is a short string INSIDE the hashed model, so editing
-     it re-keys every fit; this rides the IR envelope's `docs` dictionary and is
-     free to correct. *)
+      (** The [description = "..."] string, which is part of the compiled
+          model. *)
   mutable model_doc       : Ast.doc option;
+      (** The [#'] documentation block at the top of the file. Unlike
+          [description] it is written to the envelope's [docs] section, not
+          into the model, so editing it does not change the identity of any
+          fit of the model. *)
   mutable comp_decls      : compartment_decl list;
+      (** The [compartments] declarations. *)
   mutable param_decls     : param_decl list;
+      (** The [parameters] declarations. *)
   mutable let_bindings    : let_binding list;
+      (** The top-level [let]s. *)
   mutable stratifies      : stratify_decl list;
-  mutable transitions     : transition_decl list;  (* post-desugar *)
-  mutable orig_transitions: transition_decl list;  (* pre-desugar original *)
+      (** The [stratify(...)] declarations. *)
+  mutable transitions     : transition_decl list;
+      (** The transition declarations, with every [via] transition replaced
+          by the stage compartments' chain once [lower_via_transitions] has
+          run. Each is still one declaration per family, not per cell. *)
+  mutable orig_transitions: transition_decl list;
+      (** The transition declarations that diagnostics and the
+          declared-model records refer to. It holds the declarations as
+          written until the time-typing checks have run, and from then on
+          the same list as [transitions], after the [via] lowering. *)
   mutable init_entries    : init_entry list;
+      (** The [init] entries. *)
   mutable simulate        : simulate_decl option;
+      (** The [simulate] block, if any. *)
   mutable ode_decls       : ode_decl list;
+      (** The [ode] equations. *)
   mutable func_decls      : func_decl list;
+      (** The [forcing] declarations. *)
   mutable obs_decls       : obs_decl list;
+      (** The [observations] streams. *)
   mutable interv_decls    : intervention_decl list;
+      (** The [interventions] declarations. *)
   mutable output_decl     : output_decl option;
+      (** The [output] block, if any. *)
   mutable table_decls     : table_decl list;
+      (** The [tables] declarations. *)
   mutable scenario_decls  : scenario_decl list;
+      (** The [scenarios] declarations. *)
   mutable balance_decl    : balance_decl option;
+      (** The [balance] declaration, if any. *)
   mutable event_decls     : intervention_decl list;
-  mutable reactive_decls  : reactive_decl list;   (* gh#204 *)
-  mutable quantity_decls  : quantity_decl list;   (* proposal 2026-06-25 *)
+      (** The [events] declarations, which share the intervention type. *)
+  mutable reactive_decls  : reactive_decl list;
+      (** The [reactive] interventions. *)
+  mutable quantity_decls  : quantity_decl list;
+      (** The [quantities] declarations, after any [--quantities] file has taken the place of the model's own. *)
   mutable contrast_decls  : contrast_decl list;   (* counterfactual contrasts *)
+      (** The [contrasts] declarations. *)
   mutable timepoint_decls : timepoint_decl list;  (* parsed, lowered for checking, not emitted *)
-  (* Every time position [Lower] has judged, keyed by (kind, location,
-     expression), with whether it was refused. A position lowered twice (the
-     model's `simulate { from }` is read by the simulate block, the output
-     schedule and the default start of every recurring schedule) is judged
-     once, and the census coverage test (test 1.1 of the calendar-durations
-     proposal) reads this table to check that no time position was folded
-     outside [Lower]. *)
+      (** The [timepoints] entries. Each time is judged as an instant
+          position, so a mistake in one is reported, but the block is not
+          part of the compiled model. *)
   lowered                 : (string * Ast.loc * Ast.expr, bool) Hashtbl.t;
+      (** Every time position a [Lower] function has judged, keyed by its
+          kind, location and expression, with whether it was refused. A
+          position read by several lowerings, such as the model's
+          [simulate { from }], which also gives the output schedule and every
+          recurring schedule their default start, is judged once and
+          reported at most once. A test of the compiler compares this table
+          with {!Time_census.census} to check that every time position went
+          through [Lower]. *)
   mutable diags           : Diagnostics.t;  (* collected errors/warnings *)
+      (** Every diagnostic of the compile. The driver adds the lexer's
+          warnings, the parser actions' errors and the later passes'
+          diagnostics to the same collection. *)
   mutable reads           : (string * string) list;
-  (* (as-written, resolved) external data files opened during expansion, in
-     reverse (most-recent-first) order. Accumulated at the single read
-     chokepoint [read_csv_rows]; surfaced by [reads] and powers
-     `camdlc --emit-deps`. Never affects the IR. *)
+      (** Each data file opened during expansion, as (path as written, path
+          resolved), newest first and with repeats. All file reads go
+          through [read_csv_rows], which records them; [reads] returns the
+          distinct files in first-read order. *)
   file_sha256             : (string, string) Hashtbl.t;
-  (* Memo: resolved path → SHA-256 hex of its bytes, for the forcing
-     provenance recorded in `Ir.time_function.data_source`. An indexed
-     file-backed forcing re-reads the same file once per stratum level (774
-     levels on the national-scale models), and hashing it 774 times would be
-     774 extra full passes over the file for one answer that cannot differ. *)
+      (** The SHA-256 of each data file by resolved path, filled by
+          [file_sha256] so each file is hashed once, although an indexed
+          file-backed forcing reads its file once per level. *)
   mutable source_dir      : string;         (* directory of the source file *)
+      (** The directory of the model file, against which relative data
+          paths are resolved; empty for source with no file. *)
   mutable filename        : string;         (* source filename for diagnostic locs *)
+      (** The model file's name, written into every diagnostic location
+          whose [file] the parser left empty. *)
   mutable expanded_comp_cache : string list;
+      (** Every expanded compartment name, in order. Written by
+          [build_lookup_tables] and read nowhere. *)
   mutable dim_decls       : dimensions_entry list;
+      (** The [dimensions] entries as written. *)
   mutable dim_registry    : (string * string list) list;
-  (* dim name → ordered levels; populated by resolve_dimensions pass *)
+      (** Each dimension with its levels in order, filled by
+          [resolve_dimensions]. Read through [dim_values], which tells an
+          undeclared dimension ([None]) from one with no levels. *)
   mutable reported_undeclared_dims : (string, unit) Hashtbl.t;
-  (* gh#490: dimension names already reported by the "'X' is not a declared
-     dimension" face of E263. One undeclared name is ONE mistake, so it gets
-     one diagnostic — at the table declaration, which [check_table_dimensions]
-     reaches first — and the downstream index-site report in [dim_value_index]
-     stands down. Without this the A1 model (a table over a phantom axis that
-     is also indexed) reports the same sentence twice against two spans. *)
+      (** The undeclared dimension names already reported as E263, so that
+          one misspelt dimension gives one diagnostic, at the first place
+          that meets it, however many places use it. *)
   mutable origin          : string option;
-  (* ISO date string for date() → float conversion *)
-  (* O(1) lookup tables — populated by build_lookup_tables after resolve_dimensions *)
+      (** The date of [origin = date("...")], as written ([YYYY-MM-DD]);
+          [None] for a model with no origin, which has no calendar. *)
   mutable let_tbl         : (string, let_binding) Hashtbl.t;
+      (** The [let]s by name. *)
   mutable cyclic_lets     : (string, unit) Hashtbl.t;
-  (* gh#492: `let` names that lie on a definition cycle, found by
-     [check_let_cycles] before any expression is resolved. Both inlining sites
-     (`resolve_ident_name` for a bare reference, `resolve_expr`'s EIndex arm
-     for an indexed one) substitute a placeholder for these instead of
-     inlining the body, which is what stops the unbounded recursion. The
-     diagnostic is already emitted by then, so the placeholder is never
-     silent. *)
+      (** The [let]s that lie on a definition cycle, found by
+          [check_let_cycles] (E201) before any expression is resolved. Name
+          resolution substitutes a placeholder for a reference to one rather
+          than inlining its body, which would not terminate. *)
   mutable comp_tbl        : (string, compartment_decl) Hashtbl.t;
+      (** The compartment declarations by base name. *)
   mutable scalar_param_tbl: (string, unit) Hashtbl.t;
+      (** The names of the scalar parameters. *)
   mutable expanded_param_tbl : (string, unit) Hashtbl.t;
+      (** The cell names of every indexed parameter, such as [R0_urban]. *)
   mutable func_tbl        : (string, func_decl) Hashtbl.t;
+      (** The forcing declarations by name. *)
   mutable expanded_comp_tbl  : (string, unit) Hashtbl.t;
-  (* Fix B (shared-binding extraction). A `let` whose body is state-only
-     (no parameter, no other let — so d/dp ≡ 0, matching the
-     `differentiate(BindingRef)=0` autodiff arm) and context-independent
-     (every index-position variable is bound by the let's own declared
-     indices or an enclosing `sum`) is hoisted ONCE into `model.bindings`
-     and referenced by `Ir.BindingRef` instead of inlined at every use
-     site. This is what shrinks the spatial FOI from O(P²A²) IR to O(P²+PA). *)
+      (** The cell names of every compartment, such as [S_urban]. *)
   mutable hoist_memo      : (string, bool) Hashtbl.t;   (* let name -> hoistable? (memoized) *)
+      (** Whether each [let] may become a shared binding, memoised by
+          [let_is_hoistable]. A [let] qualifies when it has no shape, is not
+          a model constant, reads no parameter directly or through another
+          [let], table or forcing, and has every index in its body bound by
+          its own binders or an enclosing [sum]. Its derivative with respect
+          to every parameter is then zero, which is what {!Autodiff} assumes
+          of a binding reference. *)
   mutable hoisted_tbl     : (string, unit) Hashtbl.t;   (* concrete binding name -> already registered *)
+      (** The cell names of the bindings registered so far. *)
   mutable hoisted_rev     : (string * Ir.expr) list;    (* registered bindings, reverse-topological (deps last) *)
-  (* While resolving a #[lineage] transition's rate, suppress extraction so the
-     lineage parent-decomposition (Lineage.classify_parents) sees the fully
-     inlined rate exactly as before — it cannot see through a state-bearing
-     BindingRef. The same let is still hoisted at its non-lineage use sites. *)
+      (** The registered bindings, newest first. A binding's dependencies
+          are registered before it, so the reversed list, which becomes the
+          model's [bindings], lists every binding after those it reads. *)
   mutable suppress_hoist  : bool;
-  (* Every prior's arguments as resolved IR expressions, before a constant
-     prior is folded to floats: the unit literal in `mu = -2 'per_day` is gone
-     from the IR, and the dimension checker needs it (proposal
-     2026-11-06-dimension-checking §5.9). Reversed. *)
+      (** Set while the rate of a [#[lineage]] transition is resolved, so
+          that every [let] in it is inlined and {!Lineage} sees every
+          compartment the rate reads. The same [let] is still a shared
+          binding elsewhere. *)
   mutable prior_sources   : Dimcheck.prior_source list;
-  (* Every expanded body of a typed `let` whose body is not constant, with the
-     dimension its annotation declares: `let incidence : rate = ...` is
-     inlined (or hoisted) at each use, so the IR keeps no node for the
-     annotation, and the dimension checker enforces it from these (E318). *)
+      (** The arguments of every constant prior as resolved expressions,
+          before the prior is folded to numbers, newest first. The IR keeps
+          only the numbers, and the dimension checker needs the unit
+          literals, as in [mu = -2 'per_day]. *)
   mutable typed_let_uses  : (string * (int * int) * Ir.expr) list;
+      (** Each distinct resolved body of a [let] with a declared kind and a
+          non-constant body, with the dimension its kind declares, newest
+          first. Such a [let] is inlined or hoisted, so the IR keeps no node
+          for the annotation, and the dimension checker enforces it from
+          these (E318). *)
   mutable table_unit_dims : (string * (int * int)) list;
+      (** Each table declared with a unit, and the dimension of that unit,
+          newest first, for the dimension checker. *)
   typed_let_seen          : (string * Ir.expr, unit) Hashtbl.t;
-  (* Declared value-column names of the observation stream currently being
-     expanded (2026-06-10 observation data-entry §3). While set, an identifier
-     in a likelihood expression matching one of these names resolves to
-     [Ir.ObsColumnRef name] — a per-observation aux data reference the Rust
-     binder fills by name (e.g. binomial `n = tested`) — instead of falling
-     through name resolution to E100. Empty outside the likelihood-resolution
-     scope. *)
+      (** The ([let] name, resolved body) pairs already in
+          [typed_let_uses]. *)
   mutable obs_aux_cols    : string list;
-  (* Resolved constant tables, indexed by name → (row-major flattened cells,
-     ordered dimension names). Populated once by [build_table_index] right
-     after [expand_tables] runs (and before transition expansion), so a
-     compile-time `where` predicate (`sum(... where dist[p,q] < r, ...)`) can
-     read a table's resolved values during [resolve_expr]. Tables resolve to
-     compile-time constants, so this is the natural place for them to live —
-     the same way [dim_registry] holds resolved dimensions. External
-     (`--table`) tables are absent here (no compile-time values). *)
+      (** While a likelihood is resolved, the value columns its observation
+          stream declares. A name among them resolves to a per-row data
+          reference ({!Ir.ObsColumnRef}), as [tested] in
+          [binomial(n = tested, ...)]; elsewhere the list is empty. *)
   mutable table_index    : (string, Ir.expr array * string list) Hashtbl.t;
-  (* A3/D5: per-site check tallies keyed by (source loc, code), most-recent
-     site first. Accumulated during resolution, drained by
-     [flush_site_tallies]. *)
+      (** Each table with values in the model, as its cells (row-major) and
+          its dimensions, filled by [build_table_index] before transitions
+          are expanded so that a condition such as
+          [sum(q in patch where dist[p, q] < r, ...)] can read cells during
+          resolution. A table supplied at run time is not here. *)
   mutable site_tallies : ((loc * string) * site_tally) list;
-  (* What each declaration expanded to, recorded at the place the expanded
-     names are made (never recovered from the spelling of a name), for the
-     declared section's `expands_to`. Each list is newest first.
-     - [via_transitions]: a transition the staged-residence lowering
-       synthesised, and the declared `via` transition it stands for;
-     - [via_cells]: a stage compartment that lowering created in place of a
-       declared compartment, and that compartment;
-     - [emitted_transitions]: a transition declaration as it stood after
-       lowering, and the expanded transitions it produced;
-     - [emitted_observations]: an observation stream and one expanded
-       observation model it produced. *)
+      (** The {!site_tally} of each source site, keyed by its location and
+          code, newest site first. *)
   mutable via_transitions      : (string * string) list;
+      (** Each transition the [via] lowering made, with the declared [via]
+          transition it stands for. This and the next three fields record
+          what each declaration expanded to, at the place the expanded
+          names are made, for the declared-model section; each is newest
+          first. *)
   mutable via_cells            : (string * string) list;
+      (** Each stage compartment the [via] lowering made, with the declared
+          compartment it stands in for. *)
   mutable emitted_transitions  : (string * string list) list;
+      (** Each transition declaration after the lowering, with the expanded
+          transitions it produced. *)
   mutable emitted_observations : (string * string) list;
+      (** Each observation stream, with one expanded observation model it
+          produced. *)
 }
 
 (* Stratification-name predicates. Expanded names are [base] itself or a leaf
@@ -321,17 +529,31 @@ let report_undeclared_dim ctx ~loc dim : bool =
 
 (* ── Model summary ────────────────────────────────────────────────────────── *)
 
+(** How many constructs the model declared and how many it expanded to, for
+    the summary [camdlc inspect] prints. A [base_] count is of declarations,
+    an [expanded_] count of the cells they became. *)
 type model_summary = {
   base_compartment_count    : int;
+      (** Compartment declarations, after the [via] lowering. *)
   expanded_compartment_count: int;
+      (** Compartment cells. *)
   base_transition_count     : int;
+      (** Transition declarations after the [via] lowering, in which each
+          [via] transition has become the chain it stands for. *)
   expanded_transition_count : int;
+      (** Transition cells. *)
   filtered_transition_count : int;
+      (** Transition cells left out because their guard was false. *)
   let_binding_count         : int;
+      (** Top-level [let]s. *)
   table_count               : int;
+      (** Table declarations. *)
   param_count               : int;
+      (** Parameter declarations. *)
   obs_count                 : int;
+      (** Observation streams as declared. *)
   interv_count              : int;
+      (** Intervention declarations, not counting events or reactive interventions. *)
 }
 
 (* ── Date arithmetic ─────────────────────────────────────────────────────── *)
@@ -3948,7 +4170,8 @@ let partial_index_error ctx env ~loc ~base ~items : bool =
     [classify_name] returns the first that applies. *)
 type name_class =
   | Name_obs_column
-      (** A per-observation auxiliary data column, inside a likelihood (§3). *)
+      (** A value column of the observation stream whose likelihood is being
+          resolved, read per row: [tested] in [binomial(n = tested, ...)]. *)
   | Name_compartment_cell
       (** A fully-expanded compartment written literally, e.g. [S_child]. *)
   | Name_compartment
@@ -3970,9 +4193,9 @@ type name_class =
   | Name_forcing
       (** A forcing / time function. *)
   | Name_time        (** [t] *)
-  | Name_dt          (** [dt], the integrator step (gh#54). *)
+  | Name_dt          (** [dt], the integrator step. *)
   | Name_projected   (** [projected], the observation projection's output. *)
-  | Name_pi          (** [pi] (gh#58). *)
+  | Name_pi          (** [pi]. *)
   | Name_e           (** [e] *)
   | Name_origin      (** [origin], the t = 0 point of an anchored model. *)
   | Name_unresolved
@@ -4066,80 +4289,11 @@ let classify_indexed_name ctx (base_name : string) : indexed_name_class =
     | _ ->
       if is_indexed_param ctx base_name then Indexed_param else Indexed_cell
 
-(* ── The one-step calendar rule ───────────────────────────────────────────────
-   (proposal docs/dev/proposals/2026-11-16-calendar-durations-by-position.md,
-   §3.4 and §8 Stage 1b.) Under an origin, one calendar step of a whole number
-   of months (or years, as twelve months) from a date the compiler knows is that
-   calendar date, as `add_calendar_months` computes it: `to = 2 'years` is
-   `add_calendar_years(origin, 2)`, `at [date("2020-03-01") - 1 'months]` is
-   `add_calendar_months(date("2020-03-01"), -1)`. Any other use of a calendar
-   duration in a date position is refused, with the explicit form named.
+(* ── The one-step calendar rule ─────────────────────────────────────────── *)
 
-   The rule is a pure function of a reading of the expression, taken from the
-   leaves before any unit is folded (a folded `6 'months` is 182.62125 and has
-   lost the month). [read] takes the reading; [resolve_days] applies the rule.
-   The judging path (which reports a refusal) and the lowering paths (which use
-   the value) both call them on the expression the modeller wrote, so they
-   cannot disagree about which expressions resolve. *)
+(** The one-step calendar rule: which calendar durations written in a date
+    position resolve to a calendar date, and why the others are refused. *)
 module Calendar_reading : sig
-  type ymd = int * int * int
-
-  type base =
-    | Origin                                    (* `origin`, or the implicit base of a bare duration *)
-    | Date of ymd                               (* a `date(...)` literal, or a `let` of one *)
-    | Stepped of { root : base; steps : int list }
-    (* the result of `add_calendar_*` calls: [root] is [Origin] or [Date], and
-       [steps] the month counts applied to it, innermost first *)
-    | Runtime of { name : string; desc : string }
-    (* `t`, an instant-kind parameter, an observation anchor *)
-
-  (* One move: an exact part in days ('days, 'weeks) and a calendar part in
-     months ('months, plus 12 per 'years), and the expression it was read
-     from. *)
-  type duration = { days : float; months : float; src : expr }
-
-  type reading =
-    | Moved of { base : base; moves : duration list }  (* in source order *)
-    | Duration of duration
-    | Bare of float                                    (* a unitless number *)
-    | Not_constant                                     (* anything else *)
-
-  val read : context -> expr -> reading
-
-  (* Evidence that the model is anchored: constructed only from a valid
-     `origin = date(...)` and a time `time_unit`. *)
-  type anchor = private { origin : ymd; origin_rd : int; unit : unit_lit }
-
-  val anchor_of_ctx : context -> anchor option
-
-  (* What the rule refuses, with what each message needs beyond the expression
-     itself. [shown] is the calendar duration as written. *)
-  type refusal =
-    | Fractional_months of { months : float; shown : expr }
-    | Mixed of { base : base; months : int; days : float }
-    (* one calendar step and a number of days; [base] is [Origin] or [Date] *)
-    | Two_calendar_steps of { base : base; steps : int list }
-    (* [base] is [Origin] or [Date]; [steps] every calendar step taken from
-       it, in order, including those of an `add_calendar_*` base *)
-    | Calendar_from_runtime of { shown : expr; name : string; desc : string }
-    | Not_one_step
-    (* a reading the rule does not cover: a conditional, a product with a
-       parameter, a calendar step inside another call *)
-
-  (* The rule, in days from the origin. *)
-  val resolve_days : anchor -> reading -> (float, refusal) result
-
-  (* [Some days] when [e] holds a calendar step and the rule resolves it: the
-     value every lowering of a date position uses in place of the fold. *)
-  val calendar_step_days : context -> expr -> float option
-
-  (* Calendar arithmetic and spellings, for the refusal messages. *)
-  val add_months : ymd -> int -> ymd
-  val add_days : ymd -> int -> ymd
-  val ymd_of_base : anchor -> base -> ymd option
-  val base_code : base -> string
-  val show_ymd : ymd -> string
-end = struct
   type ymd = int * int * int
 
   type base =
@@ -4156,7 +4310,13 @@ end = struct
     | Bare of float
     | Not_constant
 
-  type anchor = { origin : ymd; origin_rd : int; unit : unit_lit }
+  (* The reading of an expression, as it is written. *)
+  val read : context -> expr -> reading
+
+  type anchor = private { origin : ymd; origin_rd : int; unit : unit_lit }
+
+  (* The model's anchor, or [None] without a valid origin. *)
+  val anchor_of_ctx : context -> anchor option
 
   type refusal =
     | Fractional_months of { months : float; shown : expr }
@@ -4164,6 +4324,112 @@ end = struct
     | Two_calendar_steps of { base : base; steps : int list }
     | Calendar_from_runtime of { shown : expr; name : string; desc : string }
     | Not_one_step
+
+  (* The rule, in days from the origin. *)
+  val resolve_days : anchor -> reading -> (float, refusal) result
+
+  (* [Some days] when [e] holds a calendar step and the rule resolves it: the
+     value every lowering of a date position uses in place of the fold. *)
+  val calendar_step_days : context -> expr -> float option
+
+  (* Calendar arithmetic and spellings, for the refusal messages. *)
+  val add_months : ymd -> int -> ymd
+  val add_days : ymd -> int -> ymd
+  val ymd_of_base : anchor -> base -> ymd option
+  val base_code : base -> string
+  val show_ymd : ymd -> string
+end = struct
+  (** The one-step calendar rule: which calendar durations written in a date
+      position resolve to a calendar date, and why the others are refused.
+
+      A calendar month has no fixed length, so a calendar duration means
+      something definite only when it moves a known date. In a model with an
+      [origin], one calendar step of a whole number of months, or of years
+      as twelve months, from a date the compiler knows is that calendar date,
+      as [add_calendar_months] computes it. In the example below, [to] is
+      [add_calendar_years(origin, 2)], and the intervention fires on the
+      same day of the month before the date it names. Any other calendar duration in a date position is refused
+      (E321), with a message that names the explicit form to write.
+
+      The rule is a pure function of a {!reading} of the expression, taken
+      from its leaves before any unit is folded, because a folded
+      [6 'months] is 182.62125 days and has lost the month. [read] takes the
+      reading and [resolve_days] applies the rule. The function that judges
+      a date position, and reports a refusal, and the functions that lower
+      it, and use the value, all call these on the expression the modeller
+      wrote, so they cannot disagree about which expressions resolve.
+
+      {@camdl[
+        simulate { from = 0 'days  to = 2 'years }
+        pulse : add(I, 5) at [date("2020-03-01") - 1 'months]
+      ]} *)
+
+  (** A calendar date as year, month and day of the month, as in
+      [(2020, 3, 1)]. *)
+  type ymd = int * int * int
+
+  (** The date a reading starts from. *)
+  type base =
+    | Origin
+        (** The model's origin: the name [origin], and the implicit start of
+            a duration written alone, so [to = 2 'years] moves the origin. *)
+    | Date of ymd
+        (** A [date("...")] literal, or a [let] whose body is one. *)
+    | Stepped of { root : base; steps : int list }
+        (** The result of [add_calendar_months] or [add_calendar_years]
+            calls: [root] is [Origin] or [Date], and [steps] the months each
+            call adds, innermost call first, a year counting twelve. *)
+    | Runtime of { name : string; desc : string }
+        (** An instant known only when the model runs: [t], an [instant]
+            parameter, or an observation anchor such as [last_obs]. [name]
+            is how the model writes it and [desc] what it is, for the
+            refusal message. *)
+
+  (** One duration added to or subtracted from a base, as an exact part,
+      [days], from ['days] and ['weeks], and a calendar part, [months], from
+      ['months] and ['years] at twelve months each. [src] is the expression
+      it was read from, which a refusal quotes. *)
+  type duration = { days : float; months : float; src : expr }
+
+  (** What an expression in a date position is, read from its leaves. *)
+  type reading =
+    | Moved of { base : base; moves : duration list }
+        (** A base with the durations added to or subtracted from it, in
+            source order, a subtracted one negated. *)
+    | Duration of duration
+        (** A duration alone, which moves the origin. *)
+    | Bare of float
+        (** A number with no unit, a count of the model's time unit. *)
+    | Not_constant
+        (** Anything else: a conditional, a product with a parameter, a
+            call other than [date] and the calendar functions, or an
+            expression nested more than 64 deep. *)
+
+  (** Evidence that the model has a calendar: built by [anchor_of_ctx] only
+      from an [origin] that parses as a date and a [time_unit] that is a
+      duration. [origin] is the origin date, [origin_rd] its day number
+      as [days_of_date] counts it, from which every resolved date's offset
+      is taken, and [unit] the model's time unit. *)
+  type anchor = { origin : ymd; origin_rd : int; unit : unit_lit }
+
+  (** Why the rule does not resolve a reading. *)
+  type refusal =
+    | Fractional_months of { months : float; shown : expr }
+        (** A calendar duration that is not a whole number of months, as
+            [1.5 'months]; [shown] is the duration as written. *)
+    | Mixed of { base : base; months : int; days : float }
+        (** One calendar step and a number of days from the same base, as
+            [origin + 1 'months + 3 'days]; [base] is [Origin] or [Date]. *)
+    | Two_calendar_steps of { base : base; steps : int list }
+        (** More than one calendar step: [base] is [Origin] or [Date], and
+            [steps] every calendar step taken from it in order, including
+            those of an [add_calendar_months] base. *)
+    | Calendar_from_runtime of { shown : expr; name : string; desc : string }
+        (** A calendar duration [shown] that moves an instant known only
+            when the model runs, named [name] and described by [desc]. *)
+    | Not_one_step
+        (** A reading the rule does not cover, such as a calendar step
+            inside a conditional or another call. *)
 
   let rd (y, m, d) = days_of_date y m d
   let add_months = add_calendar_months_ymd
@@ -5989,15 +6255,26 @@ let rec const_expr_dim (e : expr) : (int * int) option =
    This classifier is the whole of that interception — one function, so the
    three positions cannot accept different grammars. *)
 
+(** What [classify_anchor] found in an expression at one of the positions
+    that accept the observation anchors [first_obs] and [last_obs]:
+    [simulate { to }], the model's or a scenario's; an entry of a forcing's
+    [breakpoints]; an end of a forcing's [window]; and the time argument of
+    [value_at].
+
+    {@camdl[
+      simulate { from = 0 'days  to = last_obs + 4 'weeks }
+    ]} *)
 type anchor_class =
-  (* No anchor is mentioned anywhere in the expression: the caller handles it
-     as it always did. *)
   | AnchorNone
-  (* A well-formed anchor, with any offset already folded to model time units. *)
+      (** The expression mentions no anchor; the caller treats it as an
+          ordinary time. *)
   | AnchorAt of Ir.anchored_time
-  (* An anchor is mentioned but the term is not a legal anchor expression; a
-     diagnostic has ALREADY been emitted, so the caller must not add another. *)
+      (** A well-formed anchor, with its offset folded to model time
+          units. *)
   | AnchorBad
+      (** The expression mentions an anchor but is not a legal anchor
+          expression, such as [2 * last_obs]. The diagnostic has been
+          emitted, so the caller adds none. *)
 
 let anchor_of_ident = function
   | "first_obs" -> Some Ir.AnchorFirst
@@ -6034,7 +6311,7 @@ let time_env ctx =
 
 (* The affine day-equivalent of a calendar duration, for the hints that offer a
    fixed span. Folded from the literal, so `5 'years` suggests 1826 days and
-   `5 'months` suggests 152 (gh#843) — a fixed suggestion silently understates
+   `5 'months` suggests 152; a fixed suggestion would silently understate
    a year-valued offset 12-fold, and the model it produces compiles and runs.
 
    Folds without emitting: `resolve_float_expr` reports E401 on a non-constant,
@@ -6137,7 +6414,9 @@ let rec first_calendar_literal ctx (e : expr) : expr option =
   | ESum (_, _, _, b, _) -> go b
   | EList es -> first es
 
-(* A base known only at run time, as named in the refusal. *)
+(** An instant known only when the model runs, such as [t], as a refusal
+    of a calendar duration that moves it names it: [rb_name] as the model
+    writes it, and [rb_desc] what it is, as ["the model time"]. *)
 type runtime_base = { rb_name : string; rb_desc : string }
 
 (* E321 from a run-time base. [what] is the position, omitted where the base
@@ -6167,7 +6446,7 @@ let rec calendar_literal ctx (e : expr) : (float * unit_lit) option =
   | EUnOp (Neg, x) -> Option.map (fun (k, u) -> (-. k, u)) (calendar_literal ctx x)
   | _ -> None
 
-(* ── The refusals of the one-step calendar rule (proposal §4.1) ── *)
+(* ── The refusals of the one-step calendar rule ── *)
 
 (* A count of calendar months, and of days, in words: "a year", "18 months",
    "3 days back". *)
@@ -6365,7 +6644,8 @@ let refuse_calendar_instant ctx ~loc ~what (e : expr) : bool =
        | Error r -> report_calendar_refusal ctx ~loc ~what anchor e r; true)
 
 (* E360 alone, at one instant position: the arithmetic an instant does not
-   have (gh#1070). E321 there is [refuse_calendar_instant]'s. *)
+   have, such as the sum of two instants. E321 there is
+   [refuse_calendar_instant]'s. *)
 let check_instant_misuse ?(children = Time_typing.subexprs) ctx ~loc ~context (e : expr) =
   if ctx.origin <> None then
     Time_typing.walk_instant_misuse ~children (time_env ctx) e
@@ -6448,14 +6728,14 @@ let resolve_float_expr_simple ctx e =
     | _ -> 0.0
 
 (* ── Time positions: the checks every kind shares ────────────────────────────
-   (proposal docs/dev/proposals/2026-11-16-calendar-durations-by-position.md
-   §3.5). Under an origin, an instant moved by a calendar duration (E321, Rule
-   1) and the arithmetic an instant does not have (E360, gh#1070) are refused
-   wherever they are written. [check_instant_arithmetic] judges one expression;
+   Under an origin, an instant moved by a calendar duration (E321) and the
+   arithmetic an instant does not have (E360) are refused wherever they are
+   written. [check_instant_arithmetic] judges one expression;
    the [Lower] functions below run it on their own position, and
    [check_surface_time_typing] runs it on every ordinary expression. *)
 
-(* E321 (Rule 1) and E360 at every node of [e] the walk reaches. [children]
+(* E321 (an instant plus or minus a calendar duration) and E360 at every
+   node of [e] the walk reaches. [children]
    chooses which sub-expressions it descends into: an ordinary expression's
    walk skips the time positions inside it, which their own [Lower] function
    judges. *)
@@ -6479,8 +6759,17 @@ let check_instant_arithmetic ?(children = Time_typing.subexprs) ctx ~loc ~contex
     check_instant_misuse ~children ctx ~loc ~context e
   end
 
-(* A bare number in a time position under an origin (W324 for `simulate`, W325
-   for a schedule entry). [subject] is the spelling the message quotes. *)
+(** The warning a time position gives when it is written as a bare number
+    in a model with an origin, where the number is read in the model's time
+    unit from the origin: [bw_code] is W324 for [simulate { from }] and
+    [{ to }] and W325 for an intervention's or event's schedule entry or
+    [value_at]'s time,
+    [bw_subject] the position as the message quotes it, such as
+    [`to = 365`], and [bw_hint] the hint.
+
+    {@camdl[
+      simulate { from = 0  to = 365 }
+    ]} *)
 type bare_warning = { bw_code : string; bw_subject : string; bw_hint : string }
 
 let warn_bare_numeric ctx ~loc (w : bare_warning) e =
@@ -6498,7 +6787,7 @@ let bare_field ~code ~field ~hint e =
   { bw_code = code; bw_hint = hint;
     bw_subject = Printf.sprintf "`%s = %s`" field (Time_typing.show_short e) }
 
-(* E322: a calendar duration where one fixed step is folded (Rule 7). *)
+(* E322: a calendar duration where one fixed step is folded. *)
 let check_calendar_cadence ctx ~loc ~field ~hint e =
   if ctx.origin <> None then
     match Time_typing.classify (time_env ctx) e with
@@ -6525,12 +6814,36 @@ let rec fold_closed_ir (ir : Ir.expr) : float option =
      | _ -> None)
   | _ -> None
 
-(* ── Lower: one lowering function per time-position kind (§3.5) ──────────────
-   The only functions that turn a ['k Time_pos.t] into a number or an IR
-   expression. Each judges its position once ([judge]), with the rule for its
-   kind, and returns a value even when it refuses, so that a model with several
-   mistakes reports them all. *)
+(* ── Lower: the lowering functions of each time-position kind ───────────── *)
+
+(** The functions that turn a time position into a number or an IR
+    expression, each applying the rule of its position's kind. *)
 module Lower = struct
+  (** The functions that turn a time position, an {!Ast.Time_pos.t}, into a
+      number or an IR expression, each applying the rule of its position's
+      kind.
+
+      The type of each function names the kind it accepts: [instant_const]
+      takes an [instant Time_pos.t], [cadence] a [cadence Time_pos.t], and so
+      on, so a position cannot be lowered by another kind's rule. Each
+      function judges its position the first time it is lowered, through
+      [judge], which runs the kind's checks and records in the context's
+      [lowered] table whether they refused it; a later lowering of the same
+      position reads the record and does not run the checks again. A
+      function
+      returns a value even when its position is refused, a placeholder
+      where no value exists, so that a model with several mistakes reports
+      them all.
+
+      The rules, under an origin: an instant may be one calendar step from
+      a known date, resolved by {!Calendar_reading}, and is otherwise
+      refused a calendar duration (E321), and refused arithmetic an instant
+      does not have (E360); a cadence and an [at_day] phase are refused a
+      calendar duration (E322); a run-time offset and a span are refused one
+      (E321); a length and a sinusoidal phase read one as its average.
+      Without an origin there is no calendar and none of these refusals
+      applies. *)
+
   let key (p : _ Time_pos.t) =
     (Time_pos.kind_name p.Time_pos.kind, Time_pos.loc p, Time_pos.expr p)
 
@@ -6546,13 +6859,13 @@ module Lower = struct
 
   let loc ctx p = diag_loc_of_ast_ctx ctx (Time_pos.loc p)
 
-  (* The value of a constant time position, as `resolve_time_expr` folded it. *)
+  (* The value of a constant time position, in model time units. *)
   let fold ctx e = resolve_float_expr ctx e
 
   (* The value of a compile-time instant. Beyond [fold], instant arithmetic
      whose resolved IR is closed over constants and unit literals folds too
-     (`origin + 90 'days`, `date("2020-03-01") + 7 'days`), as an `at [...]`
-     entry always has (gh#1129). *)
+     (`origin + 90 'days`, `date("2020-03-01") + 7 'days`), as an
+     intervention's `at [...]` entry does. *)
   let fold_instant ctx e =
     if is_const_expr e then eval_const_expr ctx e
     else
@@ -6562,11 +6875,21 @@ module Lower = struct
 
   (* ── Instants ── *)
 
+  (** An instant position after lowering, by the form the position allows:
+      [instant_horizon] returns [At], [At_anchor] or [At_bad], and
+      [instant_expr] returns [At_expr], [At_anchor] or [At_bad]. *)
   type instant_value =
-    | At        of float               (* a compile-time model time *)
-    | At_expr   of Ir.expr             (* a resolved IR expression (an at-list entry, a breakpoint) *)
-    | At_anchor of Ir.anchored_time    (* `last_obs ± d`, d exact *)
-    | At_bad                           (* an anchor in a refused shape; already reported *)
+    | At        of float
+        (** A time known at compile time, in model time units. *)
+    | At_expr   of Ir.expr
+        (** A resolved IR expression, as for a [breakpoints] entry. *)
+    | At_anchor of Ir.anchored_time
+        (** An observation anchor with a fixed offset,
+            [last_obs + 4 'weeks], resolved when the data are known. *)
+    | At_bad
+        (** An anchor in a form that is refused, such as [2 * last_obs]. The
+            diagnostic has been reported, and the caller lowers a
+            placeholder. *)
 
   (* The expression an instant position is lowered from: the calendar date the
      one-step calendar rule resolves, or the expression as written. The date
@@ -6743,7 +7066,7 @@ module Lower = struct
       (if ctx.origin <> None then
          match Time_typing.classify (time_env ctx) e with
          | Time_typing.TCalendar ->
-           (* gh#1069: a `covers` width is folded to one constant span, so a
+           (* A `covers` width is folded to one constant span, so a
               calendar width would give every row the average month or year
               rather than its own. *)
            Diagnostics.error ctx.diags ~code:"E321" ~loc:cv_loc
@@ -6776,7 +7099,7 @@ module Lower = struct
       let loc = loc ctx p in
       check_time_units ctx ~what:"a schedule's `at_day`" e;
       check_instant_arithmetic ctx ~loc ~context e;
-      (* gh#1120: `at_day` is folded to one offset from the start of each
+      (* `at_day` is folded to one offset from the start of each
          period, so a calendar duration would become the average month or
          year. *)
       check_calendar_cadence ctx ~loc ~field:"at_day"
@@ -6784,7 +7107,8 @@ module Lower = struct
       false));
     fold ctx e
 
-  (* A sinusoidal `phase`: the average month, by decision G. *)
+  (* A sinusoidal `phase`: a calendar duration is the average month or year,
+     as the phase of a cycle of fixed period has to be. *)
   let phase_expr ctx env ~context (p : Time_pos.phase Time_pos.t) : Ir.expr =
     let e = Time_pos.expr p in
     ignore (judge ctx p (fun () ->
@@ -6792,8 +7116,8 @@ module Lower = struct
       false));
     resolve_expr ctx env e
 
-  (* A periodic `on` endpoint, in whole model-time units (gh#1148, D70 a).
-     [bound] names it in E407. *)
+  (* A periodic `on` endpoint, in whole model-time units. [bound] names it
+     in E407. *)
   let on_endpoint ctx ~context ~fname ~bound (p : Time_pos.phase Time_pos.t) : int =
     let e = Time_pos.expr p in
     ignore (judge ctx p (fun () ->
@@ -6811,7 +7135,8 @@ module Lower = struct
 
   (* ── Lengths ── *)
 
-  (* `simulate { dt }`: a length, the average month by design (D65 a). *)
+  (* `simulate { dt }`: a length, in which a calendar duration is the
+     average month or year. *)
   let length ctx ~context (p : Time_pos.length Time_pos.t) : float =
     let e = Time_pos.expr p in
     ignore (judge ctx p (fun () ->
@@ -6984,6 +7309,12 @@ let validate_prior_values dist_name vals =
   | "truncated_normal" -> pos_check "sd"
   | _ -> None
 
+(** A parameter's prior after its arguments are resolved: [`Plain] when every
+    argument is a constant and there is no pooling clause, folded to numbers;
+    [`Hierarchical] when an argument is not a constant, as in
+    [normal(mu = mu_r, sigma = 0.5)], or the prior pools over a dimension
+    with [| age]. On an error the result is a placeholder [`Plain] uniform
+    prior on [[0, 1]]. *)
 type prior_classification =
   [ `Plain        of Ir.prior_dist
   | `Hierarchical of Ir.hierarchical_prior ]
@@ -8884,7 +9215,7 @@ let expand_time_function_one ctx fname (env : (string * string) list)
                   (Time_census.Forcing_schema.phase ~loc:fspan lo_e) in
               let hi = Lower.on_endpoint ctx ~context:forcing_context ~fname ~bound:"upper"
                   (Time_census.Forcing_schema.phase ~loc:fspan hi_e) in
-              (* gh#1148 (D70 a): `lo` and `hi` are model time, in whole
+              (* `lo` and `hi` are model time, in whole
                  units and inclusive, so `lo:hi` covers [lo, hi + 1). Bin i
                  covers [i * step, (i + 1) * step), so the range is bins
                  lo / step to (hi + 1) / step - 1, and it must start and end
@@ -8929,7 +9260,7 @@ let expand_time_function_one ctx fname (env : (string * string) list)
                       last lo last wrapped
                   else begin
                     (* The example is one bin at each end when bins are wider
-                       than a unit, so it is itself aligned (gh#1148). *)
+                       than a unit, so it is itself aligned. *)
                     let (a, b) =
                       if step_f > 1.0 then
                         (last + 1 - int_of_float step_f, int_of_float step_f - 1)
@@ -8947,7 +9278,7 @@ let expand_time_function_one ctx fname (env : (string * string) list)
                     fname lo hi last effect)
                   ~hint ()
               end
-              (* gh#1148 (D70 a): a range that does not start on a bin edge
+              (* A range that does not start on a bin edge
                  or does not end on the last unit of a bin would switch on
                  part of a bin, which a binned forcing cannot represent. *)
               else if not (on_bin_edge (float_of_int lo)
@@ -9353,31 +9684,25 @@ let check_action_target ctx ~name ~loc ~verb ~base ~concrete =
         ()
   end
 
-(* A transfer endpoint: the compartment it names, the dimensions that
-   compartment is DECLARED with, and the concrete cells it denotes (gh#460).
+(** One end, [from] or [to], of a [transfer(...)] action: the compartment
+    it names, the dimensions that compartment is declared with, and the
+    cells it denotes. [transfer(from = S, to = V)] with both stratified by
+    [age] moves each age cell of [S] into the same age cell of [V].
 
-   `resolve_comp_name` accepts only a single `Ir.Pop`, so a bare stratified
-   endpoint — which resolves to `Ir.PopSum` — was rejected outright, and spec
-   §25.10's central idiom (`transfer(from = S, to = V)` expanding over all
-   strata) did not work.
-
-   [ep_dims] is the load-bearing field, and it must come from [comp_dims], not
-   from parsing cell names. Two endpoints pair only when they are stratified by
-   the same dimensions; deciding that by comparing the stratum *suffixes* of
-   their expanded names silently accepts two DIFFERENT dimensions that happen to
-   share level names (`age = [low, high]` against `risk = [low, high]`) and
-   transfers each age stratum into the like-named risk stratum. Level-name
-   collisions across dimensions are ordinary in epi models (`[low, high]`,
-   `[pos, neg]`, `[urban, rural]`), so this is the difference between a
-   diagnostic and a wrong answer. Same hazard as gh#459, asked in the right
-   vocabulary.
-
-   [ep_dims] is [] for a fully-indexed reference (`S[child]` names one cell) —
-   a partial index never reaches here, E287 rejects it during resolution. *)
+    Two endpoints are paired cell by cell only when [ep_dims] are equal,
+    and [ep_dims] comes from the declaration, never from the cell names:
+    two dimensions with the same level names ([age = [low, high]] and
+    [risk = [low, high]]) would otherwise pair [S_low] with [V_low] across
+    unrelated strata. A reference with only some of its indices never
+    becomes an endpoint; it is refused (E287) when it is resolved. *)
 type endpoint = {
   ep_base  : string;
+      (** The compartment as written, without indices. *)
   ep_dims  : string list;
+      (** Its declared dimensions when written bare; [[]] when written
+          with indices. *)
   ep_cells : string list;
+      (** The compartment cells the reference denotes. *)
 }
 
 (* [None] when the expression is not a compartment reference at all — the
@@ -9399,11 +9724,14 @@ let resolve_action_endpoint ctx env (e : expr) : endpoint option =
   | Some b, Ir.PopSum ns -> Some { ep_base = b; ep_dims = comp_dims ctx b; ep_cells = ns }
   | _                    -> None
 
-(* The parsed form of a `transfer(...)` kwarg list. Absence is [None] rather
-   than a fabricated placeholder cell: encoding "no `from =`" as an
-   unstratified cell called "?" made the shape check report `from` as
-   unstratified when there was no `from` at all, piling a false E237 on top of
-   the E261 that names the real mistake. *)
+(** How much a [transfer(...)] action moves. A transfer with neither
+    argument has no amount ([None]).
+
+    [TFraction e] is [fraction = e], a share of each source cell, applied
+    to every cell of a stratified transfer. [TCount e] is [count = e], an
+    absolute number of individuals, which a transfer between two whole
+    stratified compartments refuses (E238), since it could mean that count
+    from every cell or that count split across them. *)
 type transfer_amount = TFraction of expr | TCount of expr
 
 (* gh#204: the shared action resolver — used by both scheduled
@@ -9670,8 +9998,8 @@ let expand_scheduled_actions ctx decls ~(kind : Ir.intervention_kind) =
       let schedule = match iv.ivschedule with
         | SAtTimes ps ->
           (* `date_range(...)` calls are spliced into their expanded list of
-             `EConst` entries before resolving (Phase 2 of the 2026-05-22
-             typed-time proposal §4), inside [Lower.instant_list_expr]. *)
+             `EConst` entries before resolving, inside
+             [Lower.instant_list_expr]. *)
           (* gh#69: parametric `at [...]` lists must reach the runtime
              with their parameter references intact. Resolve every
              entry, then: if every entry is a compile-time constant,
@@ -10142,15 +10470,21 @@ let surface_src (e : expr) : string =
   in
   go 0 e
 
-(* The shapes `projected = prevalence(...)` can take (proposal
-   2026-07-31-aggregation-semantics §9). One classifier, read by both the
-   surface pass that reports and the projection dispatch that lowers, so the two
-   cannot disagree about which calls were refused. *)
+(** The shapes [projected = prevalence(...)] can take. One classifier,
+    [classify_prevalence_call], is read both by the surface check that
+    reports and by the projection lowering, so the two cannot disagree about
+    which calls were refused. *)
 type prevalence_call =
   | Prev_proportion of { of_ : expr; among : expr }
-  (* `prevalence(X)` / `prevalence(X1, X2)`: removed (D6). *)
+      (** The accepted form, [prevalence(of = I[a], among = N_local[a])]: a
+          numerator and the population it is a proportion of. *)
   | Prev_removed of expr list
+      (** A form with positional arguments, [prevalence(X)] or
+          [prevalence(X1, X2)], which the language does not accept
+          (E356). *)
   | Prev_malformed of { code : string; message : string; hint : string }
+      (** Any other malformed call, with the diagnostic to report: an
+          unknown or repeated argument (E251) or a missing one (E250). *)
 
 let classify_prevalence_call (args : (string * expr) list) : prevalence_call =
   let positional = List.filter_map (fun (k, e) -> if k = "" then Some e else None) args in
@@ -10238,12 +10572,18 @@ let collapsed_dims ctx (e : expr) : string list =
   in
   List.sort_uniq compare (go [] [] e)
 
-(* A bare name that pools a declared population stratum inside an observation's
-   `projected` (aggregation-semantics §10, E280): a compartment written bare, or
-   a `let` whose body pools one by a bare name. *)
+(** A name in an observation's [projected] that sums over a population
+    stratum without saying so, which is E280. In a model stratified by
+    [age], [projected = I] counts every age group; writing [sum(I)] or
+    [sum(a in age, I[a])] states it. Residence structure created by [via]
+    does not count, because it does not exist yet when this is checked. *)
 type bare_pool =
   | Bare_compartment of { name : string; dims : string list; loc : loc }
+      (** A stratified compartment written bare: [name], the dimensions
+          [dims] it is declared over, and where it is written. *)
   | Bare_let of { name : string; via : string; dims : string list; loc : loc }
+      (** A [let] [name] whose body pools compartment [via] by a bare
+          name, over [dims]. *)
 
 (* The bare pools in [e], on the SURFACE AST, so the only axes a compartment has
    are the strata declared in `dimensions {}` — residence structure created by
@@ -11813,6 +12153,11 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
    quantity references up front (via [all_q_names]) and routes them through
    [ScalarExpr]/[QRef] instead. *)
 
+(** Whether a cell of a generated quantity is one number per simulation
+    ([QShScalar]: a reduction over time such as [final(R)], or arithmetic
+    over earlier scalar quantities) or a value at every output time
+    ([QShSeries]: a bare expression of the state). Arithmetic that combines
+    earlier quantities may combine only scalar ones. *)
 type quantity_shape = QShScalar | QShSeries
 
 (* Classify one cell of a quantity declaration. [cell_stratum] is this cell's
@@ -12202,7 +12547,7 @@ let classify_quantity_body ctx env
         | Some (x, _), [time] ->
           (match Lower.instant_expr ctx env
                    ~context:(Printf.sprintf "`value_at`'s time in quantity '%s'" qd_name)
-                   (* gh#1128: a bare number is read in the model's time unit
+                   (* A bare number is read in the model's time unit
                       from the origin, as an `at [...]` entry is. *)
                    ~bare:(fun e ->
                      { bw_code = "W325";
@@ -12930,23 +13275,22 @@ let check_quadratic_coupling ctx =
 
 (* ── Surface time-typing over ordinary expressions ───────────────────────── *)
 
-(** The time-typing checks that are not about a time position (proposal
-    docs/dev/proposals/2026-11-16-calendar-durations-by-position.md §3.5).
-    A time position — a declaration field typed ['k Time_pos.t], a forcing
-    keyword whose role is a time, a reduction's time argument — is judged
-    by its kind's [Lower] function when it is lowered; nothing here lists
-    them.
+(** The time-typing checks that are not about one time position. A time
+    position (a declaration field typed ['k Time_pos.t], a forcing keyword
+    whose role is a time, a reduction's time argument) is judged by its
+    kind's [Lower] function when it is lowered, and the walk here does not
+    descend into one.
 
-    What stays here:
-      E320: `time_unit = 'months/'years` with `origin = date(...)`, a
-            property of the axis, not of a position.
-      E321 (Rule 1) and E360 inside every ordinary expression: transition
-            rates, ODE derivatives, parameter bounds and priors, `let`
-            bodies, `init` values, intervention actions, forcing keywords,
-            `balance`, and quantity bodies (gh#1070, gh#1096).
+    It reports E320 for [time_unit = 'months] or ['years] with an
+    [origin], a property of the axis rather than of a position, and E321
+    (an instant plus or minus a calendar duration) and E360 (arithmetic an
+    instant does not have) inside every ordinary expression: transition
+    rates, ODE derivatives, value bounds and priors, [let] bodies, [init]
+    values, intervention and event actions, forcing values, [balance] and
+    quantity bodies. Last, it judges each [timepoints] entry as an instant.
 
-    All anchored-mode rules are vacuous when no `origin` is declared
-    (the archived typed-time proposal §1.1, decision of record). *)
+    Every rule here is about the calendar, so none of them fires in a
+    model with no [origin]. *)
 let check_surface_time_typing ctx =
   let anchored = ctx.origin <> None in
 
@@ -12988,8 +13332,8 @@ let check_surface_time_typing ctx =
   ) ctx.ode_decls;
 
   (* ── parameter bounds & priors ──────────────────────────────────────── *)
-  (* A bound's classifier does not leak to uses of the parameter (the archived
-     typed-time proposal §3.3.2), but a bound that itself contains
+  (* A bound's classifier does not leak to uses of the parameter, but a
+     bound that itself contains
      `date(...) + <calendar>` is malformed. *)
   List.iter (fun pd ->
     let ploc = match pd with PScalar s -> s.ploc | PIndexed s -> s.ploc in
@@ -13061,7 +13405,7 @@ let check_surface_time_typing ctx =
        ~context:(Printf.sprintf "balance '%s'" bd.bcomp) bd.bexpr
    | None -> ());
 
-  (* ── quantities (gh#1096) ───────────────────────────────────────────── *)
+  (* ── quantities ─────────────────────────────────────────────────────── *)
   List.iter (fun (qd : quantity_decl) ->
     walk ~loc:(diag_loc_of_ast_ctx ctx qd.qd_loc)
       ~context:(Printf.sprintf "quantity '%s'" qd.qd_name) qd.qd_body
@@ -13088,26 +13432,41 @@ let check_expression_positions ctx (decls : declaration list) =
   in
   List.iter go (Time_census.in_expression_positions decls);
   (* A value given to an `instant` parameter: a scenario's `set`, a prior's
-     location argument (Design call A of the #1170 review). *)
+     location argument. *)
   List.iter (fun (context, p) -> Lower.instant_value ctx ~context p)
     (Time_census.value_positions decls)
 
 (* ── Scenarios expansion ─────────────────────────────────────────────────── *)
 
-(** Resolved, pre-IR scenario form. Built in two passes: first collect
-    this scenario's own fields into a ResolvedScen, then fold parent
-    chain through `extends`. Expressions in set/scale remain unresolved
-    here so that children can reference parent-resolved values. *)
+(** One scenario of a [scenarios] block, its fields gathered and, once
+    [resolve_parents] has run, merged with those of the scenario it
+    [extends]. The expressions are not yet resolved, and the end time not
+    yet lowered, so that a child's value can refer to its parent's. *)
 type resolved_scen = {
   rs_name    : string;
+      (** The scenario's name. *)
   rs_label   : string option;             (* None = use rs_name as default *)
+      (** The display label; [None] uses the name. A child without one
+          takes its parent's. *)
   rs_enable  : string list;
+      (** Interventions to switch on, by family or instance name. A child's
+          list is merged with its parent's, and a merge that changes the
+          child's list is warning W310. *)
   rs_disable : string list;
+      (** Interventions to switch off; merged like [rs_enable]. *)
   rs_set     : (string * expr) list;     (* still exprs — resolved after merge *)
+      (** Parameter values to set, the parent's entries first, so a later
+          entry for the same parameter wins. *)
   rs_scale   : (string * expr) list;
+      (** Parameter multipliers, ordered like [rs_set]. *)
   rs_compose : string list;
+      (** Other scenarios applied with this one; merged like [rs_enable]. *)
   rs_t_end   : Time_pos.instant Time_pos.t option;  (* lowered after merge *)
+      (** The scenario's [simulate { to }]: an instant position, lowered by
+          [Lower.instant_horizon] after the merge, so it may be an
+          observation anchor. A child without one takes its parent's. *)
   rs_parent  : string option;
+      (** The scenario named by [extends], before merging; [None] after. *)
 }
 
 (** Closest-by-edit-distance scenario name suggestion for an unknown
