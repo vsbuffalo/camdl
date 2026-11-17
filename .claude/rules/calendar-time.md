@@ -28,8 +28,17 @@ work):
 `caltime.rs::rata_die` is the pattern: single source of truth, mirror only with
 an equivalence test. Never two independent copies of a constant.
 
-## Non-affine operations get named functions
+## A calendar step is resolved by type once, and named when composed
 
-`add_calendar_months(d, 1)`, not `d + 1.month` — adding a month is not a fixed
-offset, so a polymorphic operator hides the arithmetic the reader needs to see.
-See `.claude/rules/dsl-surface.md`.
+A single whole-number calendar step from a date the compiler knows
+(`origin + 6 'months`, `date("2020-01-31") + 1 'months`, `to = 2 'years` in an
+instant position, `every = 1 'months` from a known start) is resolved by the
+position's type to `add_calendar_months` / `add_calendar_years`, because it has
+one meaning (the one-step calendar rule). Composed calendar arithmetic (two
+steps, a step mixed with days) is written with the named functions, because
+there the order of operations changes the answer and the reader needs to see it;
+the compiler refuses the operator form with a hint. See
+`.claude/rules/dsl-surface.md`, and "The one-step calendar rule" in
+`docs/dates.md`. (Cadences, `every = 1 'months`, resolve from Stage 2 of
+`docs/dev/proposals/2026-11-16-calendar-durations-by-position.md`; until then
+they are refused, E322.)
