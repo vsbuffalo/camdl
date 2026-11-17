@@ -300,8 +300,10 @@ calendar-exact stepping, or an explicit `'days` literal for an affine offset.
 an intervention or event, a recurring schedule's `from` and `to`, an output's
 `trajectories { at }` and an observation's `emit_schedule = at [...]` entries,
 `value_at`'s time argument, a forcing's `breakpoints`, a bspline `window` and an
-interpolated forcing's `times`, the bounds of an `instant`-kind parameter, and
-the operand compared with model time `t` in any expression. In anchored mode a
+interpolated forcing's `times`, the bounds of an `instant`-kind parameter and
+a value given to one (a scenario's `set`, a prior's `mu`, `mean`, `lower` or
+`upper`; a prior's scale such as `sigma` is a length), and the operand compared
+with model time `t`, or with `t ± d`, in any expression. In anchored mode a
 bare duration there denotes `origin + D`, so a `'months`/`'years` literal in an
 instant position, directly or through a `let`, is **E321**:
 `simulate { to = 2 'years }` is refused, and its hint names

@@ -5958,7 +5958,8 @@ let refuse_calendar_instant ctx ~loc ~what (e : expr) : bool =
        compile_time ~shown:d_abs ~step_hint ~span_of:d_abs
      | None ->
        (match find_runtime_base ctx e with
-        | Some base -> refuse_runtime_calendar ctx ~loc ~what ~base e
+        | Some base ->
+refuse_runtime_calendar ctx ~loc ~what ~base e
         | None ->
           let is_duration = match Time_typing.classify (time_env ctx) e with
             | Time_typing.TInstant -> false
@@ -6261,6 +6262,11 @@ module Lower = struct
      judges the position. *)
   let instant_in_expr ctx p =
     ignore (judge ctx p (fun () -> instant_checks ctx ~context:"a comparison with `t`" p))
+
+  (* A value given to an `instant` parameter, judged; resolved where it is
+     used, as an ordinary expression. *)
+  let instant_value ctx ~context p =
+    ignore (judge ctx p (fun () -> instant_checks ctx ~context p))
 
   (* ── Cadences ── *)
 
@@ -12585,10 +12591,14 @@ let check_surface_time_typing ctx =
      | Some (Instant_bounds _ | Length_bounds _) | None -> ());
     let pname = match pd with PScalar s -> s.pname | PIndexed s -> s.pname in
     let pprior = match pd with PScalar s -> s.pprior | PIndexed s -> s.pprior in
+    let pkind = match pd with PScalar s -> s.pkind | PIndexed s -> s.pkind in
     (match pprior with
      | Some ps ->
-       List.iter (fun (_, e) ->
-         walk ~loc ~context:(Printf.sprintf "prior on '%s'" pname) e
+       List.iter (fun (k, e) ->
+         (* An instant parameter's location arguments are date positions,
+            judged by [Lower] ([check_expression_positions]). *)
+         if not (pkind = PInstant && List.mem k Time_census.prior_location_args) then
+           walk ~loc ~context:(Printf.sprintf "prior on '%s'" pname) e
        ) ps.ps_args
      | None -> ())
   ) ctx.param_decls;
@@ -12664,7 +12674,11 @@ let check_expression_positions ctx (decls : declaration list) =
     in
     judge p
   in
-  List.iter go (Time_census.in_expression_positions decls)
+  List.iter go (Time_census.in_expression_positions decls);
+  (* A value given to an `instant` parameter: a scenario's `set`, a prior's
+     location argument (Design call A of the #1170 review). *)
+  List.iter (fun (context, p) -> Lower.instant_value ctx ~context p)
+    (Time_census.value_positions decls)
 
 (* ── Scenarios expansion ─────────────────────────────────────────────────── *)
 

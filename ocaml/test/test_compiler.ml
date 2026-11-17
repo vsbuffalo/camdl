@@ -16478,6 +16478,28 @@ let test_tp_let_reported_once () =
     (count (tp_model ~extra:"let d = 6 'months\n\
                               interventions { b : add(S, 10) at [origin + d] }" ()))
 
+(* Design call B (review of #1170): the operand compared with `t ± d` is a
+   date position too, as with `t` alone. *)
+let test_tp_refuse_t_shifted_comparison () =
+  tp_months6 ~what:"a comparison with `t`"
+    (tp_model ~rate:"if t + 7 'days >= 6 'months then 0.5 else 1.0" ())
+
+(* Design call A: a value given to an `instant` parameter is a date position:
+   a scenario's `set` and a prior's location arguments. *)
+let test_tp_refuse_scenario_set_instant () =
+  tp_months6 ~what:"scenario 's' `set` of 'tau'"
+    (tp_model ~params:"tau : instant in [0 'days, 300 'days]"
+       ~extra:"scenarios { s { set = { tau = 6 'months } } }" ())
+
+let test_tp_refuse_instant_prior_location () =
+  tp_months6 ~what:"the prior on 'tau' (`mu`)"
+    (tp_model ~params:"tau : instant ~ normal(mu = 6 'months, sigma = 10 'days)" ())
+
+(* A prior's scale is a length and keeps the average month. *)
+let test_tp_instant_prior_scale_is_length () =
+  tp_expect_no ~code:"E321"
+    (tp_model ~params:"tau : instant ~ normal(mu = 100 'days, sigma = 1 'months)" ())
+
 let stage_1a_tests = [
   "simulate to = 2 'years refused", test_tp_refuse_simulate_to_years;
   "simulate from = 6 'months refused", test_tp_refuse_simulate_from_months;
@@ -16501,6 +16523,10 @@ let stage_1a_tests = [
   "recurring from is an instant (E321, not E322)", test_tp_recurring_from_is_instant;
   "unanchored spellings keep the average", test_tp_unanchored_unchanged;
   "a calendar let is reported once", test_tp_let_reported_once;
+  "t + 7 'days >= 6 'months refused", test_tp_refuse_t_shifted_comparison;
+  "scenario set of an instant parameter refused", test_tp_refuse_scenario_set_instant;
+  "instant prior location refused", test_tp_refuse_instant_prior_location;
+  "instant prior scale keeps the average", test_tp_instant_prior_scale_is_length;
   "value_at(I, 60) draws W325 (gh#1128)", test_tp_value_at_bare_w325;
   "simulate to = origin + 90 'days is 90 (gh#1129)", test_tp_instant_arithmetic_simulate_to;
   "scenario to = date + 7 'days is 67 (gh#1129)", test_tp_instant_arithmetic_scenario_to;
