@@ -16705,8 +16705,58 @@ let test_tp_w327_round_trip () =
             (tp_model ~extra:"interventions { b : add(S, 10) \
                               at [add_calendar_months(add_calendar_months(origin, 1), -1)] }" ()))
 
+(* The time since or until an instant compared with a duration (review of
+   #1185, finding 1): `t - X ⋈ D` is `t ⋈ X + D`, and `X - t ⋈ D` (or
+   `-(t - X) ⋈ D`) is `t ⋈' X - D`. From a base known only at run time the
+   calendar step is refused as `t >= tau + 6 'months` is; from a date the
+   compiler knows it is one step from that date. *)
+let tau_runtime_refusal src =
+  tp_expect ~code:"E321"
+    ~message:"calendar duration `6 'months` in a comparison with `t` cannot move \
+              `tau`, an instant parameter, whose date is known only when the model runs"
+    ~hint:(tp_runtime_hint "`183 'days` (≈ 6 'months)")
+    (tp_model ~params:"tau : instant in [0 'days, 100 'days]"
+       ~rate:(src ^ " then 0.5 else 1.0") ())
+
+let elapsed_rows = [
+  "t - tau >= 6 'months refused (run-time base)",
+  (fun () -> tau_runtime_refusal "if t - tau >= 6 'months");
+  "6 'months <= t - tau refused (run-time base)",
+  (fun () -> tau_runtime_refusal "if 6 'months <= t - tau");
+  "tau - t <= 6 'months refused (run-time base)",
+  (fun () -> tau_runtime_refusal "if tau - t <= 6 'months");
+  "-(tau - t) >= 6 'months refused (run-time base)",
+  (fun () -> tau_runtime_refusal "if -(tau - t) >= 6 'months");
+  "-(t - tau) <= 6 'months refused (run-time base)",
+  (fun () -> tau_runtime_refusal "if -(t - tau) <= 6 'months");
+  "t - date >= 1 'months is one step from the date",
+  (fun () -> tp_resolves ~proj:p_rate_ge ~expected:[59.0]
+     ~calendar:(tp_model ~rate:"if t - date(\"2020-01-31\") >= 1 'months then 0.5 else 1.0" ())
+     ~explicit:(tp_model ~rate:"if t >= 59 'days then 0.5 else 1.0" ()) ());
+  "date - t <= 1 'months is one step back from the date",
+  (fun () -> tp_resolves ~proj:p_rate_ge ~expected:[59.0]
+     ~calendar:(tp_model ~rate:"if date(\"2020-03-31\") - t <= 1 'months then 0.5 else 1.0" ())
+     ~explicit:(tp_model ~rate:"if t >= 59 'days then 0.5 else 1.0" ()) ());
+  "-(date - t) >= 1 'months is one step from the date",
+  (fun () -> tp_resolves ~proj:p_rate_ge ~expected:[59.0]
+     ~calendar:(tp_model ~rate:"if -(date(\"2020-01-31\") - t) >= 1 'months then 0.5 else 1.0" ())
+     ~explicit:(tp_model ~rate:"if t >= 59 'days then 0.5 else 1.0" ()) ());
+  (* Guards: a duration subtracted from `t` still shifts `t`, and without an
+     origin there is no calendar. *)
+  "guard: t - 7 'days >= 6 'months compares with the date 2020-07-01",
+  (fun () -> tp_resolves ~proj:p_rate_ge ~expected:[182.0]
+     ~calendar:(tp_model ~rate:"if t - 7 'days >= 6 'months then 0.5 else 1.0" ())
+     ~explicit:(tp_model ~rate:"if t - 7 'days >= 182 'days then 0.5 else 1.0" ()) ());
+  "guard: unanchored t - tau >= 6 'months keeps the average",
+  (fun () ->
+     let m = compile_expect_ok (tp_model ~origin:None ~to_:"730 'days"
+         ~params:"tau : instant in [0 'days, 100 'days]"
+         ~rate:"if t - tau >= 6 'months then 0.5 else 1.0" ()) in
+     Alcotest.(check (list (float 1e-9))) "average month" [182.62125] (p_rate_ge m));
+]
+
 let stage_1b_tests =
-  resolution_rows @ [
+  resolution_rows @ elapsed_rows @ [
   "timepoints origin + 6 'months resolves", test_tp_timepoints_resolve;
   "a calendar instant let is reported once", test_tp_let_reported_once;
   "fractional months refused", test_tp_refuse_fractional_months;

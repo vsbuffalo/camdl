@@ -4345,6 +4345,18 @@ let calendar_instant_expr ctx (e : expr) : expr =
   | Some days -> EUnit (days, Days)
   | None -> e
 
+(* Which names hold an instant, read from the context: the same answer
+   `Time_census.instant_env_of` reads from the declarations, so the expander
+   and the census find the same comparisons with model time. *)
+let census_env ctx : Time_census.instant_env =
+  let env = Time_typing.env_of_ctx ~let_tbl:ctx.let_tbl ~param_decls:ctx.param_decls
+      ~origin_set:(ctx.origin <> None) in
+  { Time_census.instant_name =
+      (fun n -> Time_typing.param_kind_of_name env n = Some `Instant);
+    let_body = (fun n ->
+      if Hashtbl.mem ctx.cyclic_lets n then None
+      else Option.map (fun (lb : let_binding) -> lb.lbody) (Hashtbl.find_opt ctx.let_tbl n)) }
+
 let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
   match e with
   | EConst f     -> Ir.Const f
@@ -4525,20 +4537,25 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
     resolve_ident_name ctx concrete ~loc:idx_loc
   )
   | EBinOp (op, l, r) ->
-    (* The operand compared with model time `t` (or `t ± d`) is a date
-       position (`Time_census.node_positions`), so a calendar step there is
-       its calendar date (the one-step calendar rule). A refusal is reported
-       where the census's position is judged, not here. *)
-    let (l, r) =
-      if ctx.origin = None || not (Time_census.is_comparison op) then (l, r)
-      else match Time_census.model_time_side l, Time_census.model_time_side r with
-        | Some _, _ -> (l, calendar_instant_expr ctx r)
-        | None, Some _ -> (calendar_instant_expr ctx l, r)
-        | None, None -> (l, r)
+    (* A comparison with model time compares `t` with a date
+       (`Time_census.time_comparison`: the other operand of `t ± d`, or
+       `X ± D` for the time since or until an instant `X`), so a calendar
+       step there is its calendar date (the one-step calendar rule). A
+       refusal is reported where the census's position is judged, not here. *)
+    let resolved =
+      if ctx.origin = None then None
+      else match Time_census.time_comparison (census_env ctx) e with
+        | Some c ->
+          Option.map (fun days -> c.Time_census.with_date (EUnit (days, Days)))
+            (Calendar_reading.calendar_step_days ctx c.Time_census.date)
+        | None -> None
     in
-    let ir_l = resolve_expr ctx env l in
-    let ir_r = resolve_expr ctx env r in
-    normalize_expr (Ir.BinOp { op = ir_bin_op op; left = ir_l; right = ir_r })
+    (match resolved with
+     | Some e' -> resolve_expr ctx env e'
+     | None ->
+       let ir_l = resolve_expr ctx env l in
+       let ir_r = resolve_expr ctx env r in
+       normalize_expr (Ir.BinOp { op = ir_bin_op op; left = ir_l; right = ir_r }))
   | EUnOp (Total, e) -> resolve_expr ctx env e
   | EUnOp (op, e) ->
     Ir.UnOp { op = ir_un_op op; arg = resolve_expr ctx env e }
@@ -12947,7 +12964,7 @@ let check_surface_time_typing ctx =
      offset from `t`, `value_at`'s time) is judged by its [Lower] function, so
      the walk does not descend into it. *)
   let walk ~loc ~context e =
-    check_instant_arithmetic ~children:Time_census.ordinary_children ctx ~loc ~context e in
+    check_instant_arithmetic ~children:(Time_census.ordinary_children (census_env ctx)) ctx ~loc ~context e in
 
   (* ── transition rates ───────────────────────────────────────────────── *)
   List.iter (fun (tr : transition_decl) ->
