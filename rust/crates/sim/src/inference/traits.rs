@@ -213,7 +213,20 @@ pub trait ObservationModel<S>: Send + Sync {
     /// carries none, and skipping THAT step would drop a zero and count the
     /// real first observation (gh#833). `None` when nothing is observed.
     fn first_observation_idx(&self) -> Option<usize> {
-        (self.n_observations() > 0).then_some(0)
+        (0..self.n_observations()).find(|&obs_idx| self.assimilates_at(obs_idx))
+    }
+
+    /// Whether the filter assimilates at union index `obs_idx`: some stream
+    /// scheduled there holds an observed value (D72). Every stream observed
+    /// at that index is then scored in the one joint update. A stop where
+    /// nothing is observed (every scheduled stream's row `NA`, or only a
+    /// declared period opening) exists so the accumulators fold and reset
+    /// there; a filter stopping at it adds no likelihood term, opens no
+    /// collapse-check window and does not resample. Default `true`: an
+    /// observation model with no notion of a missing value observes at every
+    /// index it has.
+    fn assimilates_at(&self, _obs_idx: usize) -> bool {
+        true
     }
 
     /// Number of observation streams.

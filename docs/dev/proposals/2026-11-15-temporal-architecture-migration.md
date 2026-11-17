@@ -912,6 +912,20 @@ Recorded in the maintainer's docket; each is reflected in the spec and above.
   fit identity carries the partition rule version, and keeps whole-file and
   holdout-file digests until the score-artifact step replaces them with row
   digests.
+- **D72** (2026-11-16). A filter assimilates only where some stream holds an
+  observed (non-`NA`) value; every stream observed at that time is one joint
+  update. A stop with none (a row every stream holds as `NA`, a declared
+  period's start) folds and resets the accumulators and adds no likelihood term,
+  opens no collapse-check window and does not resample, the resampling call
+  being skipped rather than left to equal weights. IF2 perturbs and cools once
+  per assimilation event (and once at t = 0), the perturbation drawn before the
+  step that carries the swarm to it, as in Ionides et al. (2015, PNAS
+  112(3):719–724) Algorithm 1. PGAS and its initialisation are unchanged: their
+  equal-weight rule already skips resampling and ancestor sampling at such a
+  stop. The invariant: a grid-aligned boundary added only for reporting,
+  forecasting or missing data does not change the latent process, the particle
+  ancestry, the parameter evolution or the likelihood for a fixed seed.
+  `HASH_VERSION` 6.
 
 ## Part 9. Documents this plan changes
 

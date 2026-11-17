@@ -456,21 +456,22 @@ fn conditioning_check(m: usize) -> String {
     format!("{measured}; {m} simulations each")
 }
 
-/// What declaring a target does to the filter over the observed rows. The
-/// driver puts each target's start and end on the filter's axis. Two cases:
+/// What declaring a target does to the filter over the observed rows: nothing.
+/// The driver puts each target's start and end on the filter's axis. Two cases:
 ///
 /// - the target's start is already a stop of the bound data (the week
 ///   [21, 28) when a daily row covers [20, 21)): the stops before the origin
-///   are unchanged, so the observed rows' log-likelihood increments and the
-///   particle draws are bit-identical with and without the target;
+///   are unchanged;
 /// - the start falls between two data stops (daily rows only on days 23 and
-///   24, so the stops are 22, 23 and 24, and none at 21): the target adds a stop at 21 before the origin,
-///   which costs one more resampling draw. The particles' own random streams
-///   are untouched (the step grid is the same at `dt = 1`), but the
-///   resampling stream advances, so the later increments differ by Monte
-///   Carlo error, not in expectation.
+///   24, so the stops are 22, 23 and 24, and none at 21): the target adds a
+///   stop at 21 before the origin. It holds no observed value, so the filter
+///   does not assimilate or resample there (D72), and at `dt = 1` the step
+///   grid is the same.
+///
+/// Either way the observed rows' log-likelihood increments are bit-identical
+/// with and without the target.
 #[test]
-fn a_targets_start_moves_the_observed_likelihood_only_when_it_is_a_new_stop() {
+fn a_targets_start_leaves_the_observed_likelihood_unchanged() {
     let filter = |s: &Setup, plan: Option<&ForecastPlan>| {
         let specs = match plan {
             Some(p) => specs_with_targets(p, &s.streams).unwrap(),
@@ -516,11 +517,9 @@ fn a_targets_start_moves_the_observed_likelihood_only_when_it_is_a_new_stop() {
     assert!(!has_21(&without) && has_21(&with), "the target adds a stop at 21");
     let (a, b) = (observed(&without), observed(&with));
     assert_eq!(a.len(), b.len());
-    assert_eq!(a[0], b[0], "the increment before the new stop is identical");
-    // After it the resampling stream has advanced by one draw: a different
-    // Monte Carlo realisation of the same likelihood (pending D72, which
-    // decides whether a stop with no observation resamples at all).
-    assert_ne!(a[1..], b[1..], "without {a:?}\n   with {b:?}");
+    // The new stop holds no observed value: no resampling draw is spent
+    // there (D72), so every later increment is the same too.
+    assert_eq!(a, b, "the stop at 21 moved the observed increments");
 }
 
 /// gh#747: the driver's filters draw with the sampler `DriverConfig` names,

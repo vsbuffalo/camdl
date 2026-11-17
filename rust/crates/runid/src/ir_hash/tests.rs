@@ -307,7 +307,8 @@ fn model_golden_hash() {
     // unchanged.
     // HASH_VERSION 4 -> 5 (temporal-architecture Stage 2, D58): the version
     // alone.
-    const GOLDEN: &str = "5b69f516a6865f16951b8da098bb890264f91253dd3f831a514f89a25b6c5241";
+    // HASH_VERSION 5 -> 6 (D72): the version alone.
+    const GOLDEN: &str = "5cea212fdb6daf9f3c6c84ada578071a6f932160ad8aa6f3095b862abb6f56ed";
     let got = representative_model().content_hash().to_hex();
     assert_eq!(got, GOLDEN, "ir Model golden hash changed (got {got})");
 }
@@ -1184,23 +1185,23 @@ fn projection_variant_hashes_are_pinned() {
     // (temporal Stage 2) for the same reason.
     assert_eq!(
         hex(Projection::CumulativeFlow("x".into())),
-        "7ae030e5e15ad5841d731d2f093940b89388849f6882a5d22c3bc36fed7062c8"
+        "a07ba6a3e8d71b35c1888e313783cb59f97d5b12a40f6c0eb7a568928d75fe07"
     );
     assert_eq!(
         hex(Projection::CurrentPop("x".into())),
-        "1123fef05620f746084b518b02a1e470fe00c1b151280b2c20c4bfcb361aaa94"
+        "a77b36dd29eb54160dd78f322275a97c584fea4e33a8b46a333f1871c4d28e57"
     );
     assert_eq!(
         hex(Projection::CurrentPopSum(vec!["x".into()])),
-        "b40d2e2155b4acf127c8a07e15ca1092db9a6296781f54a04d1bb213e82fc061"
+        "0017cfcb897bfa039e5eafc23d26da5af0543e5b3fe9361b3f5cf9d94a3bfaee"
     );
     assert_eq!(
         hex(Projection::DerivedExpr(Expr::const_(1.0))),
-        "b099e7551d145628ab7c76e3ce07fb99c6fa744ef3b92aa7ff7711b5f1f3c318"
+        "c4847b40f3677921824f98ca4a83d5530d8eaffad8d61ad6805b712607e508cc"
     );
     assert_eq!(
         hex(Projection::CumulativeFlowSum(vec!["x".into()])),
-        "3436b060b4e4bdbde6a3b80e5c6cad990de954901e746def3737b9e041cb4461"
+        "3ce5542aa33eaeb46b11a98eda7a35596c61a184032bfbfe29f0464139540b83"
     );
     // Proposal 2026-09-09 (proportion of flows over a window): appended at 5.
     // The five pins above are unchanged by the addition — that is the
@@ -1210,7 +1211,7 @@ fn projection_variant_hashes_are_pinned() {
             numerator: vec!["x".into()],
             denominator: vec!["x".into(), "y".into()],
         }),
-        "543381da0a5107fe21715d5590bafa1595dfc4b164723e45bc979fd5b4a04bd1"
+        "b52fca553b48b3ec887652465b3773bd6c5b04b08cc172beba50b34ab519a31c"
     );
     // The two sides are hashed in order, so swapping them is a different
     // projection — `a / (a + b)` and `(a + b) / a` must not share a run_id.
