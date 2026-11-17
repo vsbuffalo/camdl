@@ -1299,6 +1299,23 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             if let Err(e) = crate::chain_index::refuse_one_based_layout(&base) {
                 out.fail(format!("error: --resume: {e}"));
             }
+            // A checkpoint is never served as a completed result. Resuming
+            // toward a target the base has already reached would address a
+            // leaf for that target holding the base's whole, longer chain —
+            // the shorter computation's identity on the longer one's result.
+            // At the base's own target the base is the result; below it, no
+            // stored chain is that computation's.
+            let target = method.algorithm.cas_target_length() as usize;
+            if let Some((done, unit)) = resumed_chain::checkpoint_length(&base, &method.algorithm) {
+                if target <= done {
+                    out.fail(format!(
+                        "error: --resume: the base {} already holds {done} {unit}, and this fit's \
+                         target is {target}. A resume extends its base to a longer target; the \
+                         base is itself the completed fit at its own length, and a shorter one \
+                         is a fresh run without --resume.",
+                        base.display()));
+                }
+            }
             match cas::cas_resume_dep(&base) {
                 Ok(Some(dep)) => deps.push(dep),
                 Ok(None) => {}

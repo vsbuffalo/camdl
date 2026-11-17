@@ -42,6 +42,36 @@ pub(crate) fn write_resume_state<T: serde::Serialize>(
 /// The per-chain file holding the state a resume continues from.
 pub(crate) const RESUME_STATE_FILE: &str = "resume_state.bin";
 
+/// The longest chain a `--resume` base's checkpoints hold: the most steps
+/// (PMMH, `mh`) or sweeps (PGAS) any `chain_N/resume_state.bin` under `base`
+/// records as completed, with the unit's name. `Ok(None)` when the base holds
+/// no checkpoint, or the method cannot be resumed; the resume itself then
+/// refuses with the reason. A checkpoint that cannot be decoded is the
+/// runner's to report, and is skipped here.
+pub(crate) fn checkpoint_length(
+    base: &Path,
+    algorithm: &crate::fit::config_v2::Algorithm,
+) -> Option<(usize, &'static str)> {
+    use crate::fit::config_v2::Algorithm;
+    let decode: fn(&[u8]) -> Option<usize> = match algorithm {
+        Algorithm::PGAS { .. } => |b| {
+            bincode::deserialize::<sim::inference::pgas::ChainResumeState>(b).ok().map(|s| s.completed_sweeps)
+        },
+        Algorithm::PMMH { .. } | Algorithm::Mh { .. } => |b| {
+            bincode::deserialize::<sim::inference::pmmh::PMMHResumeState>(b).ok().map(|s| s.completed_steps)
+        },
+        _ => return None,
+    };
+    let unit = if matches!(algorithm, Algorithm::PGAS { .. }) { "sweeps" } else { "steps" };
+    std::fs::read_dir(base).ok()?
+        .flatten()
+        .filter(|e| ChainIndex::parse_dir_name(&e.file_name().to_string_lossy()).is_some())
+        .filter_map(|e| std::fs::read(e.path().join(RESUME_STATE_FILE)).ok())
+        .filter_map(|b| decode(&b))
+        .max()
+        .map(|n| (n, unit))
+}
+
 /// Copy the parent leaf's [`CARRIED_CHAIN_FILES`] into the resumed leaf, chain
 /// by chain. The parent is read only.
 ///

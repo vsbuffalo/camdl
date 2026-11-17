@@ -388,11 +388,6 @@ pub fn run_method(
                         {
                             out.say(gap);
                         }
-                        if state.completed_steps >= n_steps {
-                            out.say(format_args!("  warning: chain already completed {} steps (requested {}). \
-                                       Increase steps in fit.toml to continue.",
-                                state.completed_steps, n_steps));
-                        }
                         states.push(Some(state));
                     }
                     Err(e) => {
@@ -854,7 +849,7 @@ pub fn run_method(
     // where its base stopped, and a refused chain ran none (gh#1012).
     let steps_run: Vec<usize> = results.iter()
         .map(|(chain_id, _)| {
-            // A base already at or past `n_steps` runs none (a warning above).
+            // `fit run` refuses a base already at or past `n_steps` before the claim.
             n_steps.saturating_sub(resume_states[*chain_id].as_ref().map_or(0, |s| s.completed_steps))
         })
         .collect();
