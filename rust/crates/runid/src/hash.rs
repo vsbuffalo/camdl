@@ -56,6 +56,18 @@ use sha2::{Digest, Sha256};
 ///
 /// ## History
 ///
+/// - **6** (D72) — a correctness fix to what the particle filters compute
+///   from a run's inputs. The bootstrap filter and IF2 assimilate only at a
+///   stop where some stream holds an observed value: at a stop with none (a
+///   row every stream holds as `NA`, a declared period's start) they fold
+///   and reset the accumulators and no longer weight, resample, open a
+///   collapse-check window, or (IF2) perturb and cool. A `pfilter`,
+///   `survey`, `profile` or fit run whose data hold such a stop stores a
+///   different, equally valid realisation for the same inputs and seed, so
+///   it must not be served the leaf a version-5 run stored. Runs without
+///   such stops compute the same bytes and re-key with the version alone.
+///   Leaves written at version 5 stay readable; they are never served as a
+///   cache hit for a version-6 run.
 /// - **5** (temporal-architecture migration, Stage 2; D58) — one deliberate
 ///   re-key for two changes to what a run computes from its inputs:
 ///   1. *Training rows are decided by period, not label* (D38). A
@@ -115,7 +127,7 @@ use sha2::{Digest, Sha256};
 ///   still parses, `fit summary` and the browsers read them); they are never
 ///   served as a cache hit for a version-2 run.
 /// - **1** — the initial encoding.
-pub const HASH_VERSION: u16 = 5;
+pub const HASH_VERSION: u16 = 6;
 
 // ─── ContentHash ─────────────────────────────────────────────────────────────
 
