@@ -4,8 +4,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::manifest::Manifest;
 use crate::model::{Input, Language, Module};
+use crate::overview::Overview;
 
 /// The file name, without extension, of the index page. No module page may
 /// take it.
@@ -73,11 +73,11 @@ pub struct ModuleEntry<'a> {
 /// One generated module page: a top-level module and the modules nested in it.
 #[derive(Debug)]
 pub struct Page {
-    /// The top-level module's name, as the manifest lists it.
+    /// The top-level module's name, as the overview lists it.
     pub name: String,
     /// The file name without extension.
     pub slug: String,
-    /// The manifest group the page is listed under.
+    /// The overview group the page is listed under.
     pub group: usize,
     /// The sidebar position.
     pub order: i64,
@@ -89,7 +89,10 @@ pub struct Page {
 /// Every module of every input, placed on pages and cross-referenced.
 #[derive(Debug)]
 pub struct Site<'a> {
-    pub manifest: &'a Manifest,
+    pub overview: &'a Overview,
+    /// The sidebar position of the index page. The module pages follow it, at
+    /// `order + 1`, `order + 2`, ... in overview order.
+    pub order: i64,
     pub modules: Vec<ModuleEntry<'a>>,
     pub pages: Vec<Page>,
     by_name: BTreeMap<&'a str, usize>,
@@ -123,13 +126,18 @@ fn sanitize_id(s: &str) -> String {
 }
 
 impl<'a> Site<'a> {
-    /// Places every module of `inputs` on the page the manifest gives it.
+    /// Places every module of `inputs` on the page the overview gives it, the
+    /// index page at sidebar position `order`.
     ///
     /// Fails, naming the modules, when an input module's top-level module is
-    /// not in the manifest, when a manifest module has no input module, when
-    /// a name occurs twice in the manifest or in the inputs, or when a module
-    /// page would overwrite the index page.
-    pub fn build(manifest: &'a Manifest, inputs: &'a [Input]) -> Result<Site<'a>, String> {
+    /// in no `{!modules: ...}` list of the overview, when a listed name has no
+    /// input module, when a name occurs twice in the lists or in the inputs,
+    /// or when a module page would overwrite the index page.
+    pub fn build(
+        overview: &'a Overview,
+        order: i64,
+        inputs: &'a [Input],
+    ) -> Result<Site<'a>, String> {
         let all: Vec<(&'a Module, Language)> = inputs
             .iter()
             .flat_map(|i| i.modules.iter().map(move |m| (m, i.language)))
@@ -149,13 +157,13 @@ impl<'a> Site<'a> {
         }
 
         let mut listed = BTreeSet::new();
-        let dup_listed: BTreeSet<&str> = manifest
+        let dup_listed: BTreeSet<&str> = overview
             .module_names()
             .filter(|n| !listed.insert(*n))
             .collect();
         if !dup_listed.is_empty() {
             return Err(format!(
-                "modules listed more than once in the manifest: {}",
+                "modules listed more than once in the overview: {}",
                 join(&dup_listed)
             ));
         }
@@ -163,7 +171,7 @@ impl<'a> Site<'a> {
             listed.iter().copied().filter(|n| n.contains('.')).collect();
         if !nested_listed.is_empty() {
             return Err(format!(
-                "the manifest lists nested modules, which are shown on their parent's page; \
+                "the overview lists nested modules, which are shown on their parent's page; \
                  list the parent instead: {}",
                 join(&nested_listed)
             ));
@@ -180,13 +188,13 @@ impl<'a> Site<'a> {
             let mut msg = Vec::new();
             if !unlisted.is_empty() {
                 msg.push(format!(
-                    "input modules not in the manifest: {}",
+                    "input modules in no {{!modules: ...}} list of the overview: {}",
                     join(&unlisted)
                 ));
             }
             if !missing.is_empty() {
                 msg.push(format!(
-                    "manifest modules absent from the input: {}",
+                    "overview modules absent from the input: {}",
                     join(&missing)
                 ));
             }
@@ -195,7 +203,7 @@ impl<'a> Site<'a> {
 
         let mut modules = Vec::new();
         let mut pages = Vec::new();
-        for (gi, group) in manifest.groups.iter().enumerate() {
+        for (gi, group) in overview.groups.iter().enumerate() {
             for name in &group.modules {
                 let slug = slug_of(name);
                 if slug == INDEX_SLUG {
@@ -252,7 +260,7 @@ impl<'a> Site<'a> {
                     name: name.clone(),
                     slug,
                     group: gi,
-                    order: manifest.order + 1 + page as i64,
+                    order: order + 1 + page as i64,
                     modules: indices,
                 });
             }
@@ -271,7 +279,8 @@ impl<'a> Site<'a> {
             }
         }
         let mut site = Site {
-            manifest,
+            overview,
+            order,
             modules,
             pages,
             by_name,
@@ -332,6 +341,13 @@ impl<'a> Site<'a> {
                 return Some(m);
             }
         }
+        self.resolve_module_global(path)
+    }
+
+    /// The module a full module path names, outside any module: the path
+    /// itself, then with leading segments dropped (a library's wrapper
+    /// module, as in `Camdl.Ast`).
+    fn resolve_module_global(&self, path: &str) -> Option<usize> {
         if let Some(&m) = self.by_name.get(path) {
             return Some(m);
         }
@@ -361,11 +377,36 @@ impl<'a> Site<'a> {
                         return Some(found);
                     }
                 }
-                match self.defining.get(path).map(Vec::as_slice) {
-                    Some([only]) => self.find_in(*only, path),
-                    _ => None,
-                }
+                self.declared_once(path)
             }
+        }
+    }
+
+    /// The declaration of `name` when exactly one module of the inputs
+    /// declares a type of that name.
+    fn declared_once(&self, name: &str) -> Option<TypeId> {
+        match self.defining.get(name).map(Vec::as_slice) {
+            Some([only]) => self.find_in(*only, name),
+            _ => None,
+        }
+    }
+
+    /// The link target, from the index page, of a reference written in the
+    /// overview: a type path or a module path, written in full since the
+    /// overview is in no module. `None` when it names nothing in the inputs.
+    pub fn index_href(&self, path: &str) -> Option<String> {
+        let path = path.trim();
+        let ty = match path.rsplit_once('.') {
+            Some((qual, name)) => self
+                .resolve_module_global(qual)
+                .and_then(|m| self.find_in(m, name)),
+            None => self.declared_once(path),
+        };
+        match ty {
+            Some(id) => Some(self.page_type_href(id)),
+            None => self
+                .resolve_module_global(path)
+                .map(|m| self.page_module_href(m)),
         }
     }
 
@@ -389,12 +430,18 @@ impl<'a> Site<'a> {
     /// the other page's file and anchor.
     pub fn type_href(&self, from_page: usize, id: TypeId) -> String {
         let e = &self.modules[id.module];
-        let anchor = &e.anchors[id.ty];
         if e.page == from_page {
-            format!("#{anchor}")
+            format!("#{}", e.anchors[id.ty])
         } else {
-            format!("{}.qmd#{anchor}", self.pages[e.page].slug)
+            self.page_type_href(id)
         }
+    }
+
+    /// The link target of a type from any other page: its page's file and
+    /// its anchor.
+    fn page_type_href(&self, id: TypeId) -> String {
+        let e = &self.modules[id.module];
+        format!("{}.qmd#{}", self.pages[e.page].slug, e.anchors[id.ty])
     }
 
     /// The anchor of a nested module's section on its page. The top-level
@@ -406,12 +453,18 @@ impl<'a> Site<'a> {
 
     /// The link target of a module from a page.
     pub fn module_href(&self, from_page: usize, m: usize) -> String {
-        let e = &self.modules[m];
-        let file = format!("{}.qmd", self.pages[e.page].slug);
-        match (self.module_anchor(m), e.page == from_page) {
-            (Some(a), true) => format!("#{a}"),
-            (Some(a), false) => format!("{file}#{a}"),
-            (None, _) => file,
+        match self.module_anchor(m) {
+            Some(a) if self.modules[m].page == from_page => format!("#{a}"),
+            _ => self.page_module_href(m),
+        }
+    }
+
+    /// The link target of a module from any other page.
+    fn page_module_href(&self, m: usize) -> String {
+        let file = format!("{}.qmd", self.pages[self.modules[m].page].slug);
+        match self.module_anchor(m) {
+            Some(a) => format!("{file}#{a}"),
+            None => file,
         }
     }
 
@@ -457,15 +510,12 @@ mod tests {
         )
     }
 
-    fn manifest(groups: &[&[&str]]) -> Manifest {
-        let mut s = String::from("title='T'\nsummary='S'\nrepo_blob='https://h/'\norder=10\n");
-        for g in groups {
-            s.push_str(&format!(
-                "[[group]]\ntitle='G'\nmodules={}\n",
-                serde_json::to_string(g).unwrap()
-            ));
+    fn overview(groups: &[&[&str]]) -> Overview {
+        let mut s = String::from("{0 T}\nSummary.\n");
+        for (k, g) in groups.iter().enumerate() {
+            s.push_str(&format!("{{1 G{k}}}\n{{!modules: {}}}\n", g.join(" ")));
         }
-        Manifest::from_toml(&s).unwrap()
+        Overview::parse(&s).unwrap()
     }
 
     fn sample() -> Vec<Input> {
@@ -487,8 +537,8 @@ mod tests {
     #[test]
     fn resolves_qualified_unqualified_nested_and_wrapped_paths() {
         let inputs = sample();
-        let m = manifest(&[&["Ast", "Ir"], &["Util"]]);
-        let site = Site::build(&m, &inputs).unwrap();
+        let m = overview(&[&["Ast", "Ir"], &["Util"]]);
+        let site = Site::build(&m, 10, &inputs).unwrap();
         let ast = 0;
         let loc = 1;
         let ir = 2;
@@ -518,8 +568,8 @@ mod tests {
     #[test]
     fn reverse_index_excludes_self_references() {
         let inputs = sample();
-        let m = manifest(&[&["Ast", "Ir"], &["Util"]]);
-        let site = Site::build(&m, &inputs).unwrap();
+        let m = overview(&[&["Ast", "Ir"], &["Util"]]);
+        let site = Site::build(&m, 10, &inputs).unwrap();
         let ast_expr = TypeId { module: 0, ty: 0 };
         assert_eq!(
             site.used_by(ast_expr),
@@ -534,10 +584,27 @@ mod tests {
     }
 
     #[test]
+    fn index_hrefs_resolve_full_paths() {
+        let inputs = sample();
+        let m = overview(&[&["Ast", "Ir"], &["Util"]]);
+        let site = Site::build(&m, 10, &inputs).unwrap();
+        let href = |p: &str| site.index_href(p);
+        assert_eq!(href("Ir.expr").as_deref(), Some("ir.qmd#t-expr"));
+        assert_eq!(href("Ast.Loc.t").as_deref(), Some("ast.qmd#t-Loc-t"));
+        assert_eq!(href("only_here").as_deref(), Some("ast.qmd#t-only_here"));
+        assert_eq!(href("Ir").as_deref(), Some("ir.qmd"));
+        assert_eq!(href("Ast.Loc").as_deref(), Some("ast.qmd#m-Loc"));
+        assert_eq!(href("Camdl.Ir.t").as_deref(), Some("ir.qmd#t-t"));
+        // Ambiguous, and absent.
+        assert_eq!(href("t"), None);
+        assert_eq!(href("Gone.t"), None);
+    }
+
+    #[test]
     fn anchors_and_hrefs() {
         let inputs = sample();
-        let m = manifest(&[&["Ast", "Ir"], &["Util"]]);
-        let site = Site::build(&m, &inputs).unwrap();
+        let m = overview(&[&["Ast", "Ir"], &["Util"]]);
+        let site = Site::build(&m, 10, &inputs).unwrap();
         assert_eq!(site.modules[1].anchors, vec!["t-Loc-t", "t-Loc-u"]);
         assert_eq!(site.type_href(0, TypeId { module: 1, ty: 0 }), "#t-Loc-t");
         assert_eq!(
@@ -556,37 +623,48 @@ mod tests {
     #[test]
     fn unlisted_and_missing_modules_fail_naming_them() {
         let inputs = sample();
-        let m = manifest(&[&["Ast", "Gone"], &["Util"]]);
-        let err = Site::build(&m, &inputs).unwrap_err();
+        let m = overview(&[&["Ast", "Gone"], &["Util"]]);
+        let err = Site::build(&m, 10, &inputs).unwrap_err();
         assert!(
-            err.contains("input modules not in the manifest: Ir"),
+            err.contains("input modules in no {!modules: ...} list of the overview: Ir"),
             "{err}"
         );
         assert!(
-            err.contains("manifest modules absent from the input: Gone"),
+            err.contains("overview modules absent from the input: Gone"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn an_unlisted_module_alone_fails() {
+        let inputs = sample();
+        let m = overview(&[&["Ast", "Util"]]);
+        let err = Site::build(&m, 10, &inputs).unwrap_err();
+        assert_eq!(
+            err,
+            "input modules in no {!modules: ...} list of the overview: Ir"
         );
     }
 
     #[test]
     fn nested_modules_are_covered_by_their_parent() {
         let inputs = sample();
-        let m = manifest(&[&["Ast", "Ir", "Util"]]);
-        assert!(Site::build(&m, &inputs).is_ok());
-        let m = manifest(&[&["Ir", "Util", "Ast.Loc"]]);
-        let err = Site::build(&m, &inputs).unwrap_err();
+        let m = overview(&[&["Ast", "Ir", "Util"]]);
+        assert!(Site::build(&m, 10, &inputs).is_ok());
+        let m = overview(&[&["Ir", "Util", "Ast.Loc"]]);
+        let err = Site::build(&m, 10, &inputs).unwrap_err();
         assert!(err.contains("nested modules"), "{err}");
     }
 
     #[test]
     fn duplicate_names_fail() {
         let inputs = sample();
-        let m = manifest(&[&["Ast", "Ir"], &["Util", "Ir"]]);
-        let err = Site::build(&m, &inputs).unwrap_err();
-        assert!(err.contains("more than once in the manifest: Ir"), "{err}");
+        let m = overview(&[&["Ast", "Ir"], &["Util", "Ir"]]);
+        let err = Site::build(&m, 10, &inputs).unwrap_err();
+        assert!(err.contains("more than once in the overview: Ir"), "{err}");
         let twice = vec![sample().remove(0), sample().remove(0)];
-        let m = manifest(&[&["Ast", "Ir", "Util"]]);
-        let err = Site::build(&m, &twice).unwrap_err();
+        let m = overview(&[&["Ast", "Ir", "Util"]]);
+        let err = Site::build(&m, 10, &twice).unwrap_err();
         assert!(err.contains("more than once in the input"), "{err}");
     }
 
@@ -596,8 +674,8 @@ mod tests {
             r#"{{"language":"ocaml","modules":[{}]}}"#,
             module("Index", &[])
         ))];
-        let m = manifest(&[&["Index"]]);
-        let err = Site::build(&m, &inputs).unwrap_err();
+        let m = overview(&[&["Index"]]);
+        let err = Site::build(&m, 10, &inputs).unwrap_err();
         assert!(err.contains("index page"), "{err}");
     }
 }
