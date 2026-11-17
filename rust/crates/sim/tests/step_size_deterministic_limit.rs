@@ -131,7 +131,7 @@ fn chain_binomial_converges_to_the_ode_as_dt_shrinks_and_differs_at_dt_1() {
     let mut gaps = Vec::new();
     let mut warned = Vec::new();
     for &dt in &dts {
-        let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start, t_end, dt });
+        let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start, t_end, dt, binomial: sim::rng::BinomialAlgorithm::Btpe });
         let traj = ChainBinomialSim.run(&compiled, &params, 1, &cfg).unwrap();
         let g = gap(&weekly_incidence(&compiled, &traj), &ode);
         println!(

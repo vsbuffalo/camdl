@@ -130,6 +130,7 @@ fn test_branching_chain_binomial_conservation() {
         t_start: model.simulation.t_start,
         t_end: model.simulation.t_end,
         dt: 0.5,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     });
     assert_conservation(&compiled,
         |seed| ChainBinomialSim.run(&compiled, &params, seed, &config).unwrap(),
@@ -161,6 +162,7 @@ fn test_branching_chain_binomial_split_ratio() {
         t_start: model.simulation.t_start,
         t_end: model.simulation.t_end,
         dt: 0.5,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     });
     assert_split_ratio(&compiled,
         |seed| ChainBinomialSim.run(&compiled, &params, seed, &config).unwrap(),

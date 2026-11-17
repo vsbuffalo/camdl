@@ -72,7 +72,7 @@ fn each_real_compartment_follows_its_own_equation_on_every_backend() {
     let ode = SimConfig::Ode(OdeConfig { t_start: 0.0, t_end: T_END, dt: 0.01 });
     check("ode", &compiled, &OdeSim.run(&compiled, p, 1, &ode).unwrap());
 
-    let cb = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: T_END, dt: 0.01 });
+    let cb = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: T_END, dt: 0.01, binomial: sim::rng::BinomialAlgorithm::Btpe });
     check("chain_binomial", &compiled, &ChainBinomialSim.run(&compiled, p, 1, &cb).unwrap());
 
     let gil = SimConfig::Gillespie(GillespieConfig { t_start: 0.0, t_end: T_END, output_dt: Some(1.0) });

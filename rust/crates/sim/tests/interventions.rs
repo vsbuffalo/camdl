@@ -234,6 +234,7 @@ fn chain_binomial_fires_scheduled_intervention_exactly_once() {
 
     let cfg = SimConfig::ChainBinomial(ChainBinomialConfig {
         t_start: 0.0, t_end: 20.0, dt: 1.0,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     });
     let traj = ChainBinomialSim.run(&compiled, &params, 42, &cfg).unwrap();
 

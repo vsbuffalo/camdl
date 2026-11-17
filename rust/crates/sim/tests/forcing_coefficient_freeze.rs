@@ -64,7 +64,7 @@ fn all_counts(traj: &Trajectory) -> Vec<i64> {
 }
 
 fn chain_binomial(compiled: &CompiledModel, params: &[f64], t_end: f64) -> Trajectory {
-    let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end, dt: 1.0 });
+    let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe });
     ChainBinomialSim.run(compiled, params, 7, &cfg)
         .expect("chain-binomial run failed")
 }

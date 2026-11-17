@@ -116,7 +116,7 @@ fn emission_confined_to_t_end() {
     for &t_end in &[40.0_f64, 160.0_f64] {
         let compiled = Arc::new(model(t_end, 1.0));
 
-        let cb = run(&compiled, SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end, dt: 1.0 }));
+        let cb = run(&compiled, SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe }));
         let gil = run(&compiled, SimConfig::Gillespie(GillespieConfig { t_start: 0.0, t_end, output_dt: None }));
 
         for (name, times) in [("chain_binomial", &cb), ("gillespie", &gil)] {

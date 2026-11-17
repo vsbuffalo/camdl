@@ -29,7 +29,7 @@ fn load_golden() -> ir::Model {
 }
 
 fn cfg() -> SimConfig {
-    SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 365.0, dt: 1.0 })
+    SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 365.0, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe })
 }
 
 /// Compile the model and return it with a params vector carrying `overrides`

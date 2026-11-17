@@ -391,7 +391,7 @@ pub fn run_chain_binomial_with_observer(
     // consumes no randomness, so the stream the loop below sees is unchanged.
     let mut rng = match resume.start.and_then(|ss| ss.rng.as_ref()) {
         Some(r) => r.clone(),
-        None => StatefulRng::new(seed),
+        None => StatefulRng::new(seed).with_binomial(cfg.binomial),
     };
 
     // gh#322 start-from-state seam: seed the compartment state from the injected

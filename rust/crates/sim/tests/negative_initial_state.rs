@@ -167,7 +167,7 @@ fn drawn(init_d: f64) -> Arc<CompiledModel> {
 }
 
 fn forward(m: &CompiledModel, seed: u64) -> [(&'static str, Result<(), SimError>); 2] {
-    let cb = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 3.0, dt: 1.0 });
+    let cb = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 3.0, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe });
     let gi = SimConfig::Gillespie(GillespieConfig { t_start: 0.0, t_end: 3.0, output_dt: None });
     [
         ("chain_binomial", ChainBinomialSim.run(m, &m.default_params, seed, &cb).map(|_| ())),

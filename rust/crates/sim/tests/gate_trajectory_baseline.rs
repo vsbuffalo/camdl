@@ -502,7 +502,7 @@ fn gate_golden_trajectories_are_byte_identical() {
         // drops any it errors on.
         let backends: &[(&str, SimConfig)] = &[
             ("gillespie", SimConfig::Gillespie(GillespieConfig { t_start, t_end, output_dt: None })),
-            ("chain_binomial", SimConfig::ChainBinomial(ChainBinomialConfig { t_start, t_end, dt: 1.0 })),
+            ("chain_binomial", SimConfig::ChainBinomial(ChainBinomialConfig { t_start, t_end, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe })),
             ("ode", SimConfig::Ode(OdeConfig { t_start, t_end, dt: 1.0 })),
         ];
         let required = compiled.required_capabilities();

@@ -99,7 +99,7 @@ fn assert_real_coupling_evolved(backend: &str, cfg: SimConfig) {
 fn chain_binomial_evolves_real_reservoir_and_couples() {
     assert_real_coupling_evolved(
         "chain_binomial",
-        SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 365.0, dt: 0.5 }),
+        SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 365.0, dt: 0.5, binomial: sim::rng::BinomialAlgorithm::Btpe }),
     );
 }
 

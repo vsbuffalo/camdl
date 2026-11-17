@@ -193,7 +193,7 @@ fn ode_and_chain_binomial_accept_and_run_dt_in_rate() {
         (
             "chain_binomial",
             &ChainBinomialSim as &dyn Simulate,
-            SimConfig::ChainBinomial(ChainBinomialConfig { t_start, t_end, dt: 1.0 }),
+            SimConfig::ChainBinomial(ChainBinomialConfig { t_start, t_end, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe }),
         ),
     ] {
         assert!(

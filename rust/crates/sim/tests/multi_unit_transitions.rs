@@ -200,7 +200,7 @@ fn gillespie_constant_rate_exit_stops_at_empty_source() {
 #[test]
 fn chain_binomial_refuses_multi_unit_before_any_step() {
     use sim::{config::ChainBinomialConfig, error::SimError, ChainBinomialSim};
-    let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 3.0, dt: 1.0 });
+    let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 3.0, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe });
     for stoich in [&[("S", -2), ("D", 1)][..], &[("S", -1), ("S", -1), ("D", 1)][..]] {
         let compiled = pair_model(stoich);
         let msg = compiled
@@ -230,7 +230,7 @@ fn chain_binomial_refuses_multi_unit_before_any_step() {
     let single = CompiledModel::new(single).unwrap();
     assert!(single.validate_unit_source_consumption().is_ok());
     // dt matches the 0.25 output step (chain-binomial snaps outputs to its grid).
-    let fine = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 3.0, dt: 0.25 });
+    let fine = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 3.0, dt: 0.25, binomial: sim::rng::BinomialAlgorithm::Btpe });
     let run = ChainBinomialSim.run(&single, &single.default_params, 1, &fine);
     assert!(run.is_ok(), "a single-unit model runs on chain_binomial: {:?}", run.err());
 }
@@ -258,7 +258,7 @@ fn chain_binomial_zero_gamma_multiplier_draws_no_exits() {
     );
     model.output.times = OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0 });
     let compiled = CompiledModel::new(model).unwrap();
-    let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 10.0, dt: 1.0 });
+    let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 10.0, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe });
     for seed in 1..=50u64 {
         let traj = ChainBinomialSim
             .run(&compiled, &compiled.default_params, seed, &cfg)
@@ -324,7 +324,7 @@ fn a_negative_initial_state_is_labelled_initial_state() {
     *model.initial_conditions.0.get_mut("R").unwrap() =
         InitSpec::Deterministic(bin(BinOp::Sub, Expr::const_(2.0), Expr::const_(5.0)));
     let compiled = CompiledModel::new(model).unwrap();
-    let cb = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 3.0, dt: 1.0 });
+    let cb = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 3.0, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe });
     for (label, res) in [
         ("chain_binomial", ChainBinomialSim.run(&compiled, &compiled.default_params, 1, &cb)),
         ("gillespie", GillespieSim.run(&compiled, &compiled.default_params, 1, &gillespie(3.0))),

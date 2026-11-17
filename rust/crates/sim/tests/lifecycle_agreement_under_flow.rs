@@ -156,7 +156,7 @@ fn run(backend: &str) -> (Arc<CompiledModel>, Trajectory) {
     let compiled = Arc::new(flow_model());
     let cfg = match backend {
         "gillespie" => SimConfig::Gillespie(GillespieConfig { t_start: 0.0, t_end: T_END, output_dt: Some(1.0) }),
-        "chain_binomial" => SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: T_END, dt: 1.0 }),
+        "chain_binomial" => SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: T_END, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe }),
         "ode" => SimConfig::Ode(OdeConfig { t_start: 0.0, t_end: T_END, dt: 1.0 }),
         other => panic!("unknown backend {other}"),
     };

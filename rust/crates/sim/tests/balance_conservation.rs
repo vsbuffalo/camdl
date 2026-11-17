@@ -130,7 +130,7 @@ fn balance_conserves_total_through_flow_and_cull() {
     let compiled = Arc::new(balance_model());
     let traj = ChainBinomialSim
         .run(&compiled, &compiled.default_params, 11,
-             &SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: T_END, dt: 1.0 }))
+             &SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: T_END, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe }))
         .unwrap();
 
     // S, I, R all integer → counts = [S, I, R].

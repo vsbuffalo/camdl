@@ -638,7 +638,7 @@ impl Arm {
 
         // Fork from X_i(fork): inject the state at cfg.t_start = fork, fresh RNG from
         // the shared per-draw seed (CRN at the fork; post-fork noise desyncs by design).
-        let cfg = sim::ChainBinomialConfig { t_start: fork_t, t_end: run_end, dt };
+        let cfg = sim::ChainBinomialConfig { t_start: fork_t, t_end: run_end, dt, binomial: sim::rng::BinomialAlgorithm::Btpe };
         let ss = sim::chain_binomial::StartState { int_s, real_s, rng: None };
         let traj = sim::chain_binomial::run_chain_binomial_with_observer(
             self.compiled.as_ref(),
