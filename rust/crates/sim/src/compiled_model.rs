@@ -3158,9 +3158,9 @@ impl CompiledModel {
                 .ok_or_else(|| SimError::UnknownCompartment(comp_name.clone()))?;
             let comp_local = self.global_to_int[global].ok_or_else(|| {
                 SimError::Validation(format!(
-                    "ODE gradient (nuts): parameterized initial condition on real \
+                    "ODE gradient (nl-lbfgs): parameterized initial condition on real \
                      compartment `{comp_name}` — real-compartment forward sensitivity is \
-                     not yet supported (gh#275 §1c). Use gradient-free `mh` on `ode`."
+                     not yet supported (gh#275 §1c). Use `nl-sbplx` on `ode`, which needs no gradient."
                 ))
             })?;
             for (param_name, entry) in param_map {
@@ -3170,8 +3170,8 @@ impl CompiledModel {
                     DerivEntry::Grad(expr) => eval_expr(expr, &ctx)?,
                     DerivEntry::Unsupported { code, .. } => {
                         return Err(SimError::Validation(format!(
-                            "ODE gradient (nuts): ∂(initial {comp_name})/∂{param_name} is \
-                             not differentiable — it {}. Use gradient-free `mh` on `ode`.",
+                            "ODE gradient (nl-lbfgs): ∂(initial {comp_name})/∂{param_name} is \
+                             not differentiable — it {}. Use `nl-sbplx` on `ode`, which needs no gradient.",
                             code.reason_message()
                         )));
                     }

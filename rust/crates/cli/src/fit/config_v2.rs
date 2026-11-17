@@ -3303,8 +3303,7 @@ impl FitConfig {
             Err(e) => Err(format!(
                 "[method]: `algorithm = \"nl-lbfgs\"` optimizes the ODE marginal \
                  likelihood using its gradient, and the gradient capability check \
-                 refuses this model. The check's reason below still names `nuts`, \
-                 the removed ODE sampler, for the same requirement (gh#917):\n\n  \
+                 refuses this model:\n\n  \
                  {e}\n\n  \
                  `algorithm = \"nl-sbplx\"` optimizes the same ODE marginal \
                  likelihood without a gradient, and has no such requirement."

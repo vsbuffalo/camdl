@@ -8,9 +8,9 @@
 //!   method shares: an estimated parameter whose gradient the compiler could not
 //!   emit for a rate, observation argument, or σ² term (a serialized
 //!   [`DerivEntry::Unsupported`]), or that reaches a Binomial/BetaBinomial `n`.
-//!   The PGAS-NUTS preflight (`pgas.rs`) and the ODE-NUTS gate both call it, so
+//!   The PGAS-NUTS preflight (`pgas.rs`) and the ODE gradient gate both call it, so
 //!   the two cannot drift.
-//! - [`preflight_gradient_ode`] — the ODE-NUTS gate: the common scan PLUS the
+//! - [`preflight_gradient_ode`] — the ODE gradient gate (`nl-lbfgs`): the common scan PLUS the
 //!   checks specific to the deterministic forward-sensitivity path (a nonsmooth
 //!   `rate_state_grad`, an adaptive integrator, a `dt`-in-rate model, a scheduled
 //!   effect, a parameterized initial condition, a `DerivedExpr` prevalence
@@ -168,7 +168,7 @@ fn expr_has_binding_ref(e: &Expr) -> bool {
 /// gradient the compiler could not emit — for a rate, an observation argument, or
 /// a σ² term — to the stable [`UnsupportedReason`] the fit-time message derives
 /// from. Deterministic order (a `BTreeMap`); the first reason wins for a parameter
-/// uncovered on more than one surface. Shared by PGAS-NUTS and ODE-NUTS.
+/// uncovered on more than one surface. Shared by PGAS-NUTS and the ODE gradient gate.
 pub(crate) fn scan_unsupported_gradients(
     model: &ir::Model,
     estimated: &HashSet<&str>,
@@ -221,7 +221,7 @@ pub(crate) fn scan_unsupported_gradients(
     refused
 }
 
-/// The ODE-NUTS gradient gate (§1h): the common coverage scan PLUS the checks
+/// The ODE gradient gate (§1h, `nl-lbfgs`): the common coverage scan PLUS the checks
 /// specific to the deterministic ODE forward-sensitivity path. Run once by
 /// `det_grad` (and any future ODE gradient-MLE) before a gradient is taken;
 /// refuses with the compiler's own reason string where one exists, so the user
@@ -245,10 +245,10 @@ pub fn preflight_gradient_ode(
             .map(|(p, code)| format!("`{}` {}", p, code.reason_message()))
             .collect();
         return Err(SimError::Validation(format!(
-            "ODE gradient (nuts) cannot estimate parameter(s) whose gradient the compiler \
-             could not emit for a rate, observation, or overdispersion term — NUTS would \
-             sample against an incomplete (silently biased) gradient. Refused: {}. Use a \
-             gradient-free method (IF2 or PMMH), or fix these parameters.",
+            "ODE gradient (nl-lbfgs) cannot estimate parameter(s) whose gradient the compiler \
+             could not emit for a rate, observation, or overdispersion term — the optimizer \
+             would search along an incomplete (silently biased) gradient. Refused: {}. Use \
+             `nl-sbplx` on `ode`, which needs no gradient, or fix these parameters.",
             details.join("; ")
         )));
     }
@@ -265,11 +265,11 @@ pub fn preflight_gradient_ode(
         && m.transitions.iter().all(|t| t.rate_state_grad.is_empty())
     {
         return Err(SimError::Validation(
-            "ODE gradient (nuts) requires the state-Jacobian `rate_state_grad`, but this \
+            "ODE gradient (nl-lbfgs) requires the state-Jacobian `rate_state_grad`, but this \
              model carries none on any transition — it was compiled with `camdlc \
-             --no-state-grad` (or has no state-dependent rates). Recompile WITHOUT \
-             --no-state-grad to fit with `nuts` on the ODE backend, or use a gradient-free \
-             method (IF2, PMMH, or `mh` on ode)."
+             --no-state-grad` (or has no state-dependent rates). Recompile without \
+             `--no-state-grad` to fit with `nl-lbfgs`, or use `nl-sbplx` on `ode`, which \
+             needs no gradient."
                 .to_string(),
         ));
     }
@@ -283,10 +283,10 @@ pub fn preflight_gradient_ode(
         for (_comp, entry) in t.rate_state_grad.iter() {
             if let DerivEntry::Unsupported { code, .. } = entry {
                 return Err(SimError::Validation(format!(
-                    "ODE gradient (nuts): transition `{}` has a rate whose derivative with \
+                    "ODE gradient (nl-lbfgs): transition `{}` has a rate whose derivative with \
                      respect to a compartment is not smooth — it {}. The ODE forward \
                      sensitivity is undefined for such a rate. Reformulate the rate with a \
-                     smooth expression, or use gradient-free `mh` on `ode`.",
+                     smooth expression, or use `nl-sbplx` on `ode`, which needs no gradient.",
                     t.name,
                     code.reason_message()
                 )));
@@ -297,16 +297,17 @@ pub fn preflight_gradient_ode(
     // ── Integrator: fixed-step RK4 only (§1c) ───────────────────────────────────
     if !matches!(m.simulation.integrator, ir::model::Integrator::Rk4) {
         return Err(SimError::Validation(
-            "ODE gradient (nuts) requires integrator = rk4 (fixed step); an adaptive \
+            "ODE gradient (nl-lbfgs) requires integrator = rk4 (fixed step); an adaptive \
              integrator (rk45) is refused — its step sequence is discontinuous in θ, \
-             breaking the forward-sensitivity/loglik consistency NUTS needs (gh#275 §1c)."
+             breaking the forward-sensitivity/loglik consistency the gradient method needs \
+             (gh#275 §1c)."
                 .to_string(),
         ));
     }
     // ── `dt`-in-rate (RUNTIME_DT): no augmented flow sensitivity (§1c) ──────────
     if model.required_capabilities().contains(crate::Capabilities::RUNTIME_DT) {
         return Err(SimError::Validation(
-            "ODE gradient (nuts) cannot differentiate a model that references `dt` in a \
+            "ODE gradient (nl-lbfgs) cannot differentiate a model that references `dt` in a \
              rate (Expr::Dt): its flow uses the first-order Euler scheme, which carries no \
              augmented sensitivity (gh#275 §1c)."
                 .to_string(),
@@ -322,10 +323,10 @@ pub fn preflight_gradient_ode(
     //    silent-wrong gradient.
     if model.required_capabilities().contains(crate::Capabilities::REAL_COMPARTMENTS) {
         return Err(SimError::Validation(
-            "ODE gradient (nuts) does not support real-valued compartments (ODE-equation \
+            "ODE gradient (nl-lbfgs) does not support real-valued compartments (ODE-equation \
              compartments): the forward sensitivity is integer-compartment only, so a real \
-             compartment's ∂x/∂θ is not tracked (gh#275 §1c). Use gradient-free `mh` on \
-             `ode` for models with real compartments."
+             compartment's ∂x/∂θ is not tracked (gh#275 §1c). Use `nl-sbplx` on `ode`, \
+             which needs no gradient, for models with real compartments."
                 .to_string(),
         ));
     }
@@ -345,9 +346,9 @@ pub fn preflight_gradient_ode(
     )?;
     if !plan.is_empty() {
         return Err(SimError::Validation(
-            "ODE gradient (nuts) does not yet support scheduled interventions or events: \
-             their event-jump sensitivity is a follow-up (gh#275 §1g). Use gradient-free \
-             `mh` on `ode` for models with effects."
+            "ODE gradient (nl-lbfgs) does not yet support scheduled interventions or events: \
+             their event-jump sensitivity is a follow-up (gh#275 §1g). Use `nl-sbplx` on \
+             `ode`, which needs no gradient, for models with effects."
                 .to_string(),
         ));
     }
@@ -356,7 +357,7 @@ pub fn preflight_gradient_ode(
     // forward sensitivity seeded at S(t_start) = ∂(initial_state)/∂θ. Admit it only
     // when the compiler emitted a smooth, int-compartment `ic_grad` entry for every
     // (estimated param → IC compartment) pair — otherwise the seed would silently
-    // drop that parameter's contribution and NUTS would sample against a gradient
+    // drop that parameter's contribution and the optimizer would search along a gradient
     // that is zero exactly where the initial condition matters (Risk #1).
     //
     // The parameter set scanned per compartment is TRANSITIVE along the init
@@ -387,10 +388,10 @@ pub fn preflight_gradient_ode(
             // descend into — refuse rather than risk a silent-zero seed.
             if expr_has_binding_ref(expr) {
                 return Err(SimError::Validation(format!(
-                    "ODE gradient (nuts): the initial condition of `{comp}` references a \
+                    "ODE gradient (nl-lbfgs): the initial condition of `{comp}` references a \
                      shared binding, which the gradient path does not yet trace for the \
                      ∂init/∂θ seed (gh#275 §1c). Inline the expression, or use \
-                     gradient-free `mh` on `ode`."
+                     `nl-sbplx` on `ode`, which needs no gradient."
                 )));
             }
             let mut refs = HashSet::new();
@@ -406,37 +407,37 @@ pub fn preflight_gradient_ode(
                 // Real-compartment forward sensitivity is a separate follow-up.
                 let global = model.comp_index.get(comp.as_str()).copied().ok_or_else(|| {
                     SimError::Validation(format!(
-                        "ODE gradient (nuts): initial condition names unknown compartment \
+                        "ODE gradient (nl-lbfgs): initial condition names unknown compartment \
                          `{comp}`."
                     ))
                 })?;
                 if model.global_to_int[global].is_none() {
                     return Err(SimError::Validation(format!(
-                        "ODE gradient (nuts): parameter-dependent initial condition on real \
+                        "ODE gradient (nl-lbfgs): parameter-dependent initial condition on real \
                          compartment `{comp}` — real-compartment forward sensitivity is not \
-                         yet supported (gh#275 §1c). Use gradient-free `mh` on `ode`."
+                         yet supported (gh#275 §1c). Use `nl-sbplx` on `ode`, which needs no gradient."
                     )));
                 }
                 match m.ic_grad.get(comp).and_then(|pm| pm.get(pname.as_str())) {
                     Some(ir::deriv::DerivEntry::Grad(_)) => {}
                     Some(ir::deriv::DerivEntry::Unsupported { code, .. }) => {
                         return Err(SimError::Validation(format!(
-                            "ODE gradient (nuts): ∂(initial {comp})/∂{pname} is not \
+                            "ODE gradient (nl-lbfgs): ∂(initial {comp})/∂{pname} is not \
                              differentiable — it {}. Reformulate the initial condition \
-                             with a smooth expression, or use gradient-free `mh` on `ode`.",
+                             with a smooth expression, or use `nl-sbplx` on `ode`, which needs no gradient.",
                             code.reason_message()
                         )));
                     }
                     None => {
                         return Err(SimError::Validation(format!(
-                            "ODE gradient (nuts): estimated parameter `{pname}` enters the \
+                            "ODE gradient (nl-lbfgs): estimated parameter `{pname}` enters the \
                              initial condition of `{comp}`, but there is no usable \
                              ∂(initial {comp})/∂{pname} — either the initial condition is not \
                              differentiable in `{pname}` (e.g. a floor/round of it), the two \
                              occurrences cancel, or this model was compiled before ic_grad \
                              emission (gh#275 §1c). Its gradient would be silently zero. \
                              Reformulate the initial condition, recompile, or use \
-                             gradient-free `mh` on `ode`."
+                             `nl-sbplx` on `ode`, which needs no gradient."
                         )));
                     }
                 }
@@ -458,22 +459,22 @@ pub fn preflight_gradient_ode(
             // factor-2 chain would silently drop the whole ∂projected/∂θ term.
             if om.projection_state_grad.is_empty() {
                 return Err(SimError::Validation(format!(
-                    "ODE gradient (nuts): the DerivedExpr projection of observation stream `{}` \
+                    "ODE gradient (nl-lbfgs): the DerivedExpr projection of observation stream `{}` \
                      carries no ∂projection/∂compartment — its factor-2 gradient would be \
                      silently zero. Recompile with a camdlc that emits projection_state_grad \
                      (gh#275 §1h). (If the projection genuinely does not depend on compartment \
                      state, it is not an identifiable observation of the trajectory — it cannot \
-                     inform a gradient fit; use gradient-free `mh` on `ode`.)",
+                     inform a gradient fit; use `nl-sbplx` on `ode`, which needs no gradient.)",
                     om.name
                 )));
             }
             for (comp, entry) in om.projection_state_grad.iter() {
                 if let DerivEntry::Unsupported { code, .. } = entry {
                     return Err(SimError::Validation(format!(
-                        "ODE gradient (nuts): the projection of observation stream `{}` is a \
+                        "ODE gradient (nl-lbfgs): the projection of observation stream `{}` is a \
                          nonsmooth function of compartment `{}` — it {}. The ∂projection/∂state \
                          chain is undefined. Reformulate the projection with a smooth \
-                         expression, or use gradient-free `mh` on `ode`.",
+                         expression, or use `nl-sbplx` on `ode`, which needs no gradient.",
                         om.name, comp, code.reason_message()
                     )));
                 }
@@ -487,9 +488,9 @@ pub fn preflight_gradient_ode(
         for (arg, d) in om.likelihood.diffables() {
             if let Some(DerivEntry::Unsupported { code, .. }) = &d.proj_grad {
                 return Err(SimError::Validation(format!(
-                    "ODE gradient (nuts): observation stream `{}` argument `{}` is a nonsmooth \
+                    "ODE gradient (nl-lbfgs): observation stream `{}` argument `{}` is a nonsmooth \
                      function of the projection output — it {}. Reformulate it with a smooth \
-                     expression, or use gradient-free `mh` on `ode`.",
+                     expression, or use `nl-sbplx` on `ode`, which needs no gradient.",
                     om.name,
                     arg,
                     code.reason_message()
@@ -508,7 +509,7 @@ pub fn preflight_gradient_ode(
         if let Some(n) = n_expr {
             if expr_references_projected(n) {
                 return Err(SimError::Validation(format!(
-                    "ODE gradient (nuts): observation stream `{}` has a Binomial/BetaBinomial \
+                    "ODE gradient (nl-lbfgs): observation stream `{}` has a Binomial/BetaBinomial \
                      denominator `n` that depends on the projection output — `n` is rounded to \
                      an integer and carries no gradient, so its projection dependence cannot be \
                      differentiated (gh#275 §1d). Make `n` a constant or an observed data column.",
@@ -631,7 +632,7 @@ mod tests {
     #[test]
     fn refuses_absent_state_jacobian_no_state_grad() {
         // A model compiled with `camdlc --no-state-grad` carries an EMPTY
-        // rate_state_grad on every transition (gh#439). The ODE-NUTS gate must
+        // rate_state_grad on every transition (gh#439). The ODE gradient gate must
         // refuse loudly rather than integrate a forward sensitivity that silently
         // drops the J_x·S state-coupling term.
         let mut m = base_model();

@@ -1301,8 +1301,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             out.fail(format!(
                 "error: --algorithm nl-lbfgs takes each cell's optimum with the ODE \
                  forward-sensitivity gradient, and the gradient capability check refuses \
-                 this model. The check's reason below still names `nuts`, the removed ODE \
-                 sampler, for the same requirement (gh#917):\n\n  {e}\n\n  \
+                 this model:\n\n  {e}\n\n  \
                  `--algorithm nl-sbplx` profiles the same ODE marginal likelihood without \
                  a gradient."
             ));
