@@ -1495,6 +1495,9 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     // The run the draws come from: the one the handle named, else the folder's.
     let run_dir = resolved.run_dir().to_path_buf();
     let crate::fit::handle::ResolvedFit { segment, config, .. } = resolved;
+    // The sampler the fit's method ran, as written in fit.toml; the leaf's own
+    // record, read in forecast mode, takes precedence (gh#747).
+    let configured_binomial = config.method().ok().map(|m| m.algorithm.binomial());
     // gh#896: everything predict writes goes under a directory keyed by the
     // run it read, so a second run's predict cannot overwrite this one's and
     // every file is attributable to one run.
@@ -1828,6 +1831,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
                 schema: schema.as_ref(),
                 dt: one_step_dt,
                 seed: args.seed.unwrap_or(1),
+                binomial: crate::fit::forecast_output::fit_binomial(&run_dir, configured_binomial)?,
             },
         )?;
         written.push(crate::fit::failures::write_report(

@@ -223,6 +223,7 @@ pub(crate) struct ForecastFailure { pub draw: Option<usize>, pub time: Option<f6
 
 pub(crate) struct DriverConfig {
     pub n_particles: usize, pub dt: f64, pub base_seed: u64, pub record_expected: bool,
+    pub binomial: BinomialAlgorithm,      // the fit's sampler, read from its leaf (gh#747)
 }
 
 pub(crate) fn fixed_origin_forecast(
@@ -290,3 +291,13 @@ plan (PR 3). Until then the forecast artifact records the mode as the string
 - **Draws are named by their key.** The samples file, `forecast.json` and a
   failure name each posterior draw by its row of `draws.tsv` and its
   `(chain, draw)` key there, never by its place in the `--n-draws` subsample.
+- **The binomial sampler is the fit's.** The forecast's filters draw with the
+  sampler the fit's method ran (gh#747), read from the leaf's `run.json`
+  (`inputs.binomial`, which `fit run` now writes for every chain-binomial
+  particle method); a leaf written before that record takes
+  `fit run
+  --binomial` from its recorded command line, else the method in
+  `fit.toml`. `forecast.json` records it. The predict address needs no new key:
+  the leaf's `run_id`, which keys it, already carries the sampler. This differs
+  from the one-step band, which names BTPE whatever the fit used, on the ground
+  that both samplers draw exactly Binomial(n, p).
