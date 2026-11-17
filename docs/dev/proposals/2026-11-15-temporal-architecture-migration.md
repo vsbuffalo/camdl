@@ -912,6 +912,66 @@ Recorded in the maintainer's docket; each is reflected in the spec and above.
   fit identity carries the partition rule version, and keeps whole-file and
   holdout-file digests until the score-artifact step replaces them with row
   digests.
+- **D59** (2026-11-16). The observation-row label is not used for any downstream
+  work. Its evaluation half is done: `fit predict`, `simulate --obs`,
+  `--design-from` and the stored observation subtree draw each row where the fit
+  scores it, refusals read what a row measures, and the calendar block is
+  required on every record (#1153). Its remaining uses (the row set, forecast
+  start, cadence and time column of `fit predict`, and the time column the
+  design-from writer emits) are removed by Stage 5's `ForecastPlan` (D69).
+- **D60** (2026-11-16). Phase B starts only after the Phase A tidy-up and after
+  every issue opened during the temporal work is closed, so that it starts
+  clean. Amended by D71: the remaining compiler issues may stay open while Stage
+  5 runs.
+- **D61** (2026-11-16). `date_range` generates every cadence from one
+  offset-from-start function, with no golden change, pinned by a 660-call grid
+  (gh#1093; #1153). A brief for a change of this kind says where the function
+  enters the language, so the reader can see which models it reaches.
+- **D62** (2026-11-16). Time positions are derived from the grammar, each tagged
+  with the kind of time it holds, with one lowering function per kind. Whether a
+  calendar duration in such a position under an origin is an error, a warning,
+  an `--allow` override or resolved automatically is decided per kind of
+  position in the calendar-durations proposal
+  (`docs/dev/proposals/2026-11-16-calendar-durations-by-position.md`, merged in
+  #1171).
+- **D63** (2026-11-16). Printed output in `docs/dates.md` is checked by the test
+  suite, by extending `camdlc doctest` (which today compiles `camdl` blocks and
+  runs no commands) rather than adding a second harness.
+- **D64** (2026-11-16). `--save-final-state` and `--init-state` stay as a
+  permanent lower-level tool and are hardened: the saved state carries each
+  stream's running period totals so that a restart in the middle of a period is
+  exact, records the model, parameters and scenario and checks them on restart,
+  and detects an edited file. This supersedes the refusal of restarts across a
+  period under way in D39.
+- **D65** (2026-11-16). `dt` and a periodic `period` given in months or years
+  stay average lengths. The year length of `1 'years` (365.2425 days) keeps a
+  periodic forcing within -0.9 to +1.3 days of 1 January over 400 years, whereas
+  `365 'days` drifts by 3 days by year 10. The drift is documented (D75) rather
+  than flagged at compile time.
+- **D66** (2026-11-16). A periodic forcing whose `on` range runs past the end of
+  its period is refused with E406, with a hint to split it into two ranges
+  (gh#1139; #1153).
+- **D67** (2026-11-16). `camdl data split` is removed.
+  `pfilter --fit
+  --save-final-state` on a fit with `holdout_after` applies the
+  fit's training cutoff itself and says so, and seven documentation passages are
+  rewritten to `holdout_after`. This is how a forecast holdout is validated
+  against the rows the fit did not train on. PR #1144, gh#1138 and gh#1143 are
+  closed with it.
+- **D68** (2026-11-16). A calendar duration in a date or repeat position is
+  resolved automatically to the calendar function where that is provably safe,
+  rather than refused. The analysis and the per-position rule are in the
+  proposal named under D62.
+- **D69** (2026-11-16). The evaluation half of D59 is carried by #1153. The
+  remaining uses of the row label are removed by Stage 5's `ForecastPlan`; the
+  forecast start that ignores the training extent (gh#1151) and the predictive
+  file that names one row at two times (gh#1152) are filed for Stage 5.
+- **D70** (2026-11-16). Endpoints of a periodic `on` range that carry units are
+  days, and a range that does not fall on bin edges is refused.
+- **D71** (2026-11-16). Phase B Stage 5 starts now, in parallel with the
+  compiler calendar work, and D60 is amended so that the remaining compiler
+  issues may stay open. Stage 5's restart clause waits on D72 and on the design
+  for exact restarts from a filtered state (#1158).
 - **D72** (2026-11-16). A filter assimilates only where some stream holds an
   observed (non-`NA`) value; every stream observed at that time is one joint
   update. A stop with none (a row every stream holds as `NA`, a declared
@@ -926,6 +986,29 @@ Recorded in the maintainer's docket; each is reflected in the spec and above.
   forecasting or missing data does not change the latent process, the particle
   ancestry, the parameter evolution or the likelihood for a fixed seed.
   `HASH_VERSION` 6.
+- **D73** (2026-11-16). Stage 1a refuses the old spellings with a hint that
+  names the explicit form before Stage 1b gives them the calendar meaning, so a
+  model is told before its meaning changes; each stage has an entry in the
+  language-changes list. Stage 1a (typed positions and the census) resolves
+  nothing: every calendar duration in a date or repeat position under an origin,
+  including `simulate { to = 2 'years }`, which compiles silently before it, is
+  a hard error (#1175).
+- **D74** (2026-11-16). A calendar duration in a date or repeat position under
+  an origin resolves to the calendar step from its known base (Stage 1b of the
+  calendar-durations proposal), on three conditions: the rule is named, its
+  rules are set out in `docs/dates.md`, and that page carries a
+  request-for-feedback box, a new box kind added to
+  `docs/documentation-style.md`. It lands only after Stage 1a.
+- **D75** (2026-11-16). The seasonal-forcing drift is documented, with no flag.
+  `docs/dates.md` separates the fixed days of each year (periodic `on` ranges,
+  as in He et al. 2010) from this year's real dates (piecewise forcing with date
+  breakpoints), and states the drift of each year length (#1169).
+
+Open, not yet decided in the docket: D76, whether a forecast command fails when
+the model declares an observation stream the fit never bound data to; D77,
+whether the particle filter also skips resampling whenever all particle weights
+are exactly equal, as PGAS does; D78, whether the one-step-ahead band draws with
+the binomial sampler the fit ran, as the forecast now does.
 
 ## Part 9. Documents this plan changes
 
