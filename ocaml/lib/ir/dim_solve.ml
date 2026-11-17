@@ -1,4 +1,95 @@
-(* Exact integer solver for dimension equations. See dim_solve.mli. *)
+(** An exact solver for systems of linear equations over integer dimension
+    exponents: it finds which dimensions a set of equations determines, which
+    it leaves free, and which equations contradict the rest.
+
+    {2 The problem}
+
+    The unknowns [x₁ … xₙ] are dimensions, each a vector in [ℤᴮ] of integer
+    exponents over [B] base dimensions. For the dimension checker [B = 2],
+    population P and time T, so [P·T⁻¹] is the vector [(1, −1)]. Each
+    equation is [Σᵢ cᵢ·xᵢ = r], with integer coefficients [cᵢ] and a known
+    vector [r]. Stacking [m] equations gives [A·X = R], where [A] is the
+    [m × n] integer coefficient matrix, [X] the [n × B] matrix of unknowns
+    and [R] the [m × B] matrix of right-hand sides. Since the entries of [A]
+    are scalars, each base is its own system [A·x⁽ᵇ⁾ = r⁽ᵇ⁾]: one matrix and
+    [B] right-hand sides. The solver keeps one copy of the coefficients and a
+    vector right-hand side per row.
+
+    Exponents must be integers, and an integer system can have rational
+    solutions and no integer one: [2·x = T⁻¹] needs [x = T^(−1/2)]. So the
+    solver works over the integers throughout, using only unimodular steps
+    (integer transformations whose inverse is also integer), which preserve
+    the set of integer solutions exactly.
+
+    {2 Pass one: elimination on unit coefficients}
+
+    {!solve} adds the equations in the order given. Each is first reduced
+    against the rows accepted so far: every pivot variable it mentions is
+    replaced by that row's expression for it. Three cases follow.
+
+    - Nothing remains on the left and the right-hand side is zero: the
+      equation is implied by the others and is dropped.
+    - Nothing remains on the left and the right-hand side [r] is not zero:
+      the equation says [0 = r], which no solution satisfies. It is recorded
+      as a [Contradiction] and dropped, so that it does not cascade into
+      every later equation that mentions the same variables.
+    - Some variable has coefficient [±1]: the equation is solved for it,
+      [x_p = r − Σ cⱼ·xⱼ], and [x_p] is substituted out of every accepted
+      row, so that no row mentions another row's pivot. Solving on a
+      coefficient of [±1] is unimodular. Among several candidates the
+      highest-numbered variable is chosen; callers number variables as they
+      create them, so this is the newest, which tends to touch the fewest
+      other rows.
+
+    An equation with no coefficient of [±1] after reduction, such as
+    [2·x − y = 0] from a square root, cannot be pivoted this way. It is set
+    aside as a residual row.
+
+    {2 Pass two: the residual rows, by column Hermite form}
+
+    After every equation has been seen, each residual row is reduced again
+    against the final pivot rows (some of its variables may have become
+    pivots later) and accepted one at a time. A candidate set of residual
+    rows [A'·y = b] is tested by bringing [A'] to column echelon form by
+    unimodular column operations: [A'·U = H], with [U] unimodular, [H] lower
+    triangular in its pivot columns, and every column of [H] past its rank
+    [k] zero. Substituting [y = U·z] turns the system into [H·z = b], solved
+    by forward substitution with the free [z] (columns [k] onward) set to
+    zero. The system has an integer solution exactly when every division in
+    that substitution is exact and every row without a pivot is satisfied.
+    When a division fails, rank separates the two kinds of failure: if
+    appending [b] as a column raises the rank of [A'], there is no rational
+    solution either ([Contradiction]); otherwise rational solutions exist and
+    integer ones do not ([Not_integral]). That is what finds
+    [2·κ + 2·w = T⁻¹], the equation of [(κ·w)^2 * I] written as a transition
+    rate. A residual row that makes the set infeasible is reported and
+    dropped like any other conflict.
+
+    Because a residual row is checked after every other equation, it is the
+    one refused when it disagrees with an equation added later than it. Each
+    further residual candidate re-analyses the whole accepted residual set;
+    residual rows arise only from roots and fractional powers, so the set is
+    small.
+
+    {2 The general solution}
+
+    The {!outcome} expresses every variable as an affine function of free
+    integer parameters, [x = x₀ + Σₖ mₖ·tₖ] (the type {!affine}). A variable
+    no accepted row constrains is its own parameter. A residual variable is
+    its row of [U] applied to the particular solution, plus the free columns
+    of [z]. A pivot variable is its row's right-hand side minus the affine
+    forms of the other variables in its row. {!value} returns [x₀] when no
+    parameter remains. {!relations} says what the system fixes about several
+    free variables jointly. With [xᵢ = x₀ᵢ + Σₖ Mᵢₖ·tₖ], a combination
+    [Σᵢ aᵢ·xᵢ] is the same in every solution exactly when [Σᵢ aᵢ·Mᵢₖ = 0]
+    for every [k], that is, when [a] lies in the integer null space of [Mᵀ].
+    The column echelon form of [Mᵀ] gives a basis of that lattice in the
+    columns of its [U] past the rank, and each basis vector [a] gives the
+    relation [Σᵢ aᵢ·xᵢ = Σᵢ aᵢ·x₀ᵢ].
+
+    Sharing one coefficient matrix across the bases has a cost: an equation
+    that contradicts the others in one base only is dropped for every base,
+    so what it said about the other base is lost too. *)
 
 type var = int
 
@@ -58,12 +149,14 @@ let add_coef v c m =
 
 let terms_of_list l = List.fold_left (fun m (v, c) -> add_coef v c m) IM.empty l
 
-(* A unit row: x_pivot + Σ terms = rhs. [terms] never mentions a pivot of any
-   row (the accepted rows are kept fully reduced against one another). *)
+(** An accepted equation solved for its pivot variable,
+    [x_pivot + Σ terms = rhs]; the pivot is the key the row is stored under
+    in {!state}. [terms] never mentions the pivot of any row: the accepted
+    rows are kept fully reduced against one another. *)
 type row = {
   mutable terms : int IM.t;
   mutable rhs   : int array;
-  mutable ctx   : origin list;
+  mutable ctx   : origin list;   (** The origins of the equations combined into this row. *)
 }
 
 let context_cap = 12
@@ -76,12 +169,15 @@ let merge_ctx a b =
   in
   go [] 0 (a @ b)
 
+(** The solver's working state during pass one: the pivot rows, an index of
+    the rows that mention each variable, the residual rows set aside, and the
+    conflicts found so far. *)
 type state = {
   nbases   : int;
-  rows     : (var, row) Hashtbl.t;
-  occ      : (var, (var, unit) Hashtbl.t) Hashtbl.t;   (* var → pivots of rows mentioning it *)
-  mutable residual : (eqn * origin list) list;          (* reversed *)
-  mutable conflicts : conflict list;                    (* reversed *)
+  rows     : (var, row) Hashtbl.t;   (** Pivot rows, keyed by their pivot. *)
+  occ      : (var, (var, unit) Hashtbl.t) Hashtbl.t;   (** For each variable, the pivots of the rows that mention it. *)
+  mutable residual : (eqn * origin list) list;          (** Rows with no coefficient of ±1, newest first. *)
+  mutable conflicts : conflict list;                    (** Newest first. *)
 }
 
 let occ_of st v =
@@ -211,11 +307,12 @@ let forward_solve a pivot_of_row m b =
   in
   go 0
 
-(* The residual system: rows of (terms, rhs) over the variables [vars]. *)
+(** The accepted residual rows in column echelon form, from which the
+    general solution of each residual variable is read. *)
 type echelon = {
-  u       : int array array;     (* m×m, x = U·y *)
-  rank    : int;
-  y0      : int array array;     (* per base, the particular solution in y *)
+  u       : int array array;     (** The [m × m] unimodular matrix with [x = U·y], over the [m] residual variables. *)
+  rank    : int;                 (** The columns of [y] from [rank] on are free. *)
+  y0      : int array array;     (** Per base, the particular solution in [y], with the free columns zero. *)
 }
 
 let matrix_of rows cols =
@@ -262,11 +359,16 @@ let classify nbases rows =
 
 (* ── The outcome ───────────────────────────────────────────────────────── *)
 
-(* A variable's general solution: x0 + Σ coef·t over free parameters t, keyed
-   [`Var v] for a variable no row constrains, [`Col j] for a free column of
-   the residual's echelon form. *)
+(** A variable's general integer solution, [x0 + Σ coef·t] over free integer
+    parameters [t]. A parameter is [`Var v] for a variable no accepted row
+    constrains, and [`Col j] for a free column of the residual rows' echelon
+    form. An empty [m] means the variable is determined. *)
 type affine = { x0 : int array; m : ((([ `Var of int | `Col of int ]) * int) list) }
 
+(** The solved system: the final pivot rows, the echelon form of the
+    accepted residual rows (absent when there are none) with each residual
+    variable's column in it, and a cache of the affine forms computed so
+    far. *)
 type outcome = {
   st        : state;
   echelon   : echelon option;

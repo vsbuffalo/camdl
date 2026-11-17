@@ -1,32 +1,60 @@
-(* Dependency order for `init { }` (gh#733).
+(** The order in which the entries of a model's [init] block are evaluated,
+    and each entry's value written in terms of parameters alone.
 
-   An initial-condition spec may read another compartment's initial value
-   (`init { I = I0   S = N0 - I }`), so the entries form a directed graph over
-   compartment references and have to be evaluated in topological order:
-   dependencies first, each entry against the partially built state. A
-   reference cycle has no evaluation order and is rejected.
+    An initial condition may read another compartment's initial value, so
+    the entries form a directed graph, an edge from each entry to every
+    compartment with an entry that it reads, and they are evaluated in
+    topological order: dependencies first, each entry against the state
+    built so far. In
 
-   One implementation, two consumers:
-   - [Validate] rejects a cycle (E515) at the contract boundary;
-   - [Compiler] walks the DAG to inline each referenced compartment's own
-     initial expression before differentiating the ODE forward-sensitivity
-     seed (`ic_grad`), so the seed differentiates the value the runtime
-     actually builds.
+    {@camdl[
+      time_unit = 'days
+      compartments { S, I, R }
+      parameters {
+        beta  : rate
+        gamma : rate
+        N0    : count
+        I0    : count
+      }
+      transitions {
+        infection : S --> I @ beta * S * I / (S + I + R)
+        recovery  : I --> R @ gamma * I
+      }
+      init {
+        S = N0 - I
+        I = I0
+      }
+    ]}
 
-   The Rust runtime (`sim/src/compiled_model.rs`) sorts the same graph the same
-   way at `CompiledModel::new`; this module is the OCaml half of that
-   agreement. *)
+    [S] reads [I], so [I] is evaluated first, and the compiled model's
+    [ic_grad] gives [S] the derivative [-1] with respect to [I0]. A reference to a compartment
+    without an entry is no edge: that compartment starts at zero. A cycle
+    has no evaluation order and is an error.
+
+    The module has two entry points. {!topo} returns the order, or a cycle;
+    {!Validate} reports the cycle as E515. {!closed} substitutes each
+    compartment reference by that compartment's own closed initial
+    expression, which is what the compiler differentiates for [ic_grad], the
+    derivative of the initial state with respect to the parameters that
+    seeds the ODE forward sensitivities: a reference to another compartment
+    would otherwise differentiate to zero, the derivative of a value the
+    runtime never computes. Both follow a [BindingRef] into the binding's
+    body, because the runtime evaluates a binding against the state built
+    so far. The Rust runtime sorts the same graph the same way when it
+    builds a model ([rust/crates/sim/src/compiled_model.rs]); this module is
+    the OCaml half of that agreement. *)
 
 module SM = Map.Make (String)
 
-(* Compartments an initial-condition expression reads.
+(** The compartments an initial-condition expression reads, in first-read
+    order.
 
-   [BindingRef] is followed into the model's hoisted bindings: `let N = S+I+R`
-   used in an init RHS is a real dependency on S, I and R, because the runtime
-   evaluates the binding body against whatever state exists at that moment.
-   Treating it as a leaf would order the entry wrongly and read zeros. Bindings
-   are emitted in dependency order and are acyclic; [seen] is a belt-and-braces
-   guard so a drifted or hand-written IR cannot spin here. *)
+    A [BindingRef] is followed into the model's bindings: [let N = S + I + R]
+    used in an initial condition is a dependency on [S], [I] and [R], because
+    the runtime evaluates the binding's body against the state built so far.
+    Bindings are acyclic as the expander emits them; each is followed at most
+    once, so a hand-written IR with a cycle among bindings cannot loop
+    here. *)
 let deps ~(bindings : Ir.binding list) (e : Ir.expr) : string list =
   let body_of =
     List.fold_left
@@ -63,18 +91,18 @@ let deps ~(bindings : Ir.binding list) (e : Ir.expr) : string list =
   go e;
   List.rev !acc
 
-(* Topologically sort the init entries.
+(** Topologically sorts the init entries.
 
-   [Ok names] is a permutation of the entry names with every dependency before
-   its dependant; ties are broken by declaration order, so the result is
-   deterministic. [Error cycle] names the compartments on one reference cycle,
-   in the order they close it (`A -> B -> A` reports `["A"; "B"]`).
+    [Ok names] is a permutation of the entry names with every dependency
+    before its dependant; ties are broken by declaration order, so the result
+    is deterministic. [Error cycle] names the compartments on one reference
+    cycle, in the order they close it ([A -> B -> A] reports [["A"; "B"]]).
 
-   A referenced compartment with no init entry is NOT an edge: it starts at 0
-   (the default) and constrains nothing. *)
+    A referenced compartment with no init entry is not an edge: it starts at
+    0 and constrains nothing. *)
 let topo (ic : Ir.initial_conditions) ~(bindings : Ir.binding list)
   : (string list, string list) result =
-  (* EVERY expression the spec evaluates is an edge source: a law's arguments
+  (* Every expression the spec evaluates is an edge source: a law's arguments
      are evaluated against the partially built state exactly as a deterministic
      RHS is, so `I ~ binomial(n = N0 - R, p = q)` depends on `R`. *)
   let entry =
@@ -116,26 +144,24 @@ let topo (ic : Ir.initial_conditions) ~(bindings : Ir.binding list)
   | Some c -> Error c
   | None -> Ok (List.rev !out)
 
-(* Each init expression closed over the rest of the block: every [Pop c] is
-   replaced by c's own (already closed) initial expression, every [PopSum] by
-   the sum of those, and every [BindingRef] by its closed body. The result is a
-   function of parameters and constants alone, in declaration order.
+(** Each init entry's expression closed over the rest of the block, in
+    declaration order: every [Pop c] is replaced by [c]'s own closed initial
+    expression, every [PopSum] by the sum of those, and every [BindingRef] by
+    its closed body. The result reads no compartment and no binding; it can
+    still read parameters, constants, tables, forcings and time.
 
-   This is what the IC gradient must differentiate. `ic_grad` is the ODE
-   forward-sensitivity seed S(t_start) = ∂(initial_state)/∂θ, and after gh#733
-   `initial_state` reads other compartments' initial values — so differentiating
-   the RAW expression, where [Autodiff.differentiate] sends [Pop] and
-   [BindingRef] to 0, reports a derivative of a value the runtime does not
-   compute. Concretely `init { A = A0   B = A0 - A }` has ∂B/∂A0 = 0 (B is
-   identically 0), but the raw expression differentiates to 1.
+    This is what the gradient of the initial state must differentiate. The
+    raw expression would not do: {!Autodiff} sends [Pop] and [BindingRef] to
+    zero, so [init { A = A0   B = A0 - A }] would give [∂B/∂A0 = 1], although
+    [B] is identically 0.
 
-   A referenced compartment with no init entry closes to [Const 0.0], matching
-   the runtime, where an unseeded compartment starts at 0.
+    A referenced compartment with no init entry closes to [Const 0.0], as an
+    unseeded compartment starts at 0 in the runtime. An entry drawn from a
+    law closes over the law's mean ({!Ir.init_spec_mean_expr}), the value
+    the deterministic ODE path starts from.
 
-   A LAW entry closes over its MEAN expression. `ic_grad` seeds the ODE forward
-   sensitivity, and the ODE path is deterministic: it starts every compartment
-   at [Ir.init_spec_mean_expr]. Closing over anything else would differentiate a
-   value that path never computes. *)
+    Raises [Failure] on a cycle, which {!Validate} reports before the
+    compiler calls this. *)
 let closed (ic : Ir.initial_conditions) ~(bindings : Ir.binding list)
   : (string * Ir.expr) list =
   match topo ic ~bindings with
@@ -144,7 +170,7 @@ let closed (ic : Ir.initial_conditions) ~(bindings : Ir.binding list)
        on validate errors before this pass runs. *)
     failwith "init dependency cycle reached the IC-gradient pass (gh#733)"
   | Ok order ->
-    (* The MEAN expression, for a law: the ODE forward-sensitivity seed
+    (* The mean expression, for a law: the ODE forward-sensitivity seed
        differentiates the value the deterministic path starts from, and that
        path takes each law at its mean. *)
     let entry =

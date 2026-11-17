@@ -1,28 +1,142 @@
-(* Dimensional analysis of an expanded model, as one system of linear
-   equations over integer exponent vectors.
+(** The dimension checker of an expanded model: it infers the physical
+    dimension of every expression and parameter, and reports each place the
+    model's dimensions disagree.
 
-   Base dimensions: P (population, index 0), T (time, index 1). A dimension is
-   an int array of exponents. Dimensions form a free abelian group on the
-   bases, so every rule of inference is linear: a product's dimension is the
-   sum of its factors', a sum's equals each operand's, a static power [a^n] is
-   n times its base's (A. Kennedy, "Dimension types", ESOP 1994, LNCS 788,
-   pp. 348–362).
+    {2 Dimensions as exponent vectors}
 
-   Three pieces:
-   - [Dim_sites.sites] names every expression-bearing position of the model
-     with the dimension its expression must have (its obligation).
-   - [gen] turns each expression into a linear form over dimension variables
-     (one per parameter, table, binding, observation stream, column and
-     quantity), emitting an equation wherever two forms must agree (the
-     operands of +, a function's argument, a branch of a conditional).
-   - [Dim_solve] solves every equation at once, in the order declared facts,
-     then expression structure, then obligations, and reports every
-     contradiction and every integer infeasibility, which become located
-     diagnostics with the code of the position they surface at.
+    A dimension is a product [Pᵃ·Tᵇ] of the two base dimensions, population
+    (P) and time (T), written as its vector of integer exponents [(a, b)]: a
+    count is [(1, 0)], a duration [(0, 1)], a per-capita rate [(0, −1)], a
+    transition's rate in individuals per unit time [(1, −1)], and a pure
+    number [(0, 0)]. Multiplying quantities adds their vectors, so the
+    dimensions form a free abelian group on the bases and every rule of
+    inference is linear in the exponents: a product's dimension is the sum of
+    its factors', the operands of a sum have one dimension, and a power [a^n]
+    with [n] fixed at compile time has [n] times its base's (A. Kennedy,
+    "Dimension types", ESOP 1994, LNCS 788, pp. 348–362). The language
+    specification, section 2.2, states the rules the user sees; this module
+    implements them.
 
-   An operator means the same thing at every position; the positions differ
-   only in their obligation (proposal
-   docs/dev/proposals/2026-11-06-dimension-checking-as-one-constraint-system.md). *)
+    {2 One system of equations for the whole model}
+
+    The checker treats the model as one system of linear equations and
+    solves it at once, so a dimension that follows only from several uses
+    together is still found. Its unknowns are dimension variables: one for
+    each name whose dimension other positions refer to ({!Dim_sites.key}: a
+    parameter or typed constant, a table's cells, a binding, an observation
+    stream's projection, an observation column, a generated quantity and the
+    series it reduces), and one fresh variable for each intermediate result
+    a rule cannot express otherwise (a square root, a fractional power). The
+    dimension of an expression is a {!form}, [Σ cᵥ·xᵥ + k]: integer
+    coefficients on variables plus a constant vector. {!gen} computes it by
+    one walk of the expression and emits an equation wherever two forms must
+    agree:
+
+    - a compartment or sum of compartments is P; [t], [dt] and the anchors
+      [first_obs] and [last_obs] are T; a unit literal and an [unchecked_dim]
+      have the dimension they state; a forcing has its declared dimension; a
+      spline basis function is a pure number;
+    - the operands of [+], [-], [min], [max], [%] and the comparisons are
+      equal (E302), and a comparison is a pure number;
+    - [*] adds forms and [/] subtracts them;
+    - the argument of [exp], [log], [sin], [cos] and [tanh] is a pure number
+      (E301), and so is their result; [abs], [floor], [ceil] and negation
+      keep their argument's dimension;
+    - [sqrt a] is a fresh [x] with [2·x = a] (E304);
+    - in [a ^ e] the exponent is a pure number (E301). When [e] is fixed at
+      compile time (literals, typed constants and arithmetic of them) and is
+      [p/q] in lowest terms with [q ≤ 12], the result [x] satisfies
+      [q·x = p·a]: an integer power scales [a], a fraction needs a fresh
+      variable (E304). Any other exponent makes the base a pure number
+      (E301);
+    - the two branches of a conditional are equal; its condition is walked
+      but constrained to nothing;
+    - an index of a table lookup is a pure number (E311).
+
+    Literals follow the position, not the neighbours. A literal [0] matches
+    any dimension (the {!value} [Any]). Any other literal is a pure number,
+    except that at a position whose {!Dim_sites.literals} is [Whole_terms]
+    (a rate, an initial value, a count) a literal, or a constant expression
+    of literals, that forms a whole additive term takes the position's
+    dimension: [I = 10] is a count.
+
+    The equations come from three sources, which {!Dim_solve} distinguishes
+    as stages. Declared facts come first: a parameter's [dim] clause or else
+    its kind (rate, probability, count, instant, duration), the [dim] clause
+    or kind of a typed constant, a table's cell kind or unit annotation, the
+    dimension of a projection that counts individuals (P) or is a ratio of
+    flows (a pure number), and the kind of an observation's value columns.
+    The structure of each expression comes next, together with the
+    definition of every binding, derived projection and quantity and the
+    reduction rule of each quantity. The obligations of the positions
+    ({!Dim_sites.obligation}) come last: a transition rate must be [P·T⁻¹], an
+    initial value P, and so on. The solver refuses the later of two
+    equations that disagree, so a mistake is normally reported at the
+    position whose requirement it breaks, with that position's code: a
+    per-capita rate written as a transition rate is E300 at the transition,
+    not a complaint about the parameter.
+
+    {2 What is reported}
+
+    Each refused equation becomes one error, worded from its {!eq_kind} and
+    naming up to three other positions whose requirements it conflicts with.
+    A bare number added to, compared with or taken the [min] of a
+    dimensioned operand gets a hint naming the two ways to give the number a
+    dimension: a typed constant or a unit literal. After the solve, a
+    parameter or typed constant whose dimension remains free, and which some
+    model position reads, is an I300 info listing what the model does fix
+    about it. In the model
+
+    {@camdl[
+      time_unit = 'days
+      compartments { S, I, R }
+      parameters {
+        a     : positive
+        b     : positive
+        gamma : rate
+      }
+      transitions {
+        infection : S --> I @ a * b * S * I / (S + I + R)
+        recovery  : I --> R @ gamma * I
+      }
+      init { S = 990  I = 10 }
+    ]}
+
+    neither [a] nor [b] is determined, and each I300 reads
+    [only this is determined: a · b is T^-1]. A system whose only solutions
+    have fractional exponents, such as [(kappa * w)^2 * I] as a rate, is an
+    error at the position whose equation could not be added.
+
+    Priors are checked after the solve and contribute no equation: a prior
+    is a distribution over the number a parameter takes in model units, and
+    its family says nothing about the parameter's dimension. What is checked
+    is each explicit unit literal in a prior's or a bound's argument, which
+    is converted to model units and so is right only in the argument's
+    conventional dimension ({!convention}); a disagreement is E316. A
+    log-normal [mu] or [sigma] that is directly a dimensioned parameter is
+    I316.
+
+    {2 Count noise}
+
+    The [sd] of a normal likelihood on a [count] column must match the
+    column's T exponent, and its P exponent is free, because variance
+    formulas for counts add a term in the count to one in its square. Its
+    site has the obligation [Equals_t], and every equation generated inside
+    it, except those requiring a function's argument to be a pure number, is
+    marked as holding on T alone. When any such equation exists, the
+    system is solved twice, once per base: P without the marked equations,
+    T with all of them. Because the bases decouple, this gives the same
+    answer as one solve when nothing is marked.
+
+    {2 Entry point and guarantees}
+
+    {!check_model} returns a {!result} and changes nothing in the model. An
+    operator means the same thing at every position; positions differ only
+    in their obligation. Every expression-bearing field of the IR is either a
+    site of {!Dim_sites.sites} or deliberately exempt from it, which the
+    build and a test enforce together. Exponent arithmetic is checked, here
+    as in the solver: an exponent outside the native integer range is the
+    single error E310, never a wrapped value. *)
 
 open Ir
 
@@ -162,10 +276,16 @@ let rec expr_to_short_string (e : expr) : string =
 
 (* ── Linear forms ──────────────────────────────────────────────────────── *)
 
-(* A dimension as Σ cᵥ·xᵥ + k: [vars] sorted by variable, no zero
-   coefficients. [Any] is the dimension of the literal 0, which takes any
-   dimension and constrains nothing. *)
+(** The dimension of an expression as a linear form [Σ cᵥ·xᵥ + k] over
+    dimension variables. [vars] pairs each variable with its coefficient,
+    sorted by variable and with no zero coefficient; the operations on forms
+    keep it so, and the type does not enforce it. *)
 type form = { vars : (int * int) list; k : dim_vec }
+
+(** The dimension an expression contributes. [Any] is that of the literal
+    [0], and of a literal standing as a whole term where it takes the
+    position's dimension: it agrees with every dimension and constrains
+    nothing. [F] is an ordinary dimension. *)
 type value = Any | F of form
 
 let const_form v = { vars = []; k = v }
@@ -188,33 +308,41 @@ let form_scale n a =
 
 (* ── Checker state ─────────────────────────────────────────────────────── *)
 
-(* What a diagnostic needs to know about an equation that conflicts. *)
+(** Why an equation was emitted: what a diagnostic needs to say about it if
+    the solver refuses it. *)
 type eq_kind =
-  | Declared_fact
+  | Declared_fact   (** A declared dimension of a name. *)
   | Operands of { op : string; left : form; right : form;
                   literals : string option * string option }
-  (* two forms must agree; [literals]: an operand written as a bare number *)
-  | Function_arg of { fn : string; arg : form }              (* must be dimensionless *)
-  | Even_root of form                                        (* sqrt *)
-  | Obligation_of of { expected : dim_vec; got : form }       (* a site's obligation *)
-  | Definition of { got : form }                              (* Defines key *)
-  | Quantity_reduction
+  (** Two operands that must have one dimension. [op] describes the operator and position; [literals] holds the text of an operand written as a bare number. *)
+  | Function_arg of { fn : string; arg : form }              (** A value that must be a pure number: the argument of a function, an exponent, a base under a non-constant exponent, a table index. *)
+  | Even_root of form                                        (** A square root or fractional power, whose argument's exponents must divide. *)
+  | Obligation_of of { expected : dim_vec; got : form }       (** A position's fixed required dimension. *)
+  | Definition of { got : form }                              (** A position whose expression defines, or must equal, a name's dimension. *)
+  | Quantity_reduction   (** The rule relating a reduced quantity to its series. *)
 
+(** An emitted equation's description: the site it came from (none for a
+    declared fact or a quantity's reduction), the code a refusal reports,
+    and its kind. *)
 type eq_info = { site : Dim_sites.site option; code : string; kind : eq_kind }
 
+(** The checker's state while it generates equations for one model. Each
+    equation is numbered in the order it is emitted; the number is the
+    [site] field of its {!Dim_solve.origin} and the key of its description
+    in [info]. *)
 type state = {
-  constants : (string, float) Hashtbl.t;   (* typed constants' values *)
-  used : (string, unit) Hashtbl.t;   (* parameters read by some model position *)
-  mutable t_only : bool;   (* the site being generated is an [Equals_t] site *)
-  t_only_eqs : (int, unit) Hashtbl.t;   (* equations that hold on T alone *)
+  constants : (string, float) Hashtbl.t;   (** Typed constants' values, for exponents fixed at compile time. *)
+  used : (string, unit) Hashtbl.t;   (** Parameters and constants read by some model position. *)
+  mutable t_only : bool;   (** Whether the site being generated is an [Equals_t] site. *)
+  t_only_eqs : (int, unit) Hashtbl.t;   (** The equations that hold on T alone. *)
   mutable next_var : int;
-  keys     : (Dim_sites.key, int) Hashtbl.t;
-  mutable declared  : Dim_solve.eqn list;   (* each list reversed *)
+  keys     : (Dim_sites.key, int) Hashtbl.t;   (** The variable of each name. *)
+  mutable declared  : Dim_solve.eqn list;   (** Each of the three stage lists is newest first. *)
   mutable structure : Dim_solve.eqn list;
   mutable obligation : Dim_solve.eqn list;
   info     : (int, eq_info) Hashtbl.t;
   mutable next_eq : int;
-  tf_dims  : (string, dim_vec) Hashtbl.t;
+  tf_dims  : (string, dim_vec) Hashtbl.t;   (** Each forcing's declared dimension. *)
 }
 
 let fresh st = let x = st.next_var in st.next_var <- x + 1; x
@@ -229,7 +357,7 @@ let emit st stage ~site ~code kind (f : form) (rhs : dim_vec) =
   let id = st.next_eq in
   st.next_eq <- id + 1;
   Hashtbl.replace st.info id { site; code; kind };
-  (* A count-noise sd (§5.6) frees the P exponent of its sums, powers and
+  (* A count-noise sd frees the P exponent of its sums, powers and
      roots; a function's argument stays dimensionless in every base, since
      the count-noise reasoning says nothing about exp or log of a count. *)
   let t_only = st.t_only && (match kind with Function_arg _ -> false | _ -> true) in
@@ -261,8 +389,8 @@ let kind_dim : param_kind -> dim_vec option = function
   | Rate -> Some (make 0 (-1))
   | Probability -> Some dimensionless
   | Count -> Some population
-  (* Both time kinds are [T] (2026-05-22 calendar-time §6.7); the
-     instant/duration distinction is for rendering, not checking. *)
+  (* Both time kinds are [T]; the instant/duration distinction is for
+     rendering, not checking. *)
   | Instant | Duration -> Some time_dim
   | Positive | Real -> None
 
@@ -380,7 +508,7 @@ let binop st ~site ~code ~what (op : bin_op) ?exponent ?literals l r : value =
        p·dim(base): an integer power scales the base's dimension, and a
        rational one is infeasible unless the exponents divide. Otherwise the
        result would be d^y with y real and changing during a fit, not a
-       dimension at all, so the base must be dimensionless (§5.4). *)
+       dimension at all, so the base must be dimensionless. *)
     (match l with
      | Any -> Any
      | F b ->
@@ -422,8 +550,6 @@ let unop st ~site ~what (op : un_op) (a : value) : value =
          (form_sub (form_scale 2 (var_form x)) f) dimensionless;
        F (var_form x))
 
-(* [term]: [e] is an entire additive term of the site's expression, where a
-   literal takes the position's dimension under [Whole_terms]. *)
 (* The value of an expression fixed at compile time: literals, typed
    constants and arithmetic of them. *)
 let rec static_value st (e : expr) : float option =
@@ -445,6 +571,8 @@ let rec static_value st (e : expr) : float option =
 let literal_text (e : expr) =
   if Dim_sites.is_constant_expr e then Some (expr_to_short_string e) else None
 
+(* [term]: [e] is an entire additive term of the site's expression, where a
+   literal takes the position's dimension under [Whole_terms]. *)
 let rec gen st ~(site : Dim_sites.site) ?(term = false) (e : expr) : value =
   let what = site.role in
   let g = gen st ~site in
@@ -566,15 +694,18 @@ let add_site st (s : Dim_sites.site) =
 
 (* ── Solving ───────────────────────────────────────────────────────────── *)
 
-(* The system decouples by base, so an equation that holds on T alone (count
-   noise, §5.6) is honoured by solving each base on its own: P without those
-   equations, T with every equation. Without one, a single solve over both
-   bases gives the same answer. *)
+(** The solution of the model's system, whether it was solved once over both
+    bases or once per base for count noise. In the per-base case a variable
+    is determined only when both solves determine it, and the conflicts are
+    those of both solves, each equation once, in the order the equations
+    were emitted. *)
 type solved = {
   value     : int -> dim_vec option;
   conflicts : Dim_solve.conflict list;
   relations : int list -> (Dim_solve.relation * int option) list;
-  (* [Some b]: a relation on base b's exponents alone *)
+  (** The relations among the given variables, each with [None] when it
+      holds on both bases at once and [Some b] when it is a relation on base
+      [b]'s exponents alone. *)
 }
 
 let solve_all st (eqs : Dim_solve.eqn list) : solved =
@@ -738,15 +869,24 @@ let render_relation names ((r : Dim_solve.relation), base) =
 
 (* A prior is a measure on the number θ takes in model units; its family
    neither establishes nor restricts θ's dimension, and nothing here emits an
-   equation (proposal §5.9). What is checked is an explicit unit literal: it is
-   converted to model units, and that conversion is right exactly when the
-   literal's dimension is the argument's conventional one. Inside an argument
-   a parameter is a number (a coordinate), so arithmetic on it is free. *)
+   equation. What is checked is an explicit unit literal: it is converted to
+   model units, and that conversion is right exactly when the literal's
+   dimension is the argument's conventional one. *)
 
+(** What the unit literals in a term of a prior's argument assert about its
+    dimension. Inside a prior argument a parameter is a number in model
+    units (a coordinate), so arithmetic on it is free and asserts nothing.
+
+    {@camdl[
+      parameters {
+        gamma : rate ~ normal(mu = 0.2 'per_day, sigma = 0.05 'per_day)   # Units
+        rho   : probability ~ beta(alpha = 2, beta = 2)                    # Bare
+      }
+    ]} *)
 type prior_value =
-  | Bare                (* bare numbers only: a coordinate, no claim *)
-  | Units of dim_vec    (* determined by unit literals alone *)
-  | Coord               (* depends on a parameter or a function's value *)
+  | Bare                (** Bare numbers only: no claim about the dimension. *)
+  | Units of dim_vec    (** A dimension fixed by unit literals alone. *)
+  | Coord               (** A value that depends on a parameter, a function or another runtime value: no claim. *)
 
 (* [report a b]: explicit units [a] and [b] disagree inside one argument. *)
 let rec prior_value ~report (e : expr) : prior_value =
@@ -780,7 +920,13 @@ let rec prior_value ~report (e : expr) : prior_value =
   | TableLookup _ | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ | ObsAnchor _
   | ForcingBasis _ -> Coord
 
-(* The dimension an argument has in a unit-aware reading of the family. *)
+(** The dimension a prior argument has in a unit-aware reading of its family,
+    relative to the parameter θ it is a prior on: [One] a pure number,
+    [Theta] θ's dimension, [Inv_theta] its inverse. A normal's [mu] is
+    [Theta], an exponential's [rate] [Inv_theta], and a log-normal's [mu]
+    and [sigma], the mean and standard deviation of ln θ, are [One]. An
+    argument of a family the function {!convention} does not list has no
+    convention, and its unit literals are checked only against each other. *)
 type convention = One | Theta | Inv_theta
 
 let convention family arg =
