@@ -1445,18 +1445,18 @@ pub fn run_method(
         }
     }
 
+    // gh#890: chains that began at one point agree by construction, so no
+    // R̂ over them is a verdict — `fit summary` reports it as not assessed
+    // (proposal 2026-09-08 §3.4) and this block, printed at the end of the
+    // same run, has to say the same thing rather than a number and a glyph.
+    // Same predicate as the read side (`method_result::point_start`): a
+    // point rule, two chains or more.
+    let withheld = (n_chains > 1 && starts.rule.is_point()).then(|| {
+        score::convergence::ConvergenceError::PointStart {
+            n_chains, starts: starts.rule.spelled(),
+        }
+    });
     if n_chains > 1 {
-        // gh#890: chains that began at one point agree by construction, so no
-        // R̂ over them is a verdict — `fit summary` reports it as not assessed
-        // (proposal 2026-09-08 §3.4) and this block, printed at the end of the
-        // same run, has to say the same thing rather than a number and a glyph.
-        // Same predicate as the read side (`method_result::point_start`): a
-        // point rule, two chains or more.
-        let withheld = starts.rule.is_point().then(|| {
-            score::convergence::ConvergenceError::PointStart {
-                n_chains, starts: starts.rule.spelled(),
-            }
-        });
         // RHAT_REPORT_THRESHOLD is unchanged from the value this method has
         // always applied; only the STATISTIC it is applied to changed (gh#84).
         // The table is drawn at the end of the run, from the summary written
@@ -1670,7 +1670,7 @@ pub fn run_method(
         .collect();
     let saved_paths = SavedPathCounts::measure(&retained_sweeps, &saved_sweeps);
     write_summary(method_dir, &all_results, kernel, thin, elapsed.as_secs_f64(), &traj_plan, &saved_paths,
-        n_trajectories, &diagnostics, chain_logliks.as_ref(), path_renewal.as_ref(),
+        n_trajectories, &diagnostics, withheld.as_ref(), chain_logliks.as_ref(), path_renewal.as_ref(),
         filter_ess.as_ref().map(|fe| &fe.summary), latent_convergence.as_ref())?;
 
     // No-op resume: every chain already reached the target sweep count
@@ -2311,6 +2311,7 @@ fn write_summary(
     saved_paths: &SavedPathCounts,
     n_trajectories: usize,
     diagnostics: &MethodConvergence,
+    withheld: Option<&score::convergence::ConvergenceError>,
     chain_logliks: Option<&super::chain_diagnostics::ChainLoglikAgreement>,
     path_renewal: Option<&super::path_renewal::PathRenewal>,
     filter_ess: Option<&super::filter_ess::FilterEss>,
@@ -2387,7 +2388,7 @@ fn write_summary(
     // Every convergence key comes from one producer, so a statistic cannot be
     // live in this summary and silently absent from pmmh's or nuts's.
     summary.as_object_mut().expect("json! built an object")
-        .extend(diagnostics.summary_fields());
+        .extend(diagnostics.summary_fields(withheld));
     super::chain_diagnostics::insert_agreement(&mut summary, chain_logliks)?;
 
     let path = dir.join(crate::run_meta::FitAlgorithm::Pgas.summary_filename());

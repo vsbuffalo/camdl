@@ -3207,6 +3207,12 @@ use score::convergence::{ConvergenceError, RhatRefusal};
 /// `method_result::ConvergenceMaps`.
 pub const FROZEN_CHAINS_KEY: &str = "frozen_chains";
 
+/// The `*_summary.json` key holding each parameter's R̂ band
+/// (`converged`, `not_converged`, `severe` or `not_assessed`), written by
+/// [`MethodConvergence::summary_fields`] for readers outside camdl. camdl's
+/// own readers derive the band from the numbers and do not read this key.
+pub const RHAT_BAND_KEY: &str = "rhat_band";
+
 impl MethodConvergence {
     /// Score each `(param name, chains[chain][draw])` pair. Order is preserved
     /// — callers pass their estimated params in declaration order and the
@@ -3327,7 +3333,14 @@ impl MethodConvergence {
     /// absent from another's — the divergence [`MethodConvergence`] exists to
     /// prevent, and which three hand-written `json!` blocks reintroduced.
     /// [`crate::fit::method_result::ConvergenceMaps`] is the matching reader.
-    pub fn summary_fields(&self) -> serde_json::Map<String, serde_json::Value> {
+    ///
+    /// `withheld` is the refusal the run's R̂ is withheld for (a point start,
+    /// gh#890), or `None`. It changes only `rhat_band`: the R̂ numbers are kept
+    /// for anyone who wants them, and a reader withholds them again on read.
+    pub fn summary_fields(
+        &self,
+        withheld: Option<&ConvergenceError>,
+    ) -> serde_json::Map<String, serde_json::Value> {
         let mut m = serde_json::Map::new();
         let mut put = |k: &str, v: serde_json::Value| {
             m.insert(k.to_string(), v);
@@ -3342,6 +3355,21 @@ impl MethodConvergence {
         put("ess_tail", serde_json::json!(self.ess_tail()));
         put("ess_per_chain", serde_json::json!(self.ess_per_chain()));
         put(FROZEN_CHAINS_KEY, serde_json::json!(self.frozen));
+        // gh#1199: camdl's verdict on each parameter's R̂, by name. Read back
+        // from the keys above the way every reader of the summary reads them
+        // (`ConvergenceMaps`), so the band is the one the method report and
+        // the end-of-run table give for the same leaf.
+        let mut per_param =
+            crate::fit::method_result::ConvergenceMaps::read(&serde_json::Value::Object(m.clone()))
+                .per_param();
+        if let Some(why) = withheld {
+            for p in per_param.values_mut() {
+                p.withhold_rhat(why.clone());
+            }
+        }
+        let bands: BTreeMap<String, score::convergence::RhatBand> =
+            per_param.iter().map(|(n, p)| (n.clone(), p.rhat_band())).collect();
+        m.insert(RHAT_BAND_KEY.to_string(), serde_json::json!(bands));
         m
     }
 
@@ -6018,8 +6046,8 @@ dt = 1.0
         // A finding bar below the certification bar is the case where the
         // two could disagree: the glyph must then follow the finding.
         assert_eq!(
-            score::convergence::RhatBand::Converged.glyph_with_finding(true),
-            score::convergence::RhatBand::NotConverged.glyph(),
+            score::convergence::RhatBand::Converged.with_finding(true),
+            score::convergence::RhatBand::NotConverged,
             "a parameter that draws a finding must not print green");
     }
 
@@ -6058,7 +6086,7 @@ dt = 1.0
     /// (`PosteriorDiagnostics::demote_point_start`).
     fn run_table(conv: &MethodConvergence, withheld: Option<&ConvergenceError>) -> String {
         use crate::fit::method_result::{ConvergenceMaps, PosteriorDiagnostics};
-        let summary = serde_json::Value::Object(conv.summary_fields());
+        let summary = serde_json::Value::Object(conv.summary_fields(None));
         let n_samples = conv.iter().find_map(|(_, d)| d.rank().map(|r| r.n_draws_total)).unwrap_or(0);
         let maps = ConvergenceMaps::read(&summary);
         let mut diag = PosteriorDiagnostics {
@@ -6147,7 +6175,7 @@ dt = 1.0
         assert!(conv.is_frozen(9) && (1..=8).all(|c| !conv.is_frozen(c)),
             "the frozen chain is named by its own number, and only it");
 
-        let summary = serde_json::Value::Object(conv.summary_fields());
+        let summary = serde_json::Value::Object(conv.summary_fields(None));
         assert_eq!(summary["frozen_chains"], serde_json::json!([9]), "{summary}");
         let maps = ConvergenceMaps::read(&summary);
         let diag = PosteriorDiagnostics {
@@ -6161,7 +6189,7 @@ dt = 1.0
         // chain, which is not the same as recording nothing.
         let moving = eight_moving_chains();
         let conv = MethodConvergence::compute(&chain_ids(&moving), [("beta".to_string(), moving)]);
-        let summary = serde_json::Value::Object(conv.summary_fields());
+        let summary = serde_json::Value::Object(conv.summary_fields(None));
         assert_eq!(summary["frozen_chains"], serde_json::json!([]), "{summary}");
         assert_eq!(ConvergenceMaps::read(&summary).frozen_chains(), Some(Vec::new()));
         // A summary written before the key existed records nothing.
@@ -6227,6 +6255,31 @@ dt = 1.0
             out.contains("rank-normalized"),
             "and which statistic that is:\n{out}"
         );
+    }
+
+    /// gh#1199: the summary saves each parameter's band by name, the one the
+    /// end-of-run table glyphs from the same summary. A point start withholds
+    /// it there too, though the R̂ numbers stay in the file.
+    #[test]
+    fn the_summary_saves_each_parameters_rhat_band() {
+        let converged = offset_chains(0.0);
+        let gap = offset_chains(0.09);
+        let conv = MethodConvergence::compute(&chain_ids(&gap), [
+            ("alpha".to_string(), converged),
+            ("beta".to_string(), gap),
+        ]);
+        let summary = serde_json::Value::Object(conv.summary_fields(None));
+        assert_eq!(summary[RHAT_BAND_KEY],
+            serde_json::json!({"alpha": "converged", "beta": "not_converged"}), "{summary}");
+        let table = run_table(&conv, None);
+        assert!(table.lines().any(|l| l.contains("alpha") && l.contains('✓')), "{table}");
+        assert!(table.lines().any(|l| l.contains("beta") && l.contains('~')), "{table}");
+
+        let withheld = ConvergenceError::PointStart { n_chains: 4, starts: "from_mle @scout".into() };
+        let point = serde_json::Value::Object(conv.summary_fields(Some(&withheld)));
+        assert_eq!(point[RHAT_BAND_KEY],
+            serde_json::json!({"alpha": "not_assessed", "beta": "not_assessed"}), "{point}");
+        assert_eq!(point["rhat"], summary["rhat"], "the numbers are kept");
     }
 
     /// gh#890: one run, one answer about R̂.

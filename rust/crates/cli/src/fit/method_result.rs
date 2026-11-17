@@ -300,17 +300,7 @@ impl PosteriorDiagnostics {
     pub fn demote_point_start(&mut self, n_chains: usize, starts: &str) {
         let refusal = ConvergenceError::PointStart { n_chains, starts: starts.to_string() };
         for entry in self.per_param.values_mut() {
-            if let ParamConvergence::Scored {
-                rhat, rhat_bulk, rhat_folded, rhat_classic, all_chains_frozen, rhat_withheld, ..
-            } = entry
-            {
-                *rhat = Stat::Undefined;
-                *rhat_bulk = Stat::Undefined;
-                *rhat_folded = Stat::Undefined;
-                *rhat_classic = Stat::Undefined;
-                *all_chains_frozen = false;
-                *rhat_withheld = Some(refusal.clone());
-            }
+            entry.withhold_rhat(refusal.clone());
         }
     }
 

@@ -310,8 +310,15 @@ impl Stat {
 ///
 /// A sum type because the two cases have disjoint payloads: there is no R̂ to
 /// hold when the reason it is missing is the thing being reported.
+///
+/// Serialized as its fields plus `rhat_band`, the verdict
+/// [`ParamConvergence::rhat_band`] gives (`converged`, `not_converged`,
+/// `severe` or `not_assessed`), so a reader of the JSON takes camdl's verdict
+/// rather than re-deriving it from the thresholds. The band is derived, never
+/// stored: reading ignores it and the next write derives it again, so a stored
+/// band cannot disagree with the numbers beside it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
+#[serde(remote = "Self", tag = "state", rename_all = "snake_case")]
 pub enum ParamConvergence {
     /// The estimator ran. Individual statistics may still be `Infinite` or
     /// `Undefined`; each says so for itself.
@@ -380,6 +387,33 @@ pub enum ParamConvergence {
 /// stored has no value, which is `Undefined`, not zero.
 fn undefined_stat() -> Stat {
     Stat::Undefined
+}
+
+impl Serialize for ParamConvergence {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        /// The derived fields, written by the `remote = "Self"` derive.
+        struct Fields<'a>(&'a ParamConvergence);
+        impl Serialize for Fields<'_> {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                ParamConvergence::serialize(self.0, s)
+            }
+        }
+        #[derive(Serialize)]
+        struct WithBand<'a> {
+            #[serde(flatten)]
+            fields: Fields<'a>,
+            rhat_band: RhatBand,
+        }
+        WithBand { fields: Fields(self), rhat_band: self.rhat_band() }.serialize(s)
+    }
+}
+
+/// Reads the fields the derive names. A `rhat_band` key is ignored: the band
+/// is derived from the numbers, not read.
+impl<'de> Deserialize<'de> for ParamConvergence {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        ParamConvergence::deserialize(d)
+    }
 }
 
 impl ParamConvergence {
@@ -482,6 +516,55 @@ impl ParamConvergence {
                  marginal".to_string(),
             ),
             Self::Scored { .. } => None,
+        }
+    }
+
+    /// Withhold this parameter's R̂ for `why`, a property of how the chains
+    /// were started (a point start, proposal 2026-09-08 §3.4): the four R̂
+    /// fields become `Undefined` and the refusal is carried, while the ESS is
+    /// kept. A parameter the estimator refused for its own reason keeps that
+    /// reason.
+    pub fn withhold_rhat(&mut self, why: ConvergenceError) {
+        if let Self::Scored {
+            rhat, rhat_bulk, rhat_folded, rhat_classic, all_chains_frozen, rhat_withheld, ..
+        } = self
+        {
+            *rhat = Stat::Undefined;
+            *rhat_bulk = Stat::Undefined;
+            *rhat_folded = Stat::Undefined;
+            *rhat_classic = Stat::Undefined;
+            *all_chains_frozen = false;
+            *rhat_withheld = Some(why);
+        }
+    }
+
+    /// The convergence band this parameter's R̂ falls in: the one verdict the
+    /// end-of-run R̂ table glyphs (`report::render::rhat_run_table` in `cli`)
+    /// and the one every artifact saves as `rhat_band`, so the printed glyph
+    /// and the saved name cannot disagree.
+    ///
+    /// - Not scored, or R̂ withheld for how the chains were started (a point
+    ///   start): `NotAssessed`; there is no R̂ to band.
+    /// - Every chain frozen at its own value with R̂ undefined: `Severe`, the
+    ///   0%-acceptance deadlock, which is the worst answer rather than none.
+    /// - Otherwise [`RhatBand::of`] on the R̂ (`+∞` is `Severe`, undefined is
+    ///   `NotAssessed`), never greener than the `RhatHigh` finding
+    ///   [`RHAT_REPORT_THRESHOLD`] draws on the same number
+    ///   ([`RhatBand::with_finding`]).
+    pub fn rhat_band(&self) -> RhatBand {
+        match self {
+            Self::NotScored { .. } | Self::Scored { rhat_withheld: Some(_), .. } => {
+                RhatBand::NotAssessed
+            }
+            Self::Scored { rhat: Stat::Undefined, all_chains_frozen: true, .. } => RhatBand::Severe,
+            Self::Scored { rhat, .. } => {
+                let r = match *rhat {
+                    Stat::Value(v) => v,
+                    Stat::Infinite => f64::INFINITY,
+                    Stat::Undefined => f64::NAN,
+                };
+                RhatBand::of(r).with_finding(r > RHAT_REPORT_THRESHOLD)
+            }
         }
     }
 
@@ -598,18 +681,18 @@ impl RhatBand {
         }
     }
 
-    /// The glyph, never greener than a drawn finding allows.
+    /// The band, never greener than a drawn finding allows.
     ///
-    /// `drew_finding` is `R̂ > RHAT_REPORT_THRESHOLD` at the call site. The two
-    /// thresholds are independent knobs, and if the finding bar is ever set
-    /// BELOW the certification bar — gh#84's open 1.01 candidate would do
-    /// exactly that — a parameter could print green beside an error-level
-    /// finding drawn on the same number. Demoting here makes that
-    /// unrepresentable rather than a coincidence of the current constants.
-    pub fn glyph_with_finding(self, drew_finding: bool) -> &'static str {
+    /// `drew_finding` is `R̂ > RHAT_REPORT_THRESHOLD`. The two thresholds are
+    /// independent knobs, and if the finding bar is ever set BELOW the
+    /// certification bar — gh#84's open 1.01 candidate would do exactly that —
+    /// a parameter could print green beside an error-level finding drawn on
+    /// the same number. Demoting here makes that unrepresentable rather than a
+    /// coincidence of the current constants.
+    pub fn with_finding(self, drew_finding: bool) -> Self {
         match (self, drew_finding) {
-            (Self::Converged, true) => Self::NotConverged.glyph(),
-            _ => self.glyph(),
+            (Self::Converged, true) => Self::NotConverged,
+            _ => self,
         }
     }
 }
@@ -844,6 +927,75 @@ mod tests {
         assert_eq!(Stat::Infinite.cell(3, "—"), "∞");
         assert_eq!(Stat::Undefined.cell(3, "—"), "—");
         assert_eq!(Stat::Value(1.0295).cell(3, "—"), "1.030");
+    }
+
+    /// A scored parameter with headline R̂ `rhat`, every chain frozen or not.
+    fn scored_at(rhat: f64, all_chains_frozen: bool) -> ParamConvergence {
+        ParamConvergence::Scored {
+            rhat: Stat::from_f64(rhat),
+            rhat_bulk: Stat::from_f64(rhat), rhat_folded: Stat::Undefined,
+            rhat_classic: Stat::from_f64(rhat),
+            ess_bulk: Stat::Value(200.0), ess_tail: Stat::Value(150.0),
+            ess_per_chain: Vec::new(), all_chains_frozen, rhat_withheld: None,
+        }
+    }
+
+    /// gh#1199: the band in every state a parameter can be in. The two
+    /// non-finite R̂ are different answers: `+∞` is the worst one, `NaN` none.
+    #[test]
+    fn rhat_band_covers_every_state() {
+        assert_eq!(scored_at(1.01, false).rhat_band(), RhatBand::Converged);
+        assert_eq!(scored_at(1.2, false).rhat_band(), RhatBand::NotConverged);
+        assert_eq!(scored_at(RHAT_SEVERE_THRESHOLD, false).rhat_band(), RhatBand::Severe);
+        assert_eq!(scored_at(f64::INFINITY, false).rhat_band(), RhatBand::Severe);
+        assert_eq!(scored_at(f64::NAN, false).rhat_band(), RhatBand::NotAssessed);
+        // The summary keeps no number for a frozen R̂: `Undefined` beside the
+        // flag is the deadlock, not "no answer".
+        assert_eq!(scored_at(f64::NAN, true).rhat_band(), RhatBand::Severe);
+        let mut withheld = scored_at(1.01, false);
+        if let ParamConvergence::Scored { rhat_withheld, .. } = &mut withheld {
+            *rhat_withheld = Some(ConvergenceError::PointStart {
+                n_chains: 4, starts: "the declared start".into() });
+        }
+        assert_eq!(withheld.rhat_band(), RhatBand::NotAssessed);
+        let refused =
+            ParamConvergence::NotScored { reason: RhatRefusal::TooFewChains, detail: None };
+        assert_eq!(refused.rhat_band(), RhatBand::NotAssessed);
+    }
+
+    /// gh#1199: the saved band is a plain name, and a non-finite R̂ keeps its
+    /// band through the trip to JSON and back — `+∞` stays `severe`, `NaN`
+    /// stays `not_assessed` — although `serde_json` writes neither number.
+    #[test]
+    fn rhat_band_is_saved_and_survives_a_round_trip() {
+        for (rhat, want) in [
+            (1.01, "converged"),
+            (1.2, "not_converged"),
+            (2.0, "severe"),
+            (f64::INFINITY, "severe"),
+            (f64::NAN, "not_assessed"),
+        ] {
+            let original = scored_at(rhat, false);
+            let json = serde_json::to_value(&original).expect("serializes");
+            assert_eq!(json["rhat_band"], want, "R̂ {rhat}: {json}");
+            assert_eq!(json["state"], "scored", "the derived fields are all still there: {json}");
+            let back: ParamConvergence = serde_json::from_value(json.clone()).expect("reads back");
+            assert_eq!(back, original, "R̂ {rhat}: {json}");
+            assert_eq!(serde_json::to_value(&back).unwrap()["rhat_band"], want, "R̂ {rhat}");
+        }
+        let refused =
+            ParamConvergence::NotScored { reason: RhatRefusal::TooFewChains, detail: None };
+        assert_eq!(serde_json::to_value(&refused).unwrap()["rhat_band"], "not_assessed");
+    }
+
+    /// The band is derived, not read: a stored band that disagrees with the
+    /// numbers beside it does not survive the next read.
+    #[test]
+    fn a_stored_rhat_band_is_not_believed() {
+        let mut json = serde_json::to_value(scored_at(2.0, false)).unwrap();
+        json["rhat_band"] = "converged".into();
+        let back: ParamConvergence = serde_json::from_value(json).expect("reads");
+        assert_eq!(back.rhat_band(), RhatBand::Severe);
     }
 
     /// Every non-reporting state carries a reason a reader can act on. A blank

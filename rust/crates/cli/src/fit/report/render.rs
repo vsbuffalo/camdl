@@ -299,13 +299,13 @@ fn stat_f64(s: Stat) -> f64 {
 /// certification glyph and its ESS against the draws; under any parameter not
 /// certified converged, the two halves of its R̂ and each chain's ESS.
 ///
-/// The glyph is the certification band `fit summary` uses (`RhatBand`), never
-/// greener than the finding `RHAT_REPORT_THRESHOLD` draws. When the run's
-/// shape withholds R̂ — every chain started at one point (gh#890) — the table
-/// says so and shows the ESS alone: no number, no glyph, no decomposition.
+/// The glyph is the parameter's band ([`ParamConvergence::rhat_band`]), never
+/// greener than the finding `RHAT_REPORT_THRESHOLD` draws, and the same band
+/// the artifacts save as `rhat_band`. When the run's shape withholds R̂ —
+/// every chain started at one point (gh#890) — the table says so and shows the
+/// ESS alone: no number, no glyph, no decomposition.
 pub(crate) fn rhat_run_table(diag: &PosteriorDiagnostics) -> Vec<Line> {
     use score::convergence::{ParamConvergence, RhatBand, RHAT_CONVERGED_THRESHOLD};
-    use score::convergence::RHAT_REPORT_THRESHOLD;
     let withheld = diag.per_param.values().find_map(|p| match p {
         ParamConvergence::Scored { rhat_withheld: Some(e), .. } => Some(e),
         _ => None,
@@ -336,14 +336,14 @@ pub(crate) fn rhat_run_table(diag: &PosteriorDiagnostics) -> Vec<Line> {
         // Every chain frozen at its own value has no finite R̂, and the
         // summary records it as that refusal rather than as a number: the
         // worst band, with no number to print.
-        let (r_text, band, drew_finding) = match (*rhat, *all_chains_frozen) {
-            (Stat::Undefined, true) => ("—".to_string(), RhatBand::Severe, true),
-            (stat, _) => {
-                let r = stat_f64(stat);
-                (format!("{r:.3}"), RhatBand::of(r), r > RHAT_REPORT_THRESHOLD)
-            }
+        let r_text = match (*rhat, *all_chains_frozen) {
+            (Stat::Undefined, true) => "—".to_string(),
+            (stat, _) => format!("{:.3}", stat_f64(stat)),
         };
-        let glyph = match band.glyph_with_finding(drew_finding) {
+        // The band every artifact saves as `rhat_band`: one function, so the
+        // glyph printed here and the name saved there cannot disagree.
+        let band = p.rhat_band();
+        let glyph = match band.glyph() {
             "✓" => Span::styled("✓", Style::Ok),
             "~" => Span::styled("~", Style::Warn),
             "✗" => Span::styled("✗", Style::Err),
@@ -356,7 +356,7 @@ pub(crate) fn rhat_run_table(diag: &PosteriorDiagnostics) -> Vec<Line> {
         ]));
         // The decomposition follows the glyph, not the finding: it is the
         // "so what do I do" line for anything not certified converged.
-        if band != RhatBand::Converged || drew_finding {
+        if band != RhatBand::Converged {
             if let Some(driver) = p.rhat_driver() {
                 out.push(plain(format!(
                     "  {:12}   R̂ = max(bulk {:.3}, folded {:.3}), classic {}; \
@@ -2056,6 +2056,63 @@ pub(crate) fn worst_rhat_param(diag: &PosteriorDiagnostics) -> Option<(&str, f64
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// gh#1199: the glyph the end-of-run R̂ table prints beside a parameter and
+    /// the `rhat_band` the artifacts save for it are one verdict. The saved
+    /// name is read from the serialized diagnostics, as camdl-scope reads it,
+    /// and mapped to the glyph a reader would expect; every state a parameter
+    /// can be in is covered, a point start included.
+    #[test]
+    fn the_printed_rhat_glyph_and_the_saved_rhat_band_agree() {
+        use score::convergence::{ParamConvergence, RhatRefusal, Stat};
+        let scored = |rhat: Stat, all_chains_frozen: bool| ParamConvergence::Scored {
+            rhat, rhat_bulk: rhat, rhat_folded: Stat::Undefined, rhat_classic: rhat,
+            ess_bulk: Stat::Value(200.0), ess_tail: Stat::Value(150.0),
+            ess_per_chain: Vec::new(), all_chains_frozen, rhat_withheld: None,
+        };
+        let diag = |per_param: BTreeMap<String, ParamConvergence>| PosteriorDiagnostics {
+            per_param, n_samples: 400, thin: 1, wall_time_secs: None, n_chains: 4,
+            frozen_chains: None, chain_logliks: None,
+        };
+        let mixed = diag(BTreeMap::from([
+            ("p_converged".into(), scored(Stat::Value(1.01), false)),
+            ("p_not_converged".into(), scored(Stat::Value(1.2), false)),
+            ("p_severe".into(), scored(Stat::Value(2.0), false)),
+            ("p_infinite".into(), scored(Stat::Infinite, false)),
+            ("p_frozen".into(), scored(Stat::Undefined, true)),
+            ("p_undefined".into(), scored(Stat::Undefined, false)),
+            ("p_refused".into(),
+                ParamConvergence::NotScored { reason: RhatRefusal::TooFewChains, detail: None }),
+        ]));
+        let mut point = diag(BTreeMap::from([
+            ("p_point".into(), scored(Stat::Value(1.01), false)),
+        ]));
+        point.demote_point_start(4, "the declared start");
+
+        let mut seen = std::collections::BTreeSet::new();
+        for d in [&mixed, &point] {
+            let saved = serde_json::to_value(d).expect("serializes");
+            let lines: Vec<String> = rhat_run_table(d).iter().map(Line::text).collect();
+            for name in d.per_param.keys() {
+                let band = saved["per_param"][name]["rhat_band"].as_str()
+                    .unwrap_or_else(|| panic!("no rhat_band for {name}: {saved}"));
+                seen.insert(band.to_string());
+                let row = lines.iter().find(|l| l.starts_with(&format!("  {name} ")))
+                    .unwrap_or_else(|| panic!("no row for {name}: {lines:#?}"));
+                let printed: Vec<&str> =
+                    ["✓", "~", "✗"].into_iter().filter(|g| row.contains(g)).collect();
+                let expected: Vec<&str> = match band {
+                    "converged" => vec!["✓"],
+                    "not_converged" => vec!["~"],
+                    "severe" => vec!["✗"],
+                    "not_assessed" => vec![],
+                    other => panic!("{name}: unknown band `{other}`"),
+                };
+                assert_eq!(printed, expected, "{name} saved `{band}` but printed: {row}");
+            }
+        }
+        assert_eq!(seen.len(), 4, "every band is exercised: {seen:?}");
+    }
 
     #[test]
     fn one_row_per_chain_with_its_warmup() {

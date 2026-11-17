@@ -914,15 +914,15 @@ pub fn run_method(
         }
     }
 
+    // gh#890, as pgas: a point start makes the between-chain statistic
+    // uninformative, `fit summary` reports it as not assessed, and this
+    // block says the same rather than a number the summary declines.
+    let withheld = (n_chains > 1 && starts.rule.is_point()).then(|| {
+        score::convergence::ConvergenceError::PointStart {
+            n_chains, starts: starts.rule.spelled(),
+        }
+    });
     if n_chains > 1 {
-        // gh#890, as pgas: a point start makes the between-chain statistic
-        // uninformative, `fit summary` reports it as not assessed, and this
-        // block says the same rather than a number the summary declines.
-        let withheld = starts.rule.is_point().then(|| {
-            score::convergence::ConvergenceError::PointStart {
-                n_chains, starts: starts.rule.spelled(),
-            }
-        });
         // RHAT_REPORT_THRESHOLD is unchanged from the value this method has
         // always applied; only the STATISTIC it is applied to changed (gh#84).
         // The table is drawn at the end of the run, from the summary written
@@ -1016,7 +1016,7 @@ pub fn run_method(
     } else {
         crate::run_meta::FitAlgorithm::Pmmh
     };
-    write_summary(method_dir, &results, &config, &diagnostics, chain_logliks.as_ref(), algo, &warmup, &plan, &cost)?;
+    write_summary(method_dir, &results, &config, &diagnostics, withheld.as_ref(), chain_logliks.as_ref(), algo, &warmup, &plan, &cost)?;
 
     // Write fit_state.toml
     let mut start_values = std::collections::BTreeMap::new();
@@ -1308,6 +1308,7 @@ fn write_summary(
     results: &[(usize, PMMHResult)],
     config: &FitRunConfig,
     diagnostics: &MethodConvergence,
+    withheld: Option<&score::convergence::ConvergenceError>,
     chain_logliks: Option<&super::chain_diagnostics::ChainLoglikAgreement>,
     algo: crate::run_meta::FitAlgorithm,
     warmup: &[ChainWarmup],
@@ -1354,7 +1355,7 @@ fn write_summary(
     // Every convergence key comes from one producer, so a statistic cannot be
     // live in this summary and silently absent from pgas's or nuts's.
     summary.as_object_mut().expect("json! built an object")
-        .extend(diagnostics.summary_fields());
+        .extend(diagnostics.summary_fields(withheld));
     super::chain_diagnostics::insert_agreement(&mut summary, chain_logliks)?;
 
     let path = dir.join(algo.summary_filename());

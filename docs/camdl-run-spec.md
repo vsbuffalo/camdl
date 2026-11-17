@@ -5669,6 +5669,22 @@ A sampler leaf (PGAS, PMMH, MH) additionally holds:
 | `<algorithm>_summary.json`  | `pgas_summary.json`, `pmmh_summary.json`, `mh_summary.json` — one file per algorithm, deliberately never shared; each names its algorithm under `method` and carries `schema = "camdl.fit-summary/v2"`, which every reader requires                                                                                                                                                                      |
 | `diagnostics.json`          | R̂ / ESS / divergence diagnostics, and one `bad_init` record per refused chain — see below                                                                                                                                                                                                                                                                                                                |
 
+**Each parameter's R̂ verdict** (gh#1199) is saved by name under `rhat_band` in
+the sampler summary, keyed by parameter like `rhat`, so a reader takes camdl's
+verdict instead of re-applying its thresholds. The value is one of `converged`
+(R̂ below 1.05), `not_converged` (1.05 up to 1.5), `severe` (1.5 or more, or
+`+∞`, which is what every chain frozen at its own value gives), or
+`not_assessed` (no R̂ to judge: the estimator refused the parameter, R̂ is
+undefined, or the chains all started at one point). It is the band the
+end-of-run R̂ table prints as ✓, ~, ✗ or no mark, from the same function, and it
+is never greener than an `rhat_high` finding drawn on the same number. The same
+field sits beside each parameter's numbers under
+`method_result.diagnostics.per_param` in the method's report
+(`fit summary
+--format json`, and the `method_report` line of `events.jsonl`,
+§10.11). camdl's own readers derive the band from the numbers rather than
+reading it back.
+
 **A chain that took no step after burn-in** (gh#1032) is one whose retained
 draws are all one parameter vector: every estimated parameter has the same value
 in every retained draw. Its draws are a point mass at wherever the chain stood
