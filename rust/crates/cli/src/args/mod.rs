@@ -1766,7 +1766,9 @@ pub struct PfilterArgs {
     /// Write final particle states to this TSV. Under a `--fit` config's
     /// `holdout_after`, the run binds only the training rows (those ending at
     /// or before the cutoff) and saves the state at their end; its
-    /// log-likelihood then covers the training rows only (gh#1138).
+    /// log-likelihood and every other output then cover the training rows
+    /// only, and `--score-from` is refused beside a cut that dropped rows
+    /// (gh#1138).
     #[arg(long)]
     pub save_final_state: Option<PathBuf>,
 
