@@ -293,7 +293,9 @@ let test_value_at_calendar_offset_rejected_under_origin () =
     simulate { from = 0 'days  to = 100 'days }
     quantities { bad = value_at(I, last_obs + 6 'months) }
   |} in
-  compile_expect_error_code ~code:"E321" ~contains:"instant" src
+  compile_expect_error_code ~code:"E321"
+    ~contains:"cannot move `last_obs`, an observation anchor, whose date is known only when the model runs"
+    src
 
 (* `last_obs` is intercepted ONLY inside value_at's second argument; anywhere
    else it stays an unknown identifier (cannot leak into dynamics). *)

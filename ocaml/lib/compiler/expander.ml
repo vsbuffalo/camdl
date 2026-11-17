@@ -5721,6 +5721,264 @@ let rec mentions_calendar_unit = function
   | EBinOp (_, a, b) -> mentions_calendar_unit a || mentions_calendar_unit b
   | _ -> false
 
+let time_env ctx =
+  Time_typing.env_of_ctx ~let_tbl:ctx.let_tbl ~param_decls:ctx.param_decls
+    ~origin_set:(ctx.origin <> None)
+
+(* The affine day-equivalent of a calendar duration, for the hints that offer a
+   fixed span. Folded from the literal, so `5 'years` suggests 1826 days and
+   `5 'months` suggests 152 (gh#843) — a fixed suggestion silently understates
+   a year-valued offset 12-fold, and the model it produces compiles and runs.
+
+   Folds without emitting: `resolve_float_expr` reports E401 on a non-constant,
+   and a hint must not manufacture a second diagnostic. `let` bindings are
+   followed so the laundered form (`let d = 6 'months`) is suggested as
+   precisely as the literal.
+
+   Returns the duration that was folded alongside its day count, so a laundered
+   offset reports `(≈ 6 'months)` rather than `(≈ d)`; the parenthetical exists
+   so a reader can check the conversion, which the binding's name does not let
+   them do. *)
+let rec calendar_span_days ctx e =
+  match e with
+  | EIdent (name, _) ->
+    (match Hashtbl.find_opt ctx.let_tbl name with
+     | Some lb when not (Hashtbl.mem ctx.cyclic_lets name) -> calendar_span_days ctx lb.lbody
+     | Some _ | None -> None)
+  | _ when is_const_expr e ->
+    (* `eval_const_expr` yields model-time units; the hint is in days. *)
+    let days = eval_const_expr ctx e *. days_per ctx.time_unit in
+    (* Only a span the modeller can actually paste. A sub-day or negative fold
+       has no honest `<n> 'days` spelling. *)
+    if Float.is_finite days && days >= 1.0
+    then Some (int_of_float (Float.round days), Time_typing.show_short e)
+    else None
+  | _ -> None
+
+(* ── Calendar durations in instant positions (Stage 1a) ──────────────────────
+   Under an origin a date position (an instant) holds a date, and a date moves
+   by calendar months or years only through `add_calendar_months` and
+   `add_calendar_years`. A `'months` or `'years` literal anywhere in an instant
+   position — `to = 2 'years` (which denotes `origin + 2 'years`),
+   `date(a) - 1 'months`, `t >= 6 'months` — is refused (E321), and the hint
+   names the explicit form. The same refusal from a base known only at run time
+   (model time `t`, an `instant` parameter, an observation anchor) says why no
+   calendar form exists there. *)
+
+(* A `let` with a scalar body, followed to that body (once, through any chain);
+   anything else is returned as written. *)
+let rec inline_scalar_let ctx (e : expr) : expr =
+  match e with
+  | EIdent (n, _) when not (Hashtbl.mem ctx.cyclic_lets n) ->
+    (match Hashtbl.find_opt ctx.let_tbl n with
+     | Some lb when lb.lindices = [] && lb.lshape = None -> inline_scalar_let ctx lb.lbody
+     | Some _ | None -> e)
+  | _ -> e
+
+(* Does [e] hold a `'months` or `'years` literal, directly or through a `let`?
+   The count of `add_calendar_*` and the cadence keywords of `date_range` are
+   not durations and are not searched; their date arguments are. *)
+let rec mentions_calendar_duration ctx (e : expr) : bool =
+  let go = mentions_calendar_duration ctx in
+  let positional args = List.filter_map (fun (k, a) -> if k = "" then Some a else None) args in
+  match e with
+  | EUnit (_, (Months | Years)) -> true
+  | EConst _ | EUnit _ | EObsAccess _ | ERunMember _ -> false
+  | EIdent (n, _) | EIndex (n, _, _) ->
+    (not (Hashtbl.mem ctx.cyclic_lets n))
+    && (match Hashtbl.find_opt ctx.let_tbl n with
+        | Some lb -> go lb.lbody
+        | None -> false)
+  | EFuncCall ("date", _) -> false
+  | EFuncCall (("add_calendar_months" | "add_calendar_years"), args) ->
+    (match positional args with d :: _ -> go d | [] -> false)
+  | EFuncCall ("date_range", args) -> List.exists go (positional args)
+  | EFuncCall (_, args) -> List.exists (fun (_, a) -> go a) args
+  | EBinOp (_, a, b) | ERange (a, b) -> go a || go b
+  | EUnOp (_, a) -> go a
+  | ECond (_, a, b) -> go a || go b
+  | ESum (_, _, _, b, _) -> go b
+  | EList es -> List.exists go es
+
+(* A base known only at run time, as named in the refusal. *)
+type runtime_base = { rb_name : string; rb_desc : string }
+
+let runtime_base_of_ident ctx (n : string) : runtime_base option =
+  if n = "t" then Some { rb_name = "t"; rb_desc = "the model time" }
+  else if n = "last_obs" || n = "first_obs" then
+    Some { rb_name = n; rb_desc = "an observation anchor" }
+  else
+    match Time_typing.param_kind_of_name (time_env ctx) n with
+    | Some `Instant -> Some { rb_name = n; rb_desc = "an instant parameter" }
+    | Some `Duration | None -> None
+
+(* The first run-time base anywhere in [e], through `let`s. *)
+let rec find_runtime_base ctx (e : expr) : runtime_base option =
+  let first = List.find_map (find_runtime_base ctx) in
+  match e with
+  | EIdent (n, _) | EIndex (n, _, _) ->
+    (match runtime_base_of_ident ctx n with
+     | Some b -> Some b
+     | None ->
+       (match Hashtbl.find_opt ctx.let_tbl n with
+        | Some lb when not (Hashtbl.mem ctx.cyclic_lets n) -> find_runtime_base ctx lb.lbody
+        | Some _ | None -> None))
+  | EConst _ | EUnit _ | EObsAccess _ | ERunMember _ -> None
+  | EFuncCall (_, args) -> first (List.map snd args)
+  | EBinOp (_, a, b) | ERange (a, b) -> first [a; b]
+  | EUnOp (_, a) -> find_runtime_base ctx a
+  | ECond (p, a, b) -> first [p; a; b]
+  | ESum (_, _, _, b, _) -> find_runtime_base ctx b
+  | EList es -> first es
+
+(* E321 from a run-time base. [what] is the position, omitted where the base
+   already names it (an offset from `t`). *)
+let refuse_runtime_calendar ctx ~loc ?what ~(base : runtime_base) (shown : expr) =
+  Diagnostics.error ctx.diags ~code:"E321" ~loc
+    ~message:(Printf.sprintf
+      "calendar duration `%s`%s cannot move `%s`, %s, whose date is known only \
+       when the model runs"
+      (Time_typing.show_short shown)
+      (match what with Some w -> " in " ^ w | None -> "")
+      base.rb_name base.rb_desc)
+    ~hint:(match calendar_span_days ctx shown with
+      | Some (days, rendered) ->
+        Printf.sprintf
+          "a calendar month from a date depends on which date it is. State the \
+           offset in days: `%d 'days` (≈ %s)." days rendered
+      | None ->
+        "a calendar month from a date depends on which date it is. State the \
+         offset in 'days or 'weeks, which are fixed spans.")
+    ()
+
+(* The calendar base of a single step, as written in the hint. *)
+type step_base = Base_origin | Base_date of string | Base_runtime of runtime_base
+
+let step_base_of ctx (b : expr) : step_base option =
+  match inline_scalar_let ctx b with
+  | EIdent ("origin", _) -> Some Base_origin
+  | EFuncCall ("date", [("", EIdent (s, _))]) -> Some (Base_date s)
+  | EIdent (n, _) | EIndex (n, _, _) ->
+    Option.map (fun rb -> Base_runtime rb) (runtime_base_of_ident ctx n)
+  | _ -> None
+
+(* `k 'months` or `k 'years` (possibly negated, possibly through a `let`):
+   the signed count and its unit. *)
+let rec calendar_literal ctx (e : expr) : (float * unit_lit) option =
+  match inline_scalar_let ctx e with
+  | EUnit (k, ((Months | Years) as u)) -> Some (k, u)
+  | EUnOp (Neg, x) -> Option.map (fun (k, u) -> (-. k, u)) (calendar_literal ctx x)
+  | _ -> None
+
+(* One calendar step `[B ±] k 'unit` from a base: the base, the signed count,
+   its unit, and the duration as written. A bare duration's base is `origin`. *)
+let single_calendar_step ctx (e : expr) =
+  let e' = inline_scalar_let ctx e in
+  match calendar_literal ctx e' with
+  | Some (k, u) -> Some (Base_origin, k, u, e')
+  | None ->
+    let step sign b d =
+      match calendar_literal ctx d with
+      | Some (k, u) when not (mentions_calendar_duration ctx b) ->
+        Option.map (fun base -> (base, sign *. k, u, d)) (step_base_of ctx b)
+      | Some _ | None -> None
+    in
+    (match e' with
+     | EBinOp (Add, b, d) ->
+       (match step 1.0 b d with Some s -> Some s | None -> step 1.0 d b)
+     | EBinOp (Sub, b, d) -> step (-1.0) b d
+     | _ -> None)
+
+let base_code = function
+  | Base_origin -> "origin"
+  | Base_date s -> Printf.sprintf "date(%S)" s
+  | Base_runtime rb -> rb.rb_name
+
+(* E321 for a calendar duration in an instant position; [true] if it fired. *)
+let refuse_calendar_instant ctx ~loc ~what (e : expr) : bool =
+  if ctx.origin = None || not (mentions_calendar_duration ctx e) then false
+  else begin
+    let compile_time ~shown ~step_hint ~span_of =
+      let fixed = match calendar_span_days ctx span_of with
+        | Some (days, rendered) -> Some (days, rendered)
+        | None -> None
+      in
+      let hint = match step_hint with
+        | Some first ->
+          Printf.sprintf "%s; for a fixed span write %s." first
+            (match fixed with
+             | Some (days, rendered) -> Printf.sprintf "`%d 'days` (≈ %s)" days rendered
+             | None -> "the offset in 'days or 'weeks")
+        | None ->
+          Printf.sprintf
+            "write each calendar step with `add_calendar_months(d, n)` or \
+             `add_calendar_years(d, n)` from a date `d`, or state the offset as a \
+             fixed span%s"
+            (match fixed with
+             | Some (days, rendered) -> Printf.sprintf ": `%d 'days` (≈ %s)." days rendered
+             | None -> " in 'days or 'weeks.")
+      in
+      Diagnostics.error ctx.diags ~code:"E321" ~loc
+        ~message:(Printf.sprintf
+          "calendar duration `%s` in %s: under `origin` this position is a date, \
+           and a date moves by calendar months or years only through \
+           `add_calendar_months` or `add_calendar_years`"
+          (Time_typing.show_short shown) what)
+        ~hint ()
+    in
+    (match single_calendar_step ctx e with
+     | Some (Base_runtime base, _, _, d) -> refuse_runtime_calendar ctx ~loc ~what ~base d
+     | Some (base, k, u, d) ->
+       let whole f = Float.is_integer f && Float.abs f < 1e9 in
+       let months = match u with Years -> 12.0 *. k | _ -> k in
+       let phrase n unit =
+         Printf.sprintf "for the date %d calendar %s%s %s `%s`"
+           (abs n) unit (if abs n = 1 then "" else "s")
+           (if n < 0 then "before" else "after") (base_code base)
+       in
+       let step_hint =
+         if u = Years && whole k then
+           let n = int_of_float k in
+           Some (Printf.sprintf "%s write `add_calendar_years(%s, %d)`"
+                   (phrase n "year") (base_code base) n)
+         else if whole months then
+           let n = int_of_float months in
+           Some (Printf.sprintf "%s write `add_calendar_months(%s, %d)`"
+                   (phrase n "month") (base_code base) n)
+         else None
+       in
+       (* The span offered is the duration's magnitude: the step's direction is
+          the operator's, and a negative span has no `'days` spelling. *)
+       let d_abs = match inline_scalar_let ctx d with EUnOp (Neg, x) -> x | x -> x in
+       compile_time ~shown:d_abs ~step_hint ~span_of:d_abs
+     | None ->
+       (match find_runtime_base ctx e with
+        | Some base -> refuse_runtime_calendar ctx ~loc ~what ~base e
+        | None ->
+          let is_duration = match Time_typing.classify (time_env ctx) e with
+            | Time_typing.TInstant -> false
+            | Time_typing.TExact | Time_typing.TCalendar | Time_typing.TOther -> true
+          in
+          compile_time ~shown:e ~step_hint:None
+            ~span_of:(if is_duration then e else EConst 0.0)));
+    true
+  end
+
+(* E360 alone, at one instant position: the arithmetic an instant does not
+   have (gh#1070). E321 there is [refuse_calendar_instant]'s. *)
+let check_instant_misuse ctx ~loc ~context (e : expr) =
+  if ctx.origin <> None then
+    Time_typing.walk_instant_misuse (time_env ctx) e
+      ~unitless:(fun off -> const_expr_dim off = Some (0, 0))
+      ~on_hit:(fun misuse node ->
+        Diagnostics.error ctx.diags ~code:"E360" ~loc
+          ~message:(Printf.sprintf
+            "`%s` %s in %s; that has no meaning as a time"
+            (Time_typing.show_short node)
+            (Time_typing.describe_instant_misuse misuse) context)
+          ~hint:(Time_typing.hint_instant_misuse misuse)
+          ())
+
 (* `~what` names the position in every message ("`simulate { to }`", "a
    `breakpoints` entry", "`value_at`'s time argument"); `~example` is a correct
    spelling for that position. *)
@@ -5732,15 +5990,12 @@ let classify_anchor ctx ~what ~example ~loc (e : expr) : anchor_class =
   (* The offset: a constant duration, folded to model time units NOW so the
      compiled model carries no unit interpretation. *)
   let offset ~anchor ~sign off =
-    if ctx.origin <> None && mentions_calendar_unit off then
-      bad ~code:"E321"
-        ~message:(Printf.sprintf
-          "calendar duration in %s: an observation anchor is an instant, so a \
-           `'months`/`'years` offset would silently mean a different number of \
-           days each time it resolves" what)
-        ~hint:"state the offset in `'days` or `'weeks`, which are fixed spans"
-        ()
-    else
+    if ctx.origin <> None && mentions_calendar_unit off then begin
+      let name = match anchor with Ir.AnchorFirst -> "first_obs" | Ir.AnchorLast -> "last_obs" in
+      refuse_runtime_calendar ctx ~loc ~what
+        ~base:{ rb_name = name; rb_desc = "an observation anchor" } off;
+      AnchorBad
+    end else
       match const_expr_dim off with
       | Some (0, 1) ->
         AnchorAt { Ir.anchor; offset = sign *. resolve_float_expr ctx off }
@@ -5799,40 +6054,6 @@ let resolve_float_expr_simple ctx e =
    wherever they are written. [check_instant_arithmetic] judges one expression;
    the [Lower] functions below run it on their own position, and
    [check_surface_time_typing] runs it on every ordinary expression. *)
-
-let time_env ctx =
-  Time_typing.env_of_ctx ~let_tbl:ctx.let_tbl ~param_decls:ctx.param_decls
-    ~origin_set:(ctx.origin <> None)
-
-(* The affine day-equivalent of a calendar duration, for the hints that offer a
-   fixed span. Folded from the literal, so `5 'years` suggests 1826 days and
-   `5 'months` suggests 152 (gh#843) — a fixed suggestion silently understates
-   a year-valued offset 12-fold, and the model it produces compiles and runs.
-
-   Folds without emitting: `resolve_float_expr` reports E401 on a non-constant,
-   and a hint must not manufacture a second diagnostic. `let` bindings are
-   followed so the laundered form (`let d = 6 'months`) is suggested as
-   precisely as the literal.
-
-   Returns the duration that was folded alongside its day count, so a laundered
-   offset reports `(≈ 6 'months)` rather than `(≈ d)`; the parenthetical exists
-   so a reader can check the conversion, which the binding's name does not let
-   them do. *)
-let rec calendar_span_days ctx e =
-  match e with
-  | EIdent (name, _) ->
-    (match Hashtbl.find_opt ctx.let_tbl name with
-     | Some lb when not (Hashtbl.mem ctx.cyclic_lets name) -> calendar_span_days ctx lb.lbody
-     | Some _ | None -> None)
-  | _ when is_const_expr e ->
-    (* `eval_const_expr` yields model-time units; the hint is in days. *)
-    let days = eval_const_expr ctx e *. days_per ctx.time_unit in
-    (* Only a span the modeller can actually paste. A sub-day or negative fold
-       has no honest `<n> 'days` spelling. *)
-    if Float.is_finite days && days >= 1.0
-    then Some (int_of_float (Float.round days), Time_typing.show_short e)
-    else None
-  | _ -> None
 
 (* E321 (Rule 1) and E360 at every node of [e] the walk reaches. [children]
    chooses which sub-expressions it descends into: an ordinary expression's
@@ -5947,41 +6168,49 @@ module Lower = struct
     | At_anchor of Ir.anchored_time    (* `last_obs ± d`, d exact *)
     | At_bad                           (* an anchor in a refused shape; already reported *)
 
-  (* The checks of an instant position. [context] names it in E321 and E360;
-     [walk] is whether those two run there; [bare] the bare-number warning the
-     position carries. *)
-  let instant_checks ctx ~context ~walk ?bare ?units ?cadence_field (p : Time_pos.instant Time_pos.t) =
+  (* The checks of an instant position (Stage 1a). Under an origin, E360 on the
+     arithmetic an instant does not have, and E321 on any calendar duration in
+     it ([refuse_calendar_instant]); [context] names the position. An
+     expression that mentions an observation anchor is left to
+     [classify_anchor] where anchors are accepted, and to name resolution
+     elsewhere. [bare] is the bare-number warning the position carries. *)
+  let instant_checks ctx ~context ?bare ?units (p : Time_pos.instant Time_pos.t) =
     let e = Time_pos.expr p in
     let loc = loc ctx p in
     Option.iter (fun what -> check_time_units ctx ~what e) units;
-    if walk then check_instant_arithmetic ctx ~loc ~context e;
-    Option.iter (fun field ->
-      check_calendar_cadence ctx ~loc ~field ~hint:Time_typing.hint_calendar_cadence_in_recurring e)
-      cadence_field;
-    Option.iter (fun w -> warn_bare_numeric ctx ~loc (w e) e) bare;
-    false
+    let refused =
+      if mentions_obs_anchor e then false
+      else begin
+        check_instant_misuse ctx ~loc ~context e;
+        refuse_calendar_instant ctx ~loc ~what:context e
+      end
+    in
+    if not refused then Option.iter (fun w -> warn_bare_numeric ctx ~loc (w e) e) bare;
+    refused
 
   (* A compile-time instant: `simulate { from, to }`, a recurring `from` and
      `to`, output and emit `at` entries, a scenario's `to`. *)
-  let instant_const ctx ~what ~context ?(walk = true) ?bare ?cadence_field p : float =
-    ignore (judge ctx p (fun () ->
-      instant_checks ctx ~context ~walk ?bare ~units:what ?cadence_field p));
+  let instant_const ctx ~what ~context ?bare p : float =
+    ignore (judge ctx p (fun () -> instant_checks ctx ~context ?bare ~units:what p));
     fold ctx (Time_pos.expr p)
 
   (* An instant that may be an observation anchor: a `simulate { to }`. *)
-  let instant_horizon ctx ~what ~context ?(walk = true) ?bare ~anchor_what ~example p : instant_value =
+  let instant_horizon ctx ~what ~context ?bare ~anchor_what ~example p : instant_value =
     let e = Time_pos.expr p in
     match classify_anchor ctx ~what:anchor_what ~example ~loc:Diagnostics.no_loc e with
     | AnchorAt a ->
-      ignore (judge ctx p (fun () -> instant_checks ctx ~context ~walk ?bare p));
+      ignore (judge ctx p (fun () -> instant_checks ctx ~context ?bare p));
       At_anchor a
-    | AnchorBad | AnchorNone -> At (instant_const ctx ~what ~context ~walk ?bare p)
+    (* Already reported; no fold, so no E100 / E401 / E602 follows (one mistake,
+       one diagnostic). *)
+    | AnchorBad -> ignore (judge ctx p (fun () -> true)); At_bad
+    | AnchorNone -> At (instant_const ctx ~what ~context ?bare p)
 
   (* An instant resolved to an IR expression (a `breakpoints` entry, a bspline
      `window` end, an interpolated `times` entry, `value_at`'s time). With
      [anchor], an observation anchor is accepted there. *)
-  let instant_expr ctx env ~context ?(walk = true) ?bare ?anchor p : instant_value =
-    ignore (judge ctx p (fun () -> instant_checks ctx ~context ~walk ?bare p));
+  let instant_expr ctx env ~context ?bare ?anchor p : instant_value =
+    ignore (judge ctx p (fun () -> instant_checks ctx ~context ?bare p));
     let e = Time_pos.expr p in
     match anchor with
     | None -> At_expr (resolve_expr ctx env e)
@@ -5993,23 +6222,26 @@ module Lower = struct
 
   (* The entries of an `at [...]` list, `date_range(...)` spliced, resolved to
      normalized IR. *)
-  let instant_list_expr ctx env ~context ?(walk = true) ?bare ps : Ir.expr list =
+  let instant_list_expr ctx env ~context ?bare ps : Ir.expr list =
     List.iter (fun p ->
-      ignore (judge ctx p (fun () -> instant_checks ctx ~context ~walk ?bare p))) ps;
+      ignore (judge ctx p (fun () -> instant_checks ctx ~context ?bare p))) ps;
     let es = splice_date_ranges ctx (List.map Time_pos.expr ps) in
     List.map (fun e -> normalize_expr (resolve_expr ctx env e)) es
 
   (* The entries of an output or emit `at = [...]` list, folded to numbers. *)
-  let instant_list_const ctx ~what ~context ?(walk = true) ps : float list =
-    List.map (fun p -> instant_const ctx ~what ~context ~walk p) ps
+  let instant_list_const ctx ~what ~context ps : float list =
+    List.map (fun p -> instant_const ctx ~what ~context p) ps
 
   (* A `timepoints` entry: judged, and dropped (the block is not emitted). *)
-  let timepoint ctx p = ignore (judge ctx p (fun () -> false))
+  let timepoint ctx ~name p =
+    ignore (judge ctx p (fun () ->
+      instant_checks ctx ~context:(Printf.sprintf "timepoint '%s'" name) p))
 
   (* The operand compared with model time `t` in an ordinary expression. Its
      value is the enclosing expression's, lowered by [resolve_expr]; this
      judges the position. *)
-  let instant_in_expr ctx p = ignore (judge ctx p (fun () -> false))
+  let instant_in_expr ctx p =
+    ignore (judge ctx p (fun () -> instant_checks ctx ~context:"a comparison with `t`" p))
 
   (* ── Cadences ── *)
 
@@ -6045,8 +6277,17 @@ module Lower = struct
     fold ctx e
 
   (* An offset added to or subtracted from model time `t` in an ordinary
-     expression; judged, its value is the enclosing expression's. *)
-  let runtime_offset_in_expr ctx p = ignore (judge ctx p (fun () -> false))
+     expression; judged, its value is the enclosing expression's. A calendar
+     duration there would move a date known only when the model runs. *)
+  let runtime_offset_in_expr ctx (p : Time_pos.runtime_offset Time_pos.t) =
+    ignore (judge ctx p (fun () ->
+      let e = Time_pos.expr p in
+      let loc = loc ctx p in
+      check_instant_misuse ctx ~loc ~context:"an offset from `t`" e;
+      if ctx.origin <> None && mentions_calendar_duration ctx e then begin
+        refuse_runtime_calendar ctx ~loc ~base:{ rb_name = "t"; rb_desc = "the model time" } e;
+        true
+      end else false))
 
   (* ── Spans ── *)
 
@@ -6117,19 +6358,19 @@ module Lower = struct
     fold ctx e
 
   (* A sinusoidal `phase`: the average month, by decision G. *)
-  let phase_expr ctx env ?(walk = false) ~context (p : Time_pos.phase Time_pos.t) : Ir.expr =
+  let phase_expr ctx env ~context (p : Time_pos.phase Time_pos.t) : Ir.expr =
     let e = Time_pos.expr p in
     ignore (judge ctx p (fun () ->
-      if walk then check_instant_arithmetic ctx ~loc:(loc ctx p) ~context e;
+      check_instant_arithmetic ctx ~loc:(loc ctx p) ~context e;
       false));
     resolve_expr ctx env e
 
   (* A periodic `on` endpoint, in whole model-time units (gh#1148, D70 a).
      [bound] names it in E407. *)
-  let on_endpoint ctx ?(walk = false) ~context ~fname ~bound (p : Time_pos.phase Time_pos.t) : int =
+  let on_endpoint ctx ~context ~fname ~bound (p : Time_pos.phase Time_pos.t) : int =
     let e = Time_pos.expr p in
     ignore (judge ctx p (fun () ->
-      if walk then check_instant_arithmetic ctx ~loc:(loc ctx p) ~context e;
+      check_instant_arithmetic ctx ~loc:(loc ctx p) ~context e;
       false));
     match e with
     | EConst f -> int_of_float f
@@ -6153,37 +6394,44 @@ module Lower = struct
     fold ctx e
 
   (* A forcing `period`, `step` or `lag`, resolved to IR. *)
-  let length_expr ctx env ?(walk = false) ~context (p : Time_pos.length Time_pos.t) : Ir.expr =
+  let length_expr ctx env ~context (p : Time_pos.length Time_pos.t) : Ir.expr =
     let e = Time_pos.expr p in
     ignore (judge ctx p (fun () ->
-      if walk then check_instant_arithmetic ctx ~loc:(loc ctx p) ~context e;
+      check_instant_arithmetic ctx ~loc:(loc ctx p) ~context e;
       false));
     resolve_expr ctx env e
 
   (* ── Bounds ── *)
 
-  (* A parameter's bounds, folded to numbers (the `in [lo, hi]` range). *)
-  let bounds ctx (b : bounds) : float * float =
+  (* Judge a parameter's bounds: an `instant` parameter's are instants, a
+     `duration` one's lengths; value bounds are ordinary expressions, which
+     [check_surface_time_typing] walks. *)
+  let judge_bounds ctx ~pname (b : bounds) =
     match b with
     | Instant_bounds (lo, hi) ->
-      List.iter (fun p -> ignore (judge ctx p (fun () -> false))) [lo; hi];
-      (resolve_float_expr_simple ctx (Time_pos.expr lo), resolve_float_expr_simple ctx (Time_pos.expr hi))
+      List.iter (fun p ->
+        ignore (judge ctx p (fun () ->
+          instant_checks ctx ~context:(Printf.sprintf "the bounds of '%s'" pname) p))) [lo; hi]
     | Length_bounds (lo, hi) ->
-      List.iter (fun p -> ignore (judge ctx p (fun () -> false))) [lo; hi];
-      (resolve_float_expr_simple ctx (Time_pos.expr lo), resolve_float_expr_simple ctx (Time_pos.expr hi))
-    | Value_bounds (lo, hi) -> (resolve_float_expr_simple ctx lo, resolve_float_expr_simple ctx hi)
+      List.iter (fun p ->
+        ignore (judge ctx p (fun () ->
+          check_instant_arithmetic ctx ~loc:(loc ctx p) ~context:"parameter bound"
+            (Time_pos.expr p);
+          false))) [lo; hi]
+    | Value_bounds _ -> ()
+
+  (* A parameter's bounds, folded to numbers (the `in [lo, hi]` range). *)
+  let bounds ctx ~pname (b : bounds) : float * float =
+    judge_bounds ctx ~pname b;
+    let (lo, hi) = bounds_exprs b in
+    (resolve_float_expr_simple ctx lo, resolve_float_expr_simple ctx hi)
 
   (* The same bounds as IR, for the dimension check of θ's units. *)
-  let bounds_ir ctx (b : bounds) : Ir.expr * Ir.expr =
+  let bounds_ir ctx ~pname (b : bounds) : Ir.expr * Ir.expr =
+    judge_bounds ctx ~pname b;
     let ir e = normalize_expr (resolve_expr ctx [] e) in
-    match b with
-    | Instant_bounds (lo, hi) ->
-      List.iter (fun p -> ignore (judge ctx p (fun () -> false))) [lo; hi];
-      (ir (Time_pos.expr lo), ir (Time_pos.expr hi))
-    | Length_bounds (lo, hi) ->
-      List.iter (fun p -> ignore (judge ctx p (fun () -> false))) [lo; hi];
-      (ir (Time_pos.expr lo), ir (Time_pos.expr hi))
-    | Value_bounds (lo, hi) -> (ir lo, ir hi)
+    let (lo, hi) = bounds_exprs b in
+    (ir lo, ir hi)
 end
 
 (* Is the MODEL's `simulate { to }` anchored?
@@ -6231,7 +6479,7 @@ let sim_t_end_baked ctx =
       Lower.instant_const ctx ~what:"`simulate.to`" ~context:"simulate.to"
         ?bare:(sim_bare "to") sd.sim_to
 
-let resolve_bounds ctx pbounds = Option.map (Lower.bounds ctx) pbounds
+let resolve_bounds ctx ~pname pbounds = Option.map (Lower.bounds ctx ~pname) pbounds
 
 (* A parameter's bounds are values of θ, so their unit literals are checked
    against θ's dimension after the solve, by the same pass as prior arguments
@@ -6241,7 +6489,7 @@ let note_bounds ctx ~pname pbounds =
   match pbounds with
   | None -> ()
   | Some b ->
-    let (lo, hi) = Lower.bounds_ir ctx b in
+    let (lo, hi) = Lower.bounds_ir ctx ~pname b in
     ctx.prior_sources <-
       { Dimcheck.param = pname; family = "bounds";
         args = [ ("lower", lo); ("upper", hi) ] } :: ctx.prior_sources
@@ -6645,7 +6893,7 @@ let expand_parameters ctx =
   let from_params = List.concat_map (fun pd ->
     match pd with
     | PScalar { pname; pbounds; pkind; pdim; pprior; ploc; _ } ->
-      let bounds = resolve_bounds ctx pbounds in
+      let bounds = resolve_bounds ctx ~pname pbounds in
       note_bounds ctx ~pname pbounds;
       let pk = Some (ir_param_kind_of_ast pkind) in
       let loc = diag_loc_of_ast_ctx ctx ploc in
@@ -6706,7 +6954,7 @@ let expand_parameters ctx =
         | Some _ -> ()) pdims;
       if has_dup || !bad_dim then []
       else begin
-        let bounds = resolve_bounds ctx pbounds in
+        let bounds = resolve_bounds ctx ~pname pbounds in
         note_bounds ctx ~pname pbounds;
         let pk = Some (ir_param_kind_of_ast pkind) in
         let resolved_dim = pdim_ann in
@@ -7271,6 +7519,10 @@ let expand_simulate ctx =
       | Lower.At f -> (f, None)
       | Lower.At_expr _ | Lower.At_bad -> (Float.nan, None)
     in
+    (* An anchor in a refused shape was reported by `classify_anchor`; the
+       horizon check below would only repeat the mistake as E602. *)
+    let horizon_refused =
+      t_end_anchor = None && mentions_obs_anchor (Time_pos.expr sd.sim_to) in
     (* gh#453: the horizon must be a forward interval. An empty or reversed
        one gives an empty output grid, so every backend's loop never runs and
        the run exits 0 with a header-only table. The Rust IR loader refuses it
@@ -7278,7 +7530,7 @@ let expand_simulate ctx =
        refuse it here, naming both resolved values. An anchored `to` bakes NaN
        on purpose and is resolved later (gh#616), so it is skipped exactly as
        the loader skips it. Located at the `to = ...` entry. *)
-    if t_end_anchor = None
+    if t_end_anchor = None && not horizon_refused
        && not (Float.is_finite t_start && Float.is_finite t_end
                && t_end > t_start) then begin
       let unit = match ctx.time_unit with
@@ -7382,7 +7634,7 @@ let expand_output ctx =
                              ~context:"output trajectories.every" ~field:"every" p }
        | SchedAt ps ->
          Ir.OutAtTimes (Lower.instant_list_const ctx ~what:"an output time"
-                          ~context:"output trajectories.at" ~walk:false ps))
+                          ~context:"output trajectories.at" ps))
     | _ -> Ir.OutRegular { Ir.start; Ir.step = 1.0 }
   in
   { Ir.times;
@@ -7590,7 +7842,8 @@ let expand_time_function_one ctx fname (env : (string * string) list)
                     = Some Time_census.Forcing_schema.Instants ->
         (* interpolated `times`: each entry an instant. *)
         List.map (fun p ->
-          match Lower.instant_expr ctx env ~context:forcing_context ~walk:false p with
+          match Lower.instant_expr ctx env
+                  ~context:(Printf.sprintf "`%s` of forcing '%s'" key fname) p with
           | Lower.At_expr ir -> ir
           | Lower.At f -> Ir.Const f
           | Lower.At_anchor a -> Ir.ObsAnchor a
@@ -7616,7 +7869,8 @@ let expand_time_function_one ctx fname (env : (string * string) list)
       []
     | Some fv ->
       let one (p : Time_pos.instant Time_pos.t) : Ir.expr =
-        match Lower.instant_expr ctx env ~context:forcing_context ~walk:false
+        match Lower.instant_expr ctx env
+                ~context:(Printf.sprintf "`%s` of forcing '%s'" key fname)
                 ~anchor:(what, example) p with
         | Lower.At_anchor a -> Ir.ObsAnchor a
         (* The classifier already reported; keep expanding so the author sees
@@ -9001,10 +9255,9 @@ let expand_scheduled_actions ctx decls ~(kind : Ir.intervention_kind) =
           let period =
             Lower.cadence ctx ~what:"a schedule's `every`" ~context:(label ^ ".every")
               ~field:"every" every in
-          (* A recurring `from` and `to` are instants; until Stage 1a's refusal
-             lands they keep the cadence check they had (E322). *)
+          (* A recurring `from` and `to` are instants. *)
           let recur_instant ~what ~field p =
-            Lower.instant_const ctx ~what ~context:(label ^ "." ^ field) ~cadence_field:field
+            Lower.instant_const ctx ~what ~context:(label ^ "." ^ field)
               ?bare:(recur_bare field) p
           in
           let start  = match from_opt with
@@ -11504,7 +11757,7 @@ let classify_quantity_body ctx env
        (match two, Time_census.reduction_time_args ~loc:qd_ast_loc fn args with
         | Some (x, _), [time] ->
           (match Lower.instant_expr ctx env
-                   ~context:(Printf.sprintf "quantity '%s'" qd_name) ~walk:false
+                   ~context:(Printf.sprintf "`value_at`'s time in quantity '%s'" qd_name)
                    ~anchor:("`value_at`'s time argument",
                             "`value_at(N0 - S, last_obs - 1 'weeks)`") time with
            | Lower.At_anchor a -> reduced_state (Ir.RValue (Ir.VValueAt (Ir.AObs a))) x
@@ -12263,7 +12516,11 @@ let check_surface_time_typing ctx =
         ()
     | _ -> ());
 
-  let walk ~loc ~context e = check_instant_arithmetic ctx ~loc ~context e in
+  (* A time position inside an ordinary expression (a comparison with `t`, an
+     offset from `t`, `value_at`'s time) is judged by its [Lower] function, so
+     the walk does not descend into it. *)
+  let walk ~loc ~context e =
+    check_instant_arithmetic ~children:Time_census.ordinary_children ctx ~loc ~context e in
 
   (* ── transition rates ───────────────────────────────────────────────── *)
   List.iter (fun (tr : transition_decl) ->
@@ -12288,11 +12545,11 @@ let check_surface_time_typing ctx =
     let loc = diag_loc_of_ast_ctx ctx ploc in
     let pbounds = match pd with PScalar s -> s.pbounds | PIndexed s -> s.pbounds in
     (match pbounds with
-     | Some b ->
-       let (lo, hi) = bounds_exprs b in
+     | Some (Value_bounds (lo, hi)) ->
        walk ~loc ~context:"parameter bound" lo;
        walk ~loc ~context:"parameter bound" hi
-     | None -> ());
+     (* Instant and length bounds are time positions, judged by [Lower]. *)
+     | Some (Instant_bounds _ | Length_bounds _) | None -> ());
     let pname = match pd with PScalar s -> s.pname | PIndexed s -> s.pname in
     let pprior = match pd with PScalar s -> s.pprior | PIndexed s -> s.pprior in
     (match pprior with
@@ -12335,13 +12592,11 @@ let check_surface_time_typing ctx =
   check_actions ctx.event_decls  ~label:"event";
 
   (* ── forcing keyword arguments ──────────────────────────────────────── *)
+  (* The keywords whose role is a time are positions, judged by [Lower]. *)
   List.iter (fun (fd : func_decl) ->
-    List.iter (fun (_, fv) ->
-      match farg_expr_opt fv with
-      | Some e ->
-        walk ~loc:Diagnostics.no_loc ~context:(Printf.sprintf "forcing '%s'" fd.fname) e
-      | None -> ()
-    ) fd.fargs
+    List.iter
+      (walk ~loc:Diagnostics.no_loc ~context:(Printf.sprintf "forcing '%s'" fd.fname))
+      (Time_census.Forcing_schema.value_exprs fd)
   ) ctx.func_decls;
 
   (* ── balance ────────────────────────────────────────────────────────── *)
@@ -12359,7 +12614,8 @@ let check_surface_time_typing ctx =
 
   (* ── timepoints: judged as instants, then dropped (the block is not
        emitted) ── *)
-  List.iter (fun (tp : timepoint_decl) -> Lower.timepoint ctx tp.tptime) ctx.timepoint_decls
+  List.iter (fun (tp : timepoint_decl) -> Lower.timepoint ctx ~name:tp.tpname tp.tptime)
+    ctx.timepoint_decls
 
 (* The census's positions inside ordinary expressions — the operand compared
    with model time `t`, and an offset from `t` — judged by their kinds' [Lower]
@@ -12718,7 +12974,7 @@ let expand_scenarios ctx : Ir.preset list =
       (match ot.otschedule with
        | SchedAt (_ :: _ as ts) ->
          Some (Lower.instant_list_const ctx ~what:"a scenario time"
-                 ~context:"output trajectories.at" ~walk:false ts)
+                 ~context:"output trajectories.at" ts)
        | _ -> None)
     | _ -> None
   in
@@ -12780,7 +13036,7 @@ let expand_scenarios ctx : Ir.preset list =
     let lowered_t_end =
       Option.map (fun p ->
         Lower.instant_horizon ctx ~what:"a scenario's `to`"
-          ~context:(Printf.sprintf "scenario '%s' simulate.to" resolved.rs_name) ~walk:false
+          ~context:(Printf.sprintf "scenario '%s' simulate.to" resolved.rs_name)
           ~anchor_what:(Printf.sprintf "scenario '%s'`s `simulate { to }`" resolved.rs_name)
           ~example:"`to = last_obs + 8 'weeks`" p) resolved.rs_t_end
     in
