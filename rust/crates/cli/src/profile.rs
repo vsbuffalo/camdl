@@ -156,6 +156,12 @@ struct ProfileBaseLevel<'a> {
     /// value outside its range (D44), so it is identity. Omitted when off.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     allow_forcing_extrapolation: bool,
+    /// `--allow-degenerate-rates`, or the `--fit` config's `[config]
+    /// allow_degenerate_rates`: a collapsing rate is 0 in every cell instead of
+    /// an error, which changes each stored loglik, so it is identity. Omitted
+    /// when off, so a profile without it keeps its key.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    allow_degenerate_rates: bool,
 }
 
 /// The `method` level's identity: the METHOD, i.e. how each cell is fitted.
@@ -559,6 +565,10 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // `[data.holdout]` files are checked to lie after them.
     let mut fit_holdout_after: Option<crate::fit::config_v2::TimeSpecToml> = None;
     let mut fit_holdout_files: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
+    // The fit config's `[config] allow_degenerate_rates`, which `fit run`
+    // applies to the fit; read from the same file so a profile of that fit
+    // evaluates its rates the same way.
+    let mut fit_allow_degenerate_rates = false;
     let (fit_estimate, fit_toml_hash, fit_toml_fixed_indexmap, fit_scenario, fit_simplex_groups,
          objective, fit_fixed_via):
         (indexmap::IndexMap<String, crate::fit::config_v2::EstimateSpecV2>,
@@ -602,6 +612,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         // through the same function `fit run` uses, so a profile curve is on
         // the scale of the fit it profiles.
         let objective = fit_cfg.likelihood_objective();
+        fit_allow_degenerate_rates = fit_cfg.config.allow_degenerate_rates;
         // The fit's holdout, applied once the data are loaded (gh#1059).
         if let Some(data) = fit_cfg.data.as_ref() {
             fit_holdout_after = data.holdout_after.clone();
@@ -615,6 +626,13 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
          (None, Vec::new(), Vec::new()), Vec::new(),
          crate::fit::config_v2::LikelihoodObjective::Full, Ok(Vec::new()))
     };
+    // A rate that collapses (a division by an empty compartment, a power to
+    // NaN) is 0 under `--allow-degenerate-rates` or the `--fit` config's
+    // `[config] allow_degenerate_rates`, and an error otherwise. It changes
+    // every cell's log-likelihood, so it is applied here, before any cell runs,
+    // and keyed in the base identity below.
+    let allow_degenerate_rates = a.inference.allow_degenerate_rates || fit_allow_degenerate_rates;
+    sim::eval_stats::set_allow_degenerate_rates(allow_degenerate_rates);
 
     // The step every cell integrates at (the one dt rule), from the model,
     // --dt and the --fit file's written `[config] dt`.
@@ -1663,6 +1681,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         objective,
         training_rows: holdout_training_rows.as_deref(),
         allow_forcing_extrapolation: crate::forcing_extrapolation::allowed(),
+        allow_degenerate_rates,
     }, &[]).unwrap_or_else(|e| {
         out.fail(format!("error: profile base identity: {e}"));
     });
@@ -2587,6 +2606,7 @@ mod tests {
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
             training_rows: None,
             allow_forcing_extrapolation: false,
+            allow_degenerate_rates: false,
         }).unwrap();
         let base_literal = serde_json::json!({
             "base_params": "bp-hash",
@@ -2610,6 +2630,7 @@ mod tests {
             objective: crate::fit::config_v2::LikelihoodObjective::ConditionalOnFirstObservation,
             training_rows: None,
             allow_forcing_extrapolation: false,
+            allow_degenerate_rates: false,
         }).unwrap();
         let mut conditional_literal = base_literal.clone();
         conditional_literal["objective"] =
@@ -2628,11 +2649,30 @@ mod tests {
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
             training_rows: Some(&[("cases".to_string(), 3)][..]),
             allow_forcing_extrapolation: false,
+            allow_degenerate_rates: false,
         }).unwrap();
         let mut held_out_literal = base_literal.clone();
         held_out_literal["training_rows"] = serde_json::json!([["cases", 3]]);
         assert_eq!(held_out, held_out_literal,
             "a holdout_after cutoff must enter the base level");
+
+        // `--allow-degenerate-rates` enters the base and re-keys it; without it
+        // the base is the literal above.
+        let degenerate = serde_json::to_value(ProfileBaseLevel {
+            base_params: "bp-hash",
+            fixed: &fixed,
+            obs_family: "poisson",
+            fit_toml: &fit_toml,
+            priors: &priors,
+            objective: crate::fit::config_v2::LikelihoodObjective::Full,
+            training_rows: None,
+            allow_forcing_extrapolation: false,
+            allow_degenerate_rates: true,
+        }).unwrap();
+        let mut degenerate_literal = base_literal.clone();
+        degenerate_literal["allow_degenerate_rates"] = serde_json::json!(true);
+        assert_eq!(degenerate, degenerate_literal,
+            "allow_degenerate_rates must enter the base level");
 
         let rw_sd: Vec<(&str, Option<f64>)> = vec![("N0", Some(5.0))];
         let init = crate::fit::starts::ChainStarts::Spread(crate::fit::starts::Spread::Lhs);
@@ -2704,6 +2744,7 @@ mod tests {
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
             training_rows: None,
             allow_forcing_extrapolation: false,
+            allow_degenerate_rates: false,
         }, &[]).unwrap().into_inner().to_hex();
         let rw_sd: Vec<(&str, Option<f64>)> = vec![("beta", None)];
         let uniform = crate::fit::starts::ChainStarts::Spread(crate::fit::starts::Spread::Uniform);
