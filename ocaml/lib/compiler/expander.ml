@@ -5805,6 +5805,32 @@ let rec mentions_calendar_duration ctx (e : expr) : bool =
   | ESum (_, _, _, b, _) -> go b
   | EList es -> List.exists go es
 
+(* The first `'months` / `'years` literal in [e], through `let`s, searched as
+   [mentions_calendar_duration] searches: what a compound refusal names. *)
+let rec first_calendar_literal ctx (e : expr) : expr option =
+  let go = first_calendar_literal ctx in
+  let first = List.find_map go in
+  let positional args = List.filter_map (fun (k, a) -> if k = "" then Some a else None) args in
+  match e with
+  | EUnit (_, (Months | Years)) -> Some e
+  | EConst _ | EUnit _ | EObsAccess _ | ERunMember _ -> None
+  | EIdent (n, _) | EIndex (n, _, _) ->
+    if Hashtbl.mem ctx.cyclic_lets n then None
+    else (match Hashtbl.find_opt ctx.let_tbl n with
+        | Some lb when Time_typing.classify (time_env ctx) lb.lbody <> Time_typing.TInstant ->
+          go lb.lbody
+        | Some _ | None -> None)
+  | EFuncCall ("date", _) -> None
+  | EFuncCall (("add_calendar_months" | "add_calendar_years"), args) ->
+    (match positional args with d :: _ -> go d | [] -> None)
+  | EFuncCall ("date_range", args) -> first (positional args)
+  | EFuncCall (_, args) -> first (List.map snd args)
+  | EBinOp (_, a, b) | ERange (a, b) -> first [a; b]
+  | EUnOp (_, a) -> go a
+  | ECond (_, a, b) -> first [a; b]
+  | ESum (_, _, _, b, _) -> go b
+  | EList es -> first es
+
 (* A base known only at run time, as named in the refusal. *)
 type runtime_base = { rb_name : string; rb_desc : string }
 
@@ -5959,13 +5985,15 @@ let refuse_calendar_instant ctx ~loc ~what (e : expr) : bool =
      | None ->
        (match find_runtime_base ctx e with
         | Some base ->
-refuse_runtime_calendar ctx ~loc ~what ~base e
+          refuse_runtime_calendar ctx ~loc ~what ~base
+            (Option.value (first_calendar_literal ctx e) ~default:e)
         | None ->
           let is_duration = match Time_typing.classify (time_env ctx) e with
             | Time_typing.TInstant -> false
             | Time_typing.TExact | Time_typing.TCalendar | Time_typing.TOther -> true
           in
-          compile_time ~shown:e ~step_hint:None
+          compile_time ~shown:(Option.value (first_calendar_literal ctx e) ~default:e)
+            ~step_hint:None
             ~span_of:(if is_duration then e else EConst 0.0)));
     true
   end
