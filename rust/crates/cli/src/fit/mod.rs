@@ -1523,6 +1523,15 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             "seed": seed,
             "n_chains": method.algorithm.chains(),
             "algorithm": algo_json,
+            // gh#747: the binomial sampler this leaf's filters drew with, for a
+            // reader that continues them (`fit predict --mode forecast`). Absent
+            // for a method that runs no chain-binomial filter.
+            "binomial": match &method.algorithm {
+                Algorithm::IF2 { .. } | Algorithm::PGAS { .. } | Algorithm::PMMH { .. }
+                | Algorithm::PFilter { .. } => serde_json::to_value(method.algorithm.binomial())
+                    .unwrap_or(serde_json::Value::Null),
+                _ => serde_json::Value::Null,
+            },
             "starts": starts_rule.spelled(),
             "chain_starts_kind": starts_rule.kind().as_str(),
             "fit_hash": resolved.levels.first().map(|l| l.hash.to_hex()),
