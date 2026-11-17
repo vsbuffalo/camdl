@@ -1388,18 +1388,24 @@ impl BoundObs {
         &self.times
     }
 
-    /// How many union indices are assimilation events: some stream scheduled
-    /// there holds a value (not a hole). The same rule as
-    /// [`ObservationModel::assimilates_at`](super::traits::ObservationModel::assimilates_at)
-    /// on the bound model (D72); IF2 perturbs and cools once per such event,
-    /// so this is the count its cooling schedule is sized from.
+    /// Whether union index `union_idx` is an assimilation event (D72): some
+    /// stream scheduled there holds a value (not a hole). A reset-only
+    /// boundary (a declared period's start) schedules no stream; a row every
+    /// stream holds as `NA` schedules them all and observes none. The one
+    /// definition: [`MultiStreamObsModel`] records it at construction and
+    /// answers [`ObservationModel::assimilates_at`](super::traits::ObservationModel::assimilates_at)
+    /// from it.
+    pub fn assimilates_at(&self, union_idx: usize) -> bool {
+        self.streams.iter().any(|s| match s.at_union[union_idx] {
+            Some(local) => s.cells[local].is_some(),
+            None => false,
+        })
+    }
+
+    /// How many union indices are assimilation events. IF2 perturbs and cools
+    /// once per such event, so this is the count its cooling is sized from.
     pub fn n_assimilation_events(&self) -> usize {
-        (0..self.times.len())
-            .filter(|&u| self.streams.iter().any(|s| match s.at_union[u] {
-                Some(local) => s.cells[local].is_some(),
-                None => false,
-            }))
-            .count()
+        (0..self.times.len()).filter(|&u| self.assimilates_at(u)).count()
     }
 
     /// What stream `stream_idx`'s observations are — the declared periods, if
@@ -1664,6 +1670,9 @@ pub struct MultiStreamObsModel {
     /// scoring fork reads the bins at `range.first ..` for `Some` and projects
     /// from `counts` for `None`.
     stream_bins: Vec<Option<BinRange>>,
+    /// Per union index, whether it is an assimilation event
+    /// ([`BoundObs::assimilates_at`], recorded at construction).
+    assimilation: Vec<bool>,
 }
 
 /// Where a stream's bins live in the dense `acc` vector: `len` consecutive
@@ -1774,6 +1783,7 @@ impl MultiStreamObsModel {
             real_s,
             interval_slots: vec![],
             stream_bins: vec![],
+            assimilation: vec![],
         }
     }
 
@@ -1791,6 +1801,8 @@ impl MultiStreamObsModel {
         bound: BoundObs,
         compiled: Arc<CompiledModel>,
     ) -> Result<Self, crate::error::SimError> {
+        let assimilation: Vec<bool> =
+            (0..bound.times.len()).map(|u| bound.assimilates_at(u)).collect();
         let BoundObs { times: obs_times, streams: bound_streams } = bound;
 
         let mut streams = Vec::with_capacity(bound_streams.len());
@@ -1853,6 +1865,7 @@ impl MultiStreamObsModel {
             real_s,
             interval_slots,
             stream_bins,
+            assimilation,
         })
     }
 
@@ -2833,14 +2846,9 @@ impl ObservationModel<ParticleState> for MultiStreamObsModel {
         (0..self.obs_times.len()).find(|&union_idx| self.assimilates_at(union_idx))
     }
 
-    /// Some stream scheduled at `union_idx` holds a value there (not a hole).
-    /// A reset-only boundary (a declared period's start) schedules no stream;
-    /// a row every stream holds as `NA` schedules them all and observes none.
+    /// Recorded from [`BoundObs::assimilates_at`] at construction.
     fn assimilates_at(&self, union_idx: usize) -> bool {
-        self.streams.iter().any(|s| match s.at_union[union_idx] {
-            Some(local) => s.observations[local].is_some(),
-            None => false,
-        })
+        self.assimilation[union_idx]
     }
 
     fn stream_names(&self) -> Vec<String> {
