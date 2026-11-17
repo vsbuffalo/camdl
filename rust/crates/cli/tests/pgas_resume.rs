@@ -350,8 +350,10 @@ fn pgas_resume_rejects_when_identity_field_changes() {
     assert!(r1.status.success(), "first PGAS run failed: {}", String::from_utf8_lossy(&r1.stderr));
     let (base_id, _, _) = post_leaf(&out, &[]);
 
-    // Run 2: 2 chains (an identity field) + --resume <base>. Reject.
-    let fit2 = write_fit_toml(tmp.path(), &ir, &data, 8, 2);
+    // Run 2: 2 chains (an identity field) + --resume <base>, toward a longer
+    // target, so the refusal is the identity check's rather than the one for
+    // a target the base already reached. Reject.
+    let fit2 = write_fit_toml(tmp.path(), &ir, &data, 12, 2);
     let r2 = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("run").arg(&fit2)
         .arg("--seed").arg("1").arg("--resume").arg(&base_id)
