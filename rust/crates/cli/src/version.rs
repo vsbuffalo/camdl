@@ -55,9 +55,63 @@ pub const ENGINE_REUSE: EngineReuse = if ENGINE_UNREUSABLE.is_empty() {
     EngineReuse::Unreusable { missing: ENGINE_UNREUSABLE }
 };
 
+/// How a build recorded as `recorded` (a [`VERSION_SHORT`] string) relates to
+/// the running one, for reports that say whether a stored result is current.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildRelation {
+    /// The same readable version.
+    Same,
+    /// The same release and commit; only the uncommitted changes differ (one
+    /// side is clean, or the two dirty digests differ).
+    UncommittedChanges,
+    /// Another release or commit.
+    Stale,
+}
+
+/// Compare two readable versions (`<release>+<commit>[.dirty-<digest>]`).
+pub fn build_relation(recorded: &str, current: &str) -> BuildRelation {
+    if recorded == current {
+        return BuildRelation::Same;
+    }
+    let base = |v: &str| v.split_once(".dirty-").map_or(v, |(b, _)| b).to_string();
+    if base(recorded) == base(current) {
+        BuildRelation::UncommittedChanges
+    } else {
+        BuildRelation::Stale
+    }
+}
+
+/// The sentence a report gives about a result recorded as produced by the
+/// readable version `recorded`, or `None` when that is this build:
+/// `stale: produced by X, current is Y` for another release or commit, `built
+/// from uncommitted changes: produced by X, current is Y` when only the
+/// uncommitted changes differ. `quote` wraps each version (backticks in
+/// Markdown).
+pub fn build_note(recorded: &str, quote: impl Fn(&str) -> String) -> Option<String> {
+    let what = match build_relation(recorded, VERSION_SHORT) {
+        BuildRelation::Same => return None,
+        BuildRelation::UncommittedChanges => "built from uncommitted changes",
+        BuildRelation::Stale => "stale",
+    };
+    Some(format!("{what}: produced by {}, current is {}", quote(recorded), quote(VERSION_SHORT)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dirty_digest_alone_is_uncommitted_changes_and_a_commit_is_stale() {
+        let clean = "0.4.0+abc1234";
+        let dirty = "0.4.0+abc1234.dirty-3f9c21e0";
+        assert_eq!(build_relation(clean, clean), BuildRelation::Same);
+        assert_eq!(build_relation(dirty, clean), BuildRelation::UncommittedChanges);
+        assert_eq!(build_relation(clean, dirty), BuildRelation::UncommittedChanges);
+        assert_eq!(build_relation(dirty, "0.4.0+abc1234.dirty-00000000"), BuildRelation::UncommittedChanges);
+        assert_eq!(build_relation("0.4.0+def5678", clean), BuildRelation::Stale);
+        assert_eq!(build_relation("0.4.0+def5678.dirty-3f9c21e0", dirty), BuildRelation::Stale);
+        assert_eq!(build_relation("0.3.0+abc1234", clean), BuildRelation::Stale);
+    }
 
     #[test]
     fn the_embedded_engine_id_is_128_bits_of_hex_and_not_the_git_hash() {
