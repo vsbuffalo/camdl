@@ -1,0 +1,45 @@
+name: Dates doc
+
+# Runs every `simulate` output table printed in docs/dates.md and compares its
+# time and date columns with what the command prints (`make test-dates-doc`,
+# gh#1089). The main CI skips its suite on doc-only changes, so this covers
+# doc-only PRs; a *code* change that moves a documented row is caught by
+# ci.yml, which runs the same harness as part of the Rust workspace. Needs both
+# toolchains: camdlc compiles each table's model, camdl runs it.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/dates.md"
+      - "rust/crates/cli/**"
+      - "ocaml/**"
+      - ".github/workflows/dates-doc.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "docs/dates.md"
+      - "rust/crates/cli/**"
+      - "ocaml/**"
+      - ".github/workflows/dates-doc.yml"
+
+jobs:
+  dates-doc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5.2"
+          dune-cache: true
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install OCaml dependencies
+        run: |
+          cd ocaml
+          opam install . --deps-only --with-test --yes
+
+      - name: Execute the dates page's printed simulate tables
+        run: opam exec -- make test-dates-doc

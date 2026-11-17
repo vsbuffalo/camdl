@@ -1,0 +1,36 @@
+# Base: none — root model
+# Adds: nothing — a context for docs/dates.md's printed trajectory excerpt,
+#   not a modelling claim
+# Changes: nothing else
+
+#' A calendar-anchored SIR simulated daily from `origin`, Wednesday 1 July
+#' 2026. The model behind the trajectory excerpt in `docs/dates.md`, "One row
+#' carries both readings": each row states the period its flow columns cover
+#' (`t_start`, `t_stop`, `date_start`, `date_stop`) beside the instant its
+#' state columns are read at (`t`, `date`). Executed by
+#' `cli/tests/dates_doc_examples.rs`.
+#'
+#' Fitted to nothing; it exists to print a trajectory.
+
+time_unit = 'days
+origin    = date("2026-07-01")
+
+compartments { S, I, R }
+
+parameters {
+  #' per-capita transmission rate
+  beta  : rate
+  #' recovery rate; mean infectious period is 1/gamma
+  gamma : rate
+  #' population size
+  N0    : count
+}
+
+transitions {
+  infection : S --> I @ beta * S * I / N0
+  recovery  : I --> R @ gamma * I
+}
+
+init { S = N0 - 10  I = 10 }
+
+simulate { from = origin  to = date("2026-07-08") }
