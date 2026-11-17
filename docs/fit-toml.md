@@ -420,10 +420,12 @@ The `ode`-backend methods fit the **deterministic marginal likelihood**
 statistical object, appropriate for equilibrium or large-population models. `mh`
 is the Bayesian sampler there and is gradient-free. `nl-lbfgs` requires a
 differentiable model (the capability check refuses an undifferentiable gradient,
-an adaptive `rk45` integrator, a scheduled effect, or an initial condition the
-gradient path cannot seed); `nl-sbplx` and `nl-bobyqa` carry no such
-requirement. See `camdl docs inference` (the ODE-backend fitting section) for
-when to pick which.
+an adaptive `rk45` integrator, a scheduled effect whose jump the sensitivity
+cannot cross — a reactive or estimated-time one, a `transfer(count = …)`, a
+state-dependent amount — or an initial condition the gradient path cannot seed;
+fixed-time fraction transfers, `add` and `set` effects are carried); `nl-sbplx`
+and `nl-bobyqa` carry no such requirement. See `camdl docs inference` (the
+ODE-backend fitting section) for when to pick which.
 
 A `[method]` key the method's own settings leave with nothing to do is refused
 at load, not ignored: `max_tree_depth` or `dense_mass` under `use_nuts = false`
