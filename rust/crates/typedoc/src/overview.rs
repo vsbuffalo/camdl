@@ -1,6 +1,17 @@
-//! The overview page: an odoc standalone page (`.mld`) that gives a set of
-//! internals pages its title, its index prose, and the groups the modules are
-//! listed under.
+//! The overview page: an odoc standalone page (`.mld`) or a Markdown page
+//! (`.md`) that gives a set of internals pages its title, its index prose,
+//! and the groups the modules are listed under. The OCaml compiler's is odoc,
+//! as its doc comments are; the Rust runtime's is Markdown, as its doc
+//! comments are. Both are held to the same rules.
+//!
+//! The Markdown page's one `# ...` heading, first in the file, is the title,
+//! and its opening paragraph's first sentence the description. Each
+//! `## ...` heading opens a group (`## Heading {#label}` gives its anchor),
+//! and the group's one `<!-- modules: a b c -->` line lists its top-level
+//! modules in order; the HTML comment keeps the list out of a plain Markdown
+//! preview. Text in fenced code blocks is never structure.
+//!
+//! The odoc page:
 //!
 //! The page is ordinary odoc. Its one `{0 ...}` heading, first in the file,
 //! is the title. Its opening paragraph's first sentence is the page
@@ -13,9 +24,18 @@
 use crate::markdown::first_sentence;
 use crate::odoc;
 
-/// A parsed overview page. The text fields hold odoc source.
+/// The markup an overview page is written in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Odoc,
+    Markdown,
+}
+
+/// A parsed overview page. The text fields hold source in [`Overview::format`].
 #[derive(Debug, Clone)]
 pub struct Overview {
+    /// The markup of the text fields.
+    pub format: Format,
     /// The text of the `{0 ...}` heading.
     pub title: String,
     /// The prose between the title and the first `{1 ...}` heading.
@@ -67,6 +87,17 @@ impl Event {
 }
 
 const MODULES_DIRECTIVE: &str = "{!modules:";
+
+/// The opening of a Markdown overview's module list.
+const MD_MODULES: &str = "<!-- modules:";
+
+/// The fence a Markdown line opens, if it does: its character and length.
+fn md_fence(line: &str) -> Option<(char, usize)> {
+    let t = line.trim_start();
+    let c = t.chars().next().filter(|c| *c == '`' || *c == '~')?;
+    let n = t.chars().take_while(|x| *x == c).count();
+    (n >= 3).then_some((c, n))
+}
 
 impl Overview {
     /// Reads an overview page from its odoc source.
@@ -203,9 +234,140 @@ impl Overview {
         }
 
         Ok(Overview {
+            format: Format::Odoc,
             title,
             intro,
             groups,
+        })
+    }
+
+    /// Reads an overview page from its Markdown source.
+    pub fn parse_markdown(src: &str) -> Result<Overview, String> {
+        let lines: Vec<&str> = src.split('\n').collect();
+        let mut fence: Option<(char, usize)> = None;
+        let mut title: Option<String> = None;
+        let mut intro = String::new();
+        // Each group, the line of its heading, and the lines of its lists.
+        let mut groups: Vec<(Group, usize, Vec<usize>)> = Vec::new();
+        for (n, &line) in lines.iter().enumerate() {
+            let lineno = n + 1;
+            let mut prose = true;
+            if let Some((c, k)) = fence {
+                let t = line.trim();
+                if t.chars().take_while(|x| *x == c).count() >= k && t.chars().all(|x| x == c) {
+                    fence = None;
+                }
+            } else if let Some(m) = md_fence(line) {
+                fence = Some(m);
+            } else if let Some(t) = line.strip_prefix("# ") {
+                if title.is_some() {
+                    return Err(format!(
+                        "line {lineno}: a second \"# ...\" heading; the page has exactly one title"
+                    ));
+                }
+                title = Some(t.trim().to_string());
+                prose = false;
+            } else if let Some(h) = line.strip_prefix("## ") {
+                let h = h.trim();
+                let (text, label) = match h.strip_suffix('}').and_then(|r| r.rsplit_once("{#")) {
+                    Some((t, l)) => (t.trim().to_string(), Some(l.trim().to_string())),
+                    None => (h.to_string(), None),
+                };
+                groups.push((
+                    Group {
+                        title: text,
+                        label,
+                        before: String::new(),
+                        modules: Vec::new(),
+                        after: String::new(),
+                    },
+                    lineno,
+                    Vec::new(),
+                ));
+                prose = false;
+            } else if let Some(names) = line
+                .trim()
+                .strip_prefix(MD_MODULES)
+                .and_then(|r| r.strip_suffix("-->"))
+            {
+                let Some((g, _, lists)) = groups.last_mut() else {
+                    return Err(format!(
+                        "line {lineno}: a {MD_MODULES} ... --> list before the first \"## ...\" \
+                         heading; every list belongs to a section"
+                    ));
+                };
+                lists.push(lineno);
+                g.modules = names.split_whitespace().map(str::to_string).collect();
+                prose = false;
+            } else if line.trim_start().starts_with(MD_MODULES) {
+                return Err(format!(
+                    "line {lineno}: a module list must be one line, {MD_MODULES} a b c -->"
+                ));
+            }
+            if title.is_none() {
+                if !line.trim().is_empty() {
+                    return Err(format!(
+                        "the overview does not open with a \"# ...\" title heading (line {lineno} \
+                         comes first)"
+                    ));
+                }
+                continue;
+            }
+            if !prose {
+                continue;
+            }
+            let target = match groups.last_mut() {
+                None => &mut intro,
+                Some((g, _, lists)) if lists.is_empty() => &mut g.before,
+                Some((g, _, _)) => &mut g.after,
+            };
+            target.push_str(line);
+            target.push('\n');
+        }
+        let Some(title) = title else {
+            return Err("the overview does not open with a \"# ...\" title heading".to_string());
+        };
+        let mut out = Vec::new();
+        for (g, at, lists) in groups {
+            match lists.as_slice() {
+                [_] => {}
+                [] => {
+                    return Err(format!(
+                        "line {at}: section \"{}\" has no {MD_MODULES} ... --> list",
+                        g.title
+                    ))
+                }
+                many => {
+                    let l: Vec<String> = many.iter().map(usize::to_string).collect();
+                    return Err(format!(
+                        "line {at}: section \"{}\" has {} {MD_MODULES} ... --> lists (lines {}); \
+                         a section lists its modules once",
+                        g.title,
+                        many.len(),
+                        l.join(", ")
+                    ));
+                }
+            }
+            if g.modules.is_empty() {
+                return Err(format!(
+                    "line {}: section \"{}\" has an empty {MD_MODULES} ... --> list",
+                    lists[0], g.title
+                ));
+            }
+            out.push(g);
+        }
+        if first_sentence(&crate::markdown::tidy(&intro)).is_none() {
+            return Err(
+                "the overview's first paragraph, under the title, gives the page's description, \
+                 but the text there opens with no sentence"
+                    .to_string(),
+            );
+        }
+        Ok(Overview {
+            format: Format::Markdown,
+            title,
+            intro,
+            groups: out,
         })
     }
 
@@ -512,6 +674,84 @@ More.
     fn an_overview_without_an_opening_sentence_fails() {
         let e = err("{0 T}\n{[ code ]}\n{1 G}\n{!modules: A}\n");
         assert!(e.contains("opens with no sentence"), "{e}");
+    }
+
+    const GOOD_MD: &str = "\
+# The runtime
+
+How camdl runs a model. It reads [`Model`].
+
+```
+## Not a heading
+<!-- modules: not_a_list -->
+```
+
+## Types first {#types}
+
+The IR.
+
+<!-- modules: ir declared -->
+
+After the table.
+
+### A subsection
+
+## Engine
+
+<!-- modules: sim -->
+";
+
+    #[test]
+    fn markdown_title_intro_and_groups() {
+        let o = Overview::parse_markdown(GOOD_MD).unwrap();
+        assert_eq!(o.format, Format::Markdown);
+        assert_eq!(o.title, "The runtime");
+        assert!(
+            o.intro.contains("<!-- modules: not_a_list -->"),
+            "{}",
+            o.intro
+        );
+        assert_eq!(o.groups.len(), 2);
+        let g = &o.groups[0];
+        assert_eq!(g.title, "Types first");
+        assert_eq!(g.label.as_deref(), Some("types"));
+        assert_eq!(g.before.trim(), "The IR.");
+        assert_eq!(g.modules, ["ir", "declared"]);
+        assert!(g.after.contains("### A subsection"), "{}", g.after);
+        assert_eq!(
+            o.module_names().collect::<Vec<_>>(),
+            ["ir", "declared", "sim"]
+        );
+    }
+
+    fn md_err(src: &str) -> String {
+        Overview::parse_markdown(src).unwrap_err()
+    }
+
+    #[test]
+    fn markdown_structure_errors_name_the_line() {
+        let e = md_err("Text.\n# T\nBody.\n## G\n<!-- modules: a -->\n");
+        assert!(e.contains("does not open with a \"# ...\" title"), "{e}");
+        let e = md_err("# T\nBody.\n## G\n<!-- modules: a -->\n# Again\n");
+        assert!(e.contains("line 5: a second"), "{e}");
+        let e = md_err("# T\nBody.\n## G\nText.\n## H\n<!-- modules: a -->\n");
+        assert!(e.contains("line 3: section \"G\" has no"), "{e}");
+        let e = md_err("# T\nBody.\n## G\n<!-- modules: a -->\n<!-- modules: b -->\n");
+        assert!(
+            e.contains("has 2 <!-- modules: ... --> lists (lines 4, 5)"),
+            "{e}"
+        );
+        let e = md_err("# T\nBody.\n<!-- modules: a -->\n## G\n<!-- modules: b -->\n");
+        assert!(
+            e.contains("line 3: a <!-- modules: ... --> list before the first"),
+            "{e}"
+        );
+        let e = md_err("# T\nBody.\n## G\n<!-- modules: -->\n");
+        assert!(e.contains("empty"), "{e}");
+        let e = md_err("# T\n```\ncode\n```\n## G\n<!-- modules: a -->\n");
+        assert!(e.contains("opens with no sentence"), "{e}");
+        let e = md_err("# T\nBody.\n## G\n<!-- modules: a\nb -->\n");
+        assert!(e.contains("must be one line"), "{e}");
     }
 
     #[test]

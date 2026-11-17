@@ -13,8 +13,9 @@ use crate::markdown::{
 };
 use crate::marks::{self, Mark};
 use crate::model::Target;
-use crate::model::{Kind, Language, Member};
+use crate::model::{DocLink, Kind, Language, LinkTo, Member};
 use crate::odoc;
+use crate::overview::Format;
 use crate::site::{From, Site, SourceEntry, TypeId, INDEX_SLUG, SOURCE_DIR};
 
 /// Where source links point: a repository on GitHub, at one commit, so that
@@ -146,20 +147,48 @@ fn source_page(
     Ok(out)
 }
 
-/// Converts a doc comment written in module `m` to Markdown for page `page`,
-/// resolving references from that module.
-fn convert_doc(site: &Site, m: usize, page: usize, doc: &str) -> String {
-    let resolve = |path: &str| -> Option<String> {
-        site.resolve_type(m, path)
-            .map(|id| site.type_href(page, id))
-            .or_else(|| {
-                site.resolve_module(m, path)
-                    .map(|t| site.module_href(page, t))
-            })
-    };
+/// Converts a doc comment written in module `m` to Markdown for page `page`.
+/// An OCaml comment's references are resolved from that module; a Rust
+/// comment's links are the ones rustdoc resolved, `links`, and a link
+/// rustdoc did not resolve to something on the pages is left unlinked.
+fn convert_doc(site: &Site, m: usize, page: usize, doc: &str, links: &[DocLink]) -> String {
     match site.modules[m].language {
-        Language::Ocaml => odoc::to_markdown(doc, &resolve),
-        Language::Rust => rustdoc_to_markdown(doc, &resolve),
+        Language::Ocaml => {
+            let resolve = |path: &str| -> Option<String> {
+                site.resolve_type(m, path)
+                    .map(|id| site.type_href(page, id))
+                    .or_else(|| {
+                        site.resolve_module(m, path)
+                            .map(|t| site.module_href(page, t))
+                    })
+            };
+            odoc::to_markdown(doc, &resolve)
+        }
+        Language::Rust => {
+            let resolve = |text: &str| -> Option<String> {
+                let link = links
+                    .iter()
+                    .find(|l| l.text == text || l.text.trim_end_matches("()") == text)?;
+                doc_link_href(site, page, &link.to)
+            };
+            rustdoc_to_markdown(doc, &resolve)
+        }
+    }
+}
+
+/// The link target, from module page `page`, of a resolved doc link.
+fn doc_link_href(site: &Site, page: usize, to: &LinkTo) -> Option<String> {
+    match to {
+        LinkTo::Type { module, ty } => site
+            .find_target(&Target {
+                module: module.clone(),
+                ty: ty.clone(),
+            })
+            .map(|id| site.type_href(page, id)),
+        LinkTo::Module { module } => site.module_named(module).map(|m| site.module_href(page, m)),
+        LinkTo::Source { path, line } => site
+            .source_named(path)
+            .map(|s| format!("{SOURCE_DIR}/{}.qmd#L{line}", s.slug)),
     }
 }
 
@@ -169,8 +198,14 @@ fn present(doc: &Option<String>) -> Option<&str> {
 }
 
 /// The summary sentence of a doc comment, or `None` when it has none.
-fn summary(site: &Site, m: usize, page: usize, doc: &Option<String>) -> Option<String> {
-    present(doc).and_then(|d| first_sentence(&convert_doc(site, m, page, d)))
+fn summary(
+    site: &Site,
+    m: usize,
+    page: usize,
+    doc: &Option<String>,
+    links: &[DocLink],
+) -> Option<String> {
+    present(doc).and_then(|d| first_sentence(&convert_doc(site, m, page, d, links)))
 }
 
 /// Text for a pipe-table cell: on one line, with `|` escaped.
@@ -240,7 +275,10 @@ fn percent(part: usize, whole: usize) -> String {
 /// index page.
 fn convert_overview(site: &Site, text: &str) -> String {
     let resolve = |path: &str| site.index_href(path);
-    odoc::page_to_markdown(text, &resolve)
+    match site.overview.format {
+        Format::Odoc => odoc::page_to_markdown(text, &resolve),
+        Format::Markdown => rustdoc_to_markdown(text, &resolve),
+    }
 }
 
 /// Converted text on one line, for a title or a heading.
@@ -289,24 +327,39 @@ fn push_prose(out: &mut String, md: &str) {
     }
 }
 
-/// The table of a group's module pages: each module's summary and counts.
+/// The table of a group's module pages, as the overview lists them: each
+/// module's summary and counts. A Rust crate's counts cover all its files.
 fn module_table(out: &mut String, site: &Site, g: usize) {
+    let pages: Vec<usize> = (0..site.pages.len())
+        .filter(|&p| site.pages[p].group == g && site.pages[p].parent.is_none())
+        .collect();
+    page_table(out, site, &pages, true);
+}
+
+/// A table of pages, linked from a page in the same directory, with their
+/// summaries and counts, which include their child pages when `with_children`.
+fn page_table(out: &mut String, site: &Site, pages: &[usize], with_children: bool) {
     out.push_str("| Module | Summary | Types | Documented | History marks |\n");
     out.push_str("|:--|:--|--:|--:|--:|\n");
-    for (p, page) in site
-        .pages
-        .iter()
-        .enumerate()
-        .filter(|(_, pg)| pg.group == g)
-    {
+    for &p in pages {
+        let page = &site.pages[p];
         let top = page.modules[0];
         let entry = &site.modules[top];
         let summary = if entry.local.is_empty() {
-            summary(site, top, p, &entry.module.doc).unwrap_or_else(|| Mark::Undocumented.render())
+            summary(site, top, p, &entry.module.doc, &entry.module.doc_links)
+                .unwrap_or_else(|| Mark::Undocumented.render())
         } else {
             Mark::Undocumented.render()
         };
-        let stats = page_stats(site, p);
+        let mut stats = page_stats(site, p);
+        if with_children {
+            for c in site.children(p) {
+                let s = page_stats(site, c);
+                stats.types += s.types;
+                stats.documented += s.documented;
+                stats.history += s.history;
+            }
+        }
         let _ = writeln!(
             out,
             "| [{}]({}.qmd) | {} | {} | {} | {} |",
@@ -369,10 +422,27 @@ fn module_page(site: &Site, source: &SourceLinks, p: usize) -> Result<String, St
         source.url(path, None)
     );
 
+    if let Some(parent) = page.parent {
+        let crate_page = &site.pages[parent];
+        let _ = writeln!(
+            out,
+            "A module of the crate [{}]({}.qmd).\n",
+            code_span(&crate_page.name),
+            crate_page.slug
+        );
+    }
+
     // The top-level module's documentation; nested modules carry their own
     // under their section heading.
     if top_entry.local.is_empty() {
         module_doc(&mut out, site, top, p);
+    }
+
+    // A crate's page lists the pages of its other files.
+    let children: Vec<usize> = site.children(p).collect();
+    if !children.is_empty() {
+        out.push_str("## Modules {#modules}\n\n");
+        page_table(&mut out, site, &children, false);
     }
 
     // The compact table of every type on the page.
@@ -389,7 +459,7 @@ fn module_page(site: &Site, source: &SourceLinks, p: usize) -> Result<String, St
         for &id in &all_types {
             let e = &site.modules[id.module];
             let t = &e.module.types[id.ty];
-            let s = summary(site, id.module, p, &t.doc).unwrap_or_default();
+            let s = summary(site, id.module, p, &t.doc, &t.doc_links).unwrap_or_default();
             let marks = marks::type_marks(t, e.language);
             let _ = writeln!(
                 out,
@@ -435,7 +505,11 @@ fn module_doc(out: &mut String, site: &Site, m: usize, p: usize) {
         let _ = writeln!(out, "{}\n", marks::render_line(&marks));
     }
     if let Some(doc) = present(&e.module.doc) {
-        let _ = writeln!(out, "{}\n", convert_doc(site, m, p, doc));
+        let _ = writeln!(
+            out,
+            "{}\n",
+            convert_doc(site, m, p, doc, &e.module.doc_links)
+        );
     }
 }
 
@@ -461,7 +535,11 @@ fn type_section(
         let _ = writeln!(out, "{}\n", marks::render_line(&marks));
     }
     if let Some(doc) = present(&t.doc) {
-        let _ = writeln!(out, "{}\n", convert_doc(site, id.module, p, doc));
+        let _ = writeln!(
+            out,
+            "{}\n",
+            convert_doc(site, id.module, p, doc, &t.doc_links)
+        );
     }
     let _ = writeln!(out, "{}\n", declaration(site, p, id)?);
 
@@ -478,7 +556,7 @@ fn type_section(
                 body.push(marks::render_line(&mem_marks));
             }
             if let Some(doc) = present(&mem.doc) {
-                body.push(convert_doc(site, id.module, p, doc));
+                body.push(convert_doc(site, id.module, p, doc, &mem.doc_links));
             }
             let body = body.join("\n\n");
             let indented = indent(&body, 4);
@@ -520,6 +598,20 @@ fn type_section(
         let _ = writeln!(out, "**Used by:** {}\n", users.join(", "));
     }
 
+    let impls = implements(site, source, p, id);
+    if !impls.is_empty() {
+        let _ = writeln!(out, "**Implements:** {impls}\n");
+    }
+
+    let implementors: Vec<String> = site
+        .implemented_by(id)
+        .iter()
+        .map(|&u| link(site, p, u))
+        .collect();
+    if !implementors.is_empty() {
+        let _ = writeln!(out, "**Implemented by:** {}\n", implementors.join(", "));
+    }
+
     let _ = writeln!(
         out,
         "[source]({}/{}.qmd#L{}){{.td-source}} · [on GitHub]({}){{.td-source}}\n",
@@ -529,6 +621,47 @@ fn type_section(
         source.url(&e.module.path, Some(t.line))
     );
     Ok(())
+}
+
+/// The traits a Rust type implements: the derived ones first, then each
+/// written impl, linked to the trait's documentation when an input declares
+/// it, with a link to where the impl is written.
+fn implements(site: &Site, source: &SourceLinks, p: usize, id: TypeId) -> String {
+    let t = &site.modules[id.module].module.types[id.ty];
+    let trait_link = |imp: &crate::model::Impl| -> String {
+        let shown = code_span(&imp.trait_path);
+        match imp.target.as_ref().and_then(|x| site.find_target(x)) {
+            Some(tr) => format!("[{shown}]({})", site.type_href(p, tr)),
+            None => shown,
+        }
+    };
+    let derived: Vec<String> = t
+        .impls
+        .iter()
+        .filter(|i| i.derived)
+        .map(trait_link)
+        .collect();
+    let written: Vec<String> = t
+        .impls
+        .iter()
+        .filter(|i| !i.derived)
+        .map(|i| match (&i.path, i.line) {
+            (Some(path), Some(line)) => {
+                let at = match site.source_named(path) {
+                    Some(s) => format!("{SOURCE_DIR}/{}.qmd#L{line}", s.slug),
+                    None => source.url(path, Some(line)),
+                };
+                format!("{} ([impl]({at}){{.td-source}})", trait_link(i))
+            }
+            _ => trait_link(i),
+        })
+        .collect();
+    let mut parts = Vec::new();
+    if !derived.is_empty() {
+        parts.push(format!("{} (derived)", derived.join(", ")));
+    }
+    parts.extend(written);
+    parts.join("; ")
 }
 
 /// A type's declaration as a highlighted block, each type name in it linked
@@ -631,6 +764,7 @@ fn member_term(kind: Kind, language: Language, m: &Member) -> String {
                 format!("{}({ty})", m.name)
             }
         }
+        (Language::Rust, false) if kind == Kind::Trait && !ty.is_empty() => ty.to_string(),
         (Language::Rust, false) => format!("{}: {ty}", m.name),
     }
 }

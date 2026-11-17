@@ -5,13 +5,19 @@
 //! reads any number of them, so the compiler's OCaml types and the runtime's
 //! Rust types can refer to each other on the generated pages. Every field is
 //! required except the doc comments, which are `null` when the source has
-//! none, and an unknown field is refused, so a change to what an extractor
+//! none, and the fields only the Rust extractor writes ([`TypeDecl::impls`]
+//! and the `doc_links` of modules, types and members), which are empty when
+//! absent. An unknown field is refused, so a change to what an extractor
 //! writes fails the render instead of being ignored.
+//!
+//! The renderer reads this JSON and the Rust extractor
+//! ([`crate::rustdoc`]) writes it from these same types, so the two cannot
+//! disagree about its shape.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Everything one extractor found in one language's source tree.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Input {
     /// The language the modules are written in. It decides how doc comments
@@ -28,7 +34,7 @@ pub struct Input {
 /// of its own. The text is not in the JSON: the renderer reads it from
 /// [`SourceFile::path`] and refuses it when its size differs from what the
 /// extractor read.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceFile {
     /// The file, relative to the repository root, as [`Module::path`] names it.
@@ -46,7 +52,7 @@ pub struct SourceFile {
 /// A run of text on one line that gets markup: a class, and a link when it
 /// names a documented type. Spans never overlap and never cross a line end;
 /// one that would is split into one span per line.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Span {
     /// The line, counting from 1.
@@ -60,12 +66,12 @@ pub struct Span {
     /// The documented type the text names. Absent for a span that does not
     /// link. The extractor resolves it from the language's own analysis, so
     /// it is exact: a name resolved by guessing never gets one.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<Target>,
 }
 
 /// What a span of source text is, for highlighting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SpanClass {
     /// A keyword of the language: `type`, `let`, `match`.
@@ -90,7 +96,7 @@ pub enum SpanClass {
 /// A documented type, named by its module's path ([`Module::name`]) and its
 /// name ([`TypeDecl::name`]). The extractor emits it only for the
 /// declaration that module binds the name to last, so the pair is unique.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Target {
     pub module: String,
@@ -99,7 +105,7 @@ pub struct Target {
 }
 
 /// A source language the extractors support.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Language {
     /// OCaml. Doc comments are odoc markup, written `(** ... *)`.
@@ -116,27 +122,42 @@ impl Language {
             Language::Rust => "rust",
         }
     }
+
+    /// What joins the segments of a module path: `Ast.Located` in OCaml,
+    /// `sim::inference` in Rust.
+    pub fn separator(self) -> &'static str {
+        match self {
+            Language::Ocaml => ".",
+            Language::Rust => "::",
+        }
+    }
 }
 
 /// One module: a source file, or a module nested inside one.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Module {
-    /// The module's path as the language names it. In OCaml a file's module
-    /// is its capitalised basename (`Ast`), and a module nested in it is
-    /// written with a dot (`Ast.Located`). The part before the first dot
-    /// names the page the module is shown on.
+    /// The module's path as the language names it, its segments joined by
+    /// [`Language::separator`]. In OCaml a file's module is its capitalised
+    /// basename (`Ast`), and a module nested in it is written with a dot
+    /// (`Ast.Located`); the first segment names the page the module is shown
+    /// on. In Rust the first segment is the crate (`sim::inference::pgas`),
+    /// and each source file's modules get a page of their own.
     pub name: String,
     /// The source file, relative to the repository root.
     pub path: String,
     /// The module's doc comment, as raw markup of [`Input::language`].
     pub doc: Option<String>,
+    /// What the links in [`Module::doc`] point to, as the language resolved
+    /// them. Rust only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub doc_links: Vec<DocLink>,
     /// The type declarations, in source order.
     pub types: Vec<TypeDecl>,
 }
 
 /// One type declaration.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TypeDecl {
     /// The type's name, without parameters or module path.
@@ -165,10 +186,76 @@ pub struct TypeDecl {
     /// The type paths the declaration mentions, as written in the source:
     /// `expr`, `Ir.expr`. A path may name the declaration itself.
     pub refs: Vec<String>,
+    /// What the links in [`TypeDecl::doc`] point to. Rust only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub doc_links: Vec<DocLink>,
+    /// The traits the type implements, in the order the compiler lists the
+    /// impls. Rust only: OCaml has no counterpart.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub impls: Vec<Impl>,
+}
+
+/// A trait a Rust type implements. Only impls written for the type itself
+/// are listed: auto traits (`Send`, `Sync`) the compiler infers and blanket
+/// impls (`impl<T: Display> ToString for T`) are left out, because they say
+/// nothing about the type that its declaration does not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Impl {
+    /// The trait as the impl names it, with its arguments: `Clone`,
+    /// `From<ir::Model>`, `std::fmt::Display`. For a derived impl, the name
+    /// in the `#[derive]` list.
+    #[serde(rename = "trait")]
+    pub trait_path: String,
+    /// The trait's declaration, when an input declares it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<Target>,
+    /// Whether the impl comes from `#[derive(...)]` rather than being
+    /// written out.
+    pub derived: bool,
+    /// The file the impl is written in, relative to the repository root.
+    /// `null` for a derived impl.
+    pub path: Option<String>,
+    /// The line the impl starts on, counting from 1. `null` for a derived
+    /// impl.
+    pub line: Option<u32>,
+}
+
+/// A link in a doc comment, as the language's own tooling resolved it, so
+/// the renderer does not have to guess what a name means in the comment's
+/// scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DocLink {
+    /// The link's destination as written, without backticks: `Model`,
+    /// `crate::expr::Expr`, `Self::new`.
+    pub text: String,
+    /// What it points to.
+    pub to: LinkTo,
+}
+
+/// The destination of a [`DocLink`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum LinkTo {
+    /// A documented type, or a variant or field of one, which is shown with
+    /// the type.
+    Type {
+        module: String,
+        #[serde(rename = "type")]
+        ty: String,
+    },
+    /// A module of the inputs.
+    Module { module: String },
+    /// Something the pages do not document, such as a function, method or
+    /// constant, shown at its line on its source file's page. `path` is
+    /// relative to the repository root and must be a source file of the
+    /// inputs.
+    Source { path: String, line: u32 },
 }
 
 /// The form of a type declaration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
     /// An OCaml variant type: a choice between constructors.
@@ -188,7 +275,8 @@ pub enum Kind {
     TupleStruct,
     /// A Rust enum: a choice between variants.
     Enum,
-    /// A Rust trait.
+    /// A Rust trait. Its members are its associated types, constants and
+    /// methods, each with its signature as the member's type.
     Trait,
 }
 
@@ -211,19 +299,27 @@ impl Kind {
     }
 }
 
-/// A constructor of a variant or enum, or a field of a record or struct.
-#[derive(Debug, Clone, Deserialize)]
+/// A constructor of a variant or enum, a field of a record or struct, or an
+/// item of a Rust trait.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Member {
-    /// The constructor's or field's name.
+    /// The constructor's, field's or trait item's name.
     pub name: String,
     /// For a field, its type. For a constructor, the type of its argument,
-    /// or the empty string for a constructor that takes none.
+    /// or the empty string for a constructor that takes none; a Rust enum
+    /// variant's is written with its delimiters, `(f64, u32)` or
+    /// `{ at: f64 }`. For a trait item, its signature, such as
+    /// `fn rate(&self, t: f64) -> f64`.
     #[serde(rename = "type")]
     pub ty: String,
-    /// Whether the field can be assigned after the value is built. Always
-    /// `false` for a constructor.
+    /// Whether the field can be assigned after the value is built (an OCaml
+    /// `mutable` field). Always `false` for a constructor and in Rust, where
+    /// mutability belongs to the binding, not the field.
     pub mutable: bool,
     /// The member's doc comment, as raw markup of [`Input::language`].
     pub doc: Option<String>,
+    /// What the links in [`Member::doc`] point to. Rust only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub doc_links: Vec<DocLink>,
 }

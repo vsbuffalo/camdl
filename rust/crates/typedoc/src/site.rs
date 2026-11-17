@@ -56,6 +56,16 @@ pub struct TypeId {
     pub ty: usize,
 }
 
+/// The separator of a module path: `::` when the path has one (a Rust
+/// path), `.` otherwise.
+fn sep_of(path: &str) -> &'static str {
+    if path.contains("::") {
+        "::"
+    } else {
+        "."
+    }
+}
+
 /// A module placed on a page.
 #[derive(Debug)]
 pub struct ModuleEntry<'a> {
@@ -70,11 +80,17 @@ pub struct ModuleEntry<'a> {
     pub anchors: Vec<String>,
 }
 
-/// One generated module page: a top-level module and the modules nested in it.
+/// One generated module page: a top-level module and the modules nested in
+/// it. For Rust, a page per source file: the crate's root file is listed by
+/// the overview, and every other file is a page under it.
 #[derive(Debug)]
 pub struct Page {
-    /// The top-level module's name, as the overview lists it.
+    /// The top-level module's name: as the overview lists it, or for a Rust
+    /// file that is not its crate's root, the file's module (`sim::pgas`).
     pub name: String,
+    /// For a Rust file that is not its crate's root, the crate's page, which
+    /// lists it; the index lists only pages without one.
+    pub parent: Option<usize>,
     /// The file name without extension.
     pub slug: String,
     /// The overview group the page is listed under.
@@ -100,6 +116,7 @@ pub struct Site<'a> {
     by_name: BTreeMap<&'a str, usize>,
     defining: BTreeMap<&'a str, Vec<usize>>,
     used_by: BTreeMap<TypeId, Vec<TypeId>>,
+    implemented_by: BTreeMap<TypeId, Vec<TypeId>>,
     source_by_path: BTreeMap<&'a str, usize>,
 }
 
@@ -128,15 +145,15 @@ pub enum From {
     Source,
 }
 
-/// The top-level module a module path belongs to: the part before the first dot.
+/// The top-level module a module path belongs to: its first segment.
 fn top_of(name: &str) -> &str {
-    name.split('.').next().unwrap_or(name)
+    name.split(sep_of(name)).next().unwrap_or(name)
 }
 
-/// The file name of a module page: the module name in lower case, with dots
-/// as hyphens.
+/// The file name of a module page: the module name in lower case, with each
+/// separator (`.` or `::`) as a hyphen.
 pub fn slug_of(name: &str) -> String {
-    name.to_lowercase().replace('.', "-")
+    name.to_lowercase().replace("::", "-").replace('.', "-")
 }
 
 /// An HTML id made from a path: characters other than ASCII letters, digits,
@@ -195,8 +212,11 @@ impl<'a> Site<'a> {
                 join(&dup_listed)
             ));
         }
-        let nested_listed: BTreeSet<&str> =
-            listed.iter().copied().filter(|n| n.contains('.')).collect();
+        let nested_listed: BTreeSet<&str> = listed
+            .iter()
+            .copied()
+            .filter(|n| n.contains('.') || n.contains("::"))
+            .collect();
         if !nested_listed.is_empty() {
             return Err(format!(
                 "the overview lists nested modules, which are shown on their parent's page; \
@@ -232,65 +252,95 @@ impl<'a> Site<'a> {
         let mut modules = Vec::new();
         let mut pages = Vec::new();
         for (gi, group) in overview.groups.iter().enumerate() {
-            for name in &group.modules {
-                let slug = slug_of(name);
-                if slug == INDEX_SLUG {
-                    return Err(format!(
-                        "module {name} would be written to {INDEX_SLUG}.qmd, the index page"
-                    ));
-                }
-                let page = pages.len();
+            for listed_name in &group.modules {
                 let mut members: Vec<(&'a Module, Language)> = all
                     .iter()
                     .copied()
-                    .filter(|(m, _)| top_of(&m.name) == name)
+                    .filter(|(m, _)| top_of(&m.name) == listed_name)
                     .collect();
                 // The top-level module first; nested ones keep input order.
-                members.sort_by_key(|(m, _)| m.name != *name);
-                let mut used_anchors = BTreeSet::new();
-                let mut indices = Vec::new();
+                members.sort_by_key(|(m, _)| m.name != *listed_name);
+                // The pages: one for an OCaml module, one per file for a Rust
+                // crate, the crate root's file first.
+                let mut files: Vec<(String, Vec<(&'a Module, Language)>)> = Vec::new();
                 for (m, language) in members {
-                    let local = m
-                        .name
-                        .strip_prefix(name.as_str())
-                        .and_then(|r| r.strip_prefix('.'))
-                        .unwrap_or("")
-                        .to_string();
-                    let anchors = m
-                        .types
-                        .iter()
-                        .map(|t| {
-                            let path = if local.is_empty() {
-                                t.name.clone()
-                            } else {
-                                format!("{local}.{}", t.name)
-                            };
-                            let base = format!("t-{}", sanitize_id(&path));
-                            let mut anchor = base.clone();
-                            let mut n = 2;
-                            while !used_anchors.insert(anchor.clone()) {
-                                anchor = format!("{base}-{n}");
-                                n += 1;
-                            }
-                            anchor
-                        })
-                        .collect();
-                    indices.push(modules.len());
-                    modules.push(ModuleEntry {
-                        module: m,
-                        language,
-                        page,
-                        local,
-                        anchors,
+                    let key = match language {
+                        Language::Ocaml => String::new(),
+                        Language::Rust => m.path.clone(),
+                    };
+                    match files.iter_mut().find(|(k, _)| *k == key) {
+                        Some((_, v)) => v.push((m, language)),
+                        None => files.push((key, vec![(m, language)])),
+                    }
+                }
+                let crate_page = pages.len();
+                for (fi, (_, members)) in files.into_iter().enumerate() {
+                    let name: String = if fi == 0 {
+                        listed_name.clone()
+                    } else {
+                        // The file's module: the shortest path among its modules.
+                        members
+                            .iter()
+                            .map(|(m, _)| m.name.as_str())
+                            .min_by_key(|n| n.len())
+                            .unwrap_or_default()
+                            .to_string()
+                    };
+                    let name = &name;
+                    let slug = slug_of(name);
+                    if slug == INDEX_SLUG {
+                        return Err(format!(
+                            "module {name} would be written to {INDEX_SLUG}.qmd, the index page"
+                        ));
+                    }
+                    let page = pages.len();
+                    let mut used_anchors = BTreeSet::new();
+                    let mut indices = Vec::new();
+                    for (m, language) in members {
+                        let sep = language.separator();
+                        let local = m
+                            .name
+                            .strip_prefix(name.as_str())
+                            .and_then(|r| r.strip_prefix(sep))
+                            .unwrap_or("")
+                            .to_string();
+                        let anchors = m
+                            .types
+                            .iter()
+                            .map(|t| {
+                                let path = if local.is_empty() {
+                                    t.name.clone()
+                                } else {
+                                    format!("{local}{sep}{}", t.name)
+                                };
+                                let base = format!("t-{}", sanitize_id(&path));
+                                let mut anchor = base.clone();
+                                let mut n = 2;
+                                while !used_anchors.insert(anchor.clone()) {
+                                    anchor = format!("{base}-{n}");
+                                    n += 1;
+                                }
+                                anchor
+                            })
+                            .collect();
+                        indices.push(modules.len());
+                        modules.push(ModuleEntry {
+                            module: m,
+                            language,
+                            page,
+                            local,
+                            anchors,
+                        });
+                    }
+                    pages.push(Page {
+                        name: name.clone(),
+                        parent: (fi > 0).then_some(crate_page),
+                        slug,
+                        group: gi,
+                        order: order + 1 + page as i64,
+                        modules: indices,
                     });
                 }
-                pages.push(Page {
-                    name: name.clone(),
-                    slug,
-                    group: gi,
-                    order: order + 1 + page as i64,
-                    modules: indices,
-                });
             }
         }
 
@@ -306,7 +356,7 @@ impl<'a> Site<'a> {
                 defining.entry(n).or_default().push(i);
             }
         }
-        let (sources, source_by_path) = place_sources(inputs, &modules)?;
+        let (sources, source_by_path) = place_sources(inputs, &modules, &pages)?;
         let mut site = Site {
             overview,
             order,
@@ -316,9 +366,25 @@ impl<'a> Site<'a> {
             by_name,
             defining,
             used_by: BTreeMap::new(),
+            implemented_by: BTreeMap::new(),
             source_by_path,
         };
         site.check_targets()?;
+        let mut implemented_by: BTreeMap<TypeId, Vec<TypeId>> = BTreeMap::new();
+        for (mi, e) in site.modules.iter().enumerate() {
+            for (ti, t) in e.module.types.iter().enumerate() {
+                for imp in &t.impls {
+                    if let Some(tr) = imp.target.as_ref().and_then(|x| site.find_target(x)) {
+                        let users = implemented_by.entry(tr).or_default();
+                        let me = TypeId { module: mi, ty: ti };
+                        if !users.contains(&me) {
+                            users.push(me);
+                        }
+                    }
+                }
+            }
+        }
+        site.implemented_by = implemented_by;
 
         let mut used_by: BTreeMap<TypeId, Vec<TypeId>> = BTreeMap::new();
         for (mi, e) in site.modules.iter().enumerate() {
@@ -340,9 +406,10 @@ impl<'a> Site<'a> {
     /// first: `from` itself, then each enclosing module.
     fn scopes(&self, from: usize) -> Vec<&'a str> {
         let name = self.modules[from].module.name.as_str();
+        let sep = self.modules[from].language.separator();
         let mut out = vec![name];
         let mut rest = name;
-        while let Some(i) = rest.rfind('.') {
+        while let Some(i) = rest.rfind(sep) {
             rest = &rest[..i];
             out.push(rest);
         }
@@ -364,8 +431,9 @@ impl<'a> Site<'a> {
     /// each enclosing scope, innermost first, then with leading path segments
     /// dropped (a library's wrapper module, as in `Camdl.Ast`).
     pub fn resolve_module(&self, from: usize, path: &str) -> Option<usize> {
+        let sep = self.modules[from].language.separator();
         for scope in self.scopes(from) {
-            if let Some(&m) = self.by_name.get(format!("{scope}.{path}").as_str()) {
+            if let Some(&m) = self.by_name.get(format!("{scope}{sep}{path}").as_str()) {
                 return Some(m);
             }
         }
@@ -379,8 +447,9 @@ impl<'a> Site<'a> {
         if let Some(&m) = self.by_name.get(path) {
             return Some(m);
         }
-        let segs: Vec<&str> = path.split('.').collect();
-        (1..segs.len()).find_map(|k| self.by_name.get(segs[k..].join(".").as_str()).copied())
+        let sep = sep_of(path);
+        let segs: Vec<&str> = path.split(sep).collect();
+        (1..segs.len()).find_map(|k| self.by_name.get(segs[k..].join(sep).as_str()).copied())
     }
 
     /// The declaration a type path written in module `from` names, if any
@@ -393,7 +462,7 @@ impl<'a> Site<'a> {
     /// is unresolved.
     pub fn resolve_type(&self, from: usize, path: &str) -> Option<TypeId> {
         let path = path.trim();
-        match path.rsplit_once('.') {
+        match path.rsplit_once(self.modules[from].language.separator()) {
             Some((qual, name)) => self
                 .resolve_module(from, qual)
                 .and_then(|m| self.find_in(m, name)),
@@ -424,7 +493,7 @@ impl<'a> Site<'a> {
     /// overview is in no module. `None` when it names nothing in the inputs.
     pub fn index_href(&self, path: &str) -> Option<String> {
         let path = path.trim();
-        let ty = match path.rsplit_once('.') {
+        let ty = match path.rsplit_once(sep_of(path)) {
             Some((qual, name)) => self
                 .resolve_module_global(qual)
                 .and_then(|m| self.find_in(m, name)),
@@ -447,6 +516,30 @@ impl<'a> Site<'a> {
         };
         let path = path.strip_prefix("Stdlib.").unwrap_or(path);
         list.contains(&path)
+    }
+
+    /// The types that implement the trait `id`, in site order: those whose
+    /// [`crate::model::TypeDecl::impls`] name it.
+    pub fn implemented_by(&self, id: TypeId) -> &[TypeId] {
+        self.implemented_by
+            .get(&id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// The module of the inputs named exactly `name`.
+    pub fn module_named(&self, name: &str) -> Option<usize> {
+        self.by_name.get(name).copied()
+    }
+
+    /// The source page of a file of the inputs, by its path.
+    pub fn source_named(&self, path: &str) -> Option<&SourceEntry<'a>> {
+        self.source_by_path.get(path).map(|&i| &self.sources[i])
+    }
+
+    /// The pages a crate's page lists: its crate's other files.
+    pub fn children(&self, page: usize) -> impl Iterator<Item = usize> + '_ {
+        (0..self.pages.len()).filter(move |&p| self.pages[p].parent == Some(page))
     }
 
     /// The types whose declarations refer to `id`, in site order.
@@ -526,6 +619,51 @@ impl<'a> Site<'a> {
                 .iter()
                 .map(move |sp| (s.file.path.as_str(), 0, sp))
         });
+        for e in &self.modules {
+            let path = e.module.path.as_str();
+            let mut links: Vec<(u32, &crate::model::DocLink)> =
+                e.module.doc_links.iter().map(|l| (0, l)).collect();
+            for t in &e.module.types {
+                links.extend(t.doc_links.iter().map(|l| (t.line, l)));
+                for m in &t.members {
+                    links.extend(m.doc_links.iter().map(|l| (t.line, l)));
+                }
+                for imp in &t.impls {
+                    if let Some(target) = &imp.target {
+                        if self.find_target(target).is_none() {
+                            return Err(format!(
+                                "{path}, the declaration at line {}: an impl names trait {}.{}, \
+                                 which no input declares",
+                                t.line, target.module, target.ty
+                            ));
+                        }
+                    }
+                }
+            }
+            for (line, l) in links {
+                let ok = match &l.to {
+                    crate::model::LinkTo::Type { module, ty } => self
+                        .find_target(&Target {
+                            module: module.clone(),
+                            ty: ty.clone(),
+                        })
+                        .is_some(),
+                    crate::model::LinkTo::Module { module } => {
+                        self.by_name.contains_key(module.as_str())
+                    }
+                    crate::model::LinkTo::Source { path, .. } => {
+                        self.source_by_path.contains_key(path.as_str())
+                    }
+                };
+                if !ok {
+                    return Err(format!(
+                        "{path}, line {line}: the doc link {:?} points to {:?}, which the inputs \
+                         do not have",
+                        l.text, l.to
+                    ));
+                }
+            }
+        }
         for (path, decl_line, s) in decls.chain(files) {
             if let Some(t) = &s.target {
                 if self.find_target(t).is_none() {
@@ -583,12 +721,13 @@ impl<'a> Site<'a> {
     pub fn type_display(&self, from_page: usize, id: TypeId) -> String {
         let e = &self.modules[id.module];
         let name = &e.module.types[id.ty].name;
+        let sep = e.language.separator();
         if e.page != from_page {
-            format!("{}.{name}", e.module.name)
+            format!("{}{sep}{name}", e.module.name)
         } else if e.local.is_empty() {
             name.clone()
         } else {
-            format!("{}.{name}", e.local)
+            format!("{}{sep}{name}", e.local)
         }
     }
 }
@@ -599,6 +738,7 @@ impl<'a> Site<'a> {
 fn place_sources<'a>(
     inputs: &'a [Input],
     modules: &[ModuleEntry<'a>],
+    pages: &[Page],
 ) -> Result<(Vec<SourceEntry<'a>>, BTreeMap<&'a str, usize>), String> {
     let mut sources = Vec::new();
     let mut by_path = BTreeMap::new();
@@ -617,8 +757,20 @@ fn place_sources<'a>(
                 "source file defines no module of the input: {path}"
             ));
         };
-        let name = path.rsplit('/').next().unwrap_or(path);
-        let slug = name.split('.').next().unwrap_or(name).to_string();
+        // An OCaml file is named after its module; Rust files repeat names
+        // (`mod.rs`, `model.rs` in several crates), so each is named after
+        // its page, which is one per file.
+        let slug = match inputs_language(inputs, file) {
+            Language::Ocaml => {
+                let name = path.rsplit('/').next().unwrap_or(path);
+                name.split('.').next().unwrap_or(name).to_string()
+            }
+            Language::Rust => modules
+                .iter()
+                .find(|e| e.module.path == path)
+                .map(|e| pages[e.page].slug.clone())
+                .unwrap_or_default(),
+        };
         if let Some(other) = slugs.insert(slug.clone(), path) {
             return Err(format!(
                 "source files {other} and {path} would both be shown on {SOURCE_DIR}/{slug}.qmd"
@@ -639,6 +791,14 @@ fn place_sources<'a>(
         ));
     }
     Ok((sources, by_path))
+}
+
+/// The language of the input a source file comes from.
+fn inputs_language(inputs: &[Input], file: &SourceFile) -> Language {
+    inputs
+        .iter()
+        .find(|i| i.sources.iter().any(|s| std::ptr::eq(s, file)))
+        .map_or(Language::Ocaml, |i| i.language)
 }
 
 fn join(names: &BTreeSet<&str>) -> String {

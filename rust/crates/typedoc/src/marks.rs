@@ -326,6 +326,7 @@ mod tests {
             ty: ty.into(),
             mutable: false,
             doc: doc.map(Into::into),
+            doc_links: vec![],
         }
     }
 
@@ -341,6 +342,8 @@ mod tests {
             doc: Some("A record.".into()),
             members,
             refs: vec![],
+            doc_links: vec![],
+            impls: vec![],
         }
     }
 

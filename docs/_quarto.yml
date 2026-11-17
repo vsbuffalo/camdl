@@ -52,6 +52,8 @@ project:
     # The source files, reached by links from the pages above; not in the
     # sidebar, whose `auto` entry below names only the directory's own pages.
     - internals/compiler/src/*.qmd
+    - internals/runtime/*.qmd
+    - internals/runtime/src/*.qmd
 
 website:
   title: "camdl"
@@ -157,7 +159,8 @@ website:
           - text: "Writing the documentation"
             href: documentation-style.md
       # Generated from the source: the pages' `order` front matter sets the
-      # sequence, in the order ocaml/lib/compiler/index.mld lists the modules.
+      # sequence, in the order ocaml/lib/compiler/index.mld lists the modules
+      # and rust/docs-overview.md lists the crates.
       - section: "Internals"
         contents:
           - section: "Compiler (OCaml)"
@@ -166,6 +169,12 @@ website:
               - text: "Overview"
                 href: internals/compiler/index.qmd
               - auto: "internals/compiler/*.qmd"
+          - section: "Runtime (Rust)"
+            href: internals/runtime/index.qmd
+            contents:
+              - text: "Overview"
+                href: internals/runtime/index.qmd
+              - auto: "internals/runtime/*.qmd"
   page-footer:
     left: "Originally created by Vince Buffalo at the Institute for Disease Modeling, Gates Foundation. [MIT License](https://github.com/vsbuffalo/camdl/blob/main/LICENSE)."
     center: "Drafted largely with an LLM"
