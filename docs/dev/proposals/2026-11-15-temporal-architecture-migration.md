@@ -1014,6 +1014,20 @@ Recorded in the maintainer's docket; each is reflected in the spec and above.
   its reason) and `failed`, so completeness is read off the artifact; free
   forward's silent skip of an unbound stream becomes the same named skip.
   `--stream` becomes repeatable to make several named streams expressible.
+- **D77** (2026-11-18). The bootstrap filter and IF2 never resample when every
+  normalised log weight is exactly equal. The comparison is on log weights, so
+  distinct weights whose exponentials underflow to 0 are not taken as equal.
+  Skipping leaves the filtering distribution unchanged and removes needless
+  Monte Carlo variance and loss of distinct ancestors; in a run that meets such
+  weights it changes the realisation and IF2's ancestry, because the resampling
+  stream is not drawn. A row whose likelihood is constant by its structure is
+  missing at the observation-likelihood boundary: the binder makes a binomial or
+  beta-binomial `0` of `0` (zero trials read from the data) a hole, so it and
+  `NA` are interchangeable for assimilation, alone or beside an informative
+  stream at the same time; a positive count against zero trials stays a bind
+  error. There is no general symbolic test of whether a likelihood is constant
+  across particles. PGAS and its initialisation pass use the same equal-weight
+  rule in place of their 1e-10 tolerance. `HASH_VERSION` 7.
 - **D78** (2026-11-18). Every prediction mode inherits the fit's binomial
   sampler. The one-step band and the free-forward replay (with its `y_rep`
   draws), like the forecast, draw with the sampler the fit ran (BTPE or BTRS),
@@ -1023,9 +1037,6 @@ Recorded in the maintainer's docket; each is reflected in the spec and above.
   explicitly overridden, every downstream simulation inherits the stochastic
   configuration recorded by its parent fit. The guarantee is the same sampler
   and recorded configuration, not identical realised draws.
-
-Open, not yet decided in the docket: D77, whether the particle filter also skips
-resampling whenever all particle weights are exactly equal, as PGAS does.
 
 ## Part 9. Documents this plan changes
 
