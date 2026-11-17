@@ -65,16 +65,25 @@ pub(crate) struct ForecastFailure {
     pub cause: String,
 }
 
-impl std::fmt::Display for ForecastFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "the forecast failed")?;
+impl ForecastFailure {
+    /// The failure in a sentence, naming the draw as `name_draw` says: the
+    /// driver knows only a draw's index among the parameter sets it was
+    /// handed, and the caller knows which posterior draw that is.
+    pub(crate) fn describe(&self, name_draw: impl Fn(usize) -> String) -> String {
+        let mut s = String::from("the forecast failed");
         if let Some(d) = self.draw {
-            write!(f, " on posterior draw {d}")?;
+            s += &format!(" on {}", name_draw(d));
         }
         if let Some(t) = self.time {
-            write!(f, " at t = {t}")?;
+            s += &format!(" at t = {t}");
         }
-        write!(f, ": {}. No draw is dropped from a forecast, so none was written.", self.cause)
+        s + &format!(": {}. No draw is dropped from a forecast, so none was written.", self.cause)
+    }
+}
+
+impl std::fmt::Display for ForecastFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.describe(|d| format!("parameter set {d} of those handed to the driver")))
     }
 }
 

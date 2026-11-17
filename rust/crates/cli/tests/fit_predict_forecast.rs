@@ -159,6 +159,27 @@ fn a_forecast_starts_at_the_training_extent_and_counts_each_streams_own_periods(
     // Joint samples: one value per target per sample.
     let samples = rows(&fdir.join("forecast-samples.tsv"));
     assert_eq!(samples.len(), 8 * 5 * 32);
+
+    // Each draw is named by its row of the fit's draws.tsv and the
+    // (chain, draw) key written there, never by its place in the subsample.
+    let draws_tsv = walk(&dir.join("results")).into_iter()
+        .find(|p| p.file_name().is_some_and(|n| n == "draws.tsv"))
+        .expect("the fit wrote draws.tsv");
+    let cloud = rows(&draws_tsv);
+    let named: Vec<(u64, u64, u64)> = manifest["draws"].as_array().unwrap().iter()
+        .map(|d| (d["cloud_row"].as_u64().unwrap(), d["chain"].as_u64().unwrap(), d["draw"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(named.iter().map(|d| d.0).collect::<Vec<_>>(), (0..8).map(|i| i * cloud.len() as u64 / 8).collect::<Vec<_>>(),
+        "the strided subsample of the cloud");
+    for &(row, chain, draw) in &named {
+        assert_eq!((cloud[row as usize]["chain"].parse::<u64>().unwrap(), cloud[row as usize]["draw"].parse::<u64>().unwrap()),
+            (chain, draw), "draws.tsv row {row}");
+    }
+    let s0 = &samples[0];
+    assert_eq!((s0["cloud_row"].parse::<u64>().unwrap(), s0["chain"].parse::<u64>().unwrap(), s0["draw"].parse::<u64>().unwrap()),
+        named[0]);
+    let last = &samples[samples.len() - 1];
+    assert_eq!(last["cloud_row"].parse::<u64>().unwrap(), named[7].0);
 }
 
 /// Flag rules (D41): `--horizon` alone is the forecast, `--mode forecast`
@@ -265,4 +286,18 @@ fn a_held_out_row_is_named_by_its_file_and_its_position_in_it() {
     let week = rows(&forecast_dir(dir).join("forecast/weekly_cases.tsv")).remove(0);
     assert_eq!((week["t_start"].as_str(), week["held_out_file"].as_str(), week["held_out_row"].as_str()),
         ("21", "holdout", "0"));
+}
+
+/// Every file under `root`.
+fn walk(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            out.extend(walk(&p));
+        } else {
+            out.push(p);
+        }
+    }
+    out
 }
