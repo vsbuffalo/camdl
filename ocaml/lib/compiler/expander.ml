@@ -6160,6 +6160,17 @@ module Lower = struct
   (* The value of a constant time position, as `resolve_time_expr` folded it. *)
   let fold ctx e = resolve_float_expr ctx e
 
+  (* The value of a compile-time instant. Beyond [fold], instant arithmetic
+     whose resolved IR is closed over constants and unit literals folds too
+     (`origin + 90 'days`, `date("2020-03-01") + 7 'days`), as an `at [...]`
+     entry always has (gh#1129). *)
+  let fold_instant ctx e =
+    if is_const_expr e then eval_const_expr ctx e
+    else
+      match fold_closed_ir (normalize_expr (resolve_expr ctx [] e)) with
+      | Some f -> f
+      | None -> resolve_float_expr ctx e
+
   (* ── Instants ── *)
 
   type instant_value =
@@ -6192,7 +6203,7 @@ module Lower = struct
      `to`, output and emit `at` entries, a scenario's `to`. *)
   let instant_const ctx ~what ~context ?bare p : float =
     ignore (judge ctx p (fun () -> instant_checks ctx ~context ?bare ~units:what p));
-    fold ctx (Time_pos.expr p)
+    fold_instant ctx (Time_pos.expr p)
 
   (* An instant that may be an observation anchor: a `simulate { to }`. *)
   let instant_horizon ctx ~what ~context ?bare ~anchor_what ~example p : instant_value =
@@ -6228,9 +6239,12 @@ module Lower = struct
     let es = splice_date_ranges ctx (List.map Time_pos.expr ps) in
     List.map (fun e -> normalize_expr (resolve_expr ctx env e)) es
 
-  (* The entries of an output or emit `at = [...]` list, folded to numbers. *)
+  (* The entries of an output or emit `at = [...]` list, `date_range(...)`
+     spliced as in an intervention's list, folded to numbers. *)
   let instant_list_const ctx ~what ~context ps : float list =
-    List.map (fun p -> instant_const ctx ~what ~context p) ps
+    List.iter (fun p ->
+      ignore (judge ctx p (fun () -> instant_checks ctx ~context ~units:what p))) ps;
+    List.map (fold_instant ctx) (splice_date_ranges ctx (List.map Time_pos.expr ps))
 
   (* A `timepoints` entry: judged, and dropped (the block is not emitted). *)
   let timepoint ctx ~name p =
