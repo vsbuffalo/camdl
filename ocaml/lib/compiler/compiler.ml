@@ -1,40 +1,94 @@
-(* Compile a camdl source string + optional model name to an Ir.model *)
+(** The driver of a compile: it runs the stages in order, decides when a
+    compile stops, and hands back either the compiled model or the rendered
+    diagnostics.
 
+    A compile starts from the source text of a model, and of an optional
+    vocabulary file given with [--quantities], and goes through three phases.
+    The front end, [front_end_collect], parses each file, swaps the model's
+    [quantities] block for the vocabulary file's, and calls
+    {!Expander.expand_detail}. It then adds the lexer's warnings (W100) and the
+    errors that parser actions recorded in {!Parser_errors} to the expander's
+    diagnostics. A lexing or syntax error is E001 at the position where
+    parsing stopped, or E115 when the cause is a duration written without its
+    tick ([80 days] for [80 'days]); an exception raised anywhere in parsing
+    or expansion is caught and becomes E001 with no location. The result is a
+    {!compile_detail}: the expanded model with the context and inputs that
+    produced it.
+
+    The analysis, [run_analysis], runs the checks of the expanded model and
+    the differentiation of transition rates: {!Validate}, then {!Dimcheck} and
+    {!Lint}, then {!Autodiff} on every rate, then the W203 warnings of the
+    declared-model section. It stops after validation if validation reported
+    anything, and after the dimension check and lint, or after
+    differentiation, if any error has been reported by then. The passes over
+    the IR return their diagnostics without source locations; this module
+    gives each the location of the declaration it names, through the
+    expander's [*_loc] lookups, or {!Diagnostics.no_loc} when there is none.
+    The finish, [finish_compile], differentiates the rest of the model (the
+    overdispersion variances, the observations, the projections, the initial
+    state and the arguments of initial-state laws), writes the dimensions the
+    dimension checker resolved onto the generated quantities, and applies
+    {!Constant_fold} and then {!Licm}.
+
+    {!compile}, {!compile_with_reads} and {!compile_with_declared} run all
+    three; [camdlc] calls the last. They render every diagnostic to standard
+    error as a side effect, warnings included on success, and return [Error]
+    with the string {!Diagnostics.render} returned: ["compilation failed"], or
+    the JSON array under [--json-errors]. [camdlc] recognises those two
+    shapes to avoid printing the failure twice. {!collect_detail},
+    {!collect_diagnostics} and {!compile_outcome} run the front end and the
+    analysis without rendering and return the diagnostics as values; [camdlc
+    check], [camdlc doctest] and the tests use them. Because both kinds of
+    caller go through [run_analysis], a check added there runs in both. None
+    of these functions raises on a bad model.
+
+    Five process-wide switches change what a compile does. {!no_dim_check},
+    set by [--no-dim-check], skips the dimension checker, so it reports
+    nothing and resolves no quantity dimensions. {!no_state_grad}, set by
+    [--no-state-grad], leaves out the derivatives of rates and projections
+    with respect to compartments. {!constant_fold}, which only tests set,
+    turns constant folding off, as does the environment variable
+    [CAMDL_NO_CONSTANT_FOLD]; [CAMDL_NO_LICM] turns off loop-invariant code
+    motion. {!Diagnostics.json_errors_mode} selects JSON rendering. The two
+    environment variables are read at each compile; the references hold for
+    the rest of the process. *)
+
+(** One model after the front end: the expanded model together with what
+    produced it, which the later stages need to report against the source. *)
 type compile_detail = {
   model   : Ir.model;
+      (** The expanded model as {!Expander.expand_detail} returned it: names
+          resolved, no gradients, not folded. *)
   ctx     : Expander.context;
+      (** The expander's working context, holding the declarations, the
+          diagnostics collected so far, and the lookups that map an expanded
+          name back to its declaration's location. *)
   summary : Expander.model_summary;
+      (** Counts of declared and expanded constructs, for [camdlc inspect]. *)
   source  : Source_cache.t;
-  (* The parsed declarations expansion started from, as the parser produced
-     them. The declared-model section is built from these and never from
-     [ctx], which the `via` lowering has rewritten. *)
+      (** The text of every file of the compile, for rendering. *)
   decls   : Ast.declaration list;
-  (* The declared-model section and the names in it that could not be
-     classified. Lazy so it is built once: [run_analysis] forces it to report
-     W203, and [compile_with_declared] returns the same value. *)
+      (** The declarations as parsed, after the [--quantities] splice. The
+          declared-model section is built from these and never from [ctx],
+          whose transitions and compartments the [via] lowering has
+          rewritten. *)
   declared : (Declared.declared_model * Declared_emit.unresolved list) Lazy.t;
+      (** The declared-model section, and the names in it that could not be
+          classified. Built at most once: [run_analysis] forces it to report
+          W203, and {!compile_with_declared} returns the same value. *)
 }
 
-(** Structured, non-raising compile outcome (gh#181 step 1).
-
-    A value-typed surface over [collect_detail]: every diagnostic — errors,
-    warnings, infos — is returned as a [diagnostic list] rather than rendered
-    and raised. [value] is [Some] exactly when no [Error]-severity diagnostic
-    was produced. Nothing in the library raises: [compile] returns [Error]
-    on failure, this returns [value = None].
-
-    This is the accumulating shape the gh#181 proposal targets — structurally
-    [MaybeT (Writer (diagnostic list))]: the diagnostic log is always present;
-    the value is present only on success. Step 1 deliberately carries the
-    expanded [compile_detail] (not a fully-finished [Ir.model]) — promoting
-    [value] to a gradient-attached, constant-folded model and routing
-    [simulate]/[fit]/CLI through this one surface is steps 2–4 of the
-    migration. Keeping it a pure addition here means no existing caller
-    changes behaviour. *)
+(** The result of a compile that does not render: every diagnostic, and a
+    value only when none of them is an error. {!compile_outcome} returns one
+    whose value is the {!compile_detail} after the analysis, not the finished
+    model: its transitions carry no gradients. *)
 type 'a outcome = {
   value       : 'a option;
+      (** [Some] exactly when no diagnostic has severity [Error]. *)
   diagnostics : Diagnostics.diagnostic list;
+      (** Every diagnostic, in the order it was reported. *)
   source      : Source_cache.t;
+      (** The text of the compile's files, for rendering the diagnostics. *)
 }
 
 (** Read the entire contents of a file into a string. *)
@@ -43,7 +97,7 @@ let read_file path = In_channel.with_open_bin path In_channel.input_all
 (* ── Front-end core ───────────────────────────────────────────────────────
 
    The single, non-aborting lex/parse/expand front end. It runs the
-   pipeline once, accumulating EVERY front-end diagnostic — the E001 on a
+   pipeline once, accumulating every front-end diagnostic — the E001 on a
    lex/parse/expand failure, the W100 lex warnings, and the parser-action
    errors — into the returned [Diagnostics.t], and never renders or
    aborts. Both consumers build on it:
@@ -76,13 +130,13 @@ let capture_e001 (diags : Diagnostics.t) (body : unit -> ('a, unit) result)
       ~message:(Printexc.to_string exn) ();
     Error ()
 
-(* gh#616: camdl writes durations with a leading tick (`4 'weeks`); the CLI's
+(* camdl writes durations with a leading tick (`4 'weeks`); the CLI's
    `--to "last_obs + 8 weeks"` writes them as bare words, because a tick is a
    shell-quoting hazard. The asymmetry is deliberate, so it must be
    self-correcting on both sides — the CLI already rejects the tick form by
    name. On this side the bare word is only ever a parse failure, and where it
    fails is not where it reads wrong: inside a `{ key = value }` block,
-   `to = 80 days` parses `80` as the value and `days` as the NEXT KEY, so the
+   `to = 80 days` parses `80` as the value and `days` as the next key, so the
    parser does not complain until the closing brace, pointing at a token the
    author has no reason to suspect.
 
@@ -110,10 +164,10 @@ let bare_duration_word_before (src : string) ~(before : Lexing.position)
   in
   scan false
 
-(* Parse ONE compilation unit into its declaration list, recording a located
+(* Parse one compilation unit into its declaration list, recording a located
    lex/parse failure as E001/E115 against [parse_diags] under that unit's own
-   filename. Factored out of [front_end_collect] because a compile can now have
-   two units: the model, and the `--quantities` vocabulary file. *)
+   filename. A compile can have two units: the model, and the `--quantities`
+   vocabulary file. *)
 let parse_unit (parse_diags : Diagnostics.t) ~(filename : string) (src : string)
     : (Ast.declaration list, unit) result =
   let lexbuf = Lexing.from_string src in
@@ -180,7 +234,7 @@ let decl_kind_name : Ast.declaration -> string = function
   | DContrasts _    -> "a `contrasts { }` block"
 
 (* Splice a vocabulary file's `quantities { }` into the model's declaration
-   list, REPLACING the model's own block wholesale. Replacement, not merge: a
+   list, replacing the model's own block wholesale. Replacement, not merge: a
    merge rule is a silent-precedence surface, and "swap the reporting
    vocabulary" is what the flag means.
 
@@ -199,7 +253,7 @@ let splice_quantities (diags : Diagnostics.t) ~(file : string)
         "the quantities file '%s' also declares %s; a file supplied to \
          --quantities may contain only a `quantities { }` block"
         file (decl_kind_name other))
-      (* A file-header `#'` block (gh#750) reaches here too, and the generic
+      (* A file-header `#'` block reaches here too, and the generic
          "move the declarations back" hint would be wrong advice for it: the
          author wrote a description, not a declaration. Point at the fix that
          applies — the model's header documents the model; a vocabulary file
@@ -232,7 +286,7 @@ let splice_quantities (diags : Diagnostics.t) ~(file : string)
       Ok (List.filter (function Ast.DQuantities _ -> false | _ -> true) model_decls
           @ [Ast.DQuantities qds])
 
-(* [quantities] is an optional SECOND compilation unit — (filename, source) —
+(* [quantities] is an optional second compilation unit — (filename, source) —
    whose `quantities { }` block replaces the model's own. See
    [splice_quantities]. *)
 let front_end_collect ?(name = "model") ?(filename = "<input>")
@@ -291,8 +345,7 @@ let front_end_collect ?(name = "model") ?(filename = "<input>")
            ~message:msg ()
        ) (List.rev !Lexer.pending_warnings);
        Lexer.pending_warnings := [];
-       (* Drain parser-action errors collected from semantic actions that
-          used to `failwith` (n3 in the 2026-04-19 compiler review). *)
+       (* Drain the errors parser actions recorded (see [Parser_errors]). *)
        List.iter (fun (sp, ep, code, msg, hint, fix) ->
          let fixes = match fix with
            | None -> []
@@ -316,10 +369,9 @@ let front_end_collect ?(name = "model") ?(filename = "<input>")
     from [Diagnostics.render] — the serialized JSON array under
     [--json-errors], else ["compilation failed"]. CLI entry points
     recognize the payload shape and exit without re-printing a redundant
-    Error line (m5 in the 2026-04-19 compiler review). Warnings are NOT
-    rendered here: callers render once at the end of their pipeline so
-    expansion-phase warnings don't print twice when downstream passes
-    (dimcheck) also emit diagnostics (M3). *)
+    Error line. Warnings are not rendered here: callers render once at the
+    end of their pipeline, so expansion-phase warnings do not print twice
+    when downstream passes also emit diagnostics. *)
 let compile_detail_result ?(name = "model") ?(filename = "<input>")
     ?(quantities : (string * string) option) (src : string)
     : (compile_detail, string) result =
@@ -340,37 +392,34 @@ let compile_detail_result ?(name = "model") ?(filename = "<input>")
     else
       Ok d
 
+(** Skip the dimension checker. Off unless [--no-dim-check] is given, to
+    [camdlc] or [camdlc check]. With it set, the checker reports nothing and
+    no generated quantity gets a resolved dimension. *)
 let no_dim_check = ref false
 
-(** Suppress emission of the state-Jacobian — the WrtPop maps
-    [rate_state_grad] (∂rate/∂compartment) and [projection_state_grad]
-    (∂projection/∂compartment). These are consumed ONLY by the ODE
-    forward-sensitivity gradient (`nl-lbfgs` on the ODE backend);
-    forward `simulate`, IF2, PMMH, and the bootstrap particle filter never
-    read them. On a model with global/mean-field coupling the state-Jacobian
-    is a dense one-entry-per-stratum map per coupled transition and dominates
-    the IR (95–98 %), making large coupled models uncompilable (gh#439), so
-    suppressing it lets forward-only and gradient-free compiles scale. Off by
-    default (full emission preserved, so goldens are unchanged); the
-    `--no-state-grad` compile flag sets it. The parameter gradient [rate_grad]
-    and the IC seed [ic_grad] are unaffected — the blowup is the state
-    gradient specifically. *)
+(** Leave out the state Jacobian: the derivatives of each transition rate
+    ([rate_state_grad]) and of each nonlinear observation projection
+    ([projection_state_grad]) with respect to every compartment. Off unless
+    [--no-state-grad] is given; the Rust runtime passes that flag on every
+    compile except one for an [nl-lbfgs] fit on the ODE backend, the only
+    consumer of these maps. On a model with mean-field coupling across many
+    strata the maps hold one entry per stratum per coupled transition and
+    make up most of the IR, so leaving them out is what keeps such a model
+    compilable. The derivatives with respect to parameters ([rate_grad],
+    [ic_grad]) are unaffected. {!collect_detail} sets it for its own
+    duration, because no diagnostic depends on these maps. *)
 let no_state_grad = ref false
 
-(** Run the sparse-coupling constant-fold pass. On by default; the
-    CAMDL_NO_CONSTANT_FOLD escape hatch forces it off (see the call site).
-    Exposed as a ref so tests that assert on the *unfolded* IR shape (the
-    expander's TableLookup-flattening contract) can disable it locally,
-    mirroring [no_dim_check]. *)
+(** Run {!Constant_fold}. On by default; tests that inspect the unfolded IR
+    set it to [false] for their duration. [CAMDL_NO_CONSTANT_FOLD], set to
+    anything, also turns the pass off. *)
 let constant_fold = ref true
 
-(** Translate a `Validate.error` into an E5xx Diagnostic and attach
-    it to the given context. Codes are new (E500–E511) — the existing
-    E2xx range covers parser/expansion-phase duplicates and unknowns,
-    but `Validate.validate` runs post-expansion and can catch cases
-    the parser/expander miss (e.g. unknown reference in a let-binding
-    that expands into a rate, or a `Real` compartment with no ODE).
-    A separate code range makes that distinction visible in output. *)
+(** Translate a [Validate.error] into an E5xx diagnostic. The E2xx range
+    covers the expander's duplicates and unknowns; [Validate.validate] runs on
+    the expanded model and catches what the expander missed, or an IR that
+    did not come from it, so its codes have a range of their own. Most of
+    them are a compiler invariant on a model compiled from source. *)
 let diagnose_validate_error ctx (err : Validate.error) : Diagnostics.diagnostic =
   let open Validate in
   (* Decl-keyed errors map their named symbol back to its declaration's source
@@ -440,7 +489,7 @@ let diagnose_validate_error ctx (err : Validate.error) : Diagnostics.diagnostic 
       Some "forcing_basis is a derivative node; only the compiler's gradient entries may hold it",
       site_loc site
     | DuplicateFlowInUnion (s, site) ->
-      (* gh#678. The expander's lowering-site check (E342) catches this on the
+      (* The expander's lowering-site check (E342) catches this on the
          .camdl path with a located span and a binder-aware hint; E514 is the
          backstop for an IR that never passed through it — hand-written,
          generated, or drifted. *)
@@ -520,7 +569,7 @@ let diagnose_validate_error ctx (err : Validate.error) : Diagnostics.diagnostic 
             IR was hand-written or has drifted",
       Diagnostics.no_loc
     | InitDependencyCycle cyc ->
-      (* gh#733. An init entry may read another compartment's initial value, so
+      (* An init entry may read another compartment's initial value, so
          the entries are evaluated in dependency order. A cycle has no such
          order — every candidate evaluation reads a compartment that has not
          been built yet. Name the whole cycle: the offending entry is rarely the
@@ -537,31 +586,21 @@ let diagnose_validate_error ctx (err : Validate.error) : Diagnostics.diagnostic 
   in
   Diagnostics.mk_error ~code ~loc ~message ?hint ()
 
-(** Run post-expansion structural validation.
+(** Run the structural validation of the expanded model.
 
-    Wired in per M1 of the 2026-04-19 compiler review — previously
-    `Validate.validate` existed in `lib/ir/validate.ml` but was never
-    called from the compile pipeline, so its unknown-reference /
-    missing-ODE / zero-delta checks ran nowhere. Without this pass
-    the `ode_equations = []` hardcoding bug (C5) would have been
-    invisible; now C5 is fixed AND the integrity net that would have
-    caught it in the first place runs.
-
-    Order: post-expansion, pre-dimcheck. Dimcheck ICEs on unknown
-    params, so running Validate first gives the user a clean
-    "unknown parameter 'foo'" error instead of a dimcheck trace. *)
+    It runs before the dimension checker, which fails on an unknown
+    parameter, so that such a model gets "unknown parameter 'foo'" rather
+    than an internal error. *)
 let run_validate (d : compile_detail) : Diagnostics.diagnostic list =
   match Validate.validate d.model with
   | Ok () -> []
   | Error errs -> List.map (diagnose_validate_error d.ctx) errs
 
-(** Run Dimcheck on a compiled model and route results into the diagnostic
-    context. Exposed so `camdlc check` runs the same pass as `camdlc compile`;
-    previously `check` skipped dimcheck entirely (GH #9). *)
-(* Run dimcheck, returning both the routed diagnostics and the resolved quantity
-   dimensions (prerequisite #5). The dimensions are written back onto the model's
-   quantity nodes by [finish_compile] — dimcheck is the single dimension
-   authority, and the stored field is a cache for the Rust contrast reducer. *)
+(** Run the dimension checker, returning its diagnostics with source
+    locations and the dimension it resolved for each generated quantity cell.
+    [finish_compile] writes the dimensions onto the model's quantities: the
+    checker is the one authority on dimensions, and the stored field is a
+    copy for the runtime's contrast reducer. *)
 let run_dimcheck_full (d : compile_detail)
     : Diagnostics.diagnostic list
       * ((string * (string * string) list) * (int * int)) list =
@@ -606,7 +645,7 @@ let run_dimcheck_full (d : compile_detail)
     in
     (diags, qdims)
 
-(* Write each resolved quantity dimension (#5) onto its IR node by (name,
+(* Write each resolved quantity dimension onto its IR node by (name,
    stratum). Quantities without a resolved dimension keep `None` (omitted on the
    wire), so only quantity-bearing models gain the field. *)
 let annotate_quantity_dims
@@ -652,17 +691,17 @@ let run_lint (d : compile_detail) : Diagnostics.diagnostic list =
     that a parameter cannot legitimately drive — `mod` over a parameter,
     structural forcing data (interpolation knots / piecewise steps / a
     spline's knots, window or period), or a non-constant table lookup index — yields an E600 (with
-    source location) and leaves that transition's [rate_grad] empty. Live
-    coefficients whose gradient is not yet emitted (a periodic step value, an
-    inline-table value via a non-constant index — gh#215) are NOT errors: the
-    parameter is simply omitted from [rate_grad] and the Rust NUTS guard
-    rejects a NUTS fit that depends on it. Pure: it neither emits into a
+    source location) and leaves that transition's [rate_grad] empty.
+    Coefficients whose gradient is not emitted (a periodic step value, an
+    inline-table value via a non-constant index) are not errors: the
+    parameter is omitted from [rate_grad], and the runtime refuses a
+    gradient-based fit that depends on it. Pure: it neither emits into a
     context nor renders, so [compile] (which short-circuits on the resulting
     errors) and [collect_diagnostics] (which does not) share it. *)
 let differentiate_transitions (d : compile_detail)
     : Ir.transition list * Diagnostics.diagnostic list =
   let param_names = List.map (fun (p : Ir.parameter) -> p.name) d.model.Ir.parameters in
-  (* gh#275: ∂rate/∂compartment (rate_state_grad, the J_x ingredient for the ODE
+  (* ∂rate/∂compartment (rate_state_grad, the J_x ingredient for the ODE
      forward sensitivities). Computed alongside rate_grad from the same rate, over
      the model's compartments; a hoisted binding body is state-bearing under WrtPop,
      so the binding list is threaded. Unlike rate_grad it never errors (E600): a
@@ -710,20 +749,19 @@ let differentiate_transitions (d : compile_detail)
 (** Sparse-coupling constant-fold (on by default): resolves
     constant-indexed inline-table lookups and drops zero-W terms from FOI
     Reduce sums, collapsing the dense P-term spatial sum to its k nonzero
-    terms. Proven byte-identical by the A/B gate (rust
-    .../gate_constant_fold_ab). Set CAMDL_NO_CONSTANT_FOLD to emit the
-    unfolded (dense) IR — an escape hatch for debugging the pass or
-    inspecting the pre-fold shape. *)
+    terms. A Rust test, [gate_constant_fold_ab], checks that it does not
+    change simulated output. Set CAMDL_NO_CONSTANT_FOLD to emit the
+    unfolded (dense) IR, for debugging the pass or inspecting the pre-fold
+    shape. *)
 let maybe_constant_fold (m : Ir.model) : Ir.model =
   let fold_on = !constant_fold && Sys.getenv_opt "CAMDL_NO_CONSTANT_FOLD" = None in
   if fold_on then Passtime.time "constant_fold" (fun () -> Constant_fold.fold_model m)
   else m
 
-(* gh#272 Loop-invariant code motion. ON by default; CAMDL_NO_LICM forces it off
+(* Loop-invariant code motion. On by default; CAMDL_NO_LICM forces it off
    (debugging / A-B comparison), mirroring constant_fold / CAMDL_NO_CONSTANT_FOLD.
-   It is value-preserving (proven byte-identical by gate_licm_ab), so default-on
-   only makes a fittable in-model kernel run at precomputed-kernel speed; it
-   never changes results. Runs AFTER constant_fold (so it hoists already-folded
+   It is value-preserving (checked by the Rust test gate_licm_ab), so it
+   changes speed, never results. Runs AFTER constant_fold (so it hoists already-folded
    subtrees; constant_fold never sees a PerEvalRef) and is the last transform
    before serialization, so the pre-LICM passes (autodiff/dimcheck/validate/lint)
    never encounter the node. *)
@@ -738,25 +776,21 @@ let maybe_licm (m : Ir.model) : Ir.model =
    validate → dimcheck → lint → autodiff-transitions, in that order, with the
    short-circuit structure [compile] and `check` must share. Each stage emits
    its diagnostics into [d.ctx.diags] (the accumulator [has_errors]/[render]
-   read); the sequence stops early exactly where [compile] historically did —
-   after Validate (dimcheck ICEs on unknown params, so a structural error must
-   halt first), and after dimcheck+lint / autodiff on any Error-severity
-   diagnostic.
+   read); the sequence stops after Validate (dimcheck fails on unknown params,
+   so a structural error must halt first), and after dimcheck+lint / autodiff
+   on any Error-severity diagnostic.
 
    Returns [Some (qdims, transitions)] on the all-clear path — the resolved
-   quantity dimensions (#5) and the gradient-annotated transitions [compile]
+   quantity dimensions and the gradient-annotated transitions [compile]
    needs to finish building the model — or [None] if a stage short-circuited on
    an error. [compile] ([finish_compile]) builds a model from the [Some];
    `check`/[collect_detail] discards it and keeps only the accumulated
-   diagnostics. Having ONE place define the stage sequence is the cure for the
-   recurring check/compile divergence (gh#9 re dimcheck, gh#170 re validate,
-   gh#114 re one-root-cause-one-diagnostic): a stage added here is added to both
-   paths at once, so they cannot drift.
+   diagnostics. One place defines the stage sequence, so a stage added here is
+   added to both paths at once and they cannot drift.
 
    The passes are pure (each returns a diagnostic list rather than emitting or
-   raising); [run_analysis] emits them, so no pass throws — a late-phase error
-   (validate E5xx, dimcheck, autodiff E600) becomes a [None] the caller renders,
-   never an uncaught [Compile_error] (gh#181). *)
+   raising); [run_analysis] emits them, so a late-phase error (validate E5xx,
+   dimcheck, autodiff E600) becomes a [None] the caller renders. *)
 (* W203: a name the declared-model section could not classify. The compile
    succeeds, since the compiled model does not depend on the section; but the
    section then says "unresolved" where it should say what the name is, and
@@ -804,14 +838,12 @@ let run_analysis (d : compile_detail)
     end
   end
 
-(* The post-expansion pipeline, factored out of [compile] so [compile_with_reads]
-   can reuse it without duplicating the high-risk pipeline. [compile] stays
-   byte-identical — it is now [compile_detail_result] + [finish_compile].
+(* The post-expansion pipeline, shared by [compile], [compile_with_reads] and
+   [compile_with_declared], which therefore produce the same model.
 
    [run_analysis] runs the shared stage sequence (validate → dimcheck → lint →
    autodiff-transitions), emitting into [d.ctx.diags]. On [None] a stage
-   short-circuited on an error, so render + [Error] (gh#181: the CLI exits
-   cleanly 1, never on an uncaught [Compile_error] trace). On [Some (qdims,
+   short-circuited on an error, so render + [Error] (the CLI exits 1). On [Some (qdims,
    transitions)] every stage cleared, so finish building the model: the obs/σ²
    autodiff tail, the quantity-dim write-back, and the value-preserving
    constant-fold/LICM transforms. *)
@@ -820,20 +852,20 @@ let finish_compile (d : compile_detail) : (Ir.model, string) result =
   | None -> Error (Diagnostics.render d.ctx.diags d.source)
   | Some (qdims, transitions) ->
     (* Single render of any collected non-blocking diagnostics (expansion
-       warnings + dimcheck infos + L4xx lints). The ONLY non-blocking emission,
+       warnings + dimcheck infos + L4xx lints). The only non-blocking emission,
        on the definitely-succeeding path — it can never co-fire with the [None]
        render above, so warnings never double-print. Routing through
        [Diagnostics.render] gives JSON under [--json-errors] and the ANSI box
        otherwise, matching the error path's shape. *)
     if Diagnostics.has_any d.ctx.diags then
       ignore (Diagnostics.render d.ctx.diags d.source);
-    (* Observation + σ² autodiff (proposal 2026-07-03, P3): differentiate every
-       likelihood argument (projection inlined) and every [DrawOverdispersed] σ²
-       w.r.t. all parameters, filling the obs [*_grad] and [sigma_sq_grad] maps.
-       Reuses the single differentiation authority [Autodiff.differentiate];
-       unlike the rate E600 path it never errors — a live-but-omitted or
-       structural coefficient becomes a coded [DEUnsupported] the P5 fit-time
-       gate refuses NUTS on. *)
+    (* Observation + σ² autodiff: differentiate every likelihood argument
+       (projection inlined) and every [DrawOverdispersed] σ² w.r.t. all
+       parameters, filling the obs [*_grad] and [sigma_sq_grad] maps. Reuses
+       the single differentiation authority [Autodiff.differentiate]; unlike
+       the rate E600 path it never errors — an omitted or structural
+       coefficient becomes a coded [DEUnsupported] that the runtime's
+       fit-time gate refuses a gradient-based fit on. *)
     let param_names =
       List.map (fun (p : Ir.parameter) -> p.name) d.model.Ir.parameters in
     let tfs = d.model.Ir.time_functions and tbls = d.model.Ir.tables in
@@ -843,7 +875,7 @@ let finish_compile (d : compile_detail) : (Ir.model, string) result =
     let observations =
       Passtime.time "autodiff-obs"
         (fun () -> Autodiff.differentiate_observations d.model.Ir.observations param_names tfs tbls) in
-    (* Projection autodiff (gh#275 §1h): ∂projection/∂compartment for a
+    (* Projection autodiff: ∂projection/∂compartment for a
        [DerivedExpr] (nonlinear) projection, filling each obs model's
        [projection_state_grad] — the factor-2 ingredient the ODE observation
        gradient consumes. The linear projection families (current-pop /
@@ -860,7 +892,7 @@ let finish_compile (d : compile_detail) : (Ir.model, string) result =
                 else Autodiff.differentiate_projection om.projection comp_names tfs tbls bindings })
           observations)
     in
-    (* Initial-condition autodiff (gh#275 §1c C-seed): ∂(initial_state)/∂θ per
+    (* Initial-condition autodiff: ∂(initial_state)/∂θ per
        initial condition, filling the model's [ic_grad] map — the ODE
        forward-sensitivity seed S(t_start). A compartment whose expression has
        no parameter dependence is dropped (empty grad_map), so a block of
@@ -868,9 +900,9 @@ let finish_compile (d : compile_detail) : (Ir.model, string) result =
        compartments.
 
        [Init_order.closed] first substitutes each compartment reference by that
-       compartment's own initial expression (gh#733): the runtime evaluates the
+       compartment's own initial expression: the runtime evaluates the
        entries in dependency order, so `init { A = A0   B = A0 - A }` starts B
-       at 0, and the seed has to differentiate THAT, not the raw `A0 - A` whose
+       at 0, and the seed has to differentiate that, not the raw `A0 - A` whose
        [Pop] leaf differentiates to zero (which would report ∂B/∂A0 = 1). *)
     let ic_grad =
       Passtime.time "autodiff-ic" (fun () ->
@@ -884,7 +916,7 @@ let finish_compile (d : compile_detail) : (Ir.model, string) result =
     in
     (* Initial-state law autodiff: ∂arg/∂θ for every argument of a drawn initial
        condition, which is what `initial_state_logpdf_grad` chains through. A
-       law is a sampler AND a density AND a gradient; emitting the first two and
+       law is a sampler, a density and a gradient; emitting the first two and
        leaving the third empty would give NUTS a gradient identically zero on
        that coordinate. Distinct from [ic_grad] above, which differentiates the
        MEAN for the deterministic ODE forward-sensitivity seed. *)
@@ -893,7 +925,7 @@ let finish_compile (d : compile_detail) : (Ir.model, string) result =
         Autodiff.differentiate_initial_conditions
           d.model.Ir.initial_conditions param_names tfs tbls)
     in
-    (* Write the resolved quantity dimensions (#5) back onto the model before the
+    (* Write the resolved quantity dimensions back onto the model before the
        value-preserving transforms (constant-fold/LICM never touch quantities). *)
     let m = annotate_quantity_dims qdims
               { d.model with Ir.transitions = transitions;
@@ -902,6 +934,10 @@ let finish_compile (d : compile_detail) : (Ir.model, string) result =
                              Ir.ic_grad } in
     Ok (maybe_licm (maybe_constant_fold m))
 
+(** Compile a model's source text to the finished IR, rendering every
+    diagnostic. [name] becomes the model's name; [filename] is used in
+    diagnostics and to resolve data paths relative to the model;
+    [quantities] is the vocabulary file, as (file name, text). *)
 let compile ?(name = "model") ?(filename = "<input>")
     ?(quantities : (string * string) option) (src : string)
     : (Ir.model, string) result =
@@ -909,12 +945,9 @@ let compile ?(name = "model") ?(filename = "<input>")
   | Ok d -> finish_compile d
   | Error e -> Error e
 
-(* As [compile], but also returns the read-closure: the distinct external data
-   files the compile opened, as (as-written, resolved) pairs, for
-   `camdlc --emit-deps`. Reuses [finish_compile], so the compiled model is
-   byte-identical to [compile]'s. The reads are populated during expansion
-   (before [finish_compile]), so they are read off [d.ctx] on the success
-   path. *)
+(** As {!compile}, and also the distinct data files the compile opened, as
+    (as written, resolved) pairs, for [camdlc --emit-deps]. The model is the
+    one {!compile} returns. *)
 let compile_with_reads ?(name = "model") ?(filename = "<input>")
     ?(quantities : (string * string) option) (src : string)
     : (Ir.model * (string * string) list, string) result =
@@ -925,11 +958,10 @@ let compile_with_reads ?(name = "model") ?(filename = "<input>")
      | Error e -> Error e)
   | Error e -> Error e
 
-(* As [compile_with_reads], and also the declared-model section of the IR
-   envelope (docs/dev/proposals/2026-11-13-model-structure-diff.md): the model
-   as its author wrote it. Built from the same compile that produced the
-   model, so the two describe one model. The compiled model is byte-identical
-   to [compile]'s. *)
+(** As {!compile_with_reads}, and also the declared-model section of the IR
+    envelope: the model as its author wrote it, built from the same compile,
+    so the two describe one model. The model is the one {!compile} returns.
+    [camdlc] calls this. *)
 let compile_with_declared ?(name = "model") ?(filename = "<input>")
     ?(quantities : (string * string) option) (src : string)
     : (Ir.model * (string * string) list * Declared.declared_model, string) result =
@@ -962,7 +994,7 @@ let write_depfile ~(path : string) ~(model : string)
 (* ── Severity-agnostic diagnostic collection ─────────────────────────────────
 
    [collect_detail] runs the real compile pipeline (lex → parse → expand →
-   validate → dimcheck → lint → autodiff) over a source, accumulating EVERY
+   validate → dimcheck → lint → autodiff) over a source, accumulating every
    diagnostic — errors, warnings, and infos alike — into the returned
    [Diagnostics.t], without rendering to stderr. It is the shared core behind
    both [collect_diagnostics] (test/tooling: keeps only the diagnostic list)
@@ -970,14 +1002,13 @@ let write_depfile ~(path : string) ~(model : string)
    [compile_detail]). [compile] runs the same stages but renders to stderr and
    returns [Error] on failure; neither raises.
 
-   Routing `run_check` through this core is the cure for the recurring
-   check/compile divergence (gh#9 re dimcheck, gh#170 re validate): there is
-   now ONE place that defines "the front-end pipeline", so `check` and
-   `compile` cannot disagree on a model's validity.
+   Routing `run_check` through this core means one place defines the
+   pipeline, so `check` and `compile` cannot disagree on a model's validity.
+   It takes no vocabulary file, so `check` cannot check one.
 
    The pipeline short-circuits exactly as [compile] does: a structural
-   [Validate] error stops before dimcheck (Validate runs first precisely
-   because dimcheck ICEs on unknown params). On the no-error path, all of
+   [Validate] error stops before dimcheck (Validate runs first because
+   dimcheck fails on unknown params). On the no-error path, all of
    dimcheck, lint, and autodiff run, so non-blocking warnings/lints (e.g.
    L402 on a clean-compiling model) are captured.
 
@@ -1002,7 +1033,7 @@ let collect_detail ?(name = "model") ?(filename = "<input>") (src : string)
         diagnostic for a root cause the expander already reported with a located
         code (e.g. an init-membership error: a located E277 from [expand_init]
         would otherwise be shadowed by a no-location E513 from [run_validate]).
-        gh#114 reviewer feedback: one root cause → one diagnostic. *)
+        One root cause, one diagnostic. *)
      if not (Diagnostics.has_errors d.ctx.diags) then begin
        (* Collecting diagnostics never needs the state Jacobian
           ([rate_state_grad]): it emits no diagnostic (a problem in it is a
@@ -1019,15 +1050,15 @@ let collect_detail ?(name = "model") ?(filename = "<input>") (src : string)
 
 (* [collect_diagnostics] is the thin test/tooling projection of
    [collect_detail]: it discards the model/summary and returns just the
-   accumulated diagnostics in source order. A fixture-driven test over it
+   accumulated diagnostics in the order they were reported. A fixture-driven test over it
    exercises the same diagnostic surface as the CLI. *)
 let collect_diagnostics ?(name = "model") ?(filename = "<input>") (src : string)
     : Diagnostics.diagnostic list =
   let (_detail, diags, _source) = collect_detail ~name ~filename src in
-  (* diags accumulates newest-first via [emit]; reverse to source order. *)
+  (* diags accumulates newest-first via [emit]; reverse to emission order. *)
   List.rev diags.Diagnostics.diags
 
-(** [compile_outcome] (gh#181 step 1): the non-raising projection of
+(** [compile_outcome]: the non-raising projection of
     [collect_detail] into the structured {!outcome}. [collect_detail] runs the
     full pipeline (expand → validate → dimcheck → lint → autodiff),
     accumulating into [diags] without rendering or aborting; this wraps it.

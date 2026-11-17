@@ -1,24 +1,35 @@
-(* Lightweight, env-gated per-pass timing for the compiler.
+(** Per-stage processor time for one compile, written to standard error when
+    the environment variable [CAMDL_TIME_PASSES] is set.
 
-   Active only when CAMDL_TIME_PASSES is set to a non-empty value; otherwise
-   every entry point is a couple of no-op nanoseconds. When active it records a
-   (label, cpu_seconds) pair per compiler pass and dumps a breakdown to stderr
-   at the end of a `camdlc` compile — never to stdout, so the emitted IR is
-   byte-for-byte unaffected.
+    The driver wraps each stage of a compile in {!time} (or measures it itself
+    and calls {!record}), under a short label: [parse], [expand], [validate],
+    [dimcheck], [lint], [autodiff], [declared-names], the differentiation of
+    observations, projections and initial conditions ([autodiff-obs] and
+    siblings), [constant_fold], [licm] and, in [camdlc], [serialize]. At the end
+    of a compile [camdlc] calls {!dump}, which prints one row per recorded
+    stage, in the order recorded, with its seconds and its share of the sum,
+    then a [TOTAL] row. The total is the sum of the recorded stages, not the
+    elapsed time of the process.
 
-   This is the compile-side analogue of CAMDL_TRACE_STEPS in the Rust runtime:
-   a diagnostic channel for "which pass dominates", used by the bench_compile
-   harness and ad-hoc profiling. Uses Sys.time (processor time, stdlib) to
-   avoid pulling unix into the ir/compiler libraries; for the CPU-bound,
-   single-threaded compiler this tracks wall time closely (GC time included,
-   which is what we want — allocation-heavy passes pay for their garbage). *)
+    The variable is read once per process: any value other than empty or [0]
+    turns timing on. When it is off, {!time} only calls its function and
+    {!record} and {!dump} do nothing, so a normal compile pays nothing and its
+    output is unchanged; when it is on, the report goes to standard error and
+    the IR on standard output is still byte-for-byte the same.
+
+    Times are [Sys.time], the processor time of the process, which includes
+    garbage collection. For the single-threaded compiler this is close to
+    elapsed time, and it keeps the [unix] library out of the [ir] and
+    [compiler] libraries. Records accumulate for the life of the process and
+    {!dump} does not clear them, so a process that compiles several models
+    reports their sum. *)
 
 let enabled : bool Lazy.t =
   lazy (match Sys.getenv_opt "CAMDL_TIME_PASSES" with
         | Some s -> s <> "" && s <> "0"
         | None -> false)
 
-(* Insertion-ordered (label, seconds) records, newest first. *)
+(* The recorded (label, seconds) pairs, newest first. *)
 let records : (string * float) list ref = ref []
 
 (** [record label dt] logs [dt] seconds against [label]. No-op when disabled. *)

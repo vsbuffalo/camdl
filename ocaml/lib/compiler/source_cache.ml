@@ -1,17 +1,31 @@
-(* Source file caching for error display.
+(** The source text of every file in one compile, kept so that diagnostics can
+    quote the line they point at and the declared-model section can quote a
+    declaration as written.
 
-   A compile has one PRIMARY source (the model), and may pull in further
-   compilation units — today just the `--quantities` vocabulary file. Each
-   diagnostic carries the file its location belongs to, so the cache is keyed by
-   filename: rendering a diagnostic about the vocabulary file must show a line
-   from THAT file, never the model's line of the same number. A location whose
-   file is unknown to the cache renders its header (file:line:col) with no
-   source excerpt, rather than an excerpt from the wrong file. *)
+    A compile has one primary file, the model, and at most one more: the
+    vocabulary file given with [--quantities]. Each diagnostic location names
+    the file it belongs to, so the cache is keyed by file name, and a lookup
+    answers from that file or not at all: a diagnostic about line 3 of the
+    vocabulary file never shows line 3 of the model.
 
+    {!Compiler.front_end_collect} builds the cache with {!of_string} and
+    {!add_unit} before parsing. {!Diagnostics.render} reads single lines with
+    {!get_line}; a location whose file is not in the cache is rendered with its
+    [file:line:col] header and no excerpt. {!Declared_emit} reads whole spans
+    with {!slice}. Both lookups treat an empty file name as the primary file,
+    because the parser leaves the [file] of every location empty and the
+    expander fills in the model's file name only where it reports. *)
+
+(** The text of the files of one compile, split into lines at ['\n']. Line [n]
+    of a file, counting from 1, is element [n - 1] of its array. *)
 type t = {
   filename : string;
-  lines    : string array;  (* 0-indexed; line_no 1 → lines.(0) *)
-  extra    : (string * string array) list;  (* additional units, by filename *)
+      (** The primary file's name, as the driver was given it. *)
+  lines    : string array;
+      (** The primary file's lines. *)
+  extra    : (string * string array) list;
+      (** Every other file, by name: the [--quantities] vocabulary file when
+          there is one. *)
 }
 
 let split src = String.split_on_char '\n' src |> Array.of_list

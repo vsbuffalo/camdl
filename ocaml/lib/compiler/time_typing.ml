@@ -1,59 +1,75 @@
-(* Surface-level time typing — the typed-time / calendar-duration
-   classifier on the DSL AST.
+(** The rules for time in a model anchored to the calendar: which expressions
+    are instants and which are durations, and which arithmetic on them has no
+    meaning.
 
-   See `docs/dev/proposals/2026-05-22-typed-time-and-dsl-ergonomics.md`
-   §3 (Rule 1) and §3.4 (recurring-schedule cadences).
+    A model that declares [origin = date("...")] is anchored: model time [0]
+    is that date, and [date(...)] and [origin] are instants, points on the
+    calendar. An instant moves by a duration, and the difference of two
+    instants is a duration; nothing else is defined. Durations come in two
+    classes. One written in ['days] or ['weeks] is an exact number of days.
+    One written in ['months] or ['years] is calendar-valued: the compiler
+    converts it to an average length (a month is 365.2425/12 days), which is
+    not the distance from one calendar date to the same date a month later,
+    so moving an instant by it gives a date the author did not mean.
 
-   This pass runs BEFORE `resolve_expr` rewrites unit-literal nodes
-   into bare numeric IR constants, so it can still see whether a
-   leaf came from a `'months`/`'years` literal or from a `'days`
-   / `'weeks` literal / parameter reference.
+    {@camdl[
+      time_unit = 'days
+      origin = date("2020-01-01")
+      let start = date("2020-03-01")      # an instant
+      let span  = start - origin          # an exact duration
+      let later = start + 26 'weeks       # an instant moved by an exact duration
+    ]}
 
-   The classifier rides alongside the existing dimcheck pass (which
-   operates on the post-expansion IR). At the IR level, every
-   duration is just an `f64` axis-units value — provenance is lost.
-   This pass captures provenance at the surface and emits any
-   diagnostics here; the IR pass continues to handle the
-   numerical-dimension story unchanged.
+    Writing [start + 6 'months] instead is E321.
 
-   Three classes of values:
+    These distinctions are made on the syntax tree, where an instant is
+    still visible: name resolution turns [date(...)] and [origin] into plain
+    numbers of time units since the origin, so in the IR an instant cannot be
+    told from a duration. So
+    [Expander.check_surface_time_typing] runs this module's checks inside
+    expansion, after the declaration and [let]-cycle checks and before any
+    expression is resolved. It builds an {!env}, calls the classifier and the
+    walks below on every expression in a time position (simulation bounds,
+    schedules, recurring cadences, observation windows, reactive triggers,
+    transition rates, initial values and others), and emits the diagnostics
+    itself. This module emits nothing: it supplies {!classify}, which assigns
+    an expression a {!tclass}; {!walk_rule1}, which finds an instant moved by
+    a calendar duration (E321); {!walk_instant_misuse}, which finds the
+    arithmetic an instant does not have (E360, an {!instant_misuse}); and the
+    text of the hints the expander attaches.
 
-     - [TExact]:    a duration derived only from exact-day primitives
-                    (`'days`, `'weeks`, `Instant − Instant`,
-                    `duration`-kind / `[T]`-annotated param refs).
-     - [TCalendar]: a duration whose synthesised type contains a
-                    `'months` or `'years` literal leaf.
-     - [TInstant]:  an Instant (origin-relative point) —
-                    `date(...)`, `origin`, or a let-laundered
-                    equivalent.
-     - [TOther]:    anything else — non-duration, non-Instant
-                    (rates, scalars, populations, …). Time-typing
-                    rules don't fire on these.
+    Every rule applies only to an anchored model. Without an origin there are
+    no instants, and a model with [time_unit = 'months] and per-month rates is
+    left alone.
 
-   Rule 1 fires at exactly one site: an `Instant ± Duration`
-   subexpression whose duration side is classified `TCalendar`. The
-   single `let`-bound case `let d = 6 'months; date(...) + d` flows
-   through the LUB propagation rule below because `let` references
-   classify recursively through the binding's body.
-
-   E360 (gh#1070) refuses the arithmetic an Instant does not have:
-   Instant + Instant, k · Instant, Duration − Instant, an Instant
-   moved by a bare number, and a conditional whose branches are an
-   Instant and a duration (gh#1096). See `walk_instant_misuse`.
-
-   In unanchored mode (no `origin` declared) the rules are vacuous:
-   we never emit a diagnostic, because the torsor refinement is
-   inactive — see proposal §1.1, decision of record. *)
+    Classification is structural. A name bound by a [let] takes the class of
+    the [let]'s body, so [let d = 6 'months] carries its class to each use; a
+    parameter of kind [instant] is an instant, and one of kind [duration] or
+    with [dim T] an exact duration. Model time [t], other parameters and every
+    function call except [date], [add_calendar_months] and
+    [add_calendar_years] are {!TOther}, so an expression built from them is
+    never refused. *)
 
 open Ast
 
 (* ── Classification lattice ─────────────────────────────────────────── *)
 
+(** The kind of time an expression denotes, read from how it is written. *)
 type tclass =
   | TExact
+      (** A duration of an exact number of days: built from ['days] or
+          ['weeks] literals, [duration]-kind or [dim T] parameters, or the
+          difference of two instants. *)
   | TCalendar
+      (** A duration that mentions a ['months] or ['years] literal anywhere
+          in it, and so is an average rather than an exact span. *)
   | TInstant
+      (** A point on the calendar: [date(...)], [origin],
+          [add_calendar_months(...)], [add_calendar_years(...)], an
+          [instant]-kind parameter, or one of these moved by a duration. *)
   | TOther
+      (** Anything else: a rate, a count, a number, model time [t]. No rule
+          applies to it. *)
 
 (* Least upper bound on the Exact <: Calendar lattice, used at
    arithmetic nodes (Add, Sub, Min, Max). *)
@@ -67,16 +83,23 @@ let lub_dur a b =
 
 (* ── Bound let bindings: an env for recursive classification ─────────── *)
 
-(* We need to look up `let` bindings during classification so that
-   `let d = 6 'months; date(...) + d` triggers the rule via
-   inheritance of `d`'s classifier from its body. The let-table is
-   available on the context AFTER `build_lookup_tables`; our caller
-   threads it in. *)
+(** What classification needs from the model: its [let]s, so that a name
+    takes the class of its definition, and its parameter declarations, for
+    their kinds. The expander builds it from its context once the lookup
+    tables exist.
 
+    [classify] follows a [let] into its body without a guard against cycles,
+    so it does not terminate on a [let] defined in terms of itself; the
+    expander reports such a [let] (E201) before these checks run but leaves
+    it in [let_tbl]. *)
 type env = {
   let_tbl : (string, let_binding) Hashtbl.t;
+      (** The model's [let]s by name. *)
   param_decls : param_decl list;
+      (** The model's parameter declarations. *)
   origin_set : bool;  (* whether `origin = date(...)` is declared *)
+      (** Whether the model declares an origin. Nothing in this module reads
+          it; the expander tests the origin itself before calling. *)
 }
 
 let env_of_ctx ~let_tbl ~param_decls ~origin_set =
@@ -100,20 +123,14 @@ let param_kind_of_name env name =
 
 (* ── The classifier proper ──────────────────────────────────────────── *)
 
-(* Classify a surface expression, returning its time-class. This is
-   pure (no diagnostics emitted here) — sinks call this and decide
-   what to do with the result.
+(** The {!tclass} of a surface expression. Emits nothing; the caller decides
+    what a class means at its position.
 
-   Notes:
-   - We classify ONLY by structure of the expression. Same
-     expression in two contexts gives the same answer; bounds on a
-     parameter declaration carry their own classifier, never leaking
-     into uses of that parameter (proposal §3.3.2 "one-line
-     invariant").
-   - Indexed-param references behave identically to scalar refs for
-     kind purposes.
-   - Function calls other than `date(...)` are conservatively
-     classified `TOther`. *)
+    The answer depends only on the expression's structure and the
+    declarations it names, so one expression gets one class wherever it
+    appears; the bounds of a parameter declaration never affect the class of
+    its uses. An indexed reference has the class of its unindexed name. Does
+    not terminate on a cyclic [let]: see {!env}. *)
 let rec classify env (e : expr) : tclass =
   match e with
   | EConst _ -> TOther
@@ -121,21 +138,12 @@ let rec classify env (e : expr) : tclass =
   | EUnit (_, Months)  | EUnit (_, Years)    -> TCalendar
   | EUnit (_, _)                              -> TOther
   | EIdent ("origin", _) ->
-    (* Phase 2 of the 2026-05-22 typed-time proposal §1.1: the
-       reserved `origin` identifier is an Instant in anchored
-       mode. In unanchored mode the expander emits E327 at the
-       resolution site; classifying as TInstant here is correct
-       either way — the classifier is structural, and an
-       unanchored `origin` reference is malformed in any context. *)
+    (* `origin` is an Instant. In an unanchored model the expander reports
+       the reference (E327) when it resolves it. *)
     TInstant
   | EIdent (name, _) ->
-    (* Lookup order:
-       1. let-binding → classify its body in our own env
-          (recursion is bounded because let-bindings are acyclic by
-          construction in the AST; cycle detection happens
-          elsewhere, not our concern here)
-       2. parameter declaration → use its kind/[T] annotation
-       3. otherwise → TOther *)
+    (* A let takes its body's class (no cycle guard; see [env]), then a
+       parameter its kind's, then TOther. *)
     (match Hashtbl.find_opt env.let_tbl name with
      | Some lb -> classify env lb.lbody
      | None ->
@@ -154,10 +162,8 @@ let rec classify env (e : expr) : tclass =
        | None           -> TOther)
   | EFuncCall ("date", _) -> TInstant
   | EFuncCall (("add_calendar_months" | "add_calendar_years"), _) ->
-    (* Phase 2 §4: calendar-arithmetic primitives produce an
-       Instant. Classified structurally, irrespective of whether the
-       expander successfully const-evaluated the call — a malformed
-       call still has Instant type from the user's perspective. *)
+    (* An Instant whether or not the expander can evaluate the call: a
+       malformed call is still meant as a date. *)
     TInstant
   | EFuncCall _ -> TOther
   | EBinOp (Sub, l, r) ->
@@ -230,7 +236,7 @@ let rec walk_rule1 ?(children = subexprs) env ~on_hit (e : expr) : unit =
    | _ -> ());
   List.iter (walk_rule1 ~children env ~on_hit) (children e)
 
-(* ── Instant arithmetic: the forms with no meaning (E360, gh#1070) ──── *)
+(* ── Instant arithmetic: the forms with no meaning (E360) ──────────── *)
 
 (* Under an origin an Instant is a point on the calendar. The algebra is
    a torsor: an Instant moves by a duration, and the difference of two
@@ -255,13 +261,17 @@ let rec walk_rule1 ?(children = subexprs) env ~on_hit (e : expr) : unit =
    `const_expr_dim` test the observation-anchor offsets use, so the two
    paths share one rule. *)
 
+(** A form of arithmetic on an instant that has no meaning, each reported as
+    E360. Judged only on a definite instant: one built from [date(...)],
+    [origin], the calendar primitives, [instant]-kind parameters and [let]s
+    of those, moved only by classified durations. *)
 type instant_misuse =
-  | InstantPlusInstant       (* Instant + Instant *)
-  | SumOfInstants            (* sum(i in d, <instant>) *)
-  | ScaledInstant            (* k · Instant, Instant / k, Instant ^ k, −Instant *)
-  | DurationMinusInstant     (* Duration − Instant *)
-  | InstantPlusBareNumber    (* Instant ± 5, Instant + 5 * 2, 5 + Instant *)
-  | InstantOrDuration        (* if c then Instant else Duration (gh#1096) *)
+  | InstantPlusInstant       (** Two instants added: [date(a) + date(b)]. *)
+  | SumOfInstants            (** A sum whose body is an instant. *)
+  | ScaledInstant            (** An instant multiplied, divided, raised to a power or negated. *)
+  | DurationMinusInstant     (** An instant subtracted from a duration. *)
+  | InstantPlusBareNumber    (** An instant moved by a number with no unit: [date(a) + 5]. *)
+  | InstantOrDuration        (** A conditional with an instant on one branch, a duration on the other. *)
 
 (* A numeric literal as spelled, for the W324/W325 warnings, which are
    about how a time position is written. E360 judges by dimension
@@ -310,7 +320,7 @@ let instant_misuse_at env ~unitless (e : expr) : instant_misuse option =
   | ESum (_, _, _, body, _) when definite body -> Some SumOfInstants
   (* `classify` takes the upper bound of a conditional's branches, so an
      Instant on one side and a duration on the other reports TInstant and
-     passes every rule above (gh#1096). The two branches must be the same
+     passes every rule above. The two branches must be the same
      kind of time. *)
   | ECond (_, a, b)
     when (definite a && is_classified_duration (classify env b))
@@ -367,7 +377,7 @@ let hint_instant_misuse = function
    duration, [add_calendar_months] otherwise. Naming the wrong one
    reproduces the very failure this hint exists to prevent: a modeller
    who pastes [add_calendar_months(d, 5)] for `5 'years` gets a horizon
-   twelve times short, in a model that compiles and runs (gh#843).
+   twelve times short, in a model that compiles and runs.
 
    [None] when the duration is not a compile-time constant. The hint
    then states the rule without a span: a suggestion the modeller can
@@ -504,11 +514,9 @@ let hint_bare_numeric_data_column =
 
 (* ── Helper: pretty-printer for the offending sub-expression ─────────── *)
 
-(* Reuse the shared expression printer the dimcheck uses. We don't
-   want a second printer for the same job. The format below is a
-   coarse approximation good enough for error messages — the real
-   printer lives in `Pp_expr` and isn't AST-shaped, so we re-render
-   here. *)
+(* A short rendering of a surface expression for messages: index lists and
+   call arguments are elided. [Pp_expr] prints IR expressions, not the
+   syntax tree, so it cannot serve here. *)
 let rec show_short (e : expr) : string =
   match e with
   | EConst f ->

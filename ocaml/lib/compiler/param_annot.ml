@@ -1,24 +1,65 @@
-(* What follows a parameter's kind: an optional size bracket (`real[6]`) and
-   an optional `dim` clause (`real dim T^-1`). Brackets on the type mean size
-   and only size; a dimension is written with `dim`. The two notations this
-   replaces, a dimension bracket (`real [1/T]`) and a unit literal
-   (`positive 'per_day`), are refused here with a machine-applicable fix-it,
-   never reinterpreted (proposal 2026-11-05-size-brackets-and-dim-clause §3).
+(** Checks what may follow a parameter's kind in its declaration, a size
+    bracket and a [dim] clause, and returns the dimension the declaration
+    states.
 
-   Called from parser semantic actions, so diagnostics go through
-   [Parser_errors] with source positions. *)
+    {@camdl[
+      parameters {
+        beta  : positive dim T^-1     # a positive quantity per unit time
+        kappa : real dim P/T          # a signed population flux
+        gamma : rate                  # the kind fixes the dimension
+      }
+    ]}
+
+    A dimension is written with [dim], as a product and quotient of [P]
+    (population) and [T] (time) with integer powers, or [1] for none. Only the
+    kinds [positive] and [real] take a [dim] clause, because every other kind
+    fixes its own dimension: [rate] is [1/T], [probability] is [1], [count] is
+    [P], and [instant] and [duration] are [T]. A bracket after the kind,
+    [real[6]], means a family's size and nothing else.
+
+    The parser calls {!resolve} from the semantic action of a parameter
+    declaration, with the parsed annotations and their source positions. It
+    returns [Some (p, t)], the exponents of [P] and [T], for a [positive] or
+    [real] parameter with a well-formed [dim] clause, and [None] otherwise.
+    Everything it refuses goes to {!Parser_errors} with a position, so the
+    parse continues and every problem in the file is reported:
+
+    - a unit literal on a parameter ([positive 'per_day]), E117: a parameter's
+      value is always in the model's time unit, so the scale the literal
+      carries would be dropped;
+    - a dimension in brackets ([real [1/T]]), E116;
+    - a sized family: fewer than two cells or two sized axes is E417, and any
+      other size, [real[6]], is E119, because sized families are not
+      implemented, so a size never reaches the syntax tree;
+    - a malformed [dim] clause, E103;
+    - a [dim] clause on a kind that fixes its dimension, E281, whether it
+      agrees with the kind or contradicts it.
+
+    The unit literal and the dimension bracket each get a machine-applicable
+    fix that rewrites them as a [dim] clause, or removes them on a kind that
+    needs none. At most one fix is attached per declaration, covering every
+    refused annotation on it, so two fixes never overlap.
+
+    {!kind_dim} is the dimension each kind fixes, and must agree with
+    [Dimcheck.kind_dim], which states the same table over the IR's kinds. *)
 
 open Ast
 
-(* One factor of a dimension expression as written: an integer literal, a
-   power of a base dimension, or an unknown name. *)
+(** One factor of a dimension expression as written, before it is checked:
+    in [P^2/T], the factors are [P^2] and [T]. *)
 type factor =
   | FInt  of int
+      (** An integer literal. Only [1], the dimensionless unit, is valid; a
+          bracket holding only integers is a size. *)
   | FBase of int * int          (* (P exponent, T exponent) *)
+      (** A power of [P] or [T], as its exponents of [P] and [T]: [T^-1] is
+          [FBase (0, -1)]. *)
   | FBad  of string
+      (** Any other name, which {!eval} refuses. *)
 
-(* A dimension expression: factors with a sign, +1 in the numerator and -1 in
-   the denominator, in source order (`P/T` is [(1, P); (-1, T)]). *)
+(** A dimension expression as written: each factor with the sign of its
+    position, [1] in the numerator and [-1] in the denominator, in source
+    order. [P/T] is [[(1, FBase (1, 0)); (-1, FBase (0, 1))]]. *)
 type dim_expr = (int * factor) list
 
 let base_factor name exp =
@@ -83,6 +124,7 @@ let unit_name : unit_lit -> string = function
 
 let see_changes = "See `camdl docs language-changes`."
 
+(** A source position as Menhir gives it. *)
 type pos = Lexing.position
 
 (* A bracket item is a size when it is a bare integer. *)

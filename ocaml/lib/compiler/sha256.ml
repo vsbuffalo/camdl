@@ -1,17 +1,28 @@
-(* SHA-256 (FIPS 180-4 §6.2), for compile-time content hashing of the external
-   data files a model reads.
+(** SHA-256, as specified in FIPS 180-4, for recording which bytes a compiled
+    model was built from.
 
-   Why hand-written: the compiler links only `yojson` and `fmt`, and the opam
-   switch carries no digest library. The OCaml stdlib's [Digest] is MD5, which
-   would put a second, weaker hash spelling next to the SHA-256 the Rust side
-   already uses everywhere (`cli::hashing::sha256_hex`, `runid::hash`) — and a
-   forcing hash a user cannot reproduce with `shasum -a 256 file` is a
-   provenance record you cannot check. So: SHA-256, over the file's raw bytes,
-   pinned by the FIPS 180-4 test vectors AND a cross-language equivalence test
-   against `shasum`/`sha2` (test_sha256.ml).
+    A model can read data files at compile time: the knots of a file-backed
+    forcing, the levels of a dimension read from a file, the vocabulary file
+    given with [--quantities]. The compiler records the hash of each such file
+    beside its path, in a forcing's {!Ir.data_source} and in the file list of
+    the declared-model section, so that a compiled model, and every fit built
+    on it, says which contents it came from. {!hex_of_file} is what those
+    records hold: the lowercase hexadecimal digest of the file's raw bytes,
+    the same string [shasum -a 256 FILE] prints and the same digest the Rust
+    command computes with the [sha2] crate. The expander calls it through
+    [Expander.file_sha256], which hashes each distinct file once.
 
-   Arithmetic runs in OCaml's native [int] (63-bit) with an explicit 32-bit
-   mask after every add/shift, rather than boxed [Int32]. *)
+    The module is written out rather than taken from a library because the
+    compiler depends only on [yojson] and [fmt], and the standard library's
+    [Digest] is MD5, a different hash from the SHA-256 the runtime uses for
+    every other provenance record. The tests in [ocaml/test/test_sha256.ml]
+    pin it to the published FIPS 180-4 test vectors and to the messages whose
+    lengths fall on the padding boundaries; a Rust test,
+    [rust/crates/cli/tests/forcing_provenance.rs], checks a compiled model's
+    recorded hash against [sha2].
+
+    Arithmetic is on OCaml's native 63-bit [int], masked to 32 bits after
+    every addition and shift, rather than on boxed [Int32]. *)
 
 let mask = 0xFFFFFFFF
 
@@ -43,11 +54,19 @@ let init_h =
   [| 0x6a09e667; 0xbb67ae85; 0x3c6ef372; 0xa54ff53a;
      0x510e527f; 0x9b05688c; 0x1f83d9ab; 0x5be0cd19 |]
 
+(** The state of one hash computation part way through its input. It is
+    mutable and single-use: {!update} feeds it bytes, and
+    [finalize] pads the message and reads the digest out, after which the
+    state must not be used again. *)
 type t = {
-  h        : int array;      (* the eight working chaining variables *)
-  block    : Bytes.t;        (* the 64-byte block under construction *)
-  mutable fill : int;        (* bytes currently in [block] *)
-  mutable len  : int;        (* total bytes absorbed so far *)
+  h        : int array;
+      (** The eight 32-bit working hash values, each held in an [int]. *)
+  block    : Bytes.t;
+      (** The 64-byte block being filled; compressed into [h] when full. *)
+  mutable fill : int;
+      (** How many bytes of [block] are filled, from 0 to 63 between calls. *)
+  mutable len  : int;
+      (** How many message bytes have been absorbed, padding excluded. *)
 }
 
 let create () =
@@ -89,7 +108,7 @@ let compress t =
   t.h.(6) <- (t.h.(6) + !g) land mask;
   t.h.(7) <- (t.h.(7) + !hh) land mask
 
-(* Feed bytes through the block buffer WITHOUT counting them as message
+(* Feed bytes through the block buffer without counting them as message
    content — [finalize]'s padding goes through here, the message through
    [update]. Keeping the length accounting out of the absorb loop is what
    stops the padding from being counted in its own length field. *)
@@ -109,7 +128,7 @@ let update t buf off n =
   absorb t buf off n
 
 (* FIPS 180-4 §5.1.1: append 0x80, pad with zeros to 56 mod 64, then the
-   message length in BITS as a 64-bit big-endian integer. A 63-bit OCaml int
+   message length in bits as a 64-bit big-endian integer. A 63-bit OCaml int
    holds the bit length of any file up to 2^60 bytes (1 EiB). *)
 let finalize t =
   let bitlen = t.len * 8 in
