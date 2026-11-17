@@ -861,6 +861,40 @@ fn the_event_log_is_outside_the_exact_set() {
     cleanup(&root);
 }
 
+/// The records of one attempt — its event log, its heartbeat
+/// (`progress.json`) and its execution record (`execution.json`: when it ran,
+/// where, for how long) — are outside the exact set. A leaf's stored bytes are
+/// a function of its computation; these differ between two executions of the
+/// same computation, so the manifest lists none of them, and rewriting one
+/// after the commit leaves the leaf a hit.
+#[test]
+fn the_records_of_an_attempt_are_outside_the_exact_set() {
+    let root = tmp_root("attemptrecords");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("fits").join("fit-aaaaaaaa").join("pmmh-bbbbbbbb");
+    let claim = store.claim_streaming(&leaf, record(id(0xaa))).unwrap();
+    claim.write("draws.tsv", b"beta\n0.5\n").unwrap();
+    for name in PER_ATTEMPT_RECORDS {
+        fs::write(leaf.join(name), b"{\"pid\":1}").unwrap();
+    }
+    let dest = claim.finalize(record(id(0xaa))).unwrap();
+    let committed = match store.lookup(&dest, &LeafIdentity::new(id(0xaa))) {
+        Lookup::Hit(r) => r,
+        other => panic!("expected Hit after finalize, got {other:?}"),
+    };
+    assert_eq!(committed.artifacts.keys().collect::<Vec<_>>(), vec!["draws.tsv"],
+        "the manifest lists a record of the attempt");
+    for name in PER_ATTEMPT_RECORDS {
+        fs::write(dest.join(name), b"{\"pid\":2, \"rewritten\": true}").unwrap();
+    }
+    match store.lookup(&dest, &LeafIdentity::new(id(0xaa))) {
+        Lookup::Hit(r) => assert_eq!(r.run_id, id(0xaa)),
+        other => panic!("a rewritten attempt record made the committed leaf {other:?}"),
+    }
+    assert!(PER_ATTEMPT_RECORDS.contains(&"progress.json") && PER_ATTEMPT_RECORDS.contains(&EXECUTION_RECORD));
+    cleanup(&root);
+}
+
 /// A run killed mid-method leaves its event log behind; the reclaim that
 /// recomputes the leaf clears it with the rest of the dead run's files, so the
 /// new run's log does not continue the dead one's.
