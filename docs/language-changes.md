@@ -13,6 +13,33 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-11-16 — periodic `on` ranges are model time when `step` is wider than one unit
+
+**What.** In a range-form `periodic` forcing, the `on` endpoints are model time
+in the model's `time_unit`, whether written with a unit (`7 'days`) or bare
+(`7`). With `step` wider than one time unit the compiler used them as bin
+indices instead: `period = 364 'days, step = 7 'days, on = [7 'days : 13 'days]`
+switched on bins 7 to 13 (days 49 to 97) rather than bin 1 (days 7 to 13), with
+no diagnostic. The endpoints are now converted to bins by `step`, and a range
+that does not start on a bin edge or does not end on the last unit of a bin is
+refused; it was warning W301, which is retired. The end of the period is now the
+end of the last bin, so with `period = 365.25 'days, step = 1 'days` (365 bins)
+a range ending at day 365 is refused instead of being cut to day 364. Apart from
+that case, forcings with `step = 1 'days` in a daily model are unaffected.
+
+**Migration.** Write each range from the first day of its first bin to the last
+day of its last bin, in model time: with 7-day bins, `7:13` for the second week
+and `0:13` for the first two. A range that read as bin indices is multiplied by
+the step: the old `on = [1:2]` meaning weeks 1 and 2 is now `7:20`.
+
+**Diagnostic.**
+``error[E406]: periodic time function 'school': `on` range 7:100 does not line
+up with the forcing's bins``,
+with the hint naming the bin edges (ranges start at 0, 7, 14, … and end at 6,
+13, 20, …).
+
+---
+
 ## 2026-11-15 — a forcing evaluated outside its range is an error
 
 **What.** An `interpolated` forcing (any `method`) is defined from its first

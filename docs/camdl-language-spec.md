@@ -1644,11 +1644,20 @@ The `periodic` type supports two forms:
 - **Range form:** `step = 1 'days` + `on = [7:100, 115:199]` — binary on/off
   with range literals. The compiler generates the values array. Use for
   calendars with known active periods (school terms, work weeks, campaign
-  windows). Each range is written low to high and lies inside the period
-  (`0:364` for a 365-day period with 1-day steps); a reversed range (`100:7`)
-  or one that runs past the end of the period (`400:500`, or `300:500`, which
-  is not read modulo the period) is **E406**. A window that spans the end of
-  the period is written as two ranges (`100:364, 0:7`).
+  windows). Range endpoints are model time in the model's `time_unit`, whole
+  units and inclusive, whether written with a unit (`7 'days : 13 'days`) or
+  bare (`7:13`); they are not bin indices. The compiler converts them to bins
+  of width `step`: bin `i` covers `i·step` to `(i+1)·step − 1`. With 1-day
+  steps an endpoint is its own bin. With wider bins each range must start on a
+  bin edge and end on the last unit of a bin: with `period = 364 'days` and
+  `step = 7 'days`, `7:13` switches on bin 1 and `0:13` bins 0 and 1, while
+  `8:13` or `7:14` is **E406**, whose hint names the bin edges (ranges start
+  at 0, 7, 14, … and end at 6, 13, 20, …). Each range is written low to high
+  and lies inside the bins (`0:364` for a 365-day period with 1-day steps,
+  `0:363` for a 364-day period with 7-day steps); a reversed range (`100:7`)
+  or one that runs past the end of the last bin (`400:500`, or `300:500`,
+  which is not read modulo the period) is **E406**. A window that spans the
+  end of the period is written as two ranges (`100:364, 0:7`).
   **In anchored mode** (top-level `origin` declared), bare-numeric
   entries inside `on=[...]` are **E323** — anchored periodic schedules must use
   `date(...)` entries (or, for the rare legitimate "day-offset from origin"
