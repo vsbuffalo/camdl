@@ -1422,6 +1422,8 @@ fn run_simulate(a: &args::SimulateArgs) {
         dt,
         seed, // overridden per-replicate below
         integrator, // gh#166: --integrator, checked against the replayed fit above
+        // `simulate` draws with BTPE, including `--draws posterior --fit`.
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
 
     // ── `--init-state`: the forecast-origin ensemble ────────────────────────
@@ -2012,6 +2014,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         params_files: base_sim_run.params_files.clone(),
         backend,
         dt,
+        binomial: base_sim_run.binomial,
         integrator, // gh#166: --integrator, checked against the replayed fit above
         source,
         scenarios,
@@ -3006,6 +3009,16 @@ fn build_simulate_cas_sink(
              CAS-writing path through them."
                 .to_string(),
         );
+    }
+    // The binomial sampler changes every chain-binomial draw and is not in the
+    // run identity, for the same reason: only `fit predict` sets one other
+    // than BTPE (D78), and its replay writes no leaf.
+    if run.binomial != sim::rng::BinomialAlgorithm::Btpe {
+        return Err(format!(
+            "internal: a content-addressed simulate cannot draw with the {} binomial \
+             sampler — it changes the trajectory but not the run identity. Fold it \
+             into the config level before routing a CAS-writing path through it.",
+            run.binomial));
     }
     // The model the engine starts every cell from — the one load
     // `resolve_run_model` also takes (`util::load_run_model`), so the model

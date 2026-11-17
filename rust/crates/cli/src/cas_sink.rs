@@ -1550,6 +1550,10 @@ mod tests {
             // refused on the CAS-writing path (`build_simulate_cas_sink`):
             // it changes the trajectory and has no identity route yet.
             required_output_times: _,
+            // refused on the CAS-writing path unless BTPE
+            // (`build_simulate_cas_sink`): only `fit predict` sets another
+            // sampler, and its replay writes no leaf.
+            binomial: _,
         } = crate::util::SimRun::default();
     }
 

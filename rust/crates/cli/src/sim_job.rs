@@ -35,6 +35,10 @@ pub struct SimulateJob {
     pub params_files: Vec<String>,
     pub backend: ForwardBackend,
     pub dt: f64,
+    /// The chain-binomial binomial sampler, copied to every cell's
+    /// `SimRun::binomial`: BTPE, except for `fit predict`, which replays a fit
+    /// on the sampler the fit ran (D78).
+    pub binomial: sim::rng::BinomialAlgorithm,
     /// gh#166: optional CLI `--integrator` override (method only); `None` → the
     /// model's declared integrator.
     pub integrator: Option<crate::args::types::IntegratorArg>,
