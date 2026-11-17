@@ -2326,20 +2326,12 @@ pub(crate) fn parse_time_spec(
         // refuses (E321, the one-step calendar rule); the same spelling must
         // not mean the average span here (decision F of
         // docs/dev/proposals/2026-11-16-calendar-durations-by-position.md).
-        if origin.is_some() && (unit == "months" || unit == "years") {
+        if origin.is_some() && is_calendar_unit(&unit) {
             let sign_str = if sign > 0.0 { "+" } else { "-" };
-            let days = span_days.round();
-            let fix = if days >= 1.0 {
-                format!("in days: \"{head} {sign_str} {days} days\" (≈ {n_tok} {unit_tok})")
-            } else {
-                "in days or weeks, which are fixed spans".to_string()
-            };
-            return Err(format!(
-                "{what} = \"{raw}\": calendar duration `{n_tok} {unit_tok}` cannot move \
-                 `{head}`, an observation anchor, whose date is known only when the model \
-                 runs. A calendar month from a date depends on which date it is, and the \
-                 one-step calendar rule resolves a step only from a date known when the \
-                 model compiles. State the offset {fix}."));
+            return Err(calendar_offset_refusal(
+                &format!("{what} = \"{raw}\""), &format!("{n_tok} {unit_tok}"),
+                &format!("`{head}`, an observation anchor"), span_days,
+                |days| format!("{head} {sign_str} {days} days")));
         }
         let model_unit_days = ir::caltime::days_per_unit(time_unit)
             .map_err(|e| format!("{what}: model time_unit: {e}"))?;
@@ -2382,6 +2374,41 @@ pub(crate) fn parse_time_spec(
 /// Normalize a user-written duration unit token to the canonical
 /// [`ir::caltime::days_per_unit`] spelling, accepting common singular/plural
 /// abbreviations so `"1 week"` and `"7 days"` both work.
+/// A month or year: a calendar unit, whose length depends on the date it is
+/// counted from.
+pub(crate) fn is_calendar_unit(canonical: &str) -> bool {
+    canonical == "months" || canonical == "years"
+}
+
+/// The refusal of a month or year counted from a date known only when the
+/// model runs, under a calendar origin (decision F of
+/// docs/dev/proposals/2026-11-16-calendar-durations-by-position.md). The DSL
+/// refuses `last_obs + 6 'months` (E321, the one-step calendar rule) with the
+/// same hint, so one spelling cannot mean the average span on the command line
+/// and a refusal in the model. [subject] opens the message (`--to =
+/// "last_obs + 6 months"`), [shown] is the duration as written, [moved] names
+/// the date it would move, and [spelling] writes the replacement for a whole
+/// number of days.
+pub(crate) fn calendar_offset_refusal(
+    subject: &str,
+    shown: &str,
+    moved: &str,
+    span_days: f64,
+    spelling: impl Fn(f64) -> String,
+) -> String {
+    let days = span_days.round();
+    let fix = if days >= 1.0 {
+        format!("in days: \"{}\" (≈ {shown})", spelling(days))
+    } else {
+        "in days or weeks, which are fixed spans".to_string()
+    };
+    format!(
+        "{subject}: calendar duration `{shown}` cannot move {moved}, whose date is \
+         known only when the model runs. A calendar month from a date depends on which \
+         date it is, and the one-step calendar rule resolves a step only from a date \
+         known when the model compiles. State the offset {fix}.")
+}
+
 pub(crate) fn canonical_duration_unit(tok: &str) -> String {
     match tok.trim().to_lowercase().as_str() {
         "day" | "days" | "d" => "days",
@@ -6943,6 +6970,13 @@ dt = 1.0
         let err = parse_time_spec("holdout_after", "first_obs - 1 year", Some("2020-01-01"), "days")
             .unwrap_err();
         assert!(err.contains("\"first_obs - 365 days\" (≈ 1 year)"), "{err}");
+        // `pfilter --score-from` reads the same grammar (pfilter.rs, the
+        // `--score-from` window) and is refused the same way.
+        let err = parse_time_spec("--score-from", "last_obs - 1 months", Some("2020-01-01"), "days")
+            .unwrap_err();
+        assert!(err.starts_with("--score-from = \"last_obs - 1 months\": calendar duration \
+                                 `1 months` cannot move `last_obs`")
+                && err.contains("\"last_obs - 30 days\" (≈ 1 months)"), "{err}");
         assert_eq!(parse_time_spec("--to", "last_obs + 1 months", None, "days").unwrap(),
                    TimeSpec::Anchored(ir::anchor::AnchoredTime {
                        anchor: ObsAnchor::Last, offset: 365.2425 / 12.0 }));
