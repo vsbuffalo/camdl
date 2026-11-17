@@ -255,6 +255,9 @@ pub fn run_method(
         n_chains,
         knobs.gate.decibans_thresh,
     );
+    if let Some(w) = all_maxeval_warning(&convergence, n_chains, knobs.max_evals) {
+        out.say(format_args!("{} {w}", crate::out::paint::warning_tag()));
+    }
 
     // Post-fit Richardson dt-convergence check at θ̂ (gh#52, gh#227). The
     // deterministic ODE sibling of the IF2/PF dt-check: re-evaluate the same
@@ -948,6 +951,25 @@ fn print_verdict(
     out.say(format_args!("  wall: {:.2}s ({} chains)", wall_secs, n_chains));
 }
 
+/// The warning for a run in which every chain stopped on its evaluation
+/// budget. Neither leg of the verdict judges such a run — both read converged
+/// chains only, so the loglik line shows Δ = 0 and a ✓ — and the status count
+/// is the one place it shows. The winner is then wherever the best chain's
+/// budget ran out, which the warning says in words.
+fn all_maxeval_warning(v: &ConvergenceVerdict, n_chains: usize, max_evals: usize) -> Option<String> {
+    if n_chains == 0 || v.n_maxeval != n_chains {
+        return None;
+    }
+    let every = if n_chains == 1 { "the only chain".to_string() } else { format!("all {n_chains} chains") };
+    Some(format!(
+        "{every} stopped at max_evals = {max_evals} without meeting the tolerance. \
+         No chain converged, so the reported optimum is where the best chain's \
+         evaluation budget ran out, not an optimum; both legs of the verdict \
+         above read converged chains only, so they judge nothing here. Raise \
+         `max_evals` under `[method]` and refit."
+    ))
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1525,4 +1547,38 @@ mod tests {
         assert_eq!(seen, (0..N).collect::<Vec<_>>());
     }
 
+    // ── every chain out of budget ────────────────────────────────────
+
+    #[test]
+    fn every_chain_out_of_budget_is_warned_about() {
+        let chains = vec![
+            (0, outcome(-100.0, vec![0.5], OptStatus::MaxEvalReached)),
+            (1, outcome(-101.0, vec![0.6], OptStatus::MaxEvalReached)),
+        ];
+        let v = check_convergence(&chains, &names(1), &[(0.0, 1.0)], &GateConfig::default(), 1e-6);
+        let w = all_maxeval_warning(&v, 2, 5000).expect("all chains hit max_evals");
+        assert!(w.contains("all 2 chains") && w.contains("max_evals = 5000"), "{w}");
+
+        let one = all_maxeval_warning(
+            &check_convergence(&chains[..1], &names(1), &[(0.0, 1.0)], &GateConfig::default(), 1e-6),
+            1, 300).unwrap();
+        assert!(one.contains("the only chain"), "{one}");
+    }
+
+    #[test]
+    fn one_converged_chain_is_no_all_out_of_budget_warning() {
+        let chains = vec![
+            (0, outcome(-100.0, vec![0.5], OptStatus::MaxEvalReached)),
+            (1, outcome(-99.0, vec![0.6], OptStatus::Converged(SuccessState::XtolReached))),
+        ];
+        let v = check_convergence(&chains, &names(1), &[(0.0, 1.0)], &GateConfig::default(), 1e-6);
+        assert_eq!(all_maxeval_warning(&v, 2, 5000), None);
+        let failed = vec![
+            (0, outcome(-100.0, vec![0.5], OptStatus::MaxEvalReached)),
+            (1, outcome(f64::NEG_INFINITY, vec![0.6], OptStatus::Failed)),
+        ];
+        let v = check_convergence(&failed, &names(1), &[(0.0, 1.0)], &GateConfig::default(), 1e-6);
+        assert_eq!(all_maxeval_warning(&v, 2, 5000), None,
+            "a hard failure is a different finding, reported by the status line");
+    }
 }
