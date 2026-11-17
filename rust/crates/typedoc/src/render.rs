@@ -204,14 +204,10 @@ fn module_page(site: &Site, p: usize) -> String {
     let page = &site.pages[p];
     let top = page.modules[0];
     let top_entry = &site.modules[top];
-    let top_doc = if top_entry.local.is_empty() {
-        &top_entry.module.doc
-    } else {
-        &None
-    };
     let mut out = String::new();
-    let description = summary(site, top, p, top_doc);
-    front_matter(&mut out, &page.name, description.as_deref(), page.order);
+    // No description: the module doc opens with its summary sentence, and a
+    // description would print that sentence twice under the title.
+    front_matter(&mut out, &page.name, None, page.order);
 
     let path = &top_entry.module.path;
     let _ = writeln!(
