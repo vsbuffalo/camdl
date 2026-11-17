@@ -1253,11 +1253,10 @@ pub struct ResolvedModel {
     /// [`CompiledModel::resolve_fire_times`] against the run's `params`.
     pub intervention_at_time_exprs: Vec<Option<Vec<ResolvedExpr>>>,
     /// gh#209: flat-bytecode VM for the propensity hot path, built once at
-    /// construction. `Some` iff `CAMDL_EVAL_FLAT` is set (see
-    /// `flat_eval::eval_flat_enabled`); `None` by default so default models pay
-    /// nothing (neither build cost nor storage) and `eval_propensities` takes
-    /// the unchanged `eval_resolved` path.
-    pub flat_vm: Option<crate::flat_eval::FlatVm>,
+    /// construction from `rates` and `bindings`. `eval_propensities` runs every
+    /// rate through it; its values are bit-identical to `eval_resolved` on the
+    /// same expression (`tests/flat_eval_byte_identity.rs`).
+    pub flat_vm: crate::flat_eval::FlatVm,
 }
 
 /// True if the expression tree references the runtime substep `dt`
@@ -2513,19 +2512,10 @@ impl CompiledModel {
             })
             .collect::<Result<_, SimError>>()?;
 
-        // gh#209: build the flat-bytecode VM once, only when the toggle is on,
-        // so default models pay nothing. Mirrors `cm.resolved.{rates,bindings}`.
-        // gh#815: a gh#272 LICM-hoisted `PerEvalRef` now lowers to `Op::PerEval`,
-        // so the flat path composes with LICM and the build is gated on the
-        // toggle alone. It used to be gated on `per_eval_bindings.is_empty()`
-        // too; since LICM is ON by default (`ocaml/lib/compiler/compiler.ml`,
-        // `maybe_licm`), that clause silently turned `CAMDL_EVAL_FLAT` into a
-        // no-op on every model the pass fires on.
-        let flat_vm = if crate::flat_eval::eval_flat_enabled() {
-            Some(crate::flat_eval::build(&rates, &resolved_bindings))
-        } else {
-            None
-        };
+        // gh#209: build the flat-bytecode VM once. Mirrors
+        // `cm.resolved.{rates,bindings}`; a gh#272 LICM-hoisted `PerEvalRef`
+        // lowers to `Op::PerEval` (gh#815), so it composes with LICM.
+        let flat_vm = crate::flat_eval::build(&rates, &resolved_bindings);
 
         // gh#733: an initial condition may read another compartment's initial
         // value, so the entries are evaluated in dependency order against the

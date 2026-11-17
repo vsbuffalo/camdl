@@ -12,7 +12,7 @@ use crate::{
 use ir::expr::{BinOp, Expr, UnOp};
 
 /// Per-thread scratch + binding cache for the flat-bytecode propensity path
-/// (gh#209, opt-in `CAMDL_EVAL_FLAT`). Thread-local for the same reason the
+/// (gh#209). Thread-local for the same reason the
 /// `resolved_expr` `BINDING_CACHE` is: PF/PGAS parallelise across particles, so
 /// each worker owns its own scratch buffer and cache and there is no
 /// cross-particle aliasing. Starts at `FlatCache::new(0)` + an empty `Vec`; both
@@ -25,6 +25,13 @@ struct FlatState {
 thread_local! {
     static FLAT_STATE: RefCell<FlatState> =
         RefCell::new(FlatState { cache: FlatCache::new(0), scratch: Vec::new() });
+}
+
+/// Read and reset this thread's flat-evaluator binding-cache hit count. Reached
+/// through `resolved_expr::take_binding_cache_hits`, the one hook the A/B gate
+/// reads.
+pub(crate) fn take_flat_binding_cache_hits() -> u64 {
+    FLAT_STATE.with(|st| st.borrow_mut().cache.take_hits())
 }
 
 /// Evaluation context: bundles all read-only simulation state for a single time step.
@@ -650,82 +657,74 @@ pub fn eval_propensities(
 
     let ctx = EvalCtx { model, int_s, real_s, params, t, dt, projected: None, aux: None, int_float_override: None, per_eval };
 
-    // gh#209: flat-bytecode propensity path (opt-in `CAMDL_EVAL_FLAT`). Built
-    // once at construction; `Some` iff the toggle is on. The flat VM uses its
-    // own `&mut FlatCache` (NOT the resolved_expr `BINDING_CACHE`), so this path
-    // does NOT enter `CacheScope`. Per-rate error handling (NaN → table-OOB →
-    // SimError::TableLookup or NumericalCollapse; negative-rate guard) is
-    // replicated verbatim from the default path below so the two are
-    // byte-for-byte identical in every observable outcome.
-    if let Some(vm) = &model.resolved.flat_vm {
-        return FLAT_STATE.with(|st| {
-            let st = &mut *st.borrow_mut();
-            // Size the per-thread cache to this model's binding count (rebuild
-            // only if it differs — e.g. first use, or a model swap on this
-            // thread). Mirrors `CacheScope::enter`'s `val.len() != n` guard.
-            if !st.cache.is_sized(vm.n_bindings) {
-                st.cache = FlatCache::new(vm.n_bindings);
-            }
-            // Bump the generation (invalidate the prior state's cached binding
-            // values) and mark active — once per propensity-vector eval, exactly
-            // like `CacheScope::enter`.
-            st.cache.activate();
-            // Reserve scratch so the unchecked executor's raw pointer never sees
-            // a realloc mid-eval. `scratch_capacity` is the global ceiling.
-            let need = flat_eval::scratch_capacity(vm);
-            if st.scratch.capacity() < need {
-                st.scratch.reserve(need - st.scratch.len());
-            }
-            out.clear();
-            for i in 0..model.model.transitions.len() {
-                // gh#127 (#12): clear the table-OOB record before EACH rate (see
-                // the default path below for the full rationale).
-                crate::resolved_expr::clear_table_oob();
-                let p = flat_eval::eval_flat(vm, &vm.rates[i], &ctx, &mut st.scratch, &mut st.cache);
-                // item 17: the shared rate guard (non-finite → table-OOB /
-                // degenerate; negative → NegativePropensity), byte-identical to
-                // the default path below.
-                out.push(guard_propensity(p, i, model, t)?);
-            }
-            Ok(())
-        });
+    // Bench/validation switch (trace::eval_unresolved): on → every rate through
+    // the string-keyed `eval_expr` path, under the tree-walk binding cache. Read
+    // once per propensity vector, so the default path pays one branch.
+    if eval_unresolved() {
+        let _cache = crate::resolved_expr::CacheScope::enter(model.resolved.bindings.len());
+        out.clear();
+        for (i, tr) in model.model.transitions.iter().enumerate() {
+            // gh#127 (#12): see the default path below.
+            crate::resolved_expr::clear_table_oob();
+            // Errors (NumericalCollapse) propagate directly; in the
+            // non-degenerate case it returns the same value as the default
+            // path, so the guard below and the trajectory are unchanged.
+            let p = eval_expr(&tr.rate, &ctx)?;
+            out.push(guard_propensity(p, i, model, t)?);
+        }
+        return Ok(());
     }
 
-    // Activate the per-state binding cache for this propensity vector: each
-    // model binding is evaluated at most once instead of on every BindingRef
-    // (the on-demand path is restored when `_cache` drops at function exit).
-    let _cache = crate::resolved_expr::CacheScope::enter(model.resolved.bindings.len());
-    // Bench/validation switch (trace::eval_unresolved): off → the
-    // pre-resolved index path (default, hot); on → the string-keyed
-    // eval_expr path. Read once here and branched per-transition below,
-    // so the off path is identical to not having the switch at all.
-    let unresolved = eval_unresolved();
-    out.clear();
-    for (i, tr) in model.model.transitions.iter().enumerate() {
-        // gh#127 (#12): clear the table-OOB record before EACH rate so that, if
-        // this rate evaluates to NaN below, any record present is attributable
-        // to THIS rate only — an OOB recorded on a Cond branch that was then not
-        // selected (so the rate is finite) cannot be mis-attributed to a later
-        // rate's NaN from an unrelated cause.
-        crate::resolved_expr::clear_table_oob();
-        let p = if unresolved {
-            // String-keyed evaluator. Errors (NumericalCollapse) propagate
-            // directly; in the non-degenerate case it returns the same
-            // value as eval_resolved, so the guard below and the resulting
-            // trajectory are unchanged.
-            eval_expr(&tr.rate, &ctx)?
+    // gh#209: the flat-bytecode propensity path, built once at construction.
+    // It uses its own `&mut FlatCache` (NOT the resolved_expr `BINDING_CACHE`),
+    // so it does not enter `CacheScope`; the cache is generation-stamped once
+    // per propensity vector, which is what `CacheScope::enter` does for the
+    // tree walk. Its rate values are bit-identical to `eval_resolved`'s
+    // (`tests/flat_eval_byte_identity.rs`).
+    let vm = &model.resolved.flat_vm;
+    FLAT_STATE.with(|st| {
+        let st = &mut *st.borrow_mut();
+        // Size the per-thread cache to this model's binding count (rebuild
+        // only if it differs — e.g. first use, or a model swap on this
+        // thread).
+        if !st.cache.is_sized(vm.n_bindings) {
+            st.cache = FlatCache::new(vm.n_bindings);
+        }
+        // Bump the generation (invalidate the prior state's cached binding
+        // values) and mark active — once per propensity-vector eval — unless
+        // the binding cache is switched off (`CAMDL_NO_BINDING_CACHE`, or the
+        // A/B gate's per-thread override), which `CacheScope::enter` honours
+        // for the tree walk the same way.
+        if crate::resolved_expr::binding_cache_disabled() {
+            st.cache.deactivate();
         } else {
-            eval_resolved(&model.resolved.rates[i], &ctx)
-        };
-        // gh#audit-C6 / S1 + item 17. eval_resolved is infallible and signals a
-        // degenerate rate out-of-band by a non-finite return (NaN for a domain
-        // error, ±inf for an overflow). The shared guard converts that, and a
-        // negative rate, to a typed error so the inference layer's per-particle
-        // recovery can decide whether to kill the particle (recoverable) or
-        // propagate (forward-sim CLI).
-        out.push(guard_propensity(p, i, model, t)?);
-    }
-    Ok(())
+            st.cache.activate();
+        }
+        // Reserve scratch so the unchecked executor's raw pointer never sees
+        // a realloc mid-eval. `scratch_capacity` is the global ceiling.
+        let need = flat_eval::scratch_capacity(vm);
+        if st.scratch.capacity() < need {
+            st.scratch.reserve(need - st.scratch.len());
+        }
+        out.clear();
+        for i in 0..model.model.transitions.len() {
+            // gh#127 (#12): clear the table-OOB record before EACH rate so
+            // that, if this rate evaluates to NaN below, any record present is
+            // attributable to THIS rate only — an OOB recorded on a Cond
+            // branch that was then not selected (so the rate is finite) cannot
+            // be mis-attributed to a later rate's NaN from an unrelated cause.
+            crate::resolved_expr::clear_table_oob();
+            let p = flat_eval::eval_flat(vm, &vm.rates[i], &ctx, &mut st.scratch, &mut st.cache);
+            // gh#audit-C6 / S1 + item 17. The evaluator signals a degenerate
+            // rate out-of-band by a non-finite return (NaN for a domain error,
+            // ±inf for an overflow). The shared guard converts that, and a
+            // negative rate, to a typed error so the inference layer's
+            // per-particle recovery can decide whether to kill the particle
+            // (recoverable) or propagate (forward-sim CLI).
+            out.push(guard_propensity(p, i, model, t)?);
+        }
+        Ok(())
+    })
 }
 
 #[cfg(test)]

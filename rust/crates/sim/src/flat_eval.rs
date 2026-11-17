@@ -30,30 +30,16 @@
 //! Byte-identity vs `eval_resolved` on every rate is the non-negotiable
 //! invariant, pinned by the bench's bit-exact check.
 //!
-//! Wiring: opt-in behind the `CAMDL_EVAL_FLAT` env toggle (default OFF, see
-//! `eval_flat_enabled`). When OFF, the `FlatVm` is never built and
-//! `eval_propensities` takes the unchanged `eval_resolved` path — default
-//! behaviour is byte-for-byte identical to not having this module wired at all.
-//! When ON, `eval_propensities` runs the flat tape with the same per-rate
-//! NaN/table-OOB/negative-rate handling as the recursive path.
-
-use std::sync::OnceLock;
+//! Wiring: every `CompiledModel` builds its `FlatVm` at construction, and
+//! `eval_propensities` runs each rate's tape with the same per-rate
+//! NaN/table-OOB/negative-rate guard as every other rate evaluation.
+//! `eval_resolved` stays as the reference this module is held bit-identical to,
+//! and as the evaluator for everything that is not a transition rate.
 
 use ir::expr::{BinOp, UnOp};
 
 use crate::propensity::{eval_forcing, EvalCtx};
 use crate::resolved_expr::{eval_resolved, ResolvedExpr};
-
-/// Opt-in toggle for the flat-bytecode evaluator on the production propensity
-/// path. Presence-based (matches `CAMDL_NO_BINDING_CACHE` / `CAMDL_EVAL_UNRESOLVED`):
-/// any value of `CAMDL_EVAL_FLAT` (even empty) turns it on. Default OFF — when
-/// unset, `ResolvedModel::flat_vm` is `None` and `eval_propensities` takes the
-/// unchanged `eval_resolved` path, so default behaviour is byte-for-byte
-/// identical to today.
-pub fn eval_flat_enabled() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("CAMDL_EVAL_FLAT").is_some())
-}
 
 /// A flat opcode. Kept small (tag + payload) so the tape is dense and
 /// cache-friendly. Index-list ops (`IntPopSum`/`MixedPopSum`), bindings, and
@@ -138,11 +124,30 @@ pub struct FlatCache {
     stamp: Vec<u32>,
     gen: u32,
     active: bool,
+    /// Lifetime hit count on this thread, the flat counterpart of
+    /// `resolved_expr::BindingCache::hits`. Read (and reset) by the binding-cache
+    /// A/B gate through `resolved_expr::take_binding_cache_hits`, which proves the
+    /// cache served reuse so that its byte-identity claim is not vacuous.
+    hits: u64,
 }
 
 impl FlatCache {
     pub fn new(n_bindings: usize) -> Self {
-        FlatCache { val: vec![0.0; n_bindings], stamp: vec![0; n_bindings], gen: 0, active: false }
+        FlatCache { val: vec![0.0; n_bindings], stamp: vec![0; n_bindings], gen: 0, active: false, hits: 0 }
+    }
+
+    /// Run the next propensity-vector evaluation with the cache off, so every
+    /// binding is recomputed on demand. The `CAMDL_NO_BINDING_CACHE` escape
+    /// hatch and the A/B gate's `set_binding_cache_disabled(true)` land here,
+    /// mirroring `CacheScope::enter`'s no-op when the cache is disabled.
+    #[inline]
+    pub fn deactivate(&mut self) {
+        self.active = false;
+    }
+
+    /// Read and reset this cache's lifetime hit count.
+    pub fn take_hits(&mut self) -> u64 {
+        std::mem::take(&mut self.hits)
     }
 
     /// True iff this cache is sized for exactly `n` bindings. The per-thread
@@ -488,7 +493,7 @@ unsafe fn run(
                 // Seed -0.0 to mirror `Iterator::sum::<f64>()` in
                 // eval_resolved (std folds from -0.0, so empty → -0.0 and a
                 // lone element keeps its sign-of-zero). Byte-identity matters
-                // for the CAMDL_EVAL_FLAT oracle.
+                // against `eval_resolved`.
                 let mut s = -0.0;
                 for &i in set {
                     s += int_val(ctx, i as usize);
@@ -581,6 +586,7 @@ unsafe fn run(
                 let s = *slot as usize;
                 // Direct field reads — no thread-local, no `_tlv_get_addr`.
                 let v = if cache.active && s < cache.stamp.len() && cache.stamp[s] == cache.gen {
+                    cache.hits = cache.hits.wrapping_add(1);
                     cache.val[s]
                 } else {
                     let body = &vm.binding_progs[s];

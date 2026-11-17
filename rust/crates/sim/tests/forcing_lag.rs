@@ -173,7 +173,7 @@ fn param_lag_resolves_live() {
     }
 }
 
-/// The flat-bytecode propensity path (`CAMDL_EVAL_FLAT`, gh#209) must apply the
+/// The flat-bytecode propensity path (gh#209) must apply the
 /// SAME lag shift as the recursive `eval_resolved` path — else a lagged forcing
 /// is silently wrong under flat eval. The generic byte-identity gate
 /// (`flat_eval_byte_identity.rs`) iterates `ir/golden`, none of which carry a

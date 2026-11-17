@@ -1,7 +1,8 @@
 //! gh#209 — byte-identity guard for the flat-bytecode propensity VM.
 //!
-//! `CAMDL_EVAL_FLAT` swaps the recursive `eval_resolved` tree-walk for a
-//! compiled op tape (`FlatVm`) executed over an unsafe raw-pointer stack. The
+//! `eval_propensities` runs every transition rate through a compiled op tape
+//! (`FlatVm`) executed over an unsafe raw-pointer stack, in place of the
+//! recursive `eval_resolved` tree-walk. The
 //! non-negotiable invariant is that `eval_flat` returns a value **bit-identical**
 //! to `eval_resolved` for every rate expression — not merely close. f64 add is
 //! non-associative and `+0.0`/`-0.0` differ in bits, so "looks equal" is not
@@ -21,30 +22,13 @@
 //!      both `EvalCtx::per_eval` states (staged prologue and on-demand
 //!      fallback). No `ir/golden` model carries one, so without this the gate
 //!      says nothing about the `Op::PerEval` arm.
-//!
-//! Every test here sets `CAMDL_EVAL_FLAT` first (see `enable_flat_toggle`), so
-//! `CompiledModel::new` builds the VM through the production guard as well —
-//! which is what the gh#815 non-vacuity assertions check.
 
-use std::sync::Once;
 
 use sim::compiled_model::CompiledModel;
 use sim::flat_eval::{build, eval_flat, scratch_capacity, FlatCache, FlatProg, FlatVm, Op};
 use sim::propensity::EvalCtx;
 use sim::resolved_expr::{eval_per_eval_scratch, eval_resolved, ResolvedExpr};
 use sim::state::{IntState, RealState};
-
-/// Turn the flat-VM toggle on for this test binary, before anything can read it.
-///
-/// `flat_eval::eval_flat_enabled` memoizes the env read in a `OnceLock`, and
-/// `cargo test` runs the tests in this file on threads of one process. Routing
-/// every test through a `Once` that sets the variable as its first action means
-/// the memoized value is deterministically `true` — no test can lose a race with
-/// another test's `CompiledModel::new`.
-fn enable_flat_toggle() {
-    static INIT: Once = Once::new();
-    INIT.call_once(|| std::env::set_var("CAMDL_EVAL_FLAT", "1"));
-}
 
 /// Golden IR carries declared parameters with bounds but no resolved value
 /// (compact IR drops scenario presets), so a bare compile is rejected. Fill any
@@ -76,7 +60,6 @@ fn bits_eq(a: f64, b: f64) -> bool {
 
 #[test]
 fn flat_matches_eval_resolved_on_all_goldens() {
-    enable_flat_toggle();
     // Match the simulate/inference default: degenerate rates fall back to the
     // legacy 0.0 sentinel rather than NaN, so the two evaluators agree on the
     // div-by-zero arm too.
@@ -173,7 +156,6 @@ fn flat_matches_eval_resolved_on_all_goldens() {
 
 #[test]
 fn flat_matches_eval_resolved_on_latent_edge_cases() {
-    enable_flat_toggle();
     sim::eval_stats::set_allow_degenerate_rates(true);
 
     // A real CompiledModel only satisfies `EvalCtx.model`; the synthetic exprs
@@ -301,7 +283,6 @@ fn count_per_eval_ops(vm: &FlatVm) -> usize {
 /// models, so this comparison would have compared nothing.
 #[test]
 fn flat_matches_eval_resolved_on_a_per_eval_model() {
-    enable_flat_toggle();
     sim::eval_stats::set_allow_degenerate_rates(true);
 
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -319,18 +300,11 @@ fn flat_matches_eval_resolved_on_a_per_eval_model() {
 
     let cm = CompiledModel::new(model).expect("compile licm_ab_on");
 
-    // NON-VACUITY 2 — `CompiledModel::new` built the VM for this model. This is
-    // the assertion that fails if the gh#815 guard is ever re-narrowed (e.g. the
-    // `per_eval_bindings.is_empty()` clause coming back): the flat VM would be
-    // `None`, `CAMDL_EVAL_FLAT` would validate and change nothing, and every
-    // comparison below would still be green against a locally-built VM.
-    let vm = cm.resolved.flat_vm.as_ref().expect(
-        "CAMDL_EVAL_FLAT is set and this model has per-eval bindings, but \
-         CompiledModel::new built no FlatVm — the flat path is gated off for \
-         LICM'd models again (gh#815), so the toggle is a silent no-op",
-    );
+    // The VM `CompiledModel::new` built for this model — the one
+    // `eval_propensities` runs — not a locally built one.
+    let vm = &cm.resolved.flat_vm;
 
-    // NON-VACUITY 3 — the emitter really lowered `PerEvalRef` to `Op::PerEval`.
+    // NON-VACUITY 2 — the emitter really lowered `PerEvalRef` to `Op::PerEval`.
     // Guards against the arm regressing to `Op::Delegate`, which would stay
     // byte-identical (and so invisible to the comparison below) while giving
     // back the whole point of the hoist.

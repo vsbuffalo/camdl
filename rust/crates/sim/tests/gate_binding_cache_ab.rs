@@ -15,7 +15,8 @@
 //! has 18 hoisted bindings (`beta`, `seas`, and per-patch `I_agg_p*`/`N_p*`),
 //! referenced repeatedly across the spatial transition rates.
 //!
-//! Two assertions:
+//! Two assertions (counting hits of both the flat evaluator's cache and the
+//! tree walk's):
 //!   1. NON-VACUITY — with the cache ON, a run must register binding-cache hits
 //!      (`take_binding_cache_hits() > 0`). A green test where the cache never
 //!      served a hit would prove nothing; this guards it.
@@ -121,10 +122,20 @@ fn gate_binding_cache_is_byte_identical() {
 
         // B side: cache OFF (the pre-cache on-demand evaluator).
         set_binding_cache_disabled(true);
+        let _ = take_binding_cache_hits();
         let traj_off = sim
             .run(&compiled, &params, SEED, config)
             .unwrap_or_else(|e| panic!("cache-off {backend} sim failed: {e:?}"));
         let h_off = trajectory_hash(&traj_off);
+        // The B side must really be off: a cache that ignored the switch would
+        // still hash identically (it is sound), and the A/B would compare the
+        // cache with itself.
+        let off_hits = take_binding_cache_hits();
+        assert_eq!(
+            off_hits, 0,
+            "{backend}: the cache-off run served {off_hits} binding-cache hits — \
+             the off switch is not honoured, so the A/B compares the cache with itself"
+        );
 
         // A side: cache ON. Clear the hit counter, run, then read it back.
         set_binding_cache_disabled(false);
@@ -137,9 +148,10 @@ fn gate_binding_cache_is_byte_identical() {
 
         // ── 1. NON-VACUITY ──────────────────────────────────────────────────
         // Every backend here evaluates propensities through `eval_propensities`
-        // (the ODE backend builds its derivatives from the same rate trees), so
-        // each must register cache hits — verified: gillespie 248,
-        // chain_binomial / ode 22630 on this fixture. Zero hits means the
+        // (the flat evaluator's cache; the ODE backend also builds derivatives
+        // through the tree walk's cache), so each must register hits —
+        // verified: gillespie 16554, chain_binomial 22630, ode 90520 on this
+        // fixture. Zero hits means the
         // cache was never exercised and byte-identity would prove nothing.
         assert!(
             hits > 0,

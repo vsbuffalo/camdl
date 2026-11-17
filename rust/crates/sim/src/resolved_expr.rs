@@ -501,7 +501,7 @@ thread_local! {
 /// on-demand path, making a run comparable to the pre-cache evaluator. The
 /// per-thread override (set by the A/B gate) wins so cache-on and cache-off can
 /// be compared in one process.
-fn binding_cache_disabled() -> bool {
+pub(crate) fn binding_cache_disabled() -> bool {
     if let Some(off) = CACHE_OVERRIDE.with(|c| c.get()) {
         return off;
     }
@@ -519,13 +519,18 @@ pub fn set_binding_cache_disabled(off: bool) {
 /// Test/bench hook: read and reset this thread's cumulative binding-cache hit
 /// count. The A/B gate calls it after a cache-on run to assert hits > 0 (the
 /// cache served reuse — so byte-identity is a non-vacuous claim).
+///
+/// Counts both caches: the tree walk's `BINDING_CACHE` (used under
+/// `CAMDL_EVAL_UNRESOLVED` and by the ODE derivative path) and the flat
+/// evaluator's per-thread `FlatCache` (the default propensity path).
 pub fn take_binding_cache_hits() -> u64 {
-    BINDING_CACHE.with(|c| {
+    let tree = BINDING_CACHE.with(|c| {
         let mut c = c.borrow_mut();
         let n = c.hits;
         c.hits = 0;
         n
-    })
+    });
+    tree.wrapping_add(crate::propensity::take_flat_binding_cache_hits())
 }
 
 /// RAII scope that activates the binding cache for one propensity-vector
