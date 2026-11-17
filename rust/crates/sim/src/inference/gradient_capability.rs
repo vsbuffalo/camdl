@@ -13,9 +13,9 @@
 //! - [`preflight_gradient_ode`] — the ODE gradient gate (`nl-lbfgs`): the common scan PLUS the
 //!   checks specific to the deterministic forward-sensitivity path (a nonsmooth
 //!   `rate_state_grad`, an adaptive integrator, a `dt`-in-rate model, a scheduled
-//!   effect, a parameterized initial condition, a `DerivedExpr` prevalence
-//!   projection, a `projected`-transforming likelihood argument). One function,
-//!   one list, run once before any gradient is taken.
+//!   effect the sensitivity cannot cross, a parameterized initial condition, a
+//!   `DerivedExpr` prevalence projection, a `projected`-transforming likelihood
+//!   argument). One function, one list, run once before any gradient is taken.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -330,28 +330,8 @@ pub fn preflight_gradient_ode(
                 .to_string(),
         ));
     }
-    // ── Scheduled effects: event-jump sensitivity is a follow-up (§1g) ──────────
-    // The plan's both halves: a model whose only effect is at t_start has an
-    // empty list of later instants and a non-empty origin batch, which the
-    // gradient path would silently fit without. The window is open at the end
-    // (the fit's last observation is not known here), so an effect after the
-    // run is refused too — the conservative side.
-    let plan = crate::effect_plan::EffectPlan::build(
-        model,
-        params,
-        m.simulation.t_start,
-        f64::INFINITY,
-        crate::effect_plan::FireClock::Exact,
-        crate::effect_plan::Origin::Init,
-    )?;
-    if !plan.is_empty() {
-        return Err(SimError::Validation(
-            "ODE gradient (nl-lbfgs) does not yet support scheduled interventions or events: \
-             their event-jump sensitivity is a follow-up (gh#275 §1g). Use `nl-sbplx` on \
-             `ode`, which needs no gradient, for models with effects."
-                .to_string(),
-        ));
-    }
+    // ── Scheduled effects: the event-jump sensitivity (§1g) ─────────────────────
+    preflight_scheduled_effects(model, params, estimated)?;
     // ── Initial condition: the ∂init/∂θ seed (`ic_grad`, §1c C-seed) ────────────
     // A parameterized IC whose expression involves an estimated parameter needs the
     // forward sensitivity seeded at S(t_start) = ∂(initial_state)/∂θ. Admit it only
@@ -519,6 +499,159 @@ pub fn preflight_gradient_ode(
         }
     }
 
+    Ok(())
+}
+
+/// The scheduled-effect half of the gate (§1g). The ODE gradient path applies
+/// every effect the run fires together with its sensitivity jump
+/// `S⁺ = ∂Φ/∂x·S⁻ + ∂Φ/∂θ` (`effects::SensBlock`), which is well defined for a
+/// fixed-time effect whose actions are smooth in state and parameters. This
+/// refuses, by name, each effect it is not defined for:
+///
+/// - a **reactive** intervention — its fire time depends on the observed data
+///   and the trajectory, an implicit `t_e(x)` the fixed-grid sensitivity does
+///   not carry (gh#204);
+/// - a fire time that reads an **estimated parameter** (`at [t_seed]`) — a
+///   θ-dependent event time carries a boundary term `−(ẋ⁺ − ẋ⁻)·∂t_e/∂θ` the
+///   fixed-grid RK4 does not compute; emitting the jump alone would be a
+///   silently wrong gradient;
+/// - a `transfer(count = …)` — its jump `min(count, source)` is not
+///   differentiable in the source compartment;
+/// - an amount that **reads compartment state** — the compiler emits
+///   `∂amount/∂θ` but not `∂amount/∂state`, so the jump's `∂Φ/∂x` would be
+///   silently incomplete (`set I = I + 10`; write `add(I, 10)` instead);
+/// - an amount whose `∂amount/∂θ` the compiler could not emit for an estimated
+///   parameter (a serialized `Unsupported`), or has no entry for one it reads —
+///   a nonsmooth function of it, a cancelled dependence, or an IR compiled
+///   before amount gradients existed (ir/VERSION 0.45); either way its
+///   contribution would be silently zero.
+///
+/// Only effects the run will fire are checked — the plan over
+/// `[t_start, ∞)`, both its origin batch and its later instants, so an effect
+/// at `t_start` counts and one after the run is checked too (the fit's last
+/// observation is not known here; the conservative side). A toggleable
+/// `interventions {}` entry the fit leaves disabled is not in `model` at all
+/// (the scenario filter removes it first).
+fn preflight_scheduled_effects(
+    model: &CompiledModel,
+    params: &[f64],
+    estimated: &HashSet<&str>,
+) -> Result<(), SimError> {
+    use ir::intervention::Action;
+    let m = &model.model;
+    let alt = "Use `nl-sbplx` on `ode`, which needs no gradient.";
+    let noun = |iv: &ir::intervention::Intervention| {
+        if iv.kind.is_event() { "event" } else { "intervention" }
+    };
+
+    for iv in &m.interventions {
+        if iv.fire.is_reactive() {
+            return Err(SimError::Validation(format!(
+                "ODE gradient (nl-lbfgs): `{}` is a reactive intervention (it fires when \
+                 an `observed(...)` quantity crosses a threshold), so its fire time depends \
+                 on the data and the trajectory — a dependence the fixed-grid forward \
+                 sensitivity does not carry (gh#275 §1g). {alt}",
+                iv.name
+            )));
+        }
+    }
+
+    let plan = crate::effect_plan::EffectPlan::build(
+        model,
+        params,
+        m.simulation.t_start,
+        f64::INFINITY,
+        crate::effect_plan::FireClock::Exact,
+        crate::effect_plan::Origin::Init,
+    )?;
+    let mut firing: std::collections::BTreeSet<usize> = plan.at_origin().iter().copied().collect();
+    for i in 0..plan.times().len() {
+        firing.extend(plan.batch(i).iter().copied());
+    }
+
+    for iv_idx in firing {
+        let iv = &m.interventions[iv_idx];
+        // A fire time that reads an estimated parameter.
+        if let Some(exprs) = model.resolved.intervention_at_time_exprs[iv_idx].as_deref() {
+            let wanted = |i: usize| estimated.contains(m.parameters[i].name.as_str());
+            if let Some(p) = exprs.iter().find_map(|e| model.first_param_read(e, &wanted)) {
+                return Err(SimError::Validation(format!(
+                    "ODE gradient (nl-lbfgs): estimated parameter `{}` sets the fire time of \
+                     {} `{}`. A θ-dependent event time adds a boundary term \
+                     −(ẋ⁺ − ẋ⁻)·∂t_e/∂θ to the sensitivity that the fixed-grid integration \
+                     does not compute, so the gradient would be silently wrong (gh#275 §1g). \
+                     Fix `{}`, or {}",
+                    m.parameters[p].name, noun(iv), iv.name, m.parameters[p].name,
+                    alt.to_string().replacen("Use", "use", 1)
+                )));
+            }
+        }
+        for (action_idx, action) in iv.actions.iter().enumerate() {
+            let (verb, amount, grad) = match action {
+                Action::Add(a) => ("add", &a.count, &a.count_grad),
+                Action::Set(s) => ("set", &s.value, &s.value_grad),
+                Action::FractionTransfer(ft) => ("transfer(fraction = …)", &ft.fraction, &ft.fraction_grad),
+                Action::AbsoluteTransfer(at) => {
+                    return Err(SimError::Validation(format!(
+                        "ODE gradient (nl-lbfgs): {} `{}` moves a fixed count from `{}` to `{}` \
+                         (`transfer(count = …)`). Its jump moves min(count, source), which is \
+                         not differentiable in the source compartment, so the forward \
+                         sensitivity cannot cross it (gh#275 §1g). Write the transfer as a \
+                         fraction of the source, or {}",
+                        noun(iv), iv.name, at.src, at.dst,
+                        alt.to_string().replacen("Use", "use", 1)
+                    )));
+                }
+            };
+            // An amount that reads compartment state (directly or through a
+            // hoisted binding): ∂amount/∂state is not emitted.
+            if crate::resolved_expr::references_state(
+                &model.resolved.intervention_exprs[iv_idx][action_idx],
+            ) {
+                return Err(SimError::Validation(format!(
+                    "ODE gradient (nl-lbfgs): the amount of {} `{}`'s `{}` reads compartment \
+                     state. The compiler emits ∂amount/∂θ but not ∂amount/∂state, so the \
+                     jump's ∂Φ/∂x would be silently incomplete (gh#275 §1g). Write the \
+                     amount in parameters and constants — `add(I, 10)` rather than \
+                     `I = I + 10` — or {}",
+                    noun(iv), iv.name, verb,
+                    alt.to_string().replacen("Use", "use", 1)
+                )));
+            }
+            // Every estimated parameter the amount reads has a usable ∂amount/∂θ.
+            let mut refs = HashSet::new();
+            collect_param_refs(amount, &mut refs);
+            let mut refs: Vec<String> = refs.into_iter().filter(|p| estimated.contains(p.as_str())).collect();
+            refs.sort();
+            for pname in refs {
+                match grad.get(pname.as_str()) {
+                    Some(DerivEntry::Grad(_)) => {}
+                    Some(DerivEntry::Unsupported { code, .. }) => {
+                        return Err(SimError::Validation(format!(
+                            "ODE gradient (nl-lbfgs): ∂(amount of {} `{}`)/∂{pname} is not \
+                             differentiable — it {}. Reformulate the amount with a smooth \
+                             expression, or {}",
+                            noun(iv), iv.name, code.reason_message(),
+                            alt.to_string().replacen("Use", "use", 1)
+                        )));
+                    }
+                    None => {
+                        return Err(SimError::Validation(format!(
+                            "ODE gradient (nl-lbfgs): estimated parameter `{pname}` enters the \
+                             amount of {} `{}` (`{}`), but there is no usable \
+                             ∂amount/∂{pname} — either the amount is not differentiable in \
+                             `{pname}` (e.g. a floor/round of it), the dependence cancels, or \
+                             this IR was compiled before amount gradients were emitted \
+                             (ir/VERSION 0.45, gh#275 §1g). Its contribution would be \
+                             silently zero. Reformulate the amount, recompile, or {}",
+                            noun(iv), iv.name, verb,
+                            alt.to_string().replacen("Use", "use", 1)
+                        )));
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -724,28 +857,226 @@ mod tests {
         assert!(msg.contains("real-valued compartments"), "{msg}");
     }
 
-    /// A model whose only effect is at t_start has an empty list of later
-    /// firing instants and a non-empty origin batch. The gradient path applies
-    /// no effect at all, so a refusal keyed on the later instants alone would
-    /// let `det_grad` and `nuts` fit this model without its effect — silently.
-    #[test]
-    fn refuses_a_model_whose_only_effect_is_at_t_start() {
-        let mut m = base_model();
-        m.interventions = vec![ir::intervention::Intervention {
-            name: "seed".into(),
+    // ── §1g: scheduled effects ──────────────────────────────────────────────────
+
+    use ir::intervention::{Action, AddAction, FireSource, FractionTransfer, Intervention,
+        InterventionKind, InterventionSchedule, SetAction};
+
+    /// One scheduled event named `name` with the given actions, firing at `times`.
+    fn event(name: &str, times: Vec<f64>, actions: Vec<Action>) -> Intervention {
+        Intervention {
+            name: name.into(),
             base_name: None,
-            fire: ir::intervention::FireSource::Scheduled(
-                ir::intervention::InterventionSchedule::AtTimes(vec![m.simulation.t_start]),
-            ),
-            actions: vec![ir::intervention::Action::Add(ir::intervention::AddAction {
-                compartment: "I".into(),
-                count: Expr::Const(ConstExpr { value: 5.0 }),
-                count_grad: Default::default(),
+            fire: FireSource::Scheduled(InterventionSchedule::AtTimes(times)),
+            actions,
+            kind: InterventionKind::Event,
+        }
+    }
+
+    fn add_param(m: &mut ir::Model, name: &str, value: f64) {
+        m.parameters.push(ir::parameter::Parameter {
+            name: name.into(),
+            value: ir::parameter::ParamValue::Fixed { value },
+            param_kind: None,
+            param_dim: None,
+        });
+    }
+
+    fn gate_ok(model: ir::Model, estimated: &[&str]) {
+        let cm = compile(model);
+        let params = cm.default_params.clone();
+        preflight_gradient_ode(&cm, &params, &est(estimated))
+            .unwrap_or_else(|e| panic!("the gate must admit this model, but refused: {e}"));
+    }
+
+    /// A fixed-fraction transfer at fixed times — the yearly school-entry /
+    /// ageing transfer — is the case the sensitivity jump exists for. Admitted,
+    /// including an instance at t_start (the origin batch, which the gradient
+    /// path applies before the first row, as `run_ode` does).
+    #[test]
+    fn admits_fixed_time_fixed_fraction_transfers_including_at_t_start() {
+        let mut m = base_model();
+        let t0 = m.simulation.t_start;
+        m.interventions = vec![event("ageing", vec![t0, 10.5, 20.5], vec![Action::FractionTransfer(
+            FractionTransfer {
+                src: "S".into(), dst: "R".into(), fraction: Expr::const_(0.1),
+                fraction_grad: Default::default(),
+            },
+        )])];
+        gate_ok(m, &["beta", "gamma", "k"]);
+    }
+
+    /// A parameterised amount is admitted when the compiler emitted its
+    /// ∂amount/∂θ for every estimated parameter it reads.
+    #[test]
+    fn admits_an_estimated_amount_with_an_emitted_gradient() {
+        let mut m = base_model();
+        add_param(&mut m, "seed", 5.0);
+        let one = DerivEntry::Grad(Expr::const_(1.0));
+        m.interventions = vec![event("import", vec![14.0], vec![Action::Add(AddAction {
+            compartment: "I".into(),
+            count: Expr::param("seed"),
+            count_grad: HashMap::from([("seed".to_string(), one)]),
+        })])];
+        gate_ok(m, &["beta", "seed"]);
+    }
+
+    /// `transfer(count = …)` moves min(count, source): nonsmooth, refused by name.
+    #[test]
+    fn refuses_a_fixed_count_transfer_by_name() {
+        let mut m = base_model();
+        m.interventions = vec![event("evacuate", vec![14.0], vec![Action::AbsoluteTransfer(
+            ir::intervention::AbsoluteTransfer {
+                src: "I".into(), dst: "R".into(), count: Expr::const_(3.0),
+            },
+        )])];
+        let msg = gate_err(m, &["beta"]);
+        assert!(
+            msg.contains("evacuate") && msg.contains("transfer(count") && msg.contains("min(count, source)"),
+            "{msg}"
+        );
+    }
+
+    /// An amount that reads state (`set I = I + 10`) has no emitted
+    /// ∂amount/∂state: refused, naming the event and the rewrite.
+    #[test]
+    fn refuses_a_state_dependent_amount() {
+        let mut m = base_model();
+        m.interventions = vec![event("pulse", vec![14.0], vec![Action::Set(SetAction {
+            compartment: "I".into(),
+            value: Expr::bin_op(ir::expr::BinOp::Add, Expr::pop("I"), Expr::const_(10.0)),
+            value_grad: Default::default(),
+        })])];
+        let msg = gate_err(m, &["beta"]);
+        assert!(
+            msg.contains("pulse") && msg.contains("reads compartment state") && msg.contains("add(I, 10)"),
+            "{msg}"
+        );
+    }
+
+    /// An estimated parameter in an amount with no emitted ∂amount/∂θ (an IR
+    /// compiled before 0.45, or a nonsmooth dependence) would contribute a
+    /// silently-zero jump term: refused.
+    #[test]
+    fn refuses_an_estimated_amount_without_a_gradient_entry() {
+        let mut m = base_model();
+        add_param(&mut m, "seed", 5.0);
+        m.interventions = vec![event("import", vec![14.0], vec![Action::Add(AddAction {
+            compartment: "I".into(),
+            count: Expr::param("seed"),
+            count_grad: Default::default(),
+        })])];
+        let msg = gate_err(m, &["beta", "seed"]);
+        assert!(msg.contains("seed") && msg.contains("import") && msg.contains("silently zero"), "{msg}");
+    }
+
+    /// The same amount with a serialized `Unsupported` entry: refused with the
+    /// compiler's reason.
+    #[test]
+    fn refuses_an_estimated_amount_with_an_unsupported_gradient() {
+        let mut m = base_model();
+        add_param(&mut m, "seed", 5.0);
+        m.interventions = vec![event("import", vec![14.0], vec![Action::Add(AddAction {
+            compartment: "I".into(),
+            count: Expr::param("seed"),
+            count_grad: HashMap::from([(
+                "seed".to_string(),
+                DerivEntry::Unsupported { node: "floor(seed)".into(), code: UnsupportedReason::NonsmoothState },
+            )]),
+        })])];
+        let msg = gate_err(m, &["seed"]);
+        assert!(msg.contains("seed") && msg.contains("not differentiable"), "{msg}");
+    }
+
+    /// A fixed parameter in an amount needs no gradient (its column is never
+    /// taken): admitted even without an entry. Guards against over-refusal.
+    #[test]
+    fn admits_a_fixed_amount_parameter_without_a_gradient_entry() {
+        let mut m = base_model();
+        add_param(&mut m, "seed", 5.0);
+        m.interventions = vec![event("import", vec![14.0], vec![Action::Add(AddAction {
+            compartment: "I".into(),
+            count: Expr::param("seed"),
+            count_grad: Default::default(),
+        })])];
+        gate_ok(m, &["beta"]);
+    }
+
+    /// A parametric fire time `at [t_seed]`: admitted while `t_seed` is fixed,
+    /// refused by name once it is estimated (the boundary term the fixed grid
+    /// does not carry).
+    #[test]
+    fn a_parametric_fire_time_is_refused_only_when_estimated() {
+        let mut m = base_model();
+        add_param(&mut m, "t_seed", 14.0);
+        let mut iv = event("import", vec![], vec![Action::Add(AddAction {
+            compartment: "I".into(),
+            count: Expr::const_(5.0),
+            count_grad: Default::default(),
+        })]);
+        iv.fire = FireSource::Scheduled(InterventionSchedule::AtTimesExpr(vec![Expr::param("t_seed")]));
+        m.interventions = vec![iv];
+        gate_ok(m.clone(), &["beta"]);
+        let msg = gate_err(m, &["beta", "t_seed"]);
+        assert!(msg.contains("t_seed") && msg.contains("fire time") && msg.contains("import"), "{msg}");
+    }
+
+    /// A reactive intervention's fire time depends on the data: refused by name.
+    #[test]
+    fn refuses_a_reactive_intervention() {
+        use ir::intervention::{CmpOp, ObsReducer, ReactiveTrigger, TriggerExpr, TriggerQuantity,
+            TriggerThreshold};
+        let mut m = base_model();
+        m.interventions = vec![Intervention {
+            name: "sia".into(),
+            base_name: None,
+            fire: FireSource::Reactive(ReactiveTrigger {
+                when_: TriggerExpr::Cmp {
+                    lhs: TriggerQuantity::Observed {
+                        stream: "weekly_cases".into(), window: None, reducer: ObsReducer::Latest,
+                    },
+                    op: CmpOp::Ge,
+                    rhs: TriggerThreshold::Const(50.0),
+                },
+                after: 0.0,
+                once: true,
+                cooldown: None,
+            }),
+            actions: vec![Action::FractionTransfer(FractionTransfer {
+                src: "S".into(), dst: "R".into(), fraction: Expr::const_(0.5),
+                fraction_grad: Default::default(),
             })],
-            kind: ir::intervention::InterventionKind::Event,
+            kind: InterventionKind::Scenario,
         }];
         let msg = gate_err(m, &["beta"]);
-        assert!(msg.contains("scheduled interventions or events"), "{msg}");
+        assert!(msg.contains("sia") && msg.contains("reactive"), "{msg}");
+    }
+
+    /// An initial condition drawn from a law (`R ~ binomial(n = N0, p = p_imm)`)
+    /// enters the ODE path through its MEAN `N0·p_imm`, which the compiler
+    /// differentiates into `ic_grad`; the gate admits it on that seed. (The
+    /// value path rounds the mean to an integer; the gradient path uses it
+    /// unrounded — see `CompiledModel::initial_state_continuous`.)
+    #[test]
+    fn admits_a_drawn_initial_condition_through_its_mean_seed() {
+        use ir::model::{InitCountLaw, InitSpec};
+        let mut m = base_model();
+        add_param(&mut m, "p_imm", 0.2);
+        let mut ic = m.initial_conditions.0.clone();
+        ic.insert(
+            "R".to_string(),
+            InitSpec::Count(InitCountLaw::Binomial(ir::observation::BinomialLikelihood {
+                n: Expr::param("N0"),
+                p: Diffable::new(Expr::param("p_imm")),
+            })),
+        );
+        m.initial_conditions = ir::model::InitialConditions(ic);
+        // ∂(N0·p_imm)/∂p_imm = N0, as `differentiate_ic` emits over the mean.
+        m.ic_grad = HashMap::from([(
+            "R".to_string(),
+            HashMap::from([("p_imm".to_string(), DerivEntry::Grad(Expr::param("N0")))]),
+        )]);
+        gate_ok(m, &["beta", "p_imm"]);
     }
 
     #[test]

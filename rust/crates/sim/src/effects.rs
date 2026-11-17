@@ -906,6 +906,150 @@ fn rounding_floor(n: usize, sum_abs: f64) -> f64 {
 pub struct ContinuousArena<'a> {
     pub int: &'a mut [f64],
     pub real: &'a mut [f64],
+    /// The forward sensitivities riding along on the ODE gradient path
+    /// ([`SensBlock`]); `None` on the value path (`run_ode`), whose arithmetic
+    /// is then exactly the code above and below with every `sens` branch
+    /// skipped.
+    pub sens: Option<SensBlock<'a>>,
+}
+
+/// The forward-sensitivity block that rides with the ODE's continuous arena
+/// through an effect instant (gh#275 §1g). `state` is `S = ∂x_int/∂θ`, an
+/// `n_int × d` row-major block over the integer compartments
+/// (`d = param_model_idx.len()`); `param_model_idx` maps each sensitivity
+/// column to its model parameter index, the key the compiler-emitted
+/// `∂amount/∂θ` maps (`*_grad`, `CompiledModel::intervention_amount_grads`) are
+/// read through.
+///
+/// When an arena carries one, every value change an action makes is applied
+/// together with the change it makes to `S` — the jump `x⁺ = Φ(x⁻, θ)` and its
+/// derivative `S⁺ = (∂Φ/∂x)·S⁻ + ∂Φ/∂θ`, per action:
+///
+/// ```text
+/// add(c, v)                     x_c += v              S[c,:] += ∂v/∂θ
+/// set c = v                     x_c  = v              S[c,:]  = ∂v/∂θ
+/// transfer(fraction = f, s → d) x = x_s · clamp(f)    dx = clamp(f)·S[s,:] + x_s·∂f/∂θ·[0 ≤ f ≤ 1]
+///                               x_s -= x,  x_d += x   S[s,:] -= dx,  S[d,:] += dx
+/// ```
+///
+/// Every read a rule makes — the amount `v`, the source `x_s`, the row `S[s,:]`
+/// — is taken from the same snapshot the value change reads (the phase snapshot
+/// for events, the live state for sequential interventions), and where several
+/// changes land on one compartment their sensitivity rows are summed in the
+/// same ascending-delta order the values are, so `S` is the exact derivative of
+/// the value computation beside it. The clamp's derivative is taken on its
+/// closed active piece `[0, 1]` and is zero outside it, where the value is
+/// locally constant in θ. An amount that reads compartment state, a
+/// `transfer(count = …)` (a nonsmooth `min`) and a real-compartment target have
+/// no rule here: the gradient capability gate refuses them before this path
+/// runs, and reaching one is an internal error, never a silently incomplete `S`.
+pub struct SensBlock<'a> {
+    pub state: &'a mut [f64],
+    pub param_model_idx: &'a [usize],
+}
+
+/// Evaluate `∂amount/∂θ` of one action for each sensitivity column, against the
+/// same f64 state the amount itself is evaluated at ([`eval_amount_f64`]).
+#[allow(clippy::too_many_arguments)]
+fn eval_amount_grad_f64(
+    model: &CompiledModel,
+    iv_idx: usize,
+    action_idx: usize,
+    int_f64: &[f64],
+    real_f64: &[f64],
+    params: &[f64],
+    t: f64,
+    dt: f64,
+    param_model_idx: &[usize],
+) -> Result<Vec<f64>, SimError> {
+    let Some(grad) = model.resolved.intervention_amount_grads[iv_idx][action_idx].as_ref() else {
+        return Err(SimError::Validation(format!(
+            "internal: the ODE gradient path reached action {} of `{}`, a \
+             `transfer(count = …)`, which carries no amount gradient; the gradient \
+             capability gate should have refused this model",
+            action_idx + 1,
+            model.model.interventions[iv_idx].name
+        )));
+    };
+    let placeholder = IntState::new(model.int_local_to_global.len());
+    let rs = RealState::from_vec(real_f64.to_vec());
+    let ctx = EvalCtx {
+        model, int_s: &placeholder, real_s: &rs, params, t, dt,
+        projected: None, aux: None, int_float_override: Some(int_f64),
+        per_eval: None,
+    };
+    Ok(param_model_idx
+        .iter()
+        .map(|&m| crate::resolved_expr::eval_emitted_grad(grad, m, &ctx))
+        .collect())
+}
+
+/// The sensitivity rows of one action — `d` entries per change, parallel (in
+/// order) to the changes [`action_changes_f64`] appended for it in `changes` —
+/// given its value `v`, its `∂v/∂θ` (`dv`), and the snapshot values and
+/// sensitivities (`read_int`, `snap_sens`) the action reads. The rules are the
+/// table on [`SensBlock`].
+#[allow(clippy::too_many_arguments)]
+fn action_changes_sens(
+    model: &CompiledModel,
+    action: &Action,
+    v: f64,
+    dv: &[f64],
+    read_int: &[f64],
+    snap_sens: &[f64],
+    changes: &[(Arena, ChangeF64)],
+    out: &mut Vec<Vec<f64>>,
+) -> Result<(), SimError> {
+    let d = dv.len();
+    let int_target = |a: Arena| -> Result<usize, SimError> {
+        match a {
+            Arena::Int(i) => Ok(i),
+            Arena::Real(i) => Err(SimError::Validation(format!(
+                "internal: the ODE gradient path applied an effect to real compartment \
+                 `{}`, whose forward sensitivity is not tracked; the gradient capability \
+                 gate should have refused this model",
+                model.model.compartments[model.real_local_to_global[i]].name
+            ))),
+        }
+    };
+    match action {
+        Action::Add(_) | Action::Set(_) => {
+            // One change: `x_c += v` or `x_c = v`, so the row is ∂v/∂θ either way
+            // (a `Write` row is the written value's derivative).
+            let [(target, _)] = changes else {
+                return Err(SimError::Validation("internal: add/set made more than one change".into()));
+            };
+            int_target(*target)?;
+            out.push(dv.to_vec());
+        }
+        Action::FractionTransfer(_) => {
+            // Two changes, `x_s -= x` then `x_d += x`, with `x = x_s · clamp(v)`.
+            let [(src, _), (dst, _)] = changes else {
+                return Err(SimError::Validation("internal: a fraction transfer did not make two changes".into()));
+            };
+            let s = int_target(*src)?;
+            int_target(*dst)?;
+            let frac = v.clamp(0.0, 1.0);
+            let active = (0.0..=1.0).contains(&v);
+            let dx: Vec<f64> = (0..d)
+                .map(|p| {
+                    let through_state = frac * snap_sens[s * d + p];
+                    if active { through_state + read_int[s] * dv[p] } else { through_state }
+                })
+                .collect();
+            out.push(dx.iter().map(|x| -x).collect());
+            out.push(dx);
+        }
+        Action::AbsoluteTransfer(_) => {
+            return Err(SimError::Validation(
+                "internal: the ODE gradient path reached a `transfer(count = …)`, whose \
+                 jump min(count, source) has no sensitivity rule; the gradient capability \
+                 gate should have refused this model"
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl EventArena for ContinuousArena<'_> {
@@ -923,7 +1067,12 @@ impl EventArena for ContinuousArena<'_> {
         }
         let snap_int = self.int.to_vec();
         let snap_real = self.real.to_vec();
+        // The phase-frozen sensitivities S⁻, which every transfer of this phase
+        // reads exactly as its value reads `snap_int`.
+        let snap_sens: Option<Vec<f64>> = self.sens.as_ref().map(|s| s.state.to_vec());
         let mut changes: Vec<(Arena, ChangeF64)> = Vec::new();
+        // `sens_rows[k]` is the sensitivity row of `changes[k]` (gradient path only).
+        let mut sens_rows: Vec<Vec<f64>> = Vec::new();
         for &iv_idx in event_idx {
             let iv = &model.model.interventions[iv_idx];
             for (action_idx, action) in iv.actions.iter().enumerate() {
@@ -933,15 +1082,26 @@ impl EventArena for ContinuousArena<'_> {
                 let v = eval_amount_f64(model, iv_idx, action_idx, &snap_int, &snap_real, params, t, dt);
                 let v = crate::intervention::finite_action_value(v, &iv.name, action, t)?;
                 crate::trace::effect_action(EffectKind::Event, &iv.name, action, v, t);
+                let first = changes.len();
                 action_changes_f64(model, action, v, &snap_int, &snap_real, &mut changes)?;
+                if let (Some(sb), Some(ss)) = (self.sens.as_ref(), snap_sens.as_ref()) {
+                    let dv = eval_amount_grad_f64(
+                        model, iv_idx, action_idx, &snap_int, &snap_real, params, t, dt,
+                        sb.param_model_idx,
+                    )?;
+                    action_changes_sens(
+                        model, action, v, &dv, &snap_int, ss, &changes[first..], &mut sens_rows,
+                    )?;
+                    debug_assert_eq!(sens_rows.len(), changes.len());
+                }
             }
         }
         // Group the changes by compartment, in first-appearance order, with a
         // per-arena index map (linear in the number of changes).
         let mut group_int = vec![usize::MAX; snap_int.len()];
         let mut group_real = vec![usize::MAX; snap_real.len()];
-        let mut groups: Vec<(Arena, Vec<ChangeF64>)> = Vec::new();
-        for &(target, change) in &changes {
+        let mut groups: Vec<(Arena, Vec<usize>)> = Vec::new();
+        for (k, &(target, _)) in changes.iter().enumerate() {
             let g = match target {
                 Arena::Int(i) => &mut group_int[i],
                 Arena::Real(i) => &mut group_real[i],
@@ -950,10 +1110,11 @@ impl EventArena for ContinuousArena<'_> {
                 *g = groups.len();
                 groups.push((target, Vec::with_capacity(1)));
             }
-            groups[*g].1.push(change);
+            groups[*g].1.push(k);
         }
         let mut sorted: Vec<f64> = Vec::new();
-        for (target, cs) in &groups {
+        for (target, ks) in &groups {
+            let cs: Vec<ChangeF64> = ks.iter().map(|&k| changes[k].1).collect();
             let base = match *target {
                 Arena::Int(i) => snap_int[i],
                 Arena::Real(i) => snap_real[i],
@@ -986,6 +1147,44 @@ impl EventArena for ContinuousArena<'_> {
                     });
                 }
             }
+            // The same combination on `S[c,:]`: one change applies directly (a
+            // `Write` row replaces the row), several add their rows to the
+            // snapshot row in the value's ascending-delta order, a `Write`
+            // contributing `∂v/∂θ − S⁻[c,:]` as its value contributes `v − x⁻`.
+            if let (Some(sb), Some(ss)) = (self.sens.as_mut(), snap_sens.as_ref()) {
+                let Arena::Int(c) = *target else {
+                    return Err(SimError::Validation(format!(
+                        "internal: the ODE gradient path applied an event to real compartment \
+                         `{}`, whose forward sensitivity is not tracked",
+                        model.model.compartments[model.real_local_to_global[match *target {
+                            Arena::Real(i) => i,
+                            Arena::Int(_) => unreachable!(),
+                        }]].name
+                    )));
+                };
+                let d = sb.param_model_idx.len();
+                let row = &mut sb.state[c * d..(c + 1) * d];
+                if let [k] = ks.as_slice() {
+                    match changes[*k].1 {
+                        ChangeF64::Delta(_) => {
+                            for (p, r) in row.iter_mut().enumerate() { *r += sens_rows[*k][p]; }
+                        }
+                        ChangeF64::Write(_) => row.copy_from_slice(&sens_rows[*k]),
+                    }
+                } else {
+                    let mut order: Vec<usize> = ks.clone();
+                    order.sort_by(|&a, &b| as_delta(&changes[a].1).total_cmp(&as_delta(&changes[b].1)));
+                    for (p, r) in row.iter_mut().enumerate() {
+                        let s_minus = ss[c * d + p];
+                        *r = order.iter().fold(s_minus, |acc, &k| {
+                            acc + match changes[k].1 {
+                                ChangeF64::Delta(_) => sens_rows[k][p],
+                                ChangeF64::Write(_) => sens_rows[k][p] - s_minus,
+                            }
+                        });
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -1008,12 +1207,13 @@ impl EventArena for ContinuousArena<'_> {
 /// and sequentially: each action reads the live state the previous one left.
 /// This is the stage after [`apply_event_phases`] at an ODE boundary; ODE
 /// carries no balance. `t_boundary` is the effect time; `dt` drives the amount
-/// evaluation.
+/// evaluation. On the gradient path (`arena.sens` present) each action's
+/// sensitivity change is applied with its value change, read against the same
+/// live state and live `S` ([`SensBlock`]).
 pub fn apply_interventions_continuous(
     model: &CompiledModel,
     intervention_idx: &[usize],
-    int_vals: &mut [f64],
-    real_vals: &mut [f64],
+    arena: &mut ContinuousArena<'_>,
     params: &[f64],
     t_boundary: f64,
     dt: f64,
@@ -1022,12 +1222,46 @@ pub fn apply_interventions_continuous(
     for &iv_idx in intervention_idx {
         let iv = &model.model.interventions[iv_idx];
         for (action_idx, action) in iv.actions.iter().enumerate() {
-            let live_int = int_vals.to_vec();
-            let live_real = real_vals.to_vec();
+            let live_int = arena.int.to_vec();
+            let live_real = arena.real.to_vec();
             let v = eval_amount_f64(model, iv_idx, action_idx, &live_int, &live_real, params, t, dt);
             let v = crate::intervention::finite_action_value(v, &iv.name, action, t)?;
             crate::trace::effect_action(EffectKind::Intervention, &iv.name, action, v, t);
-            apply_action_f64(model, action, v, &live_int, &live_real, int_vals, real_vals)?;
+            // The sensitivity rows, read against the live `S` before the value
+            // apply below moves the state.
+            let sens_update: Option<(Vec<(Arena, ChangeF64)>, Vec<Vec<f64>>)> = match arena.sens.as_ref() {
+                None => None,
+                Some(sb) => {
+                    let dv = eval_amount_grad_f64(
+                        model, iv_idx, action_idx, &live_int, &live_real, params, t, dt,
+                        sb.param_model_idx,
+                    )?;
+                    let mut changes = Vec::with_capacity(2);
+                    action_changes_f64(model, action, v, &live_int, &live_real, &mut changes)?;
+                    let mut rows = Vec::with_capacity(2);
+                    action_changes_sens(model, action, v, &dv, &live_int, sb.state, &changes, &mut rows)?;
+                    Some((changes, rows))
+                }
+            };
+            apply_action_f64(model, action, v, &live_int, &live_real, arena.int, arena.real)?;
+            if let (Some(sb), Some((changes, rows))) = (arena.sens.as_mut(), sens_update) {
+                let d = sb.param_model_idx.len();
+                for ((target, change), row) in changes.iter().zip(rows) {
+                    let Arena::Int(c) = *target else {
+                        return Err(SimError::Validation(
+                            "internal: the ODE gradient path applied an intervention to a real \
+                             compartment, whose forward sensitivity is not tracked".into(),
+                        ));
+                    };
+                    let slot = &mut sb.state[c * d..(c + 1) * d];
+                    match change {
+                        ChangeF64::Delta(_) => {
+                            for (r, v) in slot.iter_mut().zip(&row) { *r += v; }
+                        }
+                        ChangeF64::Write(_) => slot.copy_from_slice(&row),
+                    }
+                }
+            }
         }
     }
     Ok(())
@@ -1377,7 +1611,7 @@ mod tests {
         let mut int_vals = vec![100.0, 0.0];
         let mut real_vals = vec![50.0];
         {
-            let mut arena = ContinuousArena { int: &mut int_vals, real: &mut real_vals };
+            let mut arena = ContinuousArena { int: &mut int_vals, real: &mut real_vals, sens: None };
             apply_event_phases(m, &[0], &mut arena, &m.default_params, 1.0, 1.0, None).unwrap();
         }
         int_vals
@@ -1403,7 +1637,7 @@ mod tests {
     fn continuous_phases_from(m: &CompiledModel, mut int_vals: Vec<f64>) -> Vec<f64> {
         let mut real_vals = vec![50.0];
         {
-            let mut arena = ContinuousArena { int: &mut int_vals, real: &mut real_vals };
+            let mut arena = ContinuousArena { int: &mut int_vals, real: &mut real_vals, sens: None };
             apply_event_phases(m, &[0], &mut arena, &m.default_params, 1.0, 1.0, None).unwrap();
         }
         int_vals
@@ -1430,7 +1664,7 @@ mod tests {
             assert!(e.to_string().contains("a `set` and a `transfer` on compartment 'S'"), "{e}");
             let mut iv = vec![10.0, 0.0];
             let mut rv = vec![50.0];
-            let mut arena = ContinuousArena { int: &mut iv, real: &mut rv };
+            let mut arena = ContinuousArena { int: &mut iv, real: &mut rv, sens: None };
             let e = apply_event_phases(&m, &[0], &mut arena, &m.default_params, 1.0, 1.0, None).unwrap_err();
             assert!(e.to_string().contains("a `set` and a `transfer` on compartment 'S'"), "{e}");
         }
@@ -1451,7 +1685,7 @@ mod tests {
         assert!(e.to_string().contains(want), "{e}");
         let mut iv = vec![100.0, 0.0];
         let mut rv = vec![50.0];
-        let mut arena = ContinuousArena { int: &mut iv, real: &mut rv };
+        let mut arena = ContinuousArena { int: &mut iv, real: &mut rv, sens: None };
         let e = apply_event_phases(&m, &[0], &mut arena, &m.default_params, 1.0, 1.0, None).unwrap_err();
         assert!(e.to_string().contains(want), "{e}");
     }
@@ -1467,7 +1701,7 @@ mod tests {
         })]);
         let mut int_vals = vec![100.0, 0.0];
         let mut real_vals = vec![50.0];
-        let mut arena = ContinuousArena { int: &mut int_vals, real: &mut real_vals };
+        let mut arena = ContinuousArena { int: &mut int_vals, real: &mut real_vals, sens: None };
         let res = apply_event_phases(&m, &[0], &mut arena, &m.default_params, 1.0, 1.0, None);
         assert!(
             matches!(
@@ -1799,13 +2033,10 @@ mod tests {
             .expect("an effect is due at t_boundary");
         let mut batch = crate::schedule::EffectBatch::default();
         split_due_batch(model, plan.batch(idx), &mut batch);
-        apply_event_phases(
-            model, &batch.event_idx,
-            &mut ContinuousArena { int: int_vals, real: real_vals },
-            params, t_boundary, dt, None,
-        )?;
+        let mut arena = ContinuousArena { int: int_vals, real: real_vals, sens: None };
+        apply_event_phases(model, &batch.event_idx, &mut arena, params, t_boundary, dt, None)?;
         apply_interventions_continuous(
-            model, &batch.intervention_idx, int_vals, real_vals, params, t_boundary, dt,
+            model, &batch.intervention_idx, &mut arena, params, t_boundary, dt,
         )
     }
 
@@ -1931,7 +2162,7 @@ mod tests {
         let mut int_vals = vec![100.0, 0.0];
         let mut real_vals = vec![10.0 / 3.0, 0.0];
         {
-            let mut arena = ContinuousArena { int: &mut int_vals, real: &mut real_vals };
+            let mut arena = ContinuousArena { int: &mut int_vals, real: &mut real_vals, sens: None };
             apply_event_phases(&m, &[0], &mut arena, &m.default_params, 1.0, 1.0, None)?;
         }
         Ok(real_vals)

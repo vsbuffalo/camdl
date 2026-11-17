@@ -32,12 +32,19 @@ use crate::inference::MultiStreamObsModel;
 /// coarse region integrates state and sensitivity together, so the returned
 /// gradient stays consistent with the coarsely-computed value.
 ///
-/// Refuses (hard error) the cases v1 cannot differentiate soundly, each with a
-/// reason: an adaptive integrator, a `dt`-in-rate model, a scheduled effect
-/// ([`crate::ode::integrate_obs_sensitivity`]); a parameterized initial condition
-/// (needs the `ic_grad` seed, below); a `DerivedExpr` prevalence projection or a
-/// `projected`-transforming likelihood argument
-/// ([`MultiStreamObsModel::ode_loglik_and_grad`]).
+/// Scheduled effects are integrated through: the RK4 step is split exactly at
+/// each effect instant and the state jump is applied together with its
+/// sensitivity jump `S⁺ = ∂Φ/∂x·S⁻ + ∂Φ/∂θ` (gh#275 §1g,
+/// [`crate::effects::SensBlock`]), using the compiler-emitted `∂amount/∂θ` of
+/// each action.
+///
+/// Refuses (hard error) the cases that cannot be differentiated soundly, each
+/// with a reason: an adaptive integrator, a `dt`-in-rate model, an effect the
+/// sensitivity cannot cross (a reactive or θ-timed one, a `transfer(count = …)`,
+/// a state-dependent amount), an initial condition the `ic_grad` seed cannot
+/// express, a nonsmooth `DerivedExpr` prevalence projection or
+/// `projected`-transforming likelihood argument — all in
+/// [`crate::inference::gradient_capability::preflight_gradient_ode`].
 #[allow(clippy::too_many_arguments)]
 pub fn det_grad(
     compiled: &CompiledModel,
@@ -51,8 +58,9 @@ pub fn det_grad(
     // §1h capability gate: the ONE place that answers "can this model be fit by the
     // ODE gradient?" — refusing (with the compiler's own reason where one exists)
     // an unsupported rate/obs/σ² gradient, a nonsmooth ∂rate/∂state, an adaptive
-    // integrator, a `dt`-in-rate model, a scheduled effect, a nonsmooth or
-    // real-compartment initial condition, a DerivedExpr projection, and a
+    // integrator, a `dt`-in-rate model, a scheduled effect the sensitivity cannot
+    // cross, a nonsmooth or real-compartment initial condition, a DerivedExpr
+    // projection, and a
     // `projected`-transforming likelihood argument. Run before any gradient is
     // taken, so a refusal is a single actionable message, not a mid-integration
     // failure.
@@ -1361,6 +1369,332 @@ mod tests {
             let rel = (got - fd).abs() / fd.abs().max(1e-8);
             eprintln!("  ∂R(10)/∂{name} = {got:.6} vs FD {fd:.6} (rel err {rel:.2e})");
             assert!(rel < 1e-4, "∂R(10)/∂{name} = {got} vs FD {fd} (rel err {rel:.2e})");
+        }
+    }
+
+    // ── gh#275 §1g: scheduled effects — the event-jump sensitivity ─────────────
+    //
+    // The ODE gradient path applies every effect the run fires together with its
+    // sensitivity jump `S⁺ = ∂Φ/∂x·S⁻ + ∂Φ/∂θ` (`effects::SensBlock`) and splits
+    // the RK4 step exactly at each effect instant. The oracle has two halves:
+    //
+    //  1. The gradient path integrates the SAME discrete computation as the value
+    //     path (`run_ode`, which `compute_ode_loglik` scores): the incidence it
+    //     records over every observation interval is bit-identical to the sum of
+    //     `run_ode`'s snapshot flows over that interval, and its continuous state
+    //     rounds to the snapshot state. The two logliks then agree to 1e-9
+    //     relative — not bit for bit, because a stream on a longer cadence sums
+    //     its bins in a different association on the two paths (gh#680).
+    //  2. det_grad's GRADIENT matches a central finite difference OF THE VALUE
+    //     PATH for every estimated parameter, at a point where effects fall
+    //     mid-step (dt = 1, instants at .5) and at t_start (the origin batch).
+    //
+    // An FD of det_grad's own value could not see a mis-applied jump (a wrong
+    // jump is still smooth in θ, and S would be its own exact derivative); the
+    // value path is the independent reference.
+
+    use ir::intervention::{
+        Action, AddAction, FireSource, FractionTransfer, Intervention, InterventionKind,
+        InterventionSchedule, SetAction,
+    };
+
+    fn fixed_param(name: &str, value: f64) -> ir::parameter::Parameter {
+        ir::parameter::Parameter {
+            name: name.into(),
+            value: ir::parameter::ParamValue::Fixed { value },
+            param_kind: None,
+            param_dim: None,
+        }
+    }
+
+    fn event(name: &str, times: Vec<f64>, actions: Vec<Action>) -> Intervention {
+        Intervention {
+            name: name.into(),
+            base_name: None,
+            fire: FireSource::Scheduled(InterventionSchedule::AtTimes(times)),
+            actions,
+            kind: InterventionKind::Event,
+        }
+    }
+
+    fn transfer(src: &str, dst: &str, fraction: Expr, grad: &[(&str, Expr)]) -> Action {
+        Action::FractionTransfer(FractionTransfer {
+            src: src.into(),
+            dst: dst.into(),
+            fraction,
+            fraction_grad: grad.iter().map(|(p, e)| (p.to_string(), DerivEntry::Grad(e.clone()))).collect(),
+        })
+    }
+
+    /// Two incidence streams (`infection` weekly, `recovery` fortnightly) over a
+    /// 56-day SEIR carrying `interventions` and `extra_params`. The data are
+    /// generated by the VALUE path (`run_ode`) at the default θ, so they carry the
+    /// effects; the likelihood is then evaluated at `theta` (name → value, the
+    /// rest at their defaults) so the gradient is materially nonzero, and
+    /// differentiated in `est_names`.
+    /// Bind `(data, times)` per stream (in `model.observations` order) to
+    /// `compiled` — so the same data can be scored under a second compiled model.
+    fn bind_obs(compiled: &Arc<CompiledModel>, data: &[(Vec<f64>, Vec<f64>)]) -> MultiStreamObsModel {
+        let t_start = compiled.model.simulation.t_start;
+        let specs: Vec<StreamSpec> = compiled
+            .model
+            .observations
+            .iter()
+            .zip(data)
+            .map(|(om, (values, times))| {
+                let projection = StreamProjection::from_ir(&om.projection, compiled, &om.name).unwrap();
+                StreamSpec {
+                    times: StreamTimes::contiguous_for(&projection, t_start, times.clone()).unwrap(),
+                    projection,
+                    ir_model: om.clone(),
+                    observations: dense_cells(values.clone()),
+                    aux: vec![],
+                }
+            })
+            .collect();
+        MultiStreamObsModel::new(BoundObs::bind(t_start, specs).unwrap().0, compiled.clone()).unwrap()
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn event_fixture(
+        interventions: Vec<Intervention>,
+        extra_params: Vec<ir::parameter::Parameter>,
+        theta: &[(&str, f64)],
+        est_names: &[&str],
+    ) -> (Arc<CompiledModel>, MultiStreamObsModel, Vec<f64>, Vec<f64>, Vec<usize>, Vec<(Vec<f64>, Vec<f64>)>) {
+        let dt = 1.0;
+        let times_a: Vec<f64> = (1..=8).map(|w| (w * 7) as f64).collect();
+        let times_b: Vec<f64> = (1..=4).map(|w| (w * 14) as f64).collect();
+        let mut model = two_incidence_stream_model(56.0, [&["infection"], &["recovery"]]);
+        model.parameters.extend(extra_params);
+        model.interventions = interventions;
+        set_defaults(&mut model);
+        let compiled = Arc::new(CompiledModel::new(model).unwrap());
+
+        let n = compiled.param_index.len();
+        let mut truth = vec![0.0; n];
+        for p in &compiled.model.parameters {
+            truth[compiled.param_index[p.name.as_str()]] = p.value.resolved_value().unwrap();
+        }
+        let t_start = compiled.model.simulation.t_start;
+        let cfg = OdeConfig { t_start, t_end: 56.0, dt };
+        let traj = crate::ode::run_ode(&compiled, &truth, &cfg, None, None).unwrap();
+        let tr = |name: &str| compiled.model.transitions.iter().position(|t| t.name == name).unwrap();
+        let data_a = windowed_counts(&traj, &[tr("infection")], &times_a);
+        let data_b = windowed_counts(&traj, &[tr("recovery")], &times_b);
+        assert!(data_a.iter().sum::<f64>() > 100.0, "cases_a data must be substantial");
+        assert!(data_b.iter().sum::<f64>() > 10.0, "cases_b data must be substantial");
+        let data = vec![(data_a, times_a.clone()), (data_b, times_b.clone())];
+        let obs_model = bind_obs(&compiled, &data);
+
+        let mut union: Vec<f64> = times_a.iter().chain(times_b.iter()).copied().collect();
+        union.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        union.dedup();
+
+        let mut params = truth;
+        for (name, v) in theta {
+            params[compiled.param_index[*name]] = *v;
+        }
+        let est = est_names.iter().map(|n| compiled.param_index[*n]).collect();
+        (compiled, obs_model, union, params, est, data)
+    }
+
+    /// The two halves of the oracle. Returns `(name, analytic, fd, rel)` per
+    /// estimated parameter, printed as a table.
+    fn event_oracle(
+        label: &str,
+        compiled: &CompiledModel,
+        obs_model: &MultiStreamObsModel,
+        union: &[f64],
+        params: &[f64],
+        est: &[usize],
+        names: &[&str],
+    ) -> Vec<(String, f64, f64, f64)> {
+        let dt = 1.0;
+        // Half 1: the recorded state and incidence against `run_ode`'s snapshots.
+        let cfg = OdeConfig { t_start: compiled.model.simulation.t_start, t_end: compiled.model.simulation.t_end, dt };
+        let seed0 = compiled.ic_grad_seed(params, est).unwrap();
+        let recs = crate::ode::integrate_obs_sensitivity(compiled, params, est, &seed0, &cfg, union, dt).unwrap();
+        let traj = crate::ode::run_ode(compiled, params, &cfg, None, None).unwrap();
+        let n_tr = compiled.model.transitions.len();
+        let mut prev_t = cfg.t_start;
+        for rec in &recs {
+            let snap = traj.snapshots.iter().find(|s| (s.t - rec.t).abs() < 1e-9)
+                .unwrap_or_else(|| panic!("{label}: run_ode has no snapshot at t = {}", rec.t));
+            for (i, &c) in rec.counts.iter().enumerate() {
+                let v = snap.int_state.counts[i] as f64;
+                assert!((c - v).abs() <= 0.5 + 1e-9,
+                    "{label}: t = {}: continuous count {c} does not round to the value path's {v} (compartment {i})", rec.t);
+            }
+            // The flow since the previous union obs: the sequential sum of the
+            // snapshot flows in (prev_t, t], in the same association the recorder
+            // accumulates — bit for bit.
+            for tr in 0..n_tr {
+                let mut acc = 0.0;
+                for s in &traj.snapshots {
+                    if s.t > prev_t + 1e-9 && s.t <= rec.t + 1e-9 {
+                        acc += s.flows.as_real()[tr];
+                    }
+                }
+                assert_eq!(rec.inc[tr].to_bits(), acc.to_bits(),
+                    "{label}: t = {}: recorded incidence {:.17e} of transition {tr} is not the value \
+                     path's {acc:.17e} bit for bit — the two paths must apply the same effects to \
+                     the same discrete computation", rec.t, rec.inc[tr]);
+            }
+            prev_t = rec.t;
+        }
+
+        let (ll_grad, grad) = det_grad(compiled, obs_model, union, dt, dt, params, est).unwrap();
+        let ll_value = compute_ode_loglik(compiled, obs_model, union, dt, params, dt).unwrap();
+        assert!(ll_grad.is_finite() && ll_value.is_finite());
+        assert!(
+            (ll_grad - ll_value).abs() <= 1e-9 * ll_value.abs(),
+            "{label}: the gradient path's loglik {ll_grad:.17e} is not the value path's \
+             {ll_value:.17e} (Δ = {:.3e})", ll_grad - ll_value
+        );
+        let mut rows = Vec::new();
+        eprintln!("{label}: ll = {ll_grad:.6}");
+        eprintln!("  {:<8} {:>18} {:>18} {:>10}", "param", "analytic", "value-path FD", "rel err");
+        for (i, &midx) in est.iter().enumerate() {
+            let eps = 1e-6 * params[midx].abs().max(1.0);
+            let mut pp = params.to_vec();
+            let mut pm = params.to_vec();
+            pp[midx] += eps;
+            pm[midx] -= eps;
+            let llp = compute_ode_loglik(compiled, obs_model, union, dt, &pp, dt).unwrap();
+            let llm = compute_ode_loglik(compiled, obs_model, union, dt, &pm, dt).unwrap();
+            let fd = (llp - llm) / (2.0 * eps);
+            let rel = (grad[i] - fd).abs() / fd.abs().max(1e-8);
+            eprintln!("  {:<8} {:>18.8} {:>18.8} {:>10.2e}", names[i], grad[i], fd, rel);
+            rows.push((names[i].to_string(), grad[i], fd, rel));
+        }
+        rows
+    }
+
+    /// Fixed-fraction transfers at fixed times — the yearly ageing / school-entry
+    /// transfer of an age-structured model — at mid-step instants and at t_start
+    /// (the origin batch). `∂Φ/∂θ = 0` here, so this isolates the `∂Φ/∂x·S⁻`
+    /// half of the jump: `S[S,:] *= (1 − f)`, `S[R,:] += f·S[S,:]`, and the step
+    /// split at each instant.
+    #[test]
+    fn det_grad_through_fixed_fraction_transfers_matches_the_value_path_and_its_fd() {
+        let ageing = |times: Vec<f64>| {
+            event("ageing", times, vec![transfer("S", "R", Expr::const_(0.15), &[])])
+        };
+        let theta = [("beta", 0.66), ("gamma", 0.09)];
+        let names = ["beta", "gamma"];
+        let (compiled, obs_model, union, params, est, data) =
+            event_fixture(vec![ageing(vec![0.0, 10.5, 24.5, 38.5])], vec![], &theta, &names);
+        let rows = event_oracle("fixed-fraction transfers", &compiled, &obs_model, &union, &params, &est, &names);
+        for (name, got, fd, rel) in &rows {
+            assert!(rel < &1e-4, "∂/∂{name} = {got} vs value-path FD {fd} (rel err {rel:.2e})");
+            assert!(got.abs() > 1.0, "∂/∂{name} should be materially nonzero, got {got}");
+        }
+
+        // Non-vacuity: the events materially change the likelihood of the SAME
+        // data — otherwise the agreement above is about a model whose effects do
+        // nothing. The ageing-free model scores the event-generated data elsewhere.
+        let (ll_with, _) = det_grad(&compiled, &obs_model, &union, 1.0, 1.0, &params, &est).unwrap();
+        let (quiet, _, _, _, _, _) = event_fixture(vec![], vec![], &theta, &names);
+        let quiet_obs = bind_obs(&quiet, &data);
+        let (ll_without, _) = det_grad(&quiet, &quiet_obs, &union, 1.0, 1.0, &params, &est).unwrap();
+        assert!(
+            (ll_with - ll_without).abs() > 1.0,
+            "the transfers must move the likelihood of the same data: with {ll_with}, without {ll_without}"
+        );
+    }
+
+    /// Parameterised amounts, every action kind, and coincident drains: an
+    /// `add(I, seed)` import at t_start and mid-step, two same-instant transfers
+    /// into `R` (one with the product fraction `cov·eff`, exercising a non-constant
+    /// `∂f/∂θ` and the ascending-delta combination of a compartment two actions
+    /// touch), and a `set E = e_set`. Differentiated in the rate parameters AND
+    /// the four amount parameters — the `∂Φ/∂θ` half of the jump.
+    #[test]
+    fn det_grad_through_parameterised_amount_events_matches_the_value_path_and_its_fd() {
+        let extra = vec![
+            fixed_param("seed", 5.0),
+            fixed_param("cov", 0.3),
+            fixed_param("eff", 0.8),
+            fixed_param("e_set", 20.0),
+        ];
+        let interventions = vec![
+            event("import", vec![0.0, 14.0, 30.5], vec![Action::Add(AddAction {
+                compartment: "I".into(),
+                count: Expr::param("seed"),
+                count_grad: HashMap::from([("seed".to_string(), DerivEntry::Grad(Expr::const_(1.0)))]),
+            })]),
+            event("sia", vec![21.0, 35.5], vec![transfer(
+                "S", "R",
+                Expr::bin_op(BinOp::Mul, Expr::param("cov"), Expr::param("eff")),
+                &[("cov", Expr::param("eff")), ("eff", Expr::param("cov"))],
+            )]),
+            // Coincident with `sia` at 21.0: a second drain into R in the same phase.
+            event("clear", vec![21.0], vec![transfer("E", "R", Expr::const_(0.2), &[])]),
+            event("reset", vec![28.5], vec![Action::Set(SetAction {
+                compartment: "E".into(),
+                value: Expr::param("e_set"),
+                value_grad: HashMap::from([("e_set".to_string(), DerivEntry::Grad(Expr::const_(1.0)))]),
+            })]),
+        ];
+        let theta = [("beta", 0.66), ("gamma", 0.09), ("seed", 6.0), ("cov", 0.25), ("eff", 0.7), ("e_set", 25.0)];
+        let names = ["beta", "gamma", "seed", "cov", "eff", "e_set"];
+        let (compiled, obs_model, union, params, est, _) = event_fixture(interventions, extra, &theta, &names);
+        let rows = event_oracle("parameterised amounts", &compiled, &obs_model, &union, &params, &est, &names);
+        for (name, got, fd, rel) in &rows {
+            assert!(rel < &1e-4, "∂/∂{name} = {got} vs value-path FD {fd} (rel err {rel:.2e})");
+            assert!(got.abs() > 1e-2, "∂/∂{name} should be materially nonzero, got {got}");
+        }
+    }
+
+    /// Negative control: the oracle has teeth. With the import's `count_grad`
+    /// deliberately wrong (½ instead of 1) the gate still admits the model (a
+    /// `Grad` entry is present), det_grad's value is still the value path's, and
+    /// the FD exposes the wrong jump source term in `∂/∂seed` — and only there.
+    #[test]
+    fn a_wrong_amount_gradient_is_caught_by_the_value_path_fd() {
+        let interventions = vec![event("import", vec![0.0, 14.0, 30.5], vec![Action::Add(AddAction {
+            compartment: "I".into(),
+            count: Expr::param("seed"),
+            count_grad: HashMap::from([("seed".to_string(), DerivEntry::Grad(Expr::const_(0.5)))]),
+        })])];
+        let theta = [("beta", 0.66), ("seed", 6.0)];
+        let names = ["beta", "seed"];
+        let (compiled, obs_model, union, params, est, _) =
+            event_fixture(interventions, vec![fixed_param("seed", 5.0)], &theta, &names);
+        let rows = event_oracle("wrong count_grad", &compiled, &obs_model, &union, &params, &est, &names);
+        assert!(rows[0].3 < 1e-4, "∂/∂beta is unaffected by the import's amount gradient: {:?}", rows[0]);
+        assert!(
+            rows[1].3 > 0.3,
+            "a halved ∂count/∂seed must show as a ~50% error in ∂/∂seed, got rel err {:.2e}",
+            rows[1].3
+        );
+    }
+
+    /// A null jump at an existing boundary leaves value and gradient bit-identical
+    /// to the effect-free model: `transfer(fraction = 0)` at an output time adds a
+    /// boundary the walk already stops at, moves no state (`x += −0`) and no
+    /// sensitivity (`0·S`). The jump machinery itself perturbs nothing.
+    #[test]
+    fn an_inert_event_at_an_output_boundary_leaves_det_grad_bit_identical() {
+        let theta = [("beta", 0.66), ("gamma", 0.09)];
+        let names = ["beta", "gamma"];
+        let (quiet, quiet_obs, union, params, est, data) = event_fixture(vec![], vec![], &theta, &names);
+        let inert = vec![event("noop", vec![7.0, 21.0], vec![transfer("S", "R", Expr::const_(0.0), &[])])];
+        let (loud, _, _, _, _, _) = event_fixture(inert, vec![], &theta, &names);
+        assert!(
+            !crate::effect_plan::EffectPlan::build(
+                &loud, &params, 0.0, 56.0,
+                crate::effect_plan::FireClock::Exact, crate::effect_plan::Origin::Init,
+            ).unwrap().is_empty(),
+            "the inert event must actually fire"
+        );
+        let loud_obs = bind_obs(&loud, &data);
+        let (ll_q, g_q) = det_grad(&quiet, &quiet_obs, &union, 1.0, 1.0, &params, &est).unwrap();
+        let (ll_l, g_l) = det_grad(&loud, &loud_obs, &union, 1.0, 1.0, &params, &est).unwrap();
+        assert_eq!(ll_q.to_bits(), ll_l.to_bits(), "loglik moved: {ll_q:.17e} vs {ll_l:.17e}");
+        for (i, (a, b)) in g_q.iter().zip(&g_l).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "∂/∂{} moved: {a:.17e} vs {b:.17e}", names[i]);
         }
     }
 }

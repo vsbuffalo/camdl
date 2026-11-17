@@ -1247,6 +1247,14 @@ pub struct ResolvedModel {
     pub ode_derivatives: Vec<ResolvedExpr>,
     /// Per-intervention, per-action resolved expression (count/fraction/value).
     pub intervention_exprs: Vec<Vec<ResolvedExpr>>,
+    /// Per-intervention, per-action resolved `∂amount/∂θ` (the action's
+    /// `*_grad`), model-param-indexed — the source term of the event-jump
+    /// sensitivity `S⁺ = ∂Φ/∂x·S⁻ + ∂Φ/∂θ` the ODE gradient path applies when
+    /// the effect fires (gh#275 §1g). `None` for an `AbsoluteTransfer`, which
+    /// carries no gradient (the gradient gate refuses it). Built via the shared
+    /// `resolve_grad_map`, so an unknown-parameter key is rejected loudly, as a
+    /// rate's is. In lockstep with `intervention_exprs`.
+    pub intervention_amount_grads: Vec<Vec<Option<crate::resolved_expr::ResolvedGradMap>>>,
     /// gh#69: per-intervention pre-resolved `at [...]` time expressions.
     /// `Some(exprs)` iff the schedule is `InterventionSchedule::AtTimesExpr`,
     /// `None` otherwise. Evaluated once per run in
@@ -2477,6 +2485,27 @@ impl CompiledModel {
             })
             .collect::<Result<_, _>>()?;
 
+        // Resolve each action's compiler-emitted ∂amount/∂θ (gh#275 §1g), the
+        // event-jump sensitivity source term, through the shared gradient-map
+        // resolver (an unknown-parameter key is a malformed IR, refused loudly).
+        let intervention_amount_grads: Vec<Vec<Option<crate::resolved_expr::ResolvedGradMap>>> =
+            model.interventions.iter()
+                .map(|iv| {
+                    iv.actions.iter().map(|action| {
+                        let grad = match action {
+                            ir::intervention::Action::Add(a) => &a.count_grad,
+                            ir::intervention::Action::Set(s) => &s.value_grad,
+                            ir::intervention::Action::FractionTransfer(ft) => &ft.fraction_grad,
+                            ir::intervention::Action::AbsoluteTransfer(_) => return Ok(None),
+                        };
+                        crate::resolved_expr::resolve_grad_map(grad, &resolve_ctx)
+                            .map(Some)
+                            .map_err(|e| SimError::Validation(format!(
+                                "intervention '{}' action amount gradient: {}", iv.name, e)))
+                    }).collect::<Result<Vec<_>, _>>()
+                })
+                .collect::<Result<_, _>>()?;
+
         // gh#69: resolve parametric `at [...]` time expressions for each
         // intervention/event with an `AtTimesExpr` schedule. We also
         // reject any expression that references compartment state
@@ -2575,6 +2604,7 @@ impl CompiledModel {
             rate_state_grads_indexed,
             ode_derivatives,
             intervention_exprs,
+            intervention_amount_grads,
             intervention_at_time_exprs,
             flat_vm,
         };
