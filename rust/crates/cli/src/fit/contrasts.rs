@@ -162,6 +162,7 @@ pub fn emit_contrasts(
     seed: u64,
     obs_anchors: Option<ir::anchor::ObsAnchorTimes>,
     config_dt: f64,
+    binomial: sim::rng::BinomialAlgorithm,
 ) -> Result<Vec<PathBuf>, String> {
     // The draws authority, carrying the run's chain selection: one resolve, used
     // both for the (θ, X) cloud below and for the method dir the saved paths are
@@ -343,7 +344,7 @@ pub fn emit_contrasts(
     let mut arms: HashMap<String, Arm> = HashMap::new();
     for run in &runs_union {
         if !arms.contains_key(run) {
-            arms.insert(run.clone(), Arm::build(model, fit_base, run, &placeholder, obs_anchors)?);
+            arms.insert(run.clone(), Arm::build(model, fit_base, run, &placeholder, obs_anchors, binomial)?);
         }
     }
 
@@ -567,6 +568,8 @@ struct Arm {
     /// The fit's own intervention selection: the base this arm's scenario is
     /// overlaid on, per draw as at build.
     fit_base: crate::util::FitBase,
+    /// The binomial sampler the fit ran, which every fork draws with (D78).
+    binomial: sim::rng::BinomialAlgorithm,
 }
 
 impl Arm {
@@ -585,6 +588,7 @@ impl Arm {
         run: &str,
         placeholder: &[(String, f64)],
         obs_anchors: Option<ir::anchor::ObsAnchorTimes>,
+        binomial: sim::rng::BinomialAlgorithm,
     ) -> Result<Arm, String> {
         let resolved = resolve_arm(model, fit_base, run, placeholder)?;
         let compiled = std::sync::Arc::new(
@@ -593,7 +597,7 @@ impl Arm {
         );
         let quant_eval = QuantityEvaluator::new(&model.quantities, compiled.as_ref())
             .map_err(|e| format!("contrast arm '{run}': building quantity evaluator: {e}"))?;
-        Ok(Arm { compiled, quant_eval, obs_anchors, fit_base: fit_base.clone() })
+        Ok(Arm { compiled, quant_eval, obs_anchors, fit_base: fit_base.clone(), binomial })
     }
 
     /// Replay this arm for one draw from the derived fork: resolve the draw's θ
@@ -638,7 +642,7 @@ impl Arm {
 
         // Fork from X_i(fork): inject the state at cfg.t_start = fork, fresh RNG from
         // the shared per-draw seed (CRN at the fork; post-fork noise desyncs by design).
-        let cfg = sim::ChainBinomialConfig { t_start: fork_t, t_end: run_end, dt, binomial: sim::rng::BinomialAlgorithm::Btpe };
+        let cfg = sim::ChainBinomialConfig { t_start: fork_t, t_end: run_end, dt, binomial: self.binomial };
         let ss = sim::chain_binomial::StartState { int_s, real_s, rng: None };
         let traj = sim::chain_binomial::run_chain_binomial_with_observer(
             self.compiled.as_ref(),

@@ -1105,6 +1105,9 @@ struct PredictiveSink {
     /// when the cloud's `draws.tsv` carries no chain column. The partition every
     /// per-row R̂ reduces over (gh#794).
     chain_of_point: Vec<Option<usize>>,
+    /// The binomial sampler the fit ran (D78): `y_rep`'s binomial draws use it,
+    /// as the replay's transitions do.
+    binomial: sim::rng::BinomialAlgorithm,
     /// Scenario name → its accumulator. Insertion order (= the engine's canonical
     /// `scenario → point → rep` order, scenario outermost) is preserved so the
     /// rendered files list scenarios in CLI order.
@@ -1159,7 +1162,7 @@ impl crate::engine::RunSink for PredictiveSink {
             .is_some_and(|e| e.references_observations());
         let mut obs_set =
             sim::quantity::ObsSeriesSet { streams: std::collections::HashMap::new() };
-        let mut obs_rng = sim::rng::StatefulRng::new(cell.spec.obs_seed);
+        let mut obs_rng = sim::rng::StatefulRng::new(cell.spec.obs_seed).with_binomial(self.binomial);
         // Sample y_rep into a per-leaf scratch first, then commit into this
         // cell's scenario accumulator (so the borrow of `self.compiled` /
         // `self.quant_eval` does not overlap the `&mut self` accumulator borrow).
@@ -1507,6 +1510,12 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     // The sampler the fit's method ran, as written in fit.toml; the leaf's own
     // record, read in forecast mode, takes precedence (gh#747).
     let configured_binomial = config.method().ok().map(|m| m.algorithm.binomial());
+    // D78: every simulation this command runs — the forecast's filters, the
+    // one-step filters, the free-forward replay and its `y_rep` draws, the
+    // contrast forks — draws with the binomial sampler the fit ran, read from
+    // its leaf. The guarantee is the same sampler and recorded configuration,
+    // not the fit's realised random numbers.
+    let binomial = crate::fit::forecast_output::fit_binomial(&run_dir, configured_binomial)?;
     // gh#896: everything predict writes goes under a directory keyed by the
     // run it read, so a second run's predict cannot overwrite this one's and
     // every file is attributable to one run.
@@ -1856,7 +1865,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
                 schema: schema.as_ref(),
                 dt: one_step_dt,
                 seed: args.seed.unwrap_or(1),
-                binomial: crate::fit::forecast_output::fit_binomial(&run_dir, configured_binomial)?,
+                binomial,
                 selection: &streams_in,
             },
         )?;
@@ -2451,6 +2460,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
                     obs_anchors: quantity_obs_anchors,
                     conditioned,
                     chain_of_point: ff_chain_of_point.clone(),
+                    binomial,
                     by_scenario: IndexMap::new(),
                 };
 
@@ -2481,6 +2491,8 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
                         // hardcoded default.
                         backend: posterior.backend,
                         dt,
+                        // D78: the sampler the fit ran.
+                        binomial,
                         integrator: None,
                         // Generated posterior draws (not a user-authored file), so
                         // the engine's collision guard does not check them: a scenario
@@ -2653,6 +2665,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
             // different process plotted against the data.
             one_step_dt,
             &streams_in,
+            binomial,
             fit,
             n_draws_cap,
             seed,
@@ -2882,6 +2895,9 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
             "run_id": run_id,
             "options": options,
             "calendar": calendar.to_json(),
+            // D78: the binomial sampler every simulation of this predict drew
+            // with — the fit's.
+            "binomial": binomial,
             "streams": predictive_manifest_entries,
             // D76: which declared streams (leaves) this artifact holds, which it
             // left out and why, and which failed, so a reader need not infer
@@ -2993,6 +3009,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
             seed,
             quantity_obs_anchors,
             config.config.dt,
+            binomial,
         )?;
         written.extend(paths);
     }
@@ -3893,6 +3910,7 @@ fn one_step_bands(
     config: &crate::fit::config_v2::Problem,
     dt: f64,
     selection: &StreamSelection,
+    binomial: sim::rng::BinomialAlgorithm,
     fit: &FilterableFit,
     n_draws_cap: usize,
     base_seed: u64,
@@ -4018,10 +4036,11 @@ fn one_step_bands(
         record_prequential: true,
         record_predictions: false, // gh#520: one-step-ahead draws come from `.prequential`, not `.predictions`
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
-        // gh#747: BTPE, named, whatever sampler the fit used. Unlike `dt`
-        // (gh#708), which changes the process, both samplers draw exactly
-        // Binomial(n, p): the band is the same distribution either way.
-        binomial: sim::rng::BinomialAlgorithm::Btpe,
+        // D78: the sampler the fit ran, as the forecast does. Both samplers
+        // draw exactly Binomial(n, p), but from different random numbers, so a
+        // replay of the fit's filter on another sampler is a different
+        // computation from the one the fit's record describes.
+        binomial,
     };
 
     // Each draw's parameter vector — base defaults overlaid by name (the
