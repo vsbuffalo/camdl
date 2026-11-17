@@ -6568,9 +6568,16 @@ module Lower = struct
     | At_anchor of Ir.anchored_time    (* `last_obs ± d`, d exact *)
     | At_bad                           (* an anchor in a refused shape; already reported *)
 
-  (* The expression an instant position is lowered from: the calendar date a
-     one-step calendar rule resolves, or the expression as written. *)
-  let lowered ctx (p : Time_pos.instant Time_pos.t) = calendar_instant_expr ctx (Time_pos.expr p)
+  (* The expression an instant position is lowered from: the calendar date the
+     one-step calendar rule resolves, or the expression as written. The date
+     is the model-time constant `add_calendar_months` lowers to (the day count
+     over the days per `time_unit`, the same division), so `at [6 'months]`
+     and `at [add_calendar_months(origin, 6)]` compile to the same IR and the
+     same run identity. *)
+  let lowered ctx (p : Time_pos.instant Time_pos.t) =
+    match Calendar_reading.calendar_step_days ctx (Time_pos.expr p) with
+    | Some days -> EConst (days /. days_per ctx.time_unit)
+    | None -> Time_pos.expr p
 
   (* The checks of an instant position. Under an origin, E360 on the
      arithmetic an instant does not have, and E321 on a calendar duration the
