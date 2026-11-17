@@ -339,7 +339,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     let survey_ctx = crate::survey_cas::SurveyCtx {
         model:           &resolved.compiled.model,
         ir_version:      &ir_version_str,
-        engine_version:  crate::version::VERSION_SHORT,
+        engine_version:  crate::version::ENGINE_ID,
         stem:            stem.as_deref().unwrap_or("model"),
         data:            &data_hashes_vec,
         eval_method:     eval_method.as_str(),

@@ -927,7 +927,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     let parent_fit_hash_ch = cas::fit_level_hash(
         &model,
         &announce_ir_version,
-        crate::version::VERSION_SHORT,
+        crate::version::ENGINE_ID,
         &config.problem,
         &fit_data_digests,
     )
@@ -1312,7 +1312,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             model: &model,
             fit_stem: &fit_stem,
             ir_version: &ir_version_str,
-            engine_version: crate::version::VERSION_SHORT,
+            engine_version: crate::version::ENGINE_ID,
             problem: &sweep_config,
             data: &data_digests,
             method: &method,
@@ -1341,7 +1341,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         model: &model,
                         fit_stem: &fit_stem,
                         ir_version: &ir_version_str,
-                        engine_version: crate::version::VERSION_SHORT,
+                        engine_version: crate::version::ENGINE_ID,
                         problem: &cell_problem,
                         data: &data_digests,
                         method: &file_method,
@@ -3069,7 +3069,7 @@ pub fn cmd_fit_new(a: &crate::args::FitNewArgs) {
             let data = cfg.data_spec().ok()
                 .and_then(|ds| read_data_digests(ds, &m).ok())
                 .unwrap_or_default();
-            cas::fit_level_hash(&m, &ir_version, crate::version::VERSION_SHORT, &cfg, &data)
+            cas::fit_level_hash(&m, &ir_version, crate::version::ENGINE_ID, &cfg, &data)
                 .ok()
                 .map(|h| {
                     let root = crate::run_paths::output_root(None, cfg.output_dir.as_deref());

@@ -86,5 +86,10 @@ ode = ["sim/ode"]
 # production binary; `--no-default-features` keeps only the TSV writer.
 lineage-parquet = ["sim/lineage-parquet"]
 
+# The build script computes the engine's build fingerprint (`ENGINE_ID`,
+# `src/engine_fingerprint.rs`), a SHA-256 digest.
+[build-dependencies]
+sha2 = "0.10"
+
 [dev-dependencies]
 tempfile = "3"

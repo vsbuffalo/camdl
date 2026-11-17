@@ -279,7 +279,7 @@ impl CasSink {
             model: &self.base_model,
             model_stem: self.model_stem.as_deref().unwrap_or("model"),
             ir_version: ir::IR_VERSION.trim(),
-            engine_version: version::VERSION_SHORT,
+            engine_version: version::ENGINE_ID,
             backend: self.backend,
             dt: self.dt,
             // gh#641: the cell's EFFECTIVE start, not the base model's. A run
@@ -463,6 +463,12 @@ impl CasSink {
         spec: &crate::engine::CellSpec,
     ) -> Result<Option<std::path::PathBuf>, String> {
         let (rt, _, _) = self.cell_resolve(spec)?;
+        // A build whose identity is incomplete serves no stored cell.
+        if crate::resolve::engine_write_policy(crate::resolve::WritePolicy::Reuse, version::ENGINE_REUSE)
+            == crate::resolve::WritePolicy::Force
+        {
+            return Ok(None);
+        }
         let Some(dir) = runid::find_leaf(&self.root(), runid::ArtifactKind::Sim, &rt.levels) else {
             return Ok(None);
         };
@@ -485,9 +491,20 @@ impl CasSink {
     }
 }
 
+impl CasSink {
+    /// Whether a stored cell is displaced (quarantined) and recomputed rather
+    /// than reused: under `--force`, and always for a build whose identity is
+    /// incomplete ([`crate::resolve::engine_write_policy`]).
+    fn displaces(&self) -> bool {
+        self.force
+            || crate::resolve::engine_write_policy(crate::resolve::WritePolicy::Reuse, version::ENGINE_REUSE)
+                == crate::resolve::WritePolicy::Force
+    }
+}
+
 impl crate::engine::RunSink for CasSink {
     fn should_run(&mut self, spec: &crate::engine::CellSpec) -> bool {
-        if self.force {
+        if self.displaces() {
             // Through the one policy seam: under Force the incumbent is
             // displaced (quarantined) HERE, so the recompute lands on a clean
             // leaf — previously force only skipped this check and the
@@ -672,7 +689,7 @@ impl crate::engine::RunSink for CasSink {
         // `--force` could never change a stored artifact. Displacing here
         // (quarantine, not delete) gives every commit path the same one
         // meaning of force, and is a no-op when nothing is stored.
-        if self.force {
+        if self.displaces() {
             if let Err(e) = crate::resolve::check_reuse(
                 &store, &root, &resolved_artifact, crate::resolve::WritePolicy::Force,
             ) {

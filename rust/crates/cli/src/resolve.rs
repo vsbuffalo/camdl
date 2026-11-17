@@ -119,7 +119,7 @@ fn backend(b: crate::args::types::ForwardBackend) -> Backend {
 /// Deliberately **structural only** — it folds the model IR, not the engine
 /// version or IR schema string. This is `model_digest`'s `ir` component, *not*
 /// the full per-level [`ModelDigest`] (which also folds `engine` = the volatile
-/// `VERSION_SHORT` git hash). The cross-check asks "is this the same *model*?"
+/// `ENGINE_ID` build fingerprint). The cross-check asks "is this the same *model*?"
 /// (a model edit between survey and fit invalidates it), not "the same engine
 /// build?": folding the per-commit engine hash would refuse every warm-start
 /// from a survey built at a different commit, and engine/schema skew is already
@@ -313,7 +313,7 @@ impl RecordMeta {
     ) -> Self {
         RecordMeta {
             ir_version: ir_version.into(),
-            engine_version: crate::version::VERSION_SHORT.to_string(),
+            engine_version: crate::version::ENGINE_ID.to_string(),
             deps: Vec::new(),
             children: BTreeMap::new(),
             source_paths: vec![model_path.into()],
@@ -401,6 +401,42 @@ pub fn check_reuse(
     resolved: &ResolvedArtifact,
     policy: WritePolicy,
 ) -> Result<ReuseVerdict, CasError> {
+    check_reuse_with(store, root, resolved, policy, crate::version::ENGINE_REUSE)
+}
+
+/// The policy a reuse decision runs under for a build whose identity is
+/// `engine`: the one asked for, or [`WritePolicy::Force`] when the build's
+/// fingerprint is incomplete ([`crate::version::EngineReuse::Unreusable`]).
+/// Such a build's `ENGINE_ID` may stand for another build's code, so it never
+/// serves a stored leaf: it computes and records every run, and the stored
+/// leaf it would have read is quarantined, never deleted. The one
+/// fail-closed rule; every reuse decision ([`check_reuse`],
+/// [`crate::cas_sink::CasSink`]'s cell check, `profile`'s point scan) asks it.
+pub(crate) fn engine_write_policy(policy: WritePolicy, engine: crate::version::EngineReuse) -> WritePolicy {
+    match engine {
+        crate::version::EngineReuse::Reusable => policy,
+        crate::version::EngineReuse::Unreusable { missing } => {
+            static SAID: std::sync::Once = std::sync::Once::new();
+            SAID.call_once(|| {
+                crate::out::detached().say(format_args!(
+                    "warning: this camdl build could not determine its engine identity ({missing}); \
+                     it computes every run and never reuses a stored one"
+                ));
+            });
+            WritePolicy::Force
+        }
+    }
+}
+
+/// [`check_reuse`] for a build whose identity is `engine`.
+pub(crate) fn check_reuse_with(
+    store: &FsCasStore,
+    root: &Path,
+    resolved: &ResolvedArtifact,
+    policy: WritePolicy,
+    engine: crate::version::EngineReuse,
+) -> Result<ReuseVerdict, CasError> {
+    let policy = engine_write_policy(policy, engine);
     let found = runid::find_leaf(root, resolved.kind, &resolved.levels);
     if policy == WritePolicy::Force {
         // A completed leaf is found by its hashes; a leaf held from another
@@ -549,7 +585,7 @@ fn build_record(resolved: &ResolvedArtifact, meta: &RecordMeta, status: RunStatu
             argv: std::env::args().collect(),
             label: meta.label.clone(),
             created_at: Some(crate::cas::iso8601_utc(std::time::SystemTime::now())),
-            camdl_version: Some(meta.engine_version.clone()),
+            camdl_version: Some(crate::version::VERSION_SHORT.to_string()),
             source_paths: meta.source_paths.clone(),
             ..Default::default()
         },
