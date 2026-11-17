@@ -1283,8 +1283,9 @@ fn each_gradient_map_moves_the_gradient_digest_and_not_the_model_hash() {
     use crate::inputs::{model_ir_hash, model_ir_hash_with_gradients};
     use ir::deriv::{CompGradMap, DerivEntry};
     use ir::observation::Likelihood;
-    let g = |e: Expr| DerivEntry::Grad(e);
-    let cases: Vec<(&str, Box<dyn Fn(&mut Model)>)> = vec![
+    type Edit = Box<dyn Fn(&mut Model)>;
+    fn g(e: Expr) -> DerivEntry { DerivEntry::Grad(e) }
+    let cases: Vec<(&str, Edit)> = vec![
         ("rate_grad", Box::new(|m| {
             m.transitions[0].rate_grad.insert("beta".into(), g(Expr::pop("S")));
         })),
