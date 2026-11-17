@@ -471,13 +471,13 @@ fn show_sim_record(out: &crate::out::Out, leaf: &cas_read::Leaf, rel_path: &str,
 
 /// The directories `fit predict` wrote for a fit envelope, each with the
 /// segment-relative prefix its files are listed under (gh#896). For one run —
-/// the named one, or the folder's only one — its default-options
-/// `predict/<run id>/` is listed bare (prefix ""), and every options-keyed
-/// `predict/<run id>-<key>/` under its own prefix, so a bare path always
-/// means the default options and never names a different artifact as
-/// predicts come and go. For a folder holding several runs, every run's
-/// directories are listed under their prefixes. A listed path is one
-/// `cat --stream` takes.
+/// the named one, or the folder's only one — the directory of a default-options
+/// predict by this engine ([`crate::fit::fit_view::default_predictions_dir`])
+/// is listed bare (prefix ""), and every other `predict/<run id>-<key>/` under
+/// its own prefix, so a bare path always means the default options and never
+/// names a different artifact as predicts come and go. For a folder holding
+/// several runs, every run's directories are listed under their prefixes. A
+/// listed path is one `cat --stream` takes.
 fn envelope_outputs(segment: &Path, run: Option<&str>) -> Vec<(PathBuf, String)> {
     let ids: Vec<String> = match run {
         Some(id) => vec![id.to_string()],
@@ -488,8 +488,8 @@ fn envelope_outputs(segment: &Path, run: Option<&str>) -> Vec<(PathBuf, String)>
     let single = ids.len() == 1;
     let mut out: Vec<(PathBuf, String)> = Vec::new();
     for id in &ids {
-        let bare = crate::fit::fit_view::predictions_dir(segment, id, None);
-        let stem = bare.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let bare = crate::fit::fit_view::default_predictions_dir(segment, id);
+        let stem = crate::fit::fit_view::predictions_label(id);
         let mut dirs: Vec<PathBuf> = std::fs::read_dir(segment.join("predict"))
             .into_iter()
             .flatten()
@@ -497,7 +497,7 @@ fn envelope_outputs(segment: &Path, run: Option<&str>) -> Vec<(PathBuf, String)>
             .map(|e| e.path())
             .filter(|d| {
                 let n = d.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                d.is_dir() && (n.starts_with(&format!("{stem}-")) || (!single && n == stem))
+                d.is_dir() && n.starts_with(&format!("{stem}-")) && !(single && *d == bare)
             })
             .collect();
         dirs.sort();
@@ -1008,7 +1008,7 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
             }
             // A stream is looked up in the run's predictions directory first
             // (gh#896), then in the segment (`fit.meta.json`, or a
-            // `predict/<run id>/…` path when the folder holds several runs).
+            // `predict/<run id>-<key>/…` path when the folder holds several runs).
             let mut bases: Vec<PathBuf> = envelope_outputs(&segment, run.as_deref())
                 .into_iter()
                 .filter(|(_, prefix)| prefix.is_empty())
@@ -1040,14 +1040,14 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
 }
 
 /// Where a run handle's stream `name` is: the run's leaf, then its
-/// default-options predictions under the problem folder's `predict/<run id>/`,
+/// default-options predictions under the problem folder's `predict/`,
 /// then the problem folder itself. An extensionless name also matches its
 /// `.tsv` sibling. `None` when no candidate exists.
 fn run_stream_path(leaf: &cas_read::Leaf, name: &str) -> Option<PathBuf> {
     let mut bases = vec![leaf.dir.clone()];
     if let Ok(Some(segment)) = crate::fit::fit_view::leaf_segment(&leaf.dir) {
         let id = leaf.record.run_id.to_hex().to_string();
-        bases.push(crate::fit::fit_view::predictions_dir(&segment, &id, None));
+        bases.push(crate::fit::fit_view::default_predictions_dir(&segment, &id));
         bases.push(segment);
     }
     bases.iter().find_map(|b| {
@@ -1367,7 +1367,7 @@ enum Resolved {
     /// fit-level hash prefix (the `fit_id` that `fit table`/`list` display).
     ///
     /// `run` is the run a `@label` named; `fit predict` writes each run's
-    /// outputs under `<segment>/predict/<run id>/` (gh#896), so the envelope's
+    /// outputs under `<segment>/predict/<run id>-<key>/` (gh#896), so the envelope's
     /// output files are that run's, or the folder's one run's.
     FitEnvelope { segment: PathBuf, run: Option<String>, rel_path: String },
 }

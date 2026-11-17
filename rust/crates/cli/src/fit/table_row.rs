@@ -36,7 +36,7 @@ use score::convergence::GateVerdict;
 pub const SCHEMA_NAME: &str = "table_row";
 ///
 /// v3 (gh#896): `run_id`, the run the row reports. `fit predict` writes each
-/// run's quantities under `<segment>/predict/<run id>/`, so a row's
+/// run's quantities under `<segment>/predict/<run id>-<key>/`, so a row's
 /// `quantities` are read from its run's directory, not the folder's.
 ///
 /// v4: a number is a JSON number or the string `"NaN"`, `"inf"` or `"-inf"`,
@@ -150,7 +150,7 @@ pub struct TableRow {
     /// each entry is the posterior median (q50 of the `fitted` row)
     /// of a scalar quantity from the model's `quantities {}` block,
     /// read from the run's free-forward predict,
-    /// `<fit_dir>/predict/<run id>-<free-forward options key>/quantities/<NAME>.tsv`
+    /// `<fit_dir>/predict/<run id>-<free-forward address key>/quantities/<NAME>.tsv`
     /// (derived there on demand by `fit predict --mode free_forward` when
     /// absent; gh#896). An uncomputable quantity for a
     /// row is simply absent from the map. A field addition is

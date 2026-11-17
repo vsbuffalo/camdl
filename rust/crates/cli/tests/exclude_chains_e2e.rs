@@ -330,7 +330,9 @@ fn exclude_outlier_chain_moves_bands_and_is_recorded() {
     // Full cloud (all 4 chains): free-forward predictive.
     let out = run(&bin, &tmp, &["fit", "predict", &seg_str, "--mode", "free_forward"]);
     assert!(out.status.success(), "full predict failed:\n{}", String::from_utf8_lossy(&out.stderr));
-    let full = std::fs::read_to_string(predict_out(&seg).join("predictive").join("weekly_cases.tsv")).unwrap();
+    // The pooled predict's own address; a chain subset is written at another.
+    let pooled_dir = predict_out(&seg);
+    let full = std::fs::read_to_string(pooled_dir.join("predictive").join("weekly_cases.tsv")).unwrap();
     let full_rows = free_forward_rows(&full);
     assert!(!full_rows.is_empty(), "full predictive has free-forward rows");
     // n_draws over the full cloud = all 120 draws (4 chains × 30).
@@ -377,12 +379,16 @@ fn exclude_outlier_chain_moves_bands_and_is_recorded() {
     // its own address, so it can never replace the run's canonical predictive
     // (gh#795). Both the TSV and the manifest are still the full-cloud ones.
     assert_eq!(
-        std::fs::read_to_string(predict_out(&seg).join("predictive").join("weekly_cases.tsv")).unwrap(),
+        std::fs::read_to_string(pooled_dir.join("predictive").join("weekly_cases.tsv")).unwrap(),
         full,
         "the pooled predictive must not be overwritten by a chain-subset run"
     );
     let still_full: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(predict_out(&seg).join("predictive.json")).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(pooled_dir.join("predictive.json")).unwrap()).unwrap();
+    assert!(
+        predict_out(&seg) != pooled_dir,
+        "the chain subset is written at its own address"
+    );
     assert!(
         still_full.get("chain_selection").is_none(),
         "…nor the pooled manifest"

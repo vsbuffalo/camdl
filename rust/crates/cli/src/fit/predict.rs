@@ -1521,11 +1521,6 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     // every file is attributable to one run.
     let run_id: String = crate::fit::fit_view::leaf_run_id(&run_dir)?
         .ok_or_else(|| format!("{} is not a fit run (no run.json)", run_dir.display()))?;
-    let options = PredictOptions::of(args);
-    let out_dir = crate::fit::fit_view::predictions_dir(
-        &segment, &run_id, options.address_key().as_deref());
-    std::fs::create_dir_all(&out_dir)
-        .map_err(|e| format!("cannot create {}: {e}", out_dir.display()))?;
     // The problem half is all a replay reads: model, data, fixed, estimate.
     let config = config.problem;
 
@@ -1616,6 +1611,15 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     //     reporting a fit through formulas written for a different model.
     let vocabulary: Option<crate::quantities_file::QuantitiesOverride> =
         args.quantities.as_deref().map(crate::quantities_file::QuantitiesOverride::load).transpose()?;
+    // The output directory, keyed by every input that changes what is written
+    // there: the run, the engine, and the options as resolved (the chain
+    // selection against this fit's chains, the vocabulary by its bytes). Two
+    // predictions from different inputs never share it.
+    let options = PredictOptions::of(args, posterior.selection(), vocabulary.as_ref());
+    let address_key = options.address_key(&run_id);
+    let out_dir = crate::fit::fit_view::predictions_dir(&segment, &run_id, &address_key);
+    std::fs::create_dir_all(&out_dir)
+        .map_err(|e| format!("cannot create {}: {e}", out_dir.display()))?;
     if let Some(v) = &vocabulary {
         model.quantities = quantities_from_vocabulary(&model, &config, v)?;
     }
@@ -1865,6 +1869,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
                 segment: &segment,
                 out_dir: &out_dir,
                 run_id: &run_id,
+                address_key: &address_key,
                 options: &options,
                 calendar: &calendar,
                 schema: schema.as_ref(),
@@ -2898,6 +2903,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
             // gh#896: the run whose draws these bands replay, and the options
             // that shaped them (they also key this directory's address).
             "run_id": run_id,
+            "address_key": address_key,
             "options": options,
             "calendar": calendar.to_json(),
             // D78: the binomial sampler every simulation of this predict drew
@@ -2951,6 +2957,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
         let manifest = serde_json::json!({
             "schema": "camdl.observed/v1",
             "run_id": run_id,
+            "address_key": address_key,
             "options": options,
             "calendar": calendar.to_json(),
             "streams": observed_manifest_entries,
@@ -3472,12 +3479,26 @@ fn band_row(
 /// fit is thousands of ~seconds-each solves (gh#387).
 pub(crate) const DEFAULT_PREDICT_DRAWS: usize = 200;
 
-/// The `fit predict` options that shape its output, beyond the run it reads
-/// (gh#896), resolved to the values the predict used. They key the output
-/// address ([`Self::address_key`]) and are recorded in its manifests, so two
-/// predicts of one run with different options are two artifacts and a reader
-/// can tell which it holds. `--exclude-chains` and `--quantities` key their
-/// own sub-addresses inside the directory and are not repeated here.
+/// Every input that changes what `fit predict` writes, beyond the run it
+/// reads, resolved to the values the predict used. Together with the run and
+/// the engine they key the output directory ([`Self::address_key`]), and they
+/// are recorded in its manifests, so two predictions computed from different
+/// inputs never share a directory and a reader can tell which one it holds.
+///
+/// The `FitPredictArgs` flags, and where each one goes:
+///
+/// - `--fit` / the positional handle: the run it resolves to, keyed by its
+///   full run id in [`Self::address_key`] (the spelling of the handle is not).
+/// - `--mode`, `--horizon` (as `reach`), `--n-draws`, `--seed`, `--stream`,
+///   `--scenario`, `--enable`, `--disable`, `--sweep`, `--by-chain`: fields.
+/// - `--exclude-chains` / `--chains`: `excluded_chains`, the chains dropped
+///   from the fit's cloud, so the two spellings of one selection are one key.
+/// - `--quantities FILE`: `quantities`, the SHA-256 of the file's bytes.
+/// - `--allow-forcing-extrapolation`: `allow_forcing_extrapolation`, as given;
+///   the fit's own `[config]` setting is part of the run.
+///
+/// The fit's other settings (its config, its sampler, its
+/// `allow_degenerate_rates`) are read from the run, so its run id covers them.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub(crate) struct PredictOptions {
     pub mode: &'static str,
@@ -3486,10 +3507,8 @@ pub(crate) struct PredictOptions {
     pub reach: Option<String>,
     pub n_draws: usize,
     pub seed: u64,
-    /// `--stream`, as a set. Serialized as `null` when absent and as the bare
-    /// name when there is one, the form every address keyed before `--stream`
-    /// was repeatable has, so those addresses are unchanged; several are a
-    /// list.
+    /// `--stream`, as a set: `null` when absent, the bare name when there is
+    /// one, a list when there are several.
     #[serde(serialize_with = "serialize_streams")]
     pub stream: Vec<String>,
     pub scenarios: Vec<String>,
@@ -3497,7 +3516,29 @@ pub(crate) struct PredictOptions {
     pub disable: Vec<String>,
     pub sweep: Vec<(String, Vec<f64>)>,
     pub by_chain: bool,
+    /// The chains `--exclude-chains` / `--chains` dropped, sorted; absent when
+    /// the whole cloud was used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub excluded_chains: Option<Vec<usize>>,
+    /// The SHA-256 of the `--quantities` file; absent for the model's own
+    /// `quantities {}` block.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quantities: Option<String>,
+    /// `--allow-forcing-extrapolation` as given on the command line.
+    pub allow_forcing_extrapolation: bool,
 }
+
+/// What [`PredictOptions::address_key`] hashes: the run, the engine that
+/// computes the prediction, and the options.
+#[derive(serde::Serialize)]
+struct PredictAddress<'a> {
+    run_id: &'a str,
+    engine: &'a str,
+    options: &'a PredictOptions,
+}
+
+/// Hex digits of the address key: 128 bits.
+pub(crate) const PREDICT_KEY_HEX: usize = 32;
 
 impl PredictOptions {
     /// What `fit predict <run>` with no options uses.
@@ -3513,16 +3554,29 @@ impl PredictOptions {
             disable: Vec::new(),
             sweep: Vec::new(),
             by_chain: false,
+            excluded_chains: None,
+            quantities: None,
+            allow_forcing_extrapolation: false,
         }
     }
 
-    /// The free-forward horizon alone, every other option at its default —
-    /// what `fit table --quantity` derives with.
-    pub(crate) fn free_forward() -> Self {
-        PredictOptions { mode: "free_forward", ..Self::defaults() }
+    /// The free-forward horizon alone over the cloud `excluded` leaves, every
+    /// other option at its default — what `fit table --quantity` derives with.
+    pub(crate) fn free_forward(excluded: Option<&crate::chain_selection::SubsetInfo>) -> Self {
+        PredictOptions {
+            mode: "free_forward",
+            excluded_chains: excluded_chain_ids(excluded),
+            ..Self::defaults()
+        }
     }
 
-    pub(crate) fn of(args: &crate::args::FitPredictArgs) -> Self {
+    /// The options of `args`, with the chain selection as resolved against the
+    /// fit (`excluded`) and the `--quantities` vocabulary as loaded.
+    pub(crate) fn of(
+        args: &crate::args::FitPredictArgs,
+        excluded: Option<&crate::chain_selection::SubsetInfo>,
+        vocabulary: Option<&crate::quantities_file::QuantitiesOverride>,
+    ) -> Self {
         use crate::args::types::PredictModeArg;
         PredictOptions {
             // An invalid combination is refused by [`predict_mode`] before
@@ -3542,6 +3596,9 @@ impl PredictOptions {
             disable: args.disable.clone(),
             sweep: args.sweep.iter().map(|s| (s.name.clone(), s.grid.expand())).collect(),
             by_chain: args.by_chain,
+            excluded_chains: excluded_chain_ids(excluded),
+            quantities: vocabulary.map(|v| v.digest.clone()),
+            allow_forcing_extrapolation: args.forcing_extrapolation.allow_forcing_extrapolation,
         }
         .normalised()
     }
@@ -3558,16 +3615,23 @@ impl PredictOptions {
         self
     }
 
-    /// The address key: `None` for the defaults (the output keeps the bare
-    /// `predict/<run_id12>/`), else the first 8 hex of the SHA-256 of the
-    /// options' JSON.
-    pub(crate) fn address_key(&self) -> Option<String> {
-        if *self == Self::defaults() {
-            return None;
-        }
-        let json = serde_json::to_string(self).unwrap_or_default();
-        Some(crate::hashing::sha256_hex(json.as_bytes())[..8].to_string())
+    /// The address key of a prediction of `run_id` with these options by this
+    /// engine: the first [`PREDICT_KEY_HEX`] hex digits (128 bits) of the
+    /// SHA-256 of [`PredictAddress`]'s JSON.
+    pub(crate) fn address_key(&self, run_id: &str) -> String {
+        self.address_key_by(run_id, crate::version::VERSION_SHORT)
     }
+
+    fn address_key_by(&self, run_id: &str, engine: &str) -> String {
+        let json = serde_json::to_string(&PredictAddress { run_id, engine, options: self })
+            .expect("PredictOptions serializes");
+        crate::hashing::sha256_hex(json.as_bytes())[..PREDICT_KEY_HEX].to_string()
+    }
+}
+
+/// The chain ids a resolved selection dropped, in order.
+fn excluded_chain_ids(excluded: Option<&crate::chain_selection::SubsetInfo>) -> Option<Vec<usize>> {
+    excluded.map(|i| i.excluded.iter().map(|c| c.0).collect())
 }
 
 /// [`PredictOptions::stream`]: `null`, a bare name, or a list of several.
@@ -4285,11 +4349,15 @@ fn plugin_refusal(method: Option<FitAlgorithm>, leaf: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    const FREE_FORWARD_KEY: &str = "195dbcd2";
-    const SCENARIOS_AB_KEY: &str = "df45cbda";
-    /// `--stream onset` alone, computed from the options' JSON as it was
-    /// written while `--stream` took one value (`"stream":"onset"`).
-    const STREAM_ONSET_KEY: &str = "59942590";
+    /// A run id and engine for the pinned keys, so they do not move with the
+    /// build's version.
+    const RUN: &str = "1fde5903ef4cf3f8ce25eb0661a8c042e9b6baaaa126997b2ab721793e515481";
+    const OTHER_RUN: &str = "2fde5903ef4cf3f8ce25eb0661a8c042e9b6baaaa126997b2ab721793e515481";
+    const ENGINE: &str = "0.0.0+test";
+    const DEFAULTS_KEY: &str = "7840bfbd0dc6f1b96657e6cf30954059";
+    const FREE_FORWARD_KEY: &str = "c3d82086913c29f5a729e920a61aff64";
+    const SCENARIOS_AB_KEY: &str = "efe665fc26e51684ba9ac7f8f2e5a688";
+    const STREAM_ONSET_KEY: &str = "0fd2a1e70cb0f7a22152c0f284e4d821";
 
     /// gh#896: a predict's address key is pinned. It names stored outputs, so a
     /// change to it — a reordered or renamed field of `PredictOptions`, a new
@@ -4297,19 +4365,18 @@ mod tests {
     /// these values, not a side effect.
     #[test]
     fn the_predict_address_key_is_pinned() {
-        assert_eq!(PredictOptions::defaults().address_key(), None, "defaults keep the bare address");
-        assert_eq!(PredictOptions::free_forward().address_key().as_deref(), Some(FREE_FORWARD_KEY));
+        let key = |o: &PredictOptions| o.address_key_by(RUN, ENGINE);
+        assert_eq!(key(&PredictOptions::defaults()), DEFAULTS_KEY);
+        assert_eq!(key(&PredictOptions::free_forward(None)), FREE_FORWARD_KEY);
+        assert_eq!(FREE_FORWARD_KEY.len(), PREDICT_KEY_HEX, "128 bits of hex");
         let scen = |names: &[&str]| PredictOptions {
             scenarios: names.iter().map(|n| n.to_string()).collect(),
             ..PredictOptions::defaults()
         }
         .normalised();
-        assert_eq!(scen(&["b", "a"]).address_key(), scen(&["a", "b"]).address_key(),
+        assert_eq!(key(&scen(&["b", "a"])), key(&scen(&["a", "b"])),
             "the scenario set, not its spelling order, keys the address");
-        assert_eq!(scen(&["b", "a"]).address_key().as_deref(), Some(SCENARIOS_AB_KEY));
-        // `--stream` became repeatable (D76). One stream serializes as the
-        // bare name it always did, so an address keyed by one is unchanged:
-        // `--stream onset` keys STREAM_ONSET_KEY before and after.
+        assert_eq!(key(&scen(&["b", "a"])), SCENARIOS_AB_KEY);
         let streams = |names: &[&str]| PredictOptions {
             stream: names.iter().map(|n| n.to_string()).collect(),
             ..PredictOptions::defaults()
@@ -4317,9 +4384,44 @@ mod tests {
         .normalised();
         assert!(serde_json::to_string(&streams(&["onset"])).unwrap().contains(r#""stream":"onset""#));
         assert!(serde_json::to_string(&streams(&[])).unwrap().contains(r#""stream":null"#));
-        assert_eq!(streams(&["onset"]).address_key().as_deref(), Some(STREAM_ONSET_KEY));
-        assert_eq!(streams(&["b", "a"]).address_key(), streams(&["a", "b", "a"]).address_key(),
+        assert_eq!(key(&streams(&["onset"])), STREAM_ONSET_KEY);
+        assert_eq!(key(&streams(&["b", "a"])), key(&streams(&["a", "b", "a"])),
             "the stream set, not its spelling, keys the address");
+    }
+
+    /// Every input that changes the output moves the key: the run, the engine,
+    /// and each option `PredictOptions` carries for it — among them the chain
+    /// selection, the `--quantities` vocabulary and
+    /// `--allow-forcing-extrapolation`.
+    #[test]
+    fn every_output_changing_input_moves_the_predict_address_key() {
+        let base = PredictOptions::free_forward(None);
+        let k = base.address_key_by(RUN, ENGINE);
+        assert_ne!(base.address_key_by(OTHER_RUN, ENGINE), k, "the run");
+        assert_ne!(base.address_key_by(RUN, "0.0.1+test"), k, "the engine");
+        let varied = [
+            ("mode", PredictOptions { mode: "one_step", ..base.clone() }),
+            ("reach", PredictOptions { reach: Some("2 weeks".into()), ..base.clone() }),
+            ("n_draws", PredictOptions { n_draws: 7, ..base.clone() }),
+            ("seed", PredictOptions { seed: 2, ..base.clone() }),
+            ("stream", PredictOptions { stream: vec!["a".into()], ..base.clone() }),
+            ("scenarios", PredictOptions { scenarios: vec!["a".into()], ..base.clone() }),
+            ("enable", PredictOptions { enable: vec!["a".into()], ..base.clone() }),
+            ("disable", PredictOptions { disable: vec!["a".into()], ..base.clone() }),
+            ("sweep", PredictOptions { sweep: vec![("q".into(), vec![1.0])], ..base.clone() }),
+            ("by_chain", PredictOptions { by_chain: true, ..base.clone() }),
+            ("excluded_chains", PredictOptions { excluded_chains: Some(vec![1]), ..base.clone() }),
+            ("quantities", PredictOptions { quantities: Some("ab".repeat(32)), ..base.clone() }),
+            ("allow_forcing_extrapolation",
+             PredictOptions { allow_forcing_extrapolation: true, ..base.clone() }),
+        ];
+        for (what, o) in &varied {
+            assert_ne!(o.address_key_by(RUN, ENGINE), k, "{what} must move the key");
+        }
+        assert_ne!(
+            PredictOptions { excluded_chains: Some(vec![1]), ..base.clone() }.address_key_by(RUN, ENGINE),
+            PredictOptions { excluded_chains: Some(vec![0]), ..base.clone() }.address_key_by(RUN, ENGINE),
+            "two selections are two keys");
     }
 
     use super::*;

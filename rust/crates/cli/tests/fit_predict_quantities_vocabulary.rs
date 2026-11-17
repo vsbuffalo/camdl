@@ -206,14 +206,27 @@ impl Fit {
 
     /// The `quantities*` addresses the fit segment currently holds, sorted.
     fn addresses(&self) -> Vec<String> {
-        let mut names: Vec<String> = std::fs::read_dir(predict_out(&self.segment))
-            .unwrap()
-            .flatten()
-            .map(|e| e.file_name().to_string_lossy().into_owned())
+        // Across every predict directory of the fit: each vocabulary is also
+        // its own `predict/<run>-<key>/` (the key covers the file's digest).
+        let mut names: Vec<String> = self.predict_dirs().iter()
+            .flat_map(|d| std::fs::read_dir(d).unwrap().flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned()))
             .filter(|n| n.starts_with("quantities"))
             .collect();
         names.sort();
+        names.dedup();
         names
+    }
+
+    fn predict_dirs(&self) -> Vec<PathBuf> {
+        std::fs::read_dir(self.segment.join("predict")).into_iter().flatten().flatten()
+            .map(|e| e.path()).filter(|p| p.is_dir()).collect()
+    }
+
+    /// The predict directory holding `name`.
+    fn locate(&self, name: &str) -> PathBuf {
+        self.predict_dirs().into_iter().find(|d| d.join(name).exists())
+            .unwrap_or_else(|| panic!("no predict directory holds {name}"))
     }
 
     /// Every `run.json` under this fit — one per method leaf — as
@@ -322,9 +335,9 @@ fn two_vocabularies_on_one_fit_are_two_addresses_and_one_is_one() {
         .iter()
         .find(|n| !n.ends_with(".json") && *n != dir_a)
         .expect("B's own directory");
-    assert!(predict_out(&f.segment).join(dir_a).join("attack_rate.tsv").exists());
-    assert!(predict_out(&f.segment).join(dir_b).join("peak_time.tsv").exists());
-    assert!(!predict_out(&f.segment).join(dir_a).join("peak_time.tsv").exists());
+    assert!(f.locate(dir_a).join(dir_a).join("attack_rate.tsv").exists());
+    assert!(f.locate(dir_b).join(dir_b).join("peak_time.tsv").exists());
+    assert!(!f.locate(dir_a).join(dir_a).join("peak_time.tsv").exists());
 }
 
 #[test]
