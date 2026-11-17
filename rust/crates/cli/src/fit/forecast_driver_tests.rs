@@ -228,10 +228,61 @@ pub(super) fn is_reference(compiled: &Arc<sim::CompiledModel>, params: &[f64], d
     ((mu, se_mu), (var, se_var), ess)
 }
 
-fn agree(what: &str, a: (f64, f64), b: (f64, f64)) {
-    let z = (a.0 - b.0).abs() / (a.1.powi(2) + b.1.powi(2)).sqrt();
-    assert!(z < 4.0, "{what}: driver {:.3} ± {:.3} vs reference {:.3} ± {:.3} (z = {z:.2})",
+/// The pass threshold for a driver-against-reference comparison, stated
+/// before measuring: |z| below it passes, z being the difference over the
+/// combined Monte Carlo error.
+const Z_PASS: f64 = 3.0;
+
+fn z_of(a: (f64, f64), b: (f64, f64)) -> f64 {
+    (a.0 - b.0) / (a.1.powi(2) + b.1.powi(2)).sqrt()
+}
+
+fn agree(what: &str, a: (f64, f64), b: (f64, f64), summary: &str) {
+    let z = z_of(a, b);
+    assert!(z.abs() < Z_PASS, "{what}: driver {:.3} ± {:.3} vs reference {:.3} ± {:.3} (z = {z:.2})\n{summary}",
         a.0, a.1, b.0, b.1);
+}
+
+/// The reference comparison at a given precision: `n_draws` independent
+/// filters of `n_particles`, against `m` importance-sampling simulations.
+/// Returns a one-paragraph summary of every number compared.
+fn reference_check(n_draws: usize, n_particles: usize, m: usize) -> String {
+    let (daily, weekly) = daily_through(24);
+    let s = setup(with_truth(compile(&fixture_source(), "reference")), &daily, &weekly, "reference").unwrap();
+    let plan = s.plan(7.0, &["weekly_cases"]);
+    let k = index_of(&plan, "weekly_cases", 28.0);
+    assert_eq!((plan.targets()[k].measures.start(), plan.targets()[k].horizon), (21.0, 0));
+    let fc = s.run(plan, n_draws, n_particles, 11).unwrap();
+    let (rho, kd) = (0.5, 10.0);
+    let w: Vec<f64> = fc.expected.as_ref().unwrap()[k].iter().map(|e| e / rho).collect();
+    let drv_mean = pooled_with_se(&w, n_draws, |c| mean_var(c).0);
+    let drv_var = pooled_with_se(&w, n_draws, |c| mean_var(c).1);
+    let ((mu, se_mu), (var, se_var), ess) =
+        is_reference(&s.compiled, &s.params(), &daily_values(24), 21, 28, m);
+
+    // The observation noise: the reported count's moments.
+    let y = &fc.draws[k];
+    let y_mean = pooled_with_se(y, n_draws, |c| mean_var(c).0);
+    let y_var = pooled_with_se(y, n_draws, |c| mean_var(c).1);
+    let want_mean = (rho * mu, rho * se_mu);
+    let want_var = (rho * rho * var + rho * mu + rho * rho * (var + mu * mu) / kd,
+                    (rho * rho * se_var).hypot(rho * se_mu) * (1.0 + 2.0 * rho / kd));
+    let summary = format!(
+        "W mean: driver {:.3} ± {:.3}, reference {mu:.3} ± {se_mu:.3}, z = {:.2}; \
+         W variance: driver {:.2} ± {:.2}, reference {var:.2} ± {se_var:.2}, z = {:.2}; \
+         reported mean: driver {:.3} ± {:.3}, implied {:.3} ± {:.3}, z = {:.2}; \
+         reported variance: driver {:.2} ± {:.2}, implied {:.2} ± {:.2}, z = {:.2}; \
+         ESS {ess:.0}; {n_draws} draws x {n_particles} particles, {m} simulations",
+        drv_mean.0, drv_mean.1, z_of(drv_mean, (mu, se_mu)),
+        drv_var.0, drv_var.1, z_of(drv_var, (var, se_var)),
+        y_mean.0, y_mean.1, want_mean.0, want_mean.1, z_of(y_mean, want_mean),
+        y_var.0, y_var.1, want_var.0, want_var.1, z_of(y_var, want_var));
+    assert!(ess > 1000.0, "the reference needs an effective sample size; got {ess}\n{summary}");
+    agree("mean of the week's infections", drv_mean, (mu, se_mu), &summary);
+    agree("variance of the week's infections", drv_var, (var, se_var), &summary);
+    agree("mean of the reported weekly count", y_mean, want_mean, &summary);
+    agree("variance of the reported weekly count", y_var, want_var, &summary);
+    summary
 }
 
 /// The reference distribution (spec §4.4): origin day 24, the weekly target
@@ -239,36 +290,19 @@ fn agree(what: &str, a: (f64, f64), b: (f64, f64)) {
 /// week's infections agree with importance sampling from the prior weighted
 /// by the daily data; the reported count's draws carry the declared
 /// negative-binomial noise on top: mean ρ·E[W], variance
-/// ρ²·Var[W] + E[ρW + (ρW)²/k].
+/// ρ²·Var[W] + E[ρW + (ρW)²/k]. Each comparison passes at |z| < `Z_PASS`.
 #[test]
 fn the_week_under_way_matches_the_importance_sampling_reference() {
-    let (daily, weekly) = daily_through(24);
-    let s = setup(with_truth(compile(&fixture_source(), "reference")), &daily, &weekly, "reference").unwrap();
-    let plan = s.plan(7.0, &["weekly_cases"]);
-    let k = index_of(&plan, "weekly_cases", 28.0);
-    assert_eq!((plan.targets()[k].measures.start(), plan.targets()[k].horizon), (21.0, 0));
-    let (n_draws, n_particles) = (40, 1000);
-    let fc = s.run(plan, n_draws, n_particles, 11).unwrap();
-    let (rho, kd) = (0.5, 10.0);
-    let w: Vec<f64> = fc.expected.as_ref().unwrap()[k].iter().map(|e| e / rho).collect();
-    let drv_mean = pooled_with_se(&w, n_draws, |c| mean_var(c).0);
-    let drv_var = pooled_with_se(&w, n_draws, |c| mean_var(c).1);
+    reference_check(40, 1000, 100_000);
+}
 
-    let ((mu, se_mu), (var, se_var), ess) =
-        is_reference(&s.compiled, &s.params(), &daily_values(24), 21, 28, 100_000);
-    assert!(ess > 1000.0, "the reference needs an effective sample size; got {ess}");
-    agree("mean of the week's infections", drv_mean, (mu, se_mu));
-    agree("variance of the week's infections", drv_var, (var, se_var));
-
-    // The observation noise: the reported count's moments.
-    let y = &fc.draws[k];
-    let y_mean = pooled_with_se(y, n_draws, |c| mean_var(c).0);
-    let y_var = pooled_with_se(y, n_draws, |c| mean_var(c).1);
-    let want_mean = rho * mu;
-    let want_var = rho * rho * var + rho * mu + rho * rho * (var + mu * mu) / kd;
-    agree("mean of the reported weekly count", y_mean, (want_mean, rho * se_mu));
-    let se_want = (rho * rho * se_var).hypot(rho * se_mu) * (1.0 + 2.0 * rho / kd);
-    agree("variance of the reported weekly count", y_var, (want_var, se_want));
+/// The same comparison at a combined Monte Carlo error of about 0.15 on the
+/// mean (`docs/dev/notes/2026-11-16-stage5-forecast-plan.md`).
+#[test]
+#[ignore = "costly: ~1 minute in release; run with `cargo test --release -p cli --bin camdl \
+            the_week_under_way_matches_at_high_precision -- --ignored`"]
+fn the_week_under_way_matches_at_high_precision() {
+    reference_check(800, 1000, 1_000_000);
 }
 
 fn fixture_setup(through: usize, tag: &str) -> Setup {
