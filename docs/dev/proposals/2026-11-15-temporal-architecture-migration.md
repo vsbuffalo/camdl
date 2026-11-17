@@ -1003,12 +1003,24 @@ Recorded in the maintainer's docket; each is reflected in the spec and above.
   `docs/dates.md` separates the fixed days of each year (periodic `on` ranges,
   as in He et al. 2010) from this year's real dates (piecewise forcing with date
   breakpoints), and states the drift of each year length (#1169).
+- **D77** (2026-11-18). The bootstrap filter and IF2 never resample when every
+  normalised log weight is exactly equal. The comparison is on log weights, so
+  distinct weights whose exponentials underflow to 0 are not taken as equal.
+  Skipping leaves the filtering distribution unchanged and removes needless
+  Monte Carlo variance and loss of distinct ancestors; in a run that meets such
+  weights it changes the realisation and IF2's ancestry, because the resampling
+  stream is not drawn. A row whose likelihood is constant by its structure is
+  missing at the observation-likelihood boundary: the binder makes a binomial or
+  beta-binomial `0` of `0` (zero trials read from the data) a hole, so it and
+  `NA` are interchangeable for assimilation, alone or beside an informative
+  stream at the same time; a positive count against zero trials stays a bind
+  error. There is no general symbolic test of whether a likelihood is constant
+  across particles. PGAS is unchanged. `HASH_VERSION` 7.
 
 Open, not yet decided in the docket: D76, whether a forecast command fails when
-the model declares an observation stream the fit never bound data to; D77,
-whether the particle filter also skips resampling whenever all particle weights
-are exactly equal, as PGAS does; D78, whether the one-step-ahead band draws with
-the binomial sampler the fit ran, as the forecast now does.
+the model declares an observation stream the fit never bound data to; D78,
+whether the one-step-ahead band draws with the binomial sampler the fit ran, as
+the forecast now does.
 
 ## Part 9. Documents this plan changes
 
