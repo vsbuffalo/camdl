@@ -1,159 +1,222 @@
-(* IR type definitions — mirror of rust/crates/ir/src/ *)
+(** The intermediate representation (IR): a camdl model after compilation, as
+    [camdlc] writes it to JSON for the Rust runtime.
+
+    The IR is fully expanded. Every stratified declaration has become one
+    entry per cell, named by joining the base name to its levels with [_]
+    ([S] over [patch = [urban, rural]] becomes [S_urban] and [S_rural]), and
+    every name an expression mentions refers to an entry of the {!model}.
+    Times, durations and rates are numbers in the model's [time_unit]; the
+    compiler has already converted every unit literal into it. The JSON codec
+    is [Serde]; the Rust types in [rust/crates/ir/src/] read the same JSON,
+    and [ir/schema.json] is the contract between the two. *)
+
 [@@@warning "-30-50"]  (* allow duplicate record field names; suppress docstring warning *)
 
 (* ── Expression ─────────────────────────────────────────────────────────────── *)
 
+(** A binary operator of an expression.
+
+    The comparisons [Eq] to [Ge] evaluate to [1.0] when they hold and [0.0]
+    when they do not. [Mod] is Euclidean: [a mod b] is at least 0 and less than [|b|]. A
+    division or [Mod] by zero, or a [Pow] whose result is not finite,
+    evaluates to NaN, which the runtime reports as a numerical error (or
+    treats as [0.0] under [--allow-degenerate-rates]). *)
 type bin_op = Add | Sub | Mul | Div | Pow | Mod | Min | Max | Eq | Neq | Lt | Gt | Le | Ge
 
+(** A unary function of an expression. [Log] of a number that is not positive
+    and [Sqrt] of a negative number evaluate to NaN, handled as for
+    {!bin_op}. *)
 type un_op = Neg | Exp | Log | Sqrt | Abs | Floor | Ceil
-           | Sin | Cos | Tanh                    (* gh#58 *)
+           | Sin | Cos | Tanh
 
-(* ── Observation anchors (gh#616) ───────────────────────────────────────────── *)
+(* ── Observation anchors ────────────────────────────────────────────────────── *)
 
-(* Which end of the observed record an anchor names. Resolved PER RUN from the
-   run's bound observation streams — `AnchorLast` is the maximum observation
-   time over them, `AnchorFirst` the minimum — so it is not a release constant:
-   two fit configs binding different stream sets resolve different values from
-   the same compiled model. *)
+(** Which end of a run's observation record an anchor names: written
+    [first_obs] and [last_obs] in a model.
+
+    An anchor is resolved per run, from the observation streams that run binds
+    to data, so two runs of one compiled model can resolve it to different
+    times. *)
 type obs_anchor =
-  | AnchorFirst
-  | AnchorLast
+  | AnchorFirst  (** The earliest observation time over the run's bound streams. *)
+  | AnchorLast   (** The latest observation time over the run's bound streams. *)
 
-(* An observation anchor plus a constant offset ALREADY FOLDED to model time
-   units at compile time (`1 'weeks` under `time_unit = days` → 7.0). Only the
-   anchor's value binds later, so the compiled model stays data-independent and
-   the offset never needs the observation series to be interpreted.
-   `offset = 0.0` is a bare anchor. *)
+(** A time stated relative to the observed data, such as
+    [last_obs + 4 'weeks]: an anchor whose value a run supplies, plus a
+    constant offset the compiler has already converted to the model's time
+    unit.
+
+    It serialises as the bare anchor name when the offset is zero, and as an
+    object otherwise. In a days model, [last_obs + 4 'weeks] is
+
+    {@json[
+      {"anchor": "last_obs", "offset": 28.0}
+    ]} *)
 type anchored_time = {
   anchor: obs_anchor;
-  offset: float;   (* model time units; signed *)
+  offset: float;   (** Signed, in model time units. *)
 }
 
+(** The operands of a {!bin_op}. *)
 type bin_op_expr = { op: bin_op; left: expr; right: expr }
+
+(** The operand of a {!un_op}. *)
 and un_op_expr   = { op: un_op;  arg:  expr }
+
+(** A conditional, written [if pred then a else b]: [then_] when [pred]
+    evaluates to a positive number, [else_] otherwise. *)
 and cond_expr    = { pred: expr; then_: expr; else_: expr }
 
+(** A numeric expression: a transition rate, an initial value, a likelihood
+    argument, a derivative, or any other quantity the runtime evaluates.
+
+    The language is pure and first order: no variable binding, no recursion,
+    so an expression evaluates in bounded time. Every name it mentions is
+    already expanded and resolved. The rates of a model fragment such as
+
+    {@camdl[
+      let omega : rate = 0.01
+      let N[p in patch] = S[p] + I[p] + R[p]
+      transitions {
+        infection[p in patch] : S[p] --> I[p] @ beta * season * S[p] * sum(q in patch, C[p, q] * I[q] / N[q])
+        waning[p in patch]    : R[p] --> S[p] @ omega * R[p]
+        import[p in patch]    : --> I[p] @ (if t < 30 'days then 0.001 'per_day else 0.0 'per_day) * N[p]
+      }
+    ]}
+
+    use [Param "beta"], [TimeFunc "season"], [Pop "S_a"], a [Reduce] over
+    [q] with the table cells folded to [Const 0.9] and [Const 0.1],
+    [BindingRef "N_a"], [ConstRef "omega"], and a [Cond] on [Time] whose
+    branches are [UnitLiteral]s. *)
 and expr =
   | Const  of float
+      (** A number: a literal, or a value the compiler computed. *)
   | Param  of string
-  (* A reference to a model constant — a typed `let` with a constant body
-     (`let omega : rate = 0.01`) — by name, resolved against [model.constants].
-     Not a parameter: no command can set or estimate it, and its derivative with
-     respect to every parameter is zero. It is a node of its own rather than the
-     inlined literal so the dimension checker sees the constant's declared kind
-     (a bare literal is dimensionless) and every display keeps its name. *)
+      (** The value of a model parameter, named by an entry of
+          [model.parameters]. *)
   | ConstRef of string
+      (** The value of a model constant, a typed [let] with a constant body
+          such as [let omega : rate = 0.01], named by an entry of
+          [model.constants]. It is not a parameter: nothing can set or
+          estimate it, and its derivative with respect to every parameter is
+          zero. It stays a reference rather than its number so the dimension
+          checker sees the constant's declared kind and displays keep its
+          name. *)
   | Pop    of string
+      (** The current value of one compartment: a count for an integer
+          compartment, a real number for a real one. *)
   | PopSum of string list
+      (** The sum of the current values of several compartments. A bare
+          stratified compartment name in a rate, or a [let] such as
+          [N = S + I + R], lowers to it. *)
   | Time
-  | Dt                            (* runtime integrator step (gh#54) *)
+      (** The current model time, in the model's time unit, measured from the
+          model's [origin] when it declares one. *)
+  | Dt
+      (** The length of the current step, in model time units. Only the
+          stepping backends (chain-binomial and the ODE integrators) give it a
+          value; the Gillespie backend refuses a model whose rates read it,
+          and an initial condition reads [0.0]. *)
   | BinOp  of bin_op_expr
   | UnOp   of un_op_expr
   | Cond   of cond_expr
-  | TimeFunc of string           (* name of the time function *)
-  | TableLookup of string * expr list  (* table name, index exprs *)
-  (* n-ary sum over already-substituted terms (proposal
-     2026-05-29-shared-bindings-and-reduction, Fix D). Replaces the deep
-     left-nested Add chain that `sum(...)` over a dimension used to lower to,
-     which tripped serde's recursion limit past ~50 patches. Sum semantics only;
-     Prod is deferred (the FOI needs only sum, and a half-built Prod is worse
-     than none — documented deviation from the proposal's {op,terms} shape). *)
+  | TimeFunc of string           (** The value of a forcing, named by an entry of [model.time_functions], at the current time shifted back by the forcing's [lag]. *)
+  | TableLookup of string * expr list
+      (** One cell of a table, named by an entry of [model.tables], at a
+          0-based index into its values. The list always holds exactly one
+          index: the compiler flattens a multi-dimensional lookup [C[p, q]]
+          into one constant row-major index, and the runtime refuses any other
+          length. The index is rounded down, and one outside the table is a
+          runtime error. Where the cell is a literal number the compiler
+          writes the cell itself, as a [Const], in place of the lookup. *)
   | Reduce of expr list
-  (* Reference to a model-level binding by name (Fix B, shared per-coordinate
-     bindings). Resolved to a slot at CompiledModel::new (like Param/Pop) and
-     evaluated on-demand from the binding's body. Hoisted FOI aggregates
-     (N[l], I_agg[l], spatial force F[l]) are defined once in `model.bindings`
-     instead of being inlined into every (patch,age) rate. *)
+      (** The sum of the terms, added left to right. A [sum(q in patch, ...)]
+          over a dimension lowers to it, one term per level. *)
   | BindingRef of string
-  (* Reference to a model-level PER-EVAL binding by name (gh#272 LICM). Like
-     BindingRef, but the body is param/table-only (loop-invariant within a
-     trajectory) and may be param-CARRYING — so it is cached once per θ-stable
-     scope, not per step. Produced by the LICM pass (post-autodiff; on by
-     default, `CAMDL_NO_LICM` disables); absent only when LICM is disabled or
-     nothing hoists. Resolved to a slot at CompiledModel::new against
-     `model.per_eval_bindings`. *)
+      (** The value of a shared binding, named by an entry of
+          [model.bindings]: a [let] that several rates read, such as
+          [N_urban], defined once instead of copied into each rate. *)
   | PerEvalRef of string
-  | Projected                    (* refers to projection output in likelihoods *)
-  (* Per-observation auxiliary data column referenced by name in a likelihood
-     (e.g. binomial `n = tested`). The Rust binder resolves it against the
-     enclosing stream's bound aux columns and evaluates it per observation —
-     symmetric to [Projected], which the binder fills per observation from the
-     projection. Only valid inside a likelihood argument expression
-     (2026-06-10 observation data-entry §3, §6.1). *)
+      (** The value of a per-evaluation binding, named by an entry of
+          [model.per_eval_bindings]: a subexpression of parameters, constants
+          and tables only, which the compiler lifts out of the rates so the
+          runtime computes it once per parameter value rather than at every
+          step. *)
+  | Projected                    (** In a likelihood argument, the stream's projected value for the observation being scored: [projected] in the model. *)
   | ObsColumnRef of string
-  (* An observation anchor ± a compile-folded constant offset (gh#616).
-     UNRESOLVED until a run binds its data: the runtime resolver substitutes a
-     `Const` before anything evaluates, and `CompiledModel::new` refuses a model
-     that still carries one — so this variant never reaches the evaluator, and
-     no backend has a case for it. Emitted ONLY into a forcing `breakpoints`
-     list (the interception is scoped to that key), which is why it is a
-     structural knot rather than a value in the dynamics. *)
+      (** In a likelihood argument, the value of a declared data column in
+          the row being scored, such as [tested] in
+          [cases ~ binomial(n = tested, p = rho)]. *)
   | ObsAnchor of anchored_time
-  (* Basis function [index] (0-based) of spline forcing [forcing], at the
-     forcing's own evaluation time — t − lag, clamped to a bspline's window or
-     wrapped by a periodic_spline's period (proposal
-     2026-10-27-estimable-bsplines §5.1). ∂f/∂c_k = B_k(t): the derivative node
-     autodiff emits for a spline coefficient. Only ever inside a gradient map;
-     the DSL has no syntax for it. *)
+      (** A time stated relative to the observed data, such as
+          [last_obs - 2 'weeks]. It appears only among a forcing's knots: a
+          [piecewise] forcing's [breakpoints], and a [bspline]'s [window] ends
+          or [breakpoints]. The runtime substitutes a [Const] for each one once
+          a run binds its data, and refuses to build a model that still
+          carries one, so no evaluator ever sees it. *)
   | ForcingBasis of { forcing : string; index : int; space : basis_space }
-  (* Per-expression dimensional escape: asserts the wrapped subexpression
-     has dimension `(dim_p, dim_t)` without the checker verifying. The
-     user-supplied `reason` is retained for audit trails (run.json) and
-     is not consumed by runtime evaluation. Runtime semantics: identity —
-     evaluates `inner` and returns its value. See
-     docs/dev/proposals/notes/unchecked-dim-escape.md. *)
+      (** The derivative of a spline forcing with respect to one of its
+          coefficients: basis function [index] (0-based) in [space] of the
+          forcing named [forcing], at the forcing's own evaluation time (the
+          current time minus its [lag], held to a [bspline]'s window or
+          wrapped by a [periodic_spline]'s period). It appears only in
+          gradient maps; a model cannot write it. *)
   | UncheckedDim of unchecked_dim_expr
-  (* A unit literal such as `0.2 'per_day`: a known constant of dimension
-     `(dim_p, dim_t)` whose numeric [value] is already scaled into the
-     model's `time_unit`. [unit] is the literal's unit name ("per_day"),
-     kept for diagnostics and audit. Unlike [UncheckedDim] the dimension is
-     not an assertion: the checker reads it as a fact. Runtime: evaluates to
-     [value]; derivative 0. `'ratio` lowers to a bare [Const] instead. *)
+      (** [unchecked_dim(e, dim = ..., reason = ...)]: the value of [e], with a
+          dimension the author asserts and the dimension checker does not
+          verify. *)
   | UnitLiteral of { value : float; dim_p : int; dim_t : int; unit : string }
+      (** A literal written with a unit, such as [0.2 'per_day]. [value] is
+          already in the model's time unit, [(dim_p, dim_t)] is its dimension
+          as exponents of population and time, and [unit] is the unit as
+          written. In a days model [20 'weeks] has [value = 140.0] and
+          [unit = "weeks"]. It evaluates to [value], and the dimension checker
+          takes its dimension as fact. *)
 
-(* Which function a [ForcingBasis] evaluates (proposal §6.4): the k-th
-   B-spline; a smooth forcing's k-th whitened mode divided by kappa (kappa is
-   known only to the runtime when the window is anchored); or its linear
-   direction t_c - t_m (index 0). *)
+(** Which function a {!expr.ForcingBasis} node evaluates: [Space_spline] the
+    [index]-th B-spline basis function; [Space_whitened] the [index]-th
+    whitened curvature mode of a [smooth] coefficient form, divided by its
+    scale constant κ; [Space_linear] the slope direction [t - t_m], with [t_m]
+    the middle of the window and [index] 0. Only a [bspline] whose
+    coefficients are [smooth] has the whitened and linear spaces. *)
 and basis_space = Space_spline | Space_whitened | Space_linear
 
+(** The operand and asserted dimension of an [unchecked_dim(...)]. *)
 and unchecked_dim_expr = {
   inner:  expr;
-  dim_p:  int;
-  dim_t:  int;
-  reason: string;
+  dim_p:  int;     (** Asserted exponent of population. *)
+  dim_t:  int;     (** Asserted exponent of time. *)
+  reason: string;  (** The author's stated reason, kept for the record; it does not affect evaluation. *)
 }
 
-(* ── Derivative entries (obs/σ² gradient surface) ────────────────────────────────
+(* ── Derivative entries ───────────────────────────────────────────────────────── *)
 
-   The observation/σ² analogue of the transition [rate_grad], but classified so a
-   live-but-omitted coefficient never masquerades as a genuine zero. The autodiff
-   pass ([autodiff.ml]) classifies each differentiable position as
-   [Known | Omitted | Unsupported]; the obs/σ² driver (a later phase) collapses
-   that to the two states the IR carries — a real gradient [DEGrad], or a loud,
-   coded refusal [DEUnsupported] — so the fit-time gate consumes the reason
-   (proposal 2026-07-03-unified-obs-gradient-autodiff §4.1). An ABSENT map key is
-   a genuine zero.
-
-   Unlike a rate [Unsupported] (a compile-time error, never serialized), an obs/σ²
-   [DEUnsupported] is serialized into the IR and hashed into run_id identity, so it
-   carries a STABLE [unsupported_reason] code — the only hashed part — while the
-   human label ([node]) and message are derived for display, keeping a copy-edit
-   from re-keying run_id. New reasons append at the END (positional hash index). *)
+(** Why the compiler could not write the derivative of some quantity with
+    respect to a parameter (or, for [URNonsmoothState], a compartment). A
+    gradient-based method refuses a model that carries one for a parameter it
+    estimates; methods that use no gradient are unaffected. The wire spelling
+    of each reason is {!unsupported_reason_name}. *)
 type unsupported_reason =
-  | URLag
-  | URPeriodicCoeff
-  | URStructuralForcing
-  | URNonConstTableIndex
-  | URMod
-  | URParametricN
-  | URNonsmoothState   (* gh#275: a nonsmooth function of state (floor/ceil/abs/
-                          min/max of a compartment) in a WrtPop derivative — the
-                          derivative is not smooth, so a gradient method is refused *)
+  | URLag                 (** The parameter sets a forcing's [lag]. *)
+  | URPeriodicCoeff       (** The parameter sets a [periodic] forcing's step value or period. *)
+  | URStructuralForcing   (** The parameter reaches forcing data that is fixed when the model is built: [piecewise] or [interpolated] knots and values, or a spline's knots, window or period. *)
+  | URNonConstTableIndex  (** The parameter reaches a table cell through an index that is not constant. *)
+  | URMod                 (** The parameter enters through [mod], which has no derivative. *)
+  | URParametricN         (** The parameter reaches the [n] of a binomial or beta-binomial, which must not depend on parameters. The compiler never writes this reason; the runtime's gradient check produces it. *)
+  | URNonsmoothState      (** A derivative with respect to a compartment meets [floor], [ceil], [abs], [min] or [max] of a compartment, where it is not smooth. *)
 
+(** One entry of a gradient map: a derivative, or a refusal to give one. A
+    key absent from the map means the derivative is exactly zero.
+
+    {@json[
+      {"grad": {"param": "rho"}}
+    ]} *)
 type deriv_entry =
   | DEGrad of expr
+      (** The derivative, as an expression. *)
   | DEUnsupported of { node : string; code : unsupported_reason }
+      (** No derivative: [code] says why, and [node] names the construct for
+          messages, such as ["mod expression"]. *)
 
 (* snake_case wire names — must match the Rust `#[serde(rename_all="snake_case")]`
    on `ir::deriv::UnsupportedReason`. *)
@@ -178,8 +241,12 @@ let unsupported_reason_of_name = function
 
 (* ── Compartment ─────────────────────────────────────────────────────────────── *)
 
+(** What a compartment holds: [Integer], the default, a whole number of
+    individuals; [Real], declared [W : real], a continuous quantity such as a
+    pathogen reservoir evolved by an [ode] equation. *)
 type compartment_kind = Integer | Real
 
+(** One compartment of the expanded model, such as [S_urban]. *)
 type compartment = {
   name: string;
   kind: compartment_kind;
@@ -187,54 +254,87 @@ type compartment = {
 
 (* ── Transition ─────────────────────────────────────────────────────────────── *)
 
+(** One compartment's change in value each time a transition fires, such as
+    [("S", -1)]. A compartment named on both sides of a transition appears
+    once, with its net change, and a net change of zero is left out. *)
 type stoichiometry_entry = string * int
 
+(** A classification of a transition, for tooling; the runtime does not read
+    it. The compiler gives every transition one. *)
 type transition_metadata = {
   origin_kind:        string option;
+      (** One of ["inflow"] (the transition has no single source
+          compartment), ["outflow"] (no single destination), ["transmission"]
+          (the rate reads a compartment other than the source) or
+          ["intrinsic"] (it does not). The test sees only compartments the
+          rate names directly: one read through a [sum(...)] or a shared
+          [let] is missed, so such a transmission is labelled
+          ["intrinsic"], and a transition with two sources, [A + B --> C], is
+          labelled ["inflow"]. *)
   source_compartment: string option;
+      (** The compartment whose value the transition lowers, when there is
+          exactly one. *)
   dest_compartment:   string option;
+      (** The compartment whose value the transition raises, when there is
+          exactly one. *)
 }
 
+(** How a stepping backend draws the number of times a transition fires in a
+    step, from the step's expected count [rate * dt]. *)
 type draw_method =
   | DrawPoisson
-  (* [sigma_sq_grad] is the ∂σ²/∂param map (empty ⇒ not computed; absent key ⇒
-     genuine zero), carried alongside its expression so a derivative can never be
-     written without a slot for it (the Diffable principle, proposal §4.1). *)
+      (** The backend's ordinary random draw: a rate written [@ rate]. *)
   | DrawOverdispersed of { sigma_sq : expr; sigma_sq_grad : (string * deriv_entry) list }
+      (** [overdispersed(rate, sigma_sq)]: the rate is multiplied in each step
+          by gamma-distributed noise with mean 1 and variance
+          [sigma_sq / dt], so [sigma_sq] has the dimension of time. Only the
+          chain-binomial backend supports it. [sigma_sq_grad] is the
+          derivative of [sigma_sq] with respect to each parameter, empty when
+          not computed. *)
   | DrawDeterministic
+      (** [deterministic(rate)]: the transition fires [rate * dt] times,
+          rounded to the nearest integer, with no noise. *)
 
-(* Lineage (individual-sampling) annotation, emitted for `#[lineage]`
-   transitions (2026-05-19 proposal). Present iff the transition was
-   marked `#[lineage]` and passed the linear-in-parents check.
-
-   [parent_pool_weights] is the linear decomposition of the rate over
-   parent pools: a list of (parent compartment, per-pool weight
-   expression) pairs. For `β·S·I/N` with parent I this is
-   [("I", β·S/N)]; multi-pool `β·S·(β_I·I + β_A·A)/N` →
-   [("I", β·β_I·S/N); ("A", β·β_A·S/N)]. The runtime samples parent
-   pool b with P(b) ∝ weight_b · count_b, then uniform within the
-   pool. The weight expression is a frozen coefficient at the event
-   instant (normalizers like 1/N are evaluated at the current state),
-   so it must NOT itself reference the parent count linearly — that
-   linear dependence has been factored out into the per-pool entry. *)
+(** How a [#[lineage]] transition chooses which existing individual caused
+    each firing, so that the runtime can record a genealogy. The compiler
+    refuses a [#[lineage]] transition whose rate is not linear in the counts
+    of its parent compartments. *)
 type transition_lineage = {
   is_lineage_event:    bool;
+      (** Always [true]: the compiler writes a lineage record only for a
+          [#[lineage]] transition. *)
   parent_pool_weights: (string * expr) list;
+      (** The rate split over parent compartments: each pair is a parent and
+          its weight, the rate with that parent's count factored out. A
+          firing picks parent pool [b] with probability proportional to
+          [weight_b * count_b], then an individual uniformly within it. For
+          [beta * S * I / N] with parent [I] this is [[("I", beta * S / N)]]. *)
 }
 
+(** One transition of the expanded model: a stochastic flow between
+    compartments at a rate, such as [infection_urban]. A transition split by
+    [{ R : w_R, D : w_D }] becomes one transition per branch, its name
+    suffixed by the branch. *)
 type transition = {
   name:            string;
   stoichiometry:   stoichiometry_entry list;
   rate:            expr;
+      (** The expected number of firings per model time unit (the
+          propensity). The runtime refuses a rate that evaluates to a negative
+          number, and one that is not finite unless [--allow-degenerate-rates]
+          makes it zero. *)
   metadata:        transition_metadata option;
   draw_method:     draw_method;
-  rate_grad:       (string * deriv_entry) list;  (** ∂rate/∂param, classified [Grad | Unsupported] (a [grad_map]); empty if not computed. A live-but-omitted coefficient is a serialized [DEUnsupported] the fit gate refuses on (gh#342). *)
-  rate_state_grad: (string * deriv_entry) list;  (** ∂rate/∂compartment, the [rate_grad] sibling keyed by compartment ([J_x]'s ingredient for the ODE forward sensitivities, gh#275). Empty until the [WrtPop] autodiff pass emits it. *)
-  lineage:         transition_lineage option;  (** Some iff `#[lineage]`; None for ordinary transitions. *)
+  rate_grad:       (string * deriv_entry) list;  (** The derivative of [rate] with respect to each parameter, keyed by parameter name; empty when not computed. *)
+  rate_state_grad: (string * deriv_entry) list;  (** The derivative of [rate] with respect to each compartment it reads, keyed by compartment name, which the ODE gradient needs; empty when not computed, for instance under [camdlc --no-state-grad]. *)
+  lineage:         transition_lineage option;  (** Present exactly for a [#[lineage]] transition. *)
 }
 
 (* ── ODE equation ────────────────────────────────────────────────────────────── *)
 
+(** The time derivative of one real compartment, from an [ode] block:
+    [ode { W = xi * I - delta * W }] gives [compartment = "W"] and the
+    derivative of [W] per model time unit. *)
 type ode_equation = {
   compartment: string;
   derivative:  expr;
@@ -242,25 +342,42 @@ type ode_equation = {
 
 (* ── Time functions ──────────────────────────────────────────────────────────── *)
 
+(** A [sinusoidal] forcing: [baseline + amplitude * sin(2π (t - phase) / period)].
+    [phase] and [period] are in model time units; [phase] is a shift in time,
+    not an angle. *)
 type sinusoidal = { amplitude: expr; period: expr; phase: expr; baseline: expr }
+
+(** A [piecewise] forcing, a step function: [values[0]] before the first
+    breakpoint, then [values[i + 1]] from [breakpoints[i]] on. A breakpoint may
+    be an {!expr.ObsAnchor}. *)
 type piecewise  = { breakpoints: expr list; values: expr list }
+
+(** An [interpolated] forcing through the knots [(times[i], values[i])].
+    [method_] is ["linear"] (straight lines between knots, held at the end
+    values outside them), ["constant"] (the value of the last knot at or
+    before [t]) or ["spline"] (a cubic spline).
+    A forcing declared [data = "path"] has its knots read from the file at
+    compile time. *)
 type interpolated = { times: expr list; values: expr list; method_: string }
+
+(** A [periodic] forcing: [period] split into [List.length values] equal
+    intervals, each holding its value, repeating forever. *)
 type periodic   = { period: expr; values: expr list }
-(* gh#59: finite Fourier series with N estimable cos/sin pairs.
-   `harmonics[k] = (a_k, b_k)` for k = 1, 2, ... — k=0 is the
-   baseline (caller modulates as `1 + sum_k a_k cos + b_k sin`). *)
+
+(** A [fourier] forcing:
+    [Σ_k a_k cos(2π k t / period) + b_k sin(2π k t / period)], with
+    [harmonics] holding [(a_k, b_k)] for [k = 1, 2, ...] in order. It has no
+    constant term: a model writes [1 + f] for a modulation around 1. *)
 type fourier = { period: expr; harmonics: (expr * expr) list }
-(* gh#59 (revised 2026-05-12): periodic B-spline with uniform knots.
-   Knots are implicit: dx = period / n_basis, knots at k*dx for
-   k = -degree..n_basis+degree. coefs has length = n_basis. degree
-   defaults to 3 (cubic). Standard de Boor recurrence + periodic
-   wrap-fold; algorithm from de Boor 1978 §X, Eilers & Marx 1996,
-   Wand & Ormerod 2008. *)
-(* How a spline's basis sum g(t) = Σ c_k B_k(t) becomes the forcing value:
-   identity (f = g) or log (f = exp g). Proposal
-   2026-10-27-estimable-bsplines §4.4. Serialized only when log. *)
+
+(** How a spline's basis sum [g(t) = Σ c_k B_k(t)] becomes the forcing value:
+    [Link_identity] gives [g], [Link_log] gives [exp g], positive whatever the
+    coefficients. It serialises only when it is [Link_log]. *)
 type spline_link = Link_identity | Link_log
 
+(** A [periodic_spline] forcing: a periodic B-spline of [degree] with
+    [n_basis] equally spaced knots over one [period], and one coefficient per
+    basis function. *)
 type periodic_spline = {
   period:  expr;
   n_basis: int;
@@ -269,25 +386,37 @@ type periodic_spline = {
   link:    spline_link;
 }
 
-(* The knots of a clamped `bspline` forcing (proposal §4.3). [Knots_uniform]
-   keeps its window ends as single expressions, because an end may be an
-   observation anchor the runtime substitutes; [n_intervals] equal intervals
-   span it. [Knots_explicit] lists strictly increasing breakpoints, first and
-   last being the window. Both are structural. *)
+(** The knots of a [bspline] forcing. Both forms are fixed when the model is
+    built: a parameter cannot move them, though an end may be an
+    {!expr.ObsAnchor}. *)
 type bspline_knots =
   | Knots_uniform  of { lower : expr; upper : expr; n_intervals : int }
+      (** [window = [lower, upper]] cut into [n_intervals] equal intervals. *)
   | Knots_explicit of expr list
+      (** [breakpoints = [...]], strictly increasing; the first and last are
+          the window's ends. *)
 
-(* One live expression per basis function, or the whitened penalized curve
-   w = level 1 + slope (xi - t_m 1) + (scale/kappa) M modes of proposal §6.3,
-   whose M the runtime builds from the resolved knots; kappa =
-   sqrt(K - 2) per^(3/2), [per] the reference duration (structural). *)
+(** The coefficients of a [bspline] forcing. *)
 type spline_coefs =
   | Coefs_explicit of expr list
+      (** One coefficient per basis function. *)
   | Coefs_smooth of { level : expr; slope : expr; scale : expr; modes : expr list; per : expr }
+      (** [smooth(level = ..., slope = ..., scale = ..., modes = ..., per = ...)]:
+          a curve with penalised curvature,
+          [level + slope * (t - t_m) + (scale / κ) * M * modes] on the basis,
+          where [t_m] is the middle of the window, [M] whitens the curvature
+          penalty and is built by the runtime from the knots, [modes] has two
+          fewer entries than there are basis functions, and
+          [κ = sqrt(K - 2) * per^(3/2)] for [K] basis functions and the
+          reference duration [per].
 
-(* A clamped B-spline of [degree] over a window, held at its end values
-   outside it; n_intervals + degree basis functions. *)
+          {@camdl[
+            coefs = smooth(level = a_b, slope = b_b, scale = tau_b, modes = z, per = 1 'weeks)
+          ]} *)
+
+(** A [bspline] forcing: a clamped B-spline of [degree] over its window, held
+    at its end values outside it, with [n_intervals + degree] basis
+    functions. *)
 type bspline = {
   knots:  bspline_knots;
   degree: int;
@@ -295,172 +424,193 @@ type bspline = {
   link:   spline_link;
 }
 
+(** The shape of a forcing, one constructor per forcing type keyword. *)
 type time_func_kind =
   | Sinusoidal    of sinusoidal
   | Piecewise     of piecewise
   | Interpolated  of interpolated
   | Periodic      of periodic
-  | Fourier       of fourier            (* gh#59 *)
-  | PeriodicSpline of periodic_spline   (* gh#59 *)
-  | BSpline       of bspline            (* proposal 2026-10-27-estimable-bsplines *)
+  | Fourier       of fourier
+  | PeriodicSpline of periodic_spline
+  | BSpline       of bspline
 
-(* Compile-time provenance for a forcing declared `data = "path"`. The knots
-   are read from the file and INLINED into [Interpolated] at compile time, so
-   the runtime never opens it — which is exactly why the file has to be
-   recorded here. Without this, a completed fit's provenance is silently
-   incomplete on the one input most likely to change underneath it: the file
-   is not named in the IR, not named in the run record, and not recoverable
-   from the baked values.
-
-   NEITHER FIELD IS RUN IDENTITY (see `Model::hash_into` in
-   `rust/crates/runid/src/ir_hash.rs`, and the two exclusion tests beside it):
-
-   - [sha256] is redundant with the inlined knots, which ARE hashed. A file
-     edit that changes a value already re-keys through the values. Folding
-     the byte hash in as well would additionally re-key on edits that change
-     no compiled value — a comment line, a trailing newline, CRLF, a column
-     reorder, rows for a stratum this model does not read — i.e. it would
-     invalidate the cache for a model that is bit-for-bit the same model.
-   - [path] must not re-key: the SAME bytes read from a second location (a
-     copy, a checkout at a different relative prefix) are the same model.
-
-   Both are therefore provenance in the `#[run_input(provenance)]` sense:
-   recorded and displayed, never hashed. *)
+(** The file a [data = "path"] forcing's knots were read from. The compiler
+    copies the knots into the forcing, so the runtime never opens the file;
+    this record keeps the provenance. Neither field is part of the run's
+    identity: the copied values already are, and the same bytes at another
+    path, or an edit that changes no value read, are the same model. *)
 type data_source = {
-  (* The path AS WRITTEN in the model, not the resolved absolute one, so it
-     stays portable and comparable across machines and checkouts. *)
   path:   string;
-  (* Lowercase 64-char SHA-256 of the file's raw bytes — reproducible with
-     `shasum -a 256 <path>` from the model's directory. *)
+      (** The path as written in the model, not resolved, so it stays
+          comparable across machines and checkouts. *)
   sha256: string;
+      (** The lowercase hexadecimal SHA-256 of the file's bytes, as
+          [shasum -a 256 <path>] prints it from the model's directory. *)
 }
 
+(** One forcing of the expanded model: a function of time, named for
+    {!expr.TimeFunc}, such as [seasonal_p1] for the cell [p1] of an indexed
+    forcing. *)
 type time_function = {
   name: string;
   kind: time_func_kind;
-  (* Required declared dimension from the forcing's tier-3 unit literal
-     (e.g. `'count`, `'per_year`, `'ratio`). The dim-checker uses this
-     authoritatively. The expander has already applied the scale
-     factor to stored values so runtime interpolation returns values
-     in the model's `time_unit`. GH #8. *)
   dim:  int * int;
-  (* gh#314: optional evaluation-time shift. When [Some lag], every forcing
-     kind is evaluated at [t − lag] instead of [t] via one shared shift.
-     [lag] is a duration expression already rescaled to the model's
-     `time_unit` (a literal like `10 'days`, or a `Param` reference — the
-     lag-as-parameter case is a primary motivation). [None] ⇒ no shift,
-     byte-identical to a forcing declared without `lag`. *)
+      (** The dimension of the forcing's declared unit, as exponents of
+          population and time: [(0, -1)] for ['per_day], [(1, 0)] for
+          ['count], [(0, 0)] for ['ratio]. Its values are already scaled to
+          the model's time unit. *)
   lag:  expr option;
-  (* The external file this forcing's knots were read from, when it declared
-     `data = "path"`. [None] for every other forcing kind (and for the
-     `table =` / inline `times`/`values` forms of `interpolated`), which is
-     why it serializes only when present. *)
+      (** A delay, in model time units: when present the forcing is
+          evaluated at [t - lag]. It may be a parameter. *)
   data_source: data_source option;
+      (** The file the knots came from, for a forcing declared
+          [data = "path"]. *)
 }
 
 (* ── Tables ──────────────────────────────────────────────────────────────────── *)
 
-(* Table out-of-range lookups fail loud (a model bug), never silently
-   clamp/flat-extrapolate or wrap — those masked errors with surprising
-   behaviour and were removed (the evaluator was built but unselectable). *)
+(** What a lookup outside a table does. The only policy is a runtime error. *)
 type oob_policy = Error
 
+(** Where a table's values come from. *)
 type table_source =
-  | Inline   of expr list  (** values resolved at compile time *)
-  | External of string     (** logical name; values supplied via --table name=file at runtime *)
+  | Inline   of expr list  (** The values in row-major order (the last index varies fastest), each an expression of constants and parameters. *)
+  | External of string     (** Values supplied when the model is run, under this name, from [external("name")]; the runtime refuses to build a model whose external table was not supplied. *)
 
+(** A table of the expanded model, read by {!expr.TableLookup}. A table over
+    [patch × patch] declared as [[[0.9, 0.1], [0.1, 0.9]]] holds the four
+    values [[0.9; 0.1; 0.1; 0.9]]. *)
 type table = {
   name:          string;
   source:        table_source;
   out_of_bounds: oob_policy;
-  (* Optional cell-type annotation (gh#32). When present, declares the
-     dimensional kind of every value cell — same vocabulary as
-     [parameter.param_kind] ("rate", "probability", "positive",
-     "count", "real"). Absent = dimensionless cells (legacy
-     behaviour). The dim-checker treats this as authoritative, the
-     same way it treats `parameter.param_kind`. *)
   cell_kind:     string option;
+      (** The declared kind of every cell, from a table declared
+          [aging_rate : age :rate = [...]]: a {!param_kind} keyword, as a
+          string such as ["rate"]. Absent, the cells are dimensionless. *)
 }
 
 (* ── Interventions ───────────────────────────────────────────────────────────── *)
 
+(** A recurring fire schedule, in model time units. Without [at_day] it fires
+    at [start], [start + period], ... up to [end_]; with [at_day] it fires at
+    [at_day + k * period] for each [k] that falls in the window. [end_] is NaN,
+    serialised as [null], when it was taken from a model horizon that is still
+    an unresolved {!anchored_time}. *)
 type recurring_schedule = { start: float; period: float; end_: float; at_day: float option }
 
+(** When a scheduled intervention or event fires. *)
 type intervention_schedule =
   | AtTimes     of float list
+      (** At these model times, from an [at [...]] list whose entries are
+          all plain numbers once compiled. *)
   | AtTimesExpr of expr list
-  (* gh#69: parametric `at [...]` lists. Each element is an arbitrary IR
-     expression — typically `Param "t_seed"` or arithmetic of parameters
-     and constants. The runtime evaluates each expression once per
-     simulation start against the current `params` vector to obtain the
-     concrete fire times. The expander emits the legacy `AtTimes` form
-     when every entry is a compile-time constant so existing golden IRs
-     stay byte-identical. *)
+      (** At these times, each an expression the runtime evaluates against
+          the parameters when a simulation starts, so a fire time can be a
+          parameter: [at [t_seed]]. The compiler writes this form for any list
+          with an entry that does not compile to a bare number, including a
+          constant date expression such as [at [origin + 20 'weeks]]. *)
   | Recurring of recurring_schedule
 
+(** [transfer(fraction = f, from = src, to = dst)]: moves the fraction [f] of
+    [src] into [dst]. *)
 type fraction_transfer = { src: string; dst: string; fraction: expr }
+
+(** [transfer(count = n, from = src, to = dst)]: moves [n] individuals from
+    [src] into [dst]. *)
 type absolute_transfer = { src: string; dst: string; count: expr }
+
+(** Sets a compartment to a value. *)
 type set_action        = { compartment: string; value: expr }
+
+(** [add(C, n)]: adds [n] to compartment [C]. *)
 type add_action        = { add_compartment: string; add_count: expr }
 
+(** One change an intervention or event makes to the state when it fires. *)
 type action =
   | FractionTransfer of fraction_transfer
   | AbsoluteTransfer of absolute_transfer
   | Set              of set_action
   | AddAction        of add_action
 
-(* Distinguishes the two DSL constructs that both lower to [intervention]:
-   `interventions {}` (scenario-toggled) and `events {}` (fire every substep
-   unconditionally). Replaces the former [always_active: bool] (gh#107) — a
-   named enum names the distinction and extends to a future kind (e.g.
-   reactive, gh#204) instead of bolting on a second bool. *)
+(** Whether scenarios switch an intervention on, or it is always on. Both
+    kinds fire at the times their {!fire_source} gives. *)
 type intervention_kind =
-  | Scenario   (* interventions {} — toggled by enable/disable/set/scale *)
-  | Event      (* events {}        — fires unconditionally every substep   *)
+  | Scenario   (** From [interventions {}] or [reactive_interventions {}]: inactive unless a scenario or [--enable] enables it. *)
+  | Event      (** From [events {}]: active unless a scenario or [--disable] disables it. *)
 
-(* gh#204. Reactive trigger predicate — a dedicated ADT, NOT the shared [expr]:
-   boolean-valued by construction, and its observed() leaves cannot leak into
-   rate expressions. Wire strings mirror the Rust serde (snake_case). *)
+(** The comparison of a reactive trigger. *)
 type cmp_op = CmpLt | CmpLe | CmpGt | CmpGe | CmpEq | CmpNeq
 
+(** How a reactive trigger reduces an observation stream's history to one
+    number. [RedLatest], [observed(s)], is the most recent value and ignores
+    the window. [RedSum], [sum_observed(s, window = w)], is the sum over the
+    trailing window: observations later than [t - window] and no later than
+    [t], the current time. [RedMean] and [RedMax] are the mean and maximum over that window;
+    no model syntax produces them. A window that holds no observation reduces
+    to [0.0]. *)
 type obs_reducer = RedLatest | RedSum | RedMean | RedMax
-  (* observed(s) -> RedLatest; sum_observed(s, window=..) -> RedSum *)
 
+(** The quantity a reactive trigger watches: the simulated observations of a
+    stream, the data a policymaker would see, never the latent state. *)
 type trigger_quantity =
   | TQObserved of { stream : string; window : float option; reducer : obs_reducer }
+      (** The observations of the expanded stream [stream], over a trailing
+          window in model time units ([None]: the latest observation only),
+          reduced by [reducer]. *)
 
+(** The value a reactive trigger compares against. *)
 type trigger_threshold =
   | TTConst of float
-  | TTParam of string
+  | TTParam of string  (** A parameter, by name. *)
 
+(** The condition of a reactive intervention: a boolean combination of
+    comparisons, written after [when]. It is its own type, not an {!expr}, so
+    it is boolean by construction and its observation reads cannot appear in a
+    rate. *)
 type trigger_expr =
   | TECmp of trigger_quantity * cmp_op * trigger_threshold
   | TEAnd of trigger_expr * trigger_expr
   | TEOr  of trigger_expr * trigger_expr
   | TENot of trigger_expr
 
-(* gh#204. A reactive (state/observation-triggered) fire source: fire when
-   [when_] holds, [after] a non-negative lag, optionally rate-limited by
-   [cooldown]. The action grammar and effect resolution are shared with
-   scheduled interventions — only the fire source differs. *)
+(** The condition and timing of a reactive intervention. The entry
+
+    {@camdl[
+      reactive_interventions {
+        sia2 : when sum_observed(weekly_cases, window = 28 'days) >= 5 {
+          after  = 21 'days
+          action = transfer(count = 10, from = S, to = V)
+          once   = true
+        }
+      }
+    ]}
+
+    applies its action 21 days after the 28-day sum of [weekly_cases] first
+    reaches 5, and fires no more. *)
 type reactive_trigger = {
-  when_:    trigger_expr;    (* trigger predicate; wire key "when" *)
-  after:    float;          (* non-negative lag before the effect fires    *)
-  once:     bool;           (* fire-and-disable; mutually exclusive w/ cooldown *)
-  cooldown: float option;   (* min time between firings when [once = false] *)
+  when_:    trigger_expr;    (** The condition, written after [when]; it serialises under ["when"]. *)
+  after:    float;          (** The delay, in model time units and not negative, between the condition holding and the actions applying. *)
+  once:     bool;           (** Fires at most once. The compiler refuses [once] together with a [cooldown]. *)
+  cooldown: float option;   (** The least time, in model time units, between firings. *)
 }
 
-(* gh#204. How an intervention's fire times are produced — orthogonal to
-   [intervention_kind] (the toggling/structural axis). A reactive policy is
-   [kind = Scenario, fire = Reactive ..]; splitting the fire source from the
-   kind makes the illegal pairings unrepresentable. *)
+(** What decides when an intervention fires. *)
 type fire_source =
   | Scheduled of intervention_schedule
   | Reactive  of reactive_trigger
+      (** Fires when observed data meet a condition. Only the chain-binomial
+          backend's forward simulation runs these; every other backend, and
+          every inference method, refuses a model that carries one. *)
 
+(** One intervention or event of the expanded model: actions applied to the
+    state when its fire source says so. *)
 type intervention = {
   name:          string;
   base_name:     string option;
+      (** For a cell of an indexed intervention, the name it was declared
+          under, by which scenarios enable or disable the whole family;
+          [None] for an intervention declared without indices. *)
   fire:          fire_source;
   actions:       action list;
   kind:          intervention_kind;
@@ -468,66 +618,87 @@ type intervention = {
 
 (* ── Observation model ───────────────────────────────────────────────────────── *)
 
+(** What the model predicts for an observation stream: the [projected = ...]
+    line. The flow projections ([CumulativeFlow], [CumulativeFlowSum],
+    [FlowRatio]) accumulate over the period each data row covers, which the
+    stream's [covers] states; the others are read at the observation time. *)
 type projection =
   | CumulativeFlow    of string
+      (** [incidence(tr)]: how many times one transition fired in the row's
+          period. *)
   | CurrentPop        of string
+      (** The value of one compartment at the observation time. *)
   | CurrentPopSum     of string list
+      (** The sum of several compartments at the observation time, such as a
+          bare stratified compartment name. *)
   | DerivedExpr       of expr
-  (* New variants append last — keeps parity with the Rust run_id hash,
-     whose variant indices are positional and permanent. *)
+      (** Any other expression of the state, read at the observation time,
+          such as [projected = R / N]. *)
   | CumulativeFlowSum of string list
-  (* The ratio of two unit-weighted flow sums accumulated over the same row
-     window — `Σ numerator / Σ denominator`, read when the window closes.
-     Interval-valued and dimensionless; NaN when the denominator flow is 0.
-     Each side is the object [CumulativeFlowSum] carries, and is never empty
-     (proposal 2026-09-09-proportion-of-flows-over-a-window). *)
+      (** The total firings of several transitions in the row's period, such
+          as [sum(p in patch, incidence(infection[p]))]. *)
   | FlowRatio         of { numerator : string list; denominator : string list }
+      (** The firings of the [numerator] transitions divided by those of the
+          [denominator] transitions, both counted over the row's period:
+          [incidence(die_comm) / (incidence(die_comm) + incidence(die_fac))].
+          Neither list is empty. It is NaN when the denominator is zero. *)
 
-(* Each differentiable likelihood argument carries its ∂arg/∂param map (empty ⇒
-   not computed; absent key ⇒ genuine zero), the obs analogue of the transition
-   [rate_grad]. `n` (Binomial/BetaBinomial) has NO grad — it must be θ-independent
-   (rounded to an integer). Proposal 2026-07-03 §4.1, §4.4/§4.5. *)
+(** A derivative with respect to each parameter, keyed by parameter name. An
+    absent key is an exact zero; an empty map means the derivatives were not
+    computed. *)
 type grad_map = (string * deriv_entry) list
 
-(* A differentiable likelihood argument: its expression paired with its
-   per-parameter classified gradient. Bundling the two means a gradient can never
-   be written without a slot for its expression; and the producing pass
-   ([Autodiff.differentiate_likelihood]) reconstructs every [diffable] fully, so a
-   new differentiable argument is a compile error until it is differentiated
-   (proposal 2026-07-06 §4.1/§4.3). `n` (Binomial/BetaBinomial) is NOT a
-   [diffable] — it is θ-independent and carries no gradient. On the wire a
-   [diffable] is the nested shape [{"expr": …, "grad": …}] (grad omitted when
-   empty), so a field [mean] serialises as [{"mean": {"expr": …, "grad": …}}]. *)
-(* [proj_grad] is ∂expr/∂[Projected] — the observation FACTOR-2 chain ingredient
-   (gh#275): [None] = a genuine zero (the argument does not depend on the
-   projection output), [Some (Grad e)] = the derivative, [Some (DEUnsupported _)]
-   = a nonsmooth-of-projection refusal the fit-time gate consumes. Sibling of
-   [grad] (∂expr/∂θ). *)
+(** A likelihood argument, together with its derivatives. For
+    [mean = rho * projected]:
+
+    {@json[
+      {"expr": {"bin_op": {"op": "mul", "left": {"param": "rho"}, "right": {"projected": null}}},
+       "grad": {"rho": {"grad": {"projected": null}}},
+       "proj_grad": {"grad": {"param": "rho"}}}
+    ]}
+
+    [grad] is the derivative of [expr] with respect to each parameter;
+    [proj_grad] its derivative with respect to {!expr.Projected}, [None] when
+    [expr] does not depend on it. *)
 type diffable = { expr: expr; grad: grad_map; proj_grad: deriv_entry option }
+
+(** The arguments of [poisson(rate = ...)]. *)
 type poisson_likelihood      = { rate: diffable }
+
+(** The arguments of [neg_binomial(mean = ..., r = ...)]: variance
+    [mean + mean² / dispersion]. *)
 type neg_binomial_likelihood = { mean: diffable; dispersion: diffable }
+
+(** The arguments of [normal(mean = ..., sd = ...)]. *)
 type normal_likelihood       = { mean: diffable; sd: diffable }
+
+(** The arguments of [binomial(n = ..., p = ...)]. [n] is rounded to an
+    integer and must not depend on parameters, so it carries no derivative;
+    it is often a data column, [n = tested]. *)
 type binomial_likelihood     = { n: expr; p: diffable }
+
+(** The arguments of [beta_binomial(n = ..., alpha = ..., beta = ...)], with
+    [n] as for {!binomial_likelihood}. *)
 type beta_binomial_likelihood = { n: expr; alpha: diffable; beta: diffable }
-(* Beta likelihood for a continuous proportion [x ∈ (0, 1)] — an observed rate,
-   coverage, or positivity given directly as a fraction (not a k-of-n count, which
-   is [beta_binomial_likelihood]). Mean-linked like [neg_binomial_likelihood]: the
-   model predicts [mean] and [concentration] (φ) is the dispersion knob, with shape
-   parameters [α = mean·φ], [β = (1 − mean)·φ]. *)
+
+(** The arguments of [beta(mean = ..., concentration = ...)], for a proportion
+    in [(0, 1)] reported directly rather than as [k] of [n]: shape parameters
+    [mean * concentration] and [(1 - mean) * concentration]. *)
 type beta_likelihood         = { mean: diffable; concentration: diffable }
+
+(** The argument of [bernoulli(p = ...)]. *)
 type bernoulli_likelihood    = { p: diffable }
-(* Zero-inflated negative binomial: a structural-zero mass [pi] mixed with a
-   NegBinomial count. `P(Y=0) = pi + (1-pi)·f(0)`, `P(Y=k>0) = (1-pi)·f(k)`,
-   with `f` the NegBinomial(mean, dispersion) pmf. All three arguments are
-   [diffable]: the family is differentiable in closed form (the gradient
-   factors as `(1 - w)` times the NegBinomial gradient, with `w` the posterior
-   probability that an observed zero is structural), so it is usable under
-   gradient-based inference like every other family. The surface is the
-   `zero_inflated(base = neg_binomial(...), pi = ...)` wrapper, desugared to
-   this flat variant at parse time. See §12.2. *)
+
+(** The arguments of
+    [zero_inflated(base = neg_binomial(mean = ..., r = ...), pi = ...)]: a
+    zero with probability [pi], otherwise a negative binomial count, so
+    [P(Y = 0) = pi + (1 - pi) f(0)] and [P(Y = k) = (1 - pi) f(k)] for
+    [k > 0]. *)
 type zi_neg_binomial_likelihood =
   { mean: diffable; dispersion: diffable; pi: diffable }
 
+(** The distribution of an observation given its projected value: the
+    right-hand side of [cases ~ ...]. *)
 type likelihood =
   | Poisson              of poisson_likelihood
   | NegBinomial          of neg_binomial_likelihood
@@ -538,13 +709,10 @@ type likelihood =
   | Bernoulli            of bernoulli_likelihood
   | ZeroInflatedNegBinomial of zi_neg_binomial_likelihood
 
-(* DSL parameter-type keyword (the [param_kind] production in parser.mly:
-   `rate`, `probability`, `count`, `positive`, `real`, `instant`,
-   `duration`). Was a free [string option]; the typed enum is rejected at IR
-   deserialisation rather than re-parsed by every consumer (the gh#191
-   stringly-typed surface). The dimensional meaning of each kind lives in
-   [Dimcheck.kind_dim]; `instant`/`duration` are time-typed ([T]) per
-   the 2026-05-22 calendar-time proposal. *)
+(** The kind keyword of a parameter, constant or data column, which fixes its
+    dimension unless an explicit [dim] annotation does: [Rate] is per time,
+    [Probability] dimensionless, [Count] population, [Instant] and [Duration]
+    time; [Positive] and [Real] leave the dimension to be inferred. *)
 type param_kind =
   | Rate
   | Probability
@@ -573,120 +741,145 @@ let param_kind_of_name = function
   | "duration"    -> Some Duration
   | _             -> None
 
+(** [emit_schedule = every step]: from [start] to [end_], in model time units.
+    The compiler sets [start] and [end_] to the model's horizon; [end_] is NaN,
+    serialised as [null], while that horizon is an unresolved
+    {!anchored_time}. *)
 type regular_obs_schedule = { start: float; step: float; end_: float }
 
+(** When [simulate] emits a stream's synthetic observations. *)
 type observation_schedule =
   | ObsAtTimes of float list
   | ObsRegular of regular_obs_schedule
 
-(* The role of a declared file column (2026-06-10 observation data-entry §2.2):
-   - [RoleTime]    — the time axis (the FIT time source).
-   - [RoleDim d]   — a model dimension `d`; values bind to its levels.
-   - [RoleValue k] — an observed value of DSL type `k` (count/real/…). *)
+(** What one declared data column of a stream holds:
+    [columns { time : time, patch : dim, cases : count }]. *)
 type obs_column_role =
   | RoleTime
+      (** The observation time. A stream has either this or a window pair. *)
   | RoleDim   of string
+      (** A level of the named dimension, which routes a row to its cell. *)
   | RoleValue of param_kind
-  (* gh#833: the opening / closing boundary of the period this row covers.
-     Declared as a pair, and mutually exclusive with [RoleTime] — a stream
-     names exactly one set of temporal columns, either a time column or a
-     window pair. [RoleWindowStop] doubles as the stream's fit time source. *)
+      (** A value of that kind: the observed value, or a column a
+          likelihood reads as {!expr.ObsColumnRef}. *)
   | RoleWindowStart
+      (** The start of the period the row covers. *)
   | RoleWindowStop
+      (** The end of the period the row covers, which also serves as the
+          row's observation time. *)
 
+(** One declared data column: its header name and role. *)
 type obs_column = {
   col_name: string;
   col_role: obs_column_role;
 }
 
-(* What each row of an interval stream covers (gh#833).
+(** The period each data row of a flow stream covers, from its
+    [covers = ...] line, with the calendar arithmetic already done.
 
-   The FULLY-EXPANDED form — every surface spelling lowers here and the
-   expander does all the calendar arithmetic, so the Rust runtime never needs
-   to know how long a day is in the model's axis units. [offset] and [span]
-   are already in AXIS units. With [t] the row's own label and [one_day]
-   converted likewise:
+    With [t] the row's time and [one_day] one day in model time units, the
+    forms lower as follows; the last column is the period of a row dated
+    11 July, with [d] seven days:
 
-     covers = day(t)        ->  CoversFrom  (0.,      one_day)
-     starting_on (t, d)     ->  CoversFrom  (0.,      d)
-     ending_on   (t, d)     ->  CoversUntil (one_day, d)   11 Jul, 7d: [5 Jul, 12 Jul)
-     closing_at  (t, d)     ->  CoversUntil (0.,      d)   11 Jul, 7d: [4 Jul, 11 Jul)
-     window_start/_stop     ->  CoversWindowColumns
+    {v
+      covers = day(t)        CoversFrom  (0, one_day)   [11 Jul, 12 Jul)
+      starting_on(t, d)      CoversFrom  (0, d)         [11 Jul, 18 Jul)
+      ending_on(t, d)        CoversUntil (one_day, d)   [5 Jul, 12 Jul)
+      closing_at(t, d)       CoversUntil (0, d)         [4 Jul, 11 Jul)
+      window columns         CoversWindowColumns        as written
+    v}
 
-   Two anchors rather than one because the label pins a different end in each
-   case: [ending_on] and [closing_at] fix the row's CLOSE and measure
-   backwards. They differ by a whole day and are near-synonyms in English:
-   "week ending 11 July" INCLUDES the 11th, so the close is the 12th;
-   "closing at 11 July" EXCLUDES it — the label is the closing boundary, the
-   reading of pomp's accumulators and of camdl's own `simulate --obs`.
-
-   A uniform form's span is a CONSTANT. A width that varies row to row is
-   expressible as [CoversWindowColumns], which states both boundaries
-   outright; a second spelling for it (a duration naming a data column) says
-   the same thing as the primitive and would need its own convention about
-   whether the labelled day is included — the exact off-by-one class this
-   work exists to remove. *)
+    [ending_on] and [closing_at] differ by a day: a "week ending 11 July"
+    includes the 11th, while a period "closing at 11 July" ends at its
+    start. *)
 type covers =
-  (* start = t + offset ; stop = start + span *)
   | CoversFrom  of float * float
-  (* stop = t + offset ; start = stop - span *)
+      (** [(offset, span)]: the period starts at [t + offset] and lasts
+          [span]. *)
   | CoversUntil of float * float
-  (* start and stop are read per row from the window columns. The only form
-     that can state a gap between consecutive rows, or a width that varies
-     row to row. *)
+      (** [(offset, span)]: the period ends at [t + offset] and lasts
+          [span]. *)
   | CoversWindowColumns
+      (** The period's start and end are read from each row's
+          [window_start] and [window_stop] columns: the only form whose rows
+          can differ in length or leave gaps. *)
 
+(** One observation stream of the expanded model: a data column, what the
+    model predicts for it, and the distribution relating the two. A stream
+    indexed over [patch] becomes one per level, each scoring the rows of its
+    level:
+
+    {@json[
+      {"name": "cases_urban", "source": "cases",
+       "columns": [{"name": "time", "role": "time"},
+                   {"name": "patch", "role": {"dim": "patch"}},
+                   {"name": "cases", "role": {"value": "count"}}],
+       "scored": "cases",
+       "stratum": [{"dim": "patch", "level": "urban"}],
+       "covers": {"kind": "until", "offset": 0.0, "span": 7.0},
+       "projection": {"cumulative_flow": "infection_urban"}}
+    ]} *)
 type observation_model = {
   name:          string;
-  (* `from <label>` — the data SOURCE key the Rust loader binds a file to
-     (`--data label=file`); defaults to [name]. Named [obs_source] (not
-     [source]) to avoid colliding with [table.source : table_source]; the IR
-     JSON key is "source". *)
   obs_source:    string;
-  (* The explicit file schema (`columns { name : role }`). The Rust loader
-     binds the file's columns by these names. *)
+      (** The name a data file is bound to, [--data cases=file.tsv]: the
+          [from] clause, or the stream's declared name. It serialises as
+          ["source"]. *)
   columns:       obs_column list;
-  (* The `~` LHS — the declared value column the likelihood scores. *)
   scored:        string;
-  (* SIMULATE-only emission cadence (`emit_schedule`); the fit path reads the
-     data file's time column and never consults this. [None] for a fit-only
-     model that omits it. *)
+      (** The column the likelihood scores: the left-hand side of [~]. *)
   emit_schedule: observation_schedule option;
-  (* For a stratified observation stream (`cases[p in patch] ~ ...`), the
-     (dimension, level) pairs identifying which stratum cell this expanded
-     leaf observes — e.g. [("patch", "p1")]. Empty ([]) for an unstratified
-     stream. The Rust long-form loader routes each data-file row to the leaf
-     whose [stratum] matches the row's `: dim` column values BY NAME. *)
+      (** When [simulate] emits synthetic observations of the stream; a fit
+          reads the times from the data instead. *)
   stratum:       (string * string) list;
-  (* What each row covers (gh#833) — the `covers = ...` declaration, or
-     [CoversWindowColumns] when the stream carries a window pair instead. An
-     accumulating projection always carries [Some]: the expander requires the
-     declaration (E350) because no default is right — the same date column
-     means three different spans depending on the source. [None] is a state
-     read (`prevalence(...)`), which has no window. *)
+      (** The [(dimension, level)] pairs of the cell this stream observes;
+          empty for a stream declared without indices. *)
   covers:        covers option;
+      (** The period each row covers. Present for every flow projection,
+          for which the compiler requires a [covers] line; absent for a
+          stream read at an instant. *)
   projection:    projection;
-  (* ∂projection/∂compartment for a [DerivedExpr] (nonlinear) projection — the
-     WrtPop differentiation the ODE observation gradient's factor-2 chain consumes
-     (gh#275 §1h). Empty for a linear projection (CurrentPop*/CumulativeFlow* — a
-     trivial selection). The [rate_state_grad] analogue for a projection. *)
   projection_state_grad: (string * deriv_entry) list;
+      (** For a {!projection.DerivedExpr}, its derivative with respect to each
+          compartment, which the ODE gradient needs; empty otherwise. *)
   likelihood:    likelihood;
 }
 
 (* ── Parameters ──────────────────────────────────────────────────────────────── *)
 
+(** [uniform(lower = ..., upper = ...)]. *)
 type uniform_prior    = { lower: float; upper: float }
+
+(** [normal(mean = ..., sd = ...)]. *)
 type normal_prior     = { mean: float; sd: float }
+
+(** [log_normal(mu = ..., sigma = ...)]: [log X ~ Normal(mu, sigma)]. *)
 type log_normal_prior = { mu: float; sigma: float }
+
+(** [half_normal(sigma = ...)]: the absolute value of a [Normal(0, sigma)]. *)
 type half_normal_prior = { sigma: float }
+
+(** [beta(alpha = ..., beta = ...)]. *)
 type beta_prior       = { alpha: float; beta: float }
+
+(** [gamma(shape = ..., rate = ...)]. *)
 type gamma_prior      = { shape: float; rate: float }
+
+(** [exponential(rate = ...)]. *)
 type exponential_prior = { rate: float }
+
+(** [log_uniform(lower = ..., upper = ...)]:
+    [log X ~ Uniform(log lower, log upper)], for a scale uncertain over
+    orders of magnitude. *)
 type log_uniform_prior = { lu_lower: float; lu_upper: float }
+
+(** [truncated_normal(mean = ..., sd = ...)], truncated to [[tn_lower, tn_upper]],
+    which the compiler copies from the parameter's declared range. *)
 type truncated_normal_prior =
   { tn_mean: float; tn_sd: float; tn_lower: float; tn_upper: float }
 
+(** A prior distribution with constant arguments, from [~ family(...)] on a
+    parameter. *)
 type prior_dist =
   | Uniform     of uniform_prior
   | Normal_p    of normal_prior
@@ -698,12 +891,13 @@ type prior_dist =
   | LogUniform      of log_uniform_prior
   | TruncatedNormal of truncated_normal_prior
   | Fixed       of float
+      (** A point value. The compiler never writes it, and the samplers treat
+          it as a flat prior. *)
 
-(** Distribution family for a hierarchical (pooled) prior leaf.
-    Mirrors [prior_dist] variants but excludes Fixed (no meaning for
-    a hierarchically-parameterised prior). Serialises to/from the same
-    snake_case strings used in [prior_dist]: "uniform", "normal",
-    "log_normal", "half_normal", "beta", "gamma", "exponential". *)
+(** The distribution family of a {!hierarchical_prior}: the families of
+    {!prior_dist} except [Fixed]. It serialises as the same names ("uniform",
+    "normal", "log_normal", "half_normal", "beta", "gamma",
+    "exponential"). *)
 type hierarchical_kind =
   | HkUniform
   | HkNormal
@@ -732,69 +926,74 @@ let hierarchical_kind_name = function
   | HkGamma       -> "gamma"
   | HkExponential -> "exponential"
 
-(** Hierarchical prior (wave 2 / malaria #3). When a parameter's prior
-    references other parameters, we can't fold the args down to floats
-    — they're evaluated at inference time against the current
-    hyperparameter values. [hkind] is the distribution family (typed
-    enum). [hargs] are keyword → expression pairs (e.g.
-    [("mu", Param "mu_h"), ("sigma", Param "sigma_h")]). [hpool_over]
-    is the dimension name from the `| age` pooling clause — empty string
-    when the leaf is a flat scalar with hyperparent references (no
-    indexed pooling). *)
+(** A prior whose arguments read other parameters (hyperparameters), so that
+    they are evaluated during inference rather than fixed at compile time. In
+
+    {@camdl[
+      mu_r  : rate ~ half_normal(sigma = 0.1)
+      gamma : rate ~ log_normal(mu = mu_r, sigma = 0.5)
+    ]}
+
+    [gamma]'s prior is hierarchical, with [hargs] holding
+    [("mu", Param "mu_r")] and [("sigma", Const 0.5)]. *)
 type hierarchical_prior = {
   hkind:       hierarchical_kind;
   hargs:       (string * expr) list;
+      (** Each argument by keyword, such as [("mu", Param "mu_r")]. *)
   hpool_over:  string;
+      (** The dimension of a pooled prior, from a trailing [| age]; the empty
+          string when there is none. *)
 }
 
-(** The prior on an *estimated* parameter (gh#191). Collapses the former
-    [prior: prior_dist option] + [hierarchical: hierarchical_prior option]
-    (declared "mutually exclusive" by comment) into one slot: both-set is
-    unrepresentable and the ambiguous both-[None] becomes the explicit [Flat].
-    JSON: [Flat] → ["flat"]; [Dist d] → [{"dist": <prior_dist>}];
-    [Hierarchical h] → [{"hierarchical": <hierarchical_prior>}]. *)
+(** The prior on an estimated parameter.
+
+    {@json[
+      "flat"
+    ]} *)
 type prior_spec =
   | Flat
+      (** No prior beyond the parameter's bounds: a parameter declared with
+          [in [lo, hi]] and no [~]. *)
   | Dist         of prior_dist
   | Hierarchical of hierarchical_prior
 
-(** The three real meanings the former [value: float option] conflated
-    (gh#191). Inference config ([est_init]/[est_bounds]/[est_prior]) exists
-    *only* on [Estimated]. A sampler's change of variables is not part of the
-    IR: each derives it from the parameter's domain. JSON: internally tagged
-    on ["mode"] — [{"mode":"fixed","value":_}],
-    [{"mode":"estimated","bounds":_,"prior":_}],
-    [{"mode":"required"}]. *)
+(** How a parameter gets its value. Inference settings exist only on
+    [Estimated]; each sampler derives its change of variables from the
+    parameter's kind and bounds.
+
+    {@json[
+      {"mode": "estimated", "bounds": [0.001, 2.0], "prior": "flat"}
+    ]} *)
 type param_value =
   | Fixed     of float
+      (** A known value, as [camdlc --set beta=0.3] or a run's own override
+          writes it. A [parameters] declaration never compiles to it. *)
   | Estimated of {
       est_init:      float option;
       est_bounds:    (float * float) option;
       est_prior:     prior_spec;
     }
+      (** A parameter declared with bounds or a prior, which inference may
+          estimate. [est_init] is a starting point, which the compiler leaves
+          out. *)
   | Required
+      (** A parameter declared with neither bounds nor a prior, whose value
+          a run must supply. *)
 
-(* A `#'` doc block carried into the IR for non-OCaml consumers (e.g. a fit
-   report's parameter table). Presentation metadata only: excluded from the
-   content-addressed [run_id], and omitted from serialization when empty. *)
+(** A [#'] documentation block in the model source, kept for display. It is
+    not part of the run's identity. *)
 type doc = {
-  text:      string option;   (* joined prose description *)
-  symbol:    string option;   (* @symbol — display label for plots / reports *)
-  reference: string option;   (* @ref — citation for the definition *)
+  text:      string option;   (** The prose. *)
+  symbol:    string option;   (** The [@symbol] line: a display label for plots and reports, such as β. *)
+  reference: string option;   (** The [@ref] line: a citation. It serialises as ["ref"]. *)
 }
 
-(* The model's `#'` documentation dictionary: base declaration name → doc, by
-   category. Built once from the source declarations and serialized at the IR
-   *envelope* level (not the model body) — it is presentation metadata, outside
-   the content-addressed [run_id], and the single home for every entity's doc.
-   A downstream consumer (a sidecar, a plot, a report) labels any output column
-   by joining its name against this index. *)
+(** Every [#'] block of the model, by category and declared (not expanded)
+    name. It is serialised beside the model in the JSON envelope, not inside
+    it, so correcting documentation never changes the run's identity. *)
 type doc_index = {
-  (* The model's own doc — the file-header `#'` block (gh#750): what the model
-     is, what it is fitted to, what it branches from. [None] when the file has
-     no header block. Unlike [model.description], which sits in the hashed model
-     body, this is envelope metadata and can be corrected without re-keying. *)
   di_model:        doc option;
+      (** The block at the head of the file, about the model as a whole. *)
   di_parameters:   (string * doc) list;
   di_constants:    (string * doc) list;
   di_compartments: (string * doc) list;
@@ -810,29 +1009,27 @@ let empty_doc_index = {
   di_observations = []; di_dimensions = []; di_quantities = [];
 }
 
-(* A model constant: a typed `let` with a constant body, evaluated once at
-   compile time. Expressions read it through [ConstRef]. Its `#'` prose lives in
-   [doc_index.di_constants], like every other declaration's. *)
+(** A model constant: a typed [let] with a constant body, such as
+    [let omega : rate = 0.01], evaluated at compile time and read through
+    {!expr.ConstRef}. *)
 type constant = {
   c_name:  string;
   c_value: float;
-  c_kind:  param_kind;   (* the declared type keyword — what dimcheck reads *)
+  c_kind:  param_kind;   (** The declared kind, which gives the constant its dimension. *)
 }
 
+(** One parameter of the expanded model. An indexed parameter becomes one per
+    cell. *)
 type parameter = {
   name:          string;
   value:         param_value;
-  param_kind:    param_kind option;  (* DSL type keyword; see [param_kind] above *)
-  param_dim:     (int * int) option;  (* explicit dimension annotation: (P exponent, T exponent) *)
-  (* Parameter `#'` documentation lives in the model's [doc_index] (serialized at
-     the envelope level), not here — it is presentation metadata, kept out of the
-     computational record and out of [run_id]. *)
+  param_kind:    param_kind option;   (** The declared kind keyword; the compiler always writes one. *)
+  param_dim:     (int * int) option;  (** An explicit [dim] annotation, such as [dim 1/T], as exponents of population and time. *)
 }
 
-(* Accessors recovering the former flat [parameter] fields from [value].
-   Inference config exists only on [Estimated]; these return [None] for
-   [Fixed]/[Required]. [param_concrete_value] is the former [value] (the
-   number present iff [Fixed]). *)
+(* Accessors over [param_value]. Inference settings exist only on [Estimated],
+   so these return [None] for [Fixed] and [Required]; [param_concrete_value]
+   is the number of a [Fixed] parameter. *)
 let param_concrete_value (p : parameter) : float option =
   match p.value with Fixed v -> Some v | Estimated _ | Required -> None
 
@@ -850,54 +1047,52 @@ let param_hierarchical (p : parameter) : hierarchical_prior option =
 
 (* ── Initial conditions ──────────────────────────────────────────────────────── *)
 
-(** A law an INTEGER compartment's initial count is drawn from.
+(** A distribution an integer compartment's initial count is drawn from.
 
-    The argument records are the OBSERVATION ones ([poisson_likelihood] and
-    friends), reused deliberately — but NOT the [likelihood] variant, which
-    would make `bernoulli` or `beta` on a count compartment representable.
-    Each argument is a [diffable]: the expression together with its
-    per-parameter classified ∂arg/∂θ from the autodiff pass, which is what
-    makes a law's density gradient correct by construction rather than by hand.
-    [binomial_likelihood.n] is a bare expr — θ-independent, no gradient. *)
+    The arguments are the observation likelihoods' argument records, so each
+    differentiable argument carries its derivatives, but not the
+    {!likelihood} type itself, which would let a count be drawn from
+    [bernoulli] or [beta]. *)
 type init_count_law =
   | InitPoisson     of poisson_likelihood
   | InitBinomial    of binomial_likelihood
   | InitNegBinomial of neg_binomial_likelihood
 
-(** A law a REAL compartment's initial value is drawn from. Two enums rather
-    than one, so the compartment kind selects the admissible set at
-    construction: a continuous law seeds no count and a count law seeds no
-    reservoir. *)
+(** A distribution a real compartment's initial value is drawn from. It is a
+    separate type from {!init_count_law} so that the compartment's kind
+    decides which distributions it may use. *)
 type init_real_law =
   | InitNormal of normal_likelihood
 
-(** What one compartment's initial value is.
-
-    [Deterministic e] is `S = N0 - I`: an expression over constants, parameters
-    and other compartments' initial values. Whether [e] happens to be constant
-    is a runtime build detail, not a distinction the IR draws.
-
-    [InitCount l] is `I ~ poisson(rate = I0)` — the compartment is DRAWN from
-    [l] at t_start, once per particle. [InitReal l] is the same for a real
-    compartment. *)
+(** A compartment's initial value. *)
 type init_spec =
   | Deterministic of expr
+      (** [S = N0 - I]: an expression of constants, parameters and other
+          compartments' initial values. *)
   | InitCount     of init_count_law
+      (** [I ~ poisson(rate = I0)] on an integer compartment: drawn afresh
+          for each simulation or particle. *)
   | InitReal      of init_real_law
+      (** [W ~ normal(mean = w0, sd = s)] on a real compartment. *)
 
-(** One spec per compartment, in declaration order.
+(** The [init] block: one entry per compartment it names, in the order it
+    names them. A compartment it does not name starts at zero. The runtime
+    evaluates the entries in dependency order, since an entry may read
+    another compartment's initial value, and the order written breaks ties;
+    it rounds an integer compartment's value as it places it. The JSON is an
+    object whose key order is that order:
 
-    Ordered: the runtime evaluates the entries in DEPENDENCY order (an entry may
-    read another compartment's initial value), and the declaration order is part
-    of the model's identity. The association list carries that order; the Rust
-    side is an [IndexMap] over the same JSON object. *)
+    {@json[
+      {"S": {"deterministic": {"bin_op": {"op": "sub", "left": {"param": "N0"}, "right": {"param": "I0"}}}},
+       "I": {"count": {"poisson": {"rate": {"expr": {"param": "I0"}, "grad": {"I0": {"grad": {"const": 1.0}}}}}}}}
+    ]} *)
 type initial_conditions = (string * init_spec) list
 
 (** Every expression a spec evaluates, in argument order.
 
-    Dependency extraction walks ALL of them, not just the mean: a
-    `binomial(n = N0 - R, p = q)` reads `R`'s seeded value through `n`, so `n`
-    is a real edge in the init DAG. *)
+    Dependency extraction walks all of them, not only the mean: a
+    [binomial(n = N0 - R, p = q)] reads [R]'s initial value through [n], so
+    [n] is an edge in the dependency graph. *)
 let init_spec_exprs (s : init_spec) : expr list =
   match s with
   | Deterministic e -> [e]
@@ -906,11 +1101,11 @@ let init_spec_exprs (s : init_spec) : expr list =
   | InitCount (InitNegBinomial l) -> [l.mean.expr; l.dispersion.expr]
   | InitReal (InitNormal l) -> [l.mean.expr; l.sd.expr]
 
-(** The expression whose value is this compartment's MEAN initial value — what
-    the deterministic paths (the ODE skeleton, render, the pre-flight state)
-    start from, and what the ∂init/∂θ forward-sensitivity seed [ic_grad]
-    differentiates. `binomial(n, p)` has mean `n * p`, which is not a
-    subexpression of the spec, so this constructs rather than selects. *)
+(** The expression for this compartment's mean initial value: where the
+    deterministic paths (the ODE skeleton, [render], the pre-flight state)
+    start, and what [ic_grad] differentiates. [binomial(n, p)] has mean
+    [n * p], which is not a subexpression of the spec, so this builds the
+    expression rather than selecting it. *)
 let init_spec_mean_expr (s : init_spec) : expr =
   match s with
   | Deterministic e -> e
@@ -930,77 +1125,111 @@ let init_spec_law_name (s : init_spec) : string option =
 
 (* ── Output ──────────────────────────────────────────────────────────────────── *)
 
+(** Trajectory rows every [step] from [start], in model time units, up to the
+    simulation's [t_end]. *)
 type regular_output_schedule = { start: float; step: float }
 
+(** When a simulation records the state: [output { trajectories { every = 7 'days } }],
+    or every model time unit from [t_start] when the model does not say. *)
 type output_schedule =
   | OutRegular          of regular_output_schedule
   | OutAtTimes          of float list
 
+(** What a simulation writes. *)
 type output_config = {
   times:        output_schedule;
-  format:       string;
-  trajectory:   bool;
-  observations: bool;
+  format:       string;   (** The declared file format, ["tsv"] unless the model says otherwise. It does not enter the run's identity. *)
+  trajectory:   bool;     (** Always [true]. *)
+  observations: bool;     (** Always [true]. *)
 }
 
 (* ── Simulation config ───────────────────────────────────────────────────────── *)
 
-(* gh#166: ODE integrator. Rk45 carries its dimensionless adaptive tolerances, so
-   the orphan state (tolerances without rk45) is unrepresentable. *)
+(** The ODE integrator, from [simulate { integrator = ... }]. *)
 type integrator =
   | Rk4
+      (** Fixed-step classical Runge–Kutta, the default. *)
   | Rk45 of { atol: float option; rtol: float option }
+      (** Adaptive Dormand–Prince with dimensionless absolute and relative
+          tolerances; [None] takes the runtime's default. *)
 
+(** The [simulate] block: the window to simulate and how. A model without one
+    simulates [[0, 100]]. *)
 type simulation_config = {
-  t_start:        float;
+  t_start:        float;    (** The start of the window, in model time units. *)
   t_end:          float;
-  time_semantics: string;
+      (** The end of the window, in model time units. While [t_end_anchor]
+          is present it is NaN, serialised as [null], so no comparison of
+          horizons can pass by coincidence. *)
+  time_semantics: string;   (** Always ["continuous"]. It does not enter the run's identity. *)
   dt:             float option;
-  rng_seed:       int option;
+      (** The step of the stepping backends, in model time units, from
+          [simulate { dt = ... }]. [None] leaves it to the command, which
+          defaults to one model time unit. *)
+  rng_seed:       int option;  (** Always [None] in compiled output; the runtime does not read it. *)
   integrator:     integrator;
-  (* gh#616: `simulate { to = last_obs + 4 'weeks }`. When present, `t_end`
-     carries NO usable horizon — the compiler bakes NaN there so every
-     equality-based horizon guard fails closed — and this field IS the
-     unresolved marker: the Rust resolver substitutes the resolved time into
-     `t_end` and CLEARS this, and `CompiledModel::new` refuses any model that
-     still carries it. `None` for a literal horizon. *)
   t_end_anchor:   anchored_time option;
+      (** An end stated relative to the data, [to = last_obs + 4 'weeks].
+          The runtime writes the resolved time into [t_end] and clears this
+          field before it builds the model, and refuses a model that still
+          carries it. *)
 }
 
 (* ── Presets (named parameter sets for web UI / CLI) ─────────────────────────── *)
 
+(** A named scenario from the [scenarios] block: changes a run can apply by
+    name. It serialises under the model's ["scenarios"] key. *)
 type preset = {
   preset_name    : string;
-  preset_label   : string;
-  preset_params  : (string * float) list;
-  preset_enable  : string list;
-  preset_disable : string list;
-  preset_scale   : (string * float) list;
+  preset_label   : string;                 (** A display label; the name when the scenario has none. *)
+  preset_params  : (string * float) list;  (** Parameter values the scenario sets. *)
+  preset_enable  : string list;            (** Interventions it switches on, by name or family name. *)
+  preset_disable : string list;            (** Interventions and events it switches off. *)
+  preset_scale   : (string * float) list;  (** Factors it multiplies parameters by. *)
   preset_compose : string list;
+      (** Other scenarios applied first, whose parameter values this one's
+          override; a composed scenario may not itself compose. *)
   preset_t_end   : float option;
-  (* gh#616: a preset's own anchored horizon (`scenarios { s { simulate { to =
-     last_obs + 8 'weeks } } }`). Same contract as `simulation_config`'s:
-     `preset_t_end` is NaN while this is present, and the resolver clears it. *)
+      (** The scenario's own end of the window, in model time units. It is
+          [Some nan], serialised as [null], while [preset_t_end_anchor] is
+          present. *)
   preset_t_end_anchor : anchored_time option;
+      (** The scenario's end stated relative to the data, resolved and
+          cleared by the runtime as for {!simulation_config}. *)
 }
 
 (* ── Model structure ─────────────────────────────────────────────────────────── *)
 
+(** A declared dimension and its levels, in order:
+    [dimensions { patch = [urban, rural] }]. *)
 type dimension = {
   dim_name  : string;
   dim_values: string list;
 }
 
+(** The model's declarations before expansion, kept so tooling and the
+    lineage recorder can map expanded names back to their base names and
+    levels. *)
 type model_structure = {
   dimensions              : dimension list;
-  compartment_dims        : (string * string list) list; (* base → [dim_name, ...] *)
-  base_compartments       : string list;
+  compartment_dims        : (string * string list) list;
+      (** Each declared compartment's dimensions, in order; [S] stratified by
+          [patch] gives [("S", ["patch"])]. *)
+  base_compartments       : string list;  (** The declared compartment names. *)
   transmission_transitions: string list;
-  infectious_compartments : string list; (* base names of source_compartment in transmission transitions *)
+      (** The declared names of transitions whose metadata says
+          ["transmission"]. *)
+  infectious_compartments : string list;
+      (** The declared names of the compartments, other than the source,
+          that those transitions' rates read. *)
 }
 
 (* ── Balance constraint ──────────────────────────────────────────────────────── *)
 
+(** A [balance] block: at the end of every step, after its transitions,
+    interventions and events, the target compartment is set to the
+    expression's value, so that it absorbs whatever keeps the total on a
+    prescribed course (typically [pop(t) - S - E - I]). *)
 type balance_spec = {
   balance_target: string;
   balance_expr:   expr;
@@ -1008,35 +1237,26 @@ type balance_spec = {
 
 (* ── Top-level model ─────────────────────────────────────────────────────────── *)
 
-(* A model-level shared binding (Fix B): a named value (e.g. N[l], I_agg[l],
-   spatial force F[l]) referenced by Expr.BindingRef, defined once instead of
-   inlined into every (patch,age) rate. Topologically ordered — a binding's body
-   may reference earlier bindings. Evaluated on-demand in B-inc1; a later
-   increment may cache values per step. *)
+(** A named expression that several rates share, read through
+    {!expr.BindingRef} or {!expr.PerEvalRef}: [let N[p in patch] = ...]
+    becomes [N_urban] and [N_rural]. A binding may read only bindings listed
+    before it. *)
 type binding = {
   bname: string;
   bexpr: expr;
 }
 
-(* ── Generated quantities (proposal 2026-06-25) ──────────────────────────────
-   Named reductions of what a simulation produces — the non-scored twin of an
-   observation. Mirror of rust/crates/ir/src/quantity.rs; the wire format is
-   pinned there. Stratum is (dim, level) pairs, identical to observation_model.
-   A quantity's *state expression* reuses the shared [expr]; reduction
-   arithmetic uses the dedicated [scalar_expr] ADT (the trigger_expr precedent)
-   so a reduced scalar can never appear in a propensity, and a rate leaf can
-   never appear in reduction arithmetic. *)
+(* ── Generated quantities ────────────────────────────────────────────────────── *)
 
-(* A reference to an earlier *scalar* quantity, carrying the stratum it resolves
-   in (populated per-cell by the expander, like stratified observations).
-   `qref_stratum` is omitted on the wire when empty. *)
+(** A reference to an earlier scalar quantity, in the cell it is read in. *)
 type qref = {
   qref_name:    string;
-  qref_stratum: (string * string) list;  (* (dim, level) cells *)
+  qref_stratum: (string * string) list;  (** The [(dimension, level)] pairs of the cell; empty for a quantity declared without indices. *)
 }
 
-(* Reduction-arithmetic expression: closed, total, scalar-valued. Externally
-   tagged single-key objects; `op` reuses the shared bin_op/un_op encoding. *)
+(** Arithmetic over scalar quantities, parameters and numbers. It is a
+    separate type from {!expr} so that a reduced value cannot appear in a
+    rate, nor a compartment here. *)
 type scalar_expr =
   | SConst of float
   | SParam of string
@@ -1045,144 +1265,151 @@ type scalar_expr =
   | SBinOp of { op : bin_op; left : scalar_expr; right : scalar_expr }
   | SCond  of { pred : scalar_expr; then_ : scalar_expr; else_ : scalar_expr }
 
-(* When a `value_at` reads its series: a constant time expression, or a symbolic
-   observation anchor (± a compile-folded constant offset) resolved at evaluation
-   time (the compiled model stays data-independent; a data-free context
-   hard-errors at evaluator construction). Deliberately NOT `expr` alone: an
-   anchor must be unrepresentable outside its three granted positions, so it
-   cannot leak into dynamics. *)
+(** The time at which [value_at] reads a series. *)
 type time_anchor =
   | ATime of expr
+      (** A time expression of constants and parameters, such as [50] or a
+          date. *)
   | AObs  of anchored_time
+      (** A time relative to the data, such as [last_obs]. *)
 
-(* A reduction whose result has the same dimension as the series. *)
+(** A reduction of a series to a value of the series' own dimension. Each
+    reads the series at the output times. *)
 type value_reduce =
-  | VFinal
-  | VMax
-  | VMin
-  | VMean
-  | VCountAbove of expr
-  | VCountBelow of expr
-  (* The series value at the last output time <= the anchor (LOCF); censored
-     outside the trajectory window — never clamped (proposal 2026-08-17). *)
+  | VFinal                    (** [final(x)]: the last value. *)
+  | VMax                      (** [max(x)]. *)
+  | VMin                      (** [min(x)]. *)
+  | VMean                     (** The arithmetic mean over output times. *)
+  | VCountAbove of expr       (** [count_above(x, c)]: the number of output times with [x > c]. *)
+  | VCountBelow of expr       (** [count_below(x, c)]: the number of output times with [x < c]. *)
   | VValueAt of time_anchor
+      (** [value_at(x, t)]: the value at the last output time at or before
+          [t]. It is censored, not clamped, when [t] lies outside the
+          trajectory. *)
 
-(* A reduction whose result is a *time* (dimension T). *)
+(** A reduction of a series to a time. A crossing that never happens leaves
+    the value censored. *)
 type time_reduce =
-  | TimeOfMax
-  | TimeOfMin
-  | FirstAbove of expr
-  | FirstBelow of expr
-  | LastAbove  of expr
-  | LastBelow  of expr
+  | TimeOfMax                 (** The first time the series reaches its maximum. *)
+  | TimeOfMin                 (** The first time the series reaches its minimum. *)
+  | FirstAbove of expr        (** [first_above(x, c)]: the first output time with [x > c]. *)
+  | FirstBelow of expr        (** The first output time with [x < c]. *)
+  | LastAbove  of expr        (** The last output time with [x > c]. *)
+  | LastBelow  of expr        (** The last output time with [x < c]. *)
 
-(* A reduction over *time*: Value preserves the series dimension, Time yields a
-   time, Integral the trapezoidal area (person-time). *)
+(** A reduction over time, with the dimension of its result fixed by the
+    constructor. *)
 type temporal_reduce =
-  | RValue of value_reduce
-  | RTime  of time_reduce
-  | RIntegral
+  | RValue of value_reduce    (** Same dimension as the series. *)
+  | RTime  of time_reduce     (** A time. *)
+  | RIntegral                 (** The area under the series by the trapezoid rule, in the series' dimension times time (person-time for a count). *)
 
-(* What a Reduced quantity folds over. Externally tagged; the v1.1
-   `Observation { stream }` variant appends additively. *)
+(** The series a quantity reduces. *)
 type quantity_source =
   | QSState of expr
-  | QSObservation of string   (* v1.1: observations.<stream> — reduces y_sim *)
+      (** An expression of the state, evaluated at each output time:
+          [I], [N0 - S]. *)
+  | QSObservation of string
+      (** The simulated observations of the named stream. *)
 
-(* Either a reduction of a source series, or reduction arithmetic over earlier
-   scalar quantities. `reduce = None` ⇒ a series; Some ⇒ a scalar. *)
+(** How a quantity is computed. *)
 type quantity_body =
   | QBReduced of { source : quantity_source; reduce : temporal_reduce option }
+      (** A series, or with [reduce] a single number reduced from it. *)
   | QBDerived of scalar_expr
+      (** Arithmetic over earlier scalar quantities. *)
 
-(* The non-scored twin of an observation_model: a named reduction of a
-   simulation output, with no likelihood. Stratified quantities are fully
-   expanded (one leaf per cell, tagged with `q_stratum`). *)
+(** One generated quantity of the expanded model: a named summary of what a
+    run produced, reported and never scored. It is not part of the run's
+    identity. A cell of an indexed quantity is its own entry.
+
+    {@camdl[
+      quantities {
+        total = final(D)
+        onset = first_above(I, thr)
+      }
+    ]} *)
 type quantity = {
   q_name:    string;
-  q_stratum: (string * string) list;  (* (dim, level) cells; omitted when empty *)
+  q_stratum: (string * string) list;  (** The [(dimension, level)] pairs of the cell; empty for a quantity declared without indices. *)
   q_body:    quantity_body;
-  (* Resolved dimension of the reduced value, as (P exponent, T exponent)
-     (prerequisite #5 of the counterfactual-contrasts proposal). Computed by
-     `dimcheck` and stored so the Rust contrast reducer can check operand-
-     dimension agreement without re-deriving. `None` when the dimension is
-     undetermined (an unconstrained `positive`/`real` leaf); omitted on the wire
-     when absent, so non-quantity-dimension goldens are byte-identical. *)
   q_dimension: (int * int) option;
+      (** The dimension of the result as exponents of population and time,
+          as the dimension checker resolved it; [None] when it could not. *)
 }
 
-(* ── Counterfactual contrasts (proposal 2026-06-25) ────────────────────────────
-   A named difference of two run-rooted operands (cases averted). The DSL block
-   parses + dim-checks + lowers here; the Rust two-arm replay reducer (stage C)
-   evaluates it against a fit's keyed (θ, X) output. Reporting-only and
-   non-identity — excluded from the run-id walk, like quantities. *)
+(* ── Counterfactual contrasts ────────────────────────────────────────────────── *)
 
-(* The two symmetric sub-namespaces of a run member. *)
+(** Which part of a run a contrast operand names: [NsQuantities] one of its
+    quantities, [NsObservations] one of its simulated observation streams. *)
 type run_namespace = NsQuantities | NsObservations
 
-(* A contrast body: arithmetic over run-rooted operands. A dedicated ADT
-   (the trigger_expr / scalar_expr precedent) so a run-member reference can
-   never appear in a propensity, and a rate leaf can never appear in a
-   contrast. *)
+(** The arithmetic of a contrast over members of named runs. It is a separate
+    type from {!expr}, so a run member cannot appear in a rate. *)
 type contrast_expr =
   | CRunMember of { run : string; ns : run_namespace; member : string }
+      (** [no_sia.quantities.total]: [member] of run [run], where a run is a
+          declared scenario or [fitted], the fitted model with no scenario
+          applied. *)
   | CBinOp     of { op : bin_op; left : contrast_expr; right : contrast_expr }
+      (** One of [+ - * /]. *)
 
+(** A named difference between runs, such as deaths averted, from the
+    [contrasts] block. It is reported, never scored, and not part of the
+    run's identity.
+
+    {@camdl[
+      contrasts {
+        averted = no_sia.quantities.total - with_sia.quantities.total
+      }
+    ]} *)
 type contrast = {
   c_name:   string;
   c_body:   contrast_expr;
 }
 
+(** A compiled model: the whole of a [.camdl] file, expanded. *)
 type model = {
   name:               string;
-  version:            string;
-  time_unit:          string;           (* declared time unit, e.g. "days" *)
+  version:            string;           (** Always ["0.3"]. *)
+  time_unit:          string;           (** The unit of every time, duration and rate in the model, such as ["days"]. *)
   description:        string option;
-  origin:             string option;    (* ISO date string, e.g. "2020-01-01" *)
-  origin_rata_die:    int option;       (* compiler-derived proleptic-Gregorian
-                                           day number of `origin`; the runtime
-                                           reads this so it never re-parses the
-                                           origin string (2026-05-22 §6.2). *)
+  origin:             string option;    (** The calendar date of model time zero, as an ISO 8601 date string. *)
+  origin_rata_die:    int option;       (** The proleptic Gregorian day number of [origin], so the runtime need not parse the date. *)
   compartments:       compartment list;
   transitions:        transition list;
   ode_equations:      ode_equation list;
   time_functions:     time_function list;
   tables:             table list;
   interventions:      intervention list;
+      (** Interventions, events and reactive interventions alike, told apart
+          by their [kind] and [fire]. *)
   observations:       observation_model list;
   parameters:         parameter list;
-  constants:          constant list;      (* typed constant `let`s; read via [ConstRef] *)
-  bindings:           binding list;       (* Fix B: shared per-coordinate bindings, topo-ordered *)
-  per_eval_bindings:  binding list;       (* gh#272 LICM: param/table-only loop-invariant bindings,
-                                             topo-ordered; produced by the LICM pass, empty by default *)
+  constants:          constant list;
+  bindings:           binding list;
+  per_eval_bindings:  binding list;
+      (** Empty when the compiler found nothing to lift out of the rates, or
+          when [CAMDL_NO_LICM] is set. *)
   initial_conditions: initial_conditions;
   ic_grad:            (string * (string * deriv_entry) list) list;
-                      (** ∂(initial_state)/∂θ per parameterized IC compartment — the
-                          forward-sensitivity seed [S(t_start)] for the ODE gradient
-                          (gh#275). Keyed [compartment -> (param -> deriv_entry)];
-                          the [rate_grad] analogue for the init map, empty until the
-                          [WrtParam]-over-init pass emits it. *)
+                      (** The derivative of each compartment's mean initial
+                          value with respect to each parameter, keyed by
+                          compartment and then by parameter: the starting
+                          point of the ODE gradient. A compartment whose
+                          initial value depends on no parameter is left
+                          out. *)
   output:             output_config;
   simulation:         simulation_config;
   presets:            preset list;
-  model_structure:    model_structure option;
+  model_structure:    model_structure option;  (** Always present in compiled output. *)
   balance:            balance_spec option;
-  (* Compartments whose individuals carry tracked IDs, computed by
-     forward reachability from {lineage-event destinations ∪ parent
-     pools} closed under transitions (2026-05-19 proposal, §Identity-
-     tracked subgraph). Empty when no `#[lineage]` annotations exist —
-     in that case the lineage subsystem is statically inert. Cached
-     here so the runtime does not recompute it. *)
   identity_tracked_compartments: string list;
-  (* `#'` documentation dictionary (presentation metadata). Serialized at the
-     envelope level, never in the model body, so it stays outside [run_id]. *)
-  doc_index:          doc_index;
-  (* Generated quantities (proposal 2026-06-25): named, non-scored reductions of
-     simulation output. Reporting-only, fully expanded. Empty by default; the
-     frontend does not yet produce these. *)
+      (** The compartments whose individuals the lineage recorder tracks:
+          those reachable through transitions from a [#[lineage]]
+          transition's destinations and parent pools. Empty when no
+          transition is [#[lineage]]. *)
+  doc_index:          doc_index;  (** Serialised beside the model in the envelope, under ["docs"]. *)
   quantities: quantity list;
-  (* Counterfactual contrasts (proposal 2026-06-25): named differences of two
-     run-rooted operands (cases averted). Reporting-only and non-identity (out
-     of the run-id walk, like quantities). Empty by default. *)
   contrasts: contrast list;
 }
