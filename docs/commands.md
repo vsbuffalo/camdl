@@ -192,6 +192,24 @@ applicable horizons (chain-binomial → `free_forward` + `one_step`; ODE →
 `free_forward` only); an optimizer fit (IF2 / NLopt) is refused since it has no
 posterior cloud.
 
+`fit predict --fit fit.toml --horizon "4 weeks"` (or `--mode forecast`) writes
+the fixed-origin forecast instead: from the end of the fit's training rows (the
+_forecast origin_), the state is filtered through the training rows only and
+each stream's periods ending within the reach are predicted, the period under
+way at the origin included. A target's `horizon` counts its stream's own periods
+from that one (0, 1, …); `lead` is the time from the origin to the target's end.
+The targets are the periods the stream declares — a uniform `covers` form
+continues its tiling, window columns use `emit_schedule` — and a stream with
+neither, or whose likelihood reads a data column such as a binomial's `n`, is
+refused a forecast and named in `report.json`. It writes `forecast/<stream>.tsv`
+(one row per target: `t_start`, `t_stop`, `horizon`, `lead`, the held-out row it
+corresponds to, the mean and the `q05…q95` band), `forecast-samples.tsv` (joint
+samples, each one trajectory across every target), and `forecast.json` (the
+origin, the reach, the rows that conditioned the parameters and the state, and
+the calendar). Forecasts are available for chain-binomial posteriors (PMMH,
+PGAS); an ODE posterior, `--scenario`, `--sweep` and `--by-chain` are refused in
+this mode for now.
+
 A resumed fit reads the base run read-only and writes a _new_ run keyed on the
 extended length. It is a distinct deterministic artifact — not bit-identical to
 an uninterrupted fit of the same length (both are valid posterior samples).

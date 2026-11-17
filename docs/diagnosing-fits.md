@@ -633,10 +633,10 @@ one hides the very misfit you're hunting.
   posterior draw. Exposes _generative_ misspecification: can the model, run
   forward on its own, produce data like the observations? A drifting transition
   model produces a band that blows up over time.
-- **One-step-ahead** — `camdl fit predict --fit fit.toml --mode one_step`.
-  The honest short-horizon forecast `p(y_t | y_{1:t-1})`: re-conditions on the
-  data at every step, so it stays tight **iff** the filter can track the data.
-  The right tool for _timing_ questions (does the model anticipate each next
+- **One-step-ahead** — `camdl fit predict --fit fit.toml --mode one_step`. The
+  honest short-horizon forecast `p(y_t | y_{1:t-1})`: re-conditions on the data
+  at every step, so it stays tight **iff** the filter can track the data. The
+  right tool for _timing_ questions (does the model anticipate each next
   observation?). Chain-binomial only. A model can pass the free-forward check
   (wide enough to contain the data) yet fail one-step (can't predict next week),
   and vice versa — which is why both are worth emitting and carry a typed
