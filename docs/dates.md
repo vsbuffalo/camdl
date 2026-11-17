@@ -1026,6 +1026,42 @@ forcing {
 The breakpoints compile to days 5, 93, 110 and 203: 6 January, 3 April, 20 April
 and 22 July 2020, exactly.
 
+For a fit over several years, the term dates belong in a file, one row per
+change, read by an `interpolated` forcing. `method = constant` holds each row's
+value until the next row's date, which is the same step function:
+
+```tsv
+date	school
+2020-01-01	0
+2020-01-06	1
+2020-04-03	0
+2020-04-20	1
+2020-07-22	0
+2020-09-02	1
+2020-12-18	0
+2020-12-31	0
+```
+
+```camdl
+origin = date("2020-01-01")
+
+forcing {
+  school : interpolated 'ratio {
+    data      = "school_terms.tsv"
+    time_col  = "date"
+    value_col = "school"
+    method    = constant        # hold each value until the next row
+  }
+}
+```
+
+Simulated, this switches on days 5, 110 and 245 (6 January, 20 April, 2
+September) and off on days 93, 203 and 352 (3 April, 22 July, 18 December), on
+the same steps as the `piecewise` form above. The file must cover the whole run:
+a forcing read from a file is an error past its last row, unless the run is
+given `--allow-forcing-extrapolation`. That is why the file ends with a row on
+the run's last day.
+
 A smooth seasonal curve (`sinusoidal`) and a measured covariate such as rainfall
 (an `interpolated` forcing read from a data file) are the other two common
 seasonal forms. Neither switches on fixed days, so the choice below does not
