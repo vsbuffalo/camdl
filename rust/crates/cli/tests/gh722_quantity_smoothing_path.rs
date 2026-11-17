@@ -320,7 +320,7 @@ fn in_window_value_at_reads_the_conditioned_path() {
         "fit run failed:\n{}",
         String::from_utf8_lossy(&fit.stderr)
     );
-    let pred = run(&bin, &dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"]);
+    let pred = run(&bin, &dir, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
     assert!(
         pred.status.success(),
         "fit predict failed:\n{}",
@@ -434,7 +434,7 @@ fn a_fit_with_no_saved_paths_censors_instead_of_falling_back() {
     let fit = run(&bin, &dir, &["fit", "run", "fit.toml"]);
     assert!(fit.status.success(), "fit run failed:\n{}", String::from_utf8_lossy(&fit.stderr));
     let pred =
-        run(&bin, &dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"]);
+        run(&bin, &dir, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
     assert!(
         pred.status.success(),
         "fit predict must still produce the rest of the artifact:\n{}",

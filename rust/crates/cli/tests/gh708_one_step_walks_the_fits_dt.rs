@@ -14,7 +14,7 @@
 //! writes no `[config] dt`; the other model declares no step and its fit
 //! writes `[config] dt = 0.2`. Both fits walk 0.2, so their posterior clouds
 //! are byte-identical — asserted first, as the premise. The two
-//! `fit predict --horizon one_step` runs then draw from identical clouds at
+//! `fit predict --mode one_step` runs then draw from identical clouds at
 //! the same seed, so their bands must be identical too. Reading the archived
 //! `[config] dt` instead (its default 1.0 in the first arm) filters the first
 //! band on 1.0 and the bands differ. No fitted value enters the comparison.
@@ -180,7 +180,7 @@ fn the_one_step_band_is_filtered_on_the_dt_the_fit_used() {
             "[{arm}] fit run failed:\n{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let out = run(&["fit", "predict", "--fit", "fit.toml", "--horizon", "one_step"]);
+        let out = run(&["fit", "predict", "--fit", "fit.toml", "--mode", "one_step"]);
         assert!(
             out.status.success(),
             "[{arm}] fit predict failed:\n{}",

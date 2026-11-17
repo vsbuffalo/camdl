@@ -268,7 +268,7 @@ fn predict_of_a_leaf_reads_that_run() {
 
     // 2 chains × (sweeps − burn_in) retained draws.
     for (leaf, draws) in [(&short[0], 6), (&long[0], 12)] {
-        let all = p.ok(&["fit", "predict", &leaf.to_string_lossy(), "--horizon", "free_forward"]);
+        let all = p.ok(&["fit", "predict", &leaf.to_string_lossy(), "--mode", "free_forward"]);
         assert!(all.contains(&format!("{draws} draws from")),
             "{} holds {draws} draws:\n{all}", leaf.display());
     }
@@ -454,7 +454,7 @@ fn every_resolving_verb_prints_the_resolution_line() {
     let want = format!("@post → run {}", &id[..6]);
     for args in [
         vec!["fit", "summary", "@post"],
-        vec!["fit", "predict", "@post", "--horizon", "free_forward", "--n-draws", "2"],
+        vec!["fit", "predict", "@post", "--mode", "free_forward", "--n-draws", "2"],
         vec!["show", "@post", "--root", &root],
         vec!["cat", "@post", "--stream", "draws.tsv", "--root", &root],
     ] {
@@ -550,7 +550,7 @@ fn two_pgas_runs(p: &Project) -> (PathBuf, PathBuf, PathBuf) {
 fn predict_of_a_folder_with_two_runs_lists_them() {
     let p = Project::new();
     let (segment, short, long) = two_pgas_runs(&p);
-    let out = p.run(&["fit", "predict", &segment.to_string_lossy(), "--horizon", "free_forward"]);
+    let out = p.run(&["fit", "predict", &segment.to_string_lossy(), "--mode", "free_forward"]);
     let all = text(&out);
     assert!(!out.status.success(), "a choice between two runs is the user's:\n{all}");
     assert!(all.contains("names 2 runs"), "{all}");
@@ -568,13 +568,13 @@ fn predict_writes_under_the_run_it_read() {
     let p = Project::new();
     let (segment, short, long) = two_pgas_runs(&p);
     for leaf in [&short, &long] {
-        p.ok(&["fit", "predict", &leaf.to_string_lossy(), "--horizon", "free_forward"]);
+        p.ok(&["fit", "predict", &leaf.to_string_lossy(), "--mode", "free_forward"]);
     }
     assert!(!segment.join("predictive").exists() && !segment.join("predictive.json").exists(),
         "nothing is written into the shared folder");
     for (leaf, draws) in [(&short, 6), (&long, 12)] {
         let (id, _, _) = record(leaf);
-        // `--horizon free_forward` keys the address: `<id12>-<options key>`.
+        // `--mode free_forward` keys the address: `<id12>-<options key>`.
         let out = std::fs::read_dir(segment.join("predict")).unwrap().flatten()
             .map(|e| e.path())
             .find(|d| d.file_name().unwrap().to_string_lossy().starts_with(&id[..12]))
@@ -867,8 +867,8 @@ fn predict_options_key_their_own_output() {
     p.ok(&["fit", "run", "post.toml", "--seed", "1"]);
     let leaf = p.leaves().remove(0);
     let l = leaf.to_string_lossy().into_owned();
-    p.ok(&["fit", "predict", &l, "--horizon", "free_forward"]);
-    p.ok(&["fit", "predict", &l, "--horizon", "free_forward", "--n-draws", "3"]);
+    p.ok(&["fit", "predict", &l, "--mode", "free_forward"]);
+    p.ok(&["fit", "predict", &l, "--mode", "free_forward", "--n-draws", "3"]);
     let dirs: Vec<PathBuf> = std::fs::read_dir(segment_of(&leaf).join("predict")).unwrap()
         .flatten().map(|e| e.path()).collect();
     assert_eq!(dirs.len(), 2, "two option sets, two addresses: {dirs:?}");
@@ -991,7 +991,7 @@ fn bare_envelope_paths_mean_the_default_options_only() {
     let p = Project::new();
     p.config("post.toml", &pgas(7));
     p.ok(&["fit", "run", "post.toml", "--seed", "1", "--label", "post"]);
-    p.ok(&["fit", "predict", "@post", "--horizon", "free_forward", "--n-draws", "3"]);
+    p.ok(&["fit", "predict", "@post", "--mode", "free_forward", "--n-draws", "3"]);
     let root = p.dir().join("results").to_string_lossy().into_owned();
 
     let out = p.run(&["cat", "@post", "--stream", "predictive/weekly_cases.tsv", "--root", &root]);

@@ -446,7 +446,7 @@ fn parse_iso_to_unix(s: &str) -> Option<i64> {
 ///      return the `fitted` row's `q50`.
 ///   2. **Derive on demand**: else, if the fit carries a posterior
 ///      cloud (`has_cloud`, from `resolve_posterior_draws`), spawn `camdl fit predict
-///      <the row's leaf> --horizon free_forward` (the single source of truth
+///      <the row's leaf> --mode free_forward` (the single source of truth
 ///      for the simulate-per-draw + quantity-evaluation loop) and
 ///      re-read the file.
 ///   3. **Not derivable** (optimizer fit, no draws): `None`.
@@ -518,7 +518,7 @@ fn resolve_quantity_median(
     cmd.arg("fit")
         .arg("predict")
         .arg(leaf)
-        .arg("--horizon")
+        .arg("--mode")
         .arg("free_forward")
         .env("CAMDL_SKIP_VERSION_CHECK", "1");
     // Forward the chain selection so the derived quantity is banded over the

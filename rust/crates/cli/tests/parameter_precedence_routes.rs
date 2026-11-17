@@ -759,7 +759,7 @@ fn fit_predict_scenario_set_and_one_point_sweep_give_one_band() {
     let dir = tmp.path();
     posterior_fit(dir);
     let predict = |extra: &[&str]| -> (String, Vec<String>) {
-        let mut argv = vec!["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward",
+        let mut argv = vec!["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward",
             "--seed", "3"];
         argv.extend_from_slice(extra);
         let stderr = ok(&camdl(dir, &argv), &format!("fit predict {extra:?}"));
@@ -792,7 +792,7 @@ fn fit_predict_sweep_reports_the_replaced_draws_once_as_a_range() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     posterior_fit(dir);
-    let out = camdl(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward",
+    let out = camdl(dir, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward",
         "--seed", "3", "--sweep", "beta=0.3,0.4"]);
     let lines = override_lines(&ok(&out, "fit predict --sweep"));
     assert_eq!(lines.len(), 1, "{lines:?}");
@@ -943,7 +943,7 @@ thin = 1
 "#).unwrap();
     ok(&camdl(dir, &["fit", "run", "fit.toml", "--seed", "1"]), "fit run");
     let stderr = ok(&camdl(dir, &["fit", "predict", "--fit", "fit.toml",
-        "--horizon", "free_forward", "--seed", "3"]), "fit predict");
+        "--mode", "free_forward", "--seed", "3"]), "fit predict");
     assert!(stderr.contains("contrast 'averted' — fork at"), "the contrast ran: {stderr}");
     assert_eq!(override_lines(&stderr),
         vec!["info: scenario `with_sia` replaced k = 10 (from the draw or sweep point) with 12"]);

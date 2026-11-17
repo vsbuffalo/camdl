@@ -202,7 +202,7 @@ fn fit_predict_sweep_composes_with_scenario_on_distinct_params() {
 
     let out = run(&bin, &tmp, &[
         "fit", "predict", "--fit", "fit.toml",
-        "--horizon", "free_forward",
+        "--mode", "free_forward",
         "--scenario", "low_rho",
         "--sweep", "k=8,12",
         "--seed", "1",
@@ -348,7 +348,7 @@ fn fit_predict_sweep_same_param_as_scenario_is_a_hard_error() {
 
     let out = run(&bin, &tmp, &[
         "fit", "predict", "--fit", "fit.toml",
-        "--horizon", "free_forward",
+        "--mode", "free_forward",
         "--scenario", "low_rho",
         "--sweep", "rho=0.2,0.4",
         "--seed", "1",
@@ -390,7 +390,7 @@ fn fit_predict_no_sweep_header_is_byte_identical() {
 
     let out = run(&bin, &tmp, &[
         "fit", "predict", "--fit", "fit.toml",
-        "--horizon", "free_forward",
+        "--mode", "free_forward",
     ]);
     assert!(
         out.status.success(),

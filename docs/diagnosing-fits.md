@@ -628,12 +628,12 @@ Three different predictions answer three different questions; using the wrong
 one hides the very misfit you're hunting.
 
 - **Free-forward (unconditional posterior-predictive)** —
-  `camdl fit predict --fit fit.toml --horizon free_forward`. Replays the fitted
+  `camdl fit predict --fit fit.toml --mode free_forward`. Replays the fitted
   model from the start, never re-anchored to data, sampling `y_rep` per
   posterior draw. Exposes _generative_ misspecification: can the model, run
   forward on its own, produce data like the observations? A drifting transition
   model produces a band that blows up over time.
-- **One-step-ahead** — `camdl fit predict --fit fit.toml --horizon one_step`.
+- **One-step-ahead** — `camdl fit predict --fit fit.toml --mode one_step`.
   The honest short-horizon forecast `p(y_t | y_{1:t-1})`: re-conditions on the
   data at every step, so it stays tight **iff** the filter can track the data.
   The right tool for _timing_ questions (does the model anticipate each next

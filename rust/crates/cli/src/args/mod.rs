@@ -1262,11 +1262,22 @@ pub struct FitPredictArgs {
     #[arg(long = "sweep", value_name = "PARAM=GRID")]
     pub sweep: Vec<crate::args::types::SweepSpec>,
 
-    /// Which predictive horizon(s) to emit. Omitted = all applicable for the
-    /// fit's backend (chain-binomial → `free_forward` + `one_step`; ODE →
-    /// `free_forward` only). `--horizon one_step` on an ODE fit is a hard error.
-    #[arg(long, value_name = "HORIZON")]
-    pub horizon: Option<crate::args::types::HorizonArg>,
+    /// Which predictive to emit. Omitted = all applicable for the fit's
+    /// backend (chain-binomial → `free_forward` + `one_step`; ODE →
+    /// `free_forward` only), or `forecast` when `--horizon` is given.
+    /// `--mode one_step` on an ODE fit is a hard error. `forecast` is the
+    /// fixed-origin forecast from the end of the fit's training rows, out to
+    /// `--horizon`.
+    #[arg(long, value_name = "MODE")]
+    pub mode: Option<crate::args::types::PredictModeArg>,
+
+    /// The forecast's reach, a duration from the end of the fit's training
+    /// rows: `4 weeks`, `28 days`, or a bare number in the model's time unit.
+    /// Every stream's periods ending within it are forecast; a target's
+    /// horizon counts that stream's own periods from the one under way.
+    /// Implies `--mode forecast`.
+    #[arg(long, value_name = "DURATION")]
+    pub horizon: Option<String>,
 
     /// Report this fit with the `quantities {}` block in FILE instead of the
     /// model's own. FILE is an ordinary `.camdl` file containing ONLY a
@@ -1591,7 +1602,7 @@ pub struct FitTableArgs {
     /// q50 of the no-overlay `fitted` row). Repeatable for several
     /// quantities. Unlike the default read-only table, `--quantity`
     /// may DERIVE the value on demand: for a fit that has not been
-    /// predicted yet it runs `fit predict --horizon free_forward`,
+    /// predicted yet it runs `fit predict --mode free_forward`,
     /// populating that fit's `quantities/` outputs. Optimizer fits
     /// (IF2 / NLopt) have no posterior cloud, so their cell renders `—`.
     #[arg(long = "quantity", value_name = "NAME")]

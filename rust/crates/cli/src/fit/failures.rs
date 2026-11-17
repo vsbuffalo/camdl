@@ -40,6 +40,10 @@ pub enum Site {
     /// One `quantities {}` entry, by its declared name. The other entries and
     /// every stream artifact are unaffected by it and are still written.
     Quantity(String),
+    /// One stream's forecast, by its leaf name: the stream was refused a
+    /// forecast (no declared rhythm, a data column its likelihood reads). The
+    /// other streams' forecasts are still written.
+    ForecastStream(String),
 }
 
 impl Site {
@@ -48,6 +52,7 @@ impl Site {
         match self {
             Site::FreeForward => "the free-forward tail".to_string(),
             Site::Quantity(name) => format!("quantity `{name}`"),
+            Site::ForecastStream(name) => format!("the forecast of stream `{name}`"),
         }
     }
 }

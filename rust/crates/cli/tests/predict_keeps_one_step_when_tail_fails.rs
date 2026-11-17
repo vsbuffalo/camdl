@@ -260,7 +260,7 @@ fn a_refused_tail_still_writes_the_one_step_artifact_and_records_the_failure() {
 }
 
 /// The other half of the rule, and the negative control for the test above:
-/// `--horizon one_step` never builds a tail, so a scenario it could not have
+/// `--mode one_step` never builds a tail, so a scenario it could not have
 /// honoured is a plain usage error — refused outright, with no artifact and no
 /// failure record, exactly as before.
 #[test]
@@ -282,7 +282,7 @@ fn an_unhonourable_scenario_is_still_a_usage_error_when_no_tail_was_asked_for() 
         &tmp,
         &[
             "fit", "predict", "--fit", "fit.toml", "--scenario", "longer",
-            "--horizon", "one_step",
+            "--mode", "one_step",
         ],
     );
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
