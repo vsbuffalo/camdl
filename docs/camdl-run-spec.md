@@ -2872,11 +2872,15 @@ scoring see the full series. The one exception is `pfilter --save-final-state`
 under `holdout_after`: it binds only the training rows, cut by the training rule
 below (`cutoff_prefix`, `fit/training_partition.rs`), and saves the state at
 their end, since a state filtered through held-out rows would be a forecast
-origin that has seen the data its forecast is scored against (gh#1138). Its
-log-likelihood then covers the training rows only, and the training rows it kept
-enter its `config` level. An anchored cutoff resolves over the fit config's own
-files, so a run that binds only the training rows with `--data` cuts nothing and
-saves the same state.
+origin that has seen the data its forecast is scored against (gh#1138). Every
+per-run output of that run then covers the training rows only: the
+log-likelihood, `--trace`, `--save-prequential`, `--save-paths`,
+`--save-filtering` and `--pf-health`. `--score-from` is refused beside a cut
+that dropped rows, since every row it could score trained. When the cut drops a
+row, the training rows it kept enter the run's `config` level; a cut that drops
+nothing keeps the run_id of the same run without `--save-final-state`. An
+anchored cutoff resolves over the fit config's own files, so a run that binds
+only the training rows with `--data` cuts nothing and saves the same state.
 
 - `holdout_after` is a bare model time, a date (the instant that day begins), or
   an observation-anchored expression (`last_obs - 6 weeks`). Its anchors resolve

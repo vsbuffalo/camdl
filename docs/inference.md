@@ -1802,11 +1802,15 @@ at their end: a state filtered through the held-out rows would already have seen
 the data its forecast is scored against. The run says so:
 
 ```text
-pfilter: --save-final-state under holdout_after = "6" (t = 6): state saved at t = 6, the end of the training rows (holdout_after); the log-likelihood shown covers training rows only
+pfilter: --save-final-state under holdout_after = "6" (t = 6): state saved at t = 6, the end of the training rows (holdout_after); the log-likelihood shown covers training rows only, as does every other output of this run (--trace, --save-prequential, --save-paths, --save-filtering, --pf-health)
 ```
 
-That run's log-likelihood therefore covers the training rows only. Without
-`--save-final-state`, the filter and its log-likelihood cover the full series.
+Every per-run output of that run therefore covers the training rows only: the
+log-likelihood, `--trace`, `--save-prequential`, `--save-paths`,
+`--save-filtering` and `--pf-health`. `--score-from` is refused beside it when
+the cut dropped rows, because every row it could score trained; score the
+held-out window in a separate run without `--save-final-state`. Without
+`--save-final-state`, the filter and every output cover the full series.
 
 The file is a TSV with a `# camdl-final-state v1  t=<time>` header, then one row
 per particle and one column per integer compartment — nothing else. The header's
