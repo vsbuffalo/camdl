@@ -460,6 +460,25 @@ judged. The checks now in `check_surface_time_typing` move into these functions
 and the walk over declaration fields is deleted; the E320 check (a property of
 `time_unit`, not of a position) stays where it is.
 
+**Positions inside ordinary expressions.** A `t`-comparison operand and a
+`t`-offset have no fold site of their own: the enclosing rate, `let` or quantity
+is lowered whole by `resolve_expr`, which produces their value. They are judged
+from the census instead (`check_expression_positions`, which calls
+`Lower.instant_in_expr` and `Lower.runtime_offset_in_expr` on every such
+position the census lists), so test 1.1 holds for them by construction and a
+`let` that is never used is still judged. `value_at`'s time and the forcing
+keywords do have a fold site, the quantity classifier and the forcing expander,
+and those obtain the typed position from the role tables and lower it there.
+
+**The position names in the messages.** `simulate.from`, `simulate.to`,
+`scenario '<name>' simulate.to`, `intervention at-time` (`event at-time`),
+`intervention.from` and `intervention.until`, `output trajectories.at`,
+`observation '<name>'.at`, `` `value_at`'s time in quantity '<name>' ``,
+`` `breakpoints` of forcing '<name>' `` (likewise `window`, `times`),
+`the bounds of '<name>'`, `` a comparison with `t` ``, `timepoint '<name>'`. The
+W325 subject for `value_at` is `` `value_at(…, 60)` in quantity '<name>' ``,
+with a hint of its own, since the at-schedule hint names `at [...]`.
+
 Two checks in that function are not about positions and stay as an expression
 check over every ordinary expression (transition rates, ODE derivatives, `let`
 bodies, `init` values, prior arguments, intervention actions, `balance`,
@@ -1012,14 +1031,17 @@ Tests, each red on `main` where it asserts a change:
 4. (1.4) `simulate { to = origin + 90 'days }`, scenario
    `to = date("2020-03-01") + 7 'days` and output
    `at = [date("2020-03-01") + 7 'days]` compile to 90, 67 and 67, and output
-   `at = [date_range(origin, count = 3, calendar_months = 1)]` to `[0, 31, 60]`.
+   `at = [date_range(origin, count = 3, calendar_months = 1)]` to
+   `[0, 31, 60, 91]` (`count = 3` is three steps after the start, four dates).
 5. (1.5) The same spellings without an origin compile to today's average values
    (the rules are vacuous).
 6. (1.6) Compile-only: the census's guard is checked by hand: a scratch
-   `declaration` constructor, or a field added to a record the census reads,
-   fails `dune build` with warning 4 or 9 reported as an error in
-   `time_census.ml`. It cannot be a test that runs; the census's header comment
-   says how to repeat the check, and the PR states that it was done.
+   `declaration` constructor fails `dune build` with warning 8 (non-exhaustive
+   match, already an error under the compiler library's dune flags) in the
+   census's `decl_found`, and a field added to a record the census reads fails
+   it with warning 9 reported as an error. Warning 4 is what keeps a wildcard
+   out of those matches. It cannot be a test that runs; the census's header
+   comment says how to repeat the check, and the PR states that it was done.
 
 Each test is mutation-checked: the refusal or acceptance it asserts is reverted
 in `Lower` and the test is seen to fail.
