@@ -56,8 +56,9 @@ use sha2::{Digest, Sha256};
 ///
 /// ## History
 ///
-/// - **6** (D72) — a correctness fix to what the particle filters compute
-///   from a run's inputs. The bootstrap filter and IF2 assimilate only at a
+/// - **6** (D72) — an invariance fix (bootstrap filter) and an algorithm
+///   correction (IF2) to what the particle filters compute from a run's
+///   inputs. The bootstrap filter and IF2 assimilate only at a
 ///   stop where some stream holds an observed value: at a stop with none (a
 ///   row every stream holds as `NA`, a declared period's start) they fold
 ///   and reset the accumulators and no longer weight, resample, open a
