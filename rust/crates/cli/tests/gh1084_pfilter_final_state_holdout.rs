@@ -160,6 +160,50 @@ fn save_final_state_under_a_holdout_binds_only_the_training_rows() {
         "the cut run's log-likelihood must equal the training-only file's");
 }
 
+/// The store path of the run's pfilter leaf, from its `stored` line or, on a
+/// cache hit, its `cached` line. The path is one segment per identity level,
+/// each carrying that level's hash, so two runs share a path exactly when
+/// they share a run_id.
+fn leaf(o: &Output) -> String {
+    let err = stderr(o);
+    err.lines().chain(stdout(o).lines())
+        .find_map(|l| {
+            let l = l.trim();
+            l.strip_prefix("stored ").or_else(|| l.strip_prefix("cached "))
+                .filter(|p| p.contains("pfilters/"))
+                .map(|p| p.trim().to_string())
+        })
+        .unwrap_or_else(|| panic!("no stored leaf named; stderr:\n{err}"))
+}
+
+/// A cut that drops no row stores what the same evaluation stores without
+/// `--save-final-state`, so it keeps that run_id: the training rows enter the
+/// identity only when they change the stored log-likelihood. Both ways a cut
+/// can drop nothing are checked: a run bound to the training-only file, and a
+/// cutoff at or after every row.
+#[test]
+fn a_cut_that_drops_no_row_keeps_the_run_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    fixture(tmp.path(), "holdout_after = 6");
+    let plain = pfilter(tmp.path(), &["--data", "cases=training.tsv"]);
+    assert!(plain.status.success(), "{}", stderr(&plain));
+    let saved = pfilter(tmp.path(),
+        &["--data", "cases=training.tsv", "--save-final-state", "fs.tsv"]);
+    assert!(saved.status.success(), "{}", stderr(&saved));
+    assert_eq!(leaf(&plain), leaf(&saved),
+        "a training-only file loses no row to the cut and must keep its run_id");
+
+    let late = tempfile::tempdir().unwrap();
+    fixture(late.path(), "holdout_after = 10");
+    let plain = pfilter(late.path(), &[]);
+    assert!(plain.status.success(), "{}", stderr(&plain));
+    let saved = pfilter(late.path(), &["--save-final-state", "fs.tsv"]);
+    assert!(saved.status.success(), "{}", stderr(&saved));
+    assert_eq!(origin_of(&late.path().join("fs.tsv")), 10.0);
+    assert_eq!(leaf(&plain), leaf(&saved),
+        "a cutoff after every row drops nothing and must keep the run_id");
+}
+
 /// The cut is stored under its own identity: the training rows are keyed, so
 /// the cut run's stored log-likelihood does not share a leaf with the
 /// full-series run over the same file.
@@ -167,12 +211,6 @@ fn save_final_state_under_a_holdout_binds_only_the_training_rows() {
 fn the_cut_run_is_not_stored_under_the_full_series_identity() {
     let tmp = tempfile::tempdir().unwrap();
     fixture(tmp.path(), "holdout_after = 6");
-    let leaf = |o: &Output| -> String {
-        let err = stderr(o);
-        err.lines().chain(stdout(o).lines())
-            .find_map(|l| l.split("camdl cat ").nth(1).map(|s| s.trim().to_string()))
-            .unwrap_or_else(|| panic!("no stored leaf named; stderr:\n{err}"))
-    };
     let full = pfilter(tmp.path(), &[]);
     assert!(full.status.success(), "{}", stderr(&full));
     let cut = pfilter(tmp.path(), &["--save-final-state", "fs.tsv"]);

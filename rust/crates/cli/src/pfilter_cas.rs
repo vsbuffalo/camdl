@@ -63,7 +63,7 @@ pub struct PfilterCtx<'a> {
     /// Under `--save-final-state` and the `--fit` config's `holdout_after`,
     /// how many leading rows of each stream were bound (by stream name); every
     /// later row was left out of the stored log-likelihood, so it is identity
-    /// (gh#1138). `None` when every bound row was scored.
+    /// (gh#1138). `None` when the cut dropped no row, or there was no cut.
     pub training_rows: Option<&'a [(String, usize)]>,
     /// The resolved pfilter seed (the `seed` level hashes this).
     pub seed: u64,
@@ -97,7 +97,8 @@ struct PfilterConfigLevel<'a> {
     allow_forcing_extrapolation: bool,
     /// The training rows a `--save-final-state` run under `holdout_after`
     /// bound. The data is keyed already; this is what says the rows after
-    /// them were cut. Omitted without a cut, so every other run keeps its key.
+    /// them were cut. Omitted when no row was dropped, so every other run keeps
+    /// its key.
     #[serde(skip_serializing_if = "Option::is_none")]
     training_rows: Option<&'a [(String, usize)]>,
 }
