@@ -482,11 +482,6 @@ pub fn run_method(
                         {
                             out.say(format_args!("{gap}"));
                         }
-                        if state.completed_sweeps >= n_sweeps {
-                            out.say(format_args!("  warning: chain already completed {} sweeps (requested {}). \
-                                       Increase sweeps in fit.toml to continue.",
-                                state.completed_sweeps, n_sweeps));
-                        }
                         states.push(Some(state));
                     }
                     Err(e) => {
