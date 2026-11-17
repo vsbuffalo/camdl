@@ -1704,26 +1704,25 @@ above. An ODE row is not differenced against a filtered row: the filter's
 log-likelihood estimate is biased downward and the ODE score is not, so their Δ
 would carry that bias. `camdl docs model-comparison` §8 gives the details.
 
-The equivalent manual construction (also the fallback for a fit produced before
-the holdout was applied):
+The equivalent manual construction scores the held-out window with `pfilter`
+yourself, from the θ̂ of a fit that declared the cutoff:
 
 ```bash
-camdl data split data/cases.tsv --at-time 5474
-camdl fit run fit_train.toml
+camdl fit run fit.toml --label train   # [data] holdout_after = 5474
 camdl fit summary @train --params-only
 camdl pfilter model.camdl --params theta.toml --data weekly_cases=data/cases.tsv --save-prequential preq --score-from 5474
 ```
 
-`camdl data split` writes the train and holdout TSVs; point the fit's
-`[data.observations]` at the training file, and write the fit's θ̂ (from
-`fit summary --params-only`) to `theta.toml`. `--score-from` windows the trace
-to the held-out rows while still assimilating the training window. It cuts on
-the time each row is scored at, which for a row counting events over a period is
-the period's close, not the row's label. For a stream labelled by the start of
-its period (`covers = day(time)`, `starting_on`, `ending_on`), pass the close of
-the last training row's period (under `day(time)`, the split time plus one day);
-passing the split time scores the last training row as held out. `camdl compare`
-draws this boundary itself.
+The fit trains on the rows `holdout_after` leaves it, so no separate training
+file is written; write the fit's θ̂ (from `fit summary --params-only`) to
+`theta.toml`. `--score-from` windows the trace to the held-out rows while still
+assimilating the training window. It cuts on the time each row is scored at,
+which for a row counting events over a period is the period's close, not the
+row's label. For a stream labelled by the start of its period
+(`covers = day(time)`, `starting_on`, `ending_on`), pass the close of the last
+training row's period (under `day(time)`, the split time plus one day); passing
+the split time scores the last training row as held out. `camdl compare` draws
+this boundary itself.
 
 Score the full series, not the holdout file alone. Binding only the held-out
 rows starts the filter from the model's prior at the first held-out observation,
@@ -1796,11 +1795,18 @@ camdl simulate model.camdl --params mle.toml \
     --to "last_obs + 8 weeks" --fit fit.toml
 ```
 
-Under a fit config that declares `holdout_after`, `pfilter --fit` still scores
-every bound row, but `--save-final-state` is refused while any bound row with a
-value ends after the cutoff: a state filtered through the held-out rows has
-already seen the data its forecast is scored against. Bind the training rows
-alone with `--data NAME=FILE` and the state is saved at their end.
+Under a fit config that declares `holdout_after`, `pfilter --fit` scores every
+bound row, but `pfilter --fit --save-final-state` binds only the training rows
+(the rows the fit trained on, judged by the fit's own rule) and saves the state
+at their end: a state filtered through the held-out rows would already have seen
+the data its forecast is scored against. The run says so:
+
+```text
+pfilter: --save-final-state under holdout_after = "6" (t = 6): state saved at t = 6, the end of the training rows (holdout_after); the log-likelihood shown covers training rows only
+```
+
+That run's log-likelihood therefore covers the training rows only. Without
+`--save-final-state`, the filter and its log-likelihood cover the full series.
 
 The file is a TSV with a `# camdl-final-state v1  t=<time>` header, then one row
 per particle and one column per integer compartment — nothing else. The header's

@@ -2869,11 +2869,14 @@ data through the same function, and `survey --fit` keeps the rows a
 rows a cutoff leaves each stream enter the profile's base identity and the
 survey's `config` level, omitted without one. `pfilter` and `compare`'s holdout
 scoring see the full series. The one exception is `pfilter --save-final-state`
-under `holdout_after`: it is refused while a bound row with a value ends after
-the cutoff, since the saved state would be a forecast origin filtered through
-held-out rows (gh#1084). The cutoff is judged by the training rule below; an
-anchored cutoff resolves over the fit config's own files, so binding only the
-training rows with `--data` saves the state at their end.
+under `holdout_after`: it binds only the training rows, cut by the training rule
+below (`cutoff_prefix`, `fit/training_partition.rs`), and saves the state at
+their end, since a state filtered through held-out rows would be a forecast
+origin that has seen the data its forecast is scored against (gh#1138). Its
+log-likelihood then covers the training rows only, and the training rows it kept
+enter its `config` level. An anchored cutoff resolves over the fit config's own
+files, so a run that binds only the training rows with `--data` cuts nothing and
+saves the same state.
 
 - `holdout_after` is a bare model time, a date (the instant that day begins), or
   an observation-anchored expression (`last_obs - 6 weeks`). Its anchors resolve
@@ -2900,9 +2903,7 @@ partition in `fit.meta.json` (`training_partition`). `camdl compare` scores such
 a fit out of sample on every row that did not train and ends after the training
 extent (stamped `held-out tail`, with `train_end` the extent), after checking
 that each training file's leading rows still digest to the recorded prefix; a
-fit without a holdout is scored in-sample. `camdl data
-split`, which writes
-separate train/holdout TSVs for a second fit, remains an alternative.
+fit without a holdout is scored in-sample.
 
 A model anchor (`simulate { to = last_obs + … }`, a `piecewise` breakpoint) and
 `fit predict`'s `value_at(…, last_obs)` resolve over the training rows only, so
@@ -3990,9 +3991,10 @@ over its own `--sweep` grid.
 
 ## 8. fit.toml Examples
 
-The four configs below were all executed end to end. They share one project
-layout; every path inside a `fit.toml` resolves **relative to that file**, which
-is why the configs in `fits/` reach back out with `../`.
+The configs in §8.1 to §8.3 were executed end to end, and their output is shown;
+§8.4's config is shown without output. They share one project layout; every path
+inside a `fit.toml` resolves **relative to that file**, which is why the configs
+in `fits/` reach back out with `../`.
 
 ```
 models/sir.camdl          # closed SIR, weekly NegBinomial reported cases
@@ -4463,19 +4465,9 @@ rho = 0.6
 k = 10.0
 ```
 
-Out-of-sample validation is done by splitting the data file, not by a key in the
-config. `camdl data split` writes the two files:
-
-```
-$ camdl data split data/cases.tsv --at-time 56 \
-    --train data/train.tsv --holdout data/holdout.tsv
-Split at t = 56 (column 'time')
-  Train:   9 observations, t ∈ [0, 56]
-  Holdout: 3 observations, t ∈ [63, 77]
-  Written: data/train.tsv, data/holdout.tsv
-```
-
-The fit then points at the training file:
+Out-of-sample validation is a key in the config. `holdout_after` under `[data]`
+trains on the rows whose period ends at or before the cutoff (§6.2) and leaves
+the data file whole:
 
 ```toml
 output_dir = "../results"
@@ -4483,8 +4475,11 @@ output_dir = "../results"
 [model]
 camdl = "../models/sir.camdl"
 
+[data]
+holdout_after = 56
+
 [data.observations]
-weekly_cases = "../data/train.tsv"
+weekly_cases = "../data/cases.tsv"
 
 [estimate]
 beta = { bounds = [0.05, 1.0] }
@@ -4502,53 +4497,21 @@ iterations = 5
 cooling = 0.7
 ```
 
-```
-$ camdl fit run fits/08_holdoutfiles.toml --seed 1
-cooling: cf50=0.70, reached at iter 50 (target), over a 5-iteration run × 9 observations
-best chain: 1 (loglik=-48.01 ± 0.01)
-   stored if2 · …/results/fits/08_holdoutfiles-812b33c5/if2-c3b8cbc0/seed_1-e6a47b86/
-```
-
-Nine observations, as the split promised. `fit summary --params-only` emits θ̂ as
-a flat params TOML, which `camdl pfilter` reads directly, so the held-out window
-is scored in two commands:
-
-```
-$ camdl fit summary results/fits/08_holdoutfiles-812b33c5 --params-only
-# camdl fit summary --params-only (if2)
-# source: results/fits/08_holdoutfiles-812b33c5/if2-c3b8cbc0/seed_1-e6a47b86/final_params.toml
-# camdl: 0.1.0+3e2b2888
-
-I0 = 10.0
-N0 = 10000.0
-beta = 0.4115404138
-gamma = 0.1802936713
-k = 10.0
-rho = 0.6
-
-$ camdl pfilter models/sir.camdl --params theta.toml \
-    --data weekly_cases=data/holdout.tsv --particles 500
-pfilter: 3 observations × 1 streams, 500 particles, dt=1, seed=1
-pfilter: bound streams: weekly_cases(neg_binomial)
--43.9094
-```
-
-Read that number carefully. The filter starts at the model's `simulate { from }`
-and the first held-out observation is at t = 63, but each row is scored over the
-period the stream declares for it (`covers`, or window columns), so that first
-observation is scored against its own weekly period and the 0–63 warm-up is
-simulated and scored nowhere. `pfilter` binds the same declared periods
-`fit run` does — there is no separate window setting on either — so the two
-log-likelihoods are comparable by construction.
+The fit prints the rows it trained on and the first held-out row of each stream
+(§6.2) and records its training partition in `fit.meta.json`. `camdl compare`
+then scores the withheld rows out of sample: it filters the full series at θ̂, so
+each held-out row is scored one step ahead with the training window assimilated.
+To score them by hand instead, write θ̂ with
+`camdl fit summary FIT --params-only` and run `camdl pfilter` over the full file
+with `--score-from` (`docs/inference.md`, "Out-of-sample validation").
 
 `camdl fit predict` plus `camdl compare` answers a different question, replaying
 the fitted trajectory forward into the held-out window rather than re-filtering
 it; reach for that when you want a predictive score rather than a filter
 log-likelihood.
 
-A fit that declares `[data] holdout_after = <t>` or `[data.holdout]` trains on
-the rows up to the boundary only (§6.2), so the `camdl data split` step above is
-optional: `camdl compare` then scores the withheld rows out of sample.
+A held-out file that already exists on its own, with rows that all end after the
+training data, is bound with `[data.holdout]` instead (§6.2).
 
 ### 8.5 Comparing and deriving configs
 
@@ -6967,8 +6930,6 @@ camdl
 ├── pfilter MODEL               bootstrap particle filter at fixed θ
 ├── profile MODEL               profile likelihood over a parameter grid
 ├── survey MODEL                likelihood-landscape LHS diagnostic
-├── data
-│   └── split FILE              train / holdout split of a data TSV
 ├── list [ROOT]                 browse cached runs
 ├── show TARGET                 full metadata for one run
 ├── cat TARGET                  emit a run's trajectory or observation output
@@ -7237,9 +7198,9 @@ camdl fit predict [FIT]
 --trace FILE                per-observation diagnostics TSV ("-" for stdout)
 --pf-health FILE            per-obs ESS + Snyder τ², with the implied
                             particles-to-avoid-collapse estimate exp(τ²/2)
---save-final-state FILE     final particle states; refused under the --fit
-                            config's holdout_after while a bound row with a
-                            value ends after the cutoff (gh#1084)
+--save-final-state FILE     final particle states; under the --fit config's
+                            holdout_after, binds only the training rows and
+                            saves the state at their end (gh#1138)
 --save-paths FILE           smoothing-distribution trajectory samples
 --n-paths N                 how many, for --save-paths (default 1)
 --save-filtering FILE       per-step particle states and log-weights
@@ -7545,7 +7506,7 @@ no field combining streams. `--pointwise` writes only the `.streams` file.
 Without `--streams` every output is unchanged, except that the stream-set
 refusal names `--streams` with the streams the two rows share.
 
-### Browsing, labelling, data
+### Browsing and labelling
 
 ```
 camdl list [ROOT]
@@ -7560,8 +7521,6 @@ camdl list [ROOT]
 camdl show TARGET             --root DIR   --format human|json
 camdl cat TARGET              --root DIR   --stream NAME
 camdl label HASH LABEL        --root DIR
-camdl data split FILE         --at-time T | --fraction F, --time-col NAME,
-                              --train PATH, --holdout PATH
 ```
 
 ### Compiler passthroughs

@@ -1,6 +1,6 @@
 // ── Args structs only ─────────────────────────────────────────────────────────
 //
-// The clap subcommand tree (Cli, Command, FitCmd, DataCmd) lives
+// The clap subcommand tree (Cli, Command, FitCmd, ...) lives
 // in main.rs — it's the canonical, dispatched parser. This module owns
 // only the per-command argument structs (FitRunArgs, SimulateArgs, etc.)
 // referenced by main.rs's tree.
@@ -1763,9 +1763,10 @@ pub struct PfilterArgs {
     #[arg(short, long)]
     pub output: Option<PathBuf>,
 
-    /// Write final particle states to this TSV. Refused under a `--fit`
-    /// config's `holdout_after` while a bound row with a value ends after the
-    /// cutoff (gh#1084); bind the training rows alone with `--data`.
+    /// Write final particle states to this TSV. Under a `--fit` config's
+    /// `holdout_after`, the run binds only the training rows (those ending at
+    /// or before the cutoff) and saves the state at their end; its
+    /// log-likelihood then covers the training rows only (gh#1138).
     #[arg(long)]
     pub save_final_state: Option<PathBuf>,
 
@@ -2368,44 +2369,6 @@ pub struct EvalArgs {
     /// Output file (default: stdout)
     #[arg(short, long)]
     pub output: Option<PathBuf>,
-}
-
-// ─── data split ───────────────────────────────────────────────────────────────
-
-#[derive(Args)]
-#[command(after_help = colored_help!("\
-Examples:
-  # Split at a specific time point
-  camdl data split cases.tsv --at-time 100 \\
-      --train train.tsv --holdout holdout.tsv
-
-  # Split at a fraction of the rows (last 20% as holdout)
-  camdl data split cases.tsv --fraction 0.8 \\
-      --train train.tsv --holdout holdout.tsv
-"))]
-pub struct DataSplitArgs {
-    /// Input data TSV
-    pub file: PathBuf,
-
-    /// Split at this time value (conflicts with --fraction)
-    #[arg(long, conflicts_with = "fraction")]
-    pub at_time: Option<f64>,
-
-    /// Split at this fraction of rows, 0–1 (conflicts with --at-time)
-    #[arg(long, conflicts_with = "at_time")]
-    pub fraction: Option<f64>,
-
-    /// Name of the time column (auto-detected if absent)
-    #[arg(long)]
-    pub time_col: Option<String>,
-
-    /// Training set output path
-    #[arg(long)]
-    pub train: Option<PathBuf>,
-
-    /// Holdout set output path
-    #[arg(long)]
-    pub holdout: Option<PathBuf>,
 }
 
 // ─── docs ─────────────────────────────────────────────────────────────────────

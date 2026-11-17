@@ -5928,17 +5928,24 @@ Columns:
 state_mean state_q05 state_q50 state_q95 observed`.
 `obs_*` includes observation noise; `state_*` is process uncertainty only.
 
-### 21.7 Data Utilities
+### 21.7 Train/Holdout Validation
 
-```bash
-# Split a TSV at a time threshold for train/holdout validation
-camdl data split data/cases.tsv --at-time 5474
-# → data/cases_train.tsv, data/cases_holdout.tsv
+A train/holdout split is declared in the fit config, and the data file stays
+whole. A row trains when the end of what it measures is at or before the
+cutoff:
 
-# Explicit output paths
-camdl data split data/cases.tsv --at-time 5474 \
-    --train data/train.tsv --holdout data/holdout.tsv
+```toml
+[data]
+holdout_after = 5474   # rows ending after t = 5474 are withheld from training
+
+[data.observations]
+cases = "data/cases.tsv"
 ```
+
+Held-out rows supplied as their own file are bound with `[data.holdout]`
+instead. `camdl compare` scores the withheld rows out of sample, and
+`camdl pfilter --fit fit.toml --save-final-state FILE` binds only the training
+rows and saves the state at their end.
 
 ### 21.8 Particle State Export
 

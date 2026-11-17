@@ -1,12 +1,17 @@
-//! gh#1084: `camdl pfilter --fit <fit.toml> --save-final-state FILE` ignored
-//! the fit's `holdout_after`. The filter ran through every bound row, held-out
-//! ones included, and saved the swarm at the last of them — a forecast origin
-//! that already conditions on the rows a forecast from it is scored against.
+//! gh#1084, gh#1138: `camdl pfilter --fit <fit.toml> --save-final-state FILE`
+//! under the fit's `holdout_after`.
 //!
-//! The filter itself still scores the full series (its log-likelihood, trace
-//! and prequential outputs are unchanged, and `compare` relies on them); only
-//! the saved state is refused while the bound rows run past the cutoff. Binding
-//! training rows alone with `--data` saves the state at the training extent.
+//! gh#1084: the filter ran through every bound row, held-out ones included,
+//! and saved the swarm at the last of them, a forecast origin that already
+//! conditions on the rows a forecast from it is scored against. That fix
+//! refused the run. gh#1138 (maintainer decision D67 a) replaces the refusal:
+//! the run binds only the training rows, cut by the rule the fit's partition
+//! uses, saves the state at their end and says so. The saved state is the one
+//! a run bound to a training-only file saves.
+//!
+//! Without `--save-final-state` the filter still scores the full series (its
+//! log-likelihood, trace and prequential outputs are unchanged, and `compare`
+//! relies on them).
 //!
 //! End-to-end via the release `camdl` binary and the built `camdlc.exe`.
 
@@ -117,64 +122,110 @@ fn origin_of(path: &Path) -> f64 {
     header.split("t=").nth(1).unwrap().trim().parse().unwrap()
 }
 
-/// The defect: a held-out fit's rows past the cutoff reach the saved state.
-#[test]
-fn save_final_state_past_the_cutoff_is_refused() {
-    let tmp = tempfile::tempdir().unwrap();
-    fixture(tmp.path(), "holdout_after = 6");
-    let out = pfilter(tmp.path(), &["--save-final-state", "fs.tsv"]);
-    let err = stderr(&out);
-    assert!(!out.status.success(),
-        "--save-final-state under holdout_after must not save a state filtered \
-         through the held-out rows; stderr:\n{err}");
-    assert!(err.contains("--save-final-state") && err.contains("holdout_after"),
-        "the refusal must name the flag and the declaration; stderr:\n{err}");
-    assert!(!tmp.path().join("fs.tsv").exists(), "no state file may be written");
+fn stdout(o: &Output) -> String {
+    String::from_utf8_lossy(&o.stdout).into_owned()
 }
 
-/// The remedy the refusal names: bind the training rows alone and the state is
-/// saved at the training extent.
+fn read(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap()
+}
+
+/// The full series bound under `holdout_after = 6` binds the training rows
+/// alone: the state is saved at t = 6, the run says so, and the state and the
+/// log-likelihood are the ones a run bound to the training-only file gives
+/// (same seed, same rows, so byte-identical).
 #[test]
-fn training_rows_alone_save_at_the_training_extent() {
+fn save_final_state_under_a_holdout_binds_only_the_training_rows() {
     let tmp = tempfile::tempdir().unwrap();
     fixture(tmp.path(), "holdout_after = 6");
-    let out = pfilter(tmp.path(),
-        &["--data", "cases=training.tsv", "--save-final-state", "fs.tsv"]);
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert_eq!(origin_of(&tmp.path().join("fs.tsv")), 6.0);
+    let cut = pfilter(tmp.path(), &["--save-final-state", "cut.tsv", "--no-store"]);
+    assert!(cut.status.success(),
+        "--save-final-state under holdout_after must cut to the training rows, \
+         not refuse; stderr:\n{}", stderr(&cut));
+    assert_eq!(origin_of(&tmp.path().join("cut.tsv")), 6.0);
+    let err = stderr(&cut);
+    assert!(err.contains("state saved at t = 6, the end of the training rows (holdout_after)")
+            && err.contains("the log-likelihood shown covers training rows only"),
+        "the run must say where the state is saved and what the loglik covers; \
+         stderr:\n{err}");
+    assert!(err.contains("6 observation boundaries"),
+        "only the training rows may be bound; stderr:\n{err}");
+
+    let file = pfilter(tmp.path(),
+        &["--data", "cases=training.tsv", "--save-final-state", "file.tsv", "--no-store"]);
+    assert!(file.status.success(), "{}", stderr(&file));
+    assert_eq!(read(&tmp.path().join("cut.tsv")), read(&tmp.path().join("file.tsv")),
+        "the cut run's state must equal the state from binding the training-only file");
+    assert_eq!(stdout(&cut), stdout(&file),
+        "the cut run's log-likelihood must equal the training-only file's");
+}
+
+/// The cut is stored under its own identity: the training rows are keyed, so
+/// the cut run's stored log-likelihood does not share a leaf with the
+/// full-series run over the same file.
+#[test]
+fn the_cut_run_is_not_stored_under_the_full_series_identity() {
+    let tmp = tempfile::tempdir().unwrap();
+    fixture(tmp.path(), "holdout_after = 6");
+    let leaf = |o: &Output| -> String {
+        let err = stderr(o);
+        err.lines().chain(stdout(o).lines())
+            .find_map(|l| l.split("camdl cat ").nth(1).map(|s| s.trim().to_string()))
+            .unwrap_or_else(|| panic!("no stored leaf named; stderr:\n{err}"))
+    };
+    let full = pfilter(tmp.path(), &[]);
+    assert!(full.status.success(), "{}", stderr(&full));
+    let cut = pfilter(tmp.path(), &["--save-final-state", "fs.tsv"]);
+    assert!(cut.status.success(), "{}", stderr(&cut));
+    assert_ne!(leaf(&full), leaf(&cut),
+        "a log-likelihood over the training rows must not share a run_id with one \
+         over the full series");
 }
 
 /// An anchored cutoff resolves over the fit's own files, where `fit run`
 /// resolved it (`last_obs` = 10, so t = 6), not over the `--data` files: over
-/// the training rows alone `last_obs - 4 days` would resolve to t = 2 and
-/// refuse the rows that trained.
+/// the training rows alone `last_obs - 4 days` would resolve to t = 2 and cut
+/// rows that trained.
 #[test]
 fn an_anchored_cutoff_resolves_over_the_fit_files() {
     let tmp = tempfile::tempdir().unwrap();
     fixture(tmp.path(), "holdout_after = \"last_obs - 4 days\"");
-    let refused = pfilter(tmp.path(), &["--save-final-state", "fs.tsv"]);
-    assert!(!refused.status.success(), "{}", stderr(&refused));
-    assert!(stderr(&refused).contains("(t = 6)"), "{}", stderr(&refused));
-    let out = pfilter(tmp.path(),
-        &["--data", "cases=training.tsv", "--save-final-state", "fs.tsv"]);
-    assert!(out.status.success(), "{}", stderr(&out));
+    let cut = pfilter(tmp.path(), &["--save-final-state", "fs.tsv"]);
+    assert!(cut.status.success(), "{}", stderr(&cut));
+    assert!(stderr(&cut).contains("(t = 6)"), "{}", stderr(&cut));
     assert_eq!(origin_of(&tmp.path().join("fs.tsv")), 6.0);
+    let out = pfilter(tmp.path(),
+        &["--data", "cases=training.tsv", "--save-final-state", "fs2.tsv"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(origin_of(&tmp.path().join("fs2.tsv")), 6.0);
 }
 
-/// An `NA` row past the cutoff carries no value, so filtering through it
-/// conditions on nothing held out: the state is saved, at the last row.
+/// `NA` rows past the cutoff are not training rows: the fit's partition drops
+/// them, and so does the cut, so the state is saved at the training extent
+/// rather than propagated through the unobserved tail. (Before gh#1138 the
+/// state was saved at the last `NA` row, t = 10.)
 #[test]
-fn trailing_na_rows_past_the_cutoff_are_not_refused() {
+fn trailing_na_rows_past_the_cutoff_are_cut() {
     let tmp = tempfile::tempdir().unwrap();
     fixture(tmp.path(), "holdout_after = 6");
     std::fs::write(tmp.path().join("na_tail.tsv"),
         format!("{TRAINING}7\tNA\n8\tNA\n9\tNA\n10\tNA\n")).unwrap();
     let out = pfilter(tmp.path(),
         &["--data", "cases=na_tail.tsv", "--save-final-state", "fs.tsv"]);
-    assert!(out.status.success(),
-        "NA rows past the cutoff hold no data and must not be refused; stderr:\n{}",
-        stderr(&out));
-    assert_eq!(origin_of(&tmp.path().join("fs.tsv")), 10.0);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(origin_of(&tmp.path().join("fs.tsv")), 6.0);
+}
+
+/// A cutoff that leaves a stream no training row with a value is refused, as
+/// `fit run` refuses it, and writes no state.
+#[test]
+fn a_cutoff_before_every_row_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    fixture(tmp.path(), "holdout_after = 0");
+    let out = pfilter(tmp.path(), &["--save-final-state", "fs.tsv"]);
+    assert!(!out.status.success(), "{}", stderr(&out));
+    assert!(stderr(&out).contains("no training data would remain"), "{}", stderr(&out));
+    assert!(!tmp.path().join("fs.tsv").exists(), "no state file may be written");
 }
 
 /// A bare-time cutoff needs no rows, so the fit config's own files are not
@@ -207,16 +258,56 @@ fn without_a_holdout_the_state_is_saved_at_the_last_row() {
     let out = pfilter(tmp.path(), &["--save-final-state", "fs.tsv"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(origin_of(&tmp.path().join("fs.tsv")), 10.0);
+    assert!(!stderr(&out).contains("the end of the training rows"), "{}", stderr(&out));
 }
 
-/// Control: the refusal is scoped to the saved state. A plain filter under the
-/// same holdout still runs over the full series.
+/// Control: the cut is scoped to the saved state. A plain filter under the
+/// same holdout still scores every row, and its log-likelihood is the one the
+/// same filter gives with no holdout declared.
 #[test]
 fn the_filter_without_a_saved_state_still_runs_under_a_holdout() {
     let tmp = tempfile::tempdir().unwrap();
     fixture(tmp.path(), "holdout_after = 6");
-    let out = pfilter(tmp.path(), &[]);
+    let out = pfilter(tmp.path(), &["--no-store"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stderr(&out).contains("10 observation boundaries"),
         "the filter must still score every row; stderr:\n{}", stderr(&out));
+    assert!(!stderr(&out).contains("the end of the training rows"), "{}", stderr(&out));
+
+    let plain = tempfile::tempdir().unwrap();
+    fixture(plain.path(), "");
+    let control = pfilter(plain.path(), &["--no-store"]);
+    assert!(control.status.success(), "{}", stderr(&control));
+    assert_eq!(stdout(&out), stdout(&control),
+        "without --save-final-state the holdout must not change the log-likelihood");
+}
+
+/// gh#1138's case: a stream labelled by the start of its day (`covers =
+/// day(time)`). The row labelled 6 measures [6, 7), so `holdout_after = 6`
+/// holds it out (the fit's rule, on what a row measures, not on its label):
+/// the cut keeps days 1 to 5, saves the state at t = 6, and equals a run bound
+/// to a file of those five rows.
+#[test]
+fn a_start_labelled_row_is_cut_by_what_it_measures() {
+    let tmp = tempfile::tempdir().unwrap();
+    fixture(tmp.path(), "holdout_after = 6");
+    let day_model = MODEL.replace("closing_at(time, 1 'days)", "day(time)");
+    assert_ne!(day_model, MODEL, "the fixture's covers clause moved");
+    std::fs::write(tmp.path().join("sir.camdl"), day_model).unwrap();
+    let out = Command::new(camdlc()).env_remove("CLICOLOR_FORCE")
+        .arg(tmp.path().join("sir.camdl")).output().unwrap();
+    assert!(out.status.success(), "camdlc: {}", String::from_utf8_lossy(&out.stderr));
+    std::fs::write(tmp.path().join("sir.ir.json"), &out.stdout).unwrap();
+    std::fs::write(tmp.path().join("days_1_5.tsv"),
+        "time\tcases\n1\t3\n2\t4\n3\t5\n4\t6\n5\t8\n").unwrap();
+
+    let cut = pfilter(tmp.path(), &["--save-final-state", "cut.tsv", "--no-store"]);
+    assert!(cut.status.success(), "{}", stderr(&cut));
+    assert_eq!(origin_of(&tmp.path().join("cut.tsv")), 6.0);
+    let file = pfilter(tmp.path(),
+        &["--data", "cases=days_1_5.tsv", "--save-final-state", "file.tsv", "--no-store"]);
+    assert!(file.status.success(), "{}", stderr(&file));
+    assert_eq!(read(&tmp.path().join("cut.tsv")), read(&tmp.path().join("file.tsv")),
+        "the day-6 row measures [6, 7) and must be cut");
+    assert_eq!(stdout(&cut), stdout(&file));
 }
