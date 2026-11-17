@@ -1512,6 +1512,9 @@ fn eval_point_pfilter(
             // wall-clock watchdog — the content-addressed `surveys/` landscape
             // is reproducible across machines.
             max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+            // gh#747: BTPE, named. Both samplers draw exactly Binomial(n, p);
+            // `survey` maps a landscape, and exposes no sampler choice.
+            binomial: sim::rng::BinomialAlgorithm::Btpe,
         };
         match bootstrap_filter(process, obs_model, params, &cfg, seed) {
             Ok(PFilterResult { log_likelihood, ess_trace, .. }) => {

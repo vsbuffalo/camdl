@@ -277,6 +277,7 @@ fn ic_free_skips_the_first_observation_not_union_index_zero() {
         record_prequential: false,
         record_predictions: false,
         max_substeps: u64::MAX,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
     let result = bootstrap_filter(&process, &obs_model, &params, &config, 7).expect("filter");
     assert_eq!(result.ll_increments.len(), 3);

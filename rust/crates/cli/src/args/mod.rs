@@ -270,6 +270,13 @@ pub struct InferenceCore {
     /// set a process env var and made a fit's log-likelihood depend on hardware.
     #[arg(long, value_name = "N")]
     pub pf_max_substeps: Option<u64>,
+
+    /// Binomial sampler for the chain-binomial draws: `btpe` (default) or
+    /// `btrs` (Hörmann 1993; faster, gh#747). The two are not bit-compatible,
+    /// so a `btrs` run gets its own stored address.
+    #[arg(long, value_name = "SAMPLER",
+          value_parser = |v: &str| v.parse::<sim::rng::BinomialAlgorithm>())]
+    pub binomial: Option<sim::rng::BinomialAlgorithm>,
 }
 
 /// Stream selection for the inference commands. The projection and
@@ -883,8 +890,9 @@ pub struct FitRunArgs {
     #[arg(long)]
     pub dt_check_strict: bool,
 
-    /// Binomial sampler for a PGAS method's chain-binomial draws: `btpe`
-    /// (default) or `btrs` (Hörmann 1993; faster, gh#747).
+    /// Binomial sampler for the chain-binomial draws of a `pgas`, `pmmh`,
+    /// `if2` or `pfilter` method: `btpe` (default) or `btrs` (Hörmann 1993;
+    /// faster, gh#747).
     ///
     /// For the same reason as the flags above: the two
     /// samplers are NOT bit-compatible — a different rejection scheme accepts

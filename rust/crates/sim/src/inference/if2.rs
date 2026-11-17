@@ -139,6 +139,12 @@ pub struct IF2Config {
     /// `degeneracy::ITER_BUDGET`. Reproducible across machines — it replaced
     /// a machine-speed-dependent wall-clock timeout. Not part of run identity.
     pub max_substeps: u64,
+
+    /// gh#747: the binomial sampler every particle's propagation draws use —
+    /// BTPE or BTRS. Required, not defaulted: the two are not bit-compatible,
+    /// so each construction site names the one its run's identity records
+    /// (the method's `binomial` field) rather than inheriting a silent BTPE.
+    pub binomial: crate::rng::BinomialAlgorithm,
 }
 
 impl super::traits::InferenceConfig for IF2Config {
@@ -383,7 +389,7 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
         // 32 bits, particle i in the bottom 32 — fits 2^32
         // iterations × 2^32 particles with room to spare.
         let stream_base = (iter as u64) << 32;
-        let mut rngs = init_particle_rngs(seed, n, stream_base, crate::rng::BinomialAlgorithm::Btpe);
+        let mut rngs = init_particle_rngs(seed, n, stream_base, config.binomial);
         let mut resample_rng = StatefulRng::new_stream(
             seed,
             stream_base | super::types::RESAMPLE_RNG_STREAM,

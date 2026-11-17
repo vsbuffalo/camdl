@@ -919,12 +919,12 @@ impl FixedParams {
 
 // ─── Method ─────────────────────────────────────────────────────────────────
 
-/// Serialisation predicate for `Algorithm::PGAS.binomial`.
+/// Serialisation predicate for every method's `binomial` field.
 ///
 /// Deliberately named for the VALUE, not for the default: absence in a stored
 /// payload means BTPE, permanently, because that is what every run predating
 /// the field used. If the default flips (gh#761) this must NOT follow it.
-fn is_btpe(a: &sim::rng::BinomialAlgorithm) -> bool {
+pub(crate) fn is_btpe(a: &sim::rng::BinomialAlgorithm) -> bool {
     matches!(a, sim::rng::BinomialAlgorithm::Btpe)
 }
 
@@ -973,6 +973,11 @@ pub enum Algorithm {
         /// scout / smoke fits where the check is unnecessary.
         #[serde(default)]
         dt_check: DtCheckConfig,
+        /// gh#747: which binomial sampler the chain-binomial draws use,
+        /// `btpe` (default) or `btrs`. Identity-bearing and serialised only
+        /// when `btrs`, for the reasons on `Algorithm::PGAS.binomial`.
+        #[serde(default, skip_serializing_if = "is_btpe")]
+        binomial: sim::rng::BinomialAlgorithm,
     },
 
     #[serde(rename = "pgas")]
@@ -1086,6 +1091,11 @@ pub enum Algorithm {
         /// Default: 300.
         #[serde(default = "default_pmmh_adapt_start")]
         adapt_start: usize,
+        /// gh#747: which binomial sampler the chain-binomial draws use,
+        /// `btpe` (default) or `btrs`. Identity-bearing and serialised only
+        /// when `btrs`, for the reasons on `Algorithm::PGAS.binomial`.
+        #[serde(default, skip_serializing_if = "is_btpe")]
+        binomial: sim::rng::BinomialAlgorithm,
     },
 
     /// Metropolis-Hastings on the deterministic ODE marginal likelihood
@@ -1155,6 +1165,11 @@ pub enum Algorithm {
         /// write (e.g. when running PFilter purely for a loglik SD).
         #[serde(default = "default_record_prequential")]
         record_prequential: bool,
+        /// gh#747: which binomial sampler the chain-binomial draws use,
+        /// `btpe` (default) or `btrs`. Identity-bearing and serialised only
+        /// when `btrs`, for the reasons on `Algorithm::PGAS.binomial`.
+        #[serde(default, skip_serializing_if = "is_btpe")]
+        binomial: sim::rng::BinomialAlgorithm,
     },
 
     /// NLopt Sbplx (subspace-searching simplex) — deterministic MLE on the
@@ -1489,6 +1504,24 @@ impl StartsResolution {
 }
 
 impl Algorithm {
+    /// The binomial sampler this method's particle filter draws with (gh#747).
+    /// The methods that run no chain-binomial particle filter (`mh`, nl-*)
+    /// have no such field and draw nothing through it; they report BTPE, the
+    /// sampler any incidental filter they build would have used before the
+    /// field existed.
+    pub fn binomial(&self) -> sim::rng::BinomialAlgorithm {
+        match self {
+            Algorithm::IF2 { binomial, .. }
+            | Algorithm::PGAS { binomial, .. }
+            | Algorithm::PMMH { binomial, .. }
+            | Algorithm::PFilter { binomial, .. } => *binomial,
+            Algorithm::Mh { .. }
+            | Algorithm::NlSbplx(_) | Algorithm::NlBobyqa(_) | Algorithm::NlLbfgs(_) => {
+                sim::rng::BinomialAlgorithm::Btpe
+            }
+        }
+    }
+
     pub fn method_name(&self) -> &'static str {
         self.method_kind().as_str()
     }
@@ -1633,9 +1666,10 @@ impl Algorithm {
                 if let Some(b) = cli.binomial { *binomial = b; }
                 if cli.no_ancestor_sampling { *ancestor_sampling = false; }
             }
-            Algorithm::PMMH { adapt, adapt_start, .. } => {
+            Algorithm::PMMH { adapt, adapt_start, binomial, .. } => {
                 if cli.no_adapt { *adapt = false; }
                 if let Some(s) = cli.adapt_start { *adapt_start = s; }
+                if let Some(b) = cli.binomial { *binomial = b; }
             }
             Algorithm::Mh { adapt, adapt_start, dt_check, backend, .. } => {
                 if cli.no_adapt { *adapt = false; }
@@ -1644,14 +1678,16 @@ impl Algorithm {
                 if let Some(n) = cli.dt_check_halvings { dt_check.n_halvings = n; }
                 resolve_dt_check_strict(dt_check, *backend, cli.dt_check_strict)?;
             }
-            Algorithm::IF2 { cooling_target_iters, gate, dt_check, backend, .. } => {
+            Algorithm::IF2 { cooling_target_iters, gate, dt_check, backend, binomial, .. } => {
                 if let Some(n) = cli.cooling_target_iters { *cooling_target_iters = n; }
+                if let Some(b) = cli.binomial { *binomial = b; }
                 if let Some(db) = cli.decibans_thresh { gate.decibans_thresh = db; }
                 if cli.no_dt_check { dt_check.enabled = false; }
                 if let Some(n) = cli.dt_check_halvings { dt_check.n_halvings = n; }
                 resolve_dt_check_strict(dt_check, *backend, cli.dt_check_strict)?;
             }
-            Algorithm::PFilter { record_ancestry, record_prequential, .. } => {
+            Algorithm::PFilter { record_ancestry, record_prequential, binomial, .. } => {
+                if let Some(b) = cli.binomial { *binomial = b; }
                 // One-way overrides to true: the toml can opt out
                 // (`record_prequential = false`), the flag opts back in.
                 if cli.record_ancestry { *record_ancestry = true; }
@@ -1805,8 +1841,8 @@ impl OverrideFlag {
             | OverrideFlag::NTrajectories
             | OverrideFlag::DiagonalMass
             | OverrideFlag::NoNuts
-            | OverrideFlag::NoAncestorSampling
-            | OverrideFlag::Binomial => &[Pgas],
+            | OverrideFlag::NoAncestorSampling => &[Pgas],
+            OverrideFlag::Binomial => &[Pgas, Pmmh, If2, Pfilter],
             OverrideFlag::NoAdapt | OverrideFlag::AdaptStart => &[Pmmh, Mh],
             OverrideFlag::CoolingTargetIters => &[If2],
             OverrideFlag::DecibansThresh => &[If2, NlSbplx, NlBobyqa, NlLbfgs],
@@ -7935,6 +7971,7 @@ decibans_thresh = 100.0
                 chains: 4, particles: 100, iterations,
                 burn_in: Some(200), thin: Some(2),
                 adapt: true, adapt_start: 300,
+                binomial: sim::rng::BinomialAlgorithm::Btpe,
             },
             starts: Some(ChainStarts::uniform_unconstrained()),
         }
@@ -8114,6 +8151,38 @@ decibans_thresh = 100.0
         }
     }
 
+    /// gh#747, extended past PGAS: every particle-filter method parses
+    /// `binomial = "btrs"`, an absent field is BTPE, a BTRS method gets a
+    /// distinct identity that names the sampler, and a BTPE one keeps the
+    /// payload it had before the field existed. One body for the three methods,
+    /// so a method added to the field later cannot skip half the checks.
+    #[test]
+    fn binomial_sampler_parses_and_keys_on_every_particle_method() {
+        use sim::rng::BinomialAlgorithm::{Btpe, Btrs};
+        let heads = [
+            "algorithm = \"pmmh\"\nbackend = \"chain_binomial\"\nchains = 2\n\
+             particles = 100\niterations = 10\n",
+            "algorithm = \"if2\"\nbackend = \"chain_binomial\"\nchains = 2\n\
+             particles = 100\niterations = 10\ncooling = 0.7\n",
+            "algorithm = \"pfilter\"\nbackend = \"chain_binomial\"\nparticles = 100\n",
+        ];
+        for head in heads {
+            let parse = |extra: &str| -> Method {
+                toml::from_str(&format!("{head}{extra}")).unwrap_or_else(|e| panic!("{head}: {e}"))
+            };
+            let absent = parse("");
+            let btrs = parse("binomial = \"btrs\"\n");
+            assert_eq!(absent.algorithm.binomial(), Btpe, "{head}: absent must mean BTPE");
+            assert_eq!(btrs.algorithm.binomial(), Btrs, "{head}: the TOML spelling must parse");
+            let a = serde_json::to_string(&absent.identity_payload()).unwrap();
+            let b = serde_json::to_string(&btrs.identity_payload()).unwrap();
+            assert_ne!(a, b, "{head}: btpe and btrs share one identity payload");
+            assert!(b.contains(r#""binomial":"btrs""#), "{head}: btrs payload must name it; got {b}");
+            assert!(!a.contains(r#""binomial":"#),
+                "{head}: a btpe payload must stay byte-identical to the pre-field format; got {a}");
+        }
+    }
+
     #[test]
     fn identity_payload_is_byte_stable_against_recompiles() {
         // Golden bytes for a fixed PGAS method. Locks the
@@ -8192,6 +8261,7 @@ decibans_thresh = 100.0
             loglik_eval: LoglikEvalConfig::default(),
             gate: GateConfig::default(),
             dt_check: DtCheckConfig::default(),
+            binomial: sim::rng::BinomialAlgorithm::Btpe,
         });
         let s100 = if2_method(Algorithm::IF2 {
             backend: crate::run_meta::InferenceBackend::ChainBinomial,
@@ -8200,6 +8270,7 @@ decibans_thresh = 100.0
             loglik_eval: LoglikEvalConfig::default(),
             gate: GateConfig::default(),
             dt_check: DtCheckConfig::default(),
+            binomial: sim::rng::BinomialAlgorithm::Btpe,
         });
         assert_ne!(s50.identity_payload(), s100.identity_payload());
 
@@ -8210,6 +8281,7 @@ decibans_thresh = 100.0
             loglik_eval: LoglikEvalConfig::default(),
             gate: GateConfig::default(),
             dt_check: DtCheckConfig::default(),
+            binomial: sim::rng::BinomialAlgorithm::Btpe,
         });
         assert_ne!(s50.identity_payload(), s_diff_cooling.identity_payload());
 
@@ -8222,6 +8294,7 @@ decibans_thresh = 100.0
             loglik_eval: LoglikEvalConfig::default(),
             gate: GateConfig::default(),
             dt_check: DtCheckConfig::default(),
+            binomial: sim::rng::BinomialAlgorithm::Btpe,
         });
         assert_ne!(s50.identity_payload(), s_diff_target.identity_payload());
     }

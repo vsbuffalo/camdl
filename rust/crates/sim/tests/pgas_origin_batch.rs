@@ -318,6 +318,7 @@ fn an_observation_at_t_start_is_scored_after_the_origin_batch() {
         n_particles: 16, dt: DT, t_start: 0.0, skip_first_obs_from_loglik: false,
         record_ancestry: false, record_prequential: false, record_predictions: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
     let pf = sim::inference::particle_filter::bootstrap_filter(
         &sim::inference::ChainBinomialProcess::new(m.clone()),

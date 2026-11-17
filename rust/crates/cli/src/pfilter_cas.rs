@@ -65,6 +65,9 @@ pub struct PfilterCtx<'a> {
     /// later row was left out of the stored log-likelihood, so it is identity
     /// (gh#1138). `None` when the cut dropped no row, or there was no cut.
     pub training_rows: Option<&'a [(String, usize)]>,
+    /// `--binomial`: the two samplers draw different values from one stream,
+    /// so the stored loglik depends on it — identity (gh#747).
+    pub binomial: sim::rng::BinomialAlgorithm,
     /// The resolved pfilter seed (the `seed` level hashes this).
     pub seed: u64,
 }
@@ -101,6 +104,9 @@ struct PfilterConfigLevel<'a> {
     /// its key.
     #[serde(skip_serializing_if = "Option::is_none")]
     training_rows: Option<&'a [(String, usize)]>,
+    /// Omitted when BTPE, so a run without `--binomial btrs` keeps its key.
+    #[serde(skip_serializing_if = "crate::fit::config_v2::is_btpe")]
+    binomial: sim::rng::BinomialAlgorithm,
 }
 
 /// Resolve a pfilter-eval leaf's identity: the four factored levels and the
@@ -133,6 +139,7 @@ pub fn resolve_pfilter(ctx: &PfilterCtx) -> Result<ResolvedPfilter, String> {
         objective: ctx.objective,
         allow_forcing_extrapolation: ctx.allow_forcing_extrapolation,
         training_rows: ctx.training_rows,
+        binomial: ctx.binomial,
     };
 
     let model_digest = ModelDigest::from_model(
@@ -212,6 +219,7 @@ mod tests {
             obs_block: "", flow_indices: &flow, data: &data,
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
             allow_forcing_extrapolation: false, training_rows: None,
+            binomial: sim::rng::BinomialAlgorithm::Btpe,
         };
         // The literal, verbatim from before the rewrite.
         let literal = serde_json::json!({
@@ -241,6 +249,7 @@ mod tests {
             particles: 100, replicates: 1, dt: 1.0,
             obs_block: "", flow_indices: &flow, data: &data, objective,
             allow_forcing_extrapolation: false, training_rows: None,
+            binomial: sim::rng::BinomialAlgorithm::Btpe,
         }, &[]).unwrap();
         let literal = config_level(100, 1, 1.0, "", &[("cases", hh.as_str())]);
         assert_eq!(level(LikelihoodObjective::Full), literal,
@@ -262,6 +271,7 @@ mod tests {
             obs_block: "", flow_indices: &flow, data: &data,
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
             allow_forcing_extrapolation, training_rows: None,
+            binomial: sim::rng::BinomialAlgorithm::Btpe,
         }, &[]).unwrap();
         let literal = config_level(100, 1, 1.0, "", &[("cases", hh.as_str())]);
         assert_eq!(level(false), literal, "off leaves the key unchanged");
@@ -282,6 +292,7 @@ mod tests {
             obs_block: "", flow_indices: &flow, data: &data,
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
             allow_forcing_extrapolation: false, training_rows,
+            binomial: sim::rng::BinomialAlgorithm::Btpe,
         }, &[]).unwrap();
         let literal = config_level(100, 1, 1.0, "", &[("cases", hh.as_str())]);
         let six = [("cases".to_string(), 6)];
@@ -289,6 +300,27 @@ mod tests {
         assert_eq!(level(None), literal, "no cut must leave the key unchanged");
         assert_ne!(level(Some(&six)), literal, "a cut must change the config hash");
         assert_ne!(level(Some(&six)), level(Some(&seven)), "the training rows are keyed");
+    }
+
+    /// The sampler is identity (gh#747): BTRS draws different values from the
+    /// same stream, so a `--binomial btrs` loglik must not share a leaf with the
+    /// BTPE one. BTPE is omitted, so every stored pfilter leaf keeps its key.
+    #[test]
+    fn the_binomial_sampler_rekeys_the_config_level() {
+        use sim::rng::BinomialAlgorithm;
+        let hh = h(1);
+        let data: Vec<(&str, &str)> = vec![("cases", hh.as_str())];
+        let flow: Vec<u32> = Vec::new();
+        let level = |binomial| canonical_config_hash(&PfilterConfigLevel {
+            particles: 100, replicates: 1, dt: 1.0,
+            obs_block: "", flow_indices: &flow, data: &data,
+            objective: crate::fit::config_v2::LikelihoodObjective::Full,
+            allow_forcing_extrapolation: false, training_rows: None,
+            binomial,
+        }, &[]).unwrap();
+        let literal = config_level(100, 1, 1.0, "", &[("cases", hh.as_str())]);
+        assert_eq!(level(BinomialAlgorithm::Btpe), literal, "btpe leaves the key unchanged");
+        assert_ne!(level(BinomialAlgorithm::Btrs), literal, "btrs must change the config hash");
     }
 
     /// A non-finite scored value must be REFUSED, not hashed. `json!` maps

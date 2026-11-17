@@ -675,6 +675,8 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         // is no wall-clock watchdog, so a content-addressed `pfilters/` leaf is
         // produced identically regardless of hardware.
         max_substeps: a.inference.pf_max_substeps.unwrap_or(sim::inference::degeneracy::ITER_BUDGET),
+        // gh#747: `--binomial`; the run's stored address records it.
+        binomial: a.inference.binomial.unwrap_or_default(),
     };
 
     // --save-filtering caveat log. Fires unconditionally (not quietable)
@@ -728,6 +730,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             objective,
             allow_forcing_extrapolation: crate::forcing_extrapolation::allowed(),
             training_rows: training_cut.as_ref().and_then(TrainingCut::identity),
+            binomial: smc_config.binomial,
             seed,
         };
         let resolved_id = match crate::pfilter_cas::resolve_pfilter(&ctx) {

@@ -3855,7 +3855,7 @@ and the methods that read it.
 | `--diagonal-mass`         | `dense_mass = false`                | pgas                                   |
 | `--no-nuts`               | `use_nuts = false`                  | pgas                                   |
 | `--no-ancestor-sampling`  | `ancestor_sampling = false`         | pgas                                   |
-| `--binomial <SAMPLER>`    | `binomial`                          | pgas                                   |
+| `--binomial <SAMPLER>`    | `binomial`                          | pgas, pmmh, if2, pfilter               |
 | `--no-adapt`              | `adapt = false`                     | pmmh, mh                               |
 | `--adapt-start <N>`       | `adapt_start`                       | pmmh, mh                               |
 | `--record-ancestry`       | `record_ancestry = true`            | pfilter                                |
@@ -7125,8 +7125,9 @@ Per-algorithm overrides
   --no-nuts                   use_nuts = false — MH-within-Gibbs for θ|X (one-way)
   --no-ancestor-sampling      ancestor_sampling = false — plain particle Gibbs
                               (one-way; the run stores under its own address)
-  --binomial btpe|btrs        PGAS chain-binomial sampler (default btpe); not
-                              bit-compatible across samplers, so it keys identity
+  --binomial btpe|btrs        chain-binomial sampler for pgas, pmmh, if2 and
+                              pfilter (default btpe); not bit-compatible across
+                              samplers, so it keys identity
   --no-adapt                  adapt = false — lock proposal SDs (one-way)
   --adapt-start N             step at which proposal-SD adaptation begins
   --record-ancestry           record ancestor indices for smoothing paths
@@ -7197,6 +7198,8 @@ camdl fit predict [FIT]
                             (`ic_free`, always used)
 --time-format auto|numeric|date
 --pf-max-substeps N         deterministic per-call compute budget
+--binomial btpe|btrs        chain-binomial sampler (default btpe); btrs is
+                            faster, draws different values, and keys identity
 --replicates N              independent filter runs (default 1)
 -o, --output FILE           default stdout
 --trace FILE                per-observation diagnostics TSV ("-" for stdout)
@@ -7306,7 +7309,7 @@ part of the leaf's identity, and the full objective leaves the key unchanged.
                             different --dt or --fit [config] dt is refused
 --data / --obs / --time-format / --seed / --parallel / --scenario /
 --enable / --disable / --table / --allow-degenerate-rates /
---pf-max-substeps (if2 only)
+--pf-max-substeps / --binomial (if2 only)
 -o, --output FILE           where the collected table goes (default stdout): one
                             row per grid cell, read back from its leaves under
                             `profiles/`: swept values, best loglik over seeds and

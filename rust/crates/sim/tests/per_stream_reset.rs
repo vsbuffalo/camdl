@@ -353,6 +353,7 @@ fn bootstrap_filter_runs_multi_cadence() {
         record_ancestry: false, record_prequential: false,
         record_predictions: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
     let params = compiled.default_params.clone();
     let res = bootstrap_filter(&process, &obs, &params, &cfg, 7)

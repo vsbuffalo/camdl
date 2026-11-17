@@ -179,6 +179,10 @@ struct ProfileMethodLevel<'a> {
     /// its kind, its source through the point's `deps` (gh#896).
     init: serde_json::Value,
     pf_max_substeps: Option<u64>,
+    /// `--binomial` (gh#747). Omitted when BTPE, so a profile without
+    /// `--binomial btrs` keeps its key.
+    #[serde(skip_serializing_if = "crate::fit::config_v2::is_btpe")]
+    binomial: sim::rng::BinomialAlgorithm,
     /// The `[[simplex_groups]]` IF2 perturbs jointly, member names in order.
     /// Omitted when empty, so a profile without groups keeps its key.
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
@@ -244,6 +248,7 @@ pub(crate) fn refuse_if2_flags_for_nlopt(
         (a.cooling.is_some(), "--cooling"),
         (a.cooling_target_iters.is_some(), "--cooling-target-iters"),
         (a.inference.pf_max_substeps.is_some(), "--pf-max-substeps"),
+        (a.inference.binomial.is_some(), "--binomial"),
     ]
     .into_iter()
     .filter_map(|(on, flag)| on.then_some(flag))
@@ -387,6 +392,7 @@ pub(crate) fn profile_if2_config(
         skip_first_obs_from_loglik,
         max_substeps: a.inference.pf_max_substeps
             .unwrap_or(sim::inference::degeneracy::ITER_BUDGET), // gh#241
+        binomial: a.inference.binomial.unwrap_or_default(), // gh#747
     }
 }
 
@@ -1707,6 +1713,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         simplex_groups: &simplex_names,
         init: init_method.identity_value(),
         pf_max_substeps: a.inference.pf_max_substeps,
+        binomial: a.inference.binomial.unwrap_or_default(),
     }, &[]).unwrap_or_else(|e| {
         out.fail(format!("error: profile method identity: {e}"));
     });
@@ -2008,6 +2015,9 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                             record_prequential: false,
                             record_predictions: false, // gh#520: only `.log_likelihood` is read below
                             max_substeps: a.inference.pf_max_substeps.unwrap_or(sim::inference::degeneracy::ITER_BUDGET), // gh#241
+                            // gh#747: the cell's own sampler, so the re-scored
+                            // loglik is the one its IF2 run would reproduce.
+                            binomial: a.inference.binomial.unwrap_or_default(),
                         };
                         // Distinct seed from the IF2 inner run so the
                         // clean-eval PF doesn't reuse IF2's last
@@ -2638,6 +2648,7 @@ mod tests {
             simplex_groups: &[],
             init: init.identity_value(),
             pf_max_substeps: None,
+            binomial: sim::rng::BinomialAlgorithm::Btpe,
         }).unwrap();
         let method_literal = serde_json::json!({
             "algorithm": "if2",
@@ -2667,6 +2678,7 @@ mod tests {
             simplex_groups: &groups,
             init: init.identity_value(),
             pf_max_substeps: None,
+            binomial: sim::rng::BinomialAlgorithm::Btpe,
         }).unwrap();
         let mut literal_with_groups = method_literal.clone();
         literal_with_groups["simplex_groups"] = serde_json::json!(groups);
@@ -2704,6 +2716,7 @@ mod tests {
             simplex_groups: &[],
             init: uniform.identity_value(),
             pf_max_substeps: None,
+            binomial: sim::rng::BinomialAlgorithm::Btpe,
         }, &[]).unwrap().into_inner().to_hex();
         assert_eq!(base, "11d76d9cfe912830d6f32260c5bf160d7948b0f664f8f8b408f25e972f8cfb2d", "base level digest moved");
         assert_eq!(method, "069bdb09a59613aefb5133f4c171825f49357bb501109524999614d61a68d959", "method level digest moved");

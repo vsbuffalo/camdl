@@ -122,6 +122,7 @@ fn run_if2_refuses_an_estimated_event_time() {
         simplex_groups: vec![],
         skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
     let Err(err) = run_if2(&process, &obs, &model.default_params, &if2_params, &config, 1) else {
         panic!("IF2 with tau estimated must be refused")

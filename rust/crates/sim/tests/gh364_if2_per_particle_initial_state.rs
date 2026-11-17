@@ -162,6 +162,7 @@ fn if2_initial_state_uses_each_particles_own_theta() {
         simplex_groups: vec![],
         skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
 
     run_if2(&process, &obs, &base_params, &if2_params, &config, 7).expect("mock IF2 run");
@@ -468,6 +469,7 @@ fn pure_ic_ivp_param_is_identified() {
         simplex_groups: vec![],
         skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
 
     let result = run_if2(&process, &obs_model, &start_params, &if2_params, &config, 3)

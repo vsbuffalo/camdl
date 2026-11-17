@@ -213,6 +213,7 @@ fn test_if2_converges_from_dispersed_start() {
         t_start: 0.0,
         skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
 
     let result = run_if2(
@@ -284,6 +285,7 @@ fn test_if2_respects_bounds() {
         t_start: 0.0,
         skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
 
     let result = run_if2(
@@ -330,6 +332,7 @@ fn test_if2_no_cooling_explores() {
         t_start: 0.0,
         skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
 
     let result = run_if2(
@@ -384,6 +387,7 @@ fn the_if2_step_is_fixed_in_z_near_an_end() {
         t_start: 0.0,
         skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
     let result = run_if2(&process, &obs_model, &true_params, &if2_params, &config, 7).unwrap();
     let mean = result.iterations[0].param_means[0];
@@ -541,4 +545,67 @@ fn cooling_decreases_monotonically() {
         assert!(cooling_now >= 0.0, "cooling went negative at iter {}", iter);
         prev = cooling_now;
     }
+}
+
+/// gh#747: the sampler named on `SMCConfig` / `IF2Config` is the one the
+/// particles draw with. Same seed, same everything, only the sampler differs:
+/// the log-likelihoods must differ (BTRS accepts different values from the same
+/// stream) and each must reproduce itself. The SIR epidemic puts infection draws
+/// at `n·p ≥ 10`, where the two samplers diverge; below that both route to
+/// the same BINV code, so a pure-death model at small `n` could not tell them
+/// apart. Mutation check: hard-wiring `Btpe` back into `bootstrap_filter` (or
+/// `run_if2`) makes the pair equal and fails these.
+fn sir_pf_loglik(binomial: sim::rng::BinomialAlgorithm) -> f64 {
+    let (compiled, params) = sir_model();
+    let (obs_times, observations) = generate_data(&compiled, &params);
+    let process = ChainBinomialProcess::new(Arc::new(compiled));
+    let obs_model = NegBinFlowObs { observations, obs_times, flow_index: 1 };
+    let config = sim::inference::traits::SMCConfig {
+        n_particles: 200, dt: 1.0, t_start: 0.0, skip_first_obs_from_loglik: false,
+        record_ancestry: false, record_prequential: false, record_predictions: false,
+        max_substeps: sim::inference::degeneracy::ITER_BUDGET, binomial,
+    };
+    sim::inference::particle_filter::bootstrap_filter(&process, &obs_model, &params, &config, 7)
+        .unwrap().log_likelihood
+}
+
+#[test]
+fn the_binomial_sampler_reaches_the_bootstrap_filter() {
+    use sim::rng::BinomialAlgorithm::{Btpe, Btrs};
+    let (btpe, btrs) = (sir_pf_loglik(Btpe), sir_pf_loglik(Btrs));
+    assert!(btpe.is_finite() && btrs.is_finite(), "btpe {btpe}, btrs {btrs}");
+    assert_ne!(btpe.to_bits(), btrs.to_bits(),
+        "the filter returned the same loglik under both samplers ({btpe}) — the \
+         config's `binomial` is not reaching the particle draws");
+    assert_eq!(btrs.to_bits(), sir_pf_loglik(Btrs).to_bits(), "btrs must reproduce itself");
+}
+
+fn sir_if2_final_loglik(binomial: sim::rng::BinomialAlgorithm) -> f64 {
+    let (compiled, params) = sir_model();
+    let (obs_times, observations) = generate_data(&compiled, &params);
+    let process = ChainBinomialProcess::new(Arc::new(compiled));
+    let obs_model = NegBinFlowObs { observations, obs_times, flow_index: 1 };
+    let if2_params = vec![EstimatedParam {
+        name: "beta".into(), index: 0, initial: params[0],
+        rw_sd: Transform::Interval { lo: 0.01, hi: 2.0 }.step_from_natural(0.02, params[0]),
+        transform: Transform::Interval { lo: 0.01, hi: 2.0 }, perturb_only_at_t0: false, rw_sd_auto: false,
+    }];
+    let config = IF2Config {
+        n_particles: 100, n_iterations: 2,
+        cooling: sim::inference::if2::CoolingSchedule { fraction: 0.9, target_iters: 50 },
+        simplex_groups: vec![], dt: 1.0, t_start: 0.0, skip_first_obs_from_loglik: false,
+        max_substeps: sim::inference::degeneracy::ITER_BUDGET, binomial,
+    };
+    run_if2(&process, &obs_model, &params, &if2_params, &config, 7).unwrap().final_loglik
+}
+
+#[test]
+fn the_binomial_sampler_reaches_if2() {
+    use sim::rng::BinomialAlgorithm::{Btpe, Btrs};
+    let (btpe, btrs) = (sir_if2_final_loglik(Btpe), sir_if2_final_loglik(Btrs));
+    assert!(btpe.is_finite() && btrs.is_finite(), "btpe {btpe}, btrs {btrs}");
+    assert_ne!(btpe.to_bits(), btrs.to_bits(),
+        "IF2 returned the same loglik under both samplers ({btpe}) — the config's \
+         `binomial` is not reaching the particle draws");
+    assert_eq!(btrs.to_bits(), sir_if2_final_loglik(Btrs).to_bits(), "btrs must reproduce itself");
 }

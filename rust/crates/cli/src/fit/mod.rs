@@ -3451,6 +3451,7 @@ mod tests {
             loglik_eval: config_v2::LoglikEvalConfig::default(),
             gate: config_v2::GateConfig::default(),
             dt_check: config_v2::DtCheckConfig::default(),
+            binomial: sim::rng::BinomialAlgorithm::Btpe,
         }
     }
 

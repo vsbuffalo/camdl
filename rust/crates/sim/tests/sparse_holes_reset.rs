@@ -163,6 +163,7 @@ fn hole_does_not_suppress_incidence_reset() {
         record_prequential: false,
         record_predictions: true, // this test reads `res.predictions`
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
 
     let m_holed = obs_model(compiled.clone(), holed_cells, times.clone());
@@ -233,6 +234,7 @@ fn conditioning_boundary_resets_leading_incidence() {
         record_ancestry: false, record_prequential: false,
         record_predictions: true, // this test reads `res.predictions`
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
 
     let m = obs_model(compiled.clone(), cells, times.clone());
@@ -284,6 +286,7 @@ fn dense_baseline_matches_predictions_at_non_hole_indices() {
         record_ancestry: false, record_prequential: false,
         record_predictions: true, // this test reads `res.predictions`
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
 
     let dense = obs_model(

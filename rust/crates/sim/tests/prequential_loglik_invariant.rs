@@ -151,6 +151,7 @@ fn run_loglik(record_prequential: bool) -> f64 {
         record_prequential,
         record_predictions: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
     let params = compiled.default_params.clone();
     bootstrap_filter(&process, &obs, &params, &cfg, 7)
@@ -197,6 +198,7 @@ fn record_prequential_does_not_perturb_loglik() {
         record_ancestry: false, record_prequential: true,
         record_predictions: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
     let params = compiled.default_params.clone();
     let res = bootstrap_filter(&process, &obs, &params, &cfg, 7).unwrap();

@@ -196,6 +196,7 @@ fn filter(m: &Arc<CompiledModel>) -> Result<f64, SimError> {
         record_prequential: false,
         record_predictions: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
     bootstrap_filter(&process, &FlatObs, &m.default_params, &config, 11).map(|r| r.log_likelihood)
 }

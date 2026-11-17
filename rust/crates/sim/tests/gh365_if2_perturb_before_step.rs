@@ -157,6 +157,7 @@ fn if2_weights_the_same_theta_that_drove_the_step() {
         simplex_groups: vec![],
         skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
 
     let result = run_if2(&process, &obs, &base_params, &if2_params, &config, 42)

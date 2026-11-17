@@ -94,6 +94,7 @@ fn config() -> IF2Config {
         simplex_groups: vec![],
         skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     }
 }
 

@@ -145,6 +145,7 @@ fn run(with_event: bool, obs_times: Vec<f64>) -> Result<f64, sim::SimError> {
         skip_first_obs_from_loglik: false, record_ancestry: false,
         record_prequential: false, record_predictions: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
     bootstrap_filter(&process, &obs_model, &params, &config, 42).map(|r| r.log_likelihood)
 }

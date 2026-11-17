@@ -230,6 +230,7 @@ fn run(builder: RefBuilder) -> f64 {
         record_prequential: false,
         record_predictions: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
     bootstrap_filter(&process, &obs_model, &params, &config, SEED)
         .unwrap()

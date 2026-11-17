@@ -3892,6 +3892,10 @@ fn one_step_bands(
         record_prequential: true,
         record_predictions: false, // gh#520: one-step-ahead draws come from `.prequential`, not `.predictions`
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        // gh#747: BTPE, named, whatever sampler the fit used. Unlike `dt`
+        // (gh#708), which changes the process, both samplers draw exactly
+        // Binomial(n, p): the band is the same distribution either way.
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
 
     // Each draw's parameter vector — base defaults overlaid by name (the

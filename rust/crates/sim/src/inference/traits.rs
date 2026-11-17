@@ -378,6 +378,12 @@ pub struct SMCConfig {
     /// never changes a *completing* filter's result, so it is not part of run
     /// identity.
     pub max_substeps: u64,
+
+    /// gh#747: the binomial sampler every particle's propagation draws use —
+    /// BTPE or BTRS. Required, not defaulted: the two are not bit-compatible,
+    /// so each construction site names the one its run's identity records
+    /// (the method's `binomial` field) rather than inheriting a silent BTPE.
+    pub binomial: crate::rng::BinomialAlgorithm,
 }
 
 /// Shared interface for algorithm config structs that drive a particle filter.

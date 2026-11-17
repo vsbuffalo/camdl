@@ -159,6 +159,7 @@ fn x0_per_particle(compiled: &Arc<CompiledModel>, params: &[f64]) -> Vec<Vec<f64
         record_prequential: false,
         record_predictions: false, // FlatObs has n_streams() == 0; nothing to predict
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
     let result = bootstrap_filter(&process, &obs, params, &config, SEED)
         .expect("a bootstrap filter run must not be refused (gh#732)");
@@ -285,6 +286,7 @@ fn a_swarm_of_one_or_zero_particles_does_not_panic() {
             // test exists to cover (see the comment above).
             record_predictions: true,
             max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+            binomial: sim::rng::BinomialAlgorithm::Btpe,
         };
         // The outcome for an empty swarm is not meaningful (there is no
         // estimate of anything); what is asserted is that asking for one is a

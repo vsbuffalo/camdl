@@ -739,6 +739,7 @@ fn run_pf(
         record_prequential: false,
         record_predictions: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
     let r = bootstrap_filter(&process, obs_model, params, &config, seed)
         .unwrap_or_else(|e| panic!("{}: bootstrap_filter failed: {e}", cfg.label));
@@ -1308,6 +1309,7 @@ fn recording_flags_do_not_move_the_likelihood() {
             record_prequential: rec,
             record_predictions: rec,
             max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+            binomial: sim::rng::BinomialAlgorithm::Btpe,
         };
         bootstrap_filter(&process, &obs_model, &params, &config, 99).unwrap().log_likelihood
     };
@@ -1346,6 +1348,7 @@ fn if2_lls(cfg: &Config, n_particles: usize, reps: usize, seed: u64) -> Vec<f64>
         simplex_groups: vec![],
         skip_first_obs_from_loglik: cfg.skip_first,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
     let r = run_if2(&process, &obs_model, &params, &if2_params, &config, seed)
         .unwrap_or_else(|e| panic!("{}: run_if2 failed: {e}", cfg.label));

@@ -541,6 +541,9 @@ impl FitRunConfig {
             // content-addressed; with no wall-clock watchdog, theta-hat is a
             // pure function of inputs (reproducible across machines).
             max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+            // gh#747: the method's sampler, which its identity records. A
+            // build with no method in hand runs no method's filter.
+            binomial: algorithm.map_or(sim::rng::BinomialAlgorithm::Btpe, |m| m.binomial()),
         };
         // IC-free precondition (data): y₁ must actually be observed. ic_free
         // conditions the initial state on the first observation (it still
@@ -679,6 +682,7 @@ impl FitRunConfig {
             // gh#241: deterministic compute budget (engine default); no
             // wall-clock watchdog. See the IF2Config above.
             max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+            binomial: self.if2_config.binomial,
         }
     }
 }
@@ -4718,6 +4722,27 @@ dt = 1.0
         // the PF / IF2 loop.
         assert!(config.smc_config().skip_first_obs_from_loglik,
             "smc_config() must thread ic_free into skip_first_obs_from_loglik");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// gh#747: the method's `binomial` reaches the filter config every PMMH,
+    /// IF2 and PFilter evaluation is built from (`smc_config()`, and IF2's own
+    /// `if2_config`). A build with no method in hand runs no method's filter
+    /// and stays BTPE.
+    #[test]
+    fn the_methods_binomial_sampler_reaches_the_filter_config() {
+        use sim::rng::BinomialAlgorithm::{Btpe, Btrs};
+        let dir = ic_free_test_dir("binomial");
+        let fit = ic_free_fixture(&dir, false, false);
+        let pmmh: super::super::config_v2::Algorithm = toml::from_str(
+            "algorithm = \"pmmh\"\nbackend = \"chain_binomial\"\nchains = 1\n\
+             particles = 10\niterations = 1\nbinomial = \"btrs\"\n").unwrap();
+        let config = FitRunConfig::build(&fit, Some(&pmmh), 1, 10, 1, 0.5, 50, 1, false)
+            .expect("builds");
+        assert_eq!(config.smc_config().binomial, Btrs, "smc_config() must carry the method's sampler");
+        assert_eq!(config.if2_config.binomial, Btrs, "if2_config must carry the method's sampler");
+        let none = FitRunConfig::build(&fit, None, 1, 10, 1, 0.5, 50, 1, false).expect("builds");
+        assert_eq!(none.smc_config().binomial, Btpe);
         std::fs::remove_dir_all(&dir).ok();
     }
 

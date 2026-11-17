@@ -542,6 +542,7 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
         allow_forcing_extrapolation: false,
         training_rows: None,
         seed: 7,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     })
     .expect("pfilter");
     out.push(("pfilter", pf.levels[0].hash, pf.run_id));

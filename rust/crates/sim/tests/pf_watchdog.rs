@@ -189,6 +189,7 @@ fn bootstrap_filter_bails_on_ess_collapse() {
         record_ancestry: false, record_prequential: false,
         record_predictions: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
 
     let t0 = Instant::now();
@@ -272,6 +273,7 @@ fn if2_bails_on_ess_collapse() {
         simplex_groups: vec![],
         skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
 
     let t0 = Instant::now();
@@ -439,6 +441,7 @@ fn if2_theta_hat_is_identical_across_thread_counts() {
         simplex_groups: vec![],
         skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
 
     // Run the identical fit under two different rayon pool sizes. `install`
@@ -595,6 +598,7 @@ fn bootstrap_filter_iteration_budget_aborts_pre_window() {
         record_ancestry: false, record_prequential: false,
         record_predictions: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
 
     let t0 = Instant::now();
@@ -649,6 +653,7 @@ fn if2_iteration_budget_aborts_pre_window() {
         simplex_groups: vec![],
         skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
 
     let t0 = Instant::now();
@@ -691,6 +696,7 @@ fn an_empty_swarm_does_not_panic_the_bootstrap_filter() {
         record_prequential: false,
         record_predictions: false, // TimeGridObs has n_streams() == 0
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
 
     // The assertion is that this call RETURNS — Ok or Err, either is a

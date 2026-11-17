@@ -61,6 +61,7 @@ fn increments(m: &Arc<CompiledModel>, times: &[f64]) -> Vec<f64> {
         skip_first_obs_from_loglik: false, record_ancestry: false,
         record_prequential: false, record_predictions: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
     bootstrap_filter(&ChainBinomialProcess::new(m.clone()), &obs, &m.default_params, &config, 3)
         .expect("filter")
@@ -123,6 +124,7 @@ fn filter(m: &Arc<CompiledModel>, times: &[f64]) -> Result<f64, String> {
         skip_first_obs_from_loglik: false, record_ancestry: false,
         record_prequential: false, record_predictions: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
     bootstrap_filter(&ChainBinomialProcess::new(m.clone()), &obs, &m.default_params, &config, 3)
         .map(|r| r.log_likelihood)

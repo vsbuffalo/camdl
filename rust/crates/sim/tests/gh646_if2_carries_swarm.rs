@@ -95,6 +95,7 @@ fn ridge_spread(n_iterations: usize, seed: u64) -> f64 {
         simplex_groups: vec![],
         skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
     let obs = Ridge { seen: Mutex::new(Vec::new()) };
     run_if2(&NoDynamics, &obs, &[1.0, 1.0], &[spec("a", 0), spec("b", 1)], &config, seed)

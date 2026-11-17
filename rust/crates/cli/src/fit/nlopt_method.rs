@@ -1188,6 +1188,7 @@ mod tests {
             replicates: None,
             record_ancestry: false,
             record_prequential: false,
+            binomial: sim::rng::BinomialAlgorithm::Btpe,
         };
         let err = extract_nlopt_config(&method).expect_err("must reject");
         assert!(err.contains("expected nl-sbplx, nl-bobyqa or nl-lbfgs"),
