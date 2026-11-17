@@ -980,6 +980,75 @@ Stated in one line: **Rule 1 isn't "calendar units are dangerous," it's "you
 can't add a calendar duration to a date."** Rates aren't durations; bounds and
 table values don't get added to dates. They all stay legal.
 
+## Seasonal forcing: the same days every year, or this year's dates
+
+A forcing that switches with the calendar, such as school terms raising contact
+rates, can mean two different things, and camdl has a form for each. Choose by
+what the model claims about the calendar, not by convenience.
+
+**The same days every year.** The classic models of childhood infections
+idealise the school year as fixed days of the year, repeated. He, Ionides and
+King's measles model ([He et al. 2010](https://doi.org/10.1098/rsif.2009.0151),
+_J R Soc Interface_ 7:271–283), which the repository reproduces in
+`tests/external/cases/he2010_*`, writes the UK terms as days 7–100, 115–199,
+252–300 and 308–356 of each year. Real term dates are set locally and move from
+year to year, as Easter does, so this is a deliberate approximation, and it is
+the published convention. Write it as a `periodic` forcing with `on` ranges:
+
+```camdl
+forcing {
+  school : periodic 'ratio {
+    period = 1 'years
+    step   = 1 'days
+    on     = [7 'days : 100 'days, 115 'days : 199 'days,
+              252 'days : 300 'days, 308 'days : 356 'days]
+  }
+}
+```
+
+**These actual dates.** When the model should follow this year's real term
+dates, or a holiday whose date moves (Easter, Lunar New Year), the forcing is
+not periodic. It is a step function on dates, and a `piecewise` forcing takes
+dates as its breakpoints directly:
+
+```camdl
+origin = date("2020-01-01")
+
+forcing {
+  school : piecewise 'ratio {
+    breakpoints = [date("2020-01-06"), date("2020-04-03"),
+                   date("2020-04-20"), date("2020-07-22")]
+    values      = [0, 1, 0, 1, 0]
+  }
+}
+```
+
+The breakpoints compile to days 5, 93, 110 and 203: 6 January, 3 April, 20 April
+and 22 July 2020, exactly.
+
+A smooth seasonal curve (`sinusoidal`) and a measured covariate such as rainfall
+(an `interpolated` forcing read from a data file) are the other two common
+seasonal forms. Neither switches on fixed days, so the choice below does not
+arise for them.
+
+**Which year length.** In a `periodic` forcing the `on` days are counted from
+the start of each period, so the period's length decides whether those days stay
+on the calendar. `period = 1 'years` is 365.2425 days, the average Gregorian
+year, and stays within about a day of 1 January indefinitely.
+`period = 365 'days` loses a quarter-day each year, so its terms creep later
+through the calendar:
+
+| `period`              | start of period, days after 1 January, after 10 years | after 100 years | range over 400 years |
+| --------------------- | ----------------------------------------------------- | --------------- | -------------------- |
+| `1 'years` (365.2425) | +0.6                                                  | −0.3            | −0.9 to +1.3         |
+| `365.25 'days`        | +0.5                                                  | −1.0            | −3.0 to +0.8         |
+| `365 'days`           | +3                                                    | +24             | grows without bound  |
+
+The He et al. model uses `365.25 'days`, the Julian year, which is within three
+days of the calendar over four centuries. For a model fitted to a few decades,
+`1 'years` and `365.25 'days` are indistinguishable; `365 'days` is not, and
+should be written only when a 365-day cycle is what the model means.
+
 ## Not supported (yet)
 
 - **Times of day** (`2020-03-15T13:30`) in dates/data, and **sub-day
