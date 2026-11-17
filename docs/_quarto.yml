@@ -31,6 +31,7 @@ project:
     - camdl-data-spec.md
     - diagnosing-fits.md
     - debugging.md
+    - guide/run-identity.qmd
     - methods/model-comparison.md
     - mre.md
     # Concepts (explanation)
@@ -127,6 +128,8 @@ website:
             href: diagnosing-fits.md
           - text: "Debugging and inspection"
             href: debugging.md
+          - text: "When camdl runs a model again"
+            href: guide/run-identity.qmd
           - text: "Comparing models"
             href: methods/model-comparison.md
           - text: "Minimal reproducible examples"
