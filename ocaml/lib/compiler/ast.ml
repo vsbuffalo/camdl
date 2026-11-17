@@ -110,6 +110,76 @@ and run_namespace = NsQuantities | NsObservations
 
 type compartment_kind = Integer | Real
 
+(* ── Time positions (proposal 2026-11-16-calendar-durations-by-position) ─────
+
+   Every expression that holds a time is one of six kinds, a property of the
+   position it is written in rather than of the expression: `6 'months` is an
+   instant in `simulate { to }`, a cadence in `every` and a length in `dt`. A
+   declaration field that holds a time has type ['k Time_pos.t], so its kind is
+   known statically (a lowering function cannot be handed the wrong kind) and at
+   run time (printers and the census read it through [expr] and [kind]).
+
+   The wrapper is private: the parser and the forcing / reduction role tables
+   (`time_census.ml`) construct one with [make]; only the expander's [Lower]
+   folds one to a number. It lives here, not in its own file, because the
+   declaration records below hold it and it holds an [expr]. *)
+module Time_pos : sig
+  type instant        = Instant_k
+  type cadence        = Cadence_k
+  type runtime_offset = Runtime_offset_k
+  type span           = Span_k
+  type phase          = Phase_k
+  type length         = Length_k
+
+  type _ kind =
+    | Instant        : instant kind         (* a point on the axis; a bare duration D is origin + D *)
+    | Cadence        : cadence kind         (* the step of a recurring schedule *)
+    | Runtime_offset : runtime_offset kind  (* an offset from an instant known only during the run *)
+    | Span           : span kind            (* the width of a period that tiles or trails the axis *)
+    | Phase          : phase kind           (* an offset within a repeating period *)
+    | Length         : length kind          (* a fixed length, average by design (D65 a) *)
+
+  type 'k t = private { kind : 'k kind; expr : expr; loc : loc }
+
+  val make : 'k kind -> expr -> loc -> 'k t
+  val expr : _ t -> expr
+  val loc  : _ t -> loc
+  val kind_name : _ kind -> string
+
+  (* A position whose kind is known only at run time: the census's element. *)
+  type any = Any : 'k t -> any
+end = struct
+  type instant        = Instant_k
+  type cadence        = Cadence_k
+  type runtime_offset = Runtime_offset_k
+  type span           = Span_k
+  type phase          = Phase_k
+  type length         = Length_k
+
+  type _ kind =
+    | Instant        : instant kind
+    | Cadence        : cadence kind
+    | Runtime_offset : runtime_offset kind
+    | Span           : span kind
+    | Phase          : phase kind
+    | Length         : length kind
+
+  type 'k t = { kind : 'k kind; expr : expr; loc : loc }
+
+  let make kind expr loc = { kind; expr; loc }
+  let expr p = p.expr
+  let loc p = p.loc
+  let kind_name : type k. k kind -> string = function
+    | Instant        -> "instant"
+    | Cadence        -> "cadence"
+    | Runtime_offset -> "runtime offset"
+    | Span           -> "span"
+    | Phase          -> "phase"
+    | Length         -> "length"
+
+  type any = Any : 'k t -> any
+end
+
 (* A parsed `#'` doc-comment block immediately preceding a declaration: free-text
    prose plus optional structured tags. Non-semantic — it does not affect
    compilation — but it is NOT compilation-local: `Expander.build_doc_index`
@@ -150,9 +220,35 @@ type prior_spec = {
 (* [pdim] is the explicit dimension from a `dim` clause (`b : real dim T^-1`),
    accepted only on `positive` and `real`; every other kind fixes its
    dimension. *)
+(* A parameter's bounds take the position kind of the parameter: an `instant`
+   parameter's bounds are instants, a `duration` (or `[T]`-annotated) one's are
+   lengths, and every other kind's are plain values. The parser builds the
+   variant in the production that knows the kind. *)
+type bounds =
+  | Instant_bounds of Time_pos.instant Time_pos.t * Time_pos.instant Time_pos.t
+  | Length_bounds  of Time_pos.length Time_pos.t * Time_pos.length Time_pos.t
+  | Value_bounds   of expr * expr
+
+(* The bound expressions as written, for printers and walkers. *)
+let bounds_exprs = function
+  | Instant_bounds (lo, hi) -> (Time_pos.expr lo, Time_pos.expr hi)
+  | Length_bounds (lo, hi)  -> (Time_pos.expr lo, Time_pos.expr hi)
+  | Value_bounds (lo, hi)   -> (lo, hi)
+
+(* Which [bounds] arm a parameter of this kind and dimension takes. *)
+let make_bounds (kind : param_type) (dim : dim_annotation option) ~lo ~hi ~lo_loc ~hi_loc =
+  match kind, dim with
+  | PInstant, _ ->
+    Instant_bounds (Time_pos.make Time_pos.Instant lo lo_loc,
+                    Time_pos.make Time_pos.Instant hi hi_loc)
+  | PDuration, _ | _, Some (0, 1) ->
+    Length_bounds (Time_pos.make Time_pos.Length lo lo_loc,
+                   Time_pos.make Time_pos.Length hi hi_loc)
+  | _ -> Value_bounds (lo, hi)
+
 type param_decl =
-  | PScalar  of { pname: string; pkind: param_type; pdim: dim_annotation option; pbounds: (expr * expr) option; pprior: prior_spec option; pdoc: doc option; ploc: loc; pspan: loc }
-  | PIndexed of { pname: string; pdims: string list; pkind: param_type; pdim: dim_annotation option; pbounds: (expr * expr) option; pprior: prior_spec option; pdoc: doc option; ploc: loc; pspan: loc }
+  | PScalar  of { pname: string; pkind: param_type; pdim: dim_annotation option; pbounds: bounds option; pprior: prior_spec option; pdoc: doc option; ploc: loc; pspan: loc }
+  | PIndexed of { pname: string; pdims: string list; pkind: param_type; pdim: dim_annotation option; pbounds: bounds option; pprior: prior_spec option; pdoc: doc option; ploc: loc; pspan: loc }
 
 (** Table dimension entry: bare dim name, or dim + unit *)
 type table_dim_entry =
@@ -402,8 +498,8 @@ type init_entry = {
    `at = [...]` (explicit times). Reused across observation / output (and the
    `at` arm of interventions); each surface lowers it to its own IR variant. *)
 type schedule_core =
-  | SchedEvery of expr        (* every = E  *)
-  | SchedAt    of expr list   (* at = [...] *)
+  | SchedEvery of Time_pos.cadence Time_pos.t        (* every = E  *)
+  | SchedAt    of Time_pos.instant Time_pos.t list   (* at = [...] *)
 
 type obs_projection =
   | ProjIncidence  of string * index_item list
@@ -449,7 +545,7 @@ type obs_column = {
 type obs_covers = {
   ocv_form : string;        (* "day" | "starting_on" | "ending_on" *)
   ocv_col  : string;        (* the time column named in the call *)
-  ocv_span : expr option;   (* absent for `day(t)` *)
+  ocv_span : Time_pos.span Time_pos.t option;   (* absent for `day(t)` *)
   ocv_loc  : loc;
 }
 
@@ -492,11 +588,13 @@ type action_decl =
   | AAdd      of string * index_item list * expr   (* compartment, indices, count expr *)
 
 type schedule_decl =
-  | SAtTimes of expr list
-  (** Recurring schedule: (every, from?, to?).
-      from defaults to simulate.from if None; to defaults to simulate.to. *)
-  | SRecurring of expr * expr option * expr option
-  | SEveryAtDay of expr * expr          (* period, at_day *)
+  | SAtTimes of Time_pos.instant Time_pos.t list
+  (** Recurring schedule. [from] defaults to simulate.from if None; [until]
+      (written `to`) to simulate.to. *)
+  | SRecurring of { every : Time_pos.cadence Time_pos.t;
+                    from  : Time_pos.instant Time_pos.t option;
+                    until : Time_pos.instant Time_pos.t option }
+  | SEveryAtDay of { every : Time_pos.cadence Time_pos.t; at_day : Time_pos.phase Time_pos.t }
 
 type intervention_decl = {
   ivname    : string;
@@ -525,9 +623,9 @@ type reactive_decl = {
   rxname     : string;
   rxindices  : index_binding list;   (* [] for non-indexed policies *)
   rxwhen     : trig_pred;
-  rxafter    : expr option;          (* lag before the effect; default 0 *)
+  rxafter    : Time_pos.runtime_offset Time_pos.t option;  (* lag before the effect; default 0 *)
   rxonce     : expr option;          (* fire-and-disable; default true *)
-  rxcooldown : expr option;          (* min time between firings *)
+  rxcooldown : Time_pos.runtime_offset Time_pos.t option;  (* min time between firings *)
   rxaction   : action_decl;
   rxguard    : guard option;         (* where expr — compile-time filter *)
   rxloc      : loc;
@@ -582,10 +680,37 @@ type farg_value =
    string literal — which carries no unit or date content — is skipped. *)
 let farg_expr_opt = function FExpr e -> Some e | FStr _ -> None
 
+(* The forcing kinds. [FUnknown] keeps the spelling of a kind the compiler does
+   not know, which the expander reports (E408). *)
+type forcing_kind =
+  | FSinusoidal | FPiecewise | FInterpolated | FPeriodic | FFourier
+  | FPeriodicSpline | FBspline
+  | FUnknown of string
+
+let forcing_kind_of_string = function
+  | "sinusoidal"      -> FSinusoidal
+  | "piecewise"       -> FPiecewise
+  | "interpolated"    -> FInterpolated
+  | "periodic"        -> FPeriodic
+  | "fourier"         -> FFourier
+  | "periodic_spline" -> FPeriodicSpline
+  | "bspline"         -> FBspline
+  | s                 -> FUnknown s
+
+let forcing_kind_name = function
+  | FSinusoidal     -> "sinusoidal"
+  | FPiecewise      -> "piecewise"
+  | FInterpolated   -> "interpolated"
+  | FPeriodic       -> "periodic"
+  | FFourier        -> "fourier"
+  | FPeriodicSpline -> "periodic_spline"
+  | FBspline        -> "bspline"
+  | FUnknown s      -> s
+
 type func_decl = {
   fname    : string;
   findices : index_binding list;
-  fkind    : string;
+  fkind    : forcing_kind;
   (* Required tier-3 unit literal (GH #8): annotates the
      scale/dimension of values produced by this forcing function.
      E.g. `pop : interpolated 'count`, `birthrate : interpolated
@@ -611,17 +736,17 @@ type output_decl = {
    span so the expander's semantic diagnostics (unknown method, rk4-takes-no-
    tolerances, dimensioned tolerance) point at the offending token. *)
 type simulate_decl = {
-  sim_from: expr;
-  sim_to: expr;
+  sim_from: Time_pos.instant Time_pos.t;
+  sim_to: Time_pos.instant Time_pos.t;
   sim_to_loc: loc option;   (* span of the `to = ...` entry, for E602 *)
-  sim_dt: expr option;
+  sim_dt: Time_pos.length Time_pos.t option;
   sim_integrator: (string * loc) option;
   sim_atol: (expr * loc) option;
   sim_rtol: (expr * loc) option;
   sim_span: loc;
 }
 
-type timepoint_decl = { tpname: string; tptime: expr; tpspan: loc }
+type timepoint_decl = { tpname: string; tptime: Time_pos.instant Time_pos.t; tpspan: loc }
 
 type scenario_field =
   | ScLabel   of string
@@ -630,7 +755,7 @@ type scenario_field =
   | ScSet     of (string * expr) list
   | ScScale   of (string * expr) list
   | ScCompose of string list
-  | ScTEnd    of expr
+  | ScTEnd    of Time_pos.instant Time_pos.t
   | ScExtends of string     (** `extends = parent_name` — single-inheritance sugar *)
 
 type scenario_decl = {

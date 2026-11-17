@@ -23,6 +23,11 @@
       ~msg:"`compartments` members are comma-separated — write \
             `compartments { S, I, R }`. See `camdl docs language-changes`."
 
+  (* A time position (proposal 2026-11-16-calendar-durations-by-position §3.1):
+     the production that parses a time field knows its kind, so it builds the
+     typed wrapper here and no table of positions exists anywhere. *)
+  let tpos k e ~sp ~ep = Time_pos.make k e (Parser_errors.ast_loc_of ~sp ~ep)
+
   let extract_ident_list = function
     | EList items -> List.filter_map (function EIdent (n, _) -> Some n | _ -> None) items
     | _ -> []
@@ -136,7 +141,7 @@
     | EFuncCall (form, [("", EIdent (col, _))]) ->
       { ocv_form = form; ocv_col = col; ocv_span = None; ocv_loc = loc }
     | EFuncCall (form, [("", EIdent (col, _)); ("", span)]) ->
-      { ocv_form = form; ocv_col = col; ocv_span = Some span; ocv_loc = loc }
+      { ocv_form = form; ocv_col = col; ocv_span = Some (Time_pos.make Time_pos.Span span loc); ocv_loc = loc }
     | EFuncCall (_, (_ :: _ as args))
       when List.exists (fun (k, _) -> k <> "") args ->
       bad "its arguments are positional, not keyword — write `day(time)`, \
@@ -536,12 +541,12 @@ param_decl:
           pspan = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* scalar, with bounds, no prior *)
   | d = doc_opt name = IDENT COLON ka = param_type_ann IN LBRACKET lo = expr COMMA hi = expr RBRACKET
-      { PScalar { pname = name; pkind = fst ka; pdim = snd ka; pbounds = Some (lo, hi); pprior = None; pdoc = d;
+      { PScalar { pname = name; pkind = fst ka; pdim = snd ka; pbounds = Some (make_bounds (fst ka) (snd ka) ~lo ~hi ~lo_loc:(Parser_errors.ast_loc_of ~sp:$startpos(lo) ~ep:$endpos(lo)) ~hi_loc:(Parser_errors.ast_loc_of ~sp:$startpos(hi) ~ep:$endpos(hi))); pprior = None; pdoc = d;
                   ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos;
           pspan = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* scalar, with bounds, with prior *)
   | d = doc_opt name = IDENT COLON ka = param_type_ann IN LBRACKET lo = expr COMMA hi = expr RBRACKET TILDE pr = prior_clause
-      { PScalar { pname = name; pkind = fst ka; pdim = snd ka; pbounds = Some (lo, hi); pprior = Some pr; pdoc = d;
+      { PScalar { pname = name; pkind = fst ka; pdim = snd ka; pbounds = Some (make_bounds (fst ka) (snd ka) ~lo ~hi ~lo_loc:(Parser_errors.ast_loc_of ~sp:$startpos(lo) ~ep:$endpos(lo)) ~hi_loc:(Parser_errors.ast_loc_of ~sp:$startpos(hi) ~ep:$endpos(hi))); pprior = Some pr; pdoc = d;
                   ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos;
           pspan = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* indexed, no bounds, no prior *)
@@ -556,12 +561,12 @@ param_decl:
           pspan = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* indexed, with bounds, no prior *)
   | d = doc_opt name = IDENT LBRACKET dims = separated_nonempty_list(COMMA, IDENT) RBRACKET COLON ka = param_type_ann IN LBRACKET lo = expr COMMA hi = expr RBRACKET
-      { PIndexed { pname = name; pdims = dims; pkind = fst ka; pdim = snd ka; pbounds = Some (lo, hi); pprior = None; pdoc = d;
+      { PIndexed { pname = name; pdims = dims; pkind = fst ka; pdim = snd ka; pbounds = Some (make_bounds (fst ka) (snd ka) ~lo ~hi ~lo_loc:(Parser_errors.ast_loc_of ~sp:$startpos(lo) ~ep:$endpos(lo)) ~hi_loc:(Parser_errors.ast_loc_of ~sp:$startpos(hi) ~ep:$endpos(hi))); pprior = None; pdoc = d;
                    ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos;
           pspan = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* indexed, with bounds, with prior *)
   | d = doc_opt name = IDENT LBRACKET dims = separated_nonempty_list(COMMA, IDENT) RBRACKET COLON ka = param_type_ann IN LBRACKET lo = expr COMMA hi = expr RBRACKET TILDE pr = prior_clause
-      { PIndexed { pname = name; pdims = dims; pkind = fst ka; pdim = snd ka; pbounds = Some (lo, hi); pprior = Some pr; pdoc = d;
+      { PIndexed { pname = name; pdims = dims; pkind = fst ka; pdim = snd ka; pbounds = Some (make_bounds (fst ka) (snd ka) ~lo ~hi ~lo_loc:(Parser_errors.ast_loc_of ~sp:$startpos(lo) ~ep:$endpos(lo)) ~hi_loc:(Parser_errors.ast_loc_of ~sp:$startpos(hi) ~ep:$endpos(hi))); pprior = Some pr; pdoc = d;
                    ploc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos;
           pspan = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
 
@@ -682,7 +687,7 @@ func_decl:
      dim 'unit = ... }`. The dim-checker uses the declared dim
      authoritatively; no value-based inference fallback (GH #8). *)
   | name = IDENT ibs = index_bindings_opt COLON kind = IDENT u = unit_lit LBRACE args = func_args RBRACE
-      { { fname = name; findices = ibs; fkind = kind; funit = u; fargs = args;
+      { { fname = name; findices = ibs; fkind = forcing_kind_of_string kind; funit = u; fargs = args;
           fspan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
 
 func_args:
@@ -1010,9 +1015,13 @@ obs_kv:
    rides on the list elements (each `expr` may carry a unit). *)
 emit_schedule_spec:
   | EVERY e = expr
-      { SchedEvery e }
-  | AT_KW LBRACKET ts = separated_list(COMMA, expr) RBRACKET
+      { SchedEvery (tpos Time_pos.Cadence e ~sp:$startpos(e) ~ep:$endpos(e)) }
+  | AT_KW LBRACKET ts = separated_list(COMMA, instant_entry) RBRACKET
       { SchedAt ts }
+
+(* One entry of an `at [...]` list: an instant position. *)
+instant_entry:
+  | e = expr { tpos Time_pos.Instant e ~sp:$startpos ~ep:$endpos }
 
 (* The `~` RHS distribution: `D(kw = ..., ...)` — keyword-only (the positional
    case is rejected downstream in the expander as E250). *)
@@ -1079,7 +1088,7 @@ intervention_decl:
         { ivname = name; ivindices = ibs; ivaction = actions; ivschedule = sched; ivguard = guard;
           ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos;
           ivspan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
-  | name = IDENT ibs = index_bindings_opt COLON TRANSFER LPAREN kwargs = separated_list(COMMA, transfer_kwarg) RPAREN AT_KW LBRACKET ts = separated_list(COMMA, expr) RBRACKET guard = where_clause_opt
+  | name = IDENT ibs = index_bindings_opt COLON TRANSFER LPAREN kwargs = separated_list(COMMA, transfer_kwarg) RPAREN AT_KW LBRACKET ts = separated_list(COMMA, instant_entry) RBRACKET guard = where_clause_opt
       { { ivname = name; ivindices = ibs; ivaction = [ATransfer kwargs]; ivschedule = SAtTimes ts; ivguard = guard;
           ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos;
           ivspan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
@@ -1089,7 +1098,7 @@ intervention_decl:
           ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos;
           ivspan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   (* add(COMP, EXPR) at [...] *)
-  | name = IDENT ibs = index_bindings_opt COLON ADD LPAREN comp = IDENT idxs = index_items_opt COMMA count = expr RPAREN AT_KW LBRACKET ts = separated_list(COMMA, expr) RBRACKET guard = where_clause_opt
+  | name = IDENT ibs = index_bindings_opt COLON ADD LPAREN comp = IDENT idxs = index_items_opt COMMA count = expr RPAREN AT_KW LBRACKET ts = separated_list(COMMA, instant_entry) RBRACKET guard = where_clause_opt
       { { ivname = name; ivindices = ibs; ivaction = [AAdd (comp, idxs, count)]; ivschedule = SAtTimes ts; ivguard = guard;
           ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos;
           ivspan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
@@ -1100,7 +1109,10 @@ intervention_decl:
           ivspan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   (* add(COMP, EXPR) every PERIOD at_day DAY *)
   | name = IDENT ibs = index_bindings_opt COLON ADD LPAREN comp = IDENT idxs = index_items_opt COMMA count = expr RPAREN EVERY period = expr AT_DAY day = expr guard = where_clause_opt
-      { { ivname = name; ivindices = ibs; ivaction = [AAdd (comp, idxs, count)]; ivschedule = SEveryAtDay (period, day); ivguard = guard;
+      { { ivname = name; ivindices = ibs; ivaction = [AAdd (comp, idxs, count)];
+          ivschedule = SEveryAtDay { every = tpos Time_pos.Cadence period ~sp:$startpos(period) ~ep:$endpos(period);
+                                     at_day = tpos Time_pos.Phase day ~sp:$startpos(day) ~ep:$endpos(day) };
+          ivguard = guard;
           ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos;
           ivspan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
 
@@ -1158,20 +1170,20 @@ trig_atom:
 reactive_kv:
   | ACTION   EQ a = reactive_action  { `Action a }
   | k = IDENT EQ e = expr            { match k with
-                                       | "after"    -> `After e
+                                       | "after"    -> `After (tpos Time_pos.Runtime_offset e ~sp:$startpos(e) ~ep:$endpos(e))
                                        | "once"     -> `Once e
-                                       | "cooldown" -> `Cooldown e
+                                       | "cooldown" -> `Cooldown (tpos Time_pos.Runtime_offset e ~sp:$startpos(e) ~ep:$endpos(e))
                                        | "scope"    ->
                                          Parser_errors.push_error ~sp:$startpos ~ep:$endpos
                                            ~code:"E106"
                                            ~msg:"the `scope` reactive key was removed: latent-scope (scope = particle) triggers are deferred — remove it, exogenous is implicit. See `camdl docs language-changes`";
-                                         `After e
+                                         `After (tpos Time_pos.Runtime_offset e ~sp:$startpos(e) ~ep:$endpos(e))
                                        | other ->
                                          Parser_errors.push_error ~sp:$startpos ~ep:$endpos
                                            ~code:"E106"
                                            ~msg:(Printf.sprintf
                                              "unknown reactive intervention key '%s' (expected action/after/once/cooldown)" other);
-                                         `After e }
+                                         `After (tpos Time_pos.Runtime_offset e ~sp:$startpos(e) ~ep:$endpos(e)) }
 
 (* Reactive action RHS: the same action forms as scheduled interventions, minus
    the schedule (which the trigger replaces). *)
@@ -1199,15 +1211,15 @@ recurring_body:
             Parser_errors.push_error ~sp:$startpos ~ep:$endpos
               ~code:"E105"
               ~msg:"recurring schedule missing required 'every = ...'";
-            EConst 1.0
+            tpos Time_pos.Cadence (EConst 1.0) ~sp:$startpos ~ep:$endpos
         in
         (* from and to default to simulate.from / simulate.to respectively. *)
-        SRecurring (every_e, !from_, !end_) }
+        SRecurring { every = every_e; from = !from_; until = !end_ } }
 
 recurring_kv:
-  | EVERY EQ e = expr  { `Every e }
-  | FROM  EQ e = expr  { `From  e }
-  | TO    EQ e = expr  { `End   e }
+  | EVERY EQ e = expr  { `Every (tpos Time_pos.Cadence e ~sp:$startpos(e) ~ep:$endpos(e)) }
+  | FROM  EQ e = expr  { `From  (tpos Time_pos.Instant e ~sp:$startpos(e) ~ep:$endpos(e)) }
+  | TO    EQ e = expr  { `End   (tpos Time_pos.Instant e ~sp:$startpos(e) ~ep:$endpos(e)) }
   (* Migration (gh#423 schedule cleanup): the recurring window end was spelled
      `until` in a `transfer`/`add` body but `to` in a `set` block and in
      `simulate { from … to … }`. `to` is now the only spelling; reject `until`
@@ -1217,7 +1229,7 @@ recurring_kv:
           ~code:"E113"
           ~msg:"`until` is now `to`"
           ~hint:"write `to = <time>` for the recurring window end — see `camdl docs language-changes`";
-        `End e }
+        `End (tpos Time_pos.Instant e ~sp:$startpos(e) ~ep:$endpos(e)) }
 
 transfer_kwarg:
   | k = IDENT EQ e = expr { (k, e) }
@@ -1234,10 +1246,13 @@ transfer_kwarg:
   | COUNT EQ e = expr      { ("count", e) }
 
 iv_kv:
-  | AT_KW EQ LBRACKET ts = separated_list(COMMA, expr) RBRACKET
+  | AT_KW EQ LBRACKET ts = separated_list(COMMA, instant_entry) RBRACKET
       { `Schedule (SAtTimes ts) }
   | EVERY EQ e = expr FROM EQ f = expr TO EQ t = expr
-      { `Schedule (SRecurring (e, Some f, Some t)) }
+      { `Schedule (SRecurring {
+          every = tpos Time_pos.Cadence e ~sp:$startpos(e) ~ep:$endpos(e);
+          from  = Some (tpos Time_pos.Instant f ~sp:$startpos(f) ~ep:$endpos(f));
+          until = Some (tpos Time_pos.Instant t ~sp:$startpos(t) ~ep:$endpos(t)) }) }
   (* A `set` entry: `COMP = expr`, or an indexed target `c[a] = expr` inside an
      effect family (proposal 2026-11-01-indexed-set-targets). The expander
      resolves the target to one expanded cell. *)
@@ -1323,13 +1338,15 @@ output_kv:
             | `Sched s  -> set_sched s
             | `Format f -> fmt := f
           ) fields;
-          let otschedule = Option.value !sched ~default:(SchedEvery (EConst 1.0)) in
+          let otschedule = Option.value !sched
+              ~default:(SchedEvery (tpos Time_pos.Cadence (EConst 1.0) ~sp:$startpos ~ep:$endpos)) in
           `Traj { otschedule; otformat = !fmt }
         | _ ->
           Parser_errors.push_error ~sp:$startpos ~ep:$endpos
             ~code:"E106"
             ~msg:(Printf.sprintf "unknown output section '%s': expected 'trajectories'" name);
-          `Traj { otschedule = SchedEvery (EConst 1.0); otformat = "tsv" } }
+          `Traj { otschedule = SchedEvery (tpos Time_pos.Cadence (EConst 1.0) ~sp:$startpos ~ep:$endpos);
+                  otformat = "tsv" } }
 
 traj_field:
   | s = schedule_core      { `Sched s }
@@ -1339,16 +1356,16 @@ traj_field:
    that need a "specified times" schedule. *)
 schedule_core:
   | EVERY EQ e = expr
-      { SchedEvery e }
-  | AT_KW EQ LBRACKET ts = separated_list(COMMA, expr) RBRACKET
+      { SchedEvery (tpos Time_pos.Cadence e ~sp:$startpos(e) ~ep:$endpos(e)) }
+  | AT_KW EQ LBRACKET ts = separated_list(COMMA, instant_entry) RBRACKET
       { SchedAt ts }
 
 (* ── Simulate block ──────────────────────────────────────────────────────── *)
 
 simulate_body:
   | kvs = list(simulate_kv)
-      { let sim_from = ref (EConst 0.0) in
-        let sim_to   = ref (EConst 100.0) in
+      { let sim_from = ref (tpos Time_pos.Instant (EConst 0.0) ~sp:$startpos ~ep:$endpos) in
+        let sim_to   = ref (tpos Time_pos.Instant (EConst 100.0) ~sp:$startpos ~ep:$endpos) in
         let sim_to_loc = ref None in
         let sim_dt   = ref None in
         let sim_integrator = ref None in
@@ -1379,8 +1396,9 @@ simulate_body:
    here by text. Unknown keys are a hard error (no-loose-semantics), never a
    silent drop. *)
 simulate_kv:
-  | FROM EQ e = expr { `From e }
-  | TO   EQ e = expr { `To (e, Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos) }
+  | FROM EQ e = expr { `From (tpos Time_pos.Instant e ~sp:$startpos(e) ~ep:$endpos(e)) }
+  | TO   EQ e = expr { `To (tpos Time_pos.Instant e ~sp:$startpos(e) ~ep:$endpos(e),
+                            Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos) }
   (* gh#166: TAGGED integrator with an optional tolerance block —
      `integrator = rk45 { atol = 1e-8  rtol = 1e-6 }`. atol/rtol are keys of the
      rk45 block, so they cannot be written without rk45 (illegal-states-
@@ -1400,7 +1418,7 @@ simulate_kv:
         `Integrator (meth, Parser_errors.ast_loc_of ~sp:$startpos(meth) ~ep:$endpos(meth), opts) }
   | k = IDENT EQ e = expr
       { match k with
-        | "dt"   -> `Dt e
+        | "dt"   -> `Dt (tpos Time_pos.Length e ~sp:$startpos(e) ~ep:$endpos(e))
         | "integrator" ->
           (* bare form: `integrator = rk4` / `integrator = rk45` (default tols).
              The method lexes as an EIdent (atom_expr), which carries its loc. *)
@@ -1476,7 +1494,7 @@ timepoint_decl_sep:
 
 timepoint_decl:
   | name = IDENT EQ t = expr 
-      { { tpname = name; tptime = t;
+      { { tpname = name; tptime = tpos Time_pos.Instant t ~sp:$startpos(t) ~ep:$endpos(t);
           tpspan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
 
 (* ── Dimensions ─────────────────────────────────────────────────────────── *)
@@ -1695,7 +1713,7 @@ scenario_field:
                       ~code:"E106"
                       ~msg:"a scenario's `simulate {}` block must set `to`: it \
                             overrides the scenario's end time and nothing else";
-                  EConst 0.0 in
+                  tpos Time_pos.Instant (EConst 0.0) ~sp:$startpos ~ep:$endpos in
         Ast.ScTEnd e }
   | k = IDENT EQ LBRACE ps = list(scenario_kv_item) RBRACE
       { match k with

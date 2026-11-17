@@ -318,8 +318,8 @@ let distribution env pos (l : likelihood_kind) : D.distribution =
   { di_family = family l; di_args = args env pos (likelihood_kwargs l) }
 
 let schedule_core env pos : Ast.schedule_core -> D.schedule_core = function
-  | SchedEvery e -> ScEvery (dexpr env pos e)
-  | SchedAt es -> ScAt (List.map (dexpr env pos) es)
+  | SchedEvery p -> ScEvery (dexpr env pos (Time_pos.expr p))
+  | SchedAt ps -> ScAt (List.map (fun p -> dexpr env pos (Time_pos.expr p)) ps)
 
 (* ── Declarations ────────────────────────────────────────────────────────── *)
 
@@ -347,7 +347,8 @@ let prior env pos (p : prior_spec) : D.prior_decl =
   { pr_family = p.ps_name; pr_args = args env pos p.ps_args;
     pr_pool_over = p.ps_pool_over }
 
-let bounds env pos ((lo, hi) : expr * expr) : D.bounds =
+let bounds env pos (b : Ast.bounds) : D.bounds =
+  let (lo, hi) = bounds_exprs b in
   { b_lo = dexpr env pos lo; b_hi = dexpr env pos hi }
 
 let parameter env : param_decl -> D.parameter_decl = function
@@ -399,7 +400,7 @@ let forcing_arg env pos ((k, v) : string * farg_value) : D.time_input_arg =
 
 let time_input env (f : func_decl) : D.time_input_decl =
   let pos = with_binders top f.findices in
-  { ti_name = f.fname; ti_indices = bindings f.findices; ti_kind = f.fkind;
+  { ti_name = f.fname; ti_indices = bindings f.findices; ti_kind = forcing_kind_name f.fkind;
     ti_unit = unit_lit f.funit;
     ti_args = List.map (forcing_arg env pos) f.fargs;
     ti_text = text env f.fspan }
@@ -471,7 +472,7 @@ let observation env (o : obs_decl) : D.observation_decl =
       let span_pos = { pos with aux_cols = List.map (fun (c : Ast.obs_column) ->
         c.oc_name) columns } in
       { D.cv_form = c.ocv_form; cv_column = c.ocv_col;
-        cv_span = Option.map (dexpr env span_pos) c.ocv_span }) o.ocovers;
+        cv_span = Option.map (fun p -> dexpr env span_pos (Time_pos.expr p)) c.ocv_span }) o.ocovers;
     ob_expands_to =
       Some (Expander.expanded_observations env.ctx ~declared:o.oname);
     ob_text = text env o.ospan }
@@ -490,14 +491,14 @@ let intervention env (iv : Ast.intervention_decl) : D.intervention_decl =
   { iv_name = iv.ivname; iv_indices = bindings iv.ivindices;
     iv_actions = List.map (action env pos) iv.ivaction;
     iv_schedule = (match iv.ivschedule with
-      | SAtTimes es -> ShAtTimes (List.map (dexpr env pos) es)
-      | SRecurring (every, from, to_) ->
-        ShRecurring { sh_every = dexpr env pos every;
-                      sh_from = Option.map (dexpr env pos) from;
-                      sh_to = Option.map (dexpr env pos) to_ }
-      | SEveryAtDay (period, at_day) ->
-        ShEveryAtDay { sh_period = dexpr env pos period;
-                       sh_at_day = dexpr env pos at_day });
+      | SAtTimes ps -> ShAtTimes (List.map (fun p -> dexpr env pos (Time_pos.expr p)) ps)
+      | SRecurring { every; from; until } ->
+        ShRecurring { sh_every = dexpr env pos (Time_pos.expr every);
+                      sh_from = Option.map (fun p -> dexpr env pos (Time_pos.expr p)) from;
+                      sh_to = Option.map (fun p -> dexpr env pos (Time_pos.expr p)) until }
+      | SEveryAtDay { every; at_day } ->
+        ShEveryAtDay { sh_period = dexpr env pos (Time_pos.expr every);
+                       sh_at_day = dexpr env pos (Time_pos.expr at_day) });
     iv_guard = Option.map guard iv.ivguard;
     iv_text = text env iv.ivspan }
 
@@ -521,9 +522,9 @@ let reactive env (r : Ast.reactive_decl) : D.reactive_decl =
   let pos = { (with_binders top r.rxindices) with reporting = true } in
   { rc_name = r.rxname; rc_indices = bindings r.rxindices;
     rc_when = trigger env pos r.rxwhen;
-    rc_after = Option.map (dexpr env pos) r.rxafter;
+    rc_after = Option.map (fun p -> dexpr env pos (Time_pos.expr p)) r.rxafter;
     rc_once = Option.map (once env pos) r.rxonce;
-    rc_cooldown = Option.map (dexpr env pos) r.rxcooldown;
+    rc_cooldown = Option.map (fun p -> dexpr env pos (Time_pos.expr p)) r.rxcooldown;
     rc_action = action env pos r.rxaction;
     rc_guard = Option.map guard r.rxguard;
     rc_text = text env r.rxspan }
@@ -539,13 +540,14 @@ let scenario env (s : Ast.scenario_decl) : D.scenario_decl =
       | ScSet kvs -> SfSet (assigns kvs)
       | ScScale kvs -> SfScale (assigns kvs)
       | ScCompose ns -> SfCompose ns
-      | ScTEnd e -> SfTEnd (dexpr env top e)
+      | ScTEnd p -> SfTEnd (dexpr env top (Time_pos.expr p))
       | ScExtends p -> SfExtends p) s.scfields;
     sn_text = text env s.scspan }
 
 let simulation env (s : simulate_decl) : D.simulation_decl =
-  { sm_from = dexpr env top s.sim_from; sm_to = dexpr env top s.sim_to;
-    sm_dt = Option.map (dexpr env top) s.sim_dt;
+  { sm_from = dexpr env top (Time_pos.expr s.sim_from);
+    sm_to = dexpr env top (Time_pos.expr s.sim_to);
+    sm_dt = Option.map (fun p -> dexpr env top (Time_pos.expr p)) s.sim_dt;
     sm_integrator = Option.map fst s.sim_integrator;
     sm_atol = Option.map (fun (e, _) -> dexpr env top e) s.sim_atol;
     sm_rtol = Option.map (fun (e, _) -> dexpr env top e) s.sim_rtol;
@@ -684,7 +686,7 @@ let build_detail ~(source : Source_cache.t) (ctx : Expander.context)
       | DTimepoints tps ->
         List.map (fun (tp : Ast.timepoint_decl) ->
           at "timepoint" tp.tpname (fun env (tp : Ast.timepoint_decl) ->
-            { D.tp_name = tp.tpname; tp_time = dexpr env top tp.tptime;
+            { D.tp_name = tp.tpname; tp_time = dexpr env top (Time_pos.expr tp.tptime);
               tp_text = text env tp.tpspan }) tp) tps
       | _ -> []);
     dm_transitions = each (function
