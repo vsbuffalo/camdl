@@ -16425,6 +16425,45 @@ let test_tp_output_at_date_range () =
   | Ir.OutAtTimes ts -> Alcotest.(check (list (float 1e-9))) "at" [0.0; 31.0; 60.0; 91.0] ts
   | _ -> Alcotest.fail "expected an at-list output schedule"
 
+(* E322's hint names `date_range(..., calendar_months = k)` and a fixed
+   cadence in days. *)
+let test_tp_cadence_hint () =
+  tp_expect ~code:"E322"
+    ~message:"calendar duration `1 'months` in recurring schedule `every = ...`"
+    ~hint:"a calendar cadence counts whole months from its start, which one fixed \
+           step cannot represent. List the calendar dates instead, with \
+           `date_range(<start>, <end>, calendar_months = 1)` in an `at` list, or \
+           write a fixed cadence: `every = 30 'days` (≈ 1 'months)."
+    (tp_model ~extra:"output { trajectories { every = 1 'months } }" ())
+
+(* E320's hint recommends the explicit date, since `600 'months` there is now
+   refused. *)
+let test_tp_e320_hint () =
+  let src = {|
+time_unit = 'months
+origin = date("1891-01-01")
+compartments { S, I, R }
+parameters { beta : rate  gamma : rate }
+transitions {
+  infection : S --> I @ beta * S * I / (S + I + R)
+  recovery  : I --> R @ gamma * I
+}
+init { S = 990  I = 10 }
+simulate { from = 0  to = 600 }
+|} in
+  let ds = tp_diags src in
+  match List.find_opt (fun (d : Diagnostics.diagnostic) -> d.code = "E320") ds with
+  | None -> Alcotest.failf "expected E320; got:\n%s" (tp_show ds)
+  | Some d ->
+    let h = Option.value d.hint ~default:"" in
+    List.iter (fun needle ->
+      if not (contains_substring ~needle h) then
+        Alcotest.failf "E320 hint lacks %S:\n%s" needle h)
+      ["`to = add_calendar_months(origin, 600)`";
+       "a calendar duration such as `600 'months` in one of these positions is refused (E321)"];
+    if contains_substring ~needle:"(e.g. to = 600 'months)" h then
+      Alcotest.failf "E320 hint still recommends `to = 600 'months`:\n%s" h
+
 let stage_1a_tests = [
   "simulate to = 2 'years refused", test_tp_refuse_simulate_to_years;
   "simulate from = 6 'months refused", test_tp_refuse_simulate_from_months;
@@ -16452,6 +16491,8 @@ let stage_1a_tests = [
   "scenario to = date + 7 'days is 67 (gh#1129)", test_tp_instant_arithmetic_scenario_to;
   "output at = [date + 7 'days] is 67 (gh#1129)", test_tp_instant_arithmetic_output_at;
   "output at splices date_range", test_tp_output_at_date_range;
+  "E322 hint names date_range", test_tp_cadence_hint;
+  "E320 hint names add_calendar_months", test_tp_e320_hint;
 ]
 
 let () =

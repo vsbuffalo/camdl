@@ -6259,14 +6259,21 @@ module Lower = struct
 
   (* ── Cadences ── *)
 
-  let cadence ctx ~what ~context ~field ?(walk = true) ?(hint = Time_typing.hint_calendar_cadence_in_recurring)
-      (p : Time_pos.cadence Time_pos.t) : float =
+  let cadence ctx ~what ~context ~field (p : Time_pos.cadence Time_pos.t) : float =
     let e = Time_pos.expr p in
     ignore (judge ctx p (fun () ->
       let loc = loc ctx p in
       check_time_units ctx ~what e;
-      if walk then check_instant_arithmetic ctx ~loc ~context e;
-      check_calendar_cadence ctx ~loc ~field ~hint e;
+      check_instant_arithmetic ctx ~loc ~context e;
+      (* The hint's `calendar_months` is the literal's own count of months. *)
+      let months = match calendar_literal ctx e with
+        | Some (k, u) ->
+          let m = match u with Years -> 12.0 *. k | _ -> k in
+          if Float.is_integer m && m > 0.0 && m < 1e9 then Some (int_of_float m) else None
+        | None -> None
+      in
+      check_calendar_cadence ctx ~loc ~field
+        ~hint:(Time_typing.hint_calendar_cadence ~months (calendar_span_days ctx e)) e;
       false));
     fold ctx e
 
