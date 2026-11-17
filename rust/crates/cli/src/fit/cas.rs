@@ -452,17 +452,42 @@ pub fn config_identity_hash(config: &FitConfig) -> Result<String, String> {
 /// function of the problem, and hashing an absent key would let a file that
 /// spells the default and one that omits it key differently — or, worse, let
 /// the run draw from a rule its address never saw.
-fn method_config_hash(method: &Method) -> Result<ContentHash, String> {
+fn method_config_hash(method: &Method, gradients: Option<&ContentHash>) -> Result<ContentHash, String> {
     method.starts()?;
     // Gate the Method struct itself: `identity_payload()` already built its
     // Value via `json!`, which would have nulled any non-finite cooling —
     // so check the source struct before trusting it.
     ensure_finite(method)?;
-    let v = serde_json::json!({
+    let mut v = serde_json::json!({
         "identity": method.identity_payload(),
         "n_trajectories": method.algorithm.cas_n_trajectories(),
     });
+    // Only for a method that reads gradients: an absent key adds no bytes, so
+    // every gradient-free method keeps its key.
+    if let Some(g) = gradients {
+        v["gradients"] = serde_json::Value::String(g.to_hex().to_string());
+    }
     Ok(digest_value(&v))
+}
+
+/// The gradient maps `method` reads, as the digest its method level carries:
+/// the model hashed with its compiler-derived gradient maps
+/// ([`runid::inputs::model_ir_hash_with_gradients`]), for a method whose
+/// result depends on them
+/// ([`reads_gradients`](super::config_v2::Algorithm::reads_gradients)); `None` for every
+/// other.
+///
+/// The model level leaves the gradient maps out (proposal 2026-07-16), so a
+/// model compiled with or without them keys the runs that never read them
+/// alike. A gradient-reading fit's result depends on them, and they on the
+/// compiler's autodiff, which nothing else in its identity sees: a camdlc
+/// whose autodiff changed — an uncommitted one under
+/// `CAMDL_SKIP_VERSION_CHECK=1`, which the version handshake no longer
+/// guards — hands it other gradients for one forward model (proposal
+/// 2026-11-17 §1b). It hashes every gradient map, not only the ones it reads:
+/// a map it does not read can only cost it a recompute, never a wrong answer.
+pub(crate) fn gradients_read(method: &Method, model: &ir::Model) -> Option<ContentHash> {
+    method.algorithm.reads_gradients().then(|| runid::inputs::model_ir_hash_with_gradients(model))
 }
 
 /// Build the `fit`-level [`FitDigest`] — the seed-independent, method-
@@ -573,7 +598,7 @@ fn fit_method_levels(ctx: &FitMethodCtx, target_length: u64) -> Result<Vec<Level
     )?;
 
     let method_config = MethodConfig {
-        config: method_config_hash(ctx.method)?,
+        config: method_config_hash(ctx.method, gradients_read(ctx.method, ctx.model).as_ref())?,
         // Fits select observation streams via `[data]` (captured in
         // `FitDigest.data`); there is no fit-level `--obs`/`--flow`.
         obs_block: String::new(),
@@ -782,7 +807,7 @@ mod tests {
         )
         .unwrap();
         assert!(m.starts.is_none());
-        let err = method_config_hash(&m).unwrap_err();
+        let err = method_config_hash(&m, None).unwrap_err();
         assert!(err.contains("unresolved"), "{err}");
     }
 
@@ -799,7 +824,7 @@ mod tests {
             toml::from_str(&format!("{base}starts = {{ from_mle = \"@a\" }}\n")).unwrap();
         let mle_b: Method =
             toml::from_str(&format!("{base}starts = {{ from_mle = \"@b\" }}\n")).unwrap();
-        let h = |m: &Method| method_config_hash(m).unwrap();
+        let h = |m: &Method| method_config_hash(m, None).unwrap();
         assert_ne!(h(&lhs), h(&prior));
         assert_ne!(h(&prior), h(&mle));
         // gh#896: the handle as written is not the key; which source run was
@@ -819,8 +844,8 @@ mod tests {
     /// and the first run's trajectories are served for the second.)
     #[test]
     fn n_trajectories_changes_the_method_identity() {
-        let h200 = method_config_hash(&pgas_method(200)).unwrap();
-        let h10 = method_config_hash(&pgas_method(10)).unwrap();
+        let h200 = method_config_hash(&pgas_method(200), None).unwrap();
+        let h10 = method_config_hash(&pgas_method(10), None).unwrap();
         assert_ne!(
             h200, h10,
             "two methods differing only in n_trajectories must have distinct \
@@ -828,7 +853,7 @@ mod tests {
              silently reuses the wrong trajectory count"
         );
         // No spurious sensitivity: identical n_trajectories → identical hash.
-        assert_eq!(h200, method_config_hash(&pgas_method(200)).unwrap());
+        assert_eq!(h200, method_config_hash(&pgas_method(200), None).unwrap());
     }
 
     fn mh_ode_method(burnin_dt: Option<f64>) -> Method {
@@ -853,21 +878,21 @@ mod tests {
     /// the second — a silent-wrong answer.
     #[test]
     fn burnin_dt_changes_the_mh_ode_method_identity() {
-        let off = method_config_hash(&mh_ode_method(None)).unwrap();
-        let on7 = method_config_hash(&mh_ode_method(Some(7.0))).unwrap();
-        let on14 = method_config_hash(&mh_ode_method(Some(14.0))).unwrap();
+        let off = method_config_hash(&mh_ode_method(None), None).unwrap();
+        let on7 = method_config_hash(&mh_ode_method(Some(7.0)), None).unwrap();
+        let on14 = method_config_hash(&mh_ode_method(Some(14.0)), None).unwrap();
         assert_ne!(off, on7, "setting burnin_dt must re-key the mh method");
         assert_ne!(on7, on14, "distinct burnin_dt values must produce distinct method hashes");
         // No spurious sensitivity: off is stable and hashes identically each time.
-        assert_eq!(off, method_config_hash(&mh_ode_method(None)).unwrap());
+        assert_eq!(off, method_config_hash(&mh_ode_method(None), None).unwrap());
     }
 
     /// The deterministic compute identity is stable: re-resolving the same
     /// method config yields the same hash (canonical-JSON key sort).
     #[test]
     fn method_config_hash_is_stable() {
-        let a = method_config_hash(&pgas_method(50)).unwrap();
-        let b = method_config_hash(&pgas_method(50)).unwrap();
+        let a = method_config_hash(&pgas_method(50), None).unwrap();
+        let b = method_config_hash(&pgas_method(50), None).unwrap();
         assert_eq!(a, b);
     }
 
@@ -900,10 +925,10 @@ mod tests {
     /// removed; loglik_eval is set in the `[method]` table only).
     #[test]
     fn loglik_eval_changes_the_if2_method_identity() {
-        let a = method_config_hash(&if2_method(4000)).unwrap();
-        let b = method_config_hash(&if2_method(8000)).unwrap();
+        let a = method_config_hash(&if2_method(4000), None).unwrap();
+        let b = method_config_hash(&if2_method(8000), None).unwrap();
         assert_ne!(a, b, "loglik_eval must fold into the IF2 method identity (gh#189)");
-        assert_eq!(a, method_config_hash(&if2_method(4000)).unwrap());
+        assert_eq!(a, method_config_hash(&if2_method(4000), None).unwrap());
     }
 
     /// gh#189: `allow_degenerate_rates` is a keyed `[config]` field (was a CLI
