@@ -153,7 +153,7 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
             }
         };
         // gh#896: a row reports one run, and `fit predict` writes that run's
-        // quantities under `<segment>/predict/<run id>/`; so each cell is read
+        // quantities under `<segment>/predict/<run id>-<key>/`; so each cell is read
         // from, and derived by predicting, the row's own run.
         let run_by_id: std::collections::HashMap<&str, (&std::path::Path, &std::path::Path)> =
             pre_filtered
@@ -490,9 +490,9 @@ fn resolve_quantity_median(
     };
     let sub = crate::chain_selection::artifact_name("quantities", info.as_ref());
     // The address the derivation below writes: the run's, keyed by the
-    // free-forward options it passes (gh#896).
-    let key = crate::fit::predict::PredictOptions::free_forward().address_key();
-    let tsv = crate::fit::fit_view::predictions_dir(fit_dir, run_id, key.as_deref())
+    // free-forward options it passes, the chain selection among them (gh#896).
+    let key = crate::fit::predict::PredictOptions::free_forward(info.as_ref()).address_key(run_id);
+    let tsv = crate::fit::fit_view::predictions_dir(fit_dir, run_id, &key)
         .join(&sub)
         .join(format!("{name}.tsv"));
 

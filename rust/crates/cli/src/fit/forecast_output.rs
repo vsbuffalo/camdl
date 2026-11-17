@@ -146,6 +146,8 @@ pub(crate) struct ForecastJob<'a> {
     pub segment: &'a std::path::Path,
     pub out_dir: &'a std::path::Path,
     pub run_id: &'a str,
+    /// The key of `out_dir` ([`crate::fit::predict::PredictOptions::address_key`]).
+    pub address_key: &'a str,
     pub options: &'a crate::fit::predict::PredictOptions,
     pub calendar: &'a ir::caltime::CalendarAxis,
     pub schema: Option<&'a crate::run_meta::ObsSchema>,
@@ -432,6 +434,7 @@ fn write_manifest(
     let doc = serde_json::json!({
         "schema": FORECAST_SCHEMA,
         "run_id": job.run_id,
+        "address_key": job.address_key,
         "options": job.options,
         "calendar": job.calendar.to_json(),
         "mode": "fixed_origin",

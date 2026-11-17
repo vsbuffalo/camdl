@@ -263,8 +263,7 @@ pub fn outputs(leaf: &Leaf, segment: &Path) -> Vec<Output> {
         .map(|p| Output { path: p.clone(), role: schema_role(p).unwrap_or_else(|| "file".into()) })
         .collect();
     let run_id = leaf.record.run_id.to_hex().to_string();
-    let bare = crate::fit::fit_view::predictions_dir(segment, &run_id, None);
-    let stem = bare.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let stem = crate::fit::fit_view::predictions_label(&run_id).to_string();
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(segment.join("predict"))
         .into_iter()
         .flatten()
@@ -272,7 +271,7 @@ pub fn outputs(leaf: &Leaf, segment: &Path) -> Vec<Output> {
         .map(|e| e.path())
         .filter(|d| {
             let n = d.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            d.is_dir() && (n == stem || n.starts_with(&format!("{stem}-")))
+            d.is_dir() && n.starts_with(&format!("{stem}-"))
         })
         .collect();
     dirs.sort();

@@ -309,10 +309,19 @@ fn two_exclusions_are_two_addresses_and_neither_is_the_pooled_one() {
     let bin = require_binary();
     let f = setup(&bin, "addresses");
 
-    // 1. The pooled run: the canonical artifact, at the historical address.
+    // Each selection is its own `fit predict` address (`predict/<run>-<key>/`,
+    // the key covering the chain selection), so each directory is read as the
+    // one its predict wrote.
+    let read = |dir: &Path, rel: &str| -> String {
+        std::fs::read_to_string(dir.join(rel))
+            .unwrap_or_else(|e| panic!("reading {rel} under {}: {e}", dir.display()))
+    };
+
+    // 1. The pooled run: the canonical artifact.
     assert_ok(&f.predict(&bin, None), "pooled predict");
-    let pooled_tsv = f.read("predictive/weekly_cases.tsv");
-    let pooled_json = f.read("predictive.json");
+    let pooled_dir = predict_out(&f.seg);
+    let pooled_tsv = read(&pooled_dir, "predictive/weekly_cases.tsv");
+    let pooled_json = read(&pooled_dir, "predictive.json");
     assert_eq!(
         free_forward_n_draws(&pooled_tsv),
         BTreeSet::from([120]),
@@ -321,19 +330,21 @@ fn two_exclusions_are_two_addresses_and_neither_is_the_pooled_one() {
 
     // 2. Drop the outlier chain 3. This must NOT be the pooled address.
     assert_ok(&f.predict(&bin, Some("3")), "predict --exclude-chains 3");
+    let excl3_dir = predict_out(&f.seg);
+    assert_ne!(excl3_dir, pooled_dir, "a chain subset is its own address");
     assert_eq!(
-        f.read("predictive/weekly_cases.tsv"),
+        read(&pooled_dir, "predictive/weekly_cases.tsv"),
         pooled_tsv,
         "a chain-subset predict must not overwrite the pooled predictive TSV — \
          camdl-scope reads `predictive/` and would render a 3-chain subset as \
          the posterior predictive of the fit"
     );
-    assert_eq!(
-        f.read("predictive.json"),
-        pooled_json,
-        "…nor the pooled manifest"
+    assert_eq!(read(&pooled_dir, "predictive.json"), pooled_json, "…nor the pooled manifest");
+    assert!(
+        !excl3_dir.join("predictive").exists(),
+        "the subset's directory holds no unsuffixed predictive to mistake for the pooled one"
     );
-    let excl3_tsv = f.read("predictive-excl3/weekly_cases.tsv");
+    let excl3_tsv = read(&excl3_dir, "predictive-excl3/weekly_cases.tsv");
     assert_eq!(
         free_forward_n_draws(&excl3_tsv),
         BTreeSet::from([90]),
@@ -342,19 +353,21 @@ fn two_exclusions_are_two_addresses_and_neither_is_the_pooled_one() {
 
     // 3. A second, different exclusion. All three artifacts coexist.
     assert_ok(&f.predict(&bin, Some("1,3")), "predict --exclude-chains 1,3");
+    let excl13_dir = predict_out(&f.seg);
+    assert!(excl13_dir != pooled_dir && excl13_dir != excl3_dir, "a third address");
     assert_eq!(
-        f.read("predictive/weekly_cases.tsv"),
+        read(&pooled_dir, "predictive/weekly_cases.tsv"),
         pooled_tsv,
         "the pooled predictive survives the second exclusion too"
     );
     assert_eq!(
-        f.read("predictive-excl3/weekly_cases.tsv"),
+        read(&excl3_dir, "predictive-excl3/weekly_cases.tsv"),
         excl3_tsv,
         "…and so does the FIRST exclusion's artifact — the reporter ran five \
          exclusions and each overwrote the last"
     );
     assert_eq!(
-        free_forward_n_draws(&f.read("predictive-excl1,3/weekly_cases.tsv")),
+        free_forward_n_draws(&read(&excl13_dir, "predictive-excl1,3/weekly_cases.tsv")),
         BTreeSet::from([60]),
         "two chains remain"
     );
@@ -365,16 +378,18 @@ fn two_exclusions_are_two_addresses_and_neither_is_the_pooled_one() {
         pooled.get("chain_selection").is_none(),
         "the pooled manifest records no selection"
     );
-    for (name, excluded, kept) in [
-        ("predictive-excl3.json", vec![3], vec![0, 1, 2]),
-        ("predictive-excl1,3.json", vec![1, 3], vec![0, 2]),
+    for (dir, name, excluded, kept) in [
+        (&excl3_dir, "predictive-excl3.json", vec![3], vec![0, 1, 2]),
+        (&excl13_dir, "predictive-excl1,3.json", vec![1, 3], vec![0, 2]),
     ] {
-        let j: serde_json::Value = serde_json::from_str(&f.read(name)).unwrap();
+        let j: serde_json::Value = serde_json::from_str(&read(dir, name)).unwrap();
         let cs = j
             .get("chain_selection")
             .unwrap_or_else(|| panic!("{name} stamps chain_selection"));
         assert_eq!(cs["excluded"], serde_json::json!(excluded), "{name}");
         assert_eq!(cs["kept"], serde_json::json!(kept), "{name}");
+        assert_eq!(j["options"]["excluded_chains"], serde_json::json!(excluded),
+            "{name} records the selection among the options that key its address");
         // The manifest's declared file location must be the keyed one, or a
         // consumer that follows it lands back on the pooled artifact.
         let file = j["streams"][0]["file"].as_str().expect("a stream file path");
@@ -382,19 +397,19 @@ fn two_exclusions_are_two_addresses_and_neither_is_the_pooled_one() {
             file.starts_with(name.trim_end_matches(".json")),
             "{name} must point at its OWN directory, got {file}"
         );
-        assert!(f.exists(file), "{name} declares a file that exists: {file}");
+        assert!(dir.join(file).exists(), "{name} declares a file that exists: {file}");
     }
 
-    // 5. The quantities sidecar is posterior-derived too, and collides the same
-    //    way. The pooled table must survive a chain-subset run.
+    // 5. The quantities sidecar is posterior-derived too. The pooled table must
+    //    survive a chain-subset run.
     assert!(
-        f.exists("quantities/peak.tsv"),
+        pooled_dir.join("quantities/peak.tsv").exists(),
         "the pooled quantities table survives the exclusions"
     );
     assert!(
-        f.exists("quantities-excl3/peak.tsv") && f.exists("quantities-excl1,3/peak.tsv"),
-        "each exclusion writes its own quantities table, got {:?}",
-        f.artifact_names()
+        excl3_dir.join("quantities-excl3/peak.tsv").exists()
+            && excl13_dir.join("quantities-excl1,3/peak.tsv").exists(),
+        "each exclusion writes its own quantities table"
     );
 
     // 6. Discovery: `camdl show <fit>` enumerates every address the fit holds,
@@ -419,27 +434,14 @@ fn two_exclusions_are_two_addresses_and_neither_is_the_pooled_one() {
             "the fit envelope must list {expected}; got:\n{shown}"
         );
     }
-    // The pooled address leads its family, so a reader scanning the envelope
-    // meets the canonical artifact before the subsets.
-    let order = |a: &str, b: &str| {
-        let (ia, ib) = (shown.find(a), shown.find(b));
-        assert!(
-            ia.is_some() && ia < ib,
-            "{a} must be listed before {b}; got:\n{shown}"
-        );
-    };
-    order("predictive/weekly_cases.tsv", "predictive-excl1,3/weekly_cases.tsv");
-    order("/predictive.json", "predictive-excl1,3.json");
 
     // …and the name `show` prints is a name `cat --stream` takes, so the
     // discovery loop closes: no keyed artifact is listed but unreachable.
     // `--mode free_forward` keys the predict's address (gh#896), so its
     // files are listed and read under `predict/<dir>/`.
-    let prefix = format!(
-        "predict/{}/",
-        predict_out(&f.seg).file_name().unwrap().to_string_lossy()
-    );
+    let prefix = format!("predict/{}/", excl3_dir.file_name().unwrap().to_string_lossy());
     let stream = format!("{prefix}predictive-excl3/weekly_cases.tsv");
+    assert!(shown.contains(&stream), "show lists {stream}; got:\n{shown}");
     let out = run(&bin, &f.tmp, &["cat", &seg, "--stream", &stream]);
     assert_ok(&out, "camdl cat --stream predictive-excl3/weekly_cases.tsv");
     assert_eq!(

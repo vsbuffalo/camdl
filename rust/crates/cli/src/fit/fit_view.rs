@@ -169,21 +169,32 @@ pub fn leaf_segment(dir: &Path) -> Result<Option<PathBuf>, String> {
     })
 }
 
-/// Where `fit predict` writes for one run: `<segment>/predict/<run id, 12 hex>/`
-/// (gh#896), or `<run id, 12 hex>-<options key>/` when the predict was run
-/// with non-default options (`fit::predict::PredictOptions::address_key`).
-/// Keyed by the run, so two runs of one problem keep separate predictives,
-/// and by the options, so a `--n-draws 3` predict does not overwrite the
-/// default one; outside the leaf, whose exact-set manifest admits no
-/// regenerated files. The full run id and the options are recorded in the
-/// manifests written there (`predictive.json`, `observed.json`; `report.json`
-/// records the failures, not the options).
-pub fn predictions_dir(segment: &Path, run_id: &str, options_key: Option<&str>) -> PathBuf {
-    let run = &run_id[..12.min(run_id.len())];
-    segment.join("predict").join(match options_key {
-        Some(k) => format!("{run}-{k}"),
-        None => run.to_string(),
-    })
+/// Where `fit predict` writes for one run: `<segment>/predict/<run id, 12
+/// hex>-<address key>/` (gh#896), outside the leaf, whose exact-set manifest
+/// admits no regenerated files. The address key
+/// (`fit::predict::PredictOptions::address_key`, 128 bits) hashes the full
+/// run id, the engine and every option that changes the output, so two
+/// predictions from different inputs never share a directory; the 12-hex run
+/// prefix is a label for a person listing the folder. The full run id, the key
+/// and the options are recorded in the manifests written there
+/// (`predictive.json`, `observed.json`, `forecast.json`; `report.json` records
+/// the failures, not the options).
+pub fn predictions_dir(segment: &Path, run_id: &str, address_key: &str) -> PathBuf {
+    segment.join("predict").join(format!("{}-{address_key}", predictions_label(run_id)))
+}
+
+/// The run's label in its prediction directories' names, the 12-hex prefix
+/// of its run id: every directory `fit predict` wrote for the run is named
+/// `<label>-<key>`.
+pub fn predictions_label(run_id: &str) -> &str {
+    &run_id[..12.min(run_id.len())]
+}
+
+/// The directory `fit predict <run>` with every option at its default writes
+/// to, under this engine.
+pub fn default_predictions_dir(segment: &Path, run_id: &str) -> PathBuf {
+    let key = crate::fit::predict::PredictOptions::defaults().address_key(run_id);
+    predictions_dir(segment, run_id, &key)
 }
 
 /// The `run_id` (full hex) a fit leaf's `run.json` records; `Ok(None)` when

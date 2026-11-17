@@ -432,8 +432,8 @@ results/fits/{stem}-{fit_hash8}/
 The archived files and the `predictive`/`observed`/`quantities` outputs are
 **regenerated sidecars**: they are not part of any leaf's file manifest, and a
 rerun of `fit predict` overwrites them in place. The predict outputs sit under
-`predict/<run_id12>/`, one directory per run they replay, and their manifests
-record that run's full `run_id`.
+`predict/<run_id12>-<key>/`, one directory per run they replay and set of
+inputs, and their manifests record that run's full `run_id`.
 
 **What the fit hash covers.** The fit level is a `FitDigest` over the whole
 model IR digest (which itself folds `ir/VERSION` and the engine version), the
@@ -660,21 +660,27 @@ disagree with what was fit.
 `camdl fit predict <fit>` resolves the fit handle — `@label`, a `fit.toml` path,
 a leaf or problem-folder directory, or a hash prefix — to one run, refusing a
 problem folder that holds several with the runs listed. It writes two tidy,
-plot-ready families of files under `predict/<run_id12>/` in that run's segment —
-outside the leaf, whose exact-set manifest admits no regenerated files — plus a
-JSON manifest for each that records the full `run_id`. Two runs of one problem
-keep separate predictives, and each file is attributable to the run it replays.
+plot-ready families of files under `predict/<run_id12>-<key>/` in that run's
+segment — outside the leaf, whose exact-set manifest admits no regenerated files
+— plus a JSON manifest for each that records the full `run_id`. Two runs of one
+problem keep separate predictives, and each file is attributable to the run it
+replays.
 
-The directory is also keyed by the predict options that shape its output —
-`--mode`, `--horizon`, `--n-draws`, `--seed`, `--stream`,
-`--scenario`/`--enable`/ `--disable`, `--sweep`, `--by-chain` — resolved to the
-values used: the defaults write `predict/<run_id12>/`, any other set
-`predict/<run_id12>-<opts8>/` (the first 8 hex of the SHA-256 of the options'
-JSON), and `predictive.json` / `observed.json` record them under `options`. Two
-predicts of one run with different options are two artifacts, so neither
-overwrites the other, and `fit table --quantity` reads the address its own
-free-forward derivation writes. `--exclude-chains` and `--quantities` key
-sub-addresses inside the directory (`predictive-excl3/`, `quantities-<key8>/`).
+`<key>` is the first 32 hex digits (128 bits) of the SHA-256 of the full
+`run_id`, the engine version, and every predict option that changes the output,
+resolved to the values used: `--mode`, `--horizon`, `--n-draws`, `--seed`,
+`--stream`, `--scenario`/`--enable`/`--disable`, `--sweep`, `--by-chain`, the
+chains `--exclude-chains`/`--chains` drop from the fit's cloud (so the two
+spellings of one selection are one key), the SHA-256 of a `--quantities` file,
+and `--allow-forcing-extrapolation`. Two predictions computed from different
+inputs therefore never share a directory, and a reader that locates one by its
+key reads the prediction those inputs produce. `predictive.json`,
+`observed.json` and `forecast.json` record the key under `address_key` and the
+options under `options`; `run_id12` is a label for a person listing the folder.
+`fit table --quantity` reads the address its own free-forward derivation writes.
+Inside the directory, `--exclude-chains` and `--quantities` also name the files
+(`predictive-excl3/`, `quantities-<key8>/`), so a chain-subset or
+other-vocabulary table says so in its name.
 
 The free-forward replay projects each row off its own recorded trajectories, so
 it records a snapshot at every time a row reads — each data time and each
@@ -686,13 +692,13 @@ the projection: they change no stored fit or run identity, and `quantities/`
 stays on the declared output grid.
 
 ```
-results/fits/<stem>-<hash8>/predict/<run_id12>/predictive/<stream>.tsv
+results/fits/<stem>-<hash8>/predict/<run_id12>-<key>/predictive/<stream>.tsv
   scenario | sweep:<param>… | time | <dims…> | horizon | treatment
            | fit_rhat_max | fit_ess_min
            | rhat_mean | ess_mean | rhat_pred | ess_pred
            | n_draws | q05 | q25 | q50 | q75 | q95
 
-results/fits/<stem>-<hash8>/predict/<run_id12>/observed/<stream>.tsv
+results/fits/<stem>-<hash8>/predict/<run_id12>-<key>/observed/<stream>.tsv
   time | <dims…> | value
 ```
 
@@ -3472,10 +3478,10 @@ name one run; the others name a problem folder. Ambiguity is listed git-style
 rather than guessed. `camdl show` and `camdl cat` resolve through the same
 module, so a handle names the same run there as in every fit verb: `show` on a
 run handle describes the run and its recorded outputs (`run.json` `artifacts`
-plus its predictions under `predict/<run id>/`, never a directory listing), and
-`cat --stream <name>` on a run looks in the leaf, then `predict/<run id>/`, then
-the problem folder. `show --format json` writes one `fit_show` (schema 1) object
-per run,
+plus its predictions under `predict/<run id>-<key>/`, never a directory
+listing), and `cat --stream <name>` on a run looks in the leaf, then the
+directory of its default-options predict, then the problem folder.
+`show --format json` writes one `fit_show` (schema 1) object per run,
 `{schema, run_id, label, label_set_at, history_index, problem {fit_id, model, config}, method, seed, chains, starts {rule, handle, run_id, chains}, status, verdict {kind, max_rhat, min_ess_bulk}, path, outputs [{path, role}]}`,
 with `role` from `run.json` `output_schema`; on a problem folder,
 `{schema, problem, runs: [<fit_show>…]}`. For every other kind it writes
@@ -4400,10 +4406,10 @@ $ camdl fit predict fits/02_posterior.toml --n-draws 20
 fit predict: free_forward horizon — subsampling 20 of 60 posterior draws (raise with --n-draws)
 fit predict: one_step horizon — subsampling 20 of 60 posterior draws (raise with --n-draws)
 fit predict: mode=free_forward+one_step(20 draws) treatment=posterior, 1 scenario(s) [fitted], 1 stream(s), 60 draws from pgas method 'pgas'
-wrote fits/../results/fits/02_posterior-77595169/predict/<run_id12>/predictive/weekly_cases.tsv
-wrote fits/../results/fits/02_posterior-77595169/predict/<run_id12>/predictive.json
-wrote fits/../results/fits/02_posterior-77595169/predict/<run_id12>/observed/weekly_cases.tsv
-wrote fits/../results/fits/02_posterior-77595169/predict/<run_id12>/observed.json
+wrote fits/../results/fits/02_posterior-77595169/predict/<run_id12>-<key>/predictive/weekly_cases.tsv
+wrote fits/../results/fits/02_posterior-77595169/predict/<run_id12>-<key>/predictive.json
+wrote fits/../results/fits/02_posterior-77595169/predict/<run_id12>-<key>/observed/weekly_cases.tsv
+wrote fits/../results/fits/02_posterior-77595169/predict/<run_id12>-<key>/observed.json
 ```
 
 ```

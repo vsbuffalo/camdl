@@ -66,13 +66,13 @@ way every fit verb does. `@label`, a leaf directory and a `run_id` prefix name
 one run: `camdl show @m0` describes that run (its id, problem, method, how its
 chains started, its stored verdict, path and recorded outputs, including its
 predictions), and `camdl cat @m0 --stream draws.tsv` reads a file from the run's
-leaf, then from its predictions under the problem folder's `predict/<run id>/`,
-then from the problem folder. A fit-id prefix, a problem folder's path and a
-`fit.toml` name the folder: `show` lists its runs and the handle that selects
-each, and `cat` on a folder holding several runs is refused with them listed,
-unless the stream is a file of the folder itself (`fit.meta.json`, or a
-`predict/<run id>/…` path). Without `--stream`, `cat` on a run prints its
-`fit_state.toml` and on a folder its `fit.meta.json`.
+leaf, then from its default-options predictions under the problem folder's
+`predict/<run id>-<key>/`, then from the problem folder. A fit-id prefix, a
+problem folder's path and a `fit.toml` name the folder: `show` lists its runs
+and the handle that selects each, and `cat` on a folder holding several runs is
+refused with them listed, unless the stream is a file of the folder itself
+(`fit.meta.json`, or a `predict/<run id>-<key>/…` path). Without `--stream`,
+`cat` on a run prints its `fit_state.toml` and on a folder its `fit.meta.json`.
 
 **Selecting chains.** Every reader of a posterior cloud takes `--chains IDS`
 (keep only those chains) or `--exclude-chains IDS` (drop those), never both:
