@@ -32,9 +32,41 @@ pub(crate) struct Target {
     pub horizon: i64,
     /// The duration from the origin to the target's end, in model time units.
     pub lead: f64,
-    /// The position of a held-out row that measures the same period, when one
-    /// exists.
-    pub observed: Option<usize>,
+    /// The held-out row that measures the same period, when one exists.
+    pub observed: Option<HeldOutRow>,
+}
+
+/// Which file a held-out row is in: the training file (rows past the
+/// training prefix, under `holdout_after`) or the stream's `[data.holdout]`
+/// file. Row positions are counted within a file, as everywhere in camdl, so a
+/// position names a row only together with its file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RowFile {
+    Training,
+    Holdout,
+}
+
+impl RowFile {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            RowFile::Training => "training",
+            RowFile::Holdout => "holdout",
+        }
+    }
+}
+
+/// A held-out row's place: its file and its position within that file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HeldOutRow {
+    pub file: RowFile,
+    pub position: usize,
+}
+
+/// A row after the training prefix, with the file it was read from.
+#[derive(Debug, Clone)]
+pub(crate) struct HeldOut {
+    pub file: RowFile,
+    pub row: ObservedRow,
 }
 
 /// Where a stream's targets come from (§4.3).
@@ -62,8 +94,8 @@ pub(crate) struct PlanStream<'a> {
     /// The rows the parameters were fitted to (the stream's training prefix).
     pub training: &'a [ObservedRow],
     /// Rows after the training prefix, from the same file or a
-    /// `[data.holdout]` file; they only name a target's `observed` position.
-    pub held_out: &'a [ObservedRow],
+    /// `[data.holdout]` file; they only name a target's `observed` row.
+    pub held_out: &'a [HeldOut],
 }
 
 /// Why a stream has no targets (§4.3, D42, D52).
@@ -275,7 +307,7 @@ fn stream_targets(
             let span = *span;
             // The phase: any row of a uniform stream fixes it, because its
             // periods tile without gaps; the last one is nearest the origin.
-            let Some(anchor) = s.training.last().or(s.held_out.first()) else {
+            let Some(anchor) = s.training.last().or(s.held_out.first().map(|h| &h.row)) else {
                 return Err(StreamRefusal::NoBoundRows { stream });
             };
             let (a_start, a_end) = (anchor.measures.start(), anchor.measures.end());
@@ -331,8 +363,8 @@ fn stream_targets(
         .map(|(h, m)| Target {
             stream: stream.clone(),
             observed: s.held_out.iter()
-                .find(|r| same_span(&r.measures, &m))
-                .map(|r| r.position),
+                .find(|h| same_span(&h.row.measures, &m))
+                .map(|h| HeldOutRow { file: h.file, position: h.row.position }),
             measures: m,
             horizon: h as i64,
             lead: m.end() - origin,
@@ -616,19 +648,23 @@ mod tests {
         assert!(err.to_string().contains("[tested]"), "{err}");
     }
 
-    /// A held-out row measuring a target's period gives the target its
-    /// position.
+    /// A held-out row measuring a target's period gives the target its file
+    /// and its position within that file.
     #[test]
-    fn a_held_out_row_names_its_target() {
+    fn a_held_out_row_names_its_target_by_file_and_position() {
         let all: Vec<ObservedRow> = (0..5).map(|i| row(i, 7.0 * i as f64, 7.0 * (i + 1) as f64)).collect();
-        let (train, held) = all.split_at(3);
+        let (train, rest) = all.split_at(3);
         let rows = BTreeMap::from([("weekly".to_string(), train.to_vec())]);
         let wobs = weekly();
+        let held: Vec<HeldOut> = rest.iter()
+            .map(|r| HeldOut { file: RowFile::Training, row: r.clone() })
+            .collect();
         let plan = ForecastPlan::new(partition(&rows), 21.0, &[
-            PlanStream { obs: &wobs, training: train, held_out: held },
+            PlanStream { obs: &wobs, training: train, held_out: &held },
         ]).unwrap();
-        let obs: Vec<Option<usize>> = plan.targets().iter().map(|t| t.observed).collect();
-        assert_eq!(obs, vec![Some(3), Some(4), None]);
+        let obs: Vec<Option<HeldOutRow>> = plan.targets().iter().map(|t| t.observed).collect();
+        let at = |position| Some(HeldOutRow { file: RowFile::Training, position });
+        assert_eq!(obs, vec![at(3), at(4), None]);
     }
 
     #[test]
