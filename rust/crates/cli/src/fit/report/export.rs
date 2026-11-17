@@ -77,9 +77,10 @@ pub(crate) fn render_md_method(method: &MethodReport) -> String {
         s.push_str(&format!("- initial loglik: {:.2}\n", init));
     }
     if let Some(prov) = &method.provenance {
-        if let Some(stale) = &prov.stale_camdl_version {
-            s.push_str(&format!("- ⚠ stale: produced by camdl `{}`, current is `{}`\n",
-                stale, version::VERSION_SHORT));
+        if let Some(note) = prov.stale_camdl_version.as_deref()
+            .and_then(|v| version::build_note(v, |s| format!("camdl `{s}`")))
+        {
+            s.push_str(&format!("- ⚠ {note}\n"));
         }
     }
     s.push('\n');

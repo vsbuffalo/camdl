@@ -75,6 +75,11 @@ pub enum ResolveError {
     /// not complete: the message names it and its state
     /// ([`crate::leaf_use::require_completed`]).
     NotCompleted(String),
+    /// A `fit.toml` whose runs were all made by other camdl builds: none is
+    /// the computation `fit run` of the file would make with this build, so
+    /// none is used in its place. Each is listed with how its build differs
+    /// and how to name it.
+    OtherBuilds { handle: String, runs: Vec<crate::cas_read::Leaf> },
 }
 
 impl std::fmt::Display for ResolveError {
@@ -102,6 +107,23 @@ impl std::fmt::Display for ResolveError {
                     writeln!(f, "    {}", run_line(r))?;
                 }
                 write!(f, "  Name one run by its leaf directory or a run-id prefix.")
+            }
+            ResolveError::OtherBuilds { handle, runs } => {
+                writeln!(
+                    f,
+                    "no completed run of {handle} was made by this camdl build ({}); {} run(s) \
+                     of it by other builds:",
+                    crate::version::VERSION_SHORT,
+                    runs.len()
+                )?;
+                for r in runs {
+                    writeln!(f, "    {}  {}", build_of(r), run_line(r))?;
+                }
+                write!(
+                    f,
+                    "  A run another build made is not used in place of this build's. Name one \
+                     by its run-id prefix or its leaf directory, or run `camdl fit run {handle}`."
+                )
             }
         }
     }
@@ -141,6 +163,23 @@ fn differing_axes(runs: &[crate::cas_read::Leaf]) -> String {
         [] => "nothing their records show".to_string(),
         [one] => one.to_string(),
         [init @ .., last] => format!("{} and {last}", init.join(", ")),
+    }
+}
+
+/// How the build that made `r` differs from this one, for a run another build
+/// made: `stale: built by X` (another commit), `built from uncommitted
+/// changes: X` (the same commit), or, when the readable versions agree, the
+/// build configuration (features, profile, toolchain or flags).
+fn build_of(r: &crate::cas_read::Leaf) -> String {
+    let Some(v) = r.record.provenance.camdl_version.as_deref() else {
+        return "built by a camdl that recorded no version".to_string();
+    };
+    match crate::version::build_relation(v, crate::version::VERSION_SHORT) {
+        crate::version::BuildRelation::Stale => format!("stale: built by {v}"),
+        crate::version::BuildRelation::UncommittedChanges => format!("built from uncommitted changes: {v}"),
+        crate::version::BuildRelation::Same => {
+            format!("built by {v} with another build configuration (features, profile, toolchain or flags)")
+        }
     }
 }
 
@@ -729,11 +768,14 @@ pub(crate) fn config_identity(text: &str) -> Result<String, String> {
 ///
 /// Each run records the identity of the config it was read from, so the file
 /// in hand names the runs made from it as it now reads, not the problem
-/// folder's latest archived config (gh#896). Several matches — several fit
-/// seeds, a `--starts` override, older camdl builds — are narrowed to the runs
-/// this camdl build wrote, the ones `fit run` of this file would reuse; when
-/// that leaves one, it is the answer and the others are noted, and otherwise
-/// the runs are listed.
+/// folder's latest archived config (gh#896). Resolution is exact (proposal
+/// 2026-11-17 §1d): the answer is the run this camdl build made — its
+/// `engine_version` is this binary's `ENGINE_ID`, so it is the run `fit run`
+/// of this file would reuse. Runs other builds made are never chosen in its
+/// place, however recent: with none by this build they are listed
+/// ([`ResolveError::OtherBuilds`]), and beside this build's they are noted.
+/// Several runs by this build (several fit seeds, a `--starts` override) are
+/// listed.
 ///
 /// Identity is the canonical hash of the parsed value tree, not the raw bytes
 /// (gh#653): reflowing a comment, reordering two top-level tables, or writing
@@ -769,21 +811,11 @@ fn resolve_config(path: &Path) -> Result<(LeafRef, FitConfig), ResolveError> {
         .filter(|l| recorded(l).is_some_and(|ids| ids.contains(&wanted)))
         .collect();
     matches.sort_by(|a, b| a.dir.cmp(&b.dir));
-    if matches.len() > 1 {
-        let (this_build, other): (Vec<_>, Vec<_>) = matches
-            .into_iter()
-            .partition(|l| l.record.engine_version == crate::version::ENGINE_ID);
-        if this_build.len() == 1 {
-            crate::out::detached().say(format_args!(
-                "note: {} also matches {} run(s) by other camdl builds; using this build's",
-                path.display(),
-                other.len()
-            ));
-        }
-        matches = if this_build.is_empty() { other } else { this_build };
-    }
-    match matches.len() {
-        0 => {
+    let (mut this_build, other_builds): (Vec<_>, Vec<_>) = matches
+        .into_iter()
+        .partition(|l| l.record.engine_version == crate::version::ENGINE_ID);
+    match (this_build.len(), other_builds.len()) {
+        (0, 0) => {
             let mut msg = format!(
                 "no completed fit run of {} as it now reads, under {}.\n  Run `camdl fit run {}` first.",
                 path.display(),
@@ -799,8 +831,18 @@ fn resolve_config(path: &Path) -> Result<(LeafRef, FitConfig), ResolveError> {
             }
             Err(ResolveError::NotFound(msg))
         }
-        1 => Ok((LeafRef::of(matches.remove(0)), config)),
-        _ => Err(ResolveError::AmbiguousRuns { handle: path.display().to_string(), runs: matches }),
+        (0, _) => Err(ResolveError::OtherBuilds { handle: path.display().to_string(), runs: other_builds }),
+        (1, others) => {
+            if others > 0 {
+                crate::out::detached().say(format_args!(
+                    "note: {} also matches {others} run(s) by other camdl builds, which are not \
+                     used; name one by its run-id prefix or leaf directory to read it",
+                    path.display(),
+                ));
+            }
+            Ok((LeafRef::of(this_build.remove(0)), config))
+        }
+        _ => Err(ResolveError::AmbiguousRuns { handle: path.display().to_string(), runs: this_build }),
     }
 }
 
@@ -1293,5 +1335,74 @@ cooling    = 0.70
         let msg = e.to_string();
         assert!(msg.contains("@dup resolves to 2 fits"));
         assert!(msg.contains("results/fits/a") && msg.contains("results/fits/b"));
+    }
+
+    /// Plant a completed run of `config` under `seg` at `<method_dir>/seed_1-…`,
+    /// recorded as made by the build `engine` whose readable version is
+    /// `camdl_version`. Returns the leaf directory.
+    fn plant_run_built_by(seg: &Path, method_dir: &str, run_id: &str, config: &str, engine: &str, camdl_version: &str) -> PathBuf {
+        let leaf = seg.join(method_dir).join("seed_1-00000000");
+        std::fs::create_dir_all(&leaf).unwrap();
+        let rec = serde_json::json!({
+            "format_version": 1, "kind": "fit_method", "run_id": run_id,
+            "hash_version": 1, "calendar": {"days_per_unit": 1.0, "origin": null, "time_unit": "days"},
+            "ir_version": "0.7", "engine_version": engine,
+            "levels": [], "status": "completed", "artifacts": {},
+            "inputs": { "method": "if2", "config_identities": [config_identity(config).unwrap()] },
+            "provenance": { "camdl_version": camdl_version },
+        });
+        std::fs::write(leaf.join("run.json"), rec.to_string()).unwrap();
+        leaf
+    }
+
+    /// `0.1.0+abc1234` → `0.1.0+abc1234.dirty-00000000`: the running build's
+    /// commit with other uncommitted changes.
+    fn same_commit_dirty() -> String {
+        let base = crate::version::VERSION_SHORT.split(".dirty-").next().unwrap();
+        format!("{base}.dirty-00000000")
+    }
+
+    /// Proposal 2026-11-17 §1d: a `fit.toml` names the run this build made
+    /// from it, exactly. A run of the same file by another build is another
+    /// computation: it is never used in its place, even when it is the only
+    /// one; it is listed with how it differs and how to name it.
+    #[test]
+    fn a_config_whose_only_run_is_another_builds_is_refused_naming_it() {
+        let (tmp, toml_path, seg) = portable_project("other_build_only");
+        std::fs::write(&toml_path, ARCHIVED).unwrap();
+        let stale = plant_run_built_by(&seg, "if2-00000000", &"ab".repeat(32), ARCHIVED,
+            &"0".repeat(32), "0.0.1+0000000");
+        let err = resolve_config(&toml_path).map(|r| r.0.dir)
+            .expect_err("a run by another build is not this file's run under this build")
+            .to_string();
+        assert!(err.contains("no completed run of") && err.contains("by this camdl build"), "{err}");
+        let _ = stale;
+        assert!(err.contains("if2-00000000/seed_1-00000000"), "lists the run's leaf: {err}");
+        assert!(err.contains("run abababababab"), "names its run id: {err}");
+        assert!(err.contains("stale: built by 0.0.1+0000000"), "says how its build differs: {err}");
+        assert!(err.contains("run-id prefix") && err.contains("leaf directory"), "says how to name one: {err}");
+
+        // The same commit with other uncommitted changes is named as such.
+        let dirty = plant_run_built_by(&seg, "if2-11111111", &"cd".repeat(32), ARCHIVED,
+            &"1".repeat(32), &same_commit_dirty());
+        let err = resolve_config(&toml_path).map(|r| r.0.dir).expect_err("two other builds").to_string();
+        assert!(err.contains(&format!("built from uncommitted changes: {}", same_commit_dirty())), "{err}");
+        let _ = dirty;
+        assert!(err.contains("if2-11111111/seed_1-00000000") && err.contains("if2-00000000/seed_1-00000000"), "{err}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The run this build made is the answer, whatever other builds left
+    /// beside it.
+    #[test]
+    fn a_config_resolves_to_this_builds_run_beside_another_builds() {
+        let (tmp, toml_path, seg) = portable_project("this_build_and_other");
+        std::fs::write(&toml_path, ARCHIVED).unwrap();
+        plant_run_built_by(&seg, "if2-00000000", &"ab".repeat(32), ARCHIVED, &"0".repeat(32), "0.0.1+0000000");
+        let mine = plant_run_built_by(&seg, "if2-11111111", &"cd".repeat(32), ARCHIVED,
+            crate::version::ENGINE_ID, crate::version::VERSION_SHORT);
+        let got = resolve_config(&toml_path).map(|r| r.0.dir).unwrap_or_else(|e| panic!("resolves: {e}"));
+        assert_eq!(std::fs::canonicalize(got).unwrap(), std::fs::canonicalize(mine).unwrap());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

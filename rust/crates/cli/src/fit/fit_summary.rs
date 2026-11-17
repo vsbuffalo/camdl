@@ -3957,4 +3957,32 @@ mod tests {
         assert!(!nothing_loaded(&[], &[]),
             "an empty segment is not an unreadable one");
     }
+
+    /// Proposal 2026-11-17 §1d: a report says "stale" when the run was made at
+    /// another commit, and "built from uncommitted changes" when only the
+    /// uncommitted changes differ — in the text block and in `--format md`.
+    #[test]
+    fn a_report_tells_a_stale_build_from_uncommitted_changes() {
+        let base = crate::version::VERSION_SHORT.split(".dirty-").next().unwrap().to_string();
+        let dirty = format!("{base}.dirty-00000000");
+        for (recorded, want, not) in [
+            (dirty.as_str(), "built from uncommitted changes", "stale"),
+            ("0.0.1+0000000", "stale", "uncommitted"),
+        ] {
+            let mut state = synthetic_fit_state();
+            state.camdl_version = Some(recorded.to_string());
+            let run = If2Run::from_state(Path::new("/nonexistent"), &state, state.n_chains, 0);
+            let block = plain_formatter().method_block("", "scout", "/nonexistent", &run).text;
+            let line = block.lines().find(|l| l.contains(recorded))
+                .unwrap_or_else(|| panic!("the block names the recorded build {recorded}:\n{block}"));
+            assert!(line.contains(want) && !line.contains(not), "{recorded}: {line}");
+            assert!(line.contains(crate::version::VERSION_SHORT), "names the current build: {line}");
+
+            let report = if2_method_report("scout", "/nonexistent", &run, &CalendarContext::default());
+            let md = render_md_method(&report);
+            let line = md.lines().find(|l| l.contains(recorded))
+                .unwrap_or_else(|| panic!("the md names the recorded build {recorded}:\n{md}"));
+            assert!(line.contains(want) && !line.contains(not), "{recorded}: {line}");
+        }
+    }
 }

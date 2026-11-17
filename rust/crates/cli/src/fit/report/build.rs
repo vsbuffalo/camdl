@@ -250,6 +250,9 @@ pub struct ChainReport {
 pub struct ProvenanceReport {
     pub final_params_matches_mle_params: Option<bool>,
     pub fit_state_winner_matches_final_params: Option<bool>,
+    /// The readable camdl version that produced the fit, when it is not this
+    /// build's ([`crate::version::build_note`] says how it differs: another
+    /// commit, or only uncommitted changes).
     pub stale_camdl_version: Option<String>,
     /// Whether `final_params.toml` and `mle_params.toml` were there to
     /// compare, so the text can name the absent one.
