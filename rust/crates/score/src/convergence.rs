@@ -506,6 +506,19 @@ impl ParamConvergence {
 /// is unchanged and deliberately not part of that review's scope.
 pub const RHAT_CONVERGED_THRESHOLD: f64 = 1.05;
 
+/// The R̂ above which a parameter draws a `RhatHigh` diagnostic and the
+/// end-of-run report marks it.
+///
+/// Unchanged in value from what every Bayesian method has always applied; what
+/// changed in gh#84 is the STATISTIC — `RhatEss::rhat` (in `cli`'s
+/// `fit::runner`) is now the rank-normalized split statistic of Vehtari et al.
+/// (2021) rather than the classic Gelman & Rubin (1992) one, so the same 1.1
+/// is a stricter bar.
+/// Vehtari et al. recommend 1.01 for the rank-normalized statistic; adopting
+/// that is a policy decision about what camdl certifies, tracked on gh#84, and
+/// is deliberately NOT taken here.
+pub const RHAT_REPORT_THRESHOLD: f64 = 1.1;
+
 /// The R̂ above which a surface marks a parameter ✗ rather than ~ — "not
 /// converged" against "badly enough that the chains are somewhere else".
 /// Display only: nothing keys on it, and it draws no diagnostic of its own.

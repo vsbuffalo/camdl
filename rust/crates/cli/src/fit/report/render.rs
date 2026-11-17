@@ -275,7 +275,7 @@ fn pgas_run_blocks(detail: &ChainDetail) -> Vec<Line> {
 /// read as two bars with two jobs rather than as a contradiction.
 pub(crate) fn rhat_legend() -> Vec<Line> {
     use score::convergence::RHAT_CONVERGED_THRESHOLD;
-    use crate::fit::runner::RHAT_REPORT_THRESHOLD;
+    use score::convergence::RHAT_REPORT_THRESHOLD;
     use sim::inference::diagnostic::CONVERGENCE_ERROR_SEVERITY;
     vec![
         plain(format!(
@@ -305,7 +305,7 @@ fn stat_f64(s: Stat) -> f64 {
 /// says so and shows the ESS alone: no number, no glyph, no decomposition.
 pub(crate) fn rhat_run_table(diag: &PosteriorDiagnostics) -> Vec<Line> {
     use score::convergence::{ParamConvergence, RhatBand, RHAT_CONVERGED_THRESHOLD};
-    use crate::fit::runner::RHAT_REPORT_THRESHOLD;
+    use score::convergence::RHAT_REPORT_THRESHOLD;
     let withheld = diag.per_param.values().find_map(|p| match p {
         ParamConvergence::Scored { rhat_withheld: Some(e), .. } => Some(e),
         _ => None,

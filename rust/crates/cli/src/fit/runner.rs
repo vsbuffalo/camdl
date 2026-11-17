@@ -3180,18 +3180,6 @@ pub fn compute_rhat_ess(chains: &[Vec<f64>]) -> RhatEss {
     }
 }
 
-/// The R̂ above which a parameter draws a `RhatHigh` diagnostic and the
-/// end-of-run report marks it.
-///
-/// Unchanged in value from what every Bayesian method has always applied; what
-/// changed in gh#84 is the STATISTIC — `RhatEss::rhat` is now the
-/// rank-normalized split statistic of Vehtari et al. (2021) rather than the
-/// classic Gelman & Rubin (1992) one, so the same 1.1 is a stricter bar.
-/// Vehtari et al. recommend 1.01 for the rank-normalized statistic; adopting
-/// that is a policy decision about what camdl certifies, tracked on gh#84, and
-/// is deliberately NOT taken here.
-pub const RHAT_REPORT_THRESHOLD: f64 = 1.1;
-
 /// Per-parameter convergence diagnostics for one Bayesian method — the single
 /// shape every sampler fills and every renderer and serializer reads.
 ///
@@ -3818,6 +3806,7 @@ pub fn validate_prior_transform_compat(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use score::convergence::RHAT_REPORT_THRESHOLD;
 
     // ── gh#513: the preflight table must report the realised starts ─────
 

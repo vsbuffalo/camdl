@@ -1461,7 +1461,7 @@ pub fn run_method(
         // always applied; only the STATISTIC it is applied to changed (gh#84).
         // The table is drawn at the end of the run, from the summary written
         // below (`report::render::rhat_run_table`).
-        for kind in diagnostics.rhat_findings(super::runner::RHAT_REPORT_THRESHOLD, withheld.as_ref()) {
+        for kind in diagnostics.rhat_findings(score::convergence::RHAT_REPORT_THRESHOLD, withheld.as_ref()) {
             out.finding(kind);
         }
     }
