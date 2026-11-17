@@ -420,7 +420,7 @@ fn rk4_step(
     }
     if clamped_negative {
         return Err(SimError::Validation(
-            "ODE gradient (nuts): a compartment was driven below zero and clamped to 0 \
+            "ODE gradient (nl-lbfgs): a compartment was driven below zero and clamped to 0 \
              during integration — a nonsmooth operation the forward sensitivity does not \
              model, so the value and its gradient would be inconsistent. The step is too \
              large for a fast (short-residence) transition; reduce `dt`, or lower \
@@ -1135,9 +1135,10 @@ pub(crate) fn integrate_obs_sensitivity(
     // (loglik only piecewise-smooth) — a silent value/gradient mismatch.
     if !matches!(model.model.simulation.integrator, ir::model::Integrator::Rk4) {
         return Err(SimError::Validation(
-            "ODE gradient (nuts) requires integrator = rk4 (fixed step); an adaptive \
+            "ODE gradient (nl-lbfgs) requires integrator = rk4 (fixed step); an adaptive \
              integrator (rk45) is refused — its step sequence is discontinuous in θ, \
-             breaking the forward-sensitivity/loglik consistency NUTS needs (gh#275 §1c)"
+             breaking the forward-sensitivity/loglik consistency the gradient method needs \
+             (gh#275 §1c)"
                 .to_string(),
         ));
     }
@@ -1145,7 +1146,7 @@ pub(crate) fn integrate_obs_sensitivity(
     // augmented sensitivity — refuse rather than emit an inconsistent gradient.
     if model.required_capabilities().contains(crate::Capabilities::RUNTIME_DT) {
         return Err(SimError::Validation(
-            "ODE gradient (nuts) cannot differentiate a model that references `dt` in a \
+            "ODE gradient (nl-lbfgs) cannot differentiate a model that references `dt` in a \
              rate (Expr::Dt): its flow uses the first-order Euler scheme, which carries \
              no augmented sensitivity (gh#275 §1c)"
                 .to_string(),
@@ -1209,9 +1210,10 @@ pub(crate) fn integrate_obs_sensitivity(
     )?;
     if !plan.is_empty() {
         return Err(SimError::Validation(
-            "ODE gradient (nuts) does not yet support scheduled interventions \
+            "ODE gradient (nl-lbfgs) does not yet support scheduled interventions \
              or events: their event-jump sensitivity is a follow-up (gh#275 \
-             §1g). Use gradient-free `mh` on `ode` for models with effects."
+             §1g). Use `nl-sbplx` on `ode`, which needs no gradient, for models \
+             with effects."
                 .to_string(),
         ));
     }
