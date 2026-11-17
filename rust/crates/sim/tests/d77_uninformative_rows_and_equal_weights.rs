@@ -363,3 +363,80 @@ fn equal_weights_at_an_observation_do_not_resample_in_if2() {
         assert_if2_paths_identical(&a, &b, &format!("equal-weight row, seed {seed}"));
     }
 }
+
+// ─── Rule 2: `0 of 0` is missing ────────────────────────────────────────────
+
+/// Survey rows with a real denominator at t = 21 and t = 35, and the row at
+/// `t` either `0 of 0` or `NA`.
+fn survey_with(t: f64, row: Option<(f64, f64)>) -> SurveyRows {
+    vec![(t, row), (21.0, Some((60.0, 400.0))), (35.0, Some((90.0, 400.0)))]
+}
+
+/// A `0 of 0` row at a time no other stream observes is no assimilation event,
+/// exactly like `NA` there: the bootstrap filter and IF2 (perturbing at every
+/// event, three iterations) compute the same numbers with either.
+#[test]
+fn a_zero_of_zero_row_alone_is_missing() {
+    let compiled = model();
+    let zero = bind(&compiled, vec![], survey_with(10.0, Some((0.0, 0.0))));
+    let na = bind(&compiled, vec![], survey_with(10.0, None));
+    let i10 = index_of(&zero, 10.0);
+    assert!(!zero.assimilates_at(i10), "a `0 of 0` row alone is no assimilation event");
+    for &seed in &SEEDS {
+        assert_pf_identical(&pf(&compiled, &zero, seed), &pf(&compiled, &na, seed), &[],
+            &format!("`0 of 0` alone, seed {seed}"));
+        assert_if2_paths_identical(&if2(&compiled, &zero, seed, false, 3), &if2(&compiled, &na, seed, false, 3),
+            &format!("`0 of 0` alone, seed {seed}"));
+    }
+}
+
+/// A `0 of 0` survey row at t = 14, where the weekly stream is observed: the
+/// weights there are not uniform (the weekly count selects), so the swarm
+/// resamples. The `0 of 0` row must not move that: with it or with `NA` in its
+/// place, the likelihood, the ESS trace, the weights, the ancestry, the
+/// particles, the per-stream predictive record and the IF2 parameter path are
+/// bit-identical.
+#[test]
+fn a_zero_of_zero_row_beside_an_informative_stream_is_missing() {
+    let compiled = model();
+    let zero = bind(&compiled, vec![], survey_with(14.0, Some((0.0, 0.0))));
+    let na = bind(&compiled, vec![], survey_with(14.0, None));
+    let i14 = index_of(&zero, 14.0);
+    assert!(zero.assimilates_at(i14), "the weekly value at t = 14 is assimilated");
+    for &seed in &SEEDS {
+        let a = pf(&compiled, &zero, seed);
+        let b = pf(&compiled, &na, seed);
+        let lw = &a.ancestry.as_ref().unwrap().log_weights[i14];
+        assert!(lw.iter().any(|w| w.to_bits() != lw[0].to_bits()),
+            "fixture: the weights at t = 14 are not uniform");
+        assert_ne!(a.ancestry.as_ref().unwrap().ancestors[i14], (0..N_PARTICLES).collect::<Vec<_>>(),
+            "fixture: the swarm resamples at t = 14");
+        assert_eq!(a.log_likelihood.to_bits(), b.log_likelihood.to_bits(), "seed {seed}: log-likelihood");
+        assert_pf_identical(&a, &b, &[], &format!("`0 of 0` beside weekly, seed {seed}"));
+        let (pa, pb) = (a.prequential.as_ref().unwrap(), b.prequential.as_ref().unwrap());
+        assert_eq!(pa.log_liks, pb.log_liks, "seed {seed}: joint predictive log scores");
+        assert_eq!(pa.per_stream_log_liks, pb.per_stream_log_liks, "seed {seed}: per-stream log scores");
+        assert_if2_paths_identical(&if2(&compiled, &zero, seed, false, 3), &if2(&compiled, &na, seed, false, 3),
+            &format!("`0 of 0` beside weekly, seed {seed}"));
+    }
+}
+
+/// Zero trials cannot yield a positive count: `3 of 0` is still refused at bind,
+/// with the row located. Only `0 of 0` becomes a hole.
+#[test]
+fn a_positive_count_against_zero_trials_is_still_refused() {
+    let compiled = model();
+    let spec = StreamSpec {
+        ir_model: compiled.model.observations[2].clone(),
+        times: StreamTimes::Instants(vec![10.0, 21.0]),
+        projection: StreamProjection::IntCompSum(vec![I_IDX]),
+        observations: dense_cells(vec![3.0, 60.0]),
+        aux: vec![vec![("tested".into(), 0.0)], vec![("tested".into(), 400.0)]],
+    };
+    let Err(report) = BoundObs::bind(0.0, vec![spec]) else {
+        panic!("`3 of 0` must be refused at bind");
+    };
+    assert!(report.is_fatal());
+    let text = format!("{:?}", report.findings());
+    assert!(text.contains("row 0") && text.contains("no trials cannot yield a positive count"), "{text}");
+}

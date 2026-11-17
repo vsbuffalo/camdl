@@ -4351,15 +4351,17 @@ one point (starts = from_mle @scout)`
 in place of a verdict (§6.6). To keep R̂ meaningful, start from the priors (drop
 `starts`; every parameter here has one) or from a short sampler run's cloud
 (`starts = { from_posterior = "@short" }`). The `pfilter` file writes
-`prequential.tsv` (one row per scored step: `t`, the joint `log_score`, `ess`),
-`prequential.streams.tsv` (one row per step and scored stream: `t`, `stream`,
-`y_obs`, the predictive band `y_pred_q05`…`y_pred_q95`, `log_score`, `crps`,
-`pit`) and `prequential.json`. When the model declares an `origin`, both TSVs
-carry a `date` column after `t`, and the surprise table below a `date` column
-after `t`, each the step's instant as `--dates` writes it; the JSON is what
-`camdl compare` reads to score fits against each other. CRPS and PIT are in the
-per-stream file only: a step has no single observed quantity across streams to
-score them against, and a stream's `log_score` rows do not sum to the joint one.
+`prequential.tsv` (one row per scored step: `t`, the joint `log_score`, `ess`; a
+step every stream holds as missing is not scored, and a binomial row of `0` of
+`0` is missing exactly as `NA` is), `prequential.streams.tsv` (one row per step
+and scored stream: `t`, `stream`, `y_obs`, the predictive band
+`y_pred_q05`…`y_pred_q95`, `log_score`, `crps`, `pit`) and `prequential.json`.
+When the model declares an `origin`, both TSVs carry a `date` column after `t`,
+and the surprise table below a `date` column after `t`, each the step's instant
+as `--dates` writes it; the JSON is what `camdl compare` reads to score fits
+against each other. CRPS and PIT are in the per-stream file only: a step has no
+single observed quantity across streams to score them against, and a stream's
+`log_score` rows do not sum to the joint one.
 
 Beneath the `prequential:` line, whenever at least one observation was scored,
 the filter prints the **surprise table**: the five worst-scored observations of
