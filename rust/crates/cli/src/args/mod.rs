@@ -331,9 +331,11 @@ pub struct SimulateArgs {
     /// with optional offset: "last_obs", "last_obs + 8 weeks",
     /// "first_obs - 1 week". Anchored forms require --fit (the fit's
     /// [data.observations] supplies the observed times; last_obs = the max
-    /// observation time over the bound streams). months/years are fixed
-    /// spans (365.2425/12 = 30.436875 d / 365.2425 d), not calendar
-    /// arithmetic. A scenario
+    /// observation time over the bound streams). Without a model origin,
+    /// months/years are fixed spans (365.2425/12 = 30.436875 d / 365.2425 d);
+    /// under an origin a month or year offset from an anchor is refused,
+    /// since the anchor's date is known only at run time (the one-step
+    /// calendar rule): write the offset in days. A scenario
     /// that declares its own different horizon is a hard error.
     #[arg(long, value_name = "SPEC")]
     pub to: Option<String>,
@@ -3559,5 +3561,12 @@ mod tests {
         }
         assert!(!help.contains("30.4375"),
             "simulate --help still states a 30.4375-day month");
+        // Decision F (proposal 2026-11-16-calendar-durations-by-position.md):
+        // the fixed spans hold only without an origin.
+        let flat = help.split_whitespace().collect::<Vec<_>>().join(" ");
+        for stated in ["Without a model origin, months/years are fixed spans",
+                       "under an origin a month or year offset from an anchor is refused"] {
+            assert!(flat.contains(stated), "simulate --help must say {stated:?}:\n{flat}");
+        }
     }
 }
