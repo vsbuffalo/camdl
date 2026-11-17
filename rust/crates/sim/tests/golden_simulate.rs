@@ -93,6 +93,7 @@ fn test_sir_basic_all_backends() {
         t_start: model.simulation.t_start,
         t_end: model.simulation.t_end,
         dt: 1.0,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     });
     let traj = ChainBinomialSim.run(&compiled, &params, 42, &cb_config).unwrap();
     check_trajectory_invariants("sir_basic/chain_binomial", &traj, false);

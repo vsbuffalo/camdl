@@ -53,7 +53,7 @@ fn run_baseline(m: &ir::Model, backend: Backend, seed: u64, dt: f64) -> Trajecto
                 &compiled,
                 &params,
                 seed,
-                &SimConfig::ChainBinomial(ChainBinomialConfig { t_start, t_end, dt }),
+                &SimConfig::ChainBinomial(ChainBinomialConfig { t_start, t_end, dt, binomial: sim::rng::BinomialAlgorithm::Btpe }),
             )
             .unwrap(),
     }

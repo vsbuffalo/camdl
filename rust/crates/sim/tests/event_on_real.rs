@@ -132,7 +132,7 @@ fn event_on_real_applies_under_chain_binomial() {
     let compiled = Arc::new(model_with_real_event());
     let params = compiled.default_params.clone();
     let traj = ChainBinomialSim
-        .run(&compiled, &params, 7, &SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 5.0, dt: 1.0 }))
+        .run(&compiled, &params, 7, &SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 5.0, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe }))
         .unwrap();
     assert_eq!(
         w_end(&traj), 5.0,

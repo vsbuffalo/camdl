@@ -96,6 +96,7 @@ fn test_smoke_all_ocaml_golden() {
                     t_start,
                     t_end,
                     dt: 1.0,
+                    binomial: sim::rng::BinomialAlgorithm::Btpe,
                 }),
             ),
         ];

@@ -62,7 +62,7 @@ fn every_backend(model: &ir::Model) -> Vec<(&'static str, CompiledModel, Box<dyn
             "chain_binomial",
             compile(model.clone()),
             Box::new(ChainBinomialSim),
-            SimConfig::ChainBinomial(ChainBinomialConfig { t_start, t_end, dt: 0.1 }),
+            SimConfig::ChainBinomial(ChainBinomialConfig { t_start, t_end, dt: 0.1, binomial: sim::rng::BinomialAlgorithm::Btpe }),
         ),
         (
             "gillespie",

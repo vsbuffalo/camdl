@@ -97,7 +97,7 @@ pub fn record_event_log(
             run_gillespie_with_observer(&compiled, &params, seed, &cfg, Some(&mut recorder), None).unwrap()
         }
         Backend::ChainBinomial { dt } => {
-            let cfg = ChainBinomialConfig { t_start: 0.0, t_end, dt };
+            let cfg = ChainBinomialConfig { t_start: 0.0, t_end, dt, binomial: sim::rng::BinomialAlgorithm::Btpe };
             run_chain_binomial_with_observer(
                 &compiled, &params, seed, &cfg, Some(&mut recorder), None, Default::default(),
             )

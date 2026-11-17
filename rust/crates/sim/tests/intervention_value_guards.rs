@@ -40,6 +40,7 @@ fn run_chain(model: &ir::Model) -> Result<sim::state::Trajectory, sim::SimError>
         t_start: model.simulation.t_start,
         t_end: model.simulation.t_end,
         dt: 1.0,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     });
     ChainBinomialSim.run(&compiled, &params, 42, &config)
 }

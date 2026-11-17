@@ -104,7 +104,7 @@ fn chain_binomial_rejects_off_grid_output_time() {
     let compiled = Arc::new(model(5.0, 0.5));
     let err = ChainBinomialSim
         .run(&compiled, &compiled.default_params, 7,
-             &SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 5.0, dt: 1.0 }))
+             &SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 5.0, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe }))
         .expect_err("chain_binomial must REJECT a sub-dt (off-grid) output time (gh#125)");
     let msg = err.to_string();
     assert!(msg.contains("0.5"), "error must name the offending output time 0.5: {msg}");
@@ -131,7 +131,7 @@ fn chain_binomial_accepts_grid_aligned_output() {
     let compiled = Arc::new(model(5.0, 1.0));
     let traj = ChainBinomialSim
         .run(&compiled, &compiled.default_params, 7,
-             &SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 5.0, dt: 1.0 }))
+             &SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 5.0, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe }))
         .expect("chain_binomial must accept grid-aligned output times");
     assert_eq!(traj.snapshots.last().unwrap().t, 5.0);
 }
@@ -146,7 +146,7 @@ fn chain_binomial_accepts_aligned_fractional_dt_over_long_horizon() {
     let compiled = Arc::new(model(100.0, 0.1));
     let traj = ChainBinomialSim
         .run(&compiled, &compiled.default_params, 7,
-             &SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 100.0, dt: 0.1 }))
+             &SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 100.0, dt: 0.1, binomial: sim::rng::BinomialAlgorithm::Btpe }))
         .expect("chain_binomial must accept output-every==dt=0.1 on a long horizon (gh#125 review)");
     assert!((traj.snapshots.last().unwrap().t - 100.0).abs() < 1e-6,
         "last snapshot should be ~100.0, got {}", traj.snapshots.last().unwrap().t);

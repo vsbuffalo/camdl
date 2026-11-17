@@ -65,6 +65,7 @@ fn cb_run(model: &ir::Model, w_init: f64) -> sim::state::Trajectory {
         t_start: model.simulation.t_start,
         t_end: model.simulation.t_end,
         dt: 1.0,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     });
     ChainBinomialSim.run(&compiled, &params, 42, &config).unwrap()
 }
@@ -157,7 +158,7 @@ fn chain_binomial_agrees_with_ode_and_gillespie_on_real_coupling() {
             &compiled,
             &params,
             42,
-            &SimConfig::ChainBinomial(ChainBinomialConfig { t_start, t_end, dt: 1.0 }),
+            &SimConfig::ChainBinomial(ChainBinomialConfig { t_start, t_end, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe }),
         )
         .unwrap();
     let cb_s_end = cb.snapshots.last().unwrap().int_state.counts[0];

@@ -121,6 +121,7 @@ fn chain_binomial_path_reconciles_flow_with_s_depletion() {
         t_start,
         t_end: c.model.simulation.t_end.min(60.0),
         dt: 1.0,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     });
     // Many seeds: at least some have flow_infection in the first interval, so a
     // dropped t_start row fails the aggregate too (not only the structural check).
@@ -242,7 +243,7 @@ fn chain_binomial_at_list_without_t_start_labels_first_period_from_run_start() {
     let c = load_seeded_sir_at(&[20.0, 40.0, 60.0]);
     let t_start = c.model.simulation.t_start;
     let params = c.default_params.clone();
-    let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start, t_end: 60.0, dt: 1.0 });
+    let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start, t_end: 60.0, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe });
     for seed in 0..5u64 {
         let traj = ChainBinomialSim.run(&c, &params, seed, &cfg).unwrap();
         assert_first_period_starts_at_run_start(
@@ -281,7 +282,7 @@ fn ode_at_list_without_t_start_labels_first_period_from_run_start() {
 fn chain_binomial_first_period_starts_at_the_config_origin() {
     let c = load_seeded_sir_at(&[30.0, 60.0]);
     let params = c.default_params.clone();
-    let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 10.0, t_end: 60.0, dt: 1.0 });
+    let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 10.0, t_end: 60.0, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe });
     let traj = ChainBinomialSim.run(&c, &params, 3, &cfg).unwrap();
     assert_eq!(traj.flow_periods().next(), Some((10.0, 30.0)));
 }

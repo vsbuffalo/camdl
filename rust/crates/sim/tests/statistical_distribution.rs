@@ -275,6 +275,7 @@ fn test_overdispersion_variance_chain_binomial() {
         t_start: 0.0,
         t_end: 1.0,
         dt: 1.0,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     });
 
     // Collect infection counts from one chain-binomial step across many seeds

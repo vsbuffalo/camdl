@@ -3984,7 +3984,7 @@ pub fn simulate_compiled(
             )
         }
         ForwardBackend::ChainBinomial => {
-            let cfg = ChainBinomialConfig { t_start, t_end, dt: run.dt };
+            let cfg = ChainBinomialConfig { t_start, t_end, dt: run.dt, binomial: sim::rng::BinomialAlgorithm::Btpe };
             sim::chain_binomial::run_chain_binomial_with_observer(
                 compiled, &params, run.seed, &cfg, None, tick_opt.as_deref_mut(),
                 sim::chain_binomial::Resume {
@@ -4185,7 +4185,7 @@ pub fn run_simulation_event_log(
             )
         }
         ForwardBackend::ChainBinomial => {
-            let cfg = ChainBinomialConfig { t_start, t_end, dt: run.dt };
+            let cfg = ChainBinomialConfig { t_start, t_end, dt: run.dt, binomial: sim::rng::BinomialAlgorithm::Btpe };
             sim::chain_binomial::run_chain_binomial_with_observer(
                 &compiled, &params, run.seed, &cfg, Some(&mut recorder), None,
                 sim::chain_binomial::Resume::default(),

@@ -122,6 +122,7 @@ fn test_bimolecular_chain_binomial_rejected() {
         t_start: model.simulation.t_start,
         t_end: model.simulation.t_end,
         dt: 1.0,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     });
     let res = ChainBinomialSim.run(&compiled, &params, 0, &config);
     assert!(res.is_err(), "chain_binomial must reject the multi-source bimolecular model");

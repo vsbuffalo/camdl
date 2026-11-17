@@ -179,7 +179,7 @@ fn deterministic_only_decay_matches_integer_recursion() {
 
     // Deterministic ⇒ identical for any seed.
     for seed in [1u64, 42, 12345] {
-        let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: T_END, dt: DT });
+        let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: T_END, dt: DT, binomial: sim::rng::BinomialAlgorithm::Btpe });
         let traj = ChainBinomialSim.run(&compiled, &compiled.default_params, seed, &cfg).unwrap();
         for (k, &exp_i) in expected.iter().enumerate() {
             let got = count_at(&compiled, &traj, "I", k as f64);
@@ -219,7 +219,7 @@ fn conservation_under_deterministic_aging_and_stochastic_exit() {
     const TOTAL: i64 = 500 + 300;
 
     for seed in 0..20u64 {
-        let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: T_END, dt: DT });
+        let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: T_END, dt: DT, binomial: sim::rng::BinomialAlgorithm::Btpe });
         let traj = ChainBinomialSim.run(&compiled, &compiled.default_params, seed, &cfg).unwrap();
         for snap in &traj.snapshots {
             let counts = &snap.int_state.counts;
@@ -336,7 +336,7 @@ fn mixed_deterministic_source_rejected_on_stochastic_but_runs_on_ode() {
     assert!(msg.contains("recover"), "message must name the deterministic exit: {msg}");
 
     // Forward chain_binomial hard-errors (does not silently over-draw the source).
-    let cb = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: T_END, dt: DT });
+    let cb = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: T_END, dt: DT, binomial: sim::rng::BinomialAlgorithm::Btpe });
     let cb_res = ChainBinomialSim.run(&compiled, &compiled.default_params, 1, &cb);
     assert!(cb_res.is_err(), "forward chain_binomial must reject a mixed deterministic source");
     assert!(cb_res.unwrap_err().to_string().contains("gh#122"));
@@ -391,7 +391,7 @@ fn deterministic_free_model_is_unperturbed() {
     // No sourced-deterministic ⇒ validation is a no-op.
     assert!(compiled.validate_deterministic_source_exits().is_ok());
 
-    let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 20.0, dt: DT });
+    let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 20.0, dt: DT, binomial: sim::rng::BinomialAlgorithm::Btpe });
     let a = ChainBinomialSim.run(&compiled, &compiled.default_params, 99, &cfg).unwrap();
     let b = ChainBinomialSim.run(&compiled, &compiled.default_params, 99, &cfg).unwrap();
     assert_eq!(a.snapshots.len(), b.snapshots.len());

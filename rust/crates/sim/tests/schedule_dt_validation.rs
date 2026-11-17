@@ -73,7 +73,7 @@ fn assert_named_dt_error(res: Result<sim::Trajectory, sim::SimError>, ctx: &str)
 fn chain_binomial_rejects_zero_dt() {
     let compiled = load_compiled("sir_basic");
     let params = compiled.default_params.clone();
-    let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 30.0, dt: 0.0 });
+    let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 30.0, dt: 0.0, binomial: sim::rng::BinomialAlgorithm::Btpe });
     assert_named_dt_error(ChainBinomialSim.run(&compiled, &params, 1, &cfg), "chain_binomial dt=0");
 }
 
@@ -81,7 +81,7 @@ fn chain_binomial_rejects_zero_dt() {
 fn chain_binomial_rejects_negative_dt() {
     let compiled = load_compiled("sir_basic");
     let params = compiled.default_params.clone();
-    let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 30.0, dt: -1.0 });
+    let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 30.0, dt: -1.0, binomial: sim::rng::BinomialAlgorithm::Btpe });
     assert_named_dt_error(ChainBinomialSim.run(&compiled, &params, 1, &cfg), "chain_binomial dt<0");
 }
 
@@ -90,7 +90,7 @@ fn chain_binomial_rejects_nan_dt() {
     let compiled = load_compiled("sir_basic");
     let params = compiled.default_params.clone();
     let cfg =
-        SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 30.0, dt: f64::NAN });
+        SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 30.0, dt: f64::NAN, binomial: sim::rng::BinomialAlgorithm::Btpe });
     assert_named_dt_error(ChainBinomialSim.run(&compiled, &params, 1, &cfg), "chain_binomial dt=NaN");
 }
 
@@ -107,7 +107,7 @@ fn chain_binomial_still_runs_with_valid_dt() {
     // Guard against over-rejection: a valid dt must still produce a trajectory.
     let compiled = load_compiled("sir_basic");
     let params = compiled.default_params.clone();
-    let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 30.0, dt: 1.0 });
+    let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 30.0, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe });
     let traj = ChainBinomialSim
         .run(&compiled, &params, 1, &cfg)
         .expect("valid dt must run");
@@ -244,7 +244,7 @@ fn still_runs_with_valid_output_step_and_recurrence() {
     let compiled = CompiledModel::new(model_with_recurring_period(7.0))
         .expect("valid step + period must construct");
     let params = compiled.default_params.clone();
-    let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 30.0, dt: 1.0 });
+    let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 30.0, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe });
     let traj = ChainBinomialSim
         .run(&compiled, &params, 1, &cfg)
         .expect("valid step + period must run");
