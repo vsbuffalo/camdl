@@ -4066,6 +4066,285 @@ let classify_indexed_name ctx (base_name : string) : indexed_name_class =
     | _ ->
       if is_indexed_param ctx base_name then Indexed_param else Indexed_cell
 
+(* ── The one-step calendar rule ───────────────────────────────────────────────
+   (proposal docs/dev/proposals/2026-11-16-calendar-durations-by-position.md,
+   §3.4 and §8 Stage 1b.) Under an origin, one calendar step of a whole number
+   of months (or years, as twelve months) from a date the compiler knows is that
+   calendar date, as `add_calendar_months` computes it: `to = 2 'years` is
+   `add_calendar_years(origin, 2)`, `at [date("2020-03-01") - 1 'months]` is
+   `add_calendar_months(date("2020-03-01"), -1)`. Any other use of a calendar
+   duration in a date position is refused, with the explicit form named.
+
+   The rule is a pure function of a reading of the expression, taken from the
+   leaves before any unit is folded (a folded `6 'months` is 182.62125 and has
+   lost the month). [read] takes the reading; [resolve_days] applies the rule.
+   The judging path (which reports a refusal) and the lowering paths (which use
+   the value) both call them on the expression the modeller wrote, so they
+   cannot disagree about which expressions resolve. *)
+module Calendar_reading : sig
+  type ymd = int * int * int
+
+  type base =
+    | Origin                                    (* `origin`, or the implicit base of a bare duration *)
+    | Date of ymd                               (* a `date(...)` literal, or a `let` of one *)
+    | Stepped of { root : base; steps : int list }
+    (* the result of `add_calendar_*` calls: [root] is [Origin] or [Date], and
+       [steps] the month counts applied to it, innermost first *)
+    | Runtime of { name : string; desc : string }
+    (* `t`, an instant-kind parameter, an observation anchor *)
+
+  (* One move: an exact part in days ('days, 'weeks) and a calendar part in
+     months ('months, plus 12 per 'years), and the expression it was read
+     from. *)
+  type duration = { days : float; months : float; src : expr }
+
+  type reading =
+    | Moved of { base : base; moves : duration list }  (* in source order *)
+    | Duration of duration
+    | Bare of float                                    (* a unitless number *)
+    | Not_constant                                     (* anything else *)
+
+  val read : context -> expr -> reading
+
+  (* Evidence that the model is anchored: constructed only from a valid
+     `origin = date(...)` and a time `time_unit`. *)
+  type anchor = private { origin : ymd; origin_rd : int; unit : unit_lit }
+
+  val anchor_of_ctx : context -> anchor option
+
+  (* What the rule refuses, with what each message needs beyond the expression
+     itself. [shown] is the calendar duration as written. *)
+  type refusal =
+    | Fractional_months of { months : float; shown : expr }
+    | Mixed of { base : base; months : int; days : float }
+    (* one calendar step and a number of days; [base] is [Origin] or [Date] *)
+    | Two_calendar_steps of { base : base; steps : int list }
+    (* [base] is [Origin] or [Date]; [steps] every calendar step taken from
+       it, in order, including those of an `add_calendar_*` base *)
+    | Calendar_from_runtime of { shown : expr; name : string; desc : string }
+    | Not_one_step
+    (* a reading the rule does not cover: a conditional, a product with a
+       parameter, a calendar step inside another call *)
+
+  (* The rule, in days from the origin. *)
+  val resolve_days : anchor -> reading -> (float, refusal) result
+
+  (* [Some days] when [e] holds a calendar step and the rule resolves it: the
+     value every lowering of a date position uses in place of the fold. *)
+  val calendar_step_days : context -> expr -> float option
+
+  (* Calendar arithmetic and spellings, for the refusal messages. *)
+  val add_months : ymd -> int -> ymd
+  val add_days : ymd -> int -> ymd
+  val ymd_of_base : anchor -> base -> ymd option
+  val base_code : base -> string
+  val show_ymd : ymd -> string
+end = struct
+  type ymd = int * int * int
+
+  type base =
+    | Origin
+    | Date of ymd
+    | Stepped of { root : base; steps : int list }
+    | Runtime of { name : string; desc : string }
+
+  type duration = { days : float; months : float; src : expr }
+
+  type reading =
+    | Moved of { base : base; moves : duration list }
+    | Duration of duration
+    | Bare of float
+    | Not_constant
+
+  type anchor = { origin : ymd; origin_rd : int; unit : unit_lit }
+
+  type refusal =
+    | Fractional_months of { months : float; shown : expr }
+    | Mixed of { base : base; months : int; days : float }
+    | Two_calendar_steps of { base : base; steps : int list }
+    | Calendar_from_runtime of { shown : expr; name : string; desc : string }
+    | Not_one_step
+
+  let rd (y, m, d) = days_of_date y m d
+  let add_months = add_calendar_months_ymd
+  let add_days ymd n = ymd_of_days (rd ymd + n)
+  let show_ymd = format_iso_date
+
+  let anchor_of_ctx (ctx : context) =
+    match ctx.origin with
+    | None -> None
+    | Some s ->
+      (match parse_iso_date s, ctx.time_unit with
+       | Ok ymd, (Days | Weeks | Months | Years) ->
+         Some { origin = ymd; origin_rd = rd ymd; unit = ctx.time_unit }
+       | Ok _, (PerDay | PerWeek | PerMonth | PerYear | Count | Ratio) | Error _, _ -> None)
+
+  let runtime_base (ctx : context) (n : string) : base option =
+    if n = "t" then Some (Runtime { name = "t"; desc = "the model time" })
+    else if n = "last_obs" || n = "first_obs" then
+      Some (Runtime { name = n; desc = "an observation anchor" })
+    else
+      let env = Time_typing.env_of_ctx ~let_tbl:ctx.let_tbl
+          ~param_decls:ctx.param_decls ~origin_set:(ctx.origin <> None) in
+      match Time_typing.param_kind_of_name env n with
+      | Some `Instant -> Some (Runtime { name = n; desc = "an instant parameter" })
+      | Some `Duration | None -> None
+
+  let scale k (d : duration) src = { days = k *. d.days; months = k *. d.months; src }
+
+  let rec read_at (ctx : context) depth (e : expr) : reading =
+    let read = read_at ctx (depth + 1) in
+    if depth > 64 then Not_constant
+    else
+      match e with
+      | EConst f -> Bare f
+      | EUnit (k, Days) -> Duration { days = k; months = 0.0; src = e }
+      | EUnit (k, Weeks) -> Duration { days = 7.0 *. k; months = 0.0; src = e }
+      | EUnit (k, Months) -> Duration { days = 0.0; months = k; src = e }
+      | EUnit (k, Years) -> Duration { days = 0.0; months = 12.0 *. k; src = e }
+      | EUnit (_, (PerDay | PerWeek | PerMonth | PerYear | Count | Ratio)) -> Not_constant
+      | EIdent ("origin", _) -> Moved { base = Origin; moves = [] }
+      | EIdent (n, _) ->
+        (match runtime_base ctx n with
+         | Some b -> Moved { base = b; moves = [] }
+         | None ->
+           (match Hashtbl.find_opt ctx.let_tbl n with
+            (* A scalar `let` is read through; a duration it holds is shown
+               as its body is written. *)
+            | Some lb when lb.lindices = [] && lb.lshape = None
+                           && not (Hashtbl.mem ctx.cyclic_lets n) -> read lb.lbody
+            | Some _ | None -> Not_constant))
+      | EIndex (n, _, _) ->
+        (match runtime_base ctx n with
+         | Some b -> Moved { base = b; moves = [] }
+         | None -> Not_constant)
+      | EFuncCall ("date", [("", EIdent (s, _))]) ->
+        (match parse_iso_date s with
+         | Ok ymd -> Moved { base = Date ymd; moves = [] }
+         | Error _ -> Not_constant)
+      | EFuncCall (("add_calendar_months" | "add_calendar_years") as fn, [("", d); ("", n)]) ->
+        (match read d, try_eval_const_int n with
+         | Moved { base; moves = [] }, Some k ->
+           let k = if fn = "add_calendar_years" then 12 * k else k in
+           (match base with
+            | Origin | Date _ -> Moved { base = Stepped { root = base; steps = [k] }; moves = [] }
+            | Stepped s -> Moved { base = Stepped { s with steps = s.steps @ [k] }; moves = [] }
+            | Runtime _ -> Not_constant)
+         | _ -> Not_constant)
+      | EUnOp (Neg, x) ->
+        (match read x with
+         | Duration d -> Duration (scale (-1.0) d e)
+         | Bare f -> Bare (-. f)
+         | Moved _ | Not_constant -> Not_constant)
+      | EUnOp (Total, x) -> read x
+      | EBinOp (Add, a, b) ->
+        (match read a, read b with
+         | Moved m, Duration d -> Moved { m with moves = m.moves @ [d] }
+         | Duration d, Moved m -> Moved { m with moves = d :: m.moves }
+         | Duration x, Duration y ->
+           Duration { days = x.days +. y.days; months = x.months +. y.months; src = e }
+         | Bare x, Bare y -> Bare (x +. y)
+         | _ -> Not_constant)
+      | EBinOp (Sub, a, b) ->
+        (match read a, read b with
+         | Moved m, Duration d -> Moved { m with moves = m.moves @ [scale (-1.0) d d.src] }
+         | Duration x, Duration y ->
+           Duration { days = x.days -. y.days; months = x.months -. y.months; src = e }
+         | Bare x, Bare y -> Bare (x -. y)
+         | _ -> Not_constant)
+      | EBinOp (Mul, a, b) ->
+        (match read a, read b with
+         | Bare k, Duration d | Duration d, Bare k -> Duration (scale k d e)
+         | Bare x, Bare y -> Bare (x *. y)
+         | _ -> Not_constant)
+      | EBinOp (Div, a, b) ->
+        (match read a, read b with
+         | Duration d, Bare k when k <> 0.0 -> Duration (scale (1.0 /. k) d e)
+         | Bare x, Bare y when y <> 0.0 -> Bare (x /. y)
+         | _ -> Not_constant)
+      | EBinOp ((Pow | Lt | Le | Gt | Ge | Eq | Neq), _, _)
+      | EUnOp (_, _) | EFuncCall _ | ECond _ | ESum _ | EList _ | ERange _
+      | EObsAccess _ | ERunMember _ -> Not_constant
+
+  let read (ctx : context) e = read_at ctx 0 e
+
+  let is_whole f = Float.is_integer f && Float.abs f < 1e9
+
+  let rec ymd_of_base (a : anchor) (b : base) : ymd option =
+    match b with
+    | Origin -> Some a.origin
+    | Date ymd -> Some ymd
+    | Stepped { root; steps } ->
+      Option.map (fun ymd -> List.fold_left add_months ymd steps) (ymd_of_base a root)
+    | Runtime _ -> None
+
+  let rec base_code (b : base) : string =
+    match b with
+    | Origin -> "origin"
+    | Date ymd -> Printf.sprintf "date(%S)" (show_ymd ymd)
+    | Stepped { root; steps } ->
+      List.fold_left (fun acc k -> Printf.sprintf "add_calendar_months(%s, %d)" acc k)
+        (base_code root) steps
+    | Runtime { name; _ } -> name
+
+  let resolve_days (a : anchor) (r : reading) : (float, refusal) result =
+    let months_of (d : duration) = int_of_float d.months in
+    let moved base moves =
+      let calendar = List.filter (fun (d : duration) -> d.months <> 0.0) moves in
+      let days = List.fold_left (fun s (d : duration) -> s +. d.days) 0.0 moves in
+      match base, calendar with
+      | Runtime { name; desc }, c :: _ ->
+        Error (Calendar_from_runtime { shown = c.src; name; desc })
+      | Runtime _, [] -> Error Not_one_step
+      | _, _ when List.exists (fun (d : duration) -> not (is_whole d.months)) calendar ->
+        let d = List.find (fun (d : duration) -> not (is_whole d.months)) calendar in
+        Error (Fractional_months { months = d.months; shown = d.src })
+      | Stepped { root; steps }, _ :: _ ->
+        Error (Two_calendar_steps { base = root; steps = steps @ List.map months_of calendar })
+      | (Origin | Date _), _ :: _ :: _ ->
+        Error (Two_calendar_steps { base; steps = List.map months_of calendar })
+      | (Origin | Date _), [c] when days <> 0.0 ->
+        Error (Mixed { base; months = months_of c; days })
+      | (Origin | Date _ | Stepped _), _ ->
+        (match ymd_of_base a base with
+         | None -> Error Not_one_step
+         | Some b ->
+           let b = List.fold_left (fun ymd (d : duration) ->
+               if d.months = 0.0 then ymd else add_months ymd (months_of d)) b moves in
+           Ok (float_of_int (rd b - a.origin_rd) +. days))
+    in
+    match r with
+    | Duration d -> moved Origin [d]
+    | Moved { base; moves } -> moved base moves
+    | Bare f -> Ok (f *. days_per a.unit)
+    | Not_constant -> Error Not_one_step
+
+  let has_calendar_move = function
+    | Duration d -> d.months <> 0.0
+    | Moved { moves; _ } -> List.exists (fun (d : duration) -> d.months <> 0.0) moves
+    | Bare _ | Not_constant -> false
+
+  let calendar_step_days (ctx : context) e =
+    match anchor_of_ctx ctx with
+    | None -> None
+    | Some a ->
+      let r = read ctx e in
+      if not (has_calendar_move r) then None
+      else match resolve_days a r with
+        | Ok d -> Some d
+        | Error _ -> None
+end
+
+(* A date position's expression as it is lowered: a calendar step the one-step
+   calendar rule resolves becomes the day count it denotes, as a `'days`
+   literal, so every fold of the position (a number, an IR expression, a
+   dimension-checked comparison with `t`) reads the calendar date; anything
+   else is returned as written. *)
+let calendar_instant_expr ctx (e : expr) : expr =
+  match Calendar_reading.calendar_step_days ctx e with
+  | Some days -> EUnit (days, Days)
+  | None -> e
+
 let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
   match e with
   | EConst f     -> Ir.Const f
@@ -4246,6 +4525,17 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
     resolve_ident_name ctx concrete ~loc:idx_loc
   )
   | EBinOp (op, l, r) ->
+    (* The operand compared with model time `t` (or `t ± d`) is a date
+       position (`Time_census.node_positions`), so a calendar step there is
+       its calendar date (the one-step calendar rule). A refusal is reported
+       where the census's position is judged, not here. *)
+    let (l, r) =
+      if ctx.origin = None || not (Time_census.is_comparison op) then (l, r)
+      else match Time_census.model_time_side l, Time_census.model_time_side r with
+        | Some _, _ -> (l, calendar_instant_expr ctx r)
+        | None, Some _ -> (calendar_instant_expr ctx l, r)
+        | None, None -> (l, r)
+    in
     let ir_l = resolve_expr ctx env l in
     let ir_r = resolve_expr ctx env r in
     normalize_expr (Ir.BinOp { op = ir_bin_op op; left = ir_l; right = ir_r })
@@ -5755,14 +6045,13 @@ let rec calendar_span_days ctx e =
     else None
   | _ -> None
 
-(* ── Calendar durations in instant positions (Stage 1a) ──────────────────────
-   Under an origin a date position (an instant) holds a date, and a date moves
-   by calendar months or years only through `add_calendar_months` and
-   `add_calendar_years`. A `'months` or `'years` literal anywhere in an instant
-   position — `to = 2 'years` (which denotes `origin + 2 'years`),
-   `date(a) - 1 'months`, `t >= 6 'months` — is refused (E321), and the hint
-   names the explicit form. The same refusal from a base known only at run time
-   (model time `t`, an `instant` parameter, an observation anchor) says why no
+(* ── Calendar durations in instant positions ─────────────────────────────────
+   Under an origin a date position (an instant) holds a date. One whole-number
+   calendar step from a date the compiler knows is resolved to that calendar
+   date by the one-step calendar rule ([Calendar_reading]); every other
+   calendar duration in an instant position is refused (E321), and the hint
+   names the explicit form. A refusal from a base known only at run time (model
+   time `t`, an `instant` parameter, an observation anchor) says why no
    calendar form exists there. *)
 
 (* A `let` with a scalar body, followed to that body (once, through any chain);
@@ -5834,34 +6123,6 @@ let rec first_calendar_literal ctx (e : expr) : expr option =
 (* A base known only at run time, as named in the refusal. *)
 type runtime_base = { rb_name : string; rb_desc : string }
 
-let runtime_base_of_ident ctx (n : string) : runtime_base option =
-  if n = "t" then Some { rb_name = "t"; rb_desc = "the model time" }
-  else if n = "last_obs" || n = "first_obs" then
-    Some { rb_name = n; rb_desc = "an observation anchor" }
-  else
-    match Time_typing.param_kind_of_name (time_env ctx) n with
-    | Some `Instant -> Some { rb_name = n; rb_desc = "an instant parameter" }
-    | Some `Duration | None -> None
-
-(* The first run-time base anywhere in [e], through `let`s. *)
-let rec find_runtime_base ctx (e : expr) : runtime_base option =
-  let first = List.find_map (find_runtime_base ctx) in
-  match e with
-  | EIdent (n, _) | EIndex (n, _, _) ->
-    (match runtime_base_of_ident ctx n with
-     | Some b -> Some b
-     | None ->
-       (match Hashtbl.find_opt ctx.let_tbl n with
-        | Some lb when not (Hashtbl.mem ctx.cyclic_lets n) -> find_runtime_base ctx lb.lbody
-        | Some _ | None -> None))
-  | EConst _ | EUnit _ | EObsAccess _ | ERunMember _ -> None
-  | EFuncCall (_, args) -> first (List.map snd args)
-  | EBinOp (_, a, b) | ERange (a, b) -> first [a; b]
-  | EUnOp (_, a) -> find_runtime_base ctx a
-  | ECond (p, a, b) -> first [p; a; b]
-  | ESum (_, _, _, b, _) -> find_runtime_base ctx b
-  | EList es -> first es
-
 (* E321 from a run-time base. [what] is the position, omitted where the base
    already names it (an offset from `t`). *)
 let refuse_runtime_calendar ctx ~loc ?what ~(base : runtime_base) (shown : expr) =
@@ -5872,26 +6133,14 @@ let refuse_runtime_calendar ctx ~loc ?what ~(base : runtime_base) (shown : expr)
       (Time_typing.show_short shown)
       (match what with Some w -> " in " ^ w | None -> "")
       base.rb_name base.rb_desc)
-    ~hint:(match calendar_span_days ctx shown with
-      | Some (days, rendered) ->
-        Printf.sprintf
-          "a calendar month from a date depends on which date it is. State the \
-           offset in days: `%d 'days` (≈ %s)." days rendered
-      | None ->
-        "a calendar month from a date depends on which date it is. State the \
-         offset in 'days or 'weeks, which are fixed spans.")
+    ~hint:(Printf.sprintf
+      "a calendar month from a date depends on which date it is, and the one-step \
+       calendar rule resolves a step only from a date known when the model \
+       compiles. State the offset in %s."
+      (match calendar_span_days ctx shown with
+       | Some (days, rendered) -> Printf.sprintf "days: `%d 'days` (≈ %s)" days rendered
+       | None -> "'days or 'weeks, which are fixed spans"))
     ()
-
-(* The calendar base of a single step, as written in the hint. *)
-type step_base = Base_origin | Base_date of string | Base_runtime of runtime_base
-
-let step_base_of ctx (b : expr) : step_base option =
-  match inline_scalar_let ctx b with
-  | EIdent ("origin", _) -> Some Base_origin
-  | EFuncCall ("date", [("", EIdent (s, _))]) -> Some (Base_date s)
-  | EIdent (n, _) | EIndex (n, _, _) ->
-    Option.map (fun rb -> Base_runtime rb) (runtime_base_of_ident ctx n)
-  | _ -> None
 
 (* `k 'months` or `k 'years` (possibly negated, possibly through a `let`):
    the signed count and its unit. *)
@@ -5901,102 +6150,202 @@ let rec calendar_literal ctx (e : expr) : (float * unit_lit) option =
   | EUnOp (Neg, x) -> Option.map (fun (k, u) -> (-. k, u)) (calendar_literal ctx x)
   | _ -> None
 
-(* One calendar step `[B ±] k 'unit` from a base: the base, the signed count,
-   its unit, and the duration as written. A bare duration's base is `origin`. *)
-let single_calendar_step ctx (e : expr) =
-  let e' = inline_scalar_let ctx e in
-  match calendar_literal ctx e' with
-  | Some (k, u) -> Some (Base_origin, k, u, e')
-  | None ->
-    let step sign b d =
-      match calendar_literal ctx d with
-      | Some (k, u) when not (mentions_calendar_duration ctx b) ->
-        Option.map (fun base -> (base, sign *. k, u, d)) (step_base_of ctx b)
-      | Some _ | None -> None
+(* ── The refusals of the one-step calendar rule (proposal §4.1) ── *)
+
+(* A count of calendar months, and of days, in words: "a year", "18 months",
+   "3 days back". *)
+let months_words n =
+  let a = abs n in
+  let w =
+    if a mod 12 = 0 then (if a = 12 then "a year" else Printf.sprintf "%d years" (a / 12))
+    else if a = 1 then "a month" else Printf.sprintf "%d months" a
+  in
+  if n < 0 then w ^ " back" else w
+
+let days_words n =
+  let a = abs n in
+  let w = if a = 1 then "a day" else Printf.sprintf "%d days" a in
+  if n < 0 then w ^ " back" else w
+
+(* The explicit call for one step of [n] months from the base spelled [code]. *)
+let calendar_call code n =
+  if n mod 12 = 0 then Printf.sprintf "add_calendar_years(%s, %d)" code (n / 12)
+  else Printf.sprintf "add_calendar_months(%s, %d)" code n
+
+(* The first date, from 1 January of [from]'s year and over five years, at
+   which [f] and [g] differ: the base a note shows when the modeller's own base
+   happens to make two readings agree. *)
+let calendar_witness ~(from : Calendar_reading.ymd) ~f ~g =
+  let (y, _, _) = from in
+  let start = days_of_date y 1 1 in
+  let rec go i =
+    if i > 5 * 366 then None
+    else
+      let d = ymd_of_days (start + i) in
+      if f d <> g d then Some d else go (i + 1)
+  in
+  go 0
+
+(* E321 for one refusal of the rule. [e] is the position's expression, [what]
+   the position. *)
+let report_calendar_refusal ctx ~loc ~what (anchor : Calendar_reading.anchor) (e : expr)
+    (r : Calendar_reading.refusal) =
+  let module C = Calendar_reading in
+  let show = C.show_ymd in
+  let error ?detail ~message ~hint () =
+    Diagnostics.error ctx.diags ~code:"E321" ~loc ~message ?detail ~hint ()
+  in
+  let base_ymd b = Option.value (C.ymd_of_base anchor b) ~default:anchor.C.origin in
+  let whole_days d = Float.is_integer d && Float.abs d < 1e6 in
+  match r with
+  | C.Calendar_from_runtime { shown; name; desc } ->
+    refuse_runtime_calendar ctx ~loc ~what ~base:{ rb_name = name; rb_desc = desc } shown
+  | C.Fractional_months { shown; _ } ->
+    error
+      ~message:(Printf.sprintf "`%s` in %s is not a whole number of calendar months"
+                  (Time_typing.show_source shown) what)
+      ~hint:(Printf.sprintf
+        "under the one-step calendar rule a month counted from a date is a calendar \
+         step, and a calendar step is a whole number of months. Write a whole number \
+         of months, or state the offset in %s."
+        (match calendar_span_days ctx shown with
+         | Some (days, _) -> Printf.sprintf "days: `%d 'days`" days
+         | None -> "'days or 'weeks"))
+      ()
+  | C.Mixed { base; months; days } ->
+    let b = base_ymd base in
+    let unit_word =
+      if months mod 12 = 0 then (if abs months = 12 then "year" else "years")
+      else if abs months = 1 then "month" else "months"
     in
-    (match e' with
-     | EBinOp (Add, b, d) ->
-       (match step 1.0 b d with Some s -> Some s | None -> step 1.0 d b)
-     | EBinOp (Sub, b, d) -> step (-1.0) b d
-     | _ -> None)
+    let days_lit =
+      Printf.sprintf "%s %s 'days" (if days < 0.0 then "-" else "+")
+        (Time_typing.show_short (EConst (Float.abs days)))
+    in
+    let calendar_first = Printf.sprintf "%s %s" (calendar_call (C.base_code base) months) days_lit in
+    let detail, days_first =
+      if not (whole_days days) then (None, None)
+      else
+        let n = int_of_float days in
+        let cal_first ymd = C.add_days (C.add_months ymd months) n in
+        let day_first ymd = C.add_months (C.add_days ymd n) months in
+        let orders ymd =
+          Printf.sprintf "%s and then %s is %s; %s and then %s is %s"
+            (months_words months) (days_words n) (show (cal_first ymd))
+            (days_words n) (months_words months) (show (day_first ymd))
+        in
+        let note =
+          if cal_first b <> day_first b then Printf.sprintf "from %s, %s" (show b) (orders b)
+          else match calendar_witness ~from:b ~f:cal_first ~g:day_first with
+            | Some w ->
+              Printf.sprintf "from %s both orders give %s, but from %s %s"
+                (show b) (show (cal_first b)) (show w) (orders w)
+            | None -> Printf.sprintf "from %s both orders give %s" (show b) (show (cal_first b))
+        in
+        (Some note,
+         Some (calendar_call (Printf.sprintf "date(%S)" (show (C.add_days b n))) months))
+    in
+    error ?detail
+      ~message:(Printf.sprintf
+        "`%s` in %s mixes a calendar step with a number of days, and which comes \
+         first changes the date" (Time_typing.show_source e) what)
+      ~hint:(Printf.sprintf
+        "the one-step calendar rule resolves a single calendar step, not one combined \
+         with days. Write the order you mean: `%s` takes the %s first; %s"
+        calendar_first unit_word
+        (match days_first with
+         | Some d -> Printf.sprintf "for the days first, write the shifted date: `%s`." d
+         | None -> "for the days first, write the date the days lead to."))
+      ()
+  | C.Two_calendar_steps { base; steps } ->
+    let b = base_ymd base in
+    let total = List.fold_left ( + ) 0 steps in
+    let stepwise ymd = List.fold_left C.add_months ymd steps in
+    let at_once ymd = C.add_months ymd total in
+    let count = match List.length steps with
+      | 2 -> "two" | 3 -> "three" | 4 -> "four" | n -> string_of_int n in
+    let steps_phrase = match steps with
+      | k :: rest when List.for_all (( = ) k) rest ->
+        Printf.sprintf "%s steps of %d months" count k
+      | _ ->
+        let rec join = function
+          | [] -> "" | [k] -> string_of_int k
+          | [k; l] -> Printf.sprintf "%d and %d" k l
+          | k :: rest -> Printf.sprintf "%d, %s" k (join rest)
+        in
+        Printf.sprintf "steps of %s months" (join steps)
+    in
+    let both ymd =
+      Printf.sprintf "%s steps give %s and one step gives %s"
+        count (show (stepwise ymd)) (show (at_once ymd))
+    in
+    (* Where the modeller's base makes the two agree, the note shows a base
+       where they do not: the last day of the month that the first step lands
+       in February from, else the first such date. *)
+    let witness () =
+      let (y, _, _) = b in
+      let first = match steps with k :: _ -> k | [] -> 0 in
+      let m = ((((1 - first) mod 12) + 12) mod 12) + 1 in
+      let w = (y, m, days_in_month y m) in
+      if stepwise w <> at_once w then Some w
+      else calendar_witness ~from:b ~f:stepwise ~g:at_once
+    in
+    let note =
+      if stepwise b <> at_once b then Printf.sprintf "from %s %s" (show b) (both b)
+      else match witness () with
+        | Some w ->
+          Printf.sprintf "from %s both give %s, but from %s %s"
+            (show b) (show (stepwise b)) (show w) (both w)
+        | None -> Printf.sprintf "from %s both give %s" (show b) (show (stepwise b))
+    in
+    let code = C.base_code base in
+    let one =
+      if total = 0 then code
+      else Printf.sprintf "%s %s %d 'months" code (if total < 0 then "-" else "+") (abs total)
+    in
+    let nested =
+      List.fold_left (fun acc k -> Printf.sprintf "add_calendar_months(%s, %d)" acc k) code steps
+    in
+    error ~detail:note
+      ~message:(Printf.sprintf
+        "`%s` in %s takes %s calendar steps, and %s are not one step of %d"
+        (Time_typing.show_source e) what count steps_phrase total)
+      ~hint:(Printf.sprintf
+        "the one-step calendar rule resolves a single calendar step. Write one step, \
+         `%s`, or nest the steps you mean: `%s`." one nested)
+      ()
+  | C.Not_one_step ->
+    let shown = Option.value (first_calendar_literal ctx e) ~default:e in
+    let is_duration = match Time_typing.classify (time_env ctx) e with
+      | Time_typing.TInstant -> false
+      | Time_typing.TExact | Time_typing.TCalendar | Time_typing.TOther -> true
+    in
+    error
+      ~message:(Printf.sprintf
+        "calendar duration `%s` in %s is not one calendar step from a date the \
+         compiler knows" (Time_typing.show_short shown) what)
+      ~hint:(Printf.sprintf
+        "the one-step calendar rule resolves `d + k 'months` with `d` a date known \
+         when the model compiles and `k` a whole number. Write each calendar step \
+         with `add_calendar_months(d, n)` or `add_calendar_years(d, n)`, or state the \
+         offset as a fixed span%s"
+        (match (if is_duration then calendar_span_days ctx e else None) with
+         | Some (days, rendered) -> Printf.sprintf ": `%d 'days` (≈ %s)." days rendered
+         | None -> " in 'days or 'weeks."))
+      ()
 
-let base_code = function
-  | Base_origin -> "origin"
-  | Base_date s -> Printf.sprintf "date(%S)" s
-  | Base_runtime rb -> rb.rb_name
-
-(* E321 for a calendar duration in an instant position; [true] if it fired. *)
+(* E321 for a calendar duration in an instant position that the one-step
+   calendar rule does not resolve; [true] if it fired. *)
 let refuse_calendar_instant ctx ~loc ~what (e : expr) : bool =
   if ctx.origin = None || not (mentions_calendar_duration ctx e) then false
-  else begin
-    let compile_time ~shown ~step_hint ~span_of =
-      let fixed = match calendar_span_days ctx span_of with
-        | Some (days, rendered) -> Some (days, rendered)
-        | None -> None
-      in
-      let hint = match step_hint with
-        | Some first ->
-          Printf.sprintf "%s; for a fixed span write %s." first
-            (match fixed with
-             | Some (days, rendered) -> Printf.sprintf "`%d 'days` (≈ %s)" days rendered
-             | None -> "the offset in 'days or 'weeks")
-        | None ->
-          Printf.sprintf
-            "write each calendar step with `add_calendar_months(d, n)` or \
-             `add_calendar_years(d, n)` from a date `d`, or state the offset as a \
-             fixed span%s"
-            (match fixed with
-             | Some (days, rendered) -> Printf.sprintf ": `%d 'days` (≈ %s)." days rendered
-             | None -> " in 'days or 'weeks.")
-      in
-      Diagnostics.error ctx.diags ~code:"E321" ~loc
-        ~message:(Printf.sprintf
-          "calendar duration `%s` in %s: under `origin` this position is a date, \
-           and a date moves by calendar months or years only through \
-           `add_calendar_months` or `add_calendar_years`"
-          (Time_typing.show_short shown) what)
-        ~hint ()
-    in
-    (match single_calendar_step ctx e with
-     | Some (Base_runtime base, _, _, d) -> refuse_runtime_calendar ctx ~loc ~what ~base d
-     | Some (base, k, u, d) ->
-       let whole f = Float.is_integer f && Float.abs f < 1e9 in
-       let months = match u with Years -> 12.0 *. k | _ -> k in
-       let phrase n unit =
-         Printf.sprintf "for the date %d calendar %s%s %s `%s`"
-           (abs n) unit (if abs n = 1 then "" else "s")
-           (if n < 0 then "before" else "after") (base_code base)
-       in
-       let step_hint =
-         if u = Years && whole k then
-           let n = int_of_float k in
-           Some (Printf.sprintf "%s write `add_calendar_years(%s, %d)`"
-                   (phrase n "year") (base_code base) n)
-         else if whole months then
-           let n = int_of_float months in
-           Some (Printf.sprintf "%s write `add_calendar_months(%s, %d)`"
-                   (phrase n "month") (base_code base) n)
-         else None
-       in
-       (* The span offered is the duration's magnitude: the step's direction is
-          the operator's, and a negative span has no `'days` spelling. *)
-       let d_abs = match inline_scalar_let ctx d with EUnOp (Neg, x) -> x | x -> x in
-       compile_time ~shown:d_abs ~step_hint ~span_of:d_abs
-     | None ->
-       (match find_runtime_base ctx e with
-        | Some base ->
-          refuse_runtime_calendar ctx ~loc ~what ~base
-            (Option.value (first_calendar_literal ctx e) ~default:e)
-        | None ->
-          let is_duration = match Time_typing.classify (time_env ctx) e with
-            | Time_typing.TInstant -> false
-            | Time_typing.TExact | Time_typing.TCalendar | Time_typing.TOther -> true
-          in
-          compile_time ~shown:(Option.value (first_calendar_literal ctx e) ~default:e)
-            ~step_hint:None
-            ~span_of:(if is_duration then e else EConst 0.0)));
-    true
-  end
+  else
+    match Calendar_reading.anchor_of_ctx ctx with
+    (* An invalid origin is reported where it is declared. *)
+    | None -> false
+    | Some anchor ->
+      (match Calendar_reading.resolve_days anchor (Calendar_reading.read ctx e) with
+       | Ok _ -> false
+       | Error r -> report_calendar_refusal ctx ~loc ~what anchor e r; true)
 
 (* E360 alone, at one instant position: the arithmetic an instant does not
    have (gh#1070). E321 there is [refuse_calendar_instant]'s. *)
@@ -6202,10 +6551,15 @@ module Lower = struct
     | At_anchor of Ir.anchored_time    (* `last_obs ± d`, d exact *)
     | At_bad                           (* an anchor in a refused shape; already reported *)
 
-  (* The checks of an instant position (Stage 1a). Under an origin, E360 on the
-     arithmetic an instant does not have, and E321 on any calendar duration in
-     it ([refuse_calendar_instant]); [context] names the position. An
-     expression that mentions an observation anchor is left to
+  (* The expression an instant position is lowered from: the calendar date a
+     one-step calendar rule resolves, or the expression as written. *)
+  let lowered ctx (p : Time_pos.instant Time_pos.t) = calendar_instant_expr ctx (Time_pos.expr p)
+
+  (* The checks of an instant position. Under an origin, E360 on the
+     arithmetic an instant does not have, and E321 on a calendar duration the
+     one-step calendar rule does not resolve ([refuse_calendar_instant]);
+     [context] names the position. An expression that mentions an observation
+     anchor is left to
      [classify_anchor] where anchors are accepted, and to name resolution
      elsewhere. [bare] is the bare-number warning the position carries. *)
   let instant_checks ctx ~context ?bare ?units (p : Time_pos.instant Time_pos.t) =
@@ -6226,7 +6580,7 @@ module Lower = struct
      `to`, output and emit `at` entries, a scenario's `to`. *)
   let instant_const ctx ~what ~context ?bare p : float =
     ignore (judge ctx p (fun () -> instant_checks ctx ~context ?bare ~units:what p));
-    fold_instant ctx (Time_pos.expr p)
+    fold_instant ctx (lowered ctx p)
 
   (* An instant that may be an observation anchor: a `simulate { to }`. *)
   let instant_horizon ctx ~what ~context ?bare ~anchor_what ~example p : instant_value =
@@ -6247,19 +6601,19 @@ module Lower = struct
     ignore (judge ctx p (fun () -> instant_checks ctx ~context ?bare p));
     let e = Time_pos.expr p in
     match anchor with
-    | None -> At_expr (resolve_expr ctx env e)
+    | None -> At_expr (resolve_expr ctx env (lowered ctx p))
     | Some (what, example) ->
       (match classify_anchor ctx ~what ~example ~loc:Diagnostics.no_loc e with
        | AnchorAt a -> At_anchor a
        | AnchorBad -> At_bad
-       | AnchorNone -> At_expr (resolve_expr ctx env e))
+       | AnchorNone -> At_expr (resolve_expr ctx env (lowered ctx p)))
 
   (* The entries of an `at [...]` list, `date_range(...)` spliced, resolved to
      normalized IR. *)
   let instant_list_expr ctx env ~context ?bare ps : Ir.expr list =
     List.iter (fun p ->
       ignore (judge ctx p (fun () -> instant_checks ctx ~context ?bare p))) ps;
-    let es = splice_date_ranges ctx (List.map Time_pos.expr ps) in
+    let es = splice_date_ranges ctx (List.map (lowered ctx) ps) in
     List.map (fun e -> normalize_expr (resolve_expr ctx env e)) es
 
   (* The entries of an output or emit `at = [...]` list, `date_range(...)`
@@ -6267,7 +6621,7 @@ module Lower = struct
   let instant_list_const ctx ~what ~context ps : float list =
     List.iter (fun p ->
       ignore (judge ctx p (fun () -> instant_checks ctx ~context ~units:what p))) ps;
-    List.map (fold_instant ctx) (splice_date_ranges ctx (List.map Time_pos.expr ps))
+    List.map (fold_instant ctx) (splice_date_ranges ctx (List.map (lowered ctx) ps))
 
   (* A `timepoints` entry: judged, and dropped (the block is not emitted). *)
   let timepoint ctx ~name p =
@@ -6469,17 +6823,24 @@ module Lower = struct
           false))) [lo; hi]
     | Value_bounds _ -> ()
 
+  (* A parameter's bound expressions as lowered: an `instant` parameter's are
+     instants, resolved by the one-step calendar rule. *)
+  let lowered_bounds ctx (b : bounds) : expr * expr =
+    match b with
+    | Instant_bounds (lo, hi) -> (lowered ctx lo, lowered ctx hi)
+    | Length_bounds _ | Value_bounds _ -> bounds_exprs b
+
   (* A parameter's bounds, folded to numbers (the `in [lo, hi]` range). *)
   let bounds ctx ~pname (b : bounds) : float * float =
     judge_bounds ctx ~pname b;
-    let (lo, hi) = bounds_exprs b in
+    let (lo, hi) = lowered_bounds ctx b in
     (resolve_float_expr_simple ctx lo, resolve_float_expr_simple ctx hi)
 
   (* The same bounds as IR, for the dimension check of θ's units. *)
   let bounds_ir ctx ~pname (b : bounds) : Ir.expr * Ir.expr =
     judge_bounds ctx ~pname b;
     let ir e = normalize_expr (resolve_expr ctx [] e) in
-    let (lo, hi) = bounds_exprs b in
+    let (lo, hi) = lowered_bounds ctx b in
     (ir lo, ir hi)
 end
 
@@ -6763,6 +7124,16 @@ let resolve_prior_spec ?(loc = Diagnostics.no_loc) ?(bounds = None) ctx ~pname (
     Wave 2 / malaria #3. *)
 let classify_and_resolve_prior_spec ?(loc = Diagnostics.no_loc) ?(bounds = None) ctx ~pname
       (ps : prior_spec) : prior_classification =
+  (* An `instant` parameter's location arguments are dates: a calendar step
+     there is its calendar date (the one-step calendar rule). *)
+  let ps =
+    match Time_typing.param_kind_of_name (time_env ctx) pname with
+    | Some `Instant ->
+      { ps with ps_args = List.map (fun (k, e) ->
+            if List.mem k Time_census.prior_location_args
+            then (k, calendar_instant_expr ctx e) else (k, e)) ps.ps_args }
+    | Some `Duration | None -> ps
+  in
   let has_non_const_arg =
     List.exists (fun (_, e) -> not (is_const_expr e)) ps.ps_args
   in
@@ -13083,6 +13454,12 @@ let expand_scenarios ctx : Ir.preset list =
       let order = ref [] in
       let bindings = ref [] in
       List.iter (fun (k, e) ->
+        (* A value given to an `instant` parameter is a date: a calendar step
+           there is its calendar date (the one-step calendar rule). *)
+        let e = match Time_typing.param_kind_of_name (time_env ctx) k with
+          | Some `Instant -> calendar_instant_expr ctx e
+          | Some `Duration | None -> e
+        in
         let e' = subst !bindings e in
         let v = resolve_float_expr ctx e' in
         if not (Hashtbl.mem map k) then order := k :: !order;
