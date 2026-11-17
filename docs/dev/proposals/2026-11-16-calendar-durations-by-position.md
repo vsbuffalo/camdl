@@ -1,10 +1,13 @@
 # Proposal: calendar durations resolved by the position they are written in
 
-**Status:** Draft for the maintainer. Built on decisions D62 (a), D65 (a), D68
-and D70 (a); the calls still open are under
-[Decisions for the maintainer](#9-decisions-for-the-maintainer). **Assumes PR
-#1157 (gh#1148) has landed**: `on` endpoints of a periodic forcing are model
-time, binned by `step`, with misaligned ranges refused as E406.
+**Status:** Accepted 2026-11-16 in stages. **Stage 1a** (typed positions, the
+census, `Lower` per kind, and the refusal of every calendar duration in an
+instant or cadence position) is approved for implementation now. **Stage 1b**
+(the one-step calendar rule, §8) is approved on the conditions stated there and
+lands only after 1a. Stage 2 follows 1b. Every decision of §9 is recorded there.
+Built on decisions D62 (a), D65 (a), D68 and D70 (a). PR #1157 (gh#1148) has
+landed: `on` endpoints of a periodic forcing are model time, binned by `step`,
+with misaligned ranges refused as E406.
 
 **Verified against:** `main` at `842d3b66a`, and PR #1157's branch at
 `e035d97d3` for the periodic-forcing claims. _Verified (run)_ means compiled
@@ -35,6 +38,15 @@ settled by the position stays a hard error with a hint: fractional months, a
 month mixed with days, two calendar steps in a row, and any calendar step from
 an instant known only at run time. There is no override flag; the explicit
 spellings (`730 'days`, `add_calendar_years(origin, 2)`) remain the escape.
+
+The change lands in two steps so that no accepted model changes value silently.
+Stage 1a gives every position its kind and refuses, under an origin, every
+calendar duration in an instant or cadence position, including the spellings
+that compile today with the average month (`simulate { to = 2 'years }`,
+`at [6 'months]`); each refusal's hint names the explicit form. Stage 1b then
+gives those spellings the calendar meaning by the _one-step calendar rule_: a
+model that compiles under 1a contains none of them, so 1b changes the value of
+no model that has been compiled since 1a.
 
 Because the checks move from a hand-written list into the types, the class of
 bug in which a time position is missed by the checker (five fixed issues, three
@@ -171,6 +183,10 @@ Without an origin nothing changes: there is no calendar, every month literal is
 the average, and the rules below are vacuous (the archived typed-time proposal
 §1.1, decision of record).
 
+The table states the rule once Stage 1b and Stage 2 have landed. Under Stage 1a
+the Instant and Cadence rows read **refused, always**, with a hint naming the
+explicit form, and every other row is as below (§8, Stage 1a).
+
 | kind           | a calendar duration (`'months`, `'years`) is …                                                                                                                                                    | refused, with a hint                                                                             |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
 | Instant        | **resolved**: `[B ±] k 'months` with `B` `origin` or a `date(...)` literal (or a `let` of one; default `origin`) and a whole month count `k` is `add_calendar_months(B, ±k)`; years are 12 months | fractional months; months mixed with days; a second calendar step; a base known only at run time |
@@ -260,6 +276,23 @@ type bounds =
 The parser builds each wrapper in the production that already knows which field
 it is parsing, so no table of positions exists anywhere.
 
+**Where the modules live.** The declaration records that hold a `'k Time_pos.t`
+are in `ast.ml`, and `Time_pos.t` holds an `Ast.expr`, so a separate
+`time_pos.ml` would be a module cycle. The kinds, the private wrapper, `make`,
+`expr` and `interval` are therefore a submodule `Ast.Time_pos`, as `Ast.Pos_int`
+is. The census (§3.3), the forcing keyword roles and the reduction table (§3.2)
+are in `ocaml/lib/compiler/time_census.ml`, which reads only `Ast`. `Lower`
+(§3.5) is a submodule of `expander.ml`, because every lowering function needs
+the expander's `ctx`, `resolve_expr` and diagnostics.
+
+**Which lengths are typed.** A length is a typed field where a declaration holds
+one: `simulate { dt }`, the bounds of a `duration`-kind or `[T]`-annotated
+parameter, and the forcing keywords whose role is a length (`period`, `step`,
+`lag`). A unit literal inside an ordinary expression (a rate, a prior's
+arguments, a table value, a `via` mean) is not a position: the average is the
+only rule that can apply to it (D65 a), dimcheck already judges it, and the
+census does not list it.
+
 ### 3.2 Positions inside expressions
 
 Three families of time position sit inside ordinary expressions rather than in a
@@ -275,10 +308,10 @@ covers it:
 - **Forcing keyword arguments.** `fkind` becomes a variant
   (`Periodic | Sinusoidal | Piecewise | Bspline | Interpolated | ...`) and
   `Forcing_schema.role : fkind -> string -> kwarg_role option` gives every
-  keyword its role (`breakpoints` → instants, `window` → an instant interval,
-  `on` → a phase interval, `period`, `step`, `lag` → lengths, `phase` → a phase,
-  `data`, `time_col` → file). An unknown keyword is already an error; a known
-  one can only be folded through its role.
+  keyword its role (`breakpoints` and interpolated `times` → instants, `window`
+  → an instant interval, `on` → a phase interval, `period`, `step`, `lag` →
+  lengths, `phase` → a phase, `data`, `time_col` → file). An unknown keyword is
+  already an error; a known one can only be folded through its role.
 - **Comparisons with model time.** In any expression, `t <op> e` or `e <op> t`
   with `<op>` a comparison makes `e` an instant position, and `t ± d` makes `d`
   a runtime offset. This is syntactic (`EIdent ("t", _)`), so it needs no change
@@ -300,16 +333,20 @@ Two mechanisms, one per family:
    (fragile match) and warning 9 (missing record fields) as errors. Adding
    `DFoo` to `declaration`, or a field to a record the census reads, fails the
    OCaml build until the census says what kind each new time field is. The
-   census drives one property test (§8, test 1.1): for every position it lists,
-   the model's IR value at that position equals the value of its own lowering
-   function, so a site that folds a time outside `Lower` fails a test.
+   census drives one property test (§8, test 1.1): every `Lower` function
+   records the position it lowered (its kind, location and expression) in the
+   compilation context, and for every position the census lists, the record
+   holds that position with the same kind. A site that folds a time without
+   going through its kind's function leaves its position unrecorded, and the
+   test fails. Because `resolve_time_expr` is deleted, `Lower` is the only path
+   from a time field to a number, so the recorded value is the IR's value.
 
 ```ocaml
 type any_position = Any : 'k t -> any_position
 val census : Ast.declaration list -> any_position list
 ```
 
-### 3.4 The resolver
+### 3.4 The resolver (Stage 1b)
 
 The rule is a pure function of a reading of the expression. The reading is taken
 from the leaves before any unit is folded, which is where provenance still
@@ -416,9 +453,26 @@ end
 
 Each function emits its diagnostics itself and returns a placeholder on refusal
 so that a model with several mistakes reports them all, as the expander does
-today. The checks now in `check_surface_time_typing` move into these functions
-and the walk is deleted; the E320 check (a property of `time_unit`, not of a
-position) stays where it is.
+today. A position lowered more than once (the model's `simulate { from }` is
+read by the simulate block and by the output schedule's default start) reports
+once: the record that test 1.1 reads is also the set of positions already
+judged. The checks now in `check_surface_time_typing` move into these functions
+and the walk over declaration fields is deleted; the E320 check (a property of
+`time_unit`, not of a position) stays where it is.
+
+Two checks in that function are not about positions and stay as an expression
+check over every ordinary expression (transition rates, ODE derivatives, `let`
+bodies, `init` values, prior arguments, intervention actions, `balance`,
+quantity bodies): E321 on `Instant ± calendar duration` wherever it is written,
+and E360 on the arithmetic an instant does not have (gh#1070). Every `Lower`
+function runs the same two checks on its own expression, except that
+`Lower.instant` replaces the generic E321 with its own refusal, so a position
+reports one E321, not two.
+
+In Stage 1a each function implements its kind's rule from §8, Stage 1a: today's
+value, with every calendar duration in an instant or cadence position refused.
+Stage 1b replaces the instant refusal with `resolve_instant` (§3.4); Stage 2
+adds the cadence and interval resolvers.
 
 ## 4. The rules, by kind, with what they compile to
 
@@ -731,13 +785,17 @@ and the fixed-width periodic forcing.
 (`docs/dev/proposals/archive/post-alpha/2026-05-22-typed-time-and-dsl-ergonomics.md`)
 ruled that `simulate.from` and `simulate.to` are duration-typed positions and
 that `to = 600 'months` is "a one-shot affine conversion". This proposal
-reverses that: they are instant positions, a bare duration in them denotes
-`origin + D`, and a calendar duration there is a calendar step. The archived
-reasoning that a single conversion is unambiguous is right; the conclusion drew
-the wrong unambiguous reading, the one no modeller means.
+reverses that in two steps. Stage 1a makes them instant positions in which a
+bare duration denotes `origin + D`, and refuses a calendar duration there
+(`to = 600 'months` is E321, whose hint names
+`add_calendar_months(origin, 600)`). Stage 1b gives the same spelling the
+calendar meaning. The archived reasoning that a single conversion is unambiguous
+is right; the conclusion drew the wrong unambiguous reading, the one no modeller
+means.
 
-**The named-functions rule.** `.claude/rules/calendar-time.md`, "Non-affine
-operations get named functions", becomes:
+**The named-functions rule.** Under Stage 1a, `.claude/rules/calendar-time.md`,
+"Non-affine operations get named functions", stands as written, and is now
+enforced at every instant and cadence position. With Stage 1b it becomes:
 
 > ## A calendar step is resolved by type once, and named when composed
 >
@@ -745,52 +803,64 @@ operations get named functions", becomes:
 > (`origin + 6 'months`, `date("2020-01-31") + 1 'months`, `to = 2 'years` in an
 > instant position, `every = 1 'months` from a known start) is resolved by the
 > position's type to `add_calendar_months` / `add_calendar_years`, because it
-> has one meaning. Composed calendar arithmetic (two steps, a step mixed with
-> days) is written with the named functions, because there the order of
-> operations changes the answer and the reader needs to see it; the compiler
-> refuses the operator form with a hint.
+> has one meaning (the one-step calendar rule). Composed calendar arithmetic
+> (two steps, a step mixed with days) is written with the named functions,
+> because there the order of operations changes the answer and the reader needs
+> to see it; the compiler refuses the operator form with a hint.
 
 and `.claude/rules/dsl-surface.md` line 83 becomes "prefer explicitly named
 functions over polymorphic operators where the semantics differ and the position
 cannot settle them (composed calendar steps are written with
 `add_calendar_months`; a single step from a known date is resolved by type)".
 
-**E321 and E322** keep their codes. E321 no longer fires on a single
-whole-number step from a known date; it fires on the four instant refusals of
-§4.1, on spans and on runtime offsets. E322 fires on the cadence refusals of
-§4.2. Their `docs/dev/warning-catalog.md` rows are rewritten to say so.
+**E321 and E322** keep their codes. Under Stage 1a, E321 fires on every calendar
+duration in an instant position (the seven positions of §1.3, `simulate` `from`
+and `to`, scenario `to`, `at` lists, recurring `from` and `to`, output and emit
+`at`, `value_at`'s time, `breakpoints`, `instant` bounds, the operand compared
+with `t`, `timepoints`), on a calendar offset from model time `t`, on spans and
+on runtime offsets; E322 fires on every calendar cadence, as today, with a hint
+that names `date_range(..., calendar_months = k)`. Under Stage 1b E321 no longer
+fires on a single whole-number step from a known date; it fires on the four
+instant refusals of §4.1, on spans and on runtime offsets. Stage 2 moves E322 to
+the cadence refusals of §4.2. The `docs/dev/warning-catalog.md` rows are
+rewritten at each stage.
 
-**`docs/dates.md`**: "Exact vs Calendar duration kinds" and "Stepping a date by
-calendar months/years" state the rule of §2.1; "These are the only way to
-advance a date by calendar months" becomes "the way to write composed calendar
-arithmetic"; the `simulate { to }` paragraph drops the E401 sentence and its
-reference to gh#844 (closed, with the language change deferred); the
-known-deviation row for gh#847 is deleted; option 1 of "Migrating an unanchored
-monthly model" reads "`to = 600 'months` is the date 600 calendar months after
-the origin, 1941-01-01 from 1891-01-01". `docs/camdl-language-spec.md` §2.1 and
-§14.2 change to match, by hand (the spec is never formatted).
+**`docs/dates.md`**, Stage 1a: "Exact vs Calendar duration kinds" and "Stepping
+a date by calendar months/years" state that under an origin a calendar duration
+in a date or schedule position is refused, with the explicit forms; the
+`simulate
+{ to }` paragraph drops the E401 sentence and its reference to gh#844
+(instant arithmetic is accepted there); the known-deviation row for gh#847 is
+deleted, since the silent spelling is now refused; option 1 of "Migrating an
+unanchored monthly model" writes `to = add_calendar_months(origin, 600)`. Stage
+1b adds the section on the one-step calendar rule (§8, Stage 1b).
+`docs/camdl-language-spec.md` §2.1 and §14.2 change to match at each stage, by
+hand (the spec is never formatted).
 
-**`docs/language-changes.md`** gets an entry: what now resolves, what the values
-were before (the §4.1 table), what is still refused.
+**`docs/language-changes.md`** gets an entry at each stage. Stage 1a: each newly
+refused spelling, the value it compiled to before, and its replacement; the
+instant arithmetic newly accepted in `simulate`, scenario `to` and output `at`.
+Stage 1b: what now resolves, and what is still refused.
 
 **The test `test_typed_time_pos_simulate_to_months_oneshot`**
-(`ocaml/test/test_compiler.ml`) asserts only that the model compiles. It is
-rewritten to assert `t_end = 18262.0` for `to = 600 'months` from 1891-01-01,
-the value of `date("1941-01-01")`, which fails on today's 18262.125.
+(`ocaml/test/test_compiler.ml`) asserts only that the model compiles. Stage 1a
+inverts it: `to = 600 'months` from 1891-01-01 is E321, and the hint names
+`add_calendar_months(origin, 600)`. Stage 1b rewrites it to assert
+`t_end = 18262.0`, the value of `date("1941-01-01")`.
 
 ## 7. Issues this closes
 
-| issue   | how                                                                                                                              |
-| ------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| gh#847  | a duration in an instant position is `origin + D` with the calendar rule, equal to the explicit form                             |
-| gh#1097 | part 2 (one enumeration of positions, derived from the AST): the census and the typed fields. Part 1 (the classifier) stays open |
-| gh#1102 | one lowering function per kind; Span's calendar branch is D45's                                                                  |
-| gh#1128 | `Lower.instant` emits W325 for a bare number at every instant position                                                           |
-| gh#1129 | every instant position accepts instant arithmetic; also the deferred language change of gh#844                                   |
-| gh#1133 | every calendar conversion takes an `anchor`, which exists only under an origin                                                   |
-| gh#1140 | three interval resolvers                                                                                                         |
-| gh#1155 | the whole-unit endpoint check                                                                                                    |
-| gh#1156 | `periodic_bins` in the IR (decision D)                                                                                           |
+| issue   | stage | how                                                                                                                                              |
+| ------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| gh#847  | 1a    | the silent spelling `to = 2 'years` is refused with the explicit form named; 1b then gives it the calendar meaning                               |
+| gh#1097 | 1a    | part 2 (one enumeration of positions, derived from the AST): the census and the typed fields. Part 1 (the classifier) stays open                 |
+| gh#1102 | 1a    | one lowering function per kind; Span's calendar branch is D45's                                                                                  |
+| gh#1128 | 1a    | `Lower.instant` emits W325 for a bare number at `value_at`'s time, as at an `at [...]` entry                                                     |
+| gh#1129 | 1a    | `simulate { from, to }`, scenario `to`, output and emit `at` accept instant arithmetic (`date(a) + 7 'days`); also the deferred change of gh#844 |
+| gh#1133 | 1b    | every calendar conversion takes an `anchor`, which exists only under an origin                                                                   |
+| gh#1140 | 2     | three interval resolvers                                                                                                                         |
+| gh#1155 | 2     | the whole-unit endpoint check                                                                                                                    |
+| gh#1156 | 2     | `periodic_bins` in the IR (decision D)                                                                                                           |
 
 ## 8. Implementation, in stages
 
@@ -798,41 +868,190 @@ Each stage lands on a branch with `make test` green, follows this document
 exactly, and cites it with a `Proposal:` footer. The lift is a rough count of
 the code each stage touches.
 
-### Stage 1a: typed positions and the census, with today's rules
+### Stage 1a: typed positions and the census; every calendar instant and cadence refused
 
 The AST types of §3.1 and §3.2, the parser productions that build them, `Lower`
-with each function implementing today's rule for its kind, the census, and the
-deletion of `check_surface_time_typing`'s position walk and of
-`resolve_time_expr`. Behaviour changes only where a missed position starts being
-checked under today's rules: W325 on `value_at` (gh#1128), E321 on the seven
-positions of §1.3, and instant arithmetic accepted in `simulate { from, to }`,
-scenario `to` and output `at` (gh#1129). Golden-neutral.
+with one function per kind, the census, and the deletion of
+`check_surface_time_typing`'s walk over declaration fields and of
+`resolve_time_expr`. No IR type changes and every golden stays byte-identical:
+no anchored golden contains a month or year literal (§5.1), so every refusal
+below falls outside them, and every value `Lower` returns is the value the
+deleted fold returned.
+
+**The rule in Stage 1a.** There is no resolution. Under an origin:
+
+| kind           | a calendar duration (`'months`, `'years`, directly or through a `let`) is …                     | code |
+| -------------- | ----------------------------------------------------------------------------------------------- | ---- |
+| Instant        | refused, always, including a bare duration (`to = 2 'years`, which denotes `origin + 2 'years`) | E321 |
+| Cadence        | refused, always (as today)                                                                      | E322 |
+| Runtime offset | refused (as today); also a calendar offset from model time `t`, which is new                    | E321 |
+| Span           | refused (as today)                                                                              | E321 |
+| Phase          | `at_day` refused (as today, E322); periodic `on` endpoints as today; sinusoidal `phase` average | —    |
+| Length         | the average (D65 a), never refused on calendar grounds                                          | —    |
+
+Without an origin nothing changes. Instant positions additionally accept the
+instant arithmetic that `at [...]` lists accept today (`origin + 90 'days`,
+`date("2020-03-01") + 7 'days`) in `simulate { from, to }`, scenario `to` and
+output and emit `at` (gh#1129), where today it is E401; and every `at` list
+(intervention, event, output, emit) splices `date_range(...)`, which output and
+emit `at` refuse today with E270 (verified (run) on `main` at `19c1b64a3`:
+`output { trajectories { at = [date_range(origin, count = 3, calendar_months = 1)] } }`
+→ `error[E270]`). The second is needed so that the E322 hint below names a form
+that compiles at every cadence position.
+
+**Positions newly refused.** Each compiles today with the average month and no
+diagnostic (verified (run) on `main` at `19c1b64a3`, origin 2020-01-01; §1.2 and
+§1.3 give the values). Stage 1a refuses each with E321:
+
+| position                                | spelling refused                           | compiles to today       |
+| --------------------------------------- | ------------------------------------------ | ----------------------- |
+| `simulate { to }`                       | `to = 2 'years`                            | `t_end = 730.485`       |
+| `simulate { from }`                     | `from = 6 'months`                         | `t_start = 182.62125`   |
+| scenario `simulate { to }`              | `to = 30 'months`                          | `t_end = 913.10625`     |
+| intervention and event `at [...]`       | `at [6 'months]`                           | fires at 182.62125      |
+| output `trajectories { at }`, emit `at` | `at = [6 'months]`                         | `at_times [182.62125]`  |
+| `value_at`'s time                       | `value_at(I, 6 'months)`                   | reads t = 182.62125     |
+| piecewise and bspline `breakpoints`     | `breakpoints = [6 'months]`                | breakpoint 182.62125    |
+| bspline `window`                        | `window = [0 'days, 6 'months]`            | upper knot 182.62125    |
+| interpolated `times`                    | `times = [0 'days, 6 'months]`             | sample time 182.62125   |
+| bounds of an `instant` parameter        | `tau : instant in [0 'days, 6 'months]`    | upper bound 182.62125   |
+| the operand compared with `t`           | `if t >= 6 'months then … else …`          | switches at 182.62125   |
+| `timepoints` entries                    | `timepoints { peak = origin + 6 'months }` | accepted, block dropped |
+| an offset from `t` (runtime offset)     | `if t - 1 'months > tau then … else …`     | 30.436875 subtracted    |
+
+The bspline `window` and interpolated `times` rows were found while amending
+this proposal (verified (run): `window = [0 'days, 6 'months]` lowers to an
+upper knot of `182.62125 'months`; `times = [0 'days, 6 'months]` to a sample
+time of `182.62125 'months`). Both are lists of instants, so they are Instant
+positions; the forcing role table of §3.2 gives `times` the role of a list of
+instants and `window` an instant interval.
+
+A recurring schedule's `from` and `to` are instants, so a calendar duration
+there moves from E322 with the cadence hint (§10) to E321 with the instant hint.
+
+**The refusals, with the exact text.** The instant refusal from a base known at
+compile time (`origin`, implicit for a bare duration, or a `date(...)` literal,
+directly or through a `let`):
+
+```
+error[E321]: calendar duration `2 'years` in simulate.to: under `origin` this position is a date, and a date moves by calendar months or years only through `add_calendar_months` or `add_calendar_years`
+
+  = hint: for the date 2 calendar years after `origin` write `add_calendar_years(origin, 2)`; for a fixed span write `730 'days` (≈ 2 'years).
+```
+
+The first clause of the hint is present when the expression is one calendar step
+of a literal count from that base: `add_calendar_years(B, k)` for a whole number
+of years, otherwise `add_calendar_months(B, m)` for a whole number of months `m`
+(`1.5 'years` names `add_calendar_months(origin, 18)`), with "before" and a
+negative count for a subtraction (`date("2020-03-01") - 1 'months` names
+`add_calendar_months(date("2020-03-01"), -1)`). Otherwise (fractional months,
+months mixed with days, two calendar steps) the hint is
+
+```
+= hint: write each calendar step with `add_calendar_months(d, n)` or `add_calendar_years(d, n)` from a date `d`, or state the offset as a fixed span: `15 'days` (≈ 0.5 'months).
+```
+
+and the fixed-span clause appears only when the calendar part folds to a whole
+number of days of at least one; otherwise it reads "or state the offset as a
+fixed span in 'days or 'weeks."
+
+From a base known only at run time (model time `t`, an `instant` parameter, an
+observation anchor):
+
+```
+error[E321]: calendar duration `1 'months` in a comparison with `t` cannot move `tau`, an instant parameter, whose date is known only when the model runs
+
+  = hint: a calendar month from a date depends on which date it is. State the offset in days: `30 'days` (≈ 1 'months).
+```
+
+with `` `t`, the model time `` and `` `last_obs`, an observation anchor `` as
+the other two bases, and no "in …" clause for an offset from `t`, whose position
+the base already names. This replaces the observation-anchor message of
+`classify_anchor`, so the three bases read alike.
+
+The cadence refusal keeps E322 and its message; its hint becomes
+
+```
+= hint: a calendar cadence counts whole months from its start, which one fixed step cannot represent. List the calendar dates instead, with `date_range(<start>, <end>, calendar_months = 1)` in an `at` list, or write a fixed cadence: `every = 30 'days` (≈ 1 'months).
+```
+
+with `calendar_months` the literal's whole month count where it has one.
+
+E320's hint replaces "Annotate each with a unit literal (e.g. to = 600 'months)
+or a date literal (e.g. to = date("1940-12-01")) to preserve intent." by
+"Annotate each with a date: `to = add_calendar_months(origin, 600)` or
+`to = date("1940-12-01")`; a calendar duration such as `600 'months` in one of
+these positions is refused (E321)."
+
+**Bare numbers.** W324 (simulate `from` and `to`) and W325 (`at` entries and a
+recurring `from` and `to`) stay where they are, and W325 is added at
+`value_at`'s time (gh#1128). No other instant position gains a bare-number
+warning in this stage: an `instant` parameter's bounds, a `breakpoints` entry
+and a comparison with `t` are routinely bare numbers, and warning there is a
+change of its own.
+
+**Expression checks that stay.** E321 on `Instant ± calendar duration` and E360
+inside ordinary expressions stay as one expression check (§3.5), unchanged.
 
 Lift: medium to large. The AST fields are read at roughly 120 sites in
 `ocaml/lib` and `ocaml/bin` (verified, by `grep -c` per field name: `pbounds`
-26, `sim_to` 13, `SchedEvery` 11, `sim_from` 11, …), most of them mechanical
-(`Time_pos.expr p` where a printer reads the expression).
+26, `sim_to` 16, `SchedEvery` 11, `sim_from` 11, `fkind` 13, …), most of them
+mechanical (`Time_pos.expr p` where a printer reads the expression).
 
-Tests:
+Tests, each red on `main` where it asserts a change:
 
-1. (1.1) Census property: for each fixture model in `ocaml/golden/` and the
-   scratch set of this proposal, every position the census lists lowers, through
-   its kind's function, to the value at that position in the IR.
-2. (1.2) Red on `main`: each of §1.3's seven positions with `6 'months` under an
-   origin draws E321 (Stage 1b turns six of them into resolutions; the test is
-   rewritten then).
-3. (1.3) Red on `main`: `value_at(I, 60)` under an origin draws W325.
-4. (1.4) Red on `main`: `simulate { to = origin + 90 'days }`, scenario
+1. (1.1) Census coverage: for each fixture model in `ocaml/golden/` and the
+   scratch models of these tests that compile, every position the census lists
+   is in the record of lowered positions with the same kind.
+2. (1.2) Each newly refused spelling of the table above, under an origin, draws
+   E321 with the exact message and hint; `simulate { to = 2 'years }` is one of
+   them. `test_typed_time_pos_simulate_to_months_oneshot` is inverted:
+   `to = 600 'months` from 1891-01-01 is E321 and its hint names
+   `add_calendar_months(origin, 600)`.
+3. (1.3) `value_at(I, 60)` under an origin draws W325.
+4. (1.4) `simulate { to = origin + 90 'days }`, scenario
    `to = date("2020-03-01") + 7 'days` and output
-   `at = [date("2020-03-01") + 7 'days]` compile to 90, 67 and 67.
-5. (1.5) Compile-only: a scratch `declaration` constructor added in a test build
-   fails to compile the census (documented as a manual check in the census's
-   header comment; it cannot be a test that runs).
+   `at = [date("2020-03-01") + 7 'days]` compile to 90, 67 and 67, and output
+   `at = [date_range(origin, count = 3, calendar_months = 1)]` to `[0, 31, 60]`.
+5. (1.5) The same spellings without an origin compile to today's average values
+   (the rules are vacuous).
+6. (1.6) Compile-only: the census's guard is checked by hand: a scratch
+   `declaration` constructor, or a field added to a record the census reads,
+   fails `dune build` with warning 4 or 9 reported as an error in
+   `time_census.ml`. It cannot be a test that runs; the census's header comment
+   says how to repeat the check, and the PR states that it was done.
 
-### Stage 1b: the instant rule
+Each test is mutation-checked: the refusal or acceptance it asserts is reverted
+in `Lower` and the test is seen to fail.
 
-`Calendar_reading.read`, `resolve_instant`, its four refusals, the new E321
-texts and the amended E320 hint, the docs of §6 and the language-changes entry.
+### Stage 1b: the one-step calendar rule
+
+**The name.** _The one-step calendar rule_: under an origin, one calendar step
+of a whole number of months (or years, as twelve months) from a date the
+compiler knows is that calendar date, as `add_calendar_months` computes it; any
+other use of a calendar duration in a date or schedule position is refused. The
+name is used in the language spec, in `docs/dates.md`, in the E321 and E322
+messages that refuse what the rule does not cover, and in
+`docs/language-changes.md`.
+
+`Calendar_reading.read`, `resolve_instant`, its four refusals and their texts
+(§4.1), the CLI refusal of decision F, the docs of §6 and the language-changes
+entry.
+
+**Conditions of approval.** Stage 1b lands only after Stage 1a has landed, and
+only with:
+
+1. **A section in `docs/dates.md`**, "The one-step calendar rule", stating the
+   rule for each position kind of §2 with an example of each: what resolves
+   (`to = 2 'years` is 2022-01-01 from 2020-01-01), what is refused and its
+   replacement (fractional months, months mixed with days, two steps, a step
+   from `t`, a parameter or an anchor), and the kinds that keep the average
+   (`dt`, `period`, `lag`, sinusoidal `phase`).
+2. **A request-for-feedback box in that section**, of the `.feedback` kind of
+   `docs/documentation-style.md` (§5, "Feedback: …"), asking modellers whether
+   the rule matches what they mean by a month in each position, and where to say
+   so.
+3. **The name** above, used consistently in those places.
 
 Lift: small to medium, about 300 lines of OCaml and tests.
 
@@ -848,6 +1067,8 @@ Tests, each red on Stage 1a:
    vacuous).
 4. `test_typed_time_pos_simulate_to_months_oneshot` asserts 18262.0.
 5. W327 still fires on the literal nested round trip.
+6. Decision F: `--to last_obs+6months` on an anchored fit is refused with the
+   DSL's hint.
 
 ### Stage 2: calendar cadences and the periodic bin width
 
@@ -884,7 +1105,10 @@ The IR representation of a calendar offset on a runtime instant and the
 fractional-day rule (§4.3). A proposal of its own when wanted; this one commits
 only to the refusal.
 
-## 9. Decisions for the maintainer
+## 9. Decisions (recorded 2026-11-16)
+
+Each decision below was put to the maintainer with the recommendation that
+follows it, and is recorded at its end as **Decided**.
 
 **A. Is `1.5 'years` a calendar step?** The brief that motivated this proposal
 refuses fractional counts. A fractional year that is a whole number of months
@@ -895,6 +1119,10 @@ who writes `to = 1.5 'years` gets 2021-07-01 (547) rather than a refusal;
 refusing it means writing `18 'months`. The risk of resolving is a reader who
 expects 1.5 × 365.2425 = 547.86 days; the refusal costs one rewrite.
 Recommendation: resolve when the month count is whole. Leaning.
+
+**Decided: resolve when the month count is whole** (Stage 1b). Under Stage 1a
+`to = 1.5 'years` is refused like every calendar instant, and its hint names
+`add_calendar_months(origin, 18)`, the form 1b will make it equal to.
 
 **B. An accepted model changes value with no diagnostic.** Stage 1b changes what
 already-compiling anchored models mean: `to = 600 'months` moves from 18262.125
@@ -913,6 +1141,15 @@ over warnings argues against; (iii) refuse the bare calendar duration for one
 release with a hint, which is the friction this proposal removes.
 Recommendation: (i). Need you, since it is a call about the rule itself.
 
+**Decided: settled by the sequencing, so none of (i) to (iii) is needed.** Stage
+1a refuses every old spelling under an origin before Stage 1b gives it the
+calendar meaning. A model that compiles under 1a contains no calendar duration
+in an instant or cadence position, so 1b changes the value of no model compiled
+since 1a. The one path to a silent change is an upgrade that skips every release
+carrying 1a and none carrying 1b; Stage 1b's `language-changes.md` entry
+therefore repeats each spelling's pre-1a value beside its new one, and 1a and 1b
+are not released together.
+
 **C. Lower cadences to a calendar schedule in the IR, not to a list.** §5.2: a
 compile-time list stops at the model horizon, so output and emit rows past a
 scenario's or `--to`'s longer horizon would be silently absent, and a campaign
@@ -921,6 +1158,8 @@ The list is golden-neutral and needs no Rust; the IR form needs a version bump,
 Rust calendar stepping and seven consumers. A middle course, lists for
 interventions with an explicit `to` and the IR form elsewhere, leaves two
 lowerings of one concept. Recommendation: the IR form for all three. Solid.
+
+**Decided: the IR form for all three** (Stage 2).
 
 **D. gh#1156: carry the bin width, or refuse a period that is not a whole number
 of steps.** (a) Add `periodic_bins` to the IR (§4.5): the runtime uses the
@@ -933,10 +1172,14 @@ but it refuses the spec's daily-year example and every 365-day year with weekly
 bins, and asks the modeller to choose between a 364- and a 371-day year.
 Recommendation: (a), in Stage 2's bump. Solid.
 
+**Decided: (a), in Stage 2's `ir/VERSION` bump.**
+
 **E. Runtime offsets stay refused.** §4.3. Resolving `after = 1 'months` needs
 an IR offset form and a rule for an instant that is not the start of a day,
 neither of which this proposal settles, and the refusal names the fix.
 Recommendation: refuse now; a separate proposal if a model needs it. Solid.
+
+**Decided: refused**, with the messages of §4.3 unchanged in every stage.
 
 **F. The CLI time grammar reads `last_obs + 6 months` as average months.**
 `parse_time_spec` (`rust/crates/cli/src/fit/runner.rs`) accepts `month(s)` and
@@ -948,6 +1191,9 @@ units on an anchored CLI offset with the DSL's hint (a CLI breaking change), or
 leave the CLI as is and document the difference. Recommendation: refuse, in
 Stage 1b. Leaning.
 
+**Decided: refuse month and year units on an anchored CLI offset, in Stage 1b**,
+with the DSL's hint (Stage 1b test 6).
+
 **G. Forcing `lag` and sinusoidal `phase` keep the average.** Neither is in
 D65's list (`dt`, `period`). A lag is a delay on a continuous signal and a phase
 is an offset within a period of average length; neither is stepped along the
@@ -955,15 +1201,24 @@ calendar, so they fall under D65's reasoning. The alternative is to refuse month
 units there, as `at_day` does. Recommendation: average, documented in the spec's
 unit table. Leaning.
 
+**Decided: average**, in every stage, documented in the spec's unit table.
+
 **H. Comparisons with `t` and instant-parameter bounds are instant positions.**
 Found while drafting (§1.3): `if t >= 6 'months` in a rate and
 `tau : instant in [0 'days, 6 'months]` fold the average today. Making them
 instant positions changes `t >= 6 'months` from 182.62125 to 182 and refuses
 `t - 1 'months`. Recommendation: include in Stage 1. Solid.
 
+**Decided: included, in Stage 1a.** Under 1a both are refused (E321):
+`t >= 6 'months` with the instant hint, `t - 1 'months` with the run-time base
+hint. Stage 1b resolves the first to 182.
+
 ## 10. Defects found while drafting, outside this proposal
 
-Each verified (run) on `842d3b66a`; none is fixed here.
+Each verified (run) on `842d3b66a`. The first two are not fixed here; the last
+two are fixed by Stage 1a, because `Lower.instant` judges an anchored `to` once
+and returns a placeholder on refusal, and because a recurring `from` and `to`
+are instant positions.
 
 - `timepoints { }` is parsed and dropped (`| DTimepoints _ -> ()` in
   `expander.ml`); the spec marks the block "partially implemented". A model
@@ -978,7 +1233,8 @@ Each verified (run) on `842d3b66a`; none is fixed here.
   first.
 - E322's message on a recurring `from` or `to` ("calendar duration `6 'months`
   in recurring schedule `from = ...`") gives the cadence hint ("Use every = 30
-  'days …"), though `from` is an instant. Stage 1b replaces both by resolution.
+  'days …"), though `from` is an instant. Stage 1a replaces both with the
+  instant refusal (E321, the instant hint); Stage 1b resolves a single step.
 
 ## Appendix: verification transcript
 
