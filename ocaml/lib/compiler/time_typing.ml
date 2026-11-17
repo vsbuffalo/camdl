@@ -398,7 +398,10 @@ let hint_calendar_plus_instant ?(exact_fn = "add_calendar_months") (span : (int 
       "calendar months/years aren't invertible spans \
        (e.g. date(\"2021-01-31\") + 1 month = date(\"2021-02-28\") because \
        day-31 clamps to day-28 in Feb 2021). \
-       For a calendar-exact date use %s(d, N)." exact_fn
+       For a calendar-exact date use %s(d, N); the one-step calendar rule \
+       reads `d + N 'months` as that date only in a date position (an `at` \
+       entry, `simulate { to }`, the value compared with `t`), not inside a \
+       `let` or another expression." exact_fn
   in
   match span with
   | Some (days, rendered) ->
@@ -416,9 +419,9 @@ let hint_time_unit_months_with_origin =
    model silently changes meaning to the new axis: \
    simulate { from / to }, at [...] schedules on interventions and events, \
    and the time column of any --data file. \
-   Annotate each with a date: `to = add_calendar_months(origin, 600)` or \
-   `to = date(\"1940-12-01\")`; a calendar duration such as `600 'months` \
-   in one of these positions is refused (E321). \
+   Annotate each with a unit literal (`to = 600 'months` is the date 600 \
+   calendar months after the origin, by the one-step calendar rule) or a \
+   date literal (`to = date(\"1940-12-01\")`) to preserve intent. \
    Typed positions are unaffected: rate parameters declared with \
    'per_month continue to work, and lengths such as `dt = 1 'months` \
    continue to mean the average month (≈ 30.44 days)."
@@ -435,8 +438,10 @@ let hint_calendar_cadence ~(months : int option) (span : (int * string) option) 
     | None -> "or write a fixed cadence in 'days or 'weeks."
   in
   Printf.sprintf
-    "a calendar cadence counts whole months from its start, which one fixed \
-     step cannot represent. List the calendar dates instead, with \
+    "the one-step calendar rule resolves one calendar step to a date, not a \
+     repeating schedule: a calendar cadence counts whole months from its \
+     start, which one fixed step cannot represent. List the calendar dates \
+     instead, with \
      `date_range(<start>, <end>, calendar_months = %s)` in an `at` list, %s"
     months fixed
 
@@ -539,3 +544,31 @@ let rec show_short (e : expr) : string =
   | ECond (_, a, b) ->
     Printf.sprintf "(if … then %s else %s)" (show_short a) (show_short b)
   | _ -> "…"
+
+(* An expression as the modeller wrote it, for a message that quotes the whole
+   of a date position (`date("2020-02-26") + 1 'years + 3 'days`): arithmetic
+   with the parentheses its precedence needs and no more, `date(...)` with its
+   string, and calendar calls with their arguments. Anything else is rendered
+   by [show_short]. *)
+let show_source (e : expr) : string =
+  let prec = function
+    | EBinOp ((Add | Sub), _, _) -> 1
+    | EBinOp ((Mul | Div), _, _) -> 2
+    | EUnOp (Neg, _) -> 3
+    | _ -> 4
+  in
+  let rec go e =
+    match e with
+    | EBinOp (((Add | Sub | Mul | Div) as op), l, r) ->
+      let p = prec e in
+      let os = match op with Add -> "+" | Sub -> "-" | Mul -> "*" | _ -> "/" in
+      let side ~strict x = if prec x < p || (strict && prec x = p) then "(" ^ go x ^ ")" else go x in
+      Printf.sprintf "%s %s %s" (side ~strict:false l) os (side ~strict:true r)
+    | EUnOp (Neg, a) -> if prec a < 3 then "-(" ^ go a ^ ")" else "-" ^ go a
+    | EFuncCall ("date", [("", EIdent (s, _))]) -> Printf.sprintf "date(%S)" s
+    | EFuncCall (("add_calendar_months" | "add_calendar_years") as f, args) ->
+      Printf.sprintf "%s(%s)" f
+        (String.concat ", " (List.map (fun (k, a) -> if k = "" then go a else k ^ " = " ^ go a) args))
+    | _ -> show_short e
+  in
+  go e
