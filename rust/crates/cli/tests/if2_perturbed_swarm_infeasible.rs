@@ -12,7 +12,8 @@
 //! coordinate spreads the swarm over both signs, and its mean lands near
 //! a = 0, where
 //! the epidemic dies: every chain's final estimate scores −∞ (measured at
-//! seeds 1, 2 and 3), while the start is finite (log-likelihood −101.9).
+//! seeds 2, 4 and 6; it is a property of the realisation, not of every seed),
+//! while the start is finite (log-likelihood −101.9).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -98,7 +99,7 @@ fn a_feasible_start_with_too_large_a_step_names_the_perturbed_swarm() {
     let run = |rw_sd: f64| {
         std::fs::write(dir.join("fit.toml"), fit_toml(rw_sd)).unwrap();
         Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
-            .args(["fit", "run", "fit.toml", "--seed", "1", "--force", "--progress", "none"])
+            .args(["fit", "run", "fit.toml", "--seed", "2", "--force", "--progress", "none"])
             .current_dir(dir).env("CAMDL_SKIP_VERSION_CHECK", "1").output().unwrap()
     };
 
