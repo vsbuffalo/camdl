@@ -35,3 +35,6 @@ impl Model {
         self.n
     }
 }
+
+/// A count and its weight, as a tuple struct.
+pub struct Weighted(pub u32, f64);
