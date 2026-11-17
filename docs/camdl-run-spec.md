@@ -4346,7 +4346,7 @@ writes the predicted-vs-observed pair:
 $ camdl fit predict fits/02_posterior.toml --n-draws 20
 fit predict: free_forward horizon — subsampling 20 of 60 posterior draws (raise with --n-draws)
 fit predict: one_step horizon — subsampling 20 of 60 posterior draws (raise with --n-draws)
-fit predict: horizon=free_forward+one_step(20 draws) treatment=posterior, 1 scenario(s) [fitted], 1 stream(s), 60 draws from pgas method 'pgas'
+fit predict: mode=free_forward+one_step(20 draws) treatment=posterior, 1 scenario(s) [fitted], 1 stream(s), 60 draws from pgas method 'pgas'
 wrote fits/../results/fits/02_posterior-77595169/predict/<run_id12>/predictive/weekly_cases.tsv
 wrote fits/../results/fits/02_posterior-77595169/predict/<run_id12>/predictive.json
 wrote fits/../results/fits/02_posterior-77595169/predict/<run_id12>/observed/weekly_cases.tsv
