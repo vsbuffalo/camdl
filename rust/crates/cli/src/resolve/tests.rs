@@ -818,12 +818,17 @@ fn cas_identity_pins() {
         // version alone: no level's encoding changed. It declares that the
         // bootstrap filter and IF2 no longer weight, resample, perturb or cool
         // at a stop with no observed value.
-        ("sim", "b2b42b8c523c4d47bbafdc36d121fa286fb89cf239b73ae8208e708c89ec90c7"),
-        ("fit", "1f8dcc930c37a0815efe2b0313aeb33aafe5e55fd3455dd460801c97406018b3"),
-        ("pfilter", "e0b4619bc29dacc3eeebac306b8133fefeddf47fe67e8cfc64ee312c4aaf0302"),
-        ("survey", "63e320e6f4b27e6c67b0c477dcd8a502f34a517673d7f1454e2031d31a422ddf"),
-        ("sim_ensemble", "e14b152ff5e65ab3bc890927e159096bcda5123bdaf1abc3b329a8de6e01b125"),
-        ("profile", "bc7fe6bd8791967ac2dd7de4aafe318f67e08fbbf39ae6c1d0f568927d24e8e8"),
+        //
+        // HASH_VERSION 6 -> 7 (D77) moved every kind once more, for the
+        // version alone. It declares that the bootstrap filter and IF2 no
+        // longer resample on exactly equal weights, and that a binomial
+        // `0` of `0` row is bound as a hole.
+        ("sim", "9a252a6421aab7756627ebd97b40583cbd577e6cc7a8e3346bfbeb98ab3c835a"),
+        ("fit", "0a69d0db38dd80a2eb317cb74ab71958705d9d0d48947652681c7487844317b5"),
+        ("pfilter", "0dbf0a413122b69058add9f327298974f3f4a48e1618e2a1df1760dc83d6dc50"),
+        ("survey", "dd18b414b62c974436fbf6de6f2789c4730eb8564de8d14bccc2418797cbfa63"),
+        ("sim_ensemble", "4847e1bf2862356d2e2af3a12b5c523942673758489a77a35c93a58fb47291a5"),
+        ("profile", "8601e6f12fd57c073a3deb5578c24c487ef8e7299ff3a1768cc9fabfb76e334b"),
     ];
     // Compared as whole lists so a failure reports EVERY kind that moved, not
     // just the first — the re-key scope is the thing under review.

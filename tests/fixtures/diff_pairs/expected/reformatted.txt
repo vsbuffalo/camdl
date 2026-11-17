@@ -1,5 +1,5 @@
-left   base.ir.json  model 7b67b0e4bcb7148d
-right  reformatted.ir.json  model 7b67b0e4bcb7148d
+left   base.ir.json  model 1dd91f83b9234d83
+right  reformatted.ir.json  model 1dd91f83b9234d83
 
 Model: identical.
 Reported quantities and contrasts: identical.

@@ -1,5 +1,5 @@
-left   base.ir.json  model 7b67b0e4bcb7148d
-right  transitions_reordered.ir.json  model 65678fd451d70814
+left   base.ir.json  model 1dd91f83b9234d83
+right  transitions_reordered.ir.json  model 457ec4af0b3690e6
 
 Model: different.
 Reported quantities and contrasts: identical.
