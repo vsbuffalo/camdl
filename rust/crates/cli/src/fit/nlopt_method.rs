@@ -157,6 +157,15 @@ pub fn run_method(
     // The one dt rule: `FitRunConfig` carries the resolved step.
     let dt = arc_config.if2_config.dt;
 
+    // `chain_results.tsv` is kept current while the chains run: the header
+    // now, and one row the moment each chain finishes. A multi-start search
+    // can run for an hour with its slowest start holding up every other; until
+    // this, nothing about a finished start reached disk before the last one
+    // did, and a run killed partway lost every result it had. The rows land
+    // in completion order; the file is rewritten in chain order once every
+    // chain is in (`write_per_chain_files`, below).
+    let live_results = ChainResultsFile::create(method_dir, &est_names)?;
+
     let t0 = std::time::Instant::now();
     // At most one chain per worker (gh#821, `chain_fanout`).
     let mut chain_outcomes: Vec<(usize, ChainOutcome)> = super::chain_fanout::run_chains(n_chains, |chain_idx| {
@@ -172,8 +181,20 @@ pub fn run_method(
                 &chain_starts[chain_idx],
                 heartbeat,
             );
+            // A failed append costs the live view one row, not the run: the
+            // outcome is still returned, and the final rewrite below writes
+            // every row (or fails the method if the directory is unwritable).
+            if let Err(e) = live_results.append(chain_idx, &outcome) {
+                out.say(format_args!(
+                    "{} chain {}: could not append to {}: {e}",
+                    crate::out::paint::warning_tag(),
+                    ChainIndex(chain_idx),
+                    live_results.path.display()
+                ));
+            }
             (chain_idx, outcome)
         });
+    drop(live_results);
     chain_outcomes.sort_by_key(|(i, _)| *i);
     let elapsed = t0.elapsed();
 
@@ -189,8 +210,10 @@ pub fn run_method(
         .map(|(i, c)| (*i, c.clone()))
         .ok_or_else(|| "no chains ran".to_string())?;
 
-    // Per-chain final params dump for inspection. Written before the refusal
-    // below, so a refused method still records what each chain reached.
+    // Per-chain final params dump for inspection, rewritten in chain order
+    // over the completion-ordered file the chains appended to. Written before
+    // the refusal below, so a refused method still records what each chain
+    // reached.
     write_per_chain_files(method_dir, &chain_outcomes, &est_names)?;
 
     // gh#226 / gh#916. Whole-fit backstop, as in the PGAS, PMMH and IF2
@@ -670,40 +693,96 @@ fn describe_point(
     format!("({})", parts.join(", "))
 }
 
+/// The per-chain results table, one row per chain.
+const CHAIN_RESULTS_FILE: &str = "chain_results.tsv";
+
+/// `chain_results.tsv`'s header line, newline included.
+fn chain_results_header(est_names: &[String]) -> String {
+    let mut line = String::from("chain\tloglik\tstatus\tn_evals");
+    for name in est_names {
+        line.push('\t');
+        line.push_str(name);
+    }
+    line.push('\n');
+    line
+}
+
+/// One chain's `chain_results.tsv` row, newline included. The live append and
+/// the final rewrite both format through this, so a row reads the same in
+/// either.
+fn chain_results_row(chain_idx: usize, c: &ChainOutcome) -> String {
+    use std::fmt::Write;
+    let mut line = format!(
+        "{}\t{:.6}\t{}\t{}",
+        ChainIndex(chain_idx),
+        c.loglik,
+        c.status.as_str(),
+        c.n_evals,
+    );
+    for v in &c.params {
+        write!(line, "\t{v:.10}").expect("writing to a String cannot fail");
+    }
+    line.push('\n');
+    line
+}
+
+/// `chain_results.tsv` while the chains run: created with its header, then
+/// one row appended per chain as that chain finishes, from whichever worker
+/// ran it.
+///
+/// Each row is formatted in full first and handed to the file in a single
+/// unbuffered `write_all` under the lock, so a reader tailing the file sees
+/// whole rows only, and a run killed between chains leaves every finished
+/// chain's row on disk. [`TraceWriter`](super::trace_writer::TraceWriter) is
+/// not used: its fixed `index, loglik, log_posterior` columns are not this
+/// table's, and it batches rows behind a `BufWriter`, which is the delay this
+/// file exists to remove.
+struct ChainResultsFile {
+    path: std::path::PathBuf,
+    file: std::sync::Mutex<std::fs::File>,
+}
+
+impl ChainResultsFile {
+    fn create(method_dir: &Path, est_names: &[String]) -> Result<Self, String> {
+        use std::io::Write;
+        let path = method_dir.join(CHAIN_RESULTS_FILE);
+        let mut file = std::fs::File::create(&path)
+            .map_err(|e| format!("creating {}: {e}", path.display()))?;
+        file.write_all(chain_results_header(est_names).as_bytes())
+            .map_err(|e| format!("writing {}: {e}", path.display()))?;
+        Ok(ChainResultsFile { path, file: std::sync::Mutex::new(file) })
+    }
+
+    fn append(&self, chain_idx: usize, c: &ChainOutcome) -> std::io::Result<()> {
+        use std::io::Write;
+        let row = chain_results_row(chain_idx, c);
+        // A worker that panicked mid-append wrote a whole row or none of it
+        // (one `write_all` of a short line); the file is still usable.
+        let mut file = self.file.lock().unwrap_or_else(|p| p.into_inner());
+        file.write_all(row.as_bytes())?;
+        file.flush()
+    }
+}
+
+/// The finished `chain_results.tsv`: every chain's row in chain order.
+/// Written to a sibling and renamed into place, so a viewer reading the file
+/// during the swap sees either the completion-ordered rows or the sorted ones,
+/// never a truncated file.
 fn write_per_chain_files(
     method_dir: &Path,
     chain_outcomes: &[(usize, ChainOutcome)],
     est_names: &[String],
 ) -> Result<(), String> {
-    use std::io::Write;
-    let path = method_dir.join("chain_results.tsv");
-    let mut f = std::fs::File::create(&path)
-        .map_err(|e| format!("creating {}: {}", path.display(), e))?;
-    write!(f, "chain\tloglik\tstatus\tn_evals").map_err(io_err)?;
-    for name in est_names {
-        write!(f, "\t{name}").map_err(io_err)?;
-    }
-    writeln!(f).map_err(io_err)?;
+    let path = method_dir.join(CHAIN_RESULTS_FILE);
+    let tmp = method_dir.join(format!("{CHAIN_RESULTS_FILE}.tmp"));
+    let mut text = chain_results_header(est_names);
     for (chain_idx, c) in chain_outcomes {
-        write!(
-            f,
-            "{}\t{:.6}\t{}\t{}",
-            ChainIndex(*chain_idx),
-            c.loglik,
-            c.status.as_str(),
-            c.n_evals,
-        )
-        .map_err(io_err)?;
-        for v in &c.params {
-            write!(f, "\t{v:.10}").map_err(io_err)?;
-        }
-        writeln!(f).map_err(io_err)?;
+        text.push_str(&chain_results_row(*chain_idx, c));
     }
-    Ok(())
-}
-
-fn io_err(e: std::io::Error) -> String {
-    format!("io error: {e}")
+    std::fs::write(&tmp, text).map_err(|e| format!("writing {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).map_err(|e| {
+        format!("moving {} into place at {}: {e}", tmp.display(), path.display())
+    })
 }
 
 /// Two-leg convergence diagnostic for NLopt methods — generalises IF2's
@@ -1341,4 +1420,109 @@ mod tests {
              got {} entries", v.chain_agreement.len());
         assert_eq!(v.delta_loglik, 0.0);
     }
+
+    // ── chain_results.tsv, live and final ─────────────────────────────
+
+    /// The format `chain_results.tsv` had when it was written once, after the
+    /// last chain: header, then every chain's row in chain order. Kept here
+    /// verbatim so the shared row formatter is checked against it, not
+    /// against itself.
+    fn chain_results_as_written_once(chains: &[(usize, ChainOutcome)], est: &[String]) -> String {
+        let mut s = String::from("chain\tloglik\tstatus\tn_evals");
+        for n in est { s.push_str(&format!("\t{n}")); }
+        s.push('\n');
+        for (i, c) in chains {
+            s.push_str(&format!("{}\t{:.6}\t{}\t{}", ChainIndex(*i), c.loglik, c.status.as_str(), c.n_evals));
+            for v in &c.params { s.push_str(&format!("\t{v:.10}")); }
+            s.push('\n');
+        }
+        s
+    }
+
+    fn three_chains() -> Vec<(usize, ChainOutcome)> {
+        vec![
+            (0, outcome(-100.25, vec![0.5, 2.0], OptStatus::Converged(SuccessState::XtolReached))),
+            (1, outcome(-110.0, vec![0.4, 1.5], OptStatus::MaxEvalReached)),
+            (2, outcome(f64::NEG_INFINITY, vec![0.1, 3.0], OptStatus::Failed)),
+        ]
+    }
+
+    /// A chain's row is on disk the moment it is appended, in completion
+    /// order, and stays there if the run goes no further — the state a run
+    /// killed after two of three chains leaves behind.
+    #[test]
+    fn finished_chains_are_on_disk_before_the_run_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let est = names(2);
+        let chains = three_chains();
+        let live = ChainResultsFile::create(dir.path(), &est).unwrap();
+        let path = dir.path().join(CHAIN_RESULTS_FILE);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), chain_results_header(&est),
+            "the header is on disk before any chain finishes");
+
+        live.append(2, &chains[2].1).unwrap();
+        live.append(0, &chains[0].1).unwrap();
+        // Read while the writer is still open, as a viewer would.
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3, "header + the two finished chains: {text:?}");
+        assert!(lines[1].starts_with("2\t") && lines[2].starts_with("0\t"),
+            "rows in completion order: {text:?}");
+        assert!(text.ends_with('\n'), "every row is a complete line");
+        drop(live); // the run dies here: no final rewrite
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after, text, "the finished rows survive a run that never reaches the end");
+    }
+
+    /// The final rewrite puts every row in chain order, byte for byte as the
+    /// file was when it was written once at the end, and leaves no sibling.
+    #[test]
+    fn the_finished_file_is_unchanged_from_the_write_once_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let est = names(2);
+        let chains = three_chains();
+        let live = ChainResultsFile::create(dir.path(), &est).unwrap();
+        for i in [1, 2, 0] {
+            live.append(i, &chains[i].1).unwrap();
+        }
+        drop(live);
+        write_per_chain_files(dir.path(), &chains, &est).unwrap();
+        let text = std::fs::read_to_string(dir.path().join(CHAIN_RESULTS_FILE)).unwrap();
+        assert_eq!(text, chain_results_as_written_once(&chains, &est));
+        let entries: Vec<_> = std::fs::read_dir(dir.path()).unwrap()
+            .map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from(CHAIN_RESULTS_FILE)],
+            "the rename leaves only chain_results.tsv");
+    }
+
+    /// Chains finish on different workers: rows appended concurrently are
+    /// each whole, and none is lost.
+    #[test]
+    fn concurrent_appends_keep_every_row_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let est = names(6);
+        let live = ChainResultsFile::create(dir.path(), &est).unwrap();
+        const N: usize = 64;
+        std::thread::scope(|s| {
+            for i in 0..N {
+                let live = &live;
+                let est = &est;
+                s.spawn(move || {
+                    let c = outcome(-(i as f64), vec![i as f64 / 7.0; est.len()],
+                        OptStatus::Converged(SuccessState::FtolReached));
+                    live.append(i, &c).unwrap();
+                });
+            }
+        });
+        let text = std::fs::read_to_string(dir.path().join(CHAIN_RESULTS_FILE)).unwrap();
+        let rows: Vec<&str> = text.lines().skip(1).collect();
+        assert_eq!(rows.len(), N);
+        let mut seen: Vec<usize> = rows.iter().map(|r| {
+            assert_eq!(r.split('\t').count(), 4 + est.len(), "malformed row {r:?}");
+            r.split('\t').next().unwrap().parse().unwrap()
+        }).collect();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..N).collect::<Vec<_>>());
+    }
+
 }
