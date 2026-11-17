@@ -3,7 +3,7 @@
 //!
 //! The particle filter scores each row from integrator state at its data time,
 //! so a record whose times (here every 2.5 days) miss the default 1-day output
-//! grid fits fine. `fit predict --horizon free_forward` replays its own
+//! grid fits fine. `fit predict --mode free_forward` replays its own
 //! trajectories and reads each row off the *recorded* snapshots, so it used to
 //! refuse — "observation stream 'prev' needs a value at t = 2.5, which is not a
 //! recorded output time" — leaving only an `output { trajectories { every } }`
@@ -164,7 +164,7 @@ fn fit_then_predict(tmp: &Path) -> std::process::Output {
         &bin,
         tmp,
         &["fit", "predict", "--fit", "fit.toml", "--seed", "1", "--n-draws", "10",
-          "--horizon", "free_forward"],
+          "--mode", "free_forward"],
     )
 }
 

@@ -207,7 +207,7 @@ fn fit_predict_applies_a_declared_baseline_scenario() {
     let dir = tmp.path();
     fit(&bin, dir);
     let out = run(&bin, dir, &[
-        "fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward",
+        "fit", "predict", "--fit", "fit.toml", "--mode", "free_forward",
         "--scenario", "baseline", "--seed", "1",
     ]);
     ok(&out, "fit predict --scenario baseline");
@@ -282,7 +282,7 @@ fn an_undeclared_baseline_is_refused_by_every_verb() {
     // written — not partway through, with partial output on disk.
     fit(&bin, dir);
     let stderr = refused(&run(&bin, dir, &[
-        "fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward",
+        "fit", "predict", "--fit", "fit.toml", "--mode", "free_forward",
         "--scenario", "baseline", "--seed", "1",
     ]), "fit predict");
     assert!(stderr.contains("is not declared in the model"),

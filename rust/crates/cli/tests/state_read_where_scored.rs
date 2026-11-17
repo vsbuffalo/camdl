@@ -181,7 +181,7 @@ fn fit_predict_evaluates_each_row_where_it_is_scored() {
          [method]\nalgorithm = \"mh\"\nbackend = \"ode\"\nchains = 2\niterations = 40\nburn_in = 10\n")
         .unwrap();
     ok(camdl(dir, &["fit", "run", "fit.toml"]), "fit run");
-    ok(camdl(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward",
+    ok(camdl(dir, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward",
         "--n-draws", "4"]), "fit predict");
 
     let find = |root: &Path, tail: &str| -> PathBuf {

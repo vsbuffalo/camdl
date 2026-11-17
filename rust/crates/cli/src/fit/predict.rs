@@ -1457,7 +1457,28 @@ struct LeafObs {
     aux: Vec<Vec<(String, f64)>>,
 }
 
+/// The predictive `--mode` and `--horizon` ask for: `None` is every
+/// applicable one. `--horizon` alone means the forecast; the forecast needs a
+/// reach; and a reach means nothing to another mode.
+fn predict_mode(args: &crate::args::FitPredictArgs)
+    -> Result<Option<crate::args::types::PredictModeArg>, String>
+{
+    use crate::args::types::PredictModeArg;
+    match (args.mode, args.horizon.as_deref()) {
+        (None, Some(_)) => Ok(Some(PredictModeArg::Forecast)),
+        (Some(PredictModeArg::Forecast), None) => Err(
+            "--mode forecast needs --horizon DURATION, the reach of the forecast from the \
+             end of the fit's training rows (e.g. --horizon \"4 weeks\").".into()),
+        (Some(m @ (PredictModeArg::FreeForward | PredictModeArg::OneStep)), Some(h)) => Err(format!(
+            "--horizon {h:?} sets the reach of a forecast, but --mode {} is not one; use \
+             --mode forecast (or omit --mode).",
+            if m == PredictModeArg::FreeForward { "free_forward" } else { "one_step" })),
+        (m, _) => Ok(m),
+    }
+}
+
 fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, String> {
+    predict_mode(args)?;
     // 1. Resolve the fit handle (@label / hash prefix / run-dir / fit.toml) →
     //    its segment + config.
     let resolved = crate::fit::handle::resolve_fit_run(args.fit()?).map_err(|e| e.to_string())?;
@@ -1499,17 +1520,17 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
         warn_active_selection(out, sel.polarity(), info, crate::out::paint::stderr());
     }
 
-    // 2b. Resolve which horizon(s) to emit. The one-step horizon is gated by a
-    // backend witness ([`FilterableFit`]); an explicit `--horizon one_step` on a
+    // 2b. Resolve which predictive(s) to emit. The one-step horizon is gated by a
+    // backend witness ([`FilterableFit`]); an explicit `--mode one_step` on a
     // non-filterable fit is a hard error, while the default ("all applicable")
     // silently skips it for those backends. `one_step_fit` is `Some` exactly when
-    // the one-step producer will run.
-    use crate::args::types::HorizonArg;
-    let want_free_forward =
-        matches!(args.horizon, None | Some(HorizonArg::FreeForward));
-    let one_step_fit: Option<FilterableFit> = match args.horizon {
-        Some(HorizonArg::FreeForward) => None,
-        Some(HorizonArg::OneStep) => {
+    // the one-step producer will run. The forecast mode runs neither.
+    use crate::args::types::PredictModeArg;
+    let mode = predict_mode(args)?;
+    let want_free_forward = matches!(mode, None | Some(PredictModeArg::FreeForward));
+    let one_step_fit: Option<FilterableFit> = match mode {
+        Some(PredictModeArg::FreeForward | PredictModeArg::Forecast) => None,
+        Some(PredictModeArg::OneStep) => {
             // EXPLICIT request: a non-filterable fit is a hard error with a redirect.
             Some(FilterableFit::from_posterior(posterior.clone()).map_err(|why| {
                 one_step_refusal(why, posterior.method, &posterior.name)
@@ -1521,6 +1542,9 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
             FilterableFit::from_posterior(posterior.clone()).ok()
         }
     };
+    if mode == Some(PredictModeArg::Forecast) {
+        crate::fit::forecast_output::refuse_unsupported(args, &posterior)?;
+    }
 
     // 3. Resolve the model IR. Prefer the IR archived in the fit leaf at
     //    `fit run` time (gh#322 — a self-contained, portable run); fall back to
@@ -1637,7 +1661,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     // filters the OBSERVED data through the fitted model and carries no overlay
     // at all. When the tail is being built, this is a deterministic failure of
     // the tail, recorded below and reported in `report.json`; when it is not
-    // (`--horizon one_step`), the scenario could never have been honoured by
+    // (`--mode one_step`), the scenario could never have been honoured by
     // anything this run produces, so it is a plain usage error with no artifact
     // to salvage.
     let scenario_horizon_refusal: Option<String> = scenario_refs.iter().find_map(|sref| {
@@ -1772,6 +1796,37 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
         sim::CompiledModel::new(model_for_obs)
             .map_err(|e| format!("compiling model for prediction: {e:?}"))?,
     );
+
+    // The forecast mode: the fixed-origin forecast and nothing else.
+    if mode == Some(PredictModeArg::Forecast) {
+        let schema = crate::run_meta::read_fit_sidecar(&segment)?.and_then(|s| s.schema);
+        let (mut written, failures) = crate::fit::forecast_output::run_forecast(
+            out,
+            crate::fit::forecast_output::ForecastJob {
+                args,
+                model: &model,
+                seeded: &model_for_one_step,
+                compiled: &compiled,
+                config: &config,
+                fit_base: &fit_base,
+                posterior: &posterior,
+                segment: &segment,
+                out_dir: &out_dir,
+                run_id: &run_id,
+                options: &options,
+                calendar: &calendar,
+                schema: schema.as_ref(),
+                dt: one_step_dt,
+                seed: args.seed.unwrap_or(1),
+            },
+        )?;
+        written.push(crate::fit::failures::write_report(
+            &out_dir,
+            &crate::chain_selection::artifact_name("report", posterior.selection()),
+            &failures,
+        )?);
+        return Ok(PredictOutcome { written, failures });
+    }
 
     // 5. Load the observed data per leaf (the cadence, the observed half, and
     // what each row covers — resolved against the compiled model's projections).
@@ -3355,7 +3410,10 @@ pub(crate) const DEFAULT_PREDICT_DRAWS: usize = 200;
 /// own sub-addresses inside the directory and are not repeated here.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub(crate) struct PredictOptions {
-    pub horizon: &'static str,
+    pub mode: &'static str,
+    /// The forecast's `--horizon` as written; absent outside forecast mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reach: Option<String>,
     pub n_draws: usize,
     pub seed: u64,
     pub stream: Option<String>,
@@ -3370,7 +3428,8 @@ impl PredictOptions {
     /// What `fit predict <run>` with no options uses.
     pub(crate) fn defaults() -> Self {
         PredictOptions {
-            horizon: "all",
+            mode: "all",
+            reach: None,
             n_draws: DEFAULT_PREDICT_DRAWS,
             seed: 1,
             stream: None,
@@ -3385,17 +3444,21 @@ impl PredictOptions {
     /// The free-forward horizon alone, every other option at its default —
     /// what `fit table --quantity` derives with.
     pub(crate) fn free_forward() -> Self {
-        PredictOptions { horizon: "free_forward", ..Self::defaults() }
+        PredictOptions { mode: "free_forward", ..Self::defaults() }
     }
 
     pub(crate) fn of(args: &crate::args::FitPredictArgs) -> Self {
-        use crate::args::types::HorizonArg;
+        use crate::args::types::PredictModeArg;
         PredictOptions {
-            horizon: match args.horizon {
-                None => "all",
-                Some(HorizonArg::FreeForward) => "free_forward",
-                Some(HorizonArg::OneStep) => "one_step",
+            // An invalid combination is refused by [`predict_mode`] before
+            // any output is addressed; this reads the same flags.
+            mode: match (args.mode, args.horizon.is_some()) {
+                (None, false) => "all",
+                (Some(PredictModeArg::FreeForward), _) => "free_forward",
+                (Some(PredictModeArg::OneStep), _) => "one_step",
+                (Some(PredictModeArg::Forecast), _) | (None, true) => "forecast",
             },
+            reach: args.horizon.clone(),
             n_draws: args.n_draws.unwrap_or(DEFAULT_PREDICT_DRAWS),
             seed: args.seed.unwrap_or(1),
             stream: args.stream.clone(),
@@ -4063,7 +4126,7 @@ fn leaf_name(leaf: &str, method: Option<FitAlgorithm>) -> String {
     method.map(|m| m.as_str()).unwrap_or("posterior").to_string()
 }
 
-/// The actionable refusal for an explicit `--horizon one_step` on a fit whose
+/// The actionable refusal for an explicit `--mode one_step` on a fit whose
 /// backend cannot drive a particle filter. ODE's one-step predictive is
 /// identical to free-forward (deterministic given θ), so the redirect points the
 /// user there rather than emit a relabelled-identical band.
@@ -4079,7 +4142,7 @@ fn one_step_refusal(why: NotFilterable, method: Option<FitAlgorithm>, leaf: &str
              reduces to the observation model at the deterministic state, identical to \
              the free-forward band. There is no separate one-step object to emit.\n  \
              Use the free-forward horizon instead:\n    \
-             camdl fit predict --fit <run> --horizon free_forward"
+             camdl fit predict --fit <run> --mode free_forward"
         ),
         NotFilterable::NotAnInferenceBackend => format!(
             "the '{leaf}' method leaf ran on the Gillespie backend, which is not an \
@@ -4131,8 +4194,8 @@ fn plugin_refusal(method: Option<FitAlgorithm>, leaf: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    const FREE_FORWARD_KEY: &str = "9ef30aee";
-    const SCENARIOS_AB_KEY: &str = "3e5a4f48";
+    const FREE_FORWARD_KEY: &str = "195dbcd2";
+    const SCENARIOS_AB_KEY: &str = "df45cbda";
 
     /// gh#896: a predict's address key is pinned. It names stored outputs, so a
     /// change to it — a reordered or renamed field of `PredictOptions`, a new
@@ -4727,7 +4790,7 @@ mod tests {
     fn one_step_refusal_for_ode_redirects_to_free_forward() {
         let msg = one_step_refusal(NotFilterable::Deterministic, Some(FitAlgorithm::Mh), "posterior");
         assert!(msg.contains("ODE"), "names the backend: {msg}");
-        assert!(msg.contains("--horizon free_forward"), "redirects to free-forward: {msg}");
+        assert!(msg.contains("--mode free_forward"), "redirects to free-forward: {msg}");
     }
 
     #[test]

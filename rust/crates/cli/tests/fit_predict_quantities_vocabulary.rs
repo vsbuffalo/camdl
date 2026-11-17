@@ -194,7 +194,7 @@ impl Fit {
             "fit",
             "predict",
             self.segment.to_str().unwrap(),
-            "--horizon",
+            "--mode",
             "free_forward",
         ];
         if let Some(v) = vocab {

@@ -121,17 +121,20 @@ impl ForwardBackend {
     }
 }
 
-/// Which predictive horizon `camdl fit predict` emits. ABSENT on the command
-/// line = "all applicable" (the default): a chain-binomial fit emits both
-/// `free_forward` and `one_step`; an ODE fit emits `free_forward` only (its
-/// one-step is identical, so it is simply not applicable — no error). An
-/// explicit `--horizon one_step` on an ODE fit is a hard error with a redirect.
+/// Which predictive `camdl fit predict` emits (`--mode`). ABSENT on the
+/// command line = "all applicable" (the default): a chain-binomial fit emits
+/// both `free_forward` and `one_step`; an ODE fit emits `free_forward` only
+/// (its one-step is identical, so it is simply not applicable — no error). An
+/// explicit `--mode one_step` on an ODE fit is a hard error with a redirect.
+/// `forecast` is the fixed-origin forecast and needs `--horizon`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub enum HorizonArg {
+pub enum PredictModeArg {
     #[value(name = "free_forward", alias = "free-forward")]
     FreeForward,
     #[value(name = "one_step", alias = "one-step")]
     OneStep,
+    #[value(name = "forecast")]
+    Forecast,
 }
 
 /// CLI override for the ODE integrator METHOD (gh#166). Method-only by design:

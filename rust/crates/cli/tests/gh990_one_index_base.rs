@@ -319,7 +319,7 @@ fn a_pgas_leaf_numbers_its_chains_from_zero_on_every_surface() {
 
     // `--exclude-chains 1` drops the second chain: the one whose draws carry
     // `chain = 1` in draws.tsv, and whose trace is chain_1/.
-    ok(&camdl(dir, &["fit", "predict", &seg_s, "--horizon", "free_forward",
+    ok(&camdl(dir, &["fit", "predict", &seg_s, "--mode", "free_forward",
         "--exclude-chains", "1"]), "predict --exclude-chains 1");
     let prov: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(predict_out(&seg).join("predictive-excl1.json")).unwrap()).unwrap();
@@ -329,7 +329,7 @@ fn a_pgas_leaf_numbers_its_chains_from_zero_on_every_surface() {
 
     // A chain this fit does not have is refused, and the message states the
     // range in the same base.
-    let bad = camdl(dir, &["fit", "predict", &seg_s, "--horizon", "free_forward",
+    let bad = camdl(dir, &["fit", "predict", &seg_s, "--mode", "free_forward",
         "--exclude-chains", "2"]);
     assert!(!bad.status.success(), "chain 2 is not a chain of a two-chain fit");
     let e = String::from_utf8_lossy(&bad.stderr);
@@ -337,7 +337,7 @@ fn a_pgas_leaf_numbers_its_chains_from_zero_on_every_surface() {
         "the refusal names the valid range 0..1:\n{e}");
 
     // `--by-chain`: the `chain` column carries 0, 1 and `all`.
-    ok(&camdl(dir, &["fit", "predict", &seg_s, "--horizon", "free_forward", "--by-chain"]),
+    ok(&camdl(dir, &["fit", "predict", &seg_s, "--mode", "free_forward", "--by-chain"]),
         "predict --by-chain");
     let pred = std::fs::read_to_string(predict_out(&seg).join("predictive").join("weekly_cases.tsv")).unwrap();
     let mut lines = pred.lines();
@@ -388,7 +388,7 @@ fn a_leaf_with_one_based_chain_directories_is_refused_not_misread() {
     refused(camdl(dir, &["fit", "summary", &seg_s, "--format", "md"]), "fit summary --format md");
     refused(camdl(dir, &["fit", "summary", &seg_s, "--format", "json", "--exclude-chains", "1"]),
         "fit summary --format json --exclude-chains 1");
-    refused(camdl(dir, &["fit", "predict", &seg_s, "--horizon", "free_forward"]), "fit predict");
+    refused(camdl(dir, &["fit", "predict", &seg_s, "--mode", "free_forward"]), "fit predict");
     // `fit table --quantity` and `compare` fall back to a point estimate when a
     // fit has no posterior cloud; the refusal must not be taken for that.
     let fits = dir.join("results").join("fits").to_string_lossy().into_owned();

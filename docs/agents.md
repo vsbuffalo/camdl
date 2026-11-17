@@ -69,7 +69,7 @@ which observation noise cannot dilute) and `observed/<stream>.tsv` under the run
 directory. Join the two on `(time, <dims>)` and plot — do not glob the run store
 for `trace.tsv`, re-inject fixed params, shell `simulate --draws`, and
 pivot/quantile by hand; that reconstruction is exactly what this verb owns. Omit
-`--horizon` for all applicable horizons (chain-binomial → `free_forward` +
+`--mode` for all applicable horizons (chain-binomial → `free_forward` +
 `one_step`; ODE → `free_forward`).
 
 Two reflexes it drills (and you should not import elsewhere): a failing

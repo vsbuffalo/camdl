@@ -225,7 +225,7 @@ fn an_anchored_fit_replays_through_its_own_source() {
     // `fit predict --quantities` compiles a vocabulary against the same
     // source and compares it with the archived model the same way.
     std::fs::write(f.dir.join("vocab.camdl"), "quantities {\n  peak_I = max(I)\n}\n").unwrap();
-    let out = run(&f.dir, &["fit", "predict", seg, "--horizon", "free_forward", "--quantities", "vocab.camdl"]);
+    let out = run(&f.dir, &["fit", "predict", seg, "--mode", "free_forward", "--quantities", "vocab.camdl"]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "fit predict --quantities on an anchored fit:\n{err}");
 

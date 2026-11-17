@@ -213,7 +213,7 @@ fn predict_fitted_arm_and_scenario_arms_carry_the_fits_selection() {
     ok(run(tmp.path(), &["fit", "run", &fit.to_string_lossy()]), "fit run");
     let leaf = draws_leaf(&tmp.path().join("res_f"));
     ok(run(tmp.path(), &["fit", "predict", &leaf.to_string_lossy(),
-        "--horizon", "free_forward", "--scenario", "vax,same,novax"]), "fit predict");
+        "--mode", "free_forward", "--scenario", "vax,same,novax"]), "fit predict");
 
     let fitted = predict_rows(&leaf, "fitted", "free_forward");
     // `vax` restates the fit's own selection, and the paired seeds are shared
@@ -249,7 +249,7 @@ fn predict_one_step_filters_through_the_fitted_model() {
         "precondition: the two fits are one fitted model and must share a posterior");
     for l in [&l_both, &l_one] {
         ok(run(tmp.path(), &["fit", "predict", &l.to_string_lossy(),
-            "--horizon", "one_step"]), "fit predict one_step");
+            "--mode", "one_step"]), "fit predict one_step");
     }
     assert_eq!(predict_rows(&l_both, "fitted", "one_step"),
                predict_rows(&l_one, "fitted", "one_step"),
@@ -454,7 +454,7 @@ fn contrast_arms_carry_the_fits_selection() {
     ok(run(tmp.path(), &["fit", "run", &fit.to_string_lossy()]), "fit run");
     let leaf = draws_leaf(&tmp.path().join("res_f"));
     let out = ok(run(tmp.path(), &["fit", "predict", &leaf.to_string_lossy(),
-        "--horizon", "free_forward"]), "fit predict");
+        "--mode", "free_forward"]), "fit predict");
     let stderr = String::from_utf8_lossy(&out.stderr);
     let seg = leaf.parent().unwrap().parent().unwrap();
     let pdir = std::fs::read_dir(seg.join("predict")).unwrap().flatten().next().unwrap().path();

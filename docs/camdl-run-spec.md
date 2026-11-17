@@ -666,7 +666,7 @@ JSON manifest for each that records the full `run_id`. Two runs of one problem
 keep separate predictives, and each file is attributable to the run it replays.
 
 The directory is also keyed by the predict options that shape its output —
-`--horizon`, `--n-draws`, `--seed`, `--stream`, `--scenario`/`--enable`/
+`--mode`, `--horizon`, `--n-draws`, `--seed`, `--stream`, `--scenario`/`--enable`/
 `--disable`, `--sweep`, `--by-chain` — resolved to the values used: the defaults
 write `predict/<run_id12>/`, any other set `predict/<run_id12>-<opts8>/` (the
 first 8 hex of the SHA-256 of the options' JSON), and `predictive.json` /
@@ -842,7 +842,7 @@ it does not do is discard the objects that computed. Two kinds are recorded:
 - `evaluation_failed`, at `"free_forward"` — the tail as a whole refused. The
   one-step-ahead band is data-conditioned and never reaches the forecast
   horizon, so it cannot be invalidated by this: it is written, the tail's
-  failure is recorded, and the run exits 1. `--horizon one_step` remains the way
+  failure is recorded, and the run exits 1. `--mode one_step` remains the way
   to ask for that half alone — and because such a run never builds a tail, a
   scenario it could not have honoured is a plain usage error there, refused
   outright.
@@ -6419,7 +6419,7 @@ fit_id     run          label                  stem           method   methods c
 
 Read-only by default: every cell is recovered from the on-disk `run.json` and
 the leaf's outputs. **One flag breaks that rule** — `--quantity <NAME>` may
-_derive_ a value on demand, running `fit predict --horizon free_forward` for any
+_derive_ a value on demand, running `fit predict --mode free_forward` for any
 fit that has not been predicted yet, and writing that fit's `quantities/`
 outputs. Optimizer fits have no posterior cloud, so their cell renders `—`.
 
@@ -7169,7 +7169,7 @@ camdl fit predict [FIT]
   --sweep PARAM=GRID          vary a parameter across the posterior (repeatable).
                               GRID = list | lin(min,max,n) | log10(min,max,n).
                               Free-forward only; same param in a scenario is an error
-  --horizon free_forward|one_step
+  --mode free_forward|one_step
   --n-draws N                 posterior subsample cap for both horizons (default 200)
   --seed N                    RNG seed for y_rep sampling (default 1)
   --exclude-chains IDS        drop chain ids (counted from 0) before banding; always warns

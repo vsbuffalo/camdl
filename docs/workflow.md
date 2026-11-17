@@ -473,13 +473,13 @@ obs  = pl.read_csv(".../observed/onset.tsv",   separator="\t")
 ```
 
 **Two horizons answer two questions** (see
-[`camdl docs diagnosing-fits`](diagnosing-fits.md) §5). Omit `--horizon` to emit
+[`camdl docs diagnosing-fits`](diagnosing-fits.md) §5). Omit `--mode` to emit
 all applicable for the fit's backend:
 
-- `--horizon free_forward` — the generative check: replay the fitted model from
+- `--mode free_forward` — the generative check: replay the fitted model from
   the start, never re-anchored to data. The harshest test, and what exposes
   generative misspecification. Available on any backend.
-- `--horizon one_step` — the honest short-horizon forecast `p(y_t | y_{1:t-1})`:
+- `--mode one_step` — the honest short-horizon forecast `p(y_t | y_{1:t-1})`:
   re-condition on the data each step. Chain-binomial only (an ODE fit's one-step
   is identical to its free-forward and is refused with a redirect). Pools over a
   posterior subsample (`--n-draws`, default 200); both horizons stack in the

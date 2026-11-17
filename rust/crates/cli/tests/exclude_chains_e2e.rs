@@ -328,7 +328,7 @@ fn exclude_outlier_chain_moves_bands_and_is_recorded() {
     let seg_str = seg.to_string_lossy().into_owned();
 
     // Full cloud (all 4 chains): free-forward predictive.
-    let out = run(&bin, &tmp, &["fit", "predict", &seg_str, "--horizon", "free_forward"]);
+    let out = run(&bin, &tmp, &["fit", "predict", &seg_str, "--mode", "free_forward"]);
     assert!(out.status.success(), "full predict failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let full = std::fs::read_to_string(predict_out(&seg).join("predictive").join("weekly_cases.tsv")).unwrap();
     let full_rows = free_forward_rows(&full);
@@ -347,7 +347,7 @@ fn exclude_outlier_chain_moves_bands_and_is_recorded() {
     let out = run(
         &bin,
         &tmp,
-        &["fit", "predict", &seg_str, "--horizon", "free_forward", "--exclude-chains", "3"],
+        &["fit", "predict", &seg_str, "--mode", "free_forward", "--exclude-chains", "3"],
     );
     assert!(out.status.success(), "excluded predict failed:\n{}", String::from_utf8_lossy(&out.stderr));
     // The non-quietable warning fired, naming the dropped chain.
@@ -418,7 +418,7 @@ fn exclude_well_mixed_chain_barely_moves_but_is_recorded() {
     let out = run(
         &bin,
         &tmp,
-        &["fit", "predict", &seg_str, "--horizon", "free_forward", "--exclude-chains", "3"],
+        &["fit", "predict", &seg_str, "--mode", "free_forward", "--exclude-chains", "3"],
     );
     assert!(out.status.success(), "baseline exclude-3 failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let base_rows = free_forward_rows(
@@ -430,7 +430,7 @@ fn exclude_well_mixed_chain_barely_moves_but_is_recorded() {
     let out = run(
         &bin,
         &tmp,
-        &["fit", "predict", &seg_str, "--horizon", "free_forward", "--exclude-chains", "1,3"],
+        &["fit", "predict", &seg_str, "--mode", "free_forward", "--exclude-chains", "1,3"],
     );
     assert!(out.status.success(), "well-mixed exclude failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let neg_rows = free_forward_rows(
@@ -451,7 +451,7 @@ fn exclude_well_mixed_chain_barely_moves_but_is_recorded() {
     assert_eq!(cs["n_total"], serde_json::json!(4));
 
     // The full cloud (with the outlier) is the reference for the LARGE move.
-    let out = run(&bin, &tmp, &["fit", "predict", &seg_str, "--horizon", "free_forward"]);
+    let out = run(&bin, &tmp, &["fit", "predict", &seg_str, "--mode", "free_forward"]);
     assert!(out.status.success());
     let full_rows = free_forward_rows(
         &std::fs::read_to_string(predict_out(&seg).join("predictive").join("weekly_cases.tsv")).unwrap(),
@@ -485,7 +485,7 @@ fn nonexistent_chain_id_hard_errors() {
     let out = run(
         &bin,
         &tmp,
-        &["fit", "predict", &seg_str, "--horizon", "free_forward", "--exclude-chains", "9"],
+        &["fit", "predict", &seg_str, "--mode", "free_forward", "--exclude-chains", "9"],
     );
     assert!(!out.status.success(), "a chain id not in the fit must be a hard error");
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -505,7 +505,7 @@ fn excluding_every_chain_hard_errors() {
     let out = run(
         &bin,
         &tmp,
-        &["fit", "predict", &seg_str, "--horizon", "free_forward", "--exclude-chains", "0,1,2,3"],
+        &["fit", "predict", &seg_str, "--mode", "free_forward", "--exclude-chains", "0,1,2,3"],
     );
     assert!(!out.status.success(), "excluding every chain must be a hard error");
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -614,7 +614,7 @@ fn predict_subset_recomputes_convergence_agreeing_with_summary() {
 
     // Full cloud (no selection): the band carries the stored full-cloud summary.
     // That is CORRECT for the full cloud and must stay put — the regression guard.
-    let out = run(&bin, &tmp, &["fit", "predict", &seg_str, "--horizon", "free_forward"]);
+    let out = run(&bin, &tmp, &["fit", "predict", &seg_str, "--mode", "free_forward"]);
     assert!(out.status.success(), "full predict failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let (full_rhat_s, full_ess_s) = free_forward_convergence_cells(
         &std::fs::read_to_string(predict_out(&seg).join("predictive").join("weekly_cases.tsv")).unwrap(),
@@ -635,7 +635,7 @@ fn predict_subset_recomputes_convergence_agreeing_with_summary() {
     let out = run(
         &bin,
         &tmp,
-        &["fit", "predict", &seg_str, "--horizon", "free_forward", "--exclude-chains", "3"],
+        &["fit", "predict", &seg_str, "--mode", "free_forward", "--exclude-chains", "3"],
     );
     assert!(out.status.success(), "excluded predict failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let (excl_rhat_s, excl_ess_s) = free_forward_convergence_cells(

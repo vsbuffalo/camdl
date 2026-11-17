@@ -2,7 +2,7 @@
 //! the predictive-ergonomics work. A `fit table` column surfaces the posterior
 //! median (q50) of a scalar generated quantity per fit, read from
 //! `<fit_dir>/quantities/<NAME>.tsv` or DERIVED on demand by spawning
-//! `fit predict --horizon free_forward` for fits that carry a posterior cloud.
+//! `fit predict --mode free_forward` for fits that carry a posterior cloud.
 //!
 //! Properties under test:
 //!   (a) derive-on-demand: a PGAS fit that was NOT predicted gets its `peak`
