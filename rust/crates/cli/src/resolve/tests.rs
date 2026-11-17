@@ -1054,3 +1054,71 @@ fn a_build_with_an_incomplete_engine_identity_never_reads_a_stored_leaf() {
     assert!(root.join(".quarantine").read_dir().unwrap().next().is_some(), "it was quarantined, not deleted");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Proposal 2026-11-17 §1b: two compiles of one forward model whose gradient
+/// maps differ — what a camdlc with an edited autodiff emits — are one model,
+/// and so one run for a method that never reads a gradient, and two runs for
+/// a method that does. Asserted on the whole fit `run_id`, through
+/// `resolve_fit_method`, for every method on each side.
+#[test]
+fn gradient_maps_re_key_the_fits_that_read_them_and_no_other() {
+    use ir::deriv::{CompGradMap, DerivEntry};
+    use ir::expr::{BinOp, Expr};
+    use ir::transition::{DrawMethod, StoichiometryEntry, Transition};
+
+    let compiled_with = |d_rate_d_beta: Expr| -> Model {
+        let mut m = tiny_model();
+        m.transitions = vec![Transition {
+            name: "infection".into(),
+            stoichiometry: vec![StoichiometryEntry("S".into(), -1), StoichiometryEntry("I".into(), 1)],
+            rate: Expr::bin_op(BinOp::Mul, Expr::param("beta"), Expr::pop("I")),
+            metadata: None,
+            draw_method: DrawMethod::Poisson,
+            rate_grad: std::collections::HashMap::from([("beta".to_string(), DerivEntry::Grad(d_rate_d_beta))]),
+            rate_state_grad: CompGradMap(Default::default()),
+            lineage: None,
+        }];
+        m
+    };
+    // The right derivative of beta·I, and a wrong one.
+    let right = compiled_with(Expr::pop("I"));
+    let wrong = compiled_with(Expr::bin_op(BinOp::Mul, Expr::const_(2.0), Expr::pop("I")));
+    assert_eq!(model_digest_hash(&right), model_digest_hash(&wrong), "one forward model");
+
+    let cfg = fit_config();
+    let run_id = |model: &Model, method_toml: &str| {
+        let method: crate::fit::config_v2::Method =
+            toml::from_str(&format!("{method_toml}\nstarts = \"uniform_unconstrained\"\n")).expect("method toml");
+        crate::fit::cas::resolve_fit_method(&crate::fit::cas::FitMethodCtx {
+            model,
+            fit_stem: "sir",
+            ir_version: IRV,
+            engine_version: ENGV,
+            problem: &cfg.problem,
+            data: &Default::default(),
+            method: &method,
+            seed: 7,
+            deps: vec![],
+        })
+        .expect("fit identity")
+        .run_id
+    };
+    let pgas = "algorithm = \"pgas\"\nbackend = \"chain_binomial\"\nchains = 2\nparticles = 100\nsweeps = 10";
+    let reads = [
+        ("pgas with nuts", format!("{pgas}\nuse_nuts = true")),
+        ("nl-lbfgs", "algorithm = \"nl-lbfgs\"\nbackend = \"ode\"\nchains = 1".to_string()),
+    ];
+    let never_reads = [
+        ("pgas --no-nuts", format!("{pgas}\nuse_nuts = false")),
+        ("if2", "algorithm = \"if2\"\nbackend = \"chain_binomial\"\nchains = 2\nparticles = 100\n\
+                 iterations = 10\ncooling = 0.7".to_string()),
+        ("nl-sbplx", "algorithm = \"nl-sbplx\"\nbackend = \"ode\"\nchains = 1".to_string()),
+        ("nl-bobyqa", "algorithm = \"nl-bobyqa\"\nbackend = \"ode\"\nchains = 1".to_string()),
+    ];
+    for (what, toml) in &reads {
+        assert_ne!(run_id(&right, toml), run_id(&wrong, toml), "{what} reads the gradient maps: it must re-key");
+    }
+    for (what, toml) in &never_reads {
+        assert_eq!(run_id(&right, toml), run_id(&wrong, toml), "{what} reads no gradient: it must not re-key");
+    }
+}

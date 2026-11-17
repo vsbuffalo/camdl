@@ -317,6 +317,26 @@ pub fn model_ir_hash(model: &ir::Model) -> ContentHash {
     normalize_for_hash(model).content_hash()
 }
 
+/// [`model_ir_hash`] with the compiler-derived gradient maps folded in
+/// ([`CanonicalHasher::with_gradients`]): `rate_grad`, `rate_state_grad`,
+/// `sigma_sq_grad`, `projection_state_grad`, `ic_grad` and every `Diffable`'s
+/// `grad` / `proj_grad`, a reference to a hoisted subtree hashed as its body.
+///
+/// Model identity leaves those maps out, so that compiling a model with or
+/// without them does not re-key the runs that never read them (proposal
+/// 2026-07-16). A fit whose method reads them puts this digest in its method
+/// level instead (proposal 2026-11-17 §1b): its result depends on the
+/// gradients, and the gradients on the compiler's autodiff, which no other
+/// input of its identity sees. Two models with one forward model and
+/// different gradient maps share a [`model_ir_hash`] and differ here.
+pub fn model_ir_hash_with_gradients(model: &ir::Model) -> ContentHash {
+    let normalized = normalize_for_hash(model);
+    let mut h = CanonicalHasher::new();
+    h.write_u16(crate::hash::HASH_VERSION);
+    h.with_gradients(|h| normalized.hash_into(h));
+    h.finalize()
+}
+
 /// Strip the pure-presentation fields from a model before hashing, so they stay
 /// inert in identity. `output.format` (parquet/tsv) and
 /// `simulation.time_semantics` are *renderings* of the canonical artifact at

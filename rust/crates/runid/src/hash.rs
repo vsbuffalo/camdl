@@ -249,6 +249,11 @@ pub struct CanonicalHasher {
     /// body, by the name the compiler gave it (gh#1046). `None` outside a
     /// model. See [`CanonicalHasher::with_hoisted_bodies`].
     hoisted_bodies: Option<HoistedBodies>,
+    /// Whether the IR's compiler-derived gradient maps are folded in. Off for
+    /// every identity but the gradients a method reads
+    /// ([`crate::inputs::model_ir_hash_with_gradients`]); see
+    /// [`CanonicalHasher::with_gradients`].
+    gradients: bool,
 }
 
 /// The digest of each hoisted subtree's body, keyed by its compiler-assigned
@@ -264,7 +269,7 @@ impl Default for CanonicalHasher {
 
 impl CanonicalHasher {
     pub fn new() -> Self {
-        Self { state: Sha256::new(), hoisted_bodies: None }
+        Self { state: Sha256::new(), hoisted_bodies: None, gradients: false }
     }
 
     /// Run `f` with `bodies` as the table that resolves a reference to a
@@ -275,6 +280,23 @@ impl CanonicalHasher {
         let before = self.hoisted_bodies.replace(bodies);
         f(self);
         self.hoisted_bodies = before;
+    }
+
+    /// Run `f` with the IR's gradient maps folded in, then restore the mode
+    /// in force before. Model identity leaves them out (they are derived from
+    /// the hashed model by the compiler, proposal 2026-07-16); a method that
+    /// reads them hashes them too, so a compiler whose autodiff changed
+    /// re-keys it (proposal 2026-11-17 §1b). Outside this mode every
+    /// encoding is unchanged.
+    pub fn with_gradients(&mut self, f: impl FnOnce(&mut Self)) {
+        let before = std::mem::replace(&mut self.gradients, true);
+        f(self);
+        self.gradients = before;
+    }
+
+    /// Whether the gradient maps are being folded in ([`Self::with_gradients`]).
+    pub fn hashes_gradients(&self) -> bool {
+        self.gradients
     }
 
     /// The digest of the hoisted subtree `name`, when a model is being hashed
@@ -290,7 +312,8 @@ impl CanonicalHasher {
         value: &T,
         bodies: &HoistedBodies,
     ) -> ContentHash {
-        let mut h = Self { state: Sha256::new(), hoisted_bodies: Some(bodies.clone()) };
+        // A hoisted body is an expression; it holds no gradient map.
+        let mut h = Self { state: Sha256::new(), hoisted_bodies: Some(bodies.clone()), gradients: false };
         value.hash_into(&mut h);
         h.finalize()
     }

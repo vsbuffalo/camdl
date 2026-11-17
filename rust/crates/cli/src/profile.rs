@@ -77,6 +77,16 @@ enum ProfileAlgo {
 }
 
 impl ProfileAlgo {
+    /// Whether a cell's result depends on the model's gradient maps: an
+    /// `nl-lbfgs` cell takes `det_grad`'s gradient; IF2 and the
+    /// derivative-free optimizers never evaluate one.
+    fn reads_gradients(self) -> bool {
+        match self {
+            ProfileAlgo::If2 => false,
+            ProfileAlgo::Nlopt(a) => a.uses_gradient(),
+        }
+    }
+
     fn method_kind(self) -> crate::run_meta::FitAlgorithm {
         match self {
             ProfileAlgo::If2  => crate::run_meta::FitAlgorithm::If2,
@@ -193,6 +203,13 @@ struct ProfileMethodLevel<'a> {
     /// Omitted when empty, so a profile without groups keeps its key.
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     simplex_groups: &'a [Vec<String>],
+    /// An `nl-lbfgs` cell climbs the ODE forward-sensitivity gradient, so it
+    /// keys on the model's gradient maps too
+    /// ([`runid::inputs::model_ir_hash_with_gradients`]; proposal 2026-11-17
+    /// §1b, as `fit run`'s gradient-reading methods do). Absent for the
+    /// gradient-free cells, which keep their keys.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gradients: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -1732,6 +1749,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         init: init_method.identity_value(),
         pf_max_substeps: a.inference.pf_max_substeps,
         binomial: a.inference.binomial.unwrap_or_default(),
+        gradients: profile_algo.reads_gradients()
+            .then(|| runid::inputs::model_ir_hash_with_gradients(&model).to_hex().to_string()),
     }, &[]).unwrap_or_else(|e| {
         out.fail(format!("error: profile method identity: {e}"));
     });
@@ -2769,6 +2788,7 @@ mod tests {
             init: init.identity_value(),
             pf_max_substeps: None,
             binomial: sim::rng::BinomialAlgorithm::Btpe,
+            gradients: None,
         }).unwrap();
         let method_literal = serde_json::json!({
             "algorithm": "if2",
@@ -2799,6 +2819,7 @@ mod tests {
             init: init.identity_value(),
             pf_max_substeps: None,
             binomial: sim::rng::BinomialAlgorithm::Btpe,
+            gradients: None,
         }).unwrap();
         let mut literal_with_groups = method_literal.clone();
         literal_with_groups["simplex_groups"] = serde_json::json!(groups);
@@ -2838,6 +2859,7 @@ mod tests {
             init: uniform.identity_value(),
             pf_max_substeps: None,
             binomial: sim::rng::BinomialAlgorithm::Btpe,
+            gradients: None,
         }, &[]).unwrap().into_inner().to_hex();
         assert_eq!(base, "11d76d9cfe912830d6f32260c5bf160d7948b0f664f8f8b408f25e972f8cfb2d", "base level digest moved");
         assert_eq!(method, "069bdb09a59613aefb5133f4c171825f49357bb501109524999614d61a68d959", "method level digest moved");

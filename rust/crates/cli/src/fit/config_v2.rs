@@ -1589,6 +1589,27 @@ impl Algorithm {
         }
     }
 
+    /// Whether this method's result depends on the compiler-emitted gradient
+    /// maps, so that its method level hashes them
+    /// ([`crate::fit::cas`]'s `gradients_read`; proposal 2026-11-17 §1b).
+    /// PGAS with NUTS takes its θ step along the gradient of the
+    /// complete-data likelihood (`sim::inference::pgas_grad`), and `nl-lbfgs`
+    /// climbs the ODE forward-sensitivity gradient (`det_grad`, from
+    /// `nlopt_method`). Every other method, PGAS under `--no-nuts` included,
+    /// evaluates the likelihood and never a gradient.
+    pub fn reads_gradients(&self) -> bool {
+        match self {
+            Algorithm::PGAS { use_nuts, .. } => *use_nuts,
+            Algorithm::NlLbfgs(_) => true,
+            Algorithm::IF2 { .. }
+            | Algorithm::PMMH { .. }
+            | Algorithm::Mh { .. }
+            | Algorithm::PFilter { .. }
+            | Algorithm::NlSbplx(_)
+            | Algorithm::NlBobyqa(_) => false,
+        }
+    }
+
     /// The number of posterior trajectory samples saved to disk (PGAS only;
     /// default 200). An output-shaping knob that `identity_payload` otherwise
     /// omits, but it is folded into the method identity (count-in-the-key):

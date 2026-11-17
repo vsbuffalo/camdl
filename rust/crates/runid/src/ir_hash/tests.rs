@@ -1273,3 +1273,120 @@ fn a_model_level_doc_does_not_re_key_the_model() {
          every fit of every documented model"
     );
 }
+
+// ── Proposal 2026-11-17 §1b: the gradient mode ──────────────────────────────
+
+/// Every compiler-derived gradient map, changed alone, leaves the model's
+/// identity where it was and moves the digest a gradient-reading method keys
+/// on. One case per map, so a map the gradient mode forgets fails by name.
+#[test]
+fn each_gradient_map_moves_the_gradient_digest_and_not_the_model_hash() {
+    use crate::inputs::{model_ir_hash, model_ir_hash_with_gradients};
+    use ir::deriv::{CompGradMap, DerivEntry};
+    use ir::observation::Likelihood;
+    let g = |e: Expr| DerivEntry::Grad(e);
+    let cases: Vec<(&str, Box<dyn Fn(&mut Model)>)> = vec![
+        ("rate_grad", Box::new(|m| {
+            m.transitions[0].rate_grad.insert("beta".into(), g(Expr::pop("S")));
+        })),
+        ("rate_state_grad", Box::new(|m| {
+            m.transitions[0].rate_state_grad = CompGradMap(HashMap::from([("S".into(), g(Expr::param("beta")))]));
+        })),
+        ("an unsupported entry's code", Box::new(|m| {
+            m.transitions[0].rate_grad.insert("beta".into(), DerivEntry::Unsupported {
+                node: "lag".into(), code: ir::deriv::UnsupportedReason::Lag,
+            });
+        })),
+        ("sigma_sq_grad", Box::new(|m| {
+            m.transitions[0].draw_method = DrawMethod::Overdispersed {
+                sigma_sq: Expr::param("sigma_se"),
+                sigma_sq_grad: HashMap::from([("k".into(), g(Expr::const_(1.0)))]),
+            };
+        })),
+        ("projection_state_grad", Box::new(|m| {
+            m.observations[0].projection_state_grad.0.insert("I".into(), g(Expr::param("beta")));
+        })),
+        ("ic_grad", Box::new(|m| {
+            m.ic_grad.insert("I".into(), HashMap::from([("beta".into(), g(Expr::param("beta")))]));
+        })),
+        ("a likelihood's grad", Box::new(|m| match &mut m.observations[0].likelihood {
+            Likelihood::Poisson(p) => { p.rate.grad.insert("rho".into(), g(Expr::pop("S"))); }
+            other => panic!("expected Poisson, got {other:?}"),
+        })),
+        ("a likelihood's proj_grad", Box::new(|m| match &mut m.observations[0].likelihood {
+            Likelihood::Poisson(p) => p.rate.proj_grad = Some(g(Expr::const_(1.0))),
+            other => panic!("expected Poisson, got {other:?}"),
+        })),
+    ];
+    // The sigma_sq case changes the draw method too; its base is the same
+    // draw method with no gradient.
+    let base_for = |what: &str| {
+        let mut m = representative_model();
+        if what == "sigma_sq_grad" {
+            m.transitions[0].draw_method = DrawMethod::Overdispersed {
+                sigma_sq: Expr::param("sigma_se"),
+                sigma_sq_grad: HashMap::new(),
+            };
+        }
+        m
+    };
+    for (what, edit) in cases {
+        let base = base_for(what);
+        let mut m = base_for(what);
+        edit(&mut m);
+        assert_eq!(model_ir_hash(&base), model_ir_hash(&m), "{what}: model identity is gradient-independent");
+        assert_ne!(
+            model_ir_hash_with_gradients(&base),
+            model_ir_hash_with_gradients(&m),
+            "{what}: a gradient-reading method must re-key when it changes"
+        );
+    }
+}
+
+/// The two entries of one gradient map differing only in a display label are
+/// one gradient: only the refusal code is what the entry says.
+#[test]
+fn an_unsupported_entrys_display_label_is_not_hashed() {
+    use crate::inputs::model_ir_hash_with_gradients;
+    use ir::deriv::{DerivEntry, UnsupportedReason};
+    let with_node = |node: &str| {
+        let mut m = representative_model();
+        m.transitions[0].rate_grad.insert("beta".into(), DerivEntry::Unsupported {
+            node: node.into(), code: UnsupportedReason::Mod,
+        });
+        model_ir_hash_with_gradients(&m)
+    };
+    assert_eq!(with_node("mod(t, 7)"), with_node("mod(t,7)"));
+}
+
+/// A subtree hoisted only out of a gradient expression enters the gradient
+/// digest through the reference to it, as its body: a different body under
+/// the same name is a different gradient (gh#1046's table resolves it).
+#[test]
+fn a_gradient_only_hoisted_subtree_enters_the_gradient_digest_as_its_body() {
+    use crate::inputs::{model_ir_hash, model_ir_hash_with_gradients};
+    use ir::deriv::DerivEntry;
+    let with_body = |body: Expr| {
+        let mut m = hoisted_model(vec![("__licm_0", rate_piece()), ("__licm_1", body)], "__licm_0");
+        m.transitions[0].rate_grad.insert("kappa".into(), DerivEntry::Grad(Expr::per_eval_ref("__licm_1")));
+        m
+    };
+    let a = with_body(gradient_only_piece());
+    let b = with_body(Expr::un_op(UnOp::Exp, Expr::param("kappa")));
+    assert_eq!(model_ir_hash(&a), model_ir_hash(&b), "not model identity");
+    assert_ne!(model_ir_hash_with_gradients(&a), model_ir_hash_with_gradients(&b), "but the gradient differs");
+}
+
+/// The gradient mode is scoped: hashing with it leaves every other hash's
+/// bytes alone (the default path is what the goldens pin).
+#[test]
+fn the_gradient_mode_is_off_by_default_and_restored_after() {
+    let m = representative_model();
+    let mut h = CanonicalHasher::new();
+    assert!(!h.hashes_gradients());
+    h.with_gradients(|h| assert!(h.hashes_gradients()));
+    assert!(!h.hashes_gradients());
+    let mut with = m.clone();
+    with.transitions[0].rate_grad.insert("beta".into(), ir::deriv::DerivEntry::Grad(Expr::pop("S")));
+    assert_eq!(m.content_hash(), with.content_hash());
+}
