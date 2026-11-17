@@ -16388,6 +16388,15 @@ let test_tp_unanchored_unchanged () =
       | _ -> Alcotest.fail "expected one scheduled at-time")
    | _ -> Alcotest.fail "expected one intervention")
 
+(* gh#1128: a bare number as `value_at`'s time draws W325, as an `at [...]`
+   entry does. *)
+let test_tp_value_at_bare_w325 () =
+  let d = expect_diag ~code:"W325" (tp_model ~extra:"quantities { q = value_at(I, 60) }" ()) in
+  Alcotest.(check string) "message"
+    "`value_at(…, 60)` in quantity 'q' is a bare number in a time position with \
+     `origin = date(...)` declared — interpreted as internal-time units from origin"
+    d.message
+
 let stage_1a_tests = [
   "simulate to = 2 'years refused", test_tp_refuse_simulate_to_years;
   "simulate from = 6 'months refused", test_tp_refuse_simulate_from_months;
@@ -16410,6 +16419,7 @@ let stage_1a_tests = [
   "hint: years mixed with days offers days only", test_tp_hint_mixed;
   "recurring from is an instant (E321, not E322)", test_tp_recurring_from_is_instant;
   "unanchored spellings keep the average", test_tp_unanchored_unchanged;
+  "value_at(I, 60) draws W325 (gh#1128)", test_tp_value_at_bare_w325;
 ]
 
 let () =
