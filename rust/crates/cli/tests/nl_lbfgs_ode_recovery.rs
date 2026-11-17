@@ -335,6 +335,11 @@ N0 = 10000
     );
 }
 
+/// A scheduled effect the sensitivity cannot cross is refused before any leaf
+/// (gh#275 §1g). The SIA as a fixed-FRACTION transfer is carried now (the
+/// sensitivity jumps with the state; `cli/tests/nl_lbfgs_events.rs` fits such a
+/// model), so the refusal here is the same campaign as a fixed-COUNT transfer,
+/// whose jump `min(count, source)` is not differentiable.
 #[test]
 fn nl_lbfgs_on_a_scheduled_intervention_is_refused_before_any_leaf() {
     let bin = camdl_bin();
@@ -343,7 +348,12 @@ fn nl_lbfgs_on_a_scheduled_intervention_is_refused_before_any_leaf() {
         return;
     }
     let tmp = tempdir("refusal");
-    let ir = compile(tmp.path(), "sia", SIR_WITH_SIA);
+    let counted = SIR_WITH_SIA.replace(
+        "transfer(fraction = cover, from = S, to = V) at [20]",
+        "transfer(count = 500, from = S, to = V) at [20]",
+    );
+    assert_ne!(counted, SIR_WITH_SIA, "the fixture must carry the fraction SIA to rewrite");
+    let ir = compile(tmp.path(), "sia", &counted);
     // Any scorable data will do: the refusal happens before a likelihood is
     // ever evaluated.
     let data = tmp.path().join("cases.tsv");
@@ -387,8 +397,8 @@ N0 = 10000
         "a model the ODE gradient cannot be taken of must not fit silently:\n{stderr}"
     );
     assert!(
-        stderr.contains("intervention") || stderr.contains("scheduled"),
-        "the refusal must name the reason — the scheduled effect:\n{stderr}"
+        stderr.contains("sia") && stderr.contains("transfer(count"),
+        "the refusal must name the intervention and the construct it cannot cross:\n{stderr}"
     );
     assert!(
         stderr.contains("nl-sbplx"),
