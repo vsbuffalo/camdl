@@ -256,8 +256,6 @@ fn the_week_under_way_matches_the_importance_sampling_reference() {
 
     let ((mu, se_mu), (var, se_var), ess) =
         is_reference(&s.compiled, &s.params(), &daily_values(24), 21, 28, 100_000);
-    eprintln!("IS reference: mean {mu:.3} ± {se_mu:.3}, var {var:.2} ± {se_var:.2}, ESS {ess:.0}");
-    eprintln!("driver: mean {:.3} ± {:.3}, var {:.2} ± {:.2}", drv_mean.0, drv_mean.1, drv_var.0, drv_var.1);
     assert!(ess > 1000.0, "the reference needs an effective sample size; got {ess}");
     agree("mean of the week's infections", drv_mean, (mu, se_mu));
     agree("variance of the week's infections", drv_var, (var, se_var));
@@ -268,8 +266,6 @@ fn the_week_under_way_matches_the_importance_sampling_reference() {
     let y_var = pooled_with_se(y, n_draws, |c| mean_var(c).1);
     let want_mean = rho * mu;
     let want_var = rho * rho * var + rho * mu + rho * rho * (var + mu * mu) / kd;
-    eprintln!("reported: mean {:.3} ± {:.3} (want {want_mean:.3}), var {:.2} ± {:.2} (want {want_var:.2})",
-        y_mean.0, y_mean.1, y_var.0, y_var.1);
     agree("mean of the reported weekly count", y_mean, (want_mean, rho * se_mu));
     let se_want = (rho * rho * se_var).hypot(rho * se_mu) * (1.0 + 2.0 * rho / kd);
     agree("variance of the reported weekly count", y_var, (want_var, se_want));
@@ -398,8 +394,74 @@ fn the_conditioning_and_the_declaration_each_move_the_week_by_many_errors() {
     let ((prior, se_prior), (prior_var, _), _) =
         is_reference(&s.compiled, &s.params(), &[], 21, 28, 50_000);
     let ((undeclared, se_und), _, _) = is_reference(&s.compiled, &s.params(), &daily, 14, 28, 50_000);
-    eprintln!("week [21,28): conditioned {week:.2} ± {se_week:.2}; prior {prior:.2} ± {se_prior:.2} \
+    let measured = format!("week [21,28): conditioned {week:.2} ± {se_week:.2}; prior {prior:.2} ± {se_prior:.2} \
                (sd {:.2}); no reset at 21, [14,28): {undeclared:.2} ± {se_und:.2}", prior_var.sqrt());
-    assert!((prior - week).abs() > 10.0 * se_week.hypot(se_prior));
-    assert!((undeclared - week).abs() > 10.0 * se_week.hypot(se_und));
+    assert!((prior - week).abs() > 10.0 * se_week.hypot(se_prior), "{measured}");
+    assert!((undeclared - week).abs() > 10.0 * se_week.hypot(se_und), "{measured}");
+}
+
+/// What declaring a target does to the filter over the observed rows. The
+/// driver puts each target's start and end on the filter's axis. Two cases:
+///
+/// - the target's start is already a stop of the bound data (the week
+///   [21, 28) when a daily row covers [20, 21)): the stops before the origin
+///   are unchanged, so the observed rows' log-likelihood increments and the
+///   particle draws are bit-identical with and without the target;
+/// - the start falls between two data stops (daily rows only on days 23 and
+///   24, so the stops are 22, 23 and 24, and none at 21): the target adds a stop at 21 before the origin,
+///   which costs one more resampling draw. The particles' own random streams
+///   are untouched (the step grid is the same at `dt = 1`), but the
+///   resampling stream advances, so the later increments differ by Monte
+///   Carlo error, not in expectation.
+#[test]
+fn a_targets_start_moves_the_observed_likelihood_only_when_it_is_a_new_stop() {
+    let filter = |s: &Setup, plan: Option<&ForecastPlan>| {
+        let specs = match plan {
+            Some(p) => specs_with_targets(p, &s.streams).unwrap(),
+            None => crate::fit::runner::stream_specs_from_obs_streams(&s.streams),
+        };
+        let compiled = match plan { Some(p) => s.extended(p), None => s.compiled.clone() };
+        let (bound, _) = BoundObs::bind(0.0, specs).unwrap();
+        let obs = MultiStreamObsModel::new(bound, compiled.clone()).unwrap();
+        let times: Vec<f64> = (0..obs.n_observations()).map(|i| obs.obs_time(i)).collect();
+        let process = ChainBinomialProcess::new(compiled);
+        let smc = SMCConfig {
+            n_particles: 200, dt: 1.0, t_start: 0.0, skip_first_obs_from_loglik: false,
+            record_ancestry: false, record_prequential: false, record_predictions: false,
+            max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        };
+        let r = bootstrap_filter(&process, &obs, &s.params(), &smc, 17).unwrap();
+        // The increments at the observed rows (times at or before 24).
+        times.iter().zip(&r.ll_increments)
+            .filter(|(t, _)| **t <= 24.0 + 1e-9)
+            .map(|(t, ll)| (*t, *ll))
+            .collect::<Vec<_>>()
+    };
+    let observed = |v: &[(f64, f64)]| -> Vec<(f64, f64)> {
+        v.iter().copied().filter(|(_, ll)| *ll != 0.0).collect()
+    };
+
+    // A start on an existing stop: identical.
+    let s = fixture_setup(24, "stop_on");
+    let plan = s.plan(7.0, &["weekly_cases"]);
+    assert_eq!(filter(&s, None), filter(&s, Some(&plan)));
+
+    // A start between stops: a new stop at 21 before the origin.
+    let all = std::fs::read_to_string(fixture_dir().join("daily_cases.tsv")).unwrap();
+    let daily: String = all.lines()
+        .filter(|l| l.starts_with("time") || l.starts_with("23\t") || l.starts_with("24\t"))
+        .map(|l| format!("{l}\n")).collect();
+    let weekly = "time\tweekly_cases\n7\tNA\n14\tNA\n".to_string();
+    let s = setup(with_truth(compile(&fixture_source(), "stop_between")), &daily, &weekly, "stop_between").unwrap();
+    let plan = s.plan(7.0, &["weekly_cases"]);
+    let (without, with) = (filter(&s, None), filter(&s, Some(&plan)));
+    let has_21 = |v: &[(f64, f64)]| v.iter().any(|(t, _)| (*t - 21.0).abs() < 1e-9);
+    assert!(!has_21(&without) && has_21(&with), "the target adds a stop at 21");
+    let (a, b) = (observed(&without), observed(&with));
+    assert_eq!(a.len(), b.len());
+    assert_eq!(a[0], b[0], "the increment before the new stop is identical");
+    // After it the resampling stream has advanced by one draw: a different
+    // Monte Carlo realisation of the same likelihood (pending D72, which
+    // decides whether a stop with no observation resamples at all).
+    assert_ne!(a[1..], b[1..], "without {a:?}\n   with {b:?}");
 }
