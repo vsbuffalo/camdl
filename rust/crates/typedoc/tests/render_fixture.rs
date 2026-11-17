@@ -58,9 +58,14 @@ fn writes_one_page_per_module_and_an_index() {
     assert!(index.contains("## Reading the marks"));
 
     let ast = read(dir.path(), "ast.qmd");
+    // A module page has no description: its doc's opening sentence would
+    // otherwise appear twice under the title.
+    assert!(
+        !ast.contains("description:"),
+        "module page has a description:\n{ast}"
+    );
     for line in [
         "title: \"Ast\"",
-        "description: \"The parsed form of a camdl model, before names are resolved.\"",
         "order: 101",
         "Source: [`ocaml/lib/compiler/ast.ml`](https://github.com/vsbuffalo/camdl/blob/main/ocaml/lib/compiler/ast.ml){.td-source}",
         // The odoc doc: a camdl example, code, a list, a cross-module reference.
