@@ -60,6 +60,10 @@ pub struct PfilterCtx<'a> {
     /// `--allow-forcing-extrapolation`: the run may hold a forcing's end value
     /// outside its range (D44), so it is identity.
     pub allow_forcing_extrapolation: bool,
+    /// `--allow-degenerate-rates`: a collapsing rate (a division by an empty
+    /// compartment) is 0 instead of killing the particle, which changes the
+    /// stored loglik, so it is identity.
+    pub allow_degenerate_rates: bool,
     /// Under `--save-final-state` and the `--fit` config's `holdout_after`,
     /// how many leading rows of each stream were bound (by stream name); every
     /// later row was left out of the stored log-likelihood, so it is identity
@@ -98,6 +102,10 @@ struct PfilterConfigLevel<'a> {
     /// one the literal pins.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     allow_forcing_extrapolation: bool,
+    /// Omitted when off, so a run without `--allow-degenerate-rates` keeps the
+    /// key the literal pins.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    allow_degenerate_rates: bool,
     /// The training rows a `--save-final-state` run under `holdout_after`
     /// bound. The data is keyed already; this is what says the rows after
     /// them were cut. Omitted when no row was dropped, so every other run keeps
@@ -138,6 +146,7 @@ pub fn resolve_pfilter(ctx: &PfilterCtx) -> Result<ResolvedPfilter, String> {
         data: &data_sorted,
         objective: ctx.objective,
         allow_forcing_extrapolation: ctx.allow_forcing_extrapolation,
+        allow_degenerate_rates: ctx.allow_degenerate_rates,
         training_rows: ctx.training_rows,
         binomial: ctx.binomial,
     };
@@ -218,7 +227,7 @@ mod tests {
             particles: 100, replicates: 1, dt: 1.0,
             obs_block: "", flow_indices: &flow, data: &data,
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
-            allow_forcing_extrapolation: false, training_rows: None,
+            allow_forcing_extrapolation: false, allow_degenerate_rates: false, training_rows: None,
             binomial: sim::rng::BinomialAlgorithm::Btpe,
         };
         // The literal, verbatim from before the rewrite.
@@ -248,7 +257,7 @@ mod tests {
         let level = |objective| canonical_config_hash(&PfilterConfigLevel {
             particles: 100, replicates: 1, dt: 1.0,
             obs_block: "", flow_indices: &flow, data: &data, objective,
-            allow_forcing_extrapolation: false, training_rows: None,
+            allow_forcing_extrapolation: false, allow_degenerate_rates: false, training_rows: None,
             binomial: sim::rng::BinomialAlgorithm::Btpe,
         }, &[]).unwrap();
         let literal = config_level(100, 1, 1.0, "", &[("cases", hh.as_str())]);
@@ -270,12 +279,32 @@ mod tests {
             particles: 100, replicates: 1, dt: 1.0,
             obs_block: "", flow_indices: &flow, data: &data,
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
-            allow_forcing_extrapolation, training_rows: None,
+            allow_forcing_extrapolation, allow_degenerate_rates: false, training_rows: None,
             binomial: sim::rng::BinomialAlgorithm::Btpe,
         }, &[]).unwrap();
         let literal = config_level(100, 1, 1.0, "", &[("cases", hh.as_str())]);
         assert_eq!(level(false), literal, "off leaves the key unchanged");
         assert_ne!(level(true), literal, "the override must change the config hash");
+    }
+
+    /// `--allow-degenerate-rates` is identity: a collapsing rate is 0 under it
+    /// and kills the particle without it, so the two store different logliks.
+    /// Off, the level is the literal, so no stored leaf re-keys.
+    #[test]
+    fn allow_degenerate_rates_rekeys_the_config_level() {
+        let hh = h(1);
+        let data: Vec<(&str, &str)> = vec![("cases", hh.as_str())];
+        let flow: Vec<u32> = Vec::new();
+        let level = |allow_degenerate_rates| canonical_config_hash(&PfilterConfigLevel {
+            particles: 100, replicates: 1, dt: 1.0,
+            obs_block: "", flow_indices: &flow, data: &data,
+            objective: crate::fit::config_v2::LikelihoodObjective::Full,
+            allow_forcing_extrapolation: false, allow_degenerate_rates, training_rows: None,
+            binomial: sim::rng::BinomialAlgorithm::Btpe,
+        }, &[]).unwrap();
+        let literal = config_level(100, 1, 1.0, "", &[("cases", hh.as_str())]);
+        assert_eq!(level(false), literal, "off leaves the key unchanged");
+        assert_ne!(level(true), literal, "the flag must change the config hash");
     }
 
     /// The training rows a `--save-final-state` run under `holdout_after`
@@ -291,7 +320,7 @@ mod tests {
             particles: 100, replicates: 1, dt: 1.0,
             obs_block: "", flow_indices: &flow, data: &data,
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
-            allow_forcing_extrapolation: false, training_rows,
+            allow_forcing_extrapolation: false, allow_degenerate_rates: false, training_rows,
             binomial: sim::rng::BinomialAlgorithm::Btpe,
         }, &[]).unwrap();
         let literal = config_level(100, 1, 1.0, "", &[("cases", hh.as_str())]);
@@ -315,7 +344,7 @@ mod tests {
             particles: 100, replicates: 1, dt: 1.0,
             obs_block: "", flow_indices: &flow, data: &data,
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
-            allow_forcing_extrapolation: false, training_rows: None,
+            allow_forcing_extrapolation: false, allow_degenerate_rates: false, training_rows: None,
             binomial,
         }, &[]).unwrap();
         let literal = config_level(100, 1, 1.0, "", &[("cases", hh.as_str())]);
