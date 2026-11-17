@@ -632,10 +632,36 @@ After the summary, a doc comment adds only what the declaration cannot show:
 - **An example**, preferably the camdl source that produces the value. A short
   model fragment says more about an AST constructor than a paragraph does.
 
-A doc comment that needs more than a short paragraph is describing a design, and
-the design belongs in a document the comment links to. Link to a published page,
-such as a section of the language specification, when the type implements what
-that page specifies.
+A type's doc comment that needs more than a short paragraph is describing a
+design, and the design belongs in the module's doc comment or the library's
+overview page, described next. Link to a published page, such as a section of
+the language specification, when the type implements what that page specifies.
+
+### Module docs and overview pages explain the design
+
+A type's doc says what one value means. A module's doc comment, the `(** ... *)`
+at the top of the file or the `//!` at the top of a Rust module, says how the
+module is put together: what it receives and what it hands on, which types carry
+its work and how they relate, what it guarantees to the code that uses its
+output, and why it is shaped the way it is. A library's overview page (an odoc
+`index.mld`, or a crate's top-level `//!`) does the same for the whole library,
+stage by stage. These are the pages a new developer reads first, and the place
+where a reviewer learns what each part promises, so that a broken promise is
+visible.
+
+Write the reasons for the design as they stand today. "Names are resolved before
+this pass, so no expression here can refer to an unknown compartment" is a
+reason: it holds now, and it tells a reader what they may rely on. "This pass
+was moved after name resolution to fix a crash" is history, and it is left to
+the commit log. A reason names the property the design protects; history names
+the event that produced it. When the honest reason is that no one has needed
+anything better, say what the design does and leave the reason out.
+
+A module doc follows the same rules as any other page on the site: open with a
+summary sentence that stands alone, define terms on first use, show a short
+example where one helps, and prefer prose to lists. The overview page of the
+compiler, `ocaml/lib/compiler/index.mld`, and the module docs of `ast.ml` and
+`ir.ml` are the worked examples.
 
 ### What a doc comment never says
 
@@ -767,6 +793,29 @@ without judgment:
 These marks are prompts for a reviewer, not errors. Some records do need three
 independent flags. The marks exist so that the question gets asked where a
 reader can see the answer.
+
+### Checklist for documenting a module
+
+Before handing in doc comments for a module, its author, human or agent, should
+be able to answer _yes_ to each of these:
+
+- Does the module doc open with a sentence that says what the module is for, and
+  go on to explain its design: what goes in, what comes out, which types carry
+  the work, and what the module guarantees?
+- Does every type have a doc whose first sentence says what a value represents,
+  not its shape?
+- Is every non-obvious constructor and field documented, and every invariant the
+  type does not enforce stated?
+- Has every claim been checked against the code that produces and consumes the
+  value, not taken from an older comment?
+- Does every camdl example compile, and is every output excerpt copied from real
+  output?
+- Is the comment free of history: no issue or proposal numbers, dates, work
+  stream names, "previously", "now", "no longer" or "replaces"?
+- Is the change to the source comments only, with every code line as it was?
+- Has every design problem found while writing been reported, not left
+  undocumented, hidden behind a vague phrase, or quietly fixed in the same
+  change?
 
 ## 11. Final editorial checklist
 
