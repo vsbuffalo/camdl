@@ -265,6 +265,16 @@ fn extracts_modules_types_members_and_impls() {
             ("hidden", "crate::inner::Hidden")
         ]
     );
+    // A positional field's type ends at the field: not the `)` that closes
+    // the tuple, nor the `,` before the next field.
+    let weighted = ty(module(&input, "fixture::model"), "Weighted");
+    let fields: Vec<(&str, &str)> = weighted["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| (m["name"].as_str().unwrap(), m["type"].as_str().unwrap()))
+        .collect();
+    assert_eq!(fields, [("0", "u32"), ("1", "f64")]);
     let n_links = &model["members"][1]["doc_links"];
     assert_eq!(
         n_links,
@@ -370,6 +380,8 @@ fn source_links_only_where_rustdoc_resolved_the_name() {
         (26, "Model".into(), model.clone()),
         // The inherent impl's header.
         (32, "Model".into(), model),
+        // A type's name where it is defined.
+        (40, "Weighted".into(), "fixture::model/Weighted".into()),
     ];
     assert_eq!(got, expected);
 

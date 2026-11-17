@@ -661,11 +661,13 @@ impl Text {
         }
     }
 
-    /// The byte range of a rustdoc span, its end column inclusive.
+    /// The byte range of a rustdoc span. rustdoc writes the end column one
+    /// past the span's last character, although `rustdoc_types` documents it
+    /// as the last character itself: read inclusively, a tuple field
+    /// `FiniteF64(f64)` would take the `)` after it.
     fn range(&self, span: &rustdoc_types::Span) -> Option<(usize, usize)> {
         let start = self.offset(span.begin.0, span.begin.1)?;
-        let last = self.offset(span.end.0, span.end.1)?;
-        let end = last + self.src[last..].chars().next().map_or(0, char::len_utf8);
+        let end = self.offset(span.end.0, span.end.1)?;
         (start <= end).then_some((start, end))
     }
 
