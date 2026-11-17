@@ -328,3 +328,10 @@ main dl dt code {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+// On internals pages a table's first column is a type or module name: keep
+// it on one line instead of breaking it mid-identifier.
+body.td-page table td:first-child code {
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
+}
