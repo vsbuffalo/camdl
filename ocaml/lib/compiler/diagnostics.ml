@@ -1,46 +1,112 @@
-(* Diagnostic collection and rendering for the camdl compiler. *)
+(** The compiler's reports about a model, the codes that identify them, and the
+    two ways they are shown: as boxed source excerpts on a terminal, or as a
+    JSON array for tools.
+
+    Every stage of a compile reports a problem as a {!diagnostic}. Its
+    severity says whether the compile can go on: only an {!Error} stops it, a
+    {!Warning} flags a model that is valid but probably not what was meant,
+    and an {!Info} records something the compiler could not determine (an
+    undetermined dimension) and never blocks. Its code names the kind of
+    problem, independently of the wording of the message, so tests, the
+    documentation and users can refer to it: a capital letter and three digits,
+    [E] for errors, [W] for warnings, [I] for infos and [L] for lints, such as
+    [E100] for an undeclared name. The letter does not decide the severity;
+    the constructor does. Every code is listed, with its meaning, in
+    [docs/dev/warning-catalog.md], and a test in
+    [ocaml/test/test_diagnostics.ml] fails when a code the compiler emits is
+    missing from the catalog or the catalog lists one nothing emits.
+
+    A diagnostic points at source text through a {!loc}, and adds what it can
+    beyond its one-line message: a [detail] that explains, a [hint] that says
+    what to change, secondary locations, and {!fix}es an editor can apply.
+    The expander and the parser have source positions and give every
+    diagnostic a real location. The passes over the expanded model do not,
+    because the IR keeps no positions; they name the construct concerned, and
+    {!Compiler} maps it to its declaration's location, or uses {!no_loc}.
+
+    A collection {!t} accumulates diagnostics. The expander writes into its
+    own collection with {!error}, {!warning} and {!info} as it goes; the later
+    passes build values with {!mk_error} and its siblings and return them, and
+    the driver adds them. {!render} is the one place they are written out: to
+    standard error, sorted by file, line, code and message, keeping one of any
+    diagnostics that agree on all four (even if their columns or hints
+    differ), either as text or, when {!json_errors_mode} is set by
+    [--json-errors], as one JSON array. Rendering never raises or exits; what
+    happens next is the caller's decision. *)
 
 (* ── Types ─────────────────────────────────────────────────────────────────── *)
 
-(** Three-level severity — M5 in the 2026-04-19 compiler review.
-    Previously only Error | Warning existed, and the dimcheck Info
-    diagnostic (I300 "undetermined dimension") was emitted as a
-    Warning here, which confused `--json-errors` clients (they saw
-    `"severity": "warning"` for what the compiler intended as non-
-    blocking informational) and promoted Info to a blocking level in
-    any `-Werror`-style workflow. Info sits below Warning, never
-    blocks compilation, and renders in a distinct style. *)
+(** How serious a diagnostic is, which decides whether the compile continues.
+    [Error] stops it after the current stage; [Warning] and [Info] never do.
+    An [Info] reports something the compiler could not determine rather than
+    something it believes wrong, and is rendered dimmed, as ["info"] in JSON. *)
 type severity = Error | Warning | Info
 
+(** A span of source text a diagnostic points at, with the same conventions
+    as {!Ast.loc}: lines and columns from 1, columns in bytes, [end_col] one
+    past the last byte. An empty [file] is the model file. {!no_loc}, with
+    every number zero, means the diagnostic has no position, and is rendered
+    without a source excerpt. *)
 type loc = {
   file     : string;
+      (** The file; empty for the model file. *)
   line     : int;
+      (** First line, from 1; 0 in {!no_loc}. *)
   col      : int;
+      (** First column, in bytes from 1. *)
   end_line : int;
+      (** Last line. *)
   end_col  : int;
+      (** One past the last byte. *)
 }
 
-(* A machine-applicable fix-it: replace the source text spanned by [fix_loc]
-   with [replacement]. Serialized under `--json-errors` so an editor or agent
-   can apply it without parsing the hint prose. *)
+(** A change that resolves a diagnostic, written so a program can apply it:
+    replace the source text spanned by [fix_loc] with [replacement]. It
+    appears in the JSON output only; the terminal rendering shows the hint
+    instead. *)
 type fix = {
   fix_loc     : loc;
+      (** The text to replace. *)
   replacement : string;
+      (** The text to put in its place. *)
 }
 
+(** One report about a model.
+
+    {[
+      error[E100]: undeclared name 'betta'
+    ]}
+
+    is the first line of the rendering of a diagnostic whose [code] is
+    ["E100"] and whose [message] is ["undeclared name 'betta'"]; the excerpt
+    at [loc], then the [detail] (as a note) and the [hint] follow it. *)
 type diagnostic = {
   severity : severity;
-  code     : string;              (* "E100", "W200", etc. *)
+      (** Whether the compile can continue. *)
+  code     : string;
+      (** A letter and three digits, catalogued in
+          [docs/dev/warning-catalog.md]. *)
   loc      : loc;
+      (** Where the problem is; {!no_loc} when it has no position. *)
   message  : string;
+      (** One line saying what is wrong. *)
   detail   : string option;
+      (** Further explanation, rendered as a note. *)
   hint     : string option;
-  related  : (loc * string) list; (* secondary locations + labels *)
+      (** What to change, in words. *)
+  related  : (loc * string) list;
+      (** Other places that bear on the problem, each with a label, such as
+          the earlier declaration a duplicate clashes with. The terminal
+          rendering shows the first three and counts the rest; the JSON
+          output leaves them out. *)
   fixes    : fix list;
+      (** Machine-applicable fixes. The [mk_] constructors and {!error}
+          accept them; {!warning} and {!info} do not. *)
 }
 
 (* ── Collection ─────────────────────────────────────────────────────────────── *)
 
+(** The diagnostics one compile has produced so far, newest first. *)
 type t = { mutable diags : diagnostic list }
 
 let create () = { diags = [] }
@@ -150,6 +216,8 @@ let render_one ppf cache (d : diagnostic) =
 
 (* ── JSON serialisation ──────────────────────────────────────────────────── *)
 
+(** Whether {!render} writes JSON instead of text. Process-wide; [camdlc]
+    sets it for [--json-errors]. *)
 let json_errors_mode = ref false
 
 let severity_string = function
@@ -202,10 +270,7 @@ let by_source_order (a : diagnostic) (b : diagnostic) : int =
   compare a.message b.message
 
 let to_json_string (t : t) : string =
-  (* Sort ascending by (file, line, code, message) so JSON output
-     matches text-mode ordering. Pre-fix this used rev_map on the
-     raw diag list, giving unsorted, arbitrary-insertion-order
-     output that disagreed with the text renderer. *)
+  (* Same order and de-duplication as the text renderer. *)
   let sorted = List.sort_uniq by_source_order t.diags in
   let arr = `List (List.map diagnostic_to_json sorted) in
   Yojson.Safe.to_string arr
@@ -220,9 +285,8 @@ let render_all t cache ppf =
     [--json-errors], else ["compilation failed"] — which [Compiler.compile]
     hands back as its [Error] value. The single rendering surface for both
     the error path and the non-blocking warning/lint path, so JSON and ANSI
-    stay identical and there is one emission shape per call. The library
-    never raises or exits: rendering is a side effect; control flow is the
-    caller's [Error]/[outcome] value (gh#181). *)
+    stay identical and there is one emission shape per call. It never raises
+    or exits: what happens next is the caller's decision. *)
 let render t cache : string =
   if !json_errors_mode then (
     let msg = to_json_string t in
@@ -237,9 +301,9 @@ let render t cache : string =
 (* ── Shorthand constructors ──────────────────────────────────────────────── *)
 
 (* Pure constructors: build a [diagnostic] without emitting. The
-   post-expansion passes return [diagnostic list] and let the caller emit
-   (gh#181), so they construct via these; the expansion phase still emits
-   directly through [error]/[warning]/[info] below. *)
+   post-expansion passes return [diagnostic list] and let the caller emit, so
+   they construct via these; the expander emits directly through
+   [error]/[warning]/[info] below. *)
 let mk_error ~code ~loc ~message ?detail ?hint ?(related=[]) ?(fixes=[]) () =
   { severity=Error; code; loc; message; detail; hint; related; fixes }
 
@@ -255,7 +319,7 @@ let error t ~code ~loc ~message ?detail ?hint ?(related=[]) ?(fixes=[]) () =
 let warning t ~code ~loc ~message ?detail ?hint ?(related=[]) () =
   emit t (mk_warning ~code ~loc ~message ?detail ?hint ~related ())
 
-(** Info diagnostic — non-blocking, dimmed style, distinct from
-    Warning in JSON output. See `severity` type above. *)
+(** Emit an [Info] diagnostic: never blocking, rendered dimmed, and
+    [info] in JSON. *)
 let info t ~code ~loc ~message ?detail ?hint ?(related=[]) () =
   emit t (mk_info ~code ~loc ~message ?detail ?hint ~related ())

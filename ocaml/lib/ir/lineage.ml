@@ -1,52 +1,76 @@
-(** Linear-in-parents analysis for `#[lineage]` transitions.
+(** The analysis of a [#[lineage]] transition's rate: whether each firing can
+    be attributed to an individual in a parent compartment, and with what
+    weights.
 
-    Individual-sampling layer, 2026-05-19 proposal
-    (docs/dev/proposals/2026-05-19-individual-sampling-layer.md,
-    §"Linear-in-parents requirement" and §"IR change").
+    {@camdl[
+      compartments { S, I, R }
+      parameters { beta : rate  gamma : rate }
+      let N = S + I + R
+      transitions {
+        #[lineage]
+        infection : S --> I  @ beta * S * I / N
+        recovery  : I --> R  @ gamma * I
+      }
+    ]}
 
-    Two responsibilities:
+    A [#[lineage]] transition is one where some existing individual causes
+    each event, as an infector causes an infection, so that the runtime can
+    record a genealogy. The runtime chooses the cause of a firing in two
+    steps: a parent compartment [c] with probability proportional to
+    [w_c * count_c], then an individual uniformly within it. That needs the
+    rate written as a sum of [w_c * count_c] over the parent compartments,
+    and this module finds the [w_c]. For [infection] above the only parent is
+    [I], with weight [beta * S / N].
 
-    1. [classify_parents]: decide whether a `#[lineage]` rate is
-       linear in every non-source compartment it references. The
-       classifier buckets each non-source Pop reference as
-       Source / Denominator-only / Linear-parent / Nonlinear-use.
-       A Nonlinear-use is rejected (E601 at the call site).
+    A parent is a compartment the rate reads, other than the transition's
+    sources, that appears in the numerator of the rate outside any nonlinear
+    construct. {!classify_parents} walks the rate and puts every such
+    reference in one of three buckets. A reference anywhere in the right
+    operand of a division is a normaliser, such as [I] inside [N]: it is
+    treated as a coefficient frozen at the event and is never a parent. A
+    reference inside a nonlinear construct (a power other than [^ 1], [exp],
+    [log], [sqrt], [abs], [floor], [ceil], the trigonometric functions, a
+    conditional, [min], [max], [mod], a comparison, or a table index) is a
+    nonlinear use, and the expander refuses the transition with E601. Any
+    other reference makes the compartment a parent. {!parent_pool_weights}
+    then gives each parent's weight: the derivative of the rate's numerator
+    with respect to that parent's count, divided by the rate's denominator,
+    after both are simplified.
 
-    2. [parent_pool_weights]: for a rate that passes the linearity
-       check, emit the per-pool weight sub-expression — the linear
-       decomposition of the rate over parent pools. For `β·S·I/N`
-       with parent I this is [("I", β·S/N)].
+    The expander calls both, from [Expander.resolve_lineage], on the resolved
+    rate of each expanded [#[lineage]] transition, with [let]s inlined rather
+    than hoisted into shared bindings so that no parent is hidden behind a
+    binding reference. The result becomes the transition's
+    {!Ir.transition_lineage}. The module lives in the [ir] library because it
+    reads IR expressions.
 
-    The key correctness rule (proposal §"Precedence — normalizing
-    denominators win"): a parent compartment may appear in both the
-    numerator (as a linear parent) and a normalizing denominator.
-    Division by a normalizer is a nonlinear function, so a naive
-    classifier would bucket the denominator appearance as nonlinear
-    and wrongly reject `β·S·I/N` — the most common transmission form.
-    The exemption: denominator/normalizer appearances are classified
-    Denominator-only and exempt from the Nonlinear-use bucket; the
-    exemption is applied before the nonlinear-use check. Linearity is
-    required only of the numerator dependence on parent counts; a
-    normalizer is a frozen coefficient at the event instant, even when
-    it references the parent compartment.
-
-    Thus `β·S·I/N` compiles (I is a linear numerator parent; its N
-    appearance is a frozen normalizer), while `β·S·(I+ι)^α/N` is
-    rejected (the power is a genuine nonlinear use of I in the
-    numerator). *)
+    The check is weaker than linearity. A product of two parent references,
+    such as [beta * S * I * I / (N * N)], passes: each factor is a parent
+    reference outside a nonlinear construct. Its weight is
+    then the derivative, which for [I * I] is [2 * beta * S * I / (N * N)],
+    so the weights times the counts sum to twice the rate, not the rate. *)
 
 open Ir
 
-(* A non-source Pop reference, with the offending sub-expression
-   recorded for the diagnostic when it is a nonlinear use. *)
+(** A compartment the rate uses nonlinearly, which makes the transition
+    ineligible for lineage, with the construct it is used in, for the E601
+    message. In [beta * S * (I + iota)^alpha / N] it is [I] inside
+    [(I + iota)^alpha]. *)
 type nonlinear_use = {
   comp:    string;       (* the compartment used nonlinearly *)
+      (** The compartment. *)
   context: expr;         (* the enclosing nonlinear sub-expression *)
+      (** The innermost nonlinear expression around the reference. *)
 }
 
+(** What {!classify_parents} found in a rate. *)
 type classification = {
   parents:    string list;        (* numerator linear-parent compartments, in first-seen order *)
+      (** The parent compartments, each once, in the order the rate first
+          reads them. Complete only when [nonlinear] is [None]. *)
   nonlinear:  nonlinear_use option;  (* Some _ ⇒ reject (E601) *)
+      (** The first nonlinear use found, if any; the transition is then
+          refused. *)
 }
 
 (* Is this Pow a genuinely nonlinear power, i.e. exponent <> 1?
@@ -63,8 +87,8 @@ let pow_is_nonlinear (exponent : expr) : bool =
     Tracks two descent flags:
       - [in_denom]:     under the right operand of some Div (a frozen
                         normalizer). Denominator appearances are exempt
-                        from the nonlinear-use check — the exemption
-                        wins (proposal precedence rule).
+                        from the nonlinear-use check, even when they
+                        are also inside a nonlinear construct.
       - [in_nonlinear]: under a non-unit power, log/exp/sqrt/sin/cos/
                         tanh/abs, Cond, min, max, mod, or a comparison.
 
@@ -99,8 +123,8 @@ let classify_parents ~(sources : string list) (rate : expr) : classification =
     | Pop c -> record_pop ~in_denom ~in_nonlinear ~enclosing c
     | PopSum cs ->
       List.iter (record_pop ~in_denom ~in_nonlinear ~enclosing) cs
-    (* gh#616: an anchor is a knot in a forcing breakpoint list, never a
-       compartment reference — nothing to record as a parent pool. *)
+    (* An anchor is a knot in a forcing breakpoint list, never a
+       compartment reference: nothing to record as a parent pool. *)
     | Const _ | UnitLiteral _ | Param _ | ConstRef _ | Time | Dt | Projected | ObsColumnRef _ | TimeFunc _ | ForcingBasis _
     | ObsAnchor _ -> ()
     | TableLookup (_, args) ->
@@ -134,7 +158,7 @@ let classify_parents ~(sources : string list) (rate : expr) : classification =
              arg } ->
       walk ~in_denom ~in_nonlinear:true ~enclosing:e arg
     | Cond { pred; then_; else_ } ->
-      (* Cond is in the nonlinear-use bucket (proposal). A parent inside
+      (* Cond is in the nonlinear-use bucket. A parent inside
          any branch (or the predicate) that is not in a denominator is a
          nonlinear use. *)
       walk ~in_denom ~in_nonlinear:true ~enclosing:e pred;
@@ -145,8 +169,8 @@ let classify_parents ~(sources : string list) (rate : expr) : classification =
          parent candidate, in the same denom/nonlinear context. *)
       List.iter (walk ~in_denom ~in_nonlinear ~enclosing) terms
     | BindingRef _ -> ()
-      (* leaf; inc1b: a state-bearing BindingRef in a #[lineage] rate hides
-         parent pools — hoisting must be disabled for lineage transitions. *)
+      (* A state-bearing BindingRef would hide parent pools, which is why
+         the expander does not hoist lets in a #[lineage] rate. *)
     | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
   in
   walk ~in_denom:false ~in_nonlinear:false ~enclosing:rate rate;
@@ -156,8 +180,7 @@ let classify_parents ~(sources : string list) (rate : expr) : classification =
    right-operand into a single product denominator. Multiplication
    distributes over the factoring; anything that is not a Div/Mul is a
    numerator atom. This keeps the per-pool weight expression in the
-   clean `coeff / normalizer` form the proposal shows
-   (e.g. β·S/N rather than β·S·I/N − 0/N). The denominator is a frozen
+   `coeff / normalizer` form (β·S/N rather than β·S·I/N − 0/N). The denominator is a frozen
    normalizer at the event instant, so its parent-count dependence is
    preserved verbatim. *)
 let rec split_frac (e : expr) : expr * expr =
@@ -174,14 +197,13 @@ let rec split_frac (e : expr) : expr * expr =
 
 (* Derivative of a numerator expression with respect to the count of a
    single compartment [comp], treating [Pop comp] as the variable and
-   every parameter / time / other compartment as a constant. Because
-   the numerator (post [split_frac]) is degree-1 in [comp] (guaranteed
-   by [classify_parents]), this derivative is exactly the per-pool
-   coefficient, in reduced form — the product rule drops the constant
-   factors automatically (∂(β·S·β_i·I)/∂I = β·S·β_i, with no leftover
-   I term). This is the v1 specialization of the Phase-4
-   ∂rate/∂count(X_k) weighting; here it reduces to the linear
-   coefficient. *)
+   every parameter / time / other compartment as a constant. When the
+   numerator (post [split_frac]) is degree-1 in [comp], this derivative is
+   exactly the per-pool coefficient, in reduced form — the product rule
+   drops the constant factors automatically (∂(β·S·β_i·I)/∂I = β·S·β_i,
+   with no leftover I term). [classify_parents] does not guarantee degree
+   1: it accepts a product of two parent references, and for one the
+   derivative is not the coefficient (see the module doc). *)
 let rec deriv_num_wrt_pop (comp : string) (e : expr) : expr =
   match e with
   | Pop c        -> if c = comp then Const 1.0 else Const 0.0
@@ -210,7 +232,7 @@ let rec deriv_num_wrt_pop (comp : string) (e : expr) : expr =
   | Reduce terms ->
     (* d/dcount (Σ tᵢ) = Σ d/dcount tᵢ (linear, like Add). *)
     Reduce (List.map (deriv_num_wrt_pop comp) terms)
-  | BindingRef _ -> Const 0.0   (* inc1a placeholder; lineage+bindings deferred *)
+  | BindingRef _ -> Const 0.0   (* lets are not hoisted in a lineage rate *)
   | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
   | BinOp _ | UnOp _ | Cond _ ->
     (* Nonlinear constructs cannot contain a linear parent in the
