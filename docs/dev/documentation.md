@@ -293,6 +293,68 @@ When adding a page with camdl examples or commands, add it to `DOCTEST_DOCS` or
 `CLI_DOCS` and to the matching workflow's `paths:`, so a change to the page
 alone reruns its check.
 
+## Engineering pages check their references to the code
+
+An engineering page explains one engineering feature that spans several crates
+or modules, such as run identity, and why it is built that way. It is
+hand-written Markdown in `docs/engineering/<topic>.md`, committed, in the
+present tense. `make docs-internals` renders each one to
+`docs/internals/engineering/<topic>.qmd` with `typedoc engineering`, next to the
+generated compiler and runtime pages, and the website lists them first under
+Internals, in file-name order. A name starting with `_` or `.` is refused,
+because Quarto would skip the page. With no pages the step writes none and
+succeeds.
+
+A page opens with a `# Title` line and then a paragraph. The title is the page's
+title, and the paragraph's first sentence is its description, shown under the
+title, so that sentence must not hold a link. The body carries on after it. No
+YAML front matter, and no second `#` heading.
+
+**References to the code** are links whose destination is `rust:` or `ocaml:`
+and a full path, written as the language writes it:
+
+```markdown
+A run starts from a [`Seed`](rust:runid::inputs::Seed), and the compiler writes
+[`Ir.model`](ocaml:Ir.model).
+```
+
+The path is resolved exactly, against the same JSON the generated pages are made
+from, without the scope search a doc comment gets:
+
+| The path names                                             | The link goes to                                        |
+| ---------------------------------------------------------- | ------------------------------------------------------- |
+| a type (`rust:runid::inputs::Seed`, `ocaml:Ast.Located.t`) | the type's entry on its generated page                  |
+| a field, variant, constructor or trait item of a type      | the type's entry (members have no anchors of their own) |
+| a Rust function, constant, static or inherent method       | its line on the source file's page                      |
+| a module (`rust:runid::inputs`)                            | the module's page, or its section on its parent's page  |
+
+Functions and methods resolve only in Rust: the OCaml extractor lists types, not
+values. When a path could name several things, the first of type, member, value
+and module in that order is taken.
+
+**Embedded declarations.** A line holding only
+
+```markdown
+<!-- decl: rust:runid::inputs::Seed -->
+```
+
+is replaced by that type's entry as its own page shows it: a link to the entry
+and to its source line, its doc comment, its declaration with the type names in
+it linked, and its members with their doc comments. GitHub hides the comment, so
+the source file still reads cleanly there. The marker must name a type.
+
+**Relative links** are written relative to `docs/engineering/`, as in
+`[run identity](../run-identity.md)`, and are rewritten to point at the same
+file from `docs/internals/engineering/`. A link to a `.md` file the website does
+not publish is still sent to GitHub by `_web/unpublished-links.lua`.
+
+Text in code spans and fenced code blocks is left alone. Anything that does not
+resolve fails `make docs-internals` with the page, the line and the target: a
+reference that names nothing, a `decl` marker that names no type, a marker that
+shares its line with other text, and a relative link to a file that does not
+exist. So a rename in the code fails the docs build instead of leaving a page
+that points at nothing.
+
 ## Formatting
 
 Format any `.md` file you touch with `dprint fmt` (`mdfmt`) as the last step,

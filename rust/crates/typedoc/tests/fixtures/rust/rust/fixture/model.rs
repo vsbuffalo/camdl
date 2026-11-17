@@ -28,3 +28,10 @@ pub fn make(m: &Model) -> Model {
     let _ = n;
     m.clone()
 }
+
+impl Model {
+    /// How many there are.
+    pub fn count(&self) -> u32 {
+        self.n
+    }
+}

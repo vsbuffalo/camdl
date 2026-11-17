@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::model::{Input, Language, Module, SourceFile, Target};
+use crate::model::{Input, Language, Module, SourceFile, Target, Value};
 use crate::overview::Overview;
 
 /// The file name, without extension, of the index page. No module page may
@@ -135,14 +135,37 @@ pub struct SourceEntry<'a> {
     pub page: usize,
 }
 
-/// Where a link is written from, for the links in raw HTML, which Quarto
-/// does not rewrite: they name the rendered `.html` files.
+/// Where a link is written from. A Markdown link names the `.qmd` file,
+/// which Quarto rewrites; a link in raw HTML, which Quarto does not rewrite,
+/// names the rendered `.html` file.
 #[derive(Debug, Clone, Copy)]
-pub enum From {
+pub enum From<'s> {
     /// A module page, by its position in [`Site::pages`].
     Page(usize),
+    /// The index page, in the module pages' directory.
+    Index,
     /// A source page, one directory below the module pages.
     Source,
+    /// A page outside the site's directory, such as an engineering page:
+    /// the site's directory as a path relative to that page's, `../runtime`.
+    Outside(&'s str),
+}
+
+/// What a full path written outside the code names: the destinations
+/// [`Site::named`] gives the references of an engineering page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Named<'a> {
+    /// A documented type.
+    Type(TypeId),
+    /// A field, constructor, variant or trait item of a documented type, by
+    /// its position in the type's members. Members have no anchor of their
+    /// own, so a link to one goes to its type.
+    Member(TypeId, usize),
+    /// A function, constant, static or method the pages do not document,
+    /// shown at its line on its source file's page.
+    Value(&'a Value),
+    /// A module.
+    Module(usize),
 }
 
 /// The top-level module a module path belongs to: its first segment.
@@ -500,10 +523,10 @@ impl<'a> Site<'a> {
             None => self.declared_once(path),
         };
         match ty {
-            Some(id) => Some(self.page_type_href(id)),
+            Some(id) => Some(self.type_href(From::Index, id)),
             None => self
                 .resolve_module_global(path)
-                .map(|m| self.page_module_href(m)),
+                .map(|m| self.module_href(From::Index, m)),
         }
     }
 
@@ -547,22 +570,28 @@ impl<'a> Site<'a> {
         self.used_by.get(&id).map(Vec::as_slice).unwrap_or(&[])
     }
 
-    /// The link target of a type from a page: an anchor on the same page, or
-    /// the other page's file and anchor.
-    pub fn type_href(&self, from_page: usize, id: TypeId) -> String {
-        let e = &self.modules[id.module];
-        if e.page == from_page {
-            format!("#{}", e.anchors[id.ty])
-        } else {
-            self.page_type_href(id)
+    /// The link to page `page`, at `anchor` when given, from `from`: the
+    /// anchor alone on the same page, otherwise the page's file with the
+    /// extension `ext`.
+    fn page_href(&self, from: From, page: usize, anchor: Option<&str>, ext: &str) -> String {
+        if let (From::Page(p), Some(a)) = (from, anchor) {
+            if p == page {
+                return format!("#{a}");
+            }
+        }
+        let frag = anchor.map_or(String::new(), |a| format!("#{a}"));
+        let file = format!("{}.{ext}{frag}", self.pages[page].slug);
+        match from {
+            From::Page(_) | From::Index => file,
+            From::Source => format!("../{file}"),
+            From::Outside(dir) => format!("{dir}/{file}"),
         }
     }
 
-    /// The link target of a type from any other page: its page's file and
-    /// its anchor.
-    fn page_type_href(&self, id: TypeId) -> String {
+    /// The Markdown link target of a type, from `from`.
+    pub fn type_href(&self, from: From, id: TypeId) -> String {
         let e = &self.modules[id.module];
-        format!("{}.qmd#{}", self.pages[e.page].slug, e.anchors[id.ty])
+        self.page_href(from, e.page, Some(&e.anchors[id.ty]), "qmd")
     }
 
     /// The anchor of a nested module's section on its page. The top-level
@@ -572,21 +601,22 @@ impl<'a> Site<'a> {
         (!local.is_empty()).then(|| format!("m-{}", sanitize_id(local)))
     }
 
-    /// The link target of a module from a page.
-    pub fn module_href(&self, from_page: usize, m: usize) -> String {
-        match self.module_anchor(m) {
-            Some(a) if self.modules[m].page == from_page => format!("#{a}"),
-            _ => self.page_module_href(m),
-        }
+    /// The Markdown link target of a module, from `from`.
+    pub fn module_href(&self, from: From, m: usize) -> String {
+        let anchor = self.module_anchor(m);
+        self.page_href(from, self.modules[m].page, anchor.as_deref(), "qmd")
     }
 
-    /// The link target of a module from any other page.
-    fn page_module_href(&self, m: usize) -> String {
-        let file = format!("{}.qmd", self.pages[self.modules[m].page].slug);
-        match self.module_anchor(m) {
-            Some(a) => format!("{file}#{a}"),
-            None => file,
-        }
+    /// The Markdown link target of a line of a source file of the inputs,
+    /// from `from`. `None` when no input has the file.
+    pub fn source_href(&self, from: From, path: &str, line: u32) -> Option<String> {
+        let s = self.source_named(path)?;
+        let file = format!("{SOURCE_DIR}/{}.qmd#L{line}", s.slug);
+        Some(match from {
+            From::Page(_) | From::Index => file,
+            From::Source => format!("{}.qmd#L{line}", s.slug),
+            From::Outside(dir) => format!("{dir}/{file}"),
+        })
     }
 
     /// The declaration a span's target names: the declaration of that name
@@ -663,6 +693,17 @@ impl<'a> Site<'a> {
                     ));
                 }
             }
+            for v in &e.module.values {
+                if !self.source_by_path.contains_key(v.path.as_str()) {
+                    return Err(format!(
+                        "{path}: {}{}{} is written in {}, which is no source file of the inputs",
+                        e.module.name,
+                        e.language.separator(),
+                        v.name,
+                        v.path
+                    ));
+                }
+            }
         }
         for (path, decl_line, s) in decls.chain(files) {
             if let Some(t) = &s.target {
@@ -708,27 +749,71 @@ impl<'a> Site<'a> {
     /// The link target, in rendered HTML, of a type's documentation.
     pub fn type_href_html(&self, from: From, id: TypeId) -> String {
         let e = &self.modules[id.module];
-        let anchor = &e.anchors[id.ty];
-        match from {
-            From::Page(p) if p == e.page => format!("#{anchor}"),
-            From::Page(_) => format!("{}.html#{anchor}", self.pages[e.page].slug),
-            From::Source => format!("../{}.html#{anchor}", self.pages[e.page].slug),
-        }
+        self.page_href(from, e.page, Some(&e.anchors[id.ty]), "html")
     }
 
-    /// A type's name as a reader of `from_page` should see it: qualified by
-    /// its nested module on its own page, by its full module path elsewhere.
-    pub fn type_display(&self, from_page: usize, id: TypeId) -> String {
+    /// A type's name as a reader of `from` should see it: qualified by its
+    /// nested module on its own page, by its full module path elsewhere.
+    pub fn type_display(&self, from: From, id: TypeId) -> String {
         let e = &self.modules[id.module];
         let name = &e.module.types[id.ty].name;
         let sep = e.language.separator();
-        if e.page != from_page {
-            format!("{}{sep}{name}", e.module.name)
-        } else if e.local.is_empty() {
-            name.clone()
-        } else {
-            format!("{}{sep}{name}", e.local)
+        match from {
+            From::Page(p) if p == e.page && e.local.is_empty() => name.clone(),
+            From::Page(p) if p == e.page => format!("{}{sep}{name}", e.local),
+            _ => format!("{}{sep}{name}", e.module.name),
         }
+    }
+
+    /// What a full path names, written outside any module as an engineering
+    /// page's reference is: a type (`runid::inputs::Seed`, `Ir.model`), a
+    /// member of one (`runid::inputs::Seed::value`), a function, constant,
+    /// static or method the extractor lists in [`Module::values`]
+    /// (`runid::compute`, `runid::inputs::Seed::new`), or a module
+    /// (`runid::inputs`). Only modules in `language` are searched.
+    ///
+    /// Module paths are matched exactly, with neither the scope search nor
+    /// the dropping of a wrapper module that [`Site::resolve_type`] does: a
+    /// path written outside the code has no scope. When a path could name
+    /// several things, the first of type, member, value and module is taken.
+    pub fn named(&self, language: Language, path: &str) -> Option<Named<'a>> {
+        let sep = language.separator();
+        let module = |name: &str| {
+            self.by_name
+                .get(name)
+                .copied()
+                .filter(|&m| self.modules[m].language == language)
+        };
+        let qual_name = path.rsplit_once(sep);
+        // `qual` split again, for a member or a method: its module and type.
+        let qual_parts = qual_name.and_then(|(qual, _)| qual.rsplit_once(sep));
+        if let Some((qual, name)) = qual_name {
+            if let Some(id) = module(qual).and_then(|m| self.find_in(m, name)) {
+                return Some(Named::Type(id));
+            }
+            if let Some((mq, ty)) = qual_parts {
+                if let Some(id) = module(mq).and_then(|m| self.find_in(m, ty)) {
+                    let t = &self.modules[id.module].module.types[id.ty];
+                    if let Some(k) = t.members.iter().position(|mem| mem.name == name) {
+                        return Some(Named::Member(id, k));
+                    }
+                }
+            }
+            let modules = &self.modules;
+            let value_in = |m: &str, v: &str| -> Option<&'a Value> {
+                let m = module(m)?;
+                modules[m].module.values.iter().find(|x| x.name == v)
+            };
+            if let Some(v) = value_in(qual, name) {
+                return Some(Named::Value(v));
+            }
+            if let Some((mq, ty)) = qual_parts {
+                if let Some(v) = value_in(mq, &format!("{ty}{sep}{name}")) {
+                    return Some(Named::Value(v));
+                }
+            }
+        }
+        module(path).map(Named::Module)
     }
 }
 
@@ -971,17 +1056,23 @@ mod tests {
         let m = overview(&[&["Ast", "Ir"], &["Util"]]);
         let site = Site::build(&m, 10, &inputs).unwrap();
         assert_eq!(site.modules[1].anchors, vec!["t-Loc-t", "t-Loc-u"]);
-        assert_eq!(site.type_href(0, TypeId { module: 1, ty: 0 }), "#t-Loc-t");
         assert_eq!(
-            site.type_href(2, TypeId { module: 1, ty: 0 }),
+            site.type_href(From::Page(0), TypeId { module: 1, ty: 0 }),
+            "#t-Loc-t"
+        );
+        assert_eq!(
+            site.type_href(From::Page(2), TypeId { module: 1, ty: 0 }),
             "ast.qmd#t-Loc-t"
         );
         assert_eq!(
-            site.type_display(2, TypeId { module: 1, ty: 0 }),
+            site.type_display(From::Page(2), TypeId { module: 1, ty: 0 }),
             "Ast.Loc.t"
         );
-        assert_eq!(site.type_display(0, TypeId { module: 1, ty: 0 }), "Loc.t");
-        assert_eq!(site.module_href(1, 1), "ast.qmd#m-Loc");
+        assert_eq!(
+            site.type_display(From::Page(0), TypeId { module: 1, ty: 0 }),
+            "Loc.t"
+        );
+        assert_eq!(site.module_href(From::Page(1), 1), "ast.qmd#m-Loc");
         assert_eq!(site.pages[2].order, 13);
     }
 

@@ -30,13 +30,36 @@ fn run(cmd: &mut Command) {
     );
 }
 
+/// The toolchain `rust/rust-toolchain.toml` pins: the one whose rustdoc
+/// writes the JSON format the extractor reads.
+///
+/// rustup picks a toolchain by the directory cargo is started in and passes
+/// its choice to child processes as `RUSTUP_TOOLCHAIN`, so `cargo test
+/// --manifest-path rust/Cargo.toml` started from the repository root runs
+/// this test, and every `rustdoc` it starts, on the default toolchain
+/// instead. Naming the pinned toolchain explicitly makes the result
+/// independent of where the test was started. Outside rustup the variable
+/// is ignored, and the extractor's format check reports a mismatch.
+fn pinned_toolchain() -> String {
+    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../rust-toolchain.toml");
+    let text = fs::read_to_string(&file).unwrap_or_else(|e| panic!("{}: {e}", file.display()));
+    text.lines()
+        .find_map(|l| {
+            let (key, value) = l.split_once('=')?;
+            (key.trim() == "channel").then(|| value.trim().trim_matches('"').to_string())
+        })
+        .unwrap_or_else(|| panic!("{}: no channel", file.display()))
+}
+
 /// Writes `other.json` and `fixture.json` into `out`, as `cargo rustdoc`
-/// would with the docs build's flags.
+/// would with the docs build's flags, on the pinned toolchain.
 fn rustdoc_json(out: &Path) {
     let ws = repo().join("rust");
+    let toolchain = pinned_toolchain();
     let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
     let rustdoc = std::env::var("RUSTDOC").unwrap_or_else(|_| "rustdoc".into());
     run(Command::new(rustc)
+        .env("RUSTUP_TOOLCHAIN", &toolchain)
         .current_dir(&ws)
         .args([
             "--edition",
@@ -51,6 +74,7 @@ fn rustdoc_json(out: &Path) {
         .arg(out));
     let json = |name: &str, file: &str, extra: &[&str]| {
         run(Command::new(&rustdoc)
+            .env("RUSTUP_TOOLCHAIN", &toolchain)
             .current_dir(&ws)
             .env("RUSTC_BOOTSTRAP", "1")
             .args([
@@ -294,6 +318,18 @@ fn extracts_modules_types_members_and_impls() {
         ]
     );
     assert_eq!(ty(root, "Counts")["kind"], "alias");
+
+    // The values an engineering page may link to: a module's function, and
+    // a method of an inherent impl, but no trait impl's method (`area`,
+    // `step`).
+    assert_eq!(
+        module(&input, "fixture::model")["values"],
+        serde_json::json!([
+            {"name": "make", "path": "rust/fixture/model.rs", "line": 26},
+            {"name": "Model::count", "path": "rust/fixture/model.rs", "line": 34},
+        ])
+    );
+    assert!(root.get("values").is_none(), "{}", root["values"]);
     assert_eq!(
         ty(module(&input, "fixture::inner"), "Hidden")["kind"],
         "tuple_struct"
@@ -331,7 +367,9 @@ fn source_links_only_where_rustdoc_resolved_the_name() {
         (21, "crate::Step".into(), "fixture/Step".into()),
         (21, "Model".into(), model.clone()),
         (26, "Model".into(), model.clone()),
-        (26, "Model".into(), model),
+        (26, "Model".into(), model.clone()),
+        // The inherent impl's header.
+        (32, "Model".into(), model),
     ];
     assert_eq!(got, expected);
 

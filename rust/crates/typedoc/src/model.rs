@@ -154,6 +154,30 @@ pub struct Module {
     pub doc_links: Vec<DocLink>,
     /// The type declarations, in source order.
     pub types: Vec<TypeDecl>,
+    /// The functions, constants and statics the module declares, and the
+    /// methods and associated constants of its types' inherent impls, which
+    /// the pages do not document but an engineering page may link to. Rust
+    /// only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<Value>,
+}
+
+/// A function, constant, static or inherent method, by where it is written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Value {
+    /// Its name in the module: `compute` for a function, `Seed::new` for a
+    /// method of the module's type `Seed`, joined by
+    /// [`Language::separator`]. Unique within the module: a name two items
+    /// share (methods of two impls of one generic type) is left out rather
+    /// than resolved to either.
+    pub name: String,
+    /// The file it is written in, relative to the repository root: a source
+    /// file of the inputs, though not always the module's own (an impl may
+    /// be written in another file of the crate).
+    pub path: String,
+    /// The line it starts on, counting from 1.
+    pub line: u32,
 }
 
 /// One type declaration.

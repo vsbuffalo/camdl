@@ -1,0 +1,21 @@
+{"language":"rust","modules":[
+ {"name":"demo","path":"rust/demo/lib.rs","doc":"The demo crate.","types":[],
+  "values":[{"name":"run_id","path":"rust/demo/lib.rs","line":7}]},
+ {"name":"demo::inputs","path":"rust/demo/inputs.rs","doc":"What a run is made from.","types":[
+  {"name":"Seed","line":4,"kind":"struct","params":[],"recursive_group":null,
+   "decl":"pub struct Seed {\n    pub value: u64,\n    pub config: SimConfig,\n}",
+   "decl_spans":[
+    {"line":1,"col":11,"len":4,"class":"type","target":{"module":"demo::inputs","type":"Seed"}},
+    {"line":3,"col":16,"len":9,"class":"type","target":{"module":"demo::inputs","type":"SimConfig"}}],
+   "doc":"The seed of a run. See [`SimConfig`].",
+   "doc_links":[{"text":"SimConfig","to":{"kind":"type","module":"demo::inputs","type":"SimConfig"}}],
+   "members":[
+    {"name":"value","type":"u64","mutable":false,"doc":"The number the generator starts from."},
+    {"name":"config","type":"SimConfig","mutable":false,"doc":null}],
+   "refs":["SimConfig"]},
+  {"name":"SimConfig","line":12,"kind":"struct","params":[],"recursive_group":null,
+   "decl":"pub struct SimConfig;","decl_spans":[],"doc":"How to simulate.","members":[],"refs":[]}],
+  "values":[{"name":"Seed::new","path":"rust/demo/inputs.rs","line":20}]}],
+ "sources":[
+  {"path":"rust/demo/lib.rs","lines":10,"bytes":100,"spans":[]},
+  {"path":"rust/demo/inputs.rs","lines":30,"bytes":300,"spans":[]}]}
