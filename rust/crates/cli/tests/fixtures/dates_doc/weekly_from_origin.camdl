@@ -1,0 +1,48 @@
+# Base: none — root model
+# Adds: nothing — a context for docs/dates.md's printed weekly table, not a
+#   modelling claim
+# Changes: nothing else
+
+#' Weekly synthetic case reports on a calendar-anchored SIR, simulated from
+#' `origin`. The model behind the first weekly table in `docs/dates.md`,
+#' "Weekly and coarser cadences": `origin` is Wednesday 1 July 2026 and the
+#' simulation starts on it, so every generated weekly row falls on a
+#' Wednesday. Executed by `cli/tests/dates_doc_examples.rs`.
+#'
+#' Fitted to one stream: weekly case counts, a Poisson draw around a fraction
+#' of the week's new infections.
+
+time_unit = 'days
+origin    = date("2026-07-01")
+
+compartments { S, I, R }
+
+parameters {
+  #' per-capita transmission rate
+  beta  : rate
+  #' recovery rate; mean infectious period is 1/gamma
+  gamma : rate
+  #' reporting fraction
+  rho   : probability
+  #' population size
+  N0    : count
+}
+
+transitions {
+  infection : S --> I @ beta * S * I / N0
+  recovery  : I --> R @ gamma * I
+}
+
+observations {
+  cases {
+    columns       { time : time, cases : count }
+    covers        = closing_at(time, 7 'days)
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    cases         ~ poisson(rate = rho * projected)
+  }
+}
+
+init { S = N0 - 10  I = 10 }
+
+simulate { from = origin  to = date("2026-07-16") }

@@ -255,6 +255,7 @@ command's output changes, reread the paragraph that describes it.
 | `make test-docs`                       | every `` ```camdl `` block compiles, or is classified as a fragment (`camdlc doctest --gate`)                                           | `DOCTEST_DOCS` in the `Makefile` | `doctest.yml`                                    |
 | `make test-cli-docs`                   | every documented `camdl …` command parses against the real CLI                                                                          | `CLI_DOCS` in the `Makefile`     | `cli-docs.yml`                                   |
 | `make test-data-spec`                  | every observation-file example loads through the reader `fit run` uses                                                                  | `camdl-data-spec.md`             | `data-spec.yml`                                  |
+| `make test-dates-doc`                  | every printed `simulate` table has the time and date columns its command prints                                                         | `dates.md`                       | `dates-doc.yml`                                  |
 | `cargo test -p cli --bin camdl docs::` | the embedded topics exist and have unique names; each topic's page is the embedded file and is published; figure markers print as links | every embedded topic             | `docs-site.yml` (and `ci.yml` when code changes) |
 | `make docs-site`                       | every tutorial command exits as marked, and every figure marker names an SVG                                                            | the published pages              | `docs-site.yml`                                  |
 
@@ -277,6 +278,16 @@ rather than a skip. The closing `-->` must be on a line of its own, because
 camdl's own `-->` arrow would otherwise end the comment early. Data a block
 reads can travel the same way, as `<!-- camdl-doctest-data: data/pop.tsv`. The
 full rules are in the header comment of `ocaml/lib/compiler/doctest.ml`.
+
+A printed `simulate` table in `docs/dates.md` names the model and command that
+produce it in its fence's info string, as
+`` ```tsv dates-example=weekly-monday model=weekly_from_monday cmd="simulate --obs --dates" ``.
+The model is `rust/crates/cli/tests/fixtures/dates_doc/<model>.camdl`, run with
+the `<model>.params.toml` beside it. The harness compares the table's time and
+date columns with the command's output and fails if a column the table prints is
+missing; count columns are not compared. A table that shows only some of the
+output's rows also carries `excerpt`. An unmarked block that reads like
+`simulate` output fails the check.
 
 When adding a page with camdl examples or commands, add it to `DOCTEST_DOCS` or
 `CLI_DOCS` and to the matching workflow's `paths:`, so a change to the page
