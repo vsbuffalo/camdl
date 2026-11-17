@@ -10169,11 +10169,13 @@ let test_typed_time_pos_per_month_rate_in_anchored () =
   ignore m
 
 let test_typed_time_pos_simulate_to_months_oneshot () =
-  (* `simulate.to = 600 'months` in anchored mode is a one-shot
-     affine conversion to days — Rule 1 does not fire on this
-     because the position is Duration-typed, not Instant-typed.
-     Proposal §1.2. *)
-  let m = compile_expect_ok {|
+  (* `simulate { to }` is an instant position, so `to = 600 'months` denotes
+     `origin + 600 'months`, a calendar step from a date. The archived
+     typed-time proposal §1.2 read it as a one-shot affine conversion
+     (18262.125 days from 1891-01-01, half a day short of 1941-01-01); Stage
+     1a of docs/dev/proposals/2026-11-16-calendar-durations-by-position.md
+     refuses it, and the hint names the explicit form. *)
+  let src = {|
     time_unit = 'days
     origin = date("1891-01-01")
     compartments { S, I, R }
@@ -10186,7 +10188,21 @@ let test_typed_time_pos_simulate_to_months_oneshot () =
     init { S = N0 - I0  I = I0 }
     simulate { from = 0 'days  to = 600 'months }
   |} in
-  ignore m
+  let (detail, diags, _) = Compiler.front_end_collect ~name:"oneshot" src in
+  let ds = match detail with
+    | Some d -> d.Compiler.ctx.Expander.diags.Diagnostics.diags
+    | None -> diags.Diagnostics.diags in
+  match List.filter (fun (d : Diagnostics.diagnostic) -> d.code = "E321") ds with
+  | [d] ->
+    Alcotest.(check string) "message"
+      "calendar duration `600 'months` in simulate.to: under `origin` this position \
+       is a date, and a date moves by calendar months or years only through \
+       `add_calendar_months` or `add_calendar_years`" d.message;
+    Alcotest.(check (option string)) "hint"
+      (Some "for the date 600 calendar months after `origin` write \
+             `add_calendar_months(origin, 600)`; for a fixed span write \
+             `18262 'days` (≈ 600 'months).") d.hint
+  | _ -> Alcotest.fail "expected exactly one E321"
 
 let test_typed_time_pos_duration_param_bounds_with_months () =
   (* `delay : duration in [1 'months, 6 'months]` parses and stays
@@ -16161,8 +16177,245 @@ let test_time_census_coverage_goldens () =
            (String.concat "\n  " missing))) files;
   if !checked < 20 then Alcotest.failf "only %d golden models compiled" !checked
 
+(* ── Stage 1a: every calendar duration in an instant or cadence position is
+   refused under an origin (docs/dev/proposals/
+   2026-11-16-calendar-durations-by-position.md, §8 Stage 1a) ──────────────── *)
+
+(* A three-compartment SIR model with an origin (or none), extra parameters, a
+   rate factor, extra blocks, and a `simulate { from to }`. *)
+let tp_model ?(origin = Some "2020-01-01") ?(params = "") ?(rate = "1.0")
+    ?(extra = "") ?from ?(to_ = "add_calendar_years(origin, 2)") () =
+  let from = match from, origin with
+    | Some f, _ -> f | None, Some _ -> "origin" | None, None -> "0" in
+  Printf.sprintf {|
+time_unit = 'days
+%s
+compartments { S, I, R }
+parameters {
+  beta  : rate in [0.1, 2.0]
+  gamma : rate in [0.05, 0.5]
+  %s
+}
+transitions {
+  infection : S --> I @ beta * (%s) * S * I / (S + I + R)
+  recovery  : I --> R @ gamma * I
+}
+init { S = 990  I = 10 }
+%s
+simulate { from = %s  to = %s }
+|}
+    (match origin with Some o -> Printf.sprintf "origin = date(%S)" o | None -> "")
+    params rate extra from to_
+
+(* Every diagnostic a compile emits, whether or not it succeeds. *)
+let tp_diags src =
+  let (detail, diags, _) = Compiler.front_end_collect ~name:"tp" src in
+  match detail with
+  | Some d -> List.rev d.Compiler.ctx.Expander.diags.Diagnostics.diags
+  | None -> List.rev diags.Diagnostics.diags
+
+let tp_show (ds : Diagnostics.diagnostic list) =
+  String.concat "\n" (List.map (fun (d : Diagnostics.diagnostic) ->
+    Printf.sprintf "  %s: %s\n    hint: %s" d.code d.message
+      (Option.value d.hint ~default:"-")) ds)
+
+(* Exactly the diagnostic [code] with [message] and [hint] is emitted, once. *)
+let tp_expect ~code ~message ~hint src =
+  let ds = tp_diags src in
+  match List.filter (fun (d : Diagnostics.diagnostic) -> d.code = code && d.message = message) ds with
+  | [d] ->
+    if d.hint <> Some hint then
+      Alcotest.failf "%s %S\n  expected hint: %s\n  got hint:      %s" code message hint
+        (Option.value d.hint ~default:"<none>")
+  | [] -> Alcotest.failf "expected %s %S; got:\n%s" code message (tp_show ds)
+  | _ -> Alcotest.failf "%s %S emitted more than once:\n%s" code message (tp_show ds)
+
+(* No diagnostic carries [code]. *)
+let tp_expect_no ~code src =
+  let ds = tp_diags src in
+  if List.exists (fun (d : Diagnostics.diagnostic) -> d.code = code) ds then
+    Alcotest.failf "expected no %s; got:\n%s" code (tp_show ds)
+
+let tp_instant_message shown what =
+  Printf.sprintf
+    "calendar duration `%s` in %s: under `origin` this position is a date, and a \
+     date moves by calendar months or years only through `add_calendar_months` \
+     or `add_calendar_years`" shown what
+
+let hint_6_months =
+  "for the date 6 calendar months after `origin` write \
+   `add_calendar_months(origin, 6)`; for a fixed span write `183 'days` (≈ 6 'months)."
+
+let tp_months6 ~what src =
+  tp_expect ~code:"E321" ~message:(tp_instant_message "6 'months" what) ~hint:hint_6_months src
+
+let test_tp_refuse_simulate_to_years () =
+  tp_expect ~code:"E321"
+    ~message:(tp_instant_message "2 'years" "simulate.to")
+    ~hint:"for the date 2 calendar years after `origin` write \
+           `add_calendar_years(origin, 2)`; for a fixed span write `730 'days` (≈ 2 'years)."
+    (tp_model ~to_:"2 'years" ())
+
+let test_tp_refuse_simulate_from_months () =
+  tp_months6 ~what:"simulate.from" (tp_model ~from:"6 'months" ())
+
+let test_tp_refuse_scenario_to () =
+  tp_expect ~code:"E321"
+    ~message:(tp_instant_message "30 'months" "scenario 'late' simulate.to")
+    ~hint:"for the date 30 calendar months after `origin` write \
+           `add_calendar_months(origin, 30)`; for a fixed span write `913 'days` (≈ 30 'months)."
+    (tp_model ~extra:"scenarios { late { simulate { to = 30 'months } } }" ())
+
+let test_tp_refuse_at_months () =
+  tp_months6 ~what:"intervention at-time"
+    (tp_model ~extra:"interventions { b : add(S, 10) at [6 'months] }" ())
+
+let test_tp_refuse_output_at_months () =
+  tp_months6 ~what:"output trajectories.at"
+    (tp_model ~extra:"output { trajectories { at = [0 'days, 6 'months] } }" ())
+
+let test_tp_refuse_value_at_months () =
+  tp_months6 ~what:"`value_at`'s time in quantity 'q'"
+    (tp_model ~extra:"quantities { q = value_at(I, 6 'months) }" ())
+
+let test_tp_refuse_breakpoints_months () =
+  tp_months6 ~what:"`breakpoints` of forcing 'f'"
+    (tp_model ~rate:"f(t)"
+       ~extra:"forcing { f : piecewise 'ratio { breakpoints = [6 'months] values = [1.0, 0.5] } }" ())
+
+let test_tp_refuse_bspline_window_months () =
+  tp_months6 ~what:"`window` of forcing 'f'"
+    (tp_model ~rate:"f(t)"
+       ~extra:"forcing { f : bspline 'ratio { window = [0 'days, 6 'months] n_basis = 4 \
+               coefs = [1.0, 1.0, 1.0, 1.0] } }" ())
+
+let test_tp_refuse_interpolated_times_months () =
+  tp_months6 ~what:"`times` of forcing 'f'"
+    (tp_model ~rate:"f(t)"
+       ~extra:"forcing { f : interpolated 'ratio { times = [0 'days, 6 'months] values = [1.0, 2.0] } }" ())
+
+let test_tp_refuse_instant_bounds_months () =
+  tp_months6 ~what:"the bounds of 'tau'"
+    (tp_model ~params:"tau : instant in [0 'days, 6 'months]" ())
+
+let test_tp_refuse_t_comparison_months () =
+  tp_months6 ~what:"a comparison with `t`"
+    (tp_model ~rate:"if t >= 6 'months then 0.5 else 1.0" ())
+
+let test_tp_refuse_timepoints_months () =
+  tp_months6 ~what:"timepoint 'peak'"
+    (tp_model ~extra:"timepoints { peak = origin + 6 'months }" ())
+
+let test_tp_refuse_t_offset_months () =
+  tp_expect ~code:"E321"
+    ~message:"calendar duration `1 'months` cannot move `t`, the model time, whose \
+              date is known only when the model runs"
+    ~hint:"a calendar month from a date depends on which date it is. State the \
+           offset in days: `30 'days` (≈ 1 'months)."
+    (tp_model ~params:"tau : instant in [0 'days, 100 'days]"
+       ~rate:"if t - 1 'months > tau then 0.5 else 1.0" ())
+
+let test_tp_refuse_runtime_param_base () =
+  tp_expect ~code:"E321"
+    ~message:"calendar duration `1 'months` in a comparison with `t` cannot move \
+              `tau`, an instant parameter, whose date is known only when the model runs"
+    ~hint:"a calendar month from a date depends on which date it is. State the \
+           offset in days: `30 'days` (≈ 1 'months)."
+    (tp_model ~params:"tau : instant in [0 'days, 100 'days]"
+       ~rate:"if t >= tau + 1 'months then 0.5 else 1.0" ())
+
+let test_tp_refuse_anchor_base () =
+  let src = tp_model ~to_:"last_obs + 6 'months" () in
+  tp_expect ~code:"E321"
+    ~message:"calendar duration `6 'months` in `simulate { to }` cannot move \
+              `last_obs`, an observation anchor, whose date is known only when the \
+              model runs"
+    ~hint:"a calendar month from a date depends on which date it is. State the \
+           offset in days: `183 'days` (≈ 6 'months)."
+    src;
+  (* One mistake, one diagnostic: no E401 / E100 / E602 cascade (§10). *)
+  List.iter (fun code -> tp_expect_no ~code src) ["E401"; "E100"; "E602"]
+
+let test_tp_hint_date_minus_month () =
+  tp_expect ~code:"E321"
+    ~message:(tp_instant_message "1 'months" "intervention at-time")
+    ~hint:"for the date 1 calendar month before `date(\"2020-03-01\")` write \
+           `add_calendar_months(date(\"2020-03-01\"), -1)`; for a fixed span write \
+           `30 'days` (≈ 1 'months)."
+    (tp_model ~extra:"interventions { b : add(S, 10) at [date(\"2020-03-01\") - 1 'months] }" ())
+
+let test_tp_hint_fractional_years () =
+  tp_expect ~code:"E321"
+    ~message:(tp_instant_message "1.5 'years" "simulate.to")
+    ~hint:"for the date 18 calendar months after `origin` write \
+           `add_calendar_months(origin, 18)`; for a fixed span write `548 'days` (≈ 1.5 'years)."
+    (tp_model ~to_:"1.5 'years" ())
+
+let test_tp_hint_fractional_months () =
+  tp_expect ~code:"E321"
+    ~message:(tp_instant_message "0.5 'months" "simulate.to")
+    ~hint:"write each calendar step with `add_calendar_months(d, n)` or \
+           `add_calendar_years(d, n)` from a date `d`, or state the offset as a fixed \
+           span: `15 'days` (≈ 0.5 'months)."
+    (tp_model ~to_:"0.5 'months" ())
+
+let test_tp_hint_mixed () =
+  tp_expect ~code:"E321"
+    ~message:(tp_instant_message "(1 'years + 3 'days)" "simulate.to")
+    ~hint:"write each calendar step with `add_calendar_months(d, n)` or \
+           `add_calendar_years(d, n)` from a date `d`, or state the offset as a fixed \
+           span: `368 'days` (≈ (1 'years + 3 'days))."
+    (tp_model ~to_:"1 'years + 3 'days" ())
+
+let test_tp_recurring_from_is_instant () =
+  let src = tp_model
+      ~extra:"interventions { b : add(S, 10) { every = 30 'days  from = 6 'months  to = 200 'days } }" () in
+  tp_months6 ~what:"intervention.from" src;
+  tp_expect_no ~code:"E322" src
+
+(* Without an origin there is no calendar: the same spellings compile, with the
+   average month (archived typed-time proposal §1.1). *)
+let test_tp_unanchored_unchanged () =
+  let m = compile_expect_ok (tp_model ~origin:None ~to_:"2 'years"
+      ~extra:"interventions { b : add(S, 10) at [6 'months] }" ()) in
+  Alcotest.(check (float 1e-9)) "t_end = 2 average years" 730.485 m.Ir.simulation.Ir.t_end;
+  (match m.Ir.interventions with
+   | [iv] ->
+     (match iv.Ir.fire with
+      | Ir.Scheduled (Ir.AtTimes [t])
+      | Ir.Scheduled (Ir.AtTimesExpr [Ir.UnitLiteral { value = t; _ }]) ->
+        Alcotest.(check (float 1e-9)) "at = 6 average months" 182.62125 t
+      | _ -> Alcotest.fail "expected one scheduled at-time")
+   | _ -> Alcotest.fail "expected one intervention")
+
+let stage_1a_tests = [
+  "simulate to = 2 'years refused", test_tp_refuse_simulate_to_years;
+  "simulate from = 6 'months refused", test_tp_refuse_simulate_from_months;
+  "scenario to = 30 'months refused", test_tp_refuse_scenario_to;
+  "at [6 'months] refused", test_tp_refuse_at_months;
+  "output at = [6 'months] refused", test_tp_refuse_output_at_months;
+  "value_at(I, 6 'months) refused", test_tp_refuse_value_at_months;
+  "breakpoints = [6 'months] refused", test_tp_refuse_breakpoints_months;
+  "bspline window month end refused", test_tp_refuse_bspline_window_months;
+  "interpolated times month entry refused", test_tp_refuse_interpolated_times_months;
+  "instant bounds with 6 'months refused", test_tp_refuse_instant_bounds_months;
+  "t >= 6 'months refused", test_tp_refuse_t_comparison_months;
+  "timepoints origin + 6 'months refused", test_tp_refuse_timepoints_months;
+  "t - 1 'months refused (run-time base)", test_tp_refuse_t_offset_months;
+  "t >= tau + 1 'months refused (run-time base)", test_tp_refuse_runtime_param_base;
+  "last_obs + 6 'months refused once (run-time base)", test_tp_refuse_anchor_base;
+  "hint: date - 1 'months names a negative step", test_tp_hint_date_minus_month;
+  "hint: 1.5 'years names 18 months", test_tp_hint_fractional_years;
+  "hint: 0.5 'months offers days only", test_tp_hint_fractional_months;
+  "hint: years mixed with days offers days only", test_tp_hint_mixed;
+  "recurring from is an instant (E321, not E322)", test_tp_recurring_from_is_instant;
+  "unanchored spellings keep the average", test_tp_unanchored_unchanged;
+]
+
 let () =
   Alcotest.run "compiler" [
+    "time_positions_stage_1a",
+      List.map (fun (name, f) -> Alcotest.test_case name `Quick f) stage_1a_tests;
     "unused_reduction_binder_a5", [
       Alcotest.test_case "E334 rejects a binder the reduction never uses"
         `Quick test_a5_unused_binder_rejected;
@@ -17158,7 +17411,7 @@ let () =
         `Quick test_typed_time_pos_5months_table_value;
       Alcotest.test_case "0.087 'per_month rate in anchored mode is legal"
         `Quick test_typed_time_pos_per_month_rate_in_anchored;
-      Alcotest.test_case "simulate.to = 600 'months one-shot conversion (anchored)"
+      Alcotest.test_case "simulate.to = 600 'months refused, hint names add_calendar_months (anchored)"
         `Quick test_typed_time_pos_simulate_to_months_oneshot;
       Alcotest.test_case "duration param bounds with 'months stay Exact"
         `Quick test_typed_time_pos_duration_param_bounds_with_months;
