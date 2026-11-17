@@ -871,6 +871,15 @@ COMPILER_ML   := $(sort $(filter-out %/ir_version_generated.ml, \
 # `cli` crate is the `camdl` binary, so its JSON is camdl.json. rustdoc's
 # lint warnings (unresolved doc links and the like) are silenced here: they
 # are the comments' faults, which `cargo doc` reports, not this build's.
+#
+# The engineering pages, docs/internals/engineering/*.qmd, are rendered from
+# the hand-written docs/engineering/<topic>.md, each explaining one
+# engineering feature. `typedoc engineering` resolves their `rust:` and
+# `ocaml:` references against both JSON inputs above, embeds the declarations
+# their `<!-- decl: ... -->` lines name, and fails on a reference that names
+# nothing. Without any pages it writes none and succeeds. Docs:
+# docs/dev/documentation.md, "Engineering pages".
+ENGINEERING_PAGES := docs/engineering
 RUNTIME_CRATES    := ir declared runid io numerics score sim diff
 RUNTIME_OVERVIEW  := rust/docs-overview.md
 RUSTDOC_JSON      := RUSTC_BOOTSTRAP=1 cargo rustdoc --quiet
@@ -891,6 +900,10 @@ docs-internals: build $(COMPILER_OVERVIEW) $(RUNTIME_OVERVIEW)
 	$(TYPEDOC) render --overview $(RUNTIME_OVERVIEW) \
 	  --input docs/internals/runtime.json --out docs/internals/runtime \
 	  --order 1000 --commit $(shell git rev-parse HEAD)
+	$(TYPEDOC) engineering --pages $(ENGINEERING_PAGES) --out docs/internals/engineering \
+	  --site docs/internals/compiler=$(COMPILER_OVERVIEW),docs/internals/compiler.json \
+	  --site docs/internals/runtime=$(RUNTIME_OVERVIEW),docs/internals/runtime.json \
+	  --commit $(shell git rev-parse HEAD)
 
 # The camdl-scope screenshots on guide/first-fit.qmd need a running viewer, so
 # they are committed images rather than render output. Re-run after a change

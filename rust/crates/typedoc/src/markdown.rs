@@ -123,7 +123,7 @@ fn is_list_item(line: &str) -> bool {
 }
 
 /// The fence a line opens or closes, if it is one: its character and length.
-fn fence_marker(line: &str) -> Option<(char, usize)> {
+pub fn fence_marker(line: &str) -> Option<(char, usize)> {
     let t = line.trim_start();
     let c = t.chars().next().filter(|c| *c == '`' || *c == '~')?;
     let n = t.chars().take_while(|x| *x == c).count();

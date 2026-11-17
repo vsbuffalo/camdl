@@ -31,7 +31,7 @@ use serde::Deserialize;
 
 use crate::model::{
     DocLink, Impl, Input, Kind, Language, LinkTo, Member, Module, SourceFile, Span, SpanClass,
-    Target, TypeDecl,
+    Target, TypeDecl, Value,
 };
 use crate::rustlex::{self, Lines, PathRun, Tok, Token};
 
@@ -1153,6 +1153,78 @@ impl CrateExtract<'_> {
         None
     }
 
+    /// Where a value item is written, when that is a source file of the
+    /// inputs.
+    fn value_at(&self, name: String, item: &Item) -> Option<Value> {
+        let span = item.span.as_ref()?;
+        let path = repo_path(self.r.prefix, &span.filename)?;
+        self.r.world.files.contains(&path).then_some(Value {
+            name,
+            path,
+            line: span.begin.0 as u32,
+        })
+    }
+
+    /// A module's functions, constants and statics, in rustdoc's item order,
+    /// then the methods and associated constants of the inherent impls of
+    /// its types, in type order. A name given twice is left out.
+    fn values(&self, m: &ModInfo) -> Vec<Value> {
+        let mut out = Vec::new();
+        if let ItemEnum::Module(module) = &self.krate().index[&m.id].inner {
+            for id in &module.items {
+                let Some(it) = self.item(id).filter(|i| i.crate_id == 0) else {
+                    continue;
+                };
+                if matches!(
+                    it.inner,
+                    ItemEnum::Function(_) | ItemEnum::Constant { .. } | ItemEnum::Static(_)
+                ) {
+                    if let Some(v) = it.name.clone().and_then(|n| self.value_at(n, it)) {
+                        out.push(v);
+                    }
+                }
+            }
+        }
+        for t in &m.types {
+            let item = &self.krate().index[t];
+            let ty = item.name.clone().unwrap_or_default();
+            let impls: &[Id] = match &item.inner {
+                ItemEnum::Struct(s) => &s.impls,
+                ItemEnum::Enum(e) => &e.impls,
+                ItemEnum::Union(u) => &u.impls,
+                _ => &[],
+            };
+            for id in impls {
+                let Some(ItemEnum::Impl(imp)) = self.item(id).map(|i| &i.inner) else {
+                    continue;
+                };
+                if imp.trait_.is_some() || imp.is_synthetic || imp.blanket_impl.is_some() {
+                    continue;
+                }
+                for it in imp.items.iter().filter_map(|i| self.item(i)) {
+                    if !matches!(
+                        it.inner,
+                        ItemEnum::Function(_) | ItemEnum::AssocConst { .. }
+                    ) {
+                        continue;
+                    }
+                    let Some(name) = it.name.as_deref() else {
+                        continue;
+                    };
+                    if let Some(v) = self.value_at(format!("{ty}::{name}"), it) {
+                        out.push(v);
+                    }
+                }
+            }
+        }
+        let mut count: HashMap<String, usize> = HashMap::new();
+        for v in &out {
+            *count.entry(v.name.clone()).or_default() += 1;
+        }
+        out.retain(|v| count[&v.name] == 1);
+        out
+    }
+
     /// A type's declaration.
     fn decl(&self, id: &Id) -> Result<TypeDecl, String> {
         let item = &self.krate().index[id];
@@ -1453,6 +1525,7 @@ pub fn extract(specs: &[CrateSpec], prefix: &str, repo_root: &Path) -> Result<In
                 doc: item.docs.clone(),
                 doc_links: x.r.doc_links(item),
                 types,
+                values: x.values(m),
             });
             if seen_files.insert(m.file.clone()) {
                 sources.push(x.source(&m.file));

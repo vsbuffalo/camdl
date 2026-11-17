@@ -147,19 +147,20 @@ fn source_page(
     Ok(out)
 }
 
-/// Converts a doc comment written in module `m` to Markdown for page `page`.
+/// Converts a doc comment written in module `m` to Markdown for a page at
+/// `from`.
 /// An OCaml comment's references are resolved from that module; a Rust
 /// comment's links are the ones rustdoc resolved, `links`, and a link
 /// rustdoc did not resolve to something on the pages is left unlinked.
-fn convert_doc(site: &Site, m: usize, page: usize, doc: &str, links: &[DocLink]) -> String {
+fn convert_doc(site: &Site, m: usize, from: From, doc: &str, links: &[DocLink]) -> String {
     match site.modules[m].language {
         Language::Ocaml => {
             let resolve = |path: &str| -> Option<String> {
                 site.resolve_type(m, path)
-                    .map(|id| site.type_href(page, id))
+                    .map(|id| site.type_href(from, id))
                     .or_else(|| {
                         site.resolve_module(m, path)
-                            .map(|t| site.module_href(page, t))
+                            .map(|t| site.module_href(from, t))
                     })
             };
             odoc::to_markdown(doc, &resolve)
@@ -169,26 +170,24 @@ fn convert_doc(site: &Site, m: usize, page: usize, doc: &str, links: &[DocLink])
                 let link = links
                     .iter()
                     .find(|l| l.text == text || l.text.trim_end_matches("()") == text)?;
-                doc_link_href(site, page, &link.to)
+                doc_link_href(site, from, &link.to)
             };
             rustdoc_to_markdown(doc, &resolve)
         }
     }
 }
 
-/// The link target, from module page `page`, of a resolved doc link.
-fn doc_link_href(site: &Site, page: usize, to: &LinkTo) -> Option<String> {
+/// The link target, from `from`, of a resolved doc link.
+fn doc_link_href(site: &Site, from: From, to: &LinkTo) -> Option<String> {
     match to {
         LinkTo::Type { module, ty } => site
             .find_target(&Target {
                 module: module.clone(),
                 ty: ty.clone(),
             })
-            .map(|id| site.type_href(page, id)),
-        LinkTo::Module { module } => site.module_named(module).map(|m| site.module_href(page, m)),
-        LinkTo::Source { path, line } => site
-            .source_named(path)
-            .map(|s| format!("{SOURCE_DIR}/{}.qmd#L{line}", s.slug)),
+            .map(|id| site.type_href(from, id)),
+        LinkTo::Module { module } => site.module_named(module).map(|m| site.module_href(from, m)),
+        LinkTo::Source { path, line } => site.source_href(from, path, *line),
     }
 }
 
@@ -205,7 +204,7 @@ fn summary(
     doc: &Option<String>,
     links: &[DocLink],
 ) -> Option<String> {
-    present(doc).and_then(|d| first_sentence(&convert_doc(site, m, page, d, links)))
+    present(doc).and_then(|d| first_sentence(&convert_doc(site, m, From::Page(page), d, links)))
 }
 
 /// Text for a pipe-table cell: on one line, with `|` escaped.
@@ -213,7 +212,7 @@ fn cell(s: &str) -> String {
     s.replace('\n', " ").replace('|', "\\|")
 }
 
-fn front_matter(out: &mut String, title: &str, description: Option<&str>, order: i64) {
+pub fn front_matter(out: &mut String, title: &str, description: Option<&str>, order: i64) {
     out.push_str("---\n");
     let _ = writeln!(out, "title: {}", yaml_string(title));
     if let Some(d) = description {
@@ -467,9 +466,9 @@ fn module_page(site: &Site, source: &SourceLinks, p: usize) -> Result<String, St
                 code_span(&with_params(
                     e.language,
                     &t.params,
-                    &site.type_display(p, id)
+                    &site.type_display(From::Page(p), id)
                 )),
-                site.type_href(p, id),
+                site.type_href(From::Page(p), id),
                 cell(&s),
                 cell(&marks::render_line(&marks))
             );
@@ -488,7 +487,14 @@ fn module_page(site: &Site, source: &SourceLinks, p: usize) -> Result<String, St
             "###"
         };
         for ty in 0..e.module.types.len() {
-            type_section(&mut out, site, source, p, TypeId { module: m, ty }, level)?;
+            type_section(
+                &mut out,
+                site,
+                source,
+                From::Page(p),
+                TypeId { module: m, ty },
+                level,
+            )?;
         }
     }
     let trimmed = out.trim_end().len();
@@ -508,7 +514,7 @@ fn module_doc(out: &mut String, site: &Site, m: usize, p: usize) {
         let _ = writeln!(
             out,
             "{}\n",
-            convert_doc(site, m, p, doc, &e.module.doc_links)
+            convert_doc(site, m, From::Page(p), doc, &e.module.doc_links)
         );
     }
 }
@@ -517,7 +523,7 @@ fn type_section(
     out: &mut String,
     site: &Site,
     source: &SourceLinks,
-    p: usize,
+    from: From,
     id: TypeId,
     level: &str,
 ) -> Result<(), String> {
@@ -527,21 +533,85 @@ fn type_section(
     let _ = writeln!(
         out,
         "{level} {} {{#{anchor}}}\n",
-        escape_text(&site.type_display(p, id))
+        escape_text(&site.type_display(from, id))
     );
 
     let marks = marks::type_marks(t, e.language);
     if !marks.is_empty() {
         let _ = writeln!(out, "{}\n", marks::render_line(&marks));
     }
+    type_body(out, site, from, id)?;
+
+    let together: Vec<String> = match t.recursive_group {
+        Some(g) => e
+            .module
+            .types
+            .iter()
+            .enumerate()
+            .filter(|(i, other)| *i != id.ty && other.recursive_group == Some(g))
+            .map(|(i, _)| {
+                link(
+                    site,
+                    from,
+                    TypeId {
+                        module: id.module,
+                        ty: i,
+                    },
+                )
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    if !together.is_empty() {
+        let _ = writeln!(out, "**Defined together with:** {}\n", together.join(", "));
+    }
+
+    let refers = refers_to(site, from, id);
+    if !refers.is_empty() {
+        let _ = writeln!(out, "**Refers to:** {}\n", refers.join(", "));
+    }
+
+    let users: Vec<String> = site
+        .used_by(id)
+        .iter()
+        .map(|&u| link(site, from, u))
+        .collect();
+    if !users.is_empty() {
+        let _ = writeln!(out, "**Used by:** {}\n", users.join(", "));
+    }
+
+    let impls = implements(site, source, from, id);
+    if !impls.is_empty() {
+        let _ = writeln!(out, "**Implements:** {impls}\n");
+    }
+
+    let implementors: Vec<String> = site
+        .implemented_by(id)
+        .iter()
+        .map(|&u| link(site, from, u))
+        .collect();
+    if !implementors.is_empty() {
+        let _ = writeln!(out, "**Implemented by:** {}\n", implementors.join(", "));
+    }
+
+    let _ = writeln!(out, "{}\n", source_line(site, source, from, id));
+    Ok(())
+}
+
+/// What a type's section shows between its heading and its relations: its
+/// converted doc comment, its declaration, and each member with its marks
+/// and doc comment. An engineering page embeds the same.
+pub fn type_body(out: &mut String, site: &Site, from: From, id: TypeId) -> Result<(), String> {
+    let e = &site.modules[id.module];
+    let t = &e.module.types[id.ty];
     if let Some(doc) = present(&t.doc) {
         let _ = writeln!(
             out,
             "{}\n",
-            convert_doc(site, id.module, p, doc, &t.doc_links)
+            convert_doc(site, id.module, from, doc, &t.doc_links)
         );
     }
-    let _ = writeln!(out, "{}\n", declaration(site, p, id)?);
+    let _ = writeln!(out, "{}\n", declaration(site, from, id)?);
 
     if !t.members.is_empty() {
         let noun = t.kind.member_noun();
@@ -556,82 +626,39 @@ fn type_section(
                 body.push(marks::render_line(&mem_marks));
             }
             if let Some(doc) = present(&mem.doc) {
-                body.push(convert_doc(site, id.module, p, doc, &mem.doc_links));
+                body.push(convert_doc(site, id.module, from, doc, &mem.doc_links));
             }
             let body = body.join("\n\n");
             let indented = indent(&body, 4);
             let _ = writeln!(out, ":   {}\n", indented.trim_start());
         }
     }
-
-    let together: Vec<String> = match t.recursive_group {
-        Some(g) => e
-            .module
-            .types
-            .iter()
-            .enumerate()
-            .filter(|(i, other)| *i != id.ty && other.recursive_group == Some(g))
-            .map(|(i, _)| {
-                link(
-                    site,
-                    p,
-                    TypeId {
-                        module: id.module,
-                        ty: i,
-                    },
-                )
-            })
-            .collect(),
-        None => Vec::new(),
-    };
-    if !together.is_empty() {
-        let _ = writeln!(out, "**Defined together with:** {}\n", together.join(", "));
-    }
-
-    let refers = refers_to(site, p, id);
-    if !refers.is_empty() {
-        let _ = writeln!(out, "**Refers to:** {}\n", refers.join(", "));
-    }
-
-    let users: Vec<String> = site.used_by(id).iter().map(|&u| link(site, p, u)).collect();
-    if !users.is_empty() {
-        let _ = writeln!(out, "**Used by:** {}\n", users.join(", "));
-    }
-
-    let impls = implements(site, source, p, id);
-    if !impls.is_empty() {
-        let _ = writeln!(out, "**Implements:** {impls}\n");
-    }
-
-    let implementors: Vec<String> = site
-        .implemented_by(id)
-        .iter()
-        .map(|&u| link(site, p, u))
-        .collect();
-    if !implementors.is_empty() {
-        let _ = writeln!(out, "**Implemented by:** {}\n", implementors.join(", "));
-    }
-
-    let _ = writeln!(
-        out,
-        "[source]({}/{}.qmd#L{}){{.td-source}} · [on GitHub]({}){{.td-source}}\n",
-        SOURCE_DIR,
-        site.source_of(id.module).slug,
-        t.line,
-        source.url(&e.module.path, Some(t.line))
-    );
     Ok(())
+}
+
+/// The links to where a type is written: its line on its source page and
+/// on GitHub.
+pub fn source_line(site: &Site, source: &SourceLinks, from: From, id: TypeId) -> String {
+    let e = &site.modules[id.module];
+    let t = &e.module.types[id.ty];
+    let path = &e.module.path;
+    // Site::build refuses a module whose file has no source page.
+    let on_page = site.source_href(from, path, t.line).unwrap_or_default();
+    format!(
+        "[source]({on_page}){{.td-source}} · [on GitHub]({}){{.td-source}}",
+        source.url(path, Some(t.line))
+    )
 }
 
 /// The traits a Rust type implements: the derived ones first, then each
 /// written impl, linked to the trait's documentation when an input declares
 /// it, with a link to where the impl is written.
-fn implements(site: &Site, source: &SourceLinks, p: usize, id: TypeId) -> String {
+fn implements(site: &Site, source: &SourceLinks, from: From, id: TypeId) -> String {
     let t = &site.modules[id.module].module.types[id.ty];
     let trait_link = |imp: &crate::model::Impl| -> String {
         let shown = code_span(&imp.trait_path);
         match imp.target.as_ref().and_then(|x| site.find_target(x)) {
-            Some(tr) => format!("[{shown}]({})", site.type_href(p, tr)),
+            Some(tr) => format!("[{shown}]({})", site.type_href(from, tr)),
             None => shown,
         }
     };
@@ -647,10 +674,9 @@ fn implements(site: &Site, source: &SourceLinks, p: usize, id: TypeId) -> String
         .filter(|i| !i.derived)
         .map(|i| match (&i.path, i.line) {
             (Some(path), Some(line)) => {
-                let at = match site.source_named(path) {
-                    Some(s) => format!("{SOURCE_DIR}/{}.qmd#L{line}", s.slug),
-                    None => source.url(path, Some(line)),
-                };
+                let at = site
+                    .source_href(from, path, line)
+                    .unwrap_or_else(|| source.url(path, Some(line)));
                 format!("{} ([impl]({at}){{.td-source}})", trait_link(i))
             }
             _ => trait_link(i),
@@ -666,7 +692,7 @@ fn implements(site: &Site, source: &SourceLinks, p: usize, id: TypeId) -> String
 
 /// A type's declaration as a highlighted block, each type name in it linked
 /// to that type's documentation, except the type's own name.
-fn declaration(site: &Site, p: usize, id: TypeId) -> Result<String, String> {
+fn declaration(site: &Site, from: From, id: TypeId) -> Result<String, String> {
     let e = &site.modules[id.module];
     let t = &e.module.types[id.ty];
     let h = Highlighted::new(&t.decl, &t.decl_spans)
@@ -674,7 +700,7 @@ fn declaration(site: &Site, p: usize, id: TypeId) -> Result<String, String> {
     let href = |target: &Target| {
         site.find_target(target)
             .filter(|&other| other != id)
-            .map(|other| site.type_href_html(From::Page(p), other))
+            .map(|other| site.type_href_html(from, other))
     };
     let class = format!("td-decl {}", e.language.fence());
     Ok(fence(
@@ -694,12 +720,12 @@ fn with_params(language: Language, params: &[String], name: &str) -> String {
     }
 }
 
-/// A link to a type, its text the name as seen from page `p`.
-fn link(site: &Site, p: usize, id: TypeId) -> String {
+/// A link to a type, its text the name as seen from `from`.
+fn link(site: &Site, from: From, id: TypeId) -> String {
     format!(
         "[{}]({})",
-        code_span(&site.type_display(p, id)),
-        site.type_href(p, id)
+        code_span(&site.type_display(from, id)),
+        site.type_href(from, id)
     )
 }
 
@@ -708,7 +734,7 @@ fn link(site: &Site, p: usize, id: TypeId) -> String {
 /// shown as written; then a code span for each path it mentions that names
 /// no declaration and is not one of the language's own types, such as
 /// `Yojson.Safe.t`. Repeats are left out.
-fn refers_to(site: &Site, p: usize, id: TypeId) -> Vec<String> {
+fn refers_to(site: &Site, from: From, id: TypeId) -> Vec<String> {
     let t = &site.modules[id.module].module.types[id.ty];
     let decl_lines: Vec<&str> = t.decl.lines().collect();
     // The text of each span that links, with what it links to. Site::build
@@ -731,7 +757,11 @@ fn refers_to(site: &Site, p: usize, id: TypeId) -> Vec<String> {
                 .iter()
                 .find(|(_, found)| *found == Some(target))
                 .map_or(String::new(), |(text, _)| text.clone());
-            format!("[{}]({})", code_span(&written), site.type_href(p, target))
+            format!(
+                "[{}]({})",
+                code_span(&written),
+                site.type_href(from, target)
+            )
         })
         .collect();
     let mut seen_text: Vec<&str> = Vec::new();
