@@ -314,14 +314,26 @@ fn periods_the_document_states(ex: &Example, cal: &Calendar) -> Vec<(f64, f64)> 
     };
 
     // The scored column is the one on the `~` line; a row with `NA` there
-    // states its period and scores nothing, so it contributes no term.
-    let scored = ex
+    // states its period and scores nothing, so it contributes no term. So does
+    // a binomial or beta-binomial row of `0` of `0` whose trial count names a
+    // column (`n = <column>`): with no trials it carries no information, and
+    // it is fitted exactly as the row written `NA` (D77).
+    let tilde = ex
         .declaration
         .lines()
-        .find_map(|l| Some(l.trim().split_once(" ~ ")?.0.trim().to_string()))
+        .find_map(|l| l.trim().split_once(" ~ ").map(|(a, b)| (a.trim().to_string(), b.trim().to_string())))
         .unwrap_or_else(|| panic!("example '{}' has no `<column> ~ …` line", ex.name));
-    let scored_ix = column(&scored);
-    let observed = |r: &Vec<&str>| r[scored_ix].trim() != "NA";
+    let scored_ix = column(&tilde.0);
+    let trials_ix = (tilde.1.starts_with("binomial(") || tilde.1.starts_with("beta_binomial("))
+        .then(|| tilde.1.split_once("n = ")
+            .map(|(_, rest)| rest.split([',', ')']).next().unwrap_or("").trim().to_string()))
+        .flatten()
+        .and_then(|n| header.iter().position(|h| *h == n));
+    let observed = |r: &Vec<&str>| {
+        let y = r[scored_ix].trim();
+        let zero_of_zero = trials_ix.is_some_and(|i| r[i].trim() == "0") && y == "0";
+        y != "NA" && !zero_of_zero
+    };
 
     let role = |role: &str| -> Option<String> {
         ex.declaration.split_once(&format!(": {role}"))?.0.rsplit(&[',', '{'][..]).next()

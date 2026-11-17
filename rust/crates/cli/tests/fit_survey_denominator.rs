@@ -60,6 +60,11 @@ fn tempdir(tag: &str) -> Tmp {
 /// with positivity `p = I / N0` (the true prevalence). Prevalence (not
 /// incidence) → no origin-window concern; this is about the aux binding.
 fn write_model(dir: &Path) -> PathBuf {
+    write_model_scoring(dir, "pos ~ binomial(n = tested, p = projected / N0)")
+}
+
+/// The same model with the survey scored by `likelihood` (a `pos ~ …` line).
+fn write_model_scoring(dir: &Path, likelihood: &str) -> PathBuf {
     let camdlc = camdlc_bin();
     let src = r#"
 time_unit = 'days
@@ -78,13 +83,13 @@ observations {
     columns       { time : time, pos : count, tested : count }
     projected  = I
     emit_schedule = every 1 'days
-    pos ~ binomial(n = tested, p = projected / N0)
+    LIKELIHOOD
   }
 }
 scenarios { baseline { set = { beta = 0.3  gamma = 0.1  N0 = 1000 } } }
 init { S = 999  I = 1 }
 simulate { from = 0 'days  to = 6 'days }
-"#;
+"#.replace("LIKELIHOOD", likelihood);
     let model_path = dir.join("survey.camdl");
     std::fs::write(&model_path, src).unwrap();
     let ir_path = dir.join("survey.ir.json");
@@ -299,30 +304,46 @@ fn a_zero_denominator_runs_and_warns_rather_than_refusing() {
          than zero-effort:\n{stderr}");
 }
 
-/// gh#812: a zero-effort row and a missing row contribute identically — a
-/// likelihood term of exactly zero, which is why the kernel short-circuits to
-/// a literal 0.0 rather than letting the general formula reach 0 to lgamma
-/// round-off.
+/// gh#812 and D77: a zero-effort row (`0` of `0`) and a missing row (`NA`) are
+/// the same run.
 ///
-/// The two are not the same run end to end. A row holding a value (`0` of `0`)
-/// is an assimilation event, so the filter resamples there (on equal weights);
-/// an `NA` row is not, so it does not (D72). The resampling draw spent at the
-/// zero-effort row moves every later draw, so the two filters agree exactly up
-/// to and including that row and are different, equally valid realisations
-/// after it. This pins the part that is the claim: same seed, the per-step
-/// log-likelihood increments agree at t = 1 and are exactly zero at t = 2.
+/// With no trials there is one possible outcome, so the row's likelihood is
+/// exactly 0 for every particle. The observation model treats such a row as
+/// missing (D77): it is no assimilation event, so the filter does not weight,
+/// resample or open a collapse-check window there, and IF2 does not perturb or
+/// cool for it. Same seed, the two pfilter runs print the same log-likelihood
+/// and write the same trace, and the two IF2 fits store the same parameter path
+/// and the same log-likelihood, to every digit written (`mle_params.toml`
+/// writes the log-likelihood in full precision).
 #[test]
 fn a_zero_denominator_scores_exactly_as_a_hole_does() {
-    let camdl = camdl_bin();
     let tmp = tempdir("zero_vs_na");
     let ir = write_model(tmp.path());
+    assert_zero_effort_row_is_a_hole(&tmp, &ir);
+}
+
+/// The same for a beta-binomial survey: its kernel also scores `n = 0` as
+/// exactly 0 before it reads the shape parameters, and the binder makes the
+/// row a hole for both families (D77).
+#[test]
+fn a_beta_binomial_zero_denominator_scores_exactly_as_a_hole_does() {
+    let tmp = tempdir("zero_vs_na_bb");
+    let ir = write_model_scoring(tmp.path(),
+        "pos ~ beta_binomial(n = tested, mean = projected / N0, concentration = 20)");
+    assert_zero_effort_row_is_a_hole(&tmp, &ir);
+}
+
+/// pfilter (stdout and trace) and an IF2 fit (parameter path and fitted
+/// log-likelihood), on the `0 of 0` data and on the NA data, compared exactly.
+fn assert_zero_effort_row_is_a_hole(tmp: &Tmp, ir: &Path) {
+    let camdl = camdl_bin();
     let zero = write_zero_denom_data(tmp.path());
     let na = write_zero_as_na_data(tmp.path());
 
-    let trace = |data: &Path, tag: &str| -> Vec<(String, String)> {
+    let pfilter = |data: &Path, tag: &str| -> (String, String) {
         let path = tmp.path().join(format!("{tag}.trace.tsv"));
         let out = Command::new(&camdl).env_remove("CLICOLOR_FORCE")
-            .arg("pfilter").arg(&ir)
+            .arg("pfilter").arg(ir)
             .args(["--scenario", "baseline", "--particles", "200", "--seed", "1"])
             .arg("--data").arg(data)
             .arg("--trace").arg(&path)
@@ -330,20 +351,141 @@ fn a_zero_denominator_scores_exactly_as_a_hole_does() {
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .output().unwrap();
         assert!(out.status.success(), "pfilter {tag}: {}", String::from_utf8_lossy(&out.stderr));
-        std::fs::read_to_string(&path).unwrap().lines().skip(1)
-            .map(|l| {
-                let c: Vec<&str> = l.split('\t').collect();
-                (c[0].to_string(), c[1].to_string())
+        (String::from_utf8_lossy(&out.stdout).into_owned(), std::fs::read_to_string(&path).unwrap())
+    };
+    let (z_ll, z_trace) = pfilter(&zero, "zero");
+    let (n_ll, n_trace) = pfilter(&na, "na");
+    assert_eq!(z_ll, n_ll, "pfilter: the zero-effort row and the NA row must give the same log-likelihood");
+    assert_eq!(z_trace, n_trace, "pfilter: the zero-effort row and the NA row must give the same trace");
+    assert!(z_trace.lines().nth(2).is_some_and(|l| l.starts_with("2\t0.0000\t")),
+        "the row at t = 2 contributes exactly zero:\n{z_trace}");
+
+    // The IF2 fits, each in its own directory.
+    let fit = |data: &Path, tag: &str| -> (String, String) {
+        let dir = tmp.path().join(tag);
+        std::fs::create_dir_all(&dir).unwrap();
+        let toml = write_if2_toml(&dir, ir, data);
+        let out = run_fit(&camdl, &toml, "1");
+        assert!(out.status.success(), "fit {tag}: {}", String::from_utf8_lossy(&out.stderr));
+        let results = dir.join("results_if2");
+        let traces = find_file(&results, "parameter_traces.tsv")
+            .unwrap_or_else(|| panic!("fit {tag}: no parameter_traces.tsv"));
+        let mle = find_file(&results, "mle_params.toml")
+            .unwrap_or_else(|| panic!("fit {tag}: no mle_params.toml"));
+        let rows = std::fs::read_to_string(traces).unwrap().lines()
+            .filter(|l| !l.starts_with('#')).collect::<Vec<_>>().join("\n");
+        let ll = std::fs::read_to_string(mle).unwrap().lines()
+            .find(|l| l.starts_with("log_likelihood ="))
+            .unwrap_or_else(|| panic!("fit {tag}: no log_likelihood in mle_params.toml"))
+            .to_string();
+        (rows, ll)
+    };
+    let (z_path, z_fit_ll) = fit(&zero, "fit_zero");
+    let (n_path, n_fit_ll) = fit(&na, "fit_na");
+    assert_eq!(z_path, n_path, "IF2: the parameter path must be the same");
+    assert_eq!(z_fit_ll, n_fit_ll, "IF2: the fitted log-likelihood must be the same");
+}
+
+/// D77: the one-step-ahead predictive record treats a `0 of 0` row as missing,
+/// exactly as `NA`. `--save-prequential` writes the same three files for both
+/// data sets, and neither holds a row at t = 2, so the step count `compare`
+/// reads (`n_scored`) is the same too.
+#[test]
+fn a_zero_denominator_drops_out_of_the_prequential_record_as_a_hole_does() {
+    let camdl = camdl_bin();
+    let tmp = tempdir("zero_vs_na_preq");
+    let ir = write_model(tmp.path());
+    let run = |data: &Path, stem: &str| -> Vec<String> {
+        let out = Command::new(&camdl).env_remove("CLICOLOR_FORCE")
+            .arg("pfilter").arg(&ir)
+            .args(["--scenario", "baseline", "--particles", "200", "--seed", "1"])
+            .arg("--data").arg(data)
+            .arg("--save-prequential").arg(tmp.path().join(stem))
+            .args(["--no-store", "--no-progress"])
+            .env("CAMDL_SKIP_VERSION_CHECK", "1")
+            .output().unwrap();
+        assert!(out.status.success(), "pfilter {stem}: {}", String::from_utf8_lossy(&out.stderr));
+        ["tsv", "streams.tsv", "json"].iter()
+            .map(|ext| std::fs::read_to_string(tmp.path().join(format!("{stem}.{ext}"))).unwrap())
+            .collect()
+    };
+    let zero = run(&write_zero_denom_data(tmp.path()), "preq_zero");
+    let na = run(&write_zero_as_na_data(tmp.path()), "preq_na");
+    for (ext, (z, n)) in ["tsv", "streams.tsv", "json"].iter().zip(zero.iter().zip(&na)) {
+        assert_eq!(z, n, "prequential {ext}: the zero-effort row and the NA row must agree");
+    }
+    assert!(!zero[1].lines().any(|l| l.starts_with("2\t")),
+        "the `0 of 0` row at t = 2 is missing, so it has no predictive row:\n{}", zero[1]);
+}
+
+/// D77 does not change PGAS: a `0 of 0` row and an `NA` row give the same
+/// draws, trace, trajectories and filter ESS. The conditional SMC sweep never
+/// asked whether a row is an assimilation event; it scores every row, and both
+/// rows score exactly 0 for every particle, so the equal-weight rule it already
+/// had (gh#718) skips the resample and the ancestor-sampling move at either.
+#[test]
+fn a_zero_denominator_is_a_hole_under_pgas() {
+    let camdl = camdl_bin();
+    let tmp = tempdir("zero_vs_na_pgas");
+    let ir = write_model(tmp.path());
+    let fit = |data: PathBuf, tag: &str| -> Vec<String> {
+        let dir = tmp.path().join(tag);
+        std::fs::create_dir_all(&dir).unwrap();
+        let toml = dir.join("fit_pgas.toml");
+        std::fs::write(&toml, format!(r#"
+output_dir = "{out}"
+[model]
+camdl = "{ir}"
+[data.observations]
+survey = "{data}"
+[config]
+dt = 1.0
+[estimate]
+beta  = {{ bounds = [0.01, 5.0], start = 0.4, prior = {{ flat = {{}} }} }}
+gamma = {{ bounds = [0.01, 1.0], start = 0.15, prior = {{ flat = {{}} }} }}
+[fixed]
+N0 = 1000
+[method]
+algorithm = "pgas"
+backend = "chain_binomial"
+chains = 1
+particles = 30
+sweeps = 20
+burn_in = 2
+thin = 1
+"#, out = dir.join("results").display(), ir = ir.display(), data = data.display())).unwrap();
+        let out = run_fit(&camdl, &toml, "1");
+        assert!(out.status.success(), "pgas {tag}: {}", String::from_utf8_lossy(&out.stderr));
+        ["draws.tsv", "trace.tsv", "trajectories.tsv", "filter_ess.tsv"].iter()
+            .map(|name| {
+                let f = find_file(&dir.join("results"), name)
+                    .unwrap_or_else(|| panic!("pgas {tag}: no {name}"));
+                std::fs::read_to_string(f).unwrap()
             })
             .collect()
     };
-    let z = trace(&zero, "zero");
-    let n = trace(&na, "na");
-    assert_eq!(z[0], n[0], "t = 1: the step before the row must agree exactly");
-    assert_eq!(z[1], ("2".to_string(), "0.0000".to_string()),
-        "the zero-effort row contributes exactly zero: {z:?}");
-    assert_eq!(n[1], ("2".to_string(), "0.0000".to_string()),
-        "the missing row contributes exactly zero: {n:?}");
+    let zero = fit(write_zero_denom_data(tmp.path()), "pgas_zero");
+    let na = fit(write_zero_as_na_data(tmp.path()), "pgas_na");
+    for (name, (z, n)) in ["draws", "trace", "trajectories", "filter ESS"].iter().zip(zero.iter().zip(&na)) {
+        assert_eq!(z, n, "PGAS {name}: the zero-effort row and the NA row must agree");
+    }
+}
+
+/// The first file called `name` under `root`, depth-first.
+fn find_file(root: &Path, name: &str) -> Option<PathBuf> {
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(root).ok()?
+        .filter_map(|e| e.ok().map(|e| e.path())).collect();
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            if let Some(found) = find_file(&path, name) {
+                return Some(found);
+            }
+        } else if path.file_name().is_some_and(|f| f == name) {
+            return Some(path);
+        }
+    }
+    None
 }
 
 /// gh#812 does not relax the half of the check that matters: a positive count

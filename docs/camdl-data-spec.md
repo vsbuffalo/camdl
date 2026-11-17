@@ -799,9 +799,10 @@ week_ending	comm_deaths	n_deaths
 2026-07-28	14	41
 ```
 
-The row for the week ending 21 July classified no deaths. It is not a hole:
-`n_deaths = 0` is an observation, and it scores exactly `0` whatever fraction
-the model produces, because a binomial with no trials has one possible outcome.
+The row for the week ending 21 July classified no deaths. `n_deaths = 0` is an
+observation, not a missing value, but a binomial with no trials has one possible
+outcome, so the row carries no information about any fraction the model
+produces: it is fitted exactly as the same row written `NA`, and scores no term.
 A row with `n_deaths > 0` in a window where a trajectory produced no deaths at
 all is refused for that trajectory — the data recorded classified deaths where
 the model made none — and the refusal names the argument. That is the model
@@ -845,11 +846,17 @@ depends on what `n` reads.
 At load, a row with `count > n`, a negative `n`, or an `n` that is not a whole
 number (`n = tested / 2` with `tested = 91`) is refused. The refusal gives the
 stream, the row, the time and both values; nothing is scored. A row where `n` is
-`0` and the count is `0` is valid and scores exactly zero; a positive count
-against `n = 0` is refused. A row with `NA` in the count or in a column `n`
-reads is a hole and is not checked. Wrap a fractional expression in `floor()` or
-`ceil()` to choose the rounding yourself; the likelihood would otherwise round
-it, and the trial count scored would not be the one written.
+`0` and the count is `0` is valid: with no trials there is one possible outcome,
+so the row carries no information, and every fitting method (`fit`, `pfilter`,
+`profile`) fits it exactly as it fits the same row written `NA` (a hole, below).
+It is missing from the one-step-ahead predictive record too:
+`pfilter
+--save-prequential` writes no row for it, and the step count `compare`
+reads does not include it. A positive count against `n = 0` is refused. A row
+with `NA` in the count or in a column `n` reads is a hole and is not checked.
+Wrap a fractional expression in `floor()` or `ceil()` to choose the rounding
+yourself; the likelihood would otherwise round it, and the trial count scored
+would not be the one written.
 
 At run time, `n` takes a different value on each trajectory, so `count > n` is
 the model disagreeing with valid data, and that trajectory is scored as
@@ -870,8 +877,9 @@ as the `n` argument being out of domain. A fractional `n` at run time (an `n`
 built from a real-valued compartment) is rounded to the nearest whole number.
 
 `camdl survey` reads the same `n = <column>` as `camdl fit` and applies the same
-rules. Survey scores every row, so an `NA` in a column the likelihood reads is
-refused rather than made a hole.
+rules. Survey refuses an `NA` in a column the likelihood reads rather than
+making the row a hole, since its rows are meant to be complete; it accepts a `0`
+of `0` row, which, as above, carries no information and adds no term.
 
 ## Missing observations: `NA` is a hole, not a zero
 

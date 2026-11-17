@@ -790,14 +790,15 @@ fn a_dead_particle_is_counted_apart_from_one_the_observation_refused() {
 
 // ── 4. the three cell states, and the fourth thing that is not an error ────
 
-/// `Scored`, `Hole` and `NotScheduled` are distinguishable — and a genuine
-/// zero-density row is a fourth thing that is routine, not an error.
+/// `Scored`, `Hole` and `NotScheduled` are distinguishable — and a zero-effort
+/// row is routine, not an error.
 ///
-/// All four return `0.0` from the scoring path: a stream on another cadence
-/// contributes no term, a hole marginalizes its missing value, and
-/// `beta_binomial(k = 0 | n = 0)` is exactly `0.0` because zero trials have
-/// exactly one outcome — routine surveillance data for a day nobody was
-/// examined. One number for four states is what this record refuses to do.
+/// All of them return `0.0` from the scoring path: a stream on another cadence
+/// contributes no term, a hole marginalizes its missing value, and a binomial
+/// `0` of `0` has exactly one outcome — routine surveillance data for a day
+/// nobody was examined. The binder makes that row a hole (D77), so the filters
+/// treat it exactly as the row written `NA`, and this record reports it as one.
+/// One number for three states is what this record refuses to do.
 #[test]
 fn the_cell_states_are_distinguishable_and_a_zero_effort_row_is_not_a_failure() {
     let scored = obs_block(
@@ -878,13 +879,10 @@ fn the_cell_states_are_distinguishable_and_a_zero_effort_row_is_not_a_failure() 
     assert_eq!(by_name("elsewhere").cell, ObsCellState::NotScheduled);
     assert_eq!(
         by_name("zero_effort").cell,
-        ObsCellState::Scored { y_obs: 0.0 },
-        "a zero-effort row IS scored — it is an observation with the value 0, \
-         not a missing one"
+        ObsCellState::Hole,
+        "a zero-effort row carries no information and is bound as a hole (D77), \
+         exactly as the row written NA"
     );
-
-    // What separates the fourth from the other three: it was scored, and it
-    // scored finitely.
     assert_eq!(
         by_name("zero_effort").n_neg_inf,
         0,
