@@ -295,6 +295,27 @@ from an `Instant` (**E321**), because calendar months/years are non-invertible
 relative to a date. Use `add_calendar_months` / `add_calendar_years` (§2.3) for
 calendar-exact stepping, or an explicit `'days` literal for an affine offset.
 
+**Date positions.** A position that holds a date is an _instant position_:
+`simulate { from, to }`, a scenario's `simulate { to }`, an `at [...]` entry of
+an intervention or event, a recurring schedule's `from` and `to`, an output's
+`trajectories { at }` and an observation's `emit_schedule = at [...]` entries,
+`value_at`'s time argument, a forcing's `breakpoints`, a bspline `window` and an
+interpolated forcing's `times`, the bounds of an `instant`-kind parameter, and
+the operand compared with model time `t` in any expression. In anchored mode a
+bare duration there denotes `origin + D`, so a `'months`/`'years` literal in an
+instant position, directly or through a `let`, is **E321**:
+`simulate { to = 2 'years }` is refused, and its hint names
+`add_calendar_years(origin, 2)` and the span `730 'days`. An offset added to or
+subtracted from `t` (`t - 1 'months`) is refused the same way, since the date
+`t` stands for is known only when the model runs. A calendar duration as a
+cadence (a recurring `every`, an output or emit `every`) is **E322**, whose hint
+names `date_range(<start>, <end>, calendar_months = k)` in an `at` list. A
+_length_ keeps the average: `dt`, a forcing's `period`, `step` and `lag`, a
+sinusoidal `phase`, a `via` mean, a `duration` parameter's bounds, and a unit
+literal in an ordinary expression. Instant positions accept instant arithmetic
+(`to = origin + 90 'days`, `at = [date("2020-03-01") + 7 'days]`), folded at
+compile time, and every `at` list splices `date_range(...)`.
+
 An `Instant` moves by a duration, and the difference of two Instants is an
 Exact duration. In anchored mode the compiler refuses six forms on a
 **definite** Instant — one built from `date(...)`, `origin`, `add_calendar_*`,
@@ -3983,13 +4004,14 @@ NAME : ACTION {
 }
 ```
 
-**In anchored mode**, `every`, `from`, and `to` (and the `at_day` offset of
-§13.7) must be classified `Exact` (§2.1) — a `Calendar`-classified duration (e.g. `every = 1
+**In anchored mode**, `every` (and the `at_day` offset of §13.7) must be
+classified `Exact` (§2.1) — a `Calendar`-classified duration (e.g. `every = 1
 'months`) is
-**E322**, with a hint pointing at `every = 30 'days` for an affine ~monthly
-recurrence or at an explicit calendar-listed `at [date(...), date(...), ...]`
-schedule for true month-aligned recurrence. In unanchored mode the classifier is
-inactive and `every = 1 'months` is fine.
+**E322**, with a hint naming `date_range(<start>, <end>, calendar_months = 1)`
+in an `at` list for month-aligned recurrence, or `every = 30 'days` for a fixed
+cadence. `from` and `to` are instant positions (§2.1): a calendar duration there
+is **E321**, whose hint names `add_calendar_months(origin, k)`. In unanchored
+mode the classifier is inactive and `every = 1 'months` is fine.
 
 **When a scheduled time fires.** Every schedule form resolves to a list of
 declared times; each backend fires them on its own clock, so a simulation and a
@@ -4466,7 +4488,8 @@ state. That includes `t_start`.
 > declared timepoint values are currently discarded by the expander and not
 > available in expressions. Full timepoint support is not yet implemented. The
 > built-in reserved identifiers `t_start` and `t_end` are always available
-> regardless.
+> regardless. Each entry is an instant position (§2.1) and is checked as one:
+> under an origin `peak = origin + 6 'months` is **E321**.
 
 ```camdl
 timepoints {
@@ -4822,8 +4845,10 @@ is stripped before run hashing, so it never affects cached results.)
 **In anchored mode**, `every` must be classified `Exact`, as for an
 intervention's `every` (§13.2): a regular schedule has one fixed step, so
 `every = 1 'months` would place snapshots 30.436875 days apart and drift off the
-month boundaries. It is **E322**; write `every = 30 'days`, or list
-calendar-aligned times as `at = [date("2020-02-01"), date("2020-03-01"), ...]`.
+month boundaries. It is **E322**; list calendar-aligned times as
+`at = [date_range(origin, add_calendar_years(origin, 1), calendar_months = 1)]`,
+or write `every = 30 'days`. The `at` entries are instant positions (§2.1): a
+calendar duration in one is **E321**.
 
 ```camdl
 output { trajectories { at = [0, 30, 60, 90] } }   # snapshot only at these times
@@ -4969,8 +4994,10 @@ is meaningless inside a per-step propensity.
 
 **Reading a series at a time.** `value_at(series, TIME)` is the series value
 at the last output time at or before `TIME` (the state *as of* `TIME`; values
-are never interpolated). `TIME` is a constant time expression —
-`date("2026-08-10")` under a declared `origin`, or a number in model time —
+are never interpolated). `TIME` is an instant position (§2.1): a constant time
+expression — `date("2026-08-10")` under a declared `origin` (where a bare number
+draws **W325**, as an `at [...]` entry does, and a `'months`/`'years` literal is
+**E321**), or a number in model time —
 **or an observation anchor**: `last_obs` (the end of observed data),
 `first_obs` (its start), each optionally plus or minus a constant duration.
 
@@ -4988,9 +5015,9 @@ because a simulation has no observed data to anchor to.
 
 The offset must carry a duration unit: a bare `last_obs - 7` is rejected
 (**E335**), because there is no unit to interpret. Under a declared `origin` a
-`'months`/`'years` offset is rejected too (**E321**) — an anchor is an instant,
-and a calendar month is not a fixed number of days, so the resolved time would
-move with the data. Note that camdl writes durations with a leading tick
+`'months`/`'years` offset is rejected too (**E321**): the date `last_obs` stands
+for is known only when the model runs, and a calendar month from a date depends
+on which date it is, so the resolved time would move with the data. Note that camdl writes durations with a leading tick
 (`1 'weeks`); a bare word (`1 weeks`) is **E115**, which names the tick form.
 The command line takes the opposite convention (`--to "last_obs + 8 weeks"`,
 bare words), because a tick is a shell-quoting hazard.
