@@ -899,7 +899,7 @@ inverts it: `to = 600 'months` from 1891-01-01 is E321, and the hint names
 | gh#1102 | 1a    | one lowering function per kind; Span's calendar branch is D45's                                                                                  |
 | gh#1128 | 1a    | `Lower.instant` emits W325 for a bare number at `value_at`'s time, as at an `at [...]` entry                                                     |
 | gh#1129 | 1a    | `simulate { from, to }`, scenario `to`, output and emit `at` accept instant arithmetic (`date(a) + 7 'days`); also the deferred change of gh#844 |
-| gh#1133 | 1b    | every calendar conversion takes an `anchor`, which exists only under an origin                                                                   |
+| gh#1133 | 1b    | every calendar conversion takes an `anchor`, which exists only under an origin (not closed by Stage 1b's PR; see §8, Stage 1b)                   |
 | gh#1140 | 2     | three interval resolvers                                                                                                                         |
 | gh#1155 | 2     | the whole-unit endpoint check                                                                                                                    |
 | gh#1156 | 2     | `periodic_bins` in the IR (decision D)                                                                                                           |
@@ -1099,6 +1099,48 @@ only with:
 3. **The name** above, used consistently in those places.
 
 Lift: small to medium, about 300 lines of OCaml and tests.
+
+**Where the implementation departs from §3.4, and why.**
+
+- `Calendar_reading` is a submodule of `expander.ml`, with a signature that
+  keeps `anchor` private, not a file of its own: the reading needs the calendar
+  arithmetic (`parse_iso_date`, `add_calendar_months_ymd`, `days_per`), the
+  `let` table with its cycle guard and the parameter kinds, all of which live in
+  the expander's context. For the same reason `read` takes that context rather
+  than a `Time_typing.env`.
+- The rule is `resolve_days : anchor -> reading -> (float, refusal) result`, in
+  days from the origin, and there is no `resolve_instant` in model-time units.
+  Every lowering of a date position replaces a resolved expression with a
+  `'days` literal of that day count (`calendar_instant_expr`) and folds it as it
+  folds any other value. A comparison with `t` needs the literal: the explicit
+  form `t >= add_calendar_months(origin, 6)` is E302 in a rate (§10, gh#1163),
+  because the call lowers to a dimensionless constant, while `182 'days` keeps
+  dimension T. The literal converts to model time with the same division as
+  `add_calendar_months`, so the two values are bit-identical (test 1 compares
+  them); the IR carries a unit literal where the explicit form carries a
+  constant.
+- `Stepped` records its root and its month counts, so a two-step refusal can
+  compute the one-step reading; `Mixed` and `Two_calendar_steps` carry the base
+  and counts, and the message computes the dates. There is a fifth refusal,
+  `Not_one_step`, for a reading the rule does not cover at all (a conditional, a
+  product with a parameter, a calendar step inside another call), which keeps
+  Stage 1a's generic hint. The Stage 2 refusals (`Calendar_span` onwards) are
+  not added before their resolvers.
+- Each refusal's hint names the rule (condition 3), so the texts are §4.1's with
+  that clause added. Where the two readings of a mixed or two-step expression
+  agree from the modeller's base, the note gives a base where they differ: for
+  two steps, the last day of the month from which the first step lands in
+  February (2020-08-31 for six months, as in §4.1), else the first such date;
+  for a mixed step, the first such date from 1 January of the base's year.
+- A `let` whose body moves an instant by a calendar duration stays refused at
+  the `let` (§3.5's expression check), since a `let` is not a position.
+- gh#1133 is not closed here. The rule requires an `anchor`, but routing the
+  existing `date(...)`, `add_calendar_*` and `date_range` conversions through it
+  must keep the distinct diagnostics those sites report today (E220, E223, E327)
+  for an absent origin, a malformed one and a dimensionless `time_unit`, which
+  `anchor_of_ctx`'s single `None` does not distinguish. That is a refactor of
+  its own, with no change of value, and stays on gh#1133.
+- The feedback box points at gh#1184, opened for it.
 
 Tests, each red on Stage 1a:
 
