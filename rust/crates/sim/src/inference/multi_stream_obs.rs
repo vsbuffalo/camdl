@@ -1241,8 +1241,8 @@ impl BoundObs {
             // gh#812: one warning per stream, naming the rows, so a zero-effort
             // row is not silently indistinguishable from a missing one. `NA`
             // means "we do not know what happened"; `n = 0` means "we know
-            // nobody was examined". They contribute identically to the
-            // likelihood and are different claims about the world.
+            // nobody was examined". The filters treat them as one row (D77,
+            // below), and they are different claims about the world.
             if !zero_denom_rows.is_empty() {
                 let shown: Vec<String> =
                     zero_denom_rows.iter().take(8).map(|r| r.to_string()).collect();
@@ -1255,9 +1255,10 @@ impl BoundObs {
                     severity: Severity::Warn,
                     message: format!(
                         "observation stream '{}': {} of {} rows have {} = 0 \
-                         (rows {}{}). These score as zero — with no trials there is one \
-                         possible outcome, so the term is non-identifying, not invalid. \
-                         If those rows are MISSING rather than zero-effort, write them as NA.",
+                         (rows {}{}). With no trials there is one possible outcome, so \
+                         these rows carry no information and are fitted exactly as NA rows \
+                         are. If those rows are MISSING rather than zero-effort, write them \
+                         as NA, so the data file says so.",
                         stream_name,
                         zero_denom_rows.len(),
                         spec.observations.len(),
@@ -1272,6 +1273,27 @@ impl BoundObs {
         let report = BindReport::new(findings);
         if report.is_fatal() {
             return Err(report);
+        }
+
+        // D77: a row whose likelihood is the same for every particle and every
+        // parameter vector, by its structure alone, is missing to the filters.
+        // It becomes a hole here, so that it and an `NA` row are one row to
+        // everything downstream: no assimilation event, no likelihood term, no
+        // resampling, no IF2 perturbation. The only such row the binder knows
+        // without analysing the likelihood symbolically is a binomial or
+        // beta-binomial count with zero trials read from the data (`0` of `0`):
+        // with no trials there is one possible outcome, and the kernels score
+        // it exactly 0 whatever the other arguments are. A positive count
+        // against zero trials was refused above and never reaches here.
+        for spec in &mut streams {
+            let Some(n_expr) = trials_expr(&spec.ir_model.likelihood) else { continue };
+            for (cell, aux_row) in spec.observations.iter_mut().zip(spec.aux.iter()) {
+                if matches!(cell, Some(ObsCell::Scalar(v)) if *v == 0.0)
+                    && static_trials(n_expr, aux_row) == Some(0.0)
+                {
+                    *cell = None;
+                }
+            }
         }
 
         // Union axis: the sorted-unique merge of every boundary the integrator
