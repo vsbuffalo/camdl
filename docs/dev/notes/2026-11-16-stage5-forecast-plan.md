@@ -5,6 +5,72 @@
   Stage 5
 - Design: `docs/dev/temporal-architecture.md` §2.4, §2.5, §3.3, §4.3, §4.4
 
+## Measurement: the driver against an importance-sampling reference
+
+**Fixture.** `rust/crates/cli/tests/fixtures/forecast/two_cadence_sir.camdl`, a
+chain-binomial SIR (population 1000, five initial infectives, β = 0.5, γ = 0.25,
+one-day steps) with two reports of the same infections: a daily Poisson count
+with mean ρ·(the day's infections), and a weekly negative-binomial count with
+mean ρ·(the week's infections) and size k (ρ = 0.5, k = 10). `daily_cases.tsv`
+and `weekly_cases.tsv` beside it are one simulated realization
+(`camdl simulate … --seed 7 --obs-only-dir`). The parameters are fixed at the
+values that generated the data, so the comparison isolates the state
+conditioning from parameter uncertainty.
+
+**The question.** The state is conditioned on the daily counts of days 20–24
+(each row covers the day ending at its time); the weekly rows through day 21
+carry no value. The forecast origin is day 24. The target is the week [21, 28),
+under way at the origin: three of its days are inferred from the daily data and
+four are predicted. What is the distribution of the week's infections W?
+
+**Reference.** Importance sampling from the prior: 100,000 forward simulations
+of the chain-binomial process, each weighted by the Poisson likelihood of the
+five daily counts, computed by hand in the test rather than by camdl's
+likelihood code (effective sample size 4,918).
+
+**Result** (test `the_week_under_way_matches_the_importance_sampling_reference`,
+40 draws × 1,000 particles; Monte Carlo errors from the spread of the 40
+per-draw estimates):
+
+| Quantity                                                      | Mean            | Variance        |
+| ------------------------------------------------------------- | --------------- | --------------- |
+| W, importance-sampling reference                              | 170.868 ± 0.381 | 1180.20 ± 18.97 |
+| W, the fixed-origin driver                                    | 169.863 ± 0.470 | 1193.77 ± 26.87 |
+| Reported weekly count, driver                                 | 84.950 ± 0.246  | 1129.70 ± 10.83 |
+| Reported weekly count, implied by the reference (ρ, k as set) | 85.434          | 1139.88         |
+
+The reported count's implied moments are ρ·E[W] and ρ²·Var[W] + E[ρW + (ρW)²/k];
+both agree within four Monte Carlo errors, as the test requires.
+
+**What the existing method gives on the same question** (test
+`the_conditioning_and_the_declaration_each_move_the_week_by_many_errors`, 50,000
+reference simulations each):
+
+| How the week is computed                                                              | Mean of W     |
+| ------------------------------------------------------------------------------------- | ------------- |
+| Conditioned on the daily data (the forecast's target)                                 | 171.19 ± 0.51 |
+| Not conditioned (the prior; where the free-forward replay from `init {}` centres)     | 218.91 ± 0.29 |
+| Read at day 28 with no reset at day 21 (the week not declared; includes days 14 – 20) | 492.81 ± 0.57 |
+
+The free-forward band, which `fit predict` already extends past the data, is a
+replay from the initial state that never sees the observations, so its week is
+centred 48 infections higher than the conditioned one (prior standard deviation
+65.7). A reading of the stream's running total at day 28 without the week
+declared holds the previous week's infections as well, 2.9 times the conditioned
+value, with no error raised. The plan declares every target, and the driver
+refuses a reading at any time that ends no declared period
+(`a_reading_that_ends_no_declared_period_is_refused`).
+
+**Mutation check.** Declaring the week under way from the origin (the filter
+period [24, 28)) instead of its start fails the reference test: driver mean
+79.561 ± 0.360 against 170.868 ± 0.381, z = 174.
+
+The spec's own experiment (68.245 ± 0.021 against 68.227 ± 0.034; 256.95
+undeclared) used a model and data that are not committed; its numbers are not
+reproducible here, and this fixture reproduces its structure (a daily and a
+weekly stream, origin day 24, target days 21–27, fixed parameters, the reference
+weighted by the daily data) with its own numbers.
+
 ## Scope of this branch
 
 Stage 5 is larger than one reviewable change. It is split into three pull

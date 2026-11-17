@@ -476,8 +476,8 @@ obs  = pl.read_csv(".../observed/onset.tsv",   separator="\t")
 [`camdl docs diagnosing-fits`](diagnosing-fits.md) §5). Omit `--mode` to emit
 all applicable for the fit's backend:
 
-- `--mode free_forward` — the generative check: replay the fitted model from
-  the start, never re-anchored to data. The harshest test, and what exposes
+- `--mode free_forward` — the generative check: replay the fitted model from the
+  start, never re-anchored to data. The harshest test, and what exposes
   generative misspecification. Available on any backend.
 - `--mode one_step` — the honest short-horizon forecast `p(y_t | y_{1:t-1})`:
   re-condition on the data each step. Chain-binomial only (an ODE fit's one-step
