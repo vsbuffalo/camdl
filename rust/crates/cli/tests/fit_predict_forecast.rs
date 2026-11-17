@@ -304,3 +304,48 @@ fn walk(root: &Path) -> Vec<PathBuf> {
     }
     out
 }
+
+/// gh#747: a forecast continues the fit's filter on the binomial sampler the
+/// fit ran. One problem fitted twice, the second time with `--binomial btrs`:
+/// each leaf records its sampler, each forecast names the leaf's, and the two
+/// forecasts of the same seed differ.
+#[test]
+fn a_forecast_uses_the_binomial_sampler_its_fit_ran() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fit(dir, PMMH, "");
+    let out = run(dir, &["fit", "run", "fit.toml", "--seed", "1", "--binomial", "btrs"]);
+    assert!(out.status.success(), "fit run --binomial btrs: {}", stderr(&out));
+    let leaves: Vec<PathBuf> = walk(&dir.join("results")).into_iter()
+        .filter(|p| p.file_name().is_some_and(|n| n == "run.json"))
+        .map(|p| p.parent().unwrap().to_path_buf())
+        .collect();
+    assert_eq!(leaves.len(), 2, "{leaves:?}");
+    let sampler_of = |leaf: &Path| -> String {
+        let r: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(leaf.join("run.json")).unwrap()).unwrap();
+        r["inputs"]["binomial"].as_str().unwrap().to_string()
+    };
+    let mut forecasts = Vec::new();
+    for leaf in &leaves {
+        let out = run(dir, &["fit", "predict", leaf.to_str().unwrap(), "--horizon", "1 weeks", "--n-draws", "2"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        let fdir = walk(&leaf.parent().unwrap().parent().unwrap().join("predict")).into_iter()
+            .filter(|p| p.file_name().is_some_and(|n| n == "forecast.json"))
+            .find(|p| {
+                let m: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
+                let r: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(leaf.join("run.json")).unwrap()).unwrap();
+                m["run_id"] == r["run_id"]
+            })
+            .unwrap_or_else(|| panic!("no forecast of {}", leaf.display()))
+            .parent().unwrap().to_path_buf();
+        let m: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(fdir.join("forecast.json")).unwrap()).unwrap();
+        assert_eq!(m["binomial"].as_str().unwrap(), sampler_of(leaf), "{}", leaf.display());
+        forecasts.push((sampler_of(leaf), std::fs::read_to_string(fdir.join("forecast-samples.tsv")).unwrap()));
+    }
+    forecasts.sort();
+    assert_eq!((forecasts[0].0.as_str(), forecasts[1].0.as_str()), ("btpe", "btrs"));
+    assert_ne!(forecasts[0].1, forecasts[1].1, "the two samplers give different draws");
+}

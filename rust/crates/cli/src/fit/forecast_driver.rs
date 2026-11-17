@@ -44,6 +44,8 @@ pub(crate) struct Forecast {
     pub state: StateConditioning,
     pub n_draws: usize,
     pub n_particles: usize,
+    /// The binomial sampler the filters drew with.
+    pub binomial: sim::rng::BinomialAlgorithm,
     /// `draws[k][s]`: the predictive draw of the observation at target `k`
     /// (the plan's order), sample `s = draw · n_particles + particle`. One `s`
     /// across targets is one particle's trajectory (D54).
@@ -101,6 +103,10 @@ pub(crate) struct DriverConfig {
     /// Records the filter's ancestry, whose memory grows with particles ×
     /// compartments × steps; tests read it, the command does not.
     pub record_expected: bool,
+    /// The binomial sampler the propagation draws use (gh#747): the one the
+    /// fit's method ran, so a forecast continues the process the fit
+    /// filtered with the same draws.
+    pub binomial: sim::rng::BinomialAlgorithm,
 }
 
 /// The seed of draw `d`, for every filter `fit predict` runs per posterior
@@ -153,6 +159,7 @@ pub(crate) fn fixed_origin_forecast(
         record_prequential: true,
         record_predictions: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        binomial: config.binomial,
     };
 
     let n = config.n_particles;
@@ -198,7 +205,9 @@ pub(crate) fn fixed_origin_forecast(
             }
         }
     }
-    Ok(Forecast { plan, state, n_draws: param_sets.len(), n_particles: n, draws, expected })
+    Ok(Forecast {
+        plan, state, n_draws: param_sets.len(), n_particles: n, binomial: config.binomial, draws, expected,
+    })
 }
 
 /// Where the driver may read `stream` at `end`: its index and the union index

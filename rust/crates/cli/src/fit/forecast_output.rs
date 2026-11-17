@@ -89,6 +89,48 @@ pub(crate) fn refuse_unsupported(
     Ok(())
 }
 
+/// The binomial sampler the fit run in `leaf` drew with (gh#747), so the
+/// forecast continues the fit's filter on the same sampler. Read from the
+/// leaf's `run.json` (`inputs.binomial`, written by `fit run`). A leaf written
+/// before that record has none: its sampler is `fit run --binomial`'s value
+/// when its recorded command line carries one, else `configured`, the method
+/// as `fit.toml` wrote it.
+pub(crate) fn fit_binomial(
+    leaf: &std::path::Path,
+    configured: Option<sim::rng::BinomialAlgorithm>,
+) -> Result<sim::rng::BinomialAlgorithm, String> {
+    use sim::rng::BinomialAlgorithm;
+    let path = leaf.join("run.json");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let record: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("{} is not JSON: {e}", path.display()))?;
+    let parse = |v: &serde_json::Value| -> Result<BinomialAlgorithm, String> {
+        serde_json::from_value(v.clone()).map_err(|e| format!(
+            "{}: the recorded binomial sampler {v} is not one camdl knows: {e}", path.display()))
+    };
+    match record.pointer("/inputs/binomial") {
+        Some(v) if !v.is_null() => return parse(v),
+        _ => {}
+    }
+    let argv: Vec<&str> = record.pointer("/provenance/argv")
+        .and_then(|a| a.as_array())
+        .map(|a| a.iter().filter_map(|s| s.as_str()).collect())
+        .unwrap_or_default();
+    let from_argv = argv.iter().enumerate().find_map(|(i, a)| match a.strip_prefix("--binomial") {
+        Some("") => argv.get(i + 1).copied(),
+        Some(rest) => rest.strip_prefix('='),
+        None => None,
+    });
+    match (from_argv, configured) {
+        (Some(v), _) => parse(&serde_json::Value::String(v.to_string())),
+        (None, Some(c)) => Ok(c),
+        (None, None) => Err(format!(
+            "{} records no binomial sampler and its fit.toml names no method; re-run the fit \
+             so the forecast can continue its filter on the same sampler.", path.display())),
+    }
+}
+
 /// What the forecast needs from `run_predict`.
 pub(crate) struct ForecastJob<'a> {
     pub args: &'a crate::args::FitPredictArgs,
@@ -108,6 +150,8 @@ pub(crate) struct ForecastJob<'a> {
     pub schema: Option<&'a crate::run_meta::ObsSchema>,
     pub dt: f64,
     pub seed: u64,
+    /// The binomial sampler the fit's method ran (gh#747).
+    pub binomial: sim::rng::BinomialAlgorithm,
 }
 
 /// Run the forecast and write its artifact. Returns the files written and the
@@ -240,6 +284,7 @@ pub(crate) fn run_forecast(
         dt: job.dt,
         base_seed: job.seed,
         record_expected: false,
+        binomial: job.binomial,
     }).map_err(|f| f.describe(|d| draw_refs[d].describe()))?;
 
     let mut written = write_tables(&fc, model, job.schema, job.out_dir, &draw_refs)?;
@@ -400,6 +445,7 @@ fn write_manifest(
             "draw": r.key.map(|k| k.1),
         })).collect::<Vec<_>>(),
         "n_particles": fc.n_particles,
+        "binomial": fc.binomial,
         "samples_per_draw": FORECAST_SAMPLES_PER_DRAW.min(fc.n_particles),
         "targets": targets,
     });
@@ -425,5 +471,30 @@ mod tests {
         assert!(msg.contains("posterior draw (chain 1, draw 7), row 40 of draws.tsv at t = 26"), "{msg}");
         let unkeyed = DrawRef { cloud_row: 12, key: None };
         assert_eq!(unkeyed.describe(), "posterior draw at row 12 of draws.tsv");
+    }
+
+    /// The fit's sampler is the leaf's record; a leaf written before the
+    /// record takes `fit run --binomial` from its command line, else the
+    /// method as fit.toml wrote it.
+    #[test]
+    fn the_fits_sampler_is_read_from_the_leaf() {
+        use sim::rng::BinomialAlgorithm::{Btpe, Btrs};
+        let leaf = |json: &str| {
+            let dir = crate::test_support::unique_temp_dir("fit_binomial");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("run.json"), json).unwrap();
+            dir
+        };
+        let recorded = leaf(r#"{"inputs": {"binomial": "btrs"}, "provenance": {"argv": ["camdl"]}}"#);
+        assert_eq!(fit_binomial(&recorded, Some(Btpe)).unwrap(), Btrs, "the record wins over fit.toml");
+        let flag = leaf(r#"{"inputs": {}, "provenance": {"argv": ["camdl", "fit", "run", "f.toml", "--binomial", "btrs"]}}"#);
+        assert_eq!(fit_binomial(&flag, Some(Btpe)).unwrap(), Btrs);
+        let eq = leaf(r#"{"inputs": {}, "provenance": {"argv": ["camdl", "fit", "run", "--binomial=btrs"]}}"#);
+        assert_eq!(fit_binomial(&eq, Some(Btpe)).unwrap(), Btrs);
+        let plain = leaf(r#"{"inputs": {}, "provenance": {"argv": ["camdl", "fit", "run"]}}"#);
+        assert_eq!(fit_binomial(&plain, Some(Btrs)).unwrap(), Btrs, "fit.toml's method");
+        assert!(fit_binomial(&plain, None).is_err());
+        let bad = leaf(r#"{"inputs": {"binomial": "fast"}}"#);
+        assert!(fit_binomial(&bad, Some(Btpe)).is_err());
     }
 }

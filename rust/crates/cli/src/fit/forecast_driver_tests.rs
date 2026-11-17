@@ -146,6 +146,7 @@ impl Setup {
         let params = vec![self.params(); n_draws];
         fixed_origin_forecast(plan, &self.streams, compiled, &params, DriverConfig {
             n_particles, dt: 1.0, base_seed: seed, record_expected: true,
+            binomial: sim::rng::BinomialAlgorithm::Btpe,
         })
     }
 }
@@ -484,6 +485,7 @@ fn a_targets_start_moves_the_observed_likelihood_only_when_it_is_a_new_stop() {
             n_particles: 200, dt: 1.0, t_start: 0.0, skip_first_obs_from_loglik: false,
             record_ancestry: false, record_prequential: false, record_predictions: false,
             max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+            binomial: sim::rng::BinomialAlgorithm::Btpe,
         };
         let r = bootstrap_filter(&process, &obs, &s.params(), &smc, 17).unwrap();
         // The increments at the observed rows (times at or before 24).
@@ -519,4 +521,25 @@ fn a_targets_start_moves_the_observed_likelihood_only_when_it_is_a_new_stop() {
     // Monte Carlo realisation of the same likelihood (pending D72, which
     // decides whether a stop with no observation resamples at all).
     assert_ne!(a[1..], b[1..], "without {a:?}\n   with {b:?}");
+}
+
+/// gh#747: the driver's filters draw with the sampler `DriverConfig` names,
+/// and the forecast records it. BTRS and BTPE draw the same Binomial(n, p)
+/// but not the same values from one stream, so the same seed gives different
+/// draws under each.
+#[test]
+fn the_forecast_draws_with_the_sampler_it_is_given() {
+    use sim::rng::BinomialAlgorithm::{Btpe, Btrs};
+    let s = fixture_setup(24, "sampler");
+    let run = |binomial| {
+        let plan = s.plan(7.0, &["weekly_cases"]);
+        let compiled = s.extended(&plan);
+        fixed_origin_forecast(plan, &s.streams, compiled, &[s.params(), s.params()], DriverConfig {
+            n_particles: 100, dt: 1.0, base_seed: 3, record_expected: false, binomial,
+        }).unwrap()
+    };
+    let (btpe, btrs, btrs_again) = (run(Btpe), run(Btrs), run(Btrs));
+    assert_eq!((btpe.binomial, btrs.binomial), (Btpe, Btrs));
+    assert_ne!(btpe.draws, btrs.draws, "the sampler must reach the particles' draws");
+    assert_eq!(btrs.draws, btrs_again.draws, "and the draws are reproducible under it");
 }
