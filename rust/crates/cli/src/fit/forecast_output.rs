@@ -160,7 +160,13 @@ pub(crate) fn run_forecast(
             job.args.stream.as_deref().unwrap_or("")));
     }
     let plan = ForecastPlan::new(partition, reach, &plan_streams).map_err(|e| e.to_string())?;
-    let failures: Vec<DeterministicFailure> = plan.refusals().iter()
+    // A stream the fit bound no data to has no rows to continue and no stop
+    // in the filter where its running total could start: refused, and named.
+    let unbound: Vec<crate::fit::forecast_plan::StreamRefusal> = model.observations.iter()
+        .filter(|o| selected(o) && !streams.iter().any(|s| s.name == o.name))
+        .map(|o| crate::fit::forecast_plan::StreamRefusal::NoBoundRows { stream: o.name.clone() })
+        .collect();
+    let failures: Vec<DeterministicFailure> = plan.refusals().iter().chain(&unbound)
         .map(|r| {
             let stream = match r {
                 crate::fit::forecast_plan::StreamRefusal::NoRhythm { stream, .. }

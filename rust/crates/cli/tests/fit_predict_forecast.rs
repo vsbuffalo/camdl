@@ -36,6 +36,10 @@ fn stderr(o: &std::process::Output) -> String {
 /// A PMMH fit of the fixture in `dir`, training rows through day 24. The
 /// weekly file also carries rows past the cutoff, which are held out.
 fn fit(dir: &Path, method: &str, extra_data: &str) {
+    fit_bound(dir, method, extra_data, "daily_cases = \"daily_cases.tsv\"\nweekly_cases = \"weekly_cases.tsv\"");
+}
+
+fn fit_bound(dir: &Path, method: &str, extra_data: &str, bound: &str) {
     std::fs::copy(fixture("two_cadence_sir.camdl"), dir.join("model.camdl")).unwrap();
     std::fs::copy(fixture("daily_cases.tsv"), dir.join("daily_cases.tsv")).unwrap();
     std::fs::copy(fixture("weekly_cases.tsv"), dir.join("weekly_cases.tsv")).unwrap();
@@ -48,8 +52,7 @@ camdl = "model.camdl"
 holdout_after = 24.0
 {extra_data}
 [data.observations]
-daily_cases = "daily_cases.tsv"
-weekly_cases = "weekly_cases.tsv"
+{bound}
 
 [estimate]
 beta = {{ bounds = [0.2, 1.0], start = 0.5 }}
@@ -185,4 +188,21 @@ cooling = 0.7"#, "");
                          "--sweep", "rho=0.4,0.6"]);
     assert!(!out.status.success());
     assert!(stderr(&out).contains("cannot be combined with --mode forecast"), "{}", stderr(&out));
+}
+
+/// A stream the fit bound no data to (here the weekly reports of a
+/// daily-only fit) is refused a forecast and named in `report.json`; the
+/// daily forecast is still written and the exit status is 1.
+#[test]
+fn a_stream_with_no_bound_data_is_refused_and_named() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fit_bound(dir, PMMH, "", "daily_cases = \"daily_cases.tsv\"");
+    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "1 weeks", "--n-draws", "4"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let fdir = forecast_dir(dir);
+    assert!(fdir.join("forecast/daily_cases.tsv").is_file());
+    assert!(!fdir.join("forecast/weekly_cases.tsv").exists());
+    let report = std::fs::read_to_string(fdir.join("report.json")).unwrap();
+    assert!(report.contains("weekly_cases") && report.contains("binds no rows"), "{report}");
 }
