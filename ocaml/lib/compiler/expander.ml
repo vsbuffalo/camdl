@@ -5972,9 +5972,9 @@ refuse_runtime_calendar ctx ~loc ~what ~base e
 
 (* E360 alone, at one instant position: the arithmetic an instant does not
    have (gh#1070). E321 there is [refuse_calendar_instant]'s. *)
-let check_instant_misuse ctx ~loc ~context (e : expr) =
+let check_instant_misuse ?(children = Time_typing.subexprs) ctx ~loc ~context (e : expr) =
   if ctx.origin <> None then
-    Time_typing.walk_instant_misuse (time_env ctx) e
+    Time_typing.walk_instant_misuse ~children (time_env ctx) e
       ~unitless:(fun off -> const_expr_dim off = Some (0, 0))
       ~on_hit:(fun misuse node ->
         Diagnostics.error ctx.diags ~code:"E360" ~loc
@@ -6082,18 +6082,7 @@ let check_instant_arithmetic ?(children = Time_typing.subexprs) ctx ~loc ~contex
                 ~exact_fn:(Time_typing.calendar_exact_fn bad)
                 (calendar_span_days ctx bad))
         ());
-    (* A unitless offset is judged by `const_expr_dim`, the rule the
-       observation-anchor offsets use (`classify_anchor`). *)
-    Time_typing.walk_instant_misuse ~children env e
-      ~unitless:(fun off -> const_expr_dim off = Some (0, 0))
-      ~on_hit:(fun misuse node ->
-        Diagnostics.error ctx.diags ~code:"E360" ~loc
-          ~message:(Printf.sprintf
-            "`%s` %s in %s; that has no meaning as a time"
-            (Time_typing.show_short node)
-            (Time_typing.describe_instant_misuse misuse) context)
-          ~hint:(Time_typing.hint_instant_misuse misuse)
-          ())
+    check_instant_misuse ~children ctx ~loc ~context e
   end
 
 (* A bare number in a time position under an origin (W324 for `simulate`, W325
