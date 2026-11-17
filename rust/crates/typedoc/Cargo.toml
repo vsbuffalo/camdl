@@ -5,10 +5,15 @@ edition = "2021"
 publish = false
 
 # Renders the internals pages of the documentation site from the type
-# declarations that the language extractors write as JSON.
+# declarations that the language extractors write as JSON, and extracts the
+# Rust crates' declarations from rustdoc's JSON output.
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 regex = "1"
+# The types of rustdoc's JSON output, pinned to the release for
+# `format_version` 57, which toolchain 1.94.1 writes. Bump it together with
+# rust/rust-toolchain.toml: the extractor refuses any other format version.
+rustdoc-types = "=0.57.4"
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
 

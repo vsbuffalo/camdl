@@ -1,9 +1,12 @@
 //! `typedoc`: renders the internals pages of the camdl documentation site.
 //!
 //! A language extractor reads source files and writes their type
-//! declarations as JSON ([`model::Input`]). This tool reads one or more such
-//! files and an overview page ([`overview::Overview`], an odoc `.mld` file)
-//! that gives the index its title and prose and groups the modules, and
+//! declarations as JSON ([`model::Input`]): `typedoc_ocaml` for the OCaml
+//! compiler, and this tool's `extract-rust` subcommand ([`rustdoc`]) for the
+//! Rust crates, from rustdoc's JSON output. The `render` subcommand reads one
+//! or more such files and an overview page ([`overview::Overview`], an odoc
+//! `.mld` file or a Markdown `.md` file) that gives the index its title and
+//! prose and groups the modules, and
 //! writes Quarto pages: the index, and one page per top-level module showing
 //! each type's declaration, documentation, reviewer marks, cross-references
 //! and a link to its source at one commit. The output is the same, byte for
@@ -16,6 +19,8 @@ mod model;
 mod odoc;
 mod overview;
 mod render;
+mod rustdoc;
+mod rustlex;
 mod site;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -42,8 +47,11 @@ enum Command {
     /// The directory is the generator's own: any `.qmd` file in it that this
     /// run does not write is deleted.
     Render {
-        /// The overview page (odoc `.mld`): the index's title and prose, and
-        /// one `{1 ...}` section with a `{!modules: ...}` list per group.
+        /// The overview page: the index's title and prose, and one section
+        /// per group listing its modules. An odoc `.mld` file has one
+        /// `{1 ...}` section with a `{!modules: ...}` list per group; a
+        /// Markdown `.md` file has one `## ...` section with a
+        /// `<!-- modules: ... -->` line per group.
         #[arg(long)]
         overview: PathBuf,
         /// An extractor's JSON output. Repeat for several languages.
@@ -69,6 +77,42 @@ enum Command {
         #[arg(long, default_value = ".")]
         source_root: PathBuf,
     },
+    /// Write the renderer's JSON input for Rust crates, from the JSON
+    /// rustdoc writes for each (`cargo rustdoc -- -Z unstable-options
+    /// --output-format json --document-private-items`).
+    ExtractRust {
+        /// A crate, as `label=path/to/crate.json`: the label prefixes its
+        /// module paths on the pages. Repeat, in page order.
+        #[arg(long = "crate", required = true, value_parser = rustdoc::CrateSpec::parse)]
+        crates: Vec<rustdoc::CrateSpec>,
+        /// The cargo workspace's directory, relative to the repository root;
+        /// rustdoc writes source paths relative to it.
+        #[arg(long, default_value = "rust")]
+        workspace: String,
+        /// The repository root, which source files are read from.
+        #[arg(long, default_value = ".")]
+        repo_root: PathBuf,
+        /// The file to write. Standard output when absent.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+}
+
+fn run_extract_rust(
+    crates: &[rustdoc::CrateSpec],
+    workspace: &str,
+    repo_root: &Path,
+    out: Option<&Path>,
+) -> Result<(), String> {
+    let input = rustdoc::extract(crates, workspace, repo_root)?;
+    let json = serde_json::to_string(&input).map_err(|e| e.to_string())?;
+    match out {
+        Some(p) => fs::write(p, json + "\n").map_err(|e| format!("{}: {e}", p.display())),
+        None => {
+            println!("{json}");
+            Ok(())
+        }
+    }
 }
 
 fn read(path: &Path) -> Result<String, String> {
@@ -85,8 +129,13 @@ struct RenderArgs<'a> {
 }
 
 fn run_render(args: &RenderArgs) -> Result<usize, String> {
-    let overview = overview::Overview::parse(&read(args.overview)?)
-        .map_err(|e| format!("{}: {e}", args.overview.display()))?;
+    let text = read(args.overview)?;
+    let overview = if args.overview.extension().is_some_and(|x| x == "md") {
+        overview::Overview::parse_markdown(&text)
+    } else {
+        overview::Overview::parse(&text)
+    }
+    .map_err(|e| format!("{}: {e}", args.overview.display()))?;
     let inputs: Vec<model::Input> = args
         .inputs
         .iter()
@@ -130,6 +179,18 @@ fn run_render(args: &RenderArgs) -> Result<usize, String> {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
+        Command::ExtractRust {
+            crates,
+            workspace,
+            repo_root,
+            out,
+        } => match run_extract_rust(&crates, &workspace, &repo_root, out.as_deref()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("typedoc: {e}");
+                ExitCode::FAILURE
+            }
+        },
         Command::Render {
             overview,
             inputs,

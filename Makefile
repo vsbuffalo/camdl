@@ -859,12 +859,38 @@ COMPILER_OVERVIEW := ocaml/lib/compiler/index.mld
 # ir_version_generated.ml is written by the build, not authored; leave it out.
 COMPILER_ML   := $(sort $(filter-out %/ir_version_generated.ml, \
                    $(wildcard ocaml/lib/compiler/*.ml) $(wildcard ocaml/lib/ir/*.ml)))
-docs-internals: build $(COMPILER_OVERVIEW)
+#
+# The runtime's pages, docs/internals/runtime/*.qmd, come the same way from
+# the Rust crates: rustdoc writes each crate's items as JSON, every path
+# resolved, and `typedoc extract-rust` turns that into the renderer's input.
+# rustdoc's JSON output is unstable, so RUSTC_BOOTSTRAP=1 enables it on the
+# pinned stable toolchain for this step only, and the extractor refuses any
+# format version but the one it was written for (bump the `rustdoc-types` pin
+# in rust/crates/typedoc/Cargo.toml with rust/rust-toolchain.toml). The index
+# comes from rust/docs-overview.md, which must list every crate once. The
+# `cli` crate is the `camdl` binary, so its JSON is camdl.json. rustdoc's
+# lint warnings (unresolved doc links and the like) are silenced here: they
+# are the comments' faults, which `cargo doc` reports, not this build's.
+RUNTIME_CRATES    := ir declared runid io numerics score sim diff
+RUNTIME_OVERVIEW  := rust/docs-overview.md
+RUSTDOC_JSON      := RUSTC_BOOTSTRAP=1 cargo rustdoc --quiet
+RUSTDOC_JSON_ARGS := -- -Z unstable-options --output-format json --document-private-items \
+                     -A warnings
+docs-internals: build $(COMPILER_OVERVIEW) $(RUNTIME_OVERVIEW)
 	mkdir -p docs/internals
 	$(TYPEDOC_OCAML) $(TYPEDOC_CMT) $(COMPILER_ML) > docs/internals/compiler.json
 	$(TYPEDOC) render --overview $(COMPILER_OVERVIEW) \
 	  --input docs/internals/compiler.json --out docs/internals/compiler \
 	  --commit $(shell git rev-parse HEAD)
+	cd rust && for c in $(RUNTIME_CRATES); do \
+	  $(RUSTDOC_JSON) -p $$c --lib $(RUSTDOC_JSON_ARGS) || exit 1; done
+	cd rust && $(RUSTDOC_JSON) -p cli --bin camdl $(RUSTDOC_JSON_ARGS)
+	$(TYPEDOC) extract-rust --workspace rust \
+	  $(foreach c,$(RUNTIME_CRATES),--crate $(c)=rust/target/doc/$(c).json) \
+	  --crate cli=rust/target/doc/camdl.json --out docs/internals/runtime.json
+	$(TYPEDOC) render --overview $(RUNTIME_OVERVIEW) \
+	  --input docs/internals/runtime.json --out docs/internals/runtime \
+	  --order 1000 --commit $(shell git rev-parse HEAD)
 
 # The camdl-scope screenshots on guide/first-fit.qmd need a running viewer, so
 # they are committed images rather than render output. Re-run after a change

@@ -302,9 +302,72 @@ pub fn rustdoc_to_markdown(src: &str, link: &dyn Fn(&str) -> Option<String>) -> 
             out.push_str(line);
             continue;
         }
-        out.push_str(&rust_intra_links(line, link));
+        out.push_str(&rust_inline_links(&rust_intra_links(line, link), link));
     }
     tidy(&out)
+}
+
+/// Rewrites the intra-doc links written with a destination on one line,
+/// `[text](crate::module::Name)`: the destination becomes the page link
+/// `link` gives, or, when it gives none, the link is dropped and its text
+/// kept, since a Rust path is no URL a browser can follow. A destination
+/// that is not a Rust path (a URL, a file) is left alone.
+fn rust_inline_links(line: &str, link: &dyn Fn(&str) -> Option<String>) -> String {
+    let is_path = |d: &str| {
+        let d = d.strip_suffix("()").unwrap_or(d);
+        !d.is_empty()
+            && d.split("::").all(|seg| {
+                seg.chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                    && seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            })
+    };
+    let mut out = String::new();
+    let mut rest = line;
+    while let Some(k) = rest.find("](") {
+        let after = &rest[k + 2..];
+        let Some(close) = after.find(')').map(|c| {
+            // Keep a trailing `()` in the destination.
+            if after[c + 1..].starts_with(')') && after[..c].ends_with('(') {
+                c + 1
+            } else {
+                c
+            }
+        }) else {
+            break;
+        };
+        let dest = &after[..close];
+        // The `[` that opens the link text, matched backwards.
+        let head = &rest[..k];
+        let mut depth = 0usize;
+        let open = head.char_indices().rev().find_map(|(i, c)| match c {
+            ']' => {
+                depth += 1;
+                None
+            }
+            '[' if depth == 0 => Some(i),
+            '[' => {
+                depth -= 1;
+                None
+            }
+            _ => None,
+        });
+        match (is_path(dest), open) {
+            (true, Some(open)) => {
+                out.push_str(&head[..open]);
+                let text = &head[open + 1..];
+                match link(dest.trim_end_matches("()")) {
+                    Some(href) => out.push_str(&format!("[{text}]({href})")),
+                    None => out.push_str(text),
+                }
+            }
+            _ => out.push_str(&rest[..k + 2 + close + 1]),
+        }
+        rest = &after[close + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Rewrites the ``[`Name`]`` intra-doc links on one line.
@@ -403,6 +466,18 @@ mod tests {
             "a\\*b \\<c> \\$x \\@y snake_case \\_lead"
         );
         assert_eq!(escape_text("# not a heading"), "\\# not a heading");
+    }
+
+    #[test]
+    fn rust_links_with_a_destination() {
+        let link = |n: &str| (n == "crate::fit::rhat").then(|| "fit.qmd#L3".to_string());
+        assert_eq!(
+            rustdoc_to_markdown(
+                "See [`rhat`](crate::fit::rhat), [the ess](Self::ess()) and [docs](https://x.org/a).",
+                &link,
+            ),
+            "See [`rhat`](fit.qmd#L3), the ess and [docs](https://x.org/a)."
+        );
     }
 
     #[test]
