@@ -276,6 +276,29 @@ type bounds =
 The parser builds each wrapper in the production that already knows which field
 it is parsing, so no table of positions exists anywhere.
 
+**What Stage 1a builds of §3.1 and §3.5.** Stage 1a has the six kinds and
+`'k Time_pos.t`, but no `'k interval` type: an interval's two endpoints are two
+positions of their kind (a bspline `window` is two instants, a periodic `on`
+range two phases), judged one by one, and the pair type with its order and bound
+checks arrives with the interval resolvers of Stage 2. `Lower` has one function
+per kind and, for instants, one per shape of result its sites need
+(`instant_const` for a folded number, `instant_horizon` where an observation
+anchor is legal, `instant_expr` and `instant_list_expr` for IR expressions,
+`instant_list_const` for an output or emit `at` list, and `instant_in_expr`,
+`instant_value` and `timepoint` for the positions judged without a fold of their
+own). All of them run the one instant rule (`instant_checks`); Stage 1b replaces
+that rule, not the functions, with `resolve_instant` (§3.4).
+
+**Values given to an instant parameter, and `t ± d`.** A scenario's
+`set = { tau = … }` and a prior's location arguments (`mu`, `mean`, `lower`,
+`upper`) of an `instant`-kind parameter are instant positions; its scale
+arguments (`sigma`, `sd`, `rate`, …) are lengths. The operand compared with
+`t ± d` (`if t + 7 'days >= 6 'months`) is an instant position, as the operand
+compared with `t` is. Both follow from the rule of Stage 1a (every calendar
+duration in a date position under an origin is refused), and were found in the
+review of PR #1170. Like the `t` positions, they are resolved as ordinary
+expressions where they are used and are judged from the census.
+
 **Where the modules live.** The declaration records that hold a `'k Time_pos.t`
 are in `ast.ml`, and `Time_pos.t` holds an `Ast.expr`, so a separate
 `time_pos.ml` would be a module cycle. The kinds, the private wrapper, `make`,
