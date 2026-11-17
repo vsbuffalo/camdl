@@ -1,0 +1,3 @@
+(executable
+ (name typedoc_ocaml)
+ (libraries compiler-libs.common yojson))

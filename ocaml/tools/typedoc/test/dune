@@ -1,0 +1,14 @@
+; Runs typedoc_ocaml on the fixture and diffs against the committed JSON.
+; Accept a deliberate change with `dune promote`.
+(rule
+ (alias runtest)
+ (deps fixture.ml fixture.mli)
+ (action
+  (with-stdout-to
+   fixture.actual
+   (run ../typedoc_ocaml.exe --root . fixture.ml))))
+
+(rule
+ (alias runtest)
+ (action
+  (diff fixture.expected fixture.actual)))
