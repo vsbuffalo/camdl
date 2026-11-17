@@ -1,33 +1,52 @@
-(* Constant-fold pass over a fully-expanded model.
+(** Constant folding of a compiled model: a lookup into a table of literal
+    numbers becomes the number, and the terms it zeroes are removed, so a
+    sum over a sparse coupling matrix evaluates only its nonzero terms.
 
-   Resolves a constant-indexed lookup into an *inline literal* table to its
-   scalar, applies a few algebraic identities (0*x->0, 1*x->x, 0+x->x, and
-   folds Const op Const for total ops), and drops Const 0.0 terms from a
-   Reduce. The point: when a coupling matrix W is sparse, the dense P-term FOI
-   Reduce the expander emits — each term `W[l,q] * (...)` with `W[l,q]` a
-   TableLookup over constant literal indices — collapses to the k nonzero
-   terms. O(P^2) FOI -> O(P*k), with no new IR node and no sparse runtime
-   evaluator (the runtime already evals Reduce, just with fewer terms).
+    The expander turns [sum(q in patch, W[p, q] * ...)] into one
+    {!Ir.Reduce} with a term for every patch, each holding a
+    {!Ir.TableLookup} of [W] at constant indices. {!fold_model} writes the
+    cell's value in place of each such lookup, then applies a few identities
+    bottom-up: [0 * x] and [x * 0] become [0], [1 * x] and [x * 1] become
+    [x], [0 + x], [x + 0] and [x - 0] become [x], [+], [-], [*], [min] and
+    [max] of two literals become their value, and a [Reduce] loses its zero
+    terms. With [W] sparse, a sum over [P] patches keeps the [k] nonzero
+    terms per row. The runtime needs no sparse evaluator: it evaluates the
+    same {!Ir.Reduce}, with fewer terms.
 
-   Byte-identical, by construction + gate:
-   - resolving TableLookup(name,[Const i]) to its literal cell is exact;
-   - dropping a `Const 0.0` term from a left-folded Reduce is the additive
-     identity (`acc +. 0.0 = acc` for finite acc);
-   - `0*x -> 0` is exact when x is finite. In the *guarded* FOI term
-     `W[l,q] * (if N>0 then I/N else 0)` the right factor is finite and
-     bounded, so a zero-W term folds to exactly 0 in one step (the division
-     lives inside the guard, never reached when the term is zeroed).
-   Div/Pow/Mod of constants are deliberately NOT folded — their degenerate
-   handling lives in the evaluator and folding here could diverge from it.
-   The empirical proof is the A/B gate
-   `rust/crates/sim/tests/gate_constant_fold_ab.rs`: on a sparse-coupling model
-   it compiles the IR both ways and asserts the simulated trajectory is
-   byte-identical under every backend (with a non-vacuity guard that the fold
-   actually collapsed the FOI Reduce). The OCaml half
-   (`test_compiler.ml`, "constant_fold") pins the term-count collapse.
+    The pass changes the IR only when the model has an inline table whose
+    every cell is a numeric literal. Otherwise {!fold_model} returns the
+    model unchanged, and the identities are not applied anywhere. A table
+    with a parameter in a cell is left as lookups. Division, powers, [mod] and
+    comparisons of literals are not folded, so that their handling of
+    degenerate values stays the evaluator's, and there is no [0 / x] rule.
+    The collapse therefore depends on how the term is written: in
 
-   Runs after expansion + autodiff (so rate_grad folds too), before serialize.
-   On by default; set CAMDL_NO_CONSTANT_FOLD to emit the unfolded IR. *)
+    {@camdl[
+      infection[p in patch] : S[p] --> I[p] @ beta * S[p] * sum(q in patch, W[p, q] * I[q] / N[q])
+    ]}
+
+    the term parses as [(W[p, q] * I[q]) / N[q]], so a zero cell leaves
+    [0 / N_a] behind and the term is kept; written
+    [W[p, q] * (I[q] / N[q])], it folds to [0] and is dropped.
+
+    The pass runs after differentiation and before loop-invariant code
+    motion, so it folds the gradient fields as well, and never meets an
+    {!Ir.PerEvalRef}. It rewrites transition rates and their gradients,
+    overdispersion variances and their gradients, bindings, ODE equations,
+    observation projections, likelihood arguments with their gradients, and
+    [ic_grad]; it leaves initial conditions, forcings, interventions and
+    quantities alone.
+
+    Each rewrite keeps the value of a finite expression: a literal cell is
+    the value the lookup returns, and a zero term adds nothing to a finite
+    sum. [0 * x] is [0] only when [x] is finite, so a factor that would
+    evaluate to infinity or NaN, such as an unguarded division by an empty
+    patch, folds to [0] where the unfolded model would report a numerical
+    error. A lookup whose constant index is out of range is left for the
+    runtime's out-of-bounds policy. The Rust test [gate_constant_fold_ab]
+    checks, on a sparse-coupling model, that trajectories are identical with
+    and without the pass. Setting [CAMDL_NO_CONSTANT_FOLD] in the
+    environment turns it off. *)
 
 open Ir
 
@@ -63,14 +82,14 @@ let fold_bin_consts op a b : expr option =
 
 let rec fold tbls (e : expr) : expr =
   match e with
-  (* gh#616: `ObsAnchor` is a LEAF here and must stay one — its value is not
+  (* `ObsAnchor` is a leaf here and must stay one — its value is not
      known until a run binds its data, so folding it to a number at compile time
      is exactly the data-dependence this design exists to avoid. *)
   (* A model constant stays a reference, not its literal: folding it would let
      `2 * omega` and `omega * beta` re-associate with neighbouring literals and
      move the arithmetic, and would drop the name every display shows. *)
-  (* A unit literal stays a leaf, as it did when it was a wrapped Const: folding
-     it into neighbouring literals would re-associate the arithmetic. *)
+  (* A unit literal stays a leaf: folding it into neighbouring literals would
+     re-associate the arithmetic. *)
   | Const _ | UnitLiteral _ | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | ForcingBasis _ | BindingRef _
   | Projected | ObsColumnRef _ | ObsAnchor _ ->
       e
@@ -120,7 +139,7 @@ let fold_diffable fe (d : diffable) : diffable =
   { expr = fe d.expr; grad = fold_grad_map fe d.grad;
     proj_grad = Option.map (fold_deriv_entry fe) d.proj_grad }
 
-(* Overdispersion σ² and its gradient (proposal 2026-07-03 §4.5). *)
+(* Overdispersion σ² and its gradient. *)
 let fold_draw_method fe (dm : draw_method) : draw_method =
   match dm with
   | DrawOverdispersed { sigma_sq; sigma_sq_grad } ->
@@ -179,7 +198,7 @@ let fold_model (m : model) : model =
                      projection_state_grad = fold_grad_map fe o.projection_state_grad;
                      likelihood = fold_likelihood fe o.likelihood })
           m.observations;
-      (* ∂init/∂θ seed (gh#275): fold each compartment's grad_map like a rate's,
+      (* ∂init/∂θ seed: fold each compartment's grad_map like a rate's,
          so a table lookup surviving into an IC derivative collapses consistently
          with the rest of the model. *)
       ic_grad = List.map (fun (c, gm) -> (c, fold_grad_map fe gm)) m.ic_grad;

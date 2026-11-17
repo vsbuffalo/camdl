@@ -1,8 +1,28 @@
-(* Semantic color helpers using the Fmt library (Daniel Bünzli).
-   Each value is a styled formatter constructor:
-     Term_style.compartment Fmt.string ppf "S"  -- prints "S" in magenta
+(** Terminal styling for the compiler's output: a colour for each kind of
+    name a model contains, and the one policy that decides whether a stream
+    is coloured at all.
 
-   The eta-expansion (fun pp ppf x -> ...) avoids the OCaml value restriction
+    Each style wraps a [Fmt] printer, so
+    [Term_style.compartment Fmt.string ppf "S"] prints [S] in magenta.
+    Transitions are blue, compartments magenta, parameters (and the other
+    names {!Pp_expr} prints in that colour, such as [t] and bindings)
+    green, tables and forcings yellow, dimensions cyan; operators and
+    indices are faint, errors red and warnings yellow. The styles only mark
+    the text: whether the escape codes are written is decided by the
+    renderer installed on the formatter.
+
+    {!renderer} is that decision, highest precedence first: [--no-color]
+    turns colour off, then a set [NO_COLOR] variable, then a set
+    [CLICOLOR_FORCE] variable turns it on, and otherwise colour is on
+    exactly when the stream is a terminal. The Rust command-line tool
+    applies the same policy, so [camdlc] and [camdl] agree about a pipe.
+    {!apply_policy} installs it on standard output and standard error;
+    [camdlc inspect] and [camdlc check] call it, and the diagnostics
+    renderer calls {!renderer} for standard error. [--no-color] is recorded
+    once, in {!no_color_flag}, by the command that parses it, so a later
+    call reads the same decision. *)
+
+(* The eta-expansion (fun pp ppf x -> ...) avoids the OCaml value restriction
    on partially-applied polymorphic functions. *)
 
 let transition   pp ppf x = Fmt.styled (`Fg `Blue)    pp ppf x

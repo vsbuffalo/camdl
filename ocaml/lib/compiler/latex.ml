@@ -1,9 +1,45 @@
-(* LaTeX rendering of a camdl model — the mathematician's (indexed) form.
-   A read-only projection of the AST, the pre-expansion representation: index
-   variables (S[a]), reduction sums, and un-inlined `let` aggregates all survive
-   here, because this taps the model BEFORE `expander.ml` flattens it. Never
-   touches the IR or execution. Sibling to `pp_expr.ml` (which prints Ir.expr,
-   the expanded side). *)
+(** The model as mathematics: LaTeX for each expression, transition and
+    derived equation, and a node-and-edge graph of the compartments, both
+    computed from the syntax tree before expansion.
+
+    The module reads the declaration list the parser produced
+    ({!Ast.declaration}), never the IR, so index variables ([S[a]]), sums
+    over a dimension, and [let] definitions keep the form the author gave
+    them: [infection[a in age] : S[a] --> I[a] @ beta * S[a] * foi[a]] is
+    one line with a subscript [a], not one per age group. It has three
+    consumers. [Declared_emit] calls {!tex} and {!tex_loss} for every
+    expression of the declared section of the IR envelope. [camdlc render]
+    ({!run}) prints the whole model as a LaTeX document, as KaTeX strings
+    in JSON ([--format json], {!rendered_model}), or as a flow graph
+    ([--format graph], {!model_graph}); [--expand DIM] writes out the
+    levels of a dimension whose levels are listed in the model.
+
+    {!tex} renders one expression. A name becomes a symbol by a few rules,
+    in order: a [#' @symbol] the author declared, a Greek letter's name, a
+    single letter, a capital followed by lowercase letters ([Iv] becomes
+    [I_v]), and otherwise the name set upright. Trailing digits and
+    [_]-separated parts become subscripts, merged with the indices into one
+    subscript group. A product or quotient is flattened into one fraction,
+    so [beta * S * (I / N)] becomes [\frac{\beta\,S\,I}{N}]. Because these
+    rules regroup, round numbers and drop units, a rendering can lose part
+    of what the expression says; {!tex_loss} lists what is lost, so the
+    declared section can say so beside the rendering.
+
+    The derived dynamics, one equation per compartment, are assembled from
+    the transitions: each transition that removes a compartment instance
+    subtracts its rate, and each that adds one adds its rate. They are a
+    display, not the equations the runtime integrates, and two cases are
+    rendered wrongly. The weights of a branching destination are dropped,
+    so [I --> { R : 0.9, D : 0.1 } @ gamma * I] adds [gamma I] to both [R]
+    and [D]. And a compartment on both sides of a transition is treated as
+    a catalyst and left out, whatever its counts, so in
+    [S + I --> I + I @ beta * S * I / N] the infected compartment gains
+    nothing.
+
+    The [@symbol] overrides live in one table global to the module,
+    [overrides], which {!render_model}, {!build_graph} and [Declared_emit]
+    fill from a declaration list before rendering; {!tex} and {!tex_loss}
+    read whatever it last held. *)
 
 open Ast
 
@@ -38,7 +74,7 @@ let split_cap_lower s =
 
 let escape s = String.concat "\\_" (String.split_on_char '_' s)
 
-(* LaTeX-escape free prose — the model's own `#'` block (gh#750), the only
+(* LaTeX-escape free prose — the model's own `#'` block, the only
    author-written sentences the document emits. [escape] above covers names,
    where `_` is the only hazard; prose can carry more.
 
@@ -63,7 +99,7 @@ let overrides : (string, string) Hashtbl.t = Hashtbl.create 16
 (* A camdl identifier -> (base symbol, intrinsic subscripts). Order: an explicit
    `@symbol` wins; then greek (upper + lower), single letters, the `Iv -> I_v`
    capital-lower split, and finally a multi-word name set upright in \mathrm.
-   The *parts* form lets callers MERGE an index (S[a]) into ONE subscript rather
+   The *parts* form lets callers merge an index (S[a]) into one subscript rather
    than emitting an invalid double subscript `_{1}_{a}`. *)
 let sym_parts (name : string) : string * string list =
   match Hashtbl.find_opt overrides name with
@@ -163,18 +199,19 @@ and un_tex op a =
 
 (* ── What [tex] does not show ───────────────────────────────────────────────── *)
 
-(* Where [tex] places a sub-expression, which decides whether its rendering
-   needs parentheses there to be read back as the same tree. *)
+(** Where {!tex} places a subexpression, which decides whether its
+    rendering needs parentheses there to be read back as the same tree.
+    [AddLeft] and [AddRight] are the operands of a sum or difference. *)
 type slot =
-  | Whole      (* delimited by its surroundings: the whole expression, a call
-                  argument, an index, an exponent, a branch of a conditional *)
-  | Factor     (* a factor of a product or a fraction that another follows *)
-  | LastFactor (* the last factor of a numerator or a denominator *)
-  | SumBody    (* the body of a `sum` *)
+  | Whole      (** Delimited by its surroundings: the whole expression, a call
+                   argument, an index, an exponent, a branch of a conditional. *)
+  | Factor     (** A factor of a product or a fraction that another follows. *)
+  | LastFactor (** The last factor of a numerator or a denominator. *)
+  | SumBody    (** The body of a [sum]. *)
   | AddLeft | AddRight
-  | PowBase
-  | NegArg
-  | CmpArg
+  | PowBase    (** The base of a power. *)
+  | NegArg     (** The operand of a negation. *)
+  | CmpArg     (** An operand of a comparison. *)
 
 (** The ways [tex e] fails to show what [e] holds, each once, in the order of
     [Declared.katex_loss]; empty when the rendering can be read back as the
@@ -452,24 +489,39 @@ let populate_overrides (decls : declaration list) : unit =
 
 (* ── Structured render: one record, two projections ────────────────────────── *)
 
+(** A parameter as the rendering lists it: its camdl name [rp_name], its
+    LaTeX symbol [rp_symbol], and the text of its [#'] block, if any. *)
 type r_param = { rp_name : string; rp_symbol : string; rp_desc : string option }
+
+(** A transition as a row of a reaction table: its name, its sources and
+    its destinations as LaTeX joined by [+] (or [\varnothing] for none),
+    and its rate as LaTeX. A branching destination lists each destination
+    with its weight in parentheses. *)
 type r_transition = { rt_name : string; rt_reactants : string; rt_products : string; rt_rate : string }
+
+(** A [let] definition: its name, its left-hand side as LaTeX with its
+    index variables as a subscript, and its body as LaTeX. *)
 type r_definition = { rd_name : string; rd_lhs : string; rd_body : string }
+
+(** One derived equation: the base name of the compartment, the left-hand
+    side [\dot{X}_a], and the signed sum of the rates that change it, or
+    [0]. *)
 type r_dynamics = { ry_state : string; ry_lhs : string; ry_rhs : string }
 
-(* The model rendered to LaTeX, split by section with every equation its own
-   KaTeX-renderable string. `to_document` assembles the standalone `.tex`;
-   `to_json` emits the web/display shape (`model.render.json`). *)
+(** The model rendered to LaTeX, by section, with every equation its own
+    string that KaTeX can render. {!to_document} assembles it into a
+    standalone [.tex] file, and {!to_json} into the JSON that
+    [camdlc render --format json] prints. *)
 type rendered_model = {
-  rm_name : string;
-  rm_doc : doc option;                    (* the file-header `#'` block (gh#750) *)
-  rm_mode : string;                       (* "indexed" | "expanded over …" *)
-  rm_states : string list;                (* compartment names *)
-  rm_dims : (string * string list) list;  (* dimension name, ordered levels *)
-  rm_params : r_param list;
-  rm_definitions : r_definition list;
-  rm_transitions : r_transition list;
-  rm_dynamics : r_dynamics list;
+  rm_name : string;                       (** The model's name, from its file name. *)
+  rm_doc : doc option;                    (** The model's own [#'] block, at the head of the file. *)
+  rm_mode : string;                       (** ["indexed"], or ["expanded over "] and the expanded dimensions. *)
+  rm_states : string list;                (** The compartment names, as declared. *)
+  rm_dims : (string * string list) list;  (** Each dimension whose levels the model lists, with its levels in order; a dimension read from a file is left out. *)
+  rm_params : r_param list;               (** The parameters, in declaration order. *)
+  rm_definitions : r_definition list;     (** The [let] definitions, in declaration order. *)
+  rm_transitions : r_transition list;     (** One per transition, or one per combination of levels of the expanded dimensions. *)
+  rm_dynamics : r_dynamics list;          (** One per compartment instance a transition reads or writes, in order of first appearance. *)
 }
 
 let param_entry = function
@@ -540,7 +592,7 @@ let to_document (rm : rendered_model) : string =
   p "\\usepackage[margin=1in]{geometry}\n\\pagestyle{empty}\n";
   p "\\begin{document}\n";
   p "\\begin{center}\\Large\\textbf{Model: \\texttt{%s}}\\end{center}\n\\vspace{0.5em}\n\n" (escape rm.rm_name);
-  (* The model's own `#'` block (gh#750): what this model IS, before any of its
+  (* The model's own `#'` block: what this model is, before any of its
      mathematics. Each source line stays a line, so a `@base`/`@adds`/`@changes`
      lineage header reads as the author laid it out. *)
   (match rm.rm_doc with
@@ -588,7 +640,7 @@ let to_document (rm : rendered_model) : string =
 let to_json (rm : rendered_model) : string =
   let str s : Yojson.Safe.t = `String s in
   let opt_desc = function Some d -> [ ("description", str d) ] | None -> [] in
-  (* The model's own `#'` block (gh#750), keyed exactly as in the IR envelope's
+  (* The model's own `#'` block, keyed exactly as in the IR envelope's
      `docs.model` (`text` / `symbol` / `ref`) so a consumer reads one shape from
      either source. Absent when the file opens with no `#'` block. *)
   let doc_field = match rm.rm_doc with
@@ -649,30 +701,51 @@ let of_model ?(name = "model") ?(expand = []) (decls : declaration list) : strin
    edges — so a stratified model stays compact (one edge per transition family,
    not one per stratum). *)
 
+(** A node of the flow graph: a base compartment, by its camdl name and its
+    LaTeX symbol. *)
 type g_node    = { gn_id : string; gn_label : string }
+
+(** A plate of the flow graph: a dimension and its levels, empty when the
+    levels are read from a file. *)
 type g_plate   = { gp_name : string; gp_levels : string list }
+
+(** An edge of the flow graph: one transition between base compartments, or
+    one source-destination pair of a transition with several. [ge_id] is
+    the transition's name, or for a transition that fans out
+    [name__source__destination], with [src] or [sink] for a missing end.
+    [ge_from] and [ge_to] are written names: for a transition over
+    [c in compartments] they are the variable [c], which stands for every
+    node. *)
 type g_edge    = {
-  ge_id         : string;
-  ge_from       : string option;   (* None ⇒ exogenous inflow (birth) *)
-  ge_to         : string option;   (* None ⇒ outflow (death) *)
-  ge_rate       : string;          (* KaTeX rate string, as in the reaction table *)
-  ge_advances   : string option;   (* the plate a consecutive(dim) binder steps along *)
-  ge_reads_pool : bool;            (* rate reads a full-dimension aggregate (mean-field) *)
+  ge_id         : string;          (** Unique among the edges; see above. *)
+  ge_from       : string option;   (** [None] for an inflow from outside the model, such as births. *)
+  ge_to         : string option;   (** [None] for an outflow from the model, such as deaths. *)
+  ge_rate       : string;          (** The rate as KaTeX, as in the reaction table, multiplied by the branch's weight when the edge is one branch of several. *)
+  ge_advances   : string option;   (** The plate a [consecutive(dim)] binder steps along, such as [age] for ageing. *)
+  ge_reads_pool : bool;            (** The rate reads an aggregate over a dimension: a [sum], directly or through [let] definitions. *)
 }
+
+(** One aggregate an edge's rate reads: the edge's id, the aggregate (the
+    name of the [let] definition that sums, or ["sum"] for a sum written in
+    the rate), and the dimensions it sums over. *)
 type g_coupling = { gc_edge : string; gc_aggregate : string; gc_over : string list }
 
+(** The compartmental flow graph of a model before expansion, which
+    [camdlc render --format graph] prints: base compartments as nodes,
+    dimensions as plates, transitions as edges, so a stratified model has
+    one edge per transition, not one per stratum. *)
 type model_graph = {
-  mg_name      : string;
-  mg_nodes     : g_node list;
-  mg_plates    : g_plate list;
-  mg_edges     : g_edge list;
-  mg_couplings : g_coupling list;
+  mg_name      : string;            (** The model's name, from its file name. *)
+  mg_nodes     : g_node list;       (** One per declared compartment. *)
+  mg_plates    : g_plate list;      (** One per declared dimension. *)
+  mg_edges     : g_edge list;       (** The edges of every transition, in declaration order. *)
+  mg_couplings : g_coupling list;   (** Every aggregate each edge reads. *)
 }
 
 let index_item_expr = function IPosn e | INamed (_, e) -> e
 
 (* Dimensions summed over by every `sum(i in dim, …)` (ESum) node anywhere in
-   [e], WITHOUT resolving through `let` bindings — nested sums are flattened
+   [e], without resolving through `let` bindings — nested sums are flattened
    (`sum(a, sum(m, …))` → [a; m]), first-occurrence order, deduped. This is the
    "full-dimension aggregate" predicate the mean-field pool detection is built
    on: a `let` whose body has any ESum is a pool binding. *)
@@ -693,7 +766,7 @@ let sum_dims_in (e : expr) : string list =
   go e; !acc
 
 (* `let`-binding name → the dimensions its body aggregates over, for every
-   binding that IS a pool (its body contains a `sum`). ctl_bb: inf_vil → [age],
+   binding that is a pool (its body contains a `sum`). ctl_bb: inf_vil → [age],
    Nvil → [age]; ajura: those over [age; imm; compound]. *)
 let pool_bindings (lets : let_binding list) : (string, string list) Hashtbl.t =
   let tbl = Hashtbl.create 16 in
@@ -713,7 +786,7 @@ let let_body_table (lets : let_binding list) : (string, expr) Hashtbl.t =
    pool binding (aggregate = the binding's name, e.g. "inf_vil") or an inline
    `sum(…)` in the rate itself (aggregate = "sum"). `over` is the summed
    dimension(s). Deduped. A `where`-restricted sum is still reported (its guard
-   is not distinguished in v1). *)
+   is not distinguished). *)
 let rate_couplings (pools : (string, string list) Hashtbl.t)
     (lets : (string, expr) Hashtbl.t) (rate : expr) : (string * string list) list =
   let acc = ref [] in
@@ -748,11 +821,11 @@ let advances_of (t : transition_decl) : string option =
   List.find_map (function IConsec (_, _, dim) -> Some dim | _ -> None) t.trindices
 
 (* Base compartment names of a stoichiometry side, first-occurrence, deduped.
-   NOTE these are the names *as written*: an ordinary transition yields a
+   These are the names *as written*: an ordinary transition yields a
    declared compartment (S_naive), while the family transitions `aging` / `death`
    move a compartment-iteration binder (`c[…] --> c[…]` over `c in compartments`),
    so `from`/`to` there is the iterator variable `c` — signalling "every node".
-   We do NOT net-cancel same-name endpoints: `c[a] --> c[a_next]` is a real
+   We do not net-cancel same-name endpoints: `c[a] --> c[a_next]` is a real
    move along the age plate (a self-loop with `advances=age`), not a no-op. *)
 let ref_bases (refs : stoich_ref list) : string list =
   let seen = Hashtbl.create 8 in

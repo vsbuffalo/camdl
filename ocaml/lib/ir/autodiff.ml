@@ -1,63 +1,112 @@
-(** Source-to-source symbolic differentiation of camdl expressions.
+(** Symbolic differentiation of IR expressions: from the {!Ir.expr} of a
+    quantity, the {!Ir.expr} of its derivative, which the runtime evaluates
+    with the same evaluator as any other expression.
 
-    Differentiates an [expr] with respect to a named parameter, producing
-    a new [expr] representing ∂expr/∂param. The result is a plain expression
-    tree that can be evaluated by the existing [eval_expr] in the Rust backend.
+    The compiler's driver calls one entry point per kind of quantity, after
+    validation and dimension checking and before constant folding and
+    loop-invariant code motion, and stores each result in a gradient field
+    of the {!Ir.model}:
 
-    Forcing/table coefficients are expressions over parameters, not data
-    (gh#119): a parameter that enters a transition rate only through a forcing
-    or a table entry still has a real derivative. [differentiate] looks the
-    forcing/table definition up (hence the [time_function]/[table] lists) and
-    emits the analytic ∂forcing/∂coef for the kinds it supports (Sinusoidal,
-    Fourier, constant-indexed inline tables).
+    - {!differentiate_rate} fills a transition's [rate_grad], the derivative
+      of its rate with respect to every parameter. The parameter update of
+      the particle Gibbs sampler and the ODE gradient read it.
+    - {!differentiate_rate_state} fills [rate_state_grad], the derivative of
+      a rate with respect to every compartment, and
+      {!differentiate_projection} fills an observation's
+      [projection_state_grad]. With {!differentiate_ic}, which fills the
+      model's [ic_grad] from each initial value, these are what the ODE
+      forward-sensitivity gradient integrates.
+    - {!differentiate_observations} fills the [grad] and [proj_grad] of
+      every differentiable argument of every likelihood (a Poisson rate, a
+      negative-binomial mean and dispersion, and so on): its derivative with
+      respect to each parameter, and with respect to the projected value.
+      {!differentiate_overdispersion} does the same for the variance of an
+      overdispersed transition, and {!differentiate_initial_conditions} for
+      the arguments of a drawn initial state such as
+      [I ~ poisson(rate = I0)].
 
-    Three differentiation outcomes, handled differently (gh#215, gh#314):
-    - KNOWN — a real derivative expression (including a genuine [Const 0.0] when
-      the parameter does not drive the node).
-    - OMITTED — a LIVE coefficient the gradient just doesn't cover yet: a
-      Periodic step value/period, an inline-table value reached by a
-      non-constant index, or a forcing's evaluation-time shift ([lag], gh#314).
-      The Rust runtime evaluates these live, so the model must compile (forward
-      sim and gradient-free IF2/PF work). [differentiate_rate] drops the
-      parameter — byte-identical to a genuine zero — and the Rust NUTS guard
-      (coeff_guard.rs) refuses a NUTS fit that depends on the missing gradient.
-      (The obs/σ² driver, a later phase, instead refuses with the carried
-      [reason], so a live-but-omitted coefficient never masquerades as a genuine
-      zero on the observation path.)
-    - STRUCTURAL data a parameter cannot drive at all — interpolation knots, a
-      piecewise step grid, a spline's knots, window or period, or a
-      non-constant lookup index.
-      These return [Unsupported], which [differentiate_rate] turns into a
-      compile-time error (the Rust runtime also rejects them at IR-load).
+    One recursion, [differentiate], computes all of them. It takes a
+    {!diff_target} saying what the derivative is taken with respect to, and
+    returns a {!deriv}: a derivative, or a reason none can be written. The
+    target decides which leaves are constant. With respect to a parameter,
+    compartments are constant, because the gradient is taken with the
+    trajectory held fixed, and so are bindings, which validation keeps free
+    of parameters. With respect to a compartment, parameters and forcings
+    are constant and a binding is differentiated through its body. A
+    forcing whose coefficients are parameters has a real derivative: a
+    sinusoid or a Fourier series is differentiated through its closed form,
+    and a spline through its coefficients, each multiplying a basis-function
+    node ({!Ir.ForcingBasis}) that the runtime evaluates. A table cell
+    selected by a constant index is differentiated through the cell's
+    expression.
 
-    Compartment counts (Pop/PopSum), Time, Dt and Projected are constants in
-    the PGAS θ|X step (the trajectory X is fixed), so their derivative is 0. *)
+    A key absent from a gradient map means the derivative is exactly zero:
+    a derivative that simplifies to [Const 0.0] is dropped. Where no
+    derivative can be written, the drivers differ. For a transition's rate
+    with respect to a parameter, a parameter in data that is fixed when the
+    model is built (the knots or values of a [piecewise] or [interpolated]
+    forcing, a spline's knots, window or period, an index into a table, an operand
+    of [mod]) is the compile error [E600]. Every other case becomes an
+    {!Ir.DEUnsupported} entry naming the reason: a live coefficient whose
+    derivative is not written (a [periodic] forcing's values or period, a
+    forcing's [lag], a table value selected by an index that is not
+    constant), a function that is not smooth in the state ([floor], [abs]
+    or [min] of a compartment), and, outside the rate's parameter gradient,
+    the structural cases too. The model still compiles, simulates and fits
+    by methods that use no gradient; the runtime's gradient gate refuses a
+    gradient-based fit that estimates a parameter with such an entry.
+
+    The derivatives are simplified only by {!simplify_fixpoint}, which
+    removes additive and multiplicative identities, folds arithmetic on
+    numeric literals, and drops zero terms of a sum. It does no algebra
+    beyond that, so a quotient keeps the form the quotient rule gives it.
+    For the transition
+
+    {@camdl[
+      recovery : I --> R @ I / d
+    ]}
+
+    with [d] a parameter, the derivative of the rate with respect to [I] is
+    written as [d / (d * d)]:
+
+    {@json[
+      "rate_state_grad":{"I":{"grad":{"bin_op":{"op":"div","left":{"param":"d"},"right":{"bin_op":{"op":"mul","left":{"param":"d"},"right":{"param":"d"}}}}}}}
+    ]}
+
+    Every match over {!Ir.expr} here names each constructor, and the library
+    is built with warning 8 as an error, so a new expression constructor is
+    a compile error here until its derivative is written, rather than a
+    silent zero. A {!Ir.PerEvalRef} cannot reach this module: loop-invariant
+    code motion introduces it and runs after differentiation, and meeting
+    one raises [Failure]. *)
 
 open Ir
 
-(** A differentiation result. Three outcomes, distinguished so a live-but-
-    omitted coefficient never masquerades as a genuine zero (proposal
-    `2026-07-03-unified-obs-gradient-autodiff.md` §4.2; note
-    `2026-06-08-static-typing-as-bug-prevention.md` §7):
-    - [Known e]      — a real derivative [e] (including a genuine [Const 0.0]).
-    - [Omitted]      — a live coefficient whose derivative is not emitted (tier
-                       2b: Periodic step/period, inline-table value via a
-                       non-constant index, or a forcing's [lag]);
-                       [differentiate_rate] drops it, exactly as it drops a
-                       proven zero.
-    - [Unsupported]  — structural data a parameter cannot drive (tier 3);
-                       [differentiate_rate] raises a compile-time error.
+(** The derivative of one expression with respect to one {!diff_target}, or
+    the reason the compiler cannot write it.
 
-    Both non-[Known] cases carry a stable [Ir.unsupported_reason] [code]
-    alongside the human [node]/[reason]. The rate path uses [node]/[reason] for
-    its E600 message; the obs/σ² driver (P3) uses [code] to build a
-    [deriv_entry] [DEUnsupported] — the classification the differentiation site
-    already made, carried to the driver rather than re-derived from the free-text
-    [reason] (proposal §4.1: the code is canonical, the message is derived). *)
+    The two refusals are kept apart because the drivers treat them
+    differently, and a refusal is kept apart from [Known (Const 0.0)] so that
+    a derivative the compiler did not write is never mistaken for one that
+    is zero. Both carry a [code], the stable reason written to the IR, a
+    [node] naming the construct ("forcing `beta_t`", "mod expression"), and
+    a [reason], the sentence of the error message. When subexpressions
+    combine, [Unsupported] wins over [Omitted], which wins over [Known]. *)
 type deriv =
   | Known of expr
+      (** The derivative, which may be [Const 0.0]. *)
   | Omitted of { node : string; reason : string; code : unsupported_reason }
+      (** The value is a live coefficient that the runtime evaluates from
+          the parameters, but its derivative is not written: a [periodic]
+          forcing's values or period, a forcing's [lag], or a table value
+          selected by an index that is not constant. Every driver turns it
+          into an {!Ir.DEUnsupported} entry. *)
   | Unsupported of { node : string; reason : string; code : unsupported_reason }
+      (** The derivative does not exist or cannot be written: a parameter in
+          data fixed when the model is built, such as forcing knots or a
+          table index, an operand of [mod], or a function that is not smooth
+          in the target. {!differentiate_rate} turns it into the error
+          [E600], the other drivers into an {!Ir.DEUnsupported} entry. *)
 
 let map1 (d : deriv) (f : expr -> expr) : deriv =
   match d with
@@ -94,7 +143,7 @@ let rec mentions (param : string) (e : expr) : bool =
   | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
 
 (** Does [e] reference the projection output ([Projected])? The [WrtProjected]
-    analogue of [mentions]: used to detect a nonsmooth function OF the projection
+    analogue of [mentions]: used to detect a nonsmooth function of the projection
     ([floor]/[min]/… of [projected]) — undifferentiable w.r.t. the projected value.
     [Projected] only appears in likelihood argument expressions, so bindings /
     forcings / tables never carry it. *)
@@ -114,23 +163,29 @@ let rec mentions_projected (e : expr) : bool =
   | BindingRef _ -> false
   | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
 
-(** What [differentiate] differentiates with respect to (gh#275). The engine is
-    one recursion; only the leaves and the nonsmooth ops branch on the target:
-    - [WrtParam p] — ∂/∂param (the [rate_grad] path): state ([Pop]/[PopSum]) is
-      constant (fixed in the θ|X step), bindings are param-free (zero).
-    - [WrtPop c]   — ∂/∂compartment (the new [rate_state_grad] / ODE-sensitivity
-      path): parameters are constant, forcings are state-free, and bindings are
-      state-bearing (the premise inverts — recurse into their bodies).
-    - [WrtProjected] — ∂/∂projection-output (the observation FACTOR-2 chain,
-      gh#275): differentiates a likelihood ARGUMENT (a [diffable]'s [expr]) w.r.t.
-      the [Projected] leaf, so [∂arg/∂projected] can chain the obs score against
-      [∂projected/∂θ]. [Projected] is the target; parameters, state, forcings, and
-      bindings are all constant w.r.t. it. Only valid inside a likelihood
-      argument (only there does [Projected] appear). *)
+(** The variable a derivative is taken with respect to.
+
+    Only the leaves and the functions that are not smooth behave differently
+    for each target; the calculus rules are shared. *)
 type diff_target =
   | WrtParam of string
+      (** The parameter of this name, for every [*_grad] map keyed by
+          parameter. Compartments are constant, since the gradient is taken
+          with the trajectory fixed, and so are bindings, which hold no
+          parameters. *)
   | WrtPop of string
+      (** The compartment of this name, for [rate_state_grad] and
+          [projection_state_grad]. Parameters and forcings are constant; a
+          binding is differentiated through its body; [floor], [ceil],
+          [abs], [min], [max] or [mod] of an expression that reads the
+          compartment is refused. *)
   | WrtProjected
+      (** The projected value ([Projected]) inside a likelihood argument,
+          for [proj_grad], so the runtime can chain the derivative of the
+          argument with respect to the projection into the derivative of
+          the projection with respect to the parameters. Everything else is
+          constant. It is meaningful only for a likelihood argument, the one
+          place [Projected] occurs. *)
 
 module SS = Set.Make (String)
 
@@ -257,11 +312,11 @@ let two_pi = 2.0 *. Float.pi
     parameter yields the analytic ∂forcing/∂coef via the ordinary rules (the
     coefficient sub-expressions carry the parameter dependence). *)
 let sinusoidal_closed ?lag (s : sinusoidal) : expr =
-  (* Evaluation-time shift (gh#314): the runtime evaluates the forcing at
+  (* Evaluation-time shift: the runtime evaluates the forcing at
      t - lag, so the differentiated closed form must be built over (Time - lag),
      not bare Time — otherwise the emitted gradient is evaluated at t while the
-     value is at t - lag (incident 2026-07-05). The lag_mentions guard in
-     [differentiate] runs FIRST, so here the differentiation parameter is never
+     value is at t - lag. The lag_mentions guard in
+     [differentiate] runs first, so here the differentiation parameter is never
      inside [lag]; the - lag term therefore rides along as a constant shift. *)
   let t = match lag with
     | Some l -> BinOp { op = Sub; left = Time; right = l }
@@ -282,8 +337,8 @@ let sinusoidal_closed ?lag (s : sinusoidal) : expr =
     harmonic k+1) — matching the Rust evaluator (`fourier_value`). No baseline;
     the model author writes `1 + fourier(t)`. *)
 let fourier_closed ?lag (f : fourier) : expr =
-  (* Same evaluation-time shift as [sinusoidal_closed] (gh#314, incident
-     2026-07-05): differentiate over (Time - lag), not bare Time. *)
+  (* Same evaluation-time shift as [sinusoidal_closed]: differentiate over
+     (Time - lag), not bare Time. *)
   let t = match lag with
     | Some l -> BinOp { op = Sub; left = Time; right = l }
     | None -> Time
@@ -319,7 +374,7 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
     | Some { source = Inline vals; _ } -> List.exists (mentions param) vals
     | _ -> false
   in
-  (* Does [param] drive the forcing's evaluation-time shift ([lag], gh#314)?
+  (* Does [param] drive the forcing's evaluation-time shift ([lag])?
      The closed forms below differentiate against bare [Time], not [Time − lag],
      so a param in the lag has a live derivative none of them emit. *)
   let lag_mentions param (tf : time_function) =
@@ -356,7 +411,7 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
       match link with
       | Link_identity -> sum
       | Link_log -> map1 sum (fun s -> BinOp { op = Mul; left = TimeFunc fname; right = s })
-  (* Proposal §6.4: g = level + slope (t_c - t_m) + (scale/kappa) sum_i z_i W_i,
+  (* A smooth spline is g = level + slope (t_c - t_m) + (scale/kappa) sum_i z_i W_i,
      W_i(t) = sum_j M_ji B_j(t). A `whitened` basis node evaluates W_i/kappa and
      the `linear` node t_c - t_m, so
        dg/dtheta = d level + d slope * lin + d scale * sum_i z_i Wh_i
@@ -396,9 +451,9 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
       | Link_log -> map1 sum (fun s -> mul (TimeFunc fname) s)
   and d (e : expr) : deriv =
     match e with
-    (* Constant leaves — zero for every target. `ObsAnchor` (gh#616) is a
+    (* Constant leaves — zero for every target. `ObsAnchor` is a
        structural knot in a forcing breakpoint list, resolved to a number
-       before any gradient is evaluated; it depends on the DATA, never on a
+       before any gradient is evaluated; it depends on the data, never on a
        parameter or a compartment, so its derivative is a genuine zero. *)
     | Const _ | Time | Dt | ObsColumnRef _ | ObsAnchor _ -> Known (Const 0.0)
 
@@ -445,22 +500,21 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
 
     (* Forcing. Cases, in order:
        - lag guard (any kind): if [param] drives the forcing's evaluation-time
-         shift ([lag], gh#314), the closed forms below cannot express the
-         derivative (they differentiate against bare [Time], not [Time − lag]).
-         Omitted — a live coefficient with an un-emitted gradient. Checked
-         FIRST so a param that also drives a coefficient does not slip through
-         to a closed form that silently ignores the lag.
+         shift ([lag]), the derivative with respect to the lag is not
+         written. Omitted — a live coefficient with an un-emitted gradient.
+         Checked first so a param that also drives a coefficient does not slip
+         through to a closed form that ignores the lag.
        - Sinusoidal/Fourier: differentiate through the closed form (real grad).
-       - Periodic: period + step values are LIVE scalar coefficients (the Rust
+       - Periodic: period + step values are live scalar coefficients (the Rust
          runtime evaluates them per-step via `resolve_coeff`). When [param]
-         actually drives one, the gradient is not yet emitted (gh#215): Omitted
+         actually drives one, the gradient is not emitted: Omitted
          so the model compiles — forward sim and gradient-free IF2/PF use the
-         live value, and the Rust NUTS guard (coeff_guard.rs) refuses a NUTS fit
-         that depends on it. NOT a hard error: that would also break forward sim
-         and IF2/PF. When [param] does NOT drive the coefficient, the derivative
-         is a genuine zero (tier 2a), exactly as for any constant — this is the
+         live value, and the runtime's gradient gate refuses a gradient-based
+         fit that depends on it. Not a hard error: that would also break
+         forward sim and IF2/PF. When [param] does not drive the coefficient,
+         the derivative is a genuine zero, exactly as for any constant — the
          common case, e.g. a param multiplying a constant-valued periodic term.
-       - PeriodicSpline/BSpline (proposal 2026-10-27-estimable-bsplines §5.2):
+       - PeriodicSpline/BSpline:
          f = h(g), g = Σ_j c_j B_j, so ∂f/∂θ = h′ · Σ_j (∂c_j/∂θ) B_j. Each
          coefficient expression is differentiated by the ordinary rules (a
          corner constraint or a sum-to-zero gets the chain rule), each basis
@@ -468,7 +522,7 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
          forcing's own span code, and under `link = log` the sum is multiplied
          by the forcing's value (h′ = h). A parameter in a knot, window end or
          period moves the basis itself: Unsupported (E600).
-       - Piecewise/Interpolated: a parameter there drives STRUCTURAL data
+       - Piecewise/Interpolated: a parameter there drives structural data
          (interpolation knots and values, a piecewise step grid) — fixed when
          the model is built, so it cannot be a live coefficient at all. Hard
          compile error (the Rust runtime also rejects it at IR-load via
@@ -535,7 +589,7 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
 
     (* ∂B_k/∂θ: a basis function depends on t alone, so it is zero for every
        target — except a parameter in the forcing's `lag`, which moves the
-       evaluation time and whose derivative is not emitted (gh#314). Gradients
+       evaluation time and whose derivative is not emitted. Gradients
        are not differentiated again, so this arm only keeps the rule total. *)
     | ForcingBasis { forcing; _ } ->
       (match target with
@@ -557,7 +611,8 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
        (e.g. `sigma_stage[e1] = sigma_e1`) get a real gradient; the all-Const
        fold leaves such param tables as lookups. A non-constant (state- or
        param-dependent) index selects a cell we cannot identify symbolically →
-       Unsupported when the param is involved (gh#215), else a genuine zero. *)
+       Unsupported when the param is in the index, Omitted when it is in a
+       cell, else a genuine zero. *)
     | TableLookup (name, [ Const fi ]) ->
       (match find_table tbls name with
        | Some { source = Inline vals; _ } ->
@@ -570,10 +625,8 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
       (match target with
        | WrtParam param ->
       if List.exists (mentions param) args then
-        (* The parameter is in a non-constant LOOKUP INDEX — it selects which
-           cell, so the lookup is undifferentiable and the index is not a live
-           coefficient the NUTS guard covers (it treats indices as body
-           sub-expressions). Reject at compile time. *)
+        (* The parameter is in a non-constant lookup index — it selects which
+           cell, so the lookup is undifferentiable. Reject at compile time. *)
         Unsupported
           { code = URNonConstTableIndex;
             node = Printf.sprintf "table `%s`" name;
@@ -583,11 +636,11 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
                differentiable. Index the table by a constant or a compartment, \
                not by an estimated parameter" param name }
       else if table_value_mentions param name then
-        (* The parameter is an inline-table VALUE selected by a non-constant
+        (* The parameter is an inline-table value selected by a non-constant
            index. The value is a live coefficient (the Rust runtime resolves it),
-           but the gradient through a runtime-chosen cell is not yet emitted
-           (gh#215). Omitted so the model compiles — IF2/PF use the live value,
-           and the NUTS guard refuses a NUTS fit that depends on it. *)
+           but the gradient through a runtime-chosen cell is not emitted.
+           Omitted so the model compiles — IF2/PF use the live value, and the
+           gradient gate refuses a gradient-based fit that depends on it. *)
         Omitted
           { code = URNonConstTableIndex;
             node = Printf.sprintf "table `%s`" name;
@@ -644,7 +697,7 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
                       left  = BinOp { op = Mul; left = dl; right = b.right };
                       right = BinOp { op = Mul; left = b.left; right = dr } };
                     right = BinOp { op = Mul; left = b.right; right = b.right } })
-      (* Power rule, written to stay finite at a zero base (gh#952):
+      (* Power rule, written to stay finite at a zero base:
            d(f^g) = g·f^(g−1)·f′ + g′·[f > 0 ? f^g·ln f : 0]
          The textbook form f^g·(g′ ln f + g f′/f) is equal for f > 0 but
          evaluates ln 0 and 1/0 at f = 0 — NaN at runtime — where the true
@@ -671,7 +724,7 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
                         right = df };
                       right = BinOp { op = Mul; left = dg; right = f_pow_g_ln_f } })
       (* Min/Max: subgradient — differentiate the active branch (WrtParam). For
-         WrtPop, a min/max OF STATE is nonsmooth at the crossover — refuse (§1h);
+         WrtPop, a min/max of state is nonsmooth at the crossover — refuse;
          state-free min/max has ∂/∂compartment = 0. *)
       | Min ->
         (match target with
@@ -717,9 +770,8 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
                            smooth (a kink at the crossover); a gradient method \
                            cannot use it" }
            else Known (Const 0.0))
-      (* Mod: derivative needs floor, absent from the grammar. A genuine 0 when
-         neither operand depends on the differentiation variable; otherwise
-         Unsupported (was a failwith — M4 in the 2026-04-19 compiler review). *)
+      (* Mod: a genuine 0 when neither operand depends on the differentiation
+         variable; otherwise Unsupported. *)
       | Mod ->
         (match target with
          | WrtParam param ->
@@ -763,8 +815,8 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
                      right = BinOp { op = Mul; left = Const 2.0;
                                      right = UnOp { op = Sqrt; arg = u.arg } } })
       | Neg -> map1 (d u.arg) (fun da -> UnOp { op = Neg; arg = da })
-      (* d|f| = f' · sign(f), sign(0) := 0 (n1 in the 2026-04-19 review). For
-         WrtPop, |state| is nonsmooth at 0 — refuse (§1h). *)
+      (* d|f| = f' · sign(f), sign(0) := 0. For WrtPop, |state| is nonsmooth
+         at 0 — refuse. *)
       | Abs ->
         (match target with
          | WrtParam _ ->
@@ -789,8 +841,8 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
                  reason = "derivative of `abs` w.r.t. the projection output is not \
                            smooth (a kink at 0); a gradient method cannot use it" }
            else Known (Const 0.0))
-      (* Floor/Ceil: derivative 0 a.e. w.r.t. a parameter; but w.r.t. STATE it is
-         a step function (nonsmooth at each integer) — refuse for WrtPop (§1h). *)
+      (* Floor/Ceil: derivative 0 a.e. w.r.t. a parameter; but w.r.t. state it is
+         a step function (nonsmooth at each integer) — refuse for WrtPop. *)
       | Floor | Ceil ->
         (match target with
          | WrtParam _ -> Known (Const 0.0)
@@ -848,7 +900,7 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
       collect [] None terms
 
     (* Hoisted bindings are param-free (state-only), so ∂/∂param = 0 (WrtParam).
-       For WrtPop the premise INVERTS — a binding body is a function of state (a
+       For WrtPop the premise inverts — a binding body is a function of state (a
        hoisted force-of-infection is exactly where the coupling lives), so we
        resolve the reference and recurse into its body. Bindings are acyclic by
        construction (topo-ordered; enforced at validate/dimcheck), so the
@@ -925,10 +977,10 @@ let rec simplify (e : expr) : expr =
 
        This arm is load-bearing for dense mean-field coupling, not a size nicety.
        Differentiating `Σ_h N[h]` (a global denominator over hoisted, param-free
-       bindings) yields [Reduce [Const 0.0; ...]] — one zero per term, NOT
+       bindings) yields [Reduce [Const 0.0; ...]] — one zero per term, not
        [Const 0.0]. Left unfolded, the quotient rule's `-f·g'` term never meets
        `Mul, _, Const 0.0`, so `Div, Const 0.0, _` cannot fire and the entire
-       O(H) sum rides into EVERY parameter's gradient, squared — including
+       O(H) sum rides into every parameter's gradient, squared — including
        parameters absent from the rate. That is an O(H²) [rate_grad]. *)
     | Reduce terms ->
       begin match List.filter (fun t -> t <> Const 0.0) (List.map simplify terms) with
@@ -965,24 +1017,14 @@ let simplify_fixpoint (e : expr) : expr =
   in
   go e
 
-(** Differentiate a rate expression w.r.t. each estimated parameter, producing a
-    classified [grad_map].
+(** The derivative of a transition's rate with respect to each parameter in
+    [param_names], in that order: the transition's [rate_grad].
 
-    Returns [Ok grad_map] — [(param_name, deriv_entry)] pairs — or [Error msg] if
-    any parameter's derivative is [Unsupported] (a structural coefficient a param
-    cannot drive: spline/interp/piecewise knot; the caller turns it into a
-    compile-time E600). The classification mirrors the obs driver, differing only
-    in the [Unsupported] arm (rate → E600; obs → a serialized refusal):
-
-    - [Known] folding to [Const 0.0] → dropped (absent key = genuine zero).
-    - [Known d'] → [DEGrad d'].
-    - [Omitted] (live-but-omitted: Periodic step/period, [lag], inline-table value
-      via a non-constant index) → [DEUnsupported {node; code}] — was DROPPED
-      pre-3b; now serialized so the fit-time preflight refuses on it, subsuming the
-      old [coeff_guard] (gh#342). Forward sim / IF2 / PF still use the live value;
-      only a gradient-based (NUTS) fit is refused.
-    - [Unsupported] → [Error] → E600 (tier-3 is non-runnable regardless of method,
-      so the earliest, source-located rejection is best; §3 of the 3b proposal). *)
+    The driver passes every parameter of the model, estimated or not. A
+    derivative that simplifies to [Const 0.0] is left out, an [Omitted] one
+    becomes [DEUnsupported], and the first [Unsupported] one makes the whole
+    result [Error msg], which the caller reports as [E600] at the
+    transition's declaration. *)
 let differentiate_rate (rate : expr) (param_names : string list)
     (tfs : time_function list) (tbls : table list) :
     ((string * deriv_entry) list, string) result =
@@ -999,18 +1041,15 @@ let differentiate_rate (rate : expr) (param_names : string list)
   in
   go [] param_names
 
-(** ∂rate/∂compartment for each compartment name, producing the transition's
-    [rate_state_grad] map — [J_x]'s ingredient for the ODE forward sensitivities
-    (gh#275). The [WrtPop] sibling of [differentiate_rate].
+(** The derivative of a transition's rate with respect to each compartment
+    in [compartments]: the transition's [rate_state_grad], from which the
+    ODE forward-sensitivity gradient builds the Jacobian of the dynamics.
 
-    The compile-vs-defer POLICY differs from [differentiate_rate]: there an
-    [Unsupported] coefficient is a compile-time E600 (tier-3 is non-runnable by
-    any method). Here BOTH [Omitted] and [Unsupported] become a serialized
-    [DEUnsupported] the fit-time gradient gate refuses on — a rate with a
-    nonsmooth-of-state term (floor/ceil/abs/min/max of a compartment, a
-    state-indexed table) must still forward-simulate and fit by the gradient-free
-    IF2/PF; only a gradient method (ODE-NUTS) is refused. This mirrors the obs/σ²
-    driver, not the rate-θ driver. An absent key is a genuine zero. *)
+    Unlike {!differentiate_rate}, it never fails: both [Omitted] and
+    [Unsupported] become [DEUnsupported], because a rate that is not smooth
+    in the state ([floor], [abs] or [min] of a compartment, a table indexed
+    by a compartment) must still simulate and fit by methods that use no
+    gradient. A derivative that simplifies to [Const 0.0] is left out. *)
 let differentiate_rate_state (rate : expr) (compartments : string list)
     (tfs : time_function list) (tbls : table list) (bindings : binding list)
     : (string * deriv_entry) list =
@@ -1025,15 +1064,15 @@ let differentiate_rate_state (rate : expr) (compartments : string list)
   in
   List.filter_map entry_of compartments
 
-(** ∂projection/∂compartment for an observation projection — the model's
-    [projection_state_grad], consumed by the ODE observation gradient's factor-2
-    chain (`∂proj/∂θ = Σ_j ∂proj/∂x_j · S[j]`, gh#275 §1h). Only a [DerivedExpr]
-    (a nonlinear function of state) has a non-trivial state gradient; it reuses
-    [differentiate_rate_state] verbatim (∂expr/∂compartment via [WrtPop], same
-    defer POLICY — a nonsmooth-of-state projection like `floor(I/N)` becomes a
-    [DEUnsupported] the gradient gate refuses on). The linear projections
-    ([CurrentPop*]/[CumulativeFlow*]) are trivial selections the factor-2 chain
-    handles directly, so they emit nothing. *)
+(** The derivative of an observation's projection with respect to each
+    compartment: the observation's [projection_state_grad]. The ODE gradient
+    chains it with the state sensitivities, [∂proj/∂θ = Σ_j ∂proj/∂x_j ·
+    ∂x_j/∂θ].
+
+    Only a [DerivedExpr] projection, an arbitrary expression of the state,
+    gets entries, computed and classified as by {!differentiate_rate_state}.
+    The other projections select or sum compartments or accumulated flows,
+    which the runtime differentiates itself, so they give an empty list. *)
 let differentiate_projection (proj : projection) (compartments : string list)
     (tfs : time_function list) (tbls : table list) (bindings : binding list)
     : (string * deriv_entry) list =
@@ -1046,26 +1085,16 @@ let differentiate_projection (proj : projection) (compartments : string list)
   | FlowRatio _ -> []
 
 
-(* ── Observation / σ² gradient driver (proposal 2026-07-03, P3) ───────────────
+(* ── Observation, overdispersion and initial-state drivers ────────────────────
 
-   The obs and σ² densities need ∂arg/∂θ for each differentiable likelihood
-   argument (mean, sd, rate, p, α, β) and the overdispersion σ² expression. This
-   reuses the single differentiation authority [differentiate]; only the
-   compile-vs-defer POLICY differs from the rate path (the "natural seam"):
+   These never fail: [Omitted] and [Unsupported] both become [DEUnsupported]
+   ([obs_deriv_entry]), and a derivative that simplifies to zero is left out
+   of the map. *)
 
-   - rate  : [Omitted]/[Unsupported] → drop / E600 ([differentiate_rate]).
-   - obs/σ²: [Omitted] AND [Unsupported] → a serialized, coded
-     [DEUnsupported] the fit-time gate (P5) refuses NUTS on, so a live-but-
-     omitted coefficient never masquerades as a genuine zero on this path.
-
-   A genuine zero ([Known] folding to [Const 0.0]) is OMITTED from the map — an
-   absent key is a genuine zero, mirroring [differentiate_rate] dropping proven
-   zeros. *)
-
-(** Substitute every [Projected] node in [e] with [proj] — a trivial rewrite
-    ([Projected] is nullary). Used to inline a [DerivedExpr] projection into a
-    likelihood argument BEFORE differentiation, so ∂arg/∂θ picks up the
-    ∂(projected)/∂θ chain-rule term. *)
+(** Substitute every [Projected] node in [e] with [proj]. Used to inline a
+    [DerivedExpr] projection into a likelihood argument before
+    differentiation, so ∂arg/∂θ picks up the ∂(projected)/∂θ chain-rule
+    term. *)
 let rec inline_projected (proj : expr) (e : expr) : expr =
   match e with
   | Projected -> proj
@@ -1122,17 +1151,15 @@ let differentiate_obs_arg (proj : projection) (arg : expr)
       | None -> None)
     param_names
 
-(** ∂(initial-condition expression)/∂θ for every parameter — one compartment's
-    entry in the model's [ic_grad] map (compartment → param → ∂init/∂param), the
-    ODE forward-sensitivity seed S(t_start) (gh#275 §1c C-seed).
+(** The derivative of one compartment's initial value with respect to each
+    parameter: that compartment's entry in the model's [ic_grad], the
+    starting value of the ODE state sensitivities.
 
-    Same compile-vs-defer POLICY as the obs/σ² driver ([obs_deriv_entry], the
-    "natural seam"): a genuine zero is dropped (an absent key IS a genuine zero),
-    and an [Omitted] or [Unsupported] coefficient becomes a serialized
-    [DEUnsupported] the fit-time gradient gate refuses ODE-NUTS on — a nonsmooth
-    initial condition still forward-simulates and fits by the gradient-free
-    backends (IF2/PF), exactly as a nonsmooth rate does. No projection is involved
-    (an IC is not an observation argument), so nothing is inlined. *)
+    The driver passes the initial value with every compartment it reads
+    already replaced by that compartment's own initial value, so the
+    derivative follows the order in which the runtime evaluates the
+    initial state. Zero derivatives are left out, and a derivative that
+    cannot be written becomes [DEUnsupported]. *)
 let differentiate_ic (ic_expr : expr) (param_names : string list)
     (tfs : time_function list) (tbls : table list) : grad_map =
   List.filter_map
@@ -1146,17 +1173,17 @@ let differentiate_ic (ic_expr : expr) (param_names : string list)
     (`I ~ poisson(rate = I0)`), so `∂/∂θ log p(x₀ | θ)` has a compiler-emitted
     per-parameter derivative to chain through.
 
-    [Pop] differentiates to 0, which is the RIGHT convention here and not an
-    oversight: the density is scored with x₀ held FIXED (in PGAS it is the
-    conditioning trajectory's own initial state, in NUTS it is data for the θ
-    update), so the only θ-dependence is through the law's arguments. That is
-    also what makes the emitted gradient finite-difference-checkable against
+    A compartment in an argument differentiates to 0, and that is the
+    intended convention: the density is scored with the initial state x₀
+    held fixed (the conditioning trajectory's initial state), so the only
+    dependence on θ is through the law's arguments. The same convention
+    makes the emitted gradient checkable by finite differences of
     [initial_state_logpdf] at fixed x₀.
 
-    No projection is involved (an initial condition is not an observation), so
-    nothing is inlined and [proj_grad] is [None] — set by FULL RECONSTRUCTION,
-    like [differentiate_likelihood], so a new [diffable] field is a compile
-    error here until it is differentiated. *)
+    No projection is involved, so nothing is inlined and [proj_grad] is
+    [None]. Each [diffable] is built field by field rather than by a
+    functional update, so a new field is a compile error here until it is
+    differentiated. *)
 let differentiate_initial_conditions (ic : initial_conditions)
     (param_names : string list) (tfs : time_function list) (tbls : table list)
     : initial_conditions =
@@ -1186,22 +1213,21 @@ let differentiate_diffable (proj : projection) (d : diffable)
     : diffable =
   { expr = d.expr;
     grad = differentiate_obs_arg proj d.expr param_names tfs tbls;
-    (* ∂arg/∂projected (gh#275 factor 2): differentiate the argument w.r.t. the
-       [Projected] leaf directly — NO projection inlining (that is [grad]'s job,
+    (* ∂arg/∂projected: differentiate the argument w.r.t. the
+       [Projected] leaf directly, with no projection inlining (that is [grad]'s job,
        for ∂arg/∂θ). A genuine [Const 0.0] (the argument does not read the
        projection output) collapses to [None]. *)
     proj_grad = obs_deriv_entry (differentiate d.expr WrtProjected tfs tbls) }
 
-(** Fill every differentiable position of a likelihood by FULL RECONSTRUCTION
-    (not a functional update): a new [diffable] field is a compile error here
-    until it is differentiated — the OCaml half of the coverage seal (proposal
-    2026-07-06 §4.3). The match is exhaustive over [likelihood], so a new variant
-    is likewise a compile error.
+(** Fill every differentiable argument of a likelihood. The likelihood is
+    rebuilt field by field rather than by a functional update, and the match
+    names every [likelihood] constructor, so a new argument or a new
+    likelihood is a compile error here until it is differentiated.
 
-    [n] (Binomial/BetaBinomial) is deliberately NOT a [diffable] — it is
-    θ-independent (rounded to an integer) and carries no gradient; the refusal of
-    an estimated param reaching [n] after inlining is the P5 fit-gate's job
-    (proposal §4.4), nothing to emit here. *)
+    The [n] of a binomial or beta-binomial is not a [diffable] and gets no
+    gradient: it is rounded to an integer and must not depend on an
+    estimated parameter. The runtime's gradient gate, not this module,
+    refuses a gradient-based fit in which it does. *)
 let differentiate_likelihood (proj : projection) (lik : likelihood)
     (param_names : string list) (tfs : time_function list) (tbls : table list)
     : likelihood =

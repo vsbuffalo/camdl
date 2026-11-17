@@ -1,53 +1,76 @@
-(* gh#272 Loop-invariant code motion (LICM) over a fully-expanded,
-   already-differentiated model.
+(** Loop-invariant code motion: subexpressions of the dynamics that depend
+    only on parameters and tables are moved into named per-evaluation
+    bindings, which the runtime computes once per parameter vector instead
+    of at every step.
 
-   Extracts maximal param/table-only ("invariant") subexpressions out of the
-   DYNAMICS surfaces — transition `rate`, transition `rate_grad`, and
-   `ode_equations` derivatives — into `model.per_eval_bindings`, replacing each
-   with a `PerEvalRef`. The runtime evaluates a per-eval binding once per
-   theta-stable scope (a later increment adds the cache; today it is on-demand),
-   instead of recomputing the subtree on every integration step. The in-model
-   gravity kernel `N0[q]*exp(-gamma*log(dratio))` and its normalization are the
-   motivating case — loop-invariant within a trajectory but recomputed every
-   step (gh#272).
+    A transition rate is evaluated at every step of a simulation, but part
+    of it is often fixed for the whole trajectory: a distance kernel
+    [exp(-gamma * log(d))], a normalising sum over patches. {!licm_model}
+    finds, in each transition's [rate], [rate_grad] and [rate_state_grad]
+    and in each ODE equation, the largest subtrees that read nothing but
+    literals, parameters, model constants and table cells that are
+    themselves of that kind. Each such subtree that contains an
+    exponential, logarithm, square root, [sin], [cos], [tanh], power or
+    [Reduce] becomes an {!Ir.PerEvalRef} to an entry it adds to the model's
+    [per_eval_bindings]; a cheap one, such as [R0 * gamma], stays inline.
+    Identical subtrees, compared bit for bit including the sign of zero,
+    share one binding. For the rate
 
-   Scope is a hard contract: ONLY the three dynamics surfaces, which the runtime
-   evaluates with `eval_resolved`. NOT bindings, overdispersion, or observation
-   expressions — those are the secondary-gradient surfaces (`eval_resolved_deriv`
-   / `collect_param_refs`), kept PerEvalRef-free so those consumers never see the
-   node (docs/dev/proposals/2026-06-20-loop-invariant-code-motion.md).
+    {@camdl[
+      infection : S --> I @ beta * exp(-k) * S * I / (S + I + R)
+    ]}
 
-   Value-preserving: substituting a `PerEvalRef` for a structurally-identical
-   subtree (CSE-deduped by a BITWISE expr key) does not change evaluation order,
-   so trajectories and gradients are byte-identical. Runs AFTER autodiff +
-   constant_fold (it hoists already-folded subtrees; constant_fold never sees a
-   `PerEvalRef`). On by default; `CAMDL_NO_LICM` forces it off (the inlined
-   variant), mirroring constant_fold / `CAMDL_NO_CONSTANT_FOLD`. *)
+    the compiler writes the rate over [__licm_0], and its derivatives over
+    two more bindings:
+
+    {@json[
+      {"name":"__licm_0","expr":{"bin_op":{"op":"mul","left":{"param":"beta"},"right":{"un_op":{"op":"exp","arg":{"un_op":{"op":"neg","arg":{"param":"k"}}}}}}}},
+      {"name":"__licm_1","expr":{"un_op":{"op":"exp","arg":{"un_op":{"op":"neg","arg":{"param":"k"}}}}}},
+    ]}
+
+    A binding's name is [__licm_] and a counter, in a list separate from
+    the model's ordinary bindings, so it cannot collide with a name the
+    author chose. A hoisted subtree is moved whole, so no binding refers to
+    another. Overlapping subtrees, such as [beta * exp(-k)] and [exp(-k)]
+    above, get separate bindings.
+
+    At run time, each simulator and inference loop evaluates every
+    per-evaluation binding once, for the parameter vector it is about to
+    use, and every reference reads the stored value. Where a caller has not
+    stored them, a reference evaluates the binding's body where it occurs,
+    to the same value. The Rust loader refuses a binding that reads state
+    or time, or refers to a later binding. The rewrite does not change any
+    value: the same expression is evaluated, by the same evaluator, from
+    the same parameters. The Rust test [gate_licm_ab] compares trajectories
+    with and without the pass.
+
+    The pass leaves bindings, observation expressions, overdispersion
+    variances and initial conditions alone, so the runtime code that
+    differentiates or scans those never meets a {!Ir.PerEvalRef}. It is the
+    last pass before serialisation, after differentiation and constant
+    folding, so no other pass meets one either. Setting [CAMDL_NO_LICM] in
+    the environment turns it off. *)
 
 open Ir
 
 (* An invariant subtree depends only on params/tables/constants — never on
    compartment state, time, dt, a forcing (`TimeFunc`), or a (state) `BindingRef`.
    These are exactly the nodes constant within a single trajectory once theta is
-   bound. NOTE this is the variant/invariant predicate the proposal calls for; it
-   covers `Dt` explicitly (a deliberate divergence from `expr_is_time_dependent`,
-   which omits it).
+   bound. It covers `Dt` explicitly, unlike `expr_is_time_dependent`, which
+   omits it.
 
    `tbls` maps each table name to its definition so a `TableLookup` is judged on
-   its CELL BODIES, not just its index (gh#284): an inline cell that references
-   state (a future contact table scaling with prevalence) makes the whole lookup
-   variant even with a constant index. An external table is file-loaded numeric
-   data — constant within a trajectory — so it is invariant. An unknown table is
-   treated conservatively as variant (some other pass diagnoses it). Today every
-   inline cell is constant-valued — its leaves are only `Const`/`Param`, possibly
-   under constant arithmetic (the expander emits no state-dependent cells, and the
-   Rust loader evaluates each cell to a number and rejects any state reference) —
-   so this is value-preserving: no currently-emitted IR changes which subtrees
-   hoist.
+   its cell bodies, not just its index: an inline cell that references state
+   would make the whole lookup variant even with a constant index. An external
+   table is file-loaded numeric data — constant within a trajectory — so it is
+   invariant. An unknown table is treated conservatively as variant (some other
+   pass diagnoses it). The expander emits only constant-valued inline cells
+   (leaves `Const`/`Param` under constant arithmetic), and the Rust loader
+   rejects a cell that references state.
 
    The `visited` set guards the inter-table cell recursion: a table whose inline
-   cell looks up a second table (a future possibility, not emittable today) could
-   otherwise cycle. A table already on the path is conservatively variant. *)
+   cell looks up a second table could otherwise cycle. A table already on the
+   path is conservatively variant. *)
 let is_invariant (tbls : (string, table) Hashtbl.t) (e : expr) : bool =
   let rec go visited (e : expr) : bool =
     match e with
@@ -55,7 +78,7 @@ let is_invariant (tbls : (string, table) Hashtbl.t) (e : expr) : bool =
     | PerEvalRef _ -> true   (* its body is invariant; never present in LICM input *)
     | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | ForcingBasis _ | BindingRef _
     | Projected | ObsColumnRef _ -> false
-    (* gh#616: NOT invariant. Its value comes from the run, not from theta, so
+    (* Not invariant. Its value comes from the run, not from theta, so
        hoisting it into a theta-stable per-eval binding would cache a value that
        is not a function of theta. It also never reaches LICM: the resolver
        substitutes a Const before compile. *)
@@ -109,7 +132,7 @@ let unop_tag = function
 (* Bitwise-faithful canonical key for CSE dedup. Floats are encoded by their
    IEEE-754 bits so `-0.0` and `0.0` (and distinct NaNs) never alias — the
    polymorphic `Hashtbl.hash` / structural `=` that `inspect.expr_hash` uses would
-   conflate them and is the WRONG seam here (the `-0.0` Reduce seed is observable).
+   conflate them and is the wrong seam here (the `-0.0` Reduce seed is observable).
    Two subtrees share a per-eval binding iff their keys are equal. *)
 let rec canon (e : expr) : string =
   match e with
@@ -140,11 +163,13 @@ let rec canon (e : expr) : string =
   | UncheckedDim u -> "D(" ^ canon u.inner ^ ")"
   | UnitLiteral u -> Printf.sprintf "L%Ld,%d,%d;" (Int64.bits_of_float u.value) u.dim_p u.dim_t
 
+(** The state of one run of {!licm_model}: the bindings hoisted so far, and
+    the index that lets an identical subtree reuse one of them. *)
 type ctx = {
-  mutable counter      : int;
-  table                : (string, string) Hashtbl.t;   (* canon key -> per-eval binding name *)
-  mutable rev_bindings : (string * expr) list;          (* accumulated, newest first *)
-  model_tables         : (string, table) Hashtbl.t;     (* table name -> def, for is_invariant *)
+  mutable counter      : int;  (** The number in the next binding's name, [__licm_N]. *)
+  table                : (string, string) Hashtbl.t;   (** The canonical key of each hoisted subtree, mapped to its binding's name. *)
+  mutable rev_bindings : (string * expr) list;          (** The hoisted bindings, newest first; the model lists them in the reverse order. *)
+  model_tables         : (string, table) Hashtbl.t;     (** Each table's name, mapped to its definition, so a lookup can be judged by its cells. *)
 }
 
 (* Per-eval binding names use a reserved `__licm_` prefix and a monotonic
@@ -172,7 +197,7 @@ let intern ctx (e : expr) : expr =
 (* Rewrite one expression tree. The use site is a virtual variant parent: a
    maximal invariant subtree (the topmost invariant node on each path, including
    the whole tree if it is invariant) is hoisted iff it is worth hoisting; cheap
-   invariant nodes are left inline. We only descend through VARIANT nodes — an
+   invariant nodes are left inline. We only descend through variant nodes — an
    invariant node is either hoisted whole or left whole, never split. *)
 let rec rw ctx (e : expr) : expr =
   if is_invariant ctx.model_tables e then
@@ -197,7 +222,7 @@ let rec rw ctx (e : expr) : expr =
    ordered — insertion order. *)
 (* LICM a gradient entry: hoist invariant subtrees inside a real derivative
    expression; an [Unsupported] refusal carries no expression, so pass it
-   through unchanged. (gh#342: rate_grad now carries classified [deriv_entry].) *)
+   through unchanged. *)
 let rw_deriv_entry ctx (de : deriv_entry) : deriv_entry =
   match de with DEGrad e -> DEGrad (rw ctx e) | DEUnsupported _ -> de
 

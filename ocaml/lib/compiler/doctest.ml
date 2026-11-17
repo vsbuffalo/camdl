@@ -1,31 +1,55 @@
-(* Doctest: compile the ```camdl fenced code blocks in Markdown docs against the
-   real compiler and classify each block's outcome.
+(** [camdlc doctest]: compiles every camdl code block of a Markdown document
+    with the real compiler, so a documented model that stops compiling is
+    caught.
 
-   Focused fragments that reference declarations made elsewhere in a section can
-   borrow a hidden preamble and inline data that travel WITH the doc as HTML
-   comments — invisible in the rendered page, so the spec stays self-contained
-   with nothing to drift out of sync:
+    {!main} takes [--gate], [--verbose] and the files; [make test-docs] runs
+    it with [--gate] over the language specification and the user guides.
+    {!parse_doc} reads a file in one pass into a {!doc}: every fenced block
+    whose info string begins with [camdl], and two kinds of HTML comment
+    that the rendered page does not show. A preamble comment holds
+    declarations a block may borrow, so a fragment can be shown alone and
+    still compile; a data comment holds a file a block reads. Each comment
+    ends at a line that is exactly [-->], because a transition's arrow
+    [S --> I] contains that text:
 
-     <!-- camdl-doctest-preamble: sir
-     compartments { S, I, R }
-     parameters { gamma : rate }
-     -->
+    {v
+    <!-- camdl-doctest-preamble: sir
+    compartments { S, I, R }
+    parameters {
+      gamma : rate
+    }
+    -->
 
-     <!-- camdl-doctest-data: data/pop.tsv
-     patch<TAB>pop
-     north<TAB>50000
-     -->
+    <!-- camdl-doctest-data: data/pop.tsv
+    patch	pop
+    north	50000
+    -->
 
-     ```camdl preamble=sir
-     transitions { recovery : I --> R @ gamma * I }   <- compiled as preamble ^ block
-     ```
+    ```camdl preamble=sir
+    transitions { recovery : I --> R @ gamma * I }
+    ```
+    v}
 
-   A `preamble=LABEL` block is *asserted* to compile, so any residual error is a
-   FAIL, not a skip. `camdl-doctest-data` chunks are materialised into a temp
-   directory that the block's `read("…")` paths resolve against.
+    {!classify} compiles a block, prefixed by its preamble, through
+    [Compiler.collect_diagnostics], the full compile that returns its
+    diagnostics instead of stopping at the first error. The data files are
+    written to a temporary directory, which stands in for the block's own
+    directory, so [read("data/pop.tsv")] finds them. The result is a
+    {!verdict}. The rules are heuristics over the error codes, applied in
+    order: a block marked [ignore] is skipped; a block with no errors
+    passes; a block with a data-file error ([E200]) is skipped; a block
+    that names a preamble fails on any other error; a block whose only
+    errors are syntax errors ([E001]) is skipped as a fragment that cannot
+    parse alone; a block whose text does not contain [compartments] is
+    skipped as a fragment; anything else fails. A preamble that is not
+    defined, or an exception from the compiler, is a failure too. {!run}
+    prints one line per failure (per block under [--verbose]) and a summary,
+    and under [--gate] exits 1 if anything failed.
 
-   The oracle is [Compiler.collect_diagnostics] — the full, non-aborting
-   pipeline, returning structured diagnostics as values. *)
+    Two of these rules let a broken model through. A complete model with a
+    syntax error is skipped, not failed, unless it names a preamble; and a
+    block is judged a fragment by whether the word [compartments] appears
+    anywhere in its text, comments included. *)
 
 (* ── string helpers (no Str dependency) ──────────────────────────────────── *)
 
@@ -89,18 +113,20 @@ let make_temp_dir () =
 
 (* ── document model ───────────────────────────────────────────────────────── *)
 
+(** One fenced camdl block of a document, as written. *)
 type block = {
-  file     : string;
-  line     : int;            (* 1-based line of the opening fence *)
-  ignore_  : bool;           (* ```camdl ignore *)
-  preamble : string option;  (* ```camdl preamble=LABEL *)
-  source   : string;
+  file     : string;         (** The document's path, as given on the command line. *)
+  line     : int;            (** The 1-based line of the opening fence. *)
+  ignore_  : bool;           (** The info string has the word [ignore]: the block is not compiled. *)
+  preamble : string option;  (** The label of the preamble the block borrows, from [preamble=LABEL]. *)
+  source   : string;         (** The block's text, without the fences. *)
 }
 
+(** What {!parse_doc} found in one document. *)
 type doc = {
-  blocks    : block list;
-  preambles : (string * string) list;  (* label -> hidden source *)
-  datas     : (string * string) list;  (* relative path -> file content *)
+  blocks    : block list;  (** The camdl blocks, in document order. *)
+  preambles : (string * string) list;  (** Each preamble comment's label and text. Every block of the document can use every preamble, wherever it appears; when a label is defined twice, the first definition is used. *)
+  datas     : (string * string) list;  (** Each data comment's path, relative to the block's directory, and its contents. The path is not checked, so one with [..] is written outside the temporary directory. *)
 }
 
 let parse_preamble toks =
@@ -212,14 +238,16 @@ let materialize_data datas =
 
 (* ── classification ───────────────────────────────────────────────────────── *)
 
+(** The outcome of compiling one block. [Fail] and [Ice] count as failures
+    under [--gate]; every [Skip_*] counts as a skip. *)
 type verdict =
-  | Pass
-  | Skip_ignore
-  | Skip_parse
-  | Skip_data
-  | Skip_fragment
-  | Fail of Diagnostics.diagnostic list
-  | Ice of string
+  | Pass                                 (** The block compiled with no errors. *)
+  | Skip_ignore                          (** The block is marked [ignore]. *)
+  | Skip_parse                           (** Every error is a syntax error ([E001]) and the block names no preamble. *)
+  | Skip_data                            (** An error is a data file that could not be read ([E200]). *)
+  | Skip_fragment                        (** The block has errors, names no preamble, and does not contain the word [compartments]. *)
+  | Fail of Diagnostics.diagnostic list  (** The block has errors that no skip rule covers: the error diagnostics. *)
+  | Ice of string                        (** The block names an undefined preamble, or the compiler raised an exception: the message. *)
 
 let classify ~preambles ~basedir (b : block) : verdict =
   if b.ignore_ then Skip_ignore

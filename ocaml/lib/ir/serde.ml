@@ -1,26 +1,63 @@
-(* serde.ml — JSON serialization/deserialization for the compartmental IR.
- *
- * Hand-written rather than ppx-generated to maintain exact control over
- * the JSON wire format. The Rust backend (serde) deserializes this JSON,
- * so field names and structure must match ir/src/*.rs exactly. We avoid
- * ppx_deriving_yojson because:
- *
- * 1. ppx generates default field names from OCaml identifiers, which may
- *    differ from the Rust serde names. Every mismatch would need a
- *    [@key "..."] annotation — ~40 types × multiple fields = fragile.
- *
- * 2. The JSON shape is the IR contract between OCaml and Rust. Hand-written
- *    serde makes the contract explicit and auditable. ppx would hide it
- *    behind generated code.
- *
- * 3. Some types need custom serialization (e.g., expr uses tagged unions
- *    with specific key names that ppx wouldn't generate naturally).
- *
- * When adding a new field to ir.mli:
- *   1. Add the field to the type in ir.mli and ir.ml
- *   2. Add _to_json and _of_json for it HERE (side by side)
- *   3. Add the corresponding Rust type in ir/src/
- *)
+(** The JSON codec of the IR: how a compiled {!Ir.model} is written for the
+    Rust runtime, and read back.
+
+    The file [camdlc] writes is an envelope around the model:
+
+    {@json[
+      {"ir_version":"0.44","validated_by":"ocaml-compiler-v0.44","model":{"name":"licm","version":"0.3","time_unit":"days","description":null,"compartments":[
+      {"name":"S","kind":"integer"},
+      {"name":"I","kind":"integer"},
+      {"name":"R","kind":"integer"}
+      ],"transitions":[
+    ]}
+
+    [ir_version] is {!ir_version}, the contents of [ir/VERSION] at build
+    time; the Rust crate [rust/crates/ir] reads the same file and refuses an
+    envelope whose version differs, and {!model_of_envelope_json} does the
+    same. [validated_by] names the compiler that wrote the file; nothing
+    reads it to decide anything. [model] is the model. Two optional members
+    sit beside it, outside the model because nothing that simulates or fits
+    reads them: [docs], the [#'] documentation of the model and its
+    declarations, written only when there is some, and [declared], the
+    model as its author wrote it ({!Declared}), which the caller passes in
+    already serialised.
+
+    Every type has a [*_to_json] and a [*_of_json], side by side. They are
+    written by hand, not derived, because the JSON shape is the contract
+    with the Rust types in [rust/crates/ir/src/], whose [serde] attributes
+    fix each field's name and each variant's tag; [ir/schema.json] writes
+    the model's shape down, and a Rust test validates every golden IR file
+    against it. A change to the shape changes this file, the Rust types,
+    the schema and [ir/VERSION] together. The conventions are the Rust
+    side's. A variant is an object with one key naming the constructor, as
+    in [{"param": "beta"}] or [{"bin_op": {"op": "mul", ...}}]; a nullary
+    one has the value [null], as in [{"time": null}]. Optional members are
+    either written as [null] or left out, member by member, to match what
+    the Rust type accepts: [dt] and [rng_seed] are [null] when unset, while
+    [constants], [bindings], [per_eval_bindings], [ic_grad] and empty
+    gradient maps are left out when empty. An observation anchor with a
+    zero offset is the bare string ["last_obs"]. An end time taken from an
+    anchor the run has not yet resolved (the simulation's, a scenario's, a
+    recurring intervention's) is held as NaN, written as [null], since JSON
+    has no NaN, and read back as NaN. No other non-finite number is
+    handled: a [Const] whose value is NaN is written
+    as the bare token [NaN], which is not JSON, and the Rust reader refuses
+    the file.
+
+    The reader is lenient: an absent optional member takes its default (an absent [time_unit] is ["days"]),
+    an integer is accepted where a float is expected, and an integral float
+    where an integer is. A malformed file raises the internal exception
+    [DeserError], which {!model_of_envelope_json} returns as [Error].
+    Reading back what {!model_to_string} writes gives a structurally equal
+    model, which [test_ir_roundtrip.ml] checks for every frozen golden in
+    [ir/golden/]; [declared] is not read back, and [validated_by] is
+    ignored.
+
+    The canonical output, {!write_canonical}, is compact JSON with each
+    element of the model's top-level lists, and of the declared section, on
+    its own line, so a changed transition is a one-line diff in a golden.
+    It is built from the same value as the indented form
+    ([~pretty:true]), and differs from it only in whitespace. *)
 
 open Ir
 
@@ -90,16 +127,15 @@ let opt_null f = function
   | `Null -> None
   | j     -> Some (f j)
 
-(* ── Observation anchors (gh#616) ────────────────────────────────────────── *)
+(* ── Observation anchors ────────────────────────────────────────────────── *)
 
-(* ONE codec shared by every anchor position — `simulation.t_end_anchor`, a
+(* One codec shared by every anchor position — `simulation.t_end_anchor`, a
    preset's, `value_at`'s time anchor, and the `obs_anchor` expr node — so the
    spellings cannot drift apart.
 
-   Canonical form: a ZERO offset emits the bare string (`"last_obs"`), which is
-   exactly what `value_at(…, last_obs)` emitted before this feature, so the
-   pre-gh#616 corpus stays byte-identical. A non-zero offset emits the object
-   `{"anchor": …, "offset": …}`, where `offset` is already in MODEL time units.
+   Canonical form: a zero offset emits the bare string (`"last_obs"`), the
+   spelling `value_at(…, last_obs)` uses. A non-zero offset emits the object
+   `{"anchor": …, "offset": …}`, where `offset` is already in model time units.
    Decoding accepts both spellings and re-encoding normalises back to the bare
    string, so the round-trip is stable. *)
 
@@ -155,7 +191,7 @@ let rec expr_to_json (e : expr) : Yojson.Safe.t =
   | Dt           -> obj [("dt", null)]
   | Projected    -> obj [("projected", null)]
   | ObsColumnRef c -> obj [("obs_column_ref", str c)]
-  (* gh#616: through the shared anchor codec, so an expr-position anchor and a
+  (* Through the shared anchor codec, so an expr-position anchor and a
      `value_at` anchor are spelled identically on the wire. *)
   | ObsAnchor a  -> obj [("obs_anchor", anchored_time_to_json a)]
   | ForcingBasis { forcing; index; space } ->
@@ -386,7 +422,7 @@ let grad_map_of_json = function
 let grad_field key (m : (string * deriv_entry) list) =
   match m with [] -> [] | _ -> [(key, grad_map_to_json m)]
 
-(* [ic_grad]: compartment -> (param -> deriv_entry), a nested map (gh#275). Each
+(* [ic_grad]: compartment -> (param -> deriv_entry), a nested map. Each
    inner map serialises exactly like a [grad_map]; the outer object is keyed by
    compartment. Matches the Rust `HashMap<String, ParamGradMap>` wire shape. *)
 let ic_grad_to_json (m : (string * (string * deriv_entry) list) list) : Yojson.Safe.t =
@@ -424,7 +460,7 @@ let draw_method_to_json (dm : draw_method) : Yojson.Safe.t =
   match dm with
   | DrawPoisson       -> str "poisson"
   | DrawDeterministic -> str "deterministic"
-  (* Keep the σ² VALUE as the bare expression (byte-stable golden); carry the
+  (* Keep the σ² value as the bare expression (byte-stable golden); carry the
      gradient as an adjacent sibling key present only when non-empty. *)
   | DrawOverdispersed { sigma_sq; sigma_sq_grad } ->
     obj ([("overdispersed", expr_to_json sigma_sq)]
@@ -663,12 +699,10 @@ let data_source_of_json j =
 
 let time_function_to_json (tf : time_function) : Yojson.Safe.t =
   let (p, t) = tf.dim in
-  (* gh#314: [lag] is omitted when [None] so a forcing without a lag
-     serializes byte-identically to the pre-gh#314 wire format. [data_source]
-     follows the same append-when-present idiom (the `integrator` one, NOT the
-     adjacent null-emitting `dt`/`rng_seed` one) — every forcing that is not
-     file-backed, which is nearly all of them, keeps its exact pre-0.33
-     bytes. *)
+  (* [lag] is omitted when [None], and [data_source] when the forcing is
+     not file-backed (the append-when-present idiom of `integrator`, not the
+     null-emitting one of `dt`/`rng_seed`), so a forcing without them writes
+     neither member. *)
   obj (
     [ ("name", str tf.name);
       ("kind", time_func_kind_to_json tf.kind);
@@ -738,14 +772,14 @@ let intervention_schedule_to_json (s : intervention_schedule) : Yojson.Safe.t =
   | AtTimes ts ->
     obj [("at_times", arr (List.map flt ts))]
   | AtTimesExpr exprs ->
-    (* gh#69: parametric `at [...]`. JSON key is distinct from `at_times`
-       so old IRs without expressions deserialize as AtTimes unchanged. *)
+    (* Parametric `at [...]`. Its JSON key is distinct from `at_times`, so
+       the decoder tells the two apart by key. *)
     obj [("at_times_expr", arr (List.map expr_to_json exprs))]
   | Recurring r ->
     obj [("recurring", obj (
       [("start",  flt r.start);
        ("period", flt r.period);
-       (* gh#616: a baked end taken from an ANCHORED horizon is NaN, and JSON
+       (* A baked end taken from an anchored horizon is NaN, and JSON
           has no NaN literal — emit null (see simulation_config_to_json). *)
        ("end",    if Float.is_nan r.end_ then null else flt r.end_)]
       @ (match r.at_day with None -> [] | Some d -> [("at_day", flt d)])
@@ -824,12 +858,12 @@ let action_of_json j =
   )
   | _ -> fail "action must be a single-key object"
 
-(* gh#204. Reactive fire source. Wire shapes mirror the Rust serde derives:
+(* Reactive fire source. Wire shapes mirror the Rust serde derives:
    AgendaScope is a snake_case unit enum (a bare string); ReactiveTrigger is a
    struct (cooldown skipped when absent); FireSource is externally tagged
    ({"scheduled": ..} / {"reactive": ..}). *)
 
-(* gh#204. Reactive trigger predicate. Wire shapes mirror the Rust serde:
+(* Reactive trigger predicate. Wire shapes mirror the Rust serde:
    CmpOp/ObsReducer are snake_case unit enums; TriggerQuantity / TriggerThreshold
    / TriggerExpr are externally tagged; And/Or carry a 2-element array. *)
 let cmp_op_to_json = function
@@ -1265,8 +1299,8 @@ let value_reduce_to_json (v : value_reduce) : Yojson.Safe.t =
   | VCountAbove e -> obj [("count_above", expr_to_json e)]
   | VCountBelow e -> obj [("count_below", expr_to_json e)]
   | VValueAt (ATime e) -> obj [("value_at", obj [("time", expr_to_json e)])]
-  (* gh#616: through the shared anchor codec — a zero offset still emits the
-     bare `"last_obs"` string, so pre-gh#616 IR is byte-identical. *)
+  (* Through the shared anchor codec — a zero offset emits the bare
+     `"last_obs"` string. *)
   | VValueAt (AObs a)  -> obj [("value_at", anchored_time_to_json a)]
 
 let value_reduce_of_json j : value_reduce =
@@ -1277,7 +1311,7 @@ let value_reduce_of_json j : value_reduce =
   | `String "mean"  -> VMean
   | `Assoc [("count_above", e)] -> VCountAbove (expr_of_json e)
   | `Assoc [("count_below", e)] -> VCountBelow (expr_of_json e)
-  (* ORDER-SENSITIVE: both anchor arms must precede the `("value_at", v)`
+  (* Order-sensitive: both anchor arms must precede the `("value_at", v)`
      catch-all below, which reads `v.time` and would otherwise swallow them. *)
   | `Assoc [("value_at", (`String _ as a))] -> VValueAt (AObs (anchored_time_of_json a))
   | `Assoc [("value_at", (`Assoc kvs as a))] when List.mem_assoc "anchor" kvs ->
@@ -1541,8 +1575,7 @@ let param_value_of_json j : param_value =
     }
   | _ -> fail "parameter value: \"mode\" must be \"fixed\", \"estimated\", or \"required\""
 
-(* A `#'` doc block. Serialized omit-when-None so an undocumented parameter is
-   byte-identical to before this field existed (golden-neutral). *)
+(* A `#'` doc block. Each member is omitted when [None]. *)
 let doc_to_json (d : doc) : Yojson.Safe.t =
   obj (
     (match d.text      with None -> [] | Some t -> [("text",   str t)]) @
@@ -1554,7 +1587,7 @@ let doc_of_json j =
   { text = s "text"; symbol = s "symbol"; reference = s "ref" }
 
 (* The doc dictionary, serialized as `{ model: doc, category: { name: doc, … }, … }`.
-   The model's own doc (the file-header block, gh#750) is a bare doc, not a
+   The model's own doc (the file-header block) is a bare doc, not a
    name-keyed map — there is one model. Empty categories are omitted; an
    entirely-empty index serializes to `{}`, and the envelope omits the `docs`
    key altogether (see envelope_to_json). *)
@@ -1695,7 +1728,7 @@ let init_spec_of_json j =
   | `Assoc [(k, _)] -> fail "unknown init spec kind '%s'" k
   | _ -> fail "init spec must be a single-key object"
 
-(* The JSON object's key order IS the declaration order, and Yojson's [`Assoc]
+(* The JSON object's key order is the declaration order, and Yojson's [`Assoc]
    preserves it on both directions. Rust reads the same object into an
    [IndexMap], so the two sides agree on the order without a side channel. *)
 let initial_conditions_to_json (ic : initial_conditions) : Yojson.Safe.t =
@@ -1747,7 +1780,7 @@ let output_config_of_json j =
 
 (* ── Simulation config ───────────────────────────────────────────────────── *)
 
-(* gh#166: integrator serialized internally-tagged — {"method":"rk4"} /
+(* The integrator is serialized internally-tagged — {"method":"rk4"} /
    {"method":"rk45","atol":…,"rtol":…} — mirroring the Rust enum. *)
 let integrator_to_json (i : integrator) : Yojson.Safe.t =
   match i with
@@ -1774,12 +1807,11 @@ let integrator_of_json j =
   | None             -> fail "integrator: missing \"method\" field"
 
 let simulation_config_to_json (s : simulation_config) : Yojson.Safe.t =
-  (* integrator OMITTED at the Rk4 default, mirroring the Rust side's
-     `skip_serializing_if`, so a default model's IR body is unchanged by gh#166
-     (only the version string moves). *)
+  (* integrator omitted at the Rk4 default, mirroring the Rust side's
+     `skip_serializing_if`. *)
   obj (
     [ ("t_start",        flt s.t_start);
-      (* gh#616: an UNRESOLVED anchored horizon bakes NaN, and JSON has no NaN
+      (* An unresolved anchored horizon bakes NaN, and JSON has no NaN
          literal — Yojson emits a bare `NaN` token that no conforming reader
          accepts, so the IR could not be loaded at all. Emit `null` instead: the
          anchor field beside it says what the horizon IS, and the reader restores
@@ -1791,9 +1823,8 @@ let simulation_config_to_json (s : simulation_config) : Yojson.Safe.t =
       ("rng_seed",       match s.rng_seed with None -> null | Some n -> int n);
     ]
     @ (match s.integrator with Rk4 -> [] | i -> [ ("integrator", integrator_to_json i) ])
-    (* gh#616: APPENDED when present, never emitted as null — an unanchored
-       model's simulation block is byte-identical to its pre-gh#616 form (the
-       `integrator` idiom, not the `dt`/`rng_seed` null-emitting one). *)
+    (* Appended when present, never emitted as null (the `integrator`
+       idiom, not the `dt`/`rng_seed` null-emitting one). *)
     @ (match s.t_end_anchor with
        | None -> []
        | Some a -> [ ("t_end_anchor", anchored_time_to_json a) ])
@@ -1805,10 +1836,8 @@ let simulation_config_of_json j =
     | Some v -> Some (anchored_time_of_json v)
   in
   { t_start        = as_float  (member "t_start"        j);
-    (* gh#616: a null horizon is the anchored case (see the emitter). The NaN is
-       RESTORED from the anchor's presence rather than round-tripped, so the
-       "unresolved means not a usable number" invariant is enforced at load
-       instead of trusted from the file. *)
+    (* A null horizon is the anchored case (see the emitter) and reads back
+       as NaN. The reader does not check that [t_end_anchor] is present. *)
     t_end          = (match member "t_end" j with
                       | `Null -> Float.nan
                       | v     -> as_float v);
@@ -1828,7 +1857,7 @@ let preset_to_json (p : preset) : Yojson.Safe.t =
       ("params",  obj (List.map (fun (k, v) -> (k, flt v)) p.preset_params));
       ("enable",  arr (List.map str p.preset_enable));
       ("disable", arr (List.map str p.preset_disable));
-      (* gh#616: `Some NaN` (an unresolved anchored horizon) emits `null`, like
+      (* `Some NaN` (an unresolved anchored horizon) emits `null`, like
          `None`; the two are told apart on the way back by `t_end_anchor`. *)
       ("t_end",   match p.preset_t_end with
                   | None -> null
@@ -1838,7 +1867,7 @@ let preset_to_json (p : preset) : Yojson.Safe.t =
        else [("scale", obj (List.map (fun (k, v) -> (k, flt v)) p.preset_scale))])
     @ (if p.preset_compose = [] then []
        else [("compose", arr (List.map str p.preset_compose))])
-    (* gh#616: appended when present (see simulation_config_to_json). *)
+    (* Appended when present (see simulation_config_to_json). *)
     @ (match p.preset_t_end_anchor with
        | None -> []
        | Some a -> [ ("t_end_anchor", anchored_time_to_json a) ])
@@ -1859,7 +1888,7 @@ let preset_of_json j =
                       | _ -> []);
     preset_compose = (match member_opt "compose" j with Some (`List xs) -> List.map as_string xs | _ -> []);
     preset_t_end   = (match member_opt "t_end" j with
-                      (* Null WITH an anchor is the unresolved anchored horizon
+                      (* Null with an anchor is the unresolved anchored horizon
                          (`Some nan`); null without one is a scenario that
                          declares no horizon at all. *)
                       | Some `Null | None ->
@@ -2008,18 +2037,17 @@ let model_of_json (j : Yojson.Safe.t) : model =
                           | Some (`List v) -> List.map contrast_of_json v | _ -> []);
   }
 
-(* gh#audit-C8. IR schema version baked at build time from `ir/VERSION`
+(* IR schema version baked at build time from `ir/VERSION`
    via the dune rule in this directory's `dune` file. Single source of
    truth: bumping `ir/VERSION` updates both OCaml (this constant) and
    Rust (envelope.rs's `include_str!`) on the next build. *)
 let ir_version = Ir_version_generated.value
 
-(* gh#audit-C8. Producer marker emitted in the IR envelope. Rust's
-   validate.rs checks the marker; if present, can skip OCaml-mirrored
-   structural checks (audit H14). *)
+(* Producer marker emitted in the IR envelope. The Rust reader keeps it as
+   an opaque string and makes no decision on it. *)
 let validated_by = "ocaml-compiler-v" ^ ir_version
 
-(* gh#audit-C8. Wrap the model in an envelope: { ir_version,
+(* Wrap the model in an envelope: { ir_version,
    validated_by, model: <existing> }. The Rust deserializer
    (rust/crates/ir/src/lib.rs) requires the wrapper and rejects
    mismatched ir_version with IrError::VersionMismatch.
@@ -2040,7 +2068,7 @@ let envelope_to_json ?(declared : Yojson.Safe.t option) (m : model) : Yojson.Saf
        | None   -> []
        | Some d -> [("declared", d)]))
 
-(* gh#audit-C8. Parse an envelope and verify the version handshake.
+(* Parse an envelope and verify the version handshake.
    On mismatch returns Error with a hint pointing the user at the
    right rebuild target. *)
 let model_of_envelope_json (j : Yojson.Safe.t) : (model, string) result =
@@ -2068,13 +2096,13 @@ let model_of_envelope_json (j : Yojson.Safe.t) : (model, string) result =
          {ir_version, validated_by, model}). Re-emit IR with `make update-golden`.")
 
 (* ── IR JSON output ────────────────────────────────────────────────────────
-   The canonical on-disk format is COMPACT JSON with one element per line for
+   The canonical on-disk format is compact JSON with one element per line for
    the model's top-level arrays (compartments, transitions, parameters, …).
    Pretty-printing the IR was ~97% of compile time and ~80% of IR bytes on
    large models (docs/dev/notes/2026-05-30-compiler-profiling.md); compact
    removes both costs, while the per-element newlines keep golden diffs
    reviewable (a changed transition is a one-line diff). Both forms render the
-   SAME `envelope_to_json m` value — they differ only in whitespace, which every
+   same `envelope_to_json m` value — they differ only in whitespace, which every
    JSON parser ignores — so they encode identical content. `~pretty:true`
    selects the indented human view (also available via `camdlc --pretty` and
    `camdlc inspect`). The canonical/pretty equivalence is pinned by
