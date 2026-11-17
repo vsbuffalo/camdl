@@ -11,7 +11,6 @@ use crate::fit::pf_noise;
 use crate::fit::report::{ChainWarmup, SamplingCost, SamplingPlan};
 use crate::fit::loglik::LoglikType;
 use crate::fit::runner::{self, FitRunConfig, MethodConvergence};
-use crate::cas::iso8601_utc;
 use sim::inference::{
     if2::EstimatedParam,
     pmmh::{run_pmmh, Prior, PMMHConfig, PMMHResult, PMMHResumeState},
@@ -550,9 +549,11 @@ pub fn run_method(
                         if can_redraw && attempt + 1 < super::chain_starts::MAX_START_ATTEMPTS =>
                     {
                         let reason = match &e {
-                            sim::error::SimError::PFDegenerate { kind, obs_window, elapsed_s } =>
-                                format!("{:?} at obs_window={} after {:.2}s",
-                                    kind, obs_window, elapsed_s),
+                            // Not its `elapsed_s`: the reason lands in `chain_starts.tsv` and
+                            // `diagnostics.json`, whose bytes are the result, not the execution.
+                            sim::error::SimError::PFDegenerate { kind, obs_window, .. } =>
+                                format!("{:?} at obs_window={}",
+                                    kind, obs_window),
                             _ => unreachable!(),
                         };
                         let values: std::collections::HashMap<String, f64> = config
@@ -595,9 +596,11 @@ pub fn run_method(
                             String::new()
                         };
                         let reason = match &e {
-                            sim::error::SimError::PFDegenerate { kind, obs_window, elapsed_s } =>
-                                format!("{}{:?} at obs_window={} after {:.2}s",
-                                    tried, kind, obs_window, elapsed_s),
+                            // Not its `elapsed_s`: the reason lands in `chain_starts.tsv` and
+                            // `diagnostics.json`, whose bytes are the result, not the execution.
+                            sim::error::SimError::PFDegenerate { kind, obs_window, .. } =>
+                                format!("{}{:?} at obs_window={}",
+                                    tried, kind, obs_window),
                             _ => unreachable!(),
                         };
                         let params: std::collections::BTreeMap<String, f64> =
@@ -1016,7 +1019,11 @@ pub fn run_method(
     } else {
         crate::run_meta::FitAlgorithm::Pmmh
     };
-    write_summary(method_dir, &results, &config, &diagnostics, chain_logliks.as_ref(), algo, &warmup, &plan, &cost)?;
+    write_summary(method_dir, &results, &config, &diagnostics, chain_logliks.as_ref(), algo, &warmup, &plan)?;
+    // The cost is wall time, a property of this execution rather than of the
+    // result: it goes to the execution record (`fit::execution`), outside the
+    // leaf's manifest.
+    out.record_sampling(super::execution::Sampling::PerEvaluation(cost));
 
     // Write fit_state.toml
     let mut start_values = std::collections::BTreeMap::new();
@@ -1063,7 +1070,6 @@ pub fn run_method(
     let state = FitState {
         method: method_name.to_string(),
         seed,
-        timestamp: iso8601_utc(std::time::SystemTime::now()),
         input_hash: None,
         camdl_version: Some(crate::version::VERSION_SHORT.into()),
         best_loglik: map_result.map_loglik,
@@ -1312,7 +1318,6 @@ fn write_summary(
     algo: crate::run_meta::FitAlgorithm,
     warmup: &[ChainWarmup],
     plan: &SamplingPlan,
-    cost: &SamplingCost,
 ) -> Result<(), String> {
     let thin = plan.thin;
     let acceptance_rates: Vec<f64> = results.iter().map(|(_, r)| r.acceptance_rate).collect();
@@ -1349,7 +1354,6 @@ fn write_summary(
         "thin": thin,
         "warmup": warmup,
         "plan": plan,
-        "cost": cost,
     });
     // Every convergence key comes from one producer, so a statistic cannot be
     // live in this summary and silently absent from pgas's or nuts's.

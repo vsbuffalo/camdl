@@ -297,7 +297,6 @@ pub fn run_method(
     let fit_state = FitState {
         method: method_name.to_string(),
         seed,
-        timestamp: crate::cas::iso8601_utc(std::time::SystemTime::now()),
         input_hash: None,
         camdl_version: Some(crate::version::VERSION.to_string()),
         best_loglik: winner.loglik,
@@ -364,10 +363,6 @@ pub fn run_method(
     let mle_meta = provenance::MleMetadata {
         input_hash: parent_fit_hash.to_string(),
         // The leaf is `<fit folder>/<method>-<h8>/seed_<n>-<h8>`.
-        fit_folder: method_dir.ancestors().nth(2)
-            .expect("a method leaf sits two levels below its fit folder")
-            .to_path_buf(),
-        model_path: fit.model.camdl.clone(),
         model_identity: model_identity.to_string(),
         data_hashes: data_hashes.to_vec(),
         seed,
@@ -382,7 +377,6 @@ pub fn run_method(
         loglik_sd: 0.0,
         n_particles: 0,
         ess_at_mle: None,
-        timestamp: fit_state.timestamp.clone(),
     };
     if let Err(e) = provenance::write_mle_params(
         &mle_path.to_string_lossy(), &all_params, &mle_meta,

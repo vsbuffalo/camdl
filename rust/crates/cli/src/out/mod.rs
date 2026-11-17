@@ -100,6 +100,8 @@ struct RunningMethod {
     collector: Arc<DiagnosticCollector>,
     heartbeat: Arc<io::HeartbeatGuard>,
     leaf: std::path::PathBuf,
+    /// What the sampler measured of its cost, for the execution record.
+    sampling: Option<crate::fit::execution::Sampling>,
 }
 
 /// A method's record as it ended: what a failed run's report is built from,
@@ -198,7 +200,7 @@ impl Out {
         });
         self.method = Some(RunningMethod {
             header, checks: Vec::new(), collector: collector.clone(), heartbeat,
-            leaf: leaf.to_path_buf(),
+            leaf: leaf.to_path_buf(), sampling: None,
         });
         self.events = Some(log);
         Ok(collector)
@@ -262,6 +264,21 @@ impl Out {
             .expect("a method's collector is asked for only while it runs (`Out::begin_method`)")
     }
 
+    /// Keep what the running method's sampler measured of its cost: wall
+    /// time, a property of this execution, which the run writes to the
+    /// leaf's execution record (`fit::execution`) rather than into its
+    /// result files.
+    pub fn record_sampling(&mut self, sampling: crate::fit::execution::Sampling) {
+        if let Some(m) = self.method.as_mut() {
+            m.sampling = Some(sampling);
+        }
+    }
+
+    /// What the running method's sampler recorded of its cost, if anything.
+    pub fn sampling(&self) -> Option<crate::fit::execution::Sampling> {
+        self.method.as_ref().and_then(|m| m.sampling.clone())
+    }
+
     /// The running method's leaf, where its `diagnostics.json` and event
     /// log go; `None` when no method is running.
     pub fn method_leaf(&self) -> Option<&std::path::Path> {
@@ -287,8 +304,8 @@ impl Out {
     }
 
     /// The method's leaf is committed `completed`: the `done` in
-    /// `progress.json` is final. The leaf's manifest has hashed that file, so
-    /// no later error rewrites it.
+    /// `progress.json` is final: no later error rewrites it, so it never says
+    /// `failed` beside a committed `completed` record.
     pub fn method_committed(&self) {
         if let Some(m) = &self.method {
             m.heartbeat.commit();
@@ -613,11 +630,11 @@ mod tests {
         drop(taken);
     }
 
-    /// `progress.json` says `done` before the leaf is finalized (it is one of
-    /// the files the manifest hashes), so a finalize that then fails must turn
-    /// it into `failed`, with the reason, to agree with the leaf's `run.json`.
-    /// Once the leaf is committed `completed`, a later error leaves the
-    /// hashed file alone.
+    /// `progress.json` says `done` before the leaf is finalized (the heartbeat
+    /// stops before the manifest walk), so a finalize that then fails must
+    /// turn it into `failed`, with the reason, to agree with the leaf's
+    /// `run.json`. Once the leaf is committed `completed`, a later error
+    /// leaves the file alone.
     #[test]
     fn a_failure_after_done_but_before_commit_makes_progress_json_say_failed() {
         use crate::fit::report::RunHeader;

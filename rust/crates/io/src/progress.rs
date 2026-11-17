@@ -548,9 +548,10 @@ impl HeartbeatGuard {
     }
 
     /// Record that the method finished. The `done` is provisional until
-    /// [`commit`](Self::commit): `progress.json` is one of the files the leaf's
-    /// manifest hashes, so it has to stop changing before the leaf is
-    /// finalized, which is why `done` goes down first. A failure reported
+    /// [`commit`](Self::commit). The heartbeat stops before the leaf is
+    /// finalized, which is why `done` goes down first: its temporary file
+    /// (`progress.json.<pid>.tmp`) is not a record the manifest passes over,
+    /// so one written during the manifest walk would be taken into it. A failure reported
     /// after `done` but before `commit` replaces it
     /// ([`failed`](Self::failed)). A no-op once any terminal state is written.
     pub fn done(&self) {
@@ -562,8 +563,8 @@ impl HeartbeatGuard {
     }
 
     /// The leaf's record is committed `completed`, so the `done` on disk is
-    /// final: a later failure leaves `progress.json` alone, because the leaf's
-    /// manifest has hashed it.
+    /// final: a later failure leaves `progress.json` alone, so it never says
+    /// `failed` beside a `run.json` that says `completed`.
     pub fn commit(&self) {
         self.provisional_done.lock().unwrap_or_else(|e| e.into_inner()).take();
     }

@@ -989,8 +989,10 @@ pub fn preflight_spread_starts(
                         }
                         Err(e @ sim::error::SimError::PFDegenerate { .. }) => {
                             let reason = match &e {
-                                sim::error::SimError::PFDegenerate { kind, obs_window, elapsed_s } =>
-                                    format!("{:?} at obs_window={} after {:.2}s", kind, obs_window, elapsed_s),
+                                // Not its `elapsed_s`: the reason lands in `chain_starts.tsv` and
+                                // `diagnostics.json`, whose bytes are the result, not the execution.
+                                sim::error::SimError::PFDegenerate { kind, obs_window, .. } =>
+                                    format!("{:?} at obs_window={}", kind, obs_window),
                                 _ => unreachable!(),
                             };
                             let ess = ess_at_refusal(&e);
@@ -2591,8 +2593,10 @@ pub fn run_chains_with_per_chain_params(
                     // structural `Err(other)` arm below, since it trips
                     // identically for every chain.)
                     let (reason, label) = match &e {
-                        sim::error::SimError::PFDegenerate { kind, obs_window, elapsed_s } =>
-                            (format!("{:?} at obs_window={} after {:.2}s", kind, obs_window, elapsed_s),
+                        // Not its `elapsed_s`: the reason lands in `chain_starts.tsv` and
+                        // `diagnostics.json`, whose bytes are the result, not the execution.
+                        sim::error::SimError::PFDegenerate { kind, obs_window, .. } =>
+                            (format!("{:?} at obs_window={}", kind, obs_window),
                              "PF degenerate"),
                         _ => unreachable!(),
                     };
@@ -4902,7 +4906,6 @@ dt = 1.0
         let mk_state = |t0_params: Vec<String>| FitState {
             method: "scout".into(),
             seed: 1,
-            timestamp: "2026-08-23T00:00:00Z".into(),
             input_hash: None,
             camdl_version: None,
             best_loglik: -60.2,

@@ -261,10 +261,11 @@ pub struct PosteriorDiagnostics {
     /// ESS/iteration.
     #[serde(default = "default_thin")]
     pub thin: usize,
-    /// Method wall-clock (seconds) behind every draw the leaf holds: `run.json
-    /// inputs.wall_time_seconds`, or for a resumed leaf the sum over the
-    /// chain's segments (`resumed_chain::chain_wall_time_seconds`). `None`
-    /// when unknown. Denominator for ESS/second.
+    /// Method wall-clock (seconds) behind every draw the leaf holds, from its
+    /// execution record (`execution.json`): the attempt's own, plus every
+    /// earlier segment's for a resumed leaf
+    /// (`execution::Execution::chain_wall_time_seconds`). `None` when unknown.
+    /// Denominator for ESS/second.
     #[serde(default)]
     pub wall_time_secs: Option<f64>,
     /// Number of chains. R̂ requires ≥2; part of "how this posterior was
@@ -527,8 +528,8 @@ pub struct PgasRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acceptance_kernel: Option<sim::inference::diagnostic::AcceptanceKernel>,
     /// Wall time of the chains, start of the first to end of the last
-    /// (`pgas_summary.json` `cost.sampling_seconds`); `None` for a summary
-    /// written before it was recorded.
+    /// (the execution record's `sampling_seconds`); `None` when the leaf has
+    /// no execution record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sampling_seconds: Option<f64>,
     /// The chain whose sweep has the highest complete-data log-likelihood
@@ -603,8 +604,8 @@ pub struct PmmhRun {
     /// `best_chain`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub map_chain: Option<ChainIndex>,
-    /// What sampling cost (`<method>_summary.json` `cost`); `None` for a
-    /// summary written before it was recorded.
+    /// What sampling cost (the execution record's `cost`); `None` when the
+    /// leaf has no execution record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<crate::fit::report::SamplingCost>,
     /// The pre-run noise check (`fit_state.toml` `pf_noise`); `None` on the
@@ -1001,7 +1002,8 @@ impl PgasRun {
     pub fn load(method_dir: &Path) -> Result<Self, MethodResultError> {
         let inputs = read_method_inputs(method_dir)?;
         let n_chains = inputs_n_chains(&inputs);
-        let wall_time_secs = crate::fit::resumed_chain::chain_wall_time_seconds(&inputs);
+        let execution = crate::fit::execution::Execution::read(method_dir).ok().flatten();
+        let wall_time_secs = execution.as_ref().and_then(|e| e.chain_wall_time_seconds());
 
         // Estimated parameter names from algorithm config — pgas
         // doesn't store them directly. Fall back to "every column in
@@ -1081,9 +1083,7 @@ impl PgasRun {
         };
         let acceptance_kernel = summary.get("acceptance_kernel")
             .and_then(|v| serde_json::from_value(v.clone()).ok());
-        let sampling_seconds = summary.get("cost")
-            .and_then(|c| c.get("sampling_seconds"))
-            .and_then(|v| v.as_f64());
+        let sampling_seconds = execution.as_ref().and_then(|e| e.sampling_seconds);
         let state = FitState::load(&method_dir.to_string_lossy()).ok();
 
         Ok(PgasRun {
@@ -1112,7 +1112,8 @@ impl PmmhRun {
     ) -> Result<Self, MethodResultError> {
         let inputs = read_method_inputs(method_dir)?;
         let n_chains = inputs_n_chains(&inputs);
-        let wall_time_secs = crate::fit::resumed_chain::chain_wall_time_seconds(&inputs);
+        let execution = crate::fit::execution::Execution::read(method_dir).ok().flatten();
+        let wall_time_secs = execution.as_ref().and_then(|e| e.chain_wall_time_seconds());
         let summary = read_summary_json(method_dir, &algo.summary_filename())?;
         let thin = summary.get("thin").and_then(|v| v.as_u64()).map(|t| t as usize).unwrap_or(1);
 
@@ -1157,7 +1158,7 @@ impl PmmhRun {
         let state = FitState::load(&method_dir.to_string_lossy()).ok();
         let pf_noise = state.as_ref().and_then(|s| s.pf_noise);
         let map_chain = state.as_ref().map(|s| s.best_chain);
-        let cost = summary.get("cost").and_then(|v| serde_json::from_value(v.clone()).ok());
+        let cost = execution.and_then(|e| e.cost);
 
         Ok(PmmhRun {
             algorithm: algo,
@@ -1586,7 +1587,6 @@ mod tests {
         FitState {
             method: "scout".into(),
             seed: 42,
-            timestamp: "2026-04-27T00:00:00Z".into(),
             input_hash: None,
             camdl_version: Some("0.1.0+test".into()),
             best_loglik: -3804.9,

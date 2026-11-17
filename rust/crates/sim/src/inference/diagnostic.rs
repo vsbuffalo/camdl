@@ -28,7 +28,10 @@ pub struct Diagnostic {
     /// …) — the label of the `method` store level the run wrote under, which
     /// is what every collector is constructed with (gh#901).
     pub method: String,
-    pub timestamp: String,
+    // No time: `diagnostics.json` is part of a fit leaf's stored bytes, which
+    // are a function of the computation, and a finding's wall-clock time is a
+    // property of the execution. The event log records when each finding was
+    // pushed (its `elapsed`), and the execution record when the run started.
 }
 
 /// The θ-move kernel behind an acceptance rate (gh#631). Bands differ:
@@ -1229,7 +1232,6 @@ impl DiagnosticCollector {
             severity,
             message,
             method: self.method.clone(),
-            timestamp: chrono_now(),
         };
         let mut held = self.diagnostics.lock().unwrap();
         if let Some(observe) = &self.observer {
@@ -1264,27 +1266,6 @@ impl DiagnosticCollector {
         )?;
         std::fs::write(path, json)
     }
-}
-
-fn chrono_now() -> String {
-    // ISO 8601 timestamp without a chrono dependency. The civil-date
-    // arithmetic is the canonical proleptic-Gregorian one in `ir::caltime`
-    // (`civil_from_unix_epoch_days`); only the HH:MM:SS split is local.
-    // Im23 in 2026-04-19 inference review batch 3.
-    use std::time::SystemTime;
-    let secs = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let day_secs = secs % 86400;
-    let hour = day_secs / 3600;
-    let minute = (day_secs % 3600) / 60;
-    let second = day_secs % 60;
-
-    let (y, m, d) = ir::caltime::civil_from_unix_epoch_days((secs / 86400) as i64);
-
-    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m, d, hour, minute, second)
 }
 
 #[cfg(test)]
@@ -1555,7 +1536,7 @@ mod tests {
         // A new entry still prints from its fields.
         let new = acceptance_diagnostic(Some(3), 0.02, None, AcceptanceKernel::RandomWalk).unwrap();
         let d = Diagnostic { kind: new, severity: Severity::Warning, message: "ignored".into(),
-            method: "pmmh".into(), timestamp: String::new() };
+            method: "pmmh".into() };
         assert!(render_findings_entry(&[&d]).contains("[15%, 50%]"));
     }
 
