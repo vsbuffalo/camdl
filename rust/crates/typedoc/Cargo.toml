@@ -1,0 +1,17 @@
+[package]
+name = "typedoc"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Renders the internals pages of the documentation site from the type
+# declarations that the language extractors write as JSON.
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"

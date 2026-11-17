@@ -19,6 +19,7 @@ members = [
   "crates/runid-derive",
   "crates/score",
   "crates/sim",
+  "crates/typedoc",
 ]
 resolver = "2"
 

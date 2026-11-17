@@ -1,0 +1,12 @@
+title = "The compiler"
+summary = "How camdlc turns a .camdl file into the IR the runtime reads, described by its types."
+repo_blob = "https://github.com/vsbuffalo/camdl/blob/main/"
+order = 100
+
+[[group]]
+title = "Syntax tree"
+modules = ["Ast"]
+
+[[group]]
+title = "Intermediate representation"
+modules = ["Ir"]

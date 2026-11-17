@@ -1,0 +1,145 @@
+{
+  "language": "ocaml",
+  "modules": [
+    {
+      "name": "Ast",
+      "path": "ocaml/lib/compiler/ast.ml",
+      "doc": "The parsed form of a camdl model, before names are resolved.\n\n    Every node keeps the source location it was read from.",
+      "types": [
+        {
+          "name": "destination_form",
+          "line": 188,
+          "kind": "variant",
+          "params": [],
+          "recursive_group": null,
+          "decl": "type destination_form =\n  | DstSum    of stoich_ref list\n  | DstBranch of (stoich_ref * expr) list",
+          "doc": "Where a transition sends the individuals it moves.\n\n    {@camdl[\n      infection : S --> I @ beta * S * I / N\n      recovery  : I --> { R : 0.9, D : 0.1 } @ gamma * I\n    ]}\n\n    The two forms:\n    - [DstSum [I]] is a sum of compartments;\n    - [DstBranch] is a probabilistic branch.\n\n    Compare {!Ir.expr}.",
+          "members": [
+            {
+              "name": "DstSum",
+              "type": "stoich_ref list",
+              "mutable": false,
+              "doc": "Every listed compartment gains one individual per firing."
+            },
+            {
+              "name": "DstBranch",
+              "type": "(stoich_ref * expr) list",
+              "mutable": false,
+              "doc": "(wave 2 / malaria #2) One flow per branch; see gh#616."
+            }
+          ],
+          "refs": ["stoich_ref", "expr", "destination_form"]
+        },
+        {
+          "name": "expr",
+          "line": 40,
+          "kind": "variant",
+          "params": [],
+          "recursive_group": 1,
+          "decl": "type expr =\n  | Num of float\n  | Call of call",
+          "doc": "An expression as written. This is used ONLY before lowering.",
+          "members": [
+            { "name": "Num", "type": "float", "mutable": false, "doc": "A literal." },
+            { "name": "Call", "type": "call", "mutable": false, "doc": null }
+          ],
+          "refs": ["call", "expr"]
+        },
+        {
+          "name": "call",
+          "line": 44,
+          "kind": "record",
+          "params": [],
+          "recursive_group": 1,
+          "decl": "and call = { fn : string; args : expr list }",
+          "doc": null,
+          "members": [
+            { "name": "fn", "type": "string", "mutable": false, "doc": null },
+            { "name": "args", "type": "expr list", "mutable": false, "doc": null }
+          ],
+          "refs": ["expr"]
+        },
+        {
+          "name": "stoich_ref",
+          "line": 30,
+          "kind": "alias",
+          "params": [],
+          "recursive_group": null,
+          "decl": "type stoich_ref = Located.t",
+          "doc": "A compartment named on the right of an arrow.",
+          "members": [],
+          "refs": ["Located.t"]
+        },
+        {
+          "name": "settings",
+          "line": 300,
+          "kind": "record",
+          "params": [],
+          "recursive_group": null,
+          "decl": "type settings = {\n  verbose : bool;\n  strict : bool;\n  mutable cache : bool;\n  backend_kind : string;\n  out : Yojson.Safe.t;\n}",
+          "doc": "Compiler switches.",
+          "members": [
+            { "name": "verbose", "type": "bool", "mutable": false, "doc": "Print each pass." },
+            { "name": "strict", "type": "bool", "mutable": false, "doc": "Refuse warnings." },
+            { "name": "cache", "type": "bool", "mutable": true, "doc": "Reuse parsed files." },
+            { "name": "backend_kind", "type": "string", "mutable": false, "doc": "Which backend." },
+            { "name": "out", "type": "Yojson.Safe.t", "mutable": false, "doc": "Where to write." }
+          ],
+          "refs": ["Yojson.Safe.t", "bool", "string"]
+        }
+      ]
+    },
+    {
+      "name": "Ast.Located",
+      "path": "ocaml/lib/compiler/ast.ml",
+      "doc": "A value paired with its source location.",
+      "types": [
+        {
+          "name": "t",
+          "line": 12,
+          "kind": "record",
+          "params": ["'a"],
+          "recursive_group": null,
+          "decl": "type 'a t = { value : 'a; loc : Loc.t }",
+          "doc": "A located value.",
+          "members": [
+            { "name": "value", "type": "'a", "mutable": false, "doc": "The value." },
+            { "name": "loc", "type": "Loc.t", "mutable": false, "doc": "Where it was read." }
+          ],
+          "refs": ["Loc.t"]
+        }
+      ]
+    },
+    {
+      "name": "Ir",
+      "path": "ocaml/lib/ir/ir.ml",
+      "doc": null,
+      "types": [
+        {
+          "name": "expr",
+          "line": 7,
+          "kind": "abstract",
+          "params": [],
+          "recursive_group": null,
+          "decl": "type expr",
+          "doc": "A resolved expression, as the runtime reads it.",
+          "members": [],
+          "refs": []
+        },
+        {
+          "name": "transition",
+          "line": 20,
+          "kind": "record",
+          "params": [],
+          "recursive_group": null,
+          "decl": "type transition = { rate : expr; dst : Ast.destination_form }",
+          "doc": "One transition. Previously a pair.",
+          "members": [
+            { "name": "rate", "type": "expr", "mutable": false, "doc": "Its rate, per day." },
+            { "name": "dst", "type": "Ast.destination_form", "mutable": false, "doc": "Its destinations." }
+          ],
+          "refs": ["expr", "Ast.destination_form"]
+        }
+      ]
+    }
+  ]
+}
