@@ -196,7 +196,7 @@ result. Those belong in the main text.
 
 ### Color is a promise about the kind of depth
 
-camdl's documentation has five kinds of box, each with its own color:
+camdl's documentation has six kinds of box, each with its own color:
 
 | Color      | Kind                                  | Typical label            | What readers should expect                                                                                             |
 | ---------- | ------------------------------------- | ------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
@@ -205,11 +205,15 @@ camdl's documentation has five kinds of box, each with its own color:
 | **Orange** | Advanced mechanics                    | **Under the hood: ...**  | Particle filters, sampler mechanics, compiler behavior, numerical approximations, and derivations                      |
 | **Red**    | Critical warning, **not collapsible** | **Warning: ...**         | Data loss, invalid inference, a dangerous default, or a condition under which a result should not be trusted           |
 | **Slate**  | Notes for AI agents                   | **For AI agents: ...**   | What an agent running camdl for someone should do differently from a human at this step (section 5.1)                  |
+| **Violet** | Request for feedback, shown open      | **Feedback: ...**        | A rule or behaviour still being settled, the question the maintainers want answered, and where to answer it (5.2)      |
 
 The light-theme tokens are green `#2A7A51` on `#F0FDF4`, yellow `#946200` on
-`#FFFBEB`, orange `#B45309` on `#FFF7ED`, red `#B42318` on `#FEF3F2`, and slate
-`#475569` on `#F1F5F9`; the dark theme uses lighter accents on dark tints of the
-same hues (`docs/_web/theme.scss`). Every title and body color meets the WCAG AA
+`#FFFBEB`, orange `#B45309` on `#FFF7ED`, red `#B42318` on `#FEF3F2`, slate
+`#475569` on `#F1F5F9`, and violet `#6D28D9` on `#F5F3FF`; the dark theme uses
+lighter accents on dark tints of the same hues (`docs/_web/theme.scss`). The
+violet pair measures 6.5:1 for the title and above 10:1 for body text in the
+light theme, and 9.2:1 and 12.5:1 in the dark theme (`#C4B5FD` and the page's
+body text `#D9DDE2` on `#1F1833`). Every title and body color meets the WCAG AA
 contrast ratio for body text, 4.5:1, against its panel in both themes, and any
 change to the palette should be checked against that bar. The boxes use a
 subdued background, a visible left border, and a clear disclosure chevron. Color
@@ -222,9 +226,10 @@ choice: How should we choose a prior for $R_0$?” **Weak:** “Note,” “Deta
 
 Default states: yellow and orange are closed unless a page expressly depends on
 their contents; green may start closed when longer than a few sentences, or
-remain as a short visible aside if immediately useful. A short, crucial caveat
-should generally be plain prose, not a box. Avoid nested collapsibles and long
-runs of boxes with nothing between them.
+remain as a short visible aside if immediately useful. A violet feedback box is
+open by default and short: a reader who closes it has seen the question once. A
+short, crucial caveat should generally be plain prose, not a box. Avoid nested
+collapsibles and long runs of boxes with nothing between them.
 
 ### Writing a box
 
@@ -260,16 +265,18 @@ If chains are stuck or have substantially different distributions, ...
 ```
 
 The site's filter (`docs/_web/boxes.lua`) writes the label at the start of the
-title (_In practice:_, _Modeling choice:_, _Under the hood:_, _Warning:_ or _For
-AI agents:_), unless the title already begins with it, so the kind of box is in
-its text and not only its color. Green, yellow, orange and slate boxes are
-collapsed by default; `collapse="false"` shows one open, and the reader can
-still close it. A red warning is never collapsible, and a `collapse` attribute
-on it is ignored. A box without a title, or a box inside another box, fails the
-render. Leave a blank line after the opening `:::` line and before the closing
-one: without it, `dprint` reflows the fences into the box's text, and the box
-stops being a box (the filter fails the render if it finds one). Write a box
-with these classes, never with hand-coded colors or a raw Quarto callout.
+title (_In practice:_, _Modeling choice:_, _Under the hood:_, _Warning:_, _For
+AI agents:_ or _Feedback:_), unless the title already begins with it, so the
+kind of box is in its text and not only its color. Green, yellow, orange and
+slate boxes are collapsed by default; `collapse="false"` shows one open, and the
+reader can still close it. A violet feedback box is open by default;
+`collapse="true"` starts it closed. A red warning is never collapsible, and a
+`collapse` attribute on it is ignored. A box without a title, or a box inside
+another box, fails the render. Leave a blank line after the opening `:::` line
+and before the closing one: without it, `dprint` reflows the fences into the
+box's text, and the box stops being a box (the filter fails the render if it
+finds one). Write a box with these classes, never with hand-coded colors or a
+raw Quarto callout.
 
 `camdl docs` prints the same pages in a terminal, where nothing collapses: each
 box's opening fence becomes its titled label in bold and the closing fence is
@@ -393,6 +400,29 @@ the box is the wrong place for it.
 Rank points by the log-likelihoods in the survey's `landscape.tsv`, not by your
 reading of the scatter in its HTML page. Give the person the HTML path and your
 one-line reading, and let them confirm before you start a fit from it.
+
+:::
+
+### 5.2 Requests for feedback
+
+A violet **Feedback** box asks the reader a question the maintainers have not
+settled: whether a rule that has just been introduced, or is about to be,
+matches what modellers mean. It sits in the section that states the rule, so the
+reader meets the question where they meet the rule.
+
+The box is short, two to four sentences, and open by default. It says what is
+being decided, in the reader's terms; the question, which should be answerable
+from the reader's own models; and where to answer (an issue number or a
+discussion link). The title is the question: "Feedback: does a month in `every`
+mean the calendar month to you?", not "Feedback wanted". The box never carries
+the rule itself, which stays in the main text, and it is removed when the
+question is settled.
+
+::: {.feedback title="Does this box make a request for feedback clear?"}
+
+This is an example of the box. A real one names the rule in question, asks one
+question a modeller can answer from their own models, and links the issue where
+answers are collected.
 
 :::
 
