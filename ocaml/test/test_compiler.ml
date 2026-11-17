@@ -15971,6 +15971,196 @@ let test_covers_width_naming_a_column_is_rejected () =
     cases         ~ poisson(rate = projected)
   }|})
 
+(* ── Time positions: census coverage (test 1.1 of
+   docs/dev/proposals/2026-11-16-calendar-durations-by-position.md) ──────────
+
+   Every time position the census lists must have been lowered by the
+   expander's [Lower] function for its kind. A site that folds a time without
+   going through [Lower] leaves its position unrecorded, and this fails. *)
+
+let census_uncovered (d : Compiler.compile_detail) =
+  let lowered = d.Compiler.ctx.Expander.lowered in
+  List.filter_map (fun (Ast.Time_pos.Any p) ->
+    let k = (Ast.Time_pos.kind_name p.Ast.Time_pos.kind, Ast.Time_pos.loc p,
+             Ast.Time_pos.expr p) in
+    if Hashtbl.mem lowered k then None
+    else
+      let l = Ast.Time_pos.loc p in
+      Some (Printf.sprintf "%s at %d:%d (%s)"
+              (Ast.Time_pos.kind_name p.Ast.Time_pos.kind) l.Ast.line l.Ast.col
+              (Time_typing.show_short (Ast.Time_pos.expr p))))
+    (Time_census.census d.Compiler.decls)
+
+(* The positions of every kind, under an origin, in one model that compiles. *)
+let census_scratch_model = {|time_unit = 'days
+origin = date("2020-01-01")
+
+compartments { S, I, R, V }
+
+let N = S + I + R + V
+
+parameters {
+  beta  : rate        in [0.1, 2.0]
+  gamma : rate        in [0.05, 0.5]
+  cov   : probability in [0.0, 1.0]
+  tau   : instant     in [0 'days, 120 'days]
+  delay : duration    in [1 'days, 30 'days]
+  rho   : probability in [0.0, 1.0]
+}
+
+forcing {
+  school : periodic 'ratio {
+    period = 365 'days
+    step   = 1 'days
+    on     = [7 'days : 100 'days]
+  }
+  wave : sinusoidal 'ratio {
+    amplitude = 0.2
+    period    = 365 'days
+    phase     = 30 'days
+    baseline  = 1.0
+    lag       = 7 'days
+  }
+  steps : piecewise 'ratio {
+    breakpoints = [date("2020-03-01"), 120 'days]
+    values      = [1.0, 0.8, 0.6]
+  }
+  knots : interpolated 'ratio {
+    times  = [0 'days, date("2020-06-01")]
+    values = [1.0, 2.0]
+  }
+  smooth_f : bspline 'ratio {
+    window  = [0 'days, 200 'days]
+    n_basis = 4
+    coefs   = [1.0, 1.0, 1.0, 1.0]
+  }
+}
+
+transitions {
+  infection : S --> I @ beta * school(t) * wave(t) * steps(t) * knots(t) * smooth_f(t) * (if t >= tau then 0.5 else 1.0) * (if t - 7 'days > tau then 1.0 else 1.0) * S * I / N
+  recovery  : I --> R @ gamma * I
+}
+
+interventions {
+  sia : transfer(fraction = cov, from = S, to = V)
+    at [add_calendar_months(origin, 1), date("2020-04-01") + 7 'days, date_range(origin, count = 2, calendar_months = 3)]
+  boost : transfer(fraction = cov, from = R, to = V) { every = 30 'days  from = 10 'days  to = 200 'days }
+  seed : add(I, 5) every 90 'days at_day 3 'days
+}
+
+observations {
+  weekly_cases {
+    columns       { time : time, weekly_cases : count }
+    covers        = closing_at(time, 7 'days)
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    weekly_cases  ~ poisson(rate = rho * projected)
+  }
+  monthly_cases {
+    columns       { time : time, monthly_cases : count }
+    covers        = ending_on(time, 7 'days)
+    projected     = incidence(infection)
+    emit_schedule = at [30 'days, date("2020-03-01")]
+    monthly_cases ~ poisson(rate = rho * projected)
+  }
+}
+
+reactive_interventions {
+  mop : when sum_observed(weekly_cases, window = 28 'days) >= 5 {
+    after    = 7 'days
+    action   = transfer(fraction = cov, from = S, to = V)
+    cooldown = 60 'days
+    once     = false
+  }
+}
+
+quantities {
+  peak_at = value_at(I, date("2020-03-01"))
+  late    = value_at(I, 100 'days)
+}
+
+timepoints {
+  start = origin
+}
+
+init { S = 990  I = 10 }
+
+simulate {
+  from = origin
+  to   = add_calendar_years(origin, 1)
+  dt   = 1 'days
+}
+
+output {
+  trajectories { every = 1 'days }
+}
+
+scenarios {
+  short { simulate { to = add_calendar_months(origin, 6) } }
+}
+|}
+
+(* The output `at` list, a scenario horizon, a length-kind bound and a `t`
+   offset written `d + t`. *)
+let census_scratch_model_b = {|
+time_unit = 'days
+origin = date("2020-01-01")
+compartments { S, I, R }
+parameters {
+  beta  : rate     in [0.1, 2.0]
+  gamma : rate     in [0.05, 0.5]
+  delay : duration in [1 'days, 30 'days]
+}
+transitions {
+  infection : S --> I @ beta * (if 3 'days + t > 40 'days then 1.0 else 0.5) * S * I / (S + I + R)
+  recovery  : I --> R @ gamma * I
+}
+init { S = 990  I = 10 }
+simulate { from = 0 'days  to = date("2020-12-31") }
+output { trajectories { at = [0 'days, 30 'days, date("2020-06-01")] } }
+scenarios { longer { simulate { to = add_calendar_years(origin, 2) } } }
+|}
+
+let census_scratch_models = [census_scratch_model; census_scratch_model_b]
+
+let test_time_census_coverage_scratch () =
+  let kinds = ref [] in
+  List.iter (fun src ->
+    match Compiler.compile_detail_result ~name:"census" src with
+    | Error e -> Alcotest.failf "scratch model failed to compile: %s" e
+    | Ok d ->
+      let ps = Time_census.census d.Compiler.decls in
+      kinds := List.map (fun (Ast.Time_pos.Any p) ->
+        Ast.Time_pos.kind_name p.Ast.Time_pos.kind) ps @ !kinds;
+      (match census_uncovered d with
+       | [] -> ()
+       | missing ->
+         Alcotest.failf "time positions not lowered through Lower:\n  %s"
+           (String.concat "\n  " missing)))
+    census_scratch_models;
+  (* Every kind is represented, so the check is not vacuous for any of them. *)
+  List.iter (fun k ->
+    if not (List.mem k !kinds) then Alcotest.failf "no %s position in the scratch models" k)
+    ["instant"; "cadence"; "runtime offset"; "span"; "phase"; "length"]
+
+let test_time_census_coverage_goldens () =
+  let files = Sys.readdir golden_dir |> Array.to_list
+              |> List.filter (fun f -> Filename.check_suffix f ".camdl")
+              |> List.sort compare in
+  let checked = ref 0 in
+  List.iter (fun f ->
+    let path = Filename.concat golden_dir f in
+    match Compiler.compile_detail_result ~name:f ~filename:path (read_file path) with
+    | Error _ -> ()
+    | Ok d ->
+      incr checked;
+      (match census_uncovered d with
+       | [] -> ()
+       | missing ->
+         Alcotest.failf "%s: time positions not lowered through Lower:\n  %s" f
+           (String.concat "\n  " missing))) files;
+  if !checked < 20 then Alcotest.failf "only %d golden models compiled" !checked
+
 let () =
   Alcotest.run "compiler" [
     "unused_reduction_binder_a5", [
@@ -16955,6 +17145,12 @@ let () =
     "calendar_time", [
       Alcotest.test_case "origin → string + numeric origin_rata_die"        `Quick test_origin_rata_die_emitted;
       Alcotest.test_case "no origin → no origin_rata_die"                   `Quick test_origin_absent_no_rata_die;
+    ];
+    "time_positions", [
+      Alcotest.test_case "census: every position in the scratch models is lowered"
+        `Quick test_time_census_coverage_scratch;
+      Alcotest.test_case "census: every position in the golden models is lowered"
+        `Quick test_time_census_coverage_goldens;
     ];
     "typed_time_phase1", [
       (* Positive cases — must compile without error. *)

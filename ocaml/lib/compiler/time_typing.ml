@@ -218,7 +218,7 @@ let subexprs (e : expr) : expr list =
    The walk descends through Cond branches, ESum bodies, BinOp
    sub-arms, etc. — anywhere a sub-expression may itself be an
    Instant±Duration expression. *)
-let rec walk_rule1 env ~on_hit (e : expr) : unit =
+let rec walk_rule1 ?(children = subexprs) env ~on_hit (e : expr) : unit =
   (match e with
    | EBinOp ((Add | Sub) as _op, l, r) ->
      let cl = classify env l and cr = classify env r in
@@ -228,7 +228,7 @@ let rec walk_rule1 env ~on_hit (e : expr) : unit =
         on_hit ~lhs:l ~rhs:r
       | _ -> ())
    | _ -> ());
-  List.iter (walk_rule1 env ~on_hit) (subexprs e)
+  List.iter (walk_rule1 ~children env ~on_hit) (children e)
 
 (* ── Instant arithmetic: the forms with no meaning (E360, gh#1070) ──── *)
 
@@ -318,11 +318,11 @@ let instant_misuse_at env ~unitless (e : expr) : instant_misuse option =
     Some InstantOrDuration
   | _ -> None
 
-let rec walk_instant_misuse env ~unitless ~on_hit (e : expr) : unit =
+let rec walk_instant_misuse ?(children = subexprs) env ~unitless ~on_hit (e : expr) : unit =
   (match instant_misuse_at env ~unitless e with
    | Some m -> on_hit m e
    | None -> ());
-  List.iter (walk_instant_misuse env ~unitless ~on_hit) (subexprs e)
+  List.iter (walk_instant_misuse ~children env ~unitless ~on_hit) (children e)
 
 let describe_instant_misuse = function
   | InstantPlusInstant    -> "adds two instants"
