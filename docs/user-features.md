@@ -478,14 +478,21 @@ burn_in = 1000
 `nl-lbfgs` takes its gradient from **symbolic forward sensitivities**: the
 compiler differentiates the rate and observation expressions source-to-source
 and carries `∂x/∂θ` through fixed-step `rk4`, so the gradient is exact — no
-finite differences. It needs a **differentiable model**: the capability check
-refuses — naming the reason — an undifferentiable rate/observation gradient, an
-adaptive `rk45` integrator, a scheduled `interventions {}` / `events {}` effect,
-or an initial condition its ∂init/∂θ seed cannot express; fit those with
-`nl-sbplx` instead. The ODE backend targets a different statistical object than
-the stochastic backends — `p(y | θ, ODE skeleton)` rather than `p(y | θ)` — so
-see `camdl docs inference` (the ODE-backend fitting section) for when to pick
-which. `mh` and `nl-lbfgs` are `[beta]`.
+finite differences. Scheduled `interventions {}` / `events {}` effects are
+carried through: the step is split at each effect instant and the sensitivity
+jumps with the state, `S⁺ = ∂Φ/∂x·S⁻ + ∂Φ/∂θ`, with the compiler emitting each
+amount's `∂amount/∂θ` — so a yearly ageing transfer, a campaign with an
+estimated coverage or an importation of an estimated size all fit under
+`nl-lbfgs`. It needs a **differentiable model**: the capability check refuses —
+naming the reason — an undifferentiable rate/observation gradient, an adaptive
+`rk45` integrator, an effect the sensitivity cannot cross (a reactive
+intervention, a fire time that reads an estimated parameter, a
+`transfer(count = …)`, an amount that reads compartment state), or an initial
+condition its ∂init/∂θ seed cannot express; fit those with `nl-sbplx` instead.
+The ODE backend targets a different statistical object than the stochastic
+backends — `p(y | θ, ODE skeleton)` rather than `p(y | θ)` — so see
+`camdl docs inference` (the ODE-backend fitting section) for when to pick which.
+`mh` and `nl-lbfgs` are `[beta]`.
 
 ---
 

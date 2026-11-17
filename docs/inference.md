@@ -1413,23 +1413,63 @@ refuses, with a message naming the reason, a model that has:
 - an **adaptive integrator** (`rk45`) — its step sequence is data-dependent, so
   the sensitivities have no fixed step to propagate through; use fixed-step
   `rk4`;
-- a **scheduled effect** — an `interventions {}` or `events {}` entry, a
-  discrete state jump the smooth sensitivity flow cannot cross;
-- an **initial condition the ∂init/∂θ seed cannot express** — one drawn from a
-  distribution, or a parameterized one whose expression camdl emits no
-  initial-condition gradient for.
+- a **scheduled effect the sensitivity cannot cross** (see below): a reactive
+  intervention, a fire time that reads an estimated parameter, a
+  `transfer(count = …)`, or an amount that reads compartment state;
+- an **initial condition the ∂init/∂θ seed cannot express** — a parameterized
+  one whose expression camdl emits no initial-condition gradient for (a `floor`
+  of a parameter, a dependence that cancels), or one that reaches a parameter
+  through a shared `let` binding.
 
 Any of these is a hard error that points at the fix, raised at config validation
 — before a leaf is claimed, so a refusal costs a message rather than a
-half-written leaf. A model that genuinely needs one of them — a mid-run
-campaign, an estimated $S_0$ — is fit either with the gradient-free ODE methods
-(`mh` for a posterior, `nl-sbplx` for an MLE), or with the stochastic-process
-methods, which handle scheduled effects and estimated initial states.
+half-written leaf. A model that genuinely needs one of them is fit either with
+the gradient-free ODE methods (`mh` for a posterior, `nl-sbplx` for an MLE), or
+with the stochastic-process methods, which handle every effect and estimated
+initial states.
+
+**Scheduled effects.** An `interventions {}` or `events {}` entry is a jump in
+the state at a fixed instant, $x^+ = \Phi(x^-, \theta)$, and the sensitivity
+$S = \partial x/\partial\theta$ jumps with it:
+$S^+ = (\partial\Phi/\partial x)\,
+S^- + \partial\Phi/\partial\theta$. `nl-lbfgs` carries that jump: the RK4 step
+is split exactly at each effect instant, the state and its sensitivity cross the
+jump together, and the gradient is the exact derivative of the same discrete
+computation the likelihood uses. Per action, with $f$, $v$ the amount:
+`transfer(fraction = f, from = s, to = d)` moves $x = x_s f$, so
+$S_s \leftarrow (1 - f) S_s - x_s\, \partial f/\partial\theta$ and
+$S_d \leftarrow
+S_d + f S_s + x_s\, \partial f/\partial\theta$; `add(c, v)` adds
+$\partial v/\partial\theta$ to $S_c$; `set c = v` replaces $S_c$ by
+$\partial v/\partial\theta$. The compiler emits each amount's
+$\partial(\text{amount})/\partial\theta$ next to the amount, so an estimated SIA
+coverage or importation size contributes to the gradient like any other
+parameter. A yearly ageing transfer with a fixed fraction, a fixed-time campaign
+with an estimated coverage, a seeded importation of an estimated size — all run
+under `nl-lbfgs`.
+
+What is refused, each by name, is an effect whose jump is not differentiable or
+whose timing depends on the fit: a `transfer(count = …)`, which moves
+$\min(\text{count}, x_s)$ (write it as a fraction of the source); an amount that
+reads compartment state (`I = I + 10` — write `add(I, 10)`), for which camdl
+emits no $\partial(\text{amount})/\partial x$; a fire time that reads an
+estimated parameter (`at [t_seed]`), which adds a boundary term the fixed grid
+does not compute; and a reactive intervention, whose fire time depends on the
+observed data.
+
+**Initial conditions drawn from a law.** The ODE backend is deterministic, so an
+`init` entry such as `S ~ binomial(n = N0, p = s0)` starts at the law's mean,
+$N_0 s_0$. The value path (`mh`, `nl-sbplx`) rounds that mean to an integer
+count; the gradient path starts from the unrounded mean and seeds
+$\partial S(t_0)/\partial s_0 = N_0$, so its likelihood is a smooth function of
+$s_0$ and `nl-lbfgs` admits the model. The two objectives differ by that
+rounding (less than half a person in the initial state), which matters only when
+the initial count is small.
 
 The gate answers about the model the run will integrate, not the model as
 written. `interventions { }` is toggleable and defaults off, so a fit that
-declares a campaign and never enables it is not refused for a scheduled effect
-its trajectory does not contain.
+declares a campaign and never enables it is not judged on an effect its
+trajectory does not contain.
 
 A refusal that survives to the search is possible in one more way: the gradient
 may be finite everywhere the gate can check and still not be computable at some

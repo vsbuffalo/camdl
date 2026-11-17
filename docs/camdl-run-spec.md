@@ -3200,13 +3200,18 @@ that unit for all three.
 
 Because it takes a gradient, `nl-lbfgs` accepts only a **differentiable model**
 — the gradient capability check refuses an unsupported rate or observation
-gradient, an adaptive `rk45` integrator, a scheduled effect, or an initial
-condition the gradient path cannot seed. It is checked at config validation,
-before any leaf is claimed, and the refusal names `nl-sbplx` as the
-derivative-free alternative on the same likelihood. If the gradient later turns
-out not to be computable at some θ the search reaches, that chain fails with the
-reason and the θ rather than scoring the point badly and continuing — L-BFGS has
-no direction to search in there.
+gradient, an adaptive `rk45` integrator, a scheduled effect whose jump the
+sensitivity cannot cross (a reactive intervention, a fire time that reads an
+estimated parameter, a `transfer(count = …)`, an amount that reads compartment
+state), or an initial condition the gradient path cannot seed. Fixed-time
+`transfer(fraction = …)`, `add` and `set` effects, with constant or estimated
+amounts, are carried: the step is split at the effect instant and the
+sensitivity jumps with the state (`camdl docs inference`, "The differentiability
+requirement"). It is checked at config validation, before any leaf is claimed,
+and the refusal names `nl-sbplx` as the derivative-free alternative on the same
+likelihood. If the gradient later turns out not to be computable at some θ the
+search reaches, that chain fails with the reason and the θ rather than scoring
+the point badly and continuing — L-BFGS has no direction to search in there.
 
 **Observation periods and the step grid.** Where a method can place an observed
 period's start and end is a capability of the method, recorded in the `METHODS`
