@@ -812,12 +812,17 @@ fn cas_identity_pins() {
         // field, so their bytes change beyond the version. `fit` also gained
         // the partition rule version in its `fit` level (`FitDigest`); no
         // other kind hashes a `FitDigest`.
-        ("sim", "98f90aa0798e73f95c33fb4f13d5e51ca7b8904151f3a73cff4967c8e39524d0"),
-        ("fit", "c4d6ce8fda76c8487717be55413205d4c7dccad72b379ffe3c05ea1a9ee1bd8d"),
-        ("pfilter", "c879beec599b79f161181ea9da27737c3599eec7bcd332e9ce77cdde5e4cac58"),
-        ("survey", "436c5bde01f453c1dd503bebc936fb9d2b6ae38685e5fe6f60878a999cfa20ee"),
-        ("sim_ensemble", "9e383b95adc5647a6f8ecb86e6bfa40e9b3a9266373c24745df0e7deb4eee7a8"),
-        ("profile", "9877ff38894742400b3283ae14b99c8cb54e2dee2505cea3661ed694e16dfc18"),
+        //
+        // HASH_VERSION 5 -> 6 (D72) moved EVERY kind once more, for the
+        // version alone: no level's encoding changed. It declares that the
+        // bootstrap filter and IF2 no longer weight, resample, perturb or cool
+        // at a stop with no observed value.
+        ("sim", "b2b42b8c523c4d47bbafdc36d121fa286fb89cf239b73ae8208e708c89ec90c7"),
+        ("fit", "1f8dcc930c37a0815efe2b0313aeb33aafe5e55fd3455dd460801c97406018b3"),
+        ("pfilter", "e0b4619bc29dacc3eeebac306b8133fefeddf47fe67e8cfc64ee312c4aaf0302"),
+        ("survey", "63e320e6f4b27e6c67b0c477dcd8a502f34a517673d7f1454e2031d31a422ddf"),
+        ("sim_ensemble", "e14b152ff5e65ab3bc890927e159096bcda5123bdaf1abc3b329a8de6e01b125"),
+        ("profile", "bc7fe6bd8791967ac2dd7de4aafe318f67e08fbbf39ae6c1d0f568927d24e8e8"),
     ];
     // Compared as whole lists so a failure reports EVERY kind that moved, not
     // just the first — the re-key scope is the thing under review.
