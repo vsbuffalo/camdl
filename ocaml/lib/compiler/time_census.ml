@@ -194,16 +194,27 @@ let is_comparison = function
   | Lt | Le | Gt | Ge | Eq | Neq -> true
   | Add | Sub | Mul | Div | Pow -> false
 
+(* Model time `t`, or `t` shifted by an offset (`t ± d`, `d + t`): the side of
+   a comparison that makes the other side a date. Returns the location of `t`. *)
+let model_time_side (e : expr) : loc option =
+  match e with
+  | EIdent ("t", l) -> Some l
+  | EBinOp ((Add | Sub), EIdent ("t", l), _) | EBinOp (Add, _, EIdent ("t", l)) -> Some l
+  | EConst _ | EUnit _ | EIdent _ | EIndex _ | EBinOp _ | EUnOp _ | ESum _
+  | ECond _ | EFuncCall _ | EList _ | ERange _ | EObsAccess _ | ERunMember _ -> None
+
 (* The positions a node itself makes, with their sub-expression:
-   `t <op> e` / `e <op> t` makes [e] an instant position, `t ± d` / `d + t`
-   makes [d] a runtime offset. Syntactic: `t` is the reserved model-time name
-   (`reserved_time_names` in the expander), so no binding can shadow it. *)
+   `t <op> e` / `e <op> t`, and the same with `t ± d` in place of `t`, makes
+   [e] an instant position; `t ± d` / `d + t` makes [d] a runtime offset.
+   Syntactic: `t` is the reserved model-time name (`reserved_time_names` in the
+   expander), so no binding can shadow it. *)
 let node_positions (e : expr) : Time_pos.any list =
   match e with
-  | EBinOp (op, EIdent ("t", l), r) when is_comparison op ->
-    [Time_pos.Any (Time_pos.make Time_pos.Instant r l)]
-  | EBinOp (op, l, EIdent ("t", tl)) when is_comparison op ->
-    [Time_pos.Any (Time_pos.make Time_pos.Instant l tl)]
+  | EBinOp (op, l, r) when is_comparison op ->
+    (match model_time_side l, model_time_side r with
+     | Some tl, _ -> [Time_pos.Any (Time_pos.make Time_pos.Instant r tl)]
+     | None, Some tl -> [Time_pos.Any (Time_pos.make Time_pos.Instant l tl)]
+     | None, None -> [])
   | EBinOp ((Add | Sub), EIdent ("t", l), d) | EBinOp (Add, d, EIdent ("t", l)) ->
     [Time_pos.Any (Time_pos.make Time_pos.Runtime_offset d l)]
   | EConst _ | EUnit _ | EIdent _ | EIndex _ | EBinOp _ | EUnOp _ | ESum _
@@ -215,12 +226,12 @@ let node_positions (e : expr) : Time_pos.any list =
    walk must not judge it a second time. *)
 let ordinary_children (e : expr) : expr list =
   match e with
-  | EBinOp (op, (EIdent ("t", _) as t), _) when is_comparison op -> [t]
-  | EBinOp (op, _, (EIdent ("t", _) as t)) when is_comparison op -> [t]
+  | EBinOp (op, l, _) when is_comparison op && model_time_side l <> None -> [l]
+  | EBinOp (op, _, r) when is_comparison op && model_time_side r <> None -> [r]
   | EBinOp ((Add | Sub), (EIdent ("t", _) as t), _) | EBinOp (Add, _, (EIdent ("t", _) as t)) -> [t]
-  | EFuncCall (fn, args) when reduction_of_name fn <> None ->
+  | EFuncCall (fn, args) ->
     (match reduction_of_name fn with
-     | None -> List.map snd args
+     | None -> Time_typing.subexprs e
      | Some r ->
        let rec keep roles args =
          match roles, args with
@@ -231,29 +242,12 @@ let ordinary_children (e : expr) : expr list =
          | _, [] -> []
        in
        keep (reduction_args r) args)
-  | EConst _ | EUnit _ | EIdent _ | EObsAccess _ | ERunMember _ -> []
-  | EIndex (_, items, _) -> List.map (function IPosn x | INamed (_, x) -> x) items
-  | EBinOp (_, l, r) | ERange (l, r) -> [l; r]
-  | EUnOp (_, a) -> [a]
-  | ECond (p, a, b) -> [p; a; b]
-  | ESum (_, _, _, body, _) -> [body]
-  | EFuncCall (_, args) -> List.map snd args
-  | EList items -> items
+  | _ -> Time_typing.subexprs e
 
 (* Every `t`-comparison and `t`-offset position in an expression, at any depth
    (a position's own expression is searched too). *)
 let rec expression_positions (e : expr) : Time_pos.any list =
-  let children = match e with
-    | EConst _ | EUnit _ | EIdent _ | EObsAccess _ | ERunMember _ -> []
-    | EIndex (_, items, _) -> List.map (function IPosn x | INamed (_, x) -> x) items
-    | EBinOp (_, l, r) | ERange (l, r) -> [l; r]
-    | EUnOp (_, a) -> [a]
-    | ECond (p, a, b) -> [p; a; b]
-    | ESum (_, _, _, body, _) -> [body]
-    | EFuncCall (_, args) -> List.map snd args
-    | EList items -> items
-  in
-  node_positions e @ List.concat_map expression_positions children
+  node_positions e @ List.concat_map expression_positions (Time_typing.subexprs e)
 
 (* The time arguments of every reduction in an expression, at any depth. *)
 let rec reduction_positions ~loc (e : expr) : Time_pos.any list =
@@ -263,17 +257,12 @@ let rec reduction_positions ~loc (e : expr) : Time_pos.any list =
     | EConst _ | EUnit _ | EIdent _ | EIndex _ | EBinOp _ | EUnOp _ | ESum _
     | ECond _ | EList _ | ERange _ | EObsAccess _ | ERunMember _ -> []
   in
-  let children = match e with
-    | EConst _ | EUnit _ | EIdent _ | EObsAccess _ | ERunMember _ -> []
-    | EIndex (_, items, _) -> List.map (function IPosn x | INamed (_, x) -> x) items
-    | EBinOp (_, l, r) | ERange (l, r) -> [l; r]
-    | EUnOp (_, a) -> [a]
-    | ECond (p, a, b) -> [p; a; b]
-    | ESum (_, _, _, body, _) -> [body]
-    | EFuncCall (_, args) -> List.map snd args
-    | EList items -> items
-  in
-  here @ List.concat_map (reduction_positions ~loc) children
+  here @ List.concat_map (reduction_positions ~loc) (Time_typing.subexprs e)
+
+(* A prior's location arguments: for an `instant` parameter these are dates
+   (`normal(mu = …)`, `uniform(lower = …, upper = …)`); its scale arguments
+   (`sigma`, `sd`, `rate`, …) are lengths and keep the average month. *)
+let prior_location_args = ["mu"; "mean"; "lower"; "upper"]
 
 (* `window = w` of every `sum_observed(...)` in a trigger predicate: a span. *)
 let trigger_windows ~loc (p : trig_pred) : Time_pos.span Time_pos.t list =
@@ -294,6 +283,17 @@ let trigger_windows ~loc (p : trig_pred) : Time_pos.span Time_pos.t list =
   in
   go p
 
+(* The names of the `instant`-kind parameters, for the values given to them. *)
+let instant_param_names (decls : declaration list) : string list =
+  List.concat_map (fun d ->
+    match d with
+    | DParameters ps ->
+      List.filter_map (fun pd ->
+        match pd with
+        | PScalar { pname; pkind; _ } | PIndexed { pname; pkind; _ } ->
+          if pkind = PInstant then Some pname else None) ps
+    | _ -> []) decls
+
 (* ── The census (§3.3) ─────────────────────────────────────────────────────── *)
 
 (* From here on, a fragile match (4) or a record pattern that omits a field (9)
@@ -309,16 +309,26 @@ let trigger_windows ~loc (p : trig_pred) : Time_pos.span Time_pos.t list =
    and `t`-offsets inside ordinary expressions, which no site folds on its own
    (the enclosing expression is lowered whole), so the expander judges them
    from this list. *)
-type found = { lowered : Time_pos.any list; in_expr : Time_pos.any list }
+type found = {
+  lowered : Time_pos.any list;
+  in_expr : Time_pos.any list;
+  (* A value given to an `instant` parameter (a scenario's `set`, a prior's
+     location argument), with the name diagnostics give it. Resolved as an
+     ordinary expression where it is used, so, like [in_expr], judged from
+     here. *)
+  values  : (string * Time_pos.instant Time_pos.t) list;
+}
 
-let none = { lowered = []; in_expr = [] }
-let ( ++ ) a b = { lowered = a.lowered @ b.lowered; in_expr = a.in_expr @ b.in_expr }
+let none = { lowered = []; in_expr = []; values = [] }
+let ( ++ ) a b =
+  { lowered = a.lowered @ b.lowered; in_expr = a.in_expr @ b.in_expr;
+    values = a.values @ b.values }
 let cat fs = List.fold_left ( ++ ) none fs
 let any p = Time_pos.Any p
-let field p = { lowered = [any p]; in_expr = [] }
-let fields ps = { lowered = List.map any ps; in_expr = [] }
+let field p = { lowered = [any p]; in_expr = []; values = [] }
+let fields ps = { lowered = List.map any ps; in_expr = []; values = [] }
 let opt f = function None -> none | Some x -> f x
-let in_exprs es = { lowered = []; in_expr = List.concat_map expression_positions es }
+let in_exprs es = { lowered = []; in_expr = List.concat_map expression_positions es; values = [] }
 
 let action_exprs (a : action_decl) : expr list =
   match a with
@@ -343,16 +353,22 @@ let bounds_found (b : bounds) : found =
   | Length_bounds (lo, hi) -> field lo ++ field hi
   | Value_bounds (lo, hi) -> in_exprs [lo; hi]
 
-let prior_found (ps : prior_spec) : found =
+let prior_found ~pname ~pkind ~ploc (ps : prior_spec) : found =
   let { ps_name = _; ps_args; ps_pool_over = _ } = ps in
-  in_exprs (List.map snd ps_args)
+  cat (List.map (fun (k, e) ->
+    match pkind with
+    | PInstant when List.mem k prior_location_args ->
+      { none with values = [ (Printf.sprintf "the prior on '%s' (`%s`)" pname k,
+                              Time_pos.make Time_pos.Instant e ploc) ] }
+    | PInstant | PRate | PProbability | PPositive | PCount | PReal | PDuration ->
+      in_exprs [e]) ps_args)
 
 let param_found (pd : param_decl) : found =
   match pd with
-  | PScalar { pname = _; pkind = _; pdim = _; pbounds; pprior; pdoc = _; ploc = _; pspan = _ } ->
-    opt bounds_found pbounds ++ opt prior_found pprior
-  | PIndexed { pname = _; pdims = _; pkind = _; pdim = _; pbounds; pprior; pdoc = _; ploc = _; pspan = _ } ->
-    opt bounds_found pbounds ++ opt prior_found pprior
+  | PScalar { pname; pkind; pdim = _; pbounds; pprior; pdoc = _; ploc; pspan = _ } ->
+    opt bounds_found pbounds ++ opt (prior_found ~pname ~pkind ~ploc) pprior
+  | PIndexed { pname; pdims = _; pkind; pdim = _; pbounds; pprior; pdoc = _; ploc; pspan = _ } ->
+    opt bounds_found pbounds ++ opt (prior_found ~pname ~pkind ~ploc) pprior
 
 let transition_found (tr : transition_decl) : found =
   let { trname = _; trindices = _; trsrc = _; trdst; trdyn; trguard = _;
@@ -405,19 +421,25 @@ let output_found (od : output_decl) : found =
   | None -> none
   | Some { otschedule; otformat = _ } -> schedule_core_found otschedule
 
-let scenario_found (sc : scenario_decl) : found =
-  let { scname = _; scfields; scspan = _ } = sc in
+let scenario_found ~instant_params (sc : scenario_decl) : found =
+  let { scname; scfields; scspan } = sc in
   cat (List.map (fun f ->
     match f with
     | ScTEnd p -> field p
-    | ScSet kvs | ScScale kvs -> in_exprs (List.map snd kvs)
+    | ScSet kvs ->
+      cat (List.map (fun (k, e) ->
+        if List.mem k instant_params then
+          { none with values = [ (Printf.sprintf "scenario '%s' `set` of '%s'" scname k,
+                                  Time_pos.make Time_pos.Instant e scspan) ] }
+        else in_exprs [e]) kvs)
+    | ScScale kvs -> in_exprs (List.map snd kvs)
     | ScLabel _ | ScEnable _ | ScDisable _ | ScCompose _ | ScExtends _ -> none) scfields)
 
 let forcing_found (fd : func_decl) : found =
-  { lowered = Forcing_schema.positions fd; in_expr = [] }
+  { lowered = Forcing_schema.positions fd; in_expr = []; values = [] }
   ++ in_exprs (Forcing_schema.value_exprs fd)
 
-let decl_found (d : declaration) : found =
+let decl_found ~instant_params (d : declaration) : found =
   match d with
   | DTimeUnit _ | DDescription _ | DModelDoc _ | DOrigin _ | DDimensions _
   | DCompartments _ | DStratify _ -> none
@@ -441,23 +463,29 @@ let decl_found (d : declaration) : found =
     cat (List.map (fun { tpname = _; tptime; tpspan = _ } -> field tptime) tps)
   | DLet { lname = _; lindices = _; lshape = _; lkind = _; ldim = _; lloc = _; lspan = _;
            lbody; ldoc = _ } -> in_exprs [lbody]
-  | DScenarios ss -> cat (List.map scenario_found ss)
+  | DScenarios ss -> cat (List.map (scenario_found ~instant_params) ss)
   | DBalance { bcomp = _; bexpr; bspan = _ } -> in_exprs [bexpr]
   | DQuantities qs ->
     cat (List.map (fun { qd_name = _; qd_indices = _; qd_body; qd_doc = _; qd_loc; qd_span = _ } ->
-      { lowered = reduction_positions ~loc:qd_loc qd_body; in_expr = [] }
+      { lowered = reduction_positions ~loc:qd_loc qd_body; in_expr = []; values = [] }
       ++ in_exprs [qd_body]) qs)
   | DContrasts cs ->
     cat (List.map (fun { cd_name = _; cd_body; cd_doc = _; cd_loc = _; cd_span = _ } ->
       in_exprs [cd_body]) cs)
 
-let found_of (decls : declaration list) : found = cat (List.map decl_found decls)
+let found_of (decls : declaration list) : found =
+  let instant_params = instant_param_names decls in
+  cat (List.map (decl_found ~instant_params) decls)
 
 (* Every time position in the model. *)
 let census (decls : declaration list) : Time_pos.any list =
   let f = found_of decls in
-  f.lowered @ f.in_expr
+  f.lowered @ f.in_expr @ List.map (fun (_, p) -> any p) f.values
 
 (* The `t`-comparison and `t`-offset positions alone. *)
 let in_expression_positions (decls : declaration list) : Time_pos.any list =
   (found_of decls).in_expr
+
+(* The values given to `instant` parameters, with their names. *)
+let value_positions (decls : declaration list) : (string * Time_pos.instant Time_pos.t) list =
+  (found_of decls).values

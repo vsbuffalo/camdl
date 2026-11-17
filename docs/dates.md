@@ -403,11 +403,12 @@ pointing at `add_calendar_months` for calendar-exact stepping or an explicit
 recurring schedule's `from` and `to`, an output's `trajectories { at }` and an
 observation's `emit_schedule = at [...]`, `value_at`'s time, a forcing's
 `breakpoints`, a bspline `window` and an interpolated forcing's `times`, the
-bounds of an `instant` parameter, and the value compared with model time `t`.
-Under an origin a bare duration there denotes `origin + D`, so `to = 2 'years`
-means `origin + 2 'years`, and any `'months` or `'years` literal there is
-**E321**. The hint names the explicit form, computed from your own base and
-count:
+bounds of an `instant` parameter and any value given to one (a scenario's `set`,
+a prior's `mu`, `mean`, `lower` or `upper`; a prior's scale, such as `sigma`, is
+a length), and the value compared with model time `t` or with `t ± d`. Under an
+origin a bare duration there denotes `origin + D`, so `to = 2 'years` means
+`origin + 2 'years`, and any `'months` or `'years` literal there is **E321**.
+The hint names the explicit form, computed from your own base and count:
 
 | refused under an origin                 | write instead                                                                                                 |
 | --------------------------------------- | ------------------------------------------------------------------------------------------------------------- |

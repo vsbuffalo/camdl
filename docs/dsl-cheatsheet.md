@@ -177,12 +177,14 @@ parameter is a length, not a step-from-a-date, and never contaminates uses.
 **Date positions refuse calendar durations.** Under an origin, a position that
 holds a date (`simulate { from, to }`, a scenario's `to`, `at` lists, a
 recurring `from`/`to`, `value_at`'s time, `breakpoints`, a bspline `window`,
-interpolated `times`, an `instant` parameter's bounds, the value compared with
-`t`) reads a bare duration as `origin + D`, so `to = 2 'years` is **E321**.
-Write the calendar step (`to = add_calendar_years(origin, 2)`) or a span in days
-(`730 'days`); the hint names both. A calendar cadence (`every = 1 'months`) is
-**E322**; list the dates with `date_range(start, end, calendar_months = 1)` in
-an `at` list. `dt`, `period`, `lag` and other lengths keep the average month.
+interpolated `times`, an `instant` parameter's bounds and the values given to it
+in a scenario `set` or a prior's `mu`/`lower`/`upper`, the value compared with
+`t` or `t ± d`) reads a bare duration as `origin + D`, so `to = 2 'years` is
+**E321**. Write the calendar step (`to = add_calendar_years(origin, 2)`) or a
+span in days (`730 'days`); the hint names both. A calendar cadence
+(`every = 1 'months`) is **E322**; list the dates with
+`date_range(start, end, calendar_months = 1)` in an `at` list. `dt`, `period`,
+`lag` and other lengths keep the average month.
 
 **Calendar arithmetic primitives** (anchored mode, DSL constant positions only):
 

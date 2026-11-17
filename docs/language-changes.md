@@ -21,22 +21,25 @@ through a `let`) is now **E321**. Most of these compiled silently with the
 average month (365.2425/12 = 30.436875 days) and no diagnostic; values below are
 from a 2020-01-01 origin:
 
-| refused spelling                                   | compiled to before                   | write instead                                               |
-| -------------------------------------------------- | ------------------------------------ | ----------------------------------------------------------- |
-| `simulate { to = 2 'years }`                       | `t_end = 730.485` (2021-12-31 11:38) | `to = add_calendar_years(origin, 2)` (731) or `730 'days`   |
-| `simulate { from = 6 'months }`                    | `t_start = 182.62125`                | `from = add_calendar_months(origin, 6)` (182)               |
-| scenario `simulate { to = 30 'months }`            | `t_end = 913.10625`                  | `to = add_calendar_months(origin, 30)` (912)                |
-| `at [6 'months]` (interventions, events)           | fires at 182.62125                   | `at [add_calendar_months(origin, 6)]`                       |
-| `trajectories { at = [6 'months] }`, emit `at`     | output time 182.62125                | `at = [add_calendar_months(origin, 6)]`                     |
-| `value_at(I, 6 'months)`                           | reads t = 182.62125                  | `value_at(I, add_calendar_months(origin, 6))`               |
-| `breakpoints = [6 'months]`                        | breakpoint 182.62125                 | `breakpoints = [add_calendar_months(origin, 6)]`            |
-| bspline `window = [0 'days, 6 'months]`            | upper knot 182.62125                 | `window = [0 'days, add_calendar_months(origin, 6)]`        |
-| interpolated `times = [0 'days, 6 'months]`        | sample time 182.62125                | `times = [0 'days, add_calendar_months(origin, 6)]`         |
-| `tau : instant in [0 'days, 6 'months]`            | upper bound 182.62125                | `tau : instant in [0 'days, 183 'days]`                     |
-| `if t >= 6 'months then … else …` (any expression) | switches at 182.62125                | `if t >= add_calendar_months(origin, 6) then …`             |
-| `timepoints { peak = origin + 6 'months }`         | accepted; the block is not emitted   | `peak = add_calendar_months(origin, 6)`                     |
-| `if t - 1 'months > tau …` (an offset from `t`)    | 30.436875 subtracted                 | `t - 30 'days` (no calendar form: `t` is known at run time) |
-| recurring `{ every = … from = 6 'months … }`       | E322, with the cadence hint          | `from = add_calendar_months(origin, 6)` (now E321)          |
+| refused spelling                                           | compiled to before                   | write instead                                                                                      |
+| ---------------------------------------------------------- | ------------------------------------ | -------------------------------------------------------------------------------------------------- |
+| `simulate { to = 2 'years }`                               | `t_end = 730.485` (2021-12-31 11:38) | `to = add_calendar_years(origin, 2)` (731) or `730 'days`                                          |
+| `simulate { from = 6 'months }`                            | `t_start = 182.62125`                | `from = add_calendar_months(origin, 6)` (182)                                                      |
+| scenario `simulate { to = 30 'months }`                    | `t_end = 913.10625`                  | `to = add_calendar_months(origin, 30)` (912)                                                       |
+| `at [6 'months]` (interventions, events)                   | fires at 182.62125                   | `at [add_calendar_months(origin, 6)]`                                                              |
+| `trajectories { at = [6 'months] }`, emit `at`             | output time 182.62125                | `at = [add_calendar_months(origin, 6)]`                                                            |
+| `value_at(I, 6 'months)`                                   | reads t = 182.62125                  | `value_at(I, add_calendar_months(origin, 6))`                                                      |
+| `breakpoints = [6 'months]`                                | breakpoint 182.62125                 | `breakpoints = [add_calendar_months(origin, 6)]`                                                   |
+| bspline `window = [0 'days, 6 'months]`                    | upper knot 182.62125                 | `window = [0 'days, add_calendar_months(origin, 6)]`                                               |
+| interpolated `times = [0 'days, 6 'months]`                | sample time 182.62125                | `times = [0 'days, add_calendar_months(origin, 6)]`                                                |
+| `tau : instant in [0 'days, 6 'months]`                    | upper bound 182.62125                | `tau : instant in [0 'days, 183 'days]`                                                            |
+| `if t >= 6 'months then … else …` (any expression)         | switches at 182.62125                | `if t >= add_calendar_months(origin, 6) then …`                                                    |
+| `if t + 7 'days >= 6 'months then … else …`                | switches at 182.62125                | `if t + 7 'days >= add_calendar_months(origin, 6) then …`                                          |
+| scenario `set = { tau = 6 'months }` (`tau` an `instant`)  | `tau = 182.62125`                    | `set = { tau = add_calendar_months(origin, 6) }` (182)                                             |
+| `tau : instant ~ normal(mu = 6 'months, sigma = 10 'days)` | prior mean 182.62125                 | `mu = add_calendar_months(origin, 6)` (182); a scale such as `sigma = 1 'months` keeps the average |
+| `timepoints { peak = origin + 6 'months }`                 | accepted; the block is not emitted   | `peak = add_calendar_months(origin, 6)`                                                            |
+| `if t - 1 'months > tau …` (an offset from `t`)            | 30.436875 subtracted                 | `t - 30 'days` (no calendar form: `t` is known at run time)                                        |
+| recurring `{ every = … from = 6 'months … }`               | E322, with the cadence hint          | `from = add_calendar_months(origin, 6)` (now E321)                                                 |
 
 Spellings already refused keep their code with new text: `date(a) + 6 'months`
 in a date position, `last_obs + 6 'months` (now one diagnostic, where it was
