@@ -45,7 +45,6 @@ transform. A few commands delegate to the compiler.
 | `label`                                            | Set a label on any run; a fit run labelled `L` becomes `@L`, and the run that held `L` before is `@L~1`.                                                                              |
 | `fit {run,summary,predict,diff,table,new,methods}` | Run a fit; inspect, summarize, predict-vs-observe, and aggregate fits; scaffold new `fit.toml`s.                                                                                      |
 | `dev eval`                                         | Evaluate model expressions (parameters, forcings) on a time grid — pure inspection, no simulation.                                                                                    |
-| `data split`                                       | Split a data TSV into train/holdout.                                                                                                                                                  |
 | `lineage {realize,tree,sojourn,cohort}`            | Offline projections over an event log — transmission tree, dwell times, cohort incidence.                                                                                             |
 
 **Listing fit runs.** `camdl list` prints fits one row per run, grouped under a

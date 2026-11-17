@@ -540,6 +540,7 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
         flow_indices: &[],
         objective: crate::fit::config_v2::LikelihoodObjective::Full,
         allow_forcing_extrapolation: false,
+        training_rows: None,
         seed: 7,
     })
     .expect("pfilter");

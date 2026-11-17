@@ -86,39 +86,48 @@ fn collapse_message(result: &sim::inference::particle_filter::PFilterResult) -> 
         "error: the log-likelihood is -inf at these parameters: {c}"))
 }
 
-/// Refuse `--save-final-state` when a bound row with a value ends after the
-/// fit's `holdout_after` cutoff (gh#1084). An anchored cutoff resolves over
-/// `fit_streams`, the fit config's own files (where `fit run` resolves it); a
-/// bare time reads no rows. Each row of `bound` is judged by the rule the fit's
-/// training partition uses
-/// ([`crate::fit::training_partition::trains_under_cutoff`]), so a run bound
-/// to the training rows alone passes and saves its state at their end.
-fn refuse_final_state_past_cutoff(
-    spec: &crate::fit::config_v2::TimeSpecToml,
-    fit_streams: &[crate::fit::runner::ObsStream],
-    bound: &[crate::fit::runner::ObsStream],
-    model: &ir::Model,
-) -> Result<(), String> {
-    let fit_rows: std::collections::BTreeMap<String, Vec<crate::fit::observed_rows::ObservedRow>> =
-        fit_streams.iter().map(|s| (s.name.clone(), s.rows.clone())).collect();
-    let at = crate::fit::runner::resolve_holdout_cutoff(spec, &fit_rows, model)?;
-    let held_out = bound.iter().find_map(|s| {
-        s.rows.iter()
-            .find(|r| r.cell.is_some()
-                && !crate::fit::training_partition::trains_under_cutoff(r, at))
-            .map(|r| (&s.name, r.measures.end()))
-    });
-    match held_out {
-        None => Ok(()),
-        Some((stream, end)) => Err(format!(
-            "--save-final-state cannot save a state filtered through held-out rows: the \
-             --fit config declares holdout_after = \"{raw}\" (t = {at}), and stream \
-             '{stream}' has a row ending at t = {end}, after it. The saved state would be \
-             a forecast origin that has already seen the data the forecast is scored \
-             against.\n  Fix: bind only the training rows (those ending at or before \
-             t = {at}) with `--data NAME=FILE`; the state is then saved at their end.",
-            raw = spec.raw())),
+/// The rows a `--save-final-state` run under the fit's `holdout_after` binds
+/// (gh#1138): the cutoff it resolved to, the training extent (the latest end
+/// among the kept rows, where the state is saved) and how many leading rows of
+/// each stream it kept, by stream name (identity: the rows after them were
+/// left out of the stored log-likelihood).
+struct TrainingCut {
+    at: f64,
+    extent: f64,
+    rows: Vec<(String, usize)>,
+}
+
+/// Keep only the rows the fit trains on under `holdout_after` (resolved to
+/// `at`; `raw` is the value as written): in each stream the prefix
+/// [`crate::fit::training_partition::cutoff_prefix`] cuts, the one rule the
+/// fit's training partition uses. Every stream must keep a row with a value,
+/// as in `fit run`. Unlike the fit's partition, nothing need be held out: a
+/// stream bound to its training rows alone is kept whole.
+fn cut_to_training_rows(
+    at: f64,
+    raw: &str,
+    streams: &mut [crate::fit::runner::ObsStream],
+) -> Result<TrainingCut, String> {
+    use crate::fit::training_partition::PartitionError;
+    let refuse = |e| crate::fit::runner::partition_error(e, Some((raw, at)));
+    let mut rows = Vec::with_capacity(streams.len());
+    for s in streams.iter_mut() {
+        let n = crate::fit::training_partition::cutoff_prefix(&s.rows, at)
+            .map_err(|position| refuse(PartitionError::NotAPrefix {
+                stream: s.name.clone(), position,
+            }))?;
+        if !s.rows[..n].iter().any(|r| r.cell.is_some()) {
+            return Err(refuse(PartitionError::NoTrainingRows { stream: s.name.clone() }));
+        }
+        s.truncate_rows(n);
+        rows.push((s.name.clone(), n));
     }
+    rows.sort();
+    let extent = streams.iter()
+        .flat_map(|s| s.rows.iter().map(|r| r.measures.end()))
+        .reduce(f64::max)
+        .ok_or_else(|| refuse(PartitionError::NoRows))?;
+    Ok(TrainingCut { at, extent, rows })
 }
 
 pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
@@ -454,23 +463,26 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // streams warning, whose key-space (leaf name / family root) must not change.
     let effective = crate::fit::runner::data_bindings_to_effective(&model, &bound_streams)
         .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
-    let streams = crate::fit::runner::resolve_and_load_obs_streams(
+    let mut streams = crate::fit::runner::resolve_and_load_obs_streams(
         &model, &compiled, &effective, &time_opts,
     ).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
     let n_streams = streams.len();
 
-    // gh#1084: the filter scores every bound row, held-out ones included (its
-    // log-likelihood and prequential outputs are what `compare` scores a
-    // holdout with), but a saved final state is a forecast origin. Under the
-    // fit's `holdout_after`, one filtered through rows past the cutoff already
-    // conditions on the data a forecast from it is scored against, so refuse
-    // it before the filter runs.
+    // gh#1138: a saved final state is a forecast origin. Under the fit's
+    // `holdout_after`, one filtered through rows past the cutoff would already
+    // condition on the data a forecast from it is scored against, so a
+    // `--save-final-state` run binds only the training rows, cut by the rule
+    // the fit's partition uses, and saves the state at their end. Without
+    // `--save-final-state` the filter scores every bound row, held-out ones
+    // included: its log-likelihood and prequential outputs are what `compare`
+    // scores a holdout with.
     //
     // The cutoff resolves as `fit run` resolved it. A bare time or date needs
     // no rows. An anchored one (`holdout_after = "last_obs - 4 weeks"`)
     // resolves over the fit config's own files: resolved over `--data` files
-    // holding only the training rows, it would move back and refuse the very
+    // holding only the training rows, it would move back and cut the very
     // rows that trained. Those files are read only in that case.
+    let mut training_cut: Option<TrainingCut> = None;
     if save_final_state.is_some() {
         let holdout_after = fit_problem.as_ref()
             .and_then(|p| p.data.as_ref())
@@ -480,24 +492,34 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
                 crate::fit::runner::parse_time_spec(
                     "holdout_after", &spec.raw(), model.origin.as_deref(), &model.time_unit),
                 Ok(crate::fit::runner::TimeSpec::Anchored(_)));
-            let fit_streams;
-            let cutoff_streams: &[crate::fit::runner::ObsStream] =
-                if !anchored || cli_data_specs.is_empty() {
-                    &streams
-                } else {
-                    fit_streams = load_data_observations_from_fit_toml(fit_path, &model)
-                        .and_then(|b| crate::fit::runner::data_bindings_to_effective(&model, &b))
-                        .and_then(|e| crate::fit::runner::resolve_and_load_obs_streams(
-                            &model, &compiled, &e, &time_opts))
-                        .unwrap_or_else(|e| {
-                            out.fail(format!(
-                                "error: --fit toml data, read to resolve holdout_after: {e}"));
-                        });
-                    &fit_streams
-                };
-            if let Err(e) = refuse_final_state_past_cutoff(spec, cutoff_streams, &streams, &model) {
-                out.fail(format!("error: {e}"));
-            }
+            let cutoff_rows = |ss: &[crate::fit::runner::ObsStream]| -> std::collections::BTreeMap<
+                String, Vec<crate::fit::observed_rows::ObservedRow>,
+            > {
+                ss.iter().map(|s| (s.name.clone(), s.rows.clone())).collect()
+            };
+            let rows = if !anchored || cli_data_specs.is_empty() {
+                cutoff_rows(&streams)
+            } else {
+                let fit_streams = load_data_observations_from_fit_toml(fit_path, &model)
+                    .and_then(|b| crate::fit::runner::data_bindings_to_effective(&model, &b))
+                    .and_then(|e| crate::fit::runner::resolve_and_load_obs_streams(
+                        &model, &compiled, &e, &time_opts))
+                    .unwrap_or_else(|e| {
+                        out.fail(format!(
+                            "error: --fit toml data, read to resolve holdout_after: {e}"));
+                    });
+                cutoff_rows(&fit_streams)
+            };
+            let raw = spec.raw();
+            let cut = crate::fit::runner::resolve_holdout_cutoff(spec, &rows, &model)
+                .and_then(|at| cut_to_training_rows(at, &raw, &mut streams))
+                .unwrap_or_else(|e| { out.fail(format!("error: {e}")); });
+            out.say(format_args!(
+                "pfilter: --save-final-state under holdout_after = \"{raw}\" (t = {}): \
+                 state saved at t = {}, the end of the training rows (holdout_after); \
+                 the log-likelihood shown covers training rows only",
+                cut.at, cut.extent));
+            training_cut = Some(cut);
         }
     }
 
@@ -676,6 +698,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             flow_indices: &flow_indices,
             objective,
             allow_forcing_extrapolation: crate::forcing_extrapolation::allowed(),
+            training_rows: training_cut.as_ref().map(|c| c.rows.as_slice()),
             seed,
         };
         let resolved_id = match crate::pfilter_cas::resolve_pfilter(&ctx) {
