@@ -1,4 +1,4 @@
-{0 The compiler}
+{0 Overview}
 
 [camdlc] reads a [.camdl] model, expands it into a flat list of compartments,
 transitions and expressions with every name resolved, checks it, attaches
