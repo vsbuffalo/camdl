@@ -1,154 +1,241 @@
-(* AST for the camdl DSL — mirrors the surface syntax before expansion. *)
+(** The syntax tree of a camdl model: what the parser builds from a [.camdl]
+    file, before the expander resolves names, expands families over their
+    dimensions and lowers the model to the intermediate representation.
 
-(** Source location for error reporting. *)
+    The tree stays close to the surface syntax. Names are unresolved strings,
+    and an indexed family such as [infection[a in age]] is one node, not one
+    per level. The language specification, [docs/camdl-language-spec.md],
+    defines what each construct means.
+
+    Most declarations carry two source spans. The one named [*loc] is where a
+    diagnostic about the declaration points. The one named [*span] is the
+    extent of source text the compiled model quotes for the declaration in its
+    declared-model section; a declaration the compiler synthesises has
+    {!dummy_loc} there and quotes nothing.
+
+    A declaration field whose value is a time, such as [simulate { to }] or
+    an intervention's [every], is not a bare {!expr} but a {!Time_pos.t},
+    which records the kind of time its position holds (an instant, a
+    cadence, a length, ...), because the kind decides what a calendar
+    duration written there means. Times inside a forcing's arguments or
+    inside an expression are left as expressions, and {!Time_census} finds
+    them.
+
+    The module also holds the checked form of a staged-residence law
+    ({!via_spec} and the types it uses), which the expander builds from the
+    raw call the parser stores. *)
+
+(** A span of source text.
+
+    Lines and columns are 1-based. Columns count bytes, not characters, so a
+    multi-byte character such as [×] advances the column by more than one.
+    [end_col] is one past the last byte of the span. The parser leaves [file]
+    empty; the expander substitutes the model's file name when it reports, and
+    {!stamp_loc_file} fills it for declarations read from a second file. *)
 type loc = {
   file     : string;
-  line     : int;   (* 1-indexed *)
-  col      : int;   (* 1-indexed *)
+  line     : int;   (** First line. *)
+  col      : int;   (** First column. *)
   end_line : int;
   end_col  : int;
 }
 
+(** A value paired with the source span it was parsed from. No part of the
+    compiler builds one. *)
 type 'a located = { value : 'a; loc : loc }
 
+(** The location of a node the compiler built itself rather than parsed: every
+    field zero or empty. *)
 let dummy_loc = { file = ""; line = 0; col = 0; end_line = 0; end_col = 0 }
 
+(** A unit written after a number with a leading quote, as in [14 'days] or
+    [0.1 'per_day].
+
+    Durations ([Days] to [Years]) and rates ([PerDay] to [PerYear]) convert
+    to the model's time unit through days: a week is 7 days, a month
+    365.2425/12 days and a year 365.2425 days. [Count] and [Ratio] carry no
+    time scale. The same type names the model's time unit, the unit of a
+    table's cells and the unit of a forcing's values.
+
+    {@camdl[
+      time_unit = 'days
+      dur : age 'years = [5, 60]
+    ]} *)
 type unit_lit =
   | Days | Weeks | Months | Years
   | PerDay | PerWeek | PerMonth | PerYear
-  (* Tier-3 population count (dim P, scale 1). For interpolated
-     forcings that carry raw counts (e.g. `pop : interpolated 'count`). *)
   | Count
-  (* Tier-3 dimensionless multiplier (dim (0,0), scale 1). The canonical
-     choice for forcings that carry a unitless factor around 1.0 —
-     seasonal forcing, school-term indicator, reporting multiplier.
-     Distinct from the `probability` parameter kind: `'ratio` is the
-     unbounded dimensionless case (scalar could be 0.7, 1.3, 50, …),
-     `probability` is the bounded [0,1] case. *)
+      (** [count]: a number of individuals, dimension P, as in an
+          interpolated population forcing [pop : interpolated 'count]. *)
   | Ratio
+      (** [ratio]: a dimensionless multiplier with no bound, such as a
+          seasonal factor around 1. The [probability] parameter kind is the
+          bounded case. *)
 
+(** A binary operator in an expression. Both [×] and [*] parse to [Mul]. The
+    comparisons, [Eq] to [Ge], appear in the condition of an [if] and in the
+    comparisons of a reactive intervention's trigger. *)
 type bin_op =
   | Add | Sub | Mul | Div | Pow
   | Eq | Neq | Lt | Gt | Le | Ge
 
-type un_op = Neg | Exp | Log | Sqrt | Abs | Floor | Ceil
-           | Sin | Cos | Tanh                                  (* gh#58 *)
-           (* `sum(e)` with no binder: the value of [e], marked as an
-              explicit total. Under bare-name semantics `sum(I)` and `I`
-              are the same value, so this carries no arithmetic — it records
-              that the modeller STATED the pooling, which the observation
-              aggregation rule (E280) reads; every other reader treats it as
-              its body (aggregation-semantics proposal §5.4, §10). *)
-           | Total
+(** A unary operator in an expression.
 
-(* Relational operators usable in a `where` predicate (transition guards and
-   restricted sums). A subset of bin_op's comparisons, kept as a separate type
-   so the predicate grammar stays restricted (not the full expr language). *)
+    The parser builds only [Neg], from a leading minus, and [Total]. A call
+    such as [exp(x)] parses as a function call ([EFuncCall]), and no part of
+    the compiler builds [Exp] to [Tanh]; the expander's constant folding
+    evaluates them if they occur. *)
+type un_op = Neg | Exp | Log | Sqrt | Abs | Floor | Ceil
+           | Sin | Cos | Tanh
+           | Total
+               (** [sum(I)], a [sum] with no binder: the value of its operand,
+                   marked as a total the modeller stated. A bare compartment
+                   family already means its sum over strata, so [Total] changes
+                   no arithmetic. An observation uses the mark to tell a stated
+                   pooling from a silent one: [projected = sum(I)] on a
+                   stratified [I] is accepted where [projected = I] is error
+                   E280. *)
+
+(** A comparison in a [where] predicate between a table cell and a number,
+    [dist[p, q] < 20]. It is separate from {!bin_op} so that a predicate cannot
+    contain arbitrary arithmetic. *)
 type relop = RLt | RLe | RGt | RGe | REq | RNe
 
-(* The value a `where` predicate compares a constant table cell against. GoNum
-   is a numeric literal (the decidable case); GoName is a bare name, accepted
-   only so the decidability check can emit a targeted error when it resolves to
-   a parameter (e.g. a fitted radius `dist[p,q] < sparse_thresh`). *)
+(** The right-hand side of a table-cell comparison in a [where] predicate. *)
 type guard_operand =
   | GoNum  of float
+      (** A number literal: the only operand a predicate can compare
+          against. *)
   | GoName of string
+      (** A bare name, as in [dist[p, q] < radius]. A predicate must be
+          decided at compile time, so the expander always rejects this
+          operand (error E284); the parser keeps the name so the error can
+          say which name was used. *)
 
-(* `where` predicate. Compile-time-decidable: index comparisons and constant
-   table-cell comparisons only — never parameters or compartment state. *)
+(** A [where] predicate: a condition on index values, decided by the compiler
+    for each combination of a declaration's indices, keeping the combinations
+    where it holds.
+
+    It filters the members of a transition, intervention or reactive
+    intervention family and the terms of a [sum]. It may compare index
+    variables with each other or with a dimension's level names, and a
+    constant table's cells with a number; never a parameter or a compartment.
+
+    {@camdl[
+      wane2[a in age] : R[a] --> S[a] @ mu * R[a] where a == adult
+      let near = sum(p in patch, sum(q in patch where dist[p, q] < 20, 1))
+    ]} *)
 type guard =
-  | GEq  of string * string                              (* index_var == index_val_or_var *)
+  | GEq  of string * string
+      (** [a == b]: the two sides name the same level. Each side is an index
+          variable of the declaration or a level name. *)
   | GNeq of string * string
-  | GTab of string * string list * relop * guard_operand (* table[idx,…] relop operand *)
+      (** [a != b]. *)
+  | GTab of string * string list * relop * guard_operand
+      (** [dist[p, q] < 20]: the table, the index variables or level names
+          that select its cell, the comparison and the operand. *)
   | GAnd of guard * guard
   | GOr  of guard * guard
 
-(** A positional or named index in S[child] or S[age = child] *)
+(** One index inside the brackets of a reference such as [S[a]]: by
+    position, or by the dimension's name.
+
+    {@camdl[
+      infection[a in age] : S[a] --> E[a] @ lam[a] * S[a]
+      let kids_inf = I[age = child]
+    ]} *)
 type index_item =
   | IPosn  of expr
+      (** [S[a]] or [S[child]]: the index in this position. *)
   | INamed of string * expr
+      (** [S[age = child]]: the index for the named dimension. *)
 
-(** Binding in [a in age], [(a, a_next) in consecutive(age)], [c in compartments] *)
+(** A binder that makes a declaration a family with one member per level,
+    written in brackets after the declaration's name.
+
+    {@camdl[
+      infection[a in age] : S[a] --> E[a] @ lam[a] * S[a]
+      ageing[(a, a_next) in consecutive(age)] : S[a] --> S[a_next] @ aging * S[a]
+      death[a in age, c in compartments] : c[a] --> @ mu * c[a]
+    ]} *)
 and index_binding =
-  | IBind   of string * string               (* var, dim *)
-  | IConsec of string * string * string      (* var, var_next, dim *)
-  | IComp   of string                        (* compartment-iter var *)
+  | IBind   of string * string
+      (** [a in age]: the variable and the dimension it ranges over. *)
+  | IConsec of string * string * string
+      (** [(a, a_next) in consecutive(age)]: each pair of adjacent levels in
+          declared order, so a dimension of n levels gives n − 1 members.
+          The two variables, then the dimension. *)
+  | IComp   of string
+      (** [c in compartments]: the variable ranges over the model's integer
+          compartments; real compartments are excluded. *)
 
+(** An expression: a rate, a value, an argument or a predicate, as written.
+    Names are not yet resolved, so a parameter, a compartment and a [let]
+    binding look alike.
+
+    {@camdl[
+      let lam[a in age] = beta * sum(b in age, C[a, b] * I[b]) / N
+    ]} *)
 and expr =
   | EConst  of float
+      (** A number literal. The keyword [null] also parses to
+          [EConst 0.0]. *)
   | EUnit   of float * unit_lit
-  | EIdent  of string * loc                  (* unresolved name + source loc *)
-  | EIndex  of string * index_item list * loc (* S[child] + source loc *)
+      (** A number with a unit, [14 'days]. A unit after a parenthesised
+          expression, [(20 / 100000) 'per_year], parses as that expression
+          times [EUnit (1.0, u)]. *)
+  | EIdent  of string * loc
+      (** A name and its span. The keyword [origin] in an expression parses
+          to the name ["origin"]. A quoted string literal also parses to
+          [EIdent], with the string's contents as the name and {!dummy_loc}
+          as its span. *)
+  | EIndex  of string * index_item list * loc
+      (** An indexed reference, [S[a]] or [C[a, b]], with the span of the
+          whole reference. *)
   | EBinOp  of bin_op * expr * expr
   | EUnOp   of un_op * expr
-  (* sum(i in dim [where P], body) + the source loc of the binder `i in dim
-     [where P]`. The loc is per-binder, not per-`sum(...)`: the flat form
-     `sum(a in age, p in patch, body)` lowers to nested ESum nodes, and a
-     diagnostic about one binder's domain must point at that binder. *)
   | ESum    of string * string * guard option * expr * loc
-  | ECond   of expr * expr * expr            (* if p then a else b *)
-  | EFuncCall of string * (string * expr) list  (* fname(kw=v,...) *)
-  | EList   of expr list                     (* [1.0, 2.0] or [[...],[...]] *)
-  | ERange  of expr * expr                   (* 7:100 — range literal, only in [...] *)
-  (* observations.<stream> — the v1.1 generated-quantity observation source
-     (proposal 2026-06-25). Meaningful ONLY inside a `quantities { }` body, where
-     the classifier lowers it to Ir.QSObservation; anywhere else resolve_expr
-     rejects it (E290). *)
+      (** [sum(a in age where P, body)]: [body] summed over the levels of the
+          dimension that pass the optional predicate. The fields are the
+          variable, the dimension, the predicate, the body, and the span of
+          the binder [a in age where P]. A flat
+          [sum(a in age, p in patch, body)] parses to nested [ESum] nodes, one
+          per binder, each with its own binder's span. *)
+  | ECond   of expr * expr * expr
+      (** [if p then a else b]. *)
+  | EFuncCall of string * (string * expr) list
+      (** A call by name: a built-in function such as [exp], a forcing, a
+          distribution, a reduction or a projection such as [incidence]. Each
+          argument is paired with its keyword; a positional argument has the
+          keyword [""]. *)
+  | EList   of expr list
+      (** A bracketed list, [[1.0, 2.0]]; a list of lists is a matrix. *)
+  | ERange  of expr * expr
+      (** [7:100], written only as an element of a list. Only a periodic
+          forcing's [on = [...]] accepts it; anywhere else it is an error. *)
   | EObsAccess of string * loc
-  (* <run>.<quantities|observations>.<member> — a run-rooted contrast operand
-     (counterfactual-contrasts proposal 2026-06-25). `run` is an explicit
-     scenario name or the reserved `fitted`; `ns` selects the sub-namespace;
-     `member` names a quantity / observation stream on that run. Meaningful
-     ONLY inside a `contrasts { }` body, where the expander lowers it to
-     Ir.CRunMember; anywhere else resolve_expr / the quantity classifier reject
-     it with a located cross-context diagnostic. *)
+      (** [observations.cases]: the simulated values of an observation stream,
+          as the source of a [quantities] entry, with its span. Anywhere else
+          it is error E290. *)
   | ERunMember of { run : string; ns : run_namespace; member : string; loc : loc }
+      (** [with_sia.quantities.total_deaths]: a quantity or observation stream
+          of one scenario's run, as an operand in a [contrasts] block. [run] is
+          a scenario name or [fitted], the model with no scenario applied.
+          Anywhere else it is an error. *)
 
-(* The two symmetric sub-namespaces of a run member: `<run>.quantities.<q>` and
-   `<run>.observations.<stream>`. *)
+(** Which kind of member a run-rooted reference names: an entry of the
+    [quantities] block, or an observation stream. *)
 and run_namespace = NsQuantities | NsObservations
 
+(** Whether a compartment holds whole individuals ([Integer], the default) or
+    a continuous quantity ([Real], written [W : real]), such as an
+    environmental reservoir. A real compartment must have an equation in the
+    [ode] block. *)
 type compartment_kind = Integer | Real
 
-(* ── Time positions (proposal 2026-11-16-calendar-durations-by-position) ─────
-
-   Every expression that holds a time is one of six kinds, a property of the
-   position it is written in rather than of the expression: `6 'months` is an
-   instant in `simulate { to }`, a cadence in `every` and a length in `dt`. A
-   declaration field that holds a time has type ['k Time_pos.t], so its kind is
-   known statically (a lowering function cannot be handed the wrong kind) and at
-   run time (printers and the census read it through [expr] and [kind]).
-
-   The wrapper is private: the parser and the forcing / reduction role tables
-   (`time_census.ml`) construct one with [make]; only the expander's [Lower]
-   folds one to a number. It lives here, not in its own file, because the
-   declaration records below hold it and it holds an [expr]. *)
+(** A time written in a declaration, with the kind of time its position
+    holds. *)
 module Time_pos : sig
-  type instant        = Instant_k
-  type cadence        = Cadence_k
-  type runtime_offset = Runtime_offset_k
-  type span           = Span_k
-  type phase          = Phase_k
-  type length         = Length_k
-
-  type _ kind =
-    | Instant        : instant kind         (* a point on the axis; a bare duration D is origin + D *)
-    | Cadence        : cadence kind         (* the step of a recurring schedule *)
-    | Runtime_offset : runtime_offset kind  (* an offset from an instant known only during the run *)
-    | Span           : span kind            (* the width of a period that tiles or trails the axis *)
-    | Phase          : phase kind           (* an offset within a repeating period *)
-    | Length         : length kind          (* a fixed length, average by design (D65 a) *)
-
-  type 'k t = private { kind : 'k kind; expr : expr; loc : loc }
-
-  val make : 'k kind -> expr -> loc -> 'k t
-  val expr : _ t -> expr
-  val loc  : _ t -> loc
-  val kind_name : _ kind -> string
-
-  (* A position whose kind is known only at run time: the census's element. *)
-  type any = Any : 'k t -> any
-end = struct
   type instant        = Instant_k
   type cadence        = Cadence_k
   type runtime_offset = Runtime_offset_k
@@ -164,6 +251,115 @@ end = struct
     | Phase          : phase kind
     | Length         : length kind
 
+  type 'k t = private { kind : 'k kind; expr : expr; loc : loc }
+
+  (* The only way to build a position. *)
+  val make : 'k kind -> expr -> loc -> 'k t
+  val expr : _ t -> expr
+  val loc  : _ t -> loc
+  (* The kind's name, as in "instant" or "runtime offset". *)
+  val kind_name : _ kind -> string
+
+  type any = Any : 'k t -> any
+end = struct
+  (** A time written in a declaration, with the kind of time its position
+      holds.
+
+      Every expression that holds a time is one of six kinds, and the kind
+      belongs to the position the expression is written in, not to the
+      expression: [6 'months] is an instant in [simulate { to }], a cadence
+      in [every] and a length in [dt]. The kind decides what a calendar
+      duration means there. In a model with an [origin], an instant moved by
+      one whole calendar step from a date the compiler knows is that
+      calendar date, so [to = 6 'months] is the date six calendar months
+      after the origin; a cadence, a span or a run-time offset refuses a
+      calendar duration; and a length reads one as its average, a month
+      being 365.2425/12 days. Without an origin there is no calendar, and
+      every month is the average one.
+
+      A declaration field that holds a time has the type ['k Time_pos.t], so
+      the type of each lowering function says which kind it accepts. Code
+      that handles positions of every kind reads the kind as a value,
+      [kind]: the expander does so for the positions {!Time_census} lists
+      inside ordinary expressions, and to key its record of the positions it
+      has judged. The record is private, so a value is built only with
+      [make]: by the parser for every declaration field, by {!Time_census}
+      for the positions inside a forcing's arguments, a reduction or an
+      ordinary expression, and by the expander for a reactive trigger's
+      [window]. The expander's [Lower] module turns a position into a number
+      or an IR expression, with one function per kind, each applying its
+      kind's rule.
+
+      The module is defined in {!Ast}, not in a file of its own, because the
+      declaration records hold a position and a position holds an
+      {!Ast.expr}.
+
+      {@camdl[
+        simulate { from = 0 'days  to = 6 'months  dt = 1 'days }
+      ]} *)
+
+  (** The type index of an instant position. Each of the six index types
+      has one constructor, which nothing uses: the type exists only as the
+      parameter of {!kind} and {!t}. *)
+  type instant        = Instant_k
+
+  (** The type index of a cadence position. *)
+  type cadence        = Cadence_k
+
+  (** The type index of a run-time offset position. *)
+  type runtime_offset = Runtime_offset_k
+
+  (** The type index of a span position. *)
+  type span           = Span_k
+
+  (** The type index of a phase position. *)
+  type phase          = Phase_k
+
+  (** The type index of a length position. *)
+  type length         = Length_k
+
+  (** The six kinds of time position, each indexed by its own type, so that
+      a value of [instant kind] can only be [Instant]. *)
+  type _ kind =
+    | Instant        : instant kind
+        (** A point on the time axis: [simulate { from }] and [{ to }], an
+            [at] list's entries, a recurring schedule's [from] and [to], a
+            scenario's [to], a timepoint, a [breakpoints] or [times] entry,
+            the ends of a forcing's [window], [value_at]'s time, the bounds
+            of an [instant] parameter and the value compared with [t]. A
+            bare duration [D] is the instant [origin + D]. Under an origin,
+            one calendar step from a known date resolves to that date, and
+            any other calendar duration is refused (E321). *)
+    | Cadence        : cadence kind
+        (** The step of a recurring schedule: [every] of an intervention,
+            an output or an emit schedule. A calendar duration is refused
+            under an origin (E322), since one fixed step cannot follow the
+            calendar. *)
+    | Runtime_offset : runtime_offset kind
+        (** An offset from an instant known only during the run: a reactive
+            intervention's [after] and [cooldown], and an offset added to or
+            subtracted from [t]. A calendar duration is refused under an
+            origin (E321). *)
+    | Span           : span kind
+        (** The width of a period that tiles the axis or trails a time: the
+            duration of a [covers] line and the [window] of a
+            [sum_observed] trigger. A calendar duration is refused under an
+            origin (E321). *)
+    | Phase          : phase kind
+        (** An offset within a repeating period: [at_day], a sinusoidal
+            forcing's [phase] and a periodic forcing's [on] endpoints. A
+            calendar duration is refused in [at_day] (E322) and read as its
+            average in [phase]. *)
+    | Length         : length kind
+        (** A fixed length, in which a calendar duration is its average:
+            [simulate { dt }], a forcing's [period], [step] and [lag], and
+            the bounds of a [duration] parameter. *)
+
+  (** One time position: its kind, the expression as written, and the span
+      of the expression, where a diagnostic about it points. A position the
+      parser fills in for an absent field, such as the [from = 0] of a
+      [simulate] block that has none, has the span of the enclosing block
+      instead. *)
   type 'k t = { kind : 'k kind; expr : expr; loc : loc }
 
   let make kind expr loc = { kind; expr; loc }
@@ -177,65 +373,120 @@ end = struct
     | Phase          -> "phase"
     | Length         -> "length"
 
+  (** A time position of any kind, the kind known only by inspecting it:
+      the element of the census's list of every position in a model. *)
   type any = Any : 'k t -> any
 end
 
-(* A parsed `#'` doc-comment block immediately preceding a declaration: free-text
-   prose plus optional structured tags. Non-semantic — it does not affect
-   compilation — but it is NOT compilation-local: `Expander.build_doc_index`
-   folds it into the IR envelope's `docs` dictionary, which `camdl fit summary`
-   reads for its parameter legend. It also surfaces in `camdlc inspect` and, via
-   `@symbol`, in `camdlc render`. `None` when the declaration is undocumented.
+(** The text of a [#'] doc-comment block in a model file, with its recognised
+    tags.
 
-   A doc attaches to a DECLARATION, never to a block keyword — the parser's
-   `doc_opt` slot sits on the member rules (`compartment_decl`, `param_decl`,
-   `transition_decl`, `obs_decl`, `quantity_decl`, `dim_entry`) and on the
-   top-level `let`. *)
+    A block documents the declaration immediately after it or, at the head of
+    the file, the model as a whole. It does not change what the model
+    computes, but it is kept: [camdlc inspect] shows it, and the expander
+    copies it into the compiled model's documentation index for reports.
+
+    {@camdl[
+      #' transmission rate
+      #' @symbol \beta
+      beta    : rate ~ log_normal(mu = -1, sigma = 0.5)
+    ]} *)
 type doc = {
-  d_text   : string option;   (* joined prose description (the non-@tag lines) *)
-  d_symbol : string option;   (* `@symbol`: display label for plots / reports *)
-  d_ref    : string option;   (* `@ref`: citation for the definition *)
+  d_text   : string option;
+      (** The prose lines, joined with spaces; [None] when the block has only
+          tags. In the model's header block, each line that starts with an
+          unrecognised [@] tag is kept here on a line of its own. *)
+  d_symbol : string option;
+      (** [@symbol]: the label to show for the declaration in plots and
+          reports. *)
+  d_ref    : string option;
+      (** [@ref]: a citation for the definition. On a declaration, any tag
+          other than [@symbol] and [@ref] is error E111. *)
 }
 
+(** One compartment of the [compartments] block: its name, kind and doc
+    block. [cloc] and [cspan] both cover the name and the kind.
+
+    {@camdl[
+      compartments { S, E, I, R, Q, D, W : real }
+    ]} *)
 type compartment_decl = { cname: string; ckind: compartment_kind; cdoc: doc option; cloc: loc; cspan: loc }
 
-(* Parameter kinds. The two time kinds (PInstant, PDuration) both carry
-   dimension [T] for dimcheck (2026-05-22 calendar-time §6.7): an instant is
-   an origin-relative point (renders as a date), a duration is a relative
-   span (renders as a span, no origin). *)
+(** The declared kind of a parameter, a typed [let], a table's cells or an
+    observed data column, which fixes its range and, for most kinds, its
+    dimension (language specification, section 4.1).
+
+    - [PRate], [rate]: non-negative, dimension 1/time.
+    - [PProbability], [probability]: between 0 and 1, dimensionless.
+    - [PPositive], [positive]: greater than zero; the dimension comes from a
+      [dim] clause or from how the value is used.
+    - [PCount], [count]: dimension P, a number of individuals. Whole numbers
+      are not enforced.
+    - [PReal], [real]: unconstrained; the dimension comes from a [dim]
+      clause or from use.
+    - [PInstant], [instant]: a point in time, dimension T, shown as a date
+      when the model declares an [origin].
+    - [PDuration], [duration]: a span of time, dimension T. *)
 type param_type = PRate | PProbability | PPositive | PCount | PReal | PInstant | PDuration
 
-(** Explicit dimension annotation: (P exponent, T exponent) *)
+(** A dimension stated by a [dim] clause, as the exponents of the two base
+    dimensions: population P first, then time T. [dim P/T] is [(1, -1)].
+
+    {@camdl[
+      let b0 : positive dim P^-1*T^-1 = 0.0001
+    ]} *)
 type dim_annotation = int * int
 
-(** Prior distribution specification: ~ name(key = val, ...) [| dim_name]
-    The optional `| dim_name` clause marks a hierarchical / partially-
-    pooled prior (wave 2 / malaria #3). None = plain prior. *)
+(** A parameter's prior, written after [~] in the [parameters] block: a
+    distribution name, its keyword arguments, and an optional pooling clause.
+
+    {@camdl[
+      beta    : rate ~ log_normal(mu = -1, sigma = 0.5)
+      rho_a[age] : rate ~ log_normal(mu = mu_h, sigma = 0.3) | age
+    ]} *)
 type prior_spec = {
-  ps_name:      string;                    (** distribution name: "log_normal", "beta", etc. *)
-  ps_args:      (string * expr) list;      (** keyword arguments *)
-  ps_pool_over: string option;              (** `| <dim>` pooling clause *)
+  ps_name:      string;
+      (** The distribution's name as written, such as ["log_normal"]; the
+          expander checks it against the known distributions. *)
+  ps_args:      (string * expr) list;
+      (** The keyword arguments, as written. *)
+  ps_pool_over: string option;
+      (** [| age]: a hierarchical prior, partially pooling the parameter's
+          values over the named dimension. [None] for an ordinary prior. *)
 }
 
-(* [pdim] is the explicit dimension from a `dim` clause (`b : real dim T^-1`),
-   accepted only on `positive` and `real`; every other kind fixes its
-   dimension. *)
-(* A parameter's bounds take the position kind of the parameter: an `instant`
-   parameter's bounds are instants, a `duration` (or `[T]`-annotated) one's are
-   lengths, and every other kind's are plain values. The parser builds the
-   variant in the production that knows the kind. *)
+(** The two ends of a parameter's [in [lo, hi]], as time positions of the
+    parameter's own kind: instants for an [instant] parameter, lengths for a
+    [duration] parameter or one declared [dim T], and plain values for every
+    other. The parser builds the constructor, with {!make_bounds}, in the
+    production that knows the kind.
+
+    {@camdl[
+      t_intro : instant in [date("2020-01-01"), date("2020-03-01")]
+      delay   : duration in [1 'days, 3 'weeks]
+      gamma   : rate in [0.05, 0.5]
+    ]} *)
 type bounds =
   | Instant_bounds of Time_pos.instant Time_pos.t * Time_pos.instant Time_pos.t
+      (** The earliest and latest instant, judged and lowered as instant
+          positions, so a calendar step from the origin resolves to its
+          date. *)
   | Length_bounds  of Time_pos.length Time_pos.t * Time_pos.length Time_pos.t
+      (** The shortest and longest length; a calendar duration is its
+          average. *)
   | Value_bounds   of expr * expr
+      (** The lower and upper value, in the parameter's units. *)
 
-(* The bound expressions as written, for printers and walkers. *)
+(** The two bound expressions as written, whatever their kind. *)
 let bounds_exprs = function
   | Instant_bounds (lo, hi) -> (Time_pos.expr lo, Time_pos.expr hi)
   | Length_bounds (lo, hi)  -> (Time_pos.expr lo, Time_pos.expr hi)
   | Value_bounds (lo, hi)   -> (lo, hi)
 
-(* Which [bounds] arm a parameter of this kind and dimension takes. *)
+(** The bounds of a parameter of the given kind and [dim] clause, with each
+    end's span: [Instant_bounds] for an [instant] parameter,
+    [Length_bounds] for a [duration] or a [dim T] one, [Value_bounds]
+    otherwise. *)
 let make_bounds (kind : param_type) (dim : dim_annotation option) ~lo ~hi ~lo_loc ~hi_loc =
   match kind, dim with
   | PInstant, _ ->
@@ -246,65 +497,110 @@ let make_bounds (kind : param_type) (dim : dim_annotation option) ~lo ~hi ~lo_lo
                    Time_pos.make Time_pos.Length hi hi_loc)
   | _ -> Value_bounds (lo, hi)
 
+(** One entry of the [parameters] block: a scalar parameter, or a family
+    indexed by dimensions.
+
+    In both constructors [pkind] is the kind, [pdim] the dimension a [dim]
+    clause states (only [positive] and [real] accept one; every other kind
+    fixes its own), [pbounds] the interval of [in [lo, hi]], and [pprior] the
+    prior. [ploc] and [pspan] both cover the declaration from its name.
+
+    {@camdl[
+      gamma   : rate in [0.05, 0.5]
+      rho_a[age] : rate ~ log_normal(mu = mu_h, sigma = 0.3) | age
+    ]} *)
 type param_decl =
   | PScalar  of { pname: string; pkind: param_type; pdim: dim_annotation option; pbounds: bounds option; pprior: prior_spec option; pdoc: doc option; ploc: loc; pspan: loc }
+      (** [gamma : rate]: one value. *)
   | PIndexed of { pname: string; pdims: string list; pkind: param_type; pdim: dim_annotation option; pbounds: bounds option; pprior: prior_spec option; pdoc: doc option; ploc: loc; pspan: loc }
+      (** [rho_a[age] : rate]: one value per level of the dimensions listed
+          in [pdims]. *)
 
-(** Table dimension entry: bare dim name, or dim + unit *)
+(** One axis of a table's declared shape: a dimension, which may carry the
+    unit of the table's cells. The unit belongs to the cells, not the axis;
+    the expander rejects a table that writes a unit on more than one axis
+    (error E216). *)
 type table_dim_entry =
   | TDim     of string
+      (** [age]. *)
   | TDimUnit of string * unit_lit
+      (** [age 'years]: the [age] axis, with the cells in years. *)
 
-(** Table value: inline literal or EFuncCall for read_long/external *)
+(** One entry of the [tables] block: constant data indexed by dimensions,
+    written inline or read from a file.
+
+    {@camdl[
+      C : age × age = [[12.0, 4.0], [4.0, 8.0]]
+      ifr : age : probability = [0.001, 0.02]
+      dur : age 'years = [5, 60]
+    ]} *)
 type table_decl = {
-  tnames     : string list;           (* one or more names for multi-value columns *)
+  tnames     : string list;
+      (** The table's names. Several names, [pop, init_sus : patch = read(...)],
+          declare one table per value column of the file. *)
   tdims      : table_dim_entry list;
-  tcell_kind : param_type option;     (* optional cell-type annotation: rate, probability, ... (gh#32) *)
+      (** The axes, in order; empty for the form [name = value], which has
+          none. *)
+  tcell_kind : param_type option;
+      (** The kind of every cell, from [: probability] after the axes. *)
   tvalue     : expr;
-  (* Span of the declared axis list (`age × aeg`), or of the name for the
-     dimensionless form. gh#490: an undeclared axis is diagnosed here, at the
-     declaration, and the caret has to land on the axes rather than on the
-     whole declaration — an inline table's value runs to many lines. *)
+      (** The data: a list literal, or a call such as [read("pop.tsv")]. *)
   tloc       : loc;
+      (** The span of the axes ([age × patch]), or of the name when there are
+          none. A diagnostic about an undeclared axis points here rather than
+          at the whole declaration, whose inline value can run to many
+          lines. *)
   tspan      : loc;
 }
 
-(** A stoichiometry reference: compartment name + optional indices *)
+(** A compartment named on either side of a transition's arrow, with its
+    indices: [S[a]], [R], [S[child]]. *)
 type stoich_ref = string * index_item list
 
-(** Transition destination form.
-    - [DstSum] is the ordinary case: a `+`-separated list of destination
-      compartments, each contributing +1 to stoichiometry. Singleton =
-      classic, ≥ 2 = multi-dest (wave 1 / malaria #1).
-    - [DstBranch] (wave 2 / malaria #2) is a probabilistic branch:
-      `X --> { A : w_A, B : w_B } @ rate`. The expander desugars each
-      branch into its own IR transition with rate `w_i * rate`. The
-      existing chain-binomial source-grouping machinery
-      then performs the correct multinomial split at firing time. *)
+(** Where a transition sends the individuals it moves.
+
+    {@camdl[
+      infection : S --> I @ beta * S * I / N                # DstSum [I]
+      split     : I --> R + Q @ gamma * I                   # DstSum [R; Q]
+      recovery  : I --> { R : 0.9, D : 0.1 } @ gamma * I    # DstBranch
+      death     : Q --> @ mu * Q                            # DstSum []
+    ]} *)
 type destination_form =
   | DstSum    of stoich_ref list
+      (** Every listed compartment gains one individual per firing. The empty
+          list stands for two things the tree does not tell apart: a
+          transition whose individuals leave the model ([Q --> @ mu * Q], a
+          death or emigration), and a [via] transition with no arrow target,
+          [I via hyper_erlang(...)], each of whose branches names its own
+          destination. *)
   | DstBranch of (stoich_ref * expr) list
+      (** One flow per branch, at the branch's weight times the transition's
+          rate. The weights are not normalised or checked: they are branch
+          probabilities only when they sum to one. *)
 
-(* A raw, untyped dwell-law call parsed off a `via` clause (staged-residence
-   proposal, 2026-06-26 §3). The pair is the law name and its keyword arguments
-   exactly as written — e.g. `erlang(stages = 3, mean = 7 'days)` parses to
-   `("erlang", [("stages", ...); ("mean", ...)])`. The typed `via_spec`
-   (stages/mean/rate extraction + validation) is built in the EXPANDER's Phase-2
-   lowering, not here; Phase 1 stores the call verbatim. *)
+(** A [via] clause's dwell law as written: the law's name and its keyword
+    arguments, unchecked. [via erlang(stages = 3, mean = 5 'days)] is
+    [("erlang", [("stages", ...); ("mean", ...)])]. The expander checks it and
+    builds the typed {!via_spec}.
+
+    {@camdl[
+      onset     : E --> I via erlang(stages = 3, mean = 5 'days)
+    ]} *)
 type via_call = string * (string * expr) list
 
-(* A compile-time positive integer (the `stages` count of a staged residence).
-   The only way to build one is [pos_int_of_float], which rejects anything that
-   is not a positive whole-number literal — so a `Pos_int.t` in hand is a proof
-   that `stages` is a usable stage count, and no downstream code re-checks. This
-   is "parse, don't validate" at the via-spec boundary: the smart constructor is
-   the single seam where the invariant is established (staged-residence proposal
-   §3, "`stages` is a compile-time pos_int"). *)
+(** A whole number of at least one, known at compile time: the number of
+    stages of a staged residence. *)
 module Pos_int : sig
   type t
   val of_float : float -> (t, string) result   (* error message on failure *)
   val to_int   : t -> int
 end = struct
+  (** A whole number of at least one, known at compile time: the number of
+      stages of a staged residence. The only way to make one is [of_float],
+      which refuses anything else, so a value of [t] is proof that the count
+      is usable and no later code checks it again. *)
+
+  (** A whole number of at least one. Built only by [of_float]. *)
   type t = int
   let of_float f =
     if Float.is_integer f && f >= 1.0 then Ok (int_of_float f)
@@ -315,100 +611,173 @@ end = struct
   let to_int t = t
 end
 
-(* The mean-or-rate of a staged residence: EXACTLY one is supplied. Encoding the
-   XOR as a sum type makes "both" and "neither" unrepresentable in the typed
-   spec — the validation that exactly one keyword is present happens once, at the
-   point that builds this value. `Mean τ` ⇒ per-stage rate `k/τ`; `Rate ρ` ⇒
-   per-stage rate `k·ρ`. Both are expressions and may reference parameters. *)
+(** The time scale of a staged residence: its mean dwell time, or the
+    reciprocal of that, its exit rate. Either is an expression and may use
+    parameters. With [k] stages, each stage's rate is [k / τ] for [Mean τ]
+    and [k · ρ] for [Rate ρ]. The expander builds one only when exactly one of
+    [mean] and [rate] is given. *)
 type mean_spec = Mean of expr | Rate of expr
 
-(* One arm of a `hyper_erlang` finite mixture (staged-residence proposal §4). A
-   self-contained record per branch (no fragile parallel lists): its mixture
-   [weight], its Erlang [stages]/[mean], an optional per-branch destination
-   [to_] (None ⇒ the transition's arrow target), and a [label] (used for the
-   flat per-branch stage compartment names `<src>__<label>__i`, distinct across
-   branches by construction). The weight is `None` only on the LAST branch ⇒
-   `1 − Σ others`, so the mixture is normalized by construction; a non-last
-   branch missing a weight, or the last branch carrying one, is an error caught
-   when this record is built. *)
+(** One branch of a [hyper_erlang] mixture: an Erlang chain with its own
+    number of stages, its own mean and its own destination, entered with the
+    branch's probability.
+
+    {@camdl[
+      branch(label = fatal, weight = cfr, stages = 3, mean = 8 'days, to = D),
+      branch(label = recover, stages = 2, rate = 1 / tau, to = R)
+    ]} *)
 type hyper_branch = {
-  hb_weight : expr option;          (* None on the LAST branch ⇒ 1 − Σ others *)
+  hb_weight : expr option;
+      (** The probability of entering this branch. [None] only on the last
+          branch, whose weight is one minus the sum of the others, so the
+          mixture is normalised by construction. The type does not hold this:
+          the expander refuses a [None] anywhere else and a weight on the last
+          branch, and, when the weights are constants, a weight outside 0 to 1
+          or weights summing past one. *)
   hb_stages : Pos_int.t;
   hb_mean   : mean_spec;
-  hb_to     : stoich_ref option;    (* per-branch destination; None ⇒ the transition's TO *)
+  hb_to     : stoich_ref option;
+      (** The destination, from [to = D]; [None] means the transition's arrow
+          target, and a branch with neither is an error. *)
   hb_label  : string;
+      (** The branch's name, from [label = fatal]. It names the branch's stage
+          compartments, so it must be unique within the mixture. *)
 }
 
-(* A typed, validated dwell law (the EXPANDER's view of a `via_call`).
-   - [Erlang] (Phase 2): a single chain.
-   - [HyperErlang] (Phase 4): a finite mixture of Erlang chains, branched at
-     entry. Branches have different lengths, so this lowers to FLAT per-branch
-     compartments + parallel chains, NOT one stage dimension. *)
+(** A checked dwell law: the expander's typed form of a {!via_call}. The
+    parser never builds one. *)
 type via_spec =
   | Erlang      of { stages : Pos_int.t; mean : mean_spec }
+      (** [erlang(stages = k, mean = τ)]: the individual passes through [k]
+          exponential stages in turn, so the total dwell time is
+          Erlang-distributed with mean [τ]. *)
   | HyperErlang of { branches : hyper_branch list }
+      (** [hyper_erlang(branch(...), ...)]: a finite mixture of Erlang chains,
+          one chosen on entry with the branches' weights. There are at least
+          two branches. Since branches differ in length, each becomes its own
+          chain of compartments rather than a level of one stage
+          dimension. *)
 
-(* A transition's dynamics: EITHER an ordinary `@ rate` (exponential, the rate
-   IS the propensity) OR a `via law(...)` staged residence (the law supplies the
-   per-stage rate). Never both, never neither — the `@`-XOR-`via` rule. Encoding
-   it as a sum type makes the illegal "both rate and via" / "neither" states
-   unrepresentable: every reader pattern-matches and cannot forget the via case. *)
+(** How fast a transition fires: an ordinary rate, or a staged residence whose
+    law sets the rate of each stage. A transition has exactly one; writing
+    both, or neither, in the block form is a parse error.
+
+    {@camdl[
+      wane[a in age] : R[a] --> S[a] {
+        rate = mu * R[a]
+        where a == adult
+      }
+    ]} *)
 type trans_dynamics =
-  | Rate of expr        (* ordinary exponential transition: `@ rate` *)
-  | Via  of via_call    (* staged residence: `via law(...)` (lowered in Phase 2) *)
+  | Rate of expr
+      (** [@ rate], or [rate = ...] in the block form: the transition's total
+          propensity, so the waiting time to a firing is exponential. *)
+  | Via  of via_call
+      (** [via law(...)], or [via = law(...)] in the block form: a staged
+          residence, as written. *)
 
+(** One entry of the [transitions] block: a flow of individuals from source
+    compartments to destinations, at a rate or through a staged residence.
+
+    {@camdl[
+      birth : --> S[child] @ Pi
+      #[lineage]
+      infection[a in age] : S[a] --> I[a] @ beta * S[a] * sum(b in age, I[b]) / N
+    ]} *)
 type transition_decl = {
   trname    : string;
   trindices : index_binding list;
+      (** The binders that make the transition a family, one member per
+          combination of levels; empty for a single transition. *)
   trsrc     : stoich_ref list;
+      (** The compartments that each lose one individual per firing; empty
+          for an inflow such as a birth. *)
   trdst     : destination_form;
-  trdyn     : trans_dynamics;   (* `@ rate` (Rate) XOR `via law(...)` (Via) *)
+  trdyn     : trans_dynamics;
   trguard   : guard option;
-  (* `#[lineage]` attribute (individual-sampling layer, 2026-05-19
-     proposal). True ⇒ this transition has parent-child lineage
-     semantics: at firing time a parent is sampled from the
-     linear-decomposition parent pool and a tracked child is minted
-     in the destination. The compiler verifies the rate is
-     linear-in-parents (E601) and emits per-pool weight expressions
-     into the IR. *)
+      (** A [where] predicate that drops members of the family. *)
   trlineage : bool;
-  trdoc     : doc option;   (* `#'` doc block (non-semantic; inspect only) *)
+      (** [true] when the transition carries the [#[lineage]] attribute: each
+          firing records which individual caused the new one, so a simulation
+          can produce a transmission tree. The rate must be linear in the
+          infector compartments. *)
+  trdoc     : doc option;
   trloc     : loc;
+      (** From the name to the end of the declaration. *)
   trspan    : loc;
+      (** As [trloc], but starting at the [#[lineage]] attribute when there is
+          one. *)
 }
 
-(* Sub-expressions a transition's dynamics carry, for variable / let-reference
-   analysis that does not care whether the dynamics is a rate or a via law. A
-   `Rate` carries its one rate expr; a `Via` carries its law's keyword-argument
-   exprs (`stages`, `mean`, `rate`, …). Readers that walk "the exprs of a
-   transition" use this instead of reaching into `trdyn`. *)
+(** The expressions a transition's dynamics evaluate: the rate, or every
+    argument of the [via] law. *)
 let trans_dynamics_exprs (d : trans_dynamics) : expr list =
   match d with
   | Rate e        -> [e]
   | Via (_, args) -> List.map snd args
 
+(** A top-level [let]: a named expression, which may be indexed, typed or
+    shaped. The parser fills at most one of [lshape] and [lkind].
+
+    {@camdl[
+      let N = sum(a in age, S[a] + E[a] + I[a] + R[a]) + Q + D
+      let lam[a in age] = beta * sum(b in age, C[a, b] * I[b]) / N
+      let b0 : positive dim P^-1*T^-1 = 0.0001
+      let w : age × patch = [[1.0, 2.0], [3.0, 4.0]]
+    ]} *)
 type let_binding = {
   lname    : string;
   lindices : index_binding list;
-  lshape   : string list option;  (* Some dims → shaped literal, None → scalar/indexed *)
-  lkind    : param_type option;   (* optional type annotation: count, rate, etc. *)
-  ldim     : dim_annotation option;   (* a `dim` clause on the annotation *)
+      (** Binders for an indexed [let], [lam[a in age]]. *)
+  lshape   : string list option;
+      (** The dimensions of a shaped literal, [let w : age × patch = ...]:
+          the body is a nested list laid out over them. *)
+  lkind    : param_type option;
+      (** The kind of a typed [let], [let b0 : positive = ...]. *)
+  ldim     : dim_annotation option;
+      (** A [dim] clause on a typed [let]. *)
   lloc     : loc;
+      (** From the name to the end of the body. *)
   lspan    : loc;
+      (** From the [let] keyword to the end of the body. *)
   lbody    : expr;
-  (* gh#508: `#'` prose. A derived quantity is where a modelling assumption
-     hides — whether `let N[p] = S[p] + E[p] + I[p]` is "total population" or
-     "the currently-infectious denominator" changes the force of infection, and
-     the expression alone cannot say which. Surfaced by `camdlc inspect`. *)
   ldoc     : doc option;
+      (** The [#'] block. It is often the only place that says which
+          quantity a derived expression is meant to be, such as the total
+          population or the infectious denominator. *)
 }
 
+(** A [stratify(...)] declaration: each compartment it applies to is split
+    into one compartment per level of the dimension. Several declarations
+    compose, so a compartment can be stratified by age and by patch.
+
+    {@camdl[
+      stratify(by = age, only = [S, E, I, R])
+    ]} *)
 type stratify_decl = {
   sdim  : string;
+      (** The dimension, from [by]; [""] when [by] is missing, which the
+          expander reports as a dimension with no levels. *)
   sonly : string list option;
+      (** [only = [S, I]]: the compartments to stratify; [None] means all. *)
   sspan : loc;
 }
 
+(** A distribution, by family, with its keyword arguments as written: an
+    observation's measurement model, after [~], or the law an initial value
+    is drawn from.
+
+    The parser rewrites two forms into these families.
+    [diagnostic_test(base = binomial(...), sens = s, spec = c)] becomes a
+    [LikBinomial] (or [LikBernoulli]) whose [p] is replaced by
+    [s · p + (1 − c)(1 − p)]. [zero_inflated(base = neg_binomial(...), pi = z)]
+    becomes [LikZeroInflatedNegBinomial]. An unknown family is reported and
+    parsed as [LikPoisson].
+
+    {@camdl[
+      cases         ~ neg_binomial(mean = rho * projected, r = r_k)
+      I[child] ~ poisson(rate = 5)
+    ]} *)
 type likelihood_kind =
   | LikNegBinomial  of (string * expr) list
   | LikPoisson      of (string * expr) list
@@ -417,36 +786,33 @@ type likelihood_kind =
   | LikBetaBinomial of (string * expr) list
   | LikBeta         of (string * expr) list
   | LikBernoulli    of (string * expr) list
-  (* Zero-inflated NB. Surface: `zero_inflated(base = neg_binomial(mean=, r=),
-     pi = )`, desugared here at parse time to the base's kwargs (`mean`, `r`)
-     plus `pi`. *)
   | LikZeroInflatedNegBinomial of (string * expr) list
+      (** [zero_inflated(base = neg_binomial(mean = m, r = k), pi = z)],
+          flattened: the base's arguments followed by [pi], the probability
+          that a count is a structural zero. *)
 
-(* What one `init { }` entry says its compartment starts at.
-
-   [IVExpr e]   — `S = N0 - I`, a value COMPUTED from parameters, constants and
-                  other compartments' seeded values.
-   [IVLaw (l, loc)] — `I ~ poisson(rate = I0)`, a value DRAWN from [l] once per
-                  particle at t_start. The location is the law's own span, so a
-                  kind or placement diagnostic points at the distribution rather
-                  than at the whole entry.
-
-   One field, not two: an entry is computed or drawn, never both and never
-   neither. *)
+(** What one entry of the [init] block says its compartment starts at:
+    computed, or drawn. An entry is one or the other, never both. *)
 type init_value =
   | IVExpr of expr
+      (** [S = N0 - I]: computed from parameters, constants and other
+          compartments' initial values. *)
   | IVLaw  of likelihood_kind * loc
+      (** [I ~ poisson(rate = I0)]: drawn from the law once at the start of
+          each run, with the span of the law itself, where a diagnostic about
+          the distribution points. *)
 
-(* The keyword arguments of a distribution call, whichever family it is. *)
+(** The keyword arguments of a distribution, whatever its family. *)
 let likelihood_kwargs (l : likelihood_kind) : (string * expr) list =
   match l with
   | LikNegBinomial a | LikPoisson a | LikNormal a | LikBinomial a
   | LikBetaBinomial a | LikBeta a | LikBernoulli a
   | LikZeroInflatedNegBinomial a -> a
 
-(* The family keyword as written in the model file (`poisson`,
-   `neg_binomial`, ...). One definition, so a diagnostic and the IR tag cannot
-   disagree about what a distribution is called. *)
+(** The family's name, as diagnostics and the compiled model spell it:
+    the keyword written in the model file (["poisson"], ["neg_binomial"]),
+    except that the zero-inflated family is ["zero_inflated_neg_binomial"]
+    rather than the [zero_inflated] the model writes. *)
 let lik_family_name (l : likelihood_kind) : string =
   match l with
   | LikNegBinomial _  -> "neg_binomial"
@@ -458,7 +824,7 @@ let lik_family_name (l : likelihood_kind) : string =
   | LikBernoulli _    -> "bernoulli"
   | LikZeroInflatedNegBinomial _ -> "zero_inflated_neg_binomial"
 
-(* Rewrite every keyword-argument expression, keeping the family. *)
+(** Rewrites every keyword-argument expression, keeping the family. *)
 let map_likelihood_kwargs (f : expr -> expr) (l : likelihood_kind) : likelihood_kind =
   let g = List.map (fun (k, e) -> (k, f e)) in
   match l with
@@ -471,222 +837,353 @@ let map_likelihood_kwargs (f : expr -> expr) (l : likelihood_kind) : likelihood_
   | LikBernoulli a    -> LikBernoulli    (g a)
   | LikZeroInflatedNegBinomial a -> LikZeroInflatedNegBinomial (g a)
 
-(* Every expression an init entry evaluates — the RHS, or every argument of the
-   law. The passes that walk init expressions (index resolution, the Rule-1
-   unit walk, the substitution rewrites) all go through this, so a law's
-   arguments get exactly the same treatment as a deterministic RHS. *)
+(** Every expression an initial value evaluates: the right-hand side, or
+    every argument of the law. Passes over initial values go through this, so
+    a law's arguments are treated exactly as a computed value is. *)
 let init_value_exprs (v : init_value) : expr list =
   match v with
   | IVExpr e -> [e]
   | IVLaw (l, _) -> List.map snd (likelihood_kwargs l)
 
+(** Rewrites every expression of an initial value, keeping its form. *)
 let map_init_value (f : expr -> expr) (v : init_value) : init_value =
   match v with
   | IVExpr e -> IVExpr (f e)
   | IVLaw (l, loc) -> IVLaw (map_likelihood_kwargs f l, loc)
 
+(** One entry of the [init] block: a compartment, one of its strata or a
+    family of strata, and the value it starts at. The parser fills at most one
+    of [iindices] and [ibindings].
+
+    {@camdl[
+      S[a in age] = 500
+      I[child] ~ poisson(rate = 5)
+    ]} *)
 type init_entry = {
   icomp     : string;
-  iindices  : index_item list;       (* positional: S[child] *)
-  ibindings : index_binding list;    (* loop: [p in patch] *)
+  iindices  : index_item list;
+      (** [I[child]]: the one stratum the entry sets. *)
+  ibindings : index_binding list;
+      (** [S[a in age]]: binders, one entry per level. *)
   ivalue    : init_value;
   iloc      : loc;
   ispan     : loc;
 }
 
-(* Shared "specified times" schedule core: `every = E` (regular cadence) or
-   `at = [...]` (explicit times). Reused across observation / output (and the
-   `at` arm of interventions); each surface lowers it to its own IR variant. *)
+(** A set of times, given by a regular step or listed: when an observation
+    stream emits synthetic rows, or when the [output] block records the
+    state. *)
 type schedule_core =
-  | SchedEvery of Time_pos.cadence Time_pos.t        (* every = E  *)
-  | SchedAt    of Time_pos.instant Time_pos.t list   (* at = [...] *)
+  | SchedEvery of Time_pos.cadence Time_pos.t
+      (** [every = 7 'days], written [every 7 'days] in [emit_schedule]: a
+          cadence. *)
+  | SchedAt    of Time_pos.instant Time_pos.t list
+      (** [at = [0, 30, 60]], written [at [...]] in [emit_schedule]: one
+          instant per entry. *)
 
+(** The model quantity an observation stream measures, from its
+    [projected = ...] line. *)
 type obs_projection =
   | ProjIncidence  of string * index_item list
+      (** A transition's cumulative flow, by name. The parser never builds
+          it; the expander uses it only as a placeholder after reporting a
+          missing projection. [incidence(infection)] parses as
+          [ProjDerived]. *)
   | ProjDerived    of expr
+      (** The expression on the right of [=]: a compartment, [I / N], or a
+          call such as [incidence(infection)].
 
-(* A measurement-model statement: `<scored_col> ~ Dist(kw = ..., ...)`.
-   The left side is a declared value column (the scored outcome); the right
-   side is the distribution family + its keyword args. Distinct from the
-   prior `~` (no `| dim` pooling suffix — meaningless on a likelihood). *)
+          {@camdl[
+            projected     = incidence(infection)
+            projected = I / N
+          ]} *)
+
+(** An observation stream's measurement model, [npos ~ binomial(...)]: the
+    data column scored, and the distribution it is scored under.
+
+    {@camdl[
+      npos      ~ binomial(n = tested, p = projected)
+    ]} *)
 type obs_measurement = {
-  om_scored : string;          (* the `~` LHS: a declared value column *)
-  om_lik    : likelihood_kind; (* the `~` RHS distribution *)
+  om_scored : string;
+      (** The scored column, which must be a declared value column; [""]
+          only after a parse error. *)
+  om_lik    : likelihood_kind;
 }
 
-(* The role of a declared file column (the `columns { name : role }` block,
-   2026-06-10 observation data-entry §2.2):
-   - [ColTime]  — the time axis (exactly one per stream); the FIT time source.
-   - [ColDim d] — a model dimension `d`; values bind to that dimension's levels.
-   - [ColValue k] — an observed value of type `k` (count/real/probability/…);
-     either the `~` LHS (scored) or RHS-referenced auxiliary data. *)
+(** What one column of an observation's data file holds, from its entry in
+    the [columns] block. A stream declares either one [ColTime] column or a
+    [ColWindowStart] and [ColWindowStop] pair, never both. *)
 type obs_col_role =
   | ColTime
+      (** [time : time]: the time each row is labelled with. *)
   | ColDim   of string
+      (** [age : dim]: the levels of a dimension. The column is named after
+          the dimension, and the string repeats that name. The stream's header
+          binders and its [: dim] columns must match one to one. *)
   | ColValue of param_type
-  (* gh#833: the opening / closing boundary of the period this row covers.
-     Declared as a pair and mutually exclusive with [ColTime] — a stream
-     names exactly one set of temporal columns, either a time column or a
-     window pair. [ColWindowStop] doubles as the stream's fit time source. *)
+      (** [cases : count]: an observed value of that kind, either the scored
+          column or data the distribution reads, such as a binomial's [n]. A
+          value column that is neither is an error. *)
   | ColWindowStart
+      (** [window_start]: the opening boundary of the period a row covers. *)
   | ColWindowStop
+      (** [window_stop]: the closing boundary of the period a row covers. *)
 
-(* A declared file column: header name + role. *)
+(** One entry of an observation's [columns] block: a column of the data file
+    and its role.
+
+    {@camdl[
+      columns   { time : time, npos : count, tested : count }
+    ]} *)
 type obs_column = {
   oc_name : string;
   oc_role : obs_col_role;
 }
 
-(* `covers = <form>(<time column>, <duration>?)` (gh#833), as written. The
-   form name and the column are kept verbatim so the expander can check the
-   column against the stream's declared time column and report the author's
-   own spelling; the duration stays an [expr] so it reuses ordinary unit
-   handling (`7 'days`) and may also name a data column for a per-row width. *)
+(** An observation's [covers] line, as written: the period each row's count
+    accumulates over, stated relative to the row's time label.
+
+    The forms are [day(t)], the one day starting at the label;
+    [starting_on(t, d)], the span [d] starting at the label;
+    [ending_on(t, d)], the span [d] whose last included day is the label; and
+    [closing_at(t, d)], the span [d] ending at the label, the label itself
+    excluded. The expander checks the form, that [t] is the stream's time
+    column, and that [d] is a fixed duration.
+
+    {@camdl[
+      covers        = closing_at(time, 7 'days)
+    ]} *)
 type obs_covers = {
-  ocv_form : string;        (* "day" | "starting_on" | "ending_on" *)
-  ocv_col  : string;        (* the time column named in the call *)
-  ocv_span : Time_pos.span Time_pos.t option;   (* absent for `day(t)` *)
+  ocv_form : string;
+      (** The form's name; [""] after a parse error. *)
+  ocv_col  : string;
+      (** The time column named in the call. *)
+  ocv_span : Time_pos.span Time_pos.t option;
+      (** The duration, a span position; [None] for [day(t)]. *)
   ocv_loc  : loc;
 }
 
+(** One stream of the [observations] block: the columns of its data file, the
+    model quantity the data measure, and the distribution the data are scored
+    under. A missing [columns], projection or measurement is kept as [None]
+    so the expander can name the missing line. *)
 type obs_decl = {
   oname       : string;
   oindices    : index_binding list;
-  (* `from <label>` — the data SOURCE the stream reads from (§2.4). The
-     source label is the data key (`--data label=file`); None defaults the
-     key to the stream name. *)
+      (** Binders for a stratified stream, [cases[a in age]]: one stream per
+          level, each binder matched by a [: dim] column. *)
   osource     : string option;
-  (* `columns { name : role }` — the full, explicit file schema (§2.2);
-     always required. None lets the expander emit the missing-field
-     diagnostic. *)
+      (** [from label]: the key under which the data file is supplied,
+          [--data label=file]; [None] uses the stream's name. *)
   ocolumns    : obs_column list option;
-  (* m12 in 2026-04-19 review: each of measurement/projection is mandatory;
-     an empty `cases {}` block previously defaulted to Poisson(rate=1) on an
-     incidence projection, silently producing a meaningless but compile-green
-     likelihood. Represented as option here so the expander can emit a
-     specific diagnostic naming the missing field. *)
   omeasurement : obs_measurement option;
   oprojection  : obs_projection option;
-  (* `emit_schedule` (§2.5): the SIMULATE-only emission cadence — when
-     `simulate --obs` writes synthetic rows. Optional and never consulted by
-     the fit path (the data file's `time` column drives there). *)
+      (** The projection line. The parser does not check the name on the left
+          of its [=], so [foo = incidence(infection)] is accepted as the
+          projection. *)
   oschedule   : schedule_core option;
-  (* `covers = day(t) | starting_on(t, d) | ending_on(t, d)` (gh#833): what
-     each row covers. Surface-level and unlowered — the expander converts the
-     duration to axis units and picks the anchor. [None] is either a stream
-     that declared nothing (transitional) or one carrying window columns,
-     which ARE the declaration and need no `covers =` line. *)
+      (** [emit_schedule]: when [simulate --obs] writes synthetic rows. A fit
+          never reads it; there the data file's rows give the times. *)
   ocovers     : obs_covers option;
-  odoc        : doc option;   (* `#'` doc block (non-semantic; inspect only) *)
+      (** The [covers] line. [None] is right for a stream that reads state at
+          an instant, or one with window columns; a stream that accumulates a
+          flow with neither is an error. *)
+  odoc        : doc option;
   oloc        : loc;
   ospan       : loc;
 }
 
+(** What an intervention, event or reactive intervention does to the state
+    when it fires. *)
 type action_decl =
-  | ATransfer of (string * expr) list      (* kwargs: fraction=, count=, from=, to= *)
+  | ATransfer of (string * expr) list
+      (** [transfer(fraction = f, from = S, to = V)], or with [count = n]:
+          moves individuals between compartments. The keyword arguments are
+          kept as written. *)
   | ASet      of string * index_item list * expr
-  | AAdd      of string * index_item list * expr   (* compartment, indices, count expr *)
+      (** [I = I + 10] in the block form: sets a compartment, by name and
+          optional indices, to the value. *)
+  | AAdd      of string * index_item list * expr
+      (** [add(I, 5)]: adds the rounded value to a compartment, by name and
+          optional indices; a negative value removes individuals. *)
 
+(** When an intervention or event fires. *)
 type schedule_decl =
   | SAtTimes of Time_pos.instant Time_pos.t list
-  (** Recurring schedule. [from] defaults to simulate.from if None; [until]
-      (written `to`) to simulate.to. *)
+      (** [at [180, 545]], or [at = [...]] in the block form: at each listed
+          instant. A block form that states no schedule also parses to
+          [SAtTimes []], which never fires. *)
   | SRecurring of { every : Time_pos.cadence Time_pos.t;
                     from  : Time_pos.instant Time_pos.t option;
                     until : Time_pos.instant Time_pos.t option }
+      (** [{ every = 30 'days  from = 0 'days  to = 2 'years }]: the cadence
+          [every], and the optional window start [from] and end [until]
+          (written [to]), which default to the run's start and end. *)
   | SEveryAtDay of { every : Time_pos.cadence Time_pos.t; at_day : Time_pos.phase Time_pos.t }
+      (** [every 365 'days at_day 100 'days]: once per period [every], at the
+          phase [at_day] from time zero. Only the [add] action accepts
+          it. *)
 
+(** One entry of an [interventions] or [events] block: one or more actions and
+    when they fire. Interventions fire only when a scenario or [--enable]
+    turns them on; events always fire. The two blocks share this grammar.
+
+    {@camdl[
+      sia    : transfer(fraction = cov, from = S, to = V) at [180 'days]
+      pulse  : { I = I + 10  at = [90 'days] }
+      yearly : add(S, 100) every 365 'days at_day 100 'days
+    ]} *)
 type intervention_decl = {
   ivname    : string;
-  ivindices : index_binding list;   (* [] for non-indexed interventions *)
-  ivaction  : action_decl list;     (* one or more; block-form `set` keeps all *)
+  ivindices : index_binding list;
+      (** Binders for a family, one member per level; empty for a single
+          intervention. *)
+  ivaction  : action_decl list;
+      (** The actions in source order. Only the block form holds more than
+          one, and then all are [ASet]; an empty list is an error. *)
   ivschedule: schedule_decl;
-  ivguard   : guard option;         (* where expr — compile-time filter *)
+  ivguard   : guard option;
+      (** A [where] predicate that drops members of the family. *)
   ivloc     : loc;
   ivspan    : loc;
 }
 
-(* gh#204 reactive trigger predicate (pre-expansion). A dedicated predicate type
-   (not the general expr) because the general expr grammar has comparisons but
-   not and/or/not. The leaf [TgAtom] carries a comparison expr (e.g.
-   `observed(weekly_afp) >= afp_trigger_threshold`); the expander destructures
-   it — recognising observed()/sum_observed() on one side, a static threshold on
-   the other — and lowers to Ir.trigger_expr. Keeping the leaf a plain expr
-   avoids a grammar conflict with the expr-level comparison productions. *)
+(** The condition of a reactive intervention's [when] clause: comparisons of
+    observed surveillance data with thresholds, combined with [and], [or] and
+    [not]. *)
 type trig_pred =
   | TgAtom of expr
+      (** A comparison such as [observed(cases) >= threshold], as an
+          expression. The expander checks that one side reads [observed] or
+          [sum_observed] and the other is a constant or a parameter. *)
   | TgAnd  of trig_pred * trig_pred
   | TgOr   of trig_pred * trig_pred
   | TgNot  of trig_pred
+      (** [not]: the grammar puts it only directly on a comparison, and has no
+          parentheses for predicates, so a negated conjunction cannot be
+          written. *)
 
+(** One entry of the [reactive_interventions] block: an action that fires when
+    a condition on observed surveillance data holds, tested at each
+    observation-emission time. Like an intervention it is off unless a
+    scenario or [--enable] turns it on.
+
+    {@camdl[
+      mop_up : when sum_observed(cases, window = 28 'days) >= threshold {
+        after    = 21 'days
+        action   = transfer(fraction = cov, from = S, to = V)
+      }
+    ]} *)
 type reactive_decl = {
   rxname     : string;
-  rxindices  : index_binding list;   (* [] for non-indexed policies *)
+  rxindices  : index_binding list;
+      (** Binders for a family; empty for a single policy. *)
   rxwhen     : trig_pred;
-  rxafter    : Time_pos.runtime_offset Time_pos.t option;  (* lag before the effect; default 0 *)
-  rxonce     : expr option;          (* fire-and-disable; default true *)
-  rxcooldown : Time_pos.runtime_offset Time_pos.t option;  (* min time between firings *)
+  rxafter    : Time_pos.runtime_offset Time_pos.t option;
+      (** [after]: the delay from the trigger to the action, a run-time
+          offset; [None] means none. *)
+  rxonce     : expr option;
+      (** [once = true] or [once = false], as an expression; [None] means
+          [true]. Any other expression is an error. *)
+  rxcooldown : Time_pos.runtime_offset Time_pos.t option;
+      (** [cooldown]: the least time between firings of a repeating policy,
+          measured from each trigger, a run-time offset; not allowed with
+          [once = true]. *)
   rxaction   : action_decl;
-  rxguard    : guard option;         (* where expr — compile-time filter *)
+      (** The [action]; [ATransfer []] after a parse error for a missing
+          one. *)
+  rxguard    : guard option;
+      (** A [where] predicate that drops members of the family. *)
   rxloc      : loc;
   rxspan     : loc;
 }
 
+(** One equation of the [ode] block: the time derivative ([oderiv]) of a real
+    compartment ([ocomp]).
+
+    {@camdl[
+      W = xi * total_I - delta * W
+    ]} *)
 type ode_decl = { ocomp: string; oderiv: expr; odspan: loc }
 
-(* A generated-quantity declaration (proposal 2026-06-25): `name [idx]? = body`.
-   The body is a plain [expr]; the expander's quantity classifier decides
-   whether it is a temporal reduction, a series, or reduction arithmetic over
-   earlier scalar quantities (it is not resolved as an ordinary rate expr). *)
+(** One entry of the [quantities] block: a quantity computed from a run, such
+    as a final value, a peak, a series, or arithmetic over earlier entries.
+
+    The expander reads the body as a recipe, not as an ordinary expression:
+    a call such as [final(D)] or [max(I)] names a reduction over the run, and
+    these names are not keywords.
+
+    {@camdl[
+      total_deaths = final(D)
+      peak_reported = max(observations.cases)
+    ]} *)
 type quantity_decl = {
   qd_name    : string;
-  qd_indices : index_binding list;   (* [] for an unstratified quantity *)
+  qd_indices : index_binding list;
+      (** Binders for a quantity reported per level; empty for one value. *)
   qd_body    : expr;
-  qd_doc     : doc option;   (* `#'` doc block (non-semantic; inspect + doc_index) *)
+  qd_doc     : doc option;
   qd_loc     : loc;
   qd_span    : loc;
 }
 
-(* A counterfactual-contrast declaration (proposal 2026-06-25):
-   `name = <body>`. The body is arithmetic (reusing [EBinOp]) over run-rooted
-   [ERunMember] operands. There is no window — the fork is derived in the reducer
-   (the last saved snapshot before the toggled intervention's fire time) and the
-   result is shaped over `[fork, run-end]`. Resolved + lowered to Ir.contrast by
-   the expander. *)
+(** One entry of the [contrasts] block: arithmetic over the quantities or
+    observation streams of different scenarios' runs, such as the deaths an
+    intervention averted. Its operands are [ERunMember] references.
+
+    {@camdl[
+      averted = fitted.quantities.total_deaths - with_sia.quantities.total_deaths
+    ]} *)
 type contrast_decl = {
   cd_name   : string;
-  cd_body   : expr;            (* arithmetic over ERunMember; reuses EBinOp *)
+  cd_body   : expr;
   cd_doc    : doc option;
   cd_loc    : loc;
   cd_span   : loc;
 }
 
-(* A forcing-block keyword-argument value (gh#423). The string-vs-expr
-   distinction is carried in the TYPE, confined to the forcing surface — the
-   global [expr] AST is unchanged. A quoted STRING names the outside world (a
-   data-file path or a file column) and parses to [FStr]; a bare expression
-   names something inside the model (a param, a dimension, a table, or a closed
-   enum like `method = linear`) and parses to [FExpr]. Consumers require the
-   arm that matches the kwarg's role, so `value_col = C` (bare) and
-   `table = "T"` (quoted) fail with a signposted diagnostic instead of being
-   silently indistinguishable via a `dummy_loc`. Reader's rule: quoted =
-   outside the model (file), bare = inside the model or a closed enum. *)
-type farg_value =
-  | FStr  of string   (* a quoted string: a file path or a file column name *)
-  | FExpr of expr     (* a bare expression: model value, model name, or enum *)
+(** The value of one argument of a forcing declaration: a quoted string, which
+    names something outside the model, or an expression, which names
+    something inside it. Each argument accepts one of the two, and the other
+    is an error.
 
-(* The bare-expression view of a forcing arg, or [None] for a [FStr]. Readers
-   that walk "the exprs of a forcing" (unit / date analysis) use this so a
-   string literal — which carries no unit or date content — is skipped. *)
+    {@camdl[
+      data      = "data/flu_forcing.tsv"
+      method    = linear
+    ]} *)
+type farg_value =
+  | FStr  of string
+      (** A quoted string: a data-file path or a column of that file. *)
+  | FExpr of expr
+      (** A bare expression: a value, a model name such as a table, or a word
+          from a fixed set such as [linear]. *)
+
+(** The expression of a forcing argument, or [None] for a quoted string,
+    which carries no unit or date. *)
 let farg_expr_opt = function FExpr e -> Some e | FStr _ -> None
 
-(* The forcing kinds. [FUnknown] keeps the spelling of a kind the compiler does
-   not know, which the expander reports (E408). *)
+(** The kind of a forcing, the word after the colon in
+    [seasonal : sinusoidal 'ratio], which decides the arguments it takes
+    and the function of time it is. The language specification's section
+    on forcings defines each kind.
+
+    {@camdl[
+      seasonal : sinusoidal 'ratio {
+        amplitude = 0.2
+        period    = 365 'days
+        phase     = 0 'days
+        baseline  = 1.0
+      }
+    ]} *)
 type forcing_kind =
   | FSinusoidal | FPiecewise | FInterpolated | FPeriodic | FFourier
   | FPeriodicSpline | FBspline
   | FUnknown of string
+      (** A word that is not a forcing kind, kept as written so that the
+          expander can name it when it reports the declaration (E408). *)
 
+(** The kind a word names; a word that names none is [FUnknown]. *)
 let forcing_kind_of_string = function
   | "sinusoidal"      -> FSinusoidal
   | "piecewise"       -> FPiecewise
@@ -697,6 +1194,8 @@ let forcing_kind_of_string = function
   | "bspline"         -> FBspline
   | s                 -> FUnknown s
 
+(** The kind as the model file writes it, the inverse of
+    {!forcing_kind_of_string}. *)
 let forcing_kind_name = function
   | FSinusoidal     -> "sinusoidal"
   | FPiecewise      -> "piecewise"
@@ -707,96 +1206,176 @@ let forcing_kind_name = function
   | FBspline        -> "bspline"
   | FUnknown s      -> s
 
+(** One entry of the [forcing] block: a named function of time, such as a
+    seasonal factor or a population read from a file, with the unit of its
+    values. *)
 type func_decl = {
   fname    : string;
   findices : index_binding list;
+      (** Binders for a family of forcings, one per level. *)
   fkind    : forcing_kind;
-  (* Required tier-3 unit literal (GH #8): annotates the
-     scale/dimension of values produced by this forcing function.
-     E.g. `pop : interpolated 'count`, `birthrate : interpolated
-     'per_year`, `seasonal : sinusoidal 'ratio`. The dim-checker
-     uses this authoritatively — no value-based inference fallback. *)
   funit    : unit_lit;
+      (** The unit of the forcing's values, required:
+          [pop : interpolated 'count], [seasonal : sinusoidal 'ratio]. The
+          dimension checker takes the forcing's dimension from it. *)
   fargs    : (string * farg_value) list;
   fspan    : loc;
 }
 
+(** The [trajectories] entry of the [output] block: when a simulation records
+    the state. *)
 type output_traj_decl = {
   otschedule  : schedule_core;
+      (** [every = 7 'days] or [at = [...]]. With neither, the parser fills
+          [every = 1], in the model's time unit. *)
   otformat    : string;
+      (** [format = ...]; ["tsv"] when absent. It is copied into the compiled
+          model, but the language specification states that the writer always
+          emits wide TSV whatever it says. *)
 }
 
+(** The [output] block. *)
 type output_decl = {
   out_trajectories: output_traj_decl option;
+      (** [None] keeps the default: a row every 1 time unit over the run. *)
   out_span: loc;
 }
 
-(* gh#166: sim_integrator ("rk4"|"rk45", None -> default rk4); sim_atol/sim_rtol
-   are the dimensionless adaptive tolerances (rk45 only). Each carries its source
-   span so the expander's semantic diagnostics (unknown method, rk4-takes-no-
-   tolerances, dimensioned tolerance) point at the offending token. *)
+(** The [simulate] block: the run's time window, step and ODE integrator.
+
+    {@camdl[
+      from = 0 'days
+      to   = 365 'days
+      dt   = 0.5 'days
+      integrator = rk45 { atol = 1e-8  rtol = 1e-6 }
+    ]} *)
 type simulate_decl = {
   sim_from: Time_pos.instant Time_pos.t;
+      (** [from]: the start, an instant; [0] when absent. *)
   sim_to: Time_pos.instant Time_pos.t;
-  sim_to_loc: loc option;   (* span of the `to = ...` entry, for E602 *)
+      (** [to]: the end, an instant, which may be an observation anchor such
+          as [last_obs + 4 'weeks]; [100] when absent, without a
+          diagnostic. *)
+  sim_to_loc: loc option;
+      (** The span of the whole [to = ...] entry; [None] when it is
+          absent. *)
   sim_dt: Time_pos.length Time_pos.t option;
+      (** [dt]: the step of the discrete-time backends, a length. *)
   sim_integrator: (string * loc) option;
+      (** [integrator = rk4] or [rk45], as written, with its span; the
+          expander checks the name. [None] means rk4. *)
   sim_atol: (expr * loc) option;
+      (** [atol] in an [rk45 { ... }] block: a dimensionless absolute
+          tolerance, with its span. *)
   sim_rtol: (expr * loc) option;
+      (** [rtol] in an [rk45 { ... }] block: a dimensionless relative
+          tolerance, with its span. *)
   sim_span: loc;
 }
 
+(** One entry of the [timepoints] block: a named instant. The expander
+    judges each time as an instant position, so a mistake in one is
+    reported, but leaves the block out of the compiled model, so the names
+    are not defined anywhere in it. *)
 type timepoint_decl = { tpname: string; tptime: Time_pos.instant Time_pos.t; tpspan: loc }
 
+(** One field of a scenario: a change the scenario makes to the model.
+
+    {@camdl[
+      extends = baseline
+      enable  = [sia]
+      scale = { beta = 1.5 }
+      simulate { to = 730 'days }
+    ]} *)
 type scenario_field =
   | ScLabel   of string
+      (** [label = "no SIA"]: a display name. A bare word or a number is
+          accepted too. *)
   | ScEnable  of string list
+      (** [enable = [sia]]: interventions to turn on. The parser keeps only
+          the bare names of a list, so [enable = sia], without brackets,
+          enables nothing. *)
   | ScDisable of string list
+      (** [disable = [sia]]: interventions to turn off. The list is read as
+          for [ScEnable]. *)
   | ScSet     of (string * expr) list
+      (** [set = { cov = 0.9 }]: parameter values. An indexed entry
+          [beta[child] = 0.3] is stored under the joined name ["beta_child"].
+          A field [beta = 0.3] outside a block is a [ScSet] of one parameter.
+          A field [beta = { ... }] under any name other than [set] or [scale]
+          is stored as setting the parameter of that name to [0], and the
+          block's contents are dropped. *)
   | ScScale   of (string * expr) list
+      (** [scale = { beta = 1.5 }]: multiplies parameters by factors. *)
   | ScCompose of string list
+      (** [compose = [with_sia]]: other scenarios whose changes apply in
+          sequence. The list is read as for [ScEnable]. *)
   | ScTEnd    of Time_pos.instant Time_pos.t
-  | ScExtends of string     (** `extends = parent_name` — single-inheritance sugar *)
+      (** [simulate { to = ... }]: the scenario's end, an instant, the only
+          setting of [simulate] a scenario may change. *)
+  | ScExtends of string
+      (** [extends = baseline]: inherit the parent's fields; the parent's
+          enable, disable and compose lists come before the child's. *)
 
+(** One scenario of the [scenarios] block: a named set of changes to the
+    model, run as one arm of a comparison. *)
 type scenario_decl = {
   scname   : string;
   scfields : scenario_field list;
   scspan   : loc;
 }
 
-(** Source of dimension levels: inline list or read from a file column *)
+(** Where a dimension's levels come from. *)
 type dim_source =
   | DInline of string list
-  (* fn_name: what the user wrote before `(` (expected "read").
-     col_kw:  keyword for the column arg (expected "column").
-     path:    file path string.
-     col:     column name string.
-     The parser accepts any `ident(STRING, ident = STRING)` and
-     defers the "is it actually `read(…, column = …)`?" check to the
-     expander, where a proper E2xx diagnostic can fire — M11 in the
-     2026-04-19 review. *)
+      (** [age = [child, adult]]: the levels, in order. *)
   | DRead   of { fn_name: string; path: string; col_kw: string; col: string }
+      (** [patch = read("data/pop.tsv", column = "patch")]: the levels listed
+          in a column of a data file. The parser accepts any call of the shape
+          [f("...", k = "...")] and keeps [f] as [fn_name] and [k] as
+          [col_kw]; the expander requires them to be [read] and [column]. *)
 
+(** One entry of the [dimensions] block: a named set of levels, such as age
+    groups or patches, by which compartments are stratified and families are
+    indexed.
+
+    {@camdl[
+      age   = [child, adult]
+      patch = read("data/seir_defines_pop.tsv", column = "patch")
+    ]} *)
 type dimensions_entry = {
   dename : string;
   desrc  : dim_source;
-  dedoc  : doc option;   (* `#'` doc block (non-semantic; inspect only) *)
+  dedoc  : doc option;
   despan : loc;
 }
 
+(** The [balance] block: a compartment ([bcomp]) overwritten after every step
+    with an expression ([bexpr]), so that a population identity holds. Only
+    the chain-binomial backend supports it.
+
+    {@camdl[
+      R = pop(t) - S - E - I - Q
+    ]} *)
 type balance_decl = { bcomp: string; bexpr: expr; bspan: loc }
 
+(** One top-level item of a model file. A file parses to a list of these, in
+    source order. A block written twice is accepted: the expander joins the
+    entries of repeated list blocks, and for [time_unit], [origin],
+    [description], [simulate], [output] and [balance] it keeps the last one,
+    without a diagnostic. *)
 type declaration =
   | DTimeUnit    of unit_lit * loc
+      (** [time_unit = 'days]: the unit of the model's time axis. *)
   | DDescription of string
-  (* The file-header `#'` block, which documents the MODEL rather than any one
-     declaration (gh#750): what it is, what it is fitted to, what it branches
-     from. Produced ONLY by the `file` rule, from the MODEL_DOC tokens the lexer
-     emits for `#'` lines that precede every declaration — so it can only ever
-     sit at the head of the list. Like every other doc it is non-semantic and
-     rides the IR envelope's `docs` dictionary, outside the hashed model. *)
+      (** [description = "..."]: a one-line description of the model. *)
   | DModelDoc    of doc
+      (** The [#'] block at the head of the file, which documents the model
+          rather than a declaration. Only the first item of the list can be
+          one. *)
   | DOrigin      of string
+      (** [origin = date("YYYY-MM-DD")]: the calendar date of time zero, as
+          the text inside [date(...)]; [""] after a parse error. *)
   | DDimensions  of dimensions_entry list
   | DCompartments of compartment_decl list
   | DParameters   of param_decl list
@@ -805,32 +1384,36 @@ type declaration =
   | DTransitions  of transition_decl list
   | DObservations of obs_decl list
   | DInterventions of intervention_decl list
+      (** [interventions]: actions that fire only when enabled. *)
   | DEvents        of intervention_decl list
-  | DReactiveInterventions of reactive_decl list   (* gh#204 *)
+      (** [events]: actions that always fire. *)
+  | DReactiveInterventions of reactive_decl list
   | DODE          of ode_decl list
   | DOutput       of output_decl
   | DSimulate     of simulate_decl
   | DInit         of init_entry list
   | DTimepoints   of timepoint_decl list
   | DStratify     of stratify_decl
+      (** One [stratify(...)] line. *)
   | DLet          of let_binding
+      (** One [let]. *)
   | DScenarios    of scenario_decl list
   | DBalance      of balance_decl
-  | DQuantities   of quantity_decl list   (* proposal 2026-06-25 *)
-  | DContrasts    of contrast_decl list   (* counterfactual contrasts, proposal 2026-06-25 *)
+  | DQuantities   of quantity_decl list
+  | DContrasts    of contrast_decl list
 
-(* ── Cross-file locs ─────────────────────────────────────────────────────────
-   A `quantities { }` block can arrive from a SEPARATE compilation unit
-   (`camdlc MODEL.camdl --quantities VOCAB.camdl`), and every diagnostic about
-   it — an undeclared name, a bad reduction — must name that file, not the
-   model. The parser leaves [loc.file] empty and the expander fills it from the
-   context's single filename, so the decls parsed out of the vocabulary file are
-   stamped with their own path here, before they are spliced into the model's
-   declaration list. Only empty [file] fields are filled: a loc that already
-   names a file keeps it. *)
+(** [l] with [file] set to [file], unless it already names a file.
+
+    A [quantities] block can come from a second file
+    ([camdlc MODEL.camdl --quantities VOCAB.camdl]), and a diagnostic about it
+    must name that file, not the model. The parser leaves every [file] empty
+    and the expander fills it with the model's name, so the declarations read
+    from the second file are stamped with its path before they join the
+    model's list. *)
 let stamp_loc_file ~file (l : loc) : loc =
   if l.file = "" then { l with file } else l
 
+(** [e] with every location in it stamped by {!stamp_loc_file}. *)
 let rec stamp_expr_file ~file (e : expr) : expr =
   let go = stamp_expr_file ~file in
   match e with
@@ -852,6 +1435,8 @@ and stamp_index_item_file ~file = function
   | IPosn e -> IPosn (stamp_expr_file ~file e)
   | INamed (n, e) -> INamed (n, stamp_expr_file ~file e)
 
+(** A quantity declaration with its body and spans stamped by
+    {!stamp_loc_file}. *)
 let stamp_quantity_decl_file ~file (qd : quantity_decl) : quantity_decl =
   { qd with qd_body = stamp_expr_file ~file qd.qd_body;
             qd_loc  = stamp_loc_file ~file qd.qd_loc;
