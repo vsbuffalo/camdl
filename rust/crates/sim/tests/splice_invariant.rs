@@ -169,7 +169,7 @@ fn splice_is_byte_identical_to_the_continuous_tail() {
     // ── Head: run [0, T*], capturing the final RNG state. ──
     let (head_model, head_params) = sir_model(ints(T_STAR as u64), T_STAR);
     let mut captured = StatefulRng::new(0); // overwritten by the capture
-    let head_cfg = ChainBinomialConfig { t_start: 0.0, t_end: T_STAR, dt: 1.0 };
+    let head_cfg = ChainBinomialConfig { t_start: 0.0, t_end: T_STAR, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe };
     let traj_head = run_chain_binomial_with_observer(
         &head_model,
         &head_params,
@@ -195,7 +195,7 @@ fn splice_is_byte_identical_to_the_continuous_tail() {
         real_s: state_at_tstar.real_state.clone(),
         rng: Some(captured),
     };
-    let tail_cfg = ChainBinomialConfig { t_start: T_STAR, t_end: T_END, dt: 1.0 };
+    let tail_cfg = ChainBinomialConfig { t_start: T_STAR, t_end: T_END, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe };
     let traj_tail = run_chain_binomial_with_observer(
         &tail_model,
         &tail_params,
@@ -209,7 +209,7 @@ fn splice_is_byte_identical_to_the_continuous_tail() {
 
     // ── Full: the continuous run [0, t_end]. ──
     let (full_model, full_params) = sir_model(ints(T_END as u64), T_END);
-    let full_cfg = ChainBinomialConfig { t_start: 0.0, t_end: T_END, dt: 1.0 };
+    let full_cfg = ChainBinomialConfig { t_start: 0.0, t_end: T_END, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe };
     let traj_full = run_chain_binomial(&full_model, &full_params, SEED, &full_cfg).unwrap();
 
     // Index the tail by time for lookup.
@@ -285,7 +285,7 @@ fn splice_is_byte_identical_to_the_continuous_tail() {
 #[test]
 fn resume_default_is_byte_identical_to_the_plain_wrapper() {
     let (model, params) = sir_model(ints(T_END as u64), T_END);
-    let cfg = ChainBinomialConfig { t_start: 0.0, t_end: T_END, dt: 1.0 };
+    let cfg = ChainBinomialConfig { t_start: 0.0, t_end: T_END, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe };
 
     let traj_wrapper = run_chain_binomial(&model, &params, SEED, &cfg).unwrap();
     let traj_default =
@@ -310,7 +310,7 @@ fn off_grid_resume_time_is_rejected() {
     let start = StartState { int_s, real_s, rng: None };
 
     // T* = 10.5 lands BETWEEN the integer output emits.
-    let cfg = ChainBinomialConfig { t_start: 10.5, t_end: T_END, dt: 1.0 };
+    let cfg = ChainBinomialConfig { t_start: 10.5, t_end: T_END, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe };
     let err = run_chain_binomial_with_observer(
         &model,
         &params,
@@ -350,7 +350,7 @@ fn reactive_model_resume_is_rejected() {
     let (int_s, real_s) = compiled.initial_state_mean(&params).unwrap();
     let start = StartState { int_s, real_s, rng: None };
 
-    let cfg = ChainBinomialConfig { t_start: 0.0, t_end: 365.0, dt: 1.0 };
+    let cfg = ChainBinomialConfig { t_start: 0.0, t_end: 365.0, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe };
     let err = run_chain_binomial_with_observer(
         &compiled,
         &params,
@@ -387,7 +387,7 @@ fn splice_above_8192_is_byte_identical_to_the_continuous_tail() {
 
     let (head_model, head_params) = sir_model_at(T0, ivs, weekly(T_STAR_BIG), T_STAR_BIG);
     let mut captured = StatefulRng::new(0);
-    let head_cfg = ChainBinomialConfig { t_start: T0, t_end: T_STAR_BIG, dt: DT };
+    let head_cfg = ChainBinomialConfig { t_start: T0, t_end: T_STAR_BIG, dt: DT, binomial: sim::rng::BinomialAlgorithm::Btpe };
     let traj_head = run_chain_binomial_with_observer(
         &head_model,
         &head_params,
@@ -407,7 +407,7 @@ fn splice_above_8192_is_byte_identical_to_the_continuous_tail() {
         real_s: at_tstar.real_state.clone(),
         rng: Some(captured),
     };
-    let tail_cfg = ChainBinomialConfig { t_start: T_STAR_BIG, t_end: T_END_BIG, dt: DT };
+    let tail_cfg = ChainBinomialConfig { t_start: T_STAR_BIG, t_end: T_END_BIG, dt: DT, binomial: sim::rng::BinomialAlgorithm::Btpe };
     let traj_tail = run_chain_binomial_with_observer(
         &tail_model,
         &tail_params,
@@ -420,7 +420,7 @@ fn splice_above_8192_is_byte_identical_to_the_continuous_tail() {
     .expect("an on-grid T* above 8192 must resume");
     assert_eq!(traj_tail.snapshots[0].t, T_STAR_BIG, "the resumed run's first row is T*");
 
-    let full_cfg = ChainBinomialConfig { t_start: T0, t_end: T_END_BIG, dt: DT };
+    let full_cfg = ChainBinomialConfig { t_start: T0, t_end: T_END_BIG, dt: DT, binomial: sim::rng::BinomialAlgorithm::Btpe };
     let traj_full = run_chain_binomial(&tail_model, &tail_params, SEED, &full_cfg).unwrap();
     let full_tail: Vec<_> = traj_full.snapshots.iter().filter(|s| s.t >= T_STAR_BIG).collect();
     assert_eq!(full_tail.len(), traj_tail.snapshots.len(), "same tail rows");
@@ -453,7 +453,7 @@ fn off_grid_resume_above_8192_is_rejected_naming_the_neighbours() {
     let (model, params) = sir_model_at(8000.0, [8100.0, 8210.0], out, 8231.0);
     let (int_s, real_s) = model.initial_state_mean(&params).unwrap();
     let start = StartState { int_s, real_s, rng: None };
-    let cfg = ChainBinomialConfig { t_start: 8197.0, t_end: 8231.0, dt: 0.25 };
+    let cfg = ChainBinomialConfig { t_start: 8197.0, t_end: 8231.0, dt: 0.25, binomial: sim::rng::BinomialAlgorithm::Btpe };
     let err = run_chain_binomial_with_observer(
         &model,
         &params,
@@ -484,7 +484,7 @@ fn a_fork_at_an_effect_instant_does_not_fire_it_twice() {
         &head_model,
         &head_params,
         SEED,
-        &ChainBinomialConfig { t_start: 0.0, t_end: T_STAR, dt: 1.0 },
+        &ChainBinomialConfig { t_start: 0.0, t_end: T_STAR, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe },
         None,
         None,
         Resume { start: None, capture_final_rng: Some(&mut captured) },
@@ -501,7 +501,7 @@ fn a_fork_at_an_effect_instant_does_not_fire_it_twice() {
         &tail_model,
         &tail_params,
         SEED,
-        &ChainBinomialConfig { t_start: T_STAR, t_end: T_END, dt: 1.0 },
+        &ChainBinomialConfig { t_start: T_STAR, t_end: T_END, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe },
         None,
         None,
         Resume { start: Some(&start), capture_final_rng: None },
@@ -512,7 +512,7 @@ fn a_fork_at_an_effect_instant_does_not_fire_it_twice() {
         &full_model,
         &full_params,
         SEED,
-        &ChainBinomialConfig { t_start: 0.0, t_end: T_END, dt: 1.0 },
+        &ChainBinomialConfig { t_start: 0.0, t_end: T_END, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe },
     )
     .unwrap();
     for fs in traj_full.snapshots.iter().filter(|s| s.t >= T_STAR - 1e-9) {

@@ -110,7 +110,7 @@ fn all_backends_agree_on_coincident_event_intervention() {
         (
             "chain_binomial",
             &ChainBinomialSim,
-            SimConfig::ChainBinomial(ChainBinomialConfig { t_start, t_end, dt: 1.0 }),
+            SimConfig::ChainBinomial(ChainBinomialConfig { t_start, t_end, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe }),
         ),
         (
             "ode",
@@ -170,7 +170,7 @@ fn full_trajectory_no_pre_event_leak_or_time_reversal() {
         (
             "chain_binomial",
             &ChainBinomialSim,
-            SimConfig::ChainBinomial(ChainBinomialConfig { t_start, t_end, dt: 1.0 }),
+            SimConfig::ChainBinomial(ChainBinomialConfig { t_start, t_end, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe }),
         ),
         (
             "ode",
@@ -280,7 +280,7 @@ fn battery_backends(t_start: f64, t_end: f64) -> Vec<(&'static str, Box<dyn Simu
         (
             "chain_binomial",
             Box::new(ChainBinomialSim),
-            SimConfig::ChainBinomial(ChainBinomialConfig { t_start, t_end, dt: 1.0 }),
+            SimConfig::ChainBinomial(ChainBinomialConfig { t_start, t_end, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe }),
         ),
         ("ode", Box::new(OdeSim), SimConfig::Ode(OdeConfig { t_start, t_end, dt: 1.0 })),
         (

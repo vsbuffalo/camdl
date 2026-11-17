@@ -1198,7 +1198,7 @@ fn forward_chain_binomial_snaps_an_off_grid_event() {
     cfg.effects = vec![Effect { ts: &[2.3], act: Act::AddI(1.0), event: true }];
     let (compiled, params, _) = build(&cfg);
     let traj = sim::ChainBinomialSim
-        .run(&compiled, &params, 1, &SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 4.0, dt: 1.0 }))
+        .run(&compiled, &params, 1, &SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 4.0, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe }))
         .unwrap();
     let i_at = |t: f64| traj.snapshots.iter().find(|s| same(s.t, t)).unwrap().int_state.counts[I];
     assert_eq!((i_at(1.0), i_at(2.0), i_at(3.0)), (2, 3, 3), "the event is applied at the t = 2 step");

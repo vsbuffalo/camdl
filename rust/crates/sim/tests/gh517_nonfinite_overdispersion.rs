@@ -152,7 +152,7 @@ fn constant(v: f64) -> Expr { Expr::Const(ConstExpr { value: v }) }
 fn run(sigma_expr: Expr, seed: u64) -> Result<u64, sim::error::SimError> {
     let compiled = CompiledModel::new(overdispersed_model(sigma_expr)).unwrap();
     let params = compiled.default_params.clone();
-    let config = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 1.0, dt: 1.0 });
+    let config = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 1.0, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe });
     let traj = ChainBinomialSim.run(&compiled, &params, seed, &config)?;
     Ok(traj.snapshots.last().unwrap().flows.as_int()[0])
 }

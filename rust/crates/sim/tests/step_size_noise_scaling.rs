@@ -127,7 +127,7 @@ fn pure_death_run_reads_integrated_noise_with_variance_sigma_sq_at_every_dt() {
     let params = compiled.default_params.clone();
     let n = 4000;
     for &dt in &DTS {
-        let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start, t_end, dt });
+        let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start, t_end, dt, binomial: sim::rng::BinomialAlgorithm::Btpe });
         let w: Vec<f64> = (0..n as u64)
             .map(|seed| {
                 let traj = ChainBinomialSim.run(&compiled, &params, seed, &cfg).unwrap();

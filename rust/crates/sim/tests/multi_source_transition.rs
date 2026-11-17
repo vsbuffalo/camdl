@@ -167,7 +167,7 @@ fn multi_source_rejected_on_chain_binomial_but_runs_on_gillespie_and_ode() {
 
     // Forward chain_binomial hard-errors up front (does NOT over-draw the source
     // into a cryptic NegativeCount, and does NOT silently proceed).
-    let cb = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: T_END, dt: DT });
+    let cb = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: T_END, dt: DT, binomial: sim::rng::BinomialAlgorithm::Btpe });
     let cb_res = ChainBinomialSim.run(&compiled, &compiled.default_params, 1, &cb);
     assert!(cb_res.is_err(), "forward chain_binomial must reject a multi-source transition");
     assert!(
@@ -207,7 +207,7 @@ fn single_source_model_is_accepted_on_chain_binomial() {
         compiled.validate_single_source_transitions().is_ok(),
         "a single-source model must not be rejected"
     );
-    let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 20.0, dt: DT });
+    let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 20.0, dt: DT, binomial: sim::rng::BinomialAlgorithm::Btpe });
     assert!(
         ChainBinomialSim.run(&compiled, &compiled.default_params, 1, &cfg).is_ok(),
         "a single-source model must still run on chain_binomial"

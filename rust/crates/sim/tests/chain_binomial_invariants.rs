@@ -42,6 +42,7 @@ fn chain_binomial_config(model: &ir::Model, dt: f64) -> SimConfig {
         t_start: model.simulation.t_start,
         t_end: model.simulation.t_end.min(30.0),
         dt,
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
     })
 }
 

@@ -98,7 +98,7 @@ fn assert_traj_eq(a: &Trajectory, b: &Trajectory, ctx: &str) {
 #[test]
 fn chain_binomial_tick_does_not_change_trajectory() {
     let (model, params) = load_sir();
-    let cfg = ChainBinomialConfig { t_start: 0.0, t_end: T_END, dt: 1.0 };
+    let cfg = ChainBinomialConfig { t_start: 0.0, t_end: T_END, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe };
 
     let traj_none =
         run_chain_binomial_with_observer(&model, &params, SEED, &cfg, None, None, Default::default())

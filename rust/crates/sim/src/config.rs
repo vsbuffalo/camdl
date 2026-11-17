@@ -14,6 +14,11 @@ pub struct ChainBinomialConfig {
     pub t_start: f64,
     pub t_end: f64,
     pub dt: f64,
+    /// The algorithm every binomial draw of a fresh run uses (gh#747): the
+    /// transitions and the initial-state draw. Both draw exactly Binomial(n, p),
+    /// but from different random numbers, so it is part of what a run is. A run
+    /// resumed with a saved generator keeps that generator's algorithm.
+    pub binomial: crate::rng::BinomialAlgorithm,
 }
 
 /// Config for the deterministic ODE (RK4) backend.
