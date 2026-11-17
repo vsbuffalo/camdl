@@ -412,9 +412,11 @@ fn same_span(a: &Measures, b: &Measures) -> bool {
 }
 
 /// Parse the forecast's reach, `--horizon DURATION`: `N UNIT` with a plain unit
-/// word (days, weeks, months, years; months and years as fixed spans), or a
-/// bare number in model time units.
-pub(crate) fn parse_reach(raw: &str, time_unit: &str) -> Result<f64, String> {
+/// word (days, weeks, months, years), or a bare number in model time units.
+/// Without an origin months and years are fixed spans; under a calendar
+/// [origin] they are refused, since the reach is counted from the forecast
+/// origin, a date known only at run time (decision F, as for `--to`).
+pub(crate) fn parse_reach(raw: &str, time_unit: &str, origin: Option<&str>) -> Result<f64, String> {
     let s = raw.trim();
     let bad = |why: &str| format!("--horizon \"{raw}\": {why} Write a duration such as \"4 weeks\" or \"28 days\".");
     if let Ok(v) = s.parse::<f64>() {
@@ -431,8 +433,15 @@ pub(crate) fn parse_reach(raw: &str, time_unit: &str) -> Result<f64, String> {
     if !(n.is_finite() && n > 0.0) {
         return Err(bad("the reach must be positive."));
     }
+    let unit_tok = unit;
     let unit = super::runner::canonical_duration_unit(unit);
     let days = ir::caltime::days_per_unit(&unit).map_err(|_| bad(&format!("unknown unit '{unit}'.")))?;
+    if origin.is_some() && super::runner::is_calendar_unit(&unit) {
+        return Err(super::runner::calendar_offset_refusal(
+            &format!("--horizon \"{raw}\""), &format!("{n} {unit_tok}"),
+            "the forecast origin (the last training observation)", n * days,
+            |d| format!("{d} days")));
+    }
     let model_days = ir::caltime::days_per_unit(time_unit)
         .map_err(|e| format!("--horizon: the model's time_unit: {e}"))?;
     Ok(n * days / model_days)
@@ -534,7 +543,7 @@ mod tests {
         let w: Vec<ObservedRow> = (0..3).map(|i| row(i, 7.0 * i as f64, 7.0 * (i + 1) as f64)).collect();
         let rows = BTreeMap::from([("daily".to_string(), d.clone()), ("weekly".to_string(), w.clone())]);
         let (dobs, wobs) = (daily(), weekly());
-        let reach = parse_reach("4 weeks", "days").unwrap();
+        let reach = parse_reach("4 weeks", "days", None).unwrap();
         let plan = ForecastPlan::new(partition(&rows), reach, &[
             PlanStream { obs: &dobs, training: &d, held_out: &[] },
             PlanStream { obs: &wobs, training: &w, held_out: &[] },
@@ -669,10 +678,31 @@ mod tests {
 
     #[test]
     fn the_reach_parses_durations_in_the_models_unit() {
-        assert_eq!(parse_reach("4 weeks", "days").unwrap(), 28.0);
-        assert_eq!(parse_reach("28", "days").unwrap(), 28.0);
-        assert_eq!(parse_reach("14 days", "weeks").unwrap(), 2.0);
-        assert!(parse_reach("0 days", "days").is_err());
-        assert!(parse_reach("four weeks", "days").is_err());
+        assert_eq!(parse_reach("4 weeks", "days", None).unwrap(), 28.0);
+        assert_eq!(parse_reach("28", "days", None).unwrap(), 28.0);
+        assert_eq!(parse_reach("14 days", "weeks", None).unwrap(), 2.0);
+        assert!(parse_reach("0 days", "days", None).is_err());
+        assert!(parse_reach("four weeks", "days", None).is_err());
+    }
+
+    // Decision F (proposal 2026-11-16-calendar-durations-by-position.md):
+    // the reach is counted from the forecast origin, the last training
+    // observation, a date known only at run time; under a calendar origin a
+    // month or year reach is refused with `--to`'s hint. Without an origin it
+    // stays the average span.
+    #[test]
+    fn a_month_reach_is_refused_under_an_origin() {
+        let err = parse_reach("6 months", "days", Some("2020-01-01")).unwrap_err();
+        assert_eq!(err,
+            "--horizon \"6 months\": calendar duration `6 months` cannot move the \
+             forecast origin (the last training observation), whose date is known only \
+             when the model runs. A calendar month from a date depends on which date it \
+             is, and the one-step calendar rule resolves a step only from a date known \
+             when the model compiles. State the offset in days: \"183 days\" \
+             (≈ 6 months).");
+        assert!(parse_reach("1 year", "days", Some("2020-01-01")).unwrap_err()
+            .contains("\"365 days\" (≈ 1 year)"));
+        assert_eq!(parse_reach("4 weeks", "days", Some("2020-01-01")).unwrap(), 28.0);
+        assert_eq!(parse_reach("1 months", "days", None).unwrap(), 365.2425 / 12.0);
     }
 }
