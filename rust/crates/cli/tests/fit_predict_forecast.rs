@@ -192,6 +192,9 @@ fn the_mode_and_horizon_flags_are_checked() {
     assert!(stderr(&out).contains("--mode forecast needs --horizon"), "{}", stderr(&out));
     let out = run(tmp.path(), &["fit", "predict", "x", "--mode", "one_step", "--horizon", "4 weeks"]);
     assert!(stderr(&out).contains("sets the reach of a forecast"), "{}", stderr(&out));
+    // The old spelling of the mode flag is answered with the new one.
+    let out = run(tmp.path(), &["fit", "predict", "x", "--horizon", "one_step"]);
+    assert!(stderr(&out).contains("--mode one_step"), "{}", stderr(&out));
 }
 
 /// The capability matrix's refused cells for a fit that exists here: an
