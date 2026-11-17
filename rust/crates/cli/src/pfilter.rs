@@ -527,10 +527,26 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             let cut = crate::fit::runner::resolve_holdout_cutoff(spec, &rows, &model)
                 .and_then(|at| cut_to_training_rows(at, &raw, &mut streams))
                 .unwrap_or_else(|e| { out.fail(format!("error: {e}")); });
+            // `--score-from` asks for a held-out window, and a cut that dropped
+            // rows leaves none: every row it could score trained. Scoring them
+            // would present in-sample rows as the held-out score.
+            if cut.dropped {
+                if let Some(raw_from) = a.score_from.as_ref() {
+                    out.fail(format!(
+                        "error: --score-from {raw_from} scores a held-out window, but under \
+                         --save-final-state this run binds only the training rows of \
+                         holdout_after = \"{raw}\" (t = {}), so every row it could score \
+                         trained.\n  Fix: run --save-prequential --score-from without \
+                         --save-final-state (the filter then scores the full series), and \
+                         save the state in a separate run.", cut.at));
+                }
+            }
             out.say(format_args!(
                 "pfilter: --save-final-state under holdout_after = \"{raw}\" (t = {}): \
                  state saved at t = {}, the end of the training rows (holdout_after); \
-                 the log-likelihood shown covers training rows only",
+                 the log-likelihood shown covers training rows only, as does every \
+                 other output of this run (--trace, --save-prequential, --save-paths, \
+                 --save-filtering, --pf-health)",
                 cut.at, cut.extent));
             training_cut = Some(cut);
         }

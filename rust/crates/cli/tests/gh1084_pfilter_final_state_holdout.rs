@@ -204,6 +204,21 @@ fn a_cut_that_drops_no_row_keeps_the_run_id() {
         "a cutoff after every row drops nothing and must keep the run_id");
 }
 
+/// `--score-from` asks for a held-out window. Under a cut that dropped rows,
+/// every row it could score trained, so the combination is refused rather
+/// than scoring in-sample rows as held out.
+#[test]
+fn score_from_under_a_cut_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    fixture(tmp.path(), "holdout_after = 6");
+    let out = pfilter(tmp.path(), &["--save-final-state", "fs.tsv",
+        "--save-prequential", "preq", "--score-from", "4", "--no-store"]);
+    assert!(!out.status.success(), "{}", stderr(&out));
+    assert!(stderr(&out).contains("--score-from 4 scores a held-out window"),
+        "{}", stderr(&out));
+    assert!(!tmp.path().join("fs.tsv").exists(), "no state file may be written");
+}
+
 /// The cut is stored under its own identity: the training rows are keyed, so
 /// the cut run's stored log-likelihood does not share a leaf with the
 /// full-series run over the same file.
