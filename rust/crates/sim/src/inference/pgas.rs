@@ -21,7 +21,7 @@ use crate::error::{InitSource, SimError};
 use crate::inference::obs_loglik::{poisson_logpmf, binom_logpmf};
 use crate::inference::numerics::BINOM_PROB_EPS;
 use crate::inference::particle_filter::Observation;
-use crate::inference::resampling::conditional_multinomial_resample;
+use crate::inference::resampling::{conditional_multinomial_resample, log_weights_all_equal};
 use crate::inference::pmmh::Prior;
 use crate::inference::types::{EstimatedParam, RESAMPLE_RNG_STREAM, init_particle_rngs, restore_z_values};
 
@@ -3061,9 +3061,11 @@ pub fn csmc_as(
         // Between observations there is no new information, so every weight is
         // equal and resampling would only duplicate particles for nothing. Skip
         // it — and record that we skipped, because ancestor sampling below is
-        // only a legal move where an ancestry was actually drawn (gh#718).
-        let weights_are_uniform = log_weights.iter().all(|&w| (w - log_weights[0]).abs() < 1e-10);
-        let did_resample = !weights_are_uniform;
+        // only a legal move where an ancestry was actually drawn (gh#718). The
+        // test is the one the unconditional filters use (D77): normalised log
+        // weights exactly equal, so weights that differ at all are resampled
+        // and the weight they carry is never dropped.
+        let did_resample = !log_weights_all_equal(&log_weights);
 
         let substep_ancestors: Vec<usize> = if !did_resample {
             // Identity: each particle is its own ancestor.

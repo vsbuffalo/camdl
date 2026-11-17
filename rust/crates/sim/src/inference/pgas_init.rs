@@ -69,7 +69,7 @@ use super::pgas::{
     apply_origin_to_counts, sample_categorical_log, simulate_reference_on_grid, ObsAtSubstep,
     PGASTrajectory, SubstepRecord,
 };
-use super::resampling::systematic_resample;
+use super::resampling::{log_weights_all_equal, systematic_resample};
 use super::types::{init_particle_rngs, RESAMPLE_RNG_STREAM};
 
 /// Stream-separation salt for the initialization pass's RNG, so its draws come
@@ -301,10 +301,10 @@ pub fn unconditional_smc_pass(
         // Between observations every live weight is equal, so a resample would
         // only duplicate particles for nothing; the weights go non-uniform
         // exactly at the substep FOLLOWING an observation, and also as soon as
-        // any particle is dead, which is when we want the dead purged.
-        let weights_are_uniform = log_weights
-            .iter()
-            .all(|&w| (w - log_weights[0]).abs() < 1e-10);
+        // any particle is dead, which is when we want the dead purged. The test
+        // is the unconditional filters' (D77): normalised log weights exactly
+        // equal.
+        let weights_are_uniform = log_weights_all_equal(&log_weights);
         let substep_ancestors: Vec<usize> = if weights_are_uniform {
             (0..n_particles).collect()
         } else {
