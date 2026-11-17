@@ -517,7 +517,7 @@ fn within_dt_pair_fires_once_per_step_on_grid_and_once_per_time_on_exact() {
     let compiled = collision_model(vec![scheduled(
         "campaign",
         vec![2.3, 2.4],
-        Action::Add(AddAction { compartment: "V".into(), count: Expr::const_(10.0) }),
+        Action::Add(AddAction { compartment: "V".into(), count: Expr::const_(10.0), count_grad: Default::default() }),
     )]);
     for (name, sim, cfg) in battery_backends(0.0, 5.0) {
         let (s, v) = collision_final_s_v(&compiled, &*sim, &cfg);
@@ -565,12 +565,12 @@ fn within_dt_collision_two_interventions_each_fire_once() {
         scheduled(
             "a",
             vec![2.3],
-            Action::Add(AddAction { compartment: "V".into(), count: Expr::const_(10.0) }),
+            Action::Add(AddAction { compartment: "V".into(), count: Expr::const_(10.0), count_grad: Default::default() }),
         ),
         scheduled(
             "b",
             vec![2.4],
-            Action::Add(AddAction { compartment: "V".into(), count: Expr::const_(100.0) }),
+            Action::Add(AddAction { compartment: "V".into(), count: Expr::const_(100.0), count_grad: Default::default() }),
         ),
     ]);
     for (name, sim, cfg) in battery_backends(0.0, 5.0) {
@@ -601,12 +601,12 @@ fn an_effect_does_not_fire_at_an_earlier_landing_in_its_step() {
         scheduled(
             "a",
             vec![2.0],
-            Action::Add(AddAction { compartment: "V".into(), count: Expr::const_(10.0) }),
+            Action::Add(AddAction { compartment: "V".into(), count: Expr::const_(10.0), count_grad: Default::default() }),
         ),
         scheduled(
             "b",
             vec![2.4],
-            Action::Add(AddAction { compartment: "V".into(), count: Expr::const_(100.0) }),
+            Action::Add(AddAction { compartment: "V".into(), count: Expr::const_(100.0), count_grad: Default::default() }),
         ),
     ]);
     for (name, sim, cfg) in battery_backends(0.0, 5.0) {
@@ -630,7 +630,7 @@ fn an_off_grid_effect_fires_per_backend_clock() {
         let compiled = collision_model(vec![scheduled(
             "pulse",
             vec![at],
-            Action::Add(AddAction { compartment: "V".into(), count: Expr::const_(10.0) }),
+            Action::Add(AddAction { compartment: "V".into(), count: Expr::const_(10.0), count_grad: Default::default() }),
         )]);
         for (name, sim, cfg) in battery_backends(0.0, 5.0) {
             let first = if is_grid(name) { grid_row } else { at.ceil() };
@@ -651,7 +651,7 @@ fn on_grid_intervention_still_fires_once() {
     let compiled = collision_model(vec![scheduled(
         "campaign",
         vec![3.0],
-        Action::Add(AddAction { compartment: "V".into(), count: Expr::const_(10.0) }),
+        Action::Add(AddAction { compartment: "V".into(), count: Expr::const_(10.0), count_grad: Default::default() }),
     )]);
     for (name, sim, cfg) in battery_backends(0.0, 5.0) {
         let (s, v) = collision_final_s_v(&compiled, &*sim, &cfg);
@@ -747,12 +747,12 @@ fn coincident_add_and_set_event_gives_the_set_value_on_every_backend() {
             event(
                 "arrivals",
                 vec![3.0],
-                Action::Add(AddAction { compartment: "X".into(), count: Expr::const_(10.0) }),
+                Action::Add(AddAction { compartment: "X".into(), count: Expr::const_(10.0), count_grad: Default::default() }),
             ),
             event(
                 "reset",
                 vec![3.0],
-                Action::Set(SetAction { compartment: "X".into(), value: Expr::const_(5.0) }),
+                Action::Set(SetAction { compartment: "X".into(), value: Expr::const_(5.0), value_grad: Default::default() }),
             ),
         ],
     );
@@ -777,7 +777,7 @@ fn coincident_add_and_fraction_drain_event_reads_post_inflow_state() {
             event(
                 "seed",
                 vec![3.0],
-                Action::Add(AddAction { compartment: "I".into(), count: Expr::const_(10.0) }),
+                Action::Add(AddAction { compartment: "I".into(), count: Expr::const_(10.0), count_grad: Default::default() }),
             ),
             event(
                 "cull",
@@ -786,6 +786,7 @@ fn coincident_add_and_fraction_drain_event_reads_post_inflow_state() {
                     src: "I".into(),
                     dst: "R".into(),
                     fraction: Expr::const_(0.5),
+                    fraction_grad: Default::default(),
                 }),
             ),
         ],
@@ -811,7 +812,7 @@ fn coincident_add_and_count_drain_event_reads_post_inflow_state() {
             event(
                 "seed",
                 vec![3.0],
-                Action::Add(AddAction { compartment: "I".into(), count: Expr::const_(10.0) }),
+                Action::Add(AddAction { compartment: "I".into(), count: Expr::const_(10.0), count_grad: Default::default() }),
             ),
             event(
                 "cull",
@@ -873,7 +874,7 @@ fn an_add_beside_a_set_still_gives_the_set_value() {
         ("X", 0.0),
         ("Y", 0.0),
         vec![
-            event("arrivals", vec![3.0], Action::Add(AddAction { compartment: "X".into(), count: Expr::const_(10.0) })),
+            event("arrivals", vec![3.0], Action::Add(AddAction { compartment: "X".into(), count: Expr::const_(10.0), count_grad: Default::default() })),
             set_event("reset", "X", 5.0),
         ],
     );
@@ -913,7 +914,7 @@ fn set_event(name: &str, comp: &str, v: f64) -> Intervention {
     event(
         name,
         vec![3.0],
-        Action::Set(SetAction { compartment: comp.into(), value: Expr::const_(v) }),
+        Action::Set(SetAction { compartment: comp.into(), value: Expr::const_(v), value_grad: Default::default() }),
     )
 }
 
@@ -925,6 +926,7 @@ fn drain_event(name: &str, frac: f64) -> Intervention {
             src: "X".into(),
             dst: "Y".into(),
             fraction: Expr::const_(frac),
+            fraction_grad: Default::default(),
         }),
     )
 }

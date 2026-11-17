@@ -925,11 +925,27 @@ let finish_compile (d : compile_detail) : (Ir.model, string) result =
         Autodiff.differentiate_initial_conditions
           d.model.Ir.initial_conditions param_names tfs tbls)
     in
+    (* Scheduled-action autodiff: ∂amount/∂θ for every Add/Set/FractionTransfer
+       of every intervention and event, filling the action's [*_grad] — the
+       source term of the event-jump sensitivity the ODE gradient path applies
+       when the effect fires. Uniform over all interventions (a reactive or
+       AbsoluteTransfer action is left alone here; the fit-time gradient gate
+       is the single place that refuses those). A constant amount yields an
+       empty map and stays golden-neutral. *)
+    let interventions =
+      Passtime.time "autodiff-action" (fun () ->
+        List.map
+          (fun (iv : Ir.intervention) ->
+            { iv with Ir.actions =
+                List.map (Autodiff.differentiate_action param_names tfs tbls) iv.actions })
+          d.model.Ir.interventions)
+    in
     (* Write the resolved quantity dimensions back onto the model before the
        value-preserving transforms (constant-fold/LICM never touch quantities). *)
     let m = annotate_quantity_dims qdims
               { d.model with Ir.transitions = transitions;
                              Ir.observations = observations;
+                             Ir.interventions;
                              Ir.initial_conditions;
                              Ir.ic_grad } in
     Ok (maybe_licm (maybe_constant_fold m))

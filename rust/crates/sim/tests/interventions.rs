@@ -111,6 +111,7 @@ fn test_fraction_transfer_uses_floor_not_round() {
                 src: "S".into(),
                 dst: "V".into(),
                 fraction: Expr::Const(ConstExpr { value: 0.6 }),
+                fraction_grad: Default::default(),
             }),
         ],
     };
@@ -144,6 +145,7 @@ fn test_fraction_transfer_floor_larger() {
                 src: "S".into(),
                 dst: "V".into(),
                 fraction: Expr::Const(ConstExpr { value: 0.8 }),
+                fraction_grad: Default::default(),
             }),
         ],
     };
@@ -188,6 +190,7 @@ fn chain_binomial_fires_scheduled_intervention_exactly_once() {
             src: "S".into(),
             dst: "V".into(),
             fraction: Expr::Const(ConstExpr { value: 0.5 }),
+            fraction_grad: Default::default(),
         })],
     };
 

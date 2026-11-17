@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.44",
+  "ir_version": "0.45",
   "validated_by": "hand-curated-incident-fixture",
   "model": {
     "name": "real_coupled_rate",

@@ -1,10 +1,10 @@
-{"ir_version":"0.44","validated_by":"ocaml-compiler-v0.44","model":{"name":"origin_effects","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.45","validated_by":"ocaml-compiler-v0.45","model":{"name":"origin_effects","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"A","kind":"integer"},
 {"name":"B","kind":"integer"}
 ],"transitions":[
 {"name":"drain","stoichiometry":[["A",-1],["B",1]],"rate":{"bin_op":{"op":"mul","left":{"param":"k"},"right":{"pop":"A"}}},"metadata":{"origin_kind":"intrinsic","source_compartment":"A","dest_compartment":"B"},"rate_grad":{"k":{"grad":{"pop":"A"}}},"rate_state_grad":{"A":{"grad":{"param":"k"}}}}
 ],"ode_equations":[],"time_functions":[],"tables":[],"interventions":[
-{"name":"pull","fire":{"scheduled":{"at_times":[0.0,3.0]}},"actions":[{"fraction_transfer":{"src":"A","dst":"B","fraction":{"param":"keep"}}}]},
+{"name":"pull","fire":{"scheduled":{"at_times":[0.0,3.0]}},"actions":[{"fraction_transfer":{"src":"A","dst":"B","fraction":{"param":"keep"},"fraction_grad":{"keep":{"grad":{"const":1.0}}}}}]},
 {"name":"seed","fire":{"scheduled":{"at_times":[0.0]}},"actions":[{"add":{"compartment":"A","count":{"const":10.0}}}],"kind":"event"},
 {"name":"top","fire":{"scheduled":{"at_times":[2.0]}},"actions":[{"add":{"compartment":"A","count":{"const":4.0}}}],"kind":"event"}
 ],"observations":[],"parameters":[

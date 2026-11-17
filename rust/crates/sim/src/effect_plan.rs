@@ -483,7 +483,7 @@ mod tests {
                     name: (*name).into(),
                     base_name: None,
                     fire: FireSource::Scheduled(sched.clone()),
-                    actions: vec![Action::Add(AddAction { compartment: "A".into(), count: Expr::const_(1.0) })],
+                    actions: vec![Action::Add(AddAction { compartment: "A".into(), count: Expr::const_(1.0), count_grad: Default::default() })],
                     kind: if *event { InterventionKind::Event } else { InterventionKind::Scenario },
                 })
                 .collect(),

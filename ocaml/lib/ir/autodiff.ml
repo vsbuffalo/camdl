@@ -1151,6 +1151,23 @@ let differentiate_obs_arg (proj : projection) (arg : expr)
       | None -> None)
     param_names
 
+(** The derivative of a smooth scalar coefficient with respect to each
+    parameter. Zero derivatives are left out (an absent key is a zero
+    derivative), and a derivative that cannot be written becomes
+    [DEUnsupported], which the fit-time gradient gate refuses on; the
+    coefficient still simulates and fits by the gradient-free methods. The
+    shared kernel under the initial-value derivative and the scheduled-action
+    derivative: neither is a rate, an observation argument or a projection,
+    so nothing is inlined. *)
+let differentiate_coeff (e : expr) (param_names : string list)
+    (tfs : time_function list) (tbls : table list) : grad_map =
+  List.filter_map
+    (fun p ->
+      match obs_deriv_entry (differentiate e (WrtParam p) tfs tbls) with
+      | Some de -> Some (p, de)
+      | None -> None)
+    param_names
+
 (** The derivative of one compartment's initial value with respect to each
     parameter: that compartment's entry in the model's [ic_grad], the
     starting value of the ODE state sensitivities.
@@ -1160,14 +1177,28 @@ let differentiate_obs_arg (proj : projection) (arg : expr)
     derivative follows the order in which the runtime evaluates the
     initial state. Zero derivatives are left out, and a derivative that
     cannot be written becomes [DEUnsupported]. *)
-let differentiate_ic (ic_expr : expr) (param_names : string list)
-    (tfs : time_function list) (tbls : table list) : grad_map =
-  List.filter_map
-    (fun p ->
-      match obs_deriv_entry (differentiate ic_expr (WrtParam p) tfs tbls) with
-      | Some de -> Some (p, de)
-      | None -> None)
-    param_names
+let differentiate_ic = differentiate_coeff
+
+(** Fill a scheduled action's ∂amount/∂θ ([*_grad]) — the event-jump sensitivity
+    source term the ODE gradient path applies when the effect fires (gh#275 §1g).
+    [AddAction]/[Set]/[FractionTransfer] carry a smooth jump map and are
+    differentiated; [AbsoluteTransfer]'s [min(count, source)] is nonsmooth (the
+    fit-time gradient gate refuses it), so it is passed through untouched. The
+    amount is differentiated as written — a compartment it reads ([Pop]) is a
+    constant here, as in a rate — so an amount that depends on state has no
+    ∂amount/∂state emitted; the gradient gate refuses such an action. *)
+let differentiate_action (param_names : string list)
+    (tfs : time_function list) (tbls : table list) (a : action) : action =
+  match a with
+  | FractionTransfer ft ->
+    FractionTransfer
+      { ft with fraction_grad = differentiate_coeff ft.fraction param_names tfs tbls }
+  | Set sa ->
+    Set { sa with value_grad = differentiate_coeff sa.value param_names tfs tbls }
+  | AddAction aa ->
+    AddAction
+      { aa with add_count_grad = differentiate_coeff aa.add_count param_names tfs tbls }
+  | AbsoluteTransfer _ -> a
 
 (** Fill the [grad] of every differentiable argument of an initial-state law
     (`I ~ poisson(rate = I0)`), so `∂/∂θ log p(x₀ | θ)` has a compiler-emitted

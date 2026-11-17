@@ -740,6 +740,7 @@ mod tests {
             actions: vec![ir::intervention::Action::Add(ir::intervention::AddAction {
                 compartment: "I".into(),
                 count: Expr::Const(ConstExpr { value: 5.0 }),
+                count_grad: Default::default(),
             })],
             kind: ir::intervention::InterventionKind::Event,
         }];

@@ -1180,8 +1180,13 @@ impl ContentAddressed for Action {
         header(h, "ir::intervention::Action");
         // Each action struct is destructured exhaustively, so a new field is a
         // compile error here rather than a silently unhashed one.
+        // The `*_grad` maps (∂amount/∂θ, gh#275 §1g) are compiler-derived
+        // autodiff of the amount expression over the already-hashed params, so
+        // they are NOT hashed — model identity is gradient-independent (SV = 2;
+        // proposal 2026-07-16-gradient-maps-out-of-run-identity.md), exactly as
+        // for a transition's `rate_grad`.
         match self {
-            Action::FractionTransfer(FractionTransfer { src, dst, fraction }) => {
+            Action::FractionTransfer(FractionTransfer { src, dst, fraction, fraction_grad: _ }) => {
                 h.write_u32(0);
                 h.write_str(src);
                 h.write_str(dst);
@@ -1193,12 +1198,12 @@ impl ContentAddressed for Action {
                 h.write_str(dst);
                 count.hash_into(h);
             }
-            Action::Set(SetAction { compartment, value }) => {
+            Action::Set(SetAction { compartment, value, value_grad: _ }) => {
                 h.write_u32(2);
                 h.write_str(compartment);
                 value.hash_into(h);
             }
-            Action::Add(AddAction { compartment, count }) => {
+            Action::Add(AddAction { compartment, count, count_grad: _ }) => {
                 h.write_u32(3);
                 h.write_str(compartment);
                 count.hash_into(h);

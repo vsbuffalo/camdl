@@ -3921,6 +3921,7 @@ n_particles = 10
             actions: vec![Action::Add(AddAction {
                 compartment: "S".into(),
                 count: ir::expr::Expr::Const(ir::expr::ConstExpr { value: 0.0 }),
+                count_grad: Default::default(),
             })],
             kind: if always_active { ir::intervention::InterventionKind::Event } else { ir::intervention::InterventionKind::Scenario },
         }

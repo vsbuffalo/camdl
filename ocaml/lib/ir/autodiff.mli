@@ -49,6 +49,16 @@ val differentiate_ic :
   expr -> string list -> time_function list -> table list ->
   (string * deriv_entry) list
 
+(** Fill a scheduled action's derivative of its amount with respect to each
+    parameter (its [*_grad]): the term the ODE gradient adds to the state
+    sensitivities when the effect fires. [AddAction], [Set] and
+    [FractionTransfer] are differentiated with the same rules as
+    [differentiate_ic]; [AbsoluteTransfer], whose jump [min(count, source)]
+    is not smooth and which the gradient gate refuses, is returned
+    unchanged. *)
+val differentiate_action :
+  string list -> time_function list -> table list -> action -> action
+
 (** Fill the per-parameter gradients of every argument of every drawn
     initial state ([I ~ poisson(rate = I0)]), so the runtime can
     differentiate the log density of the initial state. A compartment in an

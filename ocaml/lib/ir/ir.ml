@@ -516,18 +516,29 @@ type intervention_schedule =
   | Recurring of recurring_schedule
 
 (** [transfer(fraction = f, from = src, to = dst)]: moves the fraction [f] of
-    [src] into [dst]. *)
-type fraction_transfer = { src: string; dst: string; fraction: expr }
+    [src] into [dst]. [fraction_grad] is the derivative of [f] with respect to
+    each parameter, keyed by parameter name: the term the ODE gradient adds to
+    the state sensitivities when the effect fires. It is filled by
+    [Autodiff.differentiate_action], and is empty, and then left out of the
+    JSON, for a constant amount. *)
+type fraction_transfer = { src: string; dst: string; fraction: expr;
+                           fraction_grad: (string * deriv_entry) list }
 
 (** [transfer(count = n, from = src, to = dst)]: moves [n] individuals from
-    [src] into [dst]. *)
+    [src] into [dst]. It carries no gradient: the jump [min(count, source)]
+    is not smooth, so the fit-time gradient gate refuses it. *)
 type absolute_transfer = { src: string; dst: string; count: expr }
 
-(** Sets a compartment to a value. *)
-type set_action        = { compartment: string; value: expr }
+(** Sets a compartment to a value. [value_grad] is the derivative of the value
+    with respect to each parameter, as [fraction_grad] is for a transfer. *)
+type set_action        = { compartment: string; value: expr;
+                           value_grad: (string * deriv_entry) list }
 
-(** [add(C, n)]: adds [n] to compartment [C]. *)
-type add_action        = { add_compartment: string; add_count: expr }
+(** [add(C, n)]: adds [n] to compartment [C]. [add_count_grad] is the
+    derivative of [n] with respect to each parameter, as [fraction_grad] is
+    for a transfer. *)
+type add_action        = { add_compartment: string; add_count: expr;
+                           add_count_grad: (string * deriv_entry) list }
 
 (** One change an intervention or event makes to the state when it fires. *)
 type action =

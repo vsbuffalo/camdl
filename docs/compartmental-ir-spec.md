@@ -146,14 +146,23 @@ intervention_schedule :=
   | Recurring(start: float, period: float, end: float, at_day: float | null)
 
 action :=
-  | FractionTransfer(src, dst, fraction: expr)   -- move fraction of src to dst
-  | AbsoluteTransfer(src, dst, count: expr)      -- move fixed count
-  | Set(compartment, value: expr)                -- override compartment value
-  | AddAction(compartment, count: expr)          -- add count unconditionally (importation, birth)
+  | FractionTransfer(src, dst, fraction: expr, fraction_grad: grad_map)   -- move fraction of src to dst
+  | AbsoluteTransfer(src, dst, count: expr)                               -- move fixed count
+  | Set(compartment, value: expr, value_grad: grad_map)                   -- override compartment value
+  | AddAction(compartment, count: expr, count_grad: grad_map)             -- add count unconditionally (importation, birth)
 ```
 
 The `expr` in interventions can reference parameters and current state, but not
 time (time is the trigger, not an input to the action).
+
+The `*_grad` map on the three smooth actions is the compiler's `∂amount/∂θ`
+(parameter name → `deriv_entry`, the `rate_grad` analogue; absent key = genuine
+zero, omitted on the wire when empty). It is the source term of the event-jump
+sensitivity `S⁺ = ∂Φ/∂x·S⁻ + ∂Φ/∂θ` the ODE gradient path applies when the
+effect fires, so a scheduled amount that depends on an estimated parameter
+contributes to the gradient. `AbsoluteTransfer` carries none: its jump
+`min(count, source)` is nonsmooth, and the gradient capability check refuses it.
+Like every gradient map, it is not part of the model's run identity.
 
 #### 2.3.1 Engineering Challenges for Scheduled Interventions
 
