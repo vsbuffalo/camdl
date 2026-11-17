@@ -49,16 +49,43 @@ keeps an input that belongs to it from being left out.
 
 ## The store
 
-A run is treated as a pure function of a complete, typed set of inputs, and the
-store as the table that remembers its values. The key is the hash of the inputs
-_after resolution_: parameter maps hold the values the engine will use, with
-every precedence tier applied; files enter by the digest of their bytes, never
-by their path; a scenario enters as its effective delta, every field it inherits
-through `compose` included; the seed is the one that drives the trajectory. A
-raw path or an unresolved preset name would make the key depend on how the
-inputs were spelled, so that two spellings of one computation miss each other,
-or one spelling of two computations (an edited table under an unchanged path)
-collides.
+The store is **input-addressed**: a run's address is a hash of the inputs that
+determine it, computed before the run, not a hash of the bytes the run produces.
+This is the model of the Nix package store, which Dolstra calls the
+_extensional_ model, as opposed to a _content-addressed_ (intensional) one in
+which an object's address is the hash of the object itself, as in git (E.
+Dolstra, _The Purely Functional Software Deployment Model_, PhD thesis, Utrecht
+University, 2006, chapters 5 and 6). The code's name for the store, the
+"content-addressed store" of `CasSink` and `FsCasStore`, describes the second
+model; only the input files are content-addressed here.
+
+An input-addressed store is a memo table for a function, and it is correct only
+if the function is:
+
+- **Pure.** The result depends on the hashed inputs and on nothing else: no
+  environment variable, global setting, clock, host or file read by its path.
+- **Deterministic.** The same inputs give the same bytes, whatever the thread
+  count or the order in which cells finish.
+
+Both hold within one build of camdl on one platform; measured, the evaluation
+switches (`CAMDL_EVAL_FLAT`, `CAMDL_NO_CONSTANT_FOLD` and the rest) and the
+thread count leave the stored bytes unchanged. Three limits remain. The engine
+is identified by its git commit, so a build with uncommitted changes shares the
+clean commit's identity and can be served results the old code computed. The
+platform is not part of the identity. And a fit's leaf records wall-clock
+timings in its result files, so its scientific outputs are reproducible but the
+leaf's bytes are not. A command-line flag also reaches the hash only through
+hand-written copies, described [below](#from-a-command-line-flag-to-the-hash).
+
+The function's inputs are a complete, typed set, and the key is the hash of the
+inputs _after resolution_: parameter maps hold the values the engine will use,
+with every precedence tier applied; files enter by the digest of their bytes,
+never by their path; a scenario enters as its effective delta, every field it
+inherits through `compose` included; the seed is the one that drives the
+trajectory. A raw path or an unresolved preset name would make the key depend on
+how the inputs were spelled, so that two spellings of one computation miss each
+other, or one spelling of two computations (an edited table under an unchanged
+path) collides.
 
 The inputs are not hashed as one blob. For a simulation they are split into five
 levels, each a disjoint slice: the model, the configuration, the parameters, the
