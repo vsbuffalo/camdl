@@ -96,7 +96,9 @@ simulate { from = origin to = add_calendar_years(origin, 5) }
 by calendar months/years; month-end clamping is canonical
 (`date("2021-01-31") + 1 month = date("2021-02-28")`). Direct
 `date(...) + N 'months` is a hard error (**E321**) — the language forbids the
-silent affine-drift that would produce.
+silent affine-drift that would produce. So is a bare month or year in any date
+position, which reads as a step from the origin: `simulate { to = 2 'years }` is
+**E321**, and its hint names `add_calendar_years(origin, 2)`.
 
 In an anchored model, write absolute-time positions as `date(...)` rather than
 as bare numbers — not only `simulate { from / to }` but the `at = [...]`
