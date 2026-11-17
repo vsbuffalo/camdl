@@ -676,32 +676,35 @@ type destination_form =
       infection : S --> I @ beta * S * I / N              # DstSum [I]
       split     : I --> R + Q @ gamma * I                 # DstSum [R; Q]
       recovery  : I --> { R : 0.9, D : 0.1 } @ gamma * I  # DstBranch
+      death     : Q --> @ mu * Q                          # DstSum []
     ]} *)
 type destination_form =
-  | DstSum of stoich_ref list
+  | DstSum    of stoich_ref list
       (** Every listed compartment gains one individual per firing. The empty
-          list means the transition has no arrow target, and each branch of
-          its [via] law names its own destination. *)
+          list stands for two things the tree does not tell apart: a
+          transition whose individuals leave the model ([Q --> @ mu * Q], a
+          death or emigration), and a [via] transition with no arrow target,
+          [I via hyper_erlang(...)], each of whose branches names its own
+          destination. *)
   | DstBranch of (stoich_ref * expr) list
       (** One flow per branch, at the branch's weight times the transition's
-          rate. The weights are not normalised: they are branch probabilities
-          only when they sum to one. *)
+          rate. The weights are not normalised or checked: they are branch
+          probabilities only when they sum to one. *)
 ```
 
 The first version mixes three things: what the type means, how the expander
 lowers it, and when each constructor was added. The second keeps only the first,
-and lets three lines of camdl show what the constructors are. The lowering is
+and lets four lines of camdl show what the constructors are. The lowering is
 still worth explaining, and an implementation comment at the expander's lowering
 code is the place for it.
 
-Writing the second version also surfaces two facts the first one hid.
-`DstSum
-[]` is a sentinel for "no destination", which a reader of the type would
-not guess, and the weights of a `DstBranch` are not checked to sum to one. Both
-are honest documentation of the code as it stands, and both are design
-questions: a sentinel could be its own constructor, and a missing check is a
-hole in the language. Saying plainly what a type does is how a reader finds out
-whether it should.
+Writing the second version also surfaces two facts the first one hid. The empty
+`DstSum` carries two unrelated meanings, which no reader of the type would
+guess, and the weights of a `DstBranch` are not checked. Both are honest
+documentation of the code as it stands, and both are design questions: the two
+meanings could be two constructors, and a missing check is a hole in the
+language. Saying plainly what a type does is how a reader finds out whether it
+should.
 
 **Instead of:**
 
