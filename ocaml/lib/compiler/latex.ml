@@ -416,7 +416,7 @@ let comp_instances (transitions : transition_decl list) (comps : compartment_dec
 
 (* The signed terms one transition contributes to the derivative of the
    instance [matches] selects, as (gained?, magnitude), following the
-   stoichiometry the expander emits for it.
+   stoichiometry the expander emits for it, with the one exception below.
 
    A plain destination changes the instance by its net count: the number of
    times it appears among the destinations less the number among the sources.
@@ -428,7 +428,14 @@ let comp_instances (transitions : transition_decl list) (comps : compartment_dec
    branch (a source that no branch returns to), the branches are one term with
    the sum of the weights as its factor, which a split whose weights sum to one
    drops. Otherwise each branch is its own term: the weights need not sum to
-   one, and a symbolic sum such as `p + (1 - p)` is not simplified. *)
+   one, and a symbolic sum such as `p + (1 - p)` is not simplified.
+
+   One exception, not handled (gh#1247): a staged residence (`via`) is read as
+   written, not as its expansion into stage compartments, and the destinations
+   a `via hyper_erlang` gives per branch (`branch(..., to = D)`) live in the
+   law's arguments, not in [trdst]. Such a transition is counted here as a
+   consumption of its source only, so those destinations get no gain term (and
+   no equation, if nothing else reaches them). *)
 let ode_terms (matches : stoich_ref -> bool) (t : transition_decl) : (bool * string) list =
   let count refs = List.length (List.filter matches refs) in
   let n_src = count t.trsrc in
