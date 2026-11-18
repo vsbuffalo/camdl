@@ -437,7 +437,9 @@ stage separately, so the number moved shrinks as `stages` grows (three stages of
 10 at a fraction of 0.2/3 move nobody, where the compartment form moves 2), and
 it stops compiling at `stages = 1`. `transfer` and `add` into the compartment
 enter its first stage. A `set` on the compartment is refused (**E366**): a total
-has no single meaning across stages.
+has no single meaning across stages. Two events that each transfer out of the
+same staged compartment at the same instant are refused when they fire; give
+them different times or write one transfer.
 
 **Backend choice for fits.** Use `chain_binomial` — the production fit backend.
 Gillespie is for forward-simulation sanity checks, not fits (too slow).

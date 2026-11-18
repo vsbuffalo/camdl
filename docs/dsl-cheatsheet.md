@@ -288,7 +288,9 @@ one cell (an unstaged compartment, or `from = E[pre, s2]`) is unchanged and
 floors that cell. Into a staged compartment, `transfer` and `add` enter stage 1;
 within it, the stage is kept. `set` on it is `E366` (set a stage cell:
 `E_pre_s1 = ...`); `from = E[pre, s2], to = E[sch]` is `E367`; an action on a
-`hyper_erlang` compartment is `E368`.
+`hyper_erlang` compartment is `E368`. Two events that each transfer out of the
+same staged compartment at the same instant are a runtime error: merge them or
+give them different times.
 
 Diagnostics: `E243` unknown law, `E244` stages, `E245` mean-XOR-rate, `E246`
 second `via` on one source, `E255` <2 branches, `E256` last-branch weight,

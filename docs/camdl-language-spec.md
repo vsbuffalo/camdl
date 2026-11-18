@@ -4699,14 +4699,20 @@ drains different times or merge them into one transfer. A single
 
 A `transfer` out of a compartment with an Erlang dwell (§9.4.1) takes part in
 these rules as a drain of each of its stages, with its one `fraction` (or
-`count`) on each: two such transfers of 0.6 from one compartment at one instant
-are refused as two transfers of 0.6 from an unstaged compartment are. One case
-is caught later than the others. Two transfers out of the same staged
-compartment at the same instant, with fractions summing to at most 1, each
-divide their own total among the stages, and both can give the individual left
-over to the same stage: from stages (1, 1), two transfers of 0.5 each take
-stage 1. The non-negativity check then stops the run with an error naming the
-stage. Give them different times or merge them into one transfer.
+`count`) on each, and one rule is stricter for it. Two transfers out of the
+same staged compartment at the same instant are an error on every backend,
+whatever their fractions and whatever the compartment holds: each divides its
+own total among the stages, and both can give the individual left over to the
+same stage (from stages (1, 1), two transfers of 0.5 would each take the person
+in stage 1). The error names both events and the stage they share. Give them
+different times or merge them into one transfer. Scheduled interventions are
+not affected: they apply one after another.
+
+A transfer out of a staged compartment beside a `transfer` that names one of
+its stages (`from = E[pre, s2]`) is checked by the sum of their fractions, like
+any two fraction transfers, and cannot overdraw when the sum is at most 1: from
+a stage holding `n`, the staged transfer takes at most `ceil(n * f)` and the
+other `floor(n * f')`, which together never exceed `n`.
 
 **At `t_start`.** The effects due at the start of the run (§13.2) apply to the
 `init {}` state in the same order, without a transition stage, on every

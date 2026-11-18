@@ -214,7 +214,16 @@ same ordering as a `FractionTransfer` or `AbsoluteTransfer` in its position
 (language spec §13.10). The checks on effects due at one instant treat it as a
 drain of every source cell: with its fraction on each for the
 fractions-sum-above-one refusal, as a count drain for the count form, and as a
-`transfer` on every source and destination cell beside a `set`.
+`transfer` on every source and destination cell beside a `set`. Two rules are
+its own. Two grouped transfers due at one instant that share a source cell are
+refused, whatever their fractions and whatever the cell holds: each gives the
+individuals left over by its own division to the largest remainders, so both can
+take the same individual (from stages (1, 1), two halves each take stage 1). And
+a grouped fraction transfer beside plain fraction transfers from one of its
+cells, with fractions summing to at most 1, cannot overdraw: from a cell holding
+`n` the grouped one takes at most `ceil(n * f)` and each plain one
+`floor(n * f')`, and when `n * f` is not whole the floors sum to a whole number
+below `n - n * f`.
 
 #### 2.3.1 Engineering Challenges for Scheduled Interventions
 

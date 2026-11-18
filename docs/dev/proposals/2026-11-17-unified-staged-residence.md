@@ -90,6 +90,11 @@ staged compartment with all its population dimensions indexed and no stage
 - **`set`.** `set` on a residence reference with more than one stage stays
   refused: a total has no single meaning across stages. `set(stage(E, 2), x)` is
   allowed.
+- **A stage into the same compartment's residence.** A `transfer` whose source
+  names one stage and whose destination is a residence reference of the same
+  compartment (`from = stage(E[pre], 2), to = E[sch]`) is refused (E367): the
+  table gives both "keep the stage" and "that location only" for it. The
+  destination stage is written explicitly.
 - **Population dimensions are never pooled.** `transfer(from = E, to = R)` with
   both stratified by `age` pairs cell for cell over `age`, as today, and groups
   only the stages within each age cell.
@@ -206,7 +211,10 @@ Semantics, with `n_i` the snapshot value of source `i` and `N` their sum:
 
 - **Integer compartments, fraction `f`** (clamped to [0, 1]):
   `M = floor(N * f)`.
-- **Integer compartments, count `c`:** `M = min(round(c), N)`.
+- **Integer compartments, count `c`:** `M = min(round(c), N)`. A negative `c` is
+  an error on every path (integer, real, ODE): there is no allocation of a
+  negative `M`, and a count out of a staged compartment is not read as a count
+  into it.
 - **Allocation of `M`.** Stage `i` gets `floor(M * n_i / N)`, and the remaining
   `M - sum` individuals go one each to the stages with the largest remainders
   `M * n_i mod N`, ties broken toward the earlier stage. Computed in integer
@@ -222,6 +230,22 @@ Semantics, with `n_i` the snapshot value of source `i` and `N` their sum:
   a fraction or absolute transfer at that position; conflict analysis
   (overdrawing drains, coincident `set`) treats it as a drain of every source
   cell.
+- **Two grouped transfers at one instant.** Two grouped transfers that fire at
+  the same instant as events and share a source cell are refused on every
+  backend, whatever their fractions and whatever the cell holds. Each divides
+  its own `M` and gives the individuals left over to the largest remainders, so
+  both can take the same individual: from stages (1, 1), two transfers of one
+  half each take stage 1 and would leave it at -1. The refusal is raised where
+  overdrawing drains are, names both events and the shared cell, and does not
+  depend on the state. Scheduled interventions apply sequentially and are not
+  affected.
+- **A grouped transfer beside a plain one.** A grouped fraction transfer and
+  plain fraction transfers from one of its source cells are allowed when the
+  fractions sum to at most 1, by the existing check, and cannot overdraw: from a
+  cell holding `n` the grouped transfer takes at most `ceil(n * f)` (its share
+  of `M <= N * f` is at most `ceil(M * n / N)`) and each plain one
+  `floor(n * f')`; when `n * f` is not whole, the floors sum to a whole number
+  below `n - n * f`, so to at most `n - ceil(n * f)`.
 - **Gradients.** The fraction form has the per-pair sensitivity rule of
   `fraction_transfer`. The count form is nonsmooth and is treated as
   `absolute_transfer` is.
@@ -318,8 +342,10 @@ Each step is its own set of commits and passes the full gate before the next.
   moving 2 as (1, 1, 0).
 - **Ordering.** A grouped transfer beside other actions at the same time, as an
   intervention and as an event, gives the totals the phase rules prescribe; a
-  grouped drain that overdraws with another drain is refused as two fraction
-  transfers would be.
+  grouped drain beside a plain drain is refused as two fraction transfers would
+  be when the fractions sum above 1, and never overdraws a stage when they do
+  not (a property check over random counts and fractions); two grouped drains
+  sharing a source cell are refused whatever the state.
 - **Backends.** ODE, Gillespie and chain-binomial agree on the real-valued
   semantics where both apply; inference runs with a grouped transfer are
   reproducible under a fixed seed.
