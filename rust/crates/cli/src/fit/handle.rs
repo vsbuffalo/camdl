@@ -75,11 +75,12 @@ pub enum ResolveError {
     /// not complete: the message names it and its state
     /// ([`crate::leaf_use::require_completed`]).
     NotCompleted(String),
-    /// A `fit.toml` whose runs were all made by other camdl builds: none is
-    /// the computation `fit run` of the file would make with this build, so
-    /// none is used in its place. Each is listed with how its build differs
-    /// and how to name it.
-    OtherBuilds { handle: String, runs: Vec<crate::cas_read::Leaf> },
+    /// A `fit.toml` whose runs were all made by another engine — another
+    /// camdl build, or this build with other engine switches on: none is the
+    /// computation `fit run` of the file would make here, so none is used in
+    /// its place. Each is listed with how its engine differs and how to name
+    /// it.
+    OtherEngines { handle: String, runs: Vec<crate::cas_read::Leaf> },
 }
 
 impl std::fmt::Display for ResolveError {
@@ -108,11 +109,12 @@ impl std::fmt::Display for ResolveError {
                 }
                 write!(f, "  Name one run by its leaf directory or a run-id prefix.")
             }
-            ResolveError::OtherBuilds { handle, runs } => {
+            ResolveError::OtherEngines { handle, runs } => {
                 writeln!(
                     f,
-                    "no completed run of {handle} was made by this camdl build ({}); {} run(s) \
-                     of it by other builds:",
+                    "no completed run of {handle} was made by this camdl build ({}) with the \
+                     engine switches set here; {} run(s) of it by another build or with other \
+                     engine switches:",
                     crate::version::VERSION_SHORT,
                     runs.len()
                 )?;
@@ -121,7 +123,7 @@ impl std::fmt::Display for ResolveError {
                 }
                 write!(
                     f,
-                    "  A run another build made is not used in place of this build's. Name one \
+                    "  A run another engine made is not used in place of this one's. Name one \
                      by its leaf directory (the last field of its line), or by its run-id prefix \
                      when the store is ./results; or run `camdl fit run {handle}`."
                 )
@@ -160,6 +162,9 @@ fn differing_axes(runs: &[crate::cas_read::Leaf]) -> String {
     if varies(&|r| Some(r.record.engine_version.clone())) {
         axes.push("the camdl build that ran them");
     }
+    if varies(&|r| Some(switch_names(&r.record.engine_switches))) {
+        axes.push("the engine switches set when they ran");
+    }
     match axes.as_slice() {
         [] => "nothing their records show".to_string(),
         [one] => one.to_string(),
@@ -167,11 +172,41 @@ fn differing_axes(runs: &[crate::cas_read::Leaf]) -> String {
     }
 }
 
-/// How the build that made `r` differs from this one, for a run another build
-/// made: `stale: built by X` (another commit), `built from uncommitted
-/// changes: X` (the same commit), or, when the readable versions agree, the
-/// build configuration (features, profile, toolchain or flags).
+/// The engine switches a record names, by name and value, comma-separated;
+/// `no engine switch` for none.
+fn switch_names(switches: &[runid::inputs::EngineSwitch]) -> String {
+    if switches.is_empty() {
+        return "no engine switch".to_string();
+    }
+    switches
+        .iter()
+        .map(|s| match &s.value {
+            Some(v) => format!("{}={v}", s.name),
+            None => s.name.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Whether `r` was made by the engine `fit run` keys in this process: this
+/// build ([`crate::version::ENGINE_ID`]), with the engine switches its
+/// identity keys set as they are now ([`crate::fit::fit_engine`]).
+/// `run.json`'s `engine_version` is the build alone; the switches are its
+/// `engine_switches`.
+fn made_by_this_engine(r: &crate::cas_read::Leaf) -> bool {
+    let engine = crate::fit::fit_engine();
+    r.record.engine_version == engine.build && r.record.engine_switches == engine.switches
+}
+
+/// How the engine that made `r` differs from this one, for a run another
+/// engine made: for this build, the engine switches it ran with; otherwise
+/// `stale: built by X` (another commit), `built from uncommitted changes: X`
+/// (the same commit), or, when the readable versions agree, the build
+/// configuration (features, profile, toolchain or flags).
 fn build_of(r: &crate::cas_read::Leaf) -> String {
+    if r.record.engine_version == crate::version::ENGINE_ID {
+        return format!("made with other engine switches: {}", switch_names(&r.record.engine_switches));
+    }
     let Some(v) = r.record.provenance.camdl_version.as_deref() else {
         return "built by a camdl that recorded no version".to_string();
     };
@@ -770,13 +805,14 @@ pub(crate) fn config_identity(text: &str) -> Result<String, String> {
 /// Each run records the identity of the config it was read from, so the file
 /// in hand names the runs made from it as it now reads, not the problem
 /// folder's latest archived config (gh#896). Resolution is exact (proposal
-/// 2026-11-17 §1d): the answer is the run this camdl build made — its
-/// `engine_version` is this binary's `ENGINE_ID`, so it is the run `fit run`
-/// of this file would reuse. Runs other builds made are never chosen in its
-/// place, however recent: with none by this build they are listed
-/// ([`ResolveError::OtherBuilds`]), and beside this build's they are noted.
-/// Several runs by this build (several fit seeds, a `--starts` override) are
-/// listed.
+/// 2026-11-17 §1d): the answer is the run this engine made — its
+/// `engine_version` is this binary's `ENGINE_ID` and its `engine_switches`
+/// the switches `fit run` keys in this process, so it is the run `fit run` of
+/// this file would reuse. Runs another engine made (another build, or this
+/// one with other switches) are never chosen in its place, however recent:
+/// with none by this engine they are listed ([`ResolveError::OtherEngines`]),
+/// and beside this engine's they are noted. Several runs by this engine
+/// (several fit seeds, a `--starts` override) are listed.
 ///
 /// Identity is the canonical hash of the parsed value tree, not the raw bytes
 /// (gh#653): reflowing a comment, reordering two top-level tables, or writing
@@ -814,7 +850,7 @@ fn resolve_config(path: &Path) -> Result<(LeafRef, FitConfig), ResolveError> {
     matches.sort_by(|a, b| a.dir.cmp(&b.dir));
     let (mut this_build, other_builds): (Vec<_>, Vec<_>) = matches
         .into_iter()
-        .partition(|l| l.record.engine_version == crate::version::ENGINE_ID);
+        .partition(made_by_this_engine);
     match (this_build.len(), other_builds.len()) {
         (0, 0) => {
             let mut msg = format!(
@@ -832,11 +868,12 @@ fn resolve_config(path: &Path) -> Result<(LeafRef, FitConfig), ResolveError> {
             }
             Err(ResolveError::NotFound(msg))
         }
-        (0, _) => Err(ResolveError::OtherBuilds { handle: path.display().to_string(), runs: other_builds }),
+        (0, _) => Err(ResolveError::OtherEngines { handle: path.display().to_string(), runs: other_builds }),
         (1, others) => {
             if others > 0 {
                 crate::out::detached().say(format_args!(
-                    "note: {} also matches {others} run(s) by other camdl builds, which are not \
+                    "note: {} also matches {others} run(s) by another camdl build or with other \
+                     engine switches, which are not \
                      used; name one by its run-id prefix or leaf directory to read it",
                     path.display(),
                 ));
@@ -1424,6 +1461,27 @@ cooling    = 0.70
         let dir = err.find("leaf directory").unwrap_or_else(|| panic!("{err}"));
         let prefix = err.find("run-id prefix").unwrap_or_else(|| panic!("{err}"));
         assert!(dir < prefix, "the leaf directory is the advice that always works: {err}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A run this build made with an engine switch on is not the run `fit run`
+    /// of the file makes in a process without it, and it is not another
+    /// build's: `run.json`'s `engine_version` is the build alone, and the
+    /// listing names the switch.
+    #[test]
+    fn this_builds_run_with_an_engine_switch_is_named_by_its_switch() {
+        let (tmp, toml_path, seg) = portable_project("this_build_switch");
+        std::fs::write(&toml_path, ARCHIVED).unwrap();
+        let leaf = plant_run_built_by(&seg, "if2-00000000", &"ab".repeat(32), ARCHIVED,
+            crate::version::ENGINE_ID, crate::version::VERSION_SHORT);
+        let record = leaf.join("run.json");
+        let mut rec: serde_json::Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+        rec["engine_switches"] = serde_json::json!([{ "name": "CAMDL_EVAL_UNRESOLVED" }]);
+        std::fs::write(&record, rec.to_string()).unwrap();
+        assert!(crate::env::get().engine_switches().is_empty(), "the test process sets no engine switch");
+        let err = resolve_config(&toml_path).map(|r| r.0.dir).expect_err("another engine").to_string();
+        assert!(err.contains("made with other engine switches: CAMDL_EVAL_UNRESOLVED"), "{err}");
+        assert!(!err.contains("stale") && !err.contains("another build configuration"), "not another build: {err}");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

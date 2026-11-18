@@ -3135,7 +3135,7 @@ fn resolve_sim_config(
     // `run.json` provenance show the model's real name (gh#51 cross-check
     // parity with the pre-hoist behaviour).
     let model = crate::sim_config::ResolvedModel::new(
-        base_model, ir::IR_VERSION.trim(), &crate::env::get().engine_identity(version::ENGINE_ID), display_path,
+        base_model, ir::IR_VERSION.trim(), crate::env::get().engine_identity(version::ENGINE_ID), display_path,
     );
     Ok(crate::sim_config::ResolvedSimConfig { model, run: run_config, arms })
 }
@@ -3240,7 +3240,7 @@ fn write_sim_ensemble(
     let ctx = crate::sim_ensemble_cas::EnsembleCtx {
         model: &cas.sim.model.ir,
         ir_version: ir::IR_VERSION.trim(),
-        engine_version: &cas.sim.model.engine,
+        engine: &cas.sim.model.engine,
         stem: &cas.sim.model.stem,
         backend: engine.backend,
         dt: engine.dt,
@@ -3302,7 +3302,7 @@ fn write_sim_ensemble(
     let mut meta = crate::resolve::RecordMeta::new(
         ir::IR_VERSION.trim(), &cas.sim.model.path, label, calendar, &cas.engine.forcing)
         .with_deps(deps);
-    meta.engine_version = cas.sim.model.engine.clone();
+    meta.engine = cas.sim.model.engine.clone();
 
     let mut artifacts = runid::Artifacts::new();
     artifacts.insert("ensemble.tsv", combined_bytes.to_vec());

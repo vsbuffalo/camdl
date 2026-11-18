@@ -766,7 +766,17 @@ fn keyed_emit_every() {
 #[test]
 fn keyed_env_eval_unresolved() {
     let fx = fx();
-    assert_rekeys("env:eval_unresolved", &sir(&fx, &[]), &sir(&fx, &[]).env("CAMDL_EVAL_UNRESOLVED", "1"));
+    let with = sir(&fx, &[]).env("CAMDL_EVAL_UNRESOLVED", "1");
+    assert_rekeys("env:eval_unresolved", &sir(&fx, &[]), &with);
+    // The record names the switch beside the build, and `engine_version` is
+    // the build alone: the same as a default run's.
+    let (plain, switched) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let _ = simulate_into(plain.path(), &sir(&fx, &[]));
+    let _ = simulate_into(switched.path(), &with);
+    let (plain, switched) = (records(plain.path()).pop().expect("a record"), records(switched.path()).pop().expect("a record"));
+    assert_eq!(switched["engine_version"], plain["engine_version"], "engine_version is the build");
+    assert_eq!(switched["engine_switches"], serde_json::json!([{ "name": "CAMDL_EVAL_UNRESOLVED" }]));
+    assert!(plain.get("engine_switches").is_none(), "a default run's record has no switch list: {plain}");
 }
 
 #[test]

@@ -2375,13 +2375,23 @@ fn print_fit_runs_table(out: &crate::out::Out, folders: &[FitFolder], rows: &[Fi
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
-/// The `engine` line of a record: the readable version that ran it and the
-/// engine's build fingerprint (`run.json`'s `engine_version`), e.g.
-/// `0.4.0+abc1234.dirty-3f9c21e0 (engine 9514b53cefba5cfc…)`.
+/// The `engine` line of a record: the readable version that ran it, the
+/// engine's build fingerprint (`run.json`'s `engine_version`) and any engine
+/// switch the run was keyed with (`engine_switches`), e.g.
+/// `0.4.0+abc1234.dirty-3f9c21e0 (engine 9514b53cefba5cfc…)` or
+/// `… (engine 9514b53cefba5cfc…, with CAMDL_EVAL_UNRESOLVED)`.
 fn engine_line(rec: &runid::RunRecord) -> String {
     let id = &rec.engine_version;
+    let switches: Vec<String> = rec.engine_switches.iter()
+        .map(|s| match &s.value {
+            Some(v) => format!("{}={v}", s.name),
+            None => s.name.clone(),
+        })
+        .collect();
+    let with = if switches.is_empty() { String::new() } else { format!(", with {}", switches.join(", ")) };
     match rec.provenance.camdl_version.as_deref() {
-        Some(v) if v != id => format!("{v} (engine {})", id),
+        Some(v) if v != id => format!("{v} (engine {id}{with})"),
+        _ if !with.is_empty() => format!("{id} ({})", &with[2..]),
         _ => id.clone(),
     }
 }
@@ -2479,6 +2489,7 @@ mod tests {
             hash_version: runid::HASH_VERSION,
             ir_version: "0.7".into(),
             engine_version: "test".into(),
+            engine_switches: Vec::new(),
             levels,
             deps: vec![],
             status: runid::RunStatus::Completed,

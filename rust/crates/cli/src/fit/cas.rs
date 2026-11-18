@@ -32,7 +32,7 @@
 use std::path::Path;
 
 use runid::inputs::{
-    ArtifactRef, DataDigest, Deps, EngineVersion, FitDigest, ModelDigest, Seed, MethodConfig,
+    ArtifactRef, DataDigest, Deps, EngineIdentity, FitDigest, ModelDigest, Seed, MethodConfig,
     MethodLevel,
 };
 use runid::{run_id, ArtifactKind, ContentAddressed, ContentHash, LevelId};
@@ -55,7 +55,9 @@ pub struct FitMethodCtx<'a> {
     pub model: &'a ir::Model,
     pub fit_stem: &'a str,
     pub ir_version: &'a str,
-    pub engine_version: &'a str,
+    /// The engine that computes the fit: its build and the engine switches
+    /// its identity keys.
+    pub engine: &'a EngineIdentity,
     /// The resolved (sweep-applied) problem half. Hashed whole, less
     /// `output_dir` (see [`fit_config_blob_hash`]).
     pub problem: &'a Problem,
@@ -499,7 +501,7 @@ pub(crate) fn gradients_read(method: &Method, model: &ir::Model) -> Option<Conte
 pub fn fit_level_digest(
     model: &ir::Model,
     ir_version: &str,
-    engine_version: &str,
+    engine: &EngineIdentity,
     problem: &Problem,
     data: &BoundDataDigests,
 ) -> Result<FitDigest, String> {
@@ -509,7 +511,7 @@ pub fn fit_level_digest(
         model: ModelDigest::from_model(
             model,
             ir_version.to_string(),
-            EngineVersion(engine_version.to_string()),
+            engine.clone(),
         ),
         data: data.identity_training(),
         // gh#190: the explicit `[data.holdout]` files by content, so an edit
@@ -517,7 +519,7 @@ pub fn fit_level_digest(
         // held-out score. Empty for `holdout_after`, a number in the blob.
         holdout_data: data.identity_holdout(),
         fit_toml: fit_config_blob_hash(problem)?,
-        engine: EngineVersion(engine_version.to_string()),
+        engine: engine.clone(),
         partition_rule_version: super::training_partition::PARTITION_RULE_VERSION,
     })
 }
@@ -528,11 +530,11 @@ pub fn fit_level_digest(
 pub fn fit_level_hash(
     model: &ir::Model,
     ir_version: &str,
-    engine_version: &str,
+    engine: &EngineIdentity,
     problem: &Problem,
     data: &BoundDataDigests,
 ) -> Result<ContentHash, String> {
-    Ok(fit_level_digest(model, ir_version, engine_version, problem, data)?.content_hash())
+    Ok(fit_level_digest(model, ir_version, engine, problem, data)?.content_hash())
 }
 
 /// The fit segment directory for a known fit-level hash:
@@ -592,7 +594,7 @@ fn fit_method_levels(ctx: &FitMethodCtx, target_length: u64) -> Result<Vec<Level
     let fit = fit_level_digest(
         ctx.model,
         ctx.ir_version,
-        ctx.engine_version,
+        ctx.engine,
         ctx.problem,
         ctx.data,
     )?;

@@ -344,6 +344,13 @@ pub(crate) fn abandon_method(out: &crate::out::Out, message: String) -> ! {
     out.error(crate::out::CommandError::new(message)).exit()
 }
 
+/// The engine a fit's identity folds in this process: this build. Every
+/// identity reader of a fit (`fit run`, a `fit.toml` handle) takes it from
+/// here, so they agree on which runs this engine made.
+pub(crate) fn fit_engine() -> runid::inputs::EngineIdentity {
+    runid::inputs::EngineIdentity::of_build(crate::version::ENGINE_ID)
+}
+
 pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     use config_v2::{Algorithm, FitConfig};
     // `fit run` has no `--no-color`: its painters follow the environment and
@@ -939,10 +946,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         }),
         Err(_) => Default::default(),
     };
+    let engine = fit_engine();
     let parent_fit_hash_ch = cas::fit_level_hash(
         &model,
         &announce_ir_version,
-        crate::version::ENGINE_ID,
+        &engine,
         &config.problem,
         &fit_data_digests,
     )
@@ -1357,7 +1365,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             model: &model,
             fit_stem: &fit_stem,
             ir_version: &ir_version_str,
-            engine_version: crate::version::ENGINE_ID,
+            engine: &engine,
             problem: &sweep_config,
             data: &data_digests,
             method: &method,
@@ -1386,7 +1394,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         model: &model,
                         fit_stem: &fit_stem,
                         ir_version: &ir_version_str,
-                        engine_version: crate::version::ENGINE_ID,
+                        engine: &engine,
                         problem: &cell_problem,
                         data: &data_digests,
                         method: &file_method,
@@ -3126,7 +3134,7 @@ pub fn cmd_fit_new(a: &crate::args::FitNewArgs) {
             let data = cfg.data_spec().ok()
                 .and_then(|ds| read_data_digests(ds, &m).ok())
                 .unwrap_or_default();
-            cas::fit_level_hash(&m, &ir_version, crate::version::ENGINE_ID, &cfg, &data)
+            cas::fit_level_hash(&m, &ir_version, &fit_engine(), &cfg, &data)
                 .ok()
                 .map(|h| {
                     let root = crate::run_paths::output_root(None, cfg.output_dir.as_deref());
@@ -3817,7 +3825,7 @@ mod tests {
             .expect("fixture fit.toml parses").problem;
         let digest = |problem: &config_v2::Problem| {
             let data = read_data_digests(problem.data_spec().unwrap(), &model).unwrap();
-            let d = cas::fit_level_digest(&model, "pin-ir", "pin-engine", problem, &data).unwrap();
+            let d = cas::fit_level_digest(&model, "pin-ir", &runid::inputs::EngineIdentity::of_build("pin-engine"), problem, &data).unwrap();
             let hex = |v: &[runid::inputs::DataDigest]| -> Vec<String> {
                 v.iter().map(|x| x.0.to_hex()).collect()
             };
@@ -3857,7 +3865,7 @@ mod tests {
             train.display()))
             .expect("fixture fit.toml parses").problem;
         let data = read_data_digests(problem.data_spec().unwrap(), &model).unwrap();
-        let d = cas::fit_level_digest(&model, "pin-ir", "pin-engine", &problem, &data).unwrap();
+        let d = cas::fit_level_digest(&model, "pin-ir", &runid::inputs::EngineIdentity::of_build("pin-engine"), &problem, &data).unwrap();
         assert_eq!(d.partition_rule_version, training_partition::PARTITION_RULE_VERSION);
         let mut next_rule = d.clone();
         next_rule.partition_rule_version += 1;

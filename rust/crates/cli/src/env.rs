@@ -25,12 +25,16 @@
 //! to be equivalent to the default path and pass the current differential tests,
 //! but finite tests do not establish equivalence on every model, so they are
 //! keyed until stronger justification exists. They and the experimental inputs
-//! enter the engine identity ([`Environment::engine_identity`]): a run made with
-//! one set never shares an address with a default run, and a default run's
-//! identity is unchanged. `CAMDL_NO_CONSTANT_FOLD` and `CAMDL_NO_LICM` change the
-//! IR the compiler emits and are keyed through the model level. Only `simulate`
-//! puts [`Environment::engine_identity`] into its identity so far; the other
-//! commands adopt it as they are converted (proposal phase 3 step 4).
+//! are the engine switches ([`Environment::engine_switches`]), a typed field of
+//! the engine identity beside the build ([`Environment::engine_identity`],
+//! `runid::inputs::EngineIdentity`): a run made with one set never shares an
+//! address with a default run, a default run's identity is unchanged, and
+//! `run.json` names the switches in `engine_switches` while its
+//! `engine_version` stays the build. `CAMDL_NO_CONSTANT_FOLD` and
+//! `CAMDL_NO_LICM` change the IR the compiler emits and are keyed through the
+//! model level. Only `simulate` puts the switches into its identity so far;
+//! the other commands adopt them as they are converted (proposal phase 3 step
+//! 4).
 //!
 //! Not here:
 //!
@@ -66,8 +70,8 @@ pub(crate) enum Stability {
 pub(crate) enum Route {
     /// It does not change a result (its class is not `keyed`).
     None,
-    /// Through the engine identity string in the model level
-    /// ([`Environment::engine_identity`]).
+    /// As an engine switch of the engine identity the model (or fit) level
+    /// folds ([`Environment::engine_identity`]).
     Engine,
     /// Through the compiled IR the model level hashes.
     CompiledModel,
@@ -217,16 +221,20 @@ impl Environment {
         Environment { vars }
     }
 
-    /// The engine switches that are on, each as its name and, for an
-    /// experimental input, its value, in [`VARS`] order: the keyed variables
-    /// whose route is [`Route::Engine`].
-    fn engine_switches(&self) -> Vec<(String, Option<String>)> {
+    /// The engine switches that are on, in [`VARS`] order: the keyed variables
+    /// whose route is [`Route::Engine`], each by name, an experimental input
+    /// with its value.
+    pub fn engine_switches(&self) -> Vec<runid::inputs::EngineSwitch> {
+        use runid::inputs::EngineSwitch;
+        let flag = |name: &str| EngineSwitch { name: name.to_string(), value: None };
         let mut on = Vec::new();
         for v in VARS.iter().filter(|v| matches!(v.class, Keyed(_)) && v.route == Route::Engine) {
             match v.field {
-                "eval_unresolved" if self.vars.eval_unresolved => on.push((v.name.to_string(), None)),
-                "no_binding_cache" if self.vars.no_binding_cache => on.push((v.name.to_string(), None)),
-                "experimental" => on.extend(self.vars.experimental.iter().map(|(k, x)| (k.clone(), Some(x.clone())))),
+                "eval_unresolved" if self.vars.eval_unresolved => on.push(flag(v.name)),
+                "no_binding_cache" if self.vars.no_binding_cache => on.push(flag(v.name)),
+                "experimental" => on.extend(
+                    self.vars.experimental.iter().map(|(k, x)| EngineSwitch { name: k.clone(), value: Some(x.clone()) }),
+                ),
                 "eval_unresolved" | "no_binding_cache" => {}
                 other => unreachable!("`{other}` is routed to the engine identity but not read into it"),
             }
@@ -234,21 +242,13 @@ impl Environment {
         on
     }
 
-    /// The engine identity a run's model level folds: `engine_id` (the build
-    /// fingerprint) followed, for each engine switch that is on, by
-    /// `+<len>:<NAME>` and, for an experimental input, `=<len>:<VALUE>`, the
-    /// lengths in bytes. Unchanged when no switch is on, so a default run keeps
-    /// its identity. The lengths make the encoding injective: a value that
-    /// spells `+` or `=` cannot pass for a second switch or a longer name.
-    pub fn engine_identity(&self, engine_id: &str) -> String {
-        let mut id = engine_id.to_string();
-        for (name, value) in self.engine_switches() {
-            id.push_str(&format!("+{}:{name}", name.len()));
-            if let Some(value) = value {
-                id.push_str(&format!("={}:{value}", value.len()));
-            }
-        }
-        id
+    /// The engine identity a converted command's identity folds: `engine_id`
+    /// (the build fingerprint) and the engine switches that are on, as a typed
+    /// value. With no switch on it is the build alone, so a default run keeps
+    /// its identity; how it is hashed is
+    /// [`runid::inputs::EngineIdentity`]'s.
+    pub fn engine_identity(&self, engine_id: &str) -> runid::inputs::EngineIdentity {
+        runid::inputs::EngineIdentity { build: engine_id.to_string(), switches: self.engine_switches() }
     }
 
     /// Every experimental input set for this process, by name, with its value:
@@ -361,44 +361,32 @@ mod tests {
 
     #[test]
     fn an_engine_switch_keys_the_engine_and_the_default_does_not() {
-        assert_eq!(with(&[]).engine_identity("0.4.0+abc"), "0.4.0+abc");
+        let spelled = |env: Environment, build: &str| env.engine_identity(build).hashed_spelling();
+        assert_eq!(with(&[]).engine_identity("abc"), runid::inputs::EngineIdentity::of_build("abc"));
+        assert_eq!(spelled(with(&[("CAMDL_EVAL_UNRESOLVED", "1")]), "abc"), "abc+21:CAMDL_EVAL_UNRESOLVED");
         assert_eq!(
-            with(&[("CAMDL_EVAL_UNRESOLVED", "1")]).engine_identity("0.4.0+abc"),
-            "0.4.0+abc+21:CAMDL_EVAL_UNRESOLVED"
-        );
-        assert_eq!(
-            with(&[("CAMDL_NO_BINDING_CACHE", ""), ("CAMDL_EVAL_UNRESOLVED", "x")]).engine_identity("e"),
+            spelled(with(&[("CAMDL_NO_BINDING_CACHE", ""), ("CAMDL_EVAL_UNRESOLVED", "x")]), "e"),
             "e+21:CAMDL_EVAL_UNRESOLVED+22:CAMDL_NO_BINDING_CACHE"
         );
-        assert_eq!(
-            with(&[("CAMDL_EXPERIMENTAL_FOO", "2")]).engine_identity("e"),
-            "e+22:CAMDL_EXPERIMENTAL_FOO=1:2"
-        );
+        assert_eq!(spelled(with(&[("CAMDL_EXPERIMENTAL_FOO", "2")]), "e"), "e+22:CAMDL_EXPERIMENTAL_FOO=1:2");
         // A diagnostic changes no result, and a compile switch is keyed
-        // through the IR, so neither touches the engine string.
-        assert_eq!(with(&[("CAMDL_TRACE_STEPS", "1"), ("CAMDL_NO_LICM", "1")]).engine_identity("e"), "e");
-    }
-
-    /// Two different switch sets never give one engine identity, whatever the
-    /// values hold: one variable whose value spells a second variable is not
-    /// the two variables.
-    #[test]
-    fn the_engine_identity_is_injective_in_the_switches() {
-        let spelled = with(&[("CAMDL_EXPERIMENTAL_A", "1+CAMDL_EXPERIMENTAL_B=2")]).engine_identity("e");
-        let two = with(&[("CAMDL_EXPERIMENTAL_A", "1"), ("CAMDL_EXPERIMENTAL_B", "2")]).engine_identity("e");
-        assert_ne!(spelled, two);
-        let eq_in_value = with(&[("CAMDL_EXPERIMENTAL_A", "1=2")]).engine_identity("e");
-        let eq_in_name = with(&[("CAMDL_EXPERIMENTAL_A=1", "2")]).engine_identity("e");
-        assert_ne!(eq_in_value, eq_in_name);
+        // through the IR, so neither is an engine switch.
+        assert!(with(&[("CAMDL_TRACE_STEPS", "1"), ("CAMDL_NO_LICM", "1")]).engine_switches().is_empty());
+        // The build stays the build: switches are a field of their own.
+        assert_eq!(with(&[("CAMDL_EVAL_UNRESOLVED", "1")]).engine_identity("e").build, "e");
     }
 
     #[test]
     fn every_engine_routed_variable_is_an_engine_switch() {
-        // Each `Route::Engine` variable, set, appears in the engine identity.
+        // Each `Route::Engine` variable, set, appears among the switches.
         for v in VARS.iter().filter(|v| matches!(v.class, Keyed(_)) && v.route == Route::Engine) {
             let name = if v.name == EXPERIMENTAL_PREFIX { format!("{EXPERIMENTAL_PREFIX}Z") } else { v.name.to_string() };
             let env = with(&[(name.as_str(), "1")]);
-            assert_ne!(env.engine_identity("e"), "e", "{} is routed to the engine but does not key it", v.name);
+            assert!(
+                env.engine_switches().iter().any(|s| s.name == name),
+                "{} is routed to the engine but is not an engine switch",
+                v.name
+            );
         }
     }
 

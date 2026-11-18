@@ -28,7 +28,7 @@ fn golden_fixtures() -> Vec<(&'static str, ContentHash)> {
     let model = ModelDigest {
         ir: ContentHash::from_bytes([5; 32]),
         ir_version: "0.7".into(),
-        engine: EngineVersion("0.3.0".into()),
+        engine: EngineIdentity::of_build("0.3.0"),
     };
     let config = SimConfig {
         backend: Backend::ChainBinomial,
@@ -58,7 +58,7 @@ fn golden_fixtures() -> Vec<(&'static str, ContentHash)> {
         data: vec![DataDigest(ContentHash::from_bytes([1; 32]))],
         holdout_data: vec![DataDigest(ContentHash::from_bytes([2; 32]))],
         fit_toml: ContentHash::from_bytes([3; 32]),
-        engine: EngineVersion("0.3.0".into()),
+        engine: EngineIdentity::of_build("0.3.0"),
         partition_rule_version: 1,
     };
     let method = MethodConfig {
@@ -240,14 +240,14 @@ fn fit_digest_holdout_content_is_keyed() {
     let model = ModelDigest {
         ir: ContentHash::from_bytes([5; 32]),
         ir_version: "0.9".into(),
-        engine: EngineVersion("0.3.0".into()),
+        engine: EngineIdentity::of_build("0.3.0"),
     };
     let base = FitDigest {
         model: model.clone(),
         data: vec![DataDigest(ContentHash::from_bytes([1; 32]))],
         holdout_data: vec![DataDigest(ContentHash::from_bytes([2; 32]))],
         fit_toml: ContentHash::from_bytes([3; 32]),
-        engine: EngineVersion("0.3.0".into()),
+        engine: EngineIdentity::of_build("0.3.0"),
         partition_rule_version: 1,
     };
     // Only the holdout stream's content digest differs (same training data,
@@ -270,7 +270,7 @@ fn trajectory_input_display_is_provenance() {
     let model = ModelDigest {
         ir: ContentHash::from_bytes([5; 32]),
         ir_version: "0.7".into(),
-        engine: EngineVersion("0.3.0".into()),
+        engine: EngineIdentity::of_build("0.3.0"),
     };
     let config = SimConfig {
         backend: Backend::ChainBinomial,
@@ -502,4 +502,59 @@ fn a_fit_sourced_origin_ensemble_is_keyed_by_its_content() {
         ContentHash::digest_bytes(b"# camdl-final-state v1\tt=56\n"),
         "the two origin-ensemble producers must not share a digest by construction"
     );
+}
+
+/// The engine identity hashes the bytes the engine string hashed before the
+/// switches had a field of their own (`EngineVersion(String)`, a derived
+/// newtype): each hex below is that type's hash of the string beside it,
+/// recorded at ee9ba86c0 before the change. A default run, and a run with
+/// switches, keep their identities.
+#[test]
+fn the_engine_identity_hashes_the_pre_field_engine_string() {
+    let switch = |name: &str, value: Option<&str>| EngineSwitch { name: name.into(), value: value.map(Into::into) };
+    let cases = [
+        (
+            EngineIdentity::of_build("0123456789abcdef0123456789abcdef"),
+            "0123456789abcdef0123456789abcdef",
+            "f6112779267e4043d6c401084be628e43551ceb5284bd2bd7eb5537557b7bef3",
+        ),
+        (
+            EngineIdentity { build: "e".into(), switches: vec![switch("CAMDL_EVAL_UNRESOLVED", None)] },
+            "e+21:CAMDL_EVAL_UNRESOLVED",
+            "ab19e0561fd43b075c7c99b5bfa764d333d2b95f56aabd5df70dda67abe3d870",
+        ),
+        (
+            EngineIdentity {
+                build: "e".into(),
+                switches: vec![switch("CAMDL_EVAL_UNRESOLVED", None), switch("CAMDL_NO_BINDING_CACHE", None)],
+            },
+            "e+21:CAMDL_EVAL_UNRESOLVED+22:CAMDL_NO_BINDING_CACHE",
+            "f07175f8c28634d0bdc8d56e4ca961c728e67468c36a2b0e3c14fb3b71c1af71",
+        ),
+        (
+            EngineIdentity { build: "e".into(), switches: vec![switch("CAMDL_EXPERIMENTAL_FOO", Some("2"))] },
+            "e+22:CAMDL_EXPERIMENTAL_FOO=1:2",
+            "e40728f645d6ba8ae0ee1738f82b3b59572e08de9a8146429f67a7897861876a",
+        ),
+    ];
+    for (engine, spelling, hex) in cases {
+        assert_eq!(engine.hashed_spelling(), spelling);
+        assert_eq!(engine.content_hash().to_hex(), hex, "{spelling}");
+    }
+}
+
+/// Two switch sets never give one engine identity, whatever the values hold.
+#[test]
+fn the_engine_identity_is_injective_in_the_switches() {
+    let switch = |name: &str, value: Option<&str>| EngineSwitch { name: name.into(), value: value.map(Into::into) };
+    let id = |switches: Vec<EngineSwitch>| EngineIdentity { build: "e".into(), switches }.content_hash();
+    assert_ne!(
+        id(vec![switch("CAMDL_EXPERIMENTAL_A", Some("1+22:CAMDL_EXPERIMENTAL_B=1:2"))]),
+        id(vec![switch("CAMDL_EXPERIMENTAL_A", Some("1")), switch("CAMDL_EXPERIMENTAL_B", Some("2"))]),
+    );
+    assert_ne!(
+        id(vec![switch("CAMDL_EXPERIMENTAL_A", Some("1=2"))]),
+        id(vec![switch("CAMDL_EXPERIMENTAL_A=1", Some("2"))]),
+    );
+    assert_ne!(id(vec![]), id(vec![switch("CAMDL_EVAL_UNRESOLVED", None)]));
 }

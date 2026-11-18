@@ -17,7 +17,7 @@
 
 use runid::float::FiniteF64;
 use runid::inputs::{
-    ArtifactRef, Deps, EngineVersion, ModelDigest, ParamId, ProfileBase,
+    ArtifactRef, Deps, EngineIdentity, ModelDigest, ParamId, ProfileBase,
     ProfilePointConfig, ProfileMethod, Seed, StartLevel,
 };
 use runid::{run_id, ArtifactKind, ContentHash, LevelId};
@@ -97,12 +97,12 @@ pub fn resolve_profile_point(ctx: &ProfilePointCtx) -> Result<ResolvedProfilePoi
         model: ModelDigest::from_model(
             ctx.model,
             ctx.ir_version.to_string(),
-            EngineVersion(ctx.engine_version.to_string()),
+            EngineIdentity::of_build(ctx.engine_version),
         ),
         data: data_digests(ctx.data)?,
         base_config: ctx.base_config.into_inner(),
         grid,
-        engine: EngineVersion(ctx.engine_version.to_string()),
+        engine: EngineIdentity::of_build(ctx.engine_version),
         deps: Deps(ctx.deps.clone()),
     };
 

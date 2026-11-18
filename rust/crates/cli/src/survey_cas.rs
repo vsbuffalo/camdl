@@ -19,7 +19,7 @@
 //!     (what region, how densely).
 //!   - **seed** — the resolved LHS / PF base seed.
 
-use runid::inputs::{EngineVersion, ModelDigest, Seed};
+use runid::inputs::{EngineIdentity, ModelDigest, Seed};
 use runid::{run_id, ArtifactKind, ContentHash, LevelId};
 
 use crate::fit::cas::canonical_config_hash;
@@ -141,7 +141,7 @@ pub fn resolve_survey(ctx: &SurveyCtx) -> Result<ResolvedSurvey, String> {
     let model_digest = ModelDigest::from_model(
         ctx.model,
         ctx.ir_version.to_string(),
-        EngineVersion(ctx.engine_version.to_string()),
+        EngineIdentity::of_build(ctx.engine_version),
     );
     let seed = Seed { process_seed: ctx.seed, base_seed: ctx.seed };
 

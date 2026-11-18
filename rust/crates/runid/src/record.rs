@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::hash::ContentHash;
-use crate::inputs::ArtifactRef;
+use crate::inputs::{ArtifactRef, EngineSwitch};
 use crate::kind::ArtifactKind;
 
 /// The current `run.json` schema version. A clean break bumps this; at alpha
@@ -280,7 +280,17 @@ pub struct RunRecord {
     pub hash_version: u16,
     /// The IR schema version (e.g. `"0.7"`) — a string, matching `ir/VERSION`.
     pub ir_version: String,
+    /// The build fingerprint of the engine that computed the run (the CLI's
+    /// `ENGINE_ID`), and nothing else: a run made with an engine switch on
+    /// names the switch in [`Self::engine_switches`].
     pub engine_version: String,
+    /// The engine switches that were on for the run and that its identity
+    /// keys ([`crate::inputs::EngineIdentity`]), in the order the identity
+    /// folds them. Absent when none was, so a default run's record is the
+    /// record camdl wrote before the field existed. Recorded here, hashed
+    /// through the identity's model (or fit) level.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub engine_switches: Vec<EngineSwitch>,
     /// The factored identity, in path order.
     pub levels: Vec<LevelId>,
     /// Lineage — the consumed upstream artifacts (`{run_id, kind, artifact,
@@ -376,6 +386,7 @@ mod output_schema_tests {
             hash_version: 1,
             ir_version: "0.0".to_string(),
             engine_version: "test".to_string(),
+            engine_switches: Vec::new(),
             levels: vec![],
             deps: vec![],
             status: RunStatus::Completed,
@@ -404,6 +415,7 @@ mod output_schema_tests {
             hash_version: 1,
             ir_version: "0.0".to_string(),
             engine_version: "test".to_string(),
+            engine_switches: Vec::new(),
             levels: vec![],
             deps: vec![],
             status: RunStatus::Completed,

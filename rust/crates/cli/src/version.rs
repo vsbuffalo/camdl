@@ -28,12 +28,12 @@ pub const GIT_HASH: &str = env!("CAMDL_GIT_HASH");
 /// The engine's build fingerprint (32 hex characters): the source (commit and
 /// uncommitted changes), `Cargo.lock`, the binary's resolved features, the
 /// profile, `rustc -vV`, `RUSTFLAGS` and the target
-/// (`engine_fingerprint.rs`). It is what a run's identity records as the
-/// engine, and what `run.json`'s `engine_version` holds, except that a
-/// `simulate` run made with an engine switch set records and keys
-/// `ENGINE_ID` followed by the switches (`+<len>:<NAME>`, and
-/// `=<len>:<VALUE>` for an experimental input;
-/// `env::Environment::engine_identity`).
+/// (`engine_fingerprint.rs`). It is the build of the engine a run's
+/// identity records (`runid::inputs::EngineIdentity::build`), and what
+/// `run.json`'s `engine_version` holds, for every run. The engine switches a
+/// run was keyed with are a field of their own beside it (`EngineIdentity::
+/// switches`, `run.json`'s `engine_switches`), so a run made with one by this
+/// build is this build's run.
 pub const ENGINE_ID: &str = env!("CAMDL_ENGINE_ID");
 
 /// Whether this binary may serve a stored result in place of computing it.
@@ -96,8 +96,9 @@ pub fn build_relation(recorded: &str, current: &str) -> BuildRelation {
 /// Markdown).
 ///
 /// `recorded_engine` is the run's `ENGINE_ID` (its `run.json`'s
-/// `engine_version`), when it is known: under the same readable version and
-/// another id, the run was built with [`ANOTHER_CONFIGURATION`].
+/// `engine_version`, the build alone, whatever engine switches the run had),
+/// when it is known: under the same readable version and another id, the run
+/// was built with [`ANOTHER_CONFIGURATION`].
 pub fn build_note(recorded: &str, recorded_engine: Option<&str>, quote: impl Fn(&str) -> String) -> Option<String> {
     let what = match build_relation(recorded, VERSION_SHORT) {
         BuildRelation::Same if recorded_engine.is_some_and(|e| e != ENGINE_ID) => ANOTHER_CONFIGURATION,

@@ -223,7 +223,9 @@ pub struct ResolvedArtifact {
 /// schema needs but that never enters the `run_id`.
 pub struct RecordMeta {
     pub ir_version: String,
-    pub engine_version: String,
+    /// The engine the run's identity folds: `run.json`'s `engine_version` is
+    /// its build, `engine_switches` its switches.
+    pub engine: runid::inputs::EngineIdentity,
     pub deps: Vec<runid::inputs::ArtifactRef>,
     pub children: BTreeMap<String, Vec<ContentHash>>,
     pub source_paths: Vec<String>,
@@ -243,7 +245,9 @@ pub struct RecordMeta {
 }
 
 impl RecordMeta {
-    /// The common case: engine = this binary, no deps/children, one source path.
+    /// The common case: engine = this binary with no engine switch, no
+    /// deps/children, one source path. A command whose identity keys the
+    /// engine switches sets [`Self::engine`] to the identity it keyed.
     pub fn new(
         ir_version: impl Into<String>,
         model_path: impl Into<String>,
@@ -253,7 +257,7 @@ impl RecordMeta {
     ) -> Self {
         RecordMeta {
             ir_version: ir_version.into(),
-            engine_version: crate::version::ENGINE_ID.to_string(),
+            engine: runid::inputs::EngineIdentity::of_build(crate::version::ENGINE_ID),
             deps: Vec::new(),
             children: BTreeMap::new(),
             source_paths: vec![model_path.into()],
@@ -520,7 +524,8 @@ fn build_record(resolved: &ResolvedArtifact, meta: &RecordMeta, status: RunStatu
         run_id: resolved.run_id,
         hash_version: HASH_VERSION,
         ir_version: meta.ir_version.clone(),
-        engine_version: meta.engine_version.clone(),
+        engine_version: meta.engine.build.clone(),
+        engine_switches: meta.engine.switches.clone(),
         levels: resolved.levels.clone(),
         deps: meta.deps.clone(),
         status,

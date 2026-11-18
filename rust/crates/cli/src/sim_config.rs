@@ -80,7 +80,7 @@
 //! `tests/simulate_input_classes.rs` are the assurance.
 
 use runid::inputs::{
-    Backend, CalendarMode, EngineVersion, InitStateDigest, ModelDigest, ResolvedOutputSchedule,
+    Backend, CalendarMode, EngineIdentity, InitStateDigest, ModelDigest, ResolvedOutputSchedule,
     SimConfig,
 };
 use runid::{FiniteF64, ResolveError};
@@ -124,9 +124,10 @@ pub(crate) struct ResolvedModel {
     pub ir: ir::Model,
     /// The `model` level, computed once from `ir`.
     pub digest: ModelDigest,
-    /// The engine identity string folded into `digest`, also used by the
-    /// ensemble's model level.
-    pub engine: String,
+    /// The engine identity folded into `digest` (the build and the engine
+    /// switches simulate keys), also used by the ensemble's model level and
+    /// recorded on every leaf.
+    pub engine: EngineIdentity,
     /// The readable path label of the `model` level (provenance).
     pub stem: String,
     /// The model file as named on the command line (provenance: the leaf's
@@ -135,12 +136,12 @@ pub(crate) struct ResolvedModel {
 }
 
 impl ResolvedModel {
-    pub fn new(ir: ir::Model, ir_version: &str, engine: &str, path: &str) -> Self {
-        let digest = ModelDigest::from_model(&ir, ir_version.to_string(), EngineVersion(engine.to_string()));
+    pub fn new(ir: ir::Model, ir_version: &str, engine: EngineIdentity, path: &str) -> Self {
+        let digest = ModelDigest::from_model(&ir, ir_version.to_string(), engine.clone());
         ResolvedModel {
             ir,
             digest,
-            engine: engine.to_string(),
+            engine,
             stem: crate::hashing::path_stem_slug(path).unwrap_or_else(|| "model".to_string()),
             path: path.to_string(),
         }
@@ -450,7 +451,7 @@ mod tests {
         let out = ir::model::OutputSchedule::Regular(ir::model::RegularOutputSchedule { start: 0.0, step: 1.0 });
         let run = RunConfig::new(ForwardBackend::Ode, 0.25, &out, true, true, view(false, &[])).unwrap();
         let cfg = ResolvedSimConfig {
-            model: ResolvedModel::new(crate::resolve::tiny_model(), "0.7", "0.3.0+test", "sir.camdl"),
+            model: ResolvedModel::new(crate::resolve::tiny_model(), "0.7", EngineIdentity::of_build("0.3.0+test"), "sir.camdl"),
             run,
             arms: Vec::new(),
         };
@@ -502,7 +503,7 @@ mod tests {
                 },
             arms: _,
         } = ResolvedSimConfig {
-            model: ResolvedModel::new(crate::resolve::tiny_model(), "0.7", "e", "sir.camdl"),
+            model: ResolvedModel::new(crate::resolve::tiny_model(), "0.7", EngineIdentity::of_build("e"), "sir.camdl"),
             run: RunConfig::new(
                 ForwardBackend::ChainBinomial,
                 1.0,

@@ -697,7 +697,7 @@ impl crate::engine::RunSink for CasSink {
             .with_children(children.clone());
         // The engine identity the model level folded, so a leaf keyed by an
         // engine switch (`env::Environment::engine_identity`) says which.
-        meta.engine_version = self.sim.model.engine.clone();
+        meta.engine = self.sim.model.engine.clone();
 
         let mut artifacts = runid::Artifacts::new();
         artifacts.insert("traj.tsv", traj_bytes);
@@ -1616,7 +1616,7 @@ mod tests {
         )
         .unwrap();
         let mut resolved_model = crate::sim_config::ResolvedModel::new(
-            model, ir::IR_VERSION.trim(), version::ENGINE_ID, "model.ir.json",
+            model, ir::IR_VERSION.trim(), runid::inputs::EngineIdentity::of_build(version::ENGINE_ID), "model.ir.json",
         );
         resolved_model.stem = "sir".to_string();
         let sim = std::sync::Arc::new(crate::sim_config::ResolvedSimConfig {

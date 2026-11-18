@@ -98,14 +98,14 @@ fn ctx<'a>(
 /// The `model` level of a trajectory under the fixed IR-version and engine
 /// strings the pins below were recorded with.
 fn test_model_digest(m: &Model) -> ModelDigest {
-    crate::sim_config::ResolvedModel::new(m.clone(), "0.7", "0.3.0+test", "sir.camdl").digest
+    crate::sim_config::ResolvedModel::new(m.clone(), "0.7", runid::inputs::EngineIdentity::of_build("0.3.0+test"), "sir.camdl").digest
 }
 
 /// The `model`-level digest hash under fixed versions — the unit the
 /// presentation / gradient inertness tests compare. Goes through the real
 /// `ModelDigest::from_model`, which owns the presentation strip (gh#442).
 fn model_digest_hash(m: &Model) -> ContentHash {
-    ModelDigest::from_model(m, "0.7".into(), runid::inputs::EngineVersion("0.3.0".into())).content_hash()
+    ModelDigest::from_model(m, "0.7".into(), runid::inputs::EngineIdentity::of_build("0.3.0")).content_hash()
 }
 
 fn params_empty() -> &'static HashMap<String, f64> {
@@ -509,7 +509,7 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
         model,
         fit_stem: "sir",
         ir_version: IRV,
-        engine_version: ENGV,
+        engine: &runid::inputs::EngineIdentity::of_build(ENGV),
         problem: &cfg.problem,
         data: &Default::default(),
         method: &method,
@@ -583,7 +583,7 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
     let ens = resolve_sim_ensemble(&EnsembleCtx {
         model,
         ir_version: IRV,
-        engine_version: ENGV,
+        engine: &runid::inputs::EngineIdentity::of_build(ENGV),
         stem: "sir",
         backend: ForwardBackend::ChainBinomial,
         dt: 1.0,
@@ -1098,7 +1098,7 @@ fn gradient_maps_re_key_the_fits_that_read_them_and_no_other() {
             model,
             fit_stem: "sir",
             ir_version: IRV,
-            engine_version: ENGV,
+            engine: &runid::inputs::EngineIdentity::of_build(ENGV),
             problem: &cfg.problem,
             data: &Default::default(),
             method: &method,

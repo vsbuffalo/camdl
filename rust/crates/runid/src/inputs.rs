@@ -143,12 +143,66 @@ pub struct InitStateEnsemble {
     pub rows: Vec<InitStateRow>,
 }
 
-/// The runtime engine version string (e.g. `"0.3.0+abc1234"`), folded into
-/// the model level. Distinct from the *compiler* version that keys the
-/// compile cache — a runtime-only engine change re-keys run identity without
-/// recompiling.
-#[derive(Debug, Clone, PartialEq, Eq, RunInput)]
-pub struct EngineVersion(pub String);
+/// One engine switch that was on for a run: an environment variable that
+/// selects an alternative evaluation path (`CAMDL_EVAL_UNRESOLVED`) or turns
+/// on an experimental feature (`CAMDL_EXPERIMENTAL_<NAME>`, which carries its
+/// value). Which variables are switches is the CLI's environment table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineSwitch {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+}
+
+/// The engine that computes a run, folded into the model level (and the fit
+/// level): the build that ran it and the engine switches that were on.
+///
+/// `build` is the engine's build fingerprint (the CLI's `ENGINE_ID`, 32 hex
+/// characters), distinct from the *compiler* version that keys the compile
+/// cache — a runtime-only engine change re-keys run identity without
+/// recompiling. `switches` are in the order the environment table lists them,
+/// empty for a run made with none.
+///
+/// **Hashed bytes.** The identity hashes one string, [`Self::hashed_spelling`]:
+/// `build`, then for each switch `+<len>:<NAME>` and, for a switch with a
+/// value, `=<len>:<VALUE>` (lengths in bytes), under the type tag
+/// `runid::inputs::EngineVersion` at schema version 1. That is exactly the
+/// newtype string the engine identity was before the switches had a field of
+/// their own, so no stored run re-keys. The lengths make the spelling
+/// injective in the switches as long as `build` holds no `+`, which the build
+/// fingerprint, hex digits, cannot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineIdentity {
+    pub build: String,
+    pub switches: Vec<EngineSwitch>,
+}
+
+impl EngineIdentity {
+    /// A build with no engine switch on.
+    pub fn of_build(build: impl Into<String>) -> Self {
+        EngineIdentity { build: build.into(), switches: Vec::new() }
+    }
+
+    /// The one string the identity hashes (see the type doc).
+    pub fn hashed_spelling(&self) -> String {
+        let mut s = self.build.clone();
+        for EngineSwitch { name, value } in &self.switches {
+            s.push_str(&format!("+{}:{name}", name.len()));
+            if let Some(value) = value {
+                s.push_str(&format!("={}:{value}", value.len()));
+            }
+        }
+        s
+    }
+}
+
+impl ContentAddressed for EngineIdentity {
+    fn hash_into(&self, h: &mut CanonicalHasher) {
+        h.write_type_tag("runid::inputs::EngineVersion");
+        h.write_schema_version(1);
+        self.hashed_spelling().hash_into(h);
+    }
+}
 
 /// The resolved per-process seed driving a trajectory. The seed *level*
 /// hashes `process_seed`, NOT the user `--seed`: the same base seed maps to
@@ -288,7 +342,7 @@ pub struct ModelDigest {
     pub ir: ContentHash,
     /// The IR schema version (e.g. `"0.7"`), matching `ir/VERSION`.
     pub ir_version: String,
-    pub engine: EngineVersion,
+    pub engine: EngineIdentity,
 }
 
 impl ModelDigest {
@@ -300,7 +354,7 @@ impl ModelDigest {
     /// `output.format` / `simulation.time_semantics` are inert for all of them
     /// or none. When the strip lived in the caller (`cli::resolve::model_digest`)
     /// only `sim`/`fit` got it, and the four batch kinds keyed on `--format`.
-    pub fn from_model(model: &ir::Model, ir_version: String, engine: EngineVersion) -> Self {
+    pub fn from_model(model: &ir::Model, ir_version: String, engine: EngineIdentity) -> Self {
         Self { ir: model_ir_hash(model), ir_version, engine }
     }
 }
@@ -459,7 +513,7 @@ pub struct FitDigest {
     pub holdout_data: Vec<DataDigest>,
     /// Content digest of the whole canonicalized fit.toml document.
     pub fit_toml: ContentHash,
-    pub engine: EngineVersion,
+    pub engine: EngineIdentity,
     /// The version of the rule that decides which rows train
     /// (`cli` `fit::training_partition::PARTITION_RULE_VERSION`). The fields
     /// above key the training files and the config, not the rows the rule
@@ -592,7 +646,7 @@ pub struct ProfileBase {
     /// (axes sorted by name, values ascending) so the identity is independent
     /// of `--sweep` argument order.
     pub grid: Vec<(ParamId, Vec<FiniteF64>)>,
-    pub engine: EngineVersion,
+    pub engine: EngineIdentity,
     pub deps: Deps,
 }
 

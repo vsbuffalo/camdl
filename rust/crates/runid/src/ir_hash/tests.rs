@@ -454,7 +454,7 @@ fn a_hoisted_rate_and_the_inline_rate_differ() {
 /// re-key them — this test is the tripwire.
 #[test]
 fn normalization_is_idempotent_and_sim_fit_bytes_unchanged() {
-    use crate::inputs::{normalize_for_hash, EngineVersion, ModelDigest};
+    use crate::inputs::{normalize_for_hash, EngineIdentity, ModelDigest};
 
     // The fixture carries non-default presentation fields (`format = "tsv"`,
     // `time_semantics = "continuous"`), so this is not vacuous.
@@ -462,7 +462,7 @@ fn normalization_is_idempotent_and_sim_fit_bytes_unchanged() {
     assert!(!m.output.format.is_empty() && !m.simulation.time_semantics.is_empty());
 
     let digest = |model: &Model| {
-        ModelDigest::from_model(model, "0.7".into(), EngineVersion("0.3.0".into())).content_hash()
+        ModelDigest::from_model(model, "0.7".into(), EngineIdentity::of_build("0.3.0")).content_hash()
     };
     assert_eq!(
         digest(&normalize_for_hash(&m)),
@@ -492,9 +492,9 @@ fn normalization_is_idempotent_and_sim_fit_bytes_unchanged() {
 /// one on its own — a half-fix (one field stripped, the other not) must fail.
 #[test]
 fn presentation_fields_are_inert_in_the_model_digest() {
-    use crate::inputs::{EngineVersion, ModelDigest};
+    use crate::inputs::{EngineIdentity, ModelDigest};
     let digest = |model: &Model| {
-        ModelDigest::from_model(model, "0.7".into(), EngineVersion("0.3.0".into())).content_hash()
+        ModelDigest::from_model(model, "0.7".into(), EngineIdentity::of_build("0.3.0")).content_hash()
     };
     let base = digest(&representative_model());
 

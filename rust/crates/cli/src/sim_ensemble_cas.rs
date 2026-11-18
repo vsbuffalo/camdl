@@ -36,7 +36,7 @@
 //! Mirrors [`crate::survey_cas`] / [`crate::pfilter_cas`] for the level/digest
 //! conventions.
 
-use runid::inputs::{EngineVersion, ModelDigest};
+use runid::inputs::ModelDigest;
 use runid::{run_id, ArtifactKind, ContentHash, LevelId};
 
 use crate::fit::cas::canonical_config_hash;
@@ -83,7 +83,9 @@ pub struct ResolvedEnsemble {
 pub struct EnsembleCtx<'a> {
     pub model: &'a ir::Model,
     pub ir_version: &'a str,
-    pub engine_version: &'a str,
+    /// The engine identity the ensemble's cells folded (simulate's, with any
+    /// engine switch it keys).
+    pub engine: &'a runid::inputs::EngineIdentity,
     /// Provenance label for the `model` path segment (the model stem).
     pub stem: &'a str,
     pub backend: crate::args::types::ForwardBackend,
@@ -179,7 +181,7 @@ pub fn resolve_sim_ensemble(ctx: &EnsembleCtx) -> Result<ResolvedEnsemble, Strin
     let model_digest = ModelDigest::from_model(
         ctx.model,
         ctx.ir_version.to_string(),
-        EngineVersion(ctx.engine_version.to_string()),
+        ctx.engine.clone(),
     );
 
     let config_label = format!("{}-dt{}", ctx.backend.as_str(), fmt_dt(ctx.dt));

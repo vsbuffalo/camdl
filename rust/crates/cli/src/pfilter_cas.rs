@@ -12,7 +12,7 @@
 //! loglik is computed against), keeping the `model` level the pure model IR.
 //! Mirrors [`crate::resolve`] (sim) and [`crate::profile_cas`].
 
-use runid::inputs::{EngineVersion, ModelDigest, Seed};
+use runid::inputs::{EngineIdentity, ModelDigest, Seed};
 use runid::{
     run_id, ArtifactKind, ContentHash, LevelId,
 };
@@ -155,7 +155,7 @@ pub fn resolve_pfilter(ctx: &PfilterCtx) -> Result<ResolvedPfilter, String> {
     let model_digest = ModelDigest::from_model(
         ctx.model,
         ctx.ir_version.to_string(),
-        EngineVersion(ctx.engine_version.to_string()),
+        EngineIdentity::of_build(ctx.engine_version),
     );
     let seed = Seed { process_seed: ctx.seed, base_seed: ctx.seed };
 

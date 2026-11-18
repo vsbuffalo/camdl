@@ -39,6 +39,7 @@ fn record(run_id: ContentHash) -> RunRecord {
         hash_version: HASH_VERSION,
         ir_version: "0.7".into(),
         engine_version: "0.3.0".into(),
+        engine_switches: Vec::new(),
         levels: vec![],
         deps: vec![],
         status: RunStatus::Running,
