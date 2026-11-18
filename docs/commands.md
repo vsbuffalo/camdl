@@ -236,8 +236,12 @@ that switches on or off an intervention firing before the origin (or at a time
 that depends on a parameter or on the state), and a scenario or sweep that
 changes a parameter the model reads outside its interventions (in the dynamics,
 the initial state, a forcing or an observation model), are refused before
-anything runs. After filtering, each arm's record before the origin is compared
-with the fitted model's, bit for bit, and any difference fails the forecast.
+anything runs. After filtering, each arm's observation record before the origin
+(log-likelihood increments, ESS, and each particle's log-likelihoods and
+predictive draws) is compared with the fitted model's, bit for bit, and any
+difference fails the forecast. The latent states are not compared, so a
+pre-origin difference no observation reads is caught only by the check before
+the run.
 
 `--particles N` sets the particle count per posterior draw of the filters
 `fit
