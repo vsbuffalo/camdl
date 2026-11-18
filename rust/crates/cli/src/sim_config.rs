@@ -98,23 +98,14 @@ pub(crate) struct ResolvedSimConfig {
     pub arms: Vec<ResolvedEntry>,
 }
 
-/// Compile-time settings: the first thing a `simulate` resolves, because the
-/// compile that produces [`ResolvedModel::ir`] reads them. They change the IR
-/// camdlc emits, so they reach the identity through [`ResolvedModel::digest`]
-/// and are not a field of [`ResolvedSimConfig`] of their own.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CompileSettings {
-    /// `--no-licm`: compile without loop-invariant code motion.
-    pub licm_disabled: bool,
-}
-
-impl CompileSettings {
-    /// Install the process-wide compile setting the IR loader reads. Called once
-    /// per invocation, before the first compile.
-    pub fn install(self) {
-        crate::util::set_licm_disabled(self.licm_disabled);
-    }
-}
+/// Compile-time settings ([`crate::util::CompileSettings`]): the first thing a
+/// `simulate` resolves, because the compile that produces [`ResolvedModel::ir`]
+/// reads them. They change the IR camdlc emits, so they reach the identity
+/// through [`ResolvedModel::digest`] and are not a field of
+/// [`ResolvedSimConfig`] of their own. `simulate` still installs them
+/// process-wide ([`crate::util::CompileSettings::install`]); `fit run` passes
+/// its own to every compile it makes.
+pub(crate) use crate::util::CompileSettings;
 
 /// The model the engine starts every cell from, and its identity level.
 pub(crate) struct ResolvedModel {

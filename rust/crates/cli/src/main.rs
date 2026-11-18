@@ -534,14 +534,20 @@ fn main() {
     sim::run_notes::set_reporter(util::report_run_note);
     util::set_ir_cache_disabled(cli.global.no_ir_cache);
     // `simulate` sets the compile setting from its resolved configuration
-    // (`sim_config::CompileSettings`); every other command, from the flag.
-    if !matches!(cli.command, Command::Simulate(_)) {
+    // (`sim_config::CompileSettings`), and `fit run` passes its own to every
+    // compile it makes; every other command reads it process-wide, from the
+    // flag (`util::CompileSettings::process`).
+    if !matches!(cli.command, Command::Simulate(_) | Command::Fit(FitCmd::Run(_))) {
         util::set_licm_disabled(cli.global.no_licm);
     }
+    // `--no-licm`, or `CAMDL_NO_LICM`: the compile setting `fit run` resolves.
+    let fit_compile = util::CompileSettings {
+        licm_disabled: cli.global.no_licm || crate::env::get().vars.no_licm,
+    };
 
     match cli.command {
         Command::Simulate(a)            => run_simulate(&a, &cli.global),
-        Command::Fit(FitCmd::Run(a))    => fit::cmd_fit_run_v2(&a),
+        Command::Fit(FitCmd::Run(a))    => fit::cmd_fit_run_v2(&a, fit_compile),
         Command::Fit(FitCmd::Summary(a))=> fit::cmd_fit_summary(&a),
         Command::Fit(FitCmd::Diff(a))   => fit::cmd_fit_diff(&a),
         Command::Fit(FitCmd::Table(a))  => fit::cmd_fit_table(&a),

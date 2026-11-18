@@ -421,7 +421,7 @@ pub(crate) fn run_camdlc(camdl_path: &str) -> Result<String, String> {
     // vs lean compile of the same model share the same digest. The lean opt-out
     // (`--no-state-grad`) lives on the run-producing path (`resolve_ir_path`),
     // which knows the method and so can safely drop the Jacobian.
-    run_camdlc_compile(camdl_path, None, true, None)
+    run_camdlc_compile(camdl_path, None, true, None, CompileSettings::process())
 }
 
 /// Compile `camdl_path` to IR JSON. When `emit_deps` is `Some(path)`, camdlc
@@ -448,6 +448,7 @@ pub(crate) fn run_camdlc_compile(
     emit_deps: Option<&std::path::Path>,
     needs_state_grad: bool,
     quantities: Option<&crate::quantities_file::QuantitiesOverride>,
+    compile: CompileSettings,
 ) -> Result<String, String> {
     let camdlc = find_camdlc()?;
 
@@ -489,9 +490,9 @@ pub(crate) fn run_camdlc_compile(
     // gh#272: LICM is on by default; `--no-licm` (or `CAMDL_NO_LICM`) turns it OFF
     // in the camdlc subprocess. Set it explicitly so the CLI FLAG reaches the
     // subprocess (the env var would inherit on its own, but the flag does not).
-    // The IR-cache key already folds `licm_enabled()`, so a flag flip recompiles
+    // The IR-cache key folds the same setting, so a flag flip recompiles
     // rather than serving the stale variant.
-    if !licm_enabled() {
+    if !compile.licm_enabled() {
         cmd.env("CAMDL_NO_LICM", "1");
     }
     // gh#439 A2: skip the WrtPop state-Jacobian when no downstream consumer reads
@@ -615,14 +616,45 @@ fn ir_cache_disabled() -> bool {
 static LICM_DISABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Disable LICM for this process (the `--no-licm` flag). `CAMDL_NO_LICM` is the
-/// equivalent env escape hatch (either forces the inlined IR).
+/// equivalent env escape hatch (either forces the inlined IR). Read only by
+/// [`CompileSettings::process`], for the commands that do not pass their own.
 pub fn set_licm_disabled(disabled: bool) {
     LICM_DISABLED.store(disabled, std::sync::atomic::Ordering::Relaxed);
 }
 
-pub(crate) fn licm_enabled() -> bool {
-    !(LICM_DISABLED.load(std::sync::atomic::Ordering::Relaxed)
-        || crate::env::get().vars.no_licm)
+/// The settings a compile runs under: what changes the IR camdlc emits, and so
+/// the model identity of every run made from it. A command that has resolved
+/// them passes them to each compile it makes ([`resolve_ir_path_with`],
+/// [`load_model_with`]); the others read the process-wide setting
+/// ([`CompileSettings::process`]), which `main` sets from `--no-licm` for every
+/// command but `simulate` and `fit run` (proposal 2026-11-17, phase 3 step 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CompileSettings {
+    /// `--no-licm`, or `CAMDL_NO_LICM`: compile without loop-invariant code
+    /// motion.
+    pub licm_disabled: bool,
+}
+
+impl CompileSettings {
+    /// The process-wide setting (`--no-licm` as `main` installed it, or
+    /// `CAMDL_NO_LICM`): for the commands not yet resolving their own.
+    pub fn process() -> Self {
+        CompileSettings {
+            licm_disabled: LICM_DISABLED.load(std::sync::atomic::Ordering::Relaxed)
+                || crate::env::get().vars.no_licm,
+        }
+    }
+
+    /// Install the process-wide compile setting [`Self::process`] reads.
+    /// `simulate` calls it once, before its first compile.
+    pub fn install(self) {
+        set_licm_disabled(self.licm_disabled);
+    }
+
+    /// Whether the compile runs loop-invariant code motion.
+    pub fn licm_enabled(self) -> bool {
+        !self.licm_disabled
+    }
 }
 
 /// Identity of the camdlc binary that compiles on a cache miss: the runtime's
@@ -1168,7 +1200,7 @@ mod single_flight {
 /// the fit path passes `true` iff any method is nuts+ode. The bit is folded into
 /// the cache key, so a lean entry is never reused for a nuts+ode fit.
 pub fn resolve_ir_path(path: &str, needs_state_grad: bool) -> Result<(String, Option<std::path::PathBuf>), String> {
-    resolve_ir_path_with_quantities(path, needs_state_grad, None)
+    resolve_ir_path_with(path, needs_state_grad, None, CompileSettings::process())
 }
 
 /// [`resolve_ir_path`], with an optional reporting vocabulary spliced in
@@ -1180,6 +1212,17 @@ pub fn resolve_ir_path_with_quantities(
     path: &str,
     needs_state_grad: bool,
     quantities: Option<&crate::quantities_file::QuantitiesOverride>,
+) -> Result<(String, Option<std::path::PathBuf>), String> {
+    resolve_ir_path_with(path, needs_state_grad, quantities, CompileSettings::process())
+}
+
+/// [`resolve_ir_path_with_quantities`] under the compile settings `compile`,
+/// which the caller resolved, rather than the process-wide setting.
+pub(crate) fn resolve_ir_path_with(
+    path: &str,
+    needs_state_grad: bool,
+    quantities: Option<&crate::quantities_file::QuantitiesOverride>,
+    compile: CompileSettings,
 ) -> Result<(String, Option<std::path::PathBuf>), String> {
     if !path.ends_with(".camdl") {
         // A vocabulary can only be applied by the compiler, and a compiled
@@ -1208,7 +1251,7 @@ pub fn resolve_ir_path_with_quantities(
                 // change the IR camdlc emits, so both belong in the key — else
                 // flipping one serves the stale variant.
                 let fold_disabled = crate::env::get().vars.no_constant_fold;
-                let key = ir_cache_key(&content, &compiled_model_name(path), &compiler_id, ir::IR_VERSION.trim(), fold_disabled, licm_enabled(), needs_state_grad, quantities.map(|q| q.bytes.as_slice()));
+                let key = ir_cache_key(&content, &compiled_model_name(path), &compiler_id, ir::IR_VERSION.trim(), fold_disabled, compile.licm_enabled(), needs_state_grad, quantities.map(|q| q.bytes.as_slice()));
                 Some((dir.join(format!("{}.ir.json", key)), key))
             }
             _ => None,
@@ -1259,7 +1302,7 @@ pub fn resolve_ir_path_with_quantities(
     let deps_tmp = cache_target.as_ref().map(|(_, key)| {
         std::env::temp_dir().join(format!("camdl_deps_{}_{}.json", std::process::id(), key))
     });
-    let json = run_camdlc_compile(path, deps_tmp.as_deref(), needs_state_grad, quantities)?;
+    let json = run_camdlc_compile(path, deps_tmp.as_deref(), needs_state_grad, quantities, compile)?;
     let read_deps = match deps_tmp.as_ref() {
         Some(dp) => {
             let built = build_read_deps(dp);
@@ -1405,7 +1448,7 @@ pub fn delegate_to_camdlc(args: &[&str]) -> Result<(), String> {
         .stderr(std::process::Stdio::inherit());
     // gh#272: honor `--no-licm` on the pass-through compiler subcommands
     // (`compile`/`check`/`inspect`) too, so they emit/inspect the inlined IR.
-    if !licm_enabled() {
+    if !CompileSettings::process().licm_enabled() {
         cmd.env("CAMDL_NO_LICM", "1");
     }
     let status = cmd.status().map_err(|e| format!("cannot run camdlc: {}", e))?;

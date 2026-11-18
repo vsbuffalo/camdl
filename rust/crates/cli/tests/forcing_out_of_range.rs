@@ -309,6 +309,37 @@ fn fit_aware_commands_read_the_configs_override() {
     }
 }
 
+/// A fit made with `--allow-forcing-extrapolation` on the command line, not in
+/// its config, stores the config it ran under: the fit folder's archived
+/// config records `[config] allow_forcing_extrapolation = true`, so every
+/// reader of it — `fit predict` here — runs under the override without being
+/// given the flag again (gh#1268).
+#[test]
+fn a_fit_made_under_the_flag_stores_the_override_in_its_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let m = model(tmp.path(), "linear", &ROWS_TO_50);
+    let toml = fit_toml(tmp.path(), &m, "");
+    let o = camdl(tmp.path(), &["fit", "run", toml.to_str().unwrap(), "--allow-forcing-extrapolation"]);
+    assert!(o.status.success(), "the flag lets the fit run:\n{}", stderr(&o));
+    let leaf = statuses(&tmp.path().join("results"))
+        .into_iter()
+        .find(|(_, v)| v["kind"] == "fit_method")
+        .map(|(p, _)| p.parent().unwrap().to_path_buf())
+        .expect("the fit's method leaf");
+    let segment = leaf.parent().unwrap().parent().unwrap();
+    let archived = std::fs::read_to_string(segment.join("fit.toml.original")).unwrap();
+    let parsed: toml::Table = archived.parse().unwrap_or_else(|e| panic!("the archive parses: {e}\n{archived}"));
+    let o = camdl(tmp.path(), &["fit", "predict", leaf.to_str().unwrap(), "--mode", "free_forward"]);
+    let err = stderr(&o);
+    assert!(!err.contains("forcing `mult` was evaluated"), "predict reads the stored override:\n{err}");
+    assert!(o.status.success(), "{err}");
+    assert_eq!(
+        parsed["config"].get("allow_forcing_extrapolation").and_then(|v| v.as_bool()),
+        Some(true),
+        "the stored config records the override the fit ran under:\n{archived}"
+    );
+}
+
 /// `compare` scores a chain-binomial fit with a `camdl pfilter` child at its
 /// posterior draws. A fit made under `[config] allow_forcing_extrapolation`
 /// is scored under it, so the child holds the forcing rather than refusing

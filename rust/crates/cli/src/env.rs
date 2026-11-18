@@ -32,9 +32,9 @@
 //! `run.json` names the switches in `engine_switches` while its
 //! `engine_version` stays the build. `CAMDL_NO_CONSTANT_FOLD` and
 //! `CAMDL_NO_LICM` change the IR the compiler emits and are keyed through the
-//! model level. Only `simulate` puts the switches into its identity so far;
-//! the other commands adopt them as they are converted (proposal phase 3 step
-//! 4).
+//! model level. `simulate` and `fit run` put the switches into their
+//! identities (a fit at its `fit` level); the other commands adopt them as
+//! they are converted (proposal phase 3 step 4).
 //!
 //! Not here:
 //!

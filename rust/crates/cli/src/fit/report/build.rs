@@ -34,6 +34,21 @@ pub(crate) struct CalendarContext {
 }
 
 impl CalendarContext {
+    /// The context of `model`: its origin, time unit and `instant`-kind
+    /// parameters.
+    pub(crate) fn of_model(model: &ir::Model) -> Self {
+        CalendarContext {
+            origin: model.origin.clone(),
+            time_unit: model.time_unit.clone(),
+            instant_params: model
+                .parameters
+                .iter()
+                .filter(|p| p.param_kind == Some(ir::parameter::ParamKind::Instant))
+                .map(|p| p.name.clone())
+                .collect(),
+        }
+    }
+
     /// Compute the calendar date for a rendered parameter, or `None`
     /// when it is not an `instant` estimand or no `origin` is set.
     /// Single source of truth for all four formatters so the date map

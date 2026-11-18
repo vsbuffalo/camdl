@@ -53,6 +53,7 @@ fn resolve_anchors_into_temp_ir(
 pub mod cas;  // gh#147 M3.2: fit-method CAS identity (resolve_fit_method)
 pub mod coeff_guard;  // gh#342 P4: NUTS guard — param reaching a coefficient only via an init
 pub mod config_v2;
+pub(crate) mod run_config; // ResolvedFitConfig: fit run's one resolved configuration
 pub mod loglik;  // gh#280: LoglikType — the single typed source for loglik class
 pub mod state;
 pub(crate) mod execution; // execution.json: one attempt's times, process and cost, outside the manifest
@@ -344,15 +345,20 @@ pub(crate) fn abandon_method(out: &crate::out::Out, message: String) -> ! {
     out.error(crate::out::CommandError::new(message)).exit()
 }
 
-/// The engine a fit's identity folds in this process: this build. Every
-/// identity reader of a fit (`fit run`, a `fit.toml` handle) takes it from
-/// here, so they agree on which runs this engine made.
+/// The engine a fit's identity folds in this process: this build and the
+/// engine switches set (`env::Environment::engine_identity`), so a fit made
+/// with `CAMDL_EVAL_UNRESOLVED` or an experimental input never shares a leaf
+/// with a default one. Every identity reader of a fit (`fit run`, a
+/// `fit.toml` handle, `fit new --from`'s segment hint) takes it from here, so
+/// they agree on which runs this engine made.
 pub(crate) fn fit_engine() -> runid::inputs::EngineIdentity {
-    runid::inputs::EngineIdentity::of_build(crate::version::ENGINE_ID)
+    crate::env::get().engine_identity(crate::version::ENGINE_ID)
 }
 
-pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
-    use config_v2::{Algorithm, FitConfig};
+/// `camdl fit run`, under the compile settings `compile` (`--no-licm`), which
+/// every compile the fit makes is given.
+pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs, compile: crate::util::CompileSettings) {
+    use config_v2::Algorithm;
     // `fit run` has no `--no-color`: its painters follow the environment and
     // whether each stream is a terminal.
     let mut out = crate::out::Out::new(false);
@@ -372,348 +378,35 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             .num_threads(a.parallel)
             .build_global();
     }
-    // Removed flags fail loudly before any work, each naming its replacement
-    // (alpha posture: a redirect, not a shim). Every one present is reported,
-    // so `--stage posterior --init from_prior` is answered in one message.
-    if let Some(msg) = removed_flag_message(a) {
-        out.fail(format!("error: {}", msg));
-    }
-    // PGAS parallel tempering was removed (gh#789); the flag is trapped so a
-    // stale script is answered with the fix rather than clap's "unexpected
-    // argument".
-    if let Some(raw) = a._removed_tempering.as_deref() {
-        out.fail(format!(
-            "error: --tempering is no longer accepted on `camdl fit run`: PGAS parallel \
-             tempering was removed (gh#789), and every PGAS chain samples the posterior \
-             directly, as the ladder's cold rung did. Drop `--tempering {raw}`; a \
-             `tempering = [...]` line under [method] must be deleted too. Fits stored \
-             before the removal are not reused and cannot be resumed; they run again."
-        ));
-    }
-    // Correlated pseudo-marginal PMMH was removed; `--rho` is trapped the same
-    // way.
-    if let Some(raw) = a._removed_rho.as_deref() {
-        out.fail(format!(
-            "error: --rho is no longer accepted on `camdl fit run`: correlated \
-             pseudo-marginal PMMH was removed, and `pmmh` runs the bootstrap particle \
-             filter with independent likelihood evaluations. Drop `--rho {raw}`; a \
-             `rho = ...` line under [method] must be deleted too. PMMH fits stored \
-             before the removal are not reused and cannot be resumed; they run again."
-        ));
-    }
-    let fit_path              = a.config.to_string_lossy().into_owned();
-    let base_seed             = a.seed.unwrap_or(1);
-    let force                 = a.force;
-
-    // gh#540: every CLI flag that changes what the method computes or stores,
-    // collected once so the method identity can see all of them. Applied to
-    // the in-memory method below, before the CAS claim — the dispatch sites
-    // no longer override anything, so there is no route around the key.
-    let cli_overrides = crate::fit::config_v2::CliMethodOverrides {
-        max_tree_depth:       a.max_tree_depth,
-        trajectory_warmup:    a.trajectory_warmup,
-        csmc_sweeps_per_nuts: a.csmc_sweeps_per_nuts,
-        n_trajectories:       a.n_trajectories,
-        diagonal_mass:        a.diagonal_mass,
-        no_nuts:              a.no_nuts,
-        no_ancestor_sampling: a.no_ancestor_sampling,
-        no_adapt:             a.no_adapt,
-        adapt_start:          a.adapt_start,
-        cooling_target_iters: a.cooling_target_iters,
-        decibans_thresh:      a.decibans_thresh,
-        no_dt_check:          a.no_dt_check,
-        dt_check_halvings:    a.dt_check_halvings,
-        dt_check_strict:      a.dt_check_strict,
-        binomial:             a.binomial,
-        record_ancestry:      a.record_ancestry,
-        record_prequential:   a.record_prequential,
-    };
-    let sweep_specs: Vec<(String, Vec<f64>)> = a.sweep.iter()
-        .map(|s| (s.name.clone(), s.grid.expand()))
-        .collect();
-
-    // Load the file: the problem half and the one `[method]`.
-    let mut config = FitConfig::load(&fit_path).unwrap_or_else(|e| {
-        out.fail(format!("error: {}", e));
-    });
-    // `fit run` runs the file's one method and refuses a file that has none,
-    // naming the table. Every other reader takes the problem alone.
-    if let Err(e) = config.method() {
-        out.fail(format!("error: {}: {}", fit_path, e));
-    }
-    // `[method]` keys the method's own settings leave inert. Here and not in
-    // the shared parser, which also reads stored fits' archived configs.
-    {
-        let contents = std::fs::read_to_string(&fit_path).unwrap_or_else(|e| {
-            out.fail(format!("error: cannot read {fit_path}: {e}"));
-        });
-        let method = config.inference.method.as_ref().expect("checked above");
-        if let Err(e) = config_v2::refuse_inert_method_keys_in(&contents, method) {
-            out.fail(format!("error: {fit_path}: {e}"));
-        }
-    }
-    // gh#audit-C6 / gh#189: degenerate-rate handling is a keyed `[config]` field
-    // (folds into the fit-identity hash via the config blob). Every model this
-    // fit compiles carries it (`FitBackendConfig::eval_settings`): the
-    // capability scan and gradient preflight below, `FitRunConfig::build` for
-    // each method, and the `[synthetic]` generator's runs.
-    // A forcing outside its range: the flag sets the keyed `[config]` field,
-    // so the override reaches the fit identity either way.
-    if a.forcing_extrapolation.allow_forcing_extrapolation {
-        config.problem.config.allow_forcing_extrapolation = true;
-    }
-    // The policy every model this fit evaluates runs under, and every record
-    // it writes names: installed for the rest of the command.
-    let forcing =
-        crate::forcing_extrapolation::ForcingPolicy::new(config.problem.config.allow_forcing_extrapolation);
-    let _forcing_route = forcing.install();
-
-    // gh#656: `--emit-every` reaches exactly one thing on this command — the
-    // `[synthetic]` generator, which is the only fit path where the emission
-    // cadence determines data that is then fitted. A fit against REAL data
-    // scores at its data files' own times and never consults `emit_schedule`,
-    // so the flag would silently do nothing; refuse and say why rather than
-    // leaving the user to wonder which cadence they got.
-    //
-    // Deliberately NOT written into `config`: the fit-identity hash serializes
-    // that document, so parking it there would re-key a real-data fit over a
-    // knob that fit cannot see. The override travels as an argument to
-    // generation, and keys the fit the honest way — through the generated
-    // data's bytes, which `FitDigest.data` already hashes.
-    let emit_every = crate::emit_every::EmitEvery::from_cli_specs(&a.emit_every)
-        .unwrap_or_else(|e| {
-            out.fail(format!("error: {}", e));
-        });
-    if emit_every.is_some() && !config.problem.is_synthetic_fit() {
-        out.fail(format!(
-            "error: --emit-every sets the cadence at which SYNTHETIC \
-             observations are generated, and {} {}.\n  \
-             A fit against real data scores each stream at its own data file's \
-             times — `emit_schedule` never enters the likelihood — so this flag \
-             would change nothing.\n  \
-             Drop the flag, or add a `[synthetic]` block to generate data.",
-            fit_path,
-            if config.problem.synthetic.is_some() {
-                "declares `[data]` beside `[synthetic]`, so it fits the real data"
-            } else {
-                "declares no `[synthetic]` block"
-            }
-        ));
-    }
-
-    // gh#896: the method as the file alone spells it, before any CLI override,
-    // so a run can be told apart from the run `fit run <file>` would make.
-    let mut file_method: config_v2::Method =
-        config.inference.method.clone().expect("checked above");
-    // gh#514 / gh#540: the CLI overrides — `--starts` and the sampler knobs —
-    // all change where the chains begin or what the method computes, and
-    // therefore the stored output. They are written INTO the method here,
-    // before `cas::fit_level_hash` and before the claim, so a different
-    // override is a different artifact. Leaving them unset leaves the toml's
-    // values in place.
-    {
-        let method = config.inference.method.as_mut().expect("checked above");
-        if !cli_overrides.is_empty() {
-            // A flag the method does not read is refused here, before any
-            // work, rather than dropped (`OverrideFlag::methods`).
-            if let Err(e) = method.algorithm.apply_cli_overrides(&cli_overrides) {
-                out.fail(format!("error: {e}"));
-            }
-        }
-        if let Some(starts) = &a.starts {
-            method.starts = Some(starts.clone());
-        }
-        // gh#1056: `--starts-chains` qualifies the rule in force, from the
-        // flag or the file; only `from_posterior` takes it.
-        if let Some(subset) = &a.starts_chains {
-            method.starts = Some(
-                crate::fit::starts::apply_starts_chains(method.starts.clone(), subset, "fit")
-                    .unwrap_or_else(|e| out.fail(format!("error: {e}"))));
-        }
-    }
-
-    // A sourced `starts` rule reads a stored fit or a file: resolve the handle
-    // now, before the model is compiled, so a bad handle is refused at once
-    // and the dep folded into every leaf is one resolution. The source's
-    // convergence verdict is checked here (`--allow-nonconverged-source`
-    // lifts the refusal) — the one seam an upstream fit is consumed. A bare
-    // rule has nothing to resolve until the default is known, below.
-    let early_resolved_starts: Option<chain_starts::ResolvedStarts> = {
-        let method = config.inference.method.as_ref().expect("checked above");
-        match &method.starts {
-            Some(rule) if rule.source().is_some() => Some(
-                chain_starts::resolve_starts(rule, a.allow_nonconverged_source).unwrap_or_else(|e| {
-                    out.fail(format!("error: {}", e));
-                }),
-            ),
-            _ => None,
-        }
-    };
-
-    // Compile `model.camdl` → IR EXACTLY ONCE for the whole fit. Every
-    // per-(cell × sweep point) `FitRunConfig::build` then loads this
-    // pre-compiled IR instead of re-invoking camdlc per unit (a swept fit
-    // otherwise recompiled the model dozens of times). The resolved path is
-    // recorded on `config.problem.compiled_ir`; `model.camdl` is left
-    // untouched so the fit's content hash still hashes the original `.camdl`
-    // source bytes (identity is unchanged by the hoist). The temp IR persists
-    // for the process — `resolve_ir_path`'s returned path is not a drop guard.
-    //
-    // gh#439 A2: only `nl-lbfgs` on the `ode` backend reads the WrtPop
-    // state-Jacobian (`rate_state_grad` / `projection_state_grad`, via the ODE
-    // forward-sensitivity gradient in `ode_grad::det_grad`). Otherwise compile lean
-    // (`--no-state-grad`), which omits the dense ~O(G^3) Jacobian that dominates
-    // coupled-model IR. The bit is folded into the IR-cache key, so a lean entry is
-    // never reused for an nl-lbfgs+ode fit (and run identity is gradient-independent,
-    // so lean vs full share the same model digest).
-    let needs_state_grad = config.needs_state_grad();
-    let (compiled_ir, _ir_tmp) = crate::util::resolve_ir_path(&config.problem.model.camdl, needs_state_grad)
-        .unwrap_or_else(|e| {
-            out.fail(format!("error: {}", e));
-        });
-    config.problem.compiled_ir = Some(compiled_ir.clone());
-
-    // gh#616: if the model declares observation anchors, resolve them ONCE here
-    // — from this fit's own `[data]` — and re-emit the compiled IR with the
-    // anchors substituted, so every downstream loader (the runner, each sweep
-    // point, the archived copy) reads the SAME resolved model.
-    //
-    // The alternative, substituting in memory at each of those loads, would put
-    // the resolution in half a dozen places that must agree; this puts it in
-    // one. A FRESH temp is written rather than mutating `compiled_ir` in place,
-    // because that path can be a user-supplied `.ir.json` (`resolve_ir_path`
-    // returns it unchanged) and a command must never rewrite the user's file.
-    //
-    // Fit identity is unaffected and already correct: it hashes the original
-    // `.camdl` source plus the data digests, so two data vintages against one
-    // anchored model key differently through the data, exactly as two vintages
-    // of any fit do.
-    let compiled_ir = resolve_anchors_into_temp_ir(&out, &compiled_ir, &config.problem)
-        .unwrap_or_else(|e| {
-            out.fail(format!("error: {}", e));
-        });
-    config.problem.compiled_ir = Some(compiled_ir.clone());
-
-    // Load model and validate completeness (from the pre-compiled IR).
-    let (model, _) = crate::util::load_model(&compiled_ir).unwrap_or_else(|e| {
-        out.fail(format!("error: {}", e));
-    });
-    // The one dt rule (`crate::dt_rule`): the model's declared step is the
-    // integration step for every method; a `[config] dt` the file writes that
-    // differs is refused. The resolved step is written into the config before
-    // anything reads it — the observation grid, the synthetic generator, every
-    // runner, and the fit identity, which so keys on the step the fit ran at.
-    {
-        let contents = std::fs::read_to_string(&fit_path).unwrap_or_else(|e| {
-            out.fail(format!("error: cannot read {fit_path}: {e}"));
-        });
-        let written = config_v2::table_declares_key(&contents, "config", "dt")
-            .then_some(config.problem.config.dt);
-        match crate::dt_rule::effective_dt(model.simulation.dt, written) {
-            Ok(dt) => config.problem.config.dt = dt,
-            Err(m) => {
-                out.fail(format!("error: {fit_path}: {}", m.message("[config] dt")));
-            }
-        }
-    }
-    // How each `[fixed]` name reached the config, for the partition — read
-    // before the expansion below folds a scenario's names into the inline
-    // values. An error is the expansion's to report.
-    let fixed_via = config.problem.fixed.declarations(&model);
-    // gh#33: expand `[fixed] from_scenario = "name"` into the inline
-    // values map by looking up the named scenario in the model. Must
-    // happen after model load but before validate, so the every-param-
-    // resolved check sees the expanded values.
-    config.problem.expand_fixed_from_scenario(&model).unwrap_or_else(|e| {
-        out.fail(format!("error: {}", e));
-    });
-    let model_params: Vec<String> = model.parameters.iter().map(|p| p.name.clone()).collect();
-    // The one model fact `validate` needs beyond the parameter names: does
-    // `init { }` DRAW a compartment from a law? It decides the ic_free ×
-    // pfilter/pmmh cells (gh#732) — under the bootstrap particle filter a
-    // declared law is the whole source of the swarm's spread at t=0.
-    let init_law = if model.initial_conditions.iter().any(|(_, s)| s.is_law()) {
-        crate::fit::methods::InitLaw::Declared
-    } else {
-        crate::fit::methods::InitLaw::Absent
-    };
-    config.validate(&model_params, init_law).unwrap_or_else(|e| {
-        // A model constant named in [estimate] or [fixed] is an unknown
-        // parameter; the hint says how to make it configurable.
-        let fixed = config.problem.fixed.resolve().unwrap_or_default();
-        let named = config.problem.estimate.keys().chain(fixed.keys()).map(|s| s.as_str());
-        out.fail(format!("error: {}{}", e, crate::util::constant_hints(&model, named)));
-    });
-    // gh#75: prior-presence check honoring the IR fallback. Has to run
-    // after partition validation but with the model IR in scope.
-    let ir_prior_params: std::collections::BTreeSet<&str> = model.parameters.iter()
-        .filter(|p| p.prior_dist().is_some() || p.hierarchical().is_some())
-        .map(|p| p.name.as_str())
-        .collect();
-    config.validate_priors_present(&ir_prior_params).unwrap_or_else(|e| {
-        out.fail(format!("error: {}", e));
-    });
-    // gh#369: a fit.toml prior that displaces a model `~` prior is said once,
-    // here, before the grid — a property of the config, not of a cell/chain.
-    let estimated_names: Vec<String> = config.problem.estimate.keys().cloned().collect();
-    if let Some(w) = crate::fit::priors_precedence::format_prior_override_warning(
-        &crate::fit::priors_precedence::prior_overrides(
-            &estimated_names, &config.problem.estimate, &model),
-    ) {
-        out.say_raw(format_args!("{}", w));
-    }
-    // `nl-lbfgs` is the one method whose objective needs a gradient of this
-    // model. Ask the gradient capability gate now, before a leaf is claimed, so
-    // a model it refuses costs a message rather than a half-run method.
-    config.validate_gradient_capability(&model).unwrap_or_else(|e| {
-        out.fail(format!("error: {}", e));
-    });
-    config.validate_held_hierarchical_leaves(&model).unwrap_or_else(|e| {
-        out.fail(format!("error: {}", e));
-    });
-    config.validate_hierarchical_leaf_boxes(&model).unwrap_or_else(|e| {
-        out.fail(format!("error: {}", e));
-    });
-    config.validate_smooth_scale(&model).unwrap_or_else(|e| {
-        out.fail(format!("error: {}", e));
-    });
-    config.validate_smooth_coordinates(&model).unwrap_or_else(|e| {
-        out.fail(format!("error: {}", e));
-    });
-
-    // The chain-starts rule, resolved against the problem before the identity
-    // is taken (proposal §3.4): `from_prior` when every estimated parameter
-    // declares a prior, `uniform_unconstrained` otherwise, unless the file or
-    // `--starts` spelled one. Said at startup either way, so the rule a run
-    // used is never a thing to infer.
-    let starts_resolution = {
-        let method = config.inference.method.as_mut().expect("checked above");
-        method.resolve_starts(&config.problem, &model).unwrap_or_else(|e| {
-            out.fail(format!("error: {}: {e}", starts_origin(a, &fit_path)));
-        })
-    };
-    // From here the method is read-only: the identity below sees exactly what
-    // the runners consume.
-    let method: config_v2::Method = config.inference.method.clone().expect("checked above");
-    // gh#896: the method the file alone resolves to, for the identity of the
-    // run `fit run <file>` with no CLI options would key (below, per cell).
-    let _ = file_method.resolve_starts(&config.problem, &model);
-    // The seeds the file alone runs: its `fit_seeds`, else the default seed.
-    let file_seeds: Vec<u64> = config.inference.fit_seeds.clone().unwrap_or_else(|| vec![1]);
-    let allow_nonconverged_source = a.allow_nonconverged_source;
-    // Only a fit source carries a convergence verdict to lift.
-    if allow_nonconverged_source {
-        let rule = method.starts().unwrap_or_else(|e| { out.fail(format!("error: {e}")) });
-        if let Err(e) = chain_starts::refuse_inert_allow_nonconverged(rule, "fit") {
-            out.fail(format!("error: {e}"));
-        }
-    }
-    if let Some(msg) = config.point_start_multichain_note() {
-        // gh#71: a point-started multi-chain sampler's R̂ is uninformative;
-        // the summary will report it as not assessed. A note, not an error —
-        // the sample is still valid.
-        out.say(format_args!("{} {}", crate::out::paint::note_tag(), msg));
-    }
+    let fit_path = a.config.to_string_lossy().into_owned();
+    let force = a.force;
+    // The one resolved configuration: every flag, the file and every default
+    // resolved once, before anything runs. The identity below and every
+    // method's run are built from it, and the fit folder stores its config.
+    // Its destructure names every field, so a field added to it does not
+    // compile here until it is used.
+    let (resolved, _forcing_route) = run_config::resolve(a, compile, &out);
+    let run_config::ResolvedFitConfig {
+        config,
+        model,
+        engine,
+        forcing,
+        seeds: fit_seeds,
+        sweep: sweep_specs,
+        emit_every,
+        problem_flags,
+        fixed_via,
+        starts: run_config::StartsPlan { early: early_resolved_starts, resolution: starts_resolution, allow_nonconverged_source },
+        file_only: run_config::FileOnly { method: file_method, seeds: file_seeds },
+    } = resolved;
+    let method: config_v2::Method = config.inference.method.clone().expect("resolved with a method");
+    // The config the fit folder stores: the file, with what the command line
+    // set in the problem half written into it (gh#1268); `None` stores the
+    // file as it is.
+    let stored_config: Option<String> = std::fs::read_to_string(&fit_path)
+        .map_err(|e| format!("cannot read {fit_path}: {e}"))
+        .and_then(|text| problem_flags.fold_into(&text))
+        .unwrap_or_else(|e| out.fail(format!("error: {e}")));
 
     // ── Validate sweeps ───────────────────────────────────────────────────
     // Validate: swept params must be in [fixed], not [estimate]
@@ -946,7 +639,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         }),
         Err(_) => Default::default(),
     };
-    let engine = fit_engine();
     let parent_fit_hash_ch = cas::fit_level_hash(
         &model,
         &announce_ir_version,
@@ -1053,15 +745,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // and grid roll-ups. The same applies to `dataset_idx` for synthetic fits.
     // `fit_seeds` in the file replaces the single base seed, so `--seed`
     // beside it would be read nowhere.
-    if a.seed.is_some() && config.inference.fit_seeds.is_some() {
-        out.fail(format!("error: --seed sets the single seed of a fit, and {fit_path} declares \
-                   `fit_seeds`, which replaces it, so the flag would change nothing. Drop \
-                   --seed, or delete `fit_seeds` from the file."));
-    }
-    let fit_seeds: Vec<u64> = match &config.inference.fit_seeds {
-        Some(list) => list.clone(),
-        None       => vec![base_seed],
-    };
 
     let synthetic_datasets: Vec<synthetic::SyntheticDataset> = match &config.problem.synthetic {
         Some(spec) if config.problem.is_synthetic_fit() => {
@@ -1469,6 +1152,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 ) {
                     out.say(format_args!("warning: cannot write fit-level sidecar {}: {}", seg.display(), e));
                 }
+                if let Some(text) = &stored_config {
+                    crate::run_meta::store_archived_config(seg, text).unwrap_or_else(|e| {
+                        out.fail(format!("error: cannot store the fit's config in {}: {e}", seg.display()))
+                    });
+                }
                 // gh#322: archive the compiled base-model IR in the fit segment so
                 // downstream verbs (`fit predict`) are self-contained and the run
                 // is portable — they resolve the model from this archive rather
@@ -1604,9 +1292,12 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         };
         let calendar = ir::caltime::CalendarAxis::from_model(&model)
             .unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        let meta = crate::resolve::RecordMeta::new(
+        let mut meta = crate::resolve::RecordMeta::new(
             &ir_version_str, &sweep_config.model.camdl, validated_label.clone(), calendar, &forcing)
             .with_deps(deps.clone());
+        // The engine the identity keyed, so a leaf keyed by an engine switch
+        // names it (`run.json`'s `engine_switches`).
+        meta.engine = engine.clone();
         // Reuse decision through the one policy seam. A resumed run is no
         // exception: its identity carries the longer chain's length and a dep
         // on the base leaf, so it never names the base or a fresh run of the
@@ -2498,7 +2189,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // in memory and the leaf it finalized; then the `stored` milestone.
         let record = out.end_method().expect("the method was begun before its dispatch");
         match completed_outcome(method_name, &dest, record, method_warmup,
-            method_elapsed.as_secs_f64())
+            method_elapsed.as_secs_f64(), &model)
         {
             Ok(outcome) => out.method_report(&outcome),
             Err(e) => out.say(format_args!("warning: the run's report could not be built from {}: {e}",
@@ -2644,6 +2335,7 @@ fn completed_outcome(
     record: crate::out::MethodRecord,
     warmup: Vec<report::ChainWarmup>,
     total_seconds: f64,
+    model: &ir::Model,
 ) -> Result<report::build::MethodOutcome, String> {
     use method_result::MethodResult;
     let result = MethodResult::load_from(leaf, method_name).map_err(|e| e.to_string())?;
@@ -2676,7 +2368,9 @@ fn completed_outcome(
         }),
         chain_detail,
     };
-    let cal = fit_summary::load_calendar_context(fit_dir);
+    // The calendar of the model the fit ran, in hand: reading it back from the
+    // leaf would compile the model's source again.
+    let cal = report::build::CalendarContext::of_model(model);
     Ok(report::build::MethodOutcome::Completed(report::build::build_method_report(facts, &cal)))
 }
 

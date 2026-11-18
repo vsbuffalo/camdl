@@ -315,20 +315,9 @@ pub(crate) fn load_calendar_context(fit_dir: &Path) -> CalendarContext {
     let Some(model_path) = model_path else {
         return CalendarContext::default();
     };
-    let model = match crate::util::load_model(&model_path) {
-        Ok((m, _)) => m,
-        Err(_) => return CalendarContext::default(),
-    };
-    let instant_params = model
-        .parameters
-        .iter()
-        .filter(|p| p.param_kind == Some(ir::parameter::ParamKind::Instant))
-        .map(|p| p.name.clone())
-        .collect();
-    CalendarContext {
-        origin: model.origin.clone(),
-        time_unit: model.time_unit.clone(),
-        instant_params,
+    match crate::util::load_model(&model_path) {
+        Ok((model, _)) => CalendarContext::of_model(&model),
+        Err(_) => CalendarContext::default(),
     }
 }
 

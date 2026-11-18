@@ -869,6 +869,14 @@ impl Default for FitSidecar {
 /// The producing config's archived copy inside a fit folder.
 pub const ARCHIVED_CONFIG: &str = "fit.toml.original";
 
+/// Store `text` as the fit folder's archived config ([`ARCHIVED_CONFIG`]), in
+/// place of the copy of the producing file [`write_fit_sidecar`] made: what
+/// `fit run` stores when its command line set a value of the problem half the
+/// file does not hold, so the archive is the config the fit ran under.
+pub fn store_archived_config(fit_segment: &std::path::Path, text: &str) -> std::io::Result<()> {
+    std::fs::write(fit_segment.join(ARCHIVED_CONFIG), text)
+}
+
 /// Write the fit-level sidecar and archive the producing `fit.toml`
 /// ([`ARCHIVED_CONFIG`], the config-diff source `fit table` loads). The archive
 /// is best-effort: a CLI-only fit (no `.toml`) has none and config-diff degrades
