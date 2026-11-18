@@ -553,20 +553,22 @@ and of coverage; the cases themselves are regression evidence.
    once, into `fit::run_config::ResolvedFitConfig` (flags, file and defaults,
    before anything runs), from which its identity and its runners are built,
    with every field named in the destructure. Its identity now keys the engine
-   switches, at the fit level. The fit file is read once; every fit folder
-   archives that text, with a problem-half value a flag set written in (gh#1268,
-   for run-directory, label and run-id handles; a `fit.toml` handle names only
-   the run the file alone makes and refuses a flag-made fit, naming it). Where a
-   resolved config is stored, in the archive or a file of its own, is open
-   (D93), behind `ProblemFlags::stored_text`. The archive's `[method]` stays the
-   file's, and a sweep point's archive the file's `[fixed]`. `--resume` is part
-   of the resolved value; nothing after resolution reads the command line.
-   `--no-licm` is a compile setting (`util::CompileSettings`) that `fit run`
-   passes to its compile, and the end-of-run report reads the calendar from the
-   model in hand rather than recompiling the source; `main` no longer sets the
-   process-wide setting for `fit run`. `input_class::FIT_RUN` classifies every
-   input, checked against clap both ways, and `tests/fit_run_input_classes.rs`
-   has a case for each.
+   switches, at the fit level. The fit file is read once; every fit folder keeps
+   that text byte for byte as `fit.toml.original` and, by D93, the configuration
+   its fits ran under as `fit.resolved.toml`: the text with a problem-half value
+   a flag set written in (gh#1268) and the folder's own `[fixed]` (a sweep
+   point's values), deterministic and marked as generated. Every reader of a
+   stored fit's config reads the resolved file (run-directory, label and run-id
+   handles; `fit table`); a folder without one is refused, naming the re-run
+   that writes it. A `fit.toml` handle names only the run the file alone makes
+   and refuses a flag-made fit, naming it. The resolved config's `[method]`
+   stays the file's. `--resume` is part of the resolved value; nothing after
+   resolution reads the command line. `--no-licm` is a compile setting
+   (`util::CompileSettings`) that `fit run` passes to its compile, and the
+   end-of-run report reads the calendar from the model in hand rather than
+   recompiling the source; `main` no longer sets the process-wide setting for
+   `fit run`. `input_class::FIT_RUN` classifies every input, checked against
+   clap both ways, and `tests/fit_run_input_classes.rs` has a case for each.
 
    **Done in this step, `pfilter`, `profile`, `survey`:** each resolves its
    configuration once, before anything runs, into
