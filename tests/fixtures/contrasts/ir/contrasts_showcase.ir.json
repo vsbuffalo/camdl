@@ -9,7 +9,7 @@
 {"name":"recovery","stoichiometry":[["I",-1],["R",1]],"rate":{"bin_op":{"op":"mul","left":{"param":"gamma"},"right":{"pop":"I"}}},"metadata":{"origin_kind":"intrinsic","source_compartment":"I","dest_compartment":"R"},"rate_grad":{"gamma":{"grad":{"pop":"I"}}},"rate_state_grad":{"I":{"grad":{"param":"gamma"}}}},
 {"name":"death","stoichiometry":[["I",-1],["D",1]],"rate":{"bin_op":{"op":"mul","left":{"param":"mu"},"right":{"pop":"I"}}},"metadata":{"origin_kind":"intrinsic","source_compartment":"I","dest_compartment":"D"},"rate_grad":{"mu":{"grad":{"pop":"I"}}},"rate_state_grad":{"I":{"grad":{"param":"mu"}}}}
 ],"ode_equations":[],"time_functions":[],"tables":[],"interventions":[
-{"name":"sia","fire":{"scheduled":{"at_times_expr":[{"bin_op":{"op":"add","left":{"const":0.0},"right":{"unit_literal":{"value":140.0,"dim":[0,1],"unit":"weeks"}}}}]}},"actions":[{"fraction_transfer":{"src":"S","dst":"V","fraction":{"const":0.6}}}]}
+{"name":"sia","fire":{"scheduled":{"at_times":[140.0]}},"actions":[{"fraction_transfer":{"src":"S","dst":"V","fraction":{"const":0.6}}}]}
 ],"observations":[],"parameters":[
 {"name":"beta","value":{"mode":"estimated","bounds":[0.0,5.0],"prior":"flat"},"param_kind":"rate","param_dim":null},
 {"name":"gamma","value":{"mode":"estimated","bounds":[0.01,1.0],"prior":"flat"},"param_kind":"rate","param_dim":null},
