@@ -2346,9 +2346,11 @@ pub struct SurveyArgs {
     #[arg(long, default_value_t = 42)]
     pub seed: u64,
 
-    /// Render an interactive HTML pair-plot (`landscape.html`)
-    /// alongside the TSV. Off by default — TSV is the canonical
-    /// artifact, HTML is opt-in (proposal §"Default behaviour").
+    /// Render an interactive HTML pair-plot (`landscape.html`) of the
+    /// landscape, written as a child of the stored survey
+    /// (`<leaf>/landscape_html/landscape.html`); on a stored survey it is
+    /// rendered from the stored landscape. Off by default — TSV is the
+    /// canonical artifact, HTML is opt-in (proposal §"Default behaviour").
     #[arg(long)]
     pub render: bool,
 

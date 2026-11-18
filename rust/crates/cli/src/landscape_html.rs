@@ -40,9 +40,10 @@ pub struct LandscapeMeta {
 /// the include_str! path.
 const PLOTLY_BUNDLE: &str = include_str!("../vendored/plotly-2.35.2.min.js");
 
-/// Render `<run_dir>/landscape.html` given the freshly-written
-/// `landscape.tsv` and the survey's typed inputs (used only for
-/// the run-hash + parameter list embedded in the page).
+/// The HTML of a survey's `landscape.html`, from its `landscape.tsv` at
+/// `landscape_tsv` and the survey's typed inputs (used only for the run-hash
+/// and parameter list embedded in the page). `survey --render` writes it as
+/// the leaf's child (`cas_sink::LANDSCAPE_HTML`).
 ///
 /// Layout:
 ///
@@ -66,9 +67,8 @@ const PLOTLY_BUNDLE: &str = include_str!("../vendored/plotly-2.35.2.min.js");
 ///   </body>
 /// </html>
 /// ```
-pub fn render(html_path: &Path, meta: &LandscapeMeta) -> Result<(), String> {
-    let landscape_tsv = html_path.with_file_name("landscape.tsv");
-    let tsv_text = std::fs::read_to_string(&landscape_tsv)
+pub fn render_bytes(landscape_tsv: &Path, meta: &LandscapeMeta) -> Result<Vec<u8>, String> {
+    let tsv_text = std::fs::read_to_string(landscape_tsv)
         .map_err(|e| format!("cannot read {}: {}", landscape_tsv.display(), e))?;
     let parsed = parse_landscape_tsv(&tsv_text)
         .map_err(|e| format!("parse error in landscape.tsv: {}", e))?;
@@ -79,13 +79,7 @@ pub fn render(html_path: &Path, meta: &LandscapeMeta) -> Result<(), String> {
         .unwrap_or_else(|| "camdl survey".to_string());
     let hash_short = meta.hash_short.clone();
 
-    let html = build_html(&title, &hash_short, &json_payload, meta);
-    let tmp = html_path.with_extension("html.tmp");
-    std::fs::write(&tmp, html.as_bytes())
-        .map_err(|e| format!("cannot write {}: {}", tmp.display(), e))?;
-    std::fs::rename(&tmp, html_path)
-        .map_err(|e| format!("cannot rename to {}: {}", html_path.display(), e))?;
-    Ok(())
+    Ok(build_html(&title, &hash_short, &json_payload, meta).into_bytes())
 }
 
 /// JSON schema posted into `<script type="application/json" id="landscape-data">`.

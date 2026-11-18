@@ -18,7 +18,9 @@
 //!   landscape.tsv       # primary artifact (always)
 //!   summary.json        # SE distribution, top-K stats, dimensionality info,
 //!                       # feasibility of the sampled box (gh#670)
-//!   landscape.html      # interactive pair-plot (only when --render)
+//!   landscape_html/     # the leaf's child, written only on --render:
+//!     landscape.html    #   the interactive pair-plot
+//!     landscape_html.json  # its record (parent run id, size, SHA-256)
 //! ```
 //!
 //! Reuse paths:
@@ -396,14 +398,8 @@ fn run_survey(
         Ok(crate::resolve::ReuseVerdict::CacheHit { dir, .. }) => {
             out.milestone("cached", dir.display());
             crate::resolve::note_leaf_from_another_model_file(&dir, &model_path_str);
-            let html_path = dir.join("landscape.html");
-            if render && !html_path.exists() {
-                out.say("  rendering --render HTML from cached landscape.tsv …");
-                if let Err(e) = render_landscape_html(
-                    &dir.join("landscape.tsv"), &html_path, &landscape_meta)
-                {
-                    out.say(format_args!("warning: HTML render failed: {}", e));
-                }
+            if render {
+                render_landscape_child(out, &dir, &resolved_id.run_id, &landscape_meta);
             }
             return;
         }
@@ -444,7 +440,6 @@ fn run_survey(
     let _refusal_deferred = forcing.defer_while_claimed();
     let landscape_path = staging.join("landscape.tsv");
     let summary_path = staging.join("summary.json");
-    let html_path = staging.join("landscape.html");
 
     if eval_method == SurveyEvalMethod::Simulate {
         out.say("  --eval simulate now computes p(y|θ, ODE_skeleton) via the ODE \
@@ -628,15 +623,6 @@ fn run_survey(
         out.say(format_args!("warning: could not write summary.json: {}", e));
     }
 
-    // ── Render HTML if requested ────────────────────────────────────
-    if render {
-        if let Err(e) = render_landscape_html(&landscape_path, &html_path, &landscape_meta) {
-            out.say(format_args!("warning: HTML render failed: {}", e));
-        } else {
-            out.say(format_args!("survey: wrote {}", html_path.display()));
-        }
-    }
-
     // ── Finalize the CAS leaf ───────────────────────────────────────
     let elapsed = t0.elapsed().as_secs_f64();
     let best_loglik = sorted.iter().map(|r| r.loglik).find(|l| l.is_finite());
@@ -678,6 +664,10 @@ fn run_survey(
     }
     out.milestone("stored",
         format!("{} \u{b7} {} points (eval={})", run_dir.display(), n_points, eval_method));
+    // ── Render HTML if requested: the stored leaf's child ──────────
+    if render {
+        render_landscape_child(out, &run_dir, &resolved_id.run_id, &landscape_meta);
+    }
     out.hint("camdl list --kind survey");
 }
 
@@ -2086,12 +2076,25 @@ fn quartiles(values: &[f64]) -> serde_json::Value {
 
 // ─── HTML rendering (stub — fleshed out in landscape_html commit) ───────────
 
-fn render_landscape_html(
-    _landscape_path: &Path,
-    html_path: &Path,
+/// `--render`: the landscape's interactive pair-plot, rendered from the
+/// stored leaf's `landscape.tsv` and written as the leaf's child
+/// ([`crate::cas_sink::LANDSCAPE_HTML`], declared in its record first), never
+/// one of its own files: the leaf's files are then the same whichever
+/// invocation stored it, and rendering a stored survey leaves it reusable. A
+/// failure is a warning, as it was: the landscape itself is stored.
+fn render_landscape_child(
+    out: &crate::out::Out,
+    leaf: &Path,
+    run_id: &runid::ContentHash,
     meta: &crate::landscape_html::LandscapeMeta,
-) -> Result<(), String> {
-    crate::landscape_html::render(html_path, meta)
+) {
+    let child = &crate::cas_sink::LANDSCAPE_HTML;
+    let written = crate::landscape_html::render_bytes(&leaf.join("landscape.tsv"), meta)
+        .and_then(|html| child.declare_and_write(leaf, run_id, &html));
+    match written {
+        Ok(()) => out.say(format_args!("survey: wrote {}", child.file_in(leaf).display())),
+        Err(e) => out.say(format_args!("warning: HTML render failed: {}", e)),
+    }
 }
 
 #[cfg(test)]
