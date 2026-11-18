@@ -1538,7 +1538,7 @@ mod tests {
             adhoc_enable: _,
             adhoc_disable: _,
             // scenario level: its lists lead every `ResolvedEntry`'s
-            // enable / disable (`build_simulate_cas_sink`).
+            // enable / disable (`resolve_sim_config`).
             fit_base: _,
             // provenance: the scenario label only; its values are above.
             scenario_inline_name: _,
@@ -1555,11 +1555,11 @@ mod tests {
             dt: _,
             // seed level: `CellSpec::process_seed`, the value copied here.
             seed: _,
-            // refused on the CAS-writing path (`build_simulate_cas_sink`):
+            // refused on the CAS-writing path (`resolve_sim_config`):
             // it changes the trajectory and has no identity route yet.
             required_output_times: _,
             // refused on the CAS-writing path unless BTPE
-            // (`build_simulate_cas_sink`): only `fit predict` sets another
+            // (`resolve_sim_config`): only `fit predict` sets another
             // sampler, and its replay writes no leaf.
             binomial: _,
         } = crate::util::SimRun::default();

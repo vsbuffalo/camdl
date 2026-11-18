@@ -32,11 +32,18 @@
 //! puts [`Environment::engine_identity`] into its identity so far; the other
 //! commands adopt it as they are converted (proposal phase 3 step 4).
 //!
-//! Not here: `clap`'s `env = "CAMDL_…"` attributes (`CAMDL_SEED`, `CAMDL_OUTPUT`,
-//! `CAMDL_OUTPUT_DIR` for `simulate`, `CAMDL_PARALLEL`), which are another
-//! spelling of a flag and are classified with it; `std::env::args`,
-//! `current_dir` and `temp_dir`, which are the process's context, not settings;
-//! and compile-time `env!` constants.
+//! Not here:
+//!
+//! - `clap`'s `env = "CAMDL_…"` attributes (`CAMDL_SEED`, `CAMDL_OUTPUT`,
+//!   `CAMDL_OUTPUT_DIR` for `simulate`, `CAMDL_PARALLEL`), which are another
+//!   spelling of a flag and are classified with it;
+//! - `RUST_LOG`, read by `env_logger` for the log filter;
+//! - the variables camdlc reads itself, in its own process, which inherits
+//!   camdl's environment: `CAMDL_TIME_PASSES`, `NO_COLOR`, `CLICOLOR_FORCE`,
+//!   `CAMDL_NO_CONSTANT_FOLD` and `CAMDL_NO_LICM` (the last two are also read
+//!   here, to key the IR cache and the run);
+//! - `std::env::args`, `current_dir` and `temp_dir`, which are the process's
+//!   context, not settings; and compile-time `env!` constants.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
