@@ -7432,9 +7432,14 @@ camdl fit predict [FIT]
                               fit's selection; conflicts with --scenario
   --sweep PARAM=GRID          vary a parameter across the posterior (repeatable).
                               GRID = list | lin(min,max,n) | log10(min,max,n).
-                              Free-forward only; same param in a scenario is an error
-  --mode free_forward|one_step
+                              Free-forward, or forecast arms over a parameter read
+                              only after the origin; same param in a scenario is an error
+  --mode free_forward|one_step|forecast
+  --horizon DURATION          the forecast's reach from the end of the training rows
+                              (`4 weeks`, `28 days`); implies --mode forecast
   --n-draws N                 posterior subsample cap for both horizons (default 200)
+  --particles N               particles per draw in the one-step and forecast filters
+                              (default: the PMMH fit's count, else 500)
   --seed N                    RNG seed for y_rep sampling (default 1)
   --exclude-chains IDS        drop chain ids (counted from 0) before banding; always warns
   --chains IDS                band over only the named chains; not with --exclude-chains
