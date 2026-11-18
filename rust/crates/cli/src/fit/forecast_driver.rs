@@ -493,7 +493,13 @@ fn specs_with_targets(
     for spec in &mut specs {
         let name = spec.ir_model.name.clone();
         // An empty aux list means the stream reads no data column; `bind`
-        // sizes it. A sized one gains an empty entry per target.
+        // sizes it. A stream that reads one gains, per target, the target's
+        // design values (D81), which the observation model reads to draw the
+        // prediction and to score a held-out value. They come from the plan,
+        // never from a held-out outcome.
+        if spec.aux.is_empty() && plan.targets_of(&name).any(|t| !t.design.is_empty()) {
+            spec.aux = vec![Vec::new(); spec.observations.len()];
+        }
         let sized_aux = !spec.aux.is_empty();
         for (k, t) in plan.targets().iter().enumerate().filter(|(_, t)| t.stream == name) {
             match (&mut spec.times, t.measures) {
@@ -506,7 +512,7 @@ fn specs_with_targets(
             }
             spec.observations.push(held_out.at(k).map(sim::inference::ObsCell::HeldOut));
             if sized_aux {
-                spec.aux.push(Vec::new());
+                spec.aux.push(t.design.clone());
             }
         }
     }

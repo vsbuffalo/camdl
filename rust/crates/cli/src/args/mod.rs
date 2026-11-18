@@ -1277,6 +1277,22 @@ pub struct FitPredictArgs {
     #[arg(long, value_name = "DURATION")]
     pub horizon: Option<String>,
 
+    /// Forecast mode: the design values (a column the likelihood reads, such
+    /// as a binomial's `n = tested`) of stream SOURCE's targets, from FILE, a
+    /// table in the stream's own format with its time (or window) columns and
+    /// the design columns; the outcome column is not read. A prospective
+    /// forecast (repeatable, one per stream). Every target needs a value of
+    /// every design column; a missing one is refused.
+    #[arg(long, value_name = "SOURCE=FILE", conflicts_with = "realised_design")]
+    pub design: Vec<String>,
+
+    /// Forecast mode: read each target's design values from its held-out row,
+    /// realised after the forecast origin. The result is labelled a
+    /// conditional score using realised future design, not an unconditional
+    /// forecast. Every target needs a held-out row with every design value.
+    #[arg(long)]
+    pub realised_design: bool,
+
     /// Report this fit with the `quantities {}` block in FILE instead of the
     /// model's own. FILE is an ordinary `.camdl` file containing ONLY a
     /// `quantities {}` block; it is compiled against this fit's model source and

@@ -1636,18 +1636,20 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     //     reporting a fit through formulas written for a different model.
     let vocabulary: Option<crate::quantities_file::QuantitiesOverride> =
         args.quantities.as_deref().map(crate::quantities_file::QuantitiesOverride::load).transpose()?;
-    // The output directory, keyed by every input that changes what is written
-    // there: the run, the engine, and the options as resolved (the chain
-    // selection against this fit's chains, the vocabulary by its bytes). Two
-    // predictions from different inputs never share it.
+    // The options that key the output directory. A forecast's gain its design
+    // inputs (D81) once its plan is built, so the forecast addresses its own
+    // directory (`run_forecast`); every other mode's is addressed below,
+    // after the forecast branch.
     let options = PredictOptions {
         particles: runs_filter.then_some(particles.n),
         ..PredictOptions::of(args, posterior.selection(), vocabulary.as_ref())
     };
-    let address_key = options.address_key(&run_id);
-    let out_dir = crate::fit::fit_view::predictions_dir(&segment, &run_id, &address_key);
-    std::fs::create_dir_all(&out_dir)
-        .map_err(|e| format!("cannot create {}: {e}", out_dir.display()))?;
+    if (!args.design.is_empty() || args.realised_design) && mode != Some(PredictModeArg::Forecast) {
+        return Err(format!(
+            "{} supplies the design values of a forecast's targets, and this predict is not a \
+             forecast; pass --horizon DURATION (--mode forecast).",
+            if args.realised_design { "--realised-design" } else { "--design" }));
+    }
     if let Some(v) = &vocabulary {
         model.quantities = quantities_from_vocabulary(&model, &config, v)?;
     }
@@ -1887,7 +1889,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     // The forecast mode: the fixed-origin forecast and nothing else.
     if mode == Some(PredictModeArg::Forecast) {
         let schema = crate::run_meta::read_fit_sidecar(&segment)?.and_then(|s| s.schema);
-        let (mut written, failures, skipped) = crate::fit::forecast_output::run_forecast(
+        let (out_dir, mut written, failures, skipped) = crate::fit::forecast_output::run_forecast(
             out,
             crate::fit::forecast_output::ForecastJob {
                 args,
@@ -1898,9 +1900,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
                 fit_base: &fit_base,
                 posterior: &posterior,
                 segment: &segment,
-                out_dir: &out_dir,
                 run_id: &run_id,
-                address_key: &address_key,
                 options: &options,
                 calendar: &calendar,
                 schema: schema.as_ref(),
@@ -1923,6 +1923,15 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
         )?);
         return Ok(PredictOutcome { written, failures, skipped });
     }
+
+    // The output directory, keyed by every input that changes what is written
+    // there: the run, the engine, and the options as resolved (the chain
+    // selection against this fit's chains, the vocabulary by its bytes). Two
+    // predictions from different inputs never share it.
+    let address_key = options.address_key(&run_id);
+    let out_dir = crate::fit::fit_view::predictions_dir(&segment, &run_id, &address_key);
+    std::fs::create_dir_all(&out_dir)
+        .map_err(|e| format!("cannot create {}: {e}", out_dir.display()))?;
 
     // 5. Load the observed data per leaf (the cadence, the observed half, and
     // what each row covers — resolved against the compiled model's projections).
@@ -3576,6 +3585,19 @@ pub(crate) struct PredictOptions {
     /// addresses the same output as no flag.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub particles: Option<usize>,
+    /// A forecast's design inputs (D81): how its design-reading streams'
+    /// design values were supplied and the digest of the values its targets
+    /// read ([`crate::fit::forecast_plan::ForecastPlan::design_digest`]).
+    /// Absent when no target reads one. Held-out outcomes never enter it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub design: Option<DesignKey>,
+}
+
+/// The design half of a forecast's address (D81).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub(crate) struct DesignKey {
+    pub mode: crate::fit::forecast_plan::DesignMode,
+    pub digest: String,
 }
 
 /// What [`PredictOptions::address_key`] hashes: the run, the engine that
@@ -3608,6 +3630,7 @@ impl PredictOptions {
             quantities: None,
             allow_forcing_extrapolation: false,
             particles: None,
+            design: None,
         }
     }
 
@@ -3651,6 +3674,7 @@ impl PredictOptions {
             quantities: vocabulary.map(|v| v.digest.clone()),
             allow_forcing_extrapolation: args.forcing_extrapolation.allow_forcing_extrapolation,
             particles: None,
+            design: None,
         }
         .normalised()
     }
@@ -4550,7 +4574,20 @@ mod tests {
             ("quantities", PredictOptions { quantities: Some("ab".repeat(32)), ..base.clone() }),
             ("allow_forcing_extrapolation",
              PredictOptions { allow_forcing_extrapolation: true, ..base.clone() }),
+            ("design", PredictOptions {
+                design: Some(DesignKey {
+                    mode: crate::fit::forecast_plan::DesignMode::ExPost, digest: "cd".repeat(32),
+                }),
+                ..base.clone()
+            }),
         ];
+        let design = |mode, digest: &str| PredictOptions {
+            design: Some(DesignKey { mode, digest: digest.to_string() }),
+            ..base.clone()
+        }.address_key_by(RUN, ENGINE);
+        use crate::fit::forecast_plan::DesignMode::{ExPost, Prospective};
+        assert_ne!(design(ExPost, "ab"), design(Prospective, "ab"), "the design mode keys the address");
+        assert_ne!(design(ExPost, "ab"), design(ExPost, "ac"), "and the design values");
         for (what, o) in &varied {
             assert_ne!(o.address_key_by(RUN, ENGINE), k, "{what} must move the key");
         }

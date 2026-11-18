@@ -21,7 +21,7 @@ use crate::fit::failures::{DeterministicFailure, Site, SkipReason, SkippedStream
 use crate::fit::forecast_arms::{build_arms, ArmInputs, ArmLabel, Difference};
 use crate::fit::predict_streams::StreamSelection;
 use crate::fit::forecast_driver::{extend_run, fixed_origin_forecast, DriverConfig, Forecast, HeldOutValues, StateConditioning};
-use crate::fit::forecast_plan::{parse_reach, ForecastPlan, HeldOut, PlanStream, RowFile};
+use crate::fit::forecast_plan::{parse_reach, DesignInput, ForecastPlan, HeldOut, PlanStream, RowFile};
 use crate::fit::observed_rows::{Measures, ObservedRow};
 use crate::fit::predict::PosteriorDraws;
 use crate::fit::training_partition::TrainingPartition;
@@ -52,7 +52,7 @@ impl DrawRef {
 }
 
 /// The `schema` tag of `forecast.json`.
-pub(crate) const FORECAST_SCHEMA: &str = "camdl.forecast/v3";
+pub(crate) const FORECAST_SCHEMA: &str = "camdl.forecast/v4";
 
 /// The file [`write_manifest`] writes in a forecast's directory.
 pub(crate) const FORECAST_MANIFEST: &str = "forecast.json";
@@ -235,10 +235,9 @@ pub(crate) struct ForecastJob<'a> {
     pub fit_base: &'a crate::util::FitBase,
     pub posterior: &'a PosteriorDraws,
     pub segment: &'a std::path::Path,
-    pub out_dir: &'a std::path::Path,
     pub run_id: &'a str,
-    /// The key of `out_dir` ([`crate::fit::predict::PredictOptions::address_key`]).
-    pub address_key: &'a str,
+    /// The options as resolved before the plan: the forecast adds its design
+    /// inputs (D81) and addresses its directory from the result.
     pub options: &'a crate::fit::predict::PredictOptions,
     pub calendar: &'a ir::caltime::CalendarAxis,
     pub schema: Option<&'a crate::run_meta::ObsSchema>,
@@ -256,13 +255,43 @@ pub(crate) struct ForecastJob<'a> {
     pub particles: crate::fit::predict::PredictParticles,
 }
 
-/// Run the forecast and write its artifact. Returns the files written, the
-/// streams that failed (asked for and unbound, or refused a forecast) and the
-/// streams skipped; the caller records the last two in `report.json`.
+/// Each `--design SOURCE=FILE`, read for every leaf whose source (or name) is
+/// SOURCE (D81): the leaf's design rows, by leaf name.
+fn prospective_design(
+    model: &ir::Model,
+    specs: &[String],
+    time_opts: &crate::caltime_load::TimeOpts,
+) -> Result<BTreeMap<String, Vec<ObservedRow>>, String> {
+    let mut out = BTreeMap::new();
+    for spec in specs {
+        let (name, path) = spec.split_once('=').ok_or_else(|| format!(
+            "--design {spec:?}: expected SOURCE=FILE, a stream and its design file"))?;
+        let leaves: Vec<&ir::observation::ObservationModel> = model.observations.iter()
+            .filter(|o| o.source == name || o.name == name)
+            .collect();
+        if leaves.is_empty() {
+            return Err(format!(
+                "--design {spec:?}: the model has no observation stream '{name}'"));
+        }
+        for o in leaves {
+            if out.insert(o.name.clone(), crate::fit::observed_rows::design_rows(path, o, time_opts)?).is_some() {
+                return Err(format!("--design names stream '{}' twice", o.name));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Run the forecast and write its artifact. Returns the directory it was
+/// written to (keyed by the options with the forecast's design inputs), the
+/// files written, the streams that failed (asked for and unbound, or refused a
+/// forecast) and the streams skipped; the caller records the last two in
+/// `report.json`.
+#[allow(clippy::type_complexity)]
 pub(crate) fn run_forecast(
     out: &crate::out::Out,
     job: ForecastJob,
-) -> Result<(Vec<PathBuf>, Vec<DeterministicFailure>, Vec<SkippedStream>), String> {
+) -> Result<(PathBuf, Vec<PathBuf>, Vec<DeterministicFailure>, Vec<SkippedStream>), String> {
     let model = job.model;
     let raw = job.args.horizon.as_deref().expect("forecast mode carries --horizon");
     let reach = parse_reach(raw, &model.time_unit, model.origin.as_deref())?;
@@ -317,10 +346,24 @@ pub(crate) fn run_forecast(
     // where its running total could start, so the selection has already
     // skipped it or, when `--stream` asked for it, failed it.
     let selection = job.selection;
+    // D81: where a design-reading stream's target design values come from.
+    let design_files = prospective_design(model, &job.args.design, &time_opts)?;
+    let design_of = |name: &str| match (job.args.realised_design, design_files.get(name)) {
+        (true, _) => DesignInput::ExPost,
+        (false, Some(rows)) => DesignInput::Prospective(rows),
+        (false, None) => DesignInput::NotSupplied,
+    };
     let plan_streams: Vec<PlanStream> = streams.iter()
         .filter(|s| selection.includes(&s.name))
-        .map(|s| PlanStream { obs: &s.obs_model_ir, training: &s.rows, held_out: &held_out[&s.name] })
+        .map(|s| PlanStream {
+            obs: &s.obs_model_ir, training: &s.rows, held_out: &held_out[&s.name], design: design_of(&s.name),
+        })
         .collect();
+    if let Some(name) = design_files.keys().find(|n| !plan_streams.iter().any(|p| &p.obs.name == *n)) {
+        return Err(format!(
+            "--design supplies stream '{name}', which this forecast does not predict (it binds \
+             no rows, or --stream left it out)"));
+    }
     if let Some(o) = model.observations.iter()
         .find(|o| selection.includes(&o.name) && !streams.iter().any(|s| s.name == o.name))
     {
@@ -333,6 +376,20 @@ pub(crate) fn run_forecast(
     // filter's scoring likelihood evaluates it and nothing else reads it, so
     // the predictions below do not depend on it.
     let held_out_values = HeldOutValues::from_rows(&plan, &held_out)?;
+    // The address (D81, D86): the options with the design inputs that
+    // determine the predictions. The held-out outcomes are not among them.
+    let options = crate::fit::predict::PredictOptions {
+        design: plan.design_mode().zip(plan.design_digest())
+            .map(|(mode, digest)| crate::fit::predict::DesignKey { mode, digest }),
+        ..job.options.clone()
+    };
+    let address_key = options.address_key(job.run_id);
+    let out_dir = crate::fit::fit_view::predictions_dir(job.segment, job.run_id, &address_key);
+    std::fs::create_dir_all(&out_dir)
+        .map_err(|e| format!("cannot create {}: {e}", out_dir.display()))?;
+    if let Some(mode) = plan.design_mode() {
+        out.say(format_args!("fit predict: forecast design values: {}", mode.label()));
+    }
     // An eligible stream the plan refused is a failure; one with no target
     // within the reach is skipped, unless `--stream` asked for it.
     let mut failures: Vec<DeterministicFailure> = selection.failures.clone();
@@ -441,10 +498,11 @@ pub(crate) fn run_forecast(
         forecasts.push(ArmForecast { label: arm.label, difference: arm.difference, fc });
     }
 
-    let mut written = write_tables(&forecasts, model, job.schema, job.out_dir, &draw_refs)?;
+    let mut written = write_tables(&forecasts, model, job.schema, &out_dir, &draw_refs)?;
     written.push(write_manifest(&forecasts, &job, ManifestInputs {
         record: &record, reach_as_written: raw, skipped: &skipped, failures: &failures,
-        draw_refs: &draw_refs, held_out: &held_out,
+        draw_refs: &draw_refs, held_out: &held_out, out_dir: &out_dir, address_key: &address_key,
+        options: &options,
     })?);
     let fc = &forecasts[0].fc;
     out.say(format_args!(
@@ -452,7 +510,7 @@ pub(crate) fn run_forecast(
          target(s) on {} stream(s), {} draws × {} particles, {} arm(s)",
         fc.plan.origin(), fc.plan.origin() + fc.plan.horizon(), fc.plan.targets().len(),
         fc.plan.sources().len(), fc.n_draws, fc.n_particles, forecasts.len()));
-    Ok((written, failures, skipped))
+    Ok((out_dir, written, failures, skipped))
 }
 
 /// One arm's forecast.
@@ -660,6 +718,11 @@ struct ManifestInputs<'a> {
     failures: &'a [DeterministicFailure],
     draw_refs: &'a [DrawRef],
     held_out: &'a BTreeMap<String, Vec<HeldOut>>,
+    out_dir: &'a std::path::Path,
+    /// The key of `out_dir` ([`crate::fit::predict::PredictOptions::address_key`]).
+    address_key: &'a str,
+    /// The options `address_key` hashes, with the design inputs (D81).
+    options: &'a crate::fit::predict::PredictOptions,
 }
 
 /// Each stream's held-out rows, per file: the count and the row digest of
@@ -687,7 +750,9 @@ fn held_out_record(held_out: &BTreeMap<String, Vec<HeldOut>>) -> Result<Vec<serd
 
 /// `forecast.json`: what the forecast predicted and what conditioned it.
 fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) -> Result<PathBuf, String> {
-    let ManifestInputs { record, reach_as_written, skipped, failures, draw_refs, held_out } = m;
+    let ManifestInputs {
+        record, reach_as_written, skipped, failures, draw_refs, held_out, out_dir, address_key, options,
+    } = m;
     let fc = &arms[0].fc;
     let point = |t: f64| serde_json::json!({
         "t": t,
@@ -709,6 +774,11 @@ fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) ->
             "held_out": t.observed.map(|h| serde_json::json!({
                 "file": h.file.as_str(), "position": h.position,
             })),
+            // D81: the design values the prediction read; absent for a
+            // stream whose likelihood reads none.
+            "design": (!t.design.is_empty()).then(|| t.design.iter()
+                .map(|(c, v)| (c.clone(), serde_json::json!(v)))
+                .collect::<serde_json::Map<String, serde_json::Value>>()),
         })
     }).collect();
     let model_end = job.model.simulation.t_end;
@@ -718,8 +788,8 @@ fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) ->
         // The binary that wrote this forecast, as `run.json` records it.
         "engine_version": crate::version::VERSION_SHORT,
         "run_id": job.run_id,
-        "address_key": job.address_key,
-        "options": job.options,
+        "address_key": address_key,
+        "options": options,
         "calendar": job.calendar.to_json(),
         "mode": "fixed_origin",
         "treatment": "posterior",
@@ -816,6 +886,15 @@ fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) ->
             "parameters_changed": a.difference.as_ref().map(|d| d.parameters.clone()).unwrap_or_default(),
         })).collect::<Vec<_>>(),
         "targets": targets,
+        // D81: where the design-reading streams' design values came from, and
+        // what the forecast therefore is; null when no target reads one.
+        "design": fc.plan.design_mode().map(|mode| serde_json::json!({
+            "mode": mode,
+            "label": mode.label(),
+            "streams": fc.plan.targets().iter().filter(|t| !t.design.is_empty())
+                .map(|t| t.stream.as_str()).collect::<std::collections::BTreeSet<_>>(),
+            "files": job.args.design,
+        })),
     });
     // D86: the same `chain_selection` block `predictive.json` carries, absent
     // when the full cloud was used.
@@ -826,7 +905,7 @@ fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) ->
     // full cloud. The address key hashes the options with the field absent
     // in that case, so the full cloud's key is unchanged.
     doc["options"]["excluded_chains"] =
-        serde_json::json!(job.options.excluded_chains.clone().unwrap_or_default());
+        serde_json::json!(options.excluded_chains.clone().unwrap_or_default());
     // D83: with more than one arm, how the arms' random numbers are coupled
     // and what `forecast-contrasts.tsv` holds.
     if arms.len() > 1 {
@@ -862,7 +941,7 @@ fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) ->
                 coupling of the arms' random numbers, which the scenario models do not identify",
         });
     }
-    let path = job.out_dir.join(FORECAST_MANIFEST);
+    let path = out_dir.join(FORECAST_MANIFEST);
     let text = serde_json::to_string_pretty(&doc).map_err(|e| format!("serializing forecast.json: {e}"))?;
     std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     Ok(path)

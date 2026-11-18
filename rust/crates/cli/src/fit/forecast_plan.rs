@@ -34,6 +34,47 @@ pub(crate) struct Target {
     pub lead: f64,
     /// The held-out row that measures the same period, when one exists.
     pub observed: Option<HeldOutRow>,
+    /// The design values the stream's likelihood reads at this target (D81),
+    /// sorted by column; empty for a stream that reads none. They determine
+    /// the prediction, so they are part of its identity.
+    pub design: Vec<(String, f64)>,
+}
+
+/// Where a design-reading stream's design values for its targets come from
+/// (D81).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DesignMode {
+    /// Supplied at the origin by a design file: a prospective forecast.
+    Prospective,
+    /// The held-out rows' own design values, realised after the origin: an
+    /// ex-post evaluation, a conditional score using realised future design,
+    /// never an unconditional forecast.
+    ExPost,
+}
+
+impl DesignMode {
+    /// How a manifest and a message label the mode.
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            DesignMode::Prospective => "a prospective forecast: the design values were supplied at \
+                the forecast origin by a design file",
+            DesignMode::ExPost => "a conditional score using realised future design: the design \
+                values are the held-out rows' own, realised after the forecast origin, so this is \
+                an ex-post evaluation and not an unconditional forecast",
+        }
+    }
+}
+
+/// What one stream's design values come from (D81).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum DesignInput<'a> {
+    /// No design was supplied: a stream that reads one is refused.
+    NotSupplied,
+    /// The rows of a design file (`--design`), in file order.
+    Prospective(&'a [ObservedRow]),
+    /// The stream's held-out rows (`--realised-design`).
+    ExPost,
 }
 
 /// Which file a held-out row is in: the training file (rows past the
@@ -120,9 +161,12 @@ pub(crate) struct PlanStream<'a> {
     /// Rows after the training prefix, from the same file or a
     /// `[data.holdout]` file; they only name a target's `observed` row.
     pub held_out: &'a [HeldOut],
+    /// Where the stream's design values come from, when its likelihood reads
+    /// any (D81).
+    pub design: DesignInput<'a>,
 }
 
-/// Why a stream has no targets (§4.3, D42, D52).
+/// Why a stream has no targets (§4.3, D42, D81).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum StreamRefusal {
     /// A stream with window columns and no `emit_schedule`, or a state read
@@ -154,6 +198,11 @@ pub(crate) enum StreamRefusal {
         data_source: String,
         schedule: (f64, f64),
     },
+    /// A target of a design-reading stream has no value of a design column
+    /// in the supplied design (D81): refused, never filled in.
+    MissingDesign { stream: String, column: String, start: f64, end: f64, mode: DesignMode, why: String },
+    /// A row of a `--design` file within the reach names no target (D81).
+    DesignOffTarget { stream: String, start: f64, end: f64, row: usize },
 }
 
 impl StreamRefusal {
@@ -166,7 +215,9 @@ impl StreamRefusal {
             | StreamRefusal::OverlapsObserved { stream, .. }
             | StreamRefusal::OffCadenceHeldOut { stream, .. }
             | StreamRefusal::InvalidHeldOut { stream, .. }
-            | StreamRefusal::ScheduleConflict { stream, .. } => stream,
+            | StreamRefusal::ScheduleConflict { stream, .. }
+            | StreamRefusal::MissingDesign { stream, .. }
+            | StreamRefusal::DesignOffTarget { stream, .. } => stream,
         }
     }
 }
@@ -197,9 +248,25 @@ impl std::fmt::Display for StreamRefusal {
                  have no phase to continue."),
             StreamRefusal::ReadsDataColumn { stream, columns } => write!(f,
                 "stream '{stream}' is refused a forecast: its likelihood reads the data \
-                 column(s) [{}], which have no value for a target past the data. Express \
-                 the column in the model (a parameter or a compartment sum) to forecast \
-                 this stream.", columns.join(", ")),
+                 column(s) [{}], which have no value for a target past the data unless one \
+                 is supplied. Pass --design SOURCE=FILE, a file in the stream's own format \
+                 giving the column(s) for each target (a prospective forecast), or \
+                 --realised-design to read them from the held-out rows (a conditional score \
+                 using realised future design, not an unconditional forecast).",
+                columns.join(", ")),
+            StreamRefusal::MissingDesign { stream, column, start, end, mode, why } => write!(f,
+                "stream '{stream}' is refused a forecast: its target [{start}, {end}) has no \
+                 value of the design column '{column}' ({}: {why}). A missing design value is \
+                 not filled in.",
+                match mode {
+                    DesignMode::Prospective => "--design",
+                    DesignMode::ExPost => "--realised-design",
+                }),
+            StreamRefusal::DesignOffTarget { stream, start, end, row } => write!(f,
+                "stream '{stream}' is refused a forecast: row {row} of its --design file \
+                 covers [{start}, {end}), which is not one of its targets within the reach. \
+                 A design row names the target it is for; one that names none is not \
+                 skipped."),
             StreamRefusal::OverlapsObserved { stream, start, end, row } => write!(f,
                 "stream '{stream}' is refused a forecast: its declared rhythm puts a \
                  target at [{start}, {end}), which overlaps its training row {row}. The \
@@ -262,6 +329,9 @@ pub(crate) struct ForecastPlan {
     sources: Vec<(String, TargetSource)>,
     /// Each stream refused a forecast, and why.
     refusals: Vec<StreamRefusal>,
+    /// Where the design values of the design-reading streams with targets
+    /// came from (D81); `None` when no such stream has targets.
+    design_mode: Option<DesignMode>,
 }
 
 impl ForecastPlan {
@@ -281,10 +351,19 @@ impl ForecastPlan {
         let mut targets: Vec<Target> = Vec::new();
         let mut sources = Vec::new();
         let mut refusals = Vec::new();
+        let mut design_modes: Vec<DesignMode> = Vec::new();
         for s in streams {
             match stream_targets(s, origin, horizon) {
                 Ok((source, ts)) => {
                     if !ts.is_empty() {
+                        if ts.iter().any(|t| !t.design.is_empty()) {
+                            design_modes.push(match s.design {
+                                DesignInput::Prospective(_) => DesignMode::Prospective,
+                                DesignInput::ExPost => DesignMode::ExPost,
+                                DesignInput::NotSupplied => unreachable!(
+                                    "a target carries design values only when a design was supplied"),
+                            });
+                        }
                         sources.push((s.obs.name.clone(), source));
                         targets.extend(ts);
                     }
@@ -298,7 +377,13 @@ impl ForecastPlan {
         targets.sort_by(|a, b| {
             a.measures.end().total_cmp(&b.measures.end()).then_with(|| a.stream.cmp(&b.stream))
         });
-        let plan = ForecastPlan { origin, horizon, parameters, targets, sources, refusals };
+        design_modes.dedup();
+        let design_mode = match design_modes[..] {
+            [] => None,
+            [m] => Some(m),
+            _ => unreachable!("one forecast reads its design one way: the command takes one mode"),
+        };
+        let plan = ForecastPlan { origin, horizon, parameters, targets, sources, refusals, design_mode };
         plan.check();
         Ok(plan)
     }
@@ -351,6 +436,28 @@ impl ForecastPlan {
         &self.sources
     }
 
+    /// Where the design values came from, when any target carries some (D81).
+    pub(crate) fn design_mode(&self) -> Option<DesignMode> {
+        self.design_mode
+    }
+
+    /// The SHA-256 of every target's design values, in the plan's order:
+    /// the design inputs that determine the predictions (D81), for the
+    /// prediction's address. `None` when no target carries any. Held-out
+    /// outcomes do not enter it.
+    pub(crate) fn design_digest(&self) -> Option<String> {
+        self.design_mode?;
+        let mut h = String::new();
+        for t in self.targets.iter().filter(|t| !t.design.is_empty()) {
+            h += &format!("{}\t{:016x}\t{:016x}", t.stream, t.measures.start().to_bits(), t.measures.end().to_bits());
+            for (c, v) in &t.design {
+                h += &format!("\t{c}={:016x}", v.to_bits());
+            }
+            h += "\n";
+        }
+        Some(crate::hashing::sha256_hex(h.as_bytes()))
+    }
+
     pub(crate) fn refusals(&self) -> &[StreamRefusal] {
         &self.refusals
     }
@@ -368,8 +475,10 @@ fn stream_targets(
     horizon: f64,
 ) -> Result<(TargetSource, Vec<Target>), StreamRefusal> {
     let stream = s.obs.name.clone();
+    // D81 (superseding D52): a stream whose likelihood reads design columns
+    // is forecast only when a design supplies them.
     let columns = crate::pfilter::stream_aux_columns(s.obs);
-    if !columns.is_empty() {
+    if !columns.is_empty() && matches!(s.design, DesignInput::NotSupplied) {
         return Err(StreamRefusal::ReadsDataColumn { stream, columns });
     }
     let reach = origin + horizon + TIME_TIE_EPS;
@@ -471,16 +580,91 @@ fn stream_targets(
             None => unreachable!("held-out rows within the reach are this source's targets"),
         }
     }
-    let targets = measures.into_iter().zip(observed).enumerate()
-        .map(|(h, (m, observed))| Target {
+    let design = target_design(s, &stream, &columns, &measures, &observed, origin, reach)?;
+    let targets = measures.into_iter().zip(observed).zip(design).enumerate()
+        .map(|(h, ((m, observed), design))| Target {
             stream: stream.clone(),
             observed,
             measures: m,
             horizon: h as i64,
             lead: m.end() - origin,
+            design,
         })
         .collect();
     Ok((source, targets))
+}
+
+/// D81: each target's design values, `columns` of the stream's likelihood,
+/// from where `s.design` says. A target with no value of a column is
+/// refused, never filled in. A prospective design row within the reach that
+/// names no target is refused, and so are two naming one. Outcomes never
+/// reach the result: an ex-post target reads its held-out row's design as
+/// read ([`ObservedRow::design`]), whatever its outcome.
+fn target_design(
+    s: &PlanStream,
+    stream: &str,
+    columns: &[String],
+    targets: &[Measures],
+    observed: &[Option<HeldOutRow>],
+    origin: f64,
+    reach: f64,
+) -> Result<Vec<Vec<(String, f64)>>, StreamRefusal> {
+    if columns.is_empty() {
+        return Ok(vec![Vec::new(); targets.len()]);
+    }
+    let pick = |mode: DesignMode, m: &Measures, row: Option<&ObservedRow>, absent: &str|
+        -> Result<Vec<(String, f64)>, StreamRefusal>
+    {
+        let missing = |column: &str, why: String| StreamRefusal::MissingDesign {
+            stream: stream.to_string(), column: column.to_string(), start: m.start(), end: m.end(),
+            mode, why,
+        };
+        let Some(row) = row else { return Err(missing(&columns[0], absent.to_string())) };
+        let mut out = Vec::with_capacity(columns.len());
+        for c in columns {
+            match row.design.iter().find(|(k, _)| k == c) {
+                Some(&(_, v)) if v.is_finite() => out.push((c.clone(), v)),
+                Some(&(_, v)) => return Err(missing(c, format!("its value is {v}"))),
+                None => return Err(missing(c, "the row's cell is NA".into())),
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    };
+    match s.design {
+        DesignInput::NotSupplied => Err(StreamRefusal::ReadsDataColumn {
+            stream: stream.to_string(), columns: columns.to_vec(),
+        }),
+        DesignInput::Prospective(rows) => {
+            let mut by_target: Vec<Option<&ObservedRow>> = vec![None; targets.len()];
+            for r in rows.iter().filter(|r| r.measures.end() > origin + TIME_TIE_EPS && r.measures.end() <= reach) {
+                match targets.iter().position(|m| same_span(&r.measures, m)) {
+                    None => return Err(StreamRefusal::DesignOffTarget {
+                        stream: stream.to_string(), start: r.measures.start(), end: r.measures.end(),
+                        row: r.position,
+                    }),
+                    Some(k) if by_target[k].is_some() => return Err(StreamRefusal::MissingDesign {
+                        stream: stream.to_string(), column: columns[0].clone(),
+                        start: targets[k].start(), end: targets[k].end(), mode: DesignMode::Prospective,
+                        why: format!("rows {} and {} of the design file both name it, so neither is used",
+                            by_target[k].map(|p| p.position).unwrap_or_default(), r.position),
+                    }),
+                    Some(k) => by_target[k] = Some(r),
+                }
+            }
+            targets.iter().zip(by_target)
+                .map(|(m, row)| pick(DesignMode::Prospective, m, row, "the design file has no row for it"))
+                .collect()
+        }
+        DesignInput::ExPost => targets.iter().zip(observed)
+            .map(|(m, at)| {
+                let row = at.and_then(|at| s.held_out.iter()
+                    .find(|h| h.file == at.file && h.row.position == at.position)
+                    .map(|h| &h.row));
+                pick(DesignMode::ExPost, m, row, "no held-out row measures it")
+            })
+            .collect(),
+    }
 }
 
 /// D82: an interval stream's data-implied periods (its training rows, its
@@ -677,6 +861,7 @@ mod tests {
             temporal: vec![TemporalCell::Number(end)],
             cell: Some(sim::inference::ObsCell::Scalar(1.0)),
             aux: vec![],
+            design: vec![],
         }
     }
 
@@ -688,6 +873,7 @@ mod tests {
             temporal: vec![TemporalCell::Number(t)],
             cell: Some(sim::inference::ObsCell::Scalar(1.0)),
             aux: vec![],
+            design: vec![],
         }
     }
 
@@ -715,8 +901,8 @@ mod tests {
         let rows = BTreeMap::from([("daily".to_string(), d.clone()), ("weekly".to_string(), w.clone())]);
         let (dobs, wobs) = (daily(), weekly());
         let plan = ForecastPlan::new(partition(&rows), 7.0, &[
-            PlanStream { obs: &dobs, training: &d, held_out: &[] },
-            PlanStream { obs: &wobs, training: &w, held_out: &[] },
+            PlanStream { obs: &dobs, training: &d, held_out: &[], design: DesignInput::NotSupplied },
+            PlanStream { obs: &wobs, training: &w, held_out: &[], design: DesignInput::NotSupplied },
         ]).unwrap();
         assert_eq!(plan.origin(), 24.0);
         let weekly: Vec<&Target> = plan.targets_of("weekly").collect();
@@ -739,8 +925,8 @@ mod tests {
         let (dobs, wobs) = (daily(), weekly());
         let reach = parse_reach("4 weeks", "days", None).unwrap();
         let plan = ForecastPlan::new(partition(&rows), reach, &[
-            PlanStream { obs: &dobs, training: &d, held_out: &[] },
-            PlanStream { obs: &wobs, training: &w, held_out: &[] },
+            PlanStream { obs: &dobs, training: &d, held_out: &[], design: DesignInput::NotSupplied },
+            PlanStream { obs: &wobs, training: &w, held_out: &[], design: DesignInput::NotSupplied },
         ]).unwrap();
         let wh: Vec<i64> = plan.targets_of("weekly").map(|t| t.horizon).collect();
         let dh: Vec<i64> = plan.targets_of("daily").map(|t| t.horizon).collect();
@@ -760,7 +946,7 @@ mod tests {
         let rows = BTreeMap::from([("weekly".to_string(), w.clone())]);
         let wobs = weekly();
         let plan = ForecastPlan::new(partition(&rows), 14.0, &[
-            PlanStream { obs: &wobs, training: &w, held_out: &[] },
+            PlanStream { obs: &wobs, training: &w, held_out: &[], design: DesignInput::NotSupplied },
         ]).unwrap();
         let spans: Vec<(f64, f64)> = plan.targets().iter().map(|t| (t.measures.start(), t.measures.end())).collect();
         assert_eq!(spans, vec![(35.0, 42.0), (42.0, 49.0)]);
@@ -775,7 +961,7 @@ mod tests {
         let o = obs("monthly", Some(Covers::WindowColumns),
             Projection::CumulativeFlow("infection".into()), None);
         let err = ForecastPlan::new(partition(&rows), 90.0, &[
-            PlanStream { obs: &o, training: &w, held_out: &[] },
+            PlanStream { obs: &o, training: &w, held_out: &[], design: DesignInput::NotSupplied },
         ]).unwrap_err();
         let PlanError::NoTargets { refusals } = &err else { panic!("{err:?}") };
         assert!(matches!(refusals[..], [StreamRefusal::NoRhythm { .. }]), "{refusals:?}");
@@ -792,7 +978,7 @@ mod tests {
             Projection::CumulativeFlow("infection".into()),
             Some(ObservationSchedule::AtTimes(vec![0.0, 30.0, 60.0, 91.0, 120.0])));
         let plan = ForecastPlan::new(partition(&rows), 61.0, &[
-            PlanStream { obs: &o, training: &w, held_out: &[] },
+            PlanStream { obs: &o, training: &w, held_out: &[], design: DesignInput::NotSupplied },
         ]).unwrap();
         let spans: Vec<(f64, f64)> = plan.targets().iter().map(|t| (t.measures.start(), t.measures.end())).collect();
         assert_eq!(spans, vec![(60.0, 91.0), (91.0, 120.0)]);
@@ -810,7 +996,7 @@ mod tests {
             Projection::CumulativeFlow("infection".into()),
             Some(ObservationSchedule::AtTimes(vec![0.0, 45.0, 75.0])));
         let err = ForecastPlan::new(partition(&rows), 61.0, &[
-            PlanStream { obs: &o, training: &w, held_out: &[] },
+            PlanStream { obs: &o, training: &w, held_out: &[], design: DesignInput::NotSupplied },
         ]).unwrap_err();
         let PlanError::NoTargets { refusals } = &err else { panic!("{err:?}") };
         assert_eq!(refusals, &[StreamRefusal::ScheduleConflict {
@@ -827,33 +1013,104 @@ mod tests {
         let rows = BTreeMap::from([("prev".to_string(), p.clone())]);
         let none = obs("prev", None, Projection::CurrentPop("I".into()), None);
         let err = ForecastPlan::new(partition(&rows), 14.0, &[
-            PlanStream { obs: &none, training: &p, held_out: &[] },
+            PlanStream { obs: &none, training: &p, held_out: &[], design: DesignInput::NotSupplied },
         ]).unwrap_err();
         assert!(matches!(&err, PlanError::NoTargets { refusals } if matches!(refusals[..], [StreamRefusal::NoRhythm { kind: TemporalKind::Instant, .. }])), "{err:?}");
         let every = obs("prev", None, Projection::CurrentPop("I".into()),
             Some(ObservationSchedule::Regular(RegularSchedule { start: 0.0, step: 7.0, end: 14.0 })));
         let plan = ForecastPlan::new(partition(&rows), 14.0, &[
-            PlanStream { obs: &every, training: &p, held_out: &[] },
+            PlanStream { obs: &every, training: &p, held_out: &[], design: DesignInput::NotSupplied },
         ]).unwrap();
         let at: Vec<(f64, i64)> = plan.targets().iter().map(|t| (t.measures.end(), t.horizon)).collect();
         assert_eq!(at, vec![(21.0, 0), (28.0, 1)], "the schedule continues past its baked end");
     }
 
     /// A likelihood that reads a data column (a binomial's `n`) is refused a
-    /// forecast (D52), naming the column.
+    /// forecast when no design supplies it (D81), naming the column and the
+    /// two ways to supply it.
     #[test]
     fn a_stream_whose_likelihood_reads_a_data_column_is_refused() {
+        let o = tested_weekly();
+        let w: Vec<ObservedRow> = (0..3).map(|i| row(i, 7.0 * i as f64, 7.0 * (i + 1) as f64)).collect();
+        let rows = BTreeMap::from([("weekly".to_string(), w.clone())]);
+        let err = ForecastPlan::new(partition(&rows), 14.0, &[
+            PlanStream { obs: &o, training: &w, held_out: &[], design: DesignInput::NotSupplied },
+        ]).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("[tested]") && msg.contains("--design") && msg.contains("--realised-design"), "{msg}");
+    }
+
+    fn tested_weekly() -> ObservationModel {
         let mut o = weekly();
         o.likelihood = Likelihood::Binomial(BinomialLikelihood {
             n: ir::expr::Expr::ObsColumnRef(ir::expr::ObsColumnRefExpr { obs_column_ref: "tested".into() }),
             p: ir::Diffable::new(ir::expr::Expr::const_(0.5)),
         });
-        let w: Vec<ObservedRow> = (0..3).map(|i| row(i, 7.0 * i as f64, 7.0 * (i + 1) as f64)).collect();
+        o
+    }
+
+    /// A row carrying a value and a `tested` design value.
+    fn tested_row(position: usize, start: f64, end: f64, y: Option<f64>, tested: Option<f64>) -> ObservedRow {
+        let design: Vec<(String, f64)> = tested.map(|n| ("tested".to_string(), n)).into_iter().collect();
+        ObservedRow {
+            cell: y.map(sim::inference::ObsCell::Scalar),
+            aux: if y.is_some() { design.clone() } else { vec![] },
+            design,
+            ..row(position, start, end)
+        }
+    }
+
+    /// D81, prospective: each target reads its design row's values; a target
+    /// with no row, a row whose value is NA, and a row that names no target
+    /// are each refused.
+    #[test]
+    fn a_prospective_design_supplies_each_targets_design_values() {
+        let o = tested_weekly();
+        let w: Vec<ObservedRow> = (0..3).map(|i| tested_row(i, 7.0 * i as f64, 7.0 * (i + 1) as f64, Some(2.0), Some(10.0))).collect();
         let rows = BTreeMap::from([("weekly".to_string(), w.clone())]);
-        let err = ForecastPlan::new(partition(&rows), 14.0, &[
-            PlanStream { obs: &o, training: &w, held_out: &[] },
-        ]).unwrap_err();
-        assert!(err.to_string().contains("[tested]"), "{err}");
+        let plan_with = |design: &[ObservedRow]| ForecastPlan::new(partition(&rows), 14.0, &[
+            PlanStream { obs: &o, training: &w, held_out: &[], design: DesignInput::Prospective(design) },
+        ]);
+        let design = vec![tested_row(0, 21.0, 28.0, None, Some(40.0)), tested_row(1, 28.0, 35.0, None, Some(50.0))];
+        let plan = plan_with(&design).unwrap();
+        let got: Vec<Vec<(String, f64)>> = plan.targets().iter().map(|t| t.design.clone()).collect();
+        assert_eq!(got, vec![vec![("tested".to_string(), 40.0)], vec![("tested".to_string(), 50.0)]]);
+        assert_eq!(plan.design_mode(), Some(DesignMode::Prospective));
+        let refused = |design: Vec<ObservedRow>, want: &str| {
+            let err = plan_with(&design).unwrap_err().to_string();
+            assert!(err.contains(want), "want {want:?}: {err}");
+        };
+        refused(vec![design[0].clone()], "[28, 35) has no value of the design column 'tested' (--design: the design file has no row for it)");
+        refused(vec![design[0].clone(), tested_row(1, 28.0, 35.0, None, None)], "the row's cell is NA");
+        refused(vec![design[0].clone(), tested_row(1, 28.0, 31.0, None, Some(5.0))], "row 1 of its --design file covers [28, 31)");
+    }
+
+    /// D81, ex post: each target reads its held-out row's design as read,
+    /// whatever the row's outcome; a target with no held-out row is refused.
+    /// The design digest follows the design values and not the outcomes.
+    #[test]
+    fn an_ex_post_design_reads_the_held_out_rows_and_never_their_outcomes() {
+        let o = tested_weekly();
+        let w: Vec<ObservedRow> = (0..3).map(|i| tested_row(i, 7.0 * i as f64, 7.0 * (i + 1) as f64, Some(2.0), Some(10.0))).collect();
+        let rows = BTreeMap::from([("weekly".to_string(), w.clone())]);
+        let held = |y0: Option<f64>, y1: Option<f64>, n1: f64| vec![
+            HeldOut { file: RowFile::Training, row: tested_row(3, 21.0, 28.0, y0, Some(40.0)) },
+            HeldOut { file: RowFile::Training, row: tested_row(4, 28.0, 35.0, y1, Some(n1)) },
+        ];
+        let plan_of = |h: &[HeldOut], reach: f64| ForecastPlan::new(partition(&rows), reach, &[
+            PlanStream { obs: &o, training: &w, held_out: h, design: DesignInput::ExPost },
+        ]);
+        let (a, b, na) = (held(Some(3.0), Some(4.0), 50.0), held(Some(9.0), Some(1.0), 50.0), held(None, Some(4.0), 50.0));
+        let (pa, pb, pna) = (plan_of(&a, 14.0).unwrap(), plan_of(&b, 14.0).unwrap(), plan_of(&na, 14.0).unwrap());
+        assert_eq!(pa.design_mode(), Some(DesignMode::ExPost));
+        assert_eq!(pa.targets(), pb.targets(), "outcomes change no target or design value");
+        assert_eq!(pa.targets(), pna.targets(), "an NA outcome keeps its row's design");
+        assert_eq!(pa.design_digest(), pb.design_digest());
+        assert!(pa.design_digest().is_some());
+        let changed = plan_of(&held(Some(3.0), Some(4.0), 51.0), 14.0).unwrap();
+        assert_ne!(pa.design_digest(), changed.design_digest(), "the design values key the prediction");
+        let err = plan_of(&a, 21.0).unwrap_err().to_string();
+        assert!(err.contains("[35, 42)") && err.contains("no held-out row measures it"), "{err}");
     }
 
     /// A held-out row measuring a target's period gives the target its file
@@ -868,7 +1125,7 @@ mod tests {
             .map(|r| HeldOut { file: RowFile::Training, row: r.clone() })
             .collect();
         let plan = ForecastPlan::new(partition(&rows), 21.0, &[
-            PlanStream { obs: &wobs, training: train, held_out: &held },
+            PlanStream { obs: &wobs, training: train, held_out: &held, design: DesignInput::NotSupplied },
         ]).unwrap();
         let obs: Vec<Option<HeldOutRow>> = plan.targets().iter().map(|t| t.observed).collect();
         let at = |position| Some(HeldOutRow { file: RowFile::Training, position });
@@ -886,7 +1143,7 @@ mod tests {
         let mut wobs = weekly();
         wobs.emit_schedule = Some(ObservationSchedule::Regular(RegularSchedule { start: 3.0, step: 7.0, end: 63.0 }));
         let err = ForecastPlan::new(partition(&rows), 14.0, &[
-            PlanStream { obs: &wobs, training: &train, held_out: &[] },
+            PlanStream { obs: &wobs, training: &train, held_out: &[], design: DesignInput::NotSupplied },
         ]).unwrap_err();
         let PlanError::NoTargets { refusals } = &err else { panic!("{err:?}") };
         assert!(matches!(&refusals[..], [StreamRefusal::ScheduleConflict { .. }]), "{refusals:?}");
@@ -896,7 +1153,7 @@ mod tests {
         // Agreeing declarations forecast as before.
         wobs.emit_schedule = Some(ObservationSchedule::Regular(RegularSchedule { start: 0.0, step: 7.0, end: 63.0 }));
         let plan = ForecastPlan::new(partition(&rows), 14.0, &[
-            PlanStream { obs: &wobs, training: &train, held_out: &[] },
+            PlanStream { obs: &wobs, training: &train, held_out: &[], design: DesignInput::NotSupplied },
         ]).unwrap();
         assert_eq!(plan.targets().len(), 2);
     }
@@ -910,7 +1167,7 @@ mod tests {
         let mut wobs = weekly();
         wobs.emit_schedule = Some(ObservationSchedule::AtTimes(vec![0.0, 7.0, 14.0, 21.0, 30.0]));
         let err = ForecastPlan::new(partition(&rows), 14.0, &[
-            PlanStream { obs: &wobs, training: &train, held_out: &[] },
+            PlanStream { obs: &wobs, training: &train, held_out: &[], design: DesignInput::NotSupplied },
         ]).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("[21, 28)") && msg.contains("declared tiling") && msg.contains("[21, 30)"), "{msg}");
@@ -929,7 +1186,7 @@ mod tests {
             HeldOut { file: RowFile::Holdout, row: row(1, 28.0, 31.0) },
         ];
         let err = ForecastPlan::new(partition(&rows), 14.0, &[
-            PlanStream { obs: &wobs, training: &train, held_out: &held },
+            PlanStream { obs: &wobs, training: &train, held_out: &held, design: DesignInput::NotSupplied },
         ]).unwrap_err();
         let PlanError::NoTargets { refusals } = &err else { panic!("{err:?}") };
         assert!(matches!(&refusals[..], [StreamRefusal::OffCadenceHeldOut {
@@ -938,7 +1195,7 @@ mod tests {
         assert!(msg.contains("[28, 31)") && msg.contains("declared_tiling"), "{msg}");
         // A held-out row past the reach is not this forecast's to judge.
         let ok = ForecastPlan::new(partition(&rows), 7.0, &[
-            PlanStream { obs: &wobs, training: &train, held_out: &held },
+            PlanStream { obs: &wobs, training: &train, held_out: &held, design: DesignInput::NotSupplied },
         ]).unwrap();
         assert_eq!(ok.targets()[0].observed, Some(HeldOutRow { file: RowFile::Holdout, position: 0 }));
     }
@@ -956,7 +1213,7 @@ mod tests {
             HeldOut { file: RowFile::Training, row: row(4, 35.0, 42.0) },
         ];
         let plan = ForecastPlan::new(partition(&rows), 21.0, &[
-            PlanStream { obs: &wobs, training: &train, held_out: &held },
+            PlanStream { obs: &wobs, training: &train, held_out: &held, design: DesignInput::NotSupplied },
         ]).unwrap();
         let got: Vec<(i64, f64, Option<usize>)> = plan.targets().iter()
             .map(|t| (t.horizon, t.lead, t.observed.map(|h| h.position))).collect();
@@ -975,7 +1232,7 @@ mod tests {
             HeldOut { file: RowFile::Holdout, row: row(0, 21.0, 28.0) },
         ];
         let err = ForecastPlan::new(partition(&rows), 7.0, &[
-            PlanStream { obs: &wobs, training: &train, held_out: &held },
+            PlanStream { obs: &wobs, training: &train, held_out: &held, design: DesignInput::NotSupplied },
         ]).unwrap_err();
         assert!(err.to_string().contains("held-out row 0 of the holdout file"), "{err}");
     }
@@ -999,7 +1256,7 @@ mod tests {
             HeldOut { file: RowFile::Training, row: row(4, 130.0, 200.0) },
         ];
         let plan = ForecastPlan::new(partition(&rows), 70.0, &[
-            PlanStream { obs: &o, training: &train, held_out: &held },
+            PlanStream { obs: &o, training: &train, held_out: &held, design: DesignInput::NotSupplied },
         ]).unwrap();
         let got: Vec<(f64, f64, i64, f64)> = plan.targets().iter()
             .map(|t| (t.measures.start(), t.measures.end(), t.horizon, t.lead)).collect();
@@ -1019,7 +1276,7 @@ mod tests {
             let held: Vec<HeldOut> = held.into_iter().enumerate()
                 .map(|(i, (a, b))| HeldOut { file: RowFile::Holdout, row: row(i, a, b) }).collect();
             let err = ForecastPlan::new(partition(&rows), 200.0, &[
-                PlanStream { obs: &o, training: &train, held_out: &held },
+                PlanStream { obs: &o, training: &train, held_out: &held, design: DesignInput::NotSupplied },
             ]).unwrap_err();
             assert!(err.to_string().contains(want), "want {want:?}: {err}");
         };
@@ -1037,7 +1294,7 @@ mod tests {
         let rows = BTreeMap::from([("monthly".to_string(), train.clone())]);
         let o = monthly_windows();
         let err = ForecastPlan::new(partition(&rows), 60.0, &[
-            PlanStream { obs: &o, training: &train, held_out: &[] },
+            PlanStream { obs: &o, training: &train, held_out: &[], design: DesignInput::NotSupplied },
         ]).unwrap_err();
         assert!(matches!(&err, PlanError::NoTargets { refusals } if matches!(refusals[..], [StreamRefusal::NoRhythm { .. }])), "{err:?}");
     }
