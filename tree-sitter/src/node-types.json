@@ -1017,9 +1017,19 @@
           }
         ]
       },
+      "law": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "call_expr",
+            "named": true
+          }
+        ]
+      },
       "value": {
         "multiple": false,
-        "required": true,
+        "required": false,
         "types": [
           {
             "type": "expr",
@@ -1579,7 +1589,7 @@
     "named": true,
     "fields": {
       "dim": {
-        "multiple": false,
+        "multiple": true,
         "required": true,
         "types": [
           {
@@ -2021,6 +2031,10 @@
         "types": [
           {
             "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "string",
             "named": true
           }
         ]

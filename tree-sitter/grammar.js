@@ -136,7 +136,7 @@ module.exports = grammar({
         seq($.identifier, optional(seq("^", optional("-"), $.number))),
       ),
 
-    param_index: ($) => seq("[", field("dim", $.identifier), "]"),
+    param_index: ($) => seq("[", commaSep1(field("dim", $.identifier)), "]"),
 
     param_bounds: ($) =>
       seq(
@@ -683,8 +683,12 @@ module.exports = grammar({
           ),
           $.stage_ref,
         ),
-        "=",
-        field("value", $.expr),
+        choice(
+          // computed value: `S = N0 - I`
+          seq("=", field("value", $.expr)),
+          // drawn value: `I ~ poisson(rate = I0)`
+          seq("~", field("law", $.call_expr)),
+        ),
       ),
 
     init_brackets: ($) => seq("[", commaSep(choice($.index_binding, $.index_item)), "]"),
@@ -748,7 +752,9 @@ module.exports = grammar({
           field("kind", choice("enable", "disable", "compose")),
           "=",
           "[",
-          commaSep(field("ref", $.identifier)),
+          // A quoted name parses (and is then rejected semantically when it
+          // names no intervention), so it is accepted here too.
+          commaSep(field("ref", choice($.identifier, $.string))),
           "]",
         ),
         // label = "..."
