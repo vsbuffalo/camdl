@@ -469,13 +469,14 @@ files its `run.json` manifest checksums — are a function of its computation. A
 _execution_ is one attempt to perform that computation: the first run, a run
 killed and re-run, a run on another host. Everything about an execution rather
 than its result is kept beside the leaf and outside its manifest, in three
-per-attempt records:
+per-attempt records, and a fourth for an NLopt leaf:
 
 | file             | what it records                                                                                                                                                                                                            |
 | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `execution.json` | the execution record (`camdl.execution/v1`): `started_at`, `finished_at`, the method's `wall_time_seconds`, `pid`, `host`, `threads`; PMMH and `mh` add `cost`, PGAS `sampling_seconds`; a resumed leaf `earlier_segments` |
 | `progress.json`  | the liveness heartbeat, rewritten on a wall-clock timer while the method runs (§10.10)                                                                                                                                     |
 | `events.jsonl`   | the event log, one line per event the run reports (§10.11)                                                                                                                                                                 |
+| `opt_trace.tsv`  | an NLopt leaf's live search trace: each search's running best log-likelihood, a row every 25 evaluations or 2 seconds (§10.13)                                                                                             |
 
 The run writes `execution.json` when it claims the leaf and again, with its
 finish, before the commit, so an attempt that dies still records when and where
@@ -3527,8 +3528,9 @@ Per-algorithm leaf contents: IF2 writes `mle_params.toml`, `final_params.toml`,
 `draws.tsv`, `<algorithm>_summary.json` (`pgas_summary.json`,
 `pmmh_summary.json`, `mh_summary.json`), and `chain_N/trace.tsv`; PGAS and PMMH
 also write `chain_N/resume_state.bin`. The NLopt optimizers write
-`mle_params.toml` and `chain_results.tsv`. A `pfilter` method with
-`record_prequential` writes `prequential.{tsv,json}`.
+`mle_params.toml` and `chain_results.tsv`, and beside them the live search trace
+`opt_trace.tsv`, a record of the attempt outside the manifest (§10.13). A
+`pfilter` method with `record_prequential` writes `prequential.{tsv,json}`.
 
 Every `<algorithm>_summary.json` carries `schema = "camdl.fit-summary/v2"`, and
 every reader requires it: a file without the tag, or with a tag this camdl does
@@ -5731,9 +5733,10 @@ checked):
 
 Per method leaf, alongside `run.json`. The set is method-dependent; every file
 present is listed in `run.json.artifacts` and subject to the exact-set gate,
-except the records of the attempt — `execution.json`, `progress.json` and
-`events.jsonl` (§2.2) — which are not a function of the computation (the run
-appends to `events.jsonl` after the leaf commits, §10.11).
+except the records of the attempt — `execution.json`, `progress.json`,
+`events.jsonl` and an NLopt leaf's `opt_trace.tsv` (§2.2) — which are not a
+function of the computation (the run appends to `events.jsonl` after the leaf
+commits, §10.11).
 
 Common to both families:
 
@@ -6018,6 +6021,33 @@ per-chain liveness — today every method but PGAS — and `chain` here is the s
 number `chain_starts.tsv`'s `chain_id` column, the `bad_init` records and the
 `chain_N/` directories use, so joining any two of them takes no arithmetic.
 
+**An NLopt fit adds one row per search.** `step` is the furthest any search has
+reached, which on a multistart fit says nothing about the slowest search or
+whether any of them is still improving. While an `nl-sbplx`, `nl-bobyqa` or
+`nl-lbfgs` fit runs, `progress.json` carries a top-level `searches` array beside
+the unchanged `state` counter:
+
+```json
+{
+  "updated_at": 1794981175,
+  "pid": 6919,
+  "state": { "running": { "phase": "optimizing", "step": 11, "total": 5000 } },
+  "searches": [
+    { "chain": 0, "evals": 11, "best_loglik": -56.56391717561852 },
+    { "chain": 1, "evals": 10, "best_loglik": -49.81050630695637 }
+  ]
+}
+```
+
+`chain` is the search's number in `chain_results.tsv` and `opt_trace.tsv`;
+`evals` is its evaluation count and `best_loglik` the best finite log-likelihood
+it has scored, `null` until it scores one. A search's row is updated each time
+it writes a row of `opt_trace.tsv` (§10.13), so the two agree and the row is at
+most 25 evaluations or 2 seconds behind the search, and again with its final
+count when it ends; the terminal record keeps the block. A search with no row
+has not made its first evaluation. The array is absent, not null, for every
+other method.
+
 #### Which methods write it, and what a step is
 
 Every method writes `progress.json` except `pfilter`, whose unit of work is a
@@ -6228,6 +6258,59 @@ derived index) do not visit it, and its name ends in no level hash, so a lookup
 by hash never matches it. Nothing in it enters any hash, `run_id` or record, and
 no run reads it back: the leaves an invocation writes are byte-for-byte those it
 would write without it.
+
+### 10.13 `opt_trace.tsv`: each NLopt search's running best, while it runs
+
+An NLopt search reports nothing in `chain_results.tsv` until it finishes. On a
+model whose evaluation costs 0.4 s, an 8,000-evaluation search is close to an
+hour with no output, and a search that stopped at `max_evals` cannot be told
+apart from one that had levelled off. `opt_trace.tsv` records each search's
+climb as it happens. An `nl-sbplx`, `nl-bobyqa` or `nl-lbfgs` leaf holds one,
+beside `chain_results.tsv`, with a row from every search:
+
+```tsv
+chain	eval	loglik	best_loglik	beta	gamma
+2	1	-206.26724624340633	-206.26724624340633	0.6177941455696034	0.28345867819301973
+1	1	-103.87751305001734	-103.87751305001734	0.1979316379838952	0.036382023253224934
+0	1	-4763.2417810710185	-4763.2417810710185	0.05880848536922149	0.04171466478911118
+```
+
+| column           | what it holds                                                                                                                                       |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `chain`          | the search, numbered as in `chain_results.tsv`                                                                                                      |
+| `eval`           | the search's evaluation count at this row, from 1                                                                                                   |
+| `loglik`         | the ODE log-likelihood this evaluation scored, as the objective returned it; `-inf`, `inf` or `nan` when it is not finite                           |
+| `best_loglik`    | the best finite log-likelihood the search has scored so far; empty until it scores one                                                              |
+| one per estimate | the point that scored `best_loglik`, on the natural scale, in `chain_results.tsv`'s column order and spelling; empty until a finite value is scored |
+
+**The header is written before any search starts.** Rows follow in the order
+they are written, so the searches' rows interleave; group by `chain` to read one
+search. Within a search `eval` increases and `best_loglik` never decreases.
+
+**A row at the first evaluation, then at least every 25 evaluations or every 2
+seconds, whichever comes first, and one at the search's last evaluation.** The
+25-evaluation bound keeps a fast search (milliseconds per evaluation, thousands
+of evaluations) to a few hundred rows; the 2-second bound keeps a slow one (0.4
+s per evaluation) moving in a live plot. The last row is at the count
+`chain_results.tsv` reports as `n_evals`, and its `best_loglik` and point are
+that search's result: equal to `chain_results.tsv`'s `loglik` and parameters at
+the precision that file prints. For `nl-lbfgs` NLopt reports its final iterate
+rather than the best point it evaluated, so the trace's last `best_loglik` can
+exceed the reported `loglik` in the last few digits.
+
+**Each row is one whole-line write to a file opened for appending**, so a reader
+tailing the file while the searches run sees whole rows only, and rows from
+searches running in parallel never interleave within a line.
+
+**A record of the attempt, outside the identity.** Which evaluations get a row
+depends on how fast this execution ran, so two executions of one fit can write
+different traces. `opt_trace.tsv` is therefore one of the records of the attempt
+(§2.2): outside the leaf's manifest and every hash, and moved into
+`.attempts/<n>/` with the other records when a dead attempt's leaf is reclaimed.
+The search's result is `chain_results.tsv`, which is in the manifest. The trace
+only reads the value the objective returns; the optimiser's path and result are
+the same with or without it. A `camdl profile` runs the same optimiser in each
+cell and writes no trace.
 
 ## 11. Predictive Workflows
 

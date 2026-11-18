@@ -100,6 +100,8 @@ pub mod loglik_eval;
 pub mod methods;
 #[cfg(feature = "ode")]
 pub mod nlopt_method;
+#[cfg(feature = "ode")]
+pub(crate) mod opt_trace; // opt_trace.tsv: each NLopt search's running best, written live
 pub mod fitted_model; // is the given model the one a fit ran on (the replay check)
 pub mod handle;   // gh#322: fit handles (@label / hash / run-dir / fit.toml) → segment
 pub mod run_view; // one stored fit run as `show` and `list` present it

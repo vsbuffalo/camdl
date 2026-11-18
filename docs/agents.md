@@ -719,6 +719,15 @@ that was killed or panicked, and a run that was SIGKILLed cannot write anything
 at all. Spec: `docs/camdl-run-spec.md` §10.10, which tabulates what one step
 means for each method.
 
+**To see whether an NLopt search is still climbing, read `opt_trace.tsv`.** An
+`nl-sbplx`, `nl-bobyqa` or `nl-lbfgs` leaf holds it beside `chain_results.tsv`:
+rows of `chain`, `eval`, `loglik`, `best_loglik` and the best point so far,
+written every 25 evaluations or 2 seconds while the searches run. A search whose
+`best_loglik` was still rising at its last row when it stopped at `max_evals`
+had not converged; raise `max_evals`. `progress.json` carries the same
+per-search count and best in its `searches` array. Spec:
+`docs/camdl-run-spec.md` §10.13.
+
 ### Workflow tooling — the principle, not a mandated tool
 
 **Every artifact is a named, re-runnable target.** Nothing that feeds a model, a

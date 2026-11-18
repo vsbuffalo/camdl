@@ -165,11 +165,17 @@ pub fn run_method(
     // in completion order; the file is rewritten in chain order once every
     // chain is in (`write_per_chain_files`, below).
     let live_results = ChainResultsFile::create(method_dir, &est_names)?;
+    // `opt_trace.tsv`, the searches' running best, written while they run
+    // (`super::opt_trace`). The header goes down now, before any search
+    // writes a row.
+    let opt_trace = super::opt_trace::OptTraceFile::create(method_dir, &est_names)?;
 
     let t0 = std::time::Instant::now();
     // At most one chain per worker (gh#821, `chain_fanout`).
     let mut chain_outcomes: Vec<(usize, ChainOutcome)> = super::chain_fanout::run_chains(n_chains, |chain_idx| {
             let outcome = run_one_chain(out,
+                chain_idx,
+                &opt_trace,
                 algorithm,
                 knobs,
                 &arc_config.compiled,
@@ -195,6 +201,7 @@ pub fn run_method(
             (chain_idx, outcome)
         });
     drop(live_results);
+    drop(opt_trace);
     chain_outcomes.sort_by_key(|(i, _)| *i);
     let elapsed = t0.elapsed();
 
@@ -441,6 +448,8 @@ struct ChainOutcome {
 #[allow(clippy::too_many_arguments)]
 fn run_one_chain(
     out: &crate::out::Out,
+    chain_idx: usize,
+    opt_trace: &super::opt_trace::OptTraceFile,
     algorithm: NloptAlgorithm,
     knobs: &NloptConfig,
     compiled: &Arc<sim::CompiledModel>,
@@ -458,7 +467,21 @@ fn run_one_chain(
     // for the whole of the usual one-chain Sbplx fit. A relaxed `fetch_max` on
     // a shared atomic, so "furthest any chain has reached" is what the artifact
     // shows; no I/O per evaluation and no RNG consumed.
-    let on_eval = |evals: u64| heartbeat.bump(evals);
+    //
+    // Each evaluation also goes to this search's `opt_trace.tsv` rows, which
+    // are written only every few evaluations. Whenever a row is, the same
+    // count and best go to the heartbeat's per-search row (`searches`), so the
+    // two agree and the heartbeat's shared lock is taken once per trace row,
+    // not once per evaluation from every search at once. A row is due at
+    // least every 2 s, finer than the heartbeat's 5 s writes. Both read the
+    // value after the objective computed it; neither can change it.
+    let mut trace = super::opt_trace::SearchTrace::new(opt_trace, chain_idx);
+    let mut on_eval = |e: Evaluation<'_>| {
+        heartbeat.bump(e.evals);
+        if trace.observe(e.evals, e.est, e.loglik) {
+            heartbeat.search(chain_idx, e.evals, trace.best_loglik());
+        }
+    };
     let result = optimize_cell(
         algorithm,
         compiled,
@@ -470,8 +493,21 @@ fn run_one_chain(
         full_start,
         knobs.tolerance,
         knobs.max_evals,
-        Some(&on_eval),
+        Some(&mut on_eval),
     );
+    if let Some(evals) = trace.evals() {
+        heartbeat.search(chain_idx, evals, trace.best_loglik());
+    }
+    if let Some(e) = trace.finish() {
+        // The trace is a live view: a failed write costs it its rows, not the
+        // search its result.
+        out.say(format_args!(
+            "{} chain {}: could not append to {}: {e}",
+            crate::out::paint::warning_tag(),
+            ChainIndex(chain_idx),
+            opt_trace.path.display()
+        ));
+    }
     match result {
         Ok(r) => ChainOutcome {
             params: r.params,
@@ -498,6 +534,18 @@ fn run_one_chain(
     }
 }
 
+/// One objective evaluation, as [`optimize_cell`] reports it to its caller.
+pub struct Evaluation<'a> {
+    /// The cell's running evaluation count, from 1.
+    pub evals: u64,
+    /// The point scored: the estimated slots, natural scale, in `est_indices`
+    /// order.
+    pub est: &'a [f64],
+    /// The value the objective returns to NLopt for this point, non-finite
+    /// values included (`optimize_det` floors those on its side).
+    pub loglik: f64,
+}
+
 /// One NLopt cell-level optimization — shared by `nlopt_method::run_method`
 /// (multi-chain MLE for fit.toml methods) and `cli::profile` (per-cell MLE
 /// with focal params pinned). The cell is defined by `full_start`: every
@@ -522,13 +570,14 @@ fn run_one_chain(
 /// trajectory or the reported optimum is not the optimum of the reported
 /// likelihood.
 ///
-/// `on_eval` is called with this cell's running evaluation count each time the
-/// objective is scored — the seam a caller uses to report search progress
-/// (gh#900). It is the only per-evaluation hook there is: the objective closure
-/// is built here, so a caller cannot wrap it from outside. `camdl profile`
-/// passes `None`; its progress is a grid cell, not an evaluation. One
-/// `det_grad` call counts as one evaluation, the same unit as one
-/// `compute_ode_loglik` call.
+/// `on_eval` is handed each [`Evaluation`] once the objective has scored it,
+/// before the value goes back to NLopt — the seam a caller uses to report
+/// search progress (gh#900) and to trace the search (`opt_trace.tsv`). It is
+/// the only per-evaluation hook there is: the objective closure is built here,
+/// so a caller cannot wrap it from outside. It sees the value and cannot
+/// change it. `camdl profile` passes `None`; its progress is a grid cell, not
+/// an evaluation, and it writes no trace. One `det_grad` call counts as one
+/// evaluation, the same unit as one `compute_ode_loglik` call.
 ///
 /// **When the gradient cannot be taken** — `det_grad` errors, or hands back a
 /// value or a gradient component that is not finite — this returns `Err` with
@@ -558,7 +607,7 @@ pub fn optimize_cell(
     full_start: &[f64],
     tolerance: f64,
     max_evals: usize,
-    on_eval: Option<&(dyn Fn(u64) + Sync)>,
+    mut on_eval: Option<&mut dyn FnMut(Evaluation<'_>)>,
 ) -> Result<OptResult, String> {
     let initial_est: Vec<f64> = est_indices.iter().map(|&i| full_start[i]).collect();
 
@@ -583,45 +632,48 @@ pub fn optimize_cell(
             full_params[model_idx] = est[slot];
         }
         evals += 1;
-        if let Some(report) = on_eval {
-            report(evals);
-        }
-        let Some(slot) = grad else {
-            // Derivative-free: value only.
-            return compute_ode_loglik(
+        let value = 'score: {
+            let Some(slot) = grad else {
+                // Derivative-free: value only.
+                break 'score compute_ode_loglik(
+                    &compiled_local,
+                    &obs_model_local,
+                    &obs_times_local,
+                    dt,
+                    &full_params,
+                    dt, // burnin_dt = dt ⇒ coarse burn-in off (fine step throughout)
+                )
+                .unwrap_or(f64::NEG_INFINITY);
+            };
+            // Already given up: wind down without another augmented solve.
+            if grad_failure_ref.borrow().is_some() {
+                slot.fill(f64::NAN);
+                break 'score f64::NEG_INFINITY;
+            }
+            match score_with_gradient(
                 &compiled_local,
                 &obs_model_local,
                 &obs_times_local,
                 dt,
                 &full_params,
-                dt, // burnin_dt = dt ⇒ coarse burn-in off (fine step throughout)
-            )
-            .unwrap_or(f64::NEG_INFINITY);
-        };
-        // Already given up: wind down without another augmented solve.
-        if grad_failure_ref.borrow().is_some() {
-            slot.fill(f64::NAN);
-            return f64::NEG_INFINITY;
-        }
-        match score_with_gradient(
-            &compiled_local,
-            &obs_model_local,
-            &obs_times_local,
-            dt,
-            &full_params,
-            &est_indices_local,
-            slot,
-        ) {
-            Ok(value) => value,
-            Err(reason) => {
-                let mut latched = grad_failure_ref.borrow_mut();
-                if latched.is_none() {
-                    *latched = Some(reason);
+                &est_indices_local,
+                slot,
+            ) {
+                Ok(value) => value,
+                Err(reason) => {
+                    let mut latched = grad_failure_ref.borrow_mut();
+                    if latched.is_none() {
+                        *latched = Some(reason);
+                    }
+                    slot.fill(f64::NAN);
+                    f64::NEG_INFINITY
                 }
-                slot.fill(f64::NAN);
-                f64::NEG_INFINITY
             }
+        };
+        if let Some(observe) = on_eval.as_deref_mut() {
+            observe(Evaluation { evals, est, loglik: value });
         }
+        value
     };
 
     let result = optimize_det(
@@ -1254,6 +1306,112 @@ mod tests {
             .is_ok(),
             "nl-sbplx has no gradient requirement, so the same model must run"
         );
+    }
+
+    // ── opt_trace.tsv, observed from a real search ───────────────────
+
+    /// Every derivative-free and gradient search on the SEIR fixture, from a
+    /// displaced start: `(algorithm, est_indices, bounds, start)`.
+    fn traced_cells() -> Vec<(NloptAlgorithm, Vec<usize>, Vec<(f64, f64)>, Vec<f64>)> {
+        let (compiled, _, _, params) = seir_gradient_fixture();
+        let est: Vec<usize> = ["beta", "rho"].iter().map(|n| compiled.param_index[*n]).collect();
+        let mut start = params.clone();
+        start[est[0]] = 0.22;
+        start[est[1]] = 0.35;
+        let bounds = vec![(0.05, 0.5), (0.05, 0.95)];
+        [NloptAlgorithm::Sbplx, NloptAlgorithm::Bobyqa, NloptAlgorithm::Lbfgs]
+            .into_iter()
+            .map(|a| (a, est.clone(), bounds.clone(), start.clone()))
+            .collect()
+    }
+
+    /// The trace observes the search and does not steer it: with an observer
+    /// attached, every algorithm returns the same optimum, bit for bit, after
+    /// the same number of evaluations as without one.
+    #[test]
+    fn an_observed_search_is_bit_identical_to_an_unobserved_one() {
+        let (compiled, obs_model, obs_times, _) = seir_gradient_fixture();
+        let dir = tempfile::tempdir().unwrap();
+        let file = super::super::opt_trace::OptTraceFile::create(dir.path(), &names(2)).unwrap();
+        for (algorithm, est, bounds, start) in traced_cells() {
+            let run = |observe: Option<&mut dyn FnMut(Evaluation<'_>)>| {
+                optimize_cell(algorithm, &compiled, &obs_model, &obs_times, 1.0,
+                    &bounds, &est, &start, 1e-8, 400, observe)
+                .expect("the fixture optimizes")
+            };
+            let bare = run(None);
+            let mut trace = super::super::opt_trace::SearchTrace::new(&file, 0);
+            let mut seen = Vec::new();
+            let mut observe = |e: Evaluation<'_>| {
+                seen.push(e.loglik);
+                trace.observe(e.evals, e.est, e.loglik);
+            };
+            let traced = run(Some(&mut observe));
+            assert!(trace.finish().is_none());
+            assert_eq!(traced.loglik.to_bits(), bare.loglik.to_bits(), "{algorithm:?}");
+            assert_eq!(
+                traced.params.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                bare.params.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "{algorithm:?}"
+            );
+            assert_eq!((traced.n_evals, seen.len()), (bare.n_evals, bare.n_evals), "{algorithm:?}");
+        }
+    }
+
+    /// A real search's rows are on disk while it runs — read from inside the
+    /// objective, as a reader tailing the file would — and its last row holds
+    /// the optimum NLopt reports: the best value and the point that scored it.
+    #[test]
+    fn a_real_search_traces_live_and_ends_on_its_optimum() {
+        let (compiled, obs_model, obs_times, _) = seir_gradient_fixture();
+        for (algorithm, est, bounds, start) in traced_cells() {
+            let dir = tempfile::tempdir().unwrap();
+            let file = super::super::opt_trace::OptTraceFile::create(dir.path(), &names(2)).unwrap();
+            let path = file.path.clone();
+            let mut trace = super::super::opt_trace::SearchTrace::new(&file, 2);
+            // What a reader sees mid-search: at eval 2, and at eval 27 when
+            // the search gets that far.
+            let mut mid_run = std::collections::BTreeMap::new();
+            let mut observe = |e: Evaluation<'_>| {
+                trace.observe(e.evals, e.est, e.loglik);
+                if e.evals == 2 || e.evals == 27 {
+                    mid_run.insert(e.evals, std::fs::read_to_string(&path).unwrap());
+                }
+            };
+            let r = optimize_cell(algorithm, &compiled, &obs_model, &obs_times, 1.0,
+                &bounds, &est, &start, 1e-8, 400, Some(&mut observe))
+            .expect("the fixture optimizes");
+            assert!(trace.finish().is_none());
+            let evals_at = |text: &String| -> Vec<String> {
+                text.lines().skip(1).map(|l| l.split('\t').nth(1).unwrap().to_string()).collect()
+            };
+            assert_eq!(evals_at(&mid_run[&2]), ["1"], "{algorithm:?}: the first row, mid-search");
+            if algorithm != NloptAlgorithm::Lbfgs {
+                // L-BFGS converges here in fewer than 27 evaluations.
+                assert_eq!(evals_at(&mid_run[&27]), ["1", "26"],
+                    "{algorithm:?}: every 25 evaluations, mid-search");
+            }
+
+            let text = std::fs::read_to_string(&path).unwrap();
+            let last: Vec<&str> = text.lines().last().unwrap().split('\t').collect();
+            assert_eq!(last[0], "2");
+            assert_eq!(last[1], r.n_evals.to_string(), "{algorithm:?}: the final row is the last eval");
+            let best: f64 = last[3].parse().unwrap();
+            let point: Vec<f64> = last[4..].iter().map(|v| v.parse().unwrap()).collect();
+            if algorithm == NloptAlgorithm::Lbfgs {
+                // NLopt's L-BFGS reports its final iterate, not the best point
+                // it evaluated: on this fixture the two differ by ~3e-14 nats
+                // and ~4e-10 in θ. The trace's best is never below NLopt's.
+                assert!(best >= r.loglik && best - r.loglik < 1e-9,
+                    "{algorithm:?}: best {best} vs NLopt's {}", r.loglik);
+                for (a, b) in point.iter().zip(&r.params) {
+                    assert!((a - b).abs() < 1e-6, "{algorithm:?}: {point:?} vs {:?}", r.params);
+                }
+            } else {
+                assert_eq!(best.to_bits(), r.loglik.to_bits(), "{algorithm:?}: best is NLopt's optimum");
+                assert_eq!(point, r.params, "{algorithm:?}: the best point is NLopt's");
+            }
+        }
     }
 
     fn nlopt_config() -> NloptConfig {

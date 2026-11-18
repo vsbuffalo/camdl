@@ -1136,13 +1136,25 @@ pub const EVENT_LOG: &str = "events.jsonl";
 /// result alone.
 pub const EXECUTION_RECORD: &str = "execution.json";
 
+/// An NLopt leaf's live search trace: rows of each search's running best
+/// log-likelihood, appended while the searches run, for watching a long fit
+/// (`docs/camdl-run-spec.md` §10.13). A row is written every few evaluations
+/// or every few seconds, whichever comes first, so which evaluations have a
+/// row depends on how fast this execution ran. Two executions of one
+/// computation can therefore write different bytes, which is why the trace is
+/// outside the exact-set manifest and enters no hash; the search's result is
+/// `chain_results.tsv`, which is in it.
+pub const OPT_TRACE: &str = "opt_trace.tsv";
+
 /// The leaf-root files that record one attempt at a leaf's computation rather
 /// than its result: the event log, the liveness heartbeat (`progress.json`,
-/// rewritten on a wall-clock timer, carrying a process id) and the execution
-/// record. The manifest and the orphan scan pass over them, and a reclaim
-/// moves them with the dead attempt's record into the preserved attempts
-/// (`preserve_prior_attempt`), so a leaf keeps one set per attempt.
-pub const PER_ATTEMPT_RECORDS: [&str; 3] = [EVENT_LOG, "progress.json", EXECUTION_RECORD];
+/// rewritten on a wall-clock timer, carrying a process id), the execution
+/// record and an NLopt leaf's search trace (its row cadence partly
+/// wall-clock). The manifest and the orphan scan pass over them, and a
+/// reclaim moves them with the dead attempt's record into the preserved
+/// attempts (`preserve_prior_attempt`), so a leaf keeps one set per attempt.
+pub const PER_ATTEMPT_RECORDS: [&str; 4] =
+    [EVENT_LOG, "progress.json", EXECUTION_RECORD, OPT_TRACE];
 
 /// Leaf-root entries the manifest and the orphan scan pass over: the
 /// reserved files, the records of the attempt and the preserved attempts.
