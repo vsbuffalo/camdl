@@ -437,6 +437,8 @@ let diagnose_validate_error ctx (err : Validate.error) : Diagnostics.diagnostic 
     | Validate.InOde          c -> comp_loc c
     | Validate.InObservation  n -> obs_loc n
     | Validate.InIntervention n -> interv_loc n
+    | Validate.InBinding      b -> Expander.let_loc ctx b
+    | Validate.InInit         c -> comp_loc c
   in
   let (code, message, hint, loc) = match err with
     | DuplicateCompartment s ->
@@ -500,6 +502,30 @@ let diagnose_validate_error ctx (err : Validate.error) : Diagnostics.diagnostic 
       Some "a union of flows must be disjoint. From a .camdl this is E342 with \
             a source span; a bare E514 means the IR was hand-written or has \
             drifted",
+      site_loc site
+    | NonFiniteConstant (node, v, site) ->
+      let where = match site with
+        | Validate.InTransition   n -> Printf.sprintf "transition '%s'" n
+        | Validate.InOde          c -> Printf.sprintf "the ODE equation of '%s'" c
+        | Validate.InObservation  n -> Printf.sprintf "observation '%s'" n
+        | Validate.InIntervention n -> Printf.sprintf "intervention '%s'" n
+        | Validate.InBinding      b -> Printf.sprintf "let '%s'" b
+        | Validate.InInit         c -> Printf.sprintf "the initial value of '%s'" c
+      in
+      let value =
+        if Float.is_nan v then "NaN"
+        else if v > 0.0 then "infinity" else "-infinity"
+      in
+      "E520",
+      Printf.sprintf
+        "in %s, the constant expression `%s` evaluates to %s, which is not a number \
+         a model can use" where (Pp_expr.to_string node) value,
+      Some "this expression is made only of numbers, so its value is fixed when the \
+            model compiles, and it is the same mistake whether or not the branch \
+            holding it ever runs. A negative number to a fractional power, the log \
+            of zero, a division by zero and a result too large for a float each \
+            produce one. \
+            Correct the arithmetic, or write the finite value you mean",
       site_loc site
     | UnknownTransition (s, site) ->
       "E507",

@@ -4641,6 +4641,69 @@ let test_simplify_does_not_fold_to_non_finite () =
   Alcotest.(check bool) "(0 - 8) ^ 0.5 keeps the power of -8"
     true (Autodiff.simplify_fixpoint e = pow (-8.0) 0.5)
 
+(* gh#1207: a sub-expression of literals whose value is not finite is a
+   located compile error (E520), wherever it stands. [recovery_rate] is
+   spliced into the model below, on line 10. *)
+let non_finite_src ?(extra_let = "") ?(i0 = "10") recovery_rate =
+  Printf.sprintf {|time_unit = 'days
+compartments { S, I, R }
+let N = S + I + R%s
+parameters {
+  beta  : rate     in [0.001, 2.0]
+  gamma : rate     in [0.001, 1.0]
+}
+transitions {
+  infection : S --> I  @ beta * S * (I / N)
+  recovery  : I --> R  @ %s
+}
+init {
+  S = 990
+  I = %s
+}
+simulate { from = 0 'days
+  to = 50 'days }
+|} extra_let recovery_rate i0
+
+let compile_errors src =
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"gh1207" src in
+  Diagnostics.json_errors_mode := false;
+  result
+
+let test_non_finite_literal_is_e520 () =
+  (* The issue's reproduction: the branch is never taken, and the literal is
+     still a mistake. *)
+  let src = non_finite_src
+      "if I > 1000000 'count then (0 - 8) ^ 0.5 * gamma * I else gamma * I" in
+  compile_expect_error_code ~code:"E520" ~contains:"(0 - 8) ^ 0.5" src;
+  compile_expect_error_code ~code:"E520" ~contains:"evaluates to NaN" src;
+  (match compile_errors src with
+   | Ok _ -> Alcotest.fail "expected E520"
+   | Error e ->
+     Alcotest.(check (option int)) "E520 is located at the transition" (Some 10)
+       (line_of_code ~code:"E520" e));
+  (* log(0), 1 / 0 and an overflow are the other non-finite literals. *)
+  compile_expect_error_code ~code:"E520" ~contains:"-infinity"
+    (non_finite_src "gamma * I * log(0)");
+  compile_expect_error_code ~code:"E520" ~contains:"evaluates to infinity"
+    (non_finite_src "gamma * I * (1 / 0)");
+  compile_expect_error_code ~code:"E520" ~contains:"evaluates to infinity"
+    (non_finite_src "gamma * I * exp(1000)");
+  (* A literal let and an initial condition are checked too. *)
+  compile_expect_error_code ~code:"E520" ~contains:"let 'k'"
+    (non_finite_src ~extra_let:"\nlet k = (0 - 8) ^ 0.5"
+       "if I > 1000000 'count then k * gamma * I else gamma * I");
+  compile_expect_error_code ~code:"E520" ~contains:"initial value of 'I'"
+    (non_finite_src ~i0:"10 + 0 * (0 - 8) ^ 0.5" "gamma * I")
+
+(* The check is on literal values only: the same operations on a parameter
+   or a compartment, and finite literals, compile. *)
+let test_finite_and_non_literal_powers_compile () =
+  ignore (compile_expect_ok (non_finite_src "gamma * I * 4 ^ 0.5"));
+  ignore (compile_expect_ok (non_finite_src "gamma * (0 - I) ^ 0.5"));
+  ignore (compile_expect_ok (non_finite_src "gamma * I * log(I / N)"));
+  ignore (compile_expect_ok (non_finite_src "gamma * I / (I - I)"))
+
 let test_rate_state_grad_nonsmooth_refused () =
   (* Rate = floor(S) * beta. ∂/∂S reaches floor(state) — nonsmooth (a step at
      each integer) — so it must be a loud DEUnsupported (URNonsmoothState), never
@@ -17566,6 +17629,8 @@ let () =
       Alcotest.test_case "state grad counts a repeated PopSum member" `Quick test_rate_state_grad_counts_repeated_popsum_member;
       Alcotest.test_case "simplify_fixpoint terminates on a NaN constant" `Quick test_simplify_fixpoint_terminates_on_nan;
       Alcotest.test_case "simplify does not fold literals to a non-finite value (gh#1207)" `Quick test_simplify_does_not_fold_to_non_finite;
+      Alcotest.test_case "E520: a non-finite literal sub-expression (gh#1207)" `Quick test_non_finite_literal_is_e520;
+      Alcotest.test_case "E520 is not raised for finite or non-literal operands" `Quick test_finite_and_non_literal_powers_compile;
       Alcotest.test_case "rate_state_grad: BindingRef inverts to state-bearing (gh#275)" `Quick test_rate_state_grad_through_binding;
       Alcotest.test_case "autodiff: ∂(x^c) is finite at a zero base (gh#952)" `Quick test_pow_grad_constant_exponent_at_zero_base;
       Alcotest.test_case "autodiff: ∂(I^α) is finite at a zero base (gh#952)" `Quick test_pow_grad_parameter_exponent_at_zero_base;
