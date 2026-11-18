@@ -702,6 +702,7 @@ mod tests {
     /// A keyed draw on 0-based chain `c`, draw `d`, with a single param `beta`.
     fn kd(c: usize, d: usize, beta: f64) -> KeyedDraw {
         KeyedDraw {
+            row: 0,
             chain: Some(c),
             draw: Some(d),
             params: HashMap::from([("beta".to_string(), beta)]),
@@ -837,7 +838,7 @@ mod tests {
     fn apply_errors_without_chain_column() {
         // A param-only cloud (chain = None) cannot be chain-selected.
         let draws = vec![
-            KeyedDraw { chain: None, draw: None, params: HashMap::from([("beta".to_string(), 0.1)]) },
+            KeyedDraw { row: 0, chain: None, draw: None, params: HashMap::from([("beta".to_string(), 0.1)]) },
         ];
         let sel = ChainSelection::parse_exclude("0").unwrap();
         let e = sel.apply_keyed(draws).unwrap_err();

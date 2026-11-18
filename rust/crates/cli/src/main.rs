@@ -5305,9 +5305,15 @@ fn write_draws_tsv(path: &str, draws: &[HashMap<String, f64>]) -> Result<(), Str
 /// Returns Vec<HashMap<param_name, value>>.
 /// One parsed `draws.tsv` row: the optional `(chain, draw)` posterior key
 /// (gh#322 — the join key to the smoothed `trajectories.tsv`; `None` for a
-/// pre-key, param-only file) plus the model parameters.
+/// pre-key, param-only file) plus the model parameters, and the row's place
+/// in the file.
 #[derive(Debug, Clone)]
 pub(crate) struct KeyedDraw {
+    /// The row's 0-based position among the file's data rows (the header is
+    /// not a row). A chain selection drops rows but never renumbers this, so
+    /// an artifact built from a subset can still name the row a draw came
+    /// from.
+    pub row: usize,
     pub chain: Option<usize>,
     pub draw: Option<usize>,
     pub params: HashMap<String, f64>,
@@ -5369,7 +5375,7 @@ pub(crate) fn load_draws_tsv_keyed(path: &str) -> Result<Vec<KeyedDraw>, String>
                 }
             }
         }
-        draws.push(KeyedDraw { chain, draw, params });
+        draws.push(KeyedDraw { row: draws.len(), chain, draw, params });
     }
 
     if draws.is_empty() {
