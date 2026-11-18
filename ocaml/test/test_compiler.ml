@@ -13314,6 +13314,39 @@ let test_init_dependency_cycle_hint_says_chain_not_loop () =
   compile_expect_error_code ~code:"E515" ~contains:"a chain, not a loop"
     (init_dep_model ~init:"A = B + 1\n  B = A - 1")
 
+(* gh#1219: [Init_order.closed] substitutes a binding's body for every
+   [BindingRef]. A cycle among bindings has no closed form; the expander never
+   emits one (it reports a `let` cycle itself), so this is an IR built by
+   hand or by a drifted expander, and it must fail with the cycle named rather
+   than recurse until the stack overflows. A binding read twice without a
+   cycle (a diamond) is not one. *)
+let test_init_closed_binding_cycle_is_named () =
+  let b name e : Ir.binding = { bname = name; bexpr = e } in
+  let ic = [ ("A", Ir.Deterministic (Ir.BindingRef "a")) ] in
+  let bindings = [ b "a" (Ir.BindingRef "b"); b "b" (Ir.BindingRef "a") ] in
+  (* The unguarded substitution is a tail call, so it spins rather than
+     overflowing: bound it, as the gh#492 cases do. *)
+  let prev = Sys.signal Sys.sigalrm
+      (Sys.Signal_handle (fun _ -> raise Compile_timed_out)) in
+  let restore () = ignore (Unix.alarm 0); Sys.set_signal Sys.sigalrm prev in
+  (match ignore (Unix.alarm 5); Init_order.closed ic ~bindings with
+   | _ -> restore (); Alcotest.fail "a binding cycle closed to an expression"
+   | exception Failure msg ->
+     restore ();
+     Alcotest.(check bool) ("names the cycle: " ^ msg) true
+       (contains_substring ~needle:"a -> b -> a" msg)
+   | exception Compile_timed_out -> restore (); Alcotest.fail "closed did not terminate on a binding cycle"
+   | exception Stack_overflow -> restore (); Alcotest.fail "stack overflow on a binding cycle");
+  let add l r = Ir.BinOp { op = Ir.Add; left = l; right = r } in
+  let diamond =
+    [ b "n" (Ir.Param "N0");
+      b "half" (add (Ir.BindingRef "n") (Ir.BindingRef "n")) ] in
+  let closed =
+    Init_order.closed [ ("A", Ir.Deterministic (Ir.BindingRef "half")) ]
+      ~bindings:diamond in
+  Alcotest.(check bool) "a diamond closes over its parameter" true
+    (closed = [ ("A", add (Ir.Param "N0") (Ir.Param "N0")) ])
+
 let test_init_chain_is_accepted () =
   (* Non-vacuity for the two above: the same shape without the back edge is a
      legal chain and must compile. *)
@@ -17055,6 +17088,7 @@ let () =
       Alcotest.test_case "E515 cycle names the loop" `Quick test_init_dependency_cycle_rejected;
       Alcotest.test_case "E515 hint says chain not loop" `Quick test_init_dependency_cycle_hint_says_chain_not_loop;
       Alcotest.test_case "a chain of init references compiles" `Quick test_init_chain_is_accepted;
+      Alcotest.test_case "a binding cycle in closed is named, not a stack overflow (gh#1219)" `Quick test_init_closed_binding_cycle_is_named;
       Alcotest.test_case "ic_grad differentiates the closed expression" `Quick test_ic_grad_differentiates_the_closed_expression;
     ];
     "iso_date_validation", [

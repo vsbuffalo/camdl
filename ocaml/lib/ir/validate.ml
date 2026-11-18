@@ -11,12 +11,14 @@
     construct that contains the reference ({!site}).
 
     Almost every check here repeats one the expander makes, with a source
-    location, while it builds the model. This module is the check at the
-    boundary of the IR itself: it also catches an IR that was written by
-    hand, produced by another tool, or built by an expander that has
-    drifted from its own rules. The Rust runtime validates a model again
-    when it loads one ([rust/crates/ir/src/validate.rs]), and the checks of
-    initial-state laws and intervention targets here mirror its.
+    location, while it builds the model. This module is a self-check of the
+    compiler: it catches an expander that has drifted from its own rules,
+    before the passes that follow it run. It is not the check for an IR
+    the compiler did not build. That is the Rust validation
+    ([rust/crates/ir/src/validate.rs]), which the [camdl] CLI runs on every
+    model it loads ([load_model], [rust/crates/cli/src/util.rs]) and which is
+    the boundary for an IR written by hand or produced by another tool. The
+    checks of initial-state laws and intervention targets here mirror its.
 
     The checks are:
 
