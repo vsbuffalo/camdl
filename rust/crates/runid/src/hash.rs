@@ -56,6 +56,23 @@ use sha2::{Digest, Sha256};
 ///
 /// ## History
 ///
+/// - **8** (proposal 2026-11-17, `docs/dev/proposals/2026-11-17-honest-input-
+///   addressed-store.md` §1b, §1c) — one deliberate re-key for inputs that
+///   changed a run's result without changing its key:
+///   1. *A gradient-reading fit keys on the gradient maps it reads.* PGAS
+///      with NUTS, `nl-lbfgs` and an `nl-lbfgs` profile point carry the model
+///      hashed with its compiler-derived gradient maps in their method level
+///      (`inputs::model_ir_hash_with_gradients`), so two compiles of one
+///      forward model with different gradients are two runs. Gradient-free
+///      methods hash no gradient.
+///   2. *`allow_degenerate_rates` is identity for `pfilter` and `profile`*: a
+///      `pfilter` run keys it in its config level and a `profile` point in
+///      its base level, as `simulate` and `fit run` already did.
+///
+///   The engine's build fingerprint (`ENGINE_ID`) re-keys every run by
+///   itself; the bump makes the turnover one declared event. Leaves written
+///   at version 7 stay readable; they are never served as a cache hit for a
+///   version-8 run.
 /// - **7** (D77) — three changes to what the particle filters compute from a
 ///   run's inputs:
 ///   1. *No resample on exactly equal weights.* Where every normalised log
@@ -151,7 +168,7 @@ use sha2::{Digest, Sha256};
 ///   still parses, `fit summary` and the browsers read them); they are never
 ///   served as a cache hit for a version-2 run.
 /// - **1** — the initial encoding.
-pub const HASH_VERSION: u16 = 7;
+pub const HASH_VERSION: u16 = 8;
 
 // ─── ContentHash ─────────────────────────────────────────────────────────────
 
