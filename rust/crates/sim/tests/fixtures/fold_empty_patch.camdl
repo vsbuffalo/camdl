@@ -1,0 +1,31 @@
+# Fixture for the empty-patch behaviour of the sparse-coupling fold (gh#1217).
+# Three patches; p2 is empty (S = I = 0, so N[p2] = 0) and every W[l, p2] is
+# a literal 0, so p2 is coupled to nothing. The spatial term is written
+# W[l, q] * I[q] / N[q], so the unfolded model evaluates 0 * 0 / 0 for the
+# p2 terms and the runtime reports a division by zero; the fold drops those
+# terms as structurally zero before any division exists, as it does for the
+# W[l, q] * (I[q] / N[q]) spelling.
+#
+# Regenerate both .ir.json siblings with the camdlc under test:
+#   CAMDL_NO_CONSTANT_FOLD=1 camdlc --set beta=0.3 --set gamma=0.1 fold_empty_patch.camdl > fold_empty_patch_unfolded.ir.json
+#   camdlc --set beta=0.3 --set gamma=0.1 fold_empty_patch.camdl > fold_empty_patch_folded.ir.json
+time_unit = 'days
+dimensions { patch = [p0, p1, p2] }
+compartments { S, I, R }
+stratify(by = patch)
+parameters { beta : rate in [0.01, 2.0]  gamma : rate in [0.01, 1.0] }
+tables {
+  W : patch × patch = [[0.0, 0.5, 0.0],
+                       [0.5, 0.0, 0.0],
+                       [0.0, 0.0, 0.0]]
+}
+let N[l in patch] = S[l] + I[l] + R[l]
+transitions {
+  infection[l in patch] : S[l] --> I[l] @ beta * S[l] * sum(q in patch, W[l, q] * I[q] / N[q])
+  recovery[l in patch]  : I[l] --> R[l] @ gamma * I[l]
+}
+init {
+  S[p0] = 990  I[p0] = 10
+  S[p1] = 1000
+}
+simulate { from = 0 'days  to = 30 'days }
