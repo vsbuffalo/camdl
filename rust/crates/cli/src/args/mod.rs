@@ -1308,8 +1308,8 @@ pub struct FitPredictArgs {
 
     /// Particles per posterior draw in the filters this command runs (the
     /// one-step band's and the forecast's). Default: the fit's own filter's
-    /// count for a PMMH fit, else 500. Recorded in the manifest; a value other
-    /// than the default keys its own output directory.
+    /// count for a PMMH fit, else 500. The resolved count is part of the
+    /// output directory's key and is recorded in the manifest.
     #[arg(long, value_name = "N")]
     pub particles: Option<usize>,
 
