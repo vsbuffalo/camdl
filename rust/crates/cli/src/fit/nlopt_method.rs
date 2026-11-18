@@ -320,7 +320,7 @@ pub fn run_method(
         method: method_name.to_string(),
         seed,
         input_hash: None,
-        camdl_version: Some(crate::version::VERSION.to_string()),
+        camdl_version: Some(crate::version::VERSION_SHORT.to_string()),
         best_loglik: winner.loglik,
         initial_loglik: f64::NAN,
         best_chain: ChainIndex(winner_idx),
