@@ -17737,6 +17737,132 @@ let gh1200_tests = [
     test_gh1200_parametric_entry_stays_expr;
 ]
 
+(* ── gh#1243: a folded instant's unit literals are checked whatever else it names ──
+
+   The instants folded to a number at compile time (`simulate { from, to }`, a
+   scenario's `to`, a recurring schedule's `from` and `to`, output and emit
+   `at` entries) were unit-checked from the AST, where a name such as `origin`
+   leaves the sum undecided, and then folded whatever the dimension: under an
+   origin `to = origin + 10 'per_day` compiled to `t_end = 10`. They are now
+   decided by the dimension of the resolved IR, as an intervention's
+   `at [...]` entry is (gh#1200). One slot per position; every other slot
+   holds an accepted value. *)
+
+let i1243_src ?(sim_from = "origin") ?(sim_to = "origin + 100 'days")
+    ?(scen_to = "origin + 50 'days") ?(rec_from = "origin + 5 'days")
+    ?(rec_to = "origin + 90 'days") ?(out_at = "origin + 3 'days")
+    ?(emit_at = "origin + 4 'days") () =
+  Printf.sprintf {|
+time_unit = 'days
+origin = date("2020-01-01")
+compartments { S, I, R }
+parameters {
+  beta  : rate in [0.1, 2.0]
+  gamma : rate in [0.05, 0.5]
+  rho   : probability in [0.01, 1.0]
+}
+transitions {
+  infection : S --> I @ beta * S * I / (S + I + R)
+  recovery  : I --> R @ gamma * I
+}
+init { S = 990  I = 10 }
+interventions {
+  boost : transfer(fraction = 0.1, from = R, to = S) { every = 30 'days  from = %s  to = %s }
+}
+observations {
+  cases {
+    columns       { time : time, cases : count }
+    covers        = closing_at(time, 1 'days)
+    projected     = incidence(recovery)
+    emit_schedule = at [%s]
+    cases         ~ poisson(rate = rho * projected)
+  }
+}
+scenarios {
+  short { simulate { to = %s } }
+}
+simulate { from = %s  to = %s }
+output { trajectories { at = [%s] } }
+|} rec_from rec_to emit_at scen_to sim_from sim_to out_at
+
+let rate_unit = "origin + 10 'per_day"
+let mixed_units = "origin + 1 'days + 1 'per_day"
+
+(* Each position, with a rate unit and with disagreeing units in a sum. *)
+let i1243_refused ~what mk () =
+  compile_expect_error_code ~code:"E315" ~contains:(what ^ " must be a time")
+    (mk rate_unit);
+  compile_expect_error_code ~code:"E315" ~contains:"unit literals disagree"
+    (mk mixed_units)
+
+let test_gh1243_simulate_from =
+  i1243_refused ~what:"`simulate.from`" (fun v -> i1243_src ~sim_from:v ())
+let test_gh1243_simulate_to =
+  i1243_refused ~what:"`simulate.to`" (fun v -> i1243_src ~sim_to:v ())
+let test_gh1243_scenario_to =
+  i1243_refused ~what:"a scenario's `to`" (fun v -> i1243_src ~scen_to:v ())
+let test_gh1243_schedule_from =
+  i1243_refused ~what:"a schedule's `from`" (fun v -> i1243_src ~rec_from:v ())
+let test_gh1243_schedule_to =
+  i1243_refused ~what:"a schedule's `to`" (fun v -> i1243_src ~rec_to:v ())
+let test_gh1243_output_at =
+  i1243_refused ~what:"an output time" (fun v -> i1243_src ~out_at:v ())
+let test_gh1243_emit_at =
+  i1243_refused ~what:"an emit time" (fun v -> i1243_src ~emit_at:v ())
+
+(* A date in place of `origin` takes the same route. *)
+let test_gh1243_date_base () =
+  compile_expect_error_code ~code:"E315" ~contains:"`simulate.to` must be a time"
+    (i1243_src ~sim_to:"date(\"2020-03-01\") + 1 'per_day" ())
+
+(* The values the accepted spellings compile to, in every position. *)
+let i1243_values src =
+  let m = compile_expect_ok src in
+  let sim = m.Ir.simulation in
+  let rec_ = match (List.hd m.Ir.interventions).Ir.fire with
+    | Ir.Scheduled (Ir.Recurring { start; end_; _ }) -> [start; end_]
+    | _ -> Alcotest.fail "expected a recurring schedule" in
+  let scen = match (find_scenario m "short").Ir.preset_t_end with
+    | Some v -> [v] | None -> Alcotest.fail "expected a scenario t_end" in
+  let out = match m.Ir.output.Ir.times with
+    | Ir.OutAtTimes ts -> ts | _ -> Alcotest.fail "expected OutAtTimes" in
+  let emit = match (List.hd m.Ir.observations).Ir.emit_schedule with
+    | Some (Ir.ObsAtTimes ts) -> ts | _ -> Alcotest.fail "expected ObsAtTimes" in
+  [sim.Ir.t_start; sim.Ir.t_end] @ scen @ rec_ @ out @ emit
+
+let test_gh1243_accepted_unchanged () =
+  let check name expected src =
+    Alcotest.(check (list (float 1e-9))) name expected (i1243_values src) in
+  check "origin + time units" [0.0; 100.0; 50.0; 5.0; 90.0; 3.0; 4.0]
+    (i1243_src ());
+  check "a date plus weeks, origin plus weeks, a product"
+    [7.0; 182.0; 50.0; 14.0; 90.0; 3.0; 4.0]
+    (i1243_src ~sim_from:"origin + 1 'weeks"
+       ~sim_to:"date(\"2020-01-01\") + 26 'weeks"
+       ~rec_from:"origin + 2 * 7 'days" ());
+  check "one calendar step from the origin"
+    [0.0; 91.0; 31.0; 5.0; 60.0; 31.0; 60.0]
+    (i1243_src ~sim_to:"origin + 3 'months" ~scen_to:"origin + 1 'months"
+       ~rec_to:"origin + 2 'months" ~out_at:"origin + 1 'months"
+       ~emit_at:"origin + 2 'months" ());
+  check "bare durations and dates; date_range in an at-list"
+    [0.0; 100.0; 50.0; 5.0; 90.0; 0.0; 31.0; 60.0; 4.0]
+    (i1243_src ~sim_to:"100 'days" ~scen_to:"date(\"2020-02-20\")"
+       ~rec_from:"5" ~rec_to:"90 'days"
+       ~out_at:"date_range(origin, count = 2, calendar_months = 1)" ())
+
+let gh1243_tests = [
+  "simulate.from: a non-time unit beside origin is E315", test_gh1243_simulate_from;
+  "simulate.to: a non-time unit beside origin is E315", test_gh1243_simulate_to;
+  "a scenario's to: a non-time unit beside origin is E315", test_gh1243_scenario_to;
+  "a schedule's from: a non-time unit beside origin is E315", test_gh1243_schedule_from;
+  "a schedule's to: a non-time unit beside origin is E315", test_gh1243_schedule_to;
+  "an output at entry: a non-time unit beside origin is E315", test_gh1243_output_at;
+  "an emit at entry: a non-time unit beside origin is E315", test_gh1243_emit_at;
+  "a non-time unit beside a date is E315", test_gh1243_date_base;
+  "accepted instants keep their values", test_gh1243_accepted_unchanged;
+]
+
 (* ── gh#1201: a singleton top-level declaration may be written once ──────────
 
    `time_unit`, `description`, `origin`, `simulate { }`, `output { }` and
@@ -17985,6 +18111,8 @@ let () =
       List.map (fun (name, f) -> Alcotest.test_case name `Quick f) gh1201_tests;
     "gh1200_constant_at_times",
       List.map (fun (name, f) -> Alcotest.test_case name `Quick f) gh1200_tests;
+    "gh1243_instant_units",
+      List.map (fun (name, f) -> Alcotest.test_case name `Quick f) gh1243_tests;
     "time_positions_stage_1a",
       List.map (fun (name, f) -> Alcotest.test_case name `Quick f) stage_1a_tests;
     "time_positions_stage_1b",

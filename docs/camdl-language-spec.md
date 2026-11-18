@@ -464,7 +464,7 @@ silent guess.
 | transfer `fraction`                                                                   | 1                                             | E314 |
 | transfer `count`; an assigned value; an added count                                   | P                                             | E314 |
 | an intervention's time expression                                                     | T                                             | E315 |
-| a time read as a number: schedule `every`/`from`/`to`/`at_day`, a trigger `window`, `after`, `cooldown`, `simulate` and output times | T | E315 |
+| a time read as a number: schedule `every`/`from`/`to`/`at_day`, a trigger `window`, `after`, `cooldown`, `simulate`, a scenario's `to`, output and emit times | T | E315 |
 | a reactive trigger's threshold                                                        | the observed stream's scored column           | E315 |
 | Poisson `rate`; NegBinomial and zero-inflated `mean`; Binomial and BetaBinomial `n`   | P                                             | E304 |
 | Binomial and Bernoulli `p`; Beta `mean`; zero-inflation `pi`; shapes and concentrations | 1                                           | E304 |

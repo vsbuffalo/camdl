@@ -13,6 +13,27 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-11-17 — an instant written from `origin` or a date must use a time unit
+
+**What.** Under an `origin`, an instant the compiler folds to a number
+(`simulate { from, to }`, a scenario's `to`, a recurring schedule's `from` and
+`to`, output `at = [...]` and an observation's `emit_schedule = at [...]`) was
+unit-checked only when its unit literals stood alone. A sum that named `origin`
+or a `date(...)` was not checked, and the literal's value was read as a time
+whatever its unit: `to = origin + 10 'per_day` ran to day 10, and
+`at = [origin + 3 'per_day]` recorded day 3. These are now **E315**, located at
+the position, as `to = 10 'per_day` and an intervention's
+`at [origin + 10 'per_day]` already were. A sum whose unit literals disagree
+(`origin + 1 'days + 1 'per_day`) is E315 too.
+
+**Migration.** Write the offset with a time unit: `to = origin + 10 'per_day` →
+`to = origin + 10 'days`. A model that compiled before read the number in the
+model's `time_unit`, so `origin + 10 '<time_unit>` keeps its behaviour.
+
+**Diagnostic.**
+``error[E315]: `simulate.to` must be a time, but its unit literal has dimension
+per-capita rate``.
+
 ## 2026-11-17 — a `simulate { }` block must set `to`
 
 **What.** A model's `simulate { }` block that sets `from` (or `dt`, or nothing)
@@ -45,6 +66,7 @@ one. A model that compiled before kept the later one, so deleting the earlier
 one keeps its behaviour.
 
 **Diagnostic.** ``error[E140]: `simulate { }` is declared twice``.
+
 ## 2026-11-17 — an observation's projection is written `projected = …`, once
 
 **What.** In an observation block, a value assigned under any key was taken as

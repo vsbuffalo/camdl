@@ -6333,9 +6333,9 @@ let rec literal_units (e : expr) =
    would otherwise be read as 21 days. A bare number is a time in model units;
    anything else that is not a unit literal is left to the checks of its
    position. *)
-let check_time_units ctx ~loc ~what (e : expr) =
+let report_time_units ctx ~loc ~what units =
   let show (p, t) = Dimcheck.display_dim (Dimcheck.make p t) in
-  match literal_units e with
+  match units with
   | `Units (0, 1) | `Bare | `Other -> ()
   | `Units d ->
     Diagnostics.error ctx.diags ~code:"E315" ~loc
@@ -6348,6 +6348,9 @@ let check_time_units ctx ~loc ~what (e : expr) =
       ~message:(Printf.sprintf "%s: its unit literals disagree, %s combined with %s"
                   what (show a) (show b))
       ()
+
+let check_time_units ctx ~loc ~what (e : expr) =
+  report_time_units ctx ~loc ~what (literal_units e)
 
 (* Full resolve_float_expr: tries AST const-eval first, then IR reduction.
    Errors if neither produces a constant. *)
@@ -7095,6 +7098,35 @@ module Lower = struct
     | Some days -> EConst (days /. days_per ctx.time_unit)
     | None -> Time_pos.expr p
 
+  (* The unit check of an instant folded to a number. When its unit literals
+     alone decide its dimension, the AST check ([check_time_units]) decides.
+     When something else is in the expression (`origin + 10 'per_day`,
+     `date("2020-03-01") + 1 'per_day`), the dimension of its resolved IR
+     decides, read from the unit literals of that closed arithmetic
+     ([fold_closed_ir_dim]), the rule an intervention's `at [...]` entry is
+     decided by ([closed_time_value]). Without it, the literal's value would be
+     folded as a time whatever its unit (gh#1243). An expression that does not
+     fold (a `date_range(...)`, spliced to dates; an observation anchor) is
+     left to the checks of its position. *)
+  let check_instant_units ctx ~loc ~what (p : Time_pos.instant Time_pos.t) =
+    let e = Time_pos.expr p in
+    match literal_units e with
+    | `Other when not (mentions_obs_anchor e) ->
+      (match lowered ctx p with
+       | EFuncCall ("date_range", _) -> ()
+       | le ->
+         match fold_closed_ir_dim (normalize_expr (resolve_expr ctx [] le)) with
+         | Some (_, (No_units | Units (0, 1))) | None -> ()
+         | Some (_, Units d) -> report_time_units ctx ~loc ~what (`Units d)
+         | Some (_, Mixed_units) ->
+           Diagnostics.error ctx.diags ~code:"E315" ~loc
+             ~message:(Printf.sprintf
+               "%s must be a time, but its unit literals disagree in dimension"
+               what)
+             ~hint:"write every duration in it with a time unit ('days, 'weeks, ...)"
+             ())
+    | _ -> check_time_units ctx ~loc ~what e
+
   (* The checks of an instant position. Under an origin, E360 on the
      arithmetic an instant does not have, and E321 on a calendar duration the
      one-step calendar rule does not resolve ([refuse_calendar_instant]);
@@ -7105,7 +7137,7 @@ module Lower = struct
   let instant_checks ctx ~context ?bare ?units (p : Time_pos.instant Time_pos.t) =
     let e = Time_pos.expr p in
     let loc = loc ctx p in
-    Option.iter (fun what -> check_time_units ctx ~loc ~what e) units;
+    Option.iter (fun what -> check_instant_units ctx ~loc ~what p) units;
     let refused =
       if mentions_obs_anchor e then false
       else begin
