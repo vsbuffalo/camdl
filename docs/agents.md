@@ -413,16 +413,15 @@ death_E[a in age] : E[a] --> @ mu * E[a]
 
 The compiler expands `death_E` over the stages and splits its rate in proportion
 to stage occupancy, so every stage faces the same hazard per person, and
-`incidence(death_E[a])` reads all the stage copies. Do not index the generated
-stage dimension (`E[a, s2]`, `[st in __latency_stage]`): it does not exist at
-`stages = 1`, so the model stops compiling when the stage count changes. Two
-things to state when you report such a model. The law's `mean` is the dwell time
-absent the competing exit, and the time actually spent in `E` is shorter: at a
-constant hazard `mu` the fraction that completes an Erlang-`k` dwell of stage
-rate `k * sigma` is `(k*sigma / (k*sigma + mu))^k`. And an exit into a
-_different_ staged compartment enters its first stage, restarting that dwell;
-the compiler warns (**W107**) because continuing the progression may be what was
-meant.
+`incidence(death_E[a])` reads all the stage copies. The generated stage
+dimension is not nameable: `E[a, s2]` and `[st in __latency_stage]` are refused
+(**E376**, **E375**), each with the text to write instead. Two things to state
+when you report such a model. The law's `mean` is the dwell time absent the
+competing exit, and the time actually spent in `E` is shorter: at a constant
+hazard `mu` the fraction that completes an Erlang-`k` dwell of stage rate
+`k * sigma` is `(k*sigma / (k*sigma + mu))^k`. And an exit into a _different_
+staged compartment enters its first stage, restarting that dwell; the compiler
+warns (**W107**) because continuing the progression may be what was meant.
 
 **Interventions and events on an Erlang-staged compartment are written on the
 compartment too.** `transfer(fraction = 0.2, from = E[pre], to = E[sch])`,
@@ -431,15 +430,29 @@ whatever `stages` is. A transfer out of the compartment is one action over its
 stages: the amount applies to the compartment's total, and on integer
 compartments the floor is taken once for that total (`floor(N * fraction)`) and
 the stages give up their shares in proportion to occupancy. Do not write one
-transfer per stage
-(`[st in __latency_stage] : transfer(from = E[pre, st], ...)`): that floors each
-stage separately, so the number moved shrinks as `stages` grows (three stages of
-10 at a fraction of 0.2/3 move nobody, where the compartment form moves 2), and
-it stops compiling at `stages = 1`. `transfer` and `add` into the compartment
-enter its first stage. A `set` on the compartment is refused (**E366**): a total
-has no single meaning across stages. Two events that each transfer out of the
-same staged compartment at the same instant are refused when they fire; give
-them different times or write one transfer.
+transfer per stage to move a share of the compartment
+(`[st in stages(E)] : transfer(from = stage(E[pre], st), ...)`): that floors
+each stage separately, so the number moved shrinks as `stages` grows (three
+stages of 10 at a fraction of 0.2/3 move nobody, where the compartment form
+moves 2). `transfer` and `add` into the compartment enter its first stage. A
+`set` on the compartment is refused (**E366**): a total has no single meaning
+across stages. Two events that each transfer out of the same staged compartment
+at the same instant are refused when they fire; give them different times or
+write one transfer.
+
+**Name a stage only when the model means one stage, and name it with
+`stage(...)`.** `stage(E[pre], 2)` is stage 2 of `E[pre]`, as a value in a rate
+or an observation and as an endpoint of a transition, `transfer`, `add`, `set`
+or `init`; `[st in stages(E)]` binds a variable over the stages for a family,
+whose members then write `stage(E[pre], st)`. A location is a whole number from
+1 to `stages` or such a variable, and a stage variable indexes nothing else.
+`init` and `add` without a stage land in stage 1. Prefer location 1 and stage
+variables to larger literals: at `stages = 1` there is one location,
+`stage(E[pre], 1)` is `E[pre]`, and a literal above the stage count is an error
+(**E370**). When you report a model that reads a stage, say what a stage is: a
+stochastic progression state, not an elapsed-time interval. `stage(E, 3)`
+selects people who have completed two stage transitions, not people infected
+between two dates.
 
 **Backend choice for fits.** Use `chain_binomial` — the production fit backend.
 Gillespie is for forward-simulation sanity checks, not fits (too slow).

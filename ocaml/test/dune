@@ -231,6 +231,13 @@
  (name test_staged_transfers)
  (modules test_staged_transfers)
  (libraries compiler ir alcotest yojson))
+; `stage(...)` and `stages(...)` (proposal
+; 2026-11-17-unified-staged-residence, "Explicit stages"): what each form
+; compiles to, the same text at one stage, each diagnostic and its hint.
+(test
+ (name test_stage_forms)
+ (modules test_stage_forms)
+ (libraries compiler ir alcotest yojson))
 ; The `grouped_transfer` IR action (proposal
 ; 2026-11-17-unified-staged-residence): JSON, the validator's shape rules
 ; (E521) and the derivative of its fraction.

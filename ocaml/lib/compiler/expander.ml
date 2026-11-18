@@ -422,6 +422,16 @@ type context = {
           compartment it stands in for. *)
   mutable residences           : residence list;
       (** Each compartment the [via erlang] lowering staged, newest first. *)
+  mutable stage_families       : (string * string) list;
+      (** Each transition declared with a binder over [stages(C)] of a
+          compartment the [via] lowering stages, with [C]. A flow reference
+          to such a transition reads its stage members, as it does for a
+          transition the lowering expanded per stage ([res_exits]). *)
+  mutable stage_dests_written  : (string * string) list;
+      (** Each (transition, staged compartment) whose destination in that
+          compartment the modeller wrote with its stage, [stage(I[a], 2)].
+          Recorded before the [via] lowering gives every other destination
+          its stage 1, after which the two are the same reference. *)
   mutable hyper_staged         : (string * string) list;
       (** Each compartment a [via hyper_erlang] law replaced by per-branch
           compartments, with the [via] transition that did. *)
@@ -503,6 +513,8 @@ let empty_context ?(source_dir = "") ?(filename = "<input>") () = {
   site_tallies         = [];
   via_transitions      = [];
   residences           = [];
+  stage_families       = [];
+  stage_dests_written  = [];
   hyper_staged         = [];
   via_cells            = [];
   emitted_transitions  = [];
@@ -1430,6 +1442,15 @@ let collect_declarations ctx decls =
      (`I[a]` in an age FOI) is rewritten by the pass into the explicit stage-sum
      `sum(__s in __stage, I[a, __s])` (proposal §7, [sum_staged_refs]). *)
 
+(** The stage dimension the lowering of the [via erlang] transition [trname]
+    generates. The `__` prefix keeps it apart from the dimensions a model
+    declares. *)
+let via_stage_dim (trname : string) : string = Printf.sprintf "__%s_stage" trname
+
+(** The levels of a stage dimension of [k] stages, in dwell order. *)
+let via_stage_levels (k : int) : string list =
+  List.init k (fun i -> Printf.sprintf "s%d" (i + 1))
+
 (* A `to = <compartment>` branch destination is written as a bare compartment
    identifier — `to = D` or `to = D[a]`. Lift it to a [stoich_ref]. Anything
    else (a number, an arithmetic expr) is rejected: a destination is a
@@ -1899,7 +1920,12 @@ let warn_dwell_restart ctx ~loc ~(what : string) ~(src : string) ~(dst : string)
       ctx.diags.Diagnostics.diags in
   if not reported then
     Diagnostics.warning ctx.diags ~code:"W107" ~loc ~message
-      ~hint:"use explicit `stage(...)` endpoints if continuation is intended"
+      ~hint:(Printf.sprintf
+        "if the progression is meant to continue, move each stage on its \
+         own with `stage(...)` endpoints: `stage(%s, 1)` to `stage(%s, 1)`, \
+         and so on, each with its population indices. An endpoint written \
+         with `stage(...)` states its location and is not warned about"
+        src dst)
       ()
 
 (* Append a stage index to every destination reference to the staged
@@ -1930,12 +1956,12 @@ let population_index_count ctx (comp : string) : int =
 (* Whether [e] mentions compartment [comp] anywhere, indexed or bare. *)
 let rec mentions_compartment (comp : string) (e : expr) : bool =
   let go = mentions_compartment comp in
-  let go_item = function IPosn e | INamed (_, e) -> go e in
+  let go_item = function IPosn e | INamed (_, e) | IStage e -> go e in
   match e with
   | EIdent (n, _) -> n = comp
   | EIndex (n, items, _) -> n = comp || List.exists go_item items
   | EBinOp (_, l, r) | ERange (l, r) -> go l || go r
-  | EUnOp (_, a) | ESum (_, _, _, a, _) -> go a
+  | EUnOp (_, a) | (ESum (_, _, _, a, _) | ESumStages (_, _, a, _)) -> go a
   | ECond (p, a, b) -> go p || go a || go b
   | EFuncCall (_, args) -> List.exists (fun (_, a) -> go a) args
   | EList es -> List.exists go es
@@ -2033,6 +2059,7 @@ let rec sum_staged_refs ~src ~n_pre ~dim_name ~sum_var (e : expr) : expr =
   let recur_item = function
     | IPosn e        -> IPosn (recur e)
     | INamed (n, e)  -> INamed (n, recur e)
+    | IStage e -> IStage (recur e)
   in
   match e with
   | EConst _ | EUnit _ | EIdent _ | EObsAccess _ | ERunMember _ -> e
@@ -2050,6 +2077,7 @@ let rec sum_staged_refs ~src ~n_pre ~dim_name ~sum_var (e : expr) : expr =
   | EBinOp (op, l, r) -> EBinOp (op, recur l, recur r)
   | EUnOp (op, e)     -> EUnOp (op, recur e)
   | ESum (v, d, g, b, l) -> ESum (v, d, g, recur b, l)
+  | ESumStages (v, d, b, l) -> ESumStages (v, d, recur b, l)
   | ECond (p, t, f)   -> ECond (recur p, recur t, recur f)
   | EFuncCall (f, args) -> EFuncCall (f, List.map (fun (k, e) -> (k, recur e)) args)
   | EList es          -> EList (List.map recur es)
@@ -2071,6 +2099,7 @@ let rec sum_hyper_refs ~src ~(cells : string list) (e : expr) : expr =
   let recur_item = function
     | IPosn e       -> IPosn (recur e)
     | INamed (n, e) -> INamed (n, recur e)
+    | IStage e -> IStage (recur e)
   in
   match e with
   | EIdent (n, _) when n = src ->
@@ -2083,6 +2112,7 @@ let rec sum_hyper_refs ~src ~(cells : string list) (e : expr) : expr =
   | EBinOp (op, l, r) -> EBinOp (op, recur l, recur r)
   | EUnOp (op, e)     -> EUnOp (op, recur e)
   | ESum (v, d, g, b, l) -> ESum (v, d, g, recur b, l)
+  | ESumStages (v, d, b, l) -> ESumStages (v, d, recur b, l)
   | ECond (p, t, f)   -> ECond (recur p, recur t, recur f)
   | EFuncCall (f, args) -> EFuncCall (f, List.map (fun (k, e) -> (k, recur e)) args)
   | EList es          -> EList (List.map recur es)
@@ -2113,7 +2143,8 @@ let rec sum_hyper_refs ~src ~(cells : string list) (e : expr) : expr =
 let apply_via_rewrite ctx (rw : expr -> expr) : unit =
   let rw_items items =
     List.map (function IPosn e -> IPosn (rw e)
-                     | INamed (n, e) -> INamed (n, rw e)) items in
+                     | INamed (n, e) -> INamed (n, rw e)
+                     | IStage e -> IStage (rw e)) items in
   let rw_dst = function
     | DstSum refs -> DstSum (List.map (fun (c, items) -> (c, rw_items items)) refs)
     | DstBranch brs ->
@@ -2214,6 +2245,15 @@ let lower_via_transitions ctx =
       staged_by (function HyperErlang _ -> true | Erlang _ -> false) in
     let quoted names =
       String.concat " and " (List.map (Printf.sprintf "'%s'") names) in
+    ctx.stage_dests_written <-
+      List.concat_map (fun (t : transition_decl) ->
+        let dests = match t.trdst with
+          | DstSum refs        -> refs
+          | DstBranch branches -> List.map fst branches in
+        List.filter_map (fun (c, items) ->
+          if List.mem c erlang_staged
+             && List.length items = population_index_count ctx c + 1
+          then Some (t.trname, c) else None) dests) ctx.transitions;
     (* The ordinary `@` transitions out of the staged compartment [src] of the
        `via` transition [tr] that the lowering cannot expand per stage, each
        reported at the transition. A competing exit is expanded when the
@@ -2427,8 +2467,8 @@ let lower_via_transitions ctx =
            residence stays within its stratum; the stage index is appended last. *)
         (* Stage levels: a reserved dimension `__<trname>_stage = [s1..sk]`. The
            `__` prefix keeps it out of the user namespace (collision-free). *)
-        let dim_name = Printf.sprintf "__%s_stage" tr.trname in
-        let stage_levels = List.init k (fun i -> Printf.sprintf "s%d" (i + 1)) in
+        let dim_name = via_stage_dim tr.trname in
+        let stage_levels = via_stage_levels k in
         let stage1 = List.hd stage_levels in
         let stage_last = List.nth stage_levels (k - 1) in
         (* Fresh stage bound-variable names, derived from the reserved (collision-
@@ -2533,7 +2573,8 @@ let lower_via_transitions ctx =
             | DstBranch branches -> List.map (fun ((c, _), _) -> c) branches
           in
           List.iter (fun dst ->
-            if dst <> src && List.mem dst erlang_staged then
+            if dst <> src && List.mem dst erlang_staged
+               && not (List.mem (t.trname, dst) ctx.stage_dests_written) then
               warn_dwell_restart ctx ~loc:(diag_loc_of_ast_ctx ctx t.trloc)
                 ~what:(Printf.sprintf "transition '%s'" t.trname) ~src ~dst)
             (List.sort_uniq compare dests)
@@ -2556,7 +2597,10 @@ let lower_via_transitions ctx =
             res_stage_levels = stage_levels;
             res_law          = spec;
             res_via          = tr.trname;
-            res_exits        = List.rev !exits }
+            res_exits        =
+              List.rev !exits
+              @ List.filter_map (fun (t, c) -> if c = src then Some t else None)
+                  ctx.stage_families }
           :: ctx.residences;
         (* 5. Redirect `init { E = … }` / `init { I[a] = … }` (the full pre-staging
               index, no stage) to land in stage 1. *)
@@ -3103,7 +3147,7 @@ let check_declaration_names ctx =
   (* Forcings / time functions — base + expanded over declared indices. *)
   List.iter (fun (fd : func_decl) ->
     let dims = List.filter_map (function
-      | IBind (_, d) | IConsec (_, _, d) -> Some d | IComp _ -> None) fd.findices in
+      | IBind (_, d) | IConsec (_, _, d) -> Some d | IComp _ | IStages _ -> None) fd.findices in
     List.iter (fun n -> add n "forcing" Diagnostics.no_loc)
       (expand_indexed_decl_names ctx fd.fname dims)
   ) ctx.func_decls;
@@ -3442,6 +3486,7 @@ let index_item_to_str env item =
   | IPosn _                   -> "?"
   | INamed (_, EIdent (s, _)) -> (match List.assoc_opt s env with Some v -> v | None -> s)
   | INamed (_, _)             -> "?"
+  | IStage _                  -> "?"   (* replaced by [lower_stage_forms] *)
 
 (** The declared dimension names behind an [index_binding list] — the shape
     [let], forcings, transitions and observation streams store their indices in,
@@ -3452,7 +3497,7 @@ let dims_of_index_bindings (bs : index_binding list) : string list =
   List.filter_map (function
     | IBind (_, d)      -> Some d
     | IConsec (_, _, d) -> Some d
-    | IComp _           -> None) bs
+    | IComp _ | IStages _           -> None) bs
 
 (** The residence whose stages the [via] lowering expanded transition
     [tname] over, when it is a competing exit or a move within a staged
@@ -3472,7 +3517,7 @@ let is_residence_ref (r : residence) (items : index_item list) : bool =
   List.length items = r.res_n_pop
   && not (List.exists (function
        | INamed (d, _) -> d = r.res_stage_dim
-       | IPosn _ -> false) items)
+       | IPosn _ | IStage _ -> false) items)
 
 (** E368: an action names a compartment whose dwell a [via hyper_erlang] law
     sets. Returns whether it reported, so the caller resolves nothing more. *)
@@ -3495,12 +3540,19 @@ let refuse_hyper_action_target ctx ~loc ~name ~(what : string) (comp : string) :
       ();
     true
 
+(** [stage(name[items], location)] as a model writes it, for a hint. *)
+let stage_reference_text (name : string) (items : string list) (location : int)
+    : string =
+  match items with
+  | [] -> Printf.sprintf "stage(%s, %d)" name location
+  | _  -> Printf.sprintf "stage(%s[%s], %d)" name (String.concat ", " items) location
+
 (** The stage index to append to a residence reference written with [items],
     named when the reference names its dimensions. *)
 let stage_index_item (r : residence) (items : index_item list) (level : string)
     : index_item =
   let e = EIdent (level, dummy_loc) in
-  if List.exists (function INamed _ -> true | IPosn _ -> false) items
+  if List.exists (function INamed _ -> true | IPosn _ | IStage _ -> false) items
   then INamed (r.res_stage_dim, e) else IPosn e
 
 (** The binders a transition was declared with: its binders without the stage
@@ -3512,7 +3564,7 @@ let declared_binders ctx (t : transition_decl) : index_binding list =
   | Some r ->
     List.filter (function
       | IBind (_, d) -> d <> r.res_stage_dim
-      | IConsec _ | IComp _ -> true) t.trindices
+      | IConsec _ | IComp _ | IStages _ -> true) t.trindices
 
 (** Declared dimensions of a transition, by name: the dimensions a reference
     to it is indexed by, which leaves out a stage dimension the [via]
@@ -3560,7 +3612,7 @@ let obs_dims ctx oname : string list =
 (** The dimension label a named index carries, if it is one. *)
 let index_item_dim = function
   | INamed (d, _) -> Some d
-  | IPosn _       -> None
+  | IPosn _ | IStage _ -> None
 
 (** Order a reference's index items by the DECLARED dimension vector of the
     thing being indexed, rather than by source order (gh#459).
@@ -4282,10 +4334,10 @@ let body_refs_param_or_let ctx (e : expr) : bool =
     | EIdent (n, _)      -> bad n
     | EIndex (n, items, _)  ->
       bad n
-      || List.exists (function IPosn e | INamed (_, e) -> go e) items
+      || List.exists (function IPosn e | INamed (_, e) | IStage e -> go e) items
     | EBinOp (_, l, r) -> go l || go r
     | EUnOp (_, e)     -> go e
-    | ESum (_, _, _, b, _) -> go b
+    | (ESum (_, _, _, b, _) | ESumStages (_, _, b, _)) -> go b
     | ECond (p, t, f)  -> go p || go t || go f
     | EFuncCall (f, args) -> bad f || List.exists (fun (_, e) -> go e) args
     | EList es            -> List.exists go es
@@ -4305,16 +4357,16 @@ let free_index_var_clean (lb : let_binding) : bool =
   let declared = List.concat_map (function
     | IBind (v, _)       -> [v]
     | IConsec (v, vn, _) -> [v; vn]
-    | IComp v            -> [v]) lb.lindices in
+    | IComp v | IStages (v, _)            -> [v]) lb.lindices in
   let rec ok bound (e : expr) = match e with
     | EConst _ | EUnit _ | EIdent _ -> true
     | EIndex (_, items, _) ->
       List.for_all (function
         | IPosn (EIdent (v, _)) | INamed (_, EIdent (v, _)) -> List.mem v bound
-        | IPosn e | INamed (_, e) -> ok bound e) items
+        | IPosn e | INamed (_, e) | IStage e -> ok bound e) items
     | EBinOp (_, l, r) -> ok bound l && ok bound r
     | EUnOp (_, e)     -> ok bound e
-    | ESum (v, _, _, b, _) -> ok (v :: bound) b
+    | (ESum (v, _, _, b, _) | ESumStages (v, _, b, _)) -> ok (v :: bound) b
     | ECond (p, t, f)  -> ok bound p && ok bound t && ok bound f
     | EFuncCall (_, args) -> List.for_all (fun (_, e) -> ok bound e) args
     | EList es            -> List.for_all (ok bound) es
@@ -4555,7 +4607,7 @@ let check_index_arity ctx ~loc ?axes ~kind ~name ~declared ~provided () : bool =
 let index_item_source_str item : string option =
   match item with
   | IPosn (EIdent (s, _)) | INamed (_, EIdent (s, _)) -> Some s
-  | IPosn _ | INamed (_, _) -> None
+  | IPosn _ | INamed (_, _) | IStage _ -> None
 
 (** The binder in [env] that ranges over dimension [d], if it can be named
     unambiguously. [env] maps binder → the level it is bound to at this
@@ -5079,7 +5131,7 @@ end = struct
          | Bare x, Bare y when y <> 0.0 -> Bare (x /. y)
          | _ -> Not_constant)
       | EBinOp ((Pow | Lt | Le | Gt | Ge | Eq | Neq), _, _)
-      | EUnOp (_, _) | EFuncCall _ | ECond _ | ESum _ | EList _ | ERange _
+      | EUnOp (_, _) | EFuncCall _ | ECond _ | ESum _ | ESumStages _ | EList _ | ERange _
       | EObsAccess _ | ERunMember _ -> Not_constant
 
   let read (ctx : context) e = read_at ctx 0 e
@@ -5266,7 +5318,7 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
         let var_name = match ib with
           | IBind (v, _)      -> v
           | IConsec (v, _, _) -> v
-          | IComp v           -> v
+          | IComp v | IStages (v, _)           -> v
         in
         let val_name = match List.nth_opt items i with
           | Some item -> index_item_to_str env item
@@ -5863,6 +5915,14 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
              expression; use it as an operand in a `contrasts { }` entry"
       ();
     Ir.Const 0.0
+  | ESumStages (_, comp, _, l) ->
+    Diagnostics.error ctx.diags ~code:"E001" ~loc:(diag_loc_of_ast_ctx ctx l)
+      ~message:(Printf.sprintf
+        "internal error: a sum over `stages(%s)` reached name resolution" comp)
+      ~hint:"this is a compiler bug — the stage lowering should have replaced \
+             it; please report it"
+      ();
+    Ir.Const 0.0
 
 and resolve_ident_name ctx name ~loc =
   match classify_name ctx ~obs_aux_cols:ctx.obs_aux_cols
@@ -6066,7 +6126,7 @@ let undeclared_binder_dims ctx ibs =
     match ib with
     | IBind (_, d) | IConsec (_, _, d) ->
       if dim_values ctx d = None then Some d else None
-    | IComp _ -> None) ibs
+    | IComp _ | IStages _ -> None) ibs
 
 let cartesian_product ?(loc = Diagnostics.no_loc) ibs ctx =
   match undeclared_binder_dims ctx ibs with
@@ -6105,6 +6165,7 @@ let cartesian_product ?(loc = Diagnostics.no_loc) ibs ctx =
         in
         if pairs = [] then None else Some pairs
       end
+    | IStages _ -> None   (* replaced by [lower_stage_forms] *)
     | IComp v ->
       (* Iterate over all base compartment names (Integer kind only) *)
       let names = List.filter_map (fun cd ->
@@ -6138,7 +6199,7 @@ let name_parts_from_bindings ibs env =
     match ib with
     | IBind (v, _)      -> List.assoc_opt v env
     | IConsec (v, _, _) -> List.assoc_opt v env
-    | IComp v           -> List.assoc_opt v env
+    | IComp v | IStages (v, _)           -> List.assoc_opt v env
   ) ibs
 
 (** Structured (dimension, level) selector for one expanded leaf — the by-name
@@ -6154,7 +6215,7 @@ let stratum_of_bindings ibs env : (string * string) list =
       (match List.assoc_opt v env with
        | Some level -> Some (d, level)
        | None -> None)
-    | IComp _ -> None
+    | IComp _ | IStages _ -> None
   ) ibs
 
 (** Transition-name expander — the incidence analogue of
@@ -6247,7 +6308,7 @@ let loop_vars_of_indices indices =
   List.concat_map (function
     | IBind (v, _)       -> [v]
     | IConsec (v, vn, _) -> [v; vn]
-    | IComp v            -> [v]
+    | IComp v | IStages (v, _)            -> [v]
   ) indices
 
 let count_errors ctx =
@@ -6257,6 +6318,7 @@ let count_errors ctx =
 let render_index_binding = function
   | IBind (v, d)       -> Printf.sprintf "%s in %s" v d
   | IComp v            -> Printf.sprintf "%s in compartments" v
+  | IStages (v, c)     -> Printf.sprintf "%s in stages(%s)" v c
   | IConsec (v, vn, d) -> Printf.sprintf "(%s, %s) in consecutive(%s)" v vn d
 
 let family_head family indices =
@@ -6618,7 +6680,8 @@ let binder_stage_copies ctx (tr : transition_decl) env
         in
         List.iter (fun c ->
           let dst = Option.value ~default:c (List.assoc_opt c env) in
-          if dst <> src && residence_of ctx dst <> None then
+          if dst <> src && residence_of ctx dst <> None
+             && not (List.mem (tr.trname, dst) ctx.stage_dests_written) then
             warn_dwell_restart ctx ~loc
               ~what:(Printf.sprintf "transition '%s'" tr.trname) ~src ~dst)
           (List.sort_uniq compare dest_bases);
@@ -7090,7 +7153,7 @@ let rec mentions_calendar_duration ctx (e : expr) : bool =
   | EBinOp (_, a, b) | ERange (a, b) -> go a || go b
   | EUnOp (_, a) -> go a
   | ECond (_, a, b) -> go a || go b
-  | ESum (_, _, _, b, _) -> go b
+  | (ESum (_, _, _, b, _) | ESumStages (_, _, b, _)) -> go b
   | EList es -> List.exists go es
 
 (* The first `'months` / `'years` literal in [e], through `let`s, searched as
@@ -7116,7 +7179,7 @@ let rec first_calendar_literal ctx (e : expr) : expr option =
   | EBinOp (_, a, b) | ERange (a, b) -> first [a; b]
   | EUnOp (_, a) -> go a
   | ECond (_, a, b) -> first [a; b]
-  | ESum (_, _, _, b, _) -> go b
+  | (ESum (_, _, _, b, _) | ESumStages (_, _, b, _)) -> go b
   | EList es -> first es
 
 (** An instant known only when the model runs, such as [t], as a refusal
@@ -10454,10 +10517,10 @@ let resolve_action_target ctx ~name ~loc ~verb env comp idxs =
            across them"
           name cell r.res_via (List.length r.res_stage_levels))
         ~hint:(Printf.sprintf
-          "set a stage by its cell name (`%s_%s = ...`), or move individuals \
-           with `add(...)`, which enters stage 1, or `transfer(...)`, which \
-           draws from every stage in proportion to its occupancy"
-          cell stage1)
+          "set one stage (`%s = ...`), or move individuals with `add(...)`, \
+           which enters stage 1, or `transfer(...)`, which draws from every \
+           stage in proportion to its occupancy"
+          (stage_reference_text base (List.map (index_item_to_str env) items) 1))
         ();
       None
     end else Some (base, cell ^ "_" ^ stage1)
@@ -10785,16 +10848,13 @@ let resolve_intervention_action ctx env ~name ~family ~loc ~binders (action : ac
          in
          if stage_into_residence then begin
            let src_cell = List.hd (fst (List.hd pairs)) in
-           (* The destination as written, with a stage index added. *)
-           let stage1 = match residence_of ctx d_ep.ep_base with
-             | Some r -> List.hd r.res_stage_levels
-             | None -> "s1" in
-           let dst_staged = match List.assoc_opt "to" kwargs with
-             | Some (EIndex (_, items, _)) ->
-               Printf.sprintf "%s[%s]" d_ep.ep_base
-                 (String.concat ", "
-                    (List.map (index_item_to_str env) items @ [ stage1 ]))
-             | _ -> Printf.sprintf "%s[%s]" d_ep.ep_base stage1 in
+           (* The destination as written, at its first stage. *)
+           let dst_staged =
+             let items = match List.assoc_opt "to" kwargs with
+               | Some (EIndex (_, items, _)) -> items
+               | _ -> [] in
+             stage_reference_text d_ep.ep_base
+               (List.map (index_item_to_str env) items) 1 in
            Diagnostics.error ctx.diags ~code:"E367" ~loc
              ~message:(Printf.sprintf
                "intervention '%s': `from` names one stage of the staged \
@@ -11400,7 +11460,17 @@ let surface_src (e : expr) : string =
     | EUnit (f, u) -> Printf.sprintf "%s '%s" (num f) (unit_lit_to_string u)
     | EIdent (n, _) -> n
     | EIndex (n, items, _) ->
-      Printf.sprintf "%s[%s]" n (String.concat ", " (List.map item items))
+      (* `stage(E[a], 2)` is held as `E` indexed by `a` and the location. *)
+      let location = List.find_map (function IStage e -> Some e | _ -> None) items in
+      let items = List.filter (function IStage _ -> false | _ -> true) items in
+      let reference =
+        if items = [] then n
+        else Printf.sprintf "%s[%s]" n (String.concat ", " (List.map item items)) in
+      (match location with
+       | Some e -> Printf.sprintf "stage(%s, %s)" reference (go 0 e)
+       | None -> reference)
+    | ESumStages (v, c, body, _) ->
+      Printf.sprintf "sum(%s in stages(%s), %s)" v c (go 0 body)
     | EBinOp (op, l, r) ->
       let p = prec_of op in
       (* Left-associative: the right operand of a same-precedence operator
@@ -11428,7 +11498,7 @@ let surface_src (e : expr) : string =
         (match ns with NsQuantities -> "quantities" | NsObservations -> "observations")
         member
   and item = function
-    | IPosn e -> go 0 e
+    | IPosn e | IStage e -> go 0 e
     | INamed (n, e) -> Printf.sprintf "%s = %s" n (go 0 e)
   in
   go 0 e
@@ -11503,7 +11573,7 @@ let reads_flow ctx (e : expr) : bool =
        | None -> false)
     | EFuncCall (_, args) -> List.exists (fun (_, a) -> go visiting a) args
     | EBinOp (_, l, r) | ERange (l, r) -> go visiting l || go visiting r
-    | EUnOp (_, a) | ESum (_, _, _, a, _) -> go visiting a
+    | EUnOp (_, a) | (ESum (_, _, _, a, _) | ESumStages (_, _, a, _)) -> go visiting a
     | ECond (p, a, b) -> go visiting p || go visiting a || go visiting b
     | EList es -> List.exists (go visiting) es
     | EConst _ | EUnit _ | EIdent _ | EIndex _ | EObsAccess _ | ERunMember _ ->
@@ -11520,6 +11590,7 @@ let reads_flow ctx (e : expr) : bool =
 let collapsed_dims ctx (e : expr) : string list =
   let rec go visiting acc = function
     | ESum (_, d, _, body, _) -> go visiting (d :: acc) body
+    | ESumStages (_, _, body, _) -> go visiting acc body
     | EIdent (n, _) when List.exists (fun c -> c.cname = n) ctx.comp_decls ->
       comp_dims ctx n @ acc
     | EIdent (n, _) | EIndex (n, _, _) when not (List.mem n visiting) ->
@@ -11575,7 +11646,7 @@ let rec bare_pools ctx memo visiting (e : expr) : bare_pool list =
      | Some (via, dims) -> [Bare_let { name = n; via; dims; loc = l }]
      | None -> [])
   | EIdent _ | EIndex _ | EConst _ | EUnit _ | EObsAccess _ | ERunMember _ -> []
-  | EUnOp (_, a) | ESum (_, _, _, a, _) -> go a
+  | EUnOp (_, a) | (ESum (_, _, _, a, _) | ESumStages (_, _, a, _)) -> go a
   | EBinOp (_, l, r) | ERange (l, r) -> go l @ go r
   | ECond (p, a, b) -> go p @ go a @ go b
   | EFuncCall (_, args) -> List.concat_map (fun (_, a) -> go a) args
@@ -11611,7 +11682,8 @@ and let_pools ctx memo visiting name : (string * string list) option =
 let rec strip_totals (e : expr) : expr =
   let item = function
     | IPosn x -> IPosn (strip_totals x)
-    | INamed (k, x) -> INamed (k, strip_totals x) in
+    | INamed (k, x) -> INamed (k, strip_totals x)
+    | IStage x -> IStage (strip_totals x) in
   match e with
   | EUnOp (Total, a) -> strip_totals a
   | EConst _ | EUnit _ | EIdent _ | EObsAccess _ | ERunMember _ -> e
@@ -11619,6 +11691,7 @@ let rec strip_totals (e : expr) : expr =
   | EBinOp (op, l, r) -> EBinOp (op, strip_totals l, strip_totals r)
   | EUnOp (op, a) -> EUnOp (op, strip_totals a)
   | ESum (v, d, g, b, l) -> ESum (v, d, g, strip_totals b, l)
+  | ESumStages (v, d, b, l) -> ESumStages (v, d, strip_totals b, l)
   | ECond (p, a, b) -> ECond (strip_totals p, strip_totals a, strip_totals b)
   | EFuncCall (f, args) -> EFuncCall (f, List.map (fun (k, a) -> (k, strip_totals a)) args)
   | EList es -> EList (List.map strip_totals es)
@@ -11631,7 +11704,8 @@ let rec first_name_loc (e : expr) : loc option =
   let first = List.find_map first_name_loc in
   match e with
   | EIdent (_, l) | EIndex (_, _, l) when l.line > 0 -> Some l
-  | ESum (_, _, _, b, l) -> if l.line > 0 then Some l else first_name_loc b
+  | ESum (_, _, _, b, l) | ESumStages (_, _, b, l) ->
+    if l.line > 0 then Some l else first_name_loc b
   | EBinOp (_, l, r) | ERange (l, r) -> first [l; r]
   | EUnOp (_, a) -> first_name_loc a
   | ECond (p, a, b) -> first [p; a; b]
@@ -11682,7 +11756,7 @@ let prevalence_change_date = "2026-11-06"
 let check_bare_pooling ctx (od : obs_decl) (found : bare_pool list) =
   let stream = List.filter_map (function
       | IBind (v, d) | IConsec (v, _, d) -> Some (v, d)
-      | IComp _ -> None) od.oindices in
+      | IComp _ | IStages _ -> None) od.oindices in
   let taken = ref (List.map fst stream) in
   (* A fresh binder per axis, from the axis's initial, avoiding the stream's
      binders (E283) and each other. *)
@@ -12142,12 +12216,12 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
         let rec names_of = function
           | EIdent (n, _) -> [n]
           | EIndex (n, items, _) -> n :: List.concat_map (function
-              | IPosn e -> names_of e | INamed (_, e) -> names_of e) items
+              | IPosn e | INamed (_, e) | IStage e -> names_of e) items
           | EBinOp (_, a, b) -> names_of a @ names_of b
           | EUnOp (_, e) -> names_of e
           | ECond (p, a, b) -> names_of p @ names_of a @ names_of b
           | EFuncCall (_, args) -> List.concat_map (fun (_, e) -> names_of e) args
-          | ESum (_, _, _, e, _) -> names_of e
+          | (ESum (_, _, _, e, _) | ESumStages (_, _, e, _)) -> names_of e
           | EList es -> List.concat_map names_of es
           | ERange (a, b) -> names_of a @ names_of b
           | EConst _ | EUnit _ | EObsAccess _ | ERunMember _ -> []
@@ -12296,7 +12370,7 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
             | None -> [] in
           let stream = List.filter_map (function
               | IBind (v, d) | IConsec (v, _, d) -> Some (v, d)
-              | IComp _ -> None) od.oindices in
+              | IComp _ | IStages _ -> None) od.oindices in
           let stream_vars = List.map fst stream in
           (* A sum variable may not reuse a stream binder's name (E283). *)
           let rec fresh v = if List.mem v stream_vars then fresh (v ^ "2") else v in
@@ -12497,7 +12571,7 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
     in
     let explicit_incidence_sum top =
       match top with
-      | ESum _ | EBinOp (Add, _, _) -> flow_terms top env
+      | ESum _ | ESumStages _ | EBinOp (Add, _, _) -> flow_terms top env
       | _ -> None
     in
     (* One side of a ratio of flows (proposal 2026-09-09): anything the walker
@@ -12506,7 +12580,7 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
        because on its own it lowers to `CumulativeFlow` rather than a sum. *)
     let flow_side e =
       match e with
-      | ESum _ | EBinOp (Add, _, _) | EFuncCall ("incidence", _) -> flow_terms e env
+      | ESum _ | ESumStages _ | EBinOp (Add, _, _) | EFuncCall ("incidence", _) -> flow_terms e env
       | _ -> None
     in
     (* Does this expression mention `incidence` anywhere? Used to tell a
@@ -12522,7 +12596,7 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
       | EUnOp (_, e)          -> mentions_incidence e
       | ECond (p, t, f)       -> mentions_incidence p || mentions_incidence t
                                  || mentions_incidence f
-      | ESum (_, _, _, b, _)  -> mentions_incidence b
+      | (ESum (_, _, _, b, _) | ESumStages (_, _, b, _))  -> mentions_incidence b
       | EList es              -> List.exists mentions_incidence es
       | ERange (a, b)         -> mentions_incidence a || mentions_incidence b
       | _                     -> false
@@ -13178,8 +13252,8 @@ let classify_quantity_body ctx env
        | None -> (match find_dt a with Some l -> Some l | None -> find_dt b))
     | EFuncCall (_, args) -> List.find_map (fun (_, e) -> find_dt e) args
     | EIndex (_, items, _) ->
-      List.find_map (function IPosn e | INamed (_, e) -> find_dt e) items
-    | ESum (_, _, _, e, _) -> find_dt e
+      List.find_map (function IPosn e | INamed (_, e) | IStage e -> find_dt e) items
+    | (ESum (_, _, _, e, _) | ESumStages (_, _, e, _)) -> find_dt e
     | EList es -> List.find_map find_dt es
     | ERange (a, b) -> (match find_dt a with Some l -> Some l | None -> find_dt b)
     | EConst _ | EUnit _ | EIdent _ | EObsAccess _ | ERunMember _ -> None
@@ -13201,12 +13275,12 @@ let classify_quantity_body ctx env
     | EIdent (n, _) -> List.mem n all_q_names
     | EIndex (n, items, _) ->
       List.mem n all_q_names
-      || List.exists (function IPosn e | INamed (_, e) -> refs_quantity e) items
+      || List.exists (function IPosn e | INamed (_, e) | IStage e -> refs_quantity e) items
     | EBinOp (_, a, b) -> refs_quantity a || refs_quantity b
     | EUnOp (_, x) -> refs_quantity x
     | ECond (p, a, b) -> refs_quantity p || refs_quantity a || refs_quantity b
     | EFuncCall (_, args) -> List.exists (fun (_, e) -> refs_quantity e) args
-    | ESum (_, _, _, e, _) -> refs_quantity e
+    | (ESum (_, _, _, e, _) | ESumStages (_, _, e, _)) -> refs_quantity e
     | EList es -> List.exists refs_quantity es
     | ERange (a, b) -> refs_quantity a || refs_quantity b
     | EConst _ | EUnit _ | EObsAccess _ | ERunMember _ -> false
@@ -13218,13 +13292,13 @@ let classify_quantity_body ctx env
   let rec contains_obs_access = function
     | EObsAccess _ -> true
     | EIndex (_, items, _) ->
-      List.exists (function IPosn e | INamed (_, e) -> contains_obs_access e) items
+      List.exists (function IPosn e | INamed (_, e) | IStage e -> contains_obs_access e) items
     | EBinOp (_, a, b) -> contains_obs_access a || contains_obs_access b
     | EUnOp (_, x) -> contains_obs_access x
     | ECond (p, a, b) ->
       contains_obs_access p || contains_obs_access a || contains_obs_access b
     | EFuncCall (_, args) -> List.exists (fun (_, e) -> contains_obs_access e) args
-    | ESum (_, _, _, e, _) -> contains_obs_access e
+    | (ESum (_, _, _, e, _) | ESumStages (_, _, e, _)) -> contains_obs_access e
     | EList es -> List.exists contains_obs_access es
     | ERange (a, b) -> contains_obs_access a || contains_obs_access b
     | EConst _ | EUnit _ | EIdent _ | ERunMember _ -> false
@@ -13395,7 +13469,7 @@ let classify_quantity_body ctx env
          for exhaustiveness. *)
       err (Printf.sprintf
         "`%s....%s` is a contrast operand, not valid in a quantities recipe" run member)
-    | ESum _ | EList _ | ERange _ ->
+    | ESum _ | ESumStages _ | EList _ | ERange _ ->
       err "this form is not allowed in reduction arithmetic"
   in
   let classify_non_reduction body =
@@ -13447,7 +13521,7 @@ let classify_quantity_body ctx env
   let rec find_run_member = function
     | ERunMember { run; ns; member; loc } -> Some (run, ns, member, loc)
     | EIndex (_, items, _) ->
-      List.find_map (function IPosn e | INamed (_, e) -> find_run_member e) items
+      List.find_map (function IPosn e | INamed (_, e) | IStage e -> find_run_member e) items
     | EBinOp (_, a, b) ->
       (match find_run_member a with Some r -> Some r | None -> find_run_member b)
     | EUnOp (_, x) -> find_run_member x
@@ -13455,7 +13529,7 @@ let classify_quantity_body ctx env
       (match find_run_member p with Some r -> Some r
        | None -> (match find_run_member a with Some r -> Some r | None -> find_run_member b))
     | EFuncCall (_, args) -> List.find_map (fun (_, e) -> find_run_member e) args
-    | ESum (_, _, _, e, _) -> find_run_member e
+    | (ESum (_, _, _, e, _) | ESumStages (_, _, e, _)) -> find_run_member e
     | EList es -> List.find_map find_run_member es
     | ERange (a, b) ->
       (match find_run_member a with Some r -> Some r | None -> find_run_member b)
@@ -13748,13 +13822,13 @@ let rec collect_param_refs known_params acc = function
   | EIndex (_, items, _) ->
     List.fold_left (fun a item ->
       match item with
-      | IPosn e | INamed (_, e) -> collect_param_refs known_params a e
+      | IPosn e | INamed (_, e) | IStage e -> collect_param_refs known_params a e
     ) acc items
   | EBinOp (_, l, r) ->
     let a = collect_param_refs known_params acc l in
     collect_param_refs known_params a r
   | EUnOp (_, e) -> collect_param_refs known_params acc e
-  | ESum (_, _, _, body, _) -> collect_param_refs known_params acc body
+  | (ESum (_, _, _, body, _) | ESumStages (_, _, body, _)) -> collect_param_refs known_params acc body
   | ECond (p, t, e) ->
     let a = collect_param_refs known_params acc p in
     let a = collect_param_refs known_params a t in
@@ -13806,7 +13880,7 @@ let check_let_cycles ctx =
     | EIndex (n, _, _)     -> if is_let n then n :: acc else acc
     | EBinOp (_, l, r)     -> refs (refs acc l) r
     | EUnOp (_, e)         -> refs acc e
-    | ESum (_, _, _, b, _) -> refs acc b
+    | (ESum (_, _, _, b, _) | ESumStages (_, _, b, _)) -> refs acc b
     | ECond (p, t, f)      -> refs (refs (refs acc p) t) f
     | EFuncCall (_, args)  -> List.fold_left (fun a (_, e) -> refs a e) acc args
     | EList es             -> List.fold_left refs acc es
@@ -14045,13 +14119,14 @@ let rec expr_mentions v (e : expr) : bool =
   | EIdent (n, _) -> n = v
   | EIndex (n, items, _) ->
     n = v
-    || List.exists (function IPosn e | INamed (_, e) -> expr_mentions v e) items
+    || List.exists (function IPosn e | INamed (_, e) | IStage e -> expr_mentions v e) items
   | EBinOp (_, l, r)  -> expr_mentions v l || expr_mentions v r
   | EUnOp (_, e)      -> expr_mentions v e
   | ESum (bv, _, g, b, _) ->
     (* the inner binder's own guard is still in the OUTER scope *)
     (match g with Some g -> guard_mentions v g | None -> false)
     || (bv <> v && expr_mentions v b)
+  | ESumStages (bv, _, b, _) -> bv <> v && expr_mentions v b
   | ECond (p, t, f)   ->
     expr_mentions v p || expr_mentions v t || expr_mentions v f
   | EFuncCall (_, args) -> List.exists (fun (_, e) -> expr_mentions v e) args
@@ -14122,7 +14197,7 @@ let check_no_shadowing ctx =
     match e with
     | EConst _ | EUnit _ | EIdent _ -> ()
     | EIndex (_, items, _) ->
-      List.iter (function IPosn e | INamed (_, e) -> walk decl bound e) items
+      List.iter (function IPosn e | INamed (_, e) | IStage e -> walk decl bound e) items
     | EBinOp (_, l, r) -> walk decl bound l; walk decl bound r
     | EUnOp (_, e) -> walk decl bound e
     | ESum (v, d, g, b, sum_loc) ->
@@ -14143,6 +14218,7 @@ let check_no_shadowing ctx =
            (v :: bound))
         g;
       walk decl (v :: bound) b
+    | ESumStages (v, _, b, _) -> walk decl (v :: bound) b
     | ECond (p, t, f) -> walk decl bound p; walk decl bound t; walk decl bound f
     | EFuncCall (_, args) -> List.iter (fun (_, e) -> walk decl bound e) args
     | EList es            -> List.iter (walk decl bound) es
@@ -14217,12 +14293,13 @@ let check_quadratic_coupling ctx =
     | EConst _ | EUnit _ -> false
     | EIdent (n, _) -> n = v
     | EIndex (n, items, _) ->
-      n = v || List.exists (function IPosn e | INamed (_, e) -> mentions v e) items
+      n = v || List.exists (function IPosn e | INamed (_, e) | IStage e -> mentions v e) items
     | EBinOp (_, l, r) -> mentions v l || mentions v r
     | EUnOp (_, e) -> mentions v e
     | ESum (sv, _, g, b, _) ->
       if sv = v then false   (* inner sum rebinds v (E283 forbids); stop *)
       else (match g with Some g -> guard_mentions v g | None -> false) || mentions v b
+    | ESumStages (sv, _, b, _) -> sv <> v && mentions v b
     | ECond (p, t, f) -> mentions v p || mentions v t || mentions v f
     | EFuncCall (_, args) -> List.exists (fun (_, e) -> mentions v e) args
     | EList es -> List.exists (mentions v) es
@@ -14243,7 +14320,7 @@ let check_quadratic_coupling ctx =
   List.iter (fun (tr : transition_decl) ->
     let dims = List.filter_map (function
       | IBind (v, d) | IConsec (v, _, d) -> Some (v, d)
-      | IComp _ -> None) tr.trindices in
+      | IComp _ | IStages _ -> None) tr.trindices in
     let count_dim d = List.length (List.filter (fun (_, d') -> d' = d) dims) in
     let stoich_vars =
       List.concat_map stoich_ref_vars tr.trsrc
@@ -15461,6 +15538,549 @@ let compute_identity_tracked
     if SS.mem c.Ir.name tracked then Some c.Ir.name else None
   ) compartments
 
+(* ── `stage(...)` and `stages(...)` ──────────────────────────────────────── *)
+
+(** How many residence locations a compartment has, read from the model as
+    written. *)
+type stage_site =
+  | Staged of { dim : string; levels : string list; via : string }
+      (** A [via erlang] law with more than one stage: the stage dimension
+          the lowering will generate, its levels, and the [via] transition. *)
+  | Single of string option
+      (** One location: [via erlang(stages = 1, ...)] on the transition
+          named, or no [via] law at all. *)
+  | Hyper of string
+      (** A [via hyper_erlang] law on the transition named. *)
+  | Unreadable
+      (** A [via] law whose arguments are reported as malformed where the law
+          is lowered; nothing more is said about its stages. *)
+
+(** The declared compartments with a [via] law, each with its {!stage_site}.
+    Reads the [via] calls as written and reports nothing: the laws are
+    validated where they are lowered ([via_spec_of_call]). *)
+let via_stage_sites ctx : (string * stage_site) list =
+  List.filter_map (fun (tr : transition_decl) ->
+    match tr.trsrc, tr.trdyn with
+    | [ (src, _) ], Via ("erlang", args) ->
+      let site = match List.assoc_opt "stages" args with
+        | Some (EConst f) ->
+          (match Pos_int.of_float f with
+           | Ok k when Pos_int.to_int k > 1 ->
+             Staged { dim = via_stage_dim tr.trname;
+                      levels = via_stage_levels (Pos_int.to_int k);
+                      via = tr.trname }
+           | Ok _ -> Single (Some tr.trname)
+           | Error _ -> Unreadable)
+        | _ -> Unreadable in
+      Some (src, site)
+    | [ (src, _) ], Via ("hyper_erlang", _) -> Some (src, Hyper tr.trname)
+    | _ -> None) ctx.transitions
+
+(** Replace every [stage(...)] reference and [stages(...)] binder by the form
+    the rest of the compiler reads, and refuse the spellings they replace
+    (proposal 2026-11-17-unified-staged-residence, "Explicit stages").
+
+    For a compartment whose [via erlang] law has more than one stage,
+    [stage(E[a], 2)] becomes the reference [E[a, s2]] into the stage
+    dimension the [via] lowering generates, and [st in stages(E)] a binder
+    over that dimension. For a compartment with one location (no [via] law,
+    or [stages = 1]), [stage(E[a], 1)] becomes [E[a]] and the binder is
+    dropped, so its declaration has the single member it would have had.
+
+    This runs on the declarations as the parser returned them, before the
+    [via] lowering adds anything of its own. An index into a generated stage
+    dimension that this pass finds was therefore written by the modeller,
+    and is refused (E375, E376); the references the compiler writes later
+    are never seen here. *)
+let lower_stage_forms ctx : unit =
+  let sites = via_stage_sites ctx in
+  let is_compartment c = List.exists (fun cd -> cd.cname = c) ctx.comp_decls in
+  let site_of comp : stage_site option =
+    if not (is_compartment comp) then None
+    else Some (Option.value ~default:(Single None) (List.assoc_opt comp sites)) in
+  (* Every stage dimension a `via erlang` transition of this model generates
+     or would generate at a larger stage count, with its compartment. *)
+  let generated : (string * string) list =
+    List.filter_map (fun (tr : transition_decl) ->
+      match tr.trsrc, tr.trdyn with
+      | [ (src, _) ], Via ("erlang", _) -> Some (via_stage_dim tr.trname, src)
+      | _ -> None) ctx.transitions in
+  let pop_dims comp =
+    List.filter_map (fun (sd : stratify_decl) ->
+      match sd.sonly with
+      | None -> Some sd.sdim
+      | Some only -> if List.mem comp only then Some sd.sdim else None)
+      ctx.stratifies in
+  (* The positions at which a `let` family is indexed by the stages of a
+     compartment, from its binders as written. *)
+  let let_stage_binders : (string * (int * string) list) list =
+    List.filter_map (fun (lb : let_binding) ->
+      let at = List.concat (List.mapi (fun i -> function
+          | IStages (_, c) -> [ (i, c) ]
+          | IBind _ | IConsec _ | IComp _ -> []) lb.lindices) in
+      if at = [] then None else Some (lb.lname, at)) ctx.let_bindings in
+  let error ~code ~(loc : loc) ~message ~hint =
+    Diagnostics.error ctx.diags ~code ~loc:(diag_loc_of_ast_ctx ctx loc)
+      ~message ~hint () in
+  let stage_count_text comp = function
+    | Staged { levels; via; _ } ->
+      Printf.sprintf "'%s' has %d stages (`via erlang(stages = %d, ...)` on '%s')"
+        comp (List.length levels) (List.length levels) via
+    | Single (Some via) ->
+      Printf.sprintf "'%s' has 1 stage (`via erlang(stages = 1, ...)` on '%s')"
+        comp via
+    | Single None ->
+      Printf.sprintf "'%s' has no `via` dwell, and so 1 stage" comp
+    | Hyper via ->
+      Printf.sprintf "'%s' has a `via hyper_erlang(...)` dwell (on '%s')" comp via
+    | Unreadable -> Printf.sprintf "the `via` law of '%s' is malformed" comp in
+  let refuse_hyper ~loc ~written comp via =
+    error ~code:"E373" ~loc
+      ~message:(Printf.sprintf
+        "`%s`: '%s' has a `via hyper_erlang(...)` dwell (on '%s'), for which \
+         `stage(...)` and `stages(...)` are reserved"
+        written comp via)
+      ~hint:(Printf.sprintf
+        "a location in a `hyper_erlang` dwell is a branch and a phase, which \
+         these forms do not express yet. Name one branch stage by its \
+         compartment name, or give '%s' a `via erlang(...)` dwell" comp) in
+  let migration = "see `camdl docs language-changes`" in
+  let refuse_generated_dim ~loc ~written ~replacement dim =
+    let comp = List.assoc dim generated in
+    error ~code:"E375" ~loc
+      ~message:(Printf.sprintf
+        "`%s` names '%s', the stage dimension the compiler generates for the \
+         Erlang dwell of '%s'"
+        written dim comp)
+      ~hint:(Printf.sprintf
+        "a generated stage dimension is no longer named in a model: %s — %s"
+        (replacement comp) migration) in
+  (* [vars]: each variable bound by `in stages(C)` in scope, with `C`.
+     [comp_vars]: the variables bound by `in compartments`. [at]: the
+     declaration, where a reference carries no span of its own. *)
+  let rec expr vars comp_vars (at : loc) (e : expr) : expr =
+    let go = expr vars comp_vars at in
+    match e with
+    | EConst _ | EUnit _ | EObsAccess _ | ERunMember _ -> e
+    | EIdent (v, l) when List.mem_assoc v vars ->
+      stage_var_misused ~loc:(if l.line > 0 then l else at) v
+        (List.assoc v vars) (Printf.sprintf "is read as a value (`%s`)" v);
+      e
+    | EIdent _ -> e
+    | EIndex (n, items, l) ->
+      let at' = if l.line > 0 then l else at in
+      (match reference vars comp_vars at' n items with
+       | [] when items <> [] -> EIdent (n, l)
+       | items' -> EIndex (n, items', l))
+    | EBinOp (op, a, b) -> EBinOp (op, go a, go b)
+    | EUnOp (op, a) -> EUnOp (op, go a)
+    | ESum (v, d, g, body, l) ->
+      let at' = if l.line > 0 then l else at in
+      if List.mem_assoc d generated then
+        refuse_generated_dim ~loc:at' ~written:(Printf.sprintf "%s in %s" v d)
+          ~replacement:(fun comp ->
+            Printf.sprintf
+              "write `sum(%s in stages(%s), ...)` with `stage(%s[...], %s)` in \
+               the body, or the reference without a stage, which is the sum \
+               over the stages" v comp comp v)
+          d;
+      Option.iter (guard vars at') g;
+      ESum (v, d, g, expr (List.remove_assoc v vars) comp_vars at body, l)
+    | ESumStages (v, comp, body, l) ->
+      let at' = if l.line > 0 then l else at in
+      let written = Printf.sprintf "%s in stages(%s)" v comp in
+      let inner = expr ((v, comp) :: List.remove_assoc v vars) comp_vars at body in
+      (match site_of comp with
+       | None -> not_a_compartment ~loc:at' ~written comp; inner
+       | Some (Hyper via) -> refuse_hyper ~loc:at' ~written comp via; inner
+       | Some (Staged { dim; _ }) -> ESum (v, dim, None, inner, l)
+       | Some (Single _ | Unreadable) -> inner)
+    | ECond (p, a, b) -> ECond (go p, go a, go b)
+    | EFuncCall ("stage", args) ->
+      error ~code:"E369" ~loc:at
+        ~message:(Printf.sprintf
+          "`%s` is not a stage reference: `stage` takes a compartment \
+           reference and a location" (surface_src e))
+        ~hint:"write `stage(E[a], 2)`: one population cell of a compartment, \
+               then the location, a whole number from 1 or a variable bound \
+               by `in stages(E)`";
+      ignore args;
+      EConst 0.0
+    | EFuncCall ("stages", args) ->
+      error ~code:"E374" ~loc:at
+        ~message:(Printf.sprintf
+          "`%s` is read as a value: `stages(...)` is only the domain of a \
+           binder" (surface_src e))
+        ~hint:"write it after `in`, as in `move[st in stages(E)] : ...` or \
+               `sum(st in stages(E), ...)`. There is no stage count to read: \
+               an amount written for the whole compartment is divided over \
+               its stages by the compiler";
+      ignore args;
+      EConst 0.0
+    | EFuncCall (f, args) -> EFuncCall (f, List.map (fun (k, a) -> (k, go a)) args)
+    | EList es -> EList (List.map go es)
+    | ERange (a, b) -> ERange (go a, go b)
+
+  and stage_var_misused ~loc v comp (how : string) =
+    error ~code:"E372" ~loc
+      ~message:(Printf.sprintf
+        "'%s' is bound by `%s in stages(%s)` and %s" v v comp how)
+      ~hint:(Printf.sprintf
+        "a stage variable names a location in the dwell of '%s', not a level \
+         of a dimension or a number: its one use is as the location in \
+         `stage(%s[...], %s)`" comp comp v)
+
+  and not_a_compartment ~loc ~written name =
+    error ~code:"E374" ~loc
+      ~message:(Printf.sprintf "`%s`: '%s' is not a compartment" written name)
+      ~hint:"`stages(...)` takes the name of a declared compartment, as in \
+             `st in stages(E)`"
+
+  and guard vars (at : loc) (g : Ast.guard) : unit =
+    let name n =
+      if List.mem_assoc n vars then
+        stage_var_misused ~loc:at n (List.assoc n vars)
+          "is compared in a `where` predicate" in
+    match g with
+    | GEq (a, b) | GNeq (a, b) -> name a; name b
+    | GTab (_, idx, _, _) -> List.iter name idx
+    | GAnd (a, b) | GOr (a, b) -> guard vars at a; guard vars at b
+
+  (* One index that is not a stage location. *)
+  and item vars comp_vars (at : loc) ~(of_ : string) (it : index_item) : index_item =
+    let misuse v =
+      stage_var_misused ~loc:at v (List.assoc v vars)
+        (Printf.sprintf "is used as an index of '%s'" of_) in
+    match it with
+    | IPosn (EIdent (v, _)) when List.mem_assoc v vars -> misuse v; it
+    | INamed (d, EIdent (v, _)) when List.mem_assoc v vars && not (List.mem_assoc d generated) ->
+      misuse v; it
+    | INamed (d, e) when List.mem_assoc d generated ->
+      refuse_generated_dim ~loc:at ~written:(Printf.sprintf "%s = %s" d (surface_src e))
+        ~replacement:(fun comp ->
+          Printf.sprintf "write the stage as `stage(%s[...], <location>)`" comp)
+        d;
+      it
+    | IPosn e -> IPosn (expr vars comp_vars at e)
+    | INamed (d, e) -> INamed (d, expr vars comp_vars at e)
+    | IStage e -> IStage e   (* taken out by [reference] before this is reached *)
+
+  (* The indices of one reference to [name], as the rest of the compiler
+     reads them. *)
+  and reference vars comp_vars (at : loc) (name : string) (items : index_item list)
+      : index_item list =
+    let location = List.find_map (function IStage e -> Some e | _ -> None) items in
+    let plain = List.filter (function IStage _ -> false | _ -> true) items in
+    let written () = surface_src (EIndex (name, items, dummy_loc)) in
+    match location with
+    | Some location ->
+      let plain = List.map (item vars comp_vars at ~of_:name) plain in
+      let dims = pop_dims name in
+      (match site_of name with
+       | None ->
+         error ~code:"E369" ~loc:at
+           ~message:(Printf.sprintf "`%s`: '%s' is not a compartment" (written ()) name)
+           ~hint:"`stage(...)` takes one population cell of a declared \
+                  compartment, written with the compartment's own name, and a \
+                  location: `stage(E[a], 2)`";
+         plain
+       | Some _ when List.length plain <> List.length dims ->
+         error ~code:"E369" ~loc:at
+           ~message:(Printf.sprintf
+             "`%s`: '%s' is stratified by [%s], and the reference indexes %d \
+              of its %d population dimension%s"
+             (written ()) name (String.concat ", " dims) (List.length plain)
+             (List.length dims) (if List.length dims = 1 then "" else "s"))
+           ~hint:(Printf.sprintf
+             "a stage is a location within one population cell, so index \
+              every population dimension: `stage(%s[%s], ...)`"
+             name (String.concat ", " (List.map (fun d -> "<" ^ d ^ ">") dims)));
+         plain
+       | Some (Hyper via) -> refuse_hyper ~loc:at ~written:(written ()) name via; plain
+       | Some Unreadable -> plain
+       | Some ((Staged _ | Single _) as site) ->
+         let named = List.exists (function INamed _ -> true | _ -> false) plain in
+         let stage_item dim level =
+           let e = EIdent (level, dummy_loc) in
+           if named then INamed (dim, e) else IPosn e in
+         let out_of_range () =
+           error ~code:"E370" ~loc:at
+             ~message:(Printf.sprintf "`%s`: %s" (written ())
+               (stage_count_text name site))
+             ~hint:(match site with
+               | Staged { levels; _ } ->
+                 Printf.sprintf
+                   "a location in '%s' is a whole number from 1 to %d, or a \
+                    variable bound by `in stages(%s)`"
+                   name (List.length levels) name
+               | _ ->
+                 Printf.sprintf
+                   "the only location in '%s' is 1, and `stage(%s, 1)` is the \
+                    reference itself. A variable bound by `in stages(%s)` \
+                    names it for any stage count"
+                   name
+                   (surface_src (if plain = [] then EIdent (name, dummy_loc)
+                                 else EIndex (name, plain, dummy_loc)))
+                   name);
+           plain in
+         (match location with
+          | EConst f when Float.is_integer f ->
+            let n = int_of_float f in
+            (match site with
+             | Staged { dim; levels; _ } when n >= 1 && n <= List.length levels ->
+               plain @ [ stage_item dim (List.nth levels (n - 1)) ]
+             | Single _ when n = 1 -> plain
+             | _ -> out_of_range ())
+          | EIdent (v, _) when List.mem_assoc v vars ->
+            let bound = List.assoc v vars in
+            if bound <> name then begin
+              error ~code:"E371" ~loc:at
+                ~message:(Printf.sprintf
+                  "`%s`: '%s' ranges over the stages of '%s' (`%s in \
+                   stages(%s)`), not of '%s'"
+                  (written ()) v bound v bound name)
+                ~hint:(Printf.sprintf
+                  "%s. Bind a variable of its own over `stages(%s)`, or name \
+                   the location by number"
+                  (stage_count_text name site) name);
+              plain
+            end else
+              (match site with
+               | Staged { dim; _ } -> plain @ [ stage_item dim v ]
+               | _ -> plain)
+          | _ -> out_of_range ()))
+    | None ->
+      let lowered it = item vars comp_vars at ~of_:name it in
+      let n = List.length plain in
+      let last_name = match List.rev plain with
+        | (IPosn (EIdent (v, _)) | INamed (_, EIdent (v, _))) :: _ -> Some v
+        | _ -> None in
+      (* The reference a stage level index stands for, as `stage(...)`. *)
+      let refuse_level_index comp (levels : string list) =
+        let pop = List.filteri (fun i _ -> i < n - 1) plain in
+        let location = match last_name with
+          | Some v ->
+            (match List.find_index (fun l -> l = v) levels with
+             | Some i -> EConst (float_of_int (i + 1))
+             | None -> EIdent (v, dummy_loc))
+          | None -> EIdent ("<location>", dummy_loc) in
+        error ~code:"E376" ~loc:at
+          ~message:(Printf.sprintf
+            "`%s` indexes a stage of '%s' by its position in the generated \
+             stage dimension"
+            (written ()) comp)
+          ~hint:(Printf.sprintf
+            "write `%s` — %s"
+            (surface_src (EIndex (comp, pop @ [ IStage location ], dummy_loc)))
+            migration) in
+      (match site_of name with
+       | Some (Staged { levels; _ })
+         when n = List.length (pop_dims name) + 1
+              && List.for_all (function IPosn _ -> true | _ -> false) plain ->
+         refuse_level_index name levels;
+         List.map lowered plain
+       | None when List.mem name comp_vars ->
+         (* `c[a, s2]` under `c in compartments`: a stage level of some
+            staged member. *)
+         let staged_member =
+           List.find_map (fun (comp, site) ->
+             match site, last_name with
+             | Staged { levels; _ }, Some v
+               when n = List.length (pop_dims comp) + 1 && List.mem v levels ->
+               Some (comp, levels)
+             | _ -> None) sites in
+         Option.iter (fun (comp, levels) -> refuse_level_index comp levels) staged_member;
+         List.map lowered plain
+       | _ ->
+         (* A `let` family declared over the stages of a compartment is
+            indexed by a stage variable of that compartment. *)
+         (match List.assoc_opt name let_stage_binders with
+          | None -> List.map lowered plain
+          | Some at_positions ->
+            List.concat (List.mapi (fun i (it : index_item) ->
+              match List.assoc_opt i at_positions, it with
+              | Some comp, IPosn (EIdent (v, _))
+                when List.assoc_opt v vars = Some comp ->
+                (match site_of comp with
+                 | Some (Staged _) -> [ it ]
+                 | _ -> [])
+              | Some comp, _ ->
+                error ~code:"E372" ~loc:at
+                  ~message:(Printf.sprintf
+                    "`%s`: '%s' is declared over `stages(%s)` at this index, \
+                     which takes a variable bound by `in stages(%s)`"
+                    (written ()) name comp comp)
+                  ~hint:(Printf.sprintf
+                    "bind the index where '%s' is used, as in \
+                     `sum(st in stages(%s), %s[..., st])`" name comp name);
+                [ it ]
+              | None, _ -> [ lowered it ]) plain)))
+  in
+  (* The binders of one declaration: the binders the rest of the compiler
+     reads, and the stage variables they bind. *)
+  let binders ?(stages_refused : (string -> string * string) option) (at : loc)
+      (ibs : index_binding list)
+      : index_binding list * (string * string) list * string list =
+    let vars = ref [] and comp_vars = ref [] in
+    let generated_dim v d =
+      if List.mem_assoc d generated then
+        refuse_generated_dim ~loc:at ~written:(Printf.sprintf "%s in %s" v d)
+          ~replacement:(fun comp ->
+            Printf.sprintf "write `%s in stages(%s)`, and the stage as \
+                            `stage(%s[...], %s)`" v comp comp v)
+          d in
+    let ibs = List.concat_map (fun ib ->
+      match ib with
+      | IBind (v, d) -> generated_dim v d; [ ib ]
+      | IConsec (v, _, d) -> generated_dim v d; [ ib ]
+      | IComp v -> comp_vars := v :: !comp_vars; [ ib ]
+      | IStages (v, comp) ->
+        let written = Printf.sprintf "%s in stages(%s)" v comp in
+        vars := (v, comp) :: !vars;
+        (match stages_refused with
+         | Some why ->
+           let where, hint = why comp in
+           error ~code:"E374" ~loc:at
+             ~message:(Printf.sprintf "`%s` binds %s" written where)
+             ~hint;
+           []
+         | None ->
+           match site_of comp with
+           | None -> not_a_compartment ~loc:at ~written comp; []
+           | Some (Hyper via) -> refuse_hyper ~loc:at ~written comp via; []
+           | Some (Staged { dim; _ }) -> [ IBind (v, dim) ]
+           | Some (Single _ | Unreadable) -> [])) ibs in
+    (ibs, !vars, !comp_vars) in
+  let stoich vars comp_vars at ((c, items) : stoich_ref) : stoich_ref =
+    (c, reference vars comp_vars at c items) in
+  let action vars comp_vars at = function
+    | ATransfer kwargs ->
+      ATransfer (List.map (fun (k, e) -> (k, expr vars comp_vars at e)) kwargs)
+    | ASet (c, items, e) ->
+      ASet (c, reference vars comp_vars at c items, expr vars comp_vars at e)
+    | AAdd (c, items, e) ->
+      AAdd (c, reference vars comp_vars at c items, expr vars comp_vars at e) in
+  let transition (t : transition_decl) : transition_decl =
+    let trindices, vars, comp_vars = binders t.trloc t.trindices in
+    (* The stage binder goes last, where the lowering puts the one it adds,
+       so the members are named with the stage level last (`shift_pre_s2`)
+       and a flow reference to the transition finds them. *)
+    let over_stages = function
+      | IBind (_, d) -> List.exists (fun (_, site) ->
+          match site with Staged { dim; _ } -> dim = d | _ -> false) sites
+      | IConsec _ | IComp _ | IStages _ -> false in
+    let trindices =
+      List.filter (fun ib -> not (over_stages ib)) trindices
+      @ List.filter over_stages trindices in
+    List.iter (fun (_, comp) ->
+      match site_of comp with
+      | Some (Staged _) ->
+        ctx.stage_families <- (t.trname, comp) :: ctx.stage_families
+      | _ -> ()) vars;
+    let e = expr vars comp_vars t.trloc in
+    Option.iter (guard vars t.trloc) t.trguard;
+    { t with
+      trindices;
+      trsrc = List.map (stoich vars comp_vars t.trloc) t.trsrc;
+      trdst = (match t.trdst with
+        | DstSum refs -> DstSum (List.map (stoich vars comp_vars t.trloc) refs)
+        | DstBranch brs ->
+          DstBranch (List.map (fun (r, w) ->
+            (stoich vars comp_vars t.trloc r, e w)) brs));
+      trdyn = (match t.trdyn with
+        | Rate r -> Rate (e r)
+        | Via (law, args) -> Via (law, List.map (fun (k, a) -> (k, e a)) args)) } in
+  let intervention (iv : intervention_decl) : intervention_decl =
+    let ivindices, vars, comp_vars = binders iv.ivloc iv.ivindices in
+    Option.iter (guard vars iv.ivloc) iv.ivguard;
+    { iv with ivindices;
+              ivaction = List.map (action vars comp_vars iv.ivloc) iv.ivaction } in
+  ctx.transitions <- List.map transition ctx.transitions;
+  ctx.let_bindings <- List.map (fun (lb : let_binding) ->
+    let lindices, vars, comp_vars = binders lb.lloc lb.lindices in
+    { lb with lindices; lbody = expr vars comp_vars lb.lloc lb.lbody })
+    ctx.let_bindings;
+  ctx.init_entries <- List.map (fun (ie : init_entry) ->
+    let ibindings, vars, comp_vars =
+      binders ie.iloc ie.ibindings ~stages_refused:(fun comp ->
+        ( "an index of an `init` entry, where a stage is not an index",
+          Printf.sprintf
+            "an initial value lands in stage 1; place one elsewhere with an \
+             entry per location, `stage(%s, 2) = ...`" comp )) in
+    { ie with ibindings;
+              iindices = reference vars comp_vars ie.iloc ie.icomp ie.iindices;
+              ivalue = map_init_value (expr vars comp_vars ie.iloc) ie.ivalue })
+    ctx.init_entries;
+  ctx.balance_decl <- Option.map (fun (bd : balance_decl) ->
+    { bd with bexpr = expr [] [] bd.bspan bd.bexpr }) ctx.balance_decl;
+  ctx.ode_decls <- List.map (fun (od : ode_decl) ->
+    { od with oderiv = expr [] [] od.odspan od.oderiv }) ctx.ode_decls;
+  ctx.obs_decls <- List.map (fun (od : obs_decl) ->
+    let oindices, vars, comp_vars =
+      binders od.oloc od.oindices ~stages_refused:(fun comp ->
+        ( "an index of an observation stream, and data has no column for a \
+           stage",
+          Printf.sprintf
+            "no measurement tells one stage of '%s' from another, so a \
+             stream is not indexed by them. Declare one stream per location \
+             it reads, with `projected = stage(%s, 1)`, or read the whole \
+             compartment" comp comp )) in
+    let e = expr vars comp_vars od.oloc in
+    { od with
+      oindices;
+      oprojection = (match od.oprojection with
+        | Some (ProjDerived p) -> Some (ProjDerived (e p))
+        | Some (ProjIncidence (tr, items)) ->
+          Some (ProjIncidence
+                  (tr, List.map (item vars comp_vars od.oloc ~of_:tr) items))
+        | None -> None);
+      omeasurement = Option.map (fun (om : obs_measurement) ->
+        { om with om_lik = map_likelihood_kwargs e om.om_lik }) od.omeasurement })
+    ctx.obs_decls;
+  ctx.quantity_decls <- List.map (fun (qd : quantity_decl) ->
+    let qd_indices, vars, comp_vars = binders qd.qd_loc qd.qd_indices in
+    { qd with qd_indices; qd_body = expr vars comp_vars qd.qd_loc qd.qd_body })
+    ctx.quantity_decls;
+  ctx.func_decls <- List.map (fun (fd : func_decl) ->
+    let findices, _, _ = binders fd.fspan fd.findices in
+    { fd with findices }) ctx.func_decls;
+  ctx.interv_decls <- List.map intervention ctx.interv_decls;
+  ctx.event_decls  <- List.map intervention ctx.event_decls;
+  ctx.reactive_decls <- List.map (fun (rx : reactive_decl) ->
+    let rxindices, vars, comp_vars = binders rx.rxloc rx.rxindices in
+    Option.iter (guard vars rx.rxloc) rx.rxguard;
+    { rx with rxindices; rxaction = action vars comp_vars rx.rxloc rx.rxaction })
+    ctx.reactive_decls;
+  (* A generated stage dimension named where a declaration takes a dimension:
+     a parameter or table axis, or a `stratify`. *)
+  let refuse_axis ~loc ~written d =
+    if List.mem_assoc d generated then
+      refuse_generated_dim ~loc ~written
+        ~replacement:(fun comp ->
+          Printf.sprintf
+            "nothing is declared over the stages of '%s'; a value that \
+             differs by stage is written per location, with `stage(%s[...], 1)`, \
+             `stage(%s[...], 2)`, ..." comp comp comp)
+        d in
+  List.iter (function
+    | PIndexed { pname; pdims; ploc; _ } ->
+      List.iter (fun d ->
+        refuse_axis ~loc:ploc ~written:(Printf.sprintf "%s[%s]" pname d) d) pdims
+    | PScalar _ -> ()) ctx.param_decls;
+  List.iter (fun (lb : let_binding) ->
+    List.iter (fun d ->
+      refuse_axis ~loc:lb.lloc ~written:(Printf.sprintf "let %s : %s" lb.lname d) d)
+      (Option.value ~default:[] lb.lshape)) ctx.let_bindings;
+  List.iter (fun (td : table_decl) ->
+    List.iter (fun entry ->
+      let d = match entry with TDim d | TDimUnit (d, _) -> d in
+      refuse_axis ~loc:td.tloc
+        ~written:(Printf.sprintf "%s : %s" (String.concat ", " td.tnames) d) d)
+      td.tdims) ctx.table_decls;
+  List.iter (fun (sd : stratify_decl) ->
+    refuse_axis ~loc:sd.sspan ~written:(Printf.sprintf "stratify(by = %s)" sd.sdim)
+      sd.sdim) ctx.stratifies
+
 let expand_detail ?(source_dir = "") ?(filename = "<input>") (name : string) (decls : declaration list)
     : Ir.model * context * model_summary =
   let ctx = empty_context ~source_dir ~filename () in
@@ -15479,6 +16099,10 @@ let expand_detail ?(source_dir = "") ?(filename = "<input>") (name : string) (de
      compiler is about to add. *)
   check_observation_surface ctx;
   apply_via_rewrite ctx strip_totals;
+  (* `stage(...)` and `stages(...)`, and the refusal of a generated stage
+     dimension named by the modeller. Runs on the declarations as written,
+     before the `via` lowering writes any stage index of its own. *)
+  lower_stage_forms ctx;
   lower_via_transitions ctx;
   (* M14 (gh#98): validate origin date up front, before origin_rata_die /
      date() conversion derives values from it. *)

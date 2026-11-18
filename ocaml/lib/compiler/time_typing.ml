@@ -203,7 +203,7 @@ let rec classify_in env (seen : string list) (e : expr) : tclass =
   | EUnOp ((Neg | Total), a) -> classify env a
   | EUnOp _        -> TOther
   | ECond (_, a, b) -> lub_dur (classify env a) (classify env b)
-  | ESum (_, _, _, body, _) -> classify env body
+  | ESum (_, _, _, body, _) | ESumStages (_, _, body, _) -> classify env body
   | EList _ | ERange _ -> TOther
   | EObsAccess _ -> TOther
   | ERunMember _ -> TOther   (* a contrast operand — not a time/duration *)
@@ -219,11 +219,11 @@ let subexprs (e : expr) : expr list =
   match e with
   | EConst _ | EUnit _ | EIdent _ | EObsAccess _ | ERunMember _ -> []
   | EIndex (_, items, _) ->
-    List.map (function IPosn e | INamed (_, e) -> e) items
+    List.map (function IPosn e | INamed (_, e) | IStage e -> e) items
   | EBinOp (_, l, r) | ERange (l, r) -> [l; r]
   | EUnOp (_, a) -> [a]
   | ECond (p, a, b) -> [p; a; b]
-  | ESum (_, _, _, body, _) -> [body]
+  | ESum (_, _, _, body, _) | ESumStages (_, _, body, _) -> [body]
   | EFuncCall (_, args) -> List.map snd args
   | EList items -> items
 
@@ -335,7 +335,8 @@ let instant_misuse_at env ~unitless (e : expr) : instant_misuse option =
   | EBinOp ((Mul | Div | Pow), l, r) when definite l || definite r ->
     Some ScaledInstant
   | EUnOp (Neg, a) when definite a -> Some ScaledInstant
-  | ESum (_, _, _, body, _) when definite body -> Some SumOfInstants
+  | (ESum (_, _, _, body, _) | ESumStages (_, _, body, _)) when definite body ->
+    Some SumOfInstants
   (* `classify` takes the upper bound of a conditional's branches, so an
      Instant on one side and a duration on the other reports TInstant and
      passes every rule above. The two branches must be the same

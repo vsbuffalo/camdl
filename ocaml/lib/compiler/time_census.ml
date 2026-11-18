@@ -156,7 +156,7 @@ module Forcing_schema = struct
     List.concat_map (fun x ->
       match x with
       | ERange (lo, hi) -> [Time_pos.make Time_pos.Phase lo loc; Time_pos.make Time_pos.Phase hi loc]
-      | EConst _ | EUnit _ | EIdent _ | EIndex _ | EBinOp _ | EUnOp _ | ESum _
+      | EConst _ | EUnit _ | EIdent _ | EIndex _ | EBinOp _ | EUnOp _ | ESum _ | ESumStages _
       | ECond _ | EFuncCall _ | EList _ | EObsAccess _ | ERunMember _ ->
         [Time_pos.make Time_pos.Phase x loc]) (entries e)
 
@@ -222,7 +222,7 @@ let is_instant_operand (env : instant_env) (e : expr) : bool =
     | EBinOp (Sub, a, b) -> go (depth + 1) a && not (go (depth + 1) b)
     | EUnOp (Total, a) -> go (depth + 1) a
     | ECond (_, a, b) -> go (depth + 1) a && go (depth + 1) b
-    | EConst _ | EUnit _ | EBinOp _ | EUnOp _ | ESum _ | EFuncCall _ | EList _
+    | EConst _ | EUnit _ | EBinOp _ | EUnOp _ | ESum _ | ESumStages _ | EFuncCall _ | EList _
     | ERange _ | EObsAccess _ | ERunMember _ -> false
   in
   go 0 e
@@ -251,7 +251,7 @@ let time_side env (e : expr) : time_side option =
   | EUnOp (Neg, EBinOp (Sub, EIdent ("t", l), x)) when inst x ->
     Some (Remaining { until = x; tloc = l })
   | EBinOp ((Add | Sub), EIdent ("t", l), _) | EBinOp (Add, _, EIdent ("t", l)) -> Some (Shifted l)
-  | EConst _ | EUnit _ | EIdent _ | EIndex _ | EBinOp _ | EUnOp _ | ESum _
+  | EConst _ | EUnit _ | EIdent _ | EIndex _ | EBinOp _ | EUnOp _ | ESum _ | ESumStages _
   | ECond _ | EFuncCall _ | EList _ | ERange _ | EObsAccess _ | ERunMember _ -> None
 
 (* A comparison with model time, read as a comparison of `t` with a date: the
@@ -281,7 +281,7 @@ let time_comparison env (e : expr) : time_comparison option =
     (match read l r op (fun d -> EBinOp (op, l, d)) with
      | Some c -> Some c
      | None -> read r l (flip_comparison op) (fun d -> EBinOp (op, d, r)))
-  | EConst _ | EUnit _ | EIdent _ | EIndex _ | EBinOp _ | EUnOp _ | ESum _
+  | EConst _ | EUnit _ | EIdent _ | EIndex _ | EBinOp _ | EUnOp _ | ESum _ | ESumStages _
   | ECond _ | EFuncCall _ | EList _ | ERange _ | EObsAccess _ | ERunMember _ -> None
 
 (* The positions a node itself makes, with their sub-expression: a comparison
@@ -296,7 +296,7 @@ let node_positions env (e : expr) : Time_pos.any list =
     (match e with
      | EBinOp ((Add | Sub), EIdent ("t", l), d) | EBinOp (Add, d, EIdent ("t", l)) ->
        [Time_pos.Any (Time_pos.make Time_pos.Runtime_offset d l)]
-     | EConst _ | EUnit _ | EIdent _ | EIndex _ | EBinOp _ | EUnOp _ | ESum _
+     | EConst _ | EUnit _ | EIdent _ | EIndex _ | EBinOp _ | EUnOp _ | ESum _ | ESumStages _
      | ECond _ | EFuncCall _ | EList _ | ERange _ | EObsAccess _ | ERunMember _ -> [])
 
 (* The direct sub-expressions of a node that are NOT time positions: the
@@ -333,7 +333,7 @@ let rec reduction_positions ~loc (e : expr) : Time_pos.any list =
   let here = match e with
     | EFuncCall (fn, args) ->
       List.map (fun p -> Time_pos.Any p) (reduction_time_args ~loc fn args)
-    | EConst _ | EUnit _ | EIdent _ | EIndex _ | EBinOp _ | EUnOp _ | ESum _
+    | EConst _ | EUnit _ | EIdent _ | EIndex _ | EBinOp _ | EUnOp _ | ESum _ | ESumStages _
     | ECond _ | EList _ | ERange _ | EObsAccess _ | ERunMember _ -> []
   in
   here @ List.concat_map (reduction_positions ~loc) (Time_typing.subexprs e)
@@ -352,7 +352,7 @@ let trigger_windows ~loc (p : trig_pred) : Time_pos.span Time_pos.t list =
         if k = "window" then Some (Time_pos.make Time_pos.Span a loc) else None) args
     | EBinOp (_, a, b) -> in_expr a @ in_expr b
     | EUnOp (_, a) -> in_expr a
-    | EConst _ | EUnit _ | EIdent _ | EIndex _ | ESum _ | ECond _ | EFuncCall _
+    | EConst _ | EUnit _ | EIdent _ | EIndex _ | ESum _ | ESumStages _ | ECond _ | EFuncCall _
     | EList _ | ERange _ | EObsAccess _ | ERunMember _ -> []
   in
   let rec go = function
@@ -423,7 +423,7 @@ let action_exprs (a : action_decl) : expr list =
   match a with
   | ATransfer kws -> List.map snd kws
   | ASet (_, items, e) | AAdd (_, items, e) ->
-    e :: List.map (function IPosn x | INamed (_, x) -> x) items
+    e :: List.map (function IPosn x | INamed (_, x) | IStage x -> x) items
 
 let schedule_core_found (s : schedule_core) : found =
   match s with

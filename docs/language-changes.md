@@ -13,6 +13,48 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-11-18 — a stage of a `via erlang` compartment is written `stage(...)`; the generated stage dimension is not nameable
+
+**What.** `via erlang(stages = k, ...)` on a transition splits its source
+compartment into `k` stages, held in a stage dimension the compiler generates
+(`__<transition>_stage`, levels `s1`, `s2`, …). A model could name that
+dimension and its levels: bind over it, sum over it, index a stage by its level.
+Those spellings stopped compiling when `stages` became 1, where no stage
+dimension exists. Two forms replace them. `stage(E[pre], 2)` is stage 2 of
+`E[pre]`, as a value and as an endpoint of a transition, `transfer`, `add`,
+`set` or `init`. `stages(E)` is the domain of a binder over the stages of `E`.
+At `stages = 1` (and for a compartment with no `via` law) there is one location:
+`stage(E[pre], 1)` is `E[pre]` and `stages(E)` has one element. Naming the
+generated dimension is now **E375**, and indexing a stage by its level is
+**E376**, at every stage count. An expanded cell name (`E_pre_s2`) is unchanged.
+
+**Migration.** With
+`latency[a in age] : E[a] --> I[a] via erlang(stages = 3,
+rate = sigma)`:
+
+| Old                                  | New                                              |
+| ------------------------------------ | ------------------------------------------------ |
+| `E[pre, s2]`                         | `stage(E[pre], 2)`                               |
+| `E[s2]` (`E` not stratified)         | `stage(E, 2)`                                    |
+| `E[age = pre, __latency_stage = s2]` | `stage(E[age = pre], 2)`                         |
+| `[st in __latency_stage]`            | `[st in stages(E)]`                              |
+| `E[pre, st]` under that binder       | `stage(E[pre], st)`                              |
+| `sum(s in __latency_stage, E[a, s])` | `E[a]`, or `sum(s in stages(E), stage(E[a], s))` |
+| `init { E[pre, s2] = 10 }`           | `init { stage(E[pre], 2) = 10 }`                 |
+
+A variable bound over `stages(E)` is a location of `E` and nothing else: it
+cannot index a parameter or a table, so a parameter or table declared over the
+generated dimension (`w[__latency_stage]`) has no direct replacement. Write the
+per-stage terms out with `stage(E[...], 1)`, `stage(E[...], 2)`, ….
+
+**Diagnostic.**
+``error[E375]: `st in __latency_stage` names '__latency_stage', the stage
+dimension the compiler generates for the Erlang dwell of 'E'``,
+and
+``error[E376]: `E[pre, s2]` indexes a stage of 'E' by its position in the
+generated stage dimension``,
+whose hint is `` write `stage(E[pre], 2)` ``.
+
 ## 2026-11-17 — an instant written from `origin` or a date must use a time unit
 
 **What.** Under an `origin`, an instant the compiler folds to a number

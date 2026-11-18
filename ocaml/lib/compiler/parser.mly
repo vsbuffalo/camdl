@@ -331,7 +331,51 @@
      binder, so the single-binder case is just the shortest such list. *)
   type sum_item =
     | SBinder of string * string * guard option * loc
+    | SStages of string * string * loc
     | SBody   of expr
+
+  (* `stage` and `stages` are not keywords: a model may name a parameter or a
+     compartment either word. They are read by position. `stage(<reference>,
+     <location>)` is the call form of an expression or of an endpoint, and
+     `stages(<compartment>)` follows `in` where a dimension would. The lexer
+     gives both as IDENT and the actions below check the spelling. *)
+
+  (* The domain call after `in`: `st in stages(E)`. Returns the compartment. *)
+  let stages_domain ~sp ~ep (f : string) (comp : string) : string =
+    if f <> "stages" then
+      Parser_errors.push_error_hint ~sp ~ep ~code:"E125"
+        ~msg:(Printf.sprintf
+          "`in %s(...)`: a binder ranges over a dimension, `compartments`, \
+           `consecutive(<dimension>)` or `stages(<compartment>)`" f)
+        ~hint:(Printf.sprintf
+          "write `in stages(%s)` for the stages of '%s'" comp comp);
+    comp
+
+  (* `stage(<reference>, <location>)` as a transition, `transfer`, `add`,
+     `set` or `init` endpoint: the reference with the location as its last
+     index. *)
+  let stage_endpoint ~sp ~ep (f : string) ((comp, idxs) : stoich_ref)
+      (location : expr) : stoich_ref =
+    if f <> "stage" then
+      Parser_errors.push_error_hint ~sp ~ep ~code:"E126"
+        ~msg:(Printf.sprintf
+          "`%s(...)` is not a compartment reference" f)
+        ~hint:(Printf.sprintf
+          "an endpoint is a compartment (`%s`), or one stage of it: \
+           `stage(%s, 1)`" comp comp);
+    (comp, idxs @ [ IStage location ])
+
+  (* `stage(<reference>, <location>)` in an expression. Any other argument
+     list stays a call, which the expander reports. *)
+  let stage_call ~sp ~ep (args : (string * expr) list) : expr =
+    let l = Parser_errors.ast_loc_of ~sp ~ep in
+    match args with
+    | [ ("", EIdent (comp, cl)); ("", location) ] when cl <> dummy_loc ->
+      EIndex (comp, [ IStage location ], l)
+    | [ ("", EIndex (comp, idxs, _)); ("", location) ]
+      when not (List.exists (function IStage _ -> true | _ -> false) idxs) ->
+      EIndex (comp, idxs @ [ IStage location ], l)
+    | _ -> EFuncCall ("stage", args)
 
   (* Fold a flat `sum(b1, …, bn, body)` into the nested chain the rest of the
      compiler already understands:
@@ -365,6 +409,10 @@
       | SBinder (v, d, g, l) :: rest ->
         (match go rest with
          | Ok body      -> Ok (ESum (v, d, g, body, l))
+         | Error _ as e -> e)
+      | SStages (v, c, l) :: rest ->
+        (match go rest with
+         | Ok body      -> Ok (ESumStages (v, c, body, l))
          | Error _ as e -> e)
       | SBody _ :: _ :: _            -> Error `BodyNotLast
       (* [] is reached from the binder arm above when the list ends on a
@@ -921,6 +969,8 @@ stoich_ref_list:
 
 stoich_ref_item:
   | name = IDENT idxs = index_items_opt { (name, idxs) }
+  | f = IDENT LPAREN r = stoich_ref_item COMMA location = expr RPAREN
+      { stage_endpoint ~sp:$startpos ~ep:$endpos f r location }
 
 branch_entry:
   | dst = stoich_ref_item COLON weight = expr { (dst, weight) }
@@ -997,6 +1047,8 @@ index_bindings_opt:
 index_binding:
   | v = IDENT IN d = IDENT { IBind (v, d) }
   | v = IDENT IN COMPARTMENTS { IComp v }
+  | v = IDENT IN f = IDENT LPAREN c = IDENT RPAREN
+      { IStages (v, stages_domain ~sp:$startpos(f) ~ep:$endpos f c) }
   | LPAREN v = IDENT COMMA vn = IDENT RPAREN IN CONSECUTIVE LPAREN d = IDENT RPAREN
       { IConsec (v, vn, d) }
 
@@ -1191,18 +1243,18 @@ intervention_decl:
           ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos;
           ivspan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   (* add(COMP, EXPR) at [...] *)
-  | name = IDENT ibs = index_bindings_opt COLON ADD LPAREN comp = IDENT idxs = index_items_opt COMMA count = expr RPAREN AT_KW LBRACKET ts = separated_list(COMMA, instant_entry) RBRACKET guard = where_clause_opt
-      { { ivname = name; ivindices = ibs; ivaction = [AAdd (comp, idxs, count)]; ivschedule = SAtTimes ts; ivguard = guard;
+  | name = IDENT ibs = index_bindings_opt COLON ADD LPAREN tgt = stoich_ref_item COMMA count = expr RPAREN AT_KW LBRACKET ts = separated_list(COMMA, instant_entry) RBRACKET guard = where_clause_opt
+      { { ivname = name; ivindices = ibs; ivaction = [AAdd (fst tgt, snd tgt, count)]; ivschedule = SAtTimes ts; ivguard = guard;
           ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos;
           ivspan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   (* add(COMP, EXPR) { every = T, from = T0, to = T1 } — recurring schedule *)
-  | name = IDENT ibs = index_bindings_opt COLON ADD LPAREN comp = IDENT idxs = index_items_opt COMMA count = expr RPAREN LBRACE sched = recurring_body RBRACE guard = where_clause_opt
-      { { ivname = name; ivindices = ibs; ivaction = [AAdd (comp, idxs, count)]; ivschedule = sched; ivguard = guard;
+  | name = IDENT ibs = index_bindings_opt COLON ADD LPAREN tgt = stoich_ref_item COMMA count = expr RPAREN LBRACE sched = recurring_body RBRACE guard = where_clause_opt
+      { { ivname = name; ivindices = ibs; ivaction = [AAdd (fst tgt, snd tgt, count)]; ivschedule = sched; ivguard = guard;
           ivloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos;
           ivspan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   (* add(COMP, EXPR) every PERIOD at_day DAY *)
-  | name = IDENT ibs = index_bindings_opt COLON ADD LPAREN comp = IDENT idxs = index_items_opt COMMA count = expr RPAREN EVERY period = expr AT_DAY day = expr guard = where_clause_opt
-      { { ivname = name; ivindices = ibs; ivaction = [AAdd (comp, idxs, count)];
+  | name = IDENT ibs = index_bindings_opt COLON ADD LPAREN tgt = stoich_ref_item COMMA count = expr RPAREN EVERY period = expr AT_DAY day = expr guard = where_clause_opt
+      { { ivname = name; ivindices = ibs; ivaction = [AAdd (fst tgt, snd tgt, count)];
           ivschedule = SEveryAtDay { every = tpos Time_pos.Cadence period ~sp:$startpos(period) ~ep:$endpos(period);
                                      at_day = tpos Time_pos.Phase day ~sp:$startpos(day) ~ep:$endpos(day) };
           ivguard = guard;
@@ -1283,8 +1335,8 @@ reactive_kv:
 reactive_action:
   | TRANSFER LPAREN kwargs = separated_list(COMMA, transfer_kwarg) RPAREN
       { ATransfer kwargs }
-  | ADD LPAREN comp = IDENT idxs = index_items_opt COMMA count = expr RPAREN
-      { AAdd (comp, idxs, count) }
+  | ADD LPAREN tgt = stoich_ref_item COMMA count = expr RPAREN
+      { AAdd (fst tgt, snd tgt, count) }
 
 (* Recurring schedule body: kwargs in any order, newline-separated
    (matches the rest of camdl's block style — no commas required). *)
@@ -1349,8 +1401,8 @@ iv_kv:
   (* A `set` entry: `COMP = expr`, or an indexed target `c[a] = expr` inside an
      effect family (proposal 2026-11-01-indexed-set-targets). The expander
      resolves the target to one expanded cell. *)
-  | comp = IDENT idxs = index_items_opt EQ e = expr
-      { `Action (ASet (comp, idxs, e)) }
+  | tgt = stoich_ref_item EQ e = expr
+      { `Action (ASet (fst tgt, snd tgt, e)) }
 
 (* ── ODE block ───────────────────────────────────────────────────────────── *)
 
@@ -1565,6 +1617,17 @@ init_entry:
       { { icomp = comp; iindices = idxs; ibindings = []; ivalue = IVExpr v;
           iloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos;
           ispan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+  | f = IDENT LPAREN r = stoich_ref_item COMMA location = expr RPAREN EQ v = expr
+      { let (comp, idxs) = stage_endpoint ~sp:$startpos ~ep:$endpos(location) f r location in
+        { icomp = comp; iindices = idxs; ibindings = []; ivalue = IVExpr v;
+          iloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos;
+          ispan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+  | f = IDENT LPAREN r = stoich_ref_item COMMA location = expr RPAREN TILDE l = obs_likelihood
+      { let (comp, idxs) = stage_endpoint ~sp:$startpos ~ep:$endpos(location) f r location in
+        { icomp = comp; iindices = idxs; ibindings = [];
+          ivalue = IVLaw (l, Parser_errors.ast_loc_of ~sp:$startpos(l) ~ep:$endpos(l));
+          iloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos;
+          ispan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   | comp = IDENT LBRACKET ibs = separated_nonempty_list(COMMA, index_binding) RBRACKET TILDE l = obs_likelihood
       { { icomp = comp; iindices = []; ibindings = ibs;
           ivalue = IVLaw (l, Parser_errors.ast_loc_of ~sp:$startpos(l) ~ep:$endpos(l));
@@ -1666,7 +1729,8 @@ atom_expr:
   | NULL                       { EConst 0.0 }
   | name = IDENT LPAREN args = separated_list(COMMA, kw_expr) RPAREN
       (* function call with optional keyword args *)
-      { EFuncCall (name, args) }
+      { if name = "stage" then stage_call ~sp:$startpos ~ep:$endpos args
+        else EFuncCall (name, args) }
   (* One uniform rule for every arity — see [build_sum] in the header for why
      this REPLACES the per-arity productions rather than sitting beside them. *)
   | SUM LPAREN items = separated_nonempty_list(COMMA, sum_item) RPAREN
@@ -1721,6 +1785,9 @@ sum_item:
                  Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos) }
   | v = IDENT IN d = IDENT WHERE g = guard_expr
       { SBinder (v, d, Some g,
+                 Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos) }
+  | v = IDENT IN f = IDENT LPAREN c = IDENT RPAREN
+      { SStages (v, stages_domain ~sp:$startpos(f) ~ep:$endpos f c,
                  Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos) }
   | e = expr
       { SBody e }

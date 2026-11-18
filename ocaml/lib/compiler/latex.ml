@@ -157,7 +157,8 @@ let rec tex ?(prec = 0) (e : expr) : string =
   | EUnit (f, _) -> fmt_num f (* a rate literal like 0.5 'per_day — show the number *)
   | EIdent (n, _) -> sym n
   | EIndex (n, items, _) -> comp_sym n (index_tex items)
-  | ESum (v, _dim, _guard, body, _) -> Printf.sprintf "\\sum_{%s} %s" v (tex ~prec:7 body)
+  | ESum (v, _, _, body, _) | ESumStages (v, _, body, _) ->
+    Printf.sprintf "\\sum_{%s} %s" v (tex ~prec:7 body)
   | EBinOp ((Mul | Div), _, _) ->
     let num, den = flatten_product e in
     let render fs = String.concat "\\," (List.map (tex ~prec:7) fs) in
@@ -181,7 +182,7 @@ let rec tex ?(prec = 0) (e : expr) : string =
 
 and index_tex (items : index_item list) : string =
   String.concat ","
-    (List.map (function IPosn e -> tex e | INamed (_, e) -> tex e) items)
+    (List.map (function IPosn e | INamed (_, e) | IStage e -> tex e) items)
 
 and un_tex op a =
   match op with
@@ -260,7 +261,7 @@ let tex_loss (e : expr) : Declared.katex_loss list =
     | (Factor | LastFactor), EUnOp (Neg, _) -> true
     (* A sum runs to the end of its product: only what follows it is
        ambiguous. *)
-    | Factor, (EUnOp (Total, _) | ESum _) -> true
+    | Factor, (EUnOp (Total, _) | ESum _ | ESumStages _) -> true
     | AddRight, EBinOp ((Add | Sub), _, _) -> true
     | PowBase, (EIdent _ | EIndex _ | EFuncCall _ | EBinOp ((Add | Sub), _, _)) ->
       false
@@ -283,9 +284,9 @@ let tex_loss (e : expr) : Declared.katex_loss list =
     | EIndex (n, items, _) ->
       named n;
       List.iter (function
-        | IPosn e -> go Whole e
+        | IPosn e | IStage e -> go Whole e
         | INamed (_, e) -> add LIndexDimDropped; go Whole e) items
-    | ESum (_, _, _, body, _) -> add LSumRangeDropped; go SumBody body
+    | (ESum (_, _, _, body, _) | ESumStages (_, _, body, _)) -> add LSumRangeDropped; go SumBody body
     | EBinOp ((Mul | Div), _, _) ->
       let num, den = flatten_product e in
       if e <> as_rendered num den then add LGroupingChanged;
@@ -322,6 +323,8 @@ let rec subst (v : string) (level : string) (e : expr) : expr =
   | EBinOp (op, l, r) -> EBinOp (op, subst v level l, subst v level r)
   | EUnOp (op, a) -> EUnOp (op, subst v level a)
   | ESum (sv, dim, g, body, l) -> if sv = v then e else ESum (sv, dim, g, subst v level body, l)
+  | ESumStages (sv, c, body, l) ->
+    if sv = v then e else ESumStages (sv, c, subst v level body, l)
   | ECond (p, a, b) -> ECond (subst v level p, subst v level a, subst v level b)
   | EFuncCall (f, args) -> EFuncCall (f, List.map (fun (k, e) -> (k, subst v level e)) args)
   | EList es -> EList (List.map (subst v level) es)
@@ -331,6 +334,7 @@ let rec subst (v : string) (level : string) (e : expr) : expr =
 and subst_item v level = function
   | IPosn e -> IPosn (subst v level e)
   | INamed (d, e) -> INamed (d, subst v level e)
+  | IStage e -> IStage (subst v level e)
 
 let subst_ref v level ((n, items) : stoich_ref) : stoich_ref =
   (n, List.map (subst_item v level) items)
@@ -591,7 +595,7 @@ let render_model ?(name = "model") ?(expand = []) (decls : declaration list) : r
     if expand_levels = [] then "indexed"
     else "expanded over " ^ String.concat ", " (List.map fst expand_levels)
   in
-  let binder_var = function IBind (v, _) | IConsec (v, _, _) -> v | IComp v -> v in
+  let binder_var = function IBind (v, _) | IConsec (v, _, _) -> v | IComp v | IStages (v, _) -> v in
   {
     rm_name = name;
     rm_doc = List.fold_left
@@ -782,7 +786,7 @@ type model_graph = {
   mg_couplings : g_coupling list;   (** Every aggregate each edge reads. *)
 }
 
-let index_item_expr = function IPosn e | INamed (_, e) -> e
+let index_item_expr = function IPosn e | INamed (_, e) | IStage e -> e
 
 (* Dimensions summed over by every `sum(i in dim, …)` (ESum) node anywhere in
    [e], without resolving through `let` bindings — nested sums are flattened
@@ -794,6 +798,7 @@ let sum_dims_in (e : expr) : string list =
   let add d = if not (List.mem d !acc) then acc := !acc @ [ d ] in
   let rec go = function
     | ESum (_, dim, _, body, _) -> add dim; go body
+    | ESumStages (_, _, body, _) -> go body
     | EBinOp (_, l, r) -> go l; go r
     | EUnOp (_, a) -> go a
     | ECond (p, a, b) -> go p; go a; go b
@@ -835,7 +840,7 @@ let rate_couplings (pools : (string, string list) Hashtbl.t)
   in
   let rec go visited (e : expr) =
     match e with
-    | ESum _ -> add "sum" (sum_dims_in e) (* inline aggregate; sum_dims_in already descends *)
+    | ESum _ | ESumStages _ -> add "sum" (sum_dims_in e) (* inline aggregate; sum_dims_in already descends *)
     | EIdent (n, _) ->
       if Hashtbl.mem pools n then add n (Hashtbl.find pools n)
       else if Hashtbl.mem lets n && not (List.mem n visited) then

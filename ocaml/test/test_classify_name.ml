@@ -269,7 +269,7 @@ let binder_vars (ibs : index_binding list) : string list =
   List.concat_map (function
       | IBind (v, _)         -> [v]
       | IConsec (v, next, _) -> [v; next]
-      | IComp v              -> [v]) ibs
+      | IComp v | IStages (v, _) -> [v]) ibs
 
 (* Every bare name and every indexed head in [e], each with the binders in
    scope where it appears. Index items are tokens the expander substitutes
@@ -282,7 +282,8 @@ let rec names ~(binders : string list) (e : expr)
   | EIndex (n, _, _)  -> [ (`Head, n, binders) ]
   | EBinOp (_, a, b)  -> names ~binders a @ names ~binders b
   | EUnOp (_, a)      -> names ~binders a
-  | ESum (v, _, _, body, _) -> names ~binders:(v :: binders) body
+  | ESum (v, _, _, body, _) | ESumStages (v, _, body, _) ->
+    names ~binders:(v :: binders) body
   | ECond (p, a, b)   -> names ~binders p @ names ~binders a @ names ~binders b
   (* `unchecked_dim(<expr>, dim = <keyword>, reason = "...")`: only the
      positional argument is an expression; `dim` is one of a fixed set of

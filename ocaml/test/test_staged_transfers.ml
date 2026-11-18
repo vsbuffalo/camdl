@@ -202,7 +202,7 @@ let test_restart_warning_is_per_declaration_and_silenced_by_a_stage () =
     (List.length (warnings_of ~code:"W107" (age_src
        "  jump[a in age] : transfer(fraction = 0.5, from = E[a], to = I[a]) at [10 'days]\n")));
   let explicit =
-    age_src "  late : transfer(fraction = 0.5, from = E[pre, s3], to = I[pre]) at [10 'days]\n" in
+    age_src "  late : transfer(fraction = 0.5, from = stage(E[pre], 3), to = I[pre]) at [10 'days]\n" in
   check_actions (compile_ok explicit) "late" [ "fraction 0.5 [E_pre_s3>I_pre_s1]" ];
   Alcotest.(check int) "no W107 when the source names its stage" 0
     (List.length (warnings_of ~code:"W107" explicit))
@@ -210,8 +210,8 @@ let test_restart_warning_is_per_declaration_and_silenced_by_a_stage () =
 (* An endpoint that names a stage is that cell only. *)
 let test_explicit_stage_is_one_cell () =
   let m = compile_ok (age_src
-    "  late : transfer(fraction = 0.5, from = E[pre, s2], to = R[pre]) at [10 'days]\n\
-    \  into : transfer(fraction = 0.5, from = E[pre], to = E[sch, s1]) at [11 'days]\n") in
+    "  late : transfer(fraction = 0.5, from = stage(E[pre], 2), to = R[pre]) at [10 'days]\n\
+    \  into : transfer(fraction = 0.5, from = E[pre], to = stage(E[sch], 1)) at [11 'days]\n") in
   check_actions m "late" [ "fraction 0.5 [E_pre_s2>R_pre]" ];
   check_actions m "into"
     [ grouped "0.5" (List.map (fun s -> (s, "E_sch_s1")) (e_stages "pre")) ]
@@ -317,12 +317,12 @@ let test_add_enters_stage_one () =
    across the stages. The hint's own suggestion compiles. *)
 let test_set_on_a_residence_reference_is_refused () =
   expect_error ~code:"E366"
-    ~mentions:[ "sets 'E_pre'"; "Erlang dwell"; "3 stages"; "`E_pre_s1 = ...`" ]
+    ~mentions:[ "sets 'E_pre'"; "Erlang dwell"; "3 stages"; "`stage(E[pre], 1) = ...`" ]
     ~absent:[ "E265"; "__latency_stage" ]
     (age_src "  z : { E[pre] = 5  at = [10 'days] }\n");
-  expect_error ~code:"E366" ~mentions:[ "sets 'E'"; "`E_s1 = ...`" ]
+  expect_error ~code:"E366" ~mentions:[ "sets 'E'"; "`stage(E, 1) = ...`" ]
     (flat_src "  z : { E = 5  at = [10 'days] }\n");
-  let m = compile_ok (age_src "  z : { E_pre_s1 = 5  at = [10 'days] }\n") in
+  let m = compile_ok (age_src "  z : { stage(E[pre], 1) = 5  at = [10 'days] }\n") in
   check_actions m "z" [ "set E_pre_s1 = 5" ]
 
 (* A bare stratified staged compartment is still not one cell for `add`. *)
@@ -337,10 +337,10 @@ let test_add_to_a_bare_stratified_staged_compartment_is_e265 () =
 let test_stage_into_same_compartment_residence_is_refused () =
   expect_error ~code:"E367"
     ~mentions:[ "one stage of the staged compartment 'E' (E_pre_s2)";
-                "`to = E[sch, s1]`" ]
-    (age_src "  x : transfer(fraction = 0.5, from = E[pre, s2], to = E[sch]) at [10 'days]\n");
+                "`to = stage(E[sch], 1)`" ]
+    (age_src "  x : transfer(fraction = 0.5, from = stage(E[pre], 2), to = E[sch]) at [10 'days]\n");
   let m = compile_ok (age_src
-    "  x : transfer(fraction = 0.5, from = E[pre, s2], to = E[sch, s1]) at [10 'days]\n") in
+    "  x : transfer(fraction = 0.5, from = stage(E[pre], 2), to = stage(E[sch], 1)) at [10 'days]\n") in
   check_actions m "x" [ "fraction 0.5 [E_pre_s2>E_sch_s1]" ]
 
 (* ── Same text for every stage count ─────────────────────────────────────── *)

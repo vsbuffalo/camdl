@@ -97,6 +97,7 @@ let pp_indices ppf ibs =
     | IComp v ->
       Fmt.pf ppf "%s in " v;
       Term_style.dim_style Fmt.string ppf "compartments"
+    | IStages (v, c) -> Fmt.pf ppf "%s in stages(%s)" v c
   in
   Fmt.pf ppf "[";
   List.iteri (fun i ib ->
@@ -818,7 +819,7 @@ let collect_let_refs_ast ctx ast_rate =
        | Some lb -> add lb | None -> ())
     | EBinOp (_, l, r) -> walk l; walk r
     | EUnOp (_, e) -> walk e
-    | ESum (_, _, _, body, _) -> walk body
+    | (ESum (_, _, _, body, _) | ESumStages (_, _, body, _)) -> walk body
     | ECond (p, t, el) -> walk p; walk t; walk el
     | EFuncCall (_, args) -> List.iter (fun (_, e) -> walk e) args
     | EList es -> List.iter walk es
@@ -889,7 +890,7 @@ let run_transition_rate ppf (model : Ir.model) ctx name =
             match ib with
             | IBind (v, _) -> List.assoc_opt v env
             | IConsec (v, _, _) -> List.assoc_opt v env
-            | IComp v -> List.assoc_opt v env
+            | IComp v | IStages (v, _) -> List.assoc_opt v env
           ) lb.lindices in
           let bound_name =
             if idx_vals = [] then lb.lname
@@ -947,6 +948,7 @@ let run_transition_count ppf (model : Ir.model) ctx (pattern : string option) ~a
         | IComp v ->
           let comps = List.filter (fun cd -> cd.ckind = Integer) ctx.Expander.comp_decls in
           (v, "compartments", List.length comps)
+        | IStages (v, c) -> (v, Printf.sprintf "stages(%s)" c, 1)
       in
       ignore var;
       Fmt.pf ppf "  ";
@@ -1001,6 +1003,7 @@ let run_let ppf ctx name =
       | IBind (_, d) -> Some d
       | IConsec (_, _, d) -> Some d
       | IComp _ -> Some "compartments"
+      | IStages (_, c) -> Some (Printf.sprintf "stages(%s)" c)
     ) lb.lindices in
     if dim_names = [] then
       Term_style.dim_style Fmt.string ppf "scalar"
@@ -1030,7 +1033,7 @@ let run_let ppf ctx name =
         match ib with
         | IBind (v, _)      -> List.assoc_opt v env
         | IConsec (v, _, _) -> List.assoc_opt v env
-        | IComp v           -> List.assoc_opt v env
+        | IComp v | IStages (v, _)           -> List.assoc_opt v env
       ) lb.lindices in
       let bound_name =
         if idx_vals = [] then lb.lname
@@ -1068,7 +1071,7 @@ let run_let ppf ctx name =
         | EIndex (n, _, _) when n = lb.lname -> true
         | EBinOp (_, l, r) -> expr_refs_name l || expr_refs_name r
         | EUnOp (_, e) -> expr_refs_name e
-        | ESum (_, _, _, body, _) -> expr_refs_name body
+        | (ESum (_, _, _, body, _) | ESumStages (_, _, body, _)) -> expr_refs_name body
         | ECond (p, t, el) ->
           expr_refs_name p || expr_refs_name t || expr_refs_name el
         | EFuncCall (_, args) ->

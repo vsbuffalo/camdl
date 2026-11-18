@@ -115,7 +115,7 @@ let binders_of (bs : index_binding list) : string list =
   List.concat_map (function
     | IBind (v, _)        -> [v]
     | IConsec (v, v2, _)  -> [v; v2]
-    | IComp v             -> [v]) bs
+    | IComp v | IStages (v, _)             -> [v]) bs
 
 let with_binders pos bs = { pos with binders = binders_of bs @ pos.binders }
 
@@ -154,6 +154,9 @@ let index_binding : Ast.index_binding -> D.index_binding = function
   | IBind (v, d)        -> BIn (v, d)
   | IConsec (v, v2, d)  -> BConsecutive (v, v2, d)
   | IComp v             -> BCompartments v
+  (* The declared model has no binder of its own for the stages of a
+     compartment: the domain is recorded as it is written. *)
+  | IStages (v, c)      -> BIn (v, Printf.sprintf "stages(%s)" c)
 
 let bindings = List.map index_binding
 
@@ -265,6 +268,9 @@ let rec tree env pos (e : expr) : D.expr_tree =
   | ESum (v, d, g, body, _) ->
     TSum { ts_var = v; ts_dim = d; ts_guard = Option.map guard g;
            ts_body = tree env { pos with binders = v :: pos.binders } body }
+  | ESumStages (v, c, body, _) ->
+    TSum { ts_var = v; ts_dim = Printf.sprintf "stages(%s)" c; ts_guard = None;
+           ts_body = tree env { pos with binders = v :: pos.binders } body }
   | ECond (p, a, b) -> TCond (tree env pos p, tree env pos a, tree env pos b)
   | EFuncCall (f, kvs) -> TCall (f, List.map (call_arg env pos f) kvs)
   | EList xs -> TList (List.map (tree env pos) xs)
@@ -287,6 +293,11 @@ and call_arg env pos f ((k, v) : string * expr) : D.arg =
 and index_item env pos : Ast.index_item -> D.index_item = function
   | IPosn e -> IPositional (index_tree env pos e)
   | INamed (d, e) -> D.INamed (d, index_tree env pos e)
+  (* `stage(E[a], 2)`: the location, as the call `stage(2)` in the last
+     index position. A location is a number or a variable bound by
+     `in stages(E)`, never a level name the model declares. *)
+  | IStage e ->
+    IPositional (TCall ("stage", [ { a_name = ""; a_value = index_tree env pos e } ]))
 
 and index_tree env pos (e : expr) : D.expr_tree =
   match e with

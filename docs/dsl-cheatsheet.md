@@ -257,6 +257,12 @@ promote : transfer(fraction = 0.2, from = E[pre], to = E[sch]) at [30 'days]  # 
 expose  : transfer(fraction = 0.1, from = S[pre], to = E[pre]) at [40 'days]  # enters stage 1
 treat   : transfer(fraction = 0.5, from = E, to = T)           at [50 'days]  # every stage, per age
 import  : add(E[pre], 5)                                       at [70 'days]  # enters stage 1
+
+# one stage, when the model means one: stage(<reference>, <location>)
+late_death : stage(E[pre], 3) --> @ mu * stage(E[pre], 3)                      # out of stage 3 only
+isolate    : transfer(fraction = 0.8, from = stage(E[pre], 3), to = T[pre]) at [30 'days]
+move[st in stages(E)] : transfer(fraction = 0.2, from = stage(E[pre], st), to = stage(E[sch], st)) at [40 'days]
+init { stage(E[pre], 2) = 10 }                                                 # init without a stage lands in stage 1
 ```
 
 `erlang(stages = k, mean | rate)`: give exactly one of `mean` / `rate`; `stages`
@@ -284,20 +290,41 @@ compartment total `N`. On integer compartments it moves `floor(N * fraction)`
 (largest remainder, earlier stage on a tie), so the number moved does not depend
 on `stages`: 5 people in stages (3, 1, 1) at 0.4 give up 2, as (1, 1, 0). The
 floor is taken once for the compartment, never per stage; a transfer that names
-one cell (an unstaged compartment, or `from = E[pre, s2]`) is unchanged and
-floors that cell. Into a staged compartment, `transfer` and `add` enter stage 1;
-within it, the stage is kept. `set` on it is `E366` (set a stage cell:
-`E_pre_s1 = ...`); `from = E[pre, s2], to = E[sch]` is `E367`; an action on a
-`hyper_erlang` compartment is `E368`. Two events that each transfer out of the
-same staged compartment at the same instant are a runtime error: merge them or
-give them different times.
+one cell (an unstaged compartment, or `from = stage(E[pre], 2)`) is unchanged
+and floors that cell. Into a staged compartment, `transfer` and `add` enter
+stage 1; within it, the stage is kept. `set` on it is `E366` (set one stage:
+`stage(E[pre], 1) = ...`); `from = stage(E[pre], 2), to = E[sch]` is `E367`; an
+action on a `hyper_erlang` compartment is `E368`. Two events that each transfer
+out of the same staged compartment at the same instant are a runtime error:
+merge them or give them different times.
+
+**One stage.** `stage(E[pre], 2)` is stage 2 of `E[pre]`: the compartment with
+every population dimension indexed, then a location from 1 to `stages`, or a
+variable bound by `in stages(E)`. It is a state expression
+(`beta * S * stage(I, 2) / N`) and an endpoint of a transition, `transfer`,
+`add`, `set` and `init`. `[st in stages(E)]` binds a variable over the
+locations, on a transition, intervention, event or reactive intervention, and in
+`sum(st in stages(E), ...)`; nothing else is indexed by it. A `stage(...)`
+endpoint is that location only: a transition out of it is an ordinary
+transition, not a competing exit, and it silences `W107`. `init` and `add`
+without a stage land in stage 1. At `stages = 1` (or with no `via` law)
+`stage(E[pre], 1)` is `E[pre]` and `stages(E)` has one element, so a model
+written with location 1 and stage variables compiles at every stage count. A
+stage is a stochastic progression state, not an elapsed-time interval:
+`stage(E, 3)` selects people who have completed two stage transitions, not
+people infected between two dates. The generated stage dimension is not
+nameable: `[st in __latency_stage]` is `E375` and `E[pre, s2]` is `E376`, each
+with the replacement; the cell name `E_pre_s2` still works.
 
 Diagnostics: `E243` unknown law, `E244` stages, `E245` mean-XOR-rate, `E246`
 second `via` on one source, `E255` <2 branches, `E256` last-branch weight,
 `E258` duplicate labels, `E248` stratified `hyper_erlang` (deferred). Competing
 exits: `E361` `overdispersed(...)`, `E362` takes more than one individual,
 `E363` two staged sources, `E364` out of a `hyper_erlang` compartment, `E365`
-staged plus unstaged source. Full section: language spec §9.4.1.
+staged plus unstaged source. Stages: `E369` not a residence reference, `E370` no
+such location, `E371` another compartment's stage variable, `E372` a stage
+variable used elsewhere, `E373` `hyper_erlang`, `E374` `stages(...)` misused.
+Full section: language spec §9.4.1.
 
 ## Generated quantities — `quantities {}`
 

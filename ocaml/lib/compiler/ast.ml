@@ -149,6 +149,12 @@ type index_item =
       (** [S[a]] or [S[child]]: the index in this position. *)
   | INamed of string * expr
       (** [S[age = child]]: the index for the named dimension. *)
+  | IStage of expr
+      (** The location of [stage(E[a], 2)], which the parser holds as the
+          last index of the reference: [E] indexed by [a] and [IStage 2].
+          The location is an integer literal or a variable bound by
+          [in stages(E)]. The expander replaces every [IStage] before any
+          name is resolved ([Expander.lower_stage_forms]). *)
 
 (** A binder that makes a declaration a family with one member per level,
     written in brackets after the declaration's name.
@@ -168,6 +174,11 @@ and index_binding =
   | IComp   of string
       (** [c in compartments]: the variable ranges over the model's integer
           compartments; real compartments are excluded. *)
+  | IStages of string * string
+      (** [st in stages(E)]: the variable ranges over the stages of the
+          compartment, one when it has no Erlang dwell of several stages.
+          The expander replaces it before any name is resolved
+          ([Expander.lower_stage_forms]). *)
 
 (** An expression: a rate, a value, an argument or a predicate, as written.
     Names are not yet resolved, so a parameter, a compartment and a [let]
@@ -201,6 +212,11 @@ and expr =
           the binder [a in age where P]. A flat
           [sum(a in age, p in patch, body)] parses to nested [ESum] nodes, one
           per binder, each with its own binder's span. *)
+  | ESumStages of string * string * expr * loc
+      (** [sum(st in stages(E), body)]: [body] summed over the stages of the
+          compartment. The fields are the variable, the compartment, the
+          body, and the span of the binder. The expander replaces it before
+          any name is resolved ([Expander.lower_stage_forms]). *)
   | ECond   of expr * expr * expr
       (** [if p then a else b]. *)
   | EFuncCall of string * (string * expr) list
@@ -1426,6 +1442,7 @@ let rec stamp_expr_file ~file (e : expr) : expr =
   | EBinOp (op, a, b) -> EBinOp (op, go a, go b)
   | EUnOp (op, a) -> EUnOp (op, go a)
   | ESum (v, d, g, body, l) -> ESum (v, d, g, go body, stamp_loc_file ~file l)
+  | ESumStages (v, c, body, l) -> ESumStages (v, c, go body, stamp_loc_file ~file l)
   | ECond (p, a, b) -> ECond (go p, go a, go b)
   | EFuncCall (f, kvs) -> EFuncCall (f, List.map (fun (k, v) -> (k, go v)) kvs)
   | EList xs -> EList (List.map go xs)
@@ -1436,6 +1453,7 @@ let rec stamp_expr_file ~file (e : expr) : expr =
 and stamp_index_item_file ~file = function
   | IPosn e -> IPosn (stamp_expr_file ~file e)
   | INamed (n, e) -> INamed (n, stamp_expr_file ~file e)
+  | IStage e -> IStage (stamp_expr_file ~file e)
 
 (** A quantity declaration with its body and spans stamped by
     {!stamp_loc_file}. *)
