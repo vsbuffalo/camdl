@@ -7,7 +7,8 @@
 //! - `profile` takes the flag (through the shared `InferenceCore`) and the
 //!   fit-config field, and must apply them to every cell;
 //! - `pfilter` applies the flag and must put it in its run identity, or a run
-//!   with it and a run without it share one stored leaf;
+//!   with it and a run without it share one stored leaf; with `--fit` it must
+//!   also apply the fit config's field (gh#1235);
 //! - commands that replay a stored fit (`fit predict`, `compare`) must replay
 //!   it under the fit's own setting, as they already do for forcing
 //!   extrapolation.
@@ -232,6 +233,61 @@ fn pfilter_keys_allow_degenerate_rates() {
         assert!((s - p).abs() < 1e-3,
             "each leaf holds its own run's loglik: stored {stored:?}, printed {printed:?}");
     }
+}
+
+/// A fit config over the ten-day fixture with `[config]
+/// allow_degenerate_rates = {flag}`, its data the fixture's `cases.tsv`, and
+/// `beta`, `gamma` in `[0.8, 1.2]`, where some particles reach `S + I = 0` and
+/// some do not.
+fn partial_collapse_fit_config(flag: bool) -> String {
+    format!(
+        "[model]\ncamdl = \"model.camdl\"\n\n[data.observations]\ncases = \"cases.tsv\"\n\n\
+         [config]\nallow_degenerate_rates = {flag}\n\n\
+         [estimate]\nbeta = {{ bounds = [0.8, 1.2], start = 1.0 }}\n\
+         gamma = {{ bounds = [0.8, 1.2], start = 1.0 }}\n\n[fixed]\n")
+}
+
+fn partial_collapse_fixture(tag: &str) -> Tmp {
+    let tmp = tempdir(tag);
+    std::fs::write(tmp.0.join("model.camdl"), model(10, 0.1)).unwrap();
+    std::fs::write(tmp.0.join("cases.tsv"), cases(10)).unwrap();
+    std::fs::write(tmp.0.join("on.toml"), partial_collapse_fit_config(true)).unwrap();
+    std::fs::write(tmp.0.join("off.toml"), partial_collapse_fit_config(false)).unwrap();
+    tmp
+}
+
+/// `pfilter --fit` scores under the fit config's `[config]
+/// allow_degenerate_rates`, as `fit run` did. Only some particles collapse, so
+/// the filter scores either way — without the setting it drops the collapsed
+/// particles and returns a different finite log-likelihood, with no error.
+/// Before the fix `pfilter` applied only the CLI flag: the run under the
+/// setting's config returned the value of the run without it, and shared its
+/// leaf.
+#[test]
+fn pfilter_applies_the_fit_configs_allow_degenerate_rates() {
+    let tmp = partial_collapse_fixture("pfilter_config");
+    let run = |extra: &[&str]| {
+        let mut args = vec![
+            "pfilter", "model.camdl", "--param", "beta=1", "--param", "gamma=1",
+            "--data", "cases.tsv", "--particles", "50", "--seed", "1",
+        ];
+        args.extend_from_slice(extra);
+        let o = camdl(&tmp.0, &args);
+        assert!(o.status.success(), "{}", text(&o));
+        String::from_utf8_lossy(&o.stdout).trim().parse::<f64>().unwrap()
+    };
+    let off = run(&["--fit", "off.toml"]);
+    let flagged = run(&["--fit", "off.toml", "--allow-degenerate-rates"]);
+    assert!((off - flagged).abs() > 1e-6,
+        "the control: the flag changes this filter's loglik ({off} vs {flagged})");
+    let on = run(&["--fit", "on.toml"]);
+    assert!((on - flagged).abs() < 1e-9,
+        "the fit config's setting must score as the flag does: config {on}, flag {flagged}, \
+         neither {off}");
+
+    let leaves = pfilter_leaves(&tmp.0);
+    assert_eq!(leaves.len(), 2,
+        "the config's run shares the flagged run's leaf, not the unflagged one's: {leaves:?}");
 }
 
 // ── replaying a stored fit ──────────────────────────────────────────────────

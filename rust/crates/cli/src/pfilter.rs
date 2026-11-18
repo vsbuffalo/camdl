@@ -148,7 +148,6 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // whether each stream is a terminal.
     let out = crate::out::Out::new(false);
     let _eval_stats_guard = crate::util::EvalStatsReportGuard::start();  // gh#audit-H5
-    sim::eval_stats::set_allow_degenerate_rates(a.inference.allow_degenerate_rates);  // gh#audit-C6
     crate::forcing_extrapolation::set_allowed(a.inference.forcing_extrapolation.allow_forcing_extrapolation);
     let ir_path = a.model.to_string_lossy().into_owned();
     let n_particles = a.particles;
@@ -182,6 +181,14 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             out.fail(format!("error: failed to load --fit toml '{}': {}", path_str, e));
         })
     });
+    // A rate that collapses (a division by an empty compartment) is 0 under
+    // `--allow-degenerate-rates` or the `--fit` config's `[config]
+    // allow_degenerate_rates`, which `fit run` applied to the fit, and kills
+    // the particle otherwise (gh#1235). Applied before any particle runs; the
+    // store leaf keys the value read back from `sim::eval_stats` below.
+    sim::eval_stats::set_allow_degenerate_rates(
+        a.inference.allow_degenerate_rates
+            || fit_problem.as_ref().is_some_and(|p| p.config.allow_degenerate_rates));
     let objective = fit_problem
         .as_ref()
         .map(|p| p.likelihood_objective())
