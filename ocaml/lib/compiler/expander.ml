@@ -8195,17 +8195,30 @@ let expand_init ctx ~(comps : Ir.compartment list) =
       if Hashtbl.mem ctx.comp_tbl ie.icomp then begin
         (* The base compartment exists, but this key is not a real cell:
            a bare stratified reference, or a wrong/partial index set. *)
-        let cells = expand_compartment_name ctx ie.icomp in
-        Diagnostics.error ctx.diags ~code:"E277" ~loc
-          ~message:(Printf.sprintf
-            "initial condition '%s' does not name an expanded compartment \
-             cell — compartment '%s' is stratified and requires explicit \
-             strata in `init`"
-            concrete_name ie.icomp)
-          ~hint:(Printf.sprintf
-            "specify each cell, e.g. %s = ...   (cells: %s)"
-            (List.hd cells) (String.concat ", " cells))
-          ()
+        match expand_compartment_name ctx ie.icomp with
+        | [] ->
+          (* No cells: a dimension the compartment is stratified by has no
+             levels, typically because its data file could not be read, which
+             is reported where the dimension is read. *)
+          Diagnostics.error ctx.diags ~code:"E277" ~loc
+            ~message:(Printf.sprintf
+              "initial condition '%s' names a cell of compartment '%s', which \
+               has no cells: a dimension it is stratified by has no levels"
+              concrete_name ie.icomp)
+            ~hint:"fix the dimension's levels first (a `read(...)` whose file \
+                   is missing is reported on its own)"
+            ()
+        | first :: _ as cells ->
+          Diagnostics.error ctx.diags ~code:"E277" ~loc
+            ~message:(Printf.sprintf
+              "initial condition '%s' does not name an expanded compartment \
+               cell — compartment '%s' is stratified and requires explicit \
+               strata in `init`"
+              concrete_name ie.icomp)
+            ~hint:(Printf.sprintf
+              "specify each cell, e.g. %s = ...   (cells: %s)"
+              first (String.concat ", " cells))
+            ()
       end else
         Diagnostics.error ctx.diags ~code:"E277" ~loc
           ~message:(Printf.sprintf

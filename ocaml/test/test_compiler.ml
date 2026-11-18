@@ -13259,6 +13259,29 @@ let test_init_bare_stratified_single_diagnostic () =
    | [d] -> Alcotest.(check string) "located E277" "E277" d.code
    | _ -> ())
 
+(* An init entry naming a level of a dimension whose levels could not be read
+   (its data file is missing): the expander's membership check built its hint
+   from the dimension's cells, which are none, and raised [Failure "hd"]. The
+   compile reported that as a no-location `E001: hd`, in place of the missing
+   file. The missing file is the root cause and is what is reported. *)
+let test_init_on_unread_dimension_reports_the_file () =
+  let src = {|
+time_unit = 'days
+compartments { S, I }
+dimensions { patch = read("data/missing-for-init-test.tsv", column = "patch") }
+stratify(by = patch)
+parameters { gamma : rate in [0.01, 1.0] }
+transitions {
+  recovery[p in patch] : I[p] --> S[p] @ gamma * I[p]
+}
+init { I[north] = 1 }
+simulate { from = 0 'days  to = 10 'days }
+|} in
+  let diags = Compiler.collect_diagnostics ~name:"init_unread_dim" src in
+  let codes = List.map (fun (d : Diagnostics.diagnostic) -> d.code) diags in
+  Alcotest.(check bool) "no E001 (no exception escaped)" false (List.mem "E001" codes);
+  Alcotest.(check bool) "the missing file is reported (E200)" true (List.mem "E200" codes)
+
 (* ── gh#733: an init entry may read another compartment's initial value ──────
    The entries are evaluated in dependency order against the partially built
    state, so `S = N0 - I` reads the `I` that was just seeded. Two things follow
@@ -17006,6 +17029,7 @@ let () =
       Alcotest.test_case "E277 unknown compartment init X[child]" `Quick test_init_unknown_compartment_rejected;
       Alcotest.test_case "concrete cell init S[child] ok" `Quick test_init_concrete_cell_ok;
       Alcotest.test_case "single diagnostic for one root cause" `Quick test_init_bare_stratified_single_diagnostic;
+      Alcotest.test_case "init on an unread dimension reports the file" `Quick test_init_on_unread_dimension_reports_the_file;
     ];
     "init_laws", [
       Alcotest.test_case "all four laws compile" `Quick
