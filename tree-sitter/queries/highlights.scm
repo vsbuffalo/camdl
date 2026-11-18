@@ -220,6 +220,13 @@
 
 (stoich_ref name: (identifier) @variable.parameter)
 
+; One stage of a compartment, `stage(E[a], 2)`, and the stages of a compartment
+; as a binder domain, `st in stages(E)`.
+(stage_ref     func: (identifier) @function.builtin)
+(stage_ref     name: (identifier) @variable.parameter)
+(stages_domain func: (identifier) @function.builtin)
+(stages_domain comp: (identifier) @variable.parameter)
+
 ; ── Guard expressions ─────────────────────────────────────────────────────────
 
 (guard_atom left:  (identifier) @variable)

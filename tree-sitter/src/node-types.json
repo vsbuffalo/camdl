@@ -865,6 +865,16 @@
           }
         ]
       }
+    },
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "stages_domain",
+          "named": true
+        }
+      ]
     }
   },
   {
@@ -999,7 +1009,7 @@
     "fields": {
       "comp": {
         "multiple": false,
-        "required": true,
+        "required": false,
         "types": [
           {
             "type": "identifier",
@@ -1025,6 +1035,10 @@
         {
           "type": "init_brackets",
           "named": true
+        },
+        {
+          "type": "stage_ref",
+          "named": true
         }
       ]
     }
@@ -1038,7 +1052,7 @@
         "required": false,
         "types": [
           {
-            "type": "identifier",
+            "type": "stoich_ref",
             "named": true
           }
         ]
@@ -1149,7 +1163,7 @@
           "named": true
         },
         {
-          "type": "identifier",
+          "type": "stoich_ref",
           "named": true
         }
       ]
@@ -1797,7 +1811,7 @@
         "required": false,
         "types": [
           {
-            "type": "identifier",
+            "type": "stoich_ref",
             "named": true
           }
         ]
@@ -2182,9 +2196,29 @@
     }
   },
   {
-    "type": "stoich_ref",
+    "type": "stage_ref",
     "named": true,
     "fields": {
+      "func": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "location": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "expr",
+            "named": true
+          }
+        ]
+      },
       "name": {
         "multiple": false,
         "required": true,
@@ -2202,6 +2236,62 @@
       "types": [
         {
           "type": "index_items",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "stages_domain",
+    "named": true,
+    "fields": {
+      "comp": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "func": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "stoich_ref",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "index_items",
+          "named": true
+        },
+        {
+          "type": "stage_ref",
           "named": true
         }
       ]
@@ -2279,7 +2369,7 @@
       },
       "dim": {
         "multiple": false,
-        "required": true,
+        "required": false,
         "types": [
           {
             "type": "identifier",
@@ -2302,6 +2392,10 @@
       "multiple": false,
       "required": false,
       "types": [
+        {
+          "type": "stages_domain",
+          "named": true
+        },
         {
           "type": "where_clause",
           "named": true

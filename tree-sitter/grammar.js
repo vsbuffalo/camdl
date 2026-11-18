@@ -291,7 +291,23 @@ module.exports = grammar({
     // (sum) on the RHS of -->.
     stoich_ref_list: ($) => sep1($.stoich_ref, "+"),
 
-    stoich_ref: ($) => seq(field("name", $.identifier), optional($.index_items)),
+    stoich_ref: ($) =>
+      choice(seq(field("name", $.identifier), optional($.index_items)), $.stage_ref),
+
+    // One stage of a compartment with an Erlang dwell, as an endpoint:
+    // `stage(E[a], 2)`. `stage` is an ordinary identifier read by position,
+    // so a model may still name a compartment `stage`; the same text in an
+    // expression is a call_expr.
+    stage_ref: ($) =>
+      seq(
+        field("func", $.identifier),
+        "(",
+        field("name", $.identifier),
+        optional($.index_items),
+        ",",
+        field("location", $.expr),
+        ")",
+      ),
 
     where_clause: ($) => seq("where", $.guard_expr),
 
@@ -345,6 +361,7 @@ module.exports = grammar({
       choice(
         seq(field("var", $.identifier), "in", field("dim", $.identifier)),
         seq(field("var", $.identifier), "in", "compartments"),
+        seq(field("var", $.identifier), "in", $.stages_domain),
         seq(
           "(",
           field("var", $.identifier),
@@ -358,6 +375,11 @@ module.exports = grammar({
           ")",
         ),
       ),
+
+    // The stages of a compartment as a binder domain: `st in stages(E)`.
+    // `stages` is an ordinary identifier read by position.
+    stages_domain: ($) =>
+      seq(field("func", $.identifier), "(", field("comp", $.identifier), ")"),
 
     // ── Index items  [a, b]  or  [row = a, col = b] ──────────────────────
 
@@ -482,7 +504,7 @@ module.exports = grammar({
         seq(
           "add",
           "(",
-          field("comp", $.identifier),
+          field("comp", $.stoich_ref),
           ",",
           field("count", $.expr),
           ")",
@@ -543,7 +565,7 @@ module.exports = grammar({
           ":",
           "add",
           "(",
-          field("comp", $.identifier),
+          field("comp", $.stoich_ref),
           ",",
           field("count", $.expr),
           ")",
@@ -560,7 +582,7 @@ module.exports = grammar({
           ":",
           "add",
           "(",
-          field("comp", $.identifier),
+          field("comp", $.stoich_ref),
           ",",
           field("count", $.expr),
           ")",
@@ -576,7 +598,7 @@ module.exports = grammar({
           ":",
           "add",
           "(",
-          field("comp", $.identifier),
+          field("comp", $.stoich_ref),
           ",",
           field("count", $.expr),
           ")",
@@ -600,7 +622,7 @@ module.exports = grammar({
       choice(
         seq("at", "=", "[", commaSep($.expr), "]"),
         seq("every", "=", $.expr, "from", "=", $.expr, "to", "=", $.expr),
-        seq($.identifier, "=", $.expr),
+        seq($.stoich_ref, "=", $.expr),
       ),
 
     recurring_kv: ($) =>
@@ -650,12 +672,17 @@ module.exports = grammar({
 
     init_entry: ($) =>
       seq(
-        field("comp", $.identifier),
-        // brackets may carry either concrete index items (S[young] = ...)
-        // or loop bindings (S[p in patch] = ...). One unified rule with a
-        // choice inside avoids the ambiguity tree-sitter would otherwise see
-        // when only the bracket content distinguishes the two forms.
-        optional($.init_brackets),
+        choice(
+          seq(
+            field("comp", $.identifier),
+            // brackets may carry either concrete index items (S[young] = ...)
+            // or loop bindings (S[p in patch] = ...). One unified rule with a
+            // choice inside avoids the ambiguity tree-sitter would otherwise
+            // see when only the bracket content distinguishes the two forms.
+            optional($.init_brackets),
+          ),
+          $.stage_ref,
+        ),
         "=",
         field("value", $.expr),
       ),
@@ -819,8 +846,10 @@ module.exports = grammar({
         "(",
         field("var", $.identifier),
         "in",
-        field("dim", $.identifier),
-        optional($.where_clause),
+        choice(
+          seq(field("dim", $.identifier), optional($.where_clause)),
+          $.stages_domain,
+        ),
         ",",
         field("body", $.expr),
         ")",

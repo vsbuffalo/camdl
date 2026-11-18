@@ -39,6 +39,9 @@ Surface covered:
   and the `<col> ~ Dist(...)` measurement model.
 - Tagged simulate integrator (`integrator = rk45 { atol = 1e-8, rtol = 1e-6 }`)
   and the `dt` step.
+- Explicit stages of a `via erlang` compartment: `stage(E[a], 2)` as a
+  transition, `transfer`, `add`, `set` and `init` endpoint (in an expression it
+  is an ordinary call), and `st in stages(E)` as a binder and `sum` domain.
 - Filtered sums (`sum(q in patch where dist[p, q] < 50 and q != p, I[q])`) and
   table guards in `where` clauses.
 - Tier-3 dimension annotations on parameter declarations — both unit literals

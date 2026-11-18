@@ -1658,8 +1658,54 @@
       ]
     },
     "stoich_ref": {
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "SEQ",
+          "members": [
+            {
+              "type": "FIELD",
+              "name": "name",
+              "content": {
+                "type": "SYMBOL",
+                "name": "identifier"
+              }
+            },
+            {
+              "type": "CHOICE",
+              "members": [
+                {
+                  "type": "SYMBOL",
+                  "name": "index_items"
+                },
+                {
+                  "type": "BLANK"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "SYMBOL",
+          "name": "stage_ref"
+        }
+      ]
+    },
+    "stage_ref": {
       "type": "SEQ",
       "members": [
+        {
+          "type": "FIELD",
+          "name": "func",
+          "content": {
+            "type": "SYMBOL",
+            "name": "identifier"
+          }
+        },
+        {
+          "type": "STRING",
+          "value": "("
+        },
         {
           "type": "FIELD",
           "name": "name",
@@ -1679,6 +1725,22 @@
               "type": "BLANK"
             }
           ]
+        },
+        {
+          "type": "STRING",
+          "value": ","
+        },
+        {
+          "type": "FIELD",
+          "name": "location",
+          "content": {
+            "type": "SYMBOL",
+            "name": "expr"
+          }
+        },
+        {
+          "type": "STRING",
+          "value": ")"
         }
       ]
     },
@@ -2115,6 +2177,27 @@
           "type": "SEQ",
           "members": [
             {
+              "type": "FIELD",
+              "name": "var",
+              "content": {
+                "type": "SYMBOL",
+                "name": "identifier"
+              }
+            },
+            {
+              "type": "STRING",
+              "value": "in"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "stages_domain"
+            }
+          ]
+        },
+        {
+          "type": "SEQ",
+          "members": [
+            {
               "type": "STRING",
               "value": "("
             },
@@ -2167,6 +2250,35 @@
               "value": ")"
             }
           ]
+        }
+      ]
+    },
+    "stages_domain": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "FIELD",
+          "name": "func",
+          "content": {
+            "type": "SYMBOL",
+            "name": "identifier"
+          }
+        },
+        {
+          "type": "STRING",
+          "value": "("
+        },
+        {
+          "type": "FIELD",
+          "name": "comp",
+          "content": {
+            "type": "SYMBOL",
+            "name": "identifier"
+          }
+        },
+        {
+          "type": "STRING",
+          "value": ")"
         }
       ]
     },
@@ -2955,7 +3067,7 @@
               "name": "comp",
               "content": {
                 "type": "SYMBOL",
-                "name": "identifier"
+                "name": "stoich_ref"
               }
             },
             {
@@ -3373,7 +3485,7 @@
               "name": "comp",
               "content": {
                 "type": "SYMBOL",
-                "name": "identifier"
+                "name": "stoich_ref"
               }
             },
             {
@@ -3495,7 +3607,7 @@
               "name": "comp",
               "content": {
                 "type": "SYMBOL",
-                "name": "identifier"
+                "name": "stoich_ref"
               }
             },
             {
@@ -3587,7 +3699,7 @@
               "name": "comp",
               "content": {
                 "type": "SYMBOL",
-                "name": "identifier"
+                "name": "stoich_ref"
               }
             },
             {
@@ -3842,7 +3954,7 @@
           "members": [
             {
               "type": "SYMBOL",
-              "name": "identifier"
+              "name": "stoich_ref"
             },
             {
               "type": "STRING",
@@ -4165,22 +4277,36 @@
       "type": "SEQ",
       "members": [
         {
-          "type": "FIELD",
-          "name": "comp",
-          "content": {
-            "type": "SYMBOL",
-            "name": "identifier"
-          }
-        },
-        {
           "type": "CHOICE",
           "members": [
             {
-              "type": "SYMBOL",
-              "name": "init_brackets"
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "FIELD",
+                  "name": "comp",
+                  "content": {
+                    "type": "SYMBOL",
+                    "name": "identifier"
+                  }
+                },
+                {
+                  "type": "CHOICE",
+                  "members": [
+                    {
+                      "type": "SYMBOL",
+                      "name": "init_brackets"
+                    },
+                    {
+                      "type": "BLANK"
+                    }
+                  ]
+                }
+              ]
             },
             {
-              "type": "BLANK"
+              "type": "SYMBOL",
+              "name": "stage_ref"
             }
           ]
         },
@@ -5348,22 +5474,36 @@
           "value": "in"
         },
         {
-          "type": "FIELD",
-          "name": "dim",
-          "content": {
-            "type": "SYMBOL",
-            "name": "identifier"
-          }
-        },
-        {
           "type": "CHOICE",
           "members": [
             {
-              "type": "SYMBOL",
-              "name": "where_clause"
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "FIELD",
+                  "name": "dim",
+                  "content": {
+                    "type": "SYMBOL",
+                    "name": "identifier"
+                  }
+                },
+                {
+                  "type": "CHOICE",
+                  "members": [
+                    {
+                      "type": "SYMBOL",
+                      "name": "where_clause"
+                    },
+                    {
+                      "type": "BLANK"
+                    }
+                  ]
+                }
+              ]
             },
             {
-              "type": "BLANK"
+              "type": "SYMBOL",
+              "name": "stages_domain"
             }
           ]
         },
