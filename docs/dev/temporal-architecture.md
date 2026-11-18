@@ -654,9 +654,9 @@ origin (a numerical failure, `NumericalCollapse` or a negative count; not
 epidemic extinction, which is a valid state), fails the forecast with a
 diagnostic naming the draw, the time and the cause.
 
-**Joint samples.** After the origin every particle's weight is equal, and
-systematic resampling with equal weights keeps particles in their own order
-(`sim/src/inference/resampling.rs:30-46`), so particle _i_'s draws at successive
+**Joint samples.** After the origin no stop holds an observed value, so the
+filter does not assimilate there and skips the resampling call (D72): no
+particle is copied into another's slot, and particle _i_'s draws at successive
 targets form one joint sample, with observation noise drawn from that particle's
 own trajectory. Joint samples, such as a hub's "sample" output, are therefore
 exposed (D54); since any particle death after the origin already fails the
