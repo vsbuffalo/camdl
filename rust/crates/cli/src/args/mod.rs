@@ -66,21 +66,18 @@ PRECEDENCE (last wins, per docs/camdl-run-spec.md §1.3)
 /// Inference subcommands use [`InferenceModelOverrides`] instead;
 /// `--params` / `--param` were removed there (M-1 break per
 /// 2026-05-25 CLI UX rev 2).
-#[derive(Args, Clone, Default, classify_derive::Classify)]
+#[derive(Args, Clone, Default)]
 pub struct ModelOverrides {
     /// Parameter TOML file (may be repeated)
     #[arg(long, value_name = "FILE")]
-    #[class(keyed(params))]
     pub params: Vec<PathBuf>,
 
     /// Single parameter override, e.g. --param R0=2.5 (may be repeated)
     #[arg(long, value_name = "NAME=VALUE")]
-    #[class(keyed(params))]
     pub param: Vec<ParamOverride>,
 
     /// External table for table-lookup expressions, e.g. --table contact=matrix.tsv
     #[arg(long, value_name = "NAME=FILE")]
-    #[class(keyed(params))]
     pub table: Vec<TableSpec>,
 }
 
@@ -167,23 +164,20 @@ pub struct ScenarioArgs {
 }
 
 /// `--backend` + `--dt`
-#[derive(Args, Clone, classify_derive::Classify)]
+#[derive(Args, Clone)]
 pub struct SimBackend {
     /// Simulation backend (default: chain_binomial)
     #[arg(long)]
-    #[class(keyed(config))]
     pub backend: Option<ForwardBackend>,
 
     /// Step size for discrete-time backends (default: 1.0)
     #[arg(long)]
-    #[class(keyed(config))]
     pub dt: Option<f64>,
 
     /// ODE integrator method override: rk4 (fixed) or rk45 (adaptive). gh#166.
     /// Tolerances are a model property — set them in
     /// `simulate { integrator = rk45 { atol = .., rtol = .. } }`.
     #[arg(long)]
-    #[class(keyed(model))]
     pub integrator: Option<crate::args::types::IntegratorArg>,
 }
 
@@ -197,32 +191,29 @@ pub struct SimBackend {
 /// change which columns are written to the content-addressed leaf, so they ride
 /// the `config`-level identity (`runid::inputs::SimConfig`): a non-default view
 /// is a distinct, reproducible artifact.
-#[derive(Args, Clone, Debug, Default, classify_derive::Classify)]
+#[derive(Args, Clone, Debug, Default)]
 pub struct OutputView {
     /// Emit one trajectory row every N time-units, overriding the model's
     /// `output { every }`. A plain number in the model's `time_unit` (like
     /// `--dt`); e.g. `--output-every 7` on a daily model writes weekly rows.
     #[arg(long = "output-every", value_name = "N")]
-    #[class(keyed(model))]
     pub every: Option<f64>,
 
     /// Drop every `flow_*` column from the trajectory output — most useful for
     /// stratified/spatial models where inter-stratum flow columns dominate.
     #[arg(long = "no-flows", default_value_t = false)]
-    #[class(keyed(config))]
     pub no_flows: bool,
 
     /// Restrict trajectory columns to this comma-separated allow-list of output
     /// column names (compartments and/or `flow_<name>`). Empty = all columns;
     /// emitted order follows the model, not this list.
     #[arg(long = "columns", value_delimiter = ',', value_name = "COL,...")]
-    #[class(keyed(config))]
     pub columns: Vec<String>,
 }
 
 /// The override for a forcing evaluated outside the range it is defined on,
 /// shared by every command that runs a model.
-#[derive(Args, Clone, Default, classify_derive::Classify)]
+#[derive(Args, Clone, Default)]
 pub struct ForcingExtrapolationArg {
     /// Let the run evaluate a forcing outside the range it is defined on —
     /// an `interpolated` forcing before its first or after its last data
@@ -232,7 +223,6 @@ pub struct ForcingExtrapolationArg {
     /// error. A fit config sets it as `[config] allow_forcing_extrapolation =
     /// true`.
     #[arg(long, default_value_t = false)]
-    #[class(keyed(config))]
     pub allow_forcing_extrapolation: bool,
 }
 
@@ -304,7 +294,7 @@ pub struct StreamSelection {
 
 // ─── simulate ─────────────────────────────────────────────────────────────────
 
-#[derive(Args, classify_derive::Classify)]
+#[derive(Args)]
 #[command(after_help = colored_help!("\
 Examples:
   # Basic simulation. The run is written to the content-addressed store
@@ -333,7 +323,6 @@ Examples:
 "))]
 pub struct SimulateArgs {
     /// IR JSON or .camdl model file
-    #[class(keyed(model))]
     pub model: PathBuf,
 
     /// Override the run's horizon (`simulation.t_end`), gh#626. SPEC is a
@@ -349,7 +338,6 @@ pub struct SimulateArgs {
     /// calendar rule): write the offset in days. A scenario
     /// that declares its own different horizon is a hard error.
     #[arg(long, value_name = "SPEC")]
-    #[class(keyed(config))]
     pub to: Option<String>,
 
     /// Start the run from an inferred state at the last observation time
@@ -367,7 +355,6 @@ pub struct SimulateArgs {
     ///     Requires `--draws posterior`; forecasts over the subset of draws
     ///     that have a saved latent path, and reports that count.
     #[arg(long, value_name = "FILE|fit")]
-    #[class(keyed(config))]
     pub init_state: Option<String>,
 
     /// gh#audit-C6 / S1. See InferenceCore.allow_degenerate_rates.
@@ -375,7 +362,6 @@ pub struct SimulateArgs {
     /// has a known empty-stratum-divisor and the user wants to keep
     /// the legacy zero-rate behaviour rather than fix the model.
     #[arg(long, default_value_t = false)]
-    #[class(keyed(config))]
     pub allow_degenerate_rates: bool,
 
     #[command(flatten)]
@@ -386,22 +372,18 @@ pub struct SimulateArgs {
 
     /// Parameter vector file (may be repeated), e.g. --param-vec beta=FILE
     #[arg(long, value_name = "PREFIX=FILE")]
-    #[class(keyed(params))]
     pub param_vec: Vec<ParamVecSpec>,
 
     /// Named scenarios (may be repeated; conflicts with --enable/--disable)
     #[arg(long = "scenario", conflicts_with_all = ["enable", "disable"])]
-    #[class(expands)]
     pub scenarios: Vec<String>,
 
     /// Enable an intervention (may be repeated; conflicts with --scenario)
     #[arg(long, conflicts_with = "scenarios")]
-    #[class(keyed(scenario))]
     pub enable: Vec<String>,
 
     /// Disable an intervention (may be repeated; conflicts with --scenario)
     #[arg(long, conflicts_with = "scenarios")]
-    #[class(keyed(scenario))]
     pub disable: Vec<String>,
 
     #[command(flatten)]
@@ -414,17 +396,14 @@ pub struct SimulateArgs {
     /// RNG seed for a single run (conflicts with --seeds)
     #[arg(long, default_value_t = 1, conflicts_with = "seeds",
           env = "CAMDL_SEED")]
-    #[class(keyed(seed))]
     pub seed: u64,
 
     /// Multiple seeds: range (1:100) or list (1,2,42); conflicts with --replicates
     #[arg(long, conflicts_with_all = ["replicates"])]
-    #[class(expands)]
     pub seeds: Option<SeedSpec>,
 
     /// Stochastic replicates per parameter point (conflicts with --seeds)
     #[arg(long, conflicts_with = "seeds")]
-    #[class(expands)]
     pub replicates: Option<usize>,
 
     /// Parameter draw source: path to a params TSV, "uniform", "prior", or
@@ -435,7 +414,6 @@ pub struct SimulateArgs {
     /// scenario or `--param`. A draw is a SAMPLE from a measure; a value you
     /// choose is a design point — use --sweep / --sweep-file for those.
     #[arg(long)]
-    #[class(expands)]
     pub draws: Option<String>,
 
     /// Deterministic grid over a parameter (repeatable): the DESIGN axis.
@@ -454,7 +432,6 @@ pub struct SimulateArgs {
     /// re-simulated (--force recomputes; --dry-run shows hits and misses).
     #[arg(long, value_name = "PARAM=GRID",
           conflicts_with_all = ["draws", "design_from", "sweep_file"])]
-    #[class(expands)]
     pub sweep: Vec<SweepSpec>,
 
     /// Design points from a TSV: the header names model parameters, each row
@@ -467,7 +444,6 @@ pub struct SimulateArgs {
     /// ensemble's record by content digest.
     #[arg(long, value_name = "FILE",
           conflicts_with_all = ["draws", "design_from", "sweep"])]
-    #[class(expands)]
     pub sweep_file: Option<PathBuf>,
 
     /// Companion for `--draws`. With `--draws prior`, a fit.toml supplying
@@ -483,7 +459,6 @@ pub struct SimulateArgs {
     /// against — a manual check requires --fit to come with --draws and/or
     /// an anchored --to (gh#626).
     #[arg(long)]
-    #[class(keyed(params))]
     pub fit: Option<PathBuf>,
 
     /// Number of parameter draws. For --draws uniform/prior: how many to
@@ -491,7 +466,6 @@ pub struct SimulateArgs {
     /// whole cloud (default 200, matching `fit predict` — never silently
     /// replay a full 60k-draw posterior; gh#630).
     #[arg(short = 'n', long)]
-    #[class(expands)]
     pub n_draws: Option<usize>,
 
     /// With `--draws posterior`: replay ONLY the named chains of the fit's
@@ -499,7 +473,6 @@ pub struct SimulateArgs {
     /// `--chains 3,5`). Cannot be given with `--exclude-chains`. Always warns;
     /// a chain id not in the fit, or naming every chain, is a hard error.
     #[arg(long, value_name = "IDS", conflicts_with = "exclude_chains")]
-    #[class(expands)]
     pub chains: Option<String>,
 
     /// With `--draws posterior`: drop the named chains of the fit's posterior
@@ -507,7 +480,6 @@ pub struct SimulateArgs {
     /// Post-hoc exclusion biases the posterior toward the retained mode and
     /// always prints a warning.
     #[arg(long, value_name = "IDS")]
-    #[class(expands)]
     pub exclude_chains: Option<String>,
 
     /// Write the sampled per-draw parameter vectors to this TSV (gh#157).
@@ -517,7 +489,6 @@ pub struct SimulateArgs {
     /// Only written when given; the content-addressed store leaves are
     /// unaffected.
     #[arg(long, value_name = "PATH", requires = "draws")]
-    #[class(presentation)]
     pub draws_out: Option<PathBuf>,
 
     /// Write a plain-TSV trajectory mirror to this file, IN ADDITION to the
@@ -525,7 +496,6 @@ pub struct SimulateArgs {
     /// `-o` the trajectory is not written to a loose file — read it back with
     /// `camdl cat <id>`. Use `--stdout` to stream instead of storing.
     #[arg(short, long, env = "CAMDL_OUTPUT")]
-    #[class(presentation)]
     pub output: Option<PathBuf>,
 
     /// Stream the trajectory TSV to stdout and DO NOT write the store leaf or
@@ -537,7 +507,6 @@ pub struct SimulateArgs {
         "output", "obs", "obs_dir", "obs_only", "obs_only_dir",
         "seeds", "replicates", "draws", "sweep", "sweep_file",
     ])]
-    #[class(presentation)]
     pub stdout: bool,
 
     /// Override the cadence at which synthetic observations are EMITTED
@@ -551,29 +520,24 @@ pub struct SimulateArgs {
     /// `emit_schedule = at [...]` is refused by name. This changes emitted
     /// output only; it never enters a likelihood.
     #[arg(long = "emit-every", value_name = "N | NAME=N")]
-    #[class(keyed(obs))]
     pub emit_every: Vec<String>,
 
     /// Write synthetic observations to a single TSV (all streams)
     #[arg(long, conflicts_with_all = ["obs_dir", "obs_only"])]
-    #[class(presentation)]
     pub obs: Option<PathBuf>,
 
     /// Write one TSV per observation stream to a directory
     #[arg(long, conflicts_with_all = ["obs", "obs_only"])]
-    #[class(presentation)]
     pub obs_dir: Option<PathBuf>,
 
     /// Like --obs but suppress trajectory output
     #[arg(long, conflicts_with_all = ["obs", "obs_dir", "output", "obs_only_dir"])]
-    #[class(presentation)]
     pub obs_only: Option<PathBuf>,
 
     /// Like --obs-dir (one TSV per stream) but suppress trajectory output.
     /// The multi-cadence-safe sibling of --obs-only (run-spec §3.1.1,
     /// ObsOutput::OnlyDir).
     #[arg(long, conflicts_with_all = ["obs", "obs_dir", "obs_only", "output"])]
-    #[class(presentation)]
     pub obs_only_dir: Option<PathBuf>,
 
     /// Simulate on the observation design a fit config binds, instead of on
@@ -600,7 +564,6 @@ pub struct SimulateArgs {
         "emit_every", "dates", "init_state", "quantities_out", "event_log",
         "scenarios",
     ])]
-    #[class(presentation)]
     pub design_from: Option<PathBuf>,
 
     /// Write each observation stream's projected value on the design that
@@ -617,7 +580,6 @@ pub struct SimulateArgs {
     /// --quantities-out, a sidecar outside run identity. Usable with or
     /// without --obs-dir / --obs-only-dir.
     #[arg(long, value_name = "DIR", requires = "design_from")]
-    #[class(presentation)]
     pub projected_out: Option<PathBuf>,
 
     /// Add a calendar `date` column (rendered from the model `origin` +
@@ -626,7 +588,6 @@ pub struct SimulateArgs {
     /// default; `--dates` is purely additive (2026-05-22 calendar-time §6.7).
     /// No-op with a clear error if the model declares no `origin`.
     #[arg(long)]
-    #[class(presentation)]
     pub dates: bool,
 
     /// Emit the model's `quantities {}` block to this directory as
@@ -637,7 +598,6 @@ pub struct SimulateArgs {
     /// identity. Without this flag, a model that declares quantities prints a
     /// note and skips them (not a hard error).
     #[arg(long, value_name = "DIR")]
-    #[class(presentation)]
     pub quantities_out: Option<PathBuf>,
 
     /// Report with the `quantities {}` block in FILE instead of the model's own.
@@ -650,29 +610,24 @@ pub struct SimulateArgs {
     /// The trajectory and the run's identity are unaffected (proposal
     /// 2026-08-19).
     #[arg(long, value_name = "FILE", requires = "quantities_out")]
-    #[class(presentation)]
     pub quantities: Option<PathBuf>,
 
     /// Print resolved run plan without simulating
     #[arg(long)]
-    #[class(presentation)]
     pub dry_run: bool,
 
     /// Root directory of the run store
     #[arg(long, default_value = "./results", env = "CAMDL_OUTPUT_DIR")]
-    #[class(execution)]
     pub output_dir: PathBuf,
 
     /// Rayon threads for the simulation phase of a multi-cell run (absent:
     /// sequential; 0 = all cores). Output is byte-identical whatever the
     /// value: cells are seeded by grid position and merged in canonical order.
     #[arg(long, env = "CAMDL_PARALLEL")]
-    #[class(execution)]
     pub parallel: Option<usize>,
 
     /// Re-run even if cached output already exists
     #[arg(long)]
-    #[class(execution)]
     pub force: bool,
 
     /// User-supplied display label for this simulate run. Validated
@@ -680,7 +635,6 @@ pub struct SimulateArgs {
     /// `camdl list` and `camdl show`. With `--seeds`, the label
     /// applies to each per-seed run.
     #[arg(long, value_name = "TEXT")]
-    #[class(provenance)]
     pub label: Option<String>,
 
     /// Record the Layer-1 lineage **event log** (2026-05-20 three-layer
@@ -696,18 +650,15 @@ pub struct SimulateArgs {
     /// / --draws / --sweep / --sweep-file.
     #[arg(long, value_name = "FILE", num_args = 0..=1, default_missing_value = "auto",
           conflicts_with_all = ["seeds", "replicates", "draws", "sweep", "sweep_file"])]
-    #[class(presentation)]
     pub event_log: Option<PathBuf>,
 
     /// Event-log format: `parquet` (default, production) or `tsv`
     /// (dependency-free, debug). With --event-log.
     #[arg(long, value_name = "FMT", requires = "event_log", conflicts_with = "tsv")]
-    #[class(presentation)]
     pub format: Option<String>,
 
     /// Shorthand for `--format tsv` (with --event-log).
     #[arg(long, requires = "event_log")]
-    #[class(presentation)]
     pub tsv: bool,
 
     /// Mirror the reactive firing log to this file, IN ADDITION to the
@@ -718,7 +669,6 @@ pub struct SimulateArgs {
     /// system of record. Single-run only.
     #[arg(long, value_name = "PATH",
           conflicts_with_all = ["seeds", "replicates", "draws", "sweep", "sweep_file"])]
-    #[class(presentation)]
     pub reactive_log: Option<PathBuf>,
 }
 
@@ -3105,7 +3055,7 @@ pub struct MreFitArgs {
 /// parses identically; the bundle output is `-b` (simulate's own `-o` keeps
 /// its trajectory-output meaning). No `--no-data`: a forward sim has no observed
 /// data, and its tables/params can't be dropped without breaking the run.
-#[derive(Args, classify_derive::Classify)]
+#[derive(Args)]
 #[command(after_help = colored_help!("\
 Bundles a model + its read() tables + params into a shareable `.tar.gz` that
 reproduces a forward simulation. Takes every `camdl simulate` flag; `-b/--bundle`
@@ -3124,7 +3074,6 @@ pub struct MreSimulateArgs {
 
     /// Output bundle path. Defaults to `<model-stem>.mre.tar.gz`.
     #[arg(short = 'b', long = "bundle", value_name = "FILE")]
-    #[class(presentation)]
     pub bundle: Option<PathBuf>,
 }
 

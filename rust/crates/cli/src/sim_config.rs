@@ -377,14 +377,12 @@ mod tests {
             "every field of the resolved configuration has a SOURCES row or is NON_SEMANTIC"
         );
 
-        use crate::input_class::{Classify, InputClass};
-        let cli = crate::input_class::simulate_inventory();
-        let env = crate::env::Env::inventory();
+        use crate::input_class::{InputClass, SIMULATE};
         for (field, inputs) in SOURCES {
             for input in *inputs {
                 let class = match input.strip_prefix("env:") {
-                    Some(f) => env.iter().find(|i| i.field == f).map(|i| i.class),
-                    None => cli.iter().find(|i| i.field == *input).map(|i| i.class),
+                    Some(f) => crate::env::VARS.iter().find(|v| v.field == f).map(|v| v.class),
+                    None => SIMULATE.iter().find(|(i, _)| i == input).map(|(_, c)| *c),
                 };
                 let class = class.unwrap_or_else(|| panic!("{field}: `{input}` is not an input of simulate"));
                 assert!(

@@ -1,5 +1,0 @@
-error: input `parallel` has more than one class; it must have exactly one
- --> tests/ui/fail_two_classes.rs:7:5
-  |
-7 |     #[class(provenance)]
-  |     ^^^^^^^^^^^^^^^^^^^^

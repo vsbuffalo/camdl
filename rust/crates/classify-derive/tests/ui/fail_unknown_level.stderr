@@ -1,5 +1,0 @@
-error: unknown identity level: expected model, config, params, scenario, seed or obs
- --> tests/ui/fail_unknown_level.rs:6:19
-  |
-6 |     #[class(keyed(engine))]
-  |                   ^^^^^^
