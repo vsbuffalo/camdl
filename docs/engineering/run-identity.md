@@ -359,10 +359,22 @@ start-up: the reporter routes each forcing note into the installed policy
 through one routing slot, which is the policy's only process-wide state. With
 none installed, a note is refused. `sim::run_notes` also says each distinct note
 once per process, so a second policy installed in the same process would not be
-told of a forcing the first was told of. Every command installs one policy;
-`fit predict` alone replaces it, with an allowing one, once it has read the
-stored fit's config, and a refusal under the first has already ended the
-command.
+told of a forcing the first was told of. Every command installs one policy.
+`fit predict` alone nests a second, an allowing one, once it has read the stored
+fit's config; a refusal under the first has already ended the command, and the
+inner guard's drop puts the first back. A claim-holding `fit run` keeps a
+refusal for its claim, and each chain polls the command's policy (held by `Out`
+from `hold_claim` to `take_claim`, apart from the claim itself), so the first
+chain to fail the claim does not hide the refusal from the others.
+
+Two commands still build their policy from their own flag alone, not from the
+fit they replay: `simulate --draws posterior --fit` (`run_simulate`), and
+`compare` when it scores an ODE fit in-process, so an ODE fit made under
+`[config] allow_forcing_extrapolation` is refused by `compare` without the flag.
+`compare`'s `camdl pfilter` child, which scores a chain-binomial fit, is given
+the fit's setting. Both remaining cases are for the commands' conversion in step
+4; the in-process `compare` case cannot be met by installing a policy per fit,
+because of the once-per-process note above.
 
 One process-wide setting remains, set once per command: `--no-licm`, which the
 compiler invocation reads (`util::set_licm_disabled`).
