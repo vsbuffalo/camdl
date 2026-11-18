@@ -33,6 +33,10 @@
       compartment are not detected);
     - no transition changes a compartment by zero;
     - no shared binding reads a parameter (see {!first_param});
+    - no sub-expression made only of literals has a value that is NaN or
+      infinite ({!first_non_finite}), in any expression walked for
+      references and also in shared bindings, derived projections,
+      overdispersion variances and initial conditions;
     - every initial condition names a compartment, its law suits the
       compartment's kind, no drawn compartment is the balance target, and
       the initial conditions do not read each other in a cycle
@@ -54,6 +58,8 @@ type site =
   | InOde         of string   (** The ODE equation of the named compartment. *)
   | InObservation of string   (** An observation stream. *)
   | InIntervention of string  (** An intervention or event. *)
+  | InBinding     of string   (** A shared binding (a hoisted [let]), by name. *)
+  | InInit        of string   (** The initial condition of the named compartment. *)
 
 (** One structural defect of an expanded model. The compiler's code for each
     is given in brackets. *)
@@ -83,6 +89,10 @@ type error =
       (** [E516]: (compartment, law family, the kind of compartment the law
           seeds); an integer law on a real compartment or the reverse. *)
   | InitLawOnBalanceTarget of string          (** [E517]: a compartment both drawn from a law and set by the balance, which overwrites the draw. *)
+  | NonFiniteConstant of expr * float * site
+      (** [E520]: a sub-expression made only of literals whose value is NaN or
+          infinite, such as [(0 - 8) ^ 0.5], with that value. The innermost
+          such sub-expression is reported, once per expression. *)
 
 let error_to_string = function
   | DuplicateCompartment s -> Printf.sprintf "duplicate compartment: %s" s
@@ -118,6 +128,8 @@ let error_to_string = function
   | InitLawOnBalanceTarget comp ->
     Printf.sprintf "initial condition '%s' is drawn from a law but is the balance target"
       comp
+  | NonFiniteConstant (_, v, _) ->
+    Printf.sprintf "a sub-expression of literals evaluates to %F" v
 
 module SS = Set.Make(String)
 
@@ -161,6 +173,75 @@ let uniq_check name_of xs constructor errors =
   let set = Hashtbl.fold (fun k () s -> SS.add k s) seen SS.empty in
   set
 
+(** The value of a binary operation on two numbers, as the runtime evaluator
+    computes it for finite operands, or [None] for an operator this check
+    does not evaluate (the comparisons, whose value is always finite). *)
+let literal_bin_op op a b : float option =
+  match op with
+  | Add -> Some (a +. b)
+  | Sub -> Some (a -. b)
+  | Mul -> Some (a *. b)
+  | Div -> Some (a /. b)
+  | Pow -> Some (a ** b)
+  | Min -> Some (Float.min a b)
+  | Max -> Some (Float.max a b)
+  | Mod -> Some (if b = 0.0 then Float.nan else Float.rem a b)
+  | Eq | Neq | Lt | Gt | Le | Ge -> None
+
+let literal_un_op op a : float =
+  match op with
+  | Neg -> -. a | Exp -> exp a | Log -> log a | Sqrt -> sqrt a
+  | Abs -> abs_float a | Floor -> floor a | Ceil -> ceil a
+  | Sin -> sin a | Cos -> cos a | Tanh -> tanh a
+
+(** The innermost sub-expression of [e] made only of literals whose value is
+    NaN or infinite, with that value, if there is one.
+
+    A literal is a [Const] or a [UnitLiteral]; arithmetic and the elementary
+    functions of literals are literal too. A literal whose value is not
+    finite, such as [(0 - 8) ^ 0.5] or [1 / 0], is a mistake in the model
+    wherever it stands, even in a branch that never runs, and JSON cannot
+    carry its value. The first one found, left to right, is returned. *)
+let first_non_finite (e : expr) : (expr * float) option =
+  let found = ref None in
+  (* The value of a literal node, or [None] when it is not literal or its
+     value is not finite, so that only the innermost one is kept. *)
+  let literal node v =
+    if Float.is_finite v then Some v
+    else begin
+      (if !found = None then found := Some (node, v));
+      None
+    end
+  in
+  let rec go node : float option =
+    match node with
+    | Const v -> literal node v
+    | UnitLiteral u -> literal node u.value
+    | BinOp b ->
+      let l = go b.left in
+      let r = go b.right in
+      (match l, r with
+       | Some a, Some c ->
+         (match literal_bin_op b.op a c with Some v -> literal node v | None -> None)
+       | _ -> None)
+    | UnOp u ->
+      (match go u.arg with Some a -> literal node (literal_un_op u.op a) | None -> None)
+    | UncheckedDim u -> go u.inner
+    | Cond c -> ignore (go c.pred); ignore (go c.then_); ignore (go c.else_); None
+    | TableLookup (_, idxs) -> List.iter (fun i -> ignore (go i)) idxs; None
+    | Reduce terms -> List.iter (fun t -> ignore (go t)) terms; None
+    | Param _ | ConstRef _ | Pop _ | PopSum _ | Time | Dt | TimeFunc _ | ForcingBasis _
+    | BindingRef _ | PerEvalRef _ | Projected | ObsColumnRef _ | ObsAnchor _ -> None
+  in
+  ignore (go e);
+  !found
+
+(** Record an E520 error for the first non-finite literal of [e]. *)
+let check_finite ~site errors e =
+  match first_non_finite e with
+  | Some (node, v) -> errors := NonFiniteConstant (node, v, site) :: !errors
+  | None -> ()
+
 let check_expr_refs ~site ~comps ~params ~constants ~tables ~tfs errors e =
   let rec go = function
     | Const _ | UnitLiteral _ | Time | Dt | Projected | ObsColumnRef _ | ObsAnchor _ -> ()
@@ -183,7 +264,8 @@ let check_expr_refs ~site ~comps ~params ~constants ~tables ~tfs errors e =
     | BindingRef _ -> ()   (* leaf; binding name resolution happens at CompiledModel::new *)
     | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
   in
-  go e
+  go e;
+  check_finite ~site errors e
 
 let validate (m : model) : (unit, error list) result =
   let errors = ref [] in
@@ -211,7 +293,11 @@ let validate (m : model) : (unit, error list) result =
       if delta = 0
       then errors := ZeroDelta (tr.name, comp) :: !errors
     ) tr.stoichiometry;
-    check_expr_r ~site:(InTransition tr.name) tr.rate
+    check_expr_r ~site:(InTransition tr.name) tr.rate;
+    (match tr.draw_method with
+     | DrawOverdispersed { sigma_sq; _ } ->
+       check_finite ~site:(InTransition tr.name) errors sigma_sq
+     | DrawPoisson | DrawDeterministic -> ())
   ) m.transitions;
 
   (* ODE equations *)
@@ -266,7 +352,7 @@ let validate (m : model) : (unit, error list) result =
        List.iter (fun cn ->
          if not (SS.mem cn comp_names) then errors := UnknownCompartment (cn, here) :: !errors
        ) cns
-     | _ -> ());
+     | DerivedExpr e -> check_finite ~site:here errors e);
     (* Every name in every likelihood argument. *)
     let chk e = check_expr_r ~site:here e in
     (match obs.likelihood with
@@ -284,16 +370,18 @@ let validate (m : model) : (unit, error list) result =
   (* No binding reads a parameter (see [first_param]). The expander hoists
      only parameter-free lets, so this fires only if that rule breaks. *)
   List.iter (fun (b : binding) ->
-    match first_param b.bexpr with
-    | Some p -> errors := ParamInBinding (b.bname, p) :: !errors
-    | None -> ()
+    (match first_param b.bexpr with
+     | Some p -> errors := ParamInBinding (b.bname, p) :: !errors
+     | None -> ());
+    check_finite ~site:(InBinding b.bname) errors b.bexpr
   ) m.bindings;
 
   (* Every initial condition names a compartment of the model. The expander
      reports the same mistake with a location (E277). *)
-  List.iter (fun (k, _) ->
+  List.iter (fun (k, spec) ->
     if not (SS.mem k comp_names)
-    then errors := InitUnknownCompartment k :: !errors
+    then errors := InitUnknownCompartment k :: !errors;
+    List.iter (check_finite ~site:(InInit k) errors) (init_spec_exprs spec)
   ) m.initial_conditions;
 
   (* Initial-state law admissibility. The compartment's kind selects which laws
