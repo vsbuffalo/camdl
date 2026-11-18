@@ -5487,7 +5487,9 @@ there is no fit-side flag, because on the inference path the integrator is part
 of the model's content identity and is declared in `simulate {}`.
 
 A typo'd or unsupported key in `simulate {}` is a hard error (`E106`), never
-silently dropped; the accepted keys are `from`, `to`, `dt`, `integrator`.
+silently dropped; the accepted keys are `from`, `to`, `dt`, `integrator`. `to`
+is required: a `simulate {}` block without it is `E106`, because the end of the
+run has no default. `from` defaults to `0`.
 
 Seed is always external (CLI `--seed`), never in the model file.
 

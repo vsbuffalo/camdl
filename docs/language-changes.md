@@ -13,6 +13,24 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-11-17 — a `simulate { }` block must set `to`
+
+**What.** A model's `simulate { }` block that sets `from` (or `dt`, or nothing)
+but not `to` used to run to `t = 100` in model time units (100 days, 100 weeks
+or 100 years, by `time_unit`), without a diagnostic. It is now **E106**, as a
+scenario's `simulate { }` without `to` already was. A model with no `simulate`
+block at all still runs over `(0, 100)`.
+
+**Migration.** `simulate { from = 0 'days }` →
+`simulate { from = 0 'days
+to = 100 'days }`, writing the end you mean; a model
+that compiled before ran to 100 model time units, so `to = 100 '<time_unit>`
+keeps its behaviour.
+
+**Diagnostic.**
+``error[E106]: a `simulate {}` block must set `to`, the end of
+the run``.
+
 ## 2026-11-17 — a second `time_unit`, `origin`, `description`, `simulate`, `output` or `balance` is an error
 
 **What.** Each of these declarations may be written once. A second one used to
