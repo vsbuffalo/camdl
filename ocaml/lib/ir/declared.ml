@@ -537,7 +537,8 @@ type destination =
           branches name their own destinations. *)
   | DstBranch of branch_arm list
       (** One flow per arm, at the arm's weight times the transition's rate.
-          The weights are not checked to sum to one. *)
+          Weights that are compile-time constants form a probability
+          distribution (E423); others are not checked. *)
 
 (** How fast a transition fires: a rate ([DynRate]), or a staged residence,
     [via erlang(stages = 3, mean = 5 'days)] ([DynVia]: the law's name and
