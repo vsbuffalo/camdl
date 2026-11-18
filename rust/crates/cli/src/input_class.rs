@@ -203,10 +203,6 @@ mod tests {
         format!("{class}_{}{field}", if env { "env_" } else { "" })
     }
 
-    fn differential(c: InputClass) -> bool {
-        matches!(c, InputClass::Keyed(_) | InputClass::Execution | InputClass::Expands)
-    }
-
     /// The test functions of the case file whose names begin with a class.
     fn cases() -> BTreeSet<String> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/simulate_input_classes.rs");
@@ -214,7 +210,7 @@ mod tests {
         text.lines()
             .filter_map(|l| l.trim_start().strip_prefix("fn "))
             .filter_map(|l| l.split('(').next())
-            .filter(|n| ["keyed_", "execution_", "expands_"].iter().any(|p| n.starts_with(p)))
+            .filter(|n| ["keyed_", "execution_", "expands_", "presentation_", "provenance_"].iter().any(|p| n.starts_with(p)))
             .map(str::to_string)
             .collect()
     }
@@ -229,10 +225,10 @@ mod tests {
     #[test]
     fn every_simulate_input_has_a_case() {
         let mut wanted = BTreeSet::new();
-        for (field, class) in SIMULATE.iter().filter(|(_, c)| differential(*c)) {
+        for (field, class) in SIMULATE {
             wanted.insert(case_name(*class, field, false));
         }
-        for v in crate::env::VARS.iter().filter(|v| differential(v.class)) {
+        for v in crate::env::VARS {
             if NO_CASE.iter().all(|(f, _)| *f != v.field) {
                 wanted.insert(case_name(v.class, v.field, true));
             }

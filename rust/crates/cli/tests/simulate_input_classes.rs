@@ -1,42 +1,51 @@
-//! Differential cases for every input of `camdl simulate` whose class is
-//! checked by running camdl (`keyed`, `execution`, `expands`;
-//! `rust/crates/cli/src/input_class.rs`, proposal
+//! A case for every input of `camdl simulate`, checked as its class predicts
+//! (`rust/crates/cli/src/input_class.rs`, proposal
 //! `docs/dev/proposals/2026-11-17-honest-input-addressed-store.md` phase 3
 //! "Tests").
 //!
 //! The runner, [`simulate`], runs the release `camdl` into a store in a fresh
-//! temporary directory (never the crate directory, gh#1252) and returns every
-//! stored leaf: its kind, its run id, and the bytes its manifest checksums (each
-//! file's SHA-256, checked against the digest `run.json` records). Each case is
-//! one test, named `<class>_<input>` — `keyed_dt`, `execution_parallel`,
-//! `expands_seeds`; an environment variable's case is `<class>_env_<field>` —
-//! and `input_class::tests::every_differential_simulate_input_has_a_case`
-//! fails if a `keyed`, `execution` or `expands` input has none.
+//! temporary directory (never the crate directory, gh#1252), in a cleared
+//! environment with an explicit allowlist, and returns every stored leaf: its
+//! kind, its run id, its level hashes, and the bytes its manifest checksums
+//! (each file's SHA-256, checked against the digest `run.json` records). Each
+//! case is one test, named `<class>_<input>` — `keyed_dt`,
+//! `execution_parallel`, `expands_seeds`, `presentation_dates`,
+//! `provenance_label`; an environment variable's case is
+//! `<class>_env_<field>` — and `input_class::tests::every_simulate_input_has_a_case`
+//! fails if an input has none.
 //!
 //! What each class asserts:
 //!
-//! - `keyed`: changed alone, every cell's run id changes ([`assert_rekeys`]). A
-//!   `keyed(obs)` input changes the address of the observation subtree under
-//!   the leaf and leaves the trajectory's run id alone ([`assert_obs_rekeys`]).
-//! - `execution`: changed alone, the run ids and the stored bytes stay the
-//!   same ([`assert_same_result`]).
+//! - `keyed(level)`: changed alone, every cell's run id changes, and so does
+//!   its hash at the level the class table names ([`assert_rekeys`], which
+//!   reads the level from the table). `keyed(obs)`: the trajectory keeps its
+//!   run id and the observation subtree under it re-keys.
+//! - `execution`: the run ids and the stored bytes stay the same
+//!   ([`assert_same_result`]).
 //! - `expands`: the cells common to both values keep their run ids
 //!   ([`assert_shared_cells_keep_ids`]).
+//! - `presentation`, `provenance`: on a fixture where the input does something,
+//!   the leaves are unaffected — same run ids, same stored bytes
+//!   ([`assert_leaf_unaffected`]) — or, for an input that leaves the store,
+//!   none is written ([`assert_writes_no_leaf`]).
 //!
-//! These are regression evidence on two small fixtures, not proof: another
-//! model could reach a path these do not (the proposal, "What tests can and
-//! cannot show").
+//! These are regression evidence on small fixtures, not proof: another model
+//! could reach a path these do not (the proposal, "What tests can and cannot
+//! show").
 //!
 //! The fixtures: `sir.camdl`, an SIR model with a vaccination intervention,
-//! two scenarios, a prior, an observation stream and a parameter-only rate
-//! factor that LICM hoists; `patch.camdl`, a two-patch model with an
-//! `external` table and a coupling matrix with structural zeros, which the
-//! constant fold drops.
+//! two scenarios, a prior, an observation stream, a `quantities {}` block, a
+//! lineage-annotated transition and a parameter-only rate factor that LICM
+//! hoists; `sir_dated.camdl`, the same with a calendar origin; `patch.camdl`, a
+//! two-patch model with an `external` table and a coupling matrix with
+//! structural zeros, which the constant fold drops; and the repository's
+//! reactive-policy fixture.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 
 use sha2::{Digest, Sha256};
 
@@ -85,6 +94,10 @@ observations {
     cases ~ poisson(rate = rho * projected)
   }
 }
+
+quantities {
+  peak = max(I / N)
+}
 "#;
 
 const PATCH: &str = r#"
@@ -110,8 +123,12 @@ init {
 simulate { from = 0 'days  to = 10 'days }
 "#;
 
-/// The fit config `--fit` names for `--draws prior`: a uniform prior on
-/// `beta_a`, where the model declares a log-normal one.
+/// A reporting vocabulary for `--quantities`.
+const VOCABULARY: &str = "quantities {\n  peak_i = max(I)\n}\n";
+
+/// The fit config `--fit` names for `--draws prior` (a uniform prior on
+/// `beta_a`, where the model declares a log-normal one) and `--design-from`
+/// reads (the `cases` stream bound to `cases.tsv`).
 const FIT_TOML: &str = r#"
 [model]
 camdl = "sir.ir.json"
@@ -132,45 +149,60 @@ iterations = 3
 cooling = 0.7
 "#;
 
+/// The parameters of the repository's reactive-policy fixture.
+const REACTIVE_PARAMS: &[&str] = &[
+    "--param", "beta=0.3", "--param", "gamma=0.1", "--param", "rho=0.2", "--param", "trigger_threshold=2",
+    "--param", "sia_cov=0.7", "--param", "N0=1000", "--param", "I0=10",
+];
+
+/// The fixture files, written under the target directory's scratch space
+/// (`CARGO_TARGET_TMPDIR`) and removed when the last test holding them is
+/// done.
 struct Fixture {
     dir: PathBuf,
     camdl: PathBuf,
     camdlc: PathBuf,
+    reactive: PathBuf,
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
 }
 
 impl Fixture {
     fn path(&self, name: &str) -> String {
         self.dir.join(name).to_string_lossy().into_owned()
     }
-}
 
-/// Write the fixture files once per test process, under the target directory's
-/// scratch space (`CARGO_TARGET_TMPDIR`), and compile the two models.
-fn fixture() -> &'static Fixture {
-    static FX: OnceLock<Fixture> = OnceLock::new();
-    FX.get_or_init(|| {
+    fn create() -> Fixture {
+        static N: AtomicUsize = AtomicUsize::new(0);
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
         let camdl = manifest.join("../../target/release/camdl");
         let camdlc = manifest.join("../../../ocaml/_build/default/bin/camdlc.exe");
+        let reactive = manifest.join("../../../tests/fixtures/reactive/ir/reactive_sir_observed_threshold.ir.json");
         assert!(camdl.exists(), "release camdl missing: {} — run `make build`", camdl.display());
         assert!(camdlc.exists(), "camdlc missing: {} — run `make build`", camdlc.display());
-        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("simulate_input_classes-{}", std::process::id()));
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+            "simulate_input_classes-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("post")).unwrap();
-        let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).unwrap();
+        let fx = Fixture { dir, camdl, camdlc, reactive };
+        let write = |name: &str, text: &str| std::fs::write(fx.dir.join(name), text).unwrap();
         write("sir.camdl", SIR);
-        write("patch.camdl", PATCH);
-        for stem in ["sir", "patch"] {
-            let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").arg(dir.join(format!("{stem}.camdl"))).output().unwrap();
-            assert!(out.status.success(), "camdlc {stem}: {}", String::from_utf8_lossy(&out.stderr));
-            std::fs::write(dir.join(format!("{stem}.ir.json")), out.stdout).unwrap();
-        }
-        // A second model: the first with a longer horizon.
         write("sir_long.camdl", &SIR.replace("to = 20 'days", "to = 25 'days"));
-        let out = Command::new(&camdlc).arg(dir.join("sir_long.camdl")).output().unwrap();
-        assert!(out.status.success());
-        std::fs::write(dir.join("sir_long.ir.json"), out.stdout).unwrap();
-
+        write("sir_dated.camdl", &SIR.replace("time_unit = 'days\n", "time_unit = 'days\norigin = date(\"2025-01-01\")\n"));
+        write("patch.camdl", PATCH);
+        for stem in ["sir", "sir_long", "sir_dated", "patch"] {
+            let out = Command::new(&fx.camdlc).env_clear().arg(fx.dir.join(format!("{stem}.camdl"))).output().unwrap();
+            assert!(out.status.success(), "camdlc {stem}: {}", String::from_utf8_lossy(&out.stderr));
+            std::fs::write(fx.dir.join(format!("{stem}.ir.json")), out.stdout).unwrap();
+        }
+        write("vocabulary.camdl", VOCABULARY);
         write("p.toml", "beta_a = 0.4\nbeta_b = 0.2\ngamma = 0.2\nrho = 0.5\n");
         write("p2.toml", "beta_a = 0.5\nbeta_b = 0.2\ngamma = 0.2\nrho = 0.5\n");
         write("patch.toml", "beta = 0.4\ngamma = 0.2\n");
@@ -179,8 +211,7 @@ fn fixture() -> &'static Fixture {
         write("beta_vec.tsv", "a\t0.45\nb\t0.25\n");
         write("cases.tsv", "time\tcases\n1\t3\n2\t4\n3\t5\n");
         write("fit.toml", FIT_TOML);
-        let states = "# camdl-final-state v1\tt=10\nparticle\tS\tI\tR\tV\n0\t800\t50\t150\t0\n1\t810\t40\t150\t0\n";
-        write("state.tsv", states);
+        write("state.tsv", "# camdl-final-state v1\tt=10\nparticle\tS\tI\tR\tV\n0\t800\t50\t150\t0\n1\t810\t40\t150\t0\n");
         write("draws2.tsv", "beta_a\tbeta_b\n0.3\t0.2\n0.4\t0.2\n");
         write("draws3.tsv", "beta_a\tbeta_b\n0.3\t0.2\n0.4\t0.2\n0.5\t0.2\n");
         write("sweep2.tsv", "beta_a\n0.3\n0.4\n");
@@ -191,58 +222,83 @@ fn fixture() -> &'static Fixture {
                 post.push_str(&format!("{chain}\t{draw}\t{}\t0.2\t0.2\t0.5\n", 0.3 + 0.05 * (2 * chain + draw) as f64));
             }
         }
-        std::fs::write(dir.join("post/draws.tsv"), post).unwrap();
-        Fixture { dir, camdl, camdlc }
-    })
+        write("post/draws.tsv", &post);
+        fx
+    }
+}
+
+/// The fixture, shared by the tests that hold it at once and created again
+/// when none does.
+fn fx() -> Arc<Fixture> {
+    static LIVE: Mutex<Weak<Fixture>> = Mutex::new(Weak::new());
+    let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(fx) = live.upgrade() {
+        return fx;
+    }
+    let fx = Arc::new(Fixture::create());
+    *live = Arc::downgrade(&fx);
+    fx
 }
 
 // ─── The runner ──────────────────────────────────────────────────────────────
 
-/// One invocation: the arguments after `simulate`, and the environment it
-/// changes from the runner's default.
-#[derive(Clone, Default)]
+/// One invocation: the arguments after `simulate`, and the variables it sets
+/// in the child's otherwise cleared environment.
+#[derive(Clone)]
 struct Invocation {
+    fx: Arc<Fixture>,
     args: Vec<String>,
     set: Vec<(String, String)>,
-    unset: Vec<String>,
-}
-
-fn sir(extra: &[&str]) -> Invocation {
-    let fx = fixture();
-    let mut args = vec![fx.path("sir.ir.json"), "--params".into(), fx.path("p.toml")];
-    args.extend(extra.iter().map(|s| s.to_string()));
-    Invocation { args, ..Default::default() }
-}
-
-/// The patch model, compiled from source on each run, so that the compile
-/// inputs (`--no-licm`, `CAMDL_NO_CONSTANT_FOLD`, the IR cache) take part.
-fn patch_source(extra: &[&str]) -> Invocation {
-    let fx = fixture();
-    let mut args = vec![
-        fx.path("patch.camdl"), "--params".into(), fx.path("patch.toml"),
-        "--table".into(), format!("w={}", fx.path("w1.tsv")),
-    ];
-    args.extend(extra.iter().map(|s| s.to_string()));
-    Invocation { args, ..Default::default() }
-}
-
-/// The SIR model compiled from source on each run.
-fn sir_source(extra: &[&str]) -> Invocation {
-    let fx = fixture();
-    let mut args = vec![fx.path("sir.camdl"), "--params".into(), fx.path("p.toml")];
-    args.extend(extra.iter().map(|s| s.to_string()));
-    Invocation { args, ..Default::default() }
+    /// Allowlisted variables this invocation drops.
+    drop: Vec<String>,
 }
 
 impl Invocation {
+    fn new(fx: &Arc<Fixture>, args: Vec<String>, extra: &[&str]) -> Self {
+        let mut args = args;
+        args.extend(extra.iter().map(|s| s.to_string()));
+        Invocation { fx: fx.clone(), args, set: Vec::new(), drop: Vec::new() }
+    }
     fn env(mut self, k: &str, v: &str) -> Self {
         self.set.push((k.into(), v.into()));
         self
     }
-    fn unset(mut self, k: &str) -> Self {
-        self.unset.push(k.into());
+    fn without(mut self, k: &str) -> Self {
+        self.drop.push(k.into());
         self
     }
+}
+
+/// The SIR model, from its compiled IR.
+fn sir(fx: &Arc<Fixture>, extra: &[&str]) -> Invocation {
+    Invocation::new(fx, vec![fx.path("sir.ir.json"), "--params".into(), fx.path("p.toml")], extra)
+}
+
+/// The SIR model with a calendar origin.
+fn sir_dated(fx: &Arc<Fixture>, extra: &[&str]) -> Invocation {
+    Invocation::new(fx, vec![fx.path("sir_dated.ir.json"), "--params".into(), fx.path("p.toml")], extra)
+}
+
+/// The SIR model compiled from source on each run, so that the compile
+/// inputs (`--no-licm`, the IR cache) take part.
+fn sir_source(fx: &Arc<Fixture>, extra: &[&str]) -> Invocation {
+    Invocation::new(fx, vec![fx.path("sir.camdl"), "--params".into(), fx.path("p.toml")], extra)
+}
+
+/// The patch model compiled from source on each run, with its table.
+fn patch_source(fx: &Arc<Fixture>, extra: &[&str]) -> Invocation {
+    let args = vec![
+        fx.path("patch.camdl"), "--params".into(), fx.path("patch.toml"),
+        "--table".into(), format!("w={}", fx.path("w1.tsv")),
+    ];
+    Invocation::new(fx, args, extra)
+}
+
+/// The reactive-policy fixture.
+fn reactive(fx: &Arc<Fixture>, extra: &[&str]) -> Invocation {
+    let mut args = vec![fx.reactive.to_string_lossy().into_owned()];
+    args.extend(REACTIVE_PARAMS.iter().map(|s| s.to_string()));
+    Invocation::new(fx, args, extra)
 }
 
 /// A stored leaf.
@@ -250,6 +306,8 @@ impl Invocation {
 struct Leaf {
     kind: String,
     run_id: String,
+    /// Each level's name and hash, in path order.
+    levels: BTreeMap<String, String>,
     /// Each file the manifest checksums, with the SHA-256 of its bytes.
     files: BTreeMap<String, String>,
     /// The names of the observation subtrees under the leaf (`obs/<name>/`).
@@ -268,31 +326,45 @@ impl Stored {
     fn sim_ids(&self) -> BTreeSet<String> {
         self.sims().into_keys().collect()
     }
+    /// The hashes the cells hold at `level`.
+    fn level_hashes(&self, level: &str) -> BTreeSet<String> {
+        self.sims().values().map(|l| l.levels[level].clone()).collect()
+    }
 }
+
+/// The variables a run may inherit from the test process: what starting a
+/// process needs, and nothing that configures camdl.
+const ALLOWED: &[&str] = &["PATH", "TMPDIR"];
 
 /// Run `camdl simulate` with `inv` into the store at `store`, require success,
 /// and return every leaf the store holds afterwards.
 fn simulate_into(store: &Path, inv: &Invocation) -> Stored {
-    let fx = fixture();
+    let fx = &inv.fx;
     let mut cmd = Command::new(&fx.camdl);
-    cmd.current_dir(store)
-        .env_remove("CLICOLOR_FORCE")
+    cmd.current_dir(store).env_clear();
+    for k in ALLOWED.iter().filter(|k| !inv.drop.iter().any(|d| d == *k)) {
+        if let Some(v) = std::env::var_os(k) {
+            cmd.env(k, v);
+        }
+    }
+    cmd.env("HOME", fx.dir.join("home"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", &fx.camdlc)
         // A private compiled-IR cache: never the user's, never shared with
         // another test process.
-        .env("CAMDL_IR_CACHE_DIR", fx.dir.join("ir-cache"))
-        .arg("simulate")
-        .args(&inv.args)
-        .args(["--progress", "none"]);
-    if !inv.args.iter().any(|a| a == "--output-dir") {
-        cmd.arg("--output-dir").arg(store.join("results"));
-    }
-    for k in &inv.unset {
+        .env("CAMDL_IR_CACHE_DIR", fx.dir.join("ir-cache"));
+    for k in &inv.drop {
         cmd.env_remove(k);
     }
     for (k, v) in &inv.set {
         cmd.env(k, v);
+    }
+    cmd.arg("simulate").args(&inv.args);
+    if !inv.args.iter().any(|a| a == "--progress" || a == "--no-progress") {
+        cmd.args(["--progress", "none"]);
+    }
+    if !inv.args.iter().any(|a| a == "--output-dir") {
+        cmd.arg("--output-dir").arg(store.join("results"));
     }
     let out = cmd.output().expect("spawn camdl simulate");
     assert!(
@@ -343,12 +415,19 @@ fn leaf(dir: &Path, record: &Path) -> Leaf {
         assert_eq!(Some(digest.as_str()), entry["digest"].as_str(), "{}: {name} is the manifest's bytes", dir.display());
         files.insert(name.clone(), digest);
     }
+    let levels = v["levels"]
+        .as_array()
+        .expect("levels")
+        .iter()
+        .map(|l| (l["name"].as_str().unwrap().to_string(), l["hash"].as_str().unwrap().to_string()))
+        .collect();
     let obs = std::fs::read_dir(dir.join("obs"))
         .map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
         .unwrap_or_default();
     Leaf {
         kind: v["kind"].as_str().unwrap().to_string(),
         run_id: v["run_id"].as_str().unwrap().to_string(),
+        levels,
         files,
         obs,
     }
@@ -358,34 +437,61 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-// ─── The assertions, one per class ──────────────────────────────────────────
-
-/// `keyed`: every cell of `with` has a run id `base` does not.
-fn assert_rekeys(base: &Invocation, with: &Invocation) {
-    let (a, b) = (simulate(base).sim_ids(), simulate(with).sim_ids());
-    assert!(!a.is_empty() && !b.is_empty(), "both runs store a cell");
-    assert!(a.is_disjoint(&b), "the input is keyed, so it re-keys every cell: {a:?} vs {b:?}");
+/// The level the class table declares for a keyed input: `field` is a
+/// `camdl simulate` argument id, or `env:<field>` for an environment variable.
+/// Read from the tables' source (`input_class::SIMULATE`, `env::VARS`), which
+/// this integration test cannot import.
+fn declared_level(input: &str) -> String {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let (file, needle) = match input.strip_prefix("env:") {
+        Some(f) => ("env.rs", format!("\"{f}\", Keyed(")),
+        None => ("input_class.rs", format!("(\"{input}\", Keyed(")),
+    };
+    let text = std::fs::read_to_string(src.join(file)).unwrap();
+    let line = text
+        .lines()
+        .find(|l| l.contains(&needle))
+        .unwrap_or_else(|| panic!("`{input}` is not keyed in {file}"));
+    let level = line.split(&needle).nth(1).unwrap().split(')').next().unwrap();
+    level.to_ascii_lowercase()
 }
 
-/// `keyed(obs)`: the trajectory keeps its run id and the observation subtree
-/// under it is another address.
-fn assert_obs_rekeys(base: &Invocation, with: &Invocation) {
+// ─── The assertions, one per class ──────────────────────────────────────────
+
+/// `keyed(level)`: every cell of `with` has a run id `base` does not, and a
+/// hash at the declared level `base` does not. For `keyed(obs)`, the
+/// trajectory keeps its run id and the observation subtree re-keys.
+fn assert_rekeys(input: &str, base: &Invocation, with: &Invocation) {
+    let level = declared_level(input);
     let (a, b) = (simulate(base), simulate(with));
-    assert_eq!(a.sim_ids(), b.sim_ids(), "the trajectory's identity is unchanged");
-    for (id, leaf) in a.sims() {
-        let other = &b.sims()[&id];
-        assert!(!leaf.obs.is_empty(), "the run stores observations");
-        assert!(leaf.obs.is_disjoint(&other.obs), "{id}: the observation subtree re-keys: {:?} vs {:?}", leaf.obs, other.obs);
+    if level == "obs" {
+        assert_eq!(a.sim_ids(), b.sim_ids(), "{input}: the trajectory's identity is unchanged");
+        for (id, leaf) in a.sims() {
+            let other = &b.sims()[&id];
+            assert!(!leaf.obs.is_empty(), "the run stores observations");
+            assert!(leaf.obs.is_disjoint(&other.obs), "{input}: the observation subtree re-keys");
+        }
+        return;
     }
+    let (ia, ib) = (a.sim_ids(), b.sim_ids());
+    assert!(!ia.is_empty() && !ib.is_empty(), "both runs store a cell");
+    assert!(ia.is_disjoint(&ib), "{input} is keyed, so it re-keys every cell: {ia:?} vs {ib:?}");
+    let (la, lb) = (a.level_hashes(&level), b.level_hashes(&level));
+    assert!(
+        la.is_disjoint(&lb),
+        "{input} is classified keyed({level}), so it re-keys the `{level}` level: {la:?} vs {lb:?}"
+    );
+}
+
+/// The kind, run id and stored bytes of every leaf.
+fn result(s: &Stored) -> Vec<(String, String, BTreeMap<String, String>)> {
+    s.leaves.iter().map(|l| (l.kind.clone(), l.run_id.clone(), l.files.clone())).collect()
 }
 
 /// `execution`: the same run ids and the same stored bytes.
 fn assert_same_result(a: &Stored, b: &Stored) {
     assert!(!a.leaves.is_empty(), "the run stores a leaf");
-    let strip = |s: &Stored| -> Vec<(String, String, BTreeMap<String, String>)> {
-        s.leaves.iter().map(|l| (l.kind.clone(), l.run_id.clone(), l.files.clone())).collect()
-    };
-    assert_eq!(strip(a), strip(b), "an execution input leaves the run ids and the stored bytes unchanged");
+    assert_eq!(result(a), result(b), "an execution input leaves the run ids and the stored bytes unchanged");
 }
 
 fn assert_same(a: &Invocation, b: &Invocation) {
@@ -401,163 +507,204 @@ fn assert_shared_cells_keep_ids(small: &Invocation, large: &Invocation) {
     assert!(b.len() > a.len(), "the larger set has more cells");
 }
 
+/// `presentation` / `provenance`: the same leaves, run ids and stored bytes,
+/// and `live` — the input's own output — exists after the run with it.
+fn assert_leaf_unaffected(input: &str, base: &Invocation, with: &Invocation, live: Option<&Path>) {
+    let (a, b) = (simulate(base), simulate(with));
+    assert!(!a.leaves.is_empty(), "the run stores a leaf");
+    assert_eq!(result(&a), result(&b), "{input} leaves the run ids and the stored bytes unchanged");
+    if let Some(p) = live {
+        assert!(p.exists(), "{input} wrote {}: the fixture exercises it", p.display());
+    }
+}
+
+/// `presentation`, for an input that takes the run out of the store: it
+/// succeeds and writes no leaf, and `live` exists afterwards.
+fn assert_writes_no_leaf(input: &str, with: &Invocation, live: Option<&Path>) {
+    let store = tempfile::tempdir().unwrap();
+    let s = simulate_into(store.path(), with);
+    assert!(s.leaves.is_empty(), "{input} writes no leaf: {:?}", s.leaves);
+    if let Some(p) = live {
+        assert!(p.exists(), "{input} wrote {}: the fixture exercises it", p.display());
+    }
+}
+
 // ─── keyed ───────────────────────────────────────────────────────────────────
 
 #[test]
 fn keyed_model() {
-    let fx = fixture();
-    let long = Invocation {
-        args: vec![fx.path("sir_long.ir.json"), "--params".into(), fx.path("p.toml")],
-        ..Default::default()
-    };
-    assert_rekeys(&sir(&[]), &long);
+    let fx = fx();
+    let long = Invocation::new(&fx, vec![fx.path("sir_long.ir.json"), "--params".into(), fx.path("p.toml")], &[]);
+    assert_rekeys("model", &sir(&fx, &[]), &long);
 }
 
 #[test]
 fn keyed_to() {
-    assert_rekeys(&sir(&[]), &sir(&["--to", "15"]));
+    let fx = fx();
+    assert_rekeys("to", &sir(&fx, &[]), &sir(&fx, &["--to", "15"]));
 }
 
 #[test]
 fn keyed_init_state() {
-    let state = fixture().path("state.tsv");
-    assert_rekeys(&sir(&["--replicates", "2"]), &sir(&["--replicates", "2", "--init-state", &state]));
+    let fx = fx();
+    let state = fx.path("state.tsv");
+    assert_rekeys("init_state", &sir(&fx, &["--replicates", "2"]), &sir(&fx, &["--replicates", "2", "--init-state", &state]));
 }
 
 #[test]
 fn keyed_allow_degenerate_rates() {
-    assert_rekeys(&sir(&[]), &sir(&["--allow-degenerate-rates"]));
+    let fx = fx();
+    assert_rekeys("allow_degenerate_rates", &sir(&fx, &[]), &sir(&fx, &["--allow-degenerate-rates"]));
 }
 
 #[test]
 fn keyed_allow_forcing_extrapolation() {
-    assert_rekeys(&sir(&[]), &sir(&["--allow-forcing-extrapolation"]));
+    let fx = fx();
+    assert_rekeys("allow_forcing_extrapolation", &sir(&fx, &[]), &sir(&fx, &["--allow-forcing-extrapolation"]));
 }
 
 #[test]
 fn keyed_params() {
-    let p2 = fixture().path("p2.toml");
-    let mut other = sir(&[]);
-    other.args[2] = p2;
-    assert_rekeys(&sir(&[]), &other);
+    let fx = fx();
+    let mut other = sir(&fx, &[]);
+    other.args[2] = fx.path("p2.toml");
+    assert_rekeys("params", &sir(&fx, &[]), &other);
 }
 
 #[test]
 fn keyed_param() {
-    assert_rekeys(&sir(&[]), &sir(&["--param", "beta_a=0.45"]));
+    let fx = fx();
+    assert_rekeys("param", &sir(&fx, &[]), &sir(&fx, &["--param", "beta_a=0.45"]));
 }
 
 #[test]
 fn keyed_table() {
-    let w2 = format!("w={}", fixture().path("w2.tsv"));
-    let mut other = patch_source(&[]);
-    other.args[4] = w2;
-    assert_rekeys(&patch_source(&[]), &other);
+    let fx = fx();
+    let mut other = patch_source(&fx, &[]);
+    other.args[4] = format!("w={}", fx.path("w2.tsv"));
+    assert_rekeys("table", &patch_source(&fx, &[]), &other);
 }
 
 #[test]
 fn keyed_param_vec() {
-    let v = format!("beta={}", fixture().path("beta_vec.tsv"));
-    assert_rekeys(&sir(&[]), &sir(&["--param-vec", &v]));
+    let fx = fx();
+    let v = format!("beta={}", fx.path("beta_vec.tsv"));
+    assert_rekeys("param_vec", &sir(&fx, &[]), &sir(&fx, &["--param-vec", &v]));
 }
 
 #[test]
 fn keyed_fit() {
-    let fit = fixture().path("fit.toml");
-    assert_rekeys(&sir(&["--draws", "prior", "-n", "2"]), &sir(&["--draws", "prior", "-n", "2", "--fit", &fit]));
+    let fx = fx();
+    let fit = fx.path("fit.toml");
+    assert_rekeys("fit", &sir(&fx, &["--draws", "prior", "-n", "2"]), &sir(&fx, &["--draws", "prior", "-n", "2", "--fit", &fit]));
 }
 
 #[test]
 fn keyed_enable() {
-    assert_rekeys(&sir(&[]), &sir(&["--enable", "sia"]));
+    let fx = fx();
+    assert_rekeys("enable", &sir(&fx, &[]), &sir(&fx, &["--enable", "sia"]));
 }
 
 #[test]
 fn keyed_disable() {
-    assert_rekeys(&sir(&["--enable", "sia"]), &sir(&["--disable", "sia"]));
+    let fx = fx();
+    assert_rekeys("disable", &sir(&fx, &["--enable", "sia"]), &sir(&fx, &["--disable", "sia"]));
 }
 
 #[test]
 fn keyed_backend() {
-    assert_rekeys(&sir(&[]), &sir(&["--backend", "gillespie"]));
+    let fx = fx();
+    assert_rekeys("backend", &sir(&fx, &[]), &sir(&fx, &["--backend", "gillespie"]));
 }
 
 #[test]
 fn keyed_dt() {
-    assert_rekeys(&sir(&[]), &sir(&["--dt", "0.5"]));
+    let fx = fx();
+    assert_rekeys("dt", &sir(&fx, &[]), &sir(&fx, &["--dt", "0.5"]));
 }
 
 #[test]
 fn keyed_integrator() {
-    assert_rekeys(&sir(&["--backend", "ode"]), &sir(&["--backend", "ode", "--integrator", "rk45"]));
+    let fx = fx();
+    assert_rekeys("integrator", &sir(&fx, &["--backend", "ode"]), &sir(&fx, &["--backend", "ode", "--integrator", "rk45"]));
 }
 
 #[test]
 fn keyed_every() {
-    assert_rekeys(&sir(&[]), &sir(&["--output-every", "2"]));
+    let fx = fx();
+    assert_rekeys("every", &sir(&fx, &[]), &sir(&fx, &["--output-every", "2"]));
 }
 
 #[test]
 fn keyed_no_flows() {
-    assert_rekeys(&sir(&[]), &sir(&["--no-flows"]));
+    let fx = fx();
+    assert_rekeys("no_flows", &sir(&fx, &[]), &sir(&fx, &["--no-flows"]));
 }
 
 #[test]
 fn keyed_columns() {
-    assert_rekeys(&sir(&[]), &sir(&["--columns", "S,I"]));
+    let fx = fx();
+    assert_rekeys("columns", &sir(&fx, &[]), &sir(&fx, &["--columns", "S,I"]));
 }
 
 #[test]
 fn keyed_seed() {
-    assert_rekeys(&sir(&[]), &sir(&["--seed", "2"]));
+    let fx = fx();
+    assert_rekeys("seed", &sir(&fx, &[]), &sir(&fx, &["--seed", "2"]));
 }
 
 #[test]
 fn keyed_no_licm() {
-    assert_rekeys(&sir_source(&[]), &sir_source(&["--no-licm"]));
+    let fx = fx();
+    assert_rekeys("no_licm", &sir_source(&fx, &[]), &sir_source(&fx, &["--no-licm"]));
 }
 
 #[test]
 fn keyed_emit_every() {
+    let fx = fx();
     let mirror = tempfile::tempdir().unwrap();
     let obs = mirror.path().join("obs").to_string_lossy().into_owned();
-    let base = sir(&["--obs-dir", &obs]);
-    assert_obs_rekeys(&base, &sir(&["--obs-dir", &obs, "--emit-every", "2"]));
+    assert_rekeys("emit_every", &sir(&fx, &["--obs-dir", &obs]), &sir(&fx, &["--obs-dir", &obs, "--emit-every", "2"]));
 }
 
 #[test]
 fn keyed_env_eval_unresolved() {
-    assert_rekeys(&sir(&[]), &sir(&[]).env("CAMDL_EVAL_UNRESOLVED", "1"));
+    let fx = fx();
+    assert_rekeys("env:eval_unresolved", &sir(&fx, &[]), &sir(&fx, &[]).env("CAMDL_EVAL_UNRESOLVED", "1"));
 }
 
 #[test]
 fn keyed_env_no_binding_cache() {
-    assert_rekeys(&sir(&[]), &sir(&[]).env("CAMDL_NO_BINDING_CACHE", "1"));
+    let fx = fx();
+    assert_rekeys("env:no_binding_cache", &sir(&fx, &[]), &sir(&fx, &[]).env("CAMDL_NO_BINDING_CACHE", "1"));
 }
 
 #[test]
 fn keyed_env_experimental() {
-    let with = sir(&[]).env("CAMDL_EXPERIMENTAL_DIFFERENTIAL_TEST", "1");
-    assert_rekeys(&sir(&[]), &with);
+    let fx = fx();
+    let with = sir(&fx, &[]).env("CAMDL_EXPERIMENTAL_DIFFERENTIAL_TEST", "1");
+    assert_rekeys("env:experimental", &sir(&fx, &[]), &with);
     // The record lists it.
     let store = tempfile::tempdir().unwrap();
     let _ = simulate_into(store.path(), &with);
-    let record = leaves_records(store.path()).pop().expect("a record");
+    let record = records(store.path()).pop().expect("a record");
     assert_eq!(record["provenance"]["experimental"]["CAMDL_EXPERIMENTAL_DIFFERENTIAL_TEST"], "1");
 }
 
 #[test]
 fn keyed_env_no_constant_fold() {
-    assert_rekeys(&patch_source(&[]), &patch_source(&[]).env("CAMDL_NO_CONSTANT_FOLD", "1"));
+    let fx = fx();
+    assert_rekeys("env:no_constant_fold", &patch_source(&fx, &[]), &patch_source(&fx, &[]).env("CAMDL_NO_CONSTANT_FOLD", "1"));
 }
 
 #[test]
 fn keyed_env_no_licm() {
-    assert_rekeys(&sir_source(&[]), &sir_source(&[]).env("CAMDL_NO_LICM", "1"));
+    let fx = fx();
+    assert_rekeys("env:no_licm", &sir_source(&fx, &[]), &sir_source(&fx, &[]).env("CAMDL_NO_LICM", "1"));
 }
 
-/// Every sim record under `root`, parsed.
-fn leaves_records(root: &Path) -> Vec<serde_json::Value> {
+/// Every record under `root`, parsed.
+fn records(root: &Path) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(d) = stack.pop() {
@@ -577,81 +724,83 @@ fn leaves_records(root: &Path) -> Vec<serde_json::Value> {
 
 #[test]
 fn expands_scenarios() {
-    assert_shared_cells_keep_ids(&sir(&["--scenario", "fast"]), &sir(&["--scenario", "fast", "--scenario", "with_sia"]));
+    let fx = fx();
+    assert_shared_cells_keep_ids(&sir(&fx, &["--scenario", "fast"]), &sir(&fx, &["--scenario", "fast", "--scenario", "with_sia"]));
 }
 
 #[test]
 fn expands_seeds() {
-    assert_shared_cells_keep_ids(&sir(&["--seeds", "1:2"]), &sir(&["--seeds", "1:3"]));
+    let fx = fx();
+    assert_shared_cells_keep_ids(&sir(&fx, &["--seeds", "1:2"]), &sir(&fx, &["--seeds", "1:3"]));
 }
 
 #[test]
 fn expands_replicates() {
-    assert_shared_cells_keep_ids(&sir(&["--replicates", "2"]), &sir(&["--replicates", "3"]));
+    let fx = fx();
+    assert_shared_cells_keep_ids(&sir(&fx, &["--replicates", "2"]), &sir(&fx, &["--replicates", "3"]));
 }
 
 #[test]
 fn expands_draws() {
-    let fx = fixture();
-    assert_shared_cells_keep_ids(
-        &sir(&["--draws", &fx.path("draws2.tsv")]),
-        &sir(&["--draws", &fx.path("draws3.tsv")]),
-    );
+    let fx = fx();
+    assert_shared_cells_keep_ids(&sir(&fx, &["--draws", &fx.path("draws2.tsv")]), &sir(&fx, &["--draws", &fx.path("draws3.tsv")]));
 }
 
 #[test]
 fn expands_n_draws() {
-    assert_shared_cells_keep_ids(&sir(&["--draws", "prior", "-n", "2"]), &sir(&["--draws", "prior", "-n", "3"]));
+    let fx = fx();
+    assert_shared_cells_keep_ids(&sir(&fx, &["--draws", "prior", "-n", "2"]), &sir(&fx, &["--draws", "prior", "-n", "3"]));
 }
 
 #[test]
 fn expands_sweep() {
-    assert_shared_cells_keep_ids(&sir(&["--sweep", "beta_a=0.3,0.4"]), &sir(&["--sweep", "beta_a=0.3,0.4,0.5"]));
+    let fx = fx();
+    assert_shared_cells_keep_ids(&sir(&fx, &["--sweep", "beta_a=0.3,0.4"]), &sir(&fx, &["--sweep", "beta_a=0.3,0.4,0.5"]));
 }
 
 #[test]
 fn expands_sweep_file() {
-    let fx = fixture();
+    let fx = fx();
     assert_shared_cells_keep_ids(
-        &sir(&["--sweep-file", &fx.path("sweep2.tsv")]),
-        &sir(&["--sweep-file", &fx.path("sweep3.tsv")]),
+        &sir(&fx, &["--sweep-file", &fx.path("sweep2.tsv")]),
+        &sir(&fx, &["--sweep-file", &fx.path("sweep3.tsv")]),
     );
 }
 
 #[test]
 fn expands_chains() {
-    let post = fixture().path("post");
+    let fx = fx();
+    let post = fx.path("post");
     let draws = ["--draws", "posterior", "--fit", &post];
     let one = [&draws[..], &["--chains", "0"]].concat();
     let two = [&draws[..], &["--chains", "0,1"]].concat();
-    assert_shared_cells_keep_ids(&sir(&one), &sir(&two));
+    assert_shared_cells_keep_ids(&sir(&fx, &one), &sir(&fx, &two));
 }
 
 #[test]
 fn expands_exclude_chains() {
-    let post = fixture().path("post");
+    let fx = fx();
+    let post = fx.path("post");
     let draws = ["--draws", "posterior", "--fit", &post];
     let fewer = [&draws[..], &["--exclude-chains", "1,2"]].concat();
     let more = [&draws[..], &["--exclude-chains", "2"]].concat();
-    assert_shared_cells_keep_ids(&sir(&fewer), &sir(&more));
+    assert_shared_cells_keep_ids(&sir(&fx, &fewer), &sir(&fx, &more));
 }
 
 // ─── execution ───────────────────────────────────────────────────────────────
 
 #[test]
 fn execution_parallel() {
-    assert_same(&sir(&["--seeds", "1:4", "--parallel", "1"]), &sir(&["--seeds", "1:4", "--parallel", "4"]));
+    let fx = fx();
+    assert_same(&sir(&fx, &["--seeds", "1:4", "--parallel", "1"]), &sir(&fx, &["--seeds", "1:4", "--parallel", "4"]));
 }
 
 #[test]
 fn execution_output_dir() {
     // The same run into two store roots: the stored leaves are the same.
+    let fx = fx();
     let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let at = |d: &Path| {
-        let mut inv = sir(&[]);
-        inv.args.extend(["--output-dir".to_string(), d.join("elsewhere").to_string_lossy().into_owned()]);
-        inv
-    };
+    let at = |d: &Path| sir(&fx, &["--output-dir", &d.join("elsewhere").to_string_lossy()]);
     assert_same_result(&simulate_into(a.path(), &at(a.path())), &simulate_into(b.path(), &at(b.path())));
 }
 
@@ -659,107 +808,281 @@ fn execution_output_dir() {
 fn execution_force() {
     // A forced recompute into the store that holds the run stores the same
     // leaf; the incumbent is quarantined.
+    let fx = fx();
     let store = tempfile::tempdir().unwrap();
-    let first = simulate_into(store.path(), &sir(&[]));
-    let forced = simulate_into(store.path(), &sir(&["--force"]));
+    let first = simulate_into(store.path(), &sir(&fx, &[]));
+    let forced = simulate_into(store.path(), &sir(&fx, &["--force"]));
     assert_same_result(&first, &forced);
     assert!(store.path().join("results/.quarantine").is_dir(), "--force displaced the incumbent");
 }
 
 #[test]
 fn execution_no_ir_cache() {
-    assert_same(&sir_source(&[]), &sir_source(&["--no-ir-cache"]));
+    let fx = fx();
+    assert_same(&sir_source(&fx, &[]), &sir_source(&fx, &["--no-ir-cache"]));
 }
 
 #[test]
 fn execution_env_no_ir_cache() {
-    assert_same(&sir_source(&[]), &sir_source(&[]).env("CAMDL_NO_IR_CACHE", "1"));
+    let fx = fx();
+    assert_same(&sir_source(&fx, &[]), &sir_source(&fx, &[]).env("CAMDL_NO_IR_CACHE", "1"));
 }
 
 #[test]
 fn execution_env_ir_cache_dir() {
+    let fx = fx();
     let elsewhere = tempfile::tempdir().unwrap();
-    let moved = sir_source(&[]).env("CAMDL_IR_CACHE_DIR", &elsewhere.path().to_string_lossy());
-    assert_same(&sir_source(&[]), &moved);
+    let moved = sir_source(&fx, &[]).env("CAMDL_IR_CACHE_DIR", &elsewhere.path().to_string_lossy());
+    assert_same(&sir_source(&fx, &[]), &moved);
 }
 
 #[test]
 fn execution_env_xdg_cache_home() {
     // With no `CAMDL_IR_CACHE_DIR`, the cache lives under `XDG_CACHE_HOME`.
+    let fx = fx();
     let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let under = |d: &Path| sir_source(&[]).unset("CAMDL_IR_CACHE_DIR").env("XDG_CACHE_HOME", &d.to_string_lossy());
+    let under = |d: &Path| sir_source(&fx, &[]).without("CAMDL_IR_CACHE_DIR").env("XDG_CACHE_HOME", &d.to_string_lossy());
     assert_same(&under(a.path()), &under(b.path()));
 }
 
 #[test]
 fn execution_env_home() {
     // With neither `CAMDL_IR_CACHE_DIR` nor `XDG_CACHE_HOME`, under `HOME`.
+    let fx = fx();
     let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let under = |d: &Path| {
-        sir_source(&[]).unset("CAMDL_IR_CACHE_DIR").unset("XDG_CACHE_HOME").env("HOME", &d.to_string_lossy())
-    };
+    let under = |d: &Path| sir_source(&fx, &[]).without("CAMDL_IR_CACHE_DIR").env("HOME", &d.to_string_lossy());
     assert_same(&under(a.path()), &under(b.path()));
 }
 
 #[test]
 fn execution_env_camdlc_path() {
     // The same compiler named by `CAMDLC_PATH` (which outranks `CAMDLC`).
-    let camdlc = fixture().camdlc.to_string_lossy().into_owned();
-    assert_same(&sir_source(&["--no-ir-cache"]), &sir_source(&["--no-ir-cache"]).env("CAMDLC_PATH", &camdlc));
+    let fx = fx();
+    let camdlc = fx.camdlc.to_string_lossy().into_owned();
+    assert_same(&sir_source(&fx, &["--no-ir-cache"]), &sir_source(&fx, &["--no-ir-cache"]).env("CAMDLC_PATH", &camdlc));
 }
 
 #[test]
 fn execution_env_camdlc() {
-    // The same compiler named by `CAMDLC`, against the one beside it on `PATH`.
-    let fx = fixture();
+    // The same compiler named by `CAMDLC`, against the one found on `PATH`.
+    let fx = fx();
     let bin = tempfile::tempdir().unwrap();
     std::os::unix::fs::symlink(&fx.camdlc, bin.path().join("camdlc")).unwrap();
     let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap_or_default());
-    let on_path = sir_source(&["--no-ir-cache"]).unset("CAMDLC").env("PATH", &path);
-    assert_same(&sir_source(&["--no-ir-cache"]), &on_path);
+    let on_path = sir_source(&fx, &["--no-ir-cache"]).without("CAMDLC").env("PATH", &path);
+    assert_same(&sir_source(&fx, &["--no-ir-cache"]), &on_path);
 }
 
 // ─── presentation and provenance ────────────────────────────────────────────
 
-/// A presentation or provenance input leaves the stored result alone: the
-/// same cells, under the same run ids, holding the same bytes. (That they are
-/// not fields of the resolved configuration is checked structurally, by
-/// `sim_config::tests::presentation_and_provenance_are_not_configuration`.)
-///
-/// `--event-log` is the exception: the recorder is passive, so the trajectory
-/// and the run id are the same, but the leaf gains an `event_log.tsv` artifact
-/// in its manifest, so the same run id holds different stored bytes depending
-/// on whether any invocation asked for the log. Its check is the trajectory
-/// alone, and the gain is asserted, so a change to that behaviour is seen here.
 #[test]
-fn presentation_and_provenance_inputs_leave_the_leaf_unaffected() {
-    let scratch = tempfile::tempdir().unwrap();
-    let at = |name: &str| scratch.path().join(name).to_string_lossy().into_owned();
-    let base = simulate(&sir(&[]));
-    let cases: Vec<(&str, Vec<String>)> = vec![
-        ("--output", vec!["-o".into(), at("traj.tsv")]),
-        ("--obs", vec!["--obs".into(), at("obs.tsv")]),
-        ("--obs-dir", vec!["--obs-dir".into(), at("obs_dir")]),
-        ("--obs-only", vec!["--obs-only".into(), at("obs_only.tsv")]),
-        ("--obs-only-dir", vec!["--obs-only-dir".into(), at("obs_only_dir")]),
-        ("--label", vec!["--label".into(), "a label".into()]),
-        ("--reactive-log", vec!["--reactive-log".into(), at("reactive.tsv")]),
-        ("--quantities-out", vec!["--quantities-out".into(), at("q")]),
-        ("--verbosity", vec!["--verbosity".into(), "debug".into()]),
-        ("--no-progress", vec!["--no-progress".into()]),
-    ];
-    let traj = |s: &Stored| -> Vec<(String, Option<String>)> {
-        s.sims().into_iter().map(|(id, l)| (id, l.files.get("traj.tsv").cloned())).collect()
+fn presentation_output() {
+    let fx = fx();
+    let out = tempfile::tempdir().unwrap();
+    let f = out.path().join("traj.tsv");
+    assert_leaf_unaffected("--output", &sir(&fx, &[]), &sir(&fx, &["-o", &f.to_string_lossy()]), Some(&f));
+}
+
+#[test]
+fn presentation_obs() {
+    let fx = fx();
+    let out = tempfile::tempdir().unwrap();
+    let f = out.path().join("obs.tsv");
+    assert_leaf_unaffected("--obs", &sir(&fx, &[]), &sir(&fx, &["--obs", &f.to_string_lossy()]), Some(&f));
+}
+
+#[test]
+fn presentation_obs_dir() {
+    let fx = fx();
+    let out = tempfile::tempdir().unwrap();
+    let d = out.path().join("obs");
+    assert_leaf_unaffected("--obs-dir", &sir(&fx, &[]), &sir(&fx, &["--obs-dir", &d.to_string_lossy()]), Some(&d.join("cases.tsv")));
+}
+
+#[test]
+fn presentation_obs_only() {
+    let fx = fx();
+    let out = tempfile::tempdir().unwrap();
+    let f = out.path().join("obs.tsv");
+    assert_leaf_unaffected("--obs-only", &sir(&fx, &[]), &sir(&fx, &["--obs-only", &f.to_string_lossy()]), Some(&f));
+}
+
+#[test]
+fn presentation_obs_only_dir() {
+    let fx = fx();
+    let out = tempfile::tempdir().unwrap();
+    let d = out.path().join("obs");
+    let with = sir(&fx, &["--obs-only-dir", &d.to_string_lossy()]);
+    assert_leaf_unaffected("--obs-only-dir", &sir(&fx, &[]), &with, Some(&d.join("cases.tsv")));
+}
+
+#[test]
+fn presentation_dates() {
+    // On a model with a calendar origin, `--dates` adds a date column to the
+    // mirror; the stored leaf is undated either way.
+    let fx = fx();
+    let out = tempfile::tempdir().unwrap();
+    let (a, b) = (out.path().join("a.tsv"), out.path().join("b.tsv"));
+    let base = sir_dated(&fx, &["-o", &a.to_string_lossy()]);
+    let with = sir_dated(&fx, &["-o", &b.to_string_lossy(), "--dates"]);
+    assert_leaf_unaffected("--dates", &base, &with, None);
+    let header = |p: &Path| -> String {
+        let text = std::fs::read_to_string(p).unwrap();
+        text.lines().find(|l| !l.starts_with('#')).unwrap_or_default().to_string()
     };
-    let files = |s: &Stored| -> Vec<BTreeMap<String, String>> { s.leaves.iter().map(|l| l.files.clone()).collect() };
-    for (flag, extra) in &cases {
-        let extra: Vec<&str> = extra.iter().map(String::as_str).collect();
-        let with = simulate(&sir(&extra));
-        assert_eq!(traj(&base), traj(&with), "{flag}: the cells and their trajectories are unchanged");
-        assert_eq!(files(&base), files(&with), "{flag}: the stored bytes are unchanged");
-    }
-    let logged = simulate(&sir(&["--event-log"]));
-    assert_eq!(traj(&base), traj(&logged), "--event-log: the cell and its trajectory are unchanged");
-    let gained: Vec<&String> = logged.leaves[0].files.keys().filter(|k| !base.leaves[0].files.contains_key(*k)).collect();
+    assert!(!header(&a).contains("date") && header(&b).contains("\tdate\t"), "--dates dated the mirror");
+}
+
+#[test]
+fn presentation_draws_out() {
+    let fx = fx();
+    let out = tempfile::tempdir().unwrap();
+    let f = out.path().join("draws.tsv");
+    let base = sir(&fx, &["--draws", "prior", "-n", "2"]);
+    let with = sir(&fx, &["--draws", "prior", "-n", "2", "--draws-out", &f.to_string_lossy()]);
+    assert_leaf_unaffected("--draws-out", &base, &with, Some(&f));
+}
+
+#[test]
+fn presentation_quantities_out() {
+    let fx = fx();
+    let out = tempfile::tempdir().unwrap();
+    let d = out.path().join("q");
+    assert_leaf_unaffected("--quantities-out", &sir(&fx, &[]), &sir(&fx, &["--quantities-out", &d.to_string_lossy()]), Some(&d.join("quantities.json")));
+}
+
+#[test]
+fn presentation_quantities() {
+    // A vocabulary in place of the model's `quantities {}` block changes the
+    // sidecar, never the leaf.
+    let fx = fx();
+    let out = tempfile::tempdir().unwrap();
+    let (a, b) = (out.path().join("a"), out.path().join("b"));
+    let base = sir_source(&fx, &["--quantities-out", &a.to_string_lossy()]);
+    let with = sir_source(&fx, &["--quantities-out", &b.to_string_lossy(), "--quantities", &fx.path("vocabulary.camdl")]);
+    assert_leaf_unaffected("--quantities", &base, &with, None);
+    assert!(std::fs::read_dir(&b).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with("quantities-")), "--quantities wrote its keyed table");
+}
+
+#[test]
+fn presentation_event_log() {
+    // The recorder is passive, so the trajectory and the run id are the same,
+    // but the leaf gains an `event_log.tsv` artifact under that run id: the
+    // bytes one run id holds depend on whether any invocation asked for the
+    // log. Pinned here, so a change to it is seen; the log is to become its
+    // own addressed child artifact.
+    let fx = fx();
+    let (base, logged) = (simulate(&sir(&fx, &[])), simulate(&sir(&fx, &["--event-log"])));
+    assert_eq!(base.sim_ids(), logged.sim_ids(), "--event-log: the run id is unchanged");
+    let (bl, ll) = (&base.leaves[0], &logged.leaves[0]);
+    assert_eq!(bl.files.get("traj.tsv"), ll.files.get("traj.tsv"), "--event-log: the trajectory is unchanged");
+    let gained: Vec<&String> = ll.files.keys().filter(|k| !bl.files.contains_key(*k)).collect();
     assert_eq!(gained, ["event_log.tsv"], "--event-log adds its log to the leaf, under the same run id");
+}
+
+#[test]
+fn presentation_format() {
+    let fx = fx();
+    let out = tempfile::tempdir().unwrap();
+    let (a, b) = (out.path().join("a.log"), out.path().join("b.log"));
+    let base = sir(&fx, &["--event-log", &a.to_string_lossy()]);
+    let with = sir(&fx, &["--event-log", &b.to_string_lossy(), "--format", "tsv"]);
+    assert_leaf_unaffected("--format", &base, &with, Some(&b));
+}
+
+#[test]
+fn presentation_tsv() {
+    let fx = fx();
+    let out = tempfile::tempdir().unwrap();
+    let (a, b) = (out.path().join("a.log"), out.path().join("b.log"));
+    let base = sir(&fx, &["--event-log", &a.to_string_lossy()]);
+    let with = sir(&fx, &["--event-log", &b.to_string_lossy(), "--tsv"]);
+    assert_leaf_unaffected("--tsv", &base, &with, Some(&b));
+}
+
+#[test]
+fn presentation_reactive_log() {
+    // On a model with a reactive policy, the leaf holds the firing log either
+    // way; `--reactive-log` mirrors it.
+    let fx = fx();
+    let out = tempfile::tempdir().unwrap();
+    let f = out.path().join("reactive.tsv");
+    assert_leaf_unaffected(
+        "--reactive-log",
+        &reactive(&fx, &["--enable", "sia"]),
+        &reactive(&fx, &["--enable", "sia", "--reactive-log", &f.to_string_lossy()]),
+        Some(&f),
+    );
+}
+
+#[test]
+fn presentation_progress() {
+    let fx = fx();
+    assert_leaf_unaffected("--progress", &sir(&fx, &["--progress", "none"]), &sir(&fx, &["--progress", "plain"]), None);
+}
+
+#[test]
+fn presentation_no_progress() {
+    let fx = fx();
+    assert_leaf_unaffected("--no-progress", &sir(&fx, &["--progress", "plain"]), &sir(&fx, &["--no-progress"]), None);
+}
+
+#[test]
+fn presentation_verbosity() {
+    let fx = fx();
+    assert_leaf_unaffected("--verbosity", &sir(&fx, &[]), &sir(&fx, &["--verbosity", "debug"]), None);
+}
+
+#[test]
+fn presentation_env_trace_steps() {
+    let fx = fx();
+    assert_leaf_unaffected("CAMDL_TRACE_STEPS", &sir(&fx, &[]), &sir(&fx, &[]).env("CAMDL_TRACE_STEPS", "1"), None);
+}
+
+#[test]
+fn presentation_env_no_color() {
+    let fx = fx();
+    assert_leaf_unaffected("NO_COLOR", &sir(&fx, &[]), &sir(&fx, &[]).env("NO_COLOR", "1"), None);
+}
+
+#[test]
+fn presentation_env_clicolor_force() {
+    let fx = fx();
+    assert_leaf_unaffected("CLICOLOR_FORCE", &sir(&fx, &[]), &sir(&fx, &[]).env("CLICOLOR_FORCE", "1"), None);
+}
+
+#[test]
+fn provenance_label() {
+    let fx = fx();
+    assert_leaf_unaffected("--label", &sir(&fx, &[]), &sir(&fx, &["--label", "a label"]), None);
+}
+
+#[test]
+fn presentation_stdout() {
+    let fx = fx();
+    assert_writes_no_leaf("--stdout", &sir(&fx, &["--stdout"]), None);
+}
+
+#[test]
+fn presentation_dry_run() {
+    let fx = fx();
+    assert_writes_no_leaf("--dry-run", &sir(&fx, &["--seeds", "1:2", "--dry-run"]), None);
+}
+
+#[test]
+fn presentation_design_from() {
+    let fx = fx();
+    let out = tempfile::tempdir().unwrap();
+    let d = out.path().join("design");
+    let with = sir(&fx, &["--design-from", &fx.path("fit.toml"), "--obs-only-dir", &d.to_string_lossy()]);
+    assert_writes_no_leaf("--design-from", &with, Some(&d.join("cases.tsv")));
+}
+
+#[test]
+fn presentation_projected_out() {
+    let fx = fx();
+    let out = tempfile::tempdir().unwrap();
+    let d = out.path().join("projected");
+    let with = sir(&fx, &["--design-from", &fx.path("fit.toml"), "--projected-out", &d.to_string_lossy()]);
+    assert_writes_no_leaf("--projected-out", &with, Some(&d.join("cases.tsv")));
 }
