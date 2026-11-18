@@ -673,16 +673,19 @@ impl FsCasStore {
         let lock = LeafLock::acquire(&dir, LockWait::Refuse)?;
 
         // We now hold the exclusive lock. Defense-in-depth: a legitimate
-        // reclaim only ever clears a crashed/incomplete leaf (`resolve_claim_dir`
-        // returns `Reclaim`/`Fresh` only for non-`Completed` states). If the
-        // `run.json` is `Completed` here, a concurrent claimant finalized this
-        // leaf out from under us — refuse loudly rather than blind-wipe a
-        // finished result. (Fresh claims never see a `Completed` same-identity
-        // run.json: that would have surfaced as `AlreadyCompleted` above.)
-        if let ReadResult::Ok(r) = read_record(&dir) {
-            if r.status == RunStatus::Completed {
-                return Err(CasError::ReclaimRaceCompleted { path: dir.display().to_string() });
-            }
+        // reclaim only ever clears a leaf the lookup would not serve
+        // (`resolve_claim_dir` returns `Reclaim`/`Fresh` only for a miss or a
+        // stale leaf). If the leaf is a hit here — a current, `Completed`,
+        // intact result of this identity — a concurrent claimant finalized it
+        // out from under us: refuse loudly rather than blind-wipe a finished
+        // result. A `Completed` record that is still stale under the lock is
+        // not that race: it is a result the lookup refuses for everyone (an
+        // older `format_version` or `hash_version`, a file missing or
+        // changed, an orphan), and recomputing it is what the claim is for.
+        // Refusing on the status alone left such a leaf impossible to
+        // recompute, `--force` included.
+        if let Lookup::Hit(_) = self.lookup(&dir, &id) {
+            return Err(CasError::ReclaimRaceCompleted { path: dir.display().to_string() });
         }
 
         // A prior attempt at this identity (failed, interrupted, or a stale

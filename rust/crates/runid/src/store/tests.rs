@@ -895,6 +895,38 @@ fn the_records_of_an_attempt_are_outside_the_exact_set() {
     cleanup(&root);
 }
 
+/// A completed leaf an older camdl wrote — its record's `format_version` is
+/// not this build's — is stale: the lookup refuses to serve it, so the next
+/// claim of its identity must recompute it. The claim preserves the old
+/// record under `.attempts/` and clears the leaf; it must not mistake the
+/// `Completed` status for a concurrent finalize and refuse, which left such a
+/// leaf impossible to recompute, `--force` or not.
+#[test]
+fn a_completed_leaf_of_an_older_format_is_reclaimed() {
+    let root = tmp_root("formatdrift");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("fits").join("fit-aaaaaaaa").join("pmmh-bbbbbbbb");
+    let claim = store.claim_streaming(&leaf, record(id(0xaa))).unwrap();
+    claim.write("draws.tsv", b"beta\n0.5\n").unwrap();
+    let dest = claim.finalize(record(id(0xaa))).unwrap();
+    let raw = fs::read_to_string(dest.join("run.json")).unwrap();
+    let old = raw.replacen(&format!("\"format_version\": {FORMAT_VERSION}"),
+        &format!("\"format_version\": {}", FORMAT_VERSION - 1), 1);
+    assert_ne!(raw, old, "the record names its format version");
+    fs::write(dest.join("run.json"), old).unwrap();
+    assert!(matches!(store.lookup(&dest, &LeafIdentity::new(id(0xaa))), Lookup::Stale(_)));
+
+    let claim = store.claim_streaming(&leaf, record(id(0xaa)))
+        .expect("an older-format completed leaf is recomputed, not refused");
+    assert!(dest.join(ATTEMPTS_DIR).join("1").join(ATTEMPT_RECORD).is_file(),
+        "the old record is preserved under .attempts/");
+    assert!(!dest.join("draws.tsv").exists(), "the stale result is cleared");
+    claim.write("draws.tsv", b"beta\n0.6\n").unwrap();
+    claim.finalize(record(id(0xaa))).unwrap();
+    assert!(matches!(store.lookup(&dest, &LeafIdentity::new(id(0xaa))), Lookup::Hit(_)));
+    cleanup(&root);
+}
+
 /// A run killed mid-method leaves its event log behind; the reclaim that
 /// recomputes the leaf clears it with the rest of the dead run's files, so the
 /// new run's log does not continue the dead one's.
