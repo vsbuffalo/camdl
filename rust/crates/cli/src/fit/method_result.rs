@@ -992,7 +992,7 @@ impl PgasRun {
     pub fn load(method_dir: &Path) -> Result<Self, MethodResultError> {
         let inputs = read_method_inputs(method_dir)?;
         let n_chains = inputs_n_chains(&inputs);
-        let execution = crate::fit::execution::Execution::read(method_dir).ok().flatten();
+        let execution = crate::fit::execution::Execution::read_or_warn(method_dir);
         let wall_time_secs = execution.as_ref().and_then(|e| e.chain_wall_time_seconds());
 
         // Estimated parameter names from algorithm config — pgas
@@ -1102,7 +1102,7 @@ impl PmmhRun {
     ) -> Result<Self, MethodResultError> {
         let inputs = read_method_inputs(method_dir)?;
         let n_chains = inputs_n_chains(&inputs);
-        let execution = crate::fit::execution::Execution::read(method_dir).ok().flatten();
+        let execution = crate::fit::execution::Execution::read_or_warn(method_dir);
         let wall_time_secs = execution.as_ref().and_then(|e| e.chain_wall_time_seconds());
         let summary = read_summary_json(method_dir, &algo.summary_filename())?;
         let thin = summary.get("thin").and_then(|v| v.as_u64()).map(|t| t as usize).unwrap_or(1);

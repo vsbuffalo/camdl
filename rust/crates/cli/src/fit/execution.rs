@@ -137,6 +137,21 @@ impl Execution {
         }
     }
 
+    /// [`read`](Self::read) for a reader that can go on without the record
+    /// (wall time and cost are then reported as unknown): an absent record is
+    /// `None`, and one that exists and cannot be read or parsed is `None` with
+    /// a warning naming the file, never silently.
+    pub fn read_or_warn(leaf: &Path) -> Option<Self> {
+        match Self::read(leaf) {
+            Ok(e) => e,
+            Err(e) => {
+                crate::out::detached().say(format_args!(
+                    "warning: {e}; this run's wall time and sampling cost are reported as unknown"));
+                None
+            }
+        }
+    }
+
     /// The method wall time behind every draw the leaf holds — the
     /// denominator of ESS per second: this attempt's, plus every earlier
     /// segment's for a resumed leaf. `None` when any of them is unknown,
