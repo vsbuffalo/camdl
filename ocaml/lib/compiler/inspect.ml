@@ -1102,7 +1102,8 @@ let run_dims ppf (model : Ir.model) ctx =
     Dimcheck.check_model ~prior_args:(Expander.prior_sources ctx)
       ~constant_dims:(Expander.constant_dims ctx)
       ~table_dims:(Expander.table_unit_dims ctx)
-      ~typed_lets:(Expander.typed_let_uses ctx) model in
+      ~typed_lets:(Expander.typed_let_uses ctx)
+      ~transition_sources:(Expander.lowered_sources ctx) model in
   (* Build a lookup: param name → (kind, has_explicit_dim) from AST *)
   let param_info = List.filter_map (fun (p : Ir.parameter) ->
     let ast_decl = decl_of_param ctx p in

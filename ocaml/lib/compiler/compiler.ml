@@ -675,7 +675,8 @@ let run_dimcheck_full (d : compile_detail)
       Dimcheck.check_model ~prior_args:(Expander.prior_sources d.ctx)
         ~constant_dims:(Expander.constant_dims d.ctx)
         ~table_dims:(Expander.table_unit_dims d.ctx)
-        ~typed_lets:(Expander.typed_let_uses d.ctx) d.model in
+        ~typed_lets:(Expander.typed_let_uses d.ctx)
+        ~transition_sources:(Expander.lowered_sources d.ctx) d.model in
     let diags =
       List.map (fun (dc : Dimcheck.diagnostic) ->
         let loc = loc_of_subject dc.subject in
@@ -770,6 +771,12 @@ let differentiate_transitions (d : compile_detail)
     | Some td -> Expander.diag_loc_of_ast_ctx d.ctx td.trloc
     | None -> Diagnostics.no_loc
   in
+  (* A transition the `via` lowering made is reported as the member the
+     modeller wrote, once for all its copies. *)
+  let lowered = Expander.lowered_sources d.ctx in
+  let written_name name = match List.assoc_opt name lowered with
+    | Some (src : Dimcheck.transition_source) -> src.member
+    | None -> name in
   let diags = ref [] in
   let transitions =
     Passtime.time "autodiff" (fun () ->
@@ -783,15 +790,18 @@ let differentiate_transitions (d : compile_detail)
                 d.model.Ir.time_functions d.model.Ir.tables with
         | Ok rate_grad -> { t with Ir.rate_grad; Ir.rate_state_grad }
         | Error msg ->
-          diags := Diagnostics.mk_error
-                     ~code:"E600"
-                     ~loc:(tr_loc t.name)
-                     ~message:(Printf.sprintf "transition '%s': %s" t.name msg)
-                     ~hint:"reparameterize as the message describes — a \
-                            parameter cannot drive structural forcing data or a \
-                            non-constant lookup index; see \
-                            `camdl docs language-changes`"
-                     () :: !diags;
+          let message = Printf.sprintf "transition '%s': %s" (written_name t.name) msg in
+          if not (List.exists (fun (x : Diagnostics.diagnostic) -> x.message = message) !diags)
+          then
+            diags := Diagnostics.mk_error
+                       ~code:"E600"
+                       ~loc:(tr_loc t.name)
+                       ~message
+                       ~hint:"reparameterize as the message describes — a \
+                              parameter cannot drive structural forcing data or a \
+                              non-constant lookup index; see \
+                              `camdl docs language-changes`"
+                       () :: !diags;
           { t with Ir.rate_grad = []; Ir.rate_state_grad }
       ) d.model.Ir.transitions)
   in

@@ -44,7 +44,7 @@ type severity = Error | Info
     diagnostic; a diagnostic without a subject is printed without a
     location. *)
 type subject = Dim_sites.subject =
-  | STransition  of string   (** A transition, by expanded name. *)
+  | STransition  of string   (** A transition, by expanded name; for a transition the compiler made from a written one, the written member's ({!transition_source}). *)
   | SOde         of string   (** The ODE equation of the named compartment. *)
   | SObservation of string   (** An observation stream. *)
   | SBinding     of string   (** A shared binding. The compiler has no location for one. *)
@@ -103,6 +103,23 @@ type prior_source = {
   args   : (string * expr) list;   (** Each argument, by name. *)
 }
 
+(** A transition the expander made from one the modeller wrote, as the
+    modeller wrote it. A competing exit from a compartment staged by
+    [via erlang] is compiled to one transition per stage, each with its
+    share of the written rate; the checker reports a dimension error in any
+    of them once, under [member], with [rate] as the rate shown.
+
+    {@camdl[
+      treat[a in age] : E[a] --> T[a] @ cmax * E[a] / (K + E[a])
+    ]}
+    Under [E] with three stages, [treat_pre_s1] has the source
+    [{ member = "treat_pre"; rate = "cmax * E[pre] / (K + E[pre])"; lowered }]. *)
+type transition_source = {
+  member  : string;   (** The member as written, by expanded name, such as ["treat_pre"]. *)
+  rate    : string;   (** Its rate as written, with the member's levels in place of its binders. *)
+  lowered : string;   (** One sentence on what the compiler made of the rate, added to the diagnostic. *)
+}
+
 (** Dimensionally check an expanded model, returning every diagnostic plus the
     resolved parameter and generated-quantity dimensions. [prior_args] are the
     model's priors and bounds as written; without them only hierarchical
@@ -110,14 +127,18 @@ type prior_source = {
 val check_model :
   ?prior_args:prior_source list -> ?constant_dims:(string * (int * int)) list ->
   ?table_dims:(string * (int * int)) list ->
-  ?typed_lets:(string * (int * int) * expr) list -> model -> result
+  ?typed_lets:(string * (int * int) * expr) list ->
+  ?transition_sources:(string * transition_source) list -> model -> result
 (** [constant_dims] are the [dim] clauses of typed constants, which the IR's
     constant record does not carry; [table_dims] the dimensions of tables
     declared with a unit annotation, which the IR's table record does not
     carry either. [typed_lets] are the expanded bodies of typed, non-constant
     [let]s with their declared dimension; the IR substitutes them into the
     expressions that use them, so it keeps no node for the annotation
-    (E318). All of these come from the expander; the compiler and
+    (E318). [transition_sources] map an expanded transition name to the
+    written transition it was made from; a diagnostic on that transition
+    names the written one instead, and the copies of one written member
+    give it once. All of these come from the expander; the compiler and
     [camdlc inspect] pass them. A model checked without them (an IR read
     back from JSON, a model built in a test) gets weaker results, never
     contradictory ones: a constant with a [dim] clause is inferred from its

@@ -441,6 +441,23 @@ type context = {
   mutable emitted_observations : (string * string) list;
       (** Each observation stream, with one expanded observation model it
           produced. *)
+  mutable written_rates        : (string * expr) list;
+      (** Each [@] transition's rate as the modeller wrote it, by declared
+          name, recorded when the declarations are collected and before any
+          lowering rewrites them. *)
+  mutable via_calls            : (string * (index_binding list * string * via_call)) list;
+      (** Each [via] transition the lowering replaced, by declared name, with
+          its binders, its source compartment and its law as written. *)
+  mutable hyper_entries        : (string * (string * string)) list;
+      (** Each transition into a compartment a [via hyper_erlang] law
+          stages, which the lowering split into one transition per branch,
+          with the compartment and the [via] transition. *)
+  mutable lowered_sources      : (string * Dimcheck.transition_source) list;
+      (** Each expanded transition the [via] lowering made (a stage copy of a
+          competing exit, a step of a dwell chain, a chain's exit, a branch
+          of an inflow into a [hyper_erlang] compartment), by expanded name,
+          with the member as written that it stands for, for the dimension
+          checker's diagnostics. Newest first. *)
 }
 
 (* Stratification-name predicates. Expanded names are [base] itself or a leaf
@@ -519,6 +536,10 @@ let empty_context ?(source_dir = "") ?(filename = "<input>") () = {
   via_cells            = [];
   emitted_transitions  = [];
   emitted_observations = [];
+  written_rates        = [];
+  via_calls            = [];
+  hyper_entries        = [];
+  lowered_sources      = [];
 }
 
 (* ── Dimension registry accessor ─────────────────────────────────────────── *)
@@ -1188,6 +1209,8 @@ let prior_sources ctx = List.rev ctx.prior_sources
 
 let typed_let_uses ctx = List.rev ctx.typed_let_uses
 
+let lowered_sources ctx = List.rev ctx.lowered_sources
+
 (* The cell dimension each unit-annotated table declares, for the dimension
    checker (the IR keeps only the scaled values). *)
 let table_unit_dims ctx = List.rev ctx.table_unit_dims
@@ -1419,7 +1442,9 @@ let collect_declarations ctx decls =
   ctx.quantity_decls <- List.rev ctx.quantity_decls;
   ctx.contrast_decls <- List.rev ctx.contrast_decls;
   ctx.timepoint_decls <- List.rev ctx.timepoint_decls;
-  ctx.orig_transitions <- ctx.transitions
+  ctx.orig_transitions <- ctx.transitions;
+  ctx.written_rates <- List.filter_map (fun (t : transition_decl) ->
+    match t.trdyn with Rate e -> Some (t.trname, e) | Via _ -> None) ctx.transitions
 
 (* ── Staged-residence (`via`) lowering pre-pass ──────────────────────────────
 
@@ -2499,6 +2524,10 @@ let lower_via_transitions ctx =
        identical. Only the fully-valid transitions ([to_lower]) are synthesized;
        a rejected `via` is removed below without a chain. *)
     List.iter (fun (tr, spec) ->
+      (match tr.trsrc, tr.trdyn with
+       | [ (src, _) ], Via call ->
+         ctx.via_calls <- (tr.trname, (tr.trindices, src, call)) :: ctx.via_calls
+       | _ -> ());
       match tr.trsrc, spec with
       | [ (src, src_pre_items) ], Erlang { stages; mean } ->
         let k = Pos_int.to_int stages in
@@ -2899,7 +2928,12 @@ let lower_via_transitions ctx =
             @ ctx.via_transitions;
           ctx.transitions <- List.concat_map (fun (t : transition_decl) ->
             if t.trname = tr.trname then synthesized
-            else [ { t with trdst = redirect_entry t } ]
+            else begin
+              let trdst = redirect_entry t in
+              if trdst <> t.trdst then
+                ctx.hyper_entries <- (t.trname, (src, tr.trname)) :: ctx.hyper_entries;
+              [ { t with trdst } ]
+            end
           ) ctx.transitions;
 
           (* 5. Split `init { src = n }` across the branch first-stages by weight:
@@ -6517,6 +6551,64 @@ let guard_to_string g =
   in
   pp g
 
+(** An expression as camdl source, for a diagnostic that shows what the
+    modeller wrote: each name bound in [subst] is replaced by its value, so
+    `cmax * E[a] / (K + E[a])` under [a = pre] prints as
+    `cmax * E[pre] / (K + E[pre])`. Parentheses appear only where precedence
+    requires them, so a written redundant pair is not kept. *)
+let written_expr_to_string ~(subst : (string * string) list) (e : expr) : string =
+  let name n = Option.value ~default:n (List.assoc_opt n subst) in
+  let num f = Printf.sprintf "%g" f in
+  let op_prec = function
+    | Pow -> 8 | Mul | Div -> 7 | Add | Sub -> 6
+    | Eq | Neq | Lt | Gt | Le | Ge -> 4 in
+  let op_str = function
+    | Add -> "+" | Sub -> "-" | Mul -> "*" | Div -> "/" | Pow -> "^"
+    | Eq -> "==" | Neq -> "!=" | Lt -> "<" | Gt -> ">" | Le -> "<=" | Ge -> ">=" in
+  let fn_name = function
+    | Neg -> "-" | Exp -> "exp" | Log -> "log" | Sqrt -> "sqrt" | Abs -> "abs"
+    | Floor -> "floor" | Ceil -> "ceil" | Sin -> "sin" | Cos -> "cos"
+    | Tanh -> "tanh" | Total -> "sum" in
+  let rec at min_prec e =
+    let p, s = go e in
+    if p < min_prec then "(" ^ s ^ ")" else s
+  and item = function
+    | IPosn e | IStage e -> at 0 e
+    | INamed (d, e) -> Printf.sprintf "%s = %s" d (at 0 e)
+  and go = function
+    | EConst f -> (10, num f)
+    | EUnit (f, u) -> (10, Printf.sprintf "%s '%s" (num f) (unit_lit_to_string u))
+    | EIdent (n, _) -> (10, name n)
+    | EIndex (n, items, _) ->
+      (10, Printf.sprintf "%s[%s]" (name n) (String.concat ", " (List.map item items)))
+    | EBinOp (op, l, r) ->
+      let p = op_prec op in
+      (* [^] groups to the right, the others to the left *)
+      let lp, rp = if op = Pow then (p + 1, p) else (p, p + 1) in
+      (p, Printf.sprintf "%s %s %s" (at lp l) (op_str op) (at rp r))
+    | EUnOp (Neg, a) -> (9, "-" ^ at 9 a)
+    | EUnOp (op, a) -> (10, Printf.sprintf "%s(%s)" (fn_name op) (at 0 a))
+    | ESum (v, d, g, body, _) ->
+      (10, Printf.sprintf "sum(%s in %s%s, %s)" v d
+             (match g with Some g -> " where " ^ guard_to_string g | None -> "")
+             (at 0 body))
+    | ESumStages (v, c, body, _) ->
+      (10, Printf.sprintf "sum(%s in stages(%s), %s)" v (name c) (at 0 body))
+    | ECond (c, a, b) ->
+      (0, Printf.sprintf "if %s then %s else %s" (at 0 c) (at 0 a) (at 0 b))
+    | EFuncCall (f, args) ->
+      (10, Printf.sprintf "%s(%s)" f (String.concat ", " (List.map (fun (k, v) ->
+         if k = "" then at 0 v else Printf.sprintf "%s = %s" k (at 0 v)) args)))
+    | EList es -> (10, "[" ^ String.concat ", " (List.map (at 0) es) ^ "]")
+    | ERange (a, b) -> (10, Printf.sprintf "%s:%s" (at 10 a) (at 10 b))
+    | EObsAccess (n, _) -> (10, "observations." ^ n)
+    | ERunMember { run; ns; member; loc = _ } ->
+      (10, Printf.sprintf "%s.%s.%s" run
+             (match ns with NsQuantities -> "quantities" | NsObservations -> "observations")
+             member)
+  in
+  at 0 e
+
 (* Combine signed stoichiometry entries: sum each compartment's deltas, drop any
    that net to zero (a catalyst appearing on both sides), and preserve
    first-appearance order. Pulled out of [emit_one] so that function reads as a
@@ -6662,9 +6754,10 @@ let check_branch_weights ctx (tr : transition_decl) =
     member's, extended with the stage. The stage binder comes after the
     family's own, so the expanded name ends in the stage level
     (`bg_pre_E_s1`). A member the rules refuse reports the diagnostic of the
-    corresponding written exit and gives no copies. *)
+    corresponding written exit and gives no copies. The copies come with the
+    residence of the staged compartment. *)
 let binder_stage_copies ctx (tr : transition_decl) env
-    : (transition_decl * (string * string) list) list option =
+    : (residence * (transition_decl * (string * string) list) list) option =
   let through_binder (c, items) =
     if not (List.exists (function IComp v -> v = c | _ -> false) tr.trindices)
     then None
@@ -6681,7 +6774,7 @@ let binder_stage_copies ctx (tr : transition_decl) env
     let src = r.res_compartment in
     let loc = diag_loc_of_ast_ctx ctx tr.trloc in
     let refuse ~code ~message ~hint =
-      Diagnostics.error ctx.diags ~code ~loc ~message ~hint (); Some [] in
+      Diagnostics.error ctx.diags ~code ~loc ~message ~hint (); Some (r, []) in
     let member = Printf.sprintf "transition '%s', for `%s = %s`," tr.trname binder src in
     if List.length tr.trsrc > 1 then begin
       if List.for_all (fun (c, _) -> c = binder) tr.trsrc then
@@ -6748,9 +6841,78 @@ let binder_stage_copies ctx (tr : transition_decl) env
             trdst     = stage_dest tr.trdst binder r.res_n_pop stage;
             trdyn     = Rate rate }
         in
-        Some (List.map (fun level -> (copy, env @ [ (stage_var, level) ]))
-                r.res_stage_levels)
+        Some (r, List.map (fun level -> (copy, env @ [ (stage_var, level) ]))
+                   r.res_stage_levels)
     end
+
+(** The member as written that an expanded transition the [via] lowering
+    made stands for, as the dimension checker names it
+    ({!Dimcheck.transition_source}); [None] for a transition the modeller
+    wrote as it compiles. [family] is the declaration being expanded,
+    [binder_copy] the residence when the member is a stage copy of a family
+    over compartments ({!binder_stage_copies}), [env] the expanded
+    transition's environment and [suffix] its branch suffix.
+
+    - A stage copy of a competing exit stands for the exit's member, with
+      its rate as written.
+    - A step of a dwell chain, or the chain's exit, stands for the member of
+      the [via] transition, with its law as written.
+    - A branch of an inflow into a [hyper_erlang] compartment stands for the
+      inflow's member, with its rate as written. *)
+let written_source ctx ~(family : transition_decl) ~(binder_copy : residence option)
+    env (suffix : string option) : Dimcheck.transition_source option =
+  let member_of ~suffix tname binders =
+    let parts = name_parts_from_bindings binders env in
+    let base = if parts = [] then tname else tname ^ "_" ^ String.concat "_" parts in
+    match suffix with None -> base | Some s -> base ^ "_" ^ s in
+  let member = member_of ~suffix in
+  let exit_share (r : residence) binders =
+    Option.map (fun written ->
+      let rate = match written with
+        | EFuncCall (("deterministic" | "overdispersed"), ("", inner) :: _) -> inner
+        | e -> e in
+      { Dimcheck.member = member family.trname binders;
+        rate = written_expr_to_string ~subst:env rate;
+        lowered = Printf.sprintf
+            "the compiler shares this rate across the %d stages of '%s' \
+             (the Erlang dwell of `%s`), one transition per stage in \
+             proportion to occupancy; each share has the dimension of the \
+             rate as written"
+            (List.length r.res_stage_levels) r.res_compartment r.res_via })
+      (List.assoc_opt family.trname ctx.written_rates) in
+  let via_name =
+    if List.mem_assoc family.trname ctx.via_calls then Some family.trname
+    else List.assoc_opt family.trname ctx.via_transitions in
+  match binder_copy, Option.bind via_name (fun v ->
+      Option.map (fun c -> (v, c)) (List.assoc_opt v ctx.via_calls)) with
+  | Some r, _ -> exit_share r family.trindices
+  | None, Some (via, (binders, src, (law, args))) ->
+    Some { Dimcheck.member = member via binders;
+           rate = "via " ^ written_expr_to_string ~subst:env (EFuncCall (law, args));
+           lowered = Printf.sprintf
+               "the compiler lowers the dwell to one transition per stage of \
+                '%s', each at k * rate (or k / mean) times the stage's \
+                occupancy, k the number of stages: the law's `rate` must be a \
+                per-capita rate and its `mean` a duration" src }
+  | None, None when List.mem_assoc family.trname ctx.hyper_entries ->
+    let comp, via = List.assoc family.trname ctx.hyper_entries in
+    Option.map (fun written ->
+      { Dimcheck.member = member_of ~suffix:None family.trname family.trindices;
+        rate = written_expr_to_string ~subst:env written;
+        lowered = Printf.sprintf
+            "'%s' has a hyper_erlang dwell (`via` on '%s'), so the compiler \
+             splits this inflow into one transition per branch, at the \
+             branch's weight times this rate"
+            comp via })
+      (List.assoc_opt family.trname ctx.written_rates)
+  | None, None ->
+    (match stage_expansion ctx family.trname with
+     (* A family the modeller bound over the stages already names its stage. *)
+     | Some r when not (List.mem (family.trname, r.res_compartment) ctx.stage_families) ->
+       (* the stage binder is last, after the binders the modeller wrote *)
+       let n = List.length family.trindices in
+       exit_share r (List.filteri (fun i _ -> i < n - 1) family.trindices)
+     | Some _ | None -> None)
 
 let expand_transitions_counted ctx =
   let filtered = ref 0 in
@@ -6764,7 +6926,7 @@ let expand_transitions_counted ctx =
     (* One member of the family: the transition(s) [tr] gives under [env].
        [tr] is the family as declared, or one stage copy of a member whose
        source is a staged compartment reached through a compartment binder. *)
-    let expand_member (tr : transition_decl) env =
+    let expand_member ~binder_copy (tr : transition_decl) env =
         let src_names = List.map (resolve_stoich_ref ctx env) tr.trsrc in
         (* By here a `via` transition has been desugared by [lower_via_transitions]
            (run before this pass), so the dynamics is always an ordinary `@ rate`.
@@ -6873,6 +7035,9 @@ let expand_transitions_counted ctx =
             | None -> base_name
             | Some s -> base_name ^ "_" ^ s
           in
+          Option.iter (fun src ->
+            ctx.lowered_sources <- (tr_name, src) :: ctx.lowered_sources)
+            (written_source ctx ~family ~binder_copy env name_suffix);
           let lineage = resolve_lineage ctx tr ~sources:src_names ~tr_name rate in
           {
             Ir.name            = tr_name;
@@ -6911,9 +7076,10 @@ let expand_transitions_counted ctx =
       in
       if not pass_guard then (incr filtered; incr tr_filtered; [])
       else match binder_stage_copies ctx family env with
-        | None -> expand_member family env
-        | Some copies ->
-          List.concat_map (fun (copy, env) -> expand_member copy env) copies
+        | None -> expand_member ~binder_copy:None family env
+        | Some (r, copies) ->
+          List.concat_map (fun (copy, env) ->
+            expand_member ~binder_copy:(Some r) copy env) copies
     ) combos in
     check_transition_family_distinct ctx tr ~errors_before
       (List.combine combos results);

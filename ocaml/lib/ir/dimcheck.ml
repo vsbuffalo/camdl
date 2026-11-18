@@ -227,6 +227,12 @@ type prior_source = {
   args   : (string * expr) list;
 }
 
+type transition_source = {
+  member  : string;
+  rate    : string;
+  lowered : string;
+}
+
 type result = {
   diagnostics   : diagnostic list;
   param_dims    : (string * dim_vec) list;
@@ -784,7 +790,7 @@ let literal_hint (v : string) (d : dim_vec) =
 
 let site_name (s : Dim_sites.site option) = match s with Some s -> s.role | None -> "the model"
 
-let diagnostic_of_conflict st out (c : Dim_solve.conflict) : diagnostic =
+let diagnostic_of_conflict ~sources st out (c : Dim_solve.conflict) : diagnostic =
   let info = Hashtbl.find st.info c.culprit.origin.site in
   let subject = Option.bind info.site (fun (s : Dim_sites.site) -> s.subject) in
   (* The other positions the culprit was reduced against: where the
@@ -823,9 +829,12 @@ let diagnostic_of_conflict st out (c : Dim_solve.conflict) : diagnostic =
     let got_s = show out got in
     (match info.code, s.subject, s.expr with
      | "E300", Some (STransition n), Dim_sites.E rate ->
+       let shown, lowered = match Hashtbl.find_opt sources n with
+         | Some (src : transition_source) -> (src.rate, "\n  " ^ src.lowered)
+         | None -> (expr_to_short_string rate, "") in
        mk "E300" (Printf.sprintf "transition '%s' rate has wrong dimension" n)
-         (Some (Printf.sprintf "rate = %s\n  expected dimension: %s\n  got dimension: %s"
-                  (expr_to_short_string rate) (dim_display expected) got_s))
+         (Some (Printf.sprintf "rate = %s\n  expected dimension: %s\n  got dimension: %s%s"
+                  shown (dim_display expected) got_s lowered))
      | code, _, _ ->
        let message =
          if dim_eq expected dimensionless then Printf.sprintf "%s must be dimensionless" s.role
@@ -1033,7 +1042,33 @@ let check_priors (out : solved) st (priors : prior_source list) : diagnostic lis
 
 (* ── Main check ────────────────────────────────────────────────────────── *)
 
-let check_model_exn ?prior_args ~constant_dims ~table_dims ~typed_lets (m : model) : result =
+(* [s] with every occurrence of [sub] replaced by [by]. *)
+let replace_all ~sub ~by s =
+  let n = String.length sub and b = Buffer.create (String.length s) in
+  let rec go i =
+    if i > String.length s - n then Buffer.add_string b (String.sub s i (String.length s - i))
+    else if String.sub s i n = sub then (Buffer.add_string b by; go (i + n))
+    else (Buffer.add_char b s.[i]; go (i + 1)) in
+  if n = 0 then s else (go 0; Buffer.contents b)
+
+(* A site of a transition the compiler made from a written one, reported as
+   the written one: its subject and role name the member as written, so the
+   copies of one member give one diagnostic. *)
+let as_written (sources : (string, transition_source) Hashtbl.t) (s : Dim_sites.site) =
+  match s.subject with
+  | Some (STransition n) ->
+    (match Hashtbl.find_opt sources n with
+     | Some src ->
+       { s with subject = Some (STransition src.member);
+                role = replace_all ~sub:(Printf.sprintf "'%s'" n)
+                    ~by:(Printf.sprintf "'%s'" src.member) s.role }
+     | None -> s)
+  | Some (SOde _ | SObservation _ | SBinding _ | SContrast _ | SInit _ | SParameter _
+         | SQuantity _ | SIntervention _ | SLet _ | SForcing _ | STable _ | SBalance _)
+  | None -> s
+
+let check_model_exn ?prior_args ~constant_dims ~table_dims ~typed_lets
+    ~transition_sources (m : model) : result =
   let constants = Hashtbl.create 16 in
   List.iter (fun (c : constant) -> Hashtbl.replace constants c.c_name c.c_value) m.constants;
   let st = { constants; used = Hashtbl.create 64; t_only = false; t_only_eqs = Hashtbl.create 16; next_var = 0; keys = Hashtbl.create 256; declared = []; structure = [];
@@ -1041,7 +1076,12 @@ let check_model_exn ?prior_args ~constant_dims ~table_dims ~typed_lets (m : mode
              tf_dims = Hashtbl.create 16 } in
   declare_model st ~constant_dims ~table_dims m;
   declare_quantities st m;
-  let sites = Dim_sites.sites m in
+  let by_name = Hashtbl.create 64 in
+  List.iter (fun (n, src) -> Hashtbl.replace by_name n src) transition_sources;
+  let sites = List.map (as_written by_name) (Dim_sites.sites m) in
+  let sources = Hashtbl.create 16 in
+  List.iter (fun (_, (src : transition_source)) -> Hashtbl.replace sources src.member src)
+    transition_sources;
   (* A typed `let`'s annotation, at each of its expanded bodies. *)
   let let_sites = List.map (fun (name, (p, t), e) ->
     { Dim_sites.subject = Some (SLet name);
@@ -1056,7 +1096,7 @@ let check_model_exn ?prior_args ~constant_dims ~table_dims ~typed_lets (m : mode
       (List.rev st.declared @ List.rev st.structure @ List.rev st.obligation) in
   let errors =
     out.conflicts
-    |> List.map (diagnostic_of_conflict st out)
+    |> List.map (diagnostic_of_conflict ~sources st out)
     (* one diagnostic per position and code *)
     |> List.fold_left (fun acc (d : diagnostic) ->
          if List.exists (fun (x : diagnostic) -> x.code = d.code && x.subject = d.subject
@@ -1109,8 +1149,9 @@ let check_model_exn ?prior_args ~constant_dims ~table_dims ~typed_lets (m : mode
 (* An exponent too large for a native integer (a power of a power of a power,
    ...) is reported, never wrapped: the guarantee the solver keeps holds through
    equation generation too. *)
-let check_model ?prior_args ?(constant_dims = []) ?(table_dims = []) ?(typed_lets = []) (m : model) : result =
-  try check_model_exn ?prior_args ~constant_dims ~table_dims ~typed_lets m
+let check_model ?prior_args ?(constant_dims = []) ?(table_dims = []) ?(typed_lets = [])
+    ?(transition_sources = []) (m : model) : result =
+  try check_model_exn ?prior_args ~constant_dims ~table_dims ~typed_lets ~transition_sources m
   with Dim_solve.Overflow msg ->
     { diagnostics = [ { severity = Error; code = "E319"; subject = None;
                         message = "a dimension exponent in this model is too large to represent";

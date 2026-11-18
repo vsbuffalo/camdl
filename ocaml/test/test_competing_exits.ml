@@ -729,6 +729,126 @@ let test_a_refusal_reports_only_itself () =
       Alcotest.(check bool) ("no " ^ code) false (contains ~needle:code e))
       [ "E100"; "E246"; "E287"; "E503" ]
 
+(* ── Diagnostics on stage copies ────────────────────────────────────────── *)
+
+(* The diagnostics of a model with [code], as the CLI reports them. *)
+let diags_with ~code src : Diagnostics.diagnostic list =
+  Compiler.no_dim_check := false;
+  let ds = Compiler.collect_diagnostics ~name:"competing_exits" src in
+  Compiler.no_dim_check := true;
+  List.filter (fun (d : Diagnostics.diagnostic) -> d.code = code) ds
+
+let e300s = diags_with ~code:"E300"
+
+let staged_dim_src transitions =
+  "time_unit = 'days\n\
+   dimensions { age = [pre, sch] }\n\
+   compartments { S, E, I, R, T }\n\
+   stratify(by = age)\n\
+   parameters { beta : rate  sigma : rate  gamma : rate  cmax : rate  K : count }\n\
+   transitions {\n\
+  \  infection[a in age] : S[a] --> E[a] @ beta * S[a] * I / (S + E + I + R)\n\
+  \  latency[a in age]   : E[a] --> I[a] via erlang(stages = 3, rate = sigma)\n\
+  \  recovery[a in age]  : I[a] --> R[a] @ gamma * I[a]\n"
+  ^ transitions ^
+  "}\n\
+   init { S[pre] = 500  S[sch] = 490  E[pre] = 10 }\n"
+
+(* Each E300 on a competing exit is reported once per written member, names
+   it, and shows the rate as written for that member, never the stage
+   copies the lowering made or the share it synthesized. *)
+let check_member_e300s ?(lowered = "3 stages of 'E'") ~members ds =
+  let text (d : Diagnostics.diagnostic) =
+    d.message ^ "\n" ^ Option.value ~default:"" d.detail in
+  Alcotest.(check int) "one E300 per written member" (List.length members)
+    (List.length ds);
+  List.iter (fun (member, written) ->
+    match List.find_opt (fun (d : Diagnostics.diagnostic) ->
+        contains ~needle:(Printf.sprintf "'%s'" member) d.message) ds with
+    | None ->
+      Alcotest.failf "no E300 names '%s'; got: %s" member
+        (String.concat " | " (List.map text ds))
+    | Some d ->
+      let t = text d in
+      List.iter (fun needle ->
+        if not (contains ~needle t) then
+          Alcotest.failf "E300 on '%s' should contain %S, got: %s" member needle t)
+        [ "rate = " ^ written ^ "\n"; lowered ];
+      List.iter (fun needle ->
+        if contains ~needle t then
+          Alcotest.failf "E300 on '%s' should not contain %S, got: %s" member needle t)
+        [ "_s1"; "_s2"; "_stage"; "E_pre"; "__"; "if(" ])
+    members
+
+let test_nonlinear_exit_e300_shows_the_written_rate () =
+  check_member_e300s
+    ~members:[ ("treat_pre", "cmax * E[pre] / (K + E[pre])");
+               ("treat_sch", "cmax * E[sch] / (K + E[sch])") ]
+    (e300s (staged_dim_src
+              "  treat[a in age] : E[a] --> T[a] @ cmax * E[a] / (K + E[a])\n"))
+
+let test_linear_exit_e300_shows_the_written_rate () =
+  check_member_e300s
+    ~members:[ ("die_pre", "K * E[pre]"); ("die_sch", "K * E[sch]") ]
+    (e300s (staged_dim_src "  die[a in age] : E[a] --> @ K * E[a]\n"))
+
+(* A family over compartments: the staged member is reported as written,
+   with the compartment binder replaced by the compartment. Its unstaged
+   members are ordinary transitions and keep their ordinary E300. *)
+let test_family_member_e300_shows_the_written_rate () =
+  let ds = e300s (staged_dim_src
+                    "  bg[a in age, c in compartments] : c[a] --> @ K * c[a]\n") in
+  let staged = List.filter (fun (d : Diagnostics.diagnostic) ->
+      contains ~needle:"_E" d.message) ds in
+  check_member_e300s
+    ~members:[ ("bg_pre_E", "K * E[pre]"); ("bg_sch_E", "K * E[sch]") ] staged
+
+(* The steps of a dwell chain and its exit are reported once, as the `via`
+   transition with its law as written. *)
+let test_via_chain_e300_shows_the_law () =
+  let src =
+    "time_unit = 'days\n\
+     dimensions { age = [pre, sch] }\n\
+     compartments { S, E, I }\n\
+     stratify(by = age)\n\
+     parameters { beta : rate  K : count }\n\
+     transitions {\n\
+    \  infection[a in age] : S[a] --> E[a] @ beta * S[a]\n\
+    \  latency[a in age]   : E[a] --> I[a] via erlang(stages = 3, rate = K)\n\
+     }\n\
+     init { S[pre] = 500  S[sch] = 490  E[pre] = 10 }\n" in
+  check_member_e300s ~lowered:"one transition per stage of 'E'"
+    ~members:[ ("latency_pre", "via erlang(stages = 3, rate = K)");
+               ("latency_sch", "via erlang(stages = 3, rate = K)") ]
+    (e300s src)
+
+(* An inflow into a hyper_erlang compartment, split into one transition per
+   branch, is reported once with its rate as written. *)
+let test_hyper_erlang_inflow_e300_shows_the_written_rate () =
+  let src =
+    "time_unit = 'days\n\
+     compartments { S, I, R }\n\
+     parameters { beta : count  g1 : rate  g2 : rate  w : probability }\n\
+     transitions {\n\
+    \  infection : S --> I @ beta * S\n\
+    \  outcome   : I --> R via hyper_erlang(\n\
+    \    branch(label = fast, stages = 2, rate = g1, weight = w),\n\
+    \    branch(label = slow, stages = 3, rate = g2))\n\
+     }\n\
+     init { S = 990  I = 5 }\n" in
+  check_member_e300s ~lowered:"one transition per branch"
+    ~members:[ ("infection", "beta * S") ] (e300s src)
+
+(* A rate that cannot be differentiated (E600) is reported once per written
+   member of a competing exit, by its written name. *)
+let test_competing_exit_e600_names_the_member () =
+  let ds = diags_with ~code:"E600" (staged_dim_src
+      "  treat[a in age] : E[a] --> T[a] @ cmax * E[a] * mod(beta / gamma, 0.5)\n") in
+  Alcotest.(check (list string)) "one E600 per written member, by its name"
+    [ "treat_pre"; "treat_sch" ]
+    (List.map (fun (d : Diagnostics.diagnostic) ->
+       List.nth (String.split_on_char '\'' d.message) 1) ds)
+
 let () =
   Alcotest.run "competing_exits"
     [ ("manual equivalence",
@@ -805,4 +925,17 @@ let () =
          Alcotest.test_case "second via on one source → E246" `Quick
            test_second_via_is_e246;
          Alcotest.test_case "a refusal reports only itself" `Quick
-           test_a_refusal_reports_only_itself ]) ]
+           test_a_refusal_reports_only_itself ]);
+      ("diagnostics on stage copies",
+       [ Alcotest.test_case "nonlinear exit: E300 shows the written rate" `Quick
+           test_nonlinear_exit_e300_shows_the_written_rate;
+         Alcotest.test_case "linear exit: E300 shows the written rate" `Quick
+           test_linear_exit_e300_shows_the_written_rate;
+         Alcotest.test_case "family member: E300 shows the written rate" `Quick
+           test_family_member_e300_shows_the_written_rate;
+         Alcotest.test_case "dwell chain: E300 shows the law" `Quick
+           test_via_chain_e300_shows_the_law;
+         Alcotest.test_case "hyper_erlang inflow: E300 shows the written rate" `Quick
+           test_hyper_erlang_inflow_e300_shows_the_written_rate;
+         Alcotest.test_case "competing exit: E600 names the member" `Quick
+           test_competing_exit_e600_names_the_member ]) ]
