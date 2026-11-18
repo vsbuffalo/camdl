@@ -512,7 +512,7 @@ pub(crate) fn run_forecast(
     let mut written = write_tables(&forecasts, model, job.schema, &out_dir, &draw_refs)?;
     written.push(write_manifest(&forecasts, &job, ManifestInputs {
         record: &record, reach_as_written: raw, skipped: &skipped, failures: &failures,
-        draw_refs: &draw_refs, held_out: &held_out, out_dir: &out_dir, address_key: &address_key,
+        draw_refs: &draw_refs, out_dir: &out_dir, address_key: &address_key,
         options: &options,
     })?);
     let fc = &forecasts[0].fc;
@@ -617,7 +617,7 @@ fn write_tables(
         let dims = crate::fit::predict::index_dims_for(schema, source, &stratum_of(first).into_iter().map(|(d, _)| d).collect::<Vec<_>>());
         let mut header: Vec<String> = arm_header(&sweep);
         header.extend(dims.iter().cloned());
-        header.extend(["t_start", "t_stop", "horizon", "lead", "held_out_file", "held_out_row", "mean"]
+        header.extend(["t_start", "t_stop", "horizon", "lead", "has_held_out_row", "mean"]
             .map(String::from));
         header.extend(QUANTILE_LEVELS.iter().map(|(_, l)| l.to_string()));
         header.push("n_samples".into());
@@ -636,8 +636,7 @@ fn write_tables(
             cells.push(fmt_time(t.measures.end()));
             cells.push(t.horizon.to_string());
             cells.push(fmt_time(t.lead));
-            cells.push(t.observed.map(|h| h.file.as_str().to_string()).unwrap_or_default());
-            cells.push(t.observed.map(|h| h.position.to_string()).unwrap_or_default());
+            cells.push(t.observed.is_some().to_string());
             cells.push(fmt_value(mean));
             cells.extend(qs.iter().map(|q| fmt_value(*q)));
             cells.push(ys.len().to_string());
@@ -728,7 +727,6 @@ struct ManifestInputs<'a> {
     skipped: &'a [SkippedStream],
     failures: &'a [DeterministicFailure],
     draw_refs: &'a [DrawRef],
-    held_out: &'a BTreeMap<String, Vec<HeldOut>>,
     out_dir: &'a std::path::Path,
     /// The key of `out_dir` ([`crate::fit::predict::PredictOptions::address_key`]).
     address_key: &'a str,
@@ -736,33 +734,10 @@ struct ManifestInputs<'a> {
     options: &'a crate::fit::predict::PredictOptions,
 }
 
-/// Each stream's held-out rows, per file: the count and the row digest of
-/// those rows in file order. They only name the targets they correspond to;
-/// nothing filters them, and no prediction depends on them.
-fn held_out_record(held_out: &BTreeMap<String, Vec<HeldOut>>) -> Result<Vec<serde_json::Value>, String> {
-    let mut out = Vec::new();
-    for (stream, rows) in held_out {
-        let mut files = Vec::new();
-        for file in [RowFile::Training, RowFile::Holdout] {
-            let of: Vec<ObservedRow> = rows.iter().filter(|h| h.file == file).map(|h| h.row.clone()).collect();
-            if of.is_empty() {
-                continue;
-            }
-            files.push(serde_json::json!({
-                "file": file.as_str(),
-                "rows": of.len(),
-                "digest": crate::fit::training_partition::row_digest(&of)?.to_hex(),
-            }));
-        }
-        out.push(serde_json::json!({ "stream": stream, "files": files }));
-    }
-    Ok(out)
-}
-
 /// `forecast.json`: what the forecast predicted and what conditioned it.
 fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) -> Result<PathBuf, String> {
     let ManifestInputs {
-        record, reach_as_written, skipped, failures, draw_refs, held_out, out_dir, address_key, options,
+        record, reach_as_written, skipped, failures, draw_refs, out_dir, address_key, options,
     } = m;
     let fc = &arms[0].fc;
     let point = |t: f64| serde_json::json!({
@@ -782,9 +757,11 @@ fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) ->
             "end": point(t.measures.end()),
             "horizon": t.horizon,
             "lead": t.lead,
-            "held_out": t.observed.map(|h| serde_json::json!({
-                "file": h.file.as_str(), "position": h.position,
-            })),
+            // Whether a held-out row measures this target's period. Which row
+            // it is, and its value, belong to the score artifact: this file
+            // holds only inputs to the predictions, so a change of held-out
+            // outcomes leaves it byte-identical.
+            "has_held_out_row": t.observed.is_some(),
             // D81: the design values the prediction read; absent for a
             // stream whose likelihood reads none.
             "design": (!t.design.is_empty()).then(|| t.design.iter()
@@ -878,9 +855,6 @@ fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) ->
                  every draw.",
                 n = fc.n_particles, last = per_draw.saturating_sub(1)),
         },
-        // The rows after each stream's training prefix. They only name the
-        // targets they correspond to; nothing filters them.
-        "held_out": held_out_record(held_out)?,
         // D50: the fitted model, then each scenario and sweep arm, in the
         // order of the tables' rows. Every arm ran the same draws with the
         // same seeds and shares the baseline's filter through the training

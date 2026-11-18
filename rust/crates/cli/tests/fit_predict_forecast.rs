@@ -140,17 +140,13 @@ fn a_forecast_starts_at_the_training_extent_and_counts_each_streams_own_periods(
     assert_eq!((&manifest["run_extent"]["model_end"]["t"], &manifest["run_extent"]["run_end"]["t"],
                 &manifest["run_extent"]["extended"]),
         (&serde_json::json!(63.0), &serde_json::json!(63.0), &serde_json::json!(false)));
-    // The held-out rows: days 25–63 and the weeks ending 28–63, all in the
-    // training files under `holdout_after`.
-    let held: Vec<(String, String, u64)> = manifest["held_out"].as_array().unwrap().iter()
-        .flat_map(|s| s["files"].as_array().unwrap().iter().map(move |f| (
-            s["stream"].as_str().unwrap().to_string(), f["file"].as_str().unwrap().to_string(),
-            f["rows"].as_u64().unwrap())))
-        .collect();
-    assert_eq!(held, vec![("daily_cases".into(), "training".into(), 39), ("weekly_cases".into(), "training".into(), 6)]);
-    for s in manifest["held_out"].as_array().unwrap() {
-        assert_eq!(s["files"][0]["digest"].as_str().unwrap().len(), 64, "a SHA-256 row digest");
-    }
+    // The held-out rows (days 25–63 and the weeks ending 28–63, all in the
+    // training files under `holdout_after`) are not described here: the
+    // file holds only inputs to the predictions. Each target says whether
+    // one measures its period.
+    assert!(manifest.get("held_out").is_none(), "no held-out outcome digests in forecast.json");
+    assert!(manifest["targets"].as_array().unwrap().iter()
+        .all(|t| t["has_held_out_row"] == true && t.get("held_out").is_none()));
     assert_eq!(manifest["mode"], "fixed_origin");
     assert_eq!(manifest["origin"]["t"], 24.0, "the origin is the training extent");
     assert_eq!(manifest["horizon"]["duration"], 28.0);
@@ -164,14 +160,14 @@ fn a_forecast_starts_at_the_training_extent_and_counts_each_streams_own_periods(
     let weekly = rows(&fdir.join("forecast/weekly_cases.tsv"));
     let spans: Vec<(&str, &str, &str, &str, &str)> = weekly.iter()
         .map(|r| (r["t_start"].as_str(), r["t_stop"].as_str(), r["horizon"].as_str(),
-                  r["lead"].as_str(), r["held_out_row"].as_str()))
+                  r["lead"].as_str(), r["has_held_out_row"].as_str()))
         .collect();
     assert_eq!(spans, vec![
-        ("21", "28", "0", "4", "3"),
-        ("28", "35", "1", "11", "4"),
-        ("35", "42", "2", "18", "5"),
-        ("42", "49", "3", "25", "6"),
-    ], "the week under way is horizon 0; horizons count weeks; held-out rows name their targets");
+        ("21", "28", "0", "4", "true"),
+        ("28", "35", "1", "11", "true"),
+        ("35", "42", "2", "18", "true"),
+        ("42", "49", "3", "25", "true"),
+    ], "the week under way is horizon 0; horizons count weeks; held-out rows mark their targets");
     let daily = rows(&fdir.join("forecast/daily_cases.tsv"));
     assert_eq!(daily.len(), 28, "daily horizons 0–27");
     assert_eq!((daily[0]["t_start"].as_str(), daily[0]["t_stop"].as_str()), ("24", "25"));
@@ -247,21 +243,21 @@ cooling = 0.7"#, "");
     assert!(stderr(&out).contains("cannot be combined with --mode forecast"), "{}", stderr(&out));
 }
 
-/// A held-out row is named by its file and its position within that file
-/// (design call B): the week [21, 28) is row 3 of the training file under
-/// `holdout_after = 24`, and row 0 of the `[data.holdout]` file when the
-/// weekly rows after day 24 are in one. Without the file, row 0 of the
-/// holdout file reads as training row [0, 7).
+/// A held-out row marks its target whether it is in the training file under
+/// `holdout_after = 24` or in a `[data.holdout]` file. Which row it is (its
+/// file and position) is not in the forecast's outputs: the outputs hold only
+/// inputs to the predictions, and the row's identity belongs to the score
+/// artifact (Stage 6).
 #[test]
-fn a_held_out_row_is_named_by_its_file_and_its_position_in_it() {
+fn a_held_out_row_in_either_file_marks_its_target() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     fit(dir, PMMH, "");
     let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "1 weeks", "--n-draws", "2"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let week = rows(&forecast_dir(dir).join("forecast/weekly_cases.tsv")).remove(0);
-    assert_eq!((week["t_start"].as_str(), week["held_out_file"].as_str(), week["held_out_row"].as_str()),
-        ("21", "training", "3"));
+    assert_eq!((week["t_start"].as_str(), week["has_held_out_row"].as_str()), ("21", "true"));
+    assert!(!week.contains_key("held_out_row") && !week.contains_key("held_out_file"));
 
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
@@ -288,8 +284,7 @@ fn a_held_out_row_is_named_by_its_file_and_its_position_in_it() {
     let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "1 weeks", "--n-draws", "2"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let week = rows(&forecast_dir(dir).join("forecast/weekly_cases.tsv")).remove(0);
-    assert_eq!((week["t_start"].as_str(), week["held_out_file"].as_str(), week["held_out_row"].as_str()),
-        ("21", "holdout", "0"));
+    assert_eq!((week["t_start"].as_str(), week["has_held_out_row"].as_str()), ("21", "true"));
 }
 
 /// Every file under `root`.
@@ -689,54 +684,47 @@ fn the_particle_count_defaults_to_the_fits_and_is_recorded_and_addressed() {
     assert!(stderr(&out).contains("this predict runs neither (--mode free_forward)"), "{}", stderr(&out));
 }
 
-/// `forecast.json`'s `held_out` record for a `[data.holdout]` file: the
-/// weekly rows after day 24 in their own file are counted and digested under
-/// `holdout` (the daily rows end at day 24). Changing one held-out value
-/// (the week ending 35, 127 → 128) changes that digest and nothing else in
-/// the record: the count stays, and the daily stream's record and the
-/// training rows' digests are unchanged.
+/// A `[data.holdout]` file's values are outcomes, not inputs to the
+/// predictions: editing a held-out value (the week ending 28, 127 → 128)
+/// after the fit writes the forecast to the same directory with every file
+/// byte-identical, `forecast.json` included.
 #[test]
-fn the_held_out_digest_of_a_holdout_file_follows_its_values() {
-    let record = |week_35: &str| -> serde_json::Value {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
-        copy_fixture(dir);
-        let text = std::fs::read_to_string(dir.join("weekly_cases.tsv")).unwrap();
-        let mut lines = text.lines();
-        let header = lines.next().unwrap().to_string();
-        let (mut train, mut hold) = (vec![header.clone()], vec![header]);
-        for l in lines {
-            let t: f64 = l.split('\t').next().unwrap().parse().unwrap();
-            let l = if t == 35.0 { format!("35\t{week_35}") } else { l.to_string() };
-            if t <= 24.0 { train.push(l) } else { hold.push(l) }
-        }
-        std::fs::write(dir.join("weekly_cases.tsv"), train.join("\n") + "\n").unwrap();
-        std::fs::write(dir.join("weekly_hold.tsv"), hold.join("\n") + "\n").unwrap();
-        let daily = std::fs::read_to_string(dir.join("daily_cases.tsv")).unwrap();
-        let daily: Vec<&str> = daily.lines().enumerate()
-            .filter(|(i, l)| *i == 0 || l.split('\t').next().unwrap().parse::<f64>().unwrap() <= 24.0)
-            .map(|(_, l)| l).collect();
-        std::fs::write(dir.join("daily_cases.tsv"), daily.join("\n") + "\n").unwrap();
-        fit_config(dir, PMMH, "",
-            "daily_cases = \"daily_cases.tsv\"\nweekly_cases = \"weekly_cases.tsv\"",
-            "\n[data.holdout]\nweekly_cases = \"weekly_hold.tsv\"\n");
-        let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "1 weeks", "--n-draws", "2"]);
+fn a_holdout_files_values_change_nothing_the_forecast_writes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    copy_fixture(dir);
+    let text = std::fs::read_to_string(dir.join("weekly_cases.tsv")).unwrap();
+    let mut lines = text.lines();
+    let header = lines.next().unwrap().to_string();
+    let (mut train, mut hold) = (vec![header.clone()], vec![header]);
+    for l in lines {
+        let t: f64 = l.split('\t').next().unwrap().parse().unwrap();
+        if t <= 24.0 { train.push(l.to_string()) } else { hold.push(l.to_string()) }
+    }
+    std::fs::write(dir.join("weekly_cases.tsv"), train.join("\n") + "\n").unwrap();
+    std::fs::write(dir.join("weekly_hold.tsv"), hold.join("\n") + "\n").unwrap();
+    let daily = std::fs::read_to_string(dir.join("daily_cases.tsv")).unwrap();
+    let daily: Vec<&str> = daily.lines().enumerate()
+        .filter(|(i, l)| *i == 0 || l.split('\t').next().unwrap().parse::<f64>().unwrap() <= 24.0)
+        .map(|(_, l)| l).collect();
+    std::fs::write(dir.join("daily_cases.tsv"), daily.join("\n") + "\n").unwrap();
+    fit_config(dir, PMMH, "",
+        "daily_cases = \"daily_cases.tsv\"\nweekly_cases = \"weekly_cases.tsv\"",
+        "\n[data.holdout]\nweekly_cases = \"weekly_hold.tsv\"\n");
+    let snapshot = || {
+        let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "2 weeks", "--n-draws", "2"]);
         assert!(out.status.success(), "fit predict: {}", stderr(&out));
-        let m: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(forecast_dir(dir).join("forecast.json")).unwrap()).unwrap();
-        serde_json::json!({ "held_out": m["held_out"], "state": m["state_set"]["streams"] })
+        let d = forecast_dir(dir);
+        ["forecast.json", "forecast-samples.tsv", "forecast/weekly_cases.tsv"]
+            .map(|f| (f, std::fs::read(d.join(f)).unwrap()))
     };
-    let (a, b) = (record("127"), record("128"));
-    let file = |r: &serde_json::Value, stream: &str| -> serde_json::Value {
-        r["held_out"].as_array().unwrap().iter().find(|s| s["stream"] == stream).unwrap()["files"].clone()
-    };
-    let weekly = file(&a, "weekly_cases");
-    assert_eq!(weekly.as_array().unwrap().len(), 1);
-    assert_eq!((&weekly[0]["file"], &weekly[0]["rows"]), (&serde_json::json!("holdout"), &serde_json::json!(6)));
-    assert_eq!(file(&b, "weekly_cases")[0]["rows"], 6);
-    assert_ne!(weekly[0]["digest"], file(&b, "weekly_cases")[0]["digest"], "the digest follows the held-out values");
-    assert_eq!(file(&a, "daily_cases"), file(&b, "daily_cases"));
-    assert_eq!(a["state"], b["state"], "the training rows are unchanged");
+    let before = snapshot();
+    let hold = std::fs::read_to_string(dir.join("weekly_hold.tsv")).unwrap();
+    assert!(hold.contains("28\t127"), "{hold}");
+    std::fs::write(dir.join("weekly_hold.tsv"), hold.replace("28\t127", "28\t128")).unwrap();
+    for ((name, a), (_, b)) in snapshot().iter().zip(&before) {
+        assert!(a == b, "{name} is byte-identical when a held-out value changes");
+    }
 }
 
 fn read_json(p: &Path) -> serde_json::Value {
@@ -863,7 +851,7 @@ fn a_realised_design_forecast_is_labelled_and_its_address_ignores_held_out_outco
     let tested: Vec<(f64, f64)> = survey.iter()
         .map(|t| (t["end"]["t"].as_f64().unwrap(), t["design"]["tested"].as_f64().unwrap())).collect();
     assert_eq!(tested, vec![(28.0, 40.0), (35.0, 50.0)]);
-    let snapshot = |d: &Path| ["forecast-samples.tsv", "forecast/survey.tsv", "forecast/weekly_cases.tsv"]
+    let snapshot = |d: &Path| ["forecast.json", "forecast-samples.tsv", "forecast/survey.tsv", "forecast/weekly_cases.tsv"]
         .map(|f| std::fs::read(d.join(f)).unwrap());
     let before = snapshot(&d[0]);
 
@@ -876,8 +864,10 @@ fn a_realised_design_forecast_is_labelled_and_its_address_ignores_held_out_outco
     assert_eq!(after, d, "the same address: no second directory");
     let m2 = read_json(&after[0].join("forecast.json"));
     assert_eq!(m2["address_key"], m["address_key"]);
-    assert_eq!(snapshot(&after[0]), before, "the tables and samples are byte-identical");
-    assert_ne!(m2["held_out"], m["held_out"], "the held-out rows did change");
+    let names = ["forecast.json", "forecast-samples.tsv", "forecast/survey.tsv", "forecast/weekly_cases.tsv"];
+    for (name, (a, b)) in names.iter().zip(snapshot(&after[0]).iter().zip(&before)) {
+        assert!(a == b, "{name} is byte-identical when only held-out outcomes change");
+    }
 }
 
 /// D81: without a design the survey is refused, naming both ways to supply

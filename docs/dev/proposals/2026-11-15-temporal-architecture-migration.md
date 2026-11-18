@@ -1075,7 +1075,9 @@ Recorded in the maintainer's docket; each is reflected in the spec and above.
   value is refused. Forecast outcomes reach neither state conditioning nor the
   design values. The design inputs that determine predictions are in the
   prediction's identity; held-out outcomes are in the score artifact's identity
-  only.
+  only. Held-out outcome digests, and which held-out row a target matched, are
+  recorded in the score artifact, not in `forecast.json`, which holds only
+  inputs to the predictions.
 - **D82** (2026-11-17). When the periods a stream's data implies and its
   `emit_schedule` disagree over the same reporting interval, the forecast and a
   restart are refused, with a diagnostic naming the stream, the conflicting
