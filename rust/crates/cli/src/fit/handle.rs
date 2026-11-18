@@ -758,7 +758,14 @@ impl FitProblem {
 
 /// Resolve a `--fit` handle to the problem it names ([`FitProblem`]).
 pub(crate) fn resolve_fit_problem(s: &str) -> Result<FitProblem, ResolveError> {
-    if let FitRef::Config(path) = FitRef::classify(s) {
+    // A `*.toml`, or any existing regular file, is a fit config: these
+    // readers took a config of any file name before they took handles.
+    let config_path = match FitRef::classify(s) {
+        FitRef::Config(path) => Some(path),
+        _ if Path::new(s).is_file() => Some(PathBuf::from(s)),
+        _ => None,
+    };
+    if let Some(path) = config_path {
         let text = std::fs::read_to_string(&path)
             .map_err(|e| ResolveError::NotFound(format!("cannot read fit config {}: {e}", path.display())))?;
         let config = FitConfig::parse_anchored_at(&text, &path, &path)
