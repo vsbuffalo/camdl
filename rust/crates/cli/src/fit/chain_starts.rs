@@ -389,8 +389,10 @@ impl ResolvedStarts {
     /// shape [`resolve_starts`] produces for a file-shaped handle.
     pub fn from_file(rule: ChainStarts, file: PathBuf) -> Result<Self, String> {
         // A `from_mle` source keys on its `start_values` alone
-        // (`cas_mle_start_dep`); a draws TSV or params TOML is read whole, so
-        // its bytes are the key.
+        // (`cas_mle_start_dep`); a draws TSV or params TOML is keyed by its
+        // bytes. For a params TOML that includes a `[provenance]` table the
+        // loader skips, so a change there re-keys a run whose start did not
+        // move: a spare cache miss, never a stale hit.
         let dep = match rule {
             ChainStarts::Point(Point::FromMle { .. }) => super::cas::cas_mle_start_dep(&file)
                 .map_err(|e| format!("starts = {}: {e}", rule.spelled()))?,
@@ -1223,20 +1225,15 @@ fn draw_from_params(
                 .into(),
         });
     }
-    let mut values_in_file: HashMap<String, f64> = HashMap::new();
-    for (key, val) in &table {
-        match val {
-            toml::Value::Float(f)   => { values_in_file.insert(key.clone(), *f); }
-            toml::Value::Integer(i) => { values_in_file.insert(key.clone(), *i as f64); }
-            other => {
-                return Err(InitError::SchemaMismatch {
-                    path: path_buf.clone(),
-                    expected: "flat params TOML (top-level keys = parameter names)",
-                    msg: format!("key `{}` has non-numeric value {:?}", key, other),
-                });
-            }
-        }
-    }
+    // The values come from the params-TOML reader every `--params` consumer
+    // uses, so a fit's own `mle_params.toml` reads here as it does there: its
+    // `[provenance]` table is fit metadata, not parameters, and is skipped.
+    let values_in_file = crate::util::load_params_toml(&path.to_string_lossy())
+        .map_err(|msg| InitError::SchemaMismatch {
+            path: path_buf.clone(),
+            expected: "flat params TOML (top-level keys = parameter names)",
+            msg,
+        })?;
     apply_point_to_all_chains(resolved, &path_buf, &values_in_file, n_chains,
         |path| InitSource::ParamsPoint { path })
 }
@@ -1781,6 +1778,25 @@ mod tests {
             "error must hint at from_mle: {}", msg);
         assert!(msg.contains("mle.toml"),
             "error must explain the file looks like mle.toml: {}", msg);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn from_params_skips_the_provenance_table_of_mle_params_toml() {
+        // `mle_params.toml` as a fit writes it: the parameters, then a
+        // `[provenance]` table of fit metadata. Read as a params file, the
+        // table is skipped, as every `--params` consumer skips it.
+        let resolved = mk_resolved(
+            vec![mk_param("beta", 0.3, None, Some((0.0, 1.0)))],
+            &["beta"],
+        );
+        let path = write_tmp("from_params_mle_params",
+            "beta = 0.42\n\n[provenance]\nmethod = \"if2\"\nbackend = \"chain_binomial\"\n\
+             dt = 1.0\n\n[provenance.data.cases]\nhash = \"ab\"\n");
+        let starts = draw(&resolved, &from_params(&path), 2, 42).unwrap();
+        for cs in &starts.starts {
+            assert!((cs.values["beta"] - 0.42).abs() < 1e-12);
+        }
         std::fs::remove_file(&path).ok();
     }
 
