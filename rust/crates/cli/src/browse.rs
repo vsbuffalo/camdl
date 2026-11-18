@@ -943,12 +943,16 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
     match resolved {
         Resolved::Sim { leaf, rel_path, .. } => {
             let bytes = if let Some(ref stream) = a.stream {
-                let path = find_obs_stream(&leaf.dir, stream)
-                    .or_else(|| find_event_log(&leaf.dir, stream))
-                    .unwrap_or_else(|| {
-                        out.fail(format!(
-                            "error: no observation stream or event log '{}' in {}", stream, rel_path));
-                    });
+                let named_event_log = stream == crate::cas_sink::EVENT_LOG_FILE
+                    || stream == crate::cas_sink::EVENT_LOG_CHILD;
+                let path = match find_obs_stream(&leaf.dir, stream) {
+                    Some(p) => p,
+                    None if named_event_log => crate::cas_sink::complete_event_log(&leaf.dir)
+                        .unwrap_or_else(|e| out.fail(format!("error: {e}"))),
+                    None => out.fail(format!(
+                        "error: no observation stream '{}' in {} (the event log is `event_log.tsv`)",
+                        stream, rel_path)),
+                };
                 std::fs::read(&path).unwrap_or_else(|e| {
                     out.fail(format!("error reading {}: {}", path.display(), e));
                 })
@@ -1139,14 +1143,6 @@ fn find_obs_stream(sim_dir: &Path, stream: &str) -> Option<PathBuf> {
         if file.exists() { return Some(file); }
     }
     None
-}
-
-/// The leaf's event-log child, when `stream` names it (`event_log.tsv`, or
-/// `event_log`) and the child holds it. `None` otherwise.
-fn find_event_log(sim_dir: &Path, stream: &str) -> Option<PathBuf> {
-    let file = crate::cas_sink::event_log_child_file(sim_dir);
-    let named = stream == crate::cas_sink::EVENT_LOG_FILE || stream == crate::cas_sink::EVENT_LOG_CHILD;
-    (named && file.is_file()).then_some(file)
 }
 
 // ── Internals: discovery + resolution ────────────────────────────────────────

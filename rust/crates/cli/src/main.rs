@@ -2469,16 +2469,16 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
     // (`lineage realize`).
     if let Some((event_log, exact)) = recorded {
         // A real file path `lineage realize` can read directly (run_path is
-        // relative to the store root and includes the `sims/` prefix). A
-        // failed child write has already ended the command above; the
-        // existence filter only keeps a path that is not there from being
-        // printed.
-        let leaf_event_log = sink.cas.completed_runs.last()
-            .map(|e| crate::cas_sink::event_log_child_file(
-                &std::path::Path::new(&cas_root).join(&e.run_path)))
-            .filter(|p| p.exists())
-            .map(|p| p.display().to_string());
-        lineage::finish_event_log(&out, a, &event_log, exact, leaf_event_log.as_deref());
+        // relative to the store root and includes the `sims/` prefix), named
+        // only once the child is complete. A failed child write has already
+        // ended the command above, so an incomplete child here is reported
+        // rather than pointed at.
+        let leaf = sink.cas.completed_runs.last()
+            .map(|e| std::path::Path::new(&cas_root).join(&e.run_path))
+            .unwrap_or_else(|| out.fail("internal error: --event-log stored no leaf"));
+        let leaf_event_log = crate::cas_sink::complete_event_log(&leaf)
+            .unwrap_or_else(|e| out.fail(format!("error: {e}")));
+        lineage::finish_event_log(&out, a, &event_log, exact, &leaf_event_log.display().to_string());
     }
 
     // ── Reactive-log mirror (gh#204) ─────────────────────────────────────────

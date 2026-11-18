@@ -647,9 +647,10 @@ pub struct SimulateArgs {
     /// realize`. Pass a PATH to also mirror the log to that file (format from
     /// --tsv/--format/extension); bare `--event-log` (or `auto`) records only
     /// into the leaf. Single-run only — conflicts with --seeds / --replicates
-    /// / --draws / --sweep / --sweep-file.
+    /// / --draws / --sweep / --sweep-file — and conflicts with --stdout,
+    /// which writes no leaf for the log to be a child of.
     #[arg(long, value_name = "FILE", num_args = 0..=1, default_missing_value = "auto",
-          conflicts_with_all = ["seeds", "replicates", "draws", "sweep", "sweep_file"])]
+          conflicts_with_all = ["seeds", "replicates", "draws", "sweep", "sweep_file", "stdout"])]
     pub event_log: Option<PathBuf>,
 
     /// Event-log format: `parquet` (default, production) or `tsv`
@@ -2734,7 +2735,10 @@ pub struct CatArgs {
     #[arg(long, default_value = "./results", env = "CAMDL_OUTPUT_DIR")]
     pub root: PathBuf,
 
-    /// Observation stream name (when run has multiple streams)
+    /// Print a named stream instead of the run's default output: for a
+    /// simulation, an observation stream (`cases`) or the event log
+    /// (`event_log.tsv`); for a fit or another run, a file it wrote
+    /// (`draws.tsv`)
     #[arg(long)]
     pub stream: Option<String>,
 
