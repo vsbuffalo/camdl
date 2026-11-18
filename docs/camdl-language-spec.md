@@ -6526,6 +6526,11 @@ data files   →  [Loader]     ─┤
 
 A `.camdl` file is a sequence of declarations. Order does not matter — all
 declarations are collected first, then resolved (forward references are valid).
+A block that lists entries (`compartments`, `parameters`, `transitions`, ...)
+may be written more than once, and its entries are joined. `time_unit`,
+`origin`, `description`, `simulate`, `output` and `balance` may each be written
+once; a second one is an error (**E140**), located at the second, with a note at
+the first.
 
 ```camdl
 file := declaration*
@@ -6871,6 +6876,7 @@ authoritative list is whatever `ocaml/lib/compiler/` and `ocaml/lib/ir/` emit.
 | ---- | ------- | ----------------------------------------------------------------------------------------- |
 | E001 | Error   | Parse / lexer syntax error (including using a keyword as a name)                           |
 | E100 | Error   | Reserved name used as a declaration; unknown index value; undeclared name/function         |
+| E140 | Error   | A singleton declaration (`time_unit`, `description`, `origin`, `simulate`, `output`, `balance`) written twice |
 | E200 | Error   | Undeclared compartment or parameter referenced in expression                              |
 | E202 | Error   | Table arity / shape mismatch (e.g. `table '%s' expects %d indices`)                        |
 | E228 | Error   | `time_unit` is not a duration unit (`'per_day` / `'count` / `'ratio`) — see §2               |

@@ -1360,22 +1360,24 @@ type dimensions_entry = {
 type balance_decl = { bcomp: string; bexpr: expr; bspan: loc }
 
 (** One top-level item of a model file. A file parses to a list of these, in
-    source order. A block written twice is accepted: the expander joins the
-    entries of repeated list blocks, and for [time_unit], [origin],
-    [description], [simulate], [output] and [balance] it keeps the last one,
-    without a diagnostic. *)
+    source order. The expander joins the entries of repeated list blocks
+    ([compartments], [parameters], [transitions], ...); [time_unit],
+    [origin], [description], [simulate], [output] and [balance] may each be
+    written once, and a second one is refused (E140). *)
 type declaration =
   | DTimeUnit    of unit_lit * loc
       (** [time_unit = 'days]: the unit of the model's time axis. *)
-  | DDescription of string
-      (** [description = "..."]: a one-line description of the model. *)
+  | DDescription of string * loc
+      (** [description = "..."]: a one-line description of the model, with
+          the declaration's span. *)
   | DModelDoc    of doc
       (** The [#'] block at the head of the file, which documents the model
           rather than a declaration. Only the first item of the list can be
           one. *)
-  | DOrigin      of string
+  | DOrigin      of string * loc
       (** [origin = date("YYYY-MM-DD")]: the calendar date of time zero, as
-          the text inside [date(...)]; [""] after a parse error. *)
+          the text inside [date(...)] ([""] after a parse error), with the
+          declaration's span. *)
   | DDimensions  of dimensions_entry list
   | DCompartments of compartment_decl list
   | DParameters   of param_decl list

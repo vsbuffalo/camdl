@@ -676,8 +676,8 @@ let build_detail ~(source : Source_cache.t) (ctx : Expander.context)
     dm_schema_version = D.schema_version;
     dm_compile_inputs = { ci_set_values = []; ci_files = files ctx };
     dm_time_unit = first (function DTimeUnit (u, _) -> Some (unit_lit u) | _ -> None);
-    dm_description = first (function DDescription s -> Some s | _ -> None);
-    dm_origin = first (function DOrigin s -> Some s | _ -> None);
+    dm_description = first (function DDescription (s, _) -> Some s | _ -> None);
+    dm_origin = first (function DOrigin (s, _) -> Some s | _ -> None);
     dm_dimensions = List.map (dimension env) dim_entries;
     dm_compartments = each (function
       | DCompartments cs -> List.map (compartment env) cs | _ -> []);

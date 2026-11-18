@@ -13,6 +13,21 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-11-17 — a second `time_unit`, `origin`, `description`, `simulate`, `output` or `balance` is an error
+
+**What.** Each of these declarations may be written once. A second one used to
+replace the first without a diagnostic, so a model with two `simulate { }`
+blocks ran the later one, and a second `time_unit` rescaled every rate written
+before it. It is now **E140**, located at the second, with a note at the first.
+Blocks that list entries (`compartments`, `parameters`, `transitions`, ...)
+still join their entries.
+
+**Migration.** Delete the declaration that is out of date, or merge the two into
+one. A model that compiled before kept the later one, so deleting the earlier
+one keeps its behaviour.
+
+**Diagnostic.** ``error[E140]: `simulate { }` is declared twice``.
+
 ## 2026-11-17 — the one-step calendar rule: a single month or year step in a date position is its calendar date
 
 **What.** Under `origin = date(...)`, one calendar step of a whole number of
