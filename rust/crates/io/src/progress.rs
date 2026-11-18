@@ -218,6 +218,23 @@ impl ChainLiveness {
     }
 }
 
+/// One NLopt search's progress: how many objective evaluations it has made and
+/// the best finite log-likelihood it has seen. `chain` is the search's number
+/// in `chain_results.tsv` and `opt_trace.tsv`, counted from 0 per
+/// [`CHAIN_NUMBERING`].
+///
+/// The heartbeat's `step` is the furthest any search has reached, which on a
+/// multistart fit says nothing about the slowest search, nor whether any of
+/// them is still improving. A row per search says both. `best_loglik` is
+/// `None` (written `null`) until the search scores a finite point, because a
+/// non-finite best is no best at all and JSON has no spelling for it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SearchProgress {
+    pub chain: u64,
+    pub evals: u64,
+    pub best_loglik: Option<f64>,
+}
+
 /// The on-disk artifact: an always-present envelope around the state ADT.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Progress {
@@ -235,10 +252,20 @@ pub struct Progress {
     /// fields above are unchanged for every reader that already has them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chains: Option<ChainLiveness>,
+    /// Per-search progress for an NLopt fit, one row per search that has
+    /// scored a point, in chain order. Absent, not null, for every other
+    /// method and for an NLopt fit before its first evaluation, so their
+    /// artifacts are unchanged. Additive in the same way as `chains`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub searches: Option<Vec<SearchProgress>>,
 }
 
 impl Progress {
-    fn now(state: RunState, chains: Option<ChainLiveness>) -> Progress {
+    fn now(
+        state: RunState,
+        chains: Option<ChainLiveness>,
+        searches: Option<Vec<SearchProgress>>,
+    ) -> Progress {
         Progress {
             updated_at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -247,6 +274,7 @@ impl Progress {
             pid: std::process::id(),
             state,
             chains,
+            searches,
         }
     }
 }
@@ -312,6 +340,11 @@ struct Shared {
     /// it is taken a handful of times per chain per run, never on the sweep
     /// path, so it cannot contend with the sampler.
     chains: std::sync::Mutex<Vec<Option<ChainState>>>,
+    /// The latest report from each NLopt search, keyed by chain. Empty for
+    /// every other method, which then writes no `searches` block. The NLopt
+    /// driver reports when it writes a row of `opt_trace.tsv`, not on every
+    /// evaluation, so the lock is not taken on the evaluation path.
+    searches: std::sync::Mutex<std::collections::BTreeMap<u64, SearchProgress>>,
     /// Held across each write of the file, so the timer thread and a
     /// [`publish`](Heartbeat::publish) from a worker never write the shared
     /// temp file at once, and each write reads `step` after the one before it
@@ -326,6 +359,12 @@ impl Shared {
         if slots.is_empty() { None } else { Some(ChainLiveness::of(&slots)) }
     }
 
+    /// The search block for this write — `None` when no search has reported.
+    fn search_progress(&self) -> Option<Vec<SearchProgress>> {
+        let rows = self.searches.lock().unwrap_or_else(|e| e.into_inner());
+        if rows.is_empty() { None } else { Some(rows.values().copied().collect()) }
+    }
+
     /// Write the current `Running` state now. Best effort, like every
     /// progress write: this is a diagnostic.
     fn write_running(&self) {
@@ -334,6 +373,7 @@ impl Shared {
         let p = Progress::now(
             RunState::Running { phase: self.rule.at(step), step, total: self.total },
             self.chain_liveness(),
+            self.search_progress(),
         );
         let _ = write_progress(&self.dir, &p);
     }
@@ -368,6 +408,7 @@ impl Heartbeat {
             step: AtomicU64::new(0),
             stop: AtomicBool::new(false),
             chains: std::sync::Mutex::new(vec![None; n_chains]),
+            searches: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             write: std::sync::Mutex::new(()),
         });
         let s = Arc::clone(&shared);
@@ -441,6 +482,17 @@ impl Heartbeat {
         }
     }
 
+    /// Report one NLopt search's evaluation count and best finite
+    /// log-likelihood so far. One short lock, no I/O; the timer thread
+    /// writes the latest report per search. A search's row appears from its
+    /// first report and stays, so the terminal record keeps each search's
+    /// final count.
+    pub fn search(&self, chain: usize, evals: u64, best_loglik: Option<f64>) {
+        let chain = chain as u64;
+        let mut rows = self.shared.searches.lock().unwrap_or_else(|e| e.into_inner());
+        rows.insert(chain, SearchProgress { chain, evals, best_loglik });
+    }
+
     /// Report the furthest step reached. Cheap (one relaxed `fetch_max`) — safe
     /// from the hot loop and from multiple parallel chains; monotonic, so
     /// progress never jitters backward. Does no I/O.
@@ -460,7 +512,8 @@ impl Heartbeat {
         self.stop_thread();
         let _w = self.shared.write.lock().unwrap_or_else(|e| e.into_inner());
         let chains = self.shared.chain_liveness();
-        let _ = write_progress(&self.shared.dir, &Progress::now(state, chains));
+        let searches = self.shared.search_progress();
+        let _ = write_progress(&self.shared.dir, &Progress::now(state, chains, searches));
     }
 
     fn stop_thread(&mut self) {
@@ -575,6 +628,13 @@ impl HeartbeatGuard {
         }
     }
 
+    /// Report one NLopt search's progress — see [`Heartbeat::search`].
+    pub fn search(&self, chain: usize, evals: u64, best_loglik: Option<f64>) {
+        if let Some(hb) = self.slot().as_ref() {
+            hb.search(chain, evals, best_loglik);
+        }
+    }
+
     /// Record that the method finished. The `done` is provisional until
     /// [`commit`](Self::commit). The heartbeat stops before the leaf is
     /// finalized, which is why `done` goes down first: its temporary file
@@ -607,9 +667,13 @@ impl HeartbeatGuard {
         let provisional =
             self.provisional_done.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(dir) = provisional {
-            let chains = read_progress(&dir).ok().and_then(|p| p.chains);
+            let (chains, searches) =
+                read_progress(&dir).ok().map(|p| (p.chains, p.searches)).unwrap_or_default();
             // Best effort, like every progress write: this is a diagnostic.
-            let _ = write_progress(&dir, &Progress::now(RunState::Failed { reason }, chains));
+            let _ = write_progress(
+                &dir,
+                &Progress::now(RunState::Failed { reason }, chains, searches),
+            );
             return;
         }
         self.terminal(RunState::Failed { reason });
@@ -667,10 +731,13 @@ mod tests {
             updated_at: t, pid: 1,
             state: RunState::Running { phase: Phase::Sampling, step: 5, total: 10 },
             chains: None,
+            searches: None,
         };
         assert!(matches!(liveness(&running(100), 105, 30), RunLiveness::Alive(_)));
         assert!(matches!(liveness(&running(100), 200, 30), RunLiveness::PresumedDead(_)));
-        let done = Progress { updated_at: 1, pid: 1, state: RunState::Done, chains: None };
+        let done = Progress {
+            updated_at: 1, pid: 1, state: RunState::Done, chains: None, searches: None,
+        };
         assert!(matches!(liveness(&done, 9_999_999, 30), RunLiveness::Terminal(_)));
     }
 
@@ -678,7 +745,7 @@ mod tests {
     fn write_then_read_round_trips_and_is_atomic_named() {
         let dir = tempfile::tempdir().unwrap();
         let p =
-            Progress::now(RunState::Running { phase: Phase::BurnIn, step: 7, total: 20 }, None);
+            Progress::now(RunState::Running { phase: Phase::BurnIn, step: 7, total: 20 }, None, None);
         write_progress(dir.path(), &p).unwrap();
         let tmp = dir.path().join(format!("{}.{}.tmp", PROGRESS_FILE, std::process::id()));
         assert!(!tmp.exists(), "temp file should be renamed away");
@@ -744,7 +811,7 @@ mod tests {
             Some(ChainState::Completed),
             Some(ChainState::Refused { reason: RefusedReason::NonFiniteStart }),
         ];
-        let p = Progress::now(RunState::Done, Some(ChainLiveness::of(&slots)));
+        let p = Progress::now(RunState::Done, Some(ChainLiveness::of(&slots)), None);
         let v: serde_json::Value = serde_json::to_value(&p).unwrap();
 
         // Unchanged for every reader that already has them.
@@ -773,9 +840,12 @@ mod tests {
     /// what it was before, and an old file still parses.
     #[test]
     fn a_chainless_method_writes_no_chain_key_and_an_old_file_still_parses() {
-        let p = Progress::now(RunState::Running { phase: Phase::Optimizing, step: 3, total: 10 }, None);
+        let p = Progress::now(
+            RunState::Running { phase: Phase::Optimizing, step: 3, total: 10 }, None, None,
+        );
         let json = serde_json::to_string(&p).unwrap();
         assert!(!json.contains("chains"), "no key at all, not a null: {json}");
+        assert!(!json.contains("searches"), "no key at all, not a null: {json}");
 
         let old = r#"{"updated_at":1787670244,"pid":2882,
                       "state":{"running":{"phase":"burn_in","step":276,"total":2000}}}"#;
@@ -952,5 +1022,37 @@ mod tests {
         assert!(matches!(mid.state, RunState::Running { step: 12, phase: Phase::Optimizing, .. }));
         hb.finish(RunState::Done);
         assert_eq!(read_progress(dir.path()).unwrap().state, RunState::Done);
+    }
+
+    /// An NLopt fit's per-search block: one flat row per search that has
+    /// reported, in chain order, with a `null` best before any finite point,
+    /// beside the unchanged `running` counter; `finish` keeps the block.
+    #[test]
+    fn the_heartbeat_writes_one_row_per_search_and_finish_keeps_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb = Heartbeat::optimizing(dir.path().to_path_buf(), 100, Duration::from_millis(20));
+        hb.bump(40);
+        hb.search(1, 12, None);
+        hb.search(0, 40, Some(-48.5));
+        hb.search(0, 41, Some(-47.8)); // the latest report replaces the row
+        std::thread::sleep(Duration::from_millis(60));
+
+        let v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join(PROGRESS_FILE)).unwrap()).unwrap();
+        assert_eq!(v["state"]["running"]["phase"], "optimizing");
+        assert_eq!(v["state"]["running"]["step"], 40);
+        assert!(v.get("chains").is_none(), "no chain block for an optimizer");
+        assert_eq!(
+            v["searches"],
+            serde_json::json!([
+                {"chain": 0, "evals": 41, "best_loglik": -47.8},
+                {"chain": 1, "evals": 12, "best_loglik": null},
+            ])
+        );
+
+        hb.finish(RunState::Done);
+        let end = read_progress(dir.path()).unwrap();
+        assert_eq!(end.state, RunState::Done);
+        assert_eq!(end.searches.expect("the block survives the terminal write").len(), 2);
     }
 }
