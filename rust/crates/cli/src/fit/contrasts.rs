@@ -694,7 +694,7 @@ pub(crate) fn resolve_arm(
     run: &str,
     overrides: &[(String, f64)],
 ) -> Result<crate::params_resolver::ResolvedParameters, String> {
-    let empty_tables: HashMap<String, PathBuf> = HashMap::new();
+    let no_external = crate::external_inputs::ExternalBindings::none();
     let empty_fixed: IndexMap<String, f64> = IndexMap::new();
     let empty_estimate: IndexSet<String> = IndexSet::new();
     let scenario = if run == crate::args::FITTED { None } else { Some(run.to_string()) };
@@ -714,7 +714,7 @@ pub(crate) fn resolve_arm(
         fixed_files: &[],
         fit_toml_fixed: &empty_fixed,
         fit_toml_estimate: &empty_estimate,
-        table_files: &empty_tables,
+        external: &no_external,
     };
     resolve_parameters(inputs).map_err(|e| format!("{who} '{run}': {e}"))
 }

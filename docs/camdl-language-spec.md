@@ -1525,10 +1525,33 @@ left. Name count must match non-index column count.
 
 ### 6.5 External Table Loading
 
-External tables are loaded at compile time and inlined into the IR. The IR is
-self-contained — no file references at runtime. The canonical IR format is
-compact one-element-per-line JSON (a `--pretty` variant exists for inspection);
-there is no binary format.
+A table read with `read("path")` is loaded at compile time and inlined into the
+IR, so the IR names no file and the runtime opens none. The canonical IR format
+is compact one-element-per-line JSON (a `--pretty` variant exists for
+inspection); there is no binary format.
+
+A table declared `external("NAME")` is the exception: its values are chosen when
+the model is run, not when it compiles, so one model can be run or fitted under
+several versions of a data input.
+
+```camdl
+tables {
+  C : patch × patch = external("contact")
+}
+```
+
+The file is bound with `--table contact=FILE` on the command line, or with
+`[data.tables] contact = "FILE"` in a fit config (see
+[`docs/fit-toml.md`](fit-toml.md)); the command line wins where both bind the
+same name. The file holds the table's cells as numbers in row-major order (the
+last index varies fastest): a CSV or TSV of numbers with no header, blank and
+`#` lines skipped, or a JSON array. It must hold exactly one number per cell —
+the product of the declared dimensions' sizes — and a file with more or fewer is
+refused, naming the table and both counts. The model's identity covers the
+declaration (`external("contact")` and its dimensions); the file's bytes are an
+input of each run, so the same model run under two files is one model and two
+runs. A run with an external table left unbound, or with a binding for a name
+the model does not declare, is refused.
 
 ### 6.6 Parameterized Table Entries
 
@@ -2069,6 +2092,39 @@ given `--allow-forcing-extrapolation` (in a fit config,
 `[config] allow_forcing_extrapolation = true`), under which it holds its first
 or last value there with one warning, as a `bspline` does outside its window.
 `piecewise` and the periodic kinds are defined for all time.
+
+#### Forcing data chosen when the model is run (`data = external("NAME")`)
+
+`data = "path"` fixes the forcing's file in the model. `data = external("NAME")`
+leaves it to be chosen when the model is run, exactly as for an
+[`external("NAME")` table](#65-external-table-loading): the same model can then
+be fitted under several versions of a covariate — a school calendar, a climate
+series — without a model file per version.
+
+```camdl preamble=forcing-demo
+forcing {
+  school_term : interpolated 'ratio {
+    data      = external("school")   # the file is bound when the model is run
+    time_col  = "date"
+    value_col = "in_term"
+    method    = constant
+  }
+}
+```
+
+The file is bound under the same name as a table's: `--table school=FILE`, or
+`[data.tables] school = "FILE"` in a fit config, the command line winning where
+both bind it. It is read exactly as a `data = "path"` file is read at compile
+time — separator from the extension (`.csv` or `.tsv`), the first line that is
+neither blank nor a `#` comment the header, `time_col` cells numbers in model
+time or ISO dates under the model's `origin`, the rows the knots in file order,
+the values scaled by the forcing's unit literal — and an indexed forcing reads
+only the rows whose `key_col` holds its own level. The forcing is refused, naming
+it and its external name, when the file is not bound, lacks a named column, has
+a cell that is not a number (or, for `time_col`, a date), or has no row for one
+of an indexed forcing's levels. The model's identity covers the declaration (the
+name, the columns, the key and the unit); the file's bytes are an input of each
+run, as for an external table.
 
 Unit-literal choices for forcings in practice:
 

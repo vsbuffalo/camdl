@@ -84,11 +84,11 @@ fn cubic_spline_knot_value_param_is_rejected() {
     // Interpolated + Spline → a cubic-spline basis (construction-time Thomas
     // solve); a parameter in a knot value cannot be live.
     assert_structural_rejection(
-        TimeFuncKind::Interpolated(Interpolated {
-            times: vec![Expr::const_(0.0), Expr::const_(1.0), Expr::const_(2.0)],
-            values: vec![Expr::const_(0.0), Expr::param("v"), Expr::const_(0.0)],
-            method: InterpMethod::Spline,
-        }),
+        TimeFuncKind::Interpolated(Interpolated::knots(
+            vec![Expr::const_(0.0), Expr::const_(1.0), Expr::const_(2.0)],
+            vec![Expr::const_(0.0), Expr::param("v"), Expr::const_(0.0)],
+            InterpMethod::Spline,
+        )),
         "cubic-spline knot value",
     );
 }
@@ -96,11 +96,11 @@ fn cubic_spline_knot_value_param_is_rejected() {
 #[test]
 fn linear_interp_knot_value_param_is_rejected() {
     assert_structural_rejection(
-        TimeFuncKind::Interpolated(Interpolated {
-            times: vec![Expr::const_(0.0), Expr::const_(1.0)],
-            values: vec![Expr::param("v"), Expr::const_(1.0)],
-            method: InterpMethod::Linear,
-        }),
+        TimeFuncKind::Interpolated(Interpolated::knots(
+            vec![Expr::const_(0.0), Expr::const_(1.0)],
+            vec![Expr::param("v"), Expr::const_(1.0)],
+            InterpMethod::Linear,
+        )),
         "linear interpolation knot value",
     );
 }

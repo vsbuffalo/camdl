@@ -810,10 +810,7 @@ fn run_profile(
     // Run the unified resolver.
     let fit_toml_estimate: indexmap::IndexSet<String> =
         fit_estimate.keys().cloned().collect();
-    // `--table NAME=FILE`: the model tables the file supplies, as on
-    // `simulate` and `pfilter`. They change the resolved model, which the
-    // point's identity hashes.
-    let table_files_resolver: HashMap<String, std::path::PathBuf> = tables.into_iter().collect();
+    let no_external = crate::external_inputs::ExternalBindings::from_cli(tables);
     let resolved = crate::params_resolver::resolve_parameters_with_starts(
         crate::params_resolver::ParameterInputs {
             model: &model_pre,
@@ -828,7 +825,7 @@ fn run_profile(
             fixed_files: &fixed_files_vec,
             fit_toml_fixed: &fit_toml_fixed_indexmap,
             fit_toml_estimate: &fit_toml_estimate,
-            table_files: &table_files_resolver,
+            external: &no_external,
         },
         starts_values.as_ref().map(|(origin, values)|
             crate::params_resolver::StartsValues { origin, values }),

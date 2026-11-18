@@ -454,7 +454,10 @@ fn forcing_exprs(k: &ir::time_func::TimeFuncKind) -> Vec<&Expr> {
     match k {
         K::Sinusoidal(s) => vec![&s.amplitude, &s.period, &s.phase, &s.baseline],
         K::Piecewise(p) => p.breakpoints.iter().chain(&p.values).collect(),
-        K::Interpolated(i) => i.times.iter().chain(&i.values).collect(),
+        K::Interpolated(i) => match &i.source {
+            ir::time_func::InterpSource::Knots { times, values } => times.iter().chain(values).collect(),
+            ir::time_func::InterpSource::External(_) => Vec::new(),
+        },
         K::Periodic(p) => std::iter::once(&p.period).chain(&p.values).collect(),
         K::Fourier(f) => std::iter::once(&f.period)
             .chain(f.harmonics.iter().flat_map(|(a, b)| [a, b]))
@@ -477,7 +480,11 @@ fn forcing_exprs_mut(k: &mut ir::time_func::TimeFuncKind) -> Vec<&mut Expr> {
     match k {
         K::Sinusoidal(s) => vec![&mut s.amplitude, &mut s.period, &mut s.phase, &mut s.baseline],
         K::Piecewise(p) => p.breakpoints.iter_mut().chain(&mut p.values).collect(),
-        K::Interpolated(i) => i.times.iter_mut().chain(&mut i.values).collect(),
+        K::Interpolated(i) => match &mut i.source {
+            ir::time_func::InterpSource::Knots { times, values } =>
+                times.iter_mut().chain(values.iter_mut()).collect(),
+            ir::time_func::InterpSource::External(_) => Vec::new(),
+        },
         K::Periodic(p) => std::iter::once(&mut p.period).chain(&mut p.values).collect(),
         K::Fourier(f) => std::iter::once(&mut f.period)
             .chain(f.harmonics.iter_mut().flat_map(|(a, b)| [a, b]))

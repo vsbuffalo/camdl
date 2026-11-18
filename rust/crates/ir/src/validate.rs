@@ -807,7 +807,12 @@ fn check_misplaced_forcing_basis(model: &Model, errors: &mut Vec<ValidationError
         match &tf.kind {
             K::Sinusoidal(x) => sites.extend([&x.amplitude, &x.period, &x.phase, &x.baseline]),
             K::Piecewise(x) => sites.extend(x.breakpoints.iter().chain(&x.values)),
-            K::Interpolated(x) => sites.extend(x.times.iter().chain(&x.values)),
+            K::Interpolated(x) => match &x.source {
+                crate::time_func::InterpSource::Knots { times, values } =>
+                    sites.extend(times.iter().chain(values)),
+                // Numbers read from a file when the model runs: no expression.
+                crate::time_func::InterpSource::External(_) => {}
+            },
             K::Periodic(x) => sites.extend(std::iter::once(&x.period).chain(&x.values)),
             K::Fourier(x) => {
                 sites.push(&x.period);

@@ -1753,6 +1753,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let runs_dir = dir.path().join("sims");
         let runs_dir = runs_dir.to_str().unwrap();
+        // A model that reads `contact`: a 2 × 2 table declared
+        // `C : g × g = external("contact")`.
+        let mut model = tiny_model();
+        model.tables.push(ir::table::Table {
+            name: "C".into(),
+            source: ir::table::TableSource::External {
+                external: "contact".into(),
+                shape: vec![
+                    ir::table::TableAxis { dim: "g".into(), levels: 2 },
+                    ir::table::TableAxis { dim: "g".into(), levels: 2 },
+                ],
+            },
+            out_of_bounds: ir::table::OobPolicy::Error,
+            cell_kind: None,
+        });
+        let sink = |runs_dir: &str| sink_over(model.clone(), runs_dir);
 
         let path_a = dir.path().join("matrix.tsv");
         let path_b = dir.path().join("matrix2.tsv");
@@ -1771,12 +1787,15 @@ mod tests {
         let (rt_b, _, _) = sink(runs_dir).cell_resolve(&mk(&path_b)).unwrap();
         let (rt_c, _, _) = sink(runs_dir).cell_resolve(&mk(&path_c)).unwrap();
 
-        // Negative control: with NO --table, the run_id is yet another value,
-        // and it must differ from the with-table run_ids (so the table digest
-        // is genuinely folded in, not silently dropped).
-        let (rt_none, _, _) = sink(runs_dir)
-            .cell_resolve(&baseline_spec(HashMap::new()))
-            .unwrap();
+        // Negative control: with NO --table there is no run at all — the
+        // model reads `contact`, so leaving it unbound is refused by name
+        // rather than run, or keyed, without the table.
+        let unbound = sink(runs_dir).cell_resolve(&baseline_spec(HashMap::new()));
+        let err = match unbound {
+            Ok(_) => panic!("a model reading `contact` must not resolve without it"),
+            Err(e) => e,
+        };
+        assert!(err.contains("external input 'contact' has no file"), "{err}");
 
         assert_ne!(
             rt_a.run_id, rt_b.run_id,
@@ -1785,10 +1804,6 @@ mod tests {
         assert_eq!(
             rt_a.run_id, rt_c.run_id,
             "identical --table content MUST produce the same sim run_id"
-        );
-        assert_ne!(
-            rt_a.run_id, rt_none.run_id,
-            "a --table override must change the run_id vs no table (digest folded in)"
         );
 
         // The difference is isolated to the params level (tables live there),

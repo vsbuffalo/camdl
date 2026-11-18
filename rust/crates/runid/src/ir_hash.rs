@@ -72,9 +72,10 @@ use ir::parameter::{
     BetaPrior, ExponentialPrior, GammaPrior, HalfNormalPrior, LogNormalPrior, LogUniformPrior,
     Constant, NormalPrior, TruncatedNormalPrior, UniformPrior, HierarchicalKind, HierarchicalPrior, ParamKind, ParamValue, Parameter, PriorDist, PriorSpec,
 };
-use ir::table::{OobPolicy, Table, TableSource};
+use ir::table::{OobPolicy, Table, TableAxis, TableSource};
 use ir::time_func::{
-    BSpline, BSplineKnots, Fourier, InterpMethod, Interpolated, Periodic, PeriodicSpline, Piecewise,
+    BSpline, BSplineKnots, ExternalSeries, Fourier, InterpMethod, InterpSource, Interpolated,
+    Periodic, PeriodicSpline, Piecewise, SeriesKey,
     Sinusoidal, SplineCoefs, SplineLink, TimeFuncKind, TimeFunction,
 };
 use ir::transition::{
@@ -928,9 +929,16 @@ impl ContentAddressed for TableSource {
                 h.write_u32(0);
                 values.hash_into(h);
             }
-            TableSource::External { external } => {
+            TableSource::External { external, shape } => {
                 h.write_u32(1);
                 h.write_str(external);
+                // The declared shape is what the bound file is checked against;
+                // the file itself is a run input, hashed with the run's inputs.
+                h.write_len(shape.len() as u64);
+                for TableAxis { dim, levels } in shape {
+                    h.write_str(dim);
+                    h.write_u64(*levels as u64);
+                }
             }
         }
     }
@@ -969,16 +977,44 @@ impl ContentAddressed for TimeFuncKind {
                 breakpoints.hash_into(h);
                 values.hash_into(h);
             }
-            TimeFuncKind::Interpolated(Interpolated { times, values, method }) => {
-                h.write_u32(2);
-                times.hash_into(h);
-                values.hash_into(h);
+            TimeFuncKind::Interpolated(Interpolated { source, method }) => {
                 // InterpMethod inlined.
                 let m: u32 = match method {
                     InterpMethod::Linear => 0,
                     InterpMethod::Constant => 1,
                     InterpMethod::Spline => 2,
                 };
+                match source {
+                    // Knots keep the stream they always had, under tag 2.
+                    InterpSource::Knots { times, values } => {
+                        h.write_u32(2);
+                        times.hash_into(h);
+                        values.hash_into(h);
+                    }
+                    // An external forcing hashes its declaration — which file
+                    // name, which rows, which columns, the unit scale — never
+                    // the file: the bound file's bytes are a run input, hashed
+                    // where the run's inputs are (`ResolvedParams.tables`, and
+                    // `FitDigest.tables`), so one model serves every binding.
+                    // Tag 7: no other forcing kind uses it.
+                    InterpSource::External(ExternalSeries {
+                        external, time_col, value_col, key, value_scale,
+                    }) => {
+                        h.write_u32(7);
+                        h.write_str(external);
+                        h.write_str(time_col);
+                        h.write_str(value_col);
+                        match key {
+                            None => h.write_u32(0),
+                            Some(SeriesKey { column, level }) => {
+                                h.write_u32(1);
+                                h.write_str(column);
+                                h.write_str(level);
+                            }
+                        }
+                        h.write_f64_bits(*value_scale);
+                    }
+                }
                 h.write_u32(m);
             }
             TimeFuncKind::Periodic(Periodic { period, values }) => {

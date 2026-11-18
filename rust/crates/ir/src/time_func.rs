@@ -15,11 +15,69 @@ pub struct Piecewise {
     pub values:      Vec<Expr>,
 }
 
+/// An `interpolated` forcing: its knots, from wherever they come, and how
+/// the forcing passes between them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Interpolated {
-    pub times:  Vec<Expr>,
-    pub values: Vec<Expr>,
+    #[serde(flatten)]
+    pub source: InterpSource,
     pub method: InterpMethod,
+}
+
+impl Interpolated {
+    /// A forcing through the knots `(times[i], values[i])`.
+    pub fn knots(times: Vec<Expr>, values: Vec<Expr>, method: InterpMethod) -> Self {
+        Interpolated { source: InterpSource::Knots { times, values }, method }
+    }
+}
+
+/// Where an `interpolated` forcing's knots come from — the forcing
+/// counterpart of [`crate::table::TableSource`], and serialized the same way
+/// (untagged, flattened into the forcing), so a knot-backed forcing's JSON is
+/// `{"times": [...], "values": [...], "method": ...}` as it always was.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum InterpSource {
+    /// Knots known when the model compiled: written inline, sliced from a
+    /// table, or read by `camdlc` from a `data = "path"` file.
+    Knots { times: Vec<Expr>, values: Vec<Expr> },
+    /// Knots read when the model is run, from the file bound to
+    /// `external("NAME")`. The CLI replaces this with [`InterpSource::Knots`]
+    /// before the model is built (`cli::external_inputs::bind`);
+    /// `CompiledModel::new` refuses one that reaches it.
+    External(ExternalSeries),
+}
+
+/// The rows of a bound file that an external forcing reads, and how its
+/// values are scaled. The file is read exactly as `camdlc` reads a
+/// `data = "path"` forcing: the first line that is neither blank nor a `#`
+/// comment is the header, a time cell is a number in model time or an ISO
+/// date resolved through the model's origin, and the rows are the knots in
+/// file order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExternalSeries {
+    /// The `NAME` of `data = external("NAME")`: the key a binding supplies a
+    /// file under (`--table NAME=FILE`, or `[data.tables]` in a fit config).
+    pub external:    String,
+    pub time_col:    String,
+    pub value_col:   String,
+    /// The stratum filter of an indexed forcing: only rows whose `column`
+    /// holds `level`. `None` for a forcing with no index, which reads every
+    /// row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key:         Option<SeriesKey>,
+    /// The factor converting a value in the forcing's declared unit to the
+    /// model's time unit (1/7 for `'per_week` under `time_unit = 'days`, 1 for
+    /// `'ratio`), computed by the compiler. A value `v` becomes the knot
+    /// `v × value_scale`, the expression `camdlc` writes for a file it reads.
+    pub value_scale: f64,
+}
+
+/// See [`ExternalSeries::key`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SeriesKey {
+    pub column: String,
+    pub level:  String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -251,4 +309,37 @@ pub struct TimeFunction {
     /// no file-backed forcing keeps its exact pre-0.33 bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_source: Option<DataSource>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The wire form of both knot sources, pinned to the exact strings the
+    /// OCaml serializer is pinned to (`ocaml/test/test_ir_roundtrip.ml`,
+    /// `external_series_serde_test` and `data_source_serde_test`): each parses
+    /// to the source it names and writes back byte for byte.
+    #[test]
+    fn interp_source_wire_form_matches_the_compiler() {
+        let cases = [
+            r#"{"interpolated":{"times":[{"const":0.0},{"const":30.0}],"values":[{"const":1.4},{"const":1.3}],"method":"linear"}}"#,
+            r#"{"interpolated":{"external":"school","time_col":"date","value_col":"in_term","value_scale":0.5,"method":"constant"}}"#,
+            r#"{"interpolated":{"external":"school","time_col":"date","value_col":"in_term","key":{"column":"patch","level":"north"},"value_scale":0.5,"method":"constant"}}"#,
+        ];
+        for (i, wire) in cases.iter().enumerate() {
+            let kind: TimeFuncKind = serde_json::from_str(wire)
+                .unwrap_or_else(|e| panic!("case {i} does not parse: {e}"));
+            let TimeFuncKind::Interpolated(interp) = &kind else { panic!("case {i}: not interpolated") };
+            match (i, &interp.source) {
+                (0, InterpSource::Knots { times, .. }) => assert_eq!(times.len(), 2),
+                (1, InterpSource::External(e)) => assert_eq!(e.key, None),
+                (2, InterpSource::External(e)) => assert_eq!(
+                    e.key,
+                    Some(SeriesKey { column: "patch".into(), level: "north".into() })
+                ),
+                (i, s) => panic!("case {i} parsed to the wrong source: {s:?}"),
+            }
+            assert_eq!(serde_json::to_string(&kind).unwrap(), *wire, "case {i} must write back unchanged");
+        }
+    }
 }

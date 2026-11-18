@@ -337,8 +337,7 @@ pub(crate) fn resolve_fit_parameters(
     // intervention filter, bounds, and finite-value checks.
     let fit_toml_estimate: indexmap::IndexSet<String> =
         fit.estimate.keys().cloned().collect();
-    let table_files_resolver: std::collections::HashMap<String, std::path::PathBuf> =
-        std::collections::HashMap::new();
+    let no_external = crate::external_inputs::ExternalBindings::none();
     // gh#561: a fit's window is the observation times, so a scenario's own
     // `simulate { to }` cannot be honoured here — refuse rather than drop
     // it silently. "Honour it instead" would be actively wrong on this
@@ -364,7 +363,7 @@ pub(crate) fn resolve_fit_parameters(
             fixed_files: &[],
             fit_toml_fixed: &fixed_resolved,
             fit_toml_estimate: &fit_toml_estimate,
-            table_files: &table_files_resolver,
+            external: &no_external,
         },
     ).map_err(|e| e.to_string())?;
     let mut resolved = resolved;

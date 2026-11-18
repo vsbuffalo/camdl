@@ -294,7 +294,9 @@ let forcing_coeff_exprs (k : time_func_kind) : expr list =
   match k with
   | Sinusoidal s -> [ s.amplitude; s.period; s.phase; s.baseline ]
   | Piecewise p -> p.breakpoints @ p.values
-  | Interpolated i -> i.times @ i.values
+  | Interpolated { source = Knots k; _ } -> k.times @ k.values
+  (* Knots read from a bound file at run time are numbers: no parameter. *)
+  | Interpolated { source = External_series _; _ } -> []
   | Periodic p -> p.period :: p.values
   | Fourier f -> f.period :: List.concat_map (fun (a, b) -> [ a; b ]) f.harmonics
   | PeriodicSpline ps -> ps.period :: ps.coefs

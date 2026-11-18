@@ -496,8 +496,8 @@ let data_source_serde_test () =
   let open Ir in
   let sha = "908fb5d7e89d7140b1858bd0c83773e14b3b5c40ff397d04c4031e217249f030" in
   let tf_plain = { name = "clim";
-                   kind = Interpolated { times  = [Const 0.0; Const 30.0];
-                                         values = [Const 1.4; Const 1.3];
+                   kind = Interpolated { source = Knots { times  = [Const 0.0; Const 30.0];
+                                                          values = [Const 1.4; Const 1.3] };
                                          method_ = "linear" };
                    dim  = (0, 0);
                    lag  = None;
@@ -523,6 +523,31 @@ let data_source_serde_test () =
   Alcotest.(check bool) "lag is emitted before data_source" true
     (contains (Yojson.Safe.to_string (Serde.time_function_to_json tf_both))
        {|"lag":{"const":10.0},"data_source":|})
+
+(* An external forcing's knot source: the exact bytes, with and without the
+   stratum key, and a round trip of each. The Rust side parses these same
+   strings (`ir::time_func` tests), so the two readers are pinned to one
+   wire form. *)
+let external_series_serde_test () =
+  let open Ir in
+  let tf key =
+    { name = "school";
+      kind = Interpolated {
+          source = External_series { name = "school"; time_col = "date";
+                                     value_col = "in_term"; key; value_scale = 0.5 };
+          method_ = "constant" };
+      dim = (0, 0); lag = None; data_source = None } in
+  let plain = tf None in
+  let keyed = tf (Some { column = "patch"; level = "north" }) in
+  Alcotest.(check string) "external forcing, no index"
+    {|{"name":"school","kind":{"interpolated":{"external":"school","time_col":"date","value_col":"in_term","value_scale":0.5,"method":"constant"}},"dim":[0,0]}|}
+    (Yojson.Safe.to_string (Serde.time_function_to_json plain));
+  Alcotest.(check string) "external forcing, indexed"
+    {|{"name":"school","kind":{"interpolated":{"external":"school","time_col":"date","value_col":"in_term","key":{"column":"patch","level":"north"},"value_scale":0.5,"method":"constant"}},"dim":[0,0]}|}
+    (Yojson.Safe.to_string (Serde.time_function_to_json keyed));
+  let rt t = Serde.time_function_of_json (Serde.time_function_to_json t) in
+  Alcotest.(check bool) "no-index external forcing round-trips" true (rt plain = plain);
+  Alcotest.(check bool) "indexed external forcing round-trips" true (rt keyed = keyed)
 
 (* (2): the byte-identity claim, per golden. These goldens declare forcings but
    no `data = "..."` file, so not one byte of `data_source` may appear anywhere
@@ -583,6 +608,8 @@ let () =
     Alcotest.test_case "anchor serde (round-trip + pinned wire)" `Quick anchor_serde_test;
     Alcotest.test_case "forcing data_source serde (round-trip + pinned wire)" `Quick
       data_source_serde_test;
+    Alcotest.test_case "external forcing serde (round-trip + pinned wire)" `Quick
+      external_series_serde_test;
     Alcotest.test_case "prior_spec single slot" `Quick prior_spec_single_slot_test;
     Alcotest.test_case "integrator serde (rk45 round-trip + strict)" `Quick integrator_serde_test;
     Alcotest.test_case "expr serde (PerEvalRef round-trips)" `Quick expr_serde_test;

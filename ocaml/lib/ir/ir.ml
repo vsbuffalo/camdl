@@ -354,13 +354,49 @@ type sinusoidal = { amplitude: expr; period: expr; phase: expr; baseline: expr }
     be an {!expr.ObsAnchor}. *)
 type piecewise  = { breakpoints: expr list; values: expr list }
 
-(** An [interpolated] forcing through the knots [(times[i], values[i])].
-    [method_] is ["linear"] (straight lines between knots, held at the end
-    values outside them), ["constant"] (the value of the last knot at or
-    before [t]) or ["spline"] (a cubic spline).
-    A forcing declared [data = "path"] has its knots read from the file at
-    compile time. *)
-type interpolated = { times: expr list; values: expr list; method_: string }
+(** The rows of a data file an external forcing reads: the forcing
+    [school_north] of [school[p in patch] : interpolated 'ratio { data =
+    external("school"), time_col = "date", value_col = "in_term", key_col =
+    "patch" }] reads the rows of the file bound to [school] whose [patch]
+    column is [north]. *)
+type series_key = {
+  column: string;  (** The column holding the stratum. *)
+  level:  string;  (** The value of [column] on the rows this forcing reads. *)
+}
+
+(** A forcing's knots read, when the model is run, from the file bound to
+    [name] ([--table NAME=FILE] or the fit config's [[data.tables]]). The
+    runtime reads the file exactly as the compiler reads [data = "path"]: the
+    first line that is neither blank nor a [#] comment is the header, a time
+    cell is a number in model time or an ISO date resolved through the
+    model's origin, and the rows are the knots in file order. *)
+type external_series = {
+  name:        string;  (** The name in [external("NAME")]. *)
+  time_col:    string;
+  value_col:   string;
+  key:         series_key option;
+      (** [None] for a forcing with no index: it reads every row. *)
+  value_scale: float;
+      (** The factor that converts a value in the forcing's declared unit to
+          the model's time unit (1/7 for ['per_week] in a model whose time
+          unit is days, 1 for ['ratio]). Each value [v] becomes [v * value_scale],
+          as the compiler does for knots it reads itself. *)
+}
+
+(** Where an [interpolated] forcing's knots come from. *)
+type interp_source =
+  | Knots of { times: expr list; values: expr list }
+      (** Knots known when the model compiles: written inline, sliced from a
+          table, or read from a [data = "path"] file. *)
+  | External_series of external_series
+      (** Knots supplied when the model is run; the runtime refuses to run a
+          model whose external forcing was not bound. *)
+
+(** An [interpolated] forcing through its knots. [method_] is ["linear"]
+    (straight lines between knots, held at the end values outside them),
+    ["constant"] (the value of the last knot at or before [t]) or ["spline"]
+    (a cubic spline). *)
+type interpolated = { source: interp_source; method_: string }
 
 (** A [periodic] forcing: [period] split into [List.length values] equal
     intervals, each holding its value, repeating forever. *)
@@ -474,10 +510,19 @@ type time_function = {
 (** What a lookup outside a table does. The only policy is a runtime error. *)
 type oob_policy = Error
 
+(** One axis of a table: the dimension it runs over and how many levels that
+    dimension has. *)
+type table_axis = { axis_dim : string; axis_levels : int }
+
 (** Where a table's values come from. *)
 type table_source =
   | Inline   of expr list  (** The values in row-major order (the last index varies fastest), each an expression of constants and parameters. *)
-  | External of string     (** Values supplied when the model is run, under this name, from [external("name")]; the runtime refuses to build a model whose external table was not supplied. *)
+  | External of { name : string; shape : table_axis list }
+      (** Values supplied when the model is run, under [name], from
+          [external("name")]; the runtime refuses to build a model whose
+          external table was not supplied. [shape] is the declaration's axes in
+          order, so the runtime can refuse a bound file that does not hold
+          exactly one number per cell (the product of the levels). *)
 
 (** A table of the expanded model, read by {!expr.TableLookup}. A table over
     [patch × patch] declared as [[[0.9, 0.1], [0.1, 0.9]]] holds the four

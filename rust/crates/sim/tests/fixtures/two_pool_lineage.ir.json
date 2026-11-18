@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.46",
-  "validated_by": "ocaml-compiler-v0.46",
+  "ir_version": "0.47",
+  "validated_by": "ocaml-compiler-v0.47",
   "model": {
     "name": "two_pool",
     "version": "0.3",

@@ -952,11 +952,11 @@ fn ir_forcing_data_source_excluded_from_hash() {
 fn ir_forcing_knots_change_hash() {
     let knots = |v: f64| {
         let mut m = representative_model();
-        m.time_functions[0].kind = TimeFuncKind::Interpolated(ir::time_func::Interpolated {
-            times: vec![Expr::const_(0.0), Expr::const_(30.0)],
-            values: vec![Expr::const_(1.4), Expr::const_(v)],
-            method: ir::time_func::InterpMethod::Linear,
-        });
+        m.time_functions[0].kind = TimeFuncKind::Interpolated(ir::time_func::Interpolated::knots(
+            vec![Expr::const_(0.0), Expr::const_(30.0)],
+            vec![Expr::const_(1.4), Expr::const_(v)],
+            ir::time_func::InterpMethod::Linear,
+        ));
         m.content_hash()
     };
     assert_ne!(
@@ -965,6 +965,60 @@ fn ir_forcing_knots_change_hash() {
         "a forcing value read out of the data file is run identity — editing \
          the file so a knot moves MUST re-key the fit"
     );
+}
+
+/// An external forcing hashes its declaration and nothing else: each of the
+/// name, the two columns, the stratum key and the unit scale is identity (a
+/// different one reads different numbers from the same file), and the bound
+/// file is not part of the model at all — it enters the run's inputs. It also
+/// cannot collide with a knot-backed forcing.
+#[test]
+fn ir_external_forcing_hashes_its_declaration() {
+    use ir::time_func::{ExternalSeries, InterpMethod, InterpSource, Interpolated, SeriesKey};
+    let base = ExternalSeries {
+        external: "school".into(),
+        time_col: "date".into(),
+        value_col: "in_term".into(),
+        key: None,
+        value_scale: 1.0,
+    };
+    let hash = |e: ExternalSeries| {
+        let mut m = representative_model();
+        m.time_functions[0].kind = TimeFuncKind::Interpolated(Interpolated {
+            source: InterpSource::External(e),
+            method: InterpMethod::Constant,
+        });
+        m.content_hash()
+    };
+    let h0 = hash(base.clone());
+    assert_eq!(h0, hash(base.clone()), "the hash is a function of the declaration");
+    let variants = [
+        ("name", ExternalSeries { external: "calendar".into(), ..base.clone() }),
+        ("time column", ExternalSeries { time_col: "day".into(), ..base.clone() }),
+        ("value column", ExternalSeries { value_col: "open".into(), ..base.clone() }),
+        ("key", ExternalSeries {
+            key: Some(SeriesKey { column: "patch".into(), level: "north".into() }),
+            ..base.clone()
+        }),
+        ("key level", ExternalSeries {
+            key: Some(SeriesKey { column: "patch".into(), level: "south".into() }),
+            ..base.clone()
+        }),
+        ("unit scale", ExternalSeries { value_scale: 1.0 / 7.0, ..base.clone() }),
+    ];
+    let mut seen = vec![h0];
+    for (what, e) in variants {
+        let h = hash(e);
+        assert!(!seen.contains(&h), "changing the external forcing's {what} must re-key the model");
+        seen.push(h);
+    }
+    let knots = {
+        let mut m = representative_model();
+        m.time_functions[0].kind = TimeFuncKind::Interpolated(Interpolated::knots(
+            vec![], vec![], InterpMethod::Constant));
+        m.content_hash()
+    };
+    assert!(!seen.contains(&knots), "an external forcing must not hash like an empty knot list");
 }
 
 /// `Const(0.0)` vs `Const(-0.0)` must produce *distinct* hashes — the
