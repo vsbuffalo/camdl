@@ -929,9 +929,9 @@ and fails it instead when `--stream` named it.
 - `particles` (D85): `{"n", "source"}`, the filters' particle count per draw and
   where it came from: `flag` (`--particles`), `fit_pmmh` (the PMMH fit's own
   count) or `default` (500). `predictive.json` carries the same block when the
-  one-step band ran. The output address keys the count only when it differs from
-  the default the run determines, so a predict without `--particles` keeps its
-  address.
+  one-step band ran. Whenever a filter runs, the output address keys the count
+  `n` (as `options.particles`) and not its source, so `--particles` equal to the
+  default addresses the same output as no flag.
 - `filter_diagnostics` (D85): per draw, in the order of `draws`, the effective
   sample size of the filter's weights at its last assimilation at or before the
   origin, before resampling (`ess`), its time `t`, and `ess_over_n`. Every arm
