@@ -1306,6 +1306,13 @@ pub struct FitPredictArgs {
     #[arg(long, value_name = "N")]
     pub n_draws: Option<usize>,
 
+    /// Particles per posterior draw in the filters this command runs (the
+    /// one-step band's and the forecast's). Default: the fit's own filter's
+    /// count for a PMMH fit, else 500. Recorded in the manifest; a value other
+    /// than the default keys its own output directory.
+    #[arg(long, value_name = "N")]
+    pub particles: Option<usize>,
+
     /// RNG seed for the y_rep observation sampling (default 1).
     #[arg(long)]
     pub seed: Option<u64>,

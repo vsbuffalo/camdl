@@ -160,6 +160,8 @@ pub(crate) struct ForecastJob<'a> {
     pub scenarios: &'a [crate::sim_job::ScenarioRef],
     /// The `--sweep` grid, one entry per point; empty without `--sweep`.
     pub sweep_points: &'a [Vec<(String, f64)>],
+    /// The filters' particle count per draw and where it came from (D85).
+    pub particles: crate::fit::predict::PredictParticles,
 }
 
 /// Run the forecast and write its artifact. Returns the files written, the
@@ -316,7 +318,7 @@ pub(crate) fn run_forecast(
         dt: job.dt,
     })?;
     let config = DriverConfig {
-        n_particles: crate::fit::predict::PREDICT_N_PARTICLES,
+        n_particles: job.particles.n,
         dt: job.dt,
         base_seed: job.seed,
         record_expected: false,
@@ -652,6 +654,27 @@ fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) ->
             "draw": r.key.map(|k| k.1),
         })).collect::<Vec<_>>(),
         "n_particles": fc.n_particles,
+        // D85: where the particle count came from (`flag`: --particles;
+        // `fit_pmmh`: the PMMH fit's own filter's count; `default`: 500).
+        "particles": job.particles,
+        // D85: per draw, in the order of `draws`, the effective sample size
+        // of its filter's weights at its last assimilation before the origin,
+        // before resampling, with that time and ESS/N. Every arm shares it.
+        // It characterises the Monte Carlo reliability of the state the
+        // forecast starts from; it is not a count of distinct ancestors and
+        // says nothing of the forecast's accuracy.
+        "filter_diagnostics": {
+            "n_particles": fc.n_particles,
+            "last_assimilation": fc.last_assimilation.iter().zip(draw_refs).map(|(a, r)| serde_json::json!({
+                "cloud_row": r.cloud_row,
+                "t": a.map(|a| a.time),
+                "ess": a.map(|a| a.ess),
+                "ess_over_n": a.map(|a| a.ess / fc.n_particles as f64),
+            })).collect::<Vec<_>>(),
+            "distinct_parents_at_final_resampling": serde_json::Value::Null,
+            "distinct_parents_note": "not recorded: the bootstrap filter returns its resampling \
+                indices only when it records the full ancestry, which the forecast does not",
+        },
         "binomial": fc.binomial,
         // What `forecast-samples.tsv` holds, and what the bands are over.
         "samples": {
