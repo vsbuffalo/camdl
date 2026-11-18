@@ -16974,8 +16974,72 @@ let gh1201_tests = [
   "repeatable blocks still join", test_gh1201_repeatable_blocks_join;
 ]
 
+(* ── gh#1202: a model's `simulate { }` must set `to` ──────────────────────────
+
+   A `simulate { }` block without `to` ran to t = 100 in model time units (100
+   days, weeks or years, by `time_unit`), a horizon nobody wrote. It is now
+   E106, as a scenario's `simulate { }` without `to` already is. A model with
+   no `simulate` block at all keeps its documented (0, 100) window. *)
+
+let noto1202_src ~sim = Printf.sprintf {|
+time_unit = 'days
+compartments { S, I, R }
+parameters {
+  beta  : rate in [0.1, 2.0]
+  gamma : rate in [0.05, 0.5]
+}
+transitions {
+  infection : S --> I @ beta * S * I / (S + I + R)
+  recovery  : I --> R @ gamma * I
+}
+init { S = 990  I = 10 }
+%s
+|} sim
+
+let noto1202_hint =
+  "`to` is the end of the run; write it, e.g. `simulate { from = 0 'days  \
+   to = 100 'days }`, or `to = origin + 100 'days` under an origin"
+
+let expect_missing_to ~line src =
+  let ds = tp_diags src in
+  match List.filter (fun (d : Diagnostics.diagnostic) ->
+      d.code = "E106" && d.message = "a `simulate {}` block must set `to`, \
+                                      the end of the run") ds with
+  | [d] ->
+    Alcotest.(check (option string)) "hint" (Some noto1202_hint) d.hint;
+    Alcotest.(check int) "located at the block" line d.loc.line
+  | [] -> Alcotest.failf "expected E106 for a missing `to`; got:\n%s" (tp_show ds)
+  | _ -> Alcotest.failf "E106 emitted more than once:\n%s" (tp_show ds)
+
+let test_gh1202_from_without_to () =
+  expect_missing_to ~line:13 (noto1202_src ~sim:"simulate { from = 0 'days }")
+
+let test_gh1202_empty_block () =
+  expect_missing_to ~line:13 (noto1202_src ~sim:"simulate { }")
+
+let test_gh1202_dt_only () =
+  expect_missing_to ~line:13 (noto1202_src ~sim:"simulate {\n  dt = 0.5 'days\n}")
+
+let test_gh1202_to_given_compiles () =
+  let m = compile_expect_ok (noto1202_src ~sim:"simulate { to = 50 'days }") in
+  Alcotest.(check (float 1e-9)) "t_end" 50.0 m.Ir.simulation.Ir.t_end
+
+let test_gh1202_no_block_keeps_default () =
+  let m = compile_expect_ok (noto1202_src ~sim:"") in
+  Alcotest.(check (float 1e-9)) "t_end" 100.0 m.Ir.simulation.Ir.t_end
+
+let gh1202_tests = [
+  "simulate { from } without to is E106", test_gh1202_from_without_to;
+  "an empty simulate block is E106", test_gh1202_empty_block;
+  "simulate { dt } without to is E106", test_gh1202_dt_only;
+  "simulate { to } compiles", test_gh1202_to_given_compiles;
+  "no simulate block keeps (0, 100)", test_gh1202_no_block_keeps_default;
+]
+
 let () =
   Alcotest.run "compiler" [
+    "gh1202_simulate_requires_to",
+      List.map (fun (name, f) -> Alcotest.test_case name `Quick f) gh1202_tests;
     "gh1201_singleton_declarations",
       List.map (fun (name, f) -> Alcotest.test_case name `Quick f) gh1201_tests;
     "gh1200_constant_at_times",

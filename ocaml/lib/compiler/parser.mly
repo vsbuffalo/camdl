@@ -432,7 +432,19 @@ declaration:
   | OUTPUT LBRACE od = output_body RBRACE
       { DOutput { od with out_span = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   | SIMULATE LBRACE sd = simulate_body RBRACE
-      { DSimulate { sd with sim_span = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+      { (* gh#1202: `to` has no default inside a written block. The `100` the
+           body carries when it is absent is a recovery value only; without
+           this error it was a horizon of 100 model time units nobody wrote. A
+           model with no `simulate` block at all keeps the documented (0, 100)
+           window (spec §14.1). *)
+        if sd.sim_to_loc = None then
+          Parser_errors.push_error_hint ~sp:$startpos ~ep:$endpos
+            ~code:"E106"
+            ~msg:"a `simulate {}` block must set `to`, the end of the run"
+            ~hint:"`to` is the end of the run; write it, e.g. `simulate { from = \
+                   0 'days  to = 100 'days }`, or `to = origin + 100 'days` \
+                   under an origin";
+        DSimulate { sd with sim_span = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   | INIT LBRACE ies = init_list RBRACE
       { DInit ies }
   | TIMEPOINTS LBRACE tps = timepoint_list RBRACE

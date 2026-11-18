@@ -1254,8 +1254,8 @@ type simulate_decl = {
       (** [from]: the start, an instant; [0] when absent. *)
   sim_to: Time_pos.instant Time_pos.t;
       (** [to]: the end, an instant, which may be an observation anchor such
-          as [last_obs + 4 'weeks]; [100] when absent, without a
-          diagnostic. *)
+          as [last_obs + 4 'weeks]. Required: when it is absent the parser
+          reports E106 and leaves [100] here as a recovery value. *)
   sim_to_loc: loc option;
       (** The span of the whole [to = ...] entry; [None] when it is
           absent. *)
