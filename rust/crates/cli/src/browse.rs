@@ -2017,6 +2017,7 @@ fn show_fit_run(out: &crate::out::Out, leaf: &cas_read::Leaf, rel_path: &str, cr
     out.report_line(format_args!("{} {}  ({})", p("created"),
         rec.provenance.created_at.as_deref().unwrap_or("?"),
         fmt_relative_time(created, SystemTime::now())));
+    out.report_line(format_args!("{}  {}", p("engine"), engine_line(rec)));
     out.report_line(format_args!("{}", p("outputs")));
     let outputs = segment.as_deref().map(|s| run_view::outputs(leaf, s)).unwrap_or_else(|| {
         rec.artifacts.keys().map(|k| run_view::Output { path: k.clone(), role: "file".into() }).collect()
@@ -2076,7 +2077,19 @@ fn fit_show_json(leaf: &cas_read::Leaf, rel_path: &str) -> serde_json::Value {
         "status": run_view::status_word(leaf),
         "verdict": run_view::RunVerdict::of(leaf).to_json(),
         "path": rel_path,
+        "engine": engine_json(rec),
         "outputs": outputs,
+    })
+}
+
+/// The engine that computed a run, for JSON: its build fingerprint
+/// (`run.json`'s `engine_version`), the readable version that ran it and the
+/// engine switches its identity keyed (`[]` for none).
+fn engine_json(rec: &runid::RunRecord) -> serde_json::Value {
+    serde_json::json!({
+        "build": rec.engine_version,
+        "camdl_version": rec.provenance.camdl_version,
+        "switches": rec.engine_switches,
     })
 }
 

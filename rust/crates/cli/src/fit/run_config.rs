@@ -33,13 +33,27 @@
 //! leaves; `--emit-every` keys a synthetic fit through the data it generates;
 //! `--resume` through the method level's target length and its dep on the base.
 //!
-//! **The stored config is the resolved one.** The fit folder archives the
-//! config the fit ran under: the file, with every flag that set a field of the
-//! problem half written into it ([`ProblemFlags::fold_into`]), so a reader of
-//! the stored config (`fit predict`, `pfilter --fit`, …) sees the setting the
-//! fit's identity keyed (gh#1268). The `[method]` table of that archive is the
-//! file's: a fit folder holds every method run on its problem, so a method's
-//! own resolved settings are its leaf's (`run.json`'s `inputs`).
+//! **What the fit folder stores.** The file is read once, in [`resolve`]
+//! ([`ResolvedFitConfig::config_text`]); every fit folder the run writes
+//! archives that text as `fit.toml.original`, with any problem-half value the
+//! command line set written in ([`ProblemFlags::stored_text`], the one place
+//! the stored form is decided: whether a resolved config belongs in the
+//! archive or in a file of its own is an open maintainer decision). Its
+//! `fit_toml_hash` and config identity are taken from the same text, so an
+//! edit to the file while the fit runs reaches no folder.
+//!
+//! Who reads the archive today: a run-directory, label or run-id handle
+//! (`fit predict <leaf>`, `compare <leaf>`) recovers the problem from it, and
+//! so runs under the override a flag set (gh#1268). A `fit.toml` handle names
+//! only the run the file alone makes (gh#896), so it refuses a flag-made fit,
+//! naming its leaf. `pfilter`, `profile` and `survey` `--fit` read a fit file,
+//! not the archive, and still refuse a flag-made fit; they are converted in
+//! step 4's next part. Two limits: a sweep point's folder archives the file's
+//! `[fixed]`, not the point's values (those are in its `fit.meta.json`, which
+//! `fit predict` and `compare` read); and `fit_toml_hash` hashes the file as
+//! read, without a folded flag. The archive's `[method]` table is the file's:
+//! a fit folder holds every method run on its problem, so a method's own
+//! resolved settings are its leaf's (`run.json`'s `inputs`).
 //!
 //! **What is not here.** `--parallel` and `--force` are execution: how the
 //! leaves are computed, never what. `--label` is provenance, and the progress
@@ -51,6 +65,12 @@ use super::config_v2::{self, FitConfig};
 
 /// The resolved configuration of one `camdl fit run`.
 pub(crate) struct ResolvedFitConfig {
+    /// The fit file's text, read once: what `config` was parsed from, what the
+    /// fit folder stores ([`ProblemFlags::stored_text`]), and what its config
+    /// identity and `fit_toml_hash` are taken from. Nothing after resolution
+    /// reads the file again, so an edit to it while the fit runs reaches no
+    /// leaf.
+    pub config_text: String,
     /// The configuration the fit computes from, keys and stores: the file with
     /// every flag applied, the step resolved, `[fixed] from_scenario`
     /// expanded, the starts rule resolved and `problem.compiled_ir` the
@@ -75,6 +95,14 @@ pub(crate) struct ResolvedFitConfig {
     pub sweep: Vec<(String, Vec<f64>)>,
     /// `--emit-every`: the cadence the `[synthetic]` generator emits at.
     pub emit_every: Option<crate::emit_every::EmitEvery>,
+    /// `--resume`: the base a PGAS or PMMH chain continues, as named. Keyed
+    /// at the method level, through the target length and the dep on the
+    /// base it resolves to.
+    pub resume: Option<String>,
+    /// The NUTS tuning flags given on the command line (`--max-tree-depth`,
+    /// `--diagonal-mass`), by spelling, for the note a PGAS fit gives when the
+    /// model cannot run NUTS. Their values are in `config`'s method.
+    pub nuts_tuning_flags: Vec<&'static str>,
     /// What the command line set in the problem half of `config`, for the
     /// stored config.
     pub problem_flags: ProblemFlags,
@@ -98,6 +126,9 @@ pub(crate) struct StartsPlan {
     /// converged is used rather than refused. It decides whether the run
     /// starts, never what it computes once started.
     pub allow_nonconverged_source: bool,
+    /// Where the rule came from, for the prefix of an error about it:
+    /// `--starts <spec>` or the fit file.
+    pub origin: String,
 }
 
 /// The method and seeds the file alone resolves to, so the run `fit run
@@ -118,13 +149,35 @@ pub(crate) struct ProblemFlags {
 }
 
 impl ProblemFlags {
-    /// The config text a fit folder stores: `text` (the file) with every value
+    /// The config text a fit folder stores for a fit read from `text`: `text`
+    /// itself, or, when the command line set a value of the problem half,
+    /// `text` with that value written in ([`Self::fold_into`]). The one place
+    /// the stored form is decided, so that a separate resolved-config file can
+    /// replace the fold (an open maintainer decision) by changing this alone.
+    pub fn stored_text(&self, text: &str) -> Result<String, String> {
+        Ok(self.fold_into(text)?.unwrap_or_else(|| text.to_string()))
+    }
+
+    /// `problem` without what the command line set in it: the problem the fit
+    /// file alone resolves to, for the run `fit run <file>` with no option
+    /// would make (gh#896). Each field is the inverse of the fold in
+    /// [`resolve`].
+    pub fn unfold(&self, problem: &config_v2::Problem) -> config_v2::Problem {
+        let ProblemFlags { allow_forcing_extrapolation } = *self;
+        let mut file = problem.clone();
+        if allow_forcing_extrapolation {
+            file.config.allow_forcing_extrapolation = false;
+        }
+        file
+    }
+
+    /// The config text a fit folder stores, when it differs from the file: `text` (the file) with every value
     /// the command line set in the problem half written into it, or `None`
     /// when the command line set none, and the file is stored as it is,
     /// comments included. A folded file is re-written from its parsed tables,
     /// so its comments and layout are not kept; what it says is the file's,
     /// with the flags' values.
-    pub fn fold_into(&self, text: &str) -> Result<Option<String>, String> {
+    fn fold_into(&self, text: &str) -> Result<Option<String>, String> {
         let ProblemFlags { allow_forcing_extrapolation } = *self;
         if !allow_forcing_extrapolation {
             return Ok(None);
@@ -180,6 +233,11 @@ pub(crate) fn resolve(
     }
     let fit_path              = a.config.to_string_lossy().into_owned();
     let base_seed             = a.seed.unwrap_or(1);
+    // The file is read here, once; everything below parses, checks and stores
+    // this text.
+    let config_text = std::fs::read_to_string(&fit_path).unwrap_or_else(|e| {
+        out.fail(format!("error: cannot read {fit_path}: {e}"));
+    });
 
     // gh#540: every CLI flag that changes what the method computes or stores,
     // collected once so the method identity can see all of them. Applied to
@@ -209,7 +267,8 @@ pub(crate) fn resolve(
         .collect();
 
     // Load the file: the problem half and the one `[method]`.
-    let mut config = FitConfig::load(&fit_path).unwrap_or_else(|e| {
+    let path = std::path::Path::new(&fit_path);
+    let mut config = FitConfig::parse_anchored_at(&config_text, path, path).unwrap_or_else(|e| {
         out.fail(format!("error: {}", e));
     });
     // `fit run` runs the file's one method and refuses a file that has none,
@@ -220,11 +279,8 @@ pub(crate) fn resolve(
     // `[method]` keys the method's own settings leave inert. Here and not in
     // the shared parser, which also reads stored fits' archived configs.
     {
-        let contents = std::fs::read_to_string(&fit_path).unwrap_or_else(|e| {
-            out.fail(format!("error: cannot read {fit_path}: {e}"));
-        });
         let method = config.inference.method.as_ref().expect("checked above");
-        if let Err(e) = config_v2::refuse_inert_method_keys_in(&contents, method) {
+        if let Err(e) = config_v2::refuse_inert_method_keys_in(&config_text, method) {
             out.fail(format!("error: {fit_path}: {e}"));
         }
     }
@@ -387,10 +443,7 @@ pub(crate) fn resolve(
     // anything reads it — the observation grid, the synthetic generator, every
     // runner, and the fit identity, which so keys on the step the fit ran at.
     {
-        let contents = std::fs::read_to_string(&fit_path).unwrap_or_else(|e| {
-            out.fail(format!("error: cannot read {fit_path}: {e}"));
-        });
-        let written = config_v2::table_declares_key(&contents, "config", "dt")
+        let written = config_v2::table_declares_key(&config_text, "config", "dt")
             .then_some(config.problem.config.dt);
         match crate::dt_rule::effective_dt(model.simulation.dt, written) {
             Ok(dt) => config.problem.config.dt = dt,
@@ -475,6 +528,7 @@ pub(crate) fn resolve(
             out.fail(format!("error: {}: {e}", super::starts_origin(a, &fit_path)));
         })
     };
+    let starts_origin = super::starts_origin(a, &fit_path);
     // From here the method is read-only: the identity below sees exactly what
     // the runners consume.
     let method: &config_v2::Method = config.inference.method.as_ref().expect("checked above");
@@ -497,6 +551,16 @@ pub(crate) fn resolve(
         // the sample is still valid.
         out.say(format_args!("{} {}", crate::out::paint::note_tag(), msg));
     }
+    // `--resume` continues a PGAS or PMMH chain. Other methods have no
+    // extension dimension (IF2's cooling depends on total iterations, the
+    // particle filter is one pass), so resuming would be statistically
+    // incoherent.
+    if a.resume.is_some()
+        && !matches!(method.algorithm, config_v2::Algorithm::PGAS { .. } | config_v2::Algorithm::PMMH { .. })
+    {
+        out.fail(format!("error: --resume is only supported for PGAS and PMMH methods; \
+                   this fit's method is '{}'.", method.algorithm.method_name()));
+    }
     if a.seed.is_some() && config.inference.fit_seeds.is_some() {
         out.fail(format!("error: --seed sets the single seed of a fit, and {fit_path} declares \
                    `fit_seeds`, which replaces it, so the flag would change nothing. Drop \
@@ -507,7 +571,13 @@ pub(crate) fn resolve(
         None       => vec![base_seed],
     };
 
+    let nuts_tuning_flags: Vec<&'static str> =
+        [(a.max_tree_depth.is_some(), "--max-tree-depth"), (a.diagonal_mass, "--diagonal-mass")]
+            .into_iter()
+            .filter_map(|(on, name)| on.then_some(name))
+            .collect();
     let resolved = ResolvedFitConfig {
+        config_text,
         config,
         model,
         engine: super::fit_engine(),
@@ -515,9 +585,16 @@ pub(crate) fn resolve(
         seeds: fit_seeds,
         sweep: sweep_specs,
         emit_every,
+        resume: a.resume.clone(),
+        nuts_tuning_flags,
         problem_flags,
         fixed_via,
-        starts: StartsPlan { early: early_resolved_starts, resolution: starts_resolution, allow_nonconverged_source },
+        starts: StartsPlan {
+            early: early_resolved_starts,
+            resolution: starts_resolution,
+            allow_nonconverged_source,
+            origin: starts_origin,
+        },
         file_only: FileOnly { method: file_method, seeds: file_seeds },
     };
     (resolved, _forcing_route)
@@ -530,7 +607,8 @@ mod tests {
     #[test]
     fn no_flag_stores_the_file_as_it_is() {
         let flags = ProblemFlags { allow_forcing_extrapolation: false };
-        assert_eq!(flags.fold_into("# a comment\n[config]\ndt = 1.0\n").unwrap(), None);
+        let text = "# a comment\n[config]\ndt = 1.0\n";
+        assert_eq!(flags.stored_text(text).unwrap(), text);
     }
 
     #[test]

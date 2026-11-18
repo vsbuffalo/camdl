@@ -843,6 +843,19 @@ fn resolve_config(path: &Path) -> Result<(LeafRef, FitConfig), ResolveError> {
         })
     };
     let unrecorded = completed.iter().filter(|l| recorded(l).is_none()).count();
+    // Runs read from this file whose command-line options changed what they
+    // computed (`--allow-forcing-extrapolation`, `--starts`, a sampler flag,
+    // `--sweep`, another seed): none is the file's run, so none answers for
+    // it, but the refusal names them.
+    let mut with_options: Vec<std::path::PathBuf> = completed
+        .iter()
+        .filter(|l| {
+            l.record.inputs.get("config_identities_with_options").and_then(|v| v.as_array())
+                .is_some_and(|a| a.iter().any(|x| x.as_str() == Some(wanted.as_str())))
+        })
+        .map(|l| l.dir.clone())
+        .collect();
+    with_options.sort();
     let mut matches: Vec<crate::cas_read::Leaf> = completed
         .into_iter()
         .filter(|l| recorded(l).is_some_and(|ids| ids.contains(&wanted)))
@@ -859,6 +872,18 @@ fn resolve_config(path: &Path) -> Result<(LeafRef, FitConfig), ResolveError> {
                 fits_dir.display(),
                 path.display()
             );
+            if !with_options.is_empty() {
+                msg.push_str(&format!(
+                    "\n  {} run(s) were made from this file with command-line options that \
+                     change what a fit computes (such as --allow-forcing-extrapolation, \
+                     --starts or a sampler flag), so none is the run the file alone makes. \
+                     Name one by its leaf directory:",
+                    with_options.len()
+                ));
+                for d in &with_options {
+                    msg.push_str(&format!("\n    {}", d.display()));
+                }
+            }
             if unrecorded > 0 {
                 msg.push_str(&format!(
                     "\n  {unrecorded} stored run(s) record no config identity (written before \

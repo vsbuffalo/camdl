@@ -2810,7 +2810,19 @@ impl FitConfig {
         let path = read_path.to_string_lossy();
         let contents = std::fs::read_to_string(read_path)
             .map_err(|e| format!("cannot read {}: {}", path, e))?;
-        let mut config = FitConfig::from_toml_str_named(&contents, &path)
+        Self::parse_anchored_at(&contents, read_path, anchor_toml)
+    }
+
+    /// [`load_anchored_at`](Self::load_anchored_at) over `contents`, the text
+    /// already read from `read_path`: for a reader that must parse exactly the
+    /// text it read once (`fit run`, which stores that text too).
+    pub fn parse_anchored_at(
+        contents: &str,
+        read_path: &std::path::Path,
+        anchor_toml: &std::path::Path,
+    ) -> Result<Self, String> {
+        let path = read_path.to_string_lossy();
+        let mut config = FitConfig::from_toml_str_named(contents, &path)
             .map_err(|e| format!("error in {}:\n{}", path, e))?;
 
         // gh#307: warn (do not error) on absolute file references — checked on

@@ -355,38 +355,72 @@ pub(crate) fn fit_engine() -> runid::inputs::EngineIdentity {
     crate::env::get().engine_identity(crate::version::ENGINE_ID)
 }
 
+/// How `fit run` computes its leaves, never what: the thread budget and
+/// whether a stored leaf is recomputed.
+pub(crate) struct FitExecution {
+    /// `--parallel` / CAMDL_PARALLEL: the global Rayon pool's size (0 = every
+    /// core).
+    pub parallel: usize,
+    /// `--force`: recompute a leaf the store holds, quarantining it.
+    pub force: bool,
+}
+
 /// `camdl fit run`, under the compile settings `compile` (`--no-licm`), which
-/// every compile the fit makes is given.
+/// every compile the fit makes is given. The arguments are read here and in
+/// [`run_config::resolve`] only: the run itself takes the resolved
+/// configuration, the execution settings and the label.
 pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs, compile: crate::util::CompileSettings) {
-    use config_v2::Algorithm;
     // `fit run` has no `--no-color`: its painters follow the environment and
     // whether each stream is a terminal.
-    let mut out = crate::out::Out::new(false);
+    let out = crate::out::Out::new(false);
 
     let _eval_stats_guard = crate::util::EvalStatsReportGuard::start();  // gh#audit-H5
-    // allow_degenerate_rates is set from the loaded `[config]` below (it's a
-    // keyed config field, not a CLI flag — gh#189: a CLI override would bypass
-    // the fit-identity hash).
+    let execution = FitExecution { parallel: a.parallel, force: a.force };
     // gh#162: a fit nests Rayon parallelism (chains × particle filter) on the
     // global pool, which otherwise defaults to ALL logical cores regardless of
     // `chains`. Cap it from `--parallel` / CAMDL_PARALLEL (0 = all cores) so the
     // thread budget is explicit and matches pfilter/profile/survey.
     // `build_global` is one-shot per process; ignore the already-initialised
     // Err so re-entry (tests) stays safe. Mirrors pfilter.rs.
-    if a.parallel > 0 {
+    if execution.parallel > 0 {
         let _ = rayon::ThreadPoolBuilder::new()
-            .num_threads(a.parallel)
+            .num_threads(execution.parallel)
             .build_global();
     }
+    // Validate --label early so we fail before any I/O. The same
+    // validator is reused by `cmd_label` (post-hoc relabel). Provenance: it
+    // names the run, never changes it.
+    let label = match a.label.as_deref() {
+        Some(raw) => match validate_label(raw) {
+            Ok(l) => Some(l),
+            Err(e) => {
+                out.fail(format!("error: invalid --label: {}", e));
+            }
+        },
+        None => None,
+    };
     let fit_path = a.config.to_string_lossy().into_owned();
-    let force = a.force;
     // The one resolved configuration: every flag, the file and every default
-    // resolved once, before anything runs. The identity below and every
-    // method's run are built from it, and the fit folder stores its config.
-    // Its destructure names every field, so a field added to it does not
-    // compile here until it is used.
+    // resolved once, before anything runs. The identity and every method's
+    // run are built from it, and the fit folder stores its config.
     let (resolved, _forcing_route) = run_config::resolve(a, compile, &out);
+    run_fit(out, fit_path, resolved, execution, label);
+}
+
+/// Run the fit `resolved` describes: compute or reuse each leaf. Its
+/// destructure names every field of the resolved value, so a field added to
+/// it does not compile here until it is used.
+fn run_fit(
+    mut out: crate::out::Out,
+    fit_path: String,
+    resolved: run_config::ResolvedFitConfig,
+    execution: FitExecution,
+    validated_label: Option<String>,
+) {
+    use config_v2::Algorithm;
+    let FitExecution { parallel: _, force } = execution;
     let run_config::ResolvedFitConfig {
+        config_text,
         config,
         model,
         engine,
@@ -394,18 +428,23 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs, compile: crate::util::Compile
         seeds: fit_seeds,
         sweep: sweep_specs,
         emit_every,
+        resume,
+        nuts_tuning_flags,
         problem_flags,
         fixed_via,
-        starts: run_config::StartsPlan { early: early_resolved_starts, resolution: starts_resolution, allow_nonconverged_source },
+        starts: run_config::StartsPlan {
+            early: early_resolved_starts,
+            resolution: starts_resolution,
+            allow_nonconverged_source,
+            origin: starts_origin,
+        },
         file_only: run_config::FileOnly { method: file_method, seeds: file_seeds },
     } = resolved;
     let method: config_v2::Method = config.inference.method.clone().expect("resolved with a method");
-    // The config the fit folder stores: the file, with what the command line
-    // set in the problem half written into it (gh#1268); `None` stores the
-    // file as it is.
-    let stored_config: Option<String> = std::fs::read_to_string(&fit_path)
-        .map_err(|e| format!("cannot read {fit_path}: {e}"))
-        .and_then(|text| problem_flags.fold_into(&text))
+    // The config every fit folder this run writes stores: the text resolved,
+    // with what the command line set in the problem half (gh#1268); never the
+    // file read again.
+    let stored_config: String = problem_flags.stored_text(&config_text)
         .unwrap_or_else(|e| out.fail(format!("error: {e}")));
 
     // ── Validate sweeps ───────────────────────────────────────────────────
@@ -500,17 +539,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs, compile: crate::util::Compile
         out.say(format_args!("sweep: {} points", sweep_points.len()));
     }
 
-    // Validate --resume requires a PGAS or PMMH method. Other methods
-    // have no extension dimension (IF2's cooling depends on total
-    // iterations, PFilter is single-pass), so resuming would be
-    // statistically incoherent.
-    if a.resume.is_some()
-        && !matches!(method.algorithm, Algorithm::PGAS { .. } | Algorithm::PMMH { .. })
-    {
-        out.fail(format!("error: --resume is only supported for PGAS and PMMH methods; \
-                   this fit's method is '{}'.", method.algorithm.method_name()));
-    }
-
     // gh#191: gate the model's required capabilities against the method's
     // declared backend, before any fitting work. `profile` already runs this
     // check, but `fit run` never did — so a real-compartment (ODE-coupled)
@@ -554,16 +582,16 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs, compile: crate::util::Compile
         // explicit `use_nuts = true` the model cannot honour.
         if let Algorithm::PGAS { use_nuts: true, .. } = &method.algorithm {
             if !sim::inference::pgas::nuts_active(true, &compiled) {
-                let contents = std::fs::read_to_string(&fit_path).unwrap_or_default();
-                let declared = config_v2::method_declares_key(&contents, "use_nuts");
+                let contents = &config_text;
+                let declared = config_v2::method_declares_key(contents, "use_nuts");
                 // The NUTS tuning settings, inert on the fallback as they are
                 // under `use_nuts = false`.
                 let tuning: Vec<&str> = [
-                    (config_v2::method_declares_key(&contents, "max_tree_depth"), "max_tree_depth"),
-                    (config_v2::method_declares_key(&contents, "dense_mass"), "dense_mass"),
-                    (a.max_tree_depth.is_some(), "--max-tree-depth"),
-                    (a.diagonal_mass, "--diagonal-mass"),
-                ].into_iter().filter_map(|(on, name)| on.then_some(name)).collect();
+                    (config_v2::method_declares_key(contents, "max_tree_depth"), "max_tree_depth"),
+                    (config_v2::method_declares_key(contents, "dense_mass"), "dense_mass"),
+                ].into_iter().filter_map(|(on, name)| on.then_some(name))
+                    .chain(nuts_tuning_flags.iter().copied())
+                    .collect();
                 match config_v2::nuts_unavailable(declared, &tuning) {
                     Ok(note) => out.say(format_args!("{} {note}", crate::out::paint::note_tag())),
                     Err(e) => {
@@ -596,17 +624,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs, compile: crate::util::Compile
     // as its `fit`-level hash — computing it once avoids the O(cells × full-I/O
     // rehash) pattern.
     let fit_start = std::time::Instant::now();
-    // Validate --label early so we fail before any I/O. The same
-    // validator is reused by `cmd_label` (post-hoc relabel).
-    let validated_label = match a.label.as_deref() {
-        Some(raw) => match validate_label(raw) {
-            Ok(l) => Some(l),
-            Err(e) => {
-                out.fail(format!("error: invalid --label: {}", e));
-            }
-        },
-        None => None,
-    };
     // gh#147 (M3.2): the fit identity is a CAS *path segment*
     // (`fits/{fit}-{h8}/`), not a separate fit-wide `run.json` — so there is no
     // fit-wide record; the segment is the fit-level home. Fit-level outputs
@@ -656,16 +673,14 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs, compile: crate::util::Compile
     // segment.
     let fit_dir = announced_fit_dir.clone();
 
-    let fit_sidecar = build_fit_sidecar(&config, &fit_path, &model, &fit_data_digests)
+    let fit_sidecar = build_fit_sidecar(&config, config_text.as_bytes(), &model, &fit_data_digests)
         .unwrap_or_else(|e| out.fail(format!("error: {e}")));
     // gh#896: the identity of the config this run was read from, recorded on
     // every leaf it writes or reuses (`inputs.config_identities`), so a
     // `fit.toml` handle names the runs made from the file as it now reads, not
-    // the problem folder's latest archive. Read from the file's text exactly
-    // as `handle::resolve_config` reads it.
-    let run_config_identity: Option<String> = std::fs::read_to_string(&fit_path)
-        .ok()
-        .and_then(|t| crate::fit::handle::config_identity(&t).ok());
+    // the problem folder's latest archive. Taken from the text resolved, as
+    // `handle::resolve_config` takes it from the file's.
+    let run_config_identity: Option<String> = crate::fit::handle::config_identity(&config_text).ok();
 
     // The opening block, as a record first: `run.json` keeps it
     // (`inputs.header`) so `fit summary` can show what this run showed.
@@ -910,7 +925,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs, compile: crate::util::Compile
         if let Some(src) = &resolved_starts.source {
             let estimated: Vec<&str> = config.problem.estimate.keys().map(|k| k.as_str()).collect();
             if let Err(e) = refuse_pfilter_point_source_missing(&resolved_starts.rule, &src.file, &estimated) {
-                out.fail(format!("error: {}: {e}", starts_origin(a, &fit_path)));
+                out.fail(format!("error: {}: {e}", starts_origin));
             }
         }
     }
@@ -994,7 +1009,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs, compile: crate::util::Compile
         // resumed run writes a distinct leaf keyed on the new target_length
         // plus a dep on the base. Resolve the ref and fold the dep here; the
         // chain state is copied into the new leaf after the claim below.
-        let resume_base: Option<std::path::PathBuf> = a.resume.as_deref().map(|r| {
+        let resume_base: Option<std::path::PathBuf> = resume.as_deref().map(|r| {
             let base = resolve_base_ref(r, &cas_root).unwrap_or_else(|| {
                 out.fail(format!("error: --resume base '{}' not found (run_id prefix or leaf path)", r));
             });
@@ -1068,6 +1083,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs, compile: crate::util::Compile
         // recomputed here: a seed the file does not run has no file cell, and
         // `--emit-every` changes the [synthetic] data generated before this
         // point, which the file alone would generate without it.
+        // The problem the file alone resolves to: this cell's, without what
+        // the command line set in it (`--allow-forcing-extrapolation`).
+        let file_problem = problem_flags.unfold(&cell_problem);
         let file_run_id: Option<runid::ContentHash> =
             if emit_every.is_some() || !file_seeds.contains(&seed) {
                 None
@@ -1078,7 +1096,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs, compile: crate::util::Compile
                         fit_stem: &fit_stem,
                         ir_version: &ir_version_str,
                         engine: &engine,
-                        problem: &cell_problem,
+                        problem: &file_problem,
                         data: &data_digests,
                         method: &file_method,
                         seed,
@@ -1091,6 +1109,12 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs, compile: crate::util::Compile
         let cell_config_identity: Option<&String> = run_config_identity
             .as_ref()
             .filter(|_| file_run_id == Some(resolved.run_id));
+        // A run read from the file but changed by a command-line option is not
+        // the file's run; it records the file's identity apart, so a `fit.toml`
+        // handle can name it when it refuses to stand in for the file's run.
+        let options_config_identity: Option<&String> = run_config_identity
+            .as_ref()
+            .filter(|_| file_run_id != Some(resolved.run_id));
         // gh#583 item G: the `--resume` key is this identity less its
         // extension dimension — the same levels, not a second hand-listed hash.
         let resume_guard = cas::resume_guard(&cas::FitMethodCtx { deps: starts_deps, ..ctx })
@@ -1144,18 +1168,14 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs, compile: crate::util::Compile
                 seg_sidecar.estimated = roles.estimated;
                 seg_sidecar.fixed = roles.fixed;
                 seg_sidecar.partition = Some(roles.partition);
-                if let Err(e) = crate::run_meta::write_fit_sidecar(
+                if let Err(e) = crate::run_meta::write_fit_sidecar_with_config(
                     seg,
                     std::path::Path::new(&fit_path),
+                    &stored_config,
                     std::path::Path::new(&sweep_config.model.camdl),
                     &seg_sidecar,
                 ) {
                     out.say(format_args!("warning: cannot write fit-level sidecar {}: {}", seg.display(), e));
-                }
-                if let Some(text) = &stored_config {
-                    crate::run_meta::store_archived_config(seg, text).unwrap_or_else(|e| {
-                        out.fail(format!("error: cannot store the fit's config in {}: {e}", seg.display()))
-                    });
                 }
                 // gh#322: archive the compiled base-model IR in the fit segment so
                 // downstream verbs (`fit predict`) are self-contained and the run
@@ -1278,6 +1298,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs, compile: crate::util::Compile
             "chain_starts_kind": starts_rule.kind().as_str(),
             "fit_hash": resolved.levels.first().map(|l| l.hash.to_hex()),
             "config_identities": cell_config_identity.into_iter().collect::<Vec<_>>(),
+            "config_identities_with_options": options_config_identity.into_iter().collect::<Vec<_>>(),
             "starts_source": starts_source_record,
             "header": run_header,
             "unused_starts": { "rule": starts_rule.tag(), "params": unused_starts },
@@ -1364,10 +1385,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs, compile: crate::util::Compile
                 crate::resolve::note_leaf_from_another_model_file(
                     &dir, &sweep_config.model.camdl);
                 // This config now names the stored run too.
-                if let Some(id) = cell_config_identity {
-                    if let Err(e) =
-                        crate::cas_sink::ensure_input_listed(&dir, "config_identities", id)
-                    {
+                let listed = cell_config_identity.map(|id| ("config_identities", id))
+                    .or(options_config_identity.map(|id| ("config_identities_with_options", id)));
+                if let Some((key, id)) = listed {
+                    if let Err(e) = crate::cas_sink::ensure_input_listed(&dir, key, id) {
                         out.say(format_args!("warning: record this config on {}: {e}", dir.display()));
                     }
                 }
@@ -2553,7 +2574,7 @@ fn unpartitioned_role_fields(
 /// carries.
 fn build_fit_sidecar(
     config: &config_v2::FitConfig,
-    fit_path: &str,
+    fit_toml: &[u8],
     model: &ir::Model,
     data: &stream_bindings::BoundDataDigests,
 ) -> Result<crate::run_meta::FitSidecar, String> {
@@ -2566,8 +2587,7 @@ fn build_fit_sidecar(
         .ok()
         .map(|(_, ir_json)| crate::resolve::model_identity_from_ir(&ir_json))
         .unwrap_or_default();
-    let fit_toml_bytes = std::fs::read(fit_path).unwrap_or_default();
-    let fit_toml_hash = crate::hashing::sha256_hex(&fit_toml_bytes);
+    let fit_toml_hash = crate::hashing::sha256_hex(fit_toml);
     // gh#771: the digests of the files the RESOLVED bindings name, by source
     // (`StreamBindings`), the same ones the run identity folds. The one-file
     // `[data] file = "..."` shorthand leaves `[data.observations]` empty and
@@ -3590,7 +3610,7 @@ mod tests {
         let config = config_v2::FitConfig::from_toml_str(&toml_src).unwrap();
         let model = golden_model("ocaml/golden/sir_two_patch_long_obs.ir.json");
         let data = read_data_digests(config.problem.data_spec().unwrap(), &model).unwrap();
-        let sidecar = build_fit_sidecar(&config, fit_path.to_str().unwrap(), &model, &data).unwrap();
+        let sidecar = build_fit_sidecar(&config, &std::fs::read(&fit_path).unwrap(), &model, &data).unwrap();
         assert_eq!(sidecar.data_hashes.keys().collect::<Vec<_>>(), vec!["cases"],
             "one entry, keyed by the source both leaves read: {:?}", sidecar.data_hashes);
     }
@@ -3616,7 +3636,7 @@ mod tests {
         let mut model = golden_model("ocaml/golden/sir_two_patch_long_obs.ir.json");
         model.origin = Some("2020-03-01".into());
         let data = read_data_digests(config.problem.data_spec().unwrap(), &model).unwrap();
-        let sidecar = build_fit_sidecar(&config, fit_path.to_str().unwrap(), &model, &data).unwrap();
+        let sidecar = build_fit_sidecar(&config, &std::fs::read(&fit_path).unwrap(), &model, &data).unwrap();
         let seg = tmp.path().join("seg");
         std::fs::create_dir_all(&seg).unwrap();
         crate::run_meta::store_fit_sidecar(&seg, &sidecar).unwrap();
@@ -3650,7 +3670,7 @@ mod tests {
         let config = config_v2::FitConfig::from_toml_str(&toml_src).unwrap();
         let model = golden_model("ocaml/golden/sir_two_patch_long_obs.ir.json");
         let data = read_data_digests(config.problem.data_spec().unwrap(), &model).unwrap();
-        let sidecar = build_fit_sidecar(&config, fit_path.to_str().unwrap(), &model, &data).unwrap();
+        let sidecar = build_fit_sidecar(&config, &std::fs::read(&fit_path).unwrap(), &model, &data).unwrap();
         let sha = |p: &std::path::Path| crate::hashing::sha256_hex(&std::fs::read(p).unwrap());
         assert_eq!(sidecar.data_hashes, std::collections::BTreeMap::from([("cases".into(), sha(&train))]));
         assert_eq!(sidecar.holdout_hashes, std::collections::BTreeMap::from([("cases".into(), sha(&holdout))]));
@@ -3707,7 +3727,7 @@ cooling = 0.7
 
         let data = read_data_digests(config.problem.data_spec().unwrap(), &model).unwrap();
         let sidecar = build_fit_sidecar(
-            &config, fit_path.to_str().unwrap(), &model, &data).unwrap();
+            &config, &std::fs::read(&fit_path).unwrap(), &model, &data).unwrap();
 
         let expected = crate::hashing::sha256_hex(&std::fs::read(&data_path).unwrap());
         assert_eq!(
@@ -3755,7 +3775,7 @@ N0 = 1000
             let config = config_v2::FitConfig::from_toml_str(&toml_src)
                 .expect("fixture fit.toml should parse");
             // The data digests are not under test here.
-            build_fit_sidecar(&config, fit_path.to_str().unwrap(), &model,
+            build_fit_sidecar(&config, &std::fs::read(&fit_path).unwrap(), &model,
                 &Default::default()).unwrap()
         };
         let pmmh = sidecar_for(

@@ -188,6 +188,16 @@ impl Fixture {
         let reactive = manifest.join("../../../tests/fixtures/reactive/ir/reactive_sir_observed_threshold.ir.json");
         assert!(camdl.exists(), "release camdl missing: {} — run `make build`", camdl.display());
         assert!(camdlc.exists(), "camdlc missing: {} — run `make build`", camdlc.display());
+        // The binary under test is built from the source this test was built
+        // from: `--version` names the source fingerprint both builds embed.
+        let version = Command::new(&camdl).arg("--version").output().unwrap();
+        let version = String::from_utf8_lossy(&version.stdout);
+        assert!(
+            version.contains(&format!("+{} ", env!("CAMDL_SOURCE_LABEL"))),
+            "{} is not built from this source ({}): {version} — run `make build`",
+            camdl.display(),
+            env!("CAMDL_SOURCE_LABEL")
+        );
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
             "simulate_input_classes-{}-{}",
             std::process::id(),

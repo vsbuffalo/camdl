@@ -171,6 +171,16 @@ impl Fixture {
         let camdlc = manifest.join("../../../ocaml/_build/default/bin/camdlc.exe");
         assert!(camdl.exists(), "release camdl missing: {} — run `make build`", camdl.display());
         assert!(camdlc.exists(), "camdlc missing: {} — run `make build`", camdlc.display());
+        // The binary under test is built from the source this test was built
+        // from: `--version` names the source fingerprint both builds embed.
+        let version = Command::new(&camdl).arg("--version").output().unwrap();
+        let version = String::from_utf8_lossy(&version.stdout);
+        assert!(
+            version.contains(&format!("+{} ", env!("CAMDL_SOURCE_LABEL"))),
+            "{} is not built from this source ({}): {version} — run `make build`",
+            camdl.display(),
+            env!("CAMDL_SOURCE_LABEL")
+        );
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
             "fit_run_input_classes-{}-{}",
             std::process::id(),
@@ -778,8 +788,12 @@ fn keyed_env_experimental() {
 
 #[test]
 fn execution_parallel() {
+    // On each method that runs chains or particles in parallel: IF2, PGAS
+    // and PMMH.
     let fx = fx();
-    assert_same(&fit(&fx, "if2.toml", &["--parallel", "1"]), &fit(&fx, "if2.toml", &["--parallel", "4"]));
+    for config in ["if2.toml", "pgas.toml", "pmmh.toml"] {
+        assert_same(&fit(&fx, config, &["--parallel", "1"]), &fit(&fx, config, &["--parallel", "4"]));
+    }
 }
 
 #[test]
@@ -930,6 +944,84 @@ fn presentation_env_no_color() {
 fn presentation_env_clicolor_force() {
     let fx = fx();
     assert_leaf_unaffected("CLICOLOR_FORCE", &fit(&fx, "if2.toml", &[]), &fit(&fx, "if2.toml", &[]).env("CLICOLOR_FORCE", "1"));
+}
+
+// ─── the fit file is read once ──────────────────────────────────────────────
+
+/// `fit run` reads its fit file once and stores that text in every fit folder
+/// it writes, whatever the file says later. The file here is a named pipe that
+/// serves the config on its first read and an edited config on every later
+/// one, under a two-point sweep (two fit folders): every archive is the first
+/// text, and every folder's `fit_toml_hash` is that text's.
+#[test]
+fn the_fit_file_is_read_once() {
+    use std::io::Write;
+    let fx = fx();
+    let dir = tempfile::tempdir().unwrap();
+    let fifo = dir.path().join("fit.toml");
+    let made = Command::new("mkfifo").arg(&fifo).status().expect("mkfifo");
+    assert!(made.success(), "mkfifo {}", fifo.display());
+    let first = std::fs::read_to_string(fx.dir.join("if2.toml")).unwrap();
+    let edited = format!("{first}\n# edited while the fit ran\n");
+    {
+        let (fifo, first, edited) = (fifo.clone(), first.clone(), edited.clone());
+        // Each open of the pipe for writing waits for a reader; the first
+        // reader gets the config, every later one the edit. The thread is left
+        // waiting on an open no reader makes.
+        std::thread::spawn(move || {
+            let mut text = &first;
+            while let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(&fifo) {
+                let _ = f.write_all(text.as_bytes());
+                text = &edited;
+            }
+        });
+    }
+    let inv = Invocation {
+        fx: fx.clone(),
+        args: vec![fifo.to_string_lossy().into_owned(), "--sweep".into(), "k=0.3,0.4".into()],
+        set: Vec::new(),
+        drop: Vec::new(),
+    };
+    let store = tempfile::tempdir().unwrap();
+    let stored = fit_into(store.path(), &inv);
+    let segments: BTreeSet<PathBuf> =
+        stored.fits().values().map(|l| l.dir.parent().unwrap().parent().unwrap().to_path_buf()).collect();
+    assert_eq!(segments.len(), 2, "one fit folder per sweep point");
+    let hash = hex(&Sha256::digest(first.as_bytes()));
+    for seg in segments {
+        let archived = std::fs::read_to_string(seg.join("fit.toml.original")).unwrap();
+        assert_eq!(archived, first, "{}: the archive is the text resolved", seg.display());
+        let meta: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(seg.join("fit.meta.json")).unwrap()).unwrap();
+        assert_eq!(meta["fit_toml_hash"], serde_json::json!(hash), "{}: the hash is the text resolved's", seg.display());
+    }
+}
+
+/// `camdl show` on a fit run names the engine that computed it: the build,
+/// and the engine switches its identity keyed, in the text and the JSON.
+#[test]
+fn show_names_a_fit_runs_engine_and_its_switches() {
+    let fx = fx();
+    let store = tempfile::tempdir().unwrap();
+    let stored = fit_into(store.path(), &fit(&fx, "if2.toml", &[]).env("CAMDL_EVAL_UNRESOLVED", "1"));
+    let leaf = stored.fits().into_values().next().unwrap().clone();
+    let show = |extra: &[&str]| -> String {
+        let out = fx_command(&fx.camdl, &fx.camdlc, &fx.dir, store.path(), &[], &[])
+            .arg("show")
+            .arg(&leaf.dir)
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "camdl show: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let build = leaf.record["engine_version"].as_str().unwrap().to_string();
+    let text = show(&[]);
+    let line = text.lines().find(|l| l.trim_start().starts_with("engine")).unwrap_or_else(|| panic!("an engine line:\n{text}"));
+    assert!(line.contains(&build) && line.contains("CAMDL_EVAL_UNRESOLVED"), "{line}");
+    let json: serde_json::Value = serde_json::from_str(&show(&["--format", "json"])).unwrap();
+    assert_eq!(json["engine"]["build"], serde_json::json!(build));
+    assert_eq!(json["engine"]["switches"], serde_json::json!([{ "name": "CAMDL_EVAL_UNRESOLVED" }]));
 }
 
 // ─── removed ─────────────────────────────────────────────────────────────────

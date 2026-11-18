@@ -869,14 +869,6 @@ impl Default for FitSidecar {
 /// The producing config's archived copy inside a fit folder.
 pub const ARCHIVED_CONFIG: &str = "fit.toml.original";
 
-/// Store `text` as the fit folder's archived config ([`ARCHIVED_CONFIG`]), in
-/// place of the copy of the producing file [`write_fit_sidecar`] made: what
-/// `fit run` stores when its command line set a value of the problem half the
-/// file does not hold, so the archive is the config the fit ran under.
-pub fn store_archived_config(fit_segment: &std::path::Path, text: &str) -> std::io::Result<()> {
-    std::fs::write(fit_segment.join(ARCHIVED_CONFIG), text)
-}
-
 /// Write the fit-level sidecar and archive the producing `fit.toml`
 /// ([`ARCHIVED_CONFIG`], the config-diff source `fit table` loads). The archive
 /// is best-effort: a CLI-only fit (no `.toml`) has none and config-diff degrades
@@ -900,6 +892,39 @@ pub fn write_fit_sidecar(
     model_path: &std::path::Path,
     sidecar: &FitSidecar,
 ) -> std::io::Result<()> {
+    let archive = if fit_toml_path.is_file() { Some(Archive::CopyOf(fit_toml_path)) } else { None };
+    write_fit_sidecar_archiving(fit_segment, archive, model_path, sidecar)
+}
+
+/// [`write_fit_sidecar`] for a config already read: `config_text`, read once
+/// from `fit_toml_path`, is the archive, and the file is not read again.
+/// `fit run` stores this way, so every fit folder it writes holds the text
+/// it resolved, whatever happens to the file while it runs.
+pub fn write_fit_sidecar_with_config(
+    fit_segment: &std::path::Path,
+    fit_toml_path: &std::path::Path,
+    config_text: &str,
+    model_path: &std::path::Path,
+    sidecar: &FitSidecar,
+) -> std::io::Result<()> {
+    write_fit_sidecar_archiving(fit_segment, Some(Archive::Text(fit_toml_path, config_text)), model_path, sidecar)
+}
+
+/// What a fit folder archives as its config, and the path its relative paths
+/// were written against.
+enum Archive<'a> {
+    /// A copy of the file at this path.
+    CopyOf(&'a std::path::Path),
+    /// This text, read from the file at this path.
+    Text(&'a std::path::Path, &'a str),
+}
+
+fn write_fit_sidecar_archiving(
+    fit_segment: &std::path::Path,
+    archive: Option<Archive<'_>>,
+    model_path: &std::path::Path,
+    sidecar: &FitSidecar,
+) -> std::io::Result<()> {
     std::fs::create_dir_all(fit_segment)?;
     let mut sidecar = sidecar.clone();
     sidecar.source_config = None;
@@ -908,8 +933,17 @@ pub fn write_fit_sidecar(
     } else {
         None
     };
-    if fit_toml_path.is_file() {
-        std::fs::copy(fit_toml_path, fit_segment.join(ARCHIVED_CONFIG))?;
+    if let Some(archive) = archive {
+        let fit_toml_path = match archive {
+            Archive::CopyOf(path) => {
+                std::fs::copy(path, fit_segment.join(ARCHIVED_CONFIG))?;
+                path
+            }
+            Archive::Text(path, text) => {
+                std::fs::write(fit_segment.join(ARCHIVED_CONFIG), text)?;
+                path
+            }
+        };
         sidecar.source_config = Some(relative_path(fit_segment, fit_toml_path)?);
         // gh#353: archive the model `.camdl` source too, symmetric with
         // fit.toml.original, so the leaf is self-contained (source + config +

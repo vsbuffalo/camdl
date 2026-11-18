@@ -340,6 +340,39 @@ fn a_fit_made_under_the_flag_stores_the_override_in_its_config() {
     );
 }
 
+/// The same fit, named by its `fit.toml`: the file alone does not hold the
+/// override, so the flag-made run is not the run `fit run fit.toml` makes,
+/// and a `fit.toml` handle names only that run (gh#896). `fit predict` and
+/// `compare` refuse it rather than replay the flag-made fit under a config
+/// without the override, and the refusal names the flag-made run's leaf
+/// directory so the reader can name it instead (gh#1268).
+#[test]
+fn a_fit_toml_handle_does_not_stand_for_a_flag_made_fit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let m = model(tmp.path(), "linear", &ROWS_TO_50);
+    let toml = fit_toml(tmp.path(), &m, "");
+    let toml = toml.to_str().unwrap();
+    let o = camdl(tmp.path(), &["fit", "run", toml, "--allow-forcing-extrapolation"]);
+    assert!(o.status.success(), "the flag lets the fit run:\n{}", stderr(&o));
+    let leaf = statuses(&tmp.path().join("results"))
+        .into_iter()
+        .find(|(_, v)| v["kind"] == "fit_method")
+        .map(|(p, _)| p.parent().unwrap().to_path_buf())
+        .expect("the fit's method leaf");
+    let leaf_name = leaf.file_name().unwrap().to_string_lossy().into_owned();
+    for args in [
+        vec!["fit", "predict", toml, "--mode", "free_forward"],
+        vec!["compare", toml, leaf.to_str().unwrap()],
+    ] {
+        let o = camdl(tmp.path(), &args);
+        let err = stderr(&o);
+        assert!(!o.status.success(), "{args:?}: the file alone names no run here:\n{err}");
+        assert!(!err.contains("forcing `mult` was evaluated"), "{args:?}: not replayed without the override:\n{err}");
+        assert!(err.contains("command-line options"), "{args:?}: says why the stored run is not the file's:\n{err}");
+        assert!(err.contains(&leaf_name), "{args:?}: names the flag-made run's leaf:\n{err}");
+    }
+}
+
 /// `compare` scores a chain-binomial fit with a `camdl pfilter` child at its
 /// posterior draws. A fit made under `[config] allow_forcing_extrapolation`
 /// is scored under it, so the child holds the forcing rather than refusing
