@@ -521,6 +521,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "clap",
+ "classify-derive",
  "comfy-table",
  "csv",
  "declared",
