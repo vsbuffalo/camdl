@@ -5,14 +5,14 @@
 //! This is the layout of any project that keeps its configs portable (and camdl
 //! itself warns about absolute paths): configs in `fits/`, data in `data/`,
 //! results in `results/`. Recovering the config from a run handle reads the
-//! archived `fit.toml.original` inside the segment, so anchoring its relative
-//! paths at the archive's own location resolved `../data/streams/x.tsv` to
+//! stored `fit.resolved.toml` inside the segment, so anchoring its relative
+//! paths at the stored file's own location resolved `../data/streams/x.tsv` to
 //! `results/fits/data/streams/x.tsv` — a file that never existed — and
 //! `camdl compare` could not derive a prequential for ANY such fit.
 //!
 //! The fit.toml is edited after the fit completes (a comment appended), which is
 //! how the downstream project hit this: the live config no longer matches the
-//! archive byte-for-byte, so the archive is what gets read.
+//! archive byte-for-byte, so the stored config is what gets read.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
