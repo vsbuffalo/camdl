@@ -217,16 +217,17 @@ Examples:
     #[command(after_help = colored_help!("\
 This subcommand forwards all arguments verbatim to the OCaml compiler
 `camdlc`. Input must be a .camdl source file (not a compiled .ir.json).
-Run `camdlc inspect` with no arguments for usage.
+Run `camdlc inspect --help` for every option.
 
 Common options (all parsed by camdlc):
   --summary           Compartments / transitions / parameters overview
-  --dims              Show declared dimensions and their levels
+  --dims              The physical dimension inferred for each parameter
   --compartments      List compartments (post-stratification)
   --transitions       List transitions with their rate expressions
   --tables            Show loaded table values
   --forcings          List forcings, and the data file each was read from
-  --ascii             Strip ANSI color from output
+  --ascii             Write operators in ASCII (`*` rather than `×`)
+  --no-color          Turn colour off
 
 Examples:
   # Default summary
@@ -3535,7 +3536,7 @@ fn never_fired_notice(names: &[&str]) -> Option<out::notice::Notice> {
     }
     let message = if names.len() > 20 {
         format!("{} transitions never fired during simulation\n  \
-                 (run `camdl inspect MODEL --transition \"...*\" --rate` to debug)", names.len())
+                 (run `camdl inspect MODEL --transitions \"PATTERN*\"` to see their rates)", names.len())
     } else {
         let mut m = format!("{} transition{} never fired during simulation:",
             names.len(), if names.len() == 1 { "" } else { "s" });

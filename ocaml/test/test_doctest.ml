@@ -28,6 +28,9 @@ let expected =
   ; "skip:ignore"    (* 6. ```camdl ignore *)
   ; "pass"           (* 7. fragment + preamble=demo *)
   ; "pass"           (* 8. read() + inline data *)
+  ; "fail"           (* 9. complete model, syntax error (gh#1216) *)
+  ; "skip:fragment"  (* 10. fragment, `compartments` only in a comment *)
+  ; "skip:parse"     (* 11. legend, `compartments` as an index range *)
   ]
 
 let test_classifications () =
@@ -65,9 +68,25 @@ let test_non_vacuous () =
   Doctest.rm_rf empty;
   Doctest.rm_rf basedir
 
+(* gh#1216: a data comment's path must stay inside the temporary directory. *)
+let test_bad_data_paths () =
+  let datas =
+    [ ("data/pop.tsv", ""); ("../up.tsv", ""); ("data/../../up.tsv", "");
+      ("/abs.tsv", ""); ("data/..x.tsv", "") ] in
+  Alcotest.(check (list string)) "escaping paths"
+    [ "../up.tsv"; "data/../../up.tsv"; "/abs.tsv" ]
+    (Doctest.bad_data_paths datas);
+  let dir = Doctest.materialize_data [ ("../escaped-by-doctest-test.tsv", "x\n") ] in
+  let outside = Filename.concat (Filename.dirname dir) "escaped-by-doctest-test.tsv" in
+  let escaped = Sys.file_exists outside in
+  if escaped then Sys.remove outside;
+  Doctest.rm_rf dir;
+  Alcotest.(check bool) "a '..' path is not written" false escaped
+
 let () =
   Alcotest.run "doctest"
     [ ("classify",
        [ Alcotest.test_case "every verdict bucket" `Quick test_classifications
        ; Alcotest.test_case "fail / preamble / data are non-vacuous" `Quick test_non_vacuous
+       ; Alcotest.test_case "data paths stay in the temporary directory" `Quick test_bad_data_paths
        ]) ]

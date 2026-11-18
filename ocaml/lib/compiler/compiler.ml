@@ -1004,7 +1004,8 @@ let write_depfile ~(path : string) ~(model : string)
 
    Routing `run_check` through this core means one place defines the
    pipeline, so `check` and `compile` cannot disagree on a model's validity.
-   It takes no vocabulary file, so `check` cannot check one.
+   [quantities] is the `--quantities` vocabulary file, as for [compile], so
+   `check` checks a model with the vocabulary a compile would use.
 
    The pipeline short-circuits exactly as [compile] does: a structural
    [Validate] error stops before dimcheck (Validate runs first because
@@ -1016,9 +1017,10 @@ let write_depfile ~(path : string) ~(model : string)
    [detail = None] when lex/parse/expand structurally failed (then [diags]
    holds the E001), [Some d] otherwise (then [diags] is [d.ctx.diags], now
    also carrying any validate/dimcheck/lint/autodiff diagnostics). *)
-let collect_detail ?(name = "model") ?(filename = "<input>") (src : string)
+let collect_detail ?(name = "model") ?(filename = "<input>")
+    ?(quantities : (string * string) option) (src : string)
     : compile_detail option * Diagnostics.t * Source_cache.t =
-  let (detail, diags, source) = front_end_collect ~name ~filename src in
+  let (detail, diags, source) = front_end_collect ~name ~filename ?quantities src in
   (match detail with
    | None -> ()                     (* lex/parse/expand failed; diags has the E001 *)
    | Some d ->

@@ -4,7 +4,8 @@ checking and symbolic gradients.
 
 Usage:
   camdlc FILE.camdl [--set NAME=VALUE ...]   compile to IR JSON (stdout)
-  camdlc check   FILE.camdl                  parse + type-check; report diagnostics
+  camdlc check   FILE.camdl [--quantities FILE] [--no-dim-check]
+                                             parse + type-check; report diagnostics
   camdlc inspect FILE.camdl [OPTIONS]        print model structure (summary, dims, ...)
   camdlc doctest [--gate] FILE.md ...        compile the camdl blocks in Markdown docs
   camdlc render  FILE.camdl [--format json]  render the model as LaTeX (or JSON, for display)
@@ -24,6 +25,33 @@ Flags (compile):
 To run models — simulate, fit, profile, survey, browse results — use `camdl`,
 which also wraps these compiler commands (camdl compile/check/inspect/doctest).
 Run `camdl --help`.
+|}
+
+let inspect_usage_text = {|usage: camdlc inspect FILE.camdl [OPTIONS]
+
+Prints the structure of a model: with no option, a summary of it.
+
+Reports (one per run; when several are given, the first listed here wins):
+  --cost-report            where the work of evaluating the rates lies
+  --dims                   the physical dimension inferred for each parameter
+  --tables [PATTERN]       each table's source and values
+  --forcings [PATTERN]     each forcing and its definition
+  --compartments           each compartment, its dimensions and expanded names
+  --parameters             the parameters, grouped by kind
+  --count                  how many expanded transitions each declaration yields;
+                           with --transitions PATTERN or --transition NAME, only
+                           the declarations that match
+  --transitions [PATTERN]  each transition as written, with its expanded rates
+  --transition NAME        one expanded transition, such as infection_a
+  --let NAME               one `let` definition and the transitions that use it
+  --summary                the summary (the default)
+
+A PATTERN is a name, or a glob in which `*` matches any text.
+
+Display:
+  --ascii                  write operators in ASCII (`*` rather than `×`)
+  --no-color               turn colour off
+  --help, -h               print this help
 |}
 
 let () =
@@ -54,21 +82,26 @@ let () =
 
   (* ── camdlc check FILE ────────────────────────────────────────────── *)
   | "check" :: rest ->
-    (* M26 in 2026-04-19 review: --no-dim-check previously only
-       registered on the `compile` subcommand's Arg.Unit handler,
-       so `camdlc check --no-dim-check model.camdl` silently
-       ignored the flag. Parse it here too. *)
-    let path = ref None in
-    List.iter (fun a -> match a with
-      | "--no-dim-check" -> Compiler.no_dim_check := true
-      | s when String.length s > 0 && s.[0] = '-' ->
-        Printf.eprintf "error: unknown flag '%s' for `camdlc check`\n" s;
+    (* The flags a compile takes that change what is checked:
+       `--no-dim-check`, and `--quantities FILE`, whose vocabulary replaces
+       the model's own `quantities { }` block, so a model checked clean
+       compiles clean with the same flags. *)
+    let usage = "usage: camdlc check FILE.camdl [--quantities FILE] [--no-dim-check]" in
+    let path = ref None and quantities = ref None in
+    let rec parse = function
+      | [] -> ()
+      | "--no-dim-check" :: tl -> Compiler.no_dim_check := true; parse tl
+      | "--quantities" :: q :: tl -> quantities := Some q; parse tl
+      | ("--help" | "-h") :: _ -> print_endline usage; exit 0
+      | s :: _ when String.length s > 0 && s.[0] = '-' ->
+        Printf.eprintf "error: unknown flag '%s' for `camdlc check`\n%s\n" s usage;
         exit 1
-      | s -> path := Some s
-    ) rest;
+      | s :: tl -> path := Some s; parse tl
+    in
+    parse rest;
     (match !path with
-     | None -> print_endline "usage: camdlc check [--no-dim-check] FILE.camdl"; exit 1
-     | Some p -> Inspect.run_check p)
+     | None -> print_endline usage; exit 1
+     | Some p -> Inspect.run_check ?quantities:!quantities p)
 
   (* ── camdlc inspect FILE [options] ───────────────────────────────── *)
   | "inspect" :: rest ->
@@ -81,7 +114,6 @@ let () =
     let tr_rate   = ref None in
     let tr_count  = ref false in
     let let_name  = ref None in
-    let ir_mode   = ref false in
     let ascii     = ref false in
     let no_color  = ref false in
     let dims      = ref false in
@@ -121,7 +153,7 @@ let () =
          | s :: tl2 when not (String.length s > 0 && s.[0] = '-') ->
            forcings_pat := Some s; parse tl2
          | _ -> parse tl)
-      | "--ir"       :: tl -> ir_mode   := true; parse tl
+      | ("--help" | "-h") :: _ -> print_string inspect_usage_text; exit 0
       | "--ascii"    :: tl -> ascii     := true; parse tl
       | "--no-color" :: tl -> no_color  := true; parse tl
       | s :: tl when not (String.length s > 0 && s.[0] = '-') ->
@@ -137,7 +169,7 @@ let () =
     in
     parse rest;
     let path = match List.rev !files with
-      | [] -> print_endline "usage: camdlc inspect FILE.camdl [OPTIONS]"; exit 1
+      | [] -> print_string inspect_usage_text; exit 1
       | p :: _ -> p
     in
     let cmd =
@@ -147,8 +179,12 @@ let () =
       else if !do_forcings  then Inspect.Forcings !forcings_pat
       else if !comps             then Inspect.Compartments
       else if !do_parameters then Inspect.Parameters
+      (* `--count` reshapes `--transitions` / `--transition` into counts,
+         narrowed to the pattern or name either gives. *)
+      else if !tr_count then
+        Inspect.TransitionCount
+          (match !transitions_pat with Some p -> Some p | None -> !tr_rate)
       else if !do_transitions then Inspect.Transitions !transitions_pat
-      else if !tr_count then Inspect.TransitionCount !transitions_pat
       else (match !tr_rate with
         | Some name -> Inspect.TransitionRate name
         | None ->
@@ -158,7 +194,6 @@ let () =
     in
     let opts : Inspect.inspect_opts = {
       cmd;
-      ir_mode  = !ir_mode;
       ascii    = !ascii;
       no_color = !no_color;
     } in
