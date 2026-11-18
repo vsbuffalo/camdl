@@ -3731,7 +3731,7 @@ static EMPTY_CHAIN_COUNTS: BTreeMap<usize, usize> = BTreeMap::new();
 pub(crate) const DEFAULT_PREDICT_PARTICLES: usize = 500;
 
 /// Where the particle count of `fit predict`'s filters came from (D85).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ParticlesSource {
     /// `--particles`.
@@ -3740,6 +3740,17 @@ pub(crate) enum ParticlesSource {
     FitPmmh,
     /// [`DEFAULT_PREDICT_PARTICLES`].
     Default,
+}
+
+impl ParticlesSource {
+    /// Where the count came from, as `camdl show` says it.
+    pub(crate) fn describe(self) -> &'static str {
+        match self {
+            ParticlesSource::Flag => "--particles",
+            ParticlesSource::FitPmmh => "the PMMH fit's filter",
+            ParticlesSource::Default => "the default",
+        }
+    }
 }
 
 /// The particle count of a PMMH fit's own filter, read from the leaf's
@@ -3780,7 +3791,7 @@ pub(crate) fn default_options_for(
 
 /// The particle count every filter `fit predict` runs per posterior draw
 /// uses (the one-step band's and the forecast's), as resolved (D85).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PredictParticles {
     pub n: usize,
     pub source: ParticlesSource,
