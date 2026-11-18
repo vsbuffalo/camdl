@@ -16865,7 +16865,49 @@ let test_gh1200_wrong_unit_still_e315 () =
   compile_expect_error_code ~code:"E315" ~contains:"intervention 'sia' time"
     (at1200_src ~at:"2 'days * 3 'days" ())
 
+(* The cases the dimension calculus of the one compile-time folder decides:
+   a bare number added to a time is a time; a ratio of times is not; two
+   units that disagree in a sum are not. *)
+let test_gh1200_time_plus_bare_number_is_constant () =
+  check_at_times "10 'days + 5 -> AtTimes [15]" [15.0]
+    (at_times_of_first_intervention (at1200_src ~at:"10 'days + 5" ()))
+
+let test_gh1200_ratio_of_times_is_e315 () =
+  with_dim_check_enabled @@ fun () ->
+  compile_expect_error_code ~code:"E315" ~contains:"intervention 'sia' time"
+    (at1200_src ~at:"(20 'days) / (2 'days)" ())
+
+let test_gh1200_mixed_units_not_folded () =
+  (* Not emitted as a number: the dimension checker sees the expression. *)
+  with_dim_check_enabled @@ fun () ->
+  match Compiler.compile ~name:"gh1200_mixed" (at1200_src ~at:"10 'days + 1 'per_day" ()) with
+  | Ok _ -> Alcotest.fail "`10 'days + 1 'per_day` must not compile"
+  | Error _ -> ()
+
+(* [fold_closed_ir] is the value projection of the folder and keeps its
+   value whatever the dimension; only [closed_time_value] filters. *)
+let test_gh1200_fold_closed_ir_value_unchanged () =
+  let mixed = Ir.BinOp { op = Ir.Add;
+    left = Ir.UnitLiteral { value = 10.0; dim_p = 0; dim_t = 1; unit = "days" };
+    right = Ir.UnitLiteral { value = 1.0; dim_p = 0; dim_t = -1; unit = "per_day" } } in
+  Alcotest.(check (option (float 1e-12))) "fold_closed_ir" (Some 11.0)
+    (Expander.fold_closed_ir mixed);
+  Alcotest.(check (option (float 1e-12))) "closed_time_value" None
+    (Expander.closed_time_value mixed);
+  let ratio = Ir.BinOp { op = Ir.Div;
+    left = Ir.UnitLiteral { value = 20.0; dim_p = 0; dim_t = 1; unit = "days" };
+    right = Ir.UnitLiteral { value = 2.0; dim_p = 0; dim_t = 1; unit = "days" } } in
+  Alcotest.(check (option (float 1e-12))) "ratio value" (Some 10.0)
+    (Expander.fold_closed_ir ratio);
+  Alcotest.(check (option (float 1e-12))) "ratio is not a time" None
+    (Expander.closed_time_value ratio)
+
 let gh1200_tests = [
+  "a time plus a bare number is a constant", test_gh1200_time_plus_bare_number_is_constant;
+  "a ratio of times is E315", test_gh1200_ratio_of_times_is_e315;
+  "two disagreeing units are not folded", test_gh1200_mixed_units_not_folded;
+  "fold_closed_ir keeps its value; closed_time_value filters",
+    test_gh1200_fold_closed_ir_value_unchanged;
   "a constant with a non-time unit is still E315", test_gh1200_wrong_unit_still_e315;
   "at [10 'days] is emitted as AtTimes", test_gh1200_unit_literal_at_is_constant;
   "a unit literal converts to the model time unit",
