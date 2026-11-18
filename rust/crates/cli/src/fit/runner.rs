@@ -557,7 +557,10 @@ impl FitRunConfig {
         // impossible regardless of the parameter flags.
         if ic_free
             && !streams.is_empty()
-            && streams.iter().all(|s| s.cells.first().is_some_and(|c| c.is_none()))
+            && streams.iter().all(|s| s.cells.first().is_some_and(|c| match c {
+                Some(sim::inference::ObsCell::Scalar(_)) => false,
+                Some(sim::inference::ObsCell::HeldOut(_)) | None => true,
+            }))
         {
             return Err(
                 "ic_free = true conditions the initial state on the first \
@@ -1642,7 +1645,13 @@ pub(crate) fn load_observations(
     // judged with the stream's other periods.
     if let (Some(covers), true) = (&obs_model.covers, opts.t_start.is_finite()) {
         if !matches!(covers, ir::observation::Covers::WindowColumns) {
-            rows.retain(|r| !(r.cell.is_none() && r.measures.start() < opts.t_start - 1e-9));
+            rows.retain(|r| {
+                let assimilated = match r.cell {
+                    Some(sim::inference::ObsCell::Scalar(_)) => true,
+                    Some(sim::inference::ObsCell::HeldOut(_)) | None => false,
+                };
+                assimilated || r.measures.start() >= opts.t_start - 1e-9
+            });
         }
     }
     Ok(rows)
@@ -2165,7 +2174,10 @@ pub(crate) fn partition_lines(
     };
     for stream in rows.keys() {
         let observed: Vec<&ObservedRow> =
-            training(stream).iter().filter(|r| r.cell.is_some()).collect();
+            training(stream).iter().filter(|r| match r.cell {
+                Some(sim::inference::ObsCell::Scalar(_)) => true,
+                Some(sim::inference::ObsCell::HeldOut(_)) | None => false,
+            }).collect();
         let Some(last) = observed.last() else { continue };
         let period = match last.measures {
             super::observed_rows::Measures::Period(p) => p.stop() - p.start(),

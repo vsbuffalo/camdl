@@ -128,7 +128,10 @@ fn cut_to_training_rows(
             .map_err(|position| refuse(PartitionError::NotAPrefix {
                 stream: s.name.clone(), position,
             }))?;
-        if !s.rows[..n].iter().any(|r| r.cell.is_some()) {
+        if !s.rows[..n].iter().any(|r| match r.cell {
+            Some(sim::inference::ObsCell::Scalar(_)) => true,
+            Some(sim::inference::ObsCell::HeldOut(_)) | None => false,
+        }) {
             return Err(refuse(PartitionError::NoTrainingRows { stream: s.name.clone() }));
         }
         dropped |= n < s.rows.len();
@@ -575,7 +578,10 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // the joint scores cover the present streams only, and the trace's
     // observed column prints NA where nothing is present. Say so once, so a
     // reader of the outputs knows rows were skipped rather than zero-filled.
-    let has_holes = streams.iter().any(|s| s.cells.iter().any(|c| c.is_none()));
+    let has_holes = streams.iter().any(|s| s.cells.iter().any(|c| match c {
+        Some(sim::inference::ObsCell::Scalar(_)) => false,
+        Some(sim::inference::ObsCell::HeldOut(_)) | None => true,
+    }));
     if has_holes && (save_prequential.is_some() || trace_path.is_some()) {
         out.say("pfilter: data has missing observations (NA) — prequential/trace \
              scores skip the missing (stream, time) cells; a step with no \

@@ -287,7 +287,12 @@ pub(crate) fn plan_bound_rows(
             label: labels[k],
             coverage: times.coverage(k),
             at: closes[k],
-            observed: cells[k].is_some(),
+            // Whether the row's value is one the fit assimilated: a
+            // held-out cell is written as the hole it is to the filter.
+            observed: match cells[k] {
+                Some(ObsCell::Scalar(_)) => true,
+                Some(ObsCell::HeldOut(_)) | None => false,
+            },
         })
         .collect();
     Ok(EmitPlan { columns, format, scored: obs.scored.clone(), rows })
