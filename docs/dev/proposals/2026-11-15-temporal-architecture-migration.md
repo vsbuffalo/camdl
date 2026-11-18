@@ -1111,14 +1111,18 @@ Recorded in the maintainer's docket; each is reflected in the spec and above.
   resampling, with that time, the particle count and ESS/N, and the number of
   distinct parents at its final resampling. Neither is described as lineage
   diversity, and neither guarantees forecast accuracy; both characterise Monte
-  Carlo reliability.
+  Carlo reliability. The distinct-parents count is deferred: it needs the filter
+  to return its resampling indices without full ancestry recording, a
+  `particle_filter.rs` change that follows the D84 selective-recording PR
+  (#1246).
 - **D86** (2026-11-17). A forecast's identity is its input-addressed directory,
   `predict/<run12>-<key>/` (#1225); file names stay stable and carry no
   chain-selection suffix. `forecast.json` records `address_key` and
   `options.excluded_chains`. The predictive and forecast manifests share one
   human-readable `chain_selection` block. The predictive's per-file suffixes
   converge on the keyed directory later. The forecast's `cloud_row` is the
-  draw's row in `draws.tsv` under any chain selection.
+  draw's row in `draws.tsv` under any chain selection. `address_key` and
+  `options.excluded_chains` arrive with #1225.
 
 ## Part 9. Documents this plan changes
 
