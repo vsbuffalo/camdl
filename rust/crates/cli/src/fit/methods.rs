@@ -201,9 +201,12 @@ pub const METHODS: &[InferenceMethod] = &[
         status_note:
             "Requires a differentiable model: the gradient capability check \
              refuses an unsupported rate/observation gradient, an \
-             adaptive integrator, a scheduled effect, or a parameterized \
-             initial condition — at config validation, before any \
-             optimization. Use `nl-sbplx` when the gate refuses.",
+             adaptive integrator, and the scheduled effects the \
+             sensitivity cannot cross (a fixed-count transfer, an amount \
+             that reads compartment state, a fire time that reads an \
+             estimated parameter, a reactive intervention) — at config \
+             validation, before any optimization. Use `nl-sbplx` when \
+             the gate refuses.",
         period_boundaries: PeriodBoundaries::AtOutputTimes,
     },
     InferenceMethod {
