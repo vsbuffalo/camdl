@@ -1,6 +1,6 @@
 # model_ir_hash of every compiled golden model.
 # Source: the committed *.ir.json files under ocaml/golden and tests/fixtures/*/ir (primary).
-# Recorded at commit: 174942483
+# Recorded at commit: 54b21c070
 # Regenerate: make update-golden-model-hashes
 file	model_ir_hash
 ocaml/golden/bimolecular.ir.json	a6c900e85c8027caa73b35ec6d7339cc2942c397b2b0550ba3a1bd4032000f03
@@ -73,7 +73,7 @@ tests/fixtures/bspline_inference/ir/seir_bspline_small.ir.json	ed337f72e8c066755
 tests/fixtures/bspline_inference/ir/seir_k12_explicit.ir.json	6ac6ccd7539797961a74da6bfb769d461f68def98dc54d051b4bb59480678346
 tests/fixtures/bspline_inference/ir/seir_k12_truth.ir.json	e0c1195d4682efb8bbb025f53796e78a5170fe626c0a6dc297926d1ac092fc03
 tests/fixtures/bspline_inference/ir/seir_smooth_recovery.ir.json	b5f0003feb9c0237fdf136b76d8e73dfb605b6b23491c63f7feef61a3ab8effd
-tests/fixtures/contrasts/ir/contrasts_showcase.ir.json	b07f1e211d2cd49d7ca82a8f46129c34ba1d658ff4bd074d9e4cd164a0c5545a
+tests/fixtures/contrasts/ir/contrasts_showcase.ir.json	4c96bb392662518a4a63d2d25f25b083c914c78aa52775a1b11fd3739bbce57e
 tests/fixtures/corner_cases/ir/all_lifecycle.ir.json	d2f07c46189dd33b4d7b1ff29e39ee702e8e43e9b66797af1e98bb328135da91
 tests/fixtures/corner_cases/ir/coincident_obs_intervention.ir.json	eb1934ff29bb06940eb2e7576400247e9f81ae788d7db8429eb85d5f494288f6
 tests/fixtures/corner_cases/ir/dt_rate.ir.json	04762854efac211864505a82b8228d5a0d8eee8195d6c52fc268c3a1a9589d49
