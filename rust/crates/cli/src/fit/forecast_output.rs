@@ -717,6 +717,11 @@ fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) ->
     if let Some(info) = job.posterior.selection() {
         doc["chain_selection"] = info.to_json();
     }
+    // D86: the chains left out of the cloud are always stated, `[]` for the
+    // full cloud. The address key hashes the options with the field absent
+    // in that case, so the full cloud's key is unchanged.
+    doc["options"]["excluded_chains"] =
+        serde_json::json!(job.options.excluded_chains.clone().unwrap_or_default());
     // D83: with more than one arm, how the arms' random numbers are coupled
     // and what `forecast-contrasts.tsv` holds.
     if arms.len() > 1 {
