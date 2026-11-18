@@ -203,7 +203,7 @@ static CAMDLC_CHECKED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 /// `cfg!(test)` short-circuits the check for the bin's unit tests, exactly
 /// as `CAMDL_SKIP_VERSION_CHECK=1` does for integration tests and operators.
 fn version_check_disabled() -> bool {
-    cfg!(test) || std::env::var("CAMDL_SKIP_VERSION_CHECK").is_ok()
+    cfg!(test) || crate::env::get().vars.skip_version_check
 }
 
 fn check_camdlc_version_once(camdlc: &std::path::Path) {
@@ -232,8 +232,8 @@ fn check_camdlc_version_once(camdlc: &std::path::Path) {
 
 /// The first file named `name` in a `PATH` directory, as `which` finds it.
 fn which_on_path(name: &str) -> Option<std::path::PathBuf> {
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths).map(|d| d.join(name)).find(|c| c.is_file())
+    crate::env::get().vars.path.as_ref().and_then(|paths| {
+        std::env::split_paths(paths).map(|d| d.join(name)).find(|c| c.is_file())
     })
 }
 
@@ -266,13 +266,11 @@ fn find_camdlc() -> Result<std::path::PathBuf, String> {
     }
 
     // 2. Environment variable override
-    for var in &["CAMDLC_PATH", "CAMDLC"] {
-        if let Ok(path) = std::env::var(var) {
-            let p = PathBuf::from(&path);
-            if p.exists() {
-                check_camdlc_version_once(&p);
-                return Ok(p);
-            }
+    let env = &crate::env::get().vars;
+    for p in [&env.camdlc_path, &env.camdlc].into_iter().flatten() {
+        if p.exists() {
+            check_camdlc_version_once(p);
+            return Ok(p.clone());
         }
     }
 
@@ -600,7 +598,7 @@ pub fn set_ir_cache_disabled(disabled: bool) {
 
 fn ir_cache_disabled() -> bool {
     IR_CACHE_DISABLED.load(std::sync::atomic::Ordering::Relaxed)
-        || std::env::var_os("CAMDL_NO_IR_CACHE").is_some()
+        || crate::env::get().vars.no_ir_cache
 }
 
 /// Process-wide LICM disable (gh#272, set by `--no-licm`). LICM is a compile-time
@@ -624,7 +622,7 @@ pub fn set_licm_disabled(disabled: bool) {
 
 pub(crate) fn licm_enabled() -> bool {
     !(LICM_DISABLED.load(std::sync::atomic::Ordering::Relaxed)
-        || std::env::var_os("CAMDL_NO_LICM").is_some())
+        || crate::env::get().vars.no_licm)
 }
 
 /// Identity of the camdlc binary that compiles on a cache miss: the runtime's
@@ -938,11 +936,12 @@ fn persist_cache_entry(cache_path: &std::path::Path, ir_json: &str, deps: &[Read
 /// and output dirs is safe and maximizes reuse. `None` if unresolvable (then
 /// the cache is silently skipped — caching is best-effort, never fatal).
 fn ir_cache_dir() -> Option<std::path::PathBuf> {
-    if let Some(d) = std::env::var_os("CAMDL_IR_CACHE_DIR") {
-        if !d.is_empty() { return Some(std::path::PathBuf::from(d)); }
+    let env = &crate::env::get().vars;
+    if let Some(d) = &env.ir_cache_dir {
+        return Some(d.clone());
     }
-    let base = std::env::var_os("XDG_CACHE_HOME").map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")))?;
+    let base = env.xdg_cache_home.clone()
+        .or_else(|| env.home.as_ref().map(|h| h.join(".cache")))?;
     Some(base.join("camdl").join("ir"))
 }
 
@@ -1208,7 +1207,7 @@ pub fn resolve_ir_path_with_quantities(
                 // `CAMDL_NO_CONSTANT_FOLD` and `--no-licm`/`CAMDL_NO_LICM` each
                 // change the IR camdlc emits, so both belong in the key — else
                 // flipping one serves the stale variant.
-                let fold_disabled = std::env::var_os("CAMDL_NO_CONSTANT_FOLD").is_some();
+                let fold_disabled = crate::env::get().vars.no_constant_fold;
                 let key = ir_cache_key(&content, &compiled_model_name(path), &compiler_id, ir::IR_VERSION.trim(), fold_disabled, licm_enabled(), needs_state_grad, quantities.map(|q| q.bytes.as_slice()));
                 Some((dir.join(format!("{}.ir.json", key)), key))
             }

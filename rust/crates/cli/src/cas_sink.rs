@@ -608,6 +608,9 @@ impl crate::engine::RunSink for CasSink {
             ir::IR_VERSION.trim(), self.sim.model.path.clone(), self.label.clone(), calendar)
             .with_deps(self.fit_dep.clone())
             .with_children(children.clone());
+        // The engine identity the model level folded, so a leaf keyed by an
+        // engine switch (`env::Environment::engine_identity`) says which.
+        meta.engine_version = self.sim.model.engine.clone();
 
         let mut artifacts = runid::Artifacts::new();
         artifacts.insert("traj.tsv", traj_bytes);

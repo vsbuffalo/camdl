@@ -253,8 +253,8 @@ pub(crate) const UNLABELLED_HINT_COMMANDS: [&str; 2] = [
 /// var to `0` disables the warning entirely; setting it to a value
 /// less than the actual count suppresses it for that invocation.
 pub(crate) fn emit_unlabelled_warning(out: &crate::out::Out, unlabelled_count: usize) {
-    let threshold: usize = std::env::var("CAMDL_UNLABELED_THRESHOLD")
-        .ok()
+    let threshold: usize = crate::env::get().vars.unlabeled_threshold
+        .as_deref()
         .and_then(|s| s.parse().ok())
         .unwrap_or(5);
     if threshold == 0 || unlabelled_count < threshold {

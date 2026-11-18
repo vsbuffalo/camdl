@@ -19,8 +19,10 @@
 //! `every_simulate_flag_is_classified` (below) checks the inventory covers every
 //! argument clap accepts.
 
-// Read only by the tests below until the environment module reads input
-// classes at run time (phase 3 step 1, part E), which removes this.
+// The inventory is read by tests only: the classes are checked, not acted on,
+// at run time. The derive's other half — a field without a class does not
+// compile — holds in every build, so the impls it emits are compiled in every
+// build too, and read in the test build alone.
 #![cfg_attr(not(test), allow(dead_code))]
 
 /// The identity level a keyed input enters at. The first five are the levels of

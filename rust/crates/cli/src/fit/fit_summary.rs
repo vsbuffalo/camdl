@@ -837,7 +837,12 @@ fn format_latex(out: &mut Out, dir: &str, methods: &[ResolvedMethod], strict: bo
 // ── Helpers ─────────────────────────────────────────────────────────
 
 fn ci_env_set() -> bool {
-    matches!(std::env::var("CI").as_deref(), Ok("true") | Ok("1"))
+    ci_value_set(crate::env::get().vars.ci.as_deref())
+}
+
+/// Whether a `CI` value turns on `--strict`: `true` or `1`.
+fn ci_value_set(ci: Option<&str>) -> bool {
+    matches!(ci, Some("true") | Some("1"))
 }
 
 // ── Phase 4 / 5: structured doc + multi-format renderers ────────────
@@ -1812,18 +1817,13 @@ mod tests {
 
     #[test]
     fn ci_env_strict_auto_enable() {
-        // Sanity check on the gate that triggers --strict from CI=true.
-        // We can't toggle env vars in a thread-safe way during cargo
-        // test, so just verify the helper reads the right values.
-        std::env::remove_var("CI");
-        assert!(!ci_env_set());
-        std::env::set_var("CI", "true");
-        assert!(ci_env_set());
-        std::env::set_var("CI", "1");
-        assert!(ci_env_set());
-        std::env::set_var("CI", "false");
-        assert!(!ci_env_set());
-        std::env::remove_var("CI");
+        // The gate that triggers --strict from CI=true. The environment is
+        // read once per process (`crate::env`), so the rule is checked on
+        // the value.
+        assert!(!ci_value_set(None));
+        assert!(ci_value_set(Some("true")));
+        assert!(ci_value_set(Some("1")));
+        assert!(!ci_value_set(Some("false")));
     }
 
     /// Provenance cross-check is the always-on diagnostic that turns
