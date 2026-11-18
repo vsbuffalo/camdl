@@ -1370,8 +1370,15 @@ pub fn peek_simulation_dt(path: &str) -> Option<f64> {
 /// Load a .camdl or .ir.json model, returning the parsed model and raw IR JSON.
 /// The JSON is needed for provenance hashing. Compiles via camdlc if needed.
 pub fn load_model(path: &str) -> Result<(ir::Model, String), String> {
+    load_model_with(path, CompileSettings::process())
+}
+
+/// [`load_model`] under the compile settings `compile`, which the caller
+/// resolved, rather than the process-wide setting. The full IR, as
+/// [`run_camdlc`] compiles it.
+pub(crate) fn load_model_with(path: &str, compile: CompileSettings) -> Result<(ir::Model, String), String> {
     let json = if path.ends_with(".camdl") {
-        run_camdlc(path)?
+        run_camdlc_compile(path, None, true, None, compile)?
     } else {
         std::fs::read_to_string(path)
             .map_err(|e| format!("cannot read {}: {}", path, e))?

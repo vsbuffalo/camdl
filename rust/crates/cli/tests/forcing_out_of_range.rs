@@ -373,6 +373,66 @@ fn a_fit_toml_handle_does_not_stand_for_a_flag_made_fit() {
     }
 }
 
+/// The commands that read a fit's problem but none of its results — `pfilter`
+/// here — given a fit made with `--allow-forcing-extrapolation` on the command
+/// line: named by its leaf, the fit's stored config holds the override, so the
+/// command runs past the forcing's range, records what it held, and is the
+/// same computation as under the flag (gh#1235, gh#1268). Named by its
+/// `fit.toml`, the problem is the file's, which does not hold the override
+/// (gh#896), so the same command is refused at the forcing rather than run as
+/// the flag-made fit.
+#[test]
+fn a_flag_made_fit_is_read_under_its_stored_override_through_its_leaf() {
+    let tmp = tempfile::tempdir().unwrap();
+    let m = model(tmp.path(), "linear", &ROWS_TO_50);
+    let toml = fit_toml(tmp.path(), &m, "");
+    std::fs::write(tmp.path().join("params.toml"), "beta = 0.3\ngamma = 0.1\nrho = 0.6\n").unwrap();
+    let params = tmp.path().join("params.toml");
+    let o = camdl(tmp.path(), &["fit", "run", toml.to_str().unwrap(), "--allow-forcing-extrapolation"]);
+    assert!(o.status.success(), "the flag lets the fit run:\n{}", stderr(&o));
+    let leaf = statuses(&tmp.path().join("results"))
+        .into_iter()
+        .find(|(_, v)| v["kind"] == "fit_method")
+        .map(|(p, _)| p.parent().unwrap().to_path_buf())
+        .expect("the fit's method leaf");
+    let (m, toml, params, leaf) = (m.to_str().unwrap(), toml.to_str().unwrap(), params.to_str().unwrap(), leaf.to_str().unwrap());
+    let commands: [(&str, Box<dyn Fn(&str) -> Vec<String>>); 1] = [(
+        "pfilter",
+        Box::new(|fit: &str| {
+            ["pfilter", m, "--fit", fit, "--params", params, "--particles", "50", "--seed", "1", "--dt", "1"]
+                .map(String::from)
+                .to_vec()
+        }),
+    )];
+    for (name, args) in commands {
+        let before = run_ids(tmp.path());
+        let by_leaf = args(leaf);
+        let o = camdl(tmp.path(), &by_leaf.iter().map(String::as_str).collect::<Vec<_>>());
+        let err = stderr(&o);
+        assert!(o.status.success(), "{name} --fit <leaf>: the stored override lets it run:\n{err}");
+        assert_eq!(warnings(&err), 1, "{name}: one warning for the one forcing:\n{err}");
+        let after = run_ids(tmp.path());
+        let new: Vec<_> = statuses(tmp.path())
+            .into_iter()
+            .filter(|(_, v)| v["run_id"].as_str().is_some_and(|id| !before.contains(id)))
+            .filter(|(_, v)| v["status"] == "completed" && v["kind"] != "profile_invocation" && v["kind"] != "fit_method")
+            .collect();
+        assert!(!new.is_empty(), "{name}: a completed leaf");
+        for (path, v) in &new {
+            assert_eq!(v["inputs"]["forcing_extrapolation"], held_mult_past_50(), "{name}: {}:\n{v:#}", path.display());
+        }
+        let mut flagged = args(toml);
+        flagged.push("--allow-forcing-extrapolation".into());
+        let o = camdl(tmp.path(), &flagged.iter().map(String::as_str).collect::<Vec<_>>());
+        assert!(o.status.success(), "{name} --fit fit.toml under the flag:\n{}", stderr(&o));
+        assert_eq!(run_ids(tmp.path()), after, "{name}: the stored override and the flag are one computation");
+        let o = camdl(tmp.path(), &args(toml).iter().map(String::as_str).collect::<Vec<_>>());
+        let err = stderr(&o);
+        assert!(!o.status.success(), "{name} --fit fit.toml: the file holds no override:\n{err}");
+        assert!(err.contains("forcing `mult` was evaluated"), "{name}: refused at the forcing:\n{err}");
+    }
+}
+
 /// `compare` scores a chain-binomial fit with a `camdl pfilter` child at its
 /// posterior draws. A fit made under `[config] allow_forcing_extrapolation`
 /// is scored under it, so the child holds the forcing rather than refusing

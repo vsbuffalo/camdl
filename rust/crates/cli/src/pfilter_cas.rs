@@ -30,7 +30,10 @@ pub struct ResolvedPfilter {
 pub struct PfilterCtx<'a> {
     pub model: &'a ir::Model,
     pub ir_version: &'a str,
-    pub engine_version: &'a str,
+    /// The engine the model level folds: the build and the engine switches
+    /// set (`env::Environment::engine_identity`). A run made with a switch
+    /// never shares a leaf with a default run, whose key is the build's alone.
+    pub engine: &'a EngineIdentity,
     /// Provenance label for the `model` path segment (the model stem).
     pub stem: &'a str,
     /// `(stream name, sha256-hex)` — already-computed data digests (the same
@@ -155,7 +158,7 @@ pub fn resolve_pfilter(ctx: &PfilterCtx) -> Result<ResolvedPfilter, String> {
     let model_digest = ModelDigest::from_model(
         ctx.model,
         ctx.ir_version.to_string(),
-        EngineIdentity::of_build(ctx.engine_version),
+        ctx.engine.clone(),
     );
     let seed = Seed { process_seed: ctx.seed, base_seed: ctx.seed };
 
