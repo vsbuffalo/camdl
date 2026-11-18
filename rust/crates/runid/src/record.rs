@@ -20,9 +20,10 @@ use crate::kind::ArtifactKind;
 ///
 /// 2: a fit leaf's records of one attempt (`progress.json`, the execution
 /// record `execution.json`) are outside its manifest, and its result files
-/// carry no wall-clock time, duration or path; a run's wall time is in the
-/// execution record, no longer in `inputs.wall_time_seconds`. A version-1 leaf
-/// reads as stale and is recomputed.
+/// carry no wall-clock time, duration or path; a fit leaf's wall time is in
+/// the execution record, no longer in its `inputs.wall_time_seconds` (profile
+/// and survey leaves still record theirs there). A version-1 leaf reads as
+/// stale and is recomputed.
 pub const FORMAT_VERSION: u16 = 2;
 
 /// `kind` strings an older camdl wrote, each with the name it now has. A record

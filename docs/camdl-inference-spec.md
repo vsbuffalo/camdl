@@ -538,7 +538,6 @@ method's fit_state.toml and produces its own. The user never needs to edit it
 
 method = "if2"
 seed = 1
-timestamp = "2026-03-30T14:30:00Z"
 best_loglik = -3891.2
 initial_loglik = -4523.7
 # The chain that reached best_loglik, counted from 0 like every chain index —
@@ -780,9 +779,7 @@ the fit:
   "provenance": {
     "input_hash": "7f2c1d3a",
     "content_hash": "a3c1e890",
-    "timestamp": "2026-03-30T14:30:00Z",
-    "camdl_version": "0.1.0+abc1234",
-    "wall_time_seconds": 1847
+    "camdl_version": "0.1.0+abc1234"
   }
 }
 ```
