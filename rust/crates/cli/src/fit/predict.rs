@@ -1527,11 +1527,6 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
         _ => None,
     };
     let particles = PredictParticles::resolve(args.particles, fit_pmmh_particles)?;
-    if args.particles.is_some() && predict_mode(args)? == Some(crate::args::types::PredictModeArg::FreeForward) {
-        return Err("--particles sets the particle count of the one-step band's and the \
-                    forecast's filters; --mode free_forward runs no filter."
-            .into());
-    }
     // The problem half is all a replay reads: model, data, fixed, estimate.
     let config = config.problem;
 
@@ -1582,6 +1577,20 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     if mode == Some(PredictModeArg::Forecast) {
         crate::fit::forecast_output::refuse_unsupported(args, &posterior)?;
     }
+    // D85: a filter runs for the one-step band and for the forecast (whose
+    // backend the line above has checked). Its particle count is in the
+    // address whenever one runs; where none runs, `--particles` would be
+    // silently ignored, so it is refused.
+    let runs_filter = one_step_fit.is_some() || mode == Some(PredictModeArg::Forecast);
+    if args.particles.is_some() && !runs_filter {
+        return Err(format!(
+            "--particles sets the particle count of the one-step band's and the forecast's \
+             filters, and this predict runs neither ({}).",
+            match mode {
+                Some(PredictModeArg::FreeForward) => "--mode free_forward".to_string(),
+                _ => format!("the '{}' leaf ran on a backend with no one-step band", posterior.name),
+            }));
+    }
 
     // 3. Resolve the model IR. Prefer the IR archived in the fit leaf at
     //    `fit run` time (gh#322 — a self-contained, portable run); fall back to
@@ -1627,7 +1636,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     // selection against this fit's chains, the vocabulary by its bytes). Two
     // predictions from different inputs never share it.
     let options = PredictOptions {
-        particles: particles.address_part(fit_pmmh_particles),
+        particles: runs_filter.then_some(particles.n),
         ..PredictOptions::of(args, posterior.selection(), vocabulary.as_ref())
     };
     let address_key = options.address_key(&run_id);
@@ -3547,9 +3556,10 @@ pub(crate) struct PredictOptions {
     pub quantities: Option<String>,
     /// `--allow-forcing-extrapolation` as given on the command line.
     pub allow_forcing_extrapolation: bool,
-    /// The filters' particle count (D85), present only when it is not the
-    /// one the run determines ([`PredictParticles::address_part`]), so a
-    /// predict without `--particles` keeps its address.
+    /// The filters' particle count (D85), present whenever a filter runs
+    /// (the one-step band or the forecast). Where it came from is recorded
+    /// in the manifest, not here, so `--particles` equal to the default
+    /// addresses the same output as no flag.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub particles: Option<usize>,
 }
@@ -3743,14 +3753,6 @@ impl PredictParticles {
             (None, Some(n)) => Ok(PredictParticles { n, source: ParticlesSource::FitPmmh }),
             (None, None) => Ok(PredictParticles { n: DEFAULT_PREDICT_PARTICLES, source: ParticlesSource::Default }),
         }
-    }
-
-    /// The count the output address carries: `None` when it is the one the
-    /// run itself determines (no `--particles`, or `--particles` equal to
-    /// it), since the address already keys the run.
-    pub(crate) fn address_part(&self, fit_pmmh: Option<usize>) -> Option<usize> {
-        let by_default = fit_pmmh.unwrap_or(DEFAULT_PREDICT_PARTICLES);
-        (self.n != by_default).then_some(self.n)
     }
 }
 

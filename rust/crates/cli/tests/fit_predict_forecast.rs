@@ -611,8 +611,10 @@ fn a_scenario_forecast_writes_the_difference_of_means_and_its_monte_carlo_error(
 }
 
 /// D85: the filters' particle count defaults to the PMMH fit's own (100
-/// here), `--particles` sets it, and a count other than the default keys its
-/// own directory while `--particles` equal to the default does not. Each
+/// here) and `--particles` sets it. The resolved count, not its source, is
+/// in the output address whenever a filter runs: `--particles 100` writes
+/// the same bytes to the same directory as no flag, and another count keys
+/// another directory. `--particles` where no filter runs is refused. Each
 /// draw records its filter's ESS at its last assimilation (day 24), before
 /// resampling, with ESS/N. The one-step band uses the same count and
 /// `predictive.json` records it.
@@ -641,6 +643,9 @@ fn the_particle_count_defaults_to_the_fits_and_is_recorded_and_addressed() {
     let default_dir = predict_dirs().remove(0);
     let m = manifest(&default_dir);
     assert_eq!(m["particles"], serde_json::json!({"n": 100, "source": "fit_pmmh"}));
+    assert_eq!(m["options"]["particles"], 100, "the resolved count is in the address");
+    let samples = || std::fs::read(default_dir.join("forecast-samples.tsv")).unwrap();
+    let before = samples();
     let diag = &m["filter_diagnostics"];
     assert_eq!(diag["n_particles"], 100);
     let last = diag["last_assimilation"].as_array().unwrap();
@@ -655,7 +660,10 @@ fn the_particle_count_defaults_to_the_fits_and_is_recorded_and_addressed() {
 
     forecast(&["--particles", "100"]);
     assert_eq!(predict_dirs(), vec![default_dir.clone()], "the default count keeps the default address");
-    assert_eq!(manifest(&default_dir)["particles"]["source"], "flag");
+    assert_eq!(samples(), before, "and the same output");
+    let m = manifest(&default_dir);
+    assert_eq!((&m["particles"]["source"], &m["options"]["particles"]), (&serde_json::json!("flag"), &serde_json::json!(100)),
+        "the source is recorded, not addressed");
     forecast(&["--particles", "40"]);
     let dirs = predict_dirs();
     assert_eq!(dirs.len(), 2, "another count, another directory: {dirs:?}");
@@ -673,5 +681,6 @@ fn the_particle_count_defaults_to_the_fits_and_is_recorded_and_addressed() {
     let pj: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
     assert_eq!(pj["particles"], serde_json::json!({"n": 40, "source": "flag"}));
     let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward", "--particles", "40"]);
-    assert!(!out.status.success() && stderr(&out).contains("--mode free_forward runs no filter"), "{}", stderr(&out));
+    assert!(!out.status.success(), "{}", stderr(&out));
+    assert!(stderr(&out).contains("this predict runs neither (--mode free_forward)"), "{}", stderr(&out));
 }

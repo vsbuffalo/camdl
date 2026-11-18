@@ -244,13 +244,13 @@ with the fitted model's, bit for bit, and any difference fails the forecast.
 predict` runs, the one-step band's and the forecast's. The default is the
 fit's own filter's count for a PMMH fit and 500 otherwise (PGAS's conditional
 SMC count is not a bootstrap-filter count). The manifest records the count and
-where it came from (`flag`, `fit_pmmh` or `default`); a count other than the
-default writes to its own output directory. `forecast.json` also records, per
-draw, the effective sample size of the filter's weights at its last assimilation
-before the origin (before resampling), its time and ESS/N: a measure of the
-Monte Carlo reliability of the state the forecast starts from, not of its
-accuracy. `--particles` with `--mode free_forward`, which runs no filter, is
-refused.
+where it came from (`flag`, `fit_pmmh` or `default`); the count is part of the
+output address, so each count writes to its own directory. `forecast.json` also
+records, per draw, the effective sample size of the filter's weights at its last
+assimilation before the origin (before resampling), its time and ESS/N: a
+measure of the Monte Carlo reliability of the state the forecast starts from,
+not of its accuracy. `--particles` where no filter runs (`--mode free_forward`,
+or the default mode on an ODE fit, which has no one-step band) is refused.
 
 With more than one arm the forecast also writes `forecast-contrasts.tsv`: per
 arm and target, the arm's predictive mean (`mean`), the fitted model's
