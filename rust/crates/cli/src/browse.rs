@@ -586,11 +586,17 @@ fn show_fit_envelope(out: &crate::out::Out, segment: &Path, run: Option<&str>, r
     // subset. Discover each family rather than listing fixed names, or an
     // artifact that WAS written would read here as never generated. `observed/`
     // is unkeyed — it is the fit's data, the same under any selection.
+    use crate::fit::forecast_output::{
+        FORECAST_CONTRASTS_FILE, FORECAST_MANIFEST, FORECAST_SAMPLES_FILE, FORECAST_TABLES_DIR,
+    };
     for (outputs, prefix) in envelope_outputs(segment, run) {
         let mut subs: Vec<String> = keyed_children(&outputs, "predictive", true);
         subs.push("observed".into());
         subs.extend(keyed_children(&outputs, "contrasts", true));
         subs.extend(keyed_children(&outputs, "quantities", true));
+        // gh#1233: `fit predict --mode forecast` writes `forecast/<stream>.tsv`
+        // beside its samples, contrasts and `forecast.json`.
+        subs.push(FORECAST_TABLES_DIR.into());
         for sub in &subs {
             let sub = sub.as_str();
             if let Ok(entries) = std::fs::read_dir(outputs.join(sub)) {
@@ -621,6 +627,7 @@ fn show_fit_envelope(out: &crate::out::Out, segment: &Path, run: Option<&str>, r
         // the predictive rather than being reachable only by knowing it is there.
         manifests.extend(keyed_children(&outputs, "report", false));
         manifests.extend(keyed_children(&outputs, "quantities", false));
+        manifests.extend([FORECAST_SAMPLES_FILE, FORECAST_CONTRASTS_FILE, FORECAST_MANIFEST].map(String::from));
         for manifest in &manifests {
             if outputs.join(manifest).exists() {
                 out.report_line(format_args!("  {}{}", prefix, manifest));
@@ -634,6 +641,33 @@ fn show_fit_envelope(out: &crate::out::Out, segment: &Path, run: Option<&str>, r
     }
     if !any {
         out.report_line(format_args!("  {}", style::stdout().paint("(none — run `camdl fit predict` to generate)", Style::Dim)));
+    }
+    show_forecasts(out, segment, envelope_outputs(segment, run).into_iter().map(|(d, _)| d));
+}
+
+/// The `forecasts` block (gh#1233): each forecast directory among `dirs`,
+/// segment-relative, with its origin, horizon, chain selection and particle
+/// count from its `forecast.json`. Nothing is printed when none holds one.
+fn show_forecasts(out: &crate::out::Out, segment: &Path, dirs: impl Iterator<Item = PathBuf>) {
+    use crate::fit::forecast_output::ForecastSummary;
+    let found: Vec<(PathBuf, Result<ForecastSummary, String>)> =
+        dirs.filter_map(|d| ForecastSummary::read(&d).map(|s| (d, s))).collect();
+    if found.is_empty() {
+        return;
+    }
+    out.report_line(format_args!("{}", style::stdout().paint("forecasts", Style::Dim)));
+    for (dir, summary) in found {
+        let rel = dir.strip_prefix(segment).unwrap_or(&dir).display().to_string();
+        out.report_line(format_args!("  {rel}/"));
+        match summary {
+            Ok(s) => {
+                for (label, value) in s.lines() {
+                    out.report_line(format_args!("    {}{} {value}",
+                        style::stdout().paint(label, Style::Dim), " ".repeat(10 - label.len())));
+                }
+            }
+            Err(e) => out.report_line(format_args!("    {}", style::stdout().paint(&e, Style::Dim))),
+        }
     }
 }
 
@@ -1986,6 +2020,9 @@ fn show_fit_run(out: &crate::out::Out, leaf: &cas_read::Leaf, rel_path: &str, cr
     }
     if outputs.is_empty() {
         out.report_line(format_args!("  {}", p("(none recorded)")));
+    }
+    if let Some(segment) = segment.as_deref() {
+        show_forecasts(out, segment, envelope_outputs(segment, Some(&id)).into_iter().map(|(d, _)| d));
     }
 }
 

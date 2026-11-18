@@ -54,6 +54,100 @@ impl DrawRef {
 /// The `schema` tag of `forecast.json`.
 pub(crate) const FORECAST_SCHEMA: &str = "camdl.forecast/v3";
 
+/// The file [`write_manifest`] writes in a forecast's directory.
+pub(crate) const FORECAST_MANIFEST: &str = "forecast.json";
+
+/// The joint samples file `write_tables` writes beside it.
+pub(crate) const FORECAST_SAMPLES_FILE: &str = "forecast-samples.tsv";
+
+/// The directory of the per-stream forecast tables, `forecast/<stream>.tsv`.
+pub(crate) const FORECAST_TABLES_DIR: &str = "forecast";
+
+/// What `camdl show` states of one forecast (gh#1233), read back from its
+/// `forecast.json`: where it starts, how far it reaches, which chains its
+/// draws came from and how many particles each draw's filter ran.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub(crate) struct ForecastSummary {
+    pub origin: SummaryPoint,
+    pub horizon: SummaryHorizon,
+    pub calendar: SummaryCalendar,
+    pub n_draws: usize,
+    pub particles: crate::fit::predict::PredictParticles,
+    /// Absent when the full posterior cloud was used.
+    #[serde(default)]
+    pub chain_selection: Option<SummaryChains>,
+}
+
+/// A time `forecast.json` records: model time, and its date under a
+/// calendar origin.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub(crate) struct SummaryPoint {
+    pub t: f64,
+    pub date: Option<String>,
+}
+
+/// `forecast.json`'s `horizon`: `--horizon` as written, and its length in
+/// model time units.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub(crate) struct SummaryHorizon {
+    pub as_written: String,
+    pub duration: f64,
+}
+
+/// The model's time unit, from `forecast.json`'s `calendar`.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub(crate) struct SummaryCalendar {
+    pub time_unit: String,
+}
+
+/// `forecast.json`'s `chain_selection` (D86).
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub(crate) struct SummaryChains {
+    pub excluded: Vec<usize>,
+    pub kept: Vec<usize>,
+    pub n_total: usize,
+}
+
+impl ForecastSummary {
+    /// The forecast in `dir`: `None` when `dir` holds no `forecast.json`,
+    /// an error when it cannot be read, or carries a schema other than
+    /// [`FORECAST_SCHEMA`].
+    pub(crate) fn read(dir: &std::path::Path) -> Option<Result<Self, String>> {
+        let path = dir.join(FORECAST_MANIFEST);
+        let text = std::fs::read_to_string(&path).ok()?;
+        Some(Self::parse(&text).map_err(|e| format!("{}: {e}", path.display())))
+    }
+
+    fn parse(text: &str) -> Result<Self, String> {
+        let doc: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("not JSON: {e}"))?;
+        match doc.get("schema").and_then(|s| s.as_str()) {
+            Some(FORECAST_SCHEMA) => {}
+            other => return Err(format!(
+                "schema {}, not {FORECAST_SCHEMA}, which this camdl reads",
+                other.map_or_else(|| "missing".to_string(), |s| format!("'{s}'")))),
+        }
+        serde_json::from_value(doc).map_err(|e| e.to_string())
+    }
+
+    /// The summary as `(label, value)` lines.
+    pub(crate) fn lines(&self) -> Vec<(&'static str, String)> {
+        let origin = match &self.origin.date {
+            Some(d) => format!("t = {} ({d})", fmt_time(self.origin.t)),
+            None => format!("t = {}", fmt_time(self.origin.t)),
+        };
+        let horizon = format!("{} ({} {})",
+            self.horizon.as_written, fmt_time(self.horizon.duration), self.calendar.time_unit);
+        let ids = |v: &[usize]| v.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(",");
+        let chains = match &self.chain_selection {
+            None => format!("all ({} posterior draws)", self.n_draws),
+            Some(s) => format!("kept {}, left out {}, of {} ({} posterior draws)",
+                ids(&s.kept), ids(&s.excluded), s.n_total, self.n_draws),
+        };
+        let particles = format!("{} per draw ({})", self.particles.n, self.particles.source.describe());
+        vec![("origin", origin), ("horizon", horizon), ("chains", chains), ("particles", particles)]
+    }
+}
+
 /// Refuse what forecast mode does not support, before any work: the backends
 /// and options of the Stage 5 capability matrix that have no forecast yet.
 pub(crate) fn refuse_unsupported(
@@ -477,7 +571,7 @@ fn write_tables(
             cells.push(ys.len().to_string());
             tsv += &(cells.join("\t") + "\n");
         }
-        written.push(crate::fit::predict::write_tsv(out_dir, "forecast", source, &tsv)?);
+        written.push(crate::fit::predict::write_tsv(out_dir, FORECAST_TABLES_DIR, source, &tsv)?);
     }
 
     // Joint samples: per draw, `FORECAST_SAMPLES_PER_DRAW` particles evenly
@@ -506,7 +600,7 @@ fn write_tables(
             }
         }
     }
-    let path = out_dir.join("forecast-samples.tsv");
+    let path = out_dir.join(FORECAST_SAMPLES_FILE);
     std::fs::write(&path, tsv).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     written.push(path);
     if arms.len() > 1 {
@@ -690,7 +784,7 @@ fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) ->
         "binomial": fc.binomial,
         // What `forecast-samples.tsv` holds, and what the bands are over.
         "samples": {
-            "file": "forecast-samples.tsv",
+            "file": FORECAST_SAMPLES_FILE,
             "per_draw": per_draw,
             "of_particles": fc.n_particles,
             "description": format!(
@@ -765,7 +859,7 @@ fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) ->
                 coupling of the arms' random numbers, which the scenario models do not identify",
         });
     }
-    let path = job.out_dir.join("forecast.json");
+    let path = job.out_dir.join(FORECAST_MANIFEST);
     let text = serde_json::to_string_pretty(&doc).map_err(|e| format!("serializing forecast.json: {e}"))?;
     std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     Ok(path)
@@ -787,6 +881,31 @@ mod tests {
         assert!(msg.contains("posterior draw (chain 1, draw 7), row 40 of draws.tsv at t = 26"), "{msg}");
         let unkeyed = DrawRef { cloud_row: 12, key: None };
         assert_eq!(unkeyed.describe(), "posterior draw at row 12 of draws.tsv");
+    }
+
+    /// gh#1233: `show` reads a forecast's summary back from `forecast.json`,
+    /// with the origin's date when the model has a calendar, and refuses a
+    /// manifest of another schema rather than guessing at its fields.
+    #[test]
+    fn a_forecast_summary_is_read_back_and_another_schema_is_refused() {
+        let doc = |schema: &str| serde_json::json!({
+            "schema": schema,
+            "origin": { "t": 24.0, "date": "2024-01-25" },
+            "horizon": { "as_written": "4 weeks", "duration": 28.0 },
+            "calendar": { "days_per_unit": 1.0, "origin": "2024-01-01", "time_unit": "days" },
+            "n_draws": 40,
+            "particles": { "n": 500, "source": "default" },
+            "chain_selection": { "excluded": [0, 2], "kept": [1], "n_total": 3, "summary": "…" },
+        }).to_string();
+        let s = ForecastSummary::parse(&doc(FORECAST_SCHEMA)).unwrap();
+        assert_eq!(s.lines(), vec![
+            ("origin", "t = 24 (2024-01-25)".to_string()),
+            ("horizon", "4 weeks (28 days)".to_string()),
+            ("chains", "kept 1, left out 0,2, of 3 (40 posterior draws)".to_string()),
+            ("particles", "500 per draw (the default)".to_string()),
+        ]);
+        let e = ForecastSummary::parse(&doc("camdl.forecast/v2")).unwrap_err();
+        assert!(e.contains("'camdl.forecast/v2'") && e.contains(FORECAST_SCHEMA), "{e}");
     }
 
     /// The fit's sampler is the leaf's record; a leaf written before the
