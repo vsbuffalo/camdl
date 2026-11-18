@@ -2245,8 +2245,9 @@ is found by its hashes, not its label, so a renamed model file or a relabelled
 arm is still a hit. `--force` recomputes every cell (the displaced leaves are
 quarantined, not deleted); `--quantities-out` recomputes every cell too, since
 the quantities are a sidecar over the in-memory trajectory. `--dry-run` on a
-multi-cell run prints every cell as `[hit ]` or `[miss]` with its leaf path and
-the counts, and writes nothing.
+multi-cell run prints every cell as `[hit ]` or `[miss]` with its leaf path, or
+`[fail]` with the reason for a cell whose identity does not resolve (it would
+fail when run, and is counted apart), and the counts; it writes nothing.
 
 **Layout.** Five factored levels under `<output-dir>/sims/`:
 

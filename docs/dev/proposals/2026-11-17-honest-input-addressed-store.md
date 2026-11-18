@@ -513,6 +513,22 @@ and of coverage; the cases themselves are regression evidence.
    `cli/src/forcing_extrapolation.rs` (four statics and a reporter callback,
    never read by the engine) is returned to the command as a value. Gated on the
    existing byte-identity fixtures.
+
+   **Done in this step:** `allow_degenerate_rates` is `sim::EvalSettings`, a
+   field of the compiled model, read by every evaluator from the model it
+   evaluates; each command sets it on the models it compiles, and no file that
+   builds an `EvalCtx` changed. `simulate` has a per-cell resolved value,
+   `sim_config::ResolvedCell`: the engine runs from it and returns it, and the
+   written leaf is keyed from that instance, checked against the identity the
+   cache-hit check resolved before the cell ran. **Next:** the
+   forcing-extrapolation policy becomes a per-command policy value held by
+   `EngineSettings` (and each command's equivalent); the run-note reporter
+   routes forcing notes into it through one slot, since `sim::run_notes` is
+   process-wide by design; and the identity readers read the held value, first
+   `pfilter.rs` (its leaf's `allow_forcing_extrapolation`). `--no-licm` is read
+   inside the compile helper every command calls, so it is converted per command
+   in step 4, as each command's resolved configuration gains its compile
+   settings.
 4. `fit run` (classification and cases; its hashing representation is unchanged
    until the follow-up), then `pfilter`, `profile`, `survey`.
 
@@ -642,10 +658,10 @@ and start from a fresh `origin/main` once that work settles.
   to either does not compile until it is carried across), and the engine's
   backend, step and evaluator settings come from the same value. It does not yet
   cover the per-cell inputs — parameter values and table digests, seed, horizon,
-  restored origin state — which `CasSink::cell_resolve` still assembles field by
-  field; a per-cell resolved value carrying them is planned for step 3, with the
-  removal of the process-wide settings. No generated parallel configuration
-  types; no `Identity<T>` or `ContentFile<T>` in this proposal.
+  restored origin state. Step 3 adds them: `sim_config::ResolvedCell` is the
+  per-cell resolved value the engine runs and returns, and the written leaf is
+  keyed from that instance. No generated parallel configuration types; no
+  `Identity<T>` or `ContentFile<T>` in this proposal.
 - Classification is a table per command, keyed by (command, input), checked
   against clap's `CommandFactory` both ways, with a class column in the
   environment table; tests are ordinary Rust. The derive tried in step 1 was
@@ -659,7 +675,11 @@ and start from a fresh `origin/main` once that work settles.
   assumptions are documented.
 - The process-wide evaluator settings are removed after the `simulate`
   conversion and before the other commands, by carrying the flag on the compiled
-  model.
+  model. Step 3 did this for `allow_degenerate_rates`. The forcing-extrapolation
+  policy follows as a per-command policy value held by `EngineSettings`, the
+  run-note reporter routing notes into it through one slot and the identity
+  readers reading the held value; `--no-licm` is converted per command in step
+  4.
 - Environment variables are read in one module and classified by their effect on
   results, with a stability tag (`stable`, `experimental`, `debug`); switches
   that can change results are keyed, alternative evaluation paths included until

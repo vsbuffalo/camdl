@@ -285,12 +285,19 @@ declared not to:
    ([`resolve_loaded_run`](rust:cli::util::resolve_loaded_run)) into the model
    the cell executes, its table digests, seed and restored origin state, and its
    backend, step, sampler and evaluator settings. The engine
-   ([`simulate_compiled`](rust:cli::util::simulate_compiled)) runs from it, and
-   `CasSink::cell_identity` builds the cell's `TrajectoryInput` from it with a
-   destructure that ignores no field, so a field added to the cell does not
-   compile until the identity uses it. The window and the parameter values are
-   read off the resolved model; a cell carrying a backend, step or evaluator
-   setting other than the run's `RunConfig` is refused rather than keyed.
+   ([`simulate_compiled`](rust:cli::util::simulate_compiled)) runs from it and
+   hands the same instance back with the trajectory (`engine::CellResult`);
+   `CasSink::merge_cell` keys the written leaf from it, through
+   `CasSink::cell_identity`, whose destructure binds no field to `_`, so a field
+   added to the cell does not compile there until it is named and used. The
+   window and the parameter values are read off the resolved model. What the
+   identity keys from the invocation instead is checked against the cell: a cell
+   whose backend, step, evaluator settings or sampler differ from the run's
+   `RunConfig`, whose interventions differ from its scenario arm's, or that
+   records extra snapshot times is refused rather than keyed. The cache-hit
+   check has to look a cell up before it runs, so it resolves the cell over the
+   base model; the written leaf's identity is checked against that pre-run one,
+   and a cell whose two identities differ is not written.
 4. **Every input has a case.** `rust/crates/cli/tests/simulate_input_classes.rs`
    runs camdl into fresh stores, in a cleared environment, once per input and
    checks what its class predicts (below); `every_simulate_input_has_a_case`
@@ -300,11 +307,15 @@ The configuration is not hashed as one value: a run has many cells, and each
 part reaches the level of a cell that it belongs to. The exhaustive copy of
 `RunConfig` makes the run-wide part include-by-default, and the exhaustive
 destructure of `ResolvedCell` the per-cell part (the window, the parameter
-values and table digests, the seed and the restored origin state). One limit
-remains: a `SimRun` field that changed the resolved model other than through its
-parameter values, its window or the model level would reach the engine without
-reaching the identity. `ResolvedCell::resolve` names every `SimRun` field, so
-such a field cannot be added without being routed there.
+values and table digests, the seed and the restored origin state). Two limits
+remain. The `model` level is computed once, from the sink's base model, so
+`ir_path`, `integrator` and `obs_anchors` are keyed from the job's run rather
+than each cell's own load; every cell copies them from the job, but a cell
+carrying other values would not be told apart. And a `SimRun` field that changed
+the resolved model other than through its parameter values, its window or its
+interventions would reach the engine without reaching the identity.
+`ResolvedCell::resolve` names every `SimRun` field, but a field named there as
+`field: _` compiles, so the name is a point for review, not a guarantee.
 
 `--allow-degenerate-rates` is not a process-wide setting: it is a field of the
 compiled model
