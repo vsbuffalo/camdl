@@ -12,7 +12,10 @@ pub const VERSION: &str = concat!(
 /// The readable version for display and provenance: `0.1.0+ce78a5e` for a
 /// clean build, `0.1.0+ce78a5e.dirty-3f9c21e0` for one with uncommitted
 /// changes to its build inputs, `0.1.0+nogit-1a2b3c4d` without git. Not run
-/// identity: that is [`ENGINE_ID`].
+/// identity: that is [`ENGINE_ID`]. This, never [`VERSION`], is what a file a
+/// run stores may carry: two builds with one engine identity have different
+/// build dates, so a dated header would make their stored bytes differ for the
+/// same computation.
 pub const VERSION_SHORT: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     "+", env!("CAMDL_SOURCE_LABEL"),

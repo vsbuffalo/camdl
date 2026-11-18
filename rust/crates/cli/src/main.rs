@@ -3506,7 +3506,7 @@ impl WideTrajBlock<'_> {
         use std::io::Write;
         let e = |e: std::io::Error| e.to_string();
         if self.write_header {
-            writeln!(out, "# {}", version::VERSION).map_err(e)?;
+            writeln!(out, "# {}", version::VERSION_SHORT).map_err(e)?;
             self.shape.write_coord_header(out).map_err(e)?;
             // `t t_start t_stop [date date_start date_stop]`: the instant
             // the states are read at and the period the flows cover
@@ -3768,7 +3768,7 @@ impl StreamSink {
                 use std::io::Write;
                 let e = |e: std::io::Error| e.to_string();
                 if write_header {
-                    writeln!(out, "# {}", version::VERSION).map_err(e)?;
+                    writeln!(out, "# {}", version::VERSION_SHORT).map_err(e)?;
                     shape.write_coord_header(out).map_err(e)?;
                     write!(out, "{}", util::TRAJ_TIME_HEADER).map_err(e)?;
                     if dates.is_some() {
