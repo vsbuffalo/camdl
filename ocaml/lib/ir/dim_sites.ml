@@ -76,8 +76,8 @@ type dim_vec = int array
 
 (** The construct a diagnostic concerns. The IR carries no source locations,
     so the compiler looks up the construct's declaration to place the
-    diagnostic. A site without a subject (a forcing argument, a table cell,
-    the balance expression) yields a diagnostic with no location. *)
+    diagnostic. A site without a subject (the balance expression) yields a
+    diagnostic with no location. *)
 type subject =
   | STransition  of string   (** A transition, by expanded name. *)
   | SOde         of string   (** The ODE equation of the named compartment. *)
@@ -89,6 +89,8 @@ type subject =
   | SQuantity    of string   (** A generated quantity. *)
   | SIntervention of string   (** An intervention, event or reactive trigger. *)
   | SLet         of string   (** A typed [let], for its annotation. *)
+  | SForcing     of string   (** A forcing, by expanded name, for its arguments. *)
+  | STable       of string   (** A table, for its inline cells. *)
 
 (** A name whose dimension positions of the model refer to: each key is one
     unknown of the dimension checker's system. *)
@@ -216,7 +218,7 @@ let ode_site acc ({ compartment; derivative } : ode_equation) =
 
 let forcing_sites acc (tf : time_function) =
   let { name; kind; dim = (fp, ft); lag; data_source = _ } = tf in
-  let subject = None in
+  let subject = Some (SForcing name) in
   let value_dim = [| fp; ft |] in
   let need what e want =
     let role = Printf.sprintf "forcing '%s': `%s`" name what in
@@ -309,7 +311,7 @@ let table_sites acc (tbl : table) =
          forcing argument. *)
       let obligation =
         if is_constant_expr e then Exempt Constant_argument else Equals (K_table name) in
-      add acc ~role ~code:"E302" obligation (E e)) values
+      add acc ~subject:(STable name) ~role ~code:"E302" obligation (E e)) values
 
 (* A transfer moves a fraction of a compartment, or a number of people; an
    assignment or an addition is a number of people. *)

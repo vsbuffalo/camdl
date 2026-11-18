@@ -625,6 +625,8 @@ let run_dimcheck_full (d : compile_detail)
       | Some (Dimcheck.SQuantity q)    -> Expander.quantity_loc    d.ctx q
       | Some (Dimcheck.SIntervention i) -> Expander.interv_loc     d.ctx i
       | Some (Dimcheck.SLet l)         -> Expander.let_loc         d.ctx l
+      | Some (Dimcheck.SForcing f)     -> Expander.forcing_loc     d.ctx f
+      | Some (Dimcheck.STable t)       -> Expander.table_loc       d.ctx t
       | Some (Dimcheck.SBinding _) | None -> Diagnostics.no_loc
     in
     let result =

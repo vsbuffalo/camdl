@@ -54,6 +54,8 @@ type subject = Dim_sites.subject =
   | SQuantity    of string   (** A generated quantity. *)
   | SIntervention of string  (** An intervention, event or reactive trigger. *)
   | SLet         of string   (** A typed [let], for its annotation. *)
+  | SForcing     of string   (** A forcing, by expanded name, for its arguments. *)
+  | STable       of string   (** A table, for its inline cells. *)
 
 (** One finding of the checker, before the compiler turns it into a
     located diagnostic. *)
