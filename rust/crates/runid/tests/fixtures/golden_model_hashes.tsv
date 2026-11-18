@@ -1,6 +1,6 @@
 # model_ir_hash of every compiled golden model.
 # Source: the committed *.ir.json files under ocaml/golden and tests/fixtures/*/ir (primary).
-# Recorded at commit: 174942483
+# Recorded at commit: cf2cc92be
 # Regenerate: make update-golden-model-hashes
 file	model_ir_hash
 ocaml/golden/bimolecular.ir.json	a6c900e85c8027caa73b35ec6d7339cc2942c397b2b0550ba3a1bd4032000f03
@@ -28,7 +28,7 @@ ocaml/golden/seir_age_erlang_via.ir.json	a21a8a83999b292c27ef633aebe2adbcdb810b2
 ocaml/golden/seir_age_incidence_sum.ir.json	fcbeffc4ca388a30d4c2a5f44f62a263252a7e503a229e4e1e443c3943546e8d
 ocaml/golden/seir_age_let_projection.ir.json	75d0667781c02673aa9ecc950e8e0329447f62318f3c712fca89cec3155a80c2
 ocaml/golden/seir_age_table_rates.ir.json	3cae2e8579864db03fd6f060947066f99e0566354b04937e2f3343eaaa8c93ee
-ocaml/golden/seir_cross_dim.ir.json	e385d32aa958ce1b9fafcaea0a94c3a8d668de4013a39d815df8b461c7dc6ff2
+ocaml/golden/seir_cross_dim.ir.json	96042d93a36710954b0d2190bc7bc038dc82944d6f2968b9faf8e5620719fc0d
 ocaml/golden/seir_defines_adj.ir.json	47e0ef0d3813aec9c8dec869a4e38fb7af8d783b94b6c8ddb0ee44d0f9357c74
 ocaml/golden/seir_defines_patch.ir.json	7eb5431e2c3cf48f605bc6b9063ad6dc025bb15afb2effcc864f128539032f27
 ocaml/golden/seir_erlang.ir.json	9de0fb5688ba25577e1daa823ddedd658c74631ffbf100247083ea78e39e2038
@@ -56,7 +56,7 @@ ocaml/golden/sir_patches_5.ir.json	862d0c13f967d391205bae48de963ae6a69cf4da2b964
 ocaml/golden/sir_priors.ir.json	fcc70dad35811458f7bfc8508faf16d802d61942adb1db8762e4e67c8fc9d103
 ocaml/golden/sir_reservoir.ir.json	a40358cc956052ae8e4094fd43a86e98489f25cd1b8a15a1a311ef0b2b2ff675
 ocaml/golden/sir_reservoir_mixed.ir.json	b5c8edb652bcb90991f1606888f62669d85b8c1f7a74444b60948807d3a268a3
-ocaml/golden/sir_spatial_sum.ir.json	8cdeff746960e307b4d7b3164ae039981fba27065736780e600a445a47ad4582
+ocaml/golden/sir_spatial_sum.ir.json	b92d9f6310e1f972a44de2e9dbf869a3a478c11b8263dd5212febc701e92d1c4
 ocaml/golden/sir_spatial_where.ir.json	c42f80a33f551ea3e53904af47c827b9daf04702406fd6134b8b6021fe6708a7
 ocaml/golden/sir_two_overdispersed.ir.json	a5b9b8611f360af06e1a2e1ed651b0adb34f6f11e1e156b54a53f49d9e17a6f4
 ocaml/golden/sir_two_patch.ir.json	6061cc1c4b0ca78ddac1d2bbb35182a0c570badf2aeaa90a144747d05b1790ea
