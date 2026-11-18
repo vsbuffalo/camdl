@@ -539,8 +539,9 @@ fires; users can suppress at the CLI level via gh#56's `--allow=L401` flag.
 name is referenced _nowhere_ in the rest of the model — not in any transition
 (stoichiometry, `source`/`dest`, or rate expression), ODE equation, intervention
 action, observation projection or likelihood, model-level `let` binding, initial
-condition, the balance constraint, the identity-tracked (lineage) set, or a
-time-function definition.
+condition, the balance constraint, the identity-tracked (lineage) set, a
+time-function definition, or a generated quantity (`quantities { }`: the series
+it reduces or a threshold of its reduction).
 
 **Why:** A compartment touched by none of these contributes nothing to the
 dynamics, the observation model, or the initial state. It is almost always a
@@ -549,7 +550,7 @@ intentional inert pool. The model still compiles and runs, so this is a lint
 (Warning), not an error.
 
 **Fix:** remove the compartment, or wire it into a transition / init /
-observation as intended.
+observation / quantity as intended.
 
 **False positives (explicitly NOT flagged):** the reference scan is
 comprehensive precisely to keep the false-positive rate at zero. A compartment
@@ -559,7 +560,10 @@ is live if it appears in _any_ position above. In particular:
   `R` nowhere else) is live;
 - a compartment used only in an observation (`CurrentPop`, `CurrentPopSum`, or
   inside a `DerivedExpr` / likelihood expression) is live;
-- a compartment used only as an initial-condition target is live.
+- a compartment used only as an initial-condition target is live;
+- a compartment read only by a generated quantity (`peak_v = max(V)`) is live. A
+  contrast never names a compartment (its operands are a run's quantities and
+  observation streams), so contrasts add nothing to the scan.
 
 `CumulativeFlow`'s string argument names a _flow / transition_, not a
 compartment, and is deliberately excluded from the reference set — it never

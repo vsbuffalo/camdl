@@ -294,6 +294,31 @@ let test_init_target_only_not_dead () =
   Alcotest.(check bool) "R (init-target-only) is not flagged"
     false (has_lint_for "L402" "R" r)
 
+(* gh#1209. R appears only in generated quantities: once as the series a
+   reduction reads, once in a threshold. A quantity is a reported reading of
+   the run, so a compartment it reads is live → NO L402 for R. *)
+let test_quantity_only_not_dead () =
+  let infection_no_r =
+    mk_transition "infection"
+      ~stoich:[("S", -1); ("I", 1)]
+      (param "beta" *. pop "S" *. pop "I") in
+  let base = empty_model
+    ~compartments:(sir_compartments @ [mk_compartment "V"])
+    ~parameters:[mk_param ~kind:(Some Ir.Rate) "beta"]
+    ~transitions:[infection_no_r]
+    () in
+  let q name body : Ir.quantity =
+    { q_name = name; q_stratum = []; q_body = body; q_dimension = None } in
+  let m = { base with quantities = [
+    q "peak_r" (QBReduced { source = QSState (pop "R"); reduce = Some (RValue VMax) });
+    q "onset" (QBReduced { source = QSState (pop "I");
+                           reduce = Some (RTime (FirstAbove (pop "V"))) }) ] } in
+  let r = Lint.check_model m in
+  Alcotest.(check bool) "R (quantity-series-only) is not flagged"
+    false (has_lint_for "L402" "R" r);
+  Alcotest.(check bool) "V (quantity-threshold-only) is not flagged"
+    false (has_lint_for "L402" "V" r)
+
 (* ── Negative control 4: clean SIR yields zero L402 ──────────────────── *)
 
 let test_clean_sir_no_lint () =
@@ -534,6 +559,7 @@ let () =
       Alcotest.test_case "observation-only is not dead"      `Quick test_observation_only_not_dead;
       Alcotest.test_case "derived-observation-only not dead" `Quick test_derived_observation_only_not_dead;
       Alcotest.test_case "init-target-only is not dead"      `Quick test_init_target_only_not_dead;
+      Alcotest.test_case "quantity-only is not dead (gh#1209)" `Quick test_quantity_only_not_dead;
       Alcotest.test_case "clean SIR has no lint"             `Quick test_clean_sir_no_lint;
     ];
     "shared_measurement", [

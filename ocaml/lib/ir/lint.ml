@@ -143,8 +143,9 @@ let rec pops_in_expr (acc : string list) (e : expr) : string list =
    compartment is referenced if it appears in any of: transition
    stoichiometry / metadata source-dest / rate, ODE equations, intervention
    actions, observation projections + likelihoods, model-level bindings,
-   initial conditions, the balance constraint, the identity-tracked list, or
-   time-function definitions. Only a name in none of them is dead. *)
+   initial conditions, the balance constraint, the identity-tracked list,
+   time-function definitions, or generated quantities. Only a name in none of
+   them is dead. *)
 let referenced_compartments (m : model) : (string, unit) Hashtbl.t =
   let refs = Hashtbl.create 64 in
   let add name = Hashtbl.replace refs name () in
@@ -245,6 +246,29 @@ let referenced_compartments (m : model) : (string, unit) Hashtbl.t =
     List.iter add_expr (Autodiff.forcing_coeff_exprs tf.kind)
   ) m.time_functions;
 
+  (* Generated quantities: the state series a quantity reduces, and every
+     expression of its reduction (a threshold, a `value_at` time). A quantity
+     derived from other quantities (QBDerived), or reducing an observation
+     stream, names no compartment. Contrasts name no compartment either: an
+     operand is a run's quantity or observation stream (Ir.CRunMember). *)
+  let add_anchor = function ATime e -> add_expr e | AObs _ -> () in
+  List.iter (fun (q : quantity) ->
+    match q.q_body with
+    | QBDerived _ -> ()
+    | QBReduced { source; reduce } ->
+      (match source with
+       | QSState e -> add_expr e
+       | QSObservation _ -> ());
+      (match reduce with
+       | None | Some RIntegral
+       | Some (RValue (VFinal | VMax | VMin | VMean))
+       | Some (RTime (TimeOfMax | TimeOfMin)) -> ()
+       | Some (RValue (VCountAbove c | VCountBelow c))
+       | Some (RTime (FirstAbove c | FirstBelow c | LastAbove c | LastBelow c)) ->
+         add_expr c
+       | Some (RValue (VValueAt a)) -> add_anchor a)
+  ) m.quantities;
+
   refs
 
 (* ── Lint L402: dead compartment ────────────────────────────────────────── *)
@@ -269,7 +293,7 @@ let check_dead_compartments (m : model) : diagnostic list =
         Printf.sprintf "compartment '%s' is declared but never used" name;
       detail = None;
       hint =
-        Some "remove it, or wire it into a transition / init / observation";
+        Some "remove it, or wire it into a transition / init / observation / quantity";
       subject = Some (SCompartment name);
     }
   ) dead
