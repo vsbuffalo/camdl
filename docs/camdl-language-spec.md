@@ -3381,8 +3381,9 @@ These are the only keys an observation block takes — `columns`, `covers`,
 `projected`, `emit_schedule` and the `~` measurement — and each appears at most
 once. The projected value is written under the key `projected` and read by that
 name in the `~` line; any other key assigned a value (`foo = incidence(…)`,
-`projeted = …`) is an error (**E121**) with a fix-it to `projected`, and a key
-given twice is an error (**E122**).
+`projeted = …`) is an error (**E121**) — with a fix-it to `projected` when the
+block has no `projected` line, and otherwise a hint listing the accepted keys —
+and a key given twice is an error (**E122**).
 
 ### 12.1 Projections
 
