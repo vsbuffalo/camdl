@@ -420,7 +420,11 @@ pub(crate) fn profile_if2_config(
 }
 
 pub fn cmd_profile(a: &crate::args::ProfileArgs) {
-    crate::forcing_extrapolation::set_allowed(a.inference.forcing_extrapolation.allow_forcing_extrapolation);
+    // The forcing-extrapolation policy this command's evaluations run under
+    // and its store writes record, installed for the rest of the command.
+    let forcing =
+        crate::forcing_extrapolation::ForcingPolicy::new(a.inference.forcing_extrapolation.allow_forcing_extrapolation);
+    let _forcing_route = forcing.install();
     // profile has no `--no-color`: its painters follow the environment and
     // whether each stream is a terminal.
     let out = crate::out::Out::new(false);
@@ -1696,7 +1700,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         priors: &priors_blob,
         objective,
         training_rows: holdout_training_rows.as_deref(),
-        allow_forcing_extrapolation: crate::forcing_extrapolation::allowed(),
+        allow_forcing_extrapolation: forcing.allowed(),
         allow_degenerate_rates,
     }, &[]).unwrap_or_else(|e| {
         out.fail(format!("error: profile base identity: {e}"));
@@ -2329,7 +2333,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         };
         let calendar = ir::caltime::CalendarAxis::from_model(&model)
             .unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        let meta = crate::resolve::RecordMeta::new(&ir_version_str, &ir_path, None, calendar)
+        let meta = crate::resolve::RecordMeta::new(&ir_version_str, &ir_path, None, calendar, &forcing)
             .with_deps(profile_deps.clone());
         let write = match crate::resolve::begin_resolved_write(
             &store, &root, &resolved_artifact, &meta,

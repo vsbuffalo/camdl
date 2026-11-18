@@ -120,7 +120,11 @@ struct ResolvedSurveyInputs {
 // ─── cmd_survey entry point ──────────────────────────────────────────────────
 
 pub fn cmd_survey(a: &crate::args::SurveyArgs) {
-    crate::forcing_extrapolation::set_allowed(a.forcing_extrapolation.allow_forcing_extrapolation);
+    // The forcing-extrapolation policy this command's evaluations run under
+    // and its store writes record, installed for the rest of the command.
+    let forcing =
+        crate::forcing_extrapolation::ForcingPolicy::new(a.forcing_extrapolation.allow_forcing_extrapolation);
+    let _forcing_route = forcing.install();
     // survey has no `--no-color`: its painters follow the environment and
     // whether each stream is a terminal.
     let mut out = crate::out::Out::new(false);
@@ -354,7 +358,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
         eval_particles:  a.eval_particles as u32,
         eval_replicates: a.eval_replicates as u32,
         objective,
-        allow_forcing_extrapolation: crate::forcing_extrapolation::allowed(),
+        allow_forcing_extrapolation: forcing.allowed(),
         allow_degenerate_rates,
         training_rows:   resolved.training_rows.as_deref(),
         bounds:          &bounds_vec,
@@ -435,7 +439,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     let calendar = ir::caltime::CalendarAxis::from_model(&resolved.compiled.model)
         .unwrap_or_else(|e| crate::out::detached().fail(format!("error: {e}")));
     let meta = crate::resolve::RecordMeta::new(
-        &ir_version_str, &model_path_str, label_arg.clone(), calendar);
+        &ir_version_str, &model_path_str, label_arg.clone(), calendar, &forcing);
     let write = match crate::resolve::begin_resolved_write(
         &store, &output_root, &resolved_artifact, &meta,
         crate::resolve::WriteMode::Streaming,
@@ -453,7 +457,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     // reports while the survey runs marks the leaf `failed` (`Out::error`).
     out.hold_claim(write, "survey");
     // A forcing refused from here on fails this claim, through `out`.
-    let _refusal_deferred = crate::forcing_extrapolation::defer_while_claimed();
+    let _refusal_deferred = forcing.defer_while_claimed();
     let landscape_path = staging.join("landscape.tsv");
     let summary_path = staging.join("summary.json");
     let html_path = staging.join("landscape.html");
@@ -677,7 +681,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     // `stored` is said once it is true: after every point is evaluated and
     // the leaf is committed. A leaf that did not commit is not stored, and
     // the survey fails rather than exiting 0 on a warning.
-    if let Some(refusal) = crate::forcing_extrapolation::refused() {
+    if let Some(refusal) = forcing.refused() {
         out.fail(refusal);
     }
     let write = out.take_claim().expect("the claim is held from the claim to here");

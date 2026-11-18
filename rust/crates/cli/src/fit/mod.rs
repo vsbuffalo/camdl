@@ -313,11 +313,11 @@ pub(crate) fn write_diagnostics_then_fail(
 /// method through this one function is what makes "a method always leaves a
 /// terminal record" true rather than nearly true.
 /// Stop a method whose run was refused for evaluating a forcing outside its
-/// range ([`crate::forcing_extrapolation::refused`]): its claim is failed with
+/// range ([`crate::out::Out::forcing_refusal`]): its claim is failed with
 /// the refusal. Polled once per iteration by the samplers' progress callbacks
 /// and once before the finalize, which covers every method.
 pub(crate) fn stop_if_refused(out: &crate::out::Out) {
-    if let Some(message) = crate::forcing_extrapolation::refused() {
+    if let Some(message) = out.forcing_refusal() {
         abandon_method(out, message);
     }
 }
@@ -450,7 +450,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     if a.forcing_extrapolation.allow_forcing_extrapolation {
         config.problem.config.allow_forcing_extrapolation = true;
     }
-    crate::forcing_extrapolation::set_allowed(config.problem.config.allow_forcing_extrapolation);
+    // The policy every model this fit evaluates runs under, and every record
+    // it writes names: installed for the rest of the command.
+    let forcing =
+        crate::forcing_extrapolation::ForcingPolicy::new(config.problem.config.allow_forcing_extrapolation);
+    let _forcing_route = forcing.install();
 
     // gh#656: `--emit-every` reaches exactly one thing on this command — the
     // `[synthetic]` generator, which is the only fit path where the emission
@@ -1588,7 +1592,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         let calendar = ir::caltime::CalendarAxis::from_model(&model)
             .unwrap_or_else(|e| out.fail(format!("error: {e}")));
         let meta = crate::resolve::RecordMeta::new(
-            &ir_version_str, &sweep_config.model.camdl, validated_label.clone(), calendar)
+            &ir_version_str, &sweep_config.model.camdl, validated_label.clone(), calendar, &forcing)
             .with_deps(deps.clone());
         // Reuse decision through the one policy seam. A resumed run is no
         // exception: its identity carries the longer chain's length and a dep
@@ -1707,7 +1711,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // leaf `failed` before the process exits (`Out::error`).
         out.hold_claim(write, method_name);
         // A forcing refused from here on fails this claim, through `out`.
-        let _refusal_deferred = crate::forcing_extrapolation::defer_while_claimed();
+        let _refusal_deferred = forcing.defer_while_claimed();
 
         // gh#147 (M3.2): seed the resumed leaf with the base chain's files —
         // its resume state and the rows it has written — copied from the

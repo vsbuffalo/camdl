@@ -227,6 +227,15 @@ impl Out {
             Some(HeldClaim { claim, operation: operation.into() });
     }
 
+    /// The refusal the held claim's command kept for it
+    /// ([`ForcingPolicy::refused`](crate::forcing_extrapolation::ForcingPolicy::refused)):
+    /// its run evaluated a forcing outside its range without the override.
+    /// `None` when nothing was refused or no claim is held.
+    pub fn forcing_refusal(&self) -> Option<String> {
+        let held = self.claim.lock().unwrap_or_else(|e| e.into_inner());
+        held.as_ref().and_then(|h| h.claim.forcing().refused())
+    }
+
     /// Hand back the claim [`hold_claim`](Self::hold_claim) took, for the
     /// run to finalize.
     pub fn take_claim(&mut self) -> Option<crate::resolve::ResolvedClaim> {
@@ -612,7 +621,8 @@ mod tests {
                 display_inputs: serde_json::Value::Null,
             };
             let meta = crate::resolve::RecordMeta::new("0.0", "m.camdl", None,
-                ir::caltime::CalendarAxis::parse("days", None).unwrap());
+                ir::caltime::CalendarAxis::parse("days", None).unwrap(),
+                &crate::forcing_extrapolation::ForcingPolicy::new(false));
             match crate::resolve::begin_resolved_write(&store, root.path(), &artifact, &meta,
                 crate::resolve::WriteMode::Streaming).unwrap()
             {

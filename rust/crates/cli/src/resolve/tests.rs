@@ -1039,7 +1039,8 @@ fn a_build_with_an_incomplete_engine_identity_never_reads_a_stored_leaf() {
     let root = crate::test_support::unique_temp_dir("fail_closed_reuse");
     let store = FsCasStore::new(&root);
     let calendar = ir::caltime::CalendarAxis::parse("days", None).unwrap();
-    let meta = RecordMeta::new("0.7", "sir.camdl", None, calendar);
+    let meta = RecordMeta::new("0.7", "sir.camdl", None, calendar,
+        &crate::forcing_extrapolation::ForcingPolicy::new(false));
     let mut files = runid::Artifacts::new();
     files.insert("traj.tsv", b"time\n0\n".to_vec());
     begin_resolved_write(&store, &root, &artifact, &meta, WriteMode::Atomic(files)).unwrap();

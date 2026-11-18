@@ -148,7 +148,11 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // whether each stream is a terminal.
     let out = crate::out::Out::new(false);
     let _eval_stats_guard = crate::util::EvalStatsReportGuard::start();  // gh#audit-H5
-    crate::forcing_extrapolation::set_allowed(a.inference.forcing_extrapolation.allow_forcing_extrapolation);
+    // The forcing-extrapolation policy this command's evaluations run under
+    // and its store writes record, installed for the rest of the command.
+    let forcing =
+        crate::forcing_extrapolation::ForcingPolicy::new(a.inference.forcing_extrapolation.allow_forcing_extrapolation);
+    let _forcing_route = forcing.install();
     let ir_path = a.model.to_string_lossy().into_owned();
     let n_particles = a.particles;
     let seed = a.inference.seed;
@@ -737,7 +741,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             obs_block: "",
             flow_indices: &flow_indices,
             objective,
-            allow_forcing_extrapolation: crate::forcing_extrapolation::allowed(),
+            allow_forcing_extrapolation: forcing.allowed(),
             allow_degenerate_rates: eval.allow_degenerate_rates,
             training_rows: training_cut.as_ref().and_then(TrainingCut::identity),
             binomial: smc_config.binomial,
@@ -783,7 +787,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         };
         let calendar = ir::caltime::CalendarAxis::from_model(&model)
             .unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        let meta = crate::resolve::RecordMeta::new(&ir_version_str, &ir_path, None, calendar);
+        let meta = crate::resolve::RecordMeta::new(&ir_version_str, &ir_path, None, calendar, &forcing);
         let write = match crate::resolve::begin_resolved_write(
             &store, &root, &resolved_artifact, &meta, crate::resolve::WriteMode::Streaming,
         ) {

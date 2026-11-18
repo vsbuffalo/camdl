@@ -121,6 +121,10 @@ pub(crate) struct CasSink {
     /// runs, resolved from its own `SimRun` by `sim_config::ResolvedCell::resolve`,
     /// the resolution the engine makes (gh#583).
     pub(crate) sim: std::sync::Arc<crate::sim_config::ResolvedSimConfig>,
+    /// The engine's settings, derived once from `sim`
+    /// (`ResolvedSimConfig::engine_settings`): what each cell is checked
+    /// against, and the forcing policy each leaf's record names.
+    pub(crate) engine: crate::sim_config::EngineSettings,
     /// Absolute `<output>/sims` subtree.
     pub(crate) runs_dir: String,
     pub(crate) obs_enabled: bool,
@@ -253,7 +257,7 @@ impl CasSink {
         let crate::sim_config::ResolvedCell {
             run, tables, seed, init_state, backend, dt, binomial, eval, required_output_times,
         } = cell;
-        let engine = self.sim.engine_settings();
+        let engine = &self.engine;
         if *backend != engine.backend || dt.to_bits() != engine.dt.to_bits() || *eval != engine.eval {
             return Err(format!(
                 "internal error: a cell runs on backend {backend:?} at dt = {dt} with {eval:?}, \
@@ -670,7 +674,8 @@ impl crate::engine::RunSink for CasSink {
         let calendar = ir::caltime::CalendarAxis::from_model(&self.sim.model.ir)
             .map_err(|e| e.to_string())?;
         let mut meta = crate::resolve::RecordMeta::new(
-            ir::IR_VERSION.trim(), self.sim.model.path.clone(), self.label.clone(), calendar)
+            ir::IR_VERSION.trim(), self.sim.model.path.clone(), self.label.clone(), calendar,
+            &self.engine.forcing)
             .with_deps(self.fit_dep.clone())
             .with_children(children.clone());
         // The engine identity the model level folded, so a leaf keyed by an
@@ -1452,19 +1457,21 @@ mod tests {
             model, ir::IR_VERSION.trim(), version::ENGINE_ID, "model.ir.json",
         );
         resolved_model.stem = "sir".to_string();
+        let sim = std::sync::Arc::new(crate::sim_config::ResolvedSimConfig {
+            model: resolved_model,
+            run,
+            arms: vec![ResolvedEntry {
+                name: "baseline".to_string(),
+                route: None,
+                enable: vec![],
+                disable: vec![],
+                params: HashMap::new(),
+                scale: Vec::new(),
+            }],
+        });
         CasSink {
-            sim: std::sync::Arc::new(crate::sim_config::ResolvedSimConfig {
-                model: resolved_model,
-                run,
-                arms: vec![ResolvedEntry {
-                    name: "baseline".to_string(),
-                    route: None,
-                    enable: vec![],
-                    disable: vec![],
-                    params: HashMap::new(),
-                    scale: Vec::new(),
-                }],
-            }),
+            engine: sim.engine_settings(),
+            sim,
             runs_dir: runs_dir.to_string(),
             obs_enabled: false,
             emit_every: None,
