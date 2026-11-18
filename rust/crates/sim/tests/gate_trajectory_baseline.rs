@@ -18,6 +18,8 @@
 //! Mirrors smoke_all_golden.rs (discovery, backend matrix, capability-skip) but
 //! asserts trajectory identity, not just invariants.
 
+mod env_switches;
+
 use std::path::PathBuf;
 use sim::{
     compiled_model::CompiledModel,
@@ -469,6 +471,7 @@ const ODE_STATE_BASELINES: &[(&str, u64)] = &[
 
 #[test]
 fn gate_golden_trajectories_are_byte_identical() {
+    env_switches::from_env();
     // Match smoke_all_golden: legacy degenerate-rate mode + no interventions, so
     // the baseline behavior is well-defined for the whole corpus.
     sim::eval_stats::set_allow_degenerate_rates(true);
@@ -551,6 +554,7 @@ fn gate_golden_trajectories_are_byte_identical() {
 
 #[test]
 fn gate_ode_state_only_hash_is_stable() {
+    env_switches::from_env();
     // Mirror the full gate's setup so the trajectory is the SAME run, then hash
     // state only (int+real, no flows). See `ode_state_hash`.
     sim::eval_stats::set_allow_degenerate_rates(true);

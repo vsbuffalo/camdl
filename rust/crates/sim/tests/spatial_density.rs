@@ -3,6 +3,8 @@
 //!
 //! If this fails, the density function doesn't mirror step_one.
 
+mod env_switches;
+
 use std::sync::Arc;
 use sim::compiled_model::CompiledModel;
 use sim::inference::pgas::{simulate_reference, complete_data_loglik, log_transition_density_substep, build_obs_at_substep};
@@ -21,6 +23,7 @@ fn load_model(path: &str) -> ir::Model {
 /// should be finite at its own params.
 #[test]
 fn test_density_matches_step_one_sir() {
+    env_switches::from_env();
     let model = load_model("../../../ocaml/golden/sir_basic.ir.json");
     let mut model = model;
     for p in &mut model.parameters {
@@ -61,6 +64,7 @@ fn test_density_matches_step_one_sir() {
 /// should be finite at its own params.
 #[test]
 fn test_density_matches_step_one_sir_demography() {
+    env_switches::from_env();
     // gh#audit-C6 / S1: model contains rate expressions with stratum-
     // empty divisors (legacy silent-zero); test asserts density-vs-
     // step_one parity, not numerical-collapse semantics — keep
@@ -106,6 +110,7 @@ fn test_density_matches_step_one_sir_demography() {
 /// Test: complete_data_loglik on a 2-patch model.
 #[test]
 fn test_density_matches_step_one_two_patch() {
+    env_switches::from_env();
     let path = "../../../ocaml/golden/sir_two_patch.ir.json";
     let model = match std::fs::read_to_string(path) {
         Ok(json) => match ir::from_str(&json) {
@@ -139,6 +144,7 @@ fn test_density_matches_step_one_two_patch() {
 /// This is the exact pattern that caused -inf when testing camdl-vignettes.
 #[test]
 fn test_density_matches_step_one_polio_spatial_5() {
+    env_switches::from_env();
     // gh#audit-C6 / S1: spatial model with empty patches; legacy
     // silent-zero needed for parity assertion. See companion comment
     // on test_density_matches_step_one_sir_demography.
@@ -190,7 +196,7 @@ fn test_density_matches_step_one_polio_spatial_5() {
         ll, trajectory.substeps.len());
     assert!(ll.is_finite(),
         "spatial: LL should be finite at own params, got {}. \
-         Run with CAMDL_TRACE_STEPS=1 for diagnostics.", ll);
+         Run with CAMDL_TRACE_STEPS=1 for diagnostics (read by `env_switches::from_env`).", ll);
 }
 
 /// Test: SEIR spatial 5-patch model (reproduced when testing
@@ -199,6 +205,7 @@ fn test_density_matches_step_one_polio_spatial_5() {
 /// this test fails, the underlying bug has returned.
 #[test]
 fn test_density_seir_spatial_5_vignette_regression() {
+    env_switches::from_env();
     // Uses the golden model with iota, overdispersion, seasonal forcing,
     // and high R0 — the exact combination that triggers spatial density bugs.
     // See docs/dev/incidents/2026-04-07-spatial-pgas-neg-inf.md.
@@ -304,6 +311,7 @@ fn test_density_seir_spatial_5_vignette_regression() {
 /// Runs 100 different seeds to catch rare stochastic edge cases.
 #[test]
 fn test_density_downstream_multi_seed() {
+    env_switches::from_env();
     let path = "../../../ocaml/golden/seir_spatial_5_inference.ir.json";
     let model = load_model(path);
     let mut model = model;
@@ -382,6 +390,7 @@ fn test_density_downstream_multi_seed() {
 /// infection_p5 flow is 0 (not misattributed from importation).
 #[test]
 fn test_step_one_zero_infection_flow() {
+    env_switches::from_env();
     use sim::chain_binomial::{StepScratch, step_one};
 
     let path = "tests/fixtures/seir_spatial_5.ir.json";
