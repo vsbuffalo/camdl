@@ -88,12 +88,13 @@ pub(crate) fn row_digest(rows: &[ObservedRow]) -> Result<RowDigest, String> {
                 h.write_u8(1);
                 h.write_f64_bits(finite(v, "observed value")?.get());
             }
-            // A row read from a file holds no held-out cell (D79 cells are
-            // made for the filter, from rows); were one hashed, it is tagged
-            // apart so it never digests equal to an observed row.
+            // A row read from a file holds an observed value or NA; held-out
+            // cells (D79) are made for the filter from rows and never stored
+            // in one, so a row digest refuses one rather than hash it.
             Some(sim::inference::ObsCell::HeldOut(v)) => {
-                h.write_u8(2);
-                h.write_f64_bits(finite(v, "held-out value")?.get());
+                return Err(format!(
+                    "internal error: a held-out cell ({v}) reached the row digest; rows \
+                     read from a file hold observed values or NA"));
             }
         }
         let mut aux: Vec<&(String, f64)> = row.aux.iter().collect();
@@ -196,7 +197,10 @@ impl TrainingPartition {
         rows: &BTreeMap<String, Vec<ObservedRow>>,
         at: f64,
     ) -> Result<Self, PartitionError> {
-        let observed = |rs: &[ObservedRow]| rs.iter().filter(|r| r.cell.is_some()).count();
+        let observed = |rs: &[ObservedRow]| rs.iter().filter(|r| match r.cell {
+            Some(sim::inference::ObsCell::Scalar(_)) => true,
+            Some(sim::inference::ObsCell::HeldOut(_)) | None => false,
+        }).count();
         let mut streams = Vec::with_capacity(rows.len());
         let mut held_out = 0usize;
         for (stream, rs) in rows {
@@ -362,7 +366,10 @@ pub(crate) fn observed_window<'a>(rows: impl IntoIterator<Item = &'a ObservedRow
     -> Option<(f64, f64)>
 {
     rows.into_iter()
-        .filter(|r| r.cell.is_some())
+        .filter(|r| match r.cell {
+            Some(sim::inference::ObsCell::Scalar(_)) => true,
+            Some(sim::inference::ObsCell::HeldOut(_)) | None => false,
+        })
         .map(|r| (r.measures.start(), r.measures.end()))
         .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)))
 }
@@ -409,6 +416,20 @@ mod tests {
 
     fn one(rows: Vec<ObservedRow>) -> BTreeMap<String, Vec<ObservedRow>> {
         BTreeMap::from([("cases".to_string(), rows)])
+    }
+
+    /// Rows read from a file hold observed values or NA, never a held-out
+    /// cell (D79); the row digest refuses one rather than hash it.
+    #[test]
+    fn the_row_digest_refuses_a_held_out_cell() {
+        let mut rows = rows_of("held_out_digest", Covers::Until { offset: 0.0, span: 1.0 },
+            "time\tcases\n1\t3\n2\tNA\n");
+        assert!(rows.iter().all(|r| !matches!(r.cell, Some(sim::inference::ObsCell::HeldOut(_)))),
+            "the loader makes no held-out cell");
+        assert!(row_digest(&rows).is_ok());
+        rows[0].cell = Some(sim::inference::ObsCell::HeldOut(3.0));
+        let err = row_digest(&rows).unwrap_err();
+        assert!(err.contains("held-out cell"), "{err}");
     }
 
     const DAY: Covers = Covers::From { offset: 0.0, span: 1.0 };

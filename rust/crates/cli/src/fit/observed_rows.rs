@@ -130,8 +130,12 @@ pub(crate) fn observed_rows(
     };
     let design = aux.clone();
     for (cell, row_aux) in cells.iter().zip(aux.iter_mut()) {
-        if cell.is_none() {
-            row_aux.clear();
+        match cell {
+            Some(ObsCell::Scalar(_)) => {}
+            // The loader makes observed values or holes, never held-out
+            // cells; either way a row the filter does not assimilate keeps
+            // no aux (its design stays in `design`).
+            Some(ObsCell::HeldOut(_)) | None => row_aux.clear(),
         }
     }
     assemble(obs, path, opts, labels, written, cells, aux, design)

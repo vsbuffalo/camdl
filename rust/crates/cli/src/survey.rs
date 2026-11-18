@@ -1351,7 +1351,12 @@ fn load_stream_rows(
     let siblings: Vec<&ir::observation::ObservationModel> =
         model.observations.iter().filter(|o| o.source == obs.source).collect();
     let rows = crate::fit::observed_rows::observed_rows(path, obs, &siblings, opts)?;
-    if let Some(r) = rows.iter().find(|r| r.cell.is_none()) {
+    // A survey simulates every row; a row it cannot assimilate, an `NA` (a
+    // file row holds no held-out cell), is refused.
+    if let Some(r) = rows.iter().find(|r| match r.cell {
+        Some(sim::inference::ObsCell::Scalar(_)) => false,
+        Some(sim::inference::ObsCell::HeldOut(_)) | None => true,
+    }) {
         let mut read: Vec<String> = vec![obs.scored.clone()];
         read.extend(crate::pfilter::stream_aux_columns(obs));
         return Err(format!(
