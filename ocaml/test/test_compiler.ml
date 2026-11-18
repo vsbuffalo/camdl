@@ -3681,6 +3681,63 @@ let test_scenario_compose_unknown_scenario_is_e269 () =
     }
   |})
 
+(* gh#1203: `enable = sia` without brackets used to enable nothing (any
+   non-list was read as []), the same for `disable` and `compose`, and a
+   non-name list member was dropped. Each is now E118 with the bracketed
+   form in the hint. *)
+let scenario_shape_src fields =
+  scenario_validation_boilerplate ^ Printf.sprintf {|
+    scenarios {
+      base { set = { x = 0.3 } }
+      arm { %s }
+    }
+  |} fields
+
+let test_scenario_bare_enable_is_e118 () =
+  compile_expect_error_code ~code:"E118" ~contains:"enable = [sia]"
+    (scenario_shape_src "enable = sia")
+
+let test_scenario_bare_disable_is_e118 () =
+  compile_expect_error_code ~code:"E118" ~contains:"disable = [sia]"
+    (scenario_shape_src "disable = sia")
+
+let test_scenario_bare_compose_is_e118 () =
+  compile_expect_error_code ~code:"E118" ~contains:"compose = [base]"
+    (scenario_shape_src "compose = base")
+
+let test_scenario_list_non_name_is_e118 () =
+  compile_expect_error_code ~code:"E118" ~contains:"enable"
+    (scenario_shape_src "enable = [sia, 3]")
+
+(* The diagnostic is located on the line of the offending field. *)
+let test_scenario_bare_enable_is_located () =
+  let src = scenario_shape_src "enable = sia" in
+  Diagnostics.json_errors_mode := true;
+  let r = Compiler.compile ~name:"test_err" src in
+  Diagnostics.json_errors_mode := false;
+  match r with
+  | Ok _ -> Alcotest.fail "expected E118"
+  | Error e ->
+    let expected =
+      let lines = String.split_on_char '\n' src in
+      let rec find i = function
+        | [] -> None
+        | l :: rest -> if contains_substring ~needle:"enable = sia" l then Some i
+                       else find (i + 1) rest in
+      find 1 lines in
+    Alcotest.(check (option int)) "E118 on the `enable` line"
+      expected (line_of_code ~code:"E118" e)
+
+(* gh#1203: `x = { y = 1 }` (a brace block under a key other than set/scale)
+   used to set x to 0. Now E120, naming the accepted keys. *)
+let test_scenario_unknown_block_key_is_e120 () =
+  compile_expect_error_code ~code:"E120" ~contains:"set = { x = "
+    (scenario_shape_src "x = { y = 1 }")
+
+let test_scenario_bracketed_lists_still_compile () =
+  ignore (compile_expect_ok
+    (scenario_shape_src "enable = [sia]\n disable = []\n compose = [base]"))
+
 let test_scenario_enable_known_intervention_compiles () =
   let _m = compile_expect_ok
     (scenario_validation_boilerplate ^ {|
@@ -18249,6 +18306,13 @@ let () =
       Alcotest.test_case "E268 scenario scale typo"    `Quick test_scenario_scale_unknown_param_is_e268;
       Alcotest.test_case "E269 scenario compose typo"  `Quick test_scenario_compose_unknown_scenario_is_e269;
       Alcotest.test_case "E291 scenario named fitted reserved" `Quick test_scenario_named_fitted_is_reserved_e291;
+      Alcotest.test_case "gh#1203 bare enable → E118"   `Quick test_scenario_bare_enable_is_e118;
+      Alcotest.test_case "gh#1203 bare disable → E118"  `Quick test_scenario_bare_disable_is_e118;
+      Alcotest.test_case "gh#1203 bare compose → E118"  `Quick test_scenario_bare_compose_is_e118;
+      Alcotest.test_case "gh#1203 non-name member → E118" `Quick test_scenario_list_non_name_is_e118;
+      Alcotest.test_case "gh#1203 E118 located"          `Quick test_scenario_bare_enable_is_located;
+      Alcotest.test_case "gh#1203 `x = { … }` → E120"   `Quick test_scenario_unknown_block_key_is_e120;
+      Alcotest.test_case "gh#1203 bracketed lists compile" `Quick test_scenario_bracketed_lists_still_compile;
       Alcotest.test_case "scenario enable known name"  `Quick test_scenario_enable_known_intervention_compiles;
       Alcotest.test_case "gh#130 enable expanded instance"  `Quick test_scenario_enable_expanded_instance_compiles;
       Alcotest.test_case "gh#130 disable expanded instance" `Quick test_scenario_disable_expanded_instance_compiles;

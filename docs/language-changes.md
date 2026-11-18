@@ -45,6 +45,27 @@ one. A model that compiled before kept the later one, so deleting the earlier
 one keeps its behaviour.
 
 **Diagnostic.** ``error[E140]: `simulate { }` is declared twice``.
+## 2026-11-17 — scenario lists need brackets; only `set`/`scale` take a block
+
+**What.** In a scenario, `enable`, `disable` and `compose` must be bracketed
+lists of names. Before, any other value read as the empty list: `enable = boost`
+enabled nothing, `disable = boost` left the intervention on, and a member that
+was not a name (`enable = [boost, 3]`) was dropped, all without a diagnostic. A
+`{ ... }` block under a key other than `set` or `scale` (`gamma = { x = 1 }`)
+set that name to 0; it is now rejected.
+
+**Migration.**
+
+```
+enable  = boost            →  enable  = [boost]
+compose = with_sia         →  compose = [with_sia]
+gamma   = { x = 1 }        →  set = { gamma = 0.2 }   (or scale = { gamma = 1.5 })
+```
+
+**Diagnostic.** E118, "scenario `enable` takes a bracketed list, even for one
+name", with a fix-it to the bracketed form; E120, "`gamma = { ... }` is not a
+scenario field".
+
 ## 2026-11-17 — constant destination weights must sum to 1
 
 **What.** A destination split `X --> { A : w_A, B : w_B } @ r` emits one flow

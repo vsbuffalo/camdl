@@ -5296,6 +5296,12 @@ compose = [SCENARIO, ...]          apply patches in sequence
 simulate { to = EXPR }             override only the end time (§17.2); `to` is required, and from/dt/integrator are model-wide, not per-scenario (E106)
 ```
 
+`enable`, `disable` and `compose` take a bracketed list of names even for one
+name: `enable = sia` is an error (**E118**, with a fix-it to `enable = [sia]`),
+as is a list member that is not a name. `set` and `scale` are the only fields
+that take a `{ ... }` block; `beta = { ... }` is an error (**E120**) whose hint
+shows `set = { beta = ... }`.
+
 A scenario may override the end time and nothing else. The rule is that a
 scenario overlays what leaves the **trajectory prefix** intact: extending or
 truncating `to` never re-tiles `[from, old_to]`, so two scenarios differing only
@@ -6892,6 +6898,8 @@ authoritative list is whatever `ocaml/lib/compiler/` and `ocaml/lib/ir/` emit.
 | E001 | Error   | Parse / lexer syntax error (including using a keyword as a name)                           |
 | E100 | Error   | Reserved name used as a declaration; unknown index value; undeclared name/function         |
 | E140 | Error   | A singleton declaration (`time_unit`, `description`, `origin`, `simulate`, `output`, `balance`) written twice |
+| E118 | Error   | A scenario `enable`/`disable`/`compose` value is not a bracketed list of names — write `enable = [NAME]` (§17.1) |
+| E120 | Error   | A scenario field other than `set`/`scale` written as a `{ ... }` block (§17.1) |
 | E200 | Error   | Undeclared compartment or parameter referenced in expression                              |
 | E202 | Error   | Table arity / shape mismatch (e.g. `table '%s' expects %d indices`)                        |
 | E228 | Error   | `time_unit` is not a duration unit (`'per_day` / `'count` / `'ratio`) — see §2               |
