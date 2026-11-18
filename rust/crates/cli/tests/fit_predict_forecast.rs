@@ -392,3 +392,29 @@ fn each_written_joint_sample_is_one_particles_trajectory() {
     assert!((0..n).any(|i| weeks.iter().any(|&t| mixed(i, t) != 1000.0)),
         "pairing one sample's S with another's I and R must break the sum");
 }
+
+/// D86: a forecast from a chain selection carries the same `chain_selection`
+/// block as `predictive.json`, with its sentence; the full cloud's carries
+/// none.
+#[test]
+fn a_forecast_from_a_chain_selection_records_it() {
+    let manifest = |extra: &[&str]| -> serde_json::Value {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        fit(dir, PMMH, "");
+        let mut args = vec!["fit", "predict", "--fit", "fit.toml", "--horizon", "1 weeks", "--n-draws", "2"];
+        args.extend_from_slice(extra);
+        let out = run(dir, &args);
+        assert!(out.status.success(), "fit predict: {}", stderr(&out));
+        serde_json::from_str(&std::fs::read_to_string(forecast_dir(dir).join("forecast.json")).unwrap()).unwrap()
+    };
+    assert!(manifest(&[]).get("chain_selection").is_none(), "the full cloud records no selection");
+    let m = manifest(&["--exclude-chains", "1"]);
+    let cs = &m["chain_selection"];
+    assert_eq!((&cs["excluded"], &cs["kept"], &cs["n_total"]),
+        (&serde_json::json!([1]), &serde_json::json!([0]), &serde_json::json!(2)));
+    assert_eq!(cs["summary"].as_str().unwrap(),
+        "chain(s) 1 left out by the chain selection: the draws are from chain(s) 0 only (1 of 2 \
+         chains). Leaving chains out biases the posterior toward the retained chains' mode.");
+    assert!(m["draws"].as_array().unwrap().iter().all(|d| d["chain"] == 0), "the draws are chain 0's");
+}

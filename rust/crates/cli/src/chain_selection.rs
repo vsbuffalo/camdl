@@ -424,14 +424,31 @@ fn csv<'a>(ids: impl Iterator<Item = &'a ChainIndex>) -> String {
 }
 
 impl SubsetInfo {
-    /// The JSON provenance object stamped into `predictive.json` and any other
-    /// artifact produced under a selection: `{excluded, kept, n_total}`.
+    /// The `chain_selection` block stamped into `predictive.json`,
+    /// `forecast.json` and any other artifact produced under a selection
+    /// (D86): `{excluded, kept, n_total, summary}`, the last a sentence a
+    /// reader can take in without knowing the fields.
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "excluded": self.excluded,
             "kept": self.kept,
             "n_total": self.n_total,
+            "summary": self.summary(),
         })
+    }
+
+    /// The selection in a sentence: which chains were left out, which the
+    /// draws come from, and the bias that leaving chains out carries.
+    pub fn summary(&self) -> String {
+        format!(
+            "chain(s) {} left out by the chain selection: the draws are from chain(s) {} \
+             only ({} of {} chains). Leaving chains out biases the posterior toward the \
+             retained chains' mode.",
+            self.excluded_csv(),
+            csv(self.kept.iter()),
+            self.kept.len(),
+            self.n_total,
+        )
     }
 
     /// `"3,5"` — the excluded ids as the header/warning render them.
@@ -921,6 +938,12 @@ mod tests {
         assert_eq!(j["excluded"], serde_json::json!([3, 5]));
         assert_eq!(j["kept"], serde_json::json!([0, 1, 2, 4]));
         assert_eq!(j["n_total"], serde_json::json!(6));
+        assert_eq!(
+            j["summary"],
+            "chain(s) 3,5 left out by the chain selection: the draws are from chain(s) 0,1,2,4 \
+             only (4 of 6 chains). Leaving chains out biases the posterior toward the \
+             retained chains' mode."
+        );
     }
 
     /// Review blocker 1, the half that makes `ConstantDraws` decidable.
