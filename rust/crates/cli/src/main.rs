@@ -37,6 +37,7 @@ mod dt_rule;      // the one integration-step rule: the model's declared dt, els
 mod pfilter;        // used internally by fit runner for data loading
 mod prequential_out; // the one prequential.tsv/.json writer (gh#650)
 mod pfilter_cas;    // gh#147 (M3.3): pfilter-eval CAS identity (model/config/params/seed)
+mod pfilter_config; // ResolvedPfilterConfig: pfilter's one resolved configuration; identity and filter derive from it
 mod caltime_load;   // dated-data loader: column detection + date→internal-time (2026-05-22)
 mod docs;           // `camdl docs <topic>` — embedded, version-locked usage docs
 mod fit;
@@ -534,13 +535,14 @@ fn main() {
     sim::run_notes::set_reporter(util::report_run_note);
     util::set_ir_cache_disabled(cli.global.no_ir_cache);
     // `simulate` sets the compile setting from its resolved configuration
-    // (`sim_config::CompileSettings`), and `fit run` passes its own to every
-    // compile it makes; every other command reads it process-wide, from the
-    // flag (`util::CompileSettings::process`).
-    if !matches!(cli.command, Command::Simulate(_) | Command::Fit(FitCmd::Run(_))) {
+    // (`sim_config::CompileSettings`), and `fit run` and `pfilter` pass their
+    // own to every compile they make; every other command reads it
+    // process-wide, from the flag (`util::CompileSettings::process`).
+    if !matches!(cli.command, Command::Simulate(_) | Command::Fit(FitCmd::Run(_)) | Command::Pfilter(_)) {
         util::set_licm_disabled(cli.global.no_licm);
     }
-    // `--no-licm`, or `CAMDL_NO_LICM`: the compile setting `fit run` resolves.
+    // `--no-licm`, or `CAMDL_NO_LICM`: the compile setting `fit run` and
+    // `pfilter` resolve.
     let fit_compile = util::CompileSettings {
         licm_disabled: cli.global.no_licm || crate::env::get().vars.no_licm,
     };
@@ -555,7 +557,7 @@ fn main() {
         Command::Fit(FitCmd::Predict(a)) => fit::predict::cmd_fit_predict(&a),
         Command::Fit(FitCmd::Methods)   => fit::cmd_fit_methods(),
         Command::Label(a)               => fit::cmd_label(&a),
-        Command::Pfilter(a)             => pfilter::cmd_pfilter(&a),
+        Command::Pfilter(a)             => pfilter::cmd_pfilter(&a, fit_compile),
         Command::If2(a)                 => if2::cmd_if2(&a),
         Command::Profile(a)             => profile::cmd_profile(&a),
         Command::Survey(a)              => survey::cmd_survey(&a),

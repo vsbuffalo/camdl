@@ -527,7 +527,7 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
     let pf = resolve_pfilter(&PfilterCtx {
         model,
         ir_version: IRV,
-        engine_version: ENGV,
+        engine: &runid::inputs::EngineIdentity::of_build(ENGV),
         stem: "sir",
         data: &data,
         params: &pf_params,

@@ -30,7 +30,7 @@ const PFILTER_SUPPLY: &str = "pass `--data PATH` (single-stream), \
 /// Refuse `--replicates N` (N > 1) beside any output that describes one filter
 /// run. The replicate path writes only the per-replicate log-likelihoods; every
 /// flag named here is written on the single-run path alone (gh#686).
-fn check_per_run_outputs(a: &crate::args::PfilterArgs) -> Result<(), String> {
+pub(crate) fn check_per_run_outputs(a: &crate::args::PfilterArgs) -> Result<(), String> {
     if a.replicates <= 1 {
         return Ok(());
     }
@@ -146,67 +146,61 @@ fn cut_to_training_rows(
     Ok(TrainingCut { at, extent, rows, dropped })
 }
 
-pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
+/// `camdl pfilter`, under the compile settings `compile` (`--no-licm`), which
+/// every compile of the model is given. The arguments are read once, into the
+/// resolved configuration ([`crate::pfilter_config::resolve`]); the run is
+/// built from it and does not see them.
+pub fn cmd_pfilter(a: &crate::args::PfilterArgs, compile: crate::util::CompileSettings) {
     // pfilter has no `--no-color`: its painters follow the environment and
     // whether each stream is a terminal.
     let out = crate::out::Out::new(false);
     let _eval_stats_guard = crate::util::EvalStatsReportGuard::start();  // gh#audit-H5
-    let ir_path = a.model.to_string_lossy().into_owned();
-    let n_particles = a.particles;
-    let seed = a.inference.seed;
-    let n_replicates = a.replicates;
-    let trace_path: Option<String> = a.trace.clone();
-    let output_path: Option<String> = a.output.as_ref().map(|p| p.to_string_lossy().into_owned());
-    let save_final_state: Option<String> = a.save_final_state.as_ref().map(|p| p.to_string_lossy().into_owned());
-    let save_filtering: Option<String> = a.save_filtering.as_ref().map(|p| p.to_string_lossy().into_owned());
-    let save_paths: Option<(usize, String)> = a.save_paths.as_ref()
-        .map(|p| (a.n_paths, p.to_string_lossy().into_owned()));
-    let save_prequential: Option<String> = a.save_prequential.clone();
-    let save_samples: bool = !a.no_save_samples;
-    let obs_name = a.stream.obs.clone();
+    let (config, outputs, execution, _forcing_route) = crate::pfilter_config::resolve(a, compile, &out);
+    run_pfilter(&out, config, outputs, execution);
+}
 
-    // gh#686: the replicate path reports the spread of the log-likelihood
-    // estimate over independent runs and writes nothing per run, so every
-    // per-run output would be silently not written — at exit 0, leaving any
-    // stale file of that name to be read as this run's. Refuse instead.
-    if let Err(e) = check_per_run_outputs(a) {
-        out.fail(format!("error: {e}"));
-    }
+/// The particle filter of one resolved `pfilter`, and its stored leaf.
+fn run_pfilter(
+    out: &crate::out::Out,
+    config: crate::pfilter_config::ResolvedPfilterConfig,
+    outputs: crate::pfilter_config::PfilterOutputs,
+    execution: crate::pfilter_config::PfilterExecution,
+) {
+    let crate::pfilter_config::ResolvedPfilterConfig {
+        model_path: ir_path,
+        compile,
+        fit,
+        objective,
+        eval,
+        forcing,
+        scenario: scenario_flags,
+        params: param_flags,
+        data: cli_data_specs,
+        obs: obs_name,
+        dt: dt_flag,
+        particles: n_particles,
+        replicates: n_replicates,
+        seed,
+        binomial,
+        max_substeps,
+        time_format,
+        save_final_state,
+        engine,
+    } = config;
+    let crate::pfilter_config::PfilterOutputs {
+        trace: trace_path,
+        pf_health,
+        output: output_path,
+        save_paths,
+        save_filtering,
+        save_prequential,
+        score_from,
+        save_samples,
+        no_store,
+    } = outputs;
+    let crate::pfilter_config::PfilterExecution { parallel } = execution;
+    let fit_problem: Option<&crate::fit::config_v2::Problem> = fit.as_ref().map(|f| &f.config.problem);
 
-    // The likelihood this run scores. With `--fit` it is the fit config's own
-    // (`ic_free`), read through the function `fit run` uses, so a pfilter at
-    // the fit's MLE reports the number the fit maximised. Without `--fit`
-    // there is no `ic_free` key and every observation is scored.
-    let fit_problem: Option<crate::fit::config_v2::Problem> = a.fit.as_ref().map(|fit_path| {
-        let path_str = fit_path.to_string_lossy();
-        crate::fit::config_v2::Problem::load(&path_str).unwrap_or_else(|e| {
-            out.fail(format!("error: failed to load --fit toml '{}': {}", path_str, e));
-        })
-    });
-    // A rate that collapses (a division by an empty compartment) is 0 under
-    // `--allow-degenerate-rates` or the `--fit` config's `[config]
-    // allow_degenerate_rates`, which `fit run` applied to the fit, and kills
-    // the particle otherwise (gh#1235). Carried on the compiled model every
-    // particle runs, and keyed in the store leaf below from the same value.
-    let eval = sim::EvalSettings {
-        allow_degenerate_rates: a.inference.allow_degenerate_rates
-            || fit_problem.as_ref().is_some_and(|p| p.config.allow_degenerate_rates),
-    };
-    // A forcing evaluated outside its range holds its end value under
-    // `--allow-forcing-extrapolation` or the `--fit` config's `[config]
-    // allow_forcing_extrapolation`, which `fit run` applied to the fit, and
-    // is refused otherwise. The policy the filter runs under and the leaf's
-    // record names, installed for the rest of the command and keyed in the
-    // leaf below from this value. Nothing above evaluates the model.
-    let forcing = crate::forcing_extrapolation::ForcingPolicy::new(
-        a.inference.forcing_extrapolation.allow_forcing_extrapolation
-            || fit_problem.as_ref().is_some_and(|p| p.config.allow_forcing_extrapolation),
-    );
-    let _forcing_route = forcing.install();
-    let objective = fit_problem
-        .as_ref()
-        .map(|p| p.likelihood_objective())
-        .unwrap_or(crate::fit::config_v2::LikelihoodObjective::Full);
 
     // The interventions this run scores under. With `--fit` it is the fit's
     // own problem, so the fit config's `scenario` / `enable` / `disable` is
@@ -220,19 +214,17 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // tier 4 here would override `--params` — the silent-wrong-θ hazard
     // gh#194 refuses `--scenario` beside `--params` for. A `--scenario` flag
     // keeps its full meaning, and that gh#194 refusal.
-    let flag_given = a.scenario.scenario.is_some()
-        || !a.scenario.enable.is_empty()
-        || !a.scenario.disable.is_empty();
-    let fit_base: Option<crate::util::FitBase> = fit_problem.as_ref().map(|p| {
+    let flag_given = scenario_flags.any();
+    let fit_base: Option<crate::util::FitBase> = fit_problem.map(|p| {
         crate::util::FitBase::of(p).unwrap_or_else(|e| {
             out.fail(format!("error: {e}"));
         })
     });
     if let Some(base) = &fit_base {
         let flag = crate::util::ScenarioChoice {
-            scenario: a.scenario.scenario.as_deref(),
-            enable: &a.scenario.enable,
-            disable: &a.scenario.disable,
+            scenario: scenario_flags.scenario.as_deref(),
+            enable: &scenario_flags.enable,
+            disable: &scenario_flags.disable,
         };
         let config = crate::util::ScenarioChoice {
             scenario: base.selection.scenario.as_deref(),
@@ -249,12 +241,12 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // own scenario is the one agreement `combine_fit_scenario` admits).
     let scored_fit_base: Option<crate::util::FitBase> =
         fit_base.filter(|b| !flag_given && !b.is_empty());
-    let scenario_name: Option<String> = a.scenario.scenario.clone();
-    let mut adhoc_enable: Vec<String> = a.scenario.enable.clone();
-    let mut adhoc_disable: Vec<String> = a.scenario.disable.clone();
+    let crate::pfilter_config::ScenarioFlags {
+        scenario: scenario_name, enable: mut adhoc_enable, disable: mut adhoc_disable,
+    } = scenario_flags;
 
     // Load model (supports .camdl via camdlc)
-    let (mut model_in, _model_json) = crate::util::load_model(&ir_path)
+    let (mut model_in, _model_json) = crate::util::load_model_with(&ir_path, compile)
         .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
     if let Some(base) = &scored_fit_base {
         let (enable, disable) = base.lists(&model_in).unwrap_or_else(|e| {
@@ -267,12 +259,10 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // The one dt rule (`crate::dt_rule`): the model's declared step; a
     // `--dt` or `--fit` `[config] dt` that differs is refused; 1.0 when
     // nothing declares one.
-    let fit_written_dt: Option<f64> = a.fit.as_ref().and_then(|p| {
-        let raw = std::fs::read_to_string(p).unwrap_or_default();
-        crate::fit::config_v2::written_config_dt(&raw)
-    });
+    let fit_written_dt: Option<f64> =
+        fit.as_ref().and_then(|f| crate::fit::config_v2::written_config_dt(&f.text));
     let dt = crate::dt_rule::effective_dt_for_command(
-        a.inference.dt, fit_written_dt, model_in.simulation.dt,
+        dt_flag, fit_written_dt, model_in.simulation.dt,
     ).unwrap_or_else(|e| {
         out.fail(format!("error: {e}"));
     });
@@ -303,17 +293,16 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // "--data is required", and `gh191_pfilter_real_compartments` pins it.
     let model_obs_names: Vec<String> = model_in.observations.iter()
         .map(|o| o.name.clone()).collect();
-    let cli_data_specs: Vec<crate::args::types::DataSpec> = a.data.clone();
     let bound_streams: Option<Vec<(String, std::path::PathBuf)>> = if cli_data_specs.is_empty() {
         // No CLI --data. Try the fit-toml fallback.
-        a.fit.as_ref().map(|fit_path| {
-            load_data_observations_from_fit_toml(fit_path, &model_in)
+        fit.as_ref().map(|f| {
+            data_observations_of(&f.config.problem, &model_in, &f.handle)
                 .unwrap_or_else(|e| {
                     out.fail(format!("error: --fit toml fallback for --data: {}", e));
                 })
         })
     } else {
-        if a.fit.is_some() {
+        if fit.is_some() {
             out.say("pfilter: --data on CLI overrides --fit toml [data.observations]");
         }
         Some(crate::util::resolve_data_specs(&cli_data_specs, &model_obs_names, obs_name.as_deref())
@@ -338,7 +327,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // computed from it. An unanchored model falls through untouched.
     match &bound_streams {
         Some(bound) => {
-            if let Err(e) = crate::obs_anchor::resolve_from_bindings(&out, &mut model_in, bound, dt, None) {
+            if let Err(e) = crate::obs_anchor::resolve_from_bindings(out, &mut model_in, bound, dt, None) {
                 out.fail(format!("error: {e}"));
             }
         }
@@ -376,11 +365,8 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     use crate::params_resolver::{ParameterInputs, resolve_parameters, emit_notices};
     use indexmap::{IndexMap, IndexSet};
 
-    let fixed_cli: Vec<(String, f64)> = a.model_overrides.param.iter()
-        .map(|p| (p.name.clone(), p.value)).collect();
-    let fixed_files: Vec<std::path::PathBuf> = a.model_overrides.params.clone();
-    let table_files: HashMap<String, std::path::PathBuf> = a.model_overrides.table.iter()
-        .map(|t| (t.name.clone(), t.path.clone())).collect();
+    let crate::pfilter_config::ParamFlags { param: fixed_cli, params: fixed_files, table } = param_flags;
+    let table_files: HashMap<String, std::path::PathBuf> = table.into_iter().collect();
     let ftf: IndexMap<String, f64> = IndexMap::new();
     let fte: IndexSet<String> = IndexSet::new();
 
@@ -401,7 +387,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     }).unwrap_or_else(|e| {
         out.fail(format!("error: {}", e.with_flags(crate::params_resolver::FlagStyle::Params)));
     });
-    emit_notices(&out, &[&resolved]);
+    emit_notices(out, &[&resolved]);
     let model = resolved.model.clone();
 
     let compiled = CompiledModel::new(model.clone())
@@ -441,10 +427,8 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // The conditional objective (`ic_free = true`) is admitted by the check
     // `fit run` applies to its `pfilter` method: it needs particles that
     // differ in x₀, which a deterministic `init { }` does not give.
-    if let Some(fit_path) = a.fit.as_ref() {
-        let fit_name = fit_path.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| fit_path.to_string_lossy().into_owned());
+    if let Some(f) = fit.as_ref() {
+        let fit_name = f.name();
         if objective.skips_first_observation() {
             let init_law = if compiled.has_init_law {
                 crate::fit::methods::InitLaw::Declared
@@ -482,7 +466,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         time_unit: &model.time_unit,
         dt,
         t_start: compiled.model.simulation.t_start,
-        format: a.inference.time_format,
+        format: time_format,
     };
 
     // Resolve the bound observation streams (BY SOURCE) and load each one's
@@ -519,10 +503,10 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // rows that trained. Those files are read only in that case.
     let mut training_cut: Option<TrainingCut> = None;
     if save_final_state.is_some() {
-        let holdout_after = fit_problem.as_ref()
+        let holdout_after = fit_problem
             .and_then(|p| p.data.as_ref())
             .and_then(|d| d.holdout_after.as_ref());
-        if let (Some(spec), Some(fit_path)) = (holdout_after, a.fit.as_ref()) {
+        if let (Some(spec), Some(f)) = (holdout_after, fit.as_ref()) {
             let anchored = matches!(
                 crate::fit::runner::parse_time_spec(
                     "holdout_after", &spec.raw(), model.origin.as_deref(), &model.time_unit),
@@ -535,7 +519,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             let rows = if !anchored || cli_data_specs.is_empty() {
                 cutoff_rows(&streams)
             } else {
-                let fit_streams = load_data_observations_from_fit_toml(fit_path, &model)
+                let fit_streams = data_observations_of(&f.config.problem, &model, &f.handle)
                     .and_then(|b| crate::fit::runner::data_bindings_to_effective(&model, &b))
                     .and_then(|e| crate::fit::runner::resolve_and_load_obs_streams(
                         &model, &compiled, &e, &time_opts))
@@ -553,7 +537,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             // rows leaves none: every row it could score trained. Scoring them
             // would present in-sample rows as the held-out score.
             if cut.dropped {
-                if let Some(raw_from) = a.score_from.as_ref() {
+                if let Some(raw_from) = score_from.as_ref() {
                     out.fail(format!(
                         "error: --score-from {raw_from} scores a held-out window, but under \
                          --save-final-state this run binds only the training rows of \
@@ -699,9 +683,9 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         // user passes `--pf-max-substeps`). Reproducible across machines — there
         // is no wall-clock watchdog, so a content-addressed `pfilters/` leaf is
         // produced identically regardless of hardware.
-        max_substeps: a.inference.pf_max_substeps.unwrap_or(sim::inference::degeneracy::ITER_BUDGET),
+        max_substeps,
         // gh#747: `--binomial`; the run's stored address records it.
-        binomial: a.inference.binomial.unwrap_or_default(),
+        binomial,
     };
 
     // --save-filtering caveat log. Fires unconditionally (not quietable)
@@ -724,7 +708,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // run_id → same path.
     let write_cas_leaf = |mean_ll: f64, sd_ll: f64, n_reps: usize| {
         // `--no-store`: the caller wants the evaluation, not a stored leaf.
-        if a.no_store {
+        if no_store {
             return;
         }
         let data_hashes: Vec<(String, String)> = bound_streams.iter()
@@ -743,7 +727,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         let ctx = crate::pfilter_cas::PfilterCtx {
             model: &model,
             ir_version: &ir_version_str,
-            engine_version: crate::version::ENGINE_ID,
+            engine: &engine,
             stem: &stem,
             data: &data_hashes,
             params: &scored,
@@ -799,7 +783,9 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         };
         let calendar = ir::caltime::CalendarAxis::from_model(&model)
             .unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        let meta = crate::resolve::RecordMeta::new(&ir_version_str, &ir_path, None, calendar, &forcing);
+        let mut meta = crate::resolve::RecordMeta::new(&ir_version_str, &ir_path, None, calendar, &forcing);
+        // The engine the leaf's identity keyed: `run.json` names its switches.
+        meta.engine = engine.clone();
         let write = match crate::resolve::begin_resolved_write(
             &store, &root, &resolved_artifact, &meta, crate::resolve::WriteMode::Streaming,
         ) {
@@ -868,7 +854,6 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // (particle_filter.rs par_iter_mut) inherits the surrounding pool. A
     // value of 0 means "use rayon's default" (all logical cores) — leave the
     // pool unset and run on the global pool in that case.
-    let parallel = a.inference.parallel;
     let pf_pool: Option<rayon::ThreadPool> = if parallel > 0 {
         Some(
             rayon::ThreadPoolBuilder::new()
@@ -1040,7 +1025,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     }
 
     // Particle-filter health report (ESS + Snyder τ²) — `--pf-health`.
-    if let Some(ref path) = a.pf_health {
+    if let Some(ref path) = pf_health {
         let mut w: Box<dyn Write> = if path == "-" {
             Box::new(std::io::BufWriter::new(out.data()))
         } else {
@@ -1135,7 +1120,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         // boundary maps to the union-grid index t0 — observations at
         // t <= TIME are assimilated but not scored; the trace records the
         // time-axis boundary alongside.
-        let (t0, score_from_time) = match &a.score_from {
+        let (t0, score_from_time) = match &score_from {
             None => (0usize, None),
             Some(raw) => {
                 let last = recorded.obs_times.last().copied().unwrap_or(0.0);
@@ -1258,12 +1243,22 @@ pub fn load_data_observations_from_fit_toml(
     let path_str = fit_path.to_string_lossy().into_owned();
     let fit_cfg = crate::fit::config_v2::Problem::load(&path_str)
         .map_err(|e| format!("failed to load --fit toml '{}': {}", path_str, e))?;
-    let effective = crate::fit::stream_bindings::StreamBindings::resolve(model, fit_cfg.data_spec()?)?
+    data_observations_of(&fit_cfg, model, &path_str)
+}
+
+/// [`load_data_observations_from_fit_toml`] for a problem already read:
+/// the `[data]` bindings of `problem`, the fit `handle` names.
+pub(crate) fn data_observations_of(
+    problem: &crate::fit::config_v2::Problem,
+    model: &ir::Model,
+    handle: &str,
+) -> Result<Vec<(String, std::path::PathBuf)>, String> {
+    let effective = crate::fit::stream_bindings::StreamBindings::resolve(model, problem.data_spec()?)?
         .identity_keyed_training();
     if effective.is_empty() {
         return Err(format!(
-            "--fit toml '{}' [data] resolves to zero observation streams.",
-            path_str));
+            "--fit '{}' [data] resolves to zero observation streams.",
+            handle));
     }
     // Sort by name for deterministic ordering (matches fit/runner.rs).
     let mut entries: Vec<(String, std::path::PathBuf)> = effective.iter()

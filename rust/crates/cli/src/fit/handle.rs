@@ -670,6 +670,58 @@ pub fn resolve_fit_run(s: &str) -> Result<ResolvedFit, ResolveError> {
     Ok(resolved)
 }
 
+/// The fit problem a `--fit` handle names, for a command that reads a fit's
+/// problem but none of its results (`pfilter`, `profile`, `survey`): the
+/// config text and the configuration parsed from it.
+///
+/// The handle forms are `fit predict`'s. A `fit.toml` names the problem the
+/// file states as it now reads (gh#896: a `fit.toml` names the run the file
+/// alone makes), whether or not a fit of it is stored, so a `pfilter --fit`
+/// before any fit runs keeps working; a problem a fit run's command line
+/// changed (`fit run --allow-forcing-extrapolation`) is not the file's, and is
+/// not read through it. A leaf directory, `@label`, run-id or fit-id prefix,
+/// or problem folder names a stored fit, whose archived config is read: the
+/// config the fit ran under, a flag's problem value written in (gh#1268).
+pub(crate) struct FitProblem {
+    /// The handle as typed, for messages.
+    pub handle: String,
+    /// The config text, read once: the fit file, or the stored fit's archived
+    /// config (`fit.toml.original`).
+    pub text: String,
+    /// `text`, parsed and anchored at `anchor`.
+    pub config: FitConfig,
+}
+
+impl FitProblem {
+    /// The config's file name, for messages (`fit.toml`, or
+    /// `fit.toml.original` of a stored fit).
+    pub fn name(&self) -> String {
+        Path::new(&self.handle)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.handle.clone())
+    }
+}
+
+/// Resolve a `--fit` handle to the problem it names ([`FitProblem`]).
+pub(crate) fn resolve_fit_problem(s: &str) -> Result<FitProblem, ResolveError> {
+    if let FitRef::Config(path) = FitRef::classify(s) {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| ResolveError::NotFound(format!("cannot read fit config {}: {e}", path.display())))?;
+        let config = FitConfig::parse_anchored_at(&text, &path, &path)
+            .map_err(|e| ResolveError::NotFound(format!("cannot load fit config {}: {e}", path.display())))?;
+        return Ok(FitProblem { handle: s.to_string(), text, config });
+    }
+    let segment = match resolve_target(s)? {
+        FitTarget::Segment(seg) => seg,
+        FitTarget::Leaf(l) => crate::fit::fit_view::leaf_segment(&l.dir)
+            .map_err(ResolveError::NotFound)?
+            .ok_or_else(|| ResolveError::NotFound(format!("{} is not inside a fit's directory", l.dir.display())))?,
+    };
+    let (text, _anchor, config) = read_segment_config(&segment).map_err(ResolveError::NotFound)?;
+    Ok(FitProblem { handle: s.to_string(), text, config })
+}
+
 /// Recover the config for a segment reached by run-dir / `@label` / hash.
 ///
 /// The archived `fit.toml.original` is the authoritative record of the config
@@ -699,6 +751,12 @@ pub fn resolve_fit_run(s: &str) -> Result<ResolvedFit, ResolveError> {
 /// records no `source_config` and archives nothing. That is a real gap, not a
 /// lookup miss, so it gets its own named error rather than a wrong path.
 fn load_config_for_segment(segment: &Path) -> Result<FitConfig, String> {
+    read_segment_config(segment).map(|(_, _, config)| config)
+}
+
+/// [`load_config_for_segment`], with the archived text it parsed and the path
+/// that text's relative paths are anchored at.
+fn read_segment_config(segment: &Path) -> Result<(String, PathBuf, FitConfig), String> {
     let side = crate::run_meta::read_fit_sidecar(segment)?.ok_or_else(|| {
         format!(
             "{} is not a complete fit directory: no fit.meta.json",
@@ -716,16 +774,19 @@ fn load_config_for_segment(segment: &Path) -> Result<FitConfig, String> {
     };
     let archived = segment.join(crate::run_meta::ARCHIVED_CONFIG);
     let anchor = segment.join(source_config);
-    let config = FitConfig::load_anchored_at(&archived, &anchor).map_err(|e| {
+    let unreadable = |e: String| {
         format!(
             "{} is a fit directory but its archived config could not be read: {e}\n  \
              (expected {})",
             segment.display(),
             archived.display()
         )
-    })?;
+    };
+    let text = std::fs::read_to_string(&archived)
+        .map_err(|e| unreadable(format!("cannot read {}: {e}", archived.display())))?;
+    let config = FitConfig::parse_anchored_at(&text, &archived, &anchor).map_err(unreadable)?;
     refuse_missing_data(&config, &side, &anchor)?;
-    Ok(config)
+    Ok((text, anchor, config))
 }
 
 /// `Err` naming every data file the recovered config binds that is not on
