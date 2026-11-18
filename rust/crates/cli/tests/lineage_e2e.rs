@@ -103,7 +103,7 @@ fn event_log_is_added_to_a_leaf_first_written_without_one() {
     let base: Vec<&str> = vec![
         "simulate", model_arg, "--backend", "gillespie", "--seed", "7",
         "--param", "beta=0.6", "--param", "gamma=0.2", "--param", "N0=500",
-        "--cas", "--output-dir", store_s,
+        "--output-dir", store_s,
     ];
 
     // First run: no --event-log. The leaf is committed without one.

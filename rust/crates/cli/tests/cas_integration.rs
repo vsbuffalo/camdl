@@ -1,4 +1,4 @@
-//! End-to-end tests for `camdl simulate --cas` and `camdl list/show/cat`.
+//! End-to-end tests for `camdl simulate`'s store and `camdl list/show/cat`.
 //!
 //! These shell out to the built `camdl` binary in `target/release/`
 //! and exercise the full pipeline: real hash computation, real cache
@@ -18,7 +18,7 @@ fn binary() -> PathBuf {
 }
 
 /// A golden IR with a baseline scenario that sets beta/gamma/N0/I0 —
-/// suitable for `--cas --scenario baseline --seed N`.
+/// suitable for `--scenario baseline --seed N`.
 fn golden_sir_basic() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     Path::new(&manifest).join("../../../ocaml/golden/sir_basic.ir.json")
@@ -65,12 +65,11 @@ fn cas_first_run_writes_cache_and_metadata() {
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline",
                "--seed", "42",
-               "--cas",
                "--output-dir", &output.to_string_lossy(),
                "-o", &tmp.path().join("traj.tsv").to_string_lossy()])
         .status()
         .expect("spawn");
-    assert!(status.success(), "first --cas run should succeed");
+    assert!(status.success(), "first run should succeed");
 
     // Exactly one CAS entry under runs/
     let runs = output.join("sims");
@@ -156,7 +155,6 @@ fn cas_different_seed_new_cache_entry() {
             .args(["simulate", &golden_sir_basic().to_string_lossy(),
                    "--scenario", "baseline",
                    "--seed", seed,
-                   "--cas",
                    "--output-dir", &output.to_string_lossy(),
                    "-o", &tmp.path().join("traj.tsv").to_string_lossy()])
             .status().expect("spawn");
@@ -224,11 +222,10 @@ fn cas_different_models_do_not_collide() {
             .args(["simulate", &model.to_string_lossy(),
                    "--scenario", "baseline",
                    "--seed", "1",
-                   "--cas",
                    "--output-dir", &output.to_string_lossy(),
                    "-o", &tmp.path().join("traj.tsv").to_string_lossy()])
             .status().expect("spawn");
-        assert!(st.success(), "simulate --cas should succeed");
+        assert!(st.success(), "simulate should succeed");
     };
     run(&path_a);
     run(&path_b);
@@ -264,8 +261,8 @@ fn cas_different_models_do_not_collide() {
 
 #[test]
 fn cas_multi_seeds_writes_one_leaf_per_seed() {
-    // `--cas supports single runs only` is gone: CAS is the default and
-    // multi-run writes one content-addressed leaf per cell. `--seeds 1:3` is
+    // Storing is the default and a
+    // multi-cell run writes one leaf per cell. `--seeds 1:3` is
     // three seed-slots → three leaves with
     // three distinct seed-level segments.
     let bin = skip_if_missing_binary();
@@ -533,7 +530,6 @@ fn list_shows_cached_runs() {
             .args(["simulate", &golden_sir_basic().to_string_lossy(),
                    "--scenario", "baseline",
                    "--seed", seed,
-                   "--cas",
                    "--output-dir", &output.to_string_lossy(),
                    "-o", &tmp.path().join("traj.tsv").to_string_lossy()])
             .status().expect("spawn");
@@ -698,7 +694,7 @@ fn list_kind_filter_isolates_sections() {
     // Cache one sim.
     Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
-               "--scenario", "baseline", "--seed", "7", "--cas",
+               "--scenario", "baseline", "--seed", "7",
                "--output-dir", &output.to_string_lossy(),
                "-o", &tmp.path().join("t.tsv").to_string_lossy()])
         .status().expect("spawn");
@@ -832,7 +828,6 @@ fn cat_emits_cached_trajectory() {
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline",
                "--seed", "42",
-               "--cas",
                "--output-dir", &output.to_string_lossy(),
                "-o", &tmp.path().join("traj.tsv").to_string_lossy()])
         .status().expect("spawn");
@@ -993,7 +988,6 @@ fn show_prints_metadata() {
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline",
                "--seed", "42",
-               "--cas",
                "--output-dir", &output.to_string_lossy(),
                "-o", &tmp.path().join("traj.tsv").to_string_lossy()])
         .status().expect("spawn");
@@ -1271,7 +1265,7 @@ fn label_works_on_sim_runs() {
                "--param", "gamma=0.3",
                "--param", "N0=1000",
                "--param", "I0=10",
-               "--seed", "1", "--cas",
+               "--seed", "1",
                "--output-dir", &output.to_string_lossy(),
                "-o", &tmp.path().join("traj.tsv").to_string_lossy()])
         .status().expect("spawn");
@@ -1308,7 +1302,7 @@ fn reindex_builds_index_and_show_still_resolves() {
     for seed in ["42", "99"] {
         Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .args(["simulate", &golden_sir_basic().to_string_lossy(),
-                   "--scenario", "baseline", "--seed", seed, "--cas",
+                   "--scenario", "baseline", "--seed", seed,
                    "--output-dir", &output.to_string_lossy(),
                    "-o", &tmp.path().join("t.tsv").to_string_lossy()])
             .status().expect("spawn");
@@ -1351,7 +1345,7 @@ fn out_of_band_leaf_is_found_via_walk_fallback() {
     // Cache one sim and build an index that knows only about it.
     Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
-               "--scenario", "baseline", "--seed", "1", "--cas",
+               "--scenario", "baseline", "--seed", "1",
                "--output-dir", &output.to_string_lossy(),
                "-o", &tmp.path().join("t.tsv").to_string_lossy()])
         .status().expect("spawn");
@@ -1364,7 +1358,7 @@ fn out_of_band_leaf_is_found_via_walk_fallback() {
     // does NOT contain it.
     Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
-               "--scenario", "baseline", "--seed", "2", "--cas",
+               "--scenario", "baseline", "--seed", "2",
                "--output-dir", &output.to_string_lossy(),
                "-o", &tmp.path().join("t.tsv").to_string_lossy()])
         .status().expect("spawn");
@@ -1399,7 +1393,7 @@ fn removed_leaf_does_not_resolve_to_dead_path() {
 
     Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
-               "--scenario", "baseline", "--seed", "1", "--cas",
+               "--scenario", "baseline", "--seed", "1",
                "--output-dir", &output.to_string_lossy(),
                "-o", &tmp.path().join("t.tsv").to_string_lossy()])
         .status().expect("spawn");

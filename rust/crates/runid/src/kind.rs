@@ -27,7 +27,7 @@ pub enum ArtifactKind {
     /// One grid-point × start of a profile scan (`profile`).
     ProfilePoint,
     /// Reserved for a synthetic-observation sub-artifact under a trajectory.
-    /// Not yet constructed: `--cas` obs draws currently live in an `obs/`
+    /// Not yet constructed: `simulate --obs*` draws currently live in an `obs/`
     /// child dir (carrying `obs.json`, not a `RunRecord`); this variant is the
     /// store kind for promoting them to first-class leaves.
     Obs,

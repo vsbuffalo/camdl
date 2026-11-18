@@ -658,16 +658,7 @@ pub struct SimulateArgs {
     #[class(presentation)]
     pub dry_run: bool,
 
-    /// Accepted for compatibility — content-addressed storage is now the
-    /// default for every `simulate` run (one leaf per cell under
-    /// `--output-dir`). `--output`/`--obs` mirror the store; they no longer
-    /// replace it. The flag is a no-op kept so existing invocations and
-    /// scripts that pass `--cas` keep working.
-    #[arg(long)]
-    #[class(provenance)]
-    pub cas: bool,
-
-    /// Root directory for --cas output
+    /// Root directory of the run store
     #[arg(long, default_value = "./results", env = "CAMDL_OUTPUT_DIR")]
     #[class(execution)]
     pub output_dir: PathBuf,

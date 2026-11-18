@@ -953,10 +953,8 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
     let n_draws_arg: Option<usize>   = a.n_draws;
     let fit_path_for_draws: Option<String> = a.fit.as_ref().map(|p| p.to_string_lossy().into_owned());
     let dry_run     = a.dry_run;
-    // Content-addressed storage is the default for every `simulate` run.
-    // `--cas` is accepted (and ignored) for compatibility; `--output`/`--obs`
-    // are additive mirrors of the store, never replacements.
-    let _ = a.cas;
+    // Every `simulate` run writes to the store; `--output`/`--obs` are
+    // additive mirrors of it, never replacements.
 
     // --obs-only implies --obs or --obs-dir (infer from path: trailing / or existing dir → obs-dir)
     if let Some(ref path) = obs_only {
