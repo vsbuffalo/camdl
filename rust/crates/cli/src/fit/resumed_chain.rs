@@ -43,7 +43,7 @@ pub(crate) fn write_resume_state<T: serde::Serialize>(
 pub(crate) const RESUME_STATE_FILE: &str = "resume_state.bin";
 
 /// The longest chain a `--resume` base's checkpoints hold: the most steps
-/// (PMMH, `mh`) or sweeps (PGAS) any `chain_N/resume_state.bin` under `base`
+/// (PMMH) or sweeps (PGAS) any `chain_N/resume_state.bin` under `base`
 /// records as completed, with the unit's name. `Ok(None)` when the base holds
 /// no checkpoint, or the method cannot be resumed; the resume itself then
 /// refuses with the reason. A checkpoint that cannot be decoded is the
@@ -57,7 +57,7 @@ pub(crate) fn checkpoint_length(
         Algorithm::PGAS { .. } => |b| {
             bincode::deserialize::<sim::inference::pgas::ChainResumeState>(b).ok().map(|s| s.completed_sweeps)
         },
-        Algorithm::PMMH { .. } | Algorithm::Mh { .. } => |b| {
+        Algorithm::PMMH { .. } => |b| {
             bincode::deserialize::<sim::inference::pmmh::PMMHResumeState>(b).ok().map(|s| s.completed_steps)
         },
         _ => return None,
