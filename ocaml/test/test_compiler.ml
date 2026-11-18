@@ -17276,7 +17276,7 @@ init { S = 990  I = 10 }|}
 let dup1201_src ~first ~second ?(tail = "simulate { from = 0 'days  to = 50 'days }") () =
   Printf.sprintf "%s\n%s\n%s\n%s\n" dup1201_base first second tail
 
-let expect_e118 ~what ~line ~first_line src =
+let expect_e140 ~what ~line ~first_line src =
   let ds = tp_diags src in
   match List.filter (fun (d : Diagnostics.diagnostic) -> d.code = "E140") ds with
   | [d] ->
@@ -17296,33 +17296,33 @@ let expect_e118 ~what ~line ~first_line src =
   | _ -> Alcotest.failf "E140 emitted more than once:\n%s" (tp_show ds)
 
 let test_gh1201_simulate_twice () =
-  expect_e118 ~what:"`simulate { }`" ~line:14 ~first_line:13
+  expect_e140 ~what:"`simulate { }`" ~line:14 ~first_line:13
     (dup1201_src
        ~first:"simulate { from = 0 'days  to = 50 'days }"
        ~second:"simulate { from = 0 'days  to = 300 'days }" ~tail:"" ())
 
 let test_gh1201_time_unit_twice () =
   (* The first `time_unit` is on line 2 of the base. *)
-  expect_e118 ~what:"`time_unit`" ~line:13 ~first_line:2
+  expect_e140 ~what:"`time_unit`" ~line:13 ~first_line:2
     (dup1201_src ~first:"time_unit = 'weeks" ~second:"" ())
 
 let test_gh1201_description_twice () =
-  expect_e118 ~what:"`description`" ~line:14 ~first_line:13
+  expect_e140 ~what:"`description`" ~line:14 ~first_line:13
     (dup1201_src ~first:"description = \"first\"" ~second:"description = \"second\"" ())
 
 let test_gh1201_origin_twice () =
-  expect_e118 ~what:"`origin`" ~line:14 ~first_line:13
+  expect_e140 ~what:"`origin`" ~line:14 ~first_line:13
     (dup1201_src ~first:"origin = date(\"2020-01-01\")"
        ~second:"origin = date(\"2021-01-01\")"
        ~tail:"simulate { from = origin  to = origin + 50 'days }" ())
 
 let test_gh1201_output_twice () =
-  expect_e118 ~what:"`output { }`" ~line:14 ~first_line:13
+  expect_e140 ~what:"`output { }`" ~line:14 ~first_line:13
     (dup1201_src ~first:"output { trajectories { every = 1 'days } }"
        ~second:"output { trajectories { every = 7 'days } }" ())
 
 let test_gh1201_balance_twice () =
-  expect_e118 ~what:"`balance { }`" ~line:14 ~first_line:13
+  expect_e140 ~what:"`balance { }`" ~line:14 ~first_line:13
     (dup1201_src ~first:"balance { R = 1000 - S - I }"
        ~second:"balance { R = 1000 - S - I }" ())
 
