@@ -321,6 +321,10 @@ struct Leaf {
     /// Every file under the leaf's declared children (`run.json`'s
     /// `children`), by its path relative to the leaf.
     child_files: BTreeSet<String>,
+    /// The ids `run.json` declares under each child name.
+    declared: BTreeMap<String, BTreeSet<String>>,
+    /// The leaf's directory.
+    dir: PathBuf,
 }
 
 impl Leaf {
@@ -462,6 +466,40 @@ fn leaf(dir: &Path, record: &Path) -> Leaf {
         obs,
         manifest: v["artifacts"].to_string(),
         child_files,
+        declared: v["children"]
+            .as_object()
+            .map(|o| {
+                o.iter()
+                    .map(|(k, ids)| {
+                        let ids = ids.as_array().unwrap().iter().map(|i| i.as_str().unwrap().to_string()).collect();
+                        (k.clone(), ids)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        dir: dir.to_path_buf(),
+    }
+}
+
+/// Every child under `leaf` is at the address its declared id names: an
+/// observation subtree `obs/<hash8>-<obs_seed>/` whose `obs.json` gives the
+/// `obs_hash` and `obs_seed` of a declared id SHA-256(`"{run_id}:{obs_seed}:{obs_hash}"`),
+/// and the event log `event_log/` declared as SHA-256(`"{run_id}:event_log"`).
+fn assert_children_addressed(leaf: &Leaf) {
+    let sha = |s: String| hex(&Sha256::digest(s.as_bytes()));
+    for entry in std::fs::read_dir(leaf.dir.join("obs")).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let meta: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(entry.path().join("obs.json")).unwrap()).unwrap();
+        let (obs_hash, obs_seed) = (meta["obs_hash"].as_str().unwrap(), meta["obs_seed"].as_u64().unwrap());
+        assert_eq!(name, format!("{}-{obs_seed}", &obs_hash[..8]), "obs/{name} is named by its obs.json");
+        let id = sha(format!("{}:{obs_seed}:{obs_hash}", leaf.run_id));
+        assert!(leaf.declared.get("obs").is_some_and(|ids| ids.contains(&id)),
+            "obs/{name} is a declared child: {id} not in {:?}", leaf.declared.get("obs"));
+    }
+    if leaf.dir.join("event_log").exists() {
+        let id = sha(format!("{}:event_log", leaf.run_id));
+        assert_eq!(leaf.declared.get("event_log"), Some(&BTreeSet::from([id])), "event_log/ is a declared child");
     }
 }
 
@@ -553,7 +591,8 @@ fn assert_leaf_unaffected(input: &str, base: &Invocation, with: &Invocation, liv
 /// `child`: in one store, a run with the input after a run without it leaves
 /// every leaf's run id and manifest (`run.json`'s `artifacts`, byte for byte)
 /// as they were, and puts the child at `address` under each sim leaf, where
-/// the run without it wrote nothing; and a fresh store written with the input
+/// the run without it wrote nothing, at the address its declared id names
+/// ([`assert_children_addressed`]); and a fresh store written with the input
 /// holds the same run ids and stored bytes as one written without it, so what
 /// a run id holds does not depend on which invocation wrote it first. `live`
 /// — the input's own output outside the store — exists afterwards.
@@ -568,6 +607,7 @@ fn assert_child_written(input: &str, base: &Invocation, with: &Invocation, addre
     };
     assert_eq!(manifests(&a), manifests(&b), "{input} leaves every leaf's run id and manifest unchanged");
     assert!(b.sims().values().all(|l| l.has_child(address)), "{input} writes the child at {address}");
+    b.sims().values().for_each(|l| assert_children_addressed(l));
     assert_eq!(result(&a), result(&simulate(with)), "{input}: a store first written with it holds the same leaves");
     if let Some(p) = live {
         assert!(p.exists(), "{input} wrote {}: the fixture exercises it", p.display());
