@@ -59,6 +59,10 @@ pub(crate) struct Forecast {
     /// anything could be assimilated there (D56); it enters no weight, so no
     /// other field of the forecast depends on the held-out values.
     pub held_out_log_liks: Vec<Option<Vec<f64>>>,
+    /// Per target, why a held-out row it names is not scored
+    /// ([`HeldOutValues`]): never a reason the prediction was refused.
+    #[cfg_attr(not(test), allow(dead_code))] // read by Stage 6's score artifact
+    pub not_scored: Vec<Option<String>>,
     /// The same layout, holding each particle's expected observation
     /// `E[y | x, θ]` at the target, when the caller asked for it.
     #[cfg_attr(not(test), allow(dead_code))] // the command does not ask for it
@@ -192,47 +196,85 @@ pub(crate) fn draw_seed(base_seed: u64, draw: usize) -> u64 {
 }
 
 /// Each target's held-out value, in the plan's order (D79): the value of the
-/// held-out row the target names, `None` where it names none or the row is
-/// `NA`. The values only reach the scoring likelihood; the driver binds each
-/// as an [`ObsCell::HeldOut`](sim::inference::ObsCell::HeldOut), which the
-/// filter never assimilates.
+/// held-out row the target names, bound as an
+/// [`ObsCell::HeldOut`](sim::inference::ObsCell::HeldOut), which the filter
+/// never assimilates and only its scoring likelihood reads. A target is not
+/// scored, and records why, when its row is `NA`, when the binder's checks
+/// refuse its value against the target's design (a count above its trials),
+/// or when the forecast is prospective and the stream reads a design: a
+/// prospective forecast is not scored. None of this can refuse a prediction.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct HeldOutValues(Vec<Option<f64>>);
+pub(crate) struct HeldOutValues {
+    values: Vec<Option<f64>>,
+    not_scored: Vec<Option<String>>,
+}
 
 impl HeldOutValues {
     /// No held-out value at any target: a forecast that is not scored.
     #[cfg(test)]
     pub(crate) fn none(plan: &ForecastPlan) -> Self {
-        HeldOutValues(vec![None; plan.targets().len()])
+        let n = plan.targets().len();
+        HeldOutValues { values: vec![None; n], not_scored: vec![None; n] }
     }
 
     /// The values of the rows `plan`'s targets name, read from `held_out`
-    /// (each stream's rows after its training prefix, by file).
+    /// (each stream's rows after its training prefix, by file), screened
+    /// against each target's design by the binder's checks; `model` holds
+    /// the streams' observation models.
     pub(crate) fn from_rows(
         plan: &ForecastPlan,
         held_out: &std::collections::BTreeMap<String, Vec<super::forecast_plan::HeldOut>>,
+        model: &ir::Model,
     ) -> Result<Self, String> {
+        use super::forecast_plan::DesignMode;
         use sim::inference::ObsCell;
-        plan.targets().iter().map(|t| {
-            let Some(at) = t.observed else { return Ok(None) };
+        let mut values = Vec::with_capacity(plan.targets().len());
+        let mut not_scored = Vec::with_capacity(plan.targets().len());
+        for t in plan.targets() {
+            let Some(at) = t.observed else {
+                values.push(None);
+                not_scored.push(None);
+                continue;
+            };
             let row = held_out.get(&t.stream).and_then(|rows| rows.iter()
                 .find(|h| h.file == at.file && h.row.position == at.position))
                 .ok_or_else(|| format!(
                     "internal error: target of '{}' ending at {} names its {}, which was not read",
                     t.stream, t.measures.end(), at.describe()))?;
-            match row.row.cell {
-                Some(ObsCell::Scalar(v)) => Ok(Some(v)),
-                None => Ok(None),
-                Some(ObsCell::HeldOut(_)) => Err(format!(
+            let obs = model.observations.iter().find(|o| o.name == t.stream)
+                .ok_or_else(|| format!("internal error: no observation block '{}'", t.stream))?;
+            let reads_design = !crate::pfilter::stream_aux_columns(obs).is_empty();
+            let screened: Result<f64, String> = match row.row.cell {
+                None => Err(format!("its {} is NA", at.describe())),
+                Some(ObsCell::HeldOut(_)) => return Err(format!(
                     "internal error: the {} of '{}' was read as a held-out cell; a row read \
                      from a file holds an observed value or NA", at.describe(), t.stream)),
+                Some(ObsCell::Scalar(_)) if reads_design && plan.design_mode() == Some(DesignMode::Prospective) =>
+                    Err("a prospective forecast is not scored: the held-out value was realised \
+                         under its own design, not the design supplied at the origin; score this \
+                         stream with --realised-design".to_string()),
+                Some(ObsCell::Scalar(v)) => match sim::inference::multi_stream_obs::held_out_value_refusal(
+                    obs, t.measures.end(), v, &t.design)
+                {
+                    None => Ok(v),
+                    Some(why) => Err(format!("its {} cannot be scored: {why}", at.describe())),
+                },
+            };
+            match screened {
+                Ok(v) => { values.push(Some(v)); not_scored.push(None); }
+                Err(why) => { values.push(None); not_scored.push(Some(why)); }
             }
-        }).collect::<Result<_, _>>().map(HeldOutValues)
+        }
+        Ok(HeldOutValues { values, not_scored })
     }
 
-    /// The value at target `k`.
+    /// The value bound at target `k`, when it is scored.
     pub(crate) fn at(&self, k: usize) -> Option<f64> {
-        self.0[k]
+        self.values[k]
+    }
+
+    fn len(&self) -> usize {
+        self.values.len()
     }
 }
 
@@ -250,9 +292,9 @@ pub(crate) fn fixed_origin_forecast(
     config: DriverConfig,
 ) -> Result<Forecast, ForecastFailure> {
     let origin = plan.origin();
-    if held_out.0.len() != plan.targets().len() {
+    if held_out.len() != plan.targets().len() {
         return Err(setup(format!(
-            "internal error: {} held-out values for {} targets", held_out.0.len(), plan.targets().len())));
+            "internal error: {} held-out values for {} targets", held_out.len(), plan.targets().len())));
     }
     let state = conditioning(&plan, training)?;
     let specs = specs_with_targets(&plan, training, held_out)?;
@@ -387,7 +429,8 @@ pub(crate) fn fixed_origin_forecast(
     }
     Ok(Forecast {
         plan, state, n_draws: param_sets.len(), n_particles: n, binomial: config.binomial, draws,
-        held_out_log_liks, expected, pre_origin, last_assimilation, origin_states,
+        held_out_log_liks, not_scored: held_out.not_scored.clone(), expected, pre_origin,
+        last_assimilation, origin_states,
     })
 }
 

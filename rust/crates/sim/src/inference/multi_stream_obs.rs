@@ -195,6 +195,141 @@ fn trials_label(e: &ir::expr::Expr) -> String {
     }
 }
 
+/// The binder's checks of one scored value against the row's design columns
+/// (§3, §6.1, gh#812): every column the likelihood reads is present, and a
+/// trial count is a non-negative whole number no smaller than the value.
+/// `who` names the row in a finding ("row 3", "held-out value") and
+/// `at_time` is its closing time. Returns the findings and whether the row
+/// has zero trials (a non-identifying row, not an invalid one).
+fn scored_row_findings(
+    stream_name: &str,
+    who: &str,
+    at_time: Option<f64>,
+    observed: f64,
+    aux_row: &[(String, f64)],
+    required: &[String],
+    trials: Option<&ir::expr::Expr>,
+) -> (Vec<Finding>, bool) {
+    let mut findings = Vec::new();
+    let mut zero_trials = false;
+        // present-together: every referenced aux column must be present
+        // at a scored cell. (A missing aux should have been turned into
+        // a hole by the loader; if it reaches here, it is a hard error —
+        // `binomial(n = NaN)` must be unconstructible.)
+        for col in required {
+            if !aux_row.iter().any(|(k, _)| k == col) {
+                findings.push(Finding {
+                    severity: Severity::Error,
+                    message: format!(
+                        "observation stream '{}' {}: scored value present \
+                         but referenced aux column '{}' is missing — value and \
+                         every aux column must be present together, or the row \
+                         is a hole",
+                        stream_name, who, col
+                    ),
+                });
+            }
+        }
+        // `n >= 0` and `value <= n` for a binomial denominator (§3.2).
+        //
+        // gh#812: `n == 0` is NOT an error. Zero trials has exactly one
+        // possible outcome, so the term is exactly 0 for every parameter
+        // value -- non-identifying, not invalid -- and refusing it
+        // rejects a likelihood the kernel already computes correctly
+        // (`obs_loglik::beta_binomial_logpmf`). Stan admits it too
+        // (`check_nonnegative` on the population size). Surveillance data
+        // carries a zero denominator on any day nobody was examined, and
+        // the alternative -- writing those rows NA -- destroys real
+        // information wherever the same column is also bound as a count.
+        //
+        // The `value <= n` half of this check is the load-bearing one and
+        // still applies at n = 0, where it rejects a positive count
+        // against zero trials. Only the `n > 0` half is relaxed.
+        if let Some(n_expr) = trials {
+            if let Some(n) = static_trials(n_expr, aux_row) {
+                let dn = trials_label(n_expr);
+                // The row's closing time, so a finding can be read
+                // against the data file by date as well as by index.
+                let at = match at_time {
+                    Some(t) => format!(" (t = {t})"),
+                    None => String::new(),
+                };
+                // NaN arm explicit: `n < 0.0` alone is false for NaN,
+                // which would let a NaN count past this error and
+                // into the `value <= n` comparisons below.
+                if n.is_nan() || n < 0.0 {
+                    findings.push(Finding {
+                        severity: Severity::Error,
+                        message: format!(
+                            "observation stream '{}' {}{}: {} = {} must be >= 0",
+                            stream_name, who, at, dn, n
+                        ),
+                    });
+                } else if n.fract() != 0.0 {
+                    // The likelihood scores `round(n)` trials; a
+                    // fractional count would silently become a
+                    // different integer than the one written.
+                    findings.push(Finding {
+                        severity: Severity::Error,
+                        message: format!(
+                            "observation stream '{}' {}{}: {} = {} is not an \
+                             integer; a trial count must be a whole number (wrap the \
+                             expression in floor() or ceil() to choose the rounding)",
+                            stream_name, who, at, dn, n
+                        ),
+                    });
+                } else if n == 0.0 {
+                    zero_trials = true;
+                    if observed > 0.0 {
+                        findings.push(Finding {
+                            severity: Severity::Error,
+                            message: format!(
+                                "observation stream '{}' {}{}: scored value {} \
+                                 against {} = 0 — no trials cannot \
+                                 yield a positive count",
+                                stream_name, who, at, observed, dn
+                            ),
+                        });
+                    }
+                } else if observed > n {
+                    findings.push(Finding {
+                        severity: Severity::Error,
+                        message: format!(
+                            "observation stream '{}' {}{}: scored value {} exceeds \
+                             {} = {} (value ≤ n required) — check the \
+                             data file (a transposed row?)",
+                            stream_name, who, at, observed, dn, n
+                        ),
+                    });
+                }
+            }
+        }
+    (findings, zero_trials)
+}
+
+/// Why a held-out value cannot be scored against `aux` (its design values),
+/// by the checks the binder applies to an observed value
+/// ([`scored_row_findings`]); `None` when it can. A forecast binds a
+/// held-out value only when this is `None`, so a held-out row the binder
+/// would refuse refuses its own score, never the prediction (D79).
+pub fn held_out_value_refusal(
+    ir_model: &ir::observation::ObservationModel,
+    at_time: f64,
+    value: f64,
+    aux: &[(String, f64)],
+) -> Option<String> {
+    let required = aux_refs_in_likelihood(&ir_model.likelihood);
+    let (findings, _) = scored_row_findings(
+        &ir_model.name, "held-out value", Some(at_time), value, aux, &required,
+        trials_expr(&ir_model.likelihood),
+    );
+    let errors: Vec<&str> = findings.iter()
+        .filter(|f| f.severity == Severity::Error)
+        .map(|f| f.message.as_str())
+        .collect();
+    (!errors.is_empty()).then(|| errors.join("; "))
+}
+
 /// One observation cell on a stream's grid.
 ///
 /// A stream's per-observation data is `Vec<Option<ObsCell>>`: `None` is a
@@ -1168,99 +1303,14 @@ impl BoundObs {
                     Some(ObsCell::Scalar(v)) => (*v, false),
                     Some(ObsCell::HeldOut(v)) => (*v, true),
                 };
-                // present-together: every referenced aux column must be present
-                // at a scored cell. (A missing aux should have been turned into
-                // a hole by the loader; if it reaches here, it is a hard error —
-                // `binomial(n = NaN)` must be unconstructible.)
-                for col in &required {
-                    if !aux_row.iter().any(|(k, _)| k == col) {
-                        findings.push(Finding {
-                            severity: Severity::Error,
-                            message: format!(
-                                "observation stream '{}' row {}: scored value present \
-                                 but referenced aux column '{}' is missing — value and \
-                                 every aux column must be present together, or the row \
-                                 is a hole",
-                                stream_name, i, col
-                            ),
-                        });
-                    }
-                }
-                // `n >= 0` and `value <= n` for a binomial denominator (§3.2).
-                //
-                // gh#812: `n == 0` is NOT an error. Zero trials has exactly one
-                // possible outcome, so the term is exactly 0 for every parameter
-                // value -- non-identifying, not invalid -- and refusing it
-                // rejects a likelihood the kernel already computes correctly
-                // (`obs_loglik::beta_binomial_logpmf`). Stan admits it too
-                // (`check_nonnegative` on the population size). Surveillance data
-                // carries a zero denominator on any day nobody was examined, and
-                // the alternative -- writing those rows NA -- destroys real
-                // information wherever the same column is also bound as a count.
-                //
-                // The `value <= n` half of this check is the load-bearing one and
-                // still applies at n = 0, where it rejects a positive count
-                // against zero trials. Only the `n > 0` half is relaxed.
-                if let Some(n_expr) = trials {
-                    if let Some(n) = static_trials(n_expr, aux_row) {
-                        let dn = trials_label(n_expr);
-                        // The row's closing time, so a finding can be read
-                        // against the data file by date as well as by index.
-                        let at = match close_times.get(i) {
-                            Some(t) => format!(" (t = {t})"),
-                            None => String::new(),
-                        };
-                        // NaN arm explicit: `n < 0.0` alone is false for NaN,
-                        // which would let a NaN count past this error and
-                        // into the `value <= n` comparisons below.
-                        if n.is_nan() || n < 0.0 {
-                            findings.push(Finding {
-                                severity: Severity::Error,
-                                message: format!(
-                                    "observation stream '{}' row {}{}: {} = {} must be >= 0",
-                                    stream_name, i, at, dn, n
-                                ),
-                            });
-                        } else if n.fract() != 0.0 {
-                            // The likelihood scores `round(n)` trials; a
-                            // fractional count would silently become a
-                            // different integer than the one written.
-                            findings.push(Finding {
-                                severity: Severity::Error,
-                                message: format!(
-                                    "observation stream '{}' row {}{}: {} = {} is not an \
-                                     integer; a trial count must be a whole number (wrap the \
-                                     expression in floor() or ceil() to choose the rounding)",
-                                    stream_name, i, at, dn, n
-                                ),
-                            });
-                        } else if n == 0.0 {
-                            if !held_out {
-                                zero_denom_rows.push(i);
-                            }
-                            if observed > 0.0 {
-                                findings.push(Finding {
-                                    severity: Severity::Error,
-                                    message: format!(
-                                        "observation stream '{}' row {}{}: scored value {} \
-                                         against {} = 0 — no trials cannot \
-                                         yield a positive count",
-                                        stream_name, i, at, observed, dn
-                                    ),
-                                });
-                            }
-                        } else if observed > n {
-                            findings.push(Finding {
-                                severity: Severity::Error,
-                                message: format!(
-                                    "observation stream '{}' row {}{}: scored value {} exceeds \
-                                     {} = {} (value ≤ n required) — check the \
-                                     data file (a transposed row?)",
-                                    stream_name, i, at, observed, dn, n
-                                ),
-                            });
-                        }
-                    }
+                let who = format!("row {i}");
+                let (row_findings, zero_trials) = scored_row_findings(
+                    stream_name, &who, close_times.get(i).copied(), observed, aux_row,
+                    &required, trials,
+                );
+                findings.extend(row_findings);
+                if zero_trials && !held_out {
+                    zero_denom_rows.push(i);
                 }
             }
 

@@ -696,8 +696,8 @@ fn held_out_values_change_only_the_forecasts_held_out_log_likelihoods() {
     let (rows_a, rows_b) = (held_out_rows(1.0), held_out_rows(1.6));
     let plan = s.plan_held(14.0, &rows_a);
     assert_eq!(plan.targets(), s.plan_held(14.0, &rows_b).targets(), "the targets do not depend on the values");
-    let (va, vb) = (HeldOutValues::from_rows(&plan, &rows_a).unwrap(),
-                    HeldOutValues::from_rows(&plan, &rows_b).unwrap());
+    let (va, vb) = (HeldOutValues::from_rows(&plan, &rows_a, &s.model).unwrap(),
+                    HeldOutValues::from_rows(&plan, &rows_b, &s.model).unwrap());
     for seed in [3, 11] {
         let (a, b, none) = (s.run_held(&plan, &va, seed), s.run_held(&plan, &vb, seed),
                             s.run_held(&plan, &HeldOutValues::none(&plan), seed));
@@ -736,7 +736,7 @@ fn the_held_out_log_likelihoods_and_scores_agree_with_an_independent_computation
     let s = fixture_setup(24, "held_out_oracle");
     let rows = held_out_rows(1.0);
     let plan = s.plan_held(14.0, &rows);
-    let values = HeldOutValues::from_rows(&plan, &rows).unwrap();
+    let values = HeldOutValues::from_rows(&plan, &rows, &s.model).unwrap();
     let fc = s.run_held(&plan, &values, 5);
     let expected = fc.expected.as_ref().unwrap();
     let k_disp = TRUTH.iter().find(|(n, _)| *n == "k").unwrap().1;
@@ -810,6 +810,102 @@ fn survey_held(pos: [f64; 2], tested: [f64; 2]) -> Vec<HeldOut> {
     }).collect()
 }
 
+/// The survey fixture conditioned on daily counts through day 24 and survey
+/// rows on days 7, 14 and 21.
+fn survey_setup(tag: &str) -> Setup {
+    let model = with_truth(compile(&survey_source(), tag));
+    let (daily, weekly) = daily_through(24);
+    let compiled = Arc::new(sim::CompiledModel::new(model.clone()).unwrap());
+    let dir = crate::test_support::unique_temp_dir(&format!("forecast_{tag}_data"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = |n: &str, body: &str| { let p = dir.join(n); std::fs::write(&p, body).unwrap(); p.to_string_lossy().into_owned() };
+    let effective: indexmap::IndexMap<String, String> = [
+        ("daily_cases".to_string(), path("daily.tsv", &daily)),
+        ("weekly_cases".to_string(), path("weekly.tsv", &weekly)),
+        ("survey".to_string(), path("survey.tsv", "time\tpositives\ttested\n7\t1\t40\n14\t5\t40\n21\t8\t40\n")),
+    ].into_iter().collect();
+    let time_opts = crate::caltime_load::TimeOpts {
+        origin: None, time_unit: "days", dt: 1.0, t_start: 0.0, format: crate::caltime_load::TimeFormat::Auto,
+    };
+    let streams = crate::fit::runner::resolve_and_load_obs_streams(&model, &compiled, &effective, &time_opts).unwrap();
+    Setup { rows: streams.iter().map(|x| (x.name.clone(), x.rows.clone())).collect(), model, compiled, streams }
+}
+
+impl Setup {
+    /// A 14-day plan over every stream, the survey's held-out rows `held`
+    /// and its design from `design`.
+    fn survey_plan(&self, held: &[HeldOut], design: DesignInput) -> ForecastPlan {
+        let partition = TrainingPartition::whole(&self.rows, WholeFiles::NoHoldout).unwrap();
+        let ps: Vec<PlanStream> = self.model.observations.iter().map(|o| PlanStream {
+            obs: o, training: &self.rows[&o.name],
+            held_out: if o.name == "survey" { held } else { &[] },
+            design,
+        }).collect();
+        ForecastPlan::new(partition, 14.0, &ps).unwrap()
+    }
+
+    fn survey_values(&self, plan: &ForecastPlan, held: &[HeldOut]) -> HeldOutValues {
+        let rows = BTreeMap::from([("survey".to_string(), held.to_vec()),
+            ("daily_cases".to_string(), vec![]), ("weekly_cases".to_string(), vec![])]);
+        HeldOutValues::from_rows(plan, &rows, &self.model).unwrap()
+    }
+}
+
+/// A prospective design row of the survey at day `t`.
+fn design_row(position: usize, t: f64, tested: f64) -> ObservedRow {
+    ObservedRow {
+        position, label: t, measures: Measures::Instant(t),
+        temporal: vec![crate::caltime_load::TemporalCell::Number(t)],
+        cell: None, aux: vec![], design: vec![("tested".to_string(), tested)],
+    }
+}
+
+/// A prospective forecast is not scored: with `--design` supplying
+/// tested = 5 and held-out rows whose positives (6) exceed it, the forecast
+/// is written, its predictions are identical whatever the held-out values
+/// are, and no held-out value of the design-reading stream is bound; each
+/// survey target records why it is not scored.
+#[test]
+fn a_prospective_forecast_binds_no_held_out_value_of_a_design_reading_stream() {
+    let s = survey_setup("survey_prospective");
+    let design = vec![design_row(0, 28.0, 5.0), design_row(1, 35.0, 5.0)];
+    let run = |pos: [f64; 2]| {
+        let held = survey_held(pos, [40.0, 50.0]);
+        let plan = s.survey_plan(&held, DesignInput::Prospective(&design));
+        let values = s.survey_values(&plan, &held);
+        s.run_held(&plan, &values, 17)
+    };
+    let (a, b) = (run([6.0, 6.0]), run([0.0, 1.0]));
+    assert_eq!(a.draws, b.draws, "the prediction does not depend on the held-out values");
+    let k = index_of(&a.plan, "survey", 28.0);
+    assert!(a.draws[k].iter().all(|&y| y <= 5.0), "the draws read the supplied tested = 5");
+    assert!(a.held_out_log_liks[k].is_none(), "no held-out value bound");
+    let why = a.not_scored[k].as_deref().unwrap();
+    assert!(why.contains("prospective"), "{why}");
+}
+
+/// A held-out row the binder would refuse (positives 6 out of tested 5,
+/// read ex post from the row itself) refuses that target's score, never
+/// the prediction: the forecast is written, identical to one whose held-out
+/// value is admissible, and the target records the binder's reason.
+#[test]
+fn a_held_out_row_the_binder_refuses_refuses_its_score_not_the_prediction() {
+    let s = survey_setup("survey_bad_row");
+    let run = |pos: [f64; 2]| {
+        let held = survey_held(pos, [5.0, 50.0]);
+        let plan = s.survey_plan(&held, DesignInput::ExPost);
+        let values = s.survey_values(&plan, &held);
+        s.run_held(&plan, &values, 19)
+    };
+    let (bad, good) = (run([6.0, 3.0]), run([2.0, 3.0]));
+    assert_eq!(bad.draws, good.draws, "the prediction is written and unchanged");
+    let (k28, k35) = (index_of(&bad.plan, "survey", 28.0), index_of(&bad.plan, "survey", 35.0));
+    assert!(bad.held_out_log_liks[k28].is_none() && good.held_out_log_liks[k28].is_some());
+    let why = bad.not_scored[k28].as_deref().unwrap();
+    assert!(why.contains("exceeds"), "the binder's reason: {why}");
+    assert!(bad.held_out_log_liks[k35].is_some() && bad.not_scored[k35].is_none(), "the other target is scored");
+}
+
 /// The acceptance test (D79, D81): changing the held-out outcomes, with the
 /// training data, the design inputs and the targets fixed, leaves the
 /// predictive samples and the prediction's address identical and changes
@@ -855,7 +951,7 @@ fn held_out_outcomes_change_only_the_scores_and_never_the_samples_or_the_address
         let plan = plan_of(held);
         let rows = BTreeMap::from([("survey".to_string(), held.to_vec()),
             ("daily_cases".to_string(), vec![]), ("weekly_cases".to_string(), vec![])]);
-        let values = HeldOutValues::from_rows(&plan, &rows).unwrap();
+        let values = HeldOutValues::from_rows(&plan, &rows, &s.model).unwrap();
         let fc = s.run_held(&plan, &values, 13);
         (address(&plan), fc)
     };
