@@ -79,6 +79,11 @@ pub struct Out {
     /// path, `process::exit` (which runs no destructor) included. Behind a
     /// lock because the chain workers report errors through a shared `&Out`.
     claim: std::sync::Mutex<Option<HeldClaim>>,
+    /// A heartbeat the command itself runs, outside any method — `camdl
+    /// profile`'s invocation record (`profiles/<base>/invocations/<id>/`).
+    /// An error reported while it is held marks it `failed` with the error's
+    /// sentence, `process::exit` included, as the method's heartbeat is.
+    command_heartbeat: std::sync::Mutex<Option<Arc<io::HeartbeatGuard>>>,
 }
 
 /// The operation context of a streamed run: the store claim on its leaf, and
@@ -120,7 +125,15 @@ impl Out {
             method: None,
             events: None,
             claim: std::sync::Mutex::new(None),
+            command_heartbeat: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Hold `hb` as the command's own heartbeat: until the command records
+    /// it `done`, an error reported through this handle records it `failed`
+    /// with the error's sentence.
+    pub fn hold_heartbeat(&self, hb: Arc<io::HeartbeatGuard>) {
+        *self.command_heartbeat.lock().unwrap_or_else(|e| e.into_inner()) = Some(hb);
     }
 
     /// The stderr painter, for call sites that still build their own strings.
@@ -360,6 +373,11 @@ impl Out {
             // The same sentence a reader of stderr gets, for a reader holding
             // only `progress.json`.
             m.heartbeat.failed(e.message.as_str());
+        }
+        let command_hb =
+            self.command_heartbeat.lock().unwrap_or_else(|p| p.into_inner()).take();
+        if let Some(hb) = command_hb {
+            hb.failed(e.message.as_str());
         }
         self.say(one_head(&e.message));
         if let Some(hint) = &e.hint {

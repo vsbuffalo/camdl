@@ -4917,6 +4917,8 @@ done by `FiniteF64`'s constructor.
           run.json                 # RunRecord, kind = fit_method
           … method artifacts (§10.6)
   pfilters/ surveys/ profiles/     # same {label}-{h8} factoring per §9.2.4
+  profiles/{stem}-{h8}/invocations/{invocation_id}/
+                                   # one per `camdl profile` run; not a leaf (§10.12)
 ```
 
 A path component that would exceed `NAME_MAX` is truncated to 200 bytes and
@@ -5308,6 +5310,10 @@ Sub-artifacts that are _not_ `RunRecord`s:
   holdout_hashes, estimated, fixed, resolved_priors, parameters_provenance, schema}`,
   where `schema` describes each observation stream (`name`, `index_dims`,
   `value_column`, `value_kind`, `likelihood`).
+- `profiles/{stem}-{h8}/invocations/{invocation_id}/` — one `camdl profile`
+  invocation's `invocation.json` and `progress.json` (§10.12). Neither enters
+  any hash or record, and a reader that walks `run.json` leaves never meets
+  them.
 
 ### 9.6 The derived index (`index.json`)
 
@@ -5933,6 +5939,11 @@ rest, `step` of `total` counts:
 
 `step` is the furthest **any** chain has reached, and it never moves backward.
 
+A `camdl profile` invocation writes the same file, in phase `profiling`, into
+its own directory under the profile's base rather than into a leaf: there a step
+is one job (a grid cell's start at one seed) finished, a cached one included, of
+the invocation's `total_jobs` (§10.12).
+
 #### The terminal state
 
 A method run that finishes writes `"state": "done"` after every other output in
@@ -6028,6 +6039,100 @@ consequence:
 - **A recomputed leaf** (`--force`, or a stale `Running` leaf reclaimed after a
   killed run) starts a new log: the reclaim clears the dead run's log with its
   other files, and the log is created empty when the method begins.
+
+### 10.12 `invocations/`: what a `camdl profile` run will compute, and how far it has got
+
+A profile's results arrive one start at a time: each start of each grid cell is
+its own leaf, `profiles/<base>/<point>/<method>/<seed>/<start>/`, and appears
+only when that start finishes. The base directory holds no record of its own,
+and several invocations share it — a rerun, another method, more seeds — so the
+leaves alone cannot tell a reader which cells an invocation will fill, how many
+of its starts are done, or whether it is still running. Each invocation
+therefore writes a directory of its own beside the grid points:
+
+```
+profiles/<base>/invocations/<invocation_id>/
+  invocation.json     # what this invocation runs, written once before its first job
+  progress.json       # its heartbeat (§10.10), phase "profiling"
+```
+
+`invocation_id` is `<started_at>-<pid>`, zero-padded so that the directories
+sort by start time, and suffixed `-2`, `-3`, … in the unlikely case that the
+directory already exists. It identifies the execution, not the result: a rerun
+of the same grid gets a new id and writes into the same point directories.
+
+**`invocation.json`** is written atomically, once, after the jobs are resolved
+and before the first one runs:
+
+```json
+{
+  "schema": "camdl.profile-invocation/v1",
+  "invocation_id": "1794964381-46944",
+  "started_at": 1794964381,
+  "label": null,
+  "algorithm": "nl-sbplx",
+  "focal": [
+    { "name": "gamma", "values": [0.2, 0.2833333333333333, 0.3666666666666667, 0.45] }
+  ],
+  "n_starts": 3,
+  "seeds": [1],
+  "points": [
+    { "coords": { "gamma": 0.2 }, "dir": "gamma_0.2000-c713b667" },
+    { "coords": { "gamma": 0.2833333333333333 }, "dir": "gamma_0.2833-98bf299d" },
+    { "coords": { "gamma": 0.3666666666666667 }, "dir": "gamma_0.3667-5d9f2d56" },
+    { "coords": { "gamma": 0.45 }, "dir": "gamma_0.4500-2037d381" }
+  ],
+  "method_dir": "nlopt_sbplx_-82833741",
+  "total_jobs": 12
+}
+```
+
+| field           | what it holds                                                                                                                                                                                                        |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `schema`        | `"camdl.profile-invocation/v1"`. A changed meaning or a removed field is a new version; a new field is not                                                                                                           |
+| `invocation_id` | the directory's name                                                                                                                                                                                                 |
+| `started_at`    | Unix seconds at which the invocation started                                                                                                                                                                         |
+| `label`         | `--label`, or `null`                                                                                                                                                                                                 |
+| `algorithm`     | the per-cell method: `if2`, `nl-sbplx`, `nl-bobyqa` or `nl-lbfgs`                                                                                                                                                    |
+| `focal`         | each swept parameter and its grid values, in `--sweep` order                                                                                                                                                         |
+| `n_starts`      | starts per grid cell and seed                                                                                                                                                                                        |
+| `seeds`         | the seeds the whole grid runs at                                                                                                                                                                                     |
+| `points`        | every grid cell: `coords`, its exact focal values, keyed in `focal`'s order; `dir`, the `<point>` directory under the base that the cell's leaves are written in                                                     |
+| `method_dir`    | the `<method>` directory, under each point's `dir`, that this invocation's leaves are written in. Every job of an invocation shares it; an invocation over the same grid with other method settings writes beside it |
+| `total_jobs`    | `points` × `n_starts` × `seeds`: the heartbeat's `total`                                                                                                                                                             |
+
+`coords` carries the exact floats; the `<point>` directory's label rounds them
+to four decimals, and two cells can share a rounded label, so a reader matches a
+cell to its leaves by `dir`, never by reformatting the coordinates. A cell whose
+`<dir>/<method_dir>/` does not exist yet has no finished start of this
+invocation's method; one holding `n_starts × len(seeds)` completed leaves is
+done.
+
+**`progress.json`** has the format and the staleness rule of a method run's
+(§10.10). It is written as the invocation starts, again each time a job
+finishes, and every five seconds between:
+
+```json
+{
+  "updated_at": 1794964385,
+  "pid": 46944,
+  "state": { "running": { "phase": "profiling", "step": 2, "total": 12 } }
+}
+```
+
+`step` counts the jobs finished, whatever their outcome, and starts at the
+number the store already held: a rerun whose every start is cached writes `step`
+= `total` on its first write. The terminal record is `"done"` once the collected
+table has been written, and `{"failed": {"reason": …}}`, carrying the sentence
+printed on stderr, when camdl stops the invocation on an error. A `running`
+record that has stopped being refreshed is a killed process.
+
+**Outside the identity.** The directory is not a leaf: it holds no `run.json`,
+so the store's walks (`camdl list`, `show`, `cat`, `camdl dev reindex`, the
+derived index) do not visit it, and its name ends in no level hash, so a lookup
+by hash never matches it. Nothing in it enters any hash, `run_id` or record, and
+no run reads it back: the leaves an invocation writes are byte-for-byte those it
+would write without it.
 
 ## 11. Predictive Workflows
 

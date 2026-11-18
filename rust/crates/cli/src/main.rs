@@ -44,6 +44,7 @@ mod if2;
 mod profile;
 mod profile_cas;     // gh#147 M3.3: profile-point CAS identity (resolve_profile_point)
 mod profile_diagnostics;
+mod profile_invocation; // profiles/<base>/invocations/<id>/: the grid an invocation runs, and its heartbeat
 mod profile_table;    // gh#1059: the collected per-cell table a profile run prints
 mod out;           // the stream layer: notices, progress, milestones, colour
 mod survey;

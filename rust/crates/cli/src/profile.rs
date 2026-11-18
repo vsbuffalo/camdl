@@ -1874,6 +1874,74 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         }
     }
 
+    // The invocation record and heartbeat (`profiles/<base>/invocations/<id>/`):
+    // the grid, starts and seeds this invocation runs, each cell's `<point>`
+    // directory, and a `profiling` `progress.json` whose step is the jobs
+    // finished. Outside every leaf and every hash. A record that cannot be
+    // written is a warning, as the sidecar's is: the profile's results do not
+    // depend on it.
+    let invocation_hb: Arc<io::HeartbeatGuard> = match resolved_jobs.first() {
+        None => Arc::new(io::HeartbeatGuard::inert()),
+        Some((_, _, _, resolved0, _)) => {
+            let base_seg = runid::store_path(
+                &root, runid::ArtifactKind::ProfilePoint, &resolved0.levels[..1]);
+            // A cell's `<point>` segment, from any one of its jobs: the point
+            // level does not depend on the seed or the start.
+            let mut point_dirs: Vec<String> = vec![String::new(); grid_points.len()];
+            for (_, gi, _, resolved, _) in &resolved_jobs {
+                if point_dirs[*gi].is_empty() {
+                    let seg = runid::store_path(
+                        &root, runid::ArtifactKind::ProfilePoint, &resolved.levels[..2]);
+                    point_dirs[*gi] = seg.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                }
+            }
+            let method_dir = runid::store_path(
+                &root, runid::ArtifactKind::ProfilePoint, &resolved0.levels[..3])
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let started_at = crate::profile_invocation::now_unix();
+            let record = crate::profile_invocation::InvocationRecord {
+                schema: crate::profile_invocation::INVOCATION_SCHEMA,
+                invocation_id: crate::profile_invocation::invocation_id(started_at),
+                started_at,
+                label: label_arg.clone(),
+                algorithm: profile_algo.method_kind().as_str().to_string(),
+                focal: focal_grids.iter()
+                    .map(|fg| crate::profile_invocation::FocalAxis {
+                        name: fg.name.clone(), values: fg.values.clone() })
+                    .collect(),
+                n_starts,
+                seeds: seeds.clone(),
+                points: grid_points.iter().zip(point_dirs).map(|(gp, dir)| {
+                    crate::profile_invocation::InvocationPoint {
+                        coords: crate::profile_invocation::Coords(
+                            focal_grids.iter().zip(gp.iter())
+                                .map(|(fg, &(_, v))| (fg.name.clone(), v))
+                                .collect()),
+                        dir,
+                    }
+                }).collect(),
+                method_dir,
+                total_jobs,
+            };
+            match crate::profile_invocation::begin(
+                &base_seg, record, crate::fit::HEARTBEAT_INTERVAL)
+            {
+                Ok((_, hb)) => Arc::new(hb),
+                Err(e) => {
+                    out.say(format_args!(
+                        "warning: cannot write the profile invocation record under {}: {}",
+                        base_seg.join(crate::profile_invocation::INVOCATIONS_DIR).display(), e));
+                    Arc::new(io::HeartbeatGuard::inert())
+                }
+            }
+        }
+    };
+    out.hold_heartbeat(Arc::clone(&invocation_hb));
+
     // Cache scan: a job is cached when its leaf already exists. `cached` /
     // `remaining` hold indices into `resolved_jobs`.
     let mut cached: Vec<usize> = Vec::new();
@@ -1893,6 +1961,9 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             cached.len(), total_jobs));
         bar.inc(cached.len() as u64);
     }
+    // Jobs finished, cached ones included: the invocation heartbeat's step.
+    let job_progress = crate::profile_invocation::JobProgress::new(
+        Arc::clone(&invocation_hb), cached.len() as u64);
 
     // gh#audit-H13: --parallel / CAMDL_PARALLEL throttles the rayon thread
     // budget. Build a SCOPED local pool and run the parallel job sweep inside
@@ -2295,6 +2366,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 p.swap_remove(pick)
             };
             eval_job(ji);
+            job_progress.job_finished();
         }
     };
     // One worker loop per pool thread, placed by `broadcast` in that thread's
@@ -2371,6 +2443,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         }
         None => out.data_raw(rendered),
     }
+    invocation_hb.done();
+    invocation_hb.commit();
 }
 
 /// The values a single-point starts rule supplies, and where they came from:

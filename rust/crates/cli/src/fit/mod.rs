@@ -206,7 +206,7 @@ fn gate_run_method_against_model(
 /// Wall-clock and fixed, deliberately independent of step cadence: one
 /// national-scale PGAS sweep can take minutes, so a step-boundary heartbeat
 /// would be as stale as the trace it is meant to substitute for (gh#278).
-const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+pub(crate) const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The liveness/progress heartbeat one method of `algorithm` runs under: what
 /// its step counter counts, how many of those a complete run takes, and — for
