@@ -657,6 +657,10 @@ fn the_particle_count_defaults_to_the_fits_and_is_recorded_and_addressed() {
         assert!(ess > 0.0 && ess <= 100.0 + 1e-9, "{ess}");
         assert!((a["ess_over_n"].as_f64().unwrap() - ess / 100.0).abs() < 1e-12);
     }
+    // Before resampling the weights are unequal; after it they are equal and
+    // the ESS is N. An ESS read after resampling would equal 100 everywhere.
+    assert!(last.iter().any(|a| a["ess"].as_f64().unwrap() < 100.0 - 1e-6),
+        "some draw's ESS before resampling is below N: {last:?}");
 
     forecast(&["--particles", "100"]);
     assert_eq!(predict_dirs(), vec![default_dir.clone()], "the default count keeps the default address");
