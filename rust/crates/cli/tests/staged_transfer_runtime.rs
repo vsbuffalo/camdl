@@ -594,3 +594,70 @@ burn_in = 2
         assert_eq!(fa, fb, "{name} is the same for the same seed");
     }
 }
+
+// ── An endpoint written with its stage ──────────────────────────────────────
+
+/// `stage(I[pre], 3)` as a transfer source is that one location: the transfer
+/// moves its fraction of stage 3 and leaves stages 1 and 2, and the other
+/// stratum, as they were (proposal "Explicit stages"). The progression rate
+/// is negligible, so the stages hold what `init` placed in them, which
+/// `stage(...)` also writes.
+#[test]
+fn a_transfer_from_one_stage_moves_that_stage_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = r#"time_unit = 'days
+
+dimensions { age = [pre, sch] }
+compartments { I, Q, R }
+stratify(by = age)
+
+let gamma : rate = 0.000000001 'per_day
+
+transitions {
+  recovery[a in age] : I[a] --> R[a] via erlang(stages = 3, rate = gamma)
+}
+
+init {
+  stage(I[pre], 1) = 100
+  stage(I[pre], 2) = 200
+  stage(I[pre], 3) = 400
+  I[sch] = 50
+}
+
+interventions {
+  isolate_late : transfer(fraction = 0.8, from = stage(I[pre], 3), to = Q[pre]) at [5 'days]
+}
+
+simulate { from = 0 'days  to = 8 'days }
+"#;
+    let run = |tag: &'static str, enable: &'static [&'static str]| Run {
+        tag,
+        src: src.to_string(),
+        backend: "ode",
+        seed: 1,
+        enable,
+    };
+    let close = |tag: &str, row: &Row, name: &str, want: f64| {
+        let got = row.get(name);
+        assert!((got - want).abs() < 1e-4, "{tag}: {name} = {got}, expected {want}");
+    };
+    // Before the transfer, and in a run without it, the stages hold what
+    // `init` placed: `stage(...)` in stages 1 to 3, the plain entry in stage 1.
+    let before = row_at(tmp.path(), &run("stage_before", &["isolate_late"]), 4.0);
+    let without = row_at(tmp.path(), &run("stage_without", &[]), 6.0);
+    for (tag, row) in [("before", &before), ("without", &without)] {
+        close(tag, row, "I_pre_s1", 100.0);
+        close(tag, row, "I_pre_s2", 200.0);
+        close(tag, row, "I_pre_s3", 400.0);
+        close(tag, row, "I_sch_s1", 50.0);
+        close(tag, row, "I_sch_s2", 0.0);
+        close(tag, row, "Q_pre", 0.0);
+    }
+    let after = row_at(tmp.path(), &run("stage_after", &["isolate_late"]), 6.0);
+    close("after", &after, "I_pre_s3", 80.0);
+    close("after", &after, "Q_pre", 320.0);
+    close("after", &after, "I_pre_s1", 100.0);
+    close("after", &after, "I_pre_s2", 200.0);
+    close("after", &after, "I_sch_s1", 50.0);
+    close("after", &after, "Q_sch", 0.0);
+}
