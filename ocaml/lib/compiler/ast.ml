@@ -1292,9 +1292,9 @@ type scenario_field =
       (** [label = "no SIA"]: a display name. A bare word or a number is
           accepted too. *)
   | ScEnable  of string list
-      (** [enable = [sia]]: interventions to turn on. The parser keeps only
-          the bare names of a list, so [enable = sia], without brackets,
-          enables nothing. *)
+      (** [enable = [sia]]: interventions to turn on. The value must be a
+          bracketed list of names; [enable = sia], without brackets, is
+          E123. *)
   | ScDisable of string list
       (** [disable = [sia]]: interventions to turn off. The list is read as
           for [ScEnable]. *)
