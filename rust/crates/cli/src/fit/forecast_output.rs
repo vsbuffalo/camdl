@@ -366,9 +366,12 @@ pub(crate) struct ArmForecast {
 /// An arm must share the baseline's filter before the origin bit for bit
 /// (D50): the same model with the same seeds over the same rows. The static
 /// check in [`build_arms`] admits only arms whose differences act at or after
-/// the origin; this reads what the filters did, so an arm that differs before
-/// the origin by a route that check does not see fails the forecast rather
-/// than being written.
+/// the origin; this reads the filters' observation records before the origin
+/// (log-likelihood increments, ESS, and each particle's per-stream
+/// log-likelihoods and predictive draws), so an arm that differs there by a
+/// route that check does not see fails the forecast rather than being
+/// written. It does not hash the latent states: a pre-origin difference that
+/// no observation reads before the origin is not caught here.
 pub(crate) fn check_shared_past(base: &Forecast, arm: &Forecast, label: &ArmLabel, draw_refs: &[DrawRef]) -> Result<(), String> {
     for (d, (b, a)) in base.pre_origin.iter().zip(&arm.pre_origin).enumerate() {
         if let Some((time, what)) = b.first_difference(a) {

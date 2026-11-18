@@ -21,8 +21,12 @@
 //!   fires before the origin or at a time that is not fixed.
 //!
 //! After filtering, the forecast checks each arm's record before the origin
-//! against the baseline's ([`PreOriginTrace`](super::forecast_driver::PreOriginTrace)),
-//! which catches any difference the static check missed.
+//! against the baseline's ([`PreOriginTrace`](super::forecast_driver::PreOriginTrace)).
+//! That catches any pre-origin difference the static check missed that is
+//! visible in the filter's observation record (log-likelihood increments,
+//! ESS, and each particle's per-stream log-likelihoods and predictive
+//! draws). It does not hash the latent states, so a difference confined to
+//! compartments no observation reads before the origin is not seen there.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
