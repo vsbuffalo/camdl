@@ -1277,7 +1277,7 @@ re-digest — so listing a fit with many large chain files does not re-hash them
 the recorded per-file SHA-256 is there for integrity tooling, and no read path
 recomputes it today. The manifest is an exact set over the leaf's whole subtree,
 except reserved files and _declared children_: a declared child subdirectory
-(`obs/`) is a boundary, recognized and not recursed into.
+(`obs/`, `event_log/`) is a boundary, recognized and not recursed into.
 
 **Which commands skip on a cache hit.** `fit run` consults `lookup` and skips
 the computation on a `Hit` (unless `--force`); `profile` skips each start whose
@@ -1295,9 +1295,9 @@ A single-cell `simulate` writes one `sim` leaf:
 results/sims/{model}-{h8}/{backend}-dt{dt}-{h8}/{params}-{h8}/{scenario}-{h8}/seed_{n}-{h8}/
   run.json
   traj.tsv
-  event_log.tsv          # with --event-log on a LINEAGES-capable backend
   reactive_log.tsv       # when a reactive policy was active
   obs/{obs_h8}-{obs_seed}/{stream}.tsv + obs.json    # declared child, with --obs
+  event_log/event_log.tsv + event_log.json           # declared child, with --event-log
 ```
 
 The five levels hash disjoint slices of the resolved input set. **model** is the
@@ -1365,8 +1365,13 @@ observation ensemble as a child at `obs/{obs_hash8}-{obs_seed}/`, holding one
 `<stream>.tsv` per observation stream plus an `obs.json` provenance file. That
 child is keyed on the model's observation blocks alone, so changing a reporting
 parameter re-samples the observations without invalidating the cached
-trajectory. Reach it through the parent's `children` map, not by walking the
-tree for `run.json` files.
+trajectory. `simulate --event-log` writes the lineage event log as a second
+child, at the fixed address `event_log/` (`event_log.tsv` plus an
+`event_log.json` record), since nothing the log depends on lies outside the
+trajectory's run id. Both are children rather than files of the leaf so that the
+leaf's own files, and its manifest, are the same whichever invocation wrote it
+first. Reach them through the parent's `children` map, not by walking the tree
+for `run.json` files.
 
 ### 2.6 Store-root files
 
@@ -5076,12 +5081,14 @@ done by `FiniteF64`'s constructor.
             seed_{n}-{h8}/
               run.json             # RunRecord, kind = sim
               traj.tsv
-              event_log.tsv        # only with --event-log
               reactive_log.tsv     # only when a reactive policy fired
               obs/                 # declared child, one dir per (obs model, obs seed)
                 {obs_hash8}-{obs_seed}/
                   <stream>.tsv
                   obs.json         # NOT a RunRecord
+              event_log/           # declared child, only with --event-log
+                event_log.tsv
+                event_log.json     # NOT a RunRecord
   ensembles/
     {model_stem}-{h8}/{backend}-dt{dt}-{h8}/{param_label}-{h8}/cells-n{N}-{h8}/
       run.json
@@ -5147,9 +5154,12 @@ about the store:
 - `simulate --force` quarantines an existing same-identity leaf (moved to
   `<root>/.quarantine/`, not deleted) and stores the recomputed bytes in its
   place, so a forced run is the one way to replace a leaf's contents.
-- An artifact that only some invocations produce (`event_log.tsv`) cannot be
-  added to a leaf that already exists without a fresh identity or a manual
-  delete; call sites check for the file's existence rather than assuming it.
+- An artifact that only some invocations ask for is never one of the leaf's own
+  files. The observation subtree and the event log are declared children
+  (`obs/…`, `event_log/`): a run that asks for one writes it beside a leaf that
+  already exists and declares it in the leaf's `run.json` `children`, which is
+  recorded and not hashed, so the leaf's run id and manifest are the same
+  whichever invocation wrote it first.
 - `--label` is the one recorded field refreshed on a hit: the leaf's
   `run.json.provenance.label` is rewritten in place when it differs.
 
@@ -5462,7 +5472,7 @@ carries no step: draw `k` of chain `c` is the `k`-th retained row of
 | `failure`        | `{message, operation}`                     | on a `"failed"` record camdl stopped: its error, and what was running; omitted otherwise       |
 | `artifacts`      | map path → `{bytes, mtime, digest}`        | EXACT SET over the leaf's own files; `mtime` is `"{secs}.{nanos:09}"`                          |
 | `output_schema`  | map path → `{role, columns}`               | declared column roles (§10.9); omitted when empty                                              |
-| `children`       | map namespace → `[hash]`                   | declared child sub-artifact dirs (`obs`); omitted when empty                                   |
+| `children`       | map namespace → `[hash]`                   | declared child sub-artifact dirs (`obs`, `event_log`); omitted when empty                      |
 | `inputs`         | arbitrary JSON                             | display/audit summary, **never hashed**; omitted when null                                     |
 | `provenance`     | object                                     | `argv`, `label`, `created_at`, `camdl_version`, `source_paths` — all recorded, never hashed    |
 
@@ -5489,6 +5499,13 @@ Sub-artifacts that are _not_ `RunRecord`s:
   declares this directory under `children.obs`, but the declared hash is
   `SHA256("{run_id}:{obs_seed}:{obs_hash}")` and appears nowhere inside the
   child.
+- `event_log/event_log.json` — `{parent_run_id, file, bytes, digest}`: the
+  parent leaf's run id and the size and SHA-256 of `event_log.tsv`, written
+  after it, so its presence marks the child complete. The parent declares the
+  directory under `children.event_log` with the hash
+  `SHA256("{run_id}:event_log")`. A second `--event-log` run of the same run id
+  leaves a complete child as it is, and refuses one whose recorded digest
+  differs from the bytes it recorded, overwriting nothing.
 - `fits/{fit_stem}-{h8}/fit.meta.json` — the fit-wide sidecar:
   `{schema_version, source_model, model_identity, source_config, fit_toml_hash, data_hashes,
   holdout_hashes, estimated, fixed, resolved_priors, parameters_provenance, schema}`,
@@ -5541,9 +5558,10 @@ Two flags are easy to misjudge, and neither is a gap.
   and `--stdout` views only (§10.2). The flag is therefore not identity, and a
   run with and without it is the same ensemble.
 
-Related but sound: `event_log.tsv` and `reactive_log.tsv` are identity-free
-extra artifacts, so a leaf committed without them cannot gain them later. Call
-sites check for the file rather than assume it.
+Related but sound: `reactive_log.tsv` is written whenever the model has an
+active reactive policy, so it is a function of the run id; the event log, which
+only some invocations ask for, is the leaf's `event_log/` child, never one of
+its files.
 
 ---
 
@@ -7021,7 +7039,7 @@ There is no `camdl summarize`. Four commands cover the ground:
 | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `camdl list [ROOT]`          | What runs exist? Filter by `--kind sim\|fit\|profile\|pfilter\|survey\|ensemble`, `--model`, `--scenario`, `--since 1h`, `--parent <HASH>`. `--format json`.                                                                        |
 | `camdl show <TARGET>`        | Full metadata for one run, by short hash prefix or path.                                                                                                                                                                            |
-| `camdl cat <TARGET>`         | The run's trajectory TSV; `--stream <NAME>` selects an observation stream or a named artifact (`event_log.tsv`, `reactive_log.tsv`).                                                                                                |
+| `camdl cat <TARGET>`         | The run's trajectory TSV; `--stream <NAME>` selects an observation stream or the event log (`event_log.tsv`).                                                                                                                       |
 | `camdl label <HASH> <LABEL>` | Name a run so you can find it again. 1–64 chars matching `^[a-zA-Z0-9 ,._-]+$`; refuses a still-running fit, an ambiguous prefix, a fit id (a problem folder, not a run), a label another fit run holds, and relabelling a fit run. |
 
 Per-scenario summary statistics over a trajectory tree (peak, time-of-peak,
@@ -7504,8 +7522,8 @@ Other artifacts
                               block in FILE (a .camdl file holding only that block)
                               instead of the model's own; tables land in
                               <dir>/quantities-<key>/, keyed by FILE's contents
-  --event-log [FILE]          record the lineage event log into the run leaf; pass a
-                              PATH to also mirror it. Single-run only
+  --event-log [FILE]          record the lineage event log as a child of the run leaf;
+                              pass a PATH to also mirror it. Single-run only
   --format parquet|tsv        event-log format (default parquet); --tsv is shorthand
   --reactive-log PATH         mirror the reactive firing log (leaf copy always written
                               when a reactive policy was active). Single-run only
