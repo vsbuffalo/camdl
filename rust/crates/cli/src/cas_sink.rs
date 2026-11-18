@@ -781,10 +781,7 @@ impl crate::engine::RunSink for CasSink {
         // leaf. A failure is reported and fails the command, since the log
         // is what `--event-log` was asked for.
         if let Some(bytes) = &event_log_bytes {
-            let written = ensure_children_declared(
-                &dest, EVENT_LOG_CHILD, &[event_log_child_id(&rt.run_id)],
-            )
-            .and_then(|()| write_event_log_child(&dest, &rt.run_id, bytes));
+            let written = EVENT_LOG.declare_and_write(&dest, &rt.run_id, bytes);
             if let Err(e) = written {
                 self.errors.push(format!("scenario={} seed={}: event log: {}",
                     name, spec.process_seed, e));
@@ -1078,6 +1075,114 @@ fn ensure_children_declared(
     })
 }
 
+// ─── A child holding one file and its record ───────────────────────────────
+
+/// A child of a leaf that holds one file and a record of it:
+/// `<leaf>/<name>/<file>` and `<leaf>/<name>/<record>` (the parent run id and
+/// the file's size and SHA-256, written after the file, so its presence says
+/// the child is complete), declared in the leaf's `run.json` `children` under
+/// `name` with the id SHA256("{run_id}:{name}"). The address is fixed: such a
+/// child is derived from the leaf's result alone, so one run id has one of
+/// it, and what varies by invocation is only whether it was asked for. That
+/// is why it is a child and never one of the leaf's own files. The event log
+/// ([`EVENT_LOG`]) is one.
+pub(crate) struct RecordedChild {
+    /// The name under `children`, and the child's directory.
+    pub name: &'static str,
+    /// The file the child holds.
+    pub file: &'static str,
+    /// The child's record.
+    pub record: &'static str,
+    /// What the file is, for messages ("event log").
+    pub what: &'static str,
+}
+
+/// `simulate --event-log`'s child: `<leaf>/event_log/event_log.tsv`.
+pub(crate) const EVENT_LOG: RecordedChild = RecordedChild {
+    name: "event_log",
+    file: "event_log.tsv",
+    record: "event_log.json",
+    what: "event log",
+};
+
+impl RecordedChild {
+    /// Where the child's file is in `leaf`.
+    pub(crate) fn file_in(&self, leaf: &std::path::Path) -> std::path::PathBuf {
+        leaf.join(self.name).join(self.file)
+    }
+
+    /// The id a leaf's record declares for this child.
+    fn id(&self, run_id: &runid::ContentHash) -> runid::ContentHash {
+        runid::ContentHash::digest_bytes(format!("{}:{}", run_id.to_hex(), self.name).as_bytes())
+    }
+
+    /// Declare the child in `leaf`'s record, then write `bytes` into it. In
+    /// that order a crash leaves a declared child with no record, which the
+    /// next request writes, never an undeclared directory, which the exact-set
+    /// check would read as an orphan and stale the leaf.
+    pub(crate) fn declare_and_write(
+        &self,
+        leaf: &std::path::Path,
+        run_id: &runid::ContentHash,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        ensure_children_declared(leaf, self.name, &[self.id(run_id)])?;
+        self.write(leaf, run_id, bytes)
+    }
+
+    /// Write `bytes` into `leaf`'s child, unless the child already holds them.
+    ///
+    /// A complete child (its record present, naming these bytes, and the file
+    /// holding them) is left as it is. A record naming other bytes is refused
+    /// and nothing is overwritten: one run id has one such file, so different
+    /// bytes under it are an identity defect, the same rule the store's commit
+    /// path applies. Anything else — no child, or a crash between the file and
+    /// its record — is (re)written, each file atomically
+    /// ([`runid::write_file_atomic`]).
+    fn write(&self, leaf: &std::path::Path, run_id: &runid::ContentHash, bytes: &[u8]) -> Result<(), String> {
+        let RecordedChild { name, file, record, what } = *self;
+        let dir = leaf.join(name);
+        let file_path = dir.join(file);
+        let record_path = dir.join(record);
+        let digest = runid::ContentHash::digest_bytes(bytes).to_hex().to_string();
+        match std::fs::read(&record_path) {
+            Ok(text) => {
+                let rec: serde_json::Value = serde_json::from_slice(&text).map_err(|e| {
+                    format!("the {what} record {} does not parse ({e}); `--force` recomputes the leaf",
+                        record_path.display())
+                })?;
+                let stored = rec["digest"].as_str().unwrap_or_default();
+                if stored != digest {
+                    return Err(format!(
+                        "the stored {what} {} has SHA-256 {stored}, and this run made {digest} \
+                         under the same run id {}; nothing was overwritten. One run id has one \
+                         {what}, so this is an identity defect: please report it. `--force` \
+                         recomputes the leaf.",
+                        file_path.display(), run_id.to_hex()));
+                }
+                if std::fs::read(&file_path).is_ok_and(|on_disk| on_disk == bytes) {
+                    return Ok(());
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("cannot read {}: {e}", record_path.display())),
+        }
+        std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        let rec = serde_json::json!({
+            "parent_run_id": run_id.to_hex().to_string(),
+            "file": file,
+            "bytes": bytes.len(),
+            "digest": digest,
+        });
+        let record_bytes = serde_json::to_vec_pretty(&rec)
+            .map_err(|e| format!("cannot serialize the {what} record: {e}"))?;
+        for (path, bytes) in [(&file_path, bytes), (&record_path, record_bytes.as_slice())] {
+            runid::write_file_atomic(path, bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        }
+        Ok(())
+    }
+}
+
 // ─── Event-log child (`simulate --event-log`) ──────────────────────────────
 
 /// The name under which a leaf declares its event-log child in `run.json`'s
@@ -1092,19 +1197,19 @@ fn ensure_children_declared(
 /// level folds. One run id has one event log; what varies by invocation is
 /// only whether it was asked for, which is why it is a child rather than one
 /// of the leaf's own files.
-pub(crate) const EVENT_LOG_CHILD: &str = "event_log";
+pub(crate) const EVENT_LOG_CHILD: &str = EVENT_LOG.name;
 
 /// The event log's file in the child: the TSV `lineage realize` reads.
-pub(crate) const EVENT_LOG_FILE: &str = "event_log.tsv";
+pub(crate) const EVENT_LOG_FILE: &str = EVENT_LOG.file;
 
 /// The child's record: the parent run id and the log's size and SHA-256. It
 /// is written after the log, so its presence says the child is complete.
-const EVENT_LOG_RECORD: &str = "event_log.json";
+const EVENT_LOG_RECORD: &str = EVENT_LOG.record;
 
 /// Where a leaf's event log is: `<leaf>/event_log/event_log.tsv`. One function
 /// for the writer and every reader (`simulate`'s report, `camdl cat`).
 pub(crate) fn event_log_child_file(leaf: &std::path::Path) -> std::path::PathBuf {
-    leaf.join(EVENT_LOG_CHILD).join(EVENT_LOG_FILE)
+    EVENT_LOG.file_in(leaf)
 }
 
 /// The leaf's event log, when its child is complete: the record present and
@@ -1145,61 +1250,18 @@ pub(crate) fn complete_event_log(leaf: &std::path::Path) -> Result<std::path::Pa
 
 /// The id a leaf's record declares for its event-log child.
 fn event_log_child_id(run_id: &runid::ContentHash) -> runid::ContentHash {
-    runid::ContentHash::digest_bytes(format!("{}:{}", run_id.to_hex(), EVENT_LOG_CHILD).as_bytes())
+    EVENT_LOG.id(run_id)
 }
 
-/// Write the event log into `leaf`'s child, unless the child already holds it.
-///
-/// A complete child (its record present, naming these bytes, and the file
-/// holding them) is left as it is. A record naming other bytes is refused and
-/// nothing is overwritten: one run id has one event log, so different bytes
-/// under it are an identity defect, the same rule the store's commit path
-/// applies. Anything else — no child, or a crash between the file and its
-/// record — is (re)written, each file atomically ([`runid::write_file_atomic`]).
+/// Write the event log into `leaf`'s child, unless the child already holds it
+/// ([`RecordedChild::write`]).
+#[cfg(test)]
 fn write_event_log_child(
     leaf: &std::path::Path,
     run_id: &runid::ContentHash,
     bytes: &[u8],
 ) -> Result<(), String> {
-    let dir = leaf.join(EVENT_LOG_CHILD);
-    let file = dir.join(EVENT_LOG_FILE);
-    let record_path = dir.join(EVENT_LOG_RECORD);
-    let digest = runid::ContentHash::digest_bytes(bytes).to_hex().to_string();
-    match std::fs::read(&record_path) {
-        Ok(text) => {
-            let rec: serde_json::Value = serde_json::from_slice(&text).map_err(|e| {
-                format!("the event-log record {} does not parse ({e}); `--force` recomputes the leaf",
-                    record_path.display())
-            })?;
-            let stored = rec["digest"].as_str().unwrap_or_default();
-            if stored != digest {
-                return Err(format!(
-                    "the stored event log {} has SHA-256 {stored}, and this run recorded {digest} \
-                     under the same run id {}; nothing was overwritten. One run id has one event \
-                     log, so this is an identity defect: please report it. `--force` recomputes \
-                     the leaf.",
-                    file.display(), run_id.to_hex()));
-            }
-            if std::fs::read(&file).is_ok_and(|on_disk| on_disk == bytes) {
-                return Ok(());
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(format!("cannot read {}: {e}", record_path.display())),
-    }
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    let record = serde_json::json!({
-        "parent_run_id": run_id.to_hex().to_string(),
-        "file": EVENT_LOG_FILE,
-        "bytes": bytes.len(),
-        "digest": digest,
-    });
-    let record_bytes = serde_json::to_vec_pretty(&record)
-        .map_err(|e| format!("cannot serialize the event-log record: {e}"))?;
-    for (path, bytes) in [(&file, bytes), (&record_path, record_bytes.as_slice())] {
-        runid::write_file_atomic(path, bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-    }
-    Ok(())
+    EVENT_LOG.write(leaf, run_id, bytes)
 }
 
 // ─── Observation ensemble writer (CLI review #4) ───────────────────────────
