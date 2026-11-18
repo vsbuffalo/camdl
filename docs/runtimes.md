@@ -302,13 +302,21 @@ n_int + n_real (all compartments).
 - _From explicit ODE equations:_ compartments declared `real` have their
   derivative specified directly in the `ode {}` block and evaluated verbatim.
 
-**Propensity evaluation during RK4 substeps.** At each k₁–k₄ evaluation,
-integer-compartment floats are rounded to `i64` to construct the `IntState`
-needed by `eval_expr`. This introduces a rounding error of O(1) in the
-compartment value at each substep evaluation, which means propensities have
-relative error O(1/N). For populations N > 100 this is negligible. For very
-small compartment values (< ~10) the rounding can cause premature extinction —
-this is the deterministic approximation's inherent limitation.
+**Propensity evaluation during RK4 substeps.** At each k₁–k₄ evaluation, integer
+compartments are read at their full `f64` value: the evaluator takes the float
+state as an override (`int_float_override`), so a rate that reads an integer
+compartment sees `12.37`, not `12`. Nothing is rounded to `i64` inside a step,
+and the augmented flow derivative reuses the same propensities. A very small
+compartment therefore decays smoothly rather than snapping to zero; the
+deterministic approximation still cannot represent extinction of a finite
+population. Rounding to `i64` happens only where an integer state is needed: in
+the output snapshot, and for the one exception below.
+
+The exception is a model whose rate depends on the step size (`dt` in a rate
+expression). Its cumulative flow is accumulated by a left-rectangle rule at the
+realized substep, with the propensities evaluated at the start-of-step state
+rounded to `i64`; the RK4 stages themselves still read the unrounded state. The
+CLI warns once when it loads such a model.
 
 **Non-negativity.** A fixed-step `rk4` step that drives a compartment below zero
 is refused, and the run stops with an error that names the compartment, the time
@@ -334,13 +342,16 @@ score it as a log-likelihood of −∞ and move on. `nl-lbfgs` stops, because it
 no gradient to follow at such a point. The adaptive `rk45` integrator still sets
 a negative accepted result to zero.
 
-**Interventions.** At each intervention time, the float state is rounded into
-`IntState`/`RealState`, the intervention action is applied (which may
-fractionally transfer individuals), and the result is converted back to float.
+**Interventions.** At each intervention time the action is applied exactly in
+`f64`, with no rounding, so `transfer(fraction = 0.5, ...)` from a compartment
+holding 5 moves 2.5. The changes an event phase makes combine against that
+phase's snapshot, as on the discrete backends. An integer compartment the phase
+leaves negative beyond floating-point rounding is refused, as the discrete
+backends refuse it.
 
-**Flows.** Cumulative flows are accumulated as `f64` (rate × dt per step) and
-rounded to `u64` at each output snapshot, matching the integer type used by
-stochastic backends.
+**Flows.** Cumulative flows are accumulated as `f64` and recorded without
+rounding, so a flow below one individual over an output interval survives into
+the output and the likelihood. The stochastic backends record integer flows.
 
 **Seed parameter.** The `--seed` CLI argument is accepted but ignored; ODE runs
 are fully deterministic.
