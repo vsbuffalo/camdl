@@ -16876,8 +16876,108 @@ let gh1200_tests = [
     test_gh1200_parametric_entry_stays_expr;
 ]
 
+(* ── gh#1201: a singleton top-level declaration may be written once ──────────
+
+   `time_unit`, `description`, `origin`, `simulate { }`, `output { }` and
+   `balance { }` each fill one field of the model; a second one used to
+   replace the first without a word, so a stale block above a live one (or a
+   second `time_unit`, which rescales every rate) changed the run silently.
+   The second is now E140, located at it, with a related note at the first.
+   Repeatable blocks still concatenate. *)
+
+(* The base model, one declaration per line from line 2, so a test can name
+   the line a declaration it appends sits on. Lines 2-12. *)
+let dup1201_base = {|
+time_unit = 'days
+compartments { S, I, R }
+parameters {
+  beta  : rate in [0.1, 2.0]
+  gamma : rate in [0.05, 0.5]
+}
+transitions {
+  infection : S --> I @ beta * S * I / (S + I + R)
+  recovery  : I --> R @ gamma * I
+}
+init { S = 990  I = 10 }|}
+
+(* [first] and [second] are appended on lines 13 and 14. *)
+let dup1201_src ~first ~second ?(tail = "simulate { from = 0 'days  to = 50 'days }") () =
+  Printf.sprintf "%s\n%s\n%s\n%s\n" dup1201_base first second tail
+
+let expect_e118 ~what ~line ~first_line src =
+  let ds = tp_diags src in
+  match List.filter (fun (d : Diagnostics.diagnostic) -> d.code = "E140") ds with
+  | [d] ->
+    Alcotest.(check bool) "E140 is an error" true (d.severity = Diagnostics.Error);
+    Alcotest.(check string) "message"
+      (Printf.sprintf "%s is declared twice" what) d.message;
+    Alcotest.(check int) "located at the second declaration" line d.loc.line;
+    (match d.related with
+     | [(l, label)] ->
+       Alcotest.(check int) "related note at the first" first_line l.line;
+       Alcotest.(check string) "related label" "first declared here" label
+     | _ -> Alcotest.failf "expected one related note, got %d" (List.length d.related));
+    Alcotest.(check (option string)) "hint"
+      (Some (Printf.sprintf "a model has one %s; delete the one that is out of \
+                             date, or merge the two into one" what)) d.hint
+  | [] -> Alcotest.failf "expected E140 for %s; got:\n%s" what (tp_show ds)
+  | _ -> Alcotest.failf "E140 emitted more than once:\n%s" (tp_show ds)
+
+let test_gh1201_simulate_twice () =
+  expect_e118 ~what:"`simulate { }`" ~line:14 ~first_line:13
+    (dup1201_src
+       ~first:"simulate { from = 0 'days  to = 50 'days }"
+       ~second:"simulate { from = 0 'days  to = 300 'days }" ~tail:"" ())
+
+let test_gh1201_time_unit_twice () =
+  (* The first `time_unit` is on line 2 of the base. *)
+  expect_e118 ~what:"`time_unit`" ~line:13 ~first_line:2
+    (dup1201_src ~first:"time_unit = 'weeks" ~second:"" ())
+
+let test_gh1201_description_twice () =
+  expect_e118 ~what:"`description`" ~line:14 ~first_line:13
+    (dup1201_src ~first:"description = \"first\"" ~second:"description = \"second\"" ())
+
+let test_gh1201_origin_twice () =
+  expect_e118 ~what:"`origin`" ~line:14 ~first_line:13
+    (dup1201_src ~first:"origin = date(\"2020-01-01\")"
+       ~second:"origin = date(\"2021-01-01\")"
+       ~tail:"simulate { from = origin  to = origin + 50 'days }" ())
+
+let test_gh1201_output_twice () =
+  expect_e118 ~what:"`output { }`" ~line:14 ~first_line:13
+    (dup1201_src ~first:"output { trajectories { every = 1 'days } }"
+       ~second:"output { trajectories { every = 7 'days } }" ())
+
+let test_gh1201_balance_twice () =
+  expect_e118 ~what:"`balance { }`" ~line:14 ~first_line:13
+    (dup1201_src ~first:"balance { R = 1000 - S - I }"
+       ~second:"balance { R = 1000 - S - I }" ())
+
+(* Repeatable blocks join their entries, as before. *)
+let test_gh1201_repeatable_blocks_join () =
+  let m = compile_expect_ok
+      (dup1201_src ~first:"parameters { mu : rate in [0.0, 0.1] }"
+         ~second:"transitions { death : I --> R @ mu * I }" ()) in
+  Alcotest.(check int) "three transitions" 3 (List.length m.Ir.transitions);
+  tp_expect_no ~code:"E140"
+    (dup1201_src ~first:"parameters { mu : rate in [0.0, 0.1] }"
+       ~second:"transitions { death : I --> R @ mu * I }" ())
+
+let gh1201_tests = [
+  "a second simulate block is E140", test_gh1201_simulate_twice;
+  "a second time_unit is E140", test_gh1201_time_unit_twice;
+  "a second description is E140", test_gh1201_description_twice;
+  "a second origin is E140", test_gh1201_origin_twice;
+  "a second output block is E140", test_gh1201_output_twice;
+  "a second balance block is E140", test_gh1201_balance_twice;
+  "repeatable blocks still join", test_gh1201_repeatable_blocks_join;
+]
+
 let () =
   Alcotest.run "compiler" [
+    "gh1201_singleton_declarations",
+      List.map (fun (name, f) -> Alcotest.test_case name `Quick f) gh1201_tests;
     "gh1200_constant_at_times",
       List.map (fun (name, f) -> Alcotest.test_case name `Quick f) gh1200_tests;
     "time_positions_stage_1a",

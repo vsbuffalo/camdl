@@ -393,15 +393,16 @@ declaration:
   | TIME_UNIT EQ u = unit_lit
       { DTimeUnit (u, Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos) }
   | DESCRIPTION EQ s = STRING
-      { DDescription s }
+      { DDescription (s, Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos) }
   | ORIGIN EQ e = expr
-      { match e with
-        | EFuncCall ("date", [("", EIdent (s, _))]) -> DOrigin s
+      { let l = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos in
+        match e with
+        | EFuncCall ("date", [("", EIdent (s, _))]) -> DOrigin (s, l)
         | _ ->
           Parser_errors.push_error ~sp:$startpos ~ep:$endpos
             ~code:"E101"
             ~msg:"invalid origin declaration: expected origin = date(\"YYYY-MM-DD\")";
-          DOrigin "" }
+          DOrigin ("", l) }
   | DIMENSIONS LBRACE es = list(dim_entry_sep) RBRACE
       { DDimensions es }
   | COMPARTMENTS LBRACE cs = compartment_list RBRACE

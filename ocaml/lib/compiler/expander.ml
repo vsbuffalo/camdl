@@ -1244,15 +1244,48 @@ let checked_time_unit ctx ~loc u =
       ();
     Days
 
+(* A declaration the model may contain once, as the English name the E140
+   message uses, with its span; [None] for a repeatable block, whose entries
+   are joined. The model-level `#'` doc is single by the grammar: only the
+   head of the file can produce one. *)
+let singleton_declaration : declaration -> (string * loc) option = function
+  | DTimeUnit (_, l)   -> Some ("`time_unit`", l)
+  | DDescription (_, l) -> Some ("`description`", l)
+  | DOrigin (_, l)     -> Some ("`origin`", l)
+  | DSimulate sd       -> Some ("`simulate { }`", sd.sim_span)
+  | DOutput od         -> Some ("`output { }`", od.out_span)
+  | DBalance bd        -> Some ("`balance { }`", bd.bspan)
+  | _ -> None
+
 let collect_declarations ctx decls =
+  (* gh#1201: each singleton declaration fills one field of the context, so a
+     second one would replace the first without a word. It is refused at the
+     second, pointing at the first, and the first is kept. *)
+  let seen : (string, loc) Hashtbl.t = Hashtbl.create 8 in
+  let repeated d =
+    match singleton_declaration d with
+    | None -> false
+    | Some (what, l) ->
+      (match Hashtbl.find_opt seen what with
+       | None -> Hashtbl.replace seen what l; false
+       | Some first ->
+         Diagnostics.error ctx.diags ~code:"E140" ~loc:(diag_loc_of_ast_ctx ctx l)
+           ~message:(Printf.sprintf "%s is declared twice" what)
+           ~related:[(diag_loc_of_ast_ctx ctx first, "first declared here")]
+           ~hint:(Printf.sprintf
+             "a model has one %s; delete the one that is out of date, or \
+              merge the two into one" what)
+           ();
+         true)
+  in
   (* Use List.rev_append (prepend reversed chunk) during iteration, then
      reverse each list once at the end.  This avoids O(n) per append. *)
-  List.iter (fun d -> match d with
+  List.iter (fun d -> if not (repeated d) then match d with
     | DTimeUnit (u, l)   ->
       ctx.time_unit <- checked_time_unit ctx ~loc:(diag_loc_of_ast_ctx ctx l) u
-    | DDescription s     -> ctx.description <- Some s
+    | DDescription (s, _) -> ctx.description <- Some s
     | DModelDoc d        -> ctx.model_doc <- Some d
-    | DOrigin s          -> ctx.origin <- Some s
+    | DOrigin (s, _)     -> ctx.origin <- Some s
     | DDimensions es     -> ctx.dim_decls <- List.rev_append es ctx.dim_decls
     | DCompartments cs   ->
       List.iter (fun (c : compartment_decl) ->
