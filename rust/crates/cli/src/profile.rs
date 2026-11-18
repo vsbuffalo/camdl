@@ -162,7 +162,8 @@ struct ProfileBaseLevel<'a> {
     /// training data whole and add nothing here.)
     #[serde(skip_serializing_if = "Option::is_none")]
     training_rows: Option<&'a [(String, usize)]>,
-    /// `--allow-forcing-extrapolation`: every cell may hold a forcing's end
+    /// `--allow-forcing-extrapolation`, or the `--fit` config's `[config]
+    /// allow_forcing_extrapolation`: every cell may hold a forcing's end
     /// value outside its range (D44), so it is identity. Omitted when off.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     allow_forcing_extrapolation: bool,
@@ -420,11 +421,6 @@ pub(crate) fn profile_if2_config(
 }
 
 pub fn cmd_profile(a: &crate::args::ProfileArgs) {
-    // The forcing-extrapolation policy this command's evaluations run under
-    // and its store writes record, installed for the rest of the command.
-    let forcing =
-        crate::forcing_extrapolation::ForcingPolicy::new(a.inference.forcing_extrapolation.allow_forcing_extrapolation);
-    let _forcing_route = forcing.install();
     // profile has no `--no-color`: its painters follow the environment and
     // whether each stream is a terminal.
     let out = crate::out::Out::new(false);
@@ -590,6 +586,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // applies to the fit; read from the same file so a profile of that fit
     // evaluates its rates the same way.
     let mut fit_allow_degenerate_rates = false;
+    // …and its `[config] allow_forcing_extrapolation`, the same way.
+    let mut fit_allow_forcing_extrapolation = false;
     let (fit_estimate, fit_toml_hash, fit_toml_fixed_indexmap, fit_scenario, fit_simplex_groups,
          objective, fit_fixed_via):
         (indexmap::IndexMap<String, crate::fit::config_v2::EstimateSpecV2>,
@@ -634,6 +632,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         // the scale of the fit it profiles.
         let objective = fit_cfg.likelihood_objective();
         fit_allow_degenerate_rates = fit_cfg.config.allow_degenerate_rates;
+        fit_allow_forcing_extrapolation = fit_cfg.config.allow_forcing_extrapolation;
         // The fit's holdout, applied once the data are loaded (gh#1059).
         if let Some(data) = fit_cfg.data.as_ref() {
             fit_holdout_after = data.holdout_after.clone();
@@ -653,6 +652,16 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // every cell's log-likelihood, so it is applied here, before any cell runs,
     // and keyed in the base identity below.
     let allow_degenerate_rates = a.inference.allow_degenerate_rates || fit_allow_degenerate_rates;
+    // A forcing evaluated outside its range holds its end value under
+    // `--allow-forcing-extrapolation` or the `--fit` config's `[config]
+    // allow_forcing_extrapolation` (gh#1235), and is refused otherwise. The
+    // policy every cell runs under and every record names, installed for the
+    // rest of the command and keyed in the base identity below from this
+    // value. Nothing above evaluates the model.
+    let forcing = crate::forcing_extrapolation::ForcingPolicy::new(
+        a.inference.forcing_extrapolation.allow_forcing_extrapolation || fit_allow_forcing_extrapolation,
+    );
+    let _forcing_route = forcing.install();
 
     // The step every cell integrates at (the one dt rule), from the model,
     // --dt and the --fit file's written `[config] dt`.

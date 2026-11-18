@@ -115,16 +115,15 @@ struct ResolvedSurveyInputs {
     /// scoring, as `fit run` removes it from training (gh#1059). `None`
     /// without one, and in inline mode.
     training_rows: Option<Vec<(String, usize)>>,
+    /// `--allow-forcing-extrapolation`, or the fit config's `[config]
+    /// allow_forcing_extrapolation`, which `fit run` applied to the fit
+    /// (gh#1235). The flag alone in inline mode.
+    allow_forcing_extrapolation: bool,
 }
 
 // ─── cmd_survey entry point ──────────────────────────────────────────────────
 
 pub fn cmd_survey(a: &crate::args::SurveyArgs) {
-    // The forcing-extrapolation policy this command's evaluations run under
-    // and its store writes record, installed for the rest of the command.
-    let forcing =
-        crate::forcing_extrapolation::ForcingPolicy::new(a.forcing_extrapolation.allow_forcing_extrapolation);
-    let _forcing_route = forcing.install();
     // survey has no `--no-color`: its painters follow the environment and
     // whether each stream is a terminal.
     let mut out = crate::out::Out::new(false);
@@ -191,6 +190,12 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
             out.fail(format!("error: {}", e));
         }
     };
+    // The forcing-extrapolation policy every point is evaluated under and the
+    // leaf's record names, installed for the rest of the command; keyed in
+    // the survey's identity below from this value. Nothing above evaluates
+    // the model.
+    let forcing = crate::forcing_extrapolation::ForcingPolicy::new(resolved.allow_forcing_extrapolation);
+    let _forcing_route = forcing.install();
     // A rate that collapses (a division by an empty compartment) is 0 under
     // `--allow-degenerate-rates` or the `--fit` config's `[config]
     // allow_degenerate_rates`, and fails the trajectory otherwise — under the
@@ -1082,6 +1087,8 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
             scenario: scenario_opt,
             objective: config.likelihood_objective(),
             training_rows,
+            allow_forcing_extrapolation: a.forcing_extrapolation.allow_forcing_extrapolation
+                || config.config.allow_forcing_extrapolation,
             parameters_provenance,
             notices,
             roles,
@@ -1286,6 +1293,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
             // Inline mode has no `ic_free` key: every observation is scored.
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
             training_rows: None,
+            allow_forcing_extrapolation: a.forcing_extrapolation.allow_forcing_extrapolation,
         })
     }
 }
