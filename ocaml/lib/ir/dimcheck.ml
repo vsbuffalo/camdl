@@ -210,6 +210,7 @@ type subject = Dim_sites.subject =
   | SLet         of string
   | SForcing     of string
   | STable       of string
+  | SBalance     of string
 
 type diagnostic = {
   severity : severity;

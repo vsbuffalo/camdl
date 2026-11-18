@@ -76,8 +76,7 @@ type dim_vec = int array
 
 (** The construct a diagnostic concerns. The IR carries no source locations,
     so the compiler looks up the construct's declaration to place the
-    diagnostic. A site without a subject (the balance expression) yields a
-    diagnostic with no location. *)
+    diagnostic. *)
 type subject =
   | STransition  of string   (** A transition, by expanded name. *)
   | SOde         of string   (** The ODE equation of the named compartment. *)
@@ -91,6 +90,7 @@ type subject =
   | SLet         of string   (** A typed [let], for its annotation. *)
   | SForcing     of string   (** A forcing, by expanded name, for its arguments. *)
   | STable       of string   (** A table, for its inline cells. *)
+  | SBalance     of string   (** The balance expression, by its target compartment. *)
 
 (** A name whose dimension positions of the model refer to: each key is one
     unknown of the dimension checker's system. *)
@@ -458,7 +458,7 @@ let init_sites acc ((comp, spec) : string * init_spec) =
     need "Normal `sd`" (d sd) population
 
 let balance_site acc ({ balance_target; balance_expr } : balance_spec) =
-  add acc
+  add acc ~subject:(SBalance balance_target)
     ~role:(Printf.sprintf "balance expression for '%s'" balance_target) ~code:"E305"
     ~literals:Whole_terms (Has population) (E balance_expr)
 
