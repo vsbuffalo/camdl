@@ -17164,8 +17164,94 @@ let stage_1b_tests =
   "W327 still fires on the nested round trip", test_tp_w327_round_trip;
 ]
 
+(* ── gh#1200: a constant `at [...]` entry is a constant whatever its spelling ──
+
+   An intervention's `at [...]` list is emitted as `Ir.AtTimes` when every
+   entry is known at compile time and as `Ir.AtTimesExpr` only when an entry
+   depends on a parameter. A unit literal (`10 'days`) and instant arithmetic
+   closed over the origin (`origin + 2 'weeks`) are compile-time constants; the
+   exact-alignment timeline refuses `AtTimesExpr`, so emitting them as
+   parametric made `camdl pfilter` refuse a model whose bare-number spelling
+   it runs. *)
+
+let at1200_src ?(origin = None) ?(unit_ = "days") ?(params = "") ~at () =
+  Printf.sprintf {|
+time_unit = '%s
+%s
+compartments { S, I, R }
+parameters {
+  beta  : rate in [0.1, 2.0]
+  gamma : rate in [0.05, 0.5]
+  %s
+}
+transitions {
+  infection : S --> I @ beta * S * I / (S + I + R)
+  recovery  : I --> R @ gamma * I
+}
+init { S = 990  I = 10 }
+interventions {
+  sia : transfer(fraction = 0.5, from = S, to = R) at [%s]
+}
+simulate { from = %s  to = %s }
+|}
+    unit_
+    (match origin with Some o -> Printf.sprintf "origin = date(%S)" o | None -> "")
+    params at
+    (match origin with Some _ -> "origin" | None -> "0 'days")
+    (match origin with Some _ -> "origin + 60 'days" | None -> "60 'days")
+
+let check_at_times name expected ts =
+  Alcotest.(check (list (float 1e-9))) name expected ts
+
+let test_gh1200_unit_literal_at_is_constant () =
+  check_at_times "at [10 'days] -> AtTimes [10]" [10.0]
+    (at_times_of_first_intervention (at1200_src ~at:"10 'days" ()))
+
+let test_gh1200_unit_literal_converts_to_model_time () =
+  check_at_times "14 'days, 3 'weeks under 'weeks -> AtTimes [2; 3]" [2.0; 3.0]
+    (at_times_of_first_intervention
+       (at1200_src ~unit_:"weeks" ~at:"14 'days, 3 'weeks" ()))
+
+let test_gh1200_dated_entries_are_constant () =
+  check_at_times "origin + 2 'weeks, a date -> AtTimes [14; 31]" [14.0; 31.0]
+    (at_times_of_first_intervention
+       (at1200_src ~origin:(Some "2020-01-01")
+          ~at:"origin + 2 'weeks, date(\"2020-02-01\")" ()))
+
+let test_gh1200_parametric_entry_stays_expr () =
+  let m = compile_expect_ok
+      (at1200_src ~params:"tau : instant in [1 'days, 30 'days]"
+         ~at:"10 'days, tau" ()) in
+  match (List.hd m.Ir.interventions).Ir.fire with
+  | Ir.Scheduled (Ir.AtTimesExpr [_; Ir.Param _]) -> ()
+  | Ir.Scheduled (Ir.AtTimesExpr es) ->
+    Alcotest.failf "expected [<const>; Param tau], got %d entries" (List.length es)
+  | _ -> Alcotest.fail "a parameter-dependent at-list must stay AtTimesExpr"
+
+(* Emitting a constant as a number must not skip the dimension check the
+   expression form gets: `10 'per_day` is not a time. *)
+let test_gh1200_wrong_unit_still_e315 () =
+  with_dim_check_enabled @@ fun () ->
+  compile_expect_error_code ~code:"E315" ~contains:"intervention 'sia' time"
+    (at1200_src ~at:"10 'per_day" ());
+  compile_expect_error_code ~code:"E315" ~contains:"intervention 'sia' time"
+    (at1200_src ~at:"2 'days * 3 'days" ())
+
+let gh1200_tests = [
+  "a constant with a non-time unit is still E315", test_gh1200_wrong_unit_still_e315;
+  "at [10 'days] is emitted as AtTimes", test_gh1200_unit_literal_at_is_constant;
+  "a unit literal converts to the model time unit",
+    test_gh1200_unit_literal_converts_to_model_time;
+  "origin arithmetic and date() are emitted as AtTimes",
+    test_gh1200_dated_entries_are_constant;
+  "a parameter-dependent entry stays AtTimesExpr",
+    test_gh1200_parametric_entry_stays_expr;
+]
+
 let () =
   Alcotest.run "compiler" [
+    "gh1200_constant_at_times",
+      List.map (fun (name, f) -> Alcotest.test_case name `Quick f) gh1200_tests;
     "time_positions_stage_1a",
       List.map (fun (name, f) -> Alcotest.test_case name `Quick f) stage_1a_tests;
     "time_positions_stage_1b",
