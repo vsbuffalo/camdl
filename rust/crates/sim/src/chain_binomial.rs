@@ -810,7 +810,7 @@ pub fn step_one(
                     // documented "no overdispersion" path rather than inventing
                     // a value, and `neg_binomial` counts it.
                     if !sigma_sq.is_finite() {
-                        if crate::eval_stats::allow_degenerate_rates() {
+                        if model.eval.allow_degenerate_rates {
                             sigma_sq = 0.0;
                         } else {
                             return Err(SimError::NumericalCollapse {

@@ -698,10 +698,9 @@ mod tests {
     /// +inf propensity with the SAME typed error the full `eval_propensities`
     /// path raises — NOT return `Ok(+inf)`, which would set `lambda_total = +inf`
     /// and force a burst of spurious zero-time firings. Asserts strict-mode
-    /// (the default) only: the allow-coerce arm is structurally identical to
-    /// `eval_propensities` (whose coercion is covered by the expr_eval
-    /// integration tests) and is not re-toggled here because
-    /// `ALLOW_DEGENERATE_RATES` is a process-global shared with concurrent tests.
+    /// (the default) only: the allow-coerce arm is the same `guard_propensity`
+    /// call `eval_propensities` makes, whose coercion is covered by the
+    /// expr_eval integration tests.
     #[test]
     fn eval_one_rejects_infinite_rate_like_eval_propensities() {
         let model = overflow_model();

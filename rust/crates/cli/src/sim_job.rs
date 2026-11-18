@@ -39,6 +39,10 @@ pub struct SimulateJob {
     /// `SimRun::binomial`: BTPE, except for `fit predict`, which replays a fit
     /// on the sampler the fit ran (D78).
     pub binomial: sim::rng::BinomialAlgorithm,
+    /// How the evaluators treat a collapsed expression, copied to every cell's
+    /// `SimRun::eval`: `simulate`'s resolved `--allow-degenerate-rates`, or
+    /// the replayed fit's `[config] allow_degenerate_rates` for `fit predict`.
+    pub eval: sim::EvalSettings,
     /// gh#166: optional CLI `--integrator` override (method only); `None` → the
     /// model's declared integrator.
     pub integrator: Option<crate::args::types::IntegratorArg>,

@@ -1,6 +1,6 @@
 //! What the sparse-coupling constant fold does when a patch is empty
-//! (gh#1217). Its own test binary, because it needs degenerate rates to be
-//! errors and `set_allow_degenerate_rates` is process-global.
+//! (gh#1217). Degenerate rates are errors here: every model is compiled with
+//! the default (strict) `EvalSettings`.
 //!
 //! - `fold_empty_patch`: patch p2 is empty and every `W[l, p2]` is a literal 0.
 //!   The term `W[l, p2] * I[p2] / N[p2]` is structurally zero, and the fold
@@ -53,7 +53,6 @@ fn expect_div_by_zero(name: &str) {
 
 #[test]
 fn empty_patch_zeroed_by_the_contact_matrix_is_not_evaluated() {
-    sim::eval_stats::set_allow_degenerate_rates(false);
     expect_div_by_zero("fold_empty_patch_unfolded");
     run("fold_empty_patch_folded")
         .unwrap_or_else(|e| panic!("folded model should run: the empty patch's terms are structurally zero; got {e}"));
@@ -61,7 +60,6 @@ fn empty_patch_zeroed_by_the_contact_matrix_is_not_evaluated() {
 
 #[test]
 fn empty_patch_coupled_by_a_nonzero_cell_still_divides_by_zero() {
-    sim::eval_stats::set_allow_degenerate_rates(false);
     expect_div_by_zero("fold_empty_patch_coupled_unfolded");
     expect_div_by_zero("fold_empty_patch_coupled_folded");
 }

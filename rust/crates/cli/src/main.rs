@@ -1454,6 +1454,9 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
         integrator, // gh#166: --integrator, checked against the replayed fit above
         // `simulate` draws with BTPE, including `--draws posterior --fit`.
         binomial: sim::rng::BinomialAlgorithm::Btpe,
+        // Replaced, like `backend` and `dt`, from the resolved configuration's
+        // engine settings once it exists.
+        eval: sim::EvalSettings::default(),
     };
 
     // ── `--init-state`: the forecast-origin ensemble ────────────────────────
@@ -2068,6 +2071,7 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
     // were resolved from are not read again.
     base_sim_run.backend = engine_settings.backend;
     base_sim_run.dt = engine_settings.dt;
+    base_sim_run.eval = engine_settings.eval;
 
     let job = SimulateJob {
         // The pre-compiled IR: each engine cell loads this directly (no
@@ -2077,6 +2081,7 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
         backend: engine_settings.backend,
         dt: engine_settings.dt,
         binomial: base_sim_run.binomial,
+        eval: engine_settings.eval,
         integrator, // gh#166: --integrator, checked against the replayed fit above
         source,
         scenarios,
@@ -2740,7 +2745,7 @@ fn materialize_obs_for_quantities(
             obs_ir, &times, run_start_of(traj, model), model.simulation.t_end,
             emit.and_then(|e| e.resolve_for(&obs_ir.source)),
         )?;
-        let projected = project_coverages(traj, obs_ir, model, &plan.scored())?;
+        let projected = project_coverages(traj, obs_ir, model, &plan.scored(), compiled.eval)?;
         // Each row is drawn where it is scored, and named on the series by
         // its label, as the `--obs` file names it: which time names a row is
         // a separate question (D69), not settled here.
@@ -2781,7 +2786,8 @@ impl SimQuantities {
         if self.eval.is_none() {
             let compiled = std::sync::Arc::new(
                 sim::CompiledModel::new(cell.model.clone())
-                    .map_err(|e| format!("compiling model for quantities: {e:?}"))?,
+                    .map_err(|e| format!("compiling model for quantities: {e:?}"))?
+                    .with_eval_settings(cell.spec.sim_run.eval),
             );
             let eval = sim::quantity::QuantityEvaluator::new(&self.quantities, compiled.as_ref())
                 .map_err(|e| format!("building quantity evaluator: {e}"))?;
@@ -3693,7 +3699,8 @@ impl engine::RunSink for StreamSink {
             }
             let compiled = std::sync::Arc::new(
                 sim::CompiledModel::new(model.clone())
-                    .map_err(|e| format!("error compiling model for obs: {:?}", e))?,
+                    .map_err(|e| format!("error compiling model for obs: {:?}", e))?
+                    .with_eval_settings(cell.spec.sim_run.eval),
             );
             let params = compiled.default_params.clone();
             let mut obs_rng = sim::rng::StatefulRng::new(cell.spec.obs_seed);
@@ -3711,7 +3718,7 @@ impl engine::RunSink for StreamSink {
                     obs_ir, compiled.clone(), &params,
                 ).map_err(|e| e.to_string())?;
                 let plan = &self.obs_plans[si];
-                let projected_values = project_coverages(traj, obs_ir, model, &plan.scored())?;
+                let projected_values = project_coverages(traj, obs_ir, model, &plan.scored(), compiled.eval)?;
                 for (ti, row) in plan.rows.iter().enumerate() {
                     // GH #6 fix: pass the actual compartment state where the row
                     // is scored so the likelihood p/mean expressions can resolve
@@ -4489,11 +4496,16 @@ pub(crate) fn run_start_of(traj: &sim::Trajectory, model: &ir::Model) -> f64 {
 /// snapshots the cumulative flow would resolve to an earlier one and silently
 /// hand part of the interval to the wrong row — the class of silent-wrong
 /// gh#702 was about (incident 2026-08-12, gh#589).
+///
+/// `eval` is the evaluator setting of the run that produced `traj`: a
+/// `DerivedExpr` projection compiles `model` under it, so a projection is
+/// evaluated as the run's rates were.
 pub(crate) fn project_coverages(
     traj: &sim::Trajectory,
     obs_ir: &ir::observation::ObservationModel,
     model: &ir::Model,
     rows: &[(f64, score::trace::Coverage)],
+    eval: sim::EvalSettings,
 ) -> Result<Vec<f64>, String> {
     let obs_times: Vec<f64> = rows.iter().map(|r| r.0).collect();
     check_obs_times_on_snapshot_grid(traj, &obs_ir.name, &model.time_unit, &obs_times)?;
@@ -4546,7 +4558,8 @@ pub(crate) fn project_coverages(
             let compiled = sim::CompiledModel::new(model.clone())
                 .unwrap_or_else(|e| {
                     crate::out::detached().fail(format!("error: DerivedExpr projection — model compile: {:?}", e));
-                });
+                })
+                .with_eval_settings(eval);
             let stream_proj = StreamProjection::from_ir(
                 &obs_ir.projection, &compiled, &obs_ir.name,
             ).unwrap_or_else(|e| {

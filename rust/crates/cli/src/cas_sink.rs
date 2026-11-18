@@ -738,7 +738,7 @@ impl crate::engine::RunSink for CasSink {
             let restart_origin = spec.sim_run.init_state.as_ref().map(|i| i.origin_t);
             if let Err(e) = write_obs_into_cas(
                 &dest, &cell.model, &cell.traj, spec.process_seed, restart_origin,
-                self.emit_every.as_ref(),
+                self.emit_every.as_ref(), spec.sim_run.eval,
             ) {
                 self.errors.push(format!("scenario={} seed={}: obs ensemble: {}",
                     name, spec.process_seed, e));
@@ -1091,6 +1091,9 @@ fn write_obs_into_cas(
     // the subtree (via `obs_subtree_hash`), so the two cadences coexist under one
     // trajectory leaf instead of one overwriting the other.
     emit: Option<&crate::emit_every::EmitEvery>,
+    // The evaluator setting the cell ran under (`SimRun::eval`): the
+    // observation model is compiled under it, as the cell's rates were.
+    eval: sim::EvalSettings,
 ) -> Result<(), String> {
     if model.observations.is_empty() {
         return Ok(());
@@ -1129,7 +1132,7 @@ fn write_obs_into_cas(
             obs_ir, &times, run_start, model.simulation.t_end,
             emit.and_then(|e| e.resolve_for(&obs_ir.source)),
         )?;
-        crate::project_coverages(traj, obs_ir, model, &plan.scored())?;
+        crate::project_coverages(traj, obs_ir, model, &plan.scored(), eval)?;
         plans.push(plan);
     }
 
@@ -1138,7 +1141,8 @@ fn write_obs_into_cas(
 
     let compiled = std::sync::Arc::new(
         sim::CompiledModel::new(model.clone())
-            .map_err(|e| format!("model compile error for obs: {:?}", e))?,
+            .map_err(|e| format!("model compile error for obs: {:?}", e))?
+            .with_eval_settings(eval),
     );
     let params = compiled.default_params.clone();
     // One obs RNG, consumed in declaration order across streams — the same
@@ -1155,7 +1159,7 @@ fn write_obs_into_cas(
         // subtree never carries rows past the end of the trajectory beside it
         // (gh#561).
         let rows = plan.scored();
-        let projected = crate::project_coverages(traj, obs_ir, model, &rows)?;
+        let projected = crate::project_coverages(traj, obs_ir, model, &rows, eval)?;
 
         // Each row's state and time are read where it is scored.
         let draws: Vec<f64> = rows.iter().enumerate()

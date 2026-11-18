@@ -184,11 +184,12 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // A rate that collapses (a division by an empty compartment) is 0 under
     // `--allow-degenerate-rates` or the `--fit` config's `[config]
     // allow_degenerate_rates`, which `fit run` applied to the fit, and kills
-    // the particle otherwise (gh#1235). Applied before any particle runs; the
-    // store leaf keys the value read back from `sim::eval_stats` below.
-    sim::eval_stats::set_allow_degenerate_rates(
-        a.inference.allow_degenerate_rates
-            || fit_problem.as_ref().is_some_and(|p| p.config.allow_degenerate_rates));
+    // the particle otherwise (gh#1235). Carried on the compiled model every
+    // particle runs, and keyed in the store leaf below from the same value.
+    let eval = sim::EvalSettings {
+        allow_degenerate_rates: a.inference.allow_degenerate_rates
+            || fit_problem.as_ref().is_some_and(|p| p.config.allow_degenerate_rates),
+    };
     let objective = fit_problem
         .as_ref()
         .map(|p| p.likelihood_objective())
@@ -391,7 +392,8 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     let model = resolved.model.clone();
 
     let compiled = CompiledModel::new(model.clone())
-        .unwrap_or_else(|e| { out.fail(format!("compile error: {:?}", e)); });
+        .unwrap_or_else(|e| { out.fail(format!("compile error: {:?}", e)); })
+        .with_eval_settings(eval);
     // gh#122: the particle filter is a stochastic (chain_binomial) producer; a
     // source that mixes a deterministic exit with another exit would over-draw
     // the source. Reject it here (the standalone `pfilter` command bypasses
@@ -736,7 +738,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             flow_indices: &flow_indices,
             objective,
             allow_forcing_extrapolation: crate::forcing_extrapolation::allowed(),
-            allow_degenerate_rates: sim::eval_stats::allow_degenerate_rates(),
+            allow_degenerate_rates: eval.allow_degenerate_rates,
             training_rows: training_cut.as_ref().and_then(TrainingCut::identity),
             binomial: smc_config.binomial,
             seed,

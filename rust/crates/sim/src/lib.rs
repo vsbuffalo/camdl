@@ -34,7 +34,7 @@ pub mod inference;
 pub use config::{GillespieConfig, ChainBinomialConfig, OdeConfig, SimConfig};
 pub use error::{SimError, CollapseKind, NegativeCountCause};
 pub use state::{IntState, RealState, FlowVec, Flows, Snapshot, Trajectory};
-pub use compiled_model::CompiledModel;
+pub use compiled_model::{CompiledModel, EvalSettings};
 pub use simulate::Simulate;
 pub use gillespie::GillespieSim;
 pub use chain_binomial::ChainBinomialSim;

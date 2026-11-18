@@ -403,7 +403,8 @@ impl FitRunConfig {
         let model = resolved.model.clone();
 
         let compiled = CompiledModel::new(model.clone())
-            .map_err(|e| format!("compile error: {:?}", e))?;
+            .map_err(|e| format!("compile error: {:?}", e))?
+            .with_eval_settings(fit.config.eval_settings());
         let mut base_params = compiled.default_params.clone();
 
         // `base_params` is the base point every chain-starts rule is drawn

@@ -2851,6 +2851,10 @@ pub struct SimRun {
     /// except a replay of a fit (`fit predict`), which draws with the sampler
     /// the fit ran (D78).
     pub binomial: sim::rng::BinomialAlgorithm,
+    /// How the evaluators treat a collapsed expression
+    /// (`--allow-degenerate-rates`), set on the model this run compiles
+    /// ([`resolve_run_model`]). Strict by default.
+    pub eval: sim::EvalSettings,
 }
 
 /// The forecast origin one cell starts from: one row of a `--init-state`
@@ -3561,6 +3565,7 @@ impl Default for SimRun {
             seed: 1,
             integrator: None,
             binomial: sim::rng::BinomialAlgorithm::Btpe,
+            eval: sim::EvalSettings::default(),
         }
     }
 }
@@ -3757,7 +3762,8 @@ pub fn resolved_parameter_values(model: &ir::Model) -> std::collections::BTreeMa
 pub fn resolve_run_model(run: &SimRun) -> Result<(CompiledModel, ir::Model), String> {
     let model = resolve_run_ir(run)?;
     let compiled = CompiledModel::new(model.clone())
-        .map_err(|e| format!("model compile error: {:?}", e))?;
+        .map_err(|e| format!("model compile error: {:?}", e))?
+        .with_eval_settings(run.eval);
     Ok((compiled, model))
 }
 

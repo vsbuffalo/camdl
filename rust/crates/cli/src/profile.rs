@@ -649,7 +649,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // every cell's log-likelihood, so it is applied here, before any cell runs,
     // and keyed in the base identity below.
     let allow_degenerate_rates = a.inference.allow_degenerate_rates || fit_allow_degenerate_rates;
-    sim::eval_stats::set_allow_degenerate_rates(allow_degenerate_rates);
 
     // The step every cell integrates at (the one dt rule), from the model,
     // --dt and the --fit file's written `[config] dt`.
@@ -977,7 +976,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         .iter().map(|(k, &v)| (k.clone(), v)).collect();
 
     let compiled = Arc::new(CompiledModel::new(model.clone())
-        .unwrap_or_else(|e| { out.fail(format!("{:?}", e)); }));
+        .unwrap_or_else(|e| { out.fail(format!("{:?}", e)); })
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates }));
     let base_params = compiled.default_params.clone();
 
     // Reject overdispersed models on the ODE backend (and any other

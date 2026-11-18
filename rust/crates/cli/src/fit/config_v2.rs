@@ -278,6 +278,14 @@ fn default_backend() -> crate::args::types::ForwardBackend {
 }
 fn default_dt() -> f64 { 1.0 }
 fn is_false(b: &bool) -> bool { !*b }
+impl FitBackendConfig {
+    /// The evaluator settings every model compiled for this fit carries
+    /// (`CompiledModel::with_eval_settings`).
+    pub fn eval_settings(&self) -> sim::EvalSettings {
+        sim::EvalSettings { allow_degenerate_rates: self.allow_degenerate_rates }
+    }
+}
+
 impl Default for FitBackendConfig {
     fn default() -> Self {
         FitBackendConfig {
@@ -3324,6 +3332,7 @@ impl FitConfig {
         let Ok(compiled) = sim::CompiledModel::new(seeded) else {
             return Ok(());
         };
+        let compiled = compiled.with_eval_settings(self.problem.config.eval_settings());
         let estimated: std::collections::HashSet<&str> =
             self.problem.estimate.keys().map(|s| s.as_str()).collect();
         let default_params = compiled.default_params.clone();

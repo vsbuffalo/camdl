@@ -367,7 +367,8 @@ pub(crate) fn run_forecast(
             plan.run_end(), model.simulation.t_end));
     }
     let compiled = Arc::new(sim::CompiledModel::new(fitted)
-        .map_err(|e| format!("compiling the fitted model for the forecast: {e:?}"))?);
+        .map_err(|e| format!("compiling the fitted model for the forecast: {e:?}"))?
+        .with_eval_settings(job.compiled.eval));
 
     // The posterior draws, subsampled as the other modes do.
     let cap = job.args.n_draws.unwrap_or(crate::fit::predict::DEFAULT_PREDICT_DRAWS);

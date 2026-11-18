@@ -474,7 +474,6 @@ fn gate_golden_trajectories_are_byte_identical() {
     env_switches::from_env();
     // Match smoke_all_golden: legacy degenerate-rate mode + no interventions, so
     // the baseline behavior is well-defined for the whole corpus.
-    sim::eval_stats::set_allow_degenerate_rates(true);
     let capture = std::env::var("CAMDL_CAPTURE_BASELINE").is_ok();
 
     let models = discover_models();
@@ -493,7 +492,7 @@ fn gate_golden_trajectories_are_byte_identical() {
         let mut model = load_and_apply_baseline(name);
         model.interventions.clear();
         let compiled = match CompiledModel::new(model.clone()) {
-            Ok(c) => c,
+            Ok(c) => c.with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true }),
             Err(_) => continue, // models that don't compile under baseline are out of scope here
         };
         let params = compiled.default_params.clone();
@@ -557,7 +556,6 @@ fn gate_ode_state_only_hash_is_stable() {
     env_switches::from_env();
     // Mirror the full gate's setup so the trajectory is the SAME run, then hash
     // state only (int+real, no flows). See `ode_state_hash`.
-    sim::eval_stats::set_allow_degenerate_rates(true);
     let capture = std::env::var("CAMDL_CAPTURE_BASELINE").is_ok();
 
     let models = discover_models();
@@ -574,7 +572,7 @@ fn gate_ode_state_only_hash_is_stable() {
         let mut model = load_and_apply_baseline(name);
         model.interventions.clear();
         let compiled = match CompiledModel::new(model.clone()) {
-            Ok(c) => c,
+            Ok(c) => c.with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true }),
             Err(_) => continue,
         };
         let params = compiled.default_params.clone();

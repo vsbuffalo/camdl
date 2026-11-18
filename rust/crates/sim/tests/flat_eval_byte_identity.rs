@@ -63,7 +63,6 @@ fn flat_matches_eval_resolved_on_all_goldens() {
     // Match the simulate/inference default: degenerate rates fall back to the
     // legacy 0.0 sentinel rather than NaN, so the two evaluators agree on the
     // div-by-zero arm too.
-    sim::eval_stats::set_allow_degenerate_rates(true);
 
     let dir = "../../../ir/golden";
     let mut checked_models = 0usize;
@@ -83,7 +82,7 @@ fn flat_matches_eval_resolved_on_all_goldens() {
         // byte-identity failure — it's a fixture-setup limitation. Skip it
         // VISIBLY (logged below) rather than silently, and hold a floor count.
         let cm = match CompiledModel::new(model) {
-            Ok(cm) => cm,
+            Ok(cm) => cm.with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true }),
             Err(e) => {
                 eprintln!("SKIP {fname}: compile with midpoint params: {e}");
                 continue;
@@ -156,14 +155,14 @@ fn flat_matches_eval_resolved_on_all_goldens() {
 
 #[test]
 fn flat_matches_eval_resolved_on_latent_edge_cases() {
-    sim::eval_stats::set_allow_degenerate_rates(true);
 
     // A real CompiledModel only satisfies `EvalCtx.model`; the synthetic exprs
     // below index directly into the int_s/real_s slices we control and never
     // dereference the model, so sir_basic (3 int compartments, no real ones) is
     // a fine carrier even for the mixed-pop-sum case.
     let cm = CompiledModel::new(load_model_filled("../../../ir/golden/sir_basic.ir.json"))
-        .expect("compile sir_basic with midpoint params");
+        .expect("compile sir_basic with midpoint params")
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true });
     let params = cm.default_params.clone();
 
     // int_s[0]=1 and real_s = [1e16, -1e16] make the MixedPopSum grouping
@@ -283,7 +282,6 @@ fn count_per_eval_ops(vm: &FlatVm) -> usize {
 /// models, so this comparison would have compared nothing.
 #[test]
 fn flat_matches_eval_resolved_on_a_per_eval_model() {
-    sim::eval_stats::set_allow_degenerate_rates(true);
 
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/licm_ab_on.ir.json");
@@ -298,7 +296,8 @@ fn flat_matches_eval_resolved_on_a_per_eval_model() {
          the gh#815 path; regenerate it from licm_ab.camdl with LICM on"
     );
 
-    let cm = CompiledModel::new(model).expect("compile licm_ab_on");
+    let cm = CompiledModel::new(model).expect("compile licm_ab_on")
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true });
 
     // The VM `CompiledModel::new` built for this model — the one
     // `eval_propensities` runs — not a locally built one.

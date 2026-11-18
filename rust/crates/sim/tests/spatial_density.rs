@@ -70,7 +70,6 @@ fn test_density_matches_step_one_sir_demography() {
     // step_one parity, not numerical-collapse semantics — keep
     // legacy mode here. expr_eval.rs::test_*_errors_by_default
     // covers the strict-mode contract.
-    sim::eval_stats::set_allow_degenerate_rates(true);
     let model = load_model("../../../ocaml/golden/sir_demography.ir.json");
     let mut model = model;
     for p in &mut model.parameters {
@@ -80,7 +79,8 @@ fn test_density_matches_step_one_sir_demography() {
             });
         }
     }
-    let compiled = Arc::new(CompiledModel::new(model).unwrap());
+    let compiled = Arc::new(CompiledModel::new(model).unwrap()
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true }));
     let mut params = vec![0.0; compiled.param_index.len()];
     for p in &compiled.model.parameters {
         if let Some(v) = p.value.resolved_value() {
@@ -148,7 +148,6 @@ fn test_density_matches_step_one_polio_spatial_5() {
     // gh#audit-C6 / S1: spatial model with empty patches; legacy
     // silent-zero needed for parity assertion. See companion comment
     // on test_density_matches_step_one_sir_demography.
-    sim::eval_stats::set_allow_degenerate_rates(true);
     let path = "../../../ocaml/golden/polio_spatial_5.ir.json";
     let model = match std::fs::read_to_string(path) {
         Ok(json) => match ir::from_str(&json) {
@@ -164,7 +163,8 @@ fn test_density_matches_step_one_polio_spatial_5() {
             p.value = p.value.with_value(0.1); // default for any missing param
         }
     }
-    let compiled = Arc::new(CompiledModel::new(model).unwrap());
+    let compiled = Arc::new(CompiledModel::new(model).unwrap()
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true }));
     let mut params = vec![0.0; compiled.param_index.len()];
     for p in &compiled.model.parameters {
         if let Some(v) = p.value.resolved_value() {

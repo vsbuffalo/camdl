@@ -3,7 +3,6 @@ use std::cell::RefCell;
 use crate::{
     compiled_model::{CompiledModel, CompiledTimeFuncKind},
     error::{SimError, CollapseKind},
-    eval_stats::allow_degenerate_rates,
     trace::eval_unresolved,
     flat_eval::{self, FlatCache},
     resolved_expr::{eval_resolved, ResolvedExpr},
@@ -152,7 +151,7 @@ pub fn eval_expr(expr: &Expr, ctx: &EvalCtx<'_>) -> Result<f64, SimError> {
                 BinOp::Div => {
                     if b == 0.0 {
                         crate::eval_stats::inc_div_by_zero();
-                        if allow_degenerate_rates() { Ok(0.0) }
+                        if ctx.model.eval.allow_degenerate_rates { Ok(0.0) }
                         else { Err(SimError::NumericalCollapse {
                             kind: CollapseKind::DivByZero, t: ctx.t }) }
                     } else { Ok(a / b) }
@@ -161,7 +160,7 @@ pub fn eval_expr(expr: &Expr, ctx: &EvalCtx<'_>) -> Result<f64, SimError> {
                     let r = a.powf(b);
                     if r.is_nan() || r.is_infinite() {
                         crate::eval_stats::inc_pow_nan_inf();
-                        if allow_degenerate_rates() { Ok(0.0) }
+                        if ctx.model.eval.allow_degenerate_rates { Ok(0.0) }
                         else { Err(SimError::NumericalCollapse {
                             kind: CollapseKind::PowNanInf, t: ctx.t }) }
                     } else { Ok(r) }
@@ -169,7 +168,7 @@ pub fn eval_expr(expr: &Expr, ctx: &EvalCtx<'_>) -> Result<f64, SimError> {
                 BinOp::Mod => {
                     if b == 0.0 {
                         crate::eval_stats::inc_div_by_zero();
-                        if allow_degenerate_rates() { Ok(0.0) }
+                        if ctx.model.eval.allow_degenerate_rates { Ok(0.0) }
                         else { Err(SimError::NumericalCollapse {
                             kind: CollapseKind::ModByZero, t: ctx.t }) }
                     } else { Ok(a.rem_euclid(b)) }
@@ -194,13 +193,13 @@ pub fn eval_expr(expr: &Expr, ctx: &EvalCtx<'_>) -> Result<f64, SimError> {
             // (a −inf log used to slip past the is_nan guard below entirely).
             if matches!(w.un_op.op, UnOp::Sqrt) && a < 0.0 {
                 crate::eval_stats::inc_unop_nan();
-                return if allow_degenerate_rates() { Ok(0.0) }
+                return if ctx.model.eval.allow_degenerate_rates { Ok(0.0) }
                 else { Err(SimError::NumericalCollapse {
                     kind: CollapseKind::SqrtNegative, t: ctx.t }) };
             }
             if matches!(w.un_op.op, UnOp::Log) && a <= 0.0 {
                 crate::eval_stats::inc_unop_nan();
-                return if allow_degenerate_rates() { Ok(0.0) }
+                return if ctx.model.eval.allow_degenerate_rates { Ok(0.0) }
                 else { Err(SimError::NumericalCollapse {
                     kind: CollapseKind::LogNonPositive, t: ctx.t }) };
             }
@@ -218,7 +217,7 @@ pub fn eval_expr(expr: &Expr, ctx: &EvalCtx<'_>) -> Result<f64, SimError> {
             };
             if result.is_nan() {
                 crate::eval_stats::inc_unop_nan();
-                if allow_degenerate_rates() { Ok(0.0) }
+                if ctx.model.eval.allow_degenerate_rates { Ok(0.0) }
                 else { Err(SimError::NumericalCollapse {
                     kind: CollapseKind::UnOpNan, t: ctx.t }) }
             } else {
@@ -601,7 +600,7 @@ fn refuse_propensity(
                  table or fix the index expression)"
             )));
         }
-        if allow_degenerate_rates() {
+        if model.eval.allow_degenerate_rates {
             0.0
         } else {
             return Err(SimError::NumericalCollapse {

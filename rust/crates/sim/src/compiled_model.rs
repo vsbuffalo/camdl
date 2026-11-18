@@ -1029,8 +1029,29 @@ fn eval_structural(
     eval_table_expr(expr, param_index, consts, params)
 }
 
+/// How the evaluators treat a numerically collapsed expression, set by the
+/// command that compiles the model and carried with it, so every evaluation of
+/// this model — forward simulation, the particle filters, the samplers, the
+/// observation likelihood — reads the same setting from the model it
+/// evaluates. Two models in one process may carry different settings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EvalSettings {
+    /// `--allow-degenerate-rates` / a fit config's `[config]
+    /// allow_degenerate_rates`: a collapsed expression (a division or modulus
+    /// by zero, a power, square root, logarithm or other operation that is not
+    /// finite, a non-finite rate or overdispersion) evaluates to `0.0` instead
+    /// of failing the run with [`crate::SimError::NumericalCollapse`]. The
+    /// [`crate::eval_stats`] counters increment under either setting.
+    pub allow_degenerate_rates: bool,
+}
+
 pub struct CompiledModel {
     pub model: Arc<Model>,
+
+    /// How the evaluators treat a collapsed expression ([`EvalSettings`]).
+    /// Strict (`Default`) from [`CompiledModel::new`]; a command sets it with
+    /// [`CompiledModel::with_eval_settings`] before the model is shared.
+    pub eval: EvalSettings,
 
     /// compartment name → index in the *combined* compartment list
     pub comp_index: HashMap<String, usize>,
@@ -2620,6 +2641,7 @@ impl CompiledModel {
 
         Ok(CompiledModel {
             model: Arc::new(model),
+            eval: EvalSettings::default(),
             comp_index,
             param_index,
             binding_index,
@@ -2651,6 +2673,12 @@ impl CompiledModel {
             init_depends_on_law,
             resolved,
         })
+    }
+
+    /// This model, evaluated under `eval` ([`EvalSettings`]).
+    pub fn with_eval_settings(mut self, eval: EvalSettings) -> Self {
+        self.eval = eval;
+        self
     }
 
     /// Features this model requires from a backend.

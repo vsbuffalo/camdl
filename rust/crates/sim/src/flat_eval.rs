@@ -431,7 +431,7 @@ pub fn eval_flat(
     scratch: &mut Vec<f64>,
     cache: &mut FlatCache,
 ) -> f64 {
-    let allow = crate::eval_stats::allow_degenerate_rates();
+    let allow = ctx.model.eval.allow_degenerate_rates;
     // SAFETY: caller guarantees capacity ≥ scratch_capacity(vm); no op grows the
     // buffer, so the base pointer stays valid for the whole eval. The executor
     // returns the top value and never relies on the buffer's logical len.

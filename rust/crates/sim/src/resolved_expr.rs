@@ -627,7 +627,7 @@ pub fn eval_resolved(expr: &ResolvedExpr, ctx: &EvalCtx<'_>) -> f64 {
             // to SimError::NumericalCollapse. Under
             // --allow-degenerate-rates the legacy 0.0 sentinel is
             // returned so existing models work as before.
-            let allow = crate::eval_stats::allow_degenerate_rates();
+            let allow = ctx.model.eval.allow_degenerate_rates;
             match op {
                 BinOp::Add => a + b,
                 BinOp::Sub => a - b,
@@ -664,7 +664,7 @@ pub fn eval_resolved(expr: &ResolvedExpr, ctx: &EvalCtx<'_>) -> f64 {
 
         ResolvedExpr::UnOp { op, arg } => {
             let a = eval_resolved(arg, ctx);
-            let allow = crate::eval_stats::allow_degenerate_rates();
+            let allow = ctx.model.eval.allow_degenerate_rates;
             let result = match op {
                 UnOp::Neg   => -a,
                 UnOp::Exp   => a.exp(),

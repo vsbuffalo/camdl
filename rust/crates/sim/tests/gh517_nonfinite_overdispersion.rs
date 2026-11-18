@@ -149,32 +149,31 @@ fn one_over_phi() -> Expr {
 
 fn constant(v: f64) -> Expr { Expr::Const(ConstExpr { value: v }) }
 
-fn run(sigma_expr: Expr, seed: u64) -> Result<u64, sim::error::SimError> {
-    let compiled = CompiledModel::new(overdispersed_model(sigma_expr)).unwrap();
+fn run(sigma_expr: Expr, seed: u64, eval: sim::EvalSettings) -> Result<u64, sim::error::SimError> {
+    let compiled = CompiledModel::new(overdispersed_model(sigma_expr)).unwrap().with_eval_settings(eval);
     let params = compiled.default_params.clone();
     let config = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 1.0, dt: 1.0, binomial: sim::rng::BinomialAlgorithm::Btpe });
     let traj = ChainBinomialSim.run(&compiled, &params, seed, &config)?;
     Ok(traj.snapshots.last().unwrap().flows.as_int()[0])
 }
 
-/// All three phases live in ONE test on purpose. `allow_degenerate_rates` is a
-/// process-global (`AtomicBool`), and `cargo test` runs the tests inside one
-/// binary on parallel threads — a separate `#[test]` that flipped the flag
-/// would race the strict-mode assertion and turn this file into a flake.
-/// Sequential phases in a single test make the flag's scope explicit.
+/// The three phases: a finite control, strict mode (the default
+/// `EvalSettings`) and `allow_degenerate_rates`, each compiled with its own
+/// setting.
 #[test]
 fn a_nonfinite_overdispersion_is_refused_by_default_and_coerced_under_the_flag() {
-    sim::eval_stats::set_allow_degenerate_rates(false);
+    let strict = sim::EvalSettings::default();
+    let allow = sim::EvalSettings { allow_degenerate_rates: true };
 
     // ── Negative control: a FINITE sigma^2 is untouched by this change. ──
     // Without this, the test below passes just as well against a guard that
     // rejects every draw, which is the failure mode that matters here: the
     // fix must be invisible to every model that was already correct.
-    let finite = run(constant(0.5), 42).expect("a finite sigma^2 must still simulate");
+    let finite = run(constant(0.5), 42, strict).expect("a finite sigma^2 must still simulate");
     assert!(finite > 0, "control produced no infections; fixture is wrong, not the guard");
 
     // ── Strict mode (the default): a NaN sigma^2 is an error, not a draw. ──
-    let err = run(one_over_phi(), 42)
+    let err = run(one_over_phi(), 42, strict)
         .expect_err("a NaN overdispersion must be refused, not silently drawn as Poisson");
     assert!(
         matches!(err, sim::error::SimError::NumericalCollapse { .. }),
@@ -184,7 +183,7 @@ fn a_nonfinite_overdispersion_is_refused_by_default_and_coerced_under_the_flag()
     // +inf reaches the same guard — `Gamma::new(0.0, inf)` is the other way
     // the noise model disappears without a word.
     assert!(
-        run(one_over_phi(), 7).is_err(),
+        run(one_over_phi(), 7, strict).is_err(),
         "an infinite overdispersion must be refused too"
     );
 
@@ -192,16 +191,12 @@ fn a_nonfinite_overdispersion_is_refused_by_default_and_coerced_under_the_flag()
     // that lands on the DOCUMENTED "no overdispersion" path rather than an
     // invented one. sigma^2 = 0 is what `neg_binomial` already counts via
     // `inc_neg_binomial_pois`, so the run stays legible in the eval stats.
-    sim::eval_stats::set_allow_degenerate_rates(true);
-    let coerced = run(one_over_phi(), 42).expect("under the flag a NaN sigma^2 must coerce, not error");
-    let no_overdispersion = run(constant(0.0), 42).expect("sigma^2 = 0 is a legal no-overdispersion model");
+    let coerced = run(one_over_phi(), 42, allow).expect("under the flag a NaN sigma^2 must coerce, not error");
+    let no_overdispersion = run(constant(0.0), 42, allow).expect("sigma^2 = 0 is a legal no-overdispersion model");
     assert_eq!(
         coerced, no_overdispersion,
         "coerced NaN must be byte-identical to an explicit sigma^2 = 0, from the same seed \
          — otherwise the coercion invented a distribution of its own"
     );
 
-    // Leave the global as we found it, so a later test in this binary (or a
-    // future one added to this file) sees the default.
-    sim::eval_stats::set_allow_degenerate_rates(false);
 }

@@ -67,7 +67,6 @@ fn test_smoke_all_ocaml_golden() {
     // new strict-mode behaviour should add explicit Cond guards
     // (e.g. `cond(N > 0, I/N, 0)`); the audit's S2 cleanup will
     // sweep production goldens for these patterns over time.
-    sim::eval_stats::set_allow_degenerate_rates(true);
     let models = discover_models();
     assert!(!models.is_empty(), "no *.ir.json files found in ocaml/golden/");
 
@@ -76,7 +75,8 @@ fn test_smoke_all_ocaml_golden() {
         model.interventions.clear(); // baseline: no interventions
 
         let compiled = CompiledModel::new(model.clone())
-            .unwrap_or_else(|e| panic!("{}: compile error: {:?}", name, e));
+            .unwrap_or_else(|e| panic!("{}: compile error: {:?}", name, e))
+            .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true });
         let params = compiled.default_params.clone();
         let t_start = model.simulation.t_start;
         let t_end = model.simulation.t_end.min(30.0);

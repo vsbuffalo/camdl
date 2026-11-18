@@ -1201,7 +1201,7 @@ impl crate::engine::RunSink for PredictiveSink {
             // over — the stream's declared coverage — so the first bin opens
             // where the likelihood's did, not at the model origin (gh#702).
             let projected = crate::project_coverages(
-                &cell.traj, obs_ir, model, &self.leaf_coverages[si],
+                &cell.traj, obs_ir, model, &self.leaf_coverages[si], self.compiled.eval,
             )?;
             let leaf_aux = &self.leaf_aux[si];
             // Where each row is scored: its period's stop, or the instant it
@@ -1685,8 +1685,10 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     // …and under its `allow_degenerate_rates`: a rate that collapsed to 0 in
     // the fit collapses to 0 in every replay of it (the one-step filters, the
     // free-forward replay, the forecast, the contrast forks), rather than
-    // failing the replay of a model the fit ran.
-    sim::eval_stats::set_allow_degenerate_rates(config.config.allow_degenerate_rates);
+    // failing the replay of a model the fit ran. Carried on every model this
+    // command compiles: `compiled` below and the models derived from it, and
+    // the free-forward job's cells (`SimulateJob::eval`).
+    let eval = sim::EvalSettings { allow_degenerate_rates: config.config.allow_degenerate_rates };
     // One calendar block for every sidecar manifest this run writes
     // (predictive / observed / quantities), read once off the model.
     let calendar = ir::caltime::CalendarAxis::from_model(&model).map_err(|e| e.to_string())?;
@@ -1862,7 +1864,8 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     let model_for_one_step = model_for_obs.clone();
     let compiled = std::sync::Arc::new(
         sim::CompiledModel::new(model_for_obs)
-            .map_err(|e| format!("compiling model for prediction: {e:?}"))?,
+            .map_err(|e| format!("compiling model for prediction: {e:?}"))?
+            .with_eval_settings(eval),
     );
 
     // D76: the streams this predict covers. A stream the fit bound data to is
@@ -2536,6 +2539,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
                         dt,
                         // D78: the sampler the fit ran.
                         binomial,
+                        eval,
                         integrator: None,
                         // Generated posterior draws (not a user-authored file), so
                         // the engine's collision guard does not check them: a scenario
@@ -2698,7 +2702,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
             // The fitted model — the fit's intervention selection applied —
             // not `compiled`, which carries every declared intervention so
             // the free-forward sink can read any arm's trajectory.
-            fitted_compiled(&model_for_one_step, &fit_base)?,
+            fitted_compiled(&model_for_one_step, &fit_base, eval)?,
             &model,
             &config,
             // gh#708: the step the fit's likelihood walked (the one dt rule).
@@ -3059,6 +3063,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
             quantity_obs_anchors,
             config.config.dt,
             binomial,
+            eval,
         )?;
         written.extend(paths);
     }
@@ -4089,12 +4094,14 @@ fn predict_step_grids(model_dt: Option<f64>, config_dt: f64) -> (f64, f64) {
 fn fitted_compiled(
     model: &ir::Model,
     fit_base: &crate::util::FitBase,
+    eval: sim::EvalSettings,
 ) -> Result<std::sync::Arc<sim::CompiledModel>, String> {
     let mut fitted = model.clone();
     fit_base.filter(&mut fitted)?;
     Ok(std::sync::Arc::new(
         sim::CompiledModel::new(fitted)
-            .map_err(|e| format!("compiling the fitted model for the one-step filter: {e:?}"))?,
+            .map_err(|e| format!("compiling the fitted model for the one-step filter: {e:?}"))?
+            .with_eval_settings(eval),
     ))
 }
 
