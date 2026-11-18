@@ -736,6 +736,70 @@ let test_dim_registry_single_lookup_site () =
       (String.concat "\n  "
          (List.map (fun (f, n, l) -> Printf.sprintf "%s:%d  %s" f n l) sites))
 
+(* ── gh#1210: parser-action errors survive a failed parse or expansion ───────
+
+   Parser actions record some errors (the comma-separated scenario `set`
+   block, E001 with an explanatory message) and let the parse go on. They used
+   to be moved into the diagnostics only when parsing and expansion both
+   succeeded, so a later syntax error, or a front end that stopped for another
+   reason, discarded them. *)
+
+let sir_head = {camdl|
+time_unit = 'days
+compartments { S, I, R }
+let N = S + I + R
+parameters {
+  beta  : rate  in [0.001, 2.0]
+  gamma : rate  in [0.001, 1.0]
+}
+transitions {
+  infection : S --> I  @ beta * S * (I / N)
+  recovery  : I --> R  @ gamma * I
+}
+init {
+  S = 990
+  I = 10
+}
+simulate { from = 0 'days
+  to = 50 'days }
+scenarios { baseline { set = { beta = 0.3, gamma = 0.1 } } }
+|camdl}
+
+let contains ~sub s =
+  let n = String.length sub and m = String.length s in
+  let rec go i = i + n <= m && (String.sub s i n = sub || go (i + 1)) in
+  go 0
+
+let comma_error_reported (ds : Diagnostics.diagnostic list) =
+  List.exists (fun (d : Diagnostics.diagnostic) ->
+    d.code = "E001" && contains ~sub:"separated by newlines" d.message) ds
+
+(* A later syntax error stops the parse. *)
+let test_pending_errors_survive_syntax_error () =
+  let ds =
+    Compiler.collect_diagnostics ~name:"pae" ~filename:"pae.camdl"
+      (sir_head ^ "let oops = = 3\n")
+  in
+  Alcotest.(check bool) "the later syntax error is reported" true
+    (List.exists (fun (d : Diagnostics.diagnostic) ->
+       d.code = "E001" && d.message = "syntax error") ds);
+  Alcotest.(check bool) "the comma error recorded before it is reported" true
+    (comma_error_reported ds)
+
+(* The front end stops after parsing for a reason of its own: a
+   `--quantities` file that declares more than quantities (E339). *)
+let test_pending_errors_survive_front_end_stop () =
+  let (detail, diags, _) =
+    Compiler.front_end_collect ~name:"pae" ~filename:"pae.camdl"
+      ~quantities:("q.camdl", "compartments { X }\n") sir_head
+  in
+  Alcotest.(check bool) "the front end stopped" true (detail = None);
+  let ds = List.rev diags.Diagnostics.diags in
+  Alcotest.(check bool) "E339 is reported" true
+    (List.exists (fun (d : Diagnostics.diagnostic) -> d.code = "E339") ds);
+  Alcotest.(check bool) "the comma error is reported" true
+    (comma_error_reported ds)
+
 (* ── Driver ──────────────────────────────────────────────────────────────── *)
 
 let () =
@@ -752,6 +816,12 @@ let () =
       Alcotest.test_case "emit sites ↔ warning-catalog.md" `Quick test_catalog_consistency;
       Alcotest.test_case "scanner flags code-shaped non-codes (gh#920)"
         `Quick test_invalid_code_scanner;
+    ];
+    "pending-errors-gh1210", [
+      Alcotest.test_case "kept when a later syntax error stops the parse"
+        `Quick test_pending_errors_survive_syntax_error;
+      Alcotest.test_case "kept when the front end stops after parsing"
+        `Quick test_pending_errors_survive_front_end_stop;
     ];
     "check-compile-parity", [
       Alcotest.test_case "dangling obs (E507) rejected by check AND compile"
