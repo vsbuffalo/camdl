@@ -41,7 +41,7 @@ fn main() {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .unwrap_or_else(|| "unknown".into());
 
-    let env = |k: &str| std::env::var(k).ok();
+    let vars: Vec<(String, String)> = std::env::vars().collect();
     let rustc_vv = || {
         let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
         std::process::Command::new(rustc)
@@ -56,7 +56,7 @@ fn main() {
         .filter_map(|(k, _)| k.strip_prefix("CARGO_FEATURE_").map(|n| format!("cli:{}", n.to_lowercase())))
         .collect();
     cli_features.sort();
-    let inputs = engine_fingerprint::gather(&repo_root, &env, &rustc_vv, cli_features);
+    let inputs = engine_fingerprint::gather(&repo_root, &vars, &rustc_vv, cli_features);
     let fp = engine_fingerprint::fingerprint(&inputs, || {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

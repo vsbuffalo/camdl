@@ -2,6 +2,9 @@
 name = "declared"
 version = "0.1.0"
 edition = "2021"
+# Stated, not inferred: whether a build script exists is then a fact of this
+# manifest, which the engine fingerprint hashes (cli/src/engine_fingerprint.rs).
+build = false
 
 # A leaf crate: types, serde and serde_json only. It must not depend on `ir`,
 # `runid`, `sim` or `cli`, so that a reader of a published declared-model

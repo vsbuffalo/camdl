@@ -2,6 +2,9 @@
 name = "sim"
 version = "0.1.0"
 edition = "2021"
+# Stated, not inferred: whether a build script exists is then a fact of this
+# manifest, which the engine fingerprint hashes (cli/src/engine_fingerprint.rs).
+build = "build.rs"
 # `links` carries no native library: it is how `build.rs` hands sim's resolved
 # features to cli's build script (`DEP_CAMDL_SIM_FEATURES`), which folds them
 # into the engine's build fingerprint.

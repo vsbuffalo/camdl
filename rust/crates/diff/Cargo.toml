@@ -2,6 +2,9 @@
 name = "diff"
 version = "0.1.0"
 edition = "2021"
+# Stated, not inferred: whether a build script exists is then a fact of this
+# manifest, which the engine fingerprint hashes (cli/src/engine_fingerprint.rs).
+build = false
 publish = false
 
 # The model structure diff as a library: a pure function of two declared

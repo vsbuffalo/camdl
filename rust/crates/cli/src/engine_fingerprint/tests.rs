@@ -6,11 +6,9 @@
 //! `the_watched_paths_cover_every_crate_source_dir`.
 
 use super::*;
-use std::collections::HashMap;
 
-fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-    let map: HashMap<String, String> = pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-    move |k: &str| map.get(k).cloned()
+fn env_of(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+    pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
 }
 
 const BUILD_ENV: &[(&str, &str)] = &[
@@ -374,4 +372,64 @@ fn the_watched_git_paths_are_head_and_its_branch_ref() {
     assert!(packed.iter().all(|p| p.exists()), "{packed:?}");
     assert!(packed.contains(&git_dir.join("packed-refs")), "{packed:?}");
     assert!(packed.contains(&git_dir.join("refs/heads")), "{packed:?}");
+}
+
+/// Whether a crate has a build script is a fact of its manifest, which the
+/// fingerprint hashes and the build script watches: a `build.rs` added to a
+/// crate that had none is not a path the script can watch (watching an absent
+/// path re-runs it on every build), so without the key it would change the
+/// binary and not the id. Every workspace manifest states `build`, and the
+/// statement matches the tree.
+#[test]
+fn every_workspace_manifest_states_whether_it_has_a_build_script() {
+    let rust = this_repo().join("rust");
+    let workspace: toml::Value = std::fs::read_to_string(rust.join("Cargo.toml")).unwrap().parse().unwrap();
+    let members = workspace["workspace"]["members"].as_array().expect("workspace members");
+    assert!(members.len() > 5, "{members:?}");
+    for m in members {
+        let dir = rust.join(m.as_str().unwrap());
+        let manifest: toml::Value = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap().parse().unwrap();
+        let has = dir.join("build.rs").is_file();
+        match manifest["package"].get("build") {
+            Some(toml::Value::Boolean(false)) => assert!(!has, "{}: `build = false` beside a build.rs", dir.display()),
+            Some(toml::Value::String(s)) => {
+                assert_eq!(s, "build.rs", "{}", dir.display());
+                assert!(has, "{}: `build = \"build.rs\"` with no build.rs", dir.display());
+            }
+            other => panic!("{}: [package] must state `build = false` or `build = \"build.rs\"`, has {other:?}", dir.display()),
+        }
+    }
+}
+
+/// Profile settings given through the environment (`CARGO_PROFILE_*`) and the
+/// `CARGO_CFG_*` the build script sees enter the profile component: an
+/// overflow-check setting changes what the binary does.
+#[test]
+fn a_profile_setting_from_the_environment_changes_the_engine_id() {
+    let tree = scratch_tree(true);
+    let root = tree.path();
+    let base = build_of(root);
+    for extra in [("CARGO_PROFILE_DEV_OVERFLOW_CHECKS", "false"), ("CARGO_CFG_PANIC", "abort")] {
+        let mut env: Vec<(&str, &str)> = BUILD_ENV.to_vec();
+        env.retain(|(k, _)| *k != extra.0);
+        env.push(extra);
+        let other = fingerprint(&gather(root, &env_of(&env), &rustc, cli_features()), || unreachable!());
+        assert_ne!(other.engine_id, base.engine_id, "{extra:?}");
+    }
+}
+
+/// `rust/.cargo/config.toml` can carry `[profile]` and `[build]` settings that
+/// change the binary; it is a build input.
+#[test]
+fn the_workspace_cargo_config_is_a_build_input() {
+    assert!(is_build_input("rust/.cargo/config.toml"));
+    let tree = scratch_tree(true);
+    let root = tree.path();
+    write(root, "rust/.cargo/config.toml", "[build]\n");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "config"]);
+    let base = build_of(root);
+    write(root, "rust/.cargo/config.toml", "[profile.dev]\noverflow-checks = false\n");
+    assert_ne!(build_of(root).engine_id, base.engine_id);
+    assert!(watched_source_paths(root).contains(&root.join("rust/.cargo/config.toml")));
 }
