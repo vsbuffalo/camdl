@@ -849,7 +849,38 @@ fn read_segment_config(segment: &Path) -> Result<(String, PathBuf, FitConfig), S
         .map_err(|e| unreadable(format!("cannot read {}: {e}", archived.display())))?;
     let config = FitConfig::parse_anchored_at(&text, &archived, &anchor).map_err(unreadable)?;
     refuse_missing_data(&config, &side, &anchor)?;
+    let mut config = config;
+    bind_stored_inputs(&mut config, segment, &side)?;
     Ok((text, anchor, config))
+}
+
+/// Point `config`'s `[data.tables]` at the copies the fit stored in
+/// `segment` (`run_meta::STORED_INPUTS_DIR`), so whatever replays the fit
+/// binds the bytes it was fitted under, not the file at the recorded path as
+/// it is now. A copy that is missing is refused, naming the input and the
+/// digest the fit recorded for it.
+fn bind_stored_inputs(
+    config: &mut FitConfig,
+    segment: &Path,
+    side: &crate::run_meta::FitSidecar,
+) -> Result<(), String> {
+    let Some(data) = config.problem.data.as_mut() else { return Ok(()) };
+    for (name, path) in data.tables.iter_mut() {
+        let stored = crate::run_meta::stored_input_path(segment, name, Path::new(path));
+        if !stored.is_file() {
+            let hash = side.table_hashes.get(name)
+                .map(|h| format!("recorded hash {h}"))
+                .unwrap_or_else(|| "no hash recorded".to_string());
+            return Err(format!(
+                "{} is a fit directory but its stored copy of external input '{name}' \
+                 ([data.tables] {name} = \"{path}\") is missing: expected {} ({hash}).",
+                segment.display(),
+                stored.display()
+            ));
+        }
+        *path = stored.to_string_lossy().into_owned();
+    }
+    Ok(())
 }
 
 /// `Err` naming every data file the recovered config binds that is not on

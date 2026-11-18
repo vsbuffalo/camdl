@@ -818,7 +818,9 @@ fn resolve_survey_inputs(out: &crate::out::Out, cfg: &crate::survey_config::Reso
             &model_pre, scenario_opt.as_deref(), &fixed_cli)?;
         let fixed_files: Vec<std::path::PathBuf> = Vec::new();
         let fit_toml_estimate: IndexSet<String> = config.estimate.keys().cloned().collect();
-        let no_external = crate::external_inputs::ExternalBindings::none();
+        // The config's `[data.tables]`: the resolved model the survey scores and
+        // hashes is bound to those files.
+        let fit_tables = config.external_bindings();
 
         // gh#561: a survey evaluates the likelihood at grid points, so its
         // window is the observation times — the model horizon is never read.
@@ -844,7 +846,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, cfg: &crate::survey_config::Reso
                 fixed_files: &fixed_files,
                 fit_toml_fixed: &fixed_resolved_indexmap,
                 fit_toml_estimate: &fit_toml_estimate,
-                external: &no_external,
+                external: &fit_tables,
             },
         ).map_err(|e| e.to_string())?;
         let mut resolved = resolved;

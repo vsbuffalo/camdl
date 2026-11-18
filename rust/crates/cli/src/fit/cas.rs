@@ -216,7 +216,10 @@ pub(crate) fn canonical_config_hash<T: serde::Serialize>(
     Ok(LevelHash(digest_value(&serialize_minus(value, exclude)?)))
 }
 
-/// Serialize `value` whole, then remove `exclude`d TOP-LEVEL keys.
+/// Serialize `value` whole, then remove each `exclude`d key: a top-level key
+/// (`output_dir`), or a dotted path to a nested one (`data.tables`), which is
+/// removed where the path exists and is nothing to remove where it does not
+/// (a config with no `[data]`).
 ///
 /// The one implementation of "include by default, and name every omission".
 /// It had three: this, [`fit_config_blob_hash`]'s inline copy, and
@@ -238,7 +241,15 @@ pub(crate) fn serialize_minus<T: serde::Serialize>(
         match v {
             serde_json::Value::Object(ref mut m) => {
                 for key in exclude {
-                    m.remove(*key);
+                    let mut parts: Vec<&str> = key.split('.').collect();
+                    let last = parts.pop().expect("split yields at least one part");
+                    let mut obj = Some(&mut *m);
+                    for p in parts {
+                        obj = obj.and_then(|o| o.get_mut(p)).and_then(|v| v.as_object_mut());
+                    }
+                    if let Some(o) = obj {
+                        o.remove(last);
+                    }
                 }
             }
             // `exclude` on a non-object is a programming error, not a data
@@ -393,6 +404,9 @@ pub(crate) fn ensure_finite<T: serde::Serialize>(v: &T) -> Result<(), String> {
 /// — so `ic_free`/`holdout`/`[config]`/priors can't be silently dropped) with
 /// the provenance slices normalized out ([`FIT_PROVENANCE_KEYS`]):
 ///   - `output_dir` — pure write-location provenance.
+///   - `data.tables` — where the external inputs' files were; their bytes
+///     enter as `FitDigest.tables`, so the same bytes at another path are the
+///     same fit.
 ///   - `provenance` — the `[provenance]` note (`derived_from`, `reason`):
 ///     free text for the reader. No runner, likelihood or stored artifact
 ///     reads it, so rewording it must not re-address and re-run the fit
@@ -411,7 +425,7 @@ fn fit_config_blob_hash(problem: &Problem) -> Result<ContentHash, String> {
 /// level ([`fit_config_blob_hash`]) subtracts all of them; the config lookup
 /// ([`config_identity_hash`]) subtracts the `[provenance]` note, so a config
 /// whose note was reworded finds the fit the store already holds for it.
-const FIT_PROVENANCE_KEYS: &[&str] = &["output_dir", "provenance"];
+const FIT_PROVENANCE_KEYS: &[&str] = &["output_dir", "provenance", "data.tables"];
 
 /// The config-MEANING hash: what a `fit.toml` handle is looked up by (gh#653).
 ///
@@ -518,6 +532,7 @@ pub fn fit_level_digest(
         // to one (same path) re-keys the fit rather than reusing a stale
         // held-out score. Empty for `holdout_after`, a number in the blob.
         holdout_data: data.identity_holdout(),
+        tables: data.identity_tables(),
         fit_toml: fit_config_blob_hash(problem)?,
         engine: engine.clone(),
         partition_rule_version: super::training_partition::PARTITION_RULE_VERSION,

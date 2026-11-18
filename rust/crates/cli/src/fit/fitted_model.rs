@@ -101,6 +101,14 @@ pub fn as_fitted(
     problem: &crate::fit::config_v2::Problem,
 ) -> Result<(ir::Model, Vec<crate::obs_anchor::ResolvedAnchor>), String> {
     let mut m = model.clone();
+    // `fit run` binds the model's external inputs too, so a model that still
+    // declares any is bound here from the fit's `[data.tables]` (in a stored
+    // fit, the copies in its folder). One that declares none — the archived IR
+    // itself among them — is left as it is.
+    if crate::external_inputs::declares_any(&m) {
+        crate::external_inputs::bind(&mut m, &problem.external_bindings())
+            .map_err(|e| e.to_string())?;
+    }
     if !crate::obs_anchor::model_is_anchored(&m) {
         return Ok((m, Vec::new()));
     }

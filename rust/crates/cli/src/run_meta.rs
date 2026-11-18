@@ -770,6 +770,13 @@ pub struct FitSidecar {
     /// written before holdout files were recorded.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub holdout_hashes: BTreeMap<String, String>,
+    /// External input name → full SHA-256 of the file `[data.tables]` bound
+    /// to it, the digest the fit's identity folds (`FitDigest.tables`). The
+    /// bytes themselves are stored beside this record, in
+    /// [`STORED_INPUTS_DIR`]. Empty, and omitted, for a model with no external
+    /// input.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub table_hashes: BTreeMap<String, String>,
     /// Generated from `partition` by
     /// [`crate::roles::PartitionRecord::legacy_fields`] and written no other
     /// way.
@@ -844,6 +851,7 @@ impl Default for FitSidecar {
     fn default() -> Self {
         FitSidecar {
             schema_version: 0,
+            table_hashes: BTreeMap::new(),
             label: None,
             source_model: None,
             model_identity: String::new(),
@@ -894,6 +902,38 @@ pub fn write_fit_sidecar(
 ) -> std::io::Result<()> {
     let archive = if fit_toml_path.is_file() { Some(Archive::CopyOf(fit_toml_path)) } else { None };
     write_fit_sidecar_archiving(fit_segment, archive, model_path, sidecar)
+}
+
+/// The directory of a fit folder that holds the bytes of each file bound to
+/// the model's external inputs, one `<name>.<ext>` per input: the copy a
+/// replay of the fit binds, so an edit to the source file after the fit
+/// cannot change what the fit's replays read.
+pub const STORED_INPUTS_DIR: &str = "inputs";
+
+/// The stored copy of external input `name`, read from `source`, in the fit
+/// folder `segment`. The extension is the source's: it selects the format the
+/// file is read as.
+pub fn stored_input_path(segment: &std::path::Path, name: &str, source: &std::path::Path) -> std::path::PathBuf {
+    let file = match source.extension().and_then(|e| e.to_str()) {
+        Some(ext) => format!("{name}.{ext}"),
+        None => name.to_string(),
+    };
+    segment.join(STORED_INPUTS_DIR).join(file)
+}
+
+/// Write each bound file's bytes into `segment`'s [`STORED_INPUTS_DIR`].
+pub fn store_bound_inputs(
+    segment: &std::path::Path,
+    bound: &crate::external_inputs::BoundFiles,
+) -> std::io::Result<()> {
+    for (name, file) in bound.iter() {
+        let dest = stored_input_path(segment, name, &file.path);
+        if let Some(dir) = dest.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(dest, &file.bytes)?;
+    }
+    Ok(())
 }
 
 /// [`write_fit_sidecar`] for a config already read: `config_text`, read once

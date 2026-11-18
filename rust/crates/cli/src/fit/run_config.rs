@@ -78,9 +78,13 @@ pub(crate) struct ResolvedFitConfig {
     /// compiled model's file.
     pub config: FitConfig,
     /// The model compiled under the command's compile settings, observation
-    /// anchors resolved: what every method loads (from
-    /// `config.problem.compiled_ir`) and what the fit level hashes.
+    /// anchors resolved and external inputs bound: what every method loads
+    /// (from `config.problem.compiled_ir`) and what the fit level hashes.
     pub model: ir::Model,
+    /// The files `[data.tables]` bound into `model`, read once: their digests
+    /// enter the fit level (`FitDigest.tables`) and their bytes are stored in
+    /// each fit folder. Empty for a model with no external input.
+    pub tables: crate::external_inputs::BoundFiles,
     /// The engine the identity folds: this build and the engine switches set
     /// ([`super::fit_engine`]).
     pub engine: runid::inputs::EngineIdentity,
@@ -434,6 +438,16 @@ pub(crate) fn resolve(
         });
     config.problem.compiled_ir = Some(compiled_ir.clone());
 
+    // Bind the model's external tables and forcings to the files
+    // `[data.tables]` names, once, the same way: every loader after this reads
+    // the bound model, and what was read is kept for the identity and the fit
+    // folder.
+    let (compiled_ir, tables) = super::bind_tables_into_temp_ir(&compiled_ir, &config.problem)
+        .unwrap_or_else(|e| {
+            out.fail(format!("error: {fit_path}: {e}"));
+        });
+    config.problem.compiled_ir = Some(compiled_ir.clone());
+
     // Load model and validate completeness (from the pre-compiled IR).
     let (model, _) = crate::util::load_model(&compiled_ir).unwrap_or_else(|e| {
         out.fail(format!("error: {}", e));
@@ -581,6 +595,7 @@ pub(crate) fn resolve(
         config_text,
         config,
         model,
+        tables,
         engine: super::fit_engine(),
         forcing,
         seeds: fit_seeds,

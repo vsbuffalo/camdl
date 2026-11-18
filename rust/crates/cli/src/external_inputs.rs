@@ -35,6 +35,8 @@ use ir::time_func::{ExternalSeries, InterpSource, TimeFuncKind};
 pub enum BindingOrigin {
     /// `--table NAME=FILE`.
     Cli,
+    /// `[data.tables] NAME = "FILE"` in a fit config.
+    FitConfig,
 }
 
 impl BindingOrigin {
@@ -42,6 +44,7 @@ impl BindingOrigin {
     fn spell(self, name: &str, path: &Path) -> String {
         match self {
             BindingOrigin::Cli => format!("--table {name}={}", path.display()),
+            BindingOrigin::FitConfig => format!("[data.tables] {name} = \"{}\"", path.display()),
         }
     }
 }
@@ -53,7 +56,9 @@ pub struct Binding {
     pub origin: BindingOrigin,
 }
 
-/// External name → the file bound to it.
+/// External name → the file bound to it. The command line is laid over a
+/// fit config ([`ExternalBindings::overlay`]), as `--data` is over
+/// `[data.observations]`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExternalBindings {
     entries: BTreeMap<String, Binding>,
@@ -73,6 +78,23 @@ impl ExternalBindings {
         P: Into<PathBuf>,
     {
         Self::with_origin(pairs, BindingOrigin::Cli)
+    }
+
+    /// A fit config's `[data.tables]`, its paths already anchored at the
+    /// config's directory.
+    pub fn from_fit_config<I, S, P>(pairs: I) -> Self
+    where
+        I: IntoIterator<Item = (S, P)>,
+        S: Into<String>,
+        P: Into<PathBuf>,
+    {
+        Self::with_origin(pairs, BindingOrigin::FitConfig)
+    }
+
+    /// `self` with every binding in `top` replacing the one of the same name.
+    pub fn overlay(mut self, top: ExternalBindings) -> Self {
+        self.entries.extend(top.entries);
+        self
     }
 
     fn with_origin<I, S, P>(pairs: I, origin: BindingOrigin) -> Self
@@ -95,6 +117,33 @@ impl ExternalBindings {
     /// (name, binding), sorted by name.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &Binding)> {
         self.entries.iter().map(|(n, b)| (n.as_str(), b))
+    }
+}
+
+/// One bound file as [`bind`] read it: the path, the bytes, their digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundFile {
+    pub path:   PathBuf,
+    pub bytes:  Vec<u8>,
+    pub digest: runid::ContentHash,
+}
+
+/// Every file [`bind`] read, by external name. The values bound into the model,
+/// the digests a run's identity folds and the copy a fit stores all come from
+/// this one read, so they cannot disagree about which bytes were used.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BoundFiles {
+    files: BTreeMap<String, BoundFile>,
+}
+
+impl BoundFiles {
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
+    /// (name, file), sorted by name.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &BoundFile)> {
+        self.files.iter().map(|(n, f)| (n.as_str(), f))
     }
 }
 
@@ -187,6 +236,11 @@ fn declared(model: &ir::Model) -> BTreeMap<String, Vec<Reader>> {
     out
 }
 
+/// Whether `model` declares any external input still to be bound.
+pub fn declares_any(model: &ir::Model) -> bool {
+    !declared(model).is_empty()
+}
+
 /// Bind every external input of `model` from `bindings`, in place.
 ///
 /// Refuses, naming the input: a declared input with no binding; a binding for
@@ -195,8 +249,8 @@ fn declared(model: &ir::Model) -> BTreeMap<String, Vec<Reader>> {
 /// be read; a table file without exactly one number per declared cell; a
 /// forcing file without the declared columns, with an unparseable cell, or
 /// with no row for the forcing's stratum. Each bound file is read once, however
-/// many declarations read it.
-pub fn bind(model: &mut ir::Model, bindings: &ExternalBindings) -> Result<(), BindError> {
+/// many declarations read it; what was read is returned.
+pub fn bind(model: &mut ir::Model, bindings: &ExternalBindings) -> Result<BoundFiles, BindError> {
     let declared = declared(model);
     for (name, binding) in bindings.iter() {
         if !declared.contains_key(name) {
@@ -208,9 +262,10 @@ pub fn bind(model: &mut ir::Model, bindings: &ExternalBindings) -> Result<(), Bi
         }
     }
     if declared.is_empty() {
-        return Ok(());
+        return Ok(BoundFiles::default());
     }
 
+    let mut read = BoundFiles::default();
     let mut files: BTreeMap<&str, (String, String)> = BTreeMap::new();
     for (name, readers) in &declared {
         let Some(binding) = bindings.get(name) else {
@@ -220,11 +275,19 @@ pub fn bind(model: &mut ir::Model, bindings: &ExternalBindings) -> Result<(), Bi
             });
         };
         let spelled = binding.origin.spell(name, &binding.path);
-        let text = std::fs::read_to_string(&binding.path).map_err(|e| BindError::Unreadable {
+        let unreadable = |error: String| BindError::Unreadable {
             name: name.clone(),
             binding: spelled.clone(),
-            error: e.to_string(),
-        })?;
+            error,
+        };
+        let bytes = std::fs::read(&binding.path).map_err(|e| unreadable(e.to_string()))?;
+        let text = String::from_utf8(bytes.clone())
+            .map_err(|_| unreadable("the file is not UTF-8 text".to_string()))?;
+        read.files.insert(name.clone(), BoundFile {
+            path: binding.path.clone(),
+            digest: runid::ContentHash::digest_bytes(&bytes),
+            bytes,
+        });
         files.insert(name.as_str(), (spelled, text));
     }
 
@@ -267,7 +330,7 @@ pub fn bind(model: &mut ir::Model, bindings: &ExternalBindings) -> Result<(), Bi
             .map_err(|problem| mismatch(&series.external, binding, &reader, problem))?;
         interp.source = InterpSource::Knots { times, values };
     }
-    Ok(())
+    Ok(read)
 }
 
 fn describe_shape(shape: &[TableAxis]) -> String {
