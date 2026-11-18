@@ -103,13 +103,10 @@ type env = {
       (** The model's [let]s by name. *)
   param_decls : param_decl list;
       (** The model's parameter declarations. *)
-  origin_set : bool;  (* whether `origin = date(...)` is declared *)
-      (** Whether the model declares an origin. Nothing in this module reads
-          it; the expander tests the origin itself before calling. *)
 }
 
-let env_of_ctx ~let_tbl ~param_decls ~origin_set =
-  { let_tbl; param_decls; origin_set }
+let env_of_ctx ~let_tbl ~param_decls =
+  { let_tbl; param_decls }
 
 (* ── Param kind lookup (for refs to duration/instant-kind params) ────── *)
 
@@ -525,13 +522,6 @@ let hint_bare_numeric_value_at =
    interpreted as the model's `time_unit` from origin. \
    Annotate with `'days` or use `date(\"YYYY-MM-DD\")` to make the \
    intent explicit."
-
-let hint_bare_numeric_data_column =
-  "the --data time column is numeric and the model declares \
-   `origin = date(...)` — values are interpreted as internal-time units \
-   from origin. If that's intentional, pass `--time-format internal-days` \
-   to suppress this warning; if you meant calendar dates, switch the \
-   column to ISO YYYY-MM-DD form."
 
 (* ── Helper: pretty-printer for the offending sub-expression ─────────── *)
 
