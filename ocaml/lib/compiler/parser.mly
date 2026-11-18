@@ -28,9 +28,42 @@
      typed wrapper here and no table of positions exists anywhere. *)
   let tpos k e ~sp ~ep = Time_pos.make k e (Parser_errors.ast_loc_of ~sp ~ep)
 
-  let extract_ident_list = function
-    | EList items -> List.filter_map (function EIdent (n, _) -> Some n | _ -> None) items
-    | _ -> []
+  (* The names in a scenario's `enable`/`disable`/`compose` list (spec §17.1:
+     `enable = [NAME, ...]`). gh#1203: anything else used to read as the
+     empty list, so `enable = boost` enabled nothing and a non-name member
+     was dropped, both silently. Each is now E118 at the field; a bare name
+     gets a fix-it to the bracketed form ([vsp]/[vep] span the value). *)
+  let scenario_name_list ~key ~sp ~ep ~vsp ~vep v =
+    let shape_error ~msg ~hint ~fix =
+      Parser_errors.push_error_fix ~sp ~ep ~code:"E118" ~msg ~hint ~fix in
+    let what = if key = "compose" then "a scenario" else "an intervention" in
+    match v with
+    | EList items ->
+      let names = List.filter_map (function EIdent (n, _) -> Some n | _ -> None) items in
+      if List.length names <> List.length items then
+        shape_error
+          ~msg:(Printf.sprintf
+            "scenario `%s` lists something that is not a name: every member \
+             of `%s = [...]` must be the name of %s" key key what)
+          ~hint:(Printf.sprintf "write `%s = [NAME, ...]` with only names" key)
+          ~fix:None;
+      names
+    | EIdent (n, _) ->
+      shape_error
+        ~msg:(Printf.sprintf
+          "scenario `%s` takes a bracketed list, even for one name" key)
+        ~hint:(Printf.sprintf
+          "write `%s = [%s]`. See `camdl docs language-changes`" key n)
+        ~fix:(Some (vsp, vep, Printf.sprintf "[%s]" n));
+      [n]
+    | _ ->
+      shape_error
+        ~msg:(Printf.sprintf
+          "scenario `%s` takes a bracketed list of names of %s, \
+           `%s = [NAME, ...]`" key (what ^ "s") key)
+        ~hint:(Printf.sprintf "write `%s = [NAME, ...]`" key)
+        ~fix:None;
+      []
 
   (* Assemble an [obs_decl] from the header (name, indices, source) and the
      block's key/value entries. The entries are the polymorphic variants
@@ -1719,7 +1752,18 @@ scenario_field:
       { match k with
         | "set"   -> Ast.ScSet   ps
         | "scale" -> Ast.ScScale ps
-        | _       -> Ast.ScSet   [(k, EConst 0.0)] }
+        | _       ->
+          (* gh#1203: this used to read as `set = { k = 0 }`, setting the
+             parameter to zero. The only brace-block fields are set/scale. *)
+          Parser_errors.push_error_hint ~sp:$startpos ~ep:$endpos
+            ~code:"E120"
+            ~msg:(Printf.sprintf
+              "`%s = { ... }` is not a scenario field: the only fields that \
+               take a `{ ... }` block are `set` and `scale`" k)
+            ~hint:(Printf.sprintf
+              "to override `%s` write `set = { %s = VALUE }`, or \
+               `scale = { %s = FACTOR }` to multiply it" k k k);
+          Ast.ScSet [] }
   | EXTENDS EQ v = expr
       { let s = match v with
           | EIdent (s, _)    -> s
@@ -1743,9 +1787,13 @@ scenario_field:
                 ~msg:"invalid scenario label: expected a quoted string or identifier, e.g. label = \"baseline\"";
               "" in
           Ast.ScLabel s
-        | "enable"  -> Ast.ScEnable  (extract_ident_list v)
-        | "disable" -> Ast.ScDisable (extract_ident_list v)
-        | "compose" -> Ast.ScCompose (extract_ident_list v)
+        | "enable" | "disable" | "compose" ->
+          let names = scenario_name_list ~key:k ~sp:$startpos ~ep:$endpos
+              ~vsp:$startpos(v) ~vep:$endpos(v) v in
+          (match k with
+           | "enable"  -> Ast.ScEnable  names
+           | "disable" -> Ast.ScDisable names
+           | _         -> Ast.ScCompose names)
         | _         -> Ast.ScSet [(k, v)] }
 
 scenario_kv_item:
