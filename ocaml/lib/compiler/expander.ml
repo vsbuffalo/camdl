@@ -14775,56 +14775,81 @@ let expand_detail ?(source_dir = "") ?(filename = "<input>") (name : string) (de
      [forcing_scales] so [lint_l403] can distinguish an actually-rescaled forcing
      (scale ≠ 1) from a same-unit one (scale = 1, no conversion happened). *)
   let (expanded_time_functions, forcing_scales) = expand_time_functions ctx in
+  (* The remaining sections, each bound in a fixed order before the record is
+     built. Most of these calls append to [ctx.hoisted_rev] (the hoisted
+     bindings, in the order the IR lists them) and to [ctx.diags], so the
+     order they run in is part of the output. OCaml does not specify the
+     order in which a record's fields are evaluated; this order is the one
+     the compiler used when they were record fields (the last field first),
+     kept so the IR and the diagnostics are unchanged. *)
+  let contrasts = expand_contrasts ctx in
+  let quantities = expand_quantities ctx in
+  let doc_index = build_doc_index ctx in
+  let identity_tracked_compartments =
+    compute_identity_tracked expanded_comps expanded_trs in
+  let balance =
+    match ctx.balance_decl with
+    | None -> None
+    | Some bd -> Some {
+        Ir.balance_target = bd.bcomp;
+        Ir.balance_expr   = resolve_expr ctx [] bd.bexpr;
+      }
+  in
+  let presets = expand_scenarios ctx in
+  let simulation = expand_simulate ctx in
+  let output = expand_output ctx in
+  let initial_conditions = expand_init ctx ~comps:expanded_comps in
+  let constants = expand_constants ctx in
+  let parameters = expand_parameters ctx in
+  let observations = expand_observations ctx ~transitions:expanded_trs in
+  let interventions = expand_interventions ctx in
+  let ode_equations = expand_ode_equations ctx in
+  (* Pre-resolve the origin to its proleptic-Gregorian day number so the
+     runtime never re-parses the origin string (2026-05-22 §6.2). The
+     integer is derived (never hand-edited) and uses the same `days_of_date`
+     the date() literal path uses, so it cannot drift from caltime. *)
+  let origin_rata_die =
+    match ctx.origin with
+    | None -> None
+    | Some s ->
+      (* The origin was range-validated up-front by `check_origin` (M14,
+         gh#98); on the clean path this always parses. If it didn't, the
+         E223 already fired — fall back to None rather than emit garbage. *)
+      (match parse_iso_date s with
+       | Ok (y, m, d) -> Some (days_of_date y m d)
+       | Error _ -> None)
+  in
   let model = {
     Ir.name               = name;
     Ir.version            = "0.3";
     Ir.time_unit          = unit_lit_to_string ctx.time_unit;
     Ir.description        = ctx.description;
     Ir.origin             = ctx.origin;
-    (* Pre-resolve the origin to its proleptic-Gregorian day number so the
-       runtime never re-parses the origin string (2026-05-22 §6.2). The
-       integer is derived (never hand-edited) and uses the same `days_of_date`
-       the date() literal path uses, so it cannot drift from caltime. *)
-    Ir.origin_rata_die    =
-      (match ctx.origin with
-       | None -> None
-       | Some s ->
-         (* The origin was range-validated up-front by `check_origin` (M14,
-            gh#98); on the clean path this always parses. If it didn't, the
-            E223 already fired — fall back to None rather than emit garbage. *)
-         (match parse_iso_date s with
-          | Ok (y, m, d) -> Some (days_of_date y m d)
-          | Error _ -> None));
+    Ir.origin_rata_die;
     Ir.compartments       = expanded_comps;
     Ir.transitions        = expanded_trs;
-    Ir.ode_equations      = expand_ode_equations ctx;
+    Ir.ode_equations;
     Ir.time_functions     = expanded_time_functions;
     Ir.tables             = resolved_tables;
-    Ir.interventions      = expand_interventions ctx;
-    Ir.observations       = expand_observations ctx ~transitions:expanded_trs;
-    Ir.parameters         = expand_parameters ctx;
-    Ir.constants          = expand_constants ctx;
+    Ir.interventions;
+    Ir.observations;
+    Ir.parameters;
+    Ir.constants;
     Ir.bindings           = [];   (* filled below from ctx.hoisted_rev once all resolution is done *)
     Ir.per_eval_bindings  = [];   (* gh#272 LICM: empty until the LICM pass runs (post-autodiff) *)
-    Ir.initial_conditions = expand_init ctx ~comps:expanded_comps;
+    Ir.initial_conditions;
     Ir.ic_grad            = [];
-    Ir.output             = expand_output ctx;
-    Ir.simulation         = expand_simulate ctx;
-    Ir.presets            = expand_scenarios ctx;
+    Ir.output;
+    Ir.simulation;
+    Ir.presets;
     Ir.model_structure    = Some ms;
-    Ir.balance            = (match ctx.balance_decl with
-      | None -> None
-      | Some bd -> Some {
-          Ir.balance_target = bd.bcomp;
-          Ir.balance_expr   = resolve_expr ctx [] bd.bexpr;
-        });
-    Ir.identity_tracked_compartments =
-      compute_identity_tracked expanded_comps expanded_trs;
-    Ir.doc_index = build_doc_index ctx;
-    Ir.quantities         = expand_quantities ctx;
-    Ir.contrasts          = expand_contrasts ctx;
+    Ir.balance;
+    Ir.identity_tracked_compartments;
+    Ir.doc_index;
+    Ir.quantities;
+    Ir.contrasts;
   } in
-  (* Fix B: the record above is fully forced here, so every resolve_expr call
+  (* Fix B: every section is bound above, so every resolve_expr call
      (transitions, ode, observations, balance) has run and ctx.hoisted_rev
      holds all extracted bindings in reverse-topological order. *)
   let model = { model with Ir.bindings = collect_hoisted_bindings ctx } in
