@@ -225,6 +225,31 @@ pub enum SimError {
     #[error("simulator invariant violated at t={t}: {what}. This is a bug in camdl, \
              not a problem with the model or its parameters — please report it")]
     SimulatorInvariant { what: String, t: f64 },
+
+    /// gh#1263. A fixed-step RK4 step of the ODE backend drove a compartment
+    /// below zero by more than float roundoff. Setting it back to zero would
+    /// keep the flow already credited to the downstream compartments and so
+    /// add people; on the gradient path it would also leave the forward
+    /// sensitivity on its unclamped slope. `value` is the compartment after the
+    /// step, `t` the start of the step and `dt` its length.
+    ///
+    /// Two causes: the step is too long for the fastest rate (a chain of `k`
+    /// stages at rate `r` per stage overshoots once `dt * k * r > 1` while an
+    /// upstream stage holds much more than a downstream one), or a rate does not
+    /// fall to zero as its source compartment empties, so the exact solution
+    /// itself goes negative.
+    ///
+    /// Not `is_structural`: whether a step overshoots depends on θ (a shorter
+    /// dwell time is a faster rate), so a fit rejects the θ as −∞ rather than
+    /// aborting. Not per-particle recoverable: the ODE path has no particles.
+    #[error("ODE step drove compartment '{compartment}' to {value:.6e} on the step of \
+             dt = {dt} starting at t = {t}. Setting it to zero would add people, so the \
+             step is refused. The step is too coarse for the fastest rate in the model: \
+             rerun with a smaller dt, or a smaller `burnin_dt` if the step lies in a \
+             fit's coarse warm-up (for a `via erlang(stages = k, rate = r)` chain, \
+             keep dt * k * r at or below 1). If a smaller dt does not help, a rate in \
+             the model does not fall to zero as its source compartment empties.")]
+    OdeStepNegative { compartment: String, value: f64, t: f64, dt: f64 },
 }
 
 /// gh#audit-C6 / S1. Specific numerical-degeneracy mode that
@@ -577,6 +602,8 @@ impl SimError {
             | SimError::AbsorbingState(_)
             | SimError::NumericalCollapse { .. }
             | SimError::NonFiniteParameter { .. }
+            // A coarse ODE step overshooting below zero depends on θ (gh#1263).
+            | SimError::OdeStepNegative { .. }
             | SimError::PFDegenerate { .. }
             // A start with zero posterior density is a property of THIS
             // chain's starting point, not of the model — the fit's other
@@ -755,6 +782,12 @@ mod tests {
         }.is_structural());
         assert!(!SimError::NumericalCollapse { kind: CollapseKind::DivByZero, t: 1.0 }.is_structural());
         assert!(!SimError::NonFiniteParameter { name: "beta".into(), value: f64::NAN, t: 1.0 }.is_structural());
+        // gh#1263: a coarse ODE step overshooting below zero rejects the θ.
+        let ode_negative = SimError::OdeStepNegative {
+            compartment: "E_s4".into(), value: -1.0, t: 0.0, dt: 1.0,
+        };
+        assert!(!ode_negative.is_structural());
+        assert!(!ode_negative.is_per_particle_recoverable());
         assert!(!SimError::NegativeCount {
             compartment: "S".into(), attempted_value: -1, t: 1.0,
             cause: NegativeCountCause::InitialState,

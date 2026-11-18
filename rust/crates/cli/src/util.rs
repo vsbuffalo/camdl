@@ -4120,14 +4120,14 @@ pub fn simulation_error_message(e: sim::SimError) -> String {
 /// How a runtime `SimError` is printed to the user by `simulate`, `pfilter`
 /// and the fit drivers: a negative initial state by its message, which names
 /// the compartment, its value, whether the `init {}` entry is θ-only or drawn
-/// from a random initial law, and the fix; every other error by its structured
-/// `Debug` form.
+/// from a random initial law, and the fix; an ODE step refused for driving a
+/// compartment negative by its message, which names the compartment, the step
+/// and the fix (gh#1263); every other error by its structured `Debug` form.
 pub fn sim_error_text(e: &sim::SimError) -> String {
     use sim::NegativeCountCause::{InitialState, InitialStateDrawn};
     match e {
-        sim::SimError::NegativeCount { cause: InitialState | InitialStateDrawn, .. } => {
-            e.to_string()
-        }
+        sim::SimError::NegativeCount { cause: InitialState | InitialStateDrawn, .. }
+        | sim::SimError::OdeStepNegative { .. } => e.to_string(),
         other => format!("{other:?}"),
     }
 }

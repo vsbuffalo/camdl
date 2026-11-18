@@ -12,11 +12,11 @@ use crate::{
 
 /// Relative threshold below which a compartment's post-step value counts as a
 /// *meaningful* negative excursion (a real RK4 overshoot), versus float roundoff
-/// on a near-zero compartment. Under the ODE gradient path a real clamp
-/// (`int_vals.max(0)`) is a nonsmooth operation the forward sensitivity does not
-/// model, so it is refused; roundoff clamps (scale·~1e-15, far below this) are
-/// tolerated. Compared against `max(|compartment|, 1)`, so it also floors at
-/// `1e-9` absolute for sub-unit compartments. See the clamp check in `rk4_step`.
+/// on a near-zero compartment. A meaningful excursion is refused as
+/// [`SimError::OdeStepNegative`] on every path; a roundoff undershoot
+/// (scale·~1e-15, far below this) is set to 0. Compared against
+/// `max(|compartment before the step|, 1)`, so it also floors at `1e-9`
+/// absolute for sub-unit compartments. See the check in `rk4_step`.
 const NEG_STATE_CLAMP_EPS: f64 = 1e-9;
 
 /// Tolerance for treating two times as coincident on the ODE gradient recorder's
@@ -391,42 +391,50 @@ fn rk4_step(
         (Default::default(), Default::default())
     };
 
-    // Combine compartments (clamped ≥ 0). Under the gradient path (`sens` present),
-    // a compartment driven meaningfully below zero trips the clamp — a nonsmooth
-    // operation the forward sensitivity `S` does NOT model, so the returned
-    // `(value, gradient)` pair would be inconsistent (a silent-wrong gradient NUTS
-    // would sample against). Refuse the step instead; the value-only path
-    // (`sens = None`, forward sim) keeps clamping silently and stays byte-identical.
-    // The relative `NEG_STATE_CLAMP_EPS` tolerates float roundoff on a near-zero
-    // compartment while catching a real RK4 overshoot (which is O(compartment
-    // scale) once the step exceeds a fast transition's stability limit — coarse
-    // `burnin_dt` steps make this reachable, so the check the old comment here
-    // *claimed* but never implemented finally exists).
-    let grad_path = sens.is_some();
-    let mut clamped_negative = false;
+    // Combine compartments. A result below zero by no more than roundoff
+    // (`NEG_STATE_CLAMP_EPS`, relative to the compartment's scale) is set to 0.
+    // A larger negative excursion is refused on every path (gh#1263): setting it
+    // to 0 would keep the flow this step already credited downstream, so the
+    // step would add people, and on the gradient path the sensitivity `S` would
+    // stay on its unclamped slope, so `(value, gradient)` would disagree. The
+    // whole state is computed before it is checked, and on refusal the caller's
+    // state is left as it was.
+    let mut new_int = vec![0.0f64; ni];
+    let mut new_real = vec![0.0f64; nr];
     for i in 0..ni {
-        let combined = int_vals[i] + dt / 6.0 * (k1i[i] + 2.0 * k2i[i] + 2.0 * k3i[i] + k4i[i]);
-        if grad_path && combined < -NEG_STATE_CLAMP_EPS * int_vals[i].abs().max(1.0) {
-            clamped_negative = true;
-        }
-        int_vals[i] = combined.max(0.0);
+        new_int[i] = int_vals[i] + dt / 6.0 * (k1i[i] + 2.0 * k2i[i] + 2.0 * k3i[i] + k4i[i]);
     }
     for i in 0..nr {
-        let combined = real_vals[i] + dt / 6.0 * (k1r[i] + 2.0 * k2r[i] + 2.0 * k3r[i] + k4r[i]);
-        if grad_path && combined < -NEG_STATE_CLAMP_EPS * real_vals[i].abs().max(1.0) {
-            clamped_negative = true;
-        }
-        real_vals[i] = combined.max(0.0);
+        new_real[i] = real_vals[i] + dt / 6.0 * (k1r[i] + 2.0 * k2r[i] + 2.0 * k3r[i] + k4r[i]);
     }
-    if clamped_negative {
-        return Err(SimError::Validation(
-            "ODE gradient (nl-lbfgs): a compartment was driven below zero and clamped to 0 \
-             during integration — a nonsmooth operation the forward sensitivity does not \
-             model, so the value and its gradient would be inconsistent. The step is too \
-             large for a fast (short-residence) transition; reduce `dt`, or lower \
-             `burnin_dt` if the clamp is in the coarse warm-up window (gh#275 §1c)."
-                .to_string(),
-        ));
+    // Only the part of a negative value this step created counts: a compartment
+    // can enter the step a few ulps below zero (an effect that drains it exactly,
+    // computed in f64 at a much larger scale), and a step that leaves it there
+    // has not overshot.
+    let beyond_roundoff = |new: f64, old: f64| {
+        new - old.min(0.0) < -NEG_STATE_CLAMP_EPS * old.abs().max(1.0)
+    };
+    if let Some(i) = (0..ni).find(|&i| beyond_roundoff(new_int[i], int_vals[i])) {
+        return Err(SimError::OdeStepNegative {
+            compartment: model.int_compartment_name(i),
+            value: new_int[i],
+            t,
+            dt,
+        });
+    }
+    if let Some(i) = (0..nr).find(|&i| beyond_roundoff(new_real[i], real_vals[i])) {
+        return Err(SimError::OdeStepNegative {
+            compartment: model.real_compartment_name(i),
+            value: new_real[i],
+            t,
+            dt,
+        });
+    }
+    for i in 0..ni {
+        int_vals[i] = new_int[i].max(0.0);
+    }
+    for i in 0..nr {
+        real_vals[i] = new_real[i].max(0.0);
     }
 
     // Combine augmented flow (NOT clamped).
@@ -437,10 +445,9 @@ fn rk4_step(
     }
 
     // Combine the sensitivity blocks (NOT clamped — S and acc_sens are signed).
-    // The clamp on the state above is a nonsmooth operation S does not model (§1c
-    // clamp caveat); a gradient step that actually clamps is refused by the guard
-    // above (returned before we reach here), so a valid gradient trajectory never
-    // clamps. `acc_sens` mirrors the value `flow` combine.
+    // A step that would need more than a roundoff clamp on the state is refused
+    // above (returned before we reach here), so S never has to model a clamp
+    // (§1c clamp caveat). `acc_sens` mirrors the value `flow` combine.
     if let Some(s) = sens {
         let [k1, k2, k3, k4] = &ks_state;
         for k in 0..stage_state {
@@ -459,8 +466,10 @@ fn rk4_step(
 /// cumulative per-transition flow integrals. `flow` is `∫ rate dt` accumulated
 /// since the last output reset (reset to 0 at each output boundary so
 /// `snapshot.flows` stays per-interval incidence — pomp's accumulator-variable
-/// semantics, King et al. 2016 JSS). Compartments are clamped `≥ 0`; `flow` is
-/// not (a monotone non-decreasing accumulator within an interval).
+/// semantics, King et al. 2016 JSS). Compartments are kept `≥ 0` (`rk4_step`
+/// refuses a step that would leave one negative beyond roundoff; DOPRI5 clamps
+/// its accepted result); `flow` is not (a monotone non-decreasing accumulator
+/// within an interval).
 struct OdeState {
     int:  Vec<f64>,
     real: Vec<f64>,
@@ -683,8 +692,9 @@ fn dopri5_try_step(
 
     for i in 0..7 {
         // Stage state: x + h·Σ_{j<i} a[i][j]·k_j. Stages are NOT clamped (RK
-        // stages may transiently dip <0); only the accepted result is clamped,
-        // matching rk4_step.
+        // stages may transiently dip <0); only the accepted result is clamped.
+        // Unlike `rk4_step`, which refuses a step whose result is negative
+        // beyond roundoff, the clamp below is unconditional (gh#1263).
         let mut si = state.int.clone();
         let mut sr = state.real.clone();
         for j in 0..i {
@@ -1492,18 +1502,17 @@ mod tests {
         CompiledModel::new(model).expect("constant-drain pure_death must compile")
     }
 
-    /// A gradient step (`sens = Some`) that clamps a compartment negative is
-    /// REFUSED, not silently taken. `dN/dt = -mu` with `mu = 1`, `N0 = 100`, one
-    /// step of `dt = 200` drives `N` to `100 - 200 = -100`; the value path clamps
-    /// it to 0 but the sensitivity `S = ∂N/∂mu` keeps its unclamped slope, so the
-    /// returned `(value, gradient)` pair would be inconsistent — a silent-wrong
-    /// gradient NUTS would sample against. The forward-sim path (`sens = None`) is
-    /// unchanged: it still clamps, since a stochastic-adjacent ODE state at zero
-    /// is fine when no gradient consistency is required. (Coarse `burnin_dt` steps
-    /// make this overshoot materially more likely, which is why the guard the
-    /// S-combine comment long claimed — but never implemented — matters now.)
+    /// A step that drives a compartment meaningfully below zero is refused on
+    /// both paths. `dN/dt = -mu` with `mu = 1`, `N0 = 100`, one step of
+    /// `dt = 200` drives `N` to `100 - 200 = -100`. Clamping it to 0 would leave
+    /// the outflow's destination holding the full 200, so the step would add
+    /// people (gh#1263); on the gradient path it would also leave the
+    /// sensitivity `S = ∂N/∂mu` on its unclamped slope, so `(value, gradient)`
+    /// would disagree. The refusal is a per-θ condition (`!is_structural()`), so
+    /// a fit rejects the θ rather than aborting, and it names the compartment,
+    /// the time and the step.
     #[test]
-    fn rk4_gradient_step_refuses_clamping_a_compartment_negative() {
+    fn rk4_step_refuses_a_negative_excursion_on_both_paths() {
         let cm = compiled_constant_drain();
         let mu_idx = cm.model.parameters.iter().position(|p| p.name == "mu").unwrap();
         let mut params = vec![0.0; cm.model.parameters.len()];
@@ -1528,15 +1537,104 @@ mod tests {
             int[0]
         );
 
-        // Forward-sim path: unchanged — clamps to 0, no error.
+        // Value-only path (forward simulate, `mh`, NLopt, profile, survey):
+        // refused the same way, with the compartment, time and step named.
         let mut int2 = vec![100.0];
         let mut real2: Vec<f64> = vec![];
         let mut flow2 = vec![0.0; nf];
         let res2 = rk4_step(
-            &cm, &mut int2, &mut real2, Some(&mut flow2), &params, 0.0, 200.0, None, None, &[],
+            &cm, &mut int2, &mut real2, Some(&mut flow2), &params, 3.0, 200.0, None, None, &[],
         );
-        assert!(res2.is_ok(), "the forward-sim (value-only) path still clamps silently");
-        assert_eq!(int2[0], 0.0, "forward sim clamps N to 0");
+        match res2 {
+            Err(e @ SimError::OdeStepNegative { .. }) => {
+                let SimError::OdeStepNegative { ref compartment, value, t, dt } = e else {
+                    unreachable!()
+                };
+                assert_eq!(compartment, "N");
+                assert_eq!(value, -100.0);
+                assert_eq!(t, 3.0, "t is the start of the refused step");
+                assert_eq!(dt, 200.0);
+                assert!(
+                    !e.is_structural(),
+                    "a negative excursion depends on θ: a fit must reject the θ, not abort"
+                );
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("'N'") && msg.contains("dt") && msg.contains("smaller"),
+                    "the message must name the compartment and suggest a smaller dt: {msg}"
+                );
+            }
+            other => panic!("the value-only path must refuse N = -100, got {other:?}"),
+        }
+    }
+
+    /// Float roundoff below zero is not a negative excursion: a result within
+    /// `NEG_STATE_CLAMP_EPS` of zero (relative to the compartment's scale) is
+    /// set to 0 silently on both paths. `N0 = 100` drained at rate 1 over
+    /// `dt = 100 + 1e-8` lands at about `-1e-8`, inside the threshold `-1e-7`.
+    #[test]
+    fn rk4_step_clamps_roundoff_below_zero_silently() {
+        let cm = compiled_constant_drain();
+        let mu_idx = cm.model.parameters.iter().position(|p| p.name == "mu").unwrap();
+        let mut params = vec![0.0; cm.model.parameters.len()];
+        params[mu_idx] = 1.0;
+        let nf = cm.model.transitions.len();
+        let dt = 100.0 + 1e-8;
+
+        let mut int = vec![100.0];
+        let mut real: Vec<f64> = vec![];
+        let mut flow = vec![0.0; nf];
+        let res = rk4_step(&cm, &mut int, &mut real, Some(&mut flow), &params, 0.0, dt, None, None, &[]);
+        assert!(res.is_ok(), "a roundoff-sized undershoot must clamp silently, got {res:?}");
+        assert_eq!(int[0], 0.0);
+
+        let pmi = [mu_idx];
+        let mut int2 = vec![100.0];
+        let mut flow2 = vec![0.0; nf];
+        let mut sens =
+            Sens { state: vec![0.0; pmi.len()], flow: vec![0.0; nf * pmi.len()] };
+        let res2 = rk4_step(
+            &cm, &mut int2, &mut real, Some(&mut flow2), &params, 0.0, dt, None, Some(&mut sens),
+            &pmi,
+        );
+        assert!(res2.is_ok(), "the gradient path tolerates the same roundoff, got {res2:?}");
+        assert_eq!(int2[0], 0.0);
+
+        // A compartment that enters the step a few ulps below zero (ten f64
+        // drains of 0.1 from 999999937 leave -1.49e-7) and that the step does
+        // not move further down has not been overshot by the step: set to 0.
+        params[mu_idx] = 0.0;
+        let mut int3 = vec![-1.490116e-7];
+        let mut flow3 = vec![0.0; nf];
+        let res3 =
+            rk4_step(&cm, &mut int3, &mut real, Some(&mut flow3), &params, 3.0, 1.0, None, None, &[]);
+        assert!(res3.is_ok(), "an inherited ulp-sized negative is not the step's doing, got {res3:?}");
+        assert_eq!(int3[0], 0.0);
+    }
+
+    /// The refusal reaches the whole-run entry point the likelihood paths call
+    /// (`run_ode`, under `compute_ode_loglik`) as the same per-θ error, so the
+    /// `mh` and dt-check closures (`Err(e) if e.is_structural()` aborts, any
+    /// other error scores −∞) reject the θ. The fixture starts `N` at 1000;
+    /// drained at rate 300 with `dt = 1` it reaches 100 at `t = 3` and the next
+    /// step lands at -200.
+    #[test]
+    fn run_ode_refuses_a_negative_excursion_as_a_per_theta_error() {
+        let cm = compiled_constant_drain();
+        let mu_idx = cm.model.parameters.iter().position(|p| p.name == "mu").unwrap();
+        let mut params = vec![0.0; cm.model.parameters.len()];
+        params[mu_idx] = 300.0;
+        let cfg = OdeConfig { t_start: 0.0, t_end: 20.0, dt: 1.0 };
+        match run_ode(&cm, &params, &cfg, None, None) {
+            Err(e @ SimError::OdeStepNegative { .. }) => {
+                assert!(!e.is_structural(), "must reject the θ, not abort the fit: {e}");
+                let SimError::OdeStepNegative { ref compartment, value, t, dt } = e else {
+                    unreachable!()
+                };
+                assert_eq!((compartment.as_str(), value, t, dt), ("N", -200.0, 3.0, 1.0));
+            }
+            other => panic!("expected OdeStepNegative from run_ode, got {other:?}"),
+        }
     }
 
     fn load_golden(name: &str) -> ir::Model {

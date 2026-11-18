@@ -1382,6 +1382,18 @@ impl CompiledModel {
             .unwrap_or_else(|| format!("(local-int-{local})"))
     }
 
+    /// Compartment name for a local **real** state index, for diagnostics; the
+    /// real-compartment counterpart of [`Self::int_compartment_name`], used
+    /// only on error paths.
+    pub fn real_compartment_name(&self, local: usize) -> String {
+        let global = self.real_local_to_global.get(local).copied();
+        self.comp_index
+            .iter()
+            .find(|(_, &g)| Some(g) == global)
+            .map(|(n, _)| n.clone())
+            .unwrap_or_else(|| format!("(local-real-{local})"))
+    }
+
     /// gh#122: reject a source compartment that mixes a `deterministic(...)`
     /// exit with any other outgoing transition, for the stochastic backends.
     ///

@@ -310,9 +310,29 @@ relative error O(1/N). For populations N > 100 this is negligible. For very
 small compartment values (< ~10) the rounding can cause premature extinction —
 this is the deterministic approximation's inherent limitation.
 
-**Non-negativity.** After each RK4 step, all state values are clamped to ≥ 0 to
-suppress floating-point undershoots. This is a conservative guard; a properly
-tuned h should not require it in practice.
+**Non-negativity.** A fixed-step `rk4` step that drives a compartment below zero
+is refused, and the run stops with an error that names the compartment, the time
+and the step size. Setting the compartment back to zero instead would keep the
+flow the step had already passed downstream, so the step would add people: a
+closed cohort of 10⁹ in an 8-stage `via erlang` chain at rate 0.2 per day grows
+to 3.2 × 10⁹ in eight days at `dt = 1`. Only a floating-point undershoot,
+smaller than 10⁻⁹ of the compartment's value before the step (or 10⁻⁹ absolute
+below one person), is set to zero silently.
+
+The usual cause is a step that is too long for the fastest rate. A linear chain
+of `k` stages at rate `r` per stage, taken on its own, stays non-negative on
+every step when `dt · k · r ≤ 1`; above that, a step can overshoot while an
+upstream stage holds much more than a downstream one, as at the start of an
+outbreak or after an importation. The fix is a smaller `dt`. If a smaller `dt`
+does not remove the error, a rate in the model does not fall to zero as its
+source compartment empties (a constant outflow, for example), and the exact
+solution itself goes negative.
+
+Inside a fit the refusal depends on the parameters, so it rules out that
+parameter set rather than stopping the fit: `mh` and `nl-sbplx`/`nl-bobyqa`
+score it as a log-likelihood of −∞ and move on. `nl-lbfgs` stops, because it has
+no gradient to follow at such a point. The adaptive `rk45` integrator still sets
+a negative accepted result to zero.
 
 **Interventions.** At each intervention time, the float state is rounded into
 `IntState`/`RealState`, the intervention action is applied (which may
