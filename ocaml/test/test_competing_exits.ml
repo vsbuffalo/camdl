@@ -839,6 +839,88 @@ let test_hyper_erlang_inflow_e300_shows_the_written_rate () =
   check_member_e300s ~lowered:"one transition per branch"
     ~members:[ ("infection", "beta * S") ] (e300s src)
 
+(* ── Lineage on a competing exit ────────────────────────────────────────── *)
+
+let lineage_src ~stages rate =
+  Printf.sprintf
+    "time_unit = 'days\n\
+     dimensions { age = [pre, sch] }\n\
+     compartments { S, E, I, R, T }\n\
+     stratify(by = age)\n\
+     parameters { beta : rate  sigma : rate  gamma : rate  cmax : rate  mu : rate  K : count }\n\
+     transitions {\n\
+    \  infection[a in age] : S[a] --> E[a] @ beta * S[a] * I / (S + E + I + R)\n\
+    \  latency[a in age]   : E[a] --> I[a] via erlang(stages = %d, rate = sigma)\n\
+    \  recovery[a in age]  : I[a] --> R[a] @ gamma * I[a]\n\
+    \  #[lineage]\n\
+    \  treat[a in age] : E[a] --> T[a] @ %s\n\
+     }\n\
+     init { S[pre] = 500  S[sch] = 490  E[pre] = 10 }\n" stages rate
+
+let lineage_of (t : Ir.transition) : Ir.transition_lineage =
+  match t.Ir.lineage with
+  | Some l -> l
+  | None -> Alcotest.failf "%s: no lineage record" t.Ir.name
+
+let treat_copies (m : Ir.model) age =
+  List.filter (fun (t : Ir.transition) ->
+    String.length t.Ir.name >= 9 && String.sub t.Ir.name 0 9 = "treat_" ^ age)
+    m.Ir.transitions
+
+(* The source of a competing exit is the whole compartment cell, at every
+   stage count: a rate nonlinear in its own source has no parent, staged or
+   not, as it has no parent unstaged. *)
+let test_lineage_source_is_the_whole_cell () =
+  let rate = "cmax * E[a] * E[a] / (K + E[a])" in
+  List.iter (fun stages ->
+    match detail (lineage_src ~stages rate) with
+    | Error e -> Alcotest.failf "stages = %d: should compile, got: %s" stages e
+    | Ok m ->
+      List.iter (fun age ->
+        let copies = treat_copies m age in
+        Alcotest.(check int) (Printf.sprintf "stages = %d: copies of treat_%s" stages age)
+          stages (List.length copies);
+        List.iter (fun (t : Ir.transition) ->
+          Alcotest.(check (list string)) (t.Ir.name ^ ": no parent") []
+            (List.map fst (lineage_of t).Ir.parent_pool_weights)) copies)
+        [ "pre"; "sch" ])
+    [ 1; 3 ]
+
+(* A real parent inside a rate that lowers to the guarded share: every stage
+   copy has the unstaged transition's parent, and the copies' weights times
+   the parent count sum to the unstaged weight times it, at each state where
+   the stages hold the unstaged cell's count between them; an empty source
+   gives every weight zero. *)
+let test_lineage_parent_weights_split_across_stages () =
+  let rate = "mu * E[a] * I[a] / (K + E[a])" in
+  let params = [ ("mu", 0.3); ("K", 7.0) ] in
+  let one = compile_ok (lineage_src ~stages:1 rate) in
+  let three = compile_ok (lineage_src ~stages:3 rate) in
+  let unstaged = lineage_of (transition one "treat_pre") in
+  Alcotest.(check (list string)) "unstaged parent" [ "I_pre" ]
+    (List.map fst unstaged.Ir.parent_pool_weights);
+  let copies = treat_copies three "pre" in
+  Alcotest.(check int) "three copies" 3 (List.length copies);
+  let copy_weights = List.map (fun (t : Ir.transition) ->
+    let l = lineage_of t in
+    Alcotest.(check (list string)) (t.Ir.name ^ ": the unstaged parent") [ "I_pre" ]
+      (List.map fst l.Ir.parent_pool_weights);
+    List.assoc "I_pre" l.Ir.parent_pool_weights) copies in
+  List.iter (fun (e1, e2, e3, i) ->
+    let flat_pops = [ ("E_pre", e1 +. e2 +. e3); ("I_pre", i) ] in
+    let stages_pops = [ ("E_pre_s1", e1); ("E_pre_s2", e2); ("E_pre_s3", e3);
+                        ("I_pre", i) ] in
+    let w_flat = eval ~pops:flat_pops ~params one
+        (List.assoc "I_pre" unstaged.Ir.parent_pool_weights) in
+    let ws = List.map (eval ~pops:stages_pops ~params three) copy_weights in
+    let label = Printf.sprintf "E = (%g, %g, %g), I = %g" e1 e2 e3 i in
+    Alcotest.(check (float 1e-12)) (label ^ ": stage weights sum to the unstaged weight")
+      w_flat (List.fold_left ( +. ) 0.0 ws);
+    if e1 +. e2 +. e3 = 0.0 then
+      Alcotest.(check (list (float 0.0))) (label ^ ": every weight zero") [ 0.0; 0.0; 0.0 ] ws)
+    [ (4.0, 0.0, 9.0, 11.0); (1.0, 1.0, 1.0, 3.0); (0.0, 0.0, 25.0, 0.0);
+      (0.0, 0.0, 0.0, 11.0) ]
+
 (* A rate that cannot be differentiated (E600) is reported once per written
    member of a competing exit, by its written name. *)
 let test_competing_exit_e600_names_the_member () =
@@ -938,4 +1020,9 @@ let () =
          Alcotest.test_case "hyper_erlang inflow: E300 shows the written rate" `Quick
            test_hyper_erlang_inflow_e300_shows_the_written_rate;
          Alcotest.test_case "competing exit: E600 names the member" `Quick
-           test_competing_exit_e600_names_the_member ]) ]
+           test_competing_exit_e600_names_the_member ]);
+      ("lineage",
+       [ Alcotest.test_case "the source is the whole compartment cell" `Quick
+           test_lineage_source_is_the_whole_cell;
+         Alcotest.test_case "parent weights split across the stages" `Quick
+           test_lineage_parent_weights_split_across_stages ]) ]

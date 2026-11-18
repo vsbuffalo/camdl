@@ -10490,6 +10490,51 @@ let test_lineage_weight_freq_dependent () =
   | other ->
     Alcotest.failf "expected single I weight, got %d pools" (List.length other)
 
+(* A conditional whose predicate reads no parent is linear in the parents
+   when its branches are: the predicate picks a branch without regard to the
+   parent counts. The weight is the conditional of the branches' weights,
+   with the predicate of the rate (gh#1276). *)
+let lineage_if_src rate = Printf.sprintf {|
+    compartments { S, E, I, R, V }
+    parameters { beta : rate  sigma : rate  gamma : rate  N0 : count  I0 : count  K : count }
+    let N = S + E + I + R + V
+    transitions {
+      #[lineage]
+      infection : S --> E  @ %s
+      progression : E --> I  @ sigma * E
+      recovery    : I --> R  @ gamma * I
+    }
+    init { S = N0 - I0  I = I0 }
+    simulate { from = 0 'days  to = 120 'days }
+  |} rate
+
+let test_lineage_parent_free_if_is_linear () =
+  let m = compile_expect_ok (lineage_if_src "if t > 10 then beta * S * I / N else 0") in
+  let l = find_lineage m "infection" in
+  let open Ir in
+  let pred = match (find_transition m "infection").rate with
+    | Cond { pred; _ } -> pred
+    | _ -> Alcotest.fail "the rate should be a conditional" in
+  let expected =
+    Cond { pred;
+           then_ = BinOp { op = Div;
+                           left  = BinOp { op = Mul; left = Param "beta"; right = Pop "S" };
+                           right = PopSum ["S"; "E"; "I"; "R"; "V"] };
+           else_ = Const 0.0 } in
+  match l.parent_pool_weights with
+  | [("I", w)] ->
+    Alcotest.(check bool) "weight(I) = if t > 10 then beta*S/N else 0" true (w = expected)
+  | other ->
+    Alcotest.failf "expected the single parent I, got %d pools" (List.length other)
+
+(* A predicate that reads a parent still makes the conditional a nonlinear
+   use, in a numerator or a denominator of the predicate. *)
+let test_lineage_if_reading_a_parent_is_e601 () =
+  compile_expect_error_code ~code:"E601" ~contains:"of 'I'"
+    (lineage_if_src "if I > 10 then beta * S * I / N else 0");
+  compile_expect_error_code ~code:"E601" ~contains:"of 'I'"
+    (lineage_if_src "if S / (K + I) > 0.5 then beta * S * I / N else 0")
+
 (* (d) Multi-pool weights: weight(I) = β·β_I·S/N, weight(A) = β·β_A·S/N. *)
 let test_lineage_weight_multi_pool () =
   let m = compile_expect_ok multi_pool_src in
@@ -19188,6 +19233,8 @@ let () =
       Alcotest.test_case "a product with one parent factor is accepted"   `Quick test_lineage_product_with_one_parent_still_accepted;
       Alcotest.test_case "weight(I) = β·S/N for freq-dependent"            `Quick test_lineage_weight_freq_dependent;
       Alcotest.test_case "multi-pool weights β·β_I·S/N, β·β_A·S/N"         `Quick test_lineage_weight_multi_pool;
+      Alcotest.test_case "a parent-free if is linear (gh#1276)"            `Quick test_lineage_parent_free_if_is_linear;
+      Alcotest.test_case "an if reading a parent is E601 (gh#1276)"        `Quick test_lineage_if_reading_a_parent_is_e601;
       Alcotest.test_case "identity subgraph SEIR S→E tracks {E,I,R}"       `Quick test_lineage_identity_subgraph_seir;
       Alcotest.test_case "identity subgraph SIRS cycle tracks {S,I,R}"     `Quick test_lineage_identity_subgraph_sirs_cycle;
       Alcotest.test_case "inert when no #[lineage] annotations"            `Quick test_lineage_inert_when_absent;

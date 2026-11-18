@@ -29,14 +29,24 @@
     operand of a division is a normaliser, such as [I] inside [N]: it is
     treated as a coefficient frozen at the event and is never a parent. A
     reference inside a nonlinear construct (a power other than [^ 1], [exp],
-    [log], [sqrt], [abs], [floor], [ceil], the trigonometric functions, a
-    conditional, [min], [max], [mod], a comparison, or a table index) is a
-    nonlinear use, and so is a product whose two operands both read a
-    parent, such as [I * I] or [I * A]; the expander refuses the transition
-    with E601. Any other reference makes the compartment a parent. {!parent_pool_weights}
-    then gives each parent's weight: the derivative of the rate's numerator
-    with respect to that parent's count, divided by the rate's denominator,
-    after both are simplified.
+    [log], [sqrt], [abs], [floor], [ceil], the trigonometric functions,
+    [min], [max], [mod], a comparison, or a table index) is a nonlinear use,
+    and so is a product whose two operands both read a parent, such as
+    [I * I] or [I * A]; the expander refuses the transition with E601. A
+    conditional [if p then a else b] is a nonlinear use of every parent in
+    it when [p] reads a parent anywhere; when [p] reads none, the branch it
+    picks does not depend on the parent counts, and the conditional is
+    linear in the parents when [a] and [b] are. Any other reference makes
+    the compartment a parent. {!parent_pool_weights} then gives each
+    parent's weight: the derivative of the rate's numerator with respect to
+    that parent's count, divided by the rate's denominator, after both are
+    simplified. For a conditional that derivative is
+    [if p then a' else b'], each branch's own.
+
+    [if t > 10 then beta * S * I / N else 0] has the parent [I] with weight
+    [if t > 10 then beta * S / N else 0]. This is also the form of a stage
+    copy of a competing exit, [if E > 0 then R * E_s / E else 0], whose
+    predicate reads only the source.
 
     The expander calls both, from [Expander.resolve_lineage], on the resolved
     rate of each expanded [#[lineage]] transition, with [let]s inlined rather
@@ -93,7 +103,9 @@ let pow_is_nonlinear (exponent : expr) : bool =
                         from the nonlinear-use check, even when they
                         are also inside a nonlinear construct.
       - [in_nonlinear]: under a non-unit power, log/exp/sqrt/sin/cos/
-                        tanh/abs, Cond, min, max, mod, or a comparison.
+                        tanh/abs, min, max, mod, a comparison, the
+                        predicate of a Cond, or either branch of a Cond
+                        whose predicate reads a parent.
 
     A non-source Pop is:
       - Denominator-only if [in_denom] (exempt; not a parent),
@@ -123,6 +135,22 @@ let classify_parents ~(sources : string list) (rate : expr) : classification =
     | Const _ | UnitLiteral _ | Param _ | ConstRef _ | Time | Dt | Projected
     | ObsColumnRef _ | TimeFunc _ | ForcingBasis _ | ObsAnchor _ | BindingRef _
     | PerEvalRef _ -> None
+  in
+  (* Whether [e] reads a compartment other than a source anywhere, a
+     denominator included. *)
+  let rec reads_parent (e : expr) : bool =
+    match e with
+    | Pop c -> not (is_source c)
+    | PopSum cs -> List.exists (fun c -> not (is_source c)) cs
+    | BinOp { left; right; _ } -> reads_parent left || reads_parent right
+    | UnOp { arg; _ } -> reads_parent arg
+    | UncheckedDim u -> reads_parent u.inner
+    | Cond { pred; then_; else_ } -> List.exists reads_parent [pred; then_; else_]
+    | Reduce terms -> List.exists reads_parent terms
+    | TableLookup (_, args) -> List.exists reads_parent args
+    | Const _ | UnitLiteral _ | Param _ | ConstRef _ | Time | Dt | Projected
+    | ObsColumnRef _ | TimeFunc _ | ForcingBasis _ | ObsAnchor _ | BindingRef _
+    | PerEvalRef _ -> false
   in
   let parents = ref [] in           (* reverse first-seen order *)
   let add_parent c =
@@ -193,12 +221,15 @@ let classify_parents ~(sources : string list) (rate : expr) : classification =
              arg } ->
       walk ~in_denom ~in_nonlinear:true ~enclosing:e arg
     | Cond { pred; then_; else_ } ->
-      (* Cond is in the nonlinear-use bucket. A parent inside
-         any branch (or the predicate) that is not in a denominator is a
-         nonlinear use. *)
+      (* A predicate that reads no parent picks a branch without regard to
+         the parent counts, so the conditional is linear in the parents
+         when each branch is. A predicate that reads a parent anywhere,
+         even in a denominator, makes the conditional a nonlinear use of
+         every parent in it. *)
       walk ~in_denom ~in_nonlinear:true ~enclosing:e pred;
-      walk ~in_denom ~in_nonlinear:true ~enclosing:e then_;
-      walk ~in_denom ~in_nonlinear:true ~enclosing:e else_
+      let branches_nonlinear = in_nonlinear || reads_parent pred in
+      walk ~in_denom ~in_nonlinear:branches_nonlinear ~enclosing:e then_;
+      walk ~in_denom ~in_nonlinear:branches_nonlinear ~enclosing:e else_
     | Reduce terms ->
       (* A sum is linear (like Add): a parent inside any term is a linear
          parent candidate, in the same denom/nonlinear context. *)
@@ -268,7 +299,16 @@ let rec deriv_num_wrt_pop (comp : string) (e : expr) : expr =
     Reduce (List.map (deriv_num_wrt_pop comp) terms)
   | BindingRef _ -> Const 0.0   (* lets are not hoisted in a lineage rate *)
   | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
-  | BinOp _ | UnOp _ | Cond _ ->
+  | Cond { pred; then_; else_ } ->
+    (* [classify_parents] admits a parent in a branch only when [pred] reads
+       no parent, so the branch [pred] picks is fixed with respect to the
+       count: the derivative is that branch's derivative. A conditional
+       with no parent in either branch has derivative 0. *)
+    let a = Autodiff.simplify_fixpoint (deriv_num_wrt_pop comp then_) in
+    let b = Autodiff.simplify_fixpoint (deriv_num_wrt_pop comp else_) in
+    if a = Const 0.0 && b = Const 0.0 then Const 0.0
+    else Cond { pred; then_ = a; else_ = b }
+  | BinOp _ | UnOp _ ->
     (* Nonlinear constructs cannot contain a linear parent in the
        numerator (classify_parents would have rejected the rate), so
        the parent does not occur here: derivative is 0. *)

@@ -150,6 +150,16 @@ progression runs unchanged alongside.
   the refusal to pool a flow over an unbound dimension (E280). The per-stage
   flow columns are named like any indexed family, with the stage level last
   (`death_E_pre_s1`).
+- **Lineage.** A `#[lineage]` competing exit takes every stage cell of its
+  source cell as the source (`E_pre_s1` to `E_pre_s3` for each copy of
+  `treat_pre`), as the unstaged transition takes `E_pre`, so the stages are
+  never parents of one another and the E601 check gives the same answer at every
+  stage count. A conditional whose predicate reads no parent is linear for
+  lineage when its branches are, with weight `if p then w_a else w_b`, so the
+  guarded share keeps the written rate's parents: copy `s` of
+  `mu * E[a] * I[a] / (K + E[a])` has the parent `I[a]` with weight
+  `if E > 0 then mu * E / (K + E) * E_s / E else 0`, and the copies' weights sum
+  to the unstaged weight.
 - **`stages = 1`.** The source is unstaged and the transition is an ordinary
   second exit; nothing is rewritten. The refusals below therefore do not apply
   at `stages = 1`: an `overdispersed(...)` second exit compiles there and is

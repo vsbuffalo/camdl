@@ -6845,13 +6845,30 @@ let binder_stage_copies ctx (tr : transition_decl) env
                    r.res_stage_levels)
     end
 
+(** When an expanded transition is a stage copy of a competing exit, the
+    residence whose stages the copies cover and the binders the modeller
+    wrote on the exit. [family] is the declaration being expanded and
+    [binder_copy] the residence when the member is a stage copy of a family
+    over compartments ({!binder_stage_copies}). A family the modeller bound
+    over the stages names its stage itself and is not a copy. *)
+let competing_copy ctx ~(family : transition_decl) ~(binder_copy : residence option)
+    : (residence * index_binding list) option =
+  match binder_copy with
+  | Some r -> Some (r, family.trindices)
+  | None ->
+    (match stage_expansion ctx family.trname with
+     | Some r when not (List.mem (family.trname, r.res_compartment) ctx.stage_families) ->
+       (* the stage binder is last, after the binders the modeller wrote *)
+       let n = List.length family.trindices in
+       Some (r, List.filteri (fun i _ -> i < n - 1) family.trindices)
+     | Some _ | None -> None)
+
 (** The member as written that an expanded transition the [via] lowering
     made stands for, as the dimension checker names it
     ({!Dimcheck.transition_source}); [None] for a transition the modeller
-    wrote as it compiles. [family] is the declaration being expanded,
-    [binder_copy] the residence when the member is a stage copy of a family
-    over compartments ({!binder_stage_copies}), [env] the expanded
-    transition's environment and [suffix] its branch suffix.
+    wrote as it compiles. [family] and [binder_copy] are as for
+    {!competing_copy}, [env] is the expanded transition's environment and
+    [suffix] its branch suffix.
 
     - A stage copy of a competing exit stands for the exit's member, with
       its rate as written.
@@ -6866,7 +6883,12 @@ let written_source ctx ~(family : transition_decl) ~(binder_copy : residence opt
     let base = if parts = [] then tname else tname ^ "_" ^ String.concat "_" parts in
     match suffix with None -> base | Some s -> base ^ "_" ^ s in
   let member = member_of ~suffix in
-  let exit_share (r : residence) binders =
+  let via_name =
+    if List.mem_assoc family.trname ctx.via_calls then Some family.trname
+    else List.assoc_opt family.trname ctx.via_transitions in
+  match competing_copy ctx ~family ~binder_copy, Option.bind via_name (fun v ->
+      Option.map (fun c -> (v, c)) (List.assoc_opt v ctx.via_calls)) with
+  | Some (r, binders), _ ->
     Option.map (fun written ->
       let rate = match written with
         | EFuncCall (("deterministic" | "overdispersed"), ("", inner) :: _) -> inner
@@ -6879,13 +6901,7 @@ let written_source ctx ~(family : transition_decl) ~(binder_copy : residence opt
              proportion to occupancy; each share has the dimension of the \
              rate as written"
             (List.length r.res_stage_levels) r.res_compartment r.res_via })
-      (List.assoc_opt family.trname ctx.written_rates) in
-  let via_name =
-    if List.mem_assoc family.trname ctx.via_calls then Some family.trname
-    else List.assoc_opt family.trname ctx.via_transitions in
-  match binder_copy, Option.bind via_name (fun v ->
-      Option.map (fun c -> (v, c)) (List.assoc_opt v ctx.via_calls)) with
-  | Some r, _ -> exit_share r family.trindices
+      (List.assoc_opt family.trname ctx.written_rates)
   | None, Some (via, (binders, src, (law, args))) ->
     Some { Dimcheck.member = member via binders;
            rate = "via " ^ written_expr_to_string ~subst:env (EFuncCall (law, args));
@@ -6905,14 +6921,7 @@ let written_source ctx ~(family : transition_decl) ~(binder_copy : residence opt
              branch's weight times this rate"
             comp via })
       (List.assoc_opt family.trname ctx.written_rates)
-  | None, None ->
-    (match stage_expansion ctx family.trname with
-     (* A family the modeller bound over the stages already names its stage. *)
-     | Some r when not (List.mem (family.trname, r.res_compartment) ctx.stage_families) ->
-       (* the stage binder is last, after the binders the modeller wrote *)
-       let n = List.length family.trindices in
-       exit_share r (List.filteri (fun i _ -> i < n - 1) family.trindices)
-     | Some _ | None -> None)
+  | None, None -> None
 
 let expand_transitions_counted ctx =
   let filtered = ref 0 in
@@ -7038,7 +7047,20 @@ let expand_transitions_counted ctx =
           Option.iter (fun src ->
             ctx.lowered_sources <- (tr_name, src) :: ctx.lowered_sources)
             (written_source ctx ~family ~binder_copy env name_suffix);
-          let lineage = resolve_lineage ctx tr ~sources:src_names ~tr_name rate in
+          (* A stage copy of a competing exit takes its share of the whole
+             compartment cell, so lineage takes every stage of the cell as
+             the source, as it takes the cell when it is unstaged. *)
+          let lineage_sources =
+            if not tr.trlineage then src_names
+            else match competing_copy ctx ~family ~binder_copy, tr.trsrc,
+                       List.rev tr.trindices with
+              | Some (r, _), [ src_ref ], IBind (v, d) :: _ when d = r.res_stage_dim ->
+                List.map (fun level ->
+                  resolve_stoich_ref ctx ((v, level) :: List.remove_assoc v env) src_ref)
+                  r.res_stage_levels
+              | _ -> src_names
+          in
+          let lineage = resolve_lineage ctx tr ~sources:lineage_sources ~tr_name rate in
           {
             Ir.name            = tr_name;
             Ir.stoichiometry   = stoich;

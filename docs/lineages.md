@@ -62,7 +62,12 @@ compartments. `β·S·I/N` compiles (`I` is a linear parent in the numerator; it
 appearance in the `N` denominator is a frozen normalizer — denominator
 precedence). `β·S·(I+ι)^α/N` does **not** (the power is a genuine nonlinear use
 of `I`) and errors with `E601`, as does a product of two parent counts in the
-numerator, `β·S·I·I/N²` or `β·S·I·A/N`. Nonlinear mixing is future work.
+numerator, `β·S·I·I/N²` or `β·S·I·A/N`. A conditional whose condition reads no
+parent is linear when its branches are: `if t > 10 then β·S·I/N else 0` has the
+weight `if t > 10 then β·S/N else 0`; a condition that reads a parent is `E601`.
+On a competing exit from a compartment staged by `via erlang`, the whole
+compartment cell is the source, so its stages are never parents of one another.
+Nonlinear mixing is future work.
 
 **Overdispersion is transparent.** `overdispersed(β·S·I/N, σ²)` on a
 `#[lineage]` transition compiles: the classifier sees through the noise wrapper

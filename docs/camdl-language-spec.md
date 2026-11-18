@@ -2390,7 +2390,11 @@ denominator `N` is treated as a frozen normalizer. A genuinely nonlinear use of
 a parent compartment — `beta * S * (I + iota)^alpha / N` — is **E601**, which
 names the offending compartment and the subexpression it appears in. So is a
 product of two parent counts in the numerator, `beta * S * I * I / (N * N)` or
-`beta * S * I * A / N`: its weights could not sum to the rate. Wrapping
+`beta * S * I * A / N`: its weights could not sum to the rate. A conditional
+is linear when its condition reads no parent compartment and each branch is
+linear: `if t > 10 then beta * S * I / N else 0` has the parent `I` with weight
+`if t > 10 then beta * S / N else 0`. A condition that reads a parent anywhere,
+`if I > 10 then …` or `if S / (K + I) > 0.5 then …`, is E601. Wrapping
 the rate in `overdispersed(...)` (§9.8) is transparent to this analysis: the
 environmental noise changes the counts, not the attribution.
 
@@ -2928,6 +2932,15 @@ copies are named like any indexed family, with the stage level last
 
 With `stages = 1` the source is not staged and the transition is an ordinary
 second exit: the same model text compiles at every stage count.
+
+*Lineage.* A `#[lineage]` competing exit takes the whole compartment cell as
+its source, every stage of `E[a]`, as the unstaged transition takes `E[a]`. So
+the stages are never parents of one another, and a rate is accepted or refused
+(E601) at every stage count alike. Each stage copy's parent weight is its share
+of the written rate's: for `mu * E[a] * I[a] / (K + E[a])` the parent of every
+copy is `I[a]`, with weight `if E > 0 then mu * E / (K + E) * E_s / E else 0`,
+and the weights of the copies sum to the unstaged transition's
+`mu * E[a] / (K + E[a])`.
 
 *Families over compartments.* A transition family bound over the compartment
 set is a competing exit for each staged member and an ordinary exit for the

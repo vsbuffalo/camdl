@@ -563,3 +563,102 @@ fn lineage_on_ode_is_rejected() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// A `#[lineage]` competing exit from a compartment staged by `via erlang`,
+/// with a real parent inside a rate the compiler lowers to the guarded share
+/// `if E > 0 then R * E_s / E else 0` (gh#1276). The parent-pool weight of
+/// each stage copy is a conditional; the run records lineage events for the
+/// copies, each with one finite, non-negative parent mass.
+const STAGED_EXIT_LINEAGE: &str = r#"
+time_unit = 'days
+dimensions { age = [pre, sch] }
+compartments { S, E, I, R, T }
+stratify(by = age)
+parameters { beta : rate  sigma : rate  gamma : rate  mu : rate  K : count }
+transitions {
+  infection[a in age] : S[a] --> E[a] @ beta * S[a] * I / (S + E + I + R)
+  latency[a in age]   : E[a] --> I[a] via erlang(stages = 3, rate = sigma)
+  recovery[a in age]  : I[a] --> R[a] @ gamma * I[a]
+  #[lineage]
+  treat[a in age] : E[a] --> T[a] @ mu * E[a] * I[a] / (K + E[a])
+}
+init { S[pre] = 500  S[sch] = 490  E[pre] = 10  I[pre] = 5 }
+simulate { from = 0 'days  to = 30 'days }
+"#;
+
+#[test]
+fn staged_competing_exit_records_conditional_parent_weights() {
+    let camdl = camdl_bin();
+    let tmp = tempdir("staged_exit");
+    let model = tmp.join("staged.camdl");
+    std::fs::write(&model, STAGED_EXIT_LINEAGE).unwrap();
+    let ir = tmp.join("staged.ir.json");
+    let compiled = run(
+        &camdl,
+        &["dev", "compile", model.to_str().unwrap(), "-o", ir.to_str().unwrap()],
+    );
+    if !compiled.status.success() {
+        let stderr = String::from_utf8_lossy(&compiled.stderr);
+        // A compiler diagnostic is this test's failure; anything else means
+        // camdlc is unavailable, as for the other tests here.
+        assert!(!stderr.contains("[E"), "the model must compile: {stderr}");
+        eprintln!("skipping: camdl compile failed (camdlc likely unavailable): {stderr}");
+        return;
+    }
+
+    // The stage copies of `treat_pre`, by their index in the compiled model.
+    let compiled_ir: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&ir).unwrap()).unwrap();
+    let copies: Vec<usize> = compiled_ir["model"]["transitions"]
+        .as_array()
+        .expect("the compiled model lists its transitions")
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t["name"].as_str().is_some_and(|n| n.starts_with("treat_pre_s")))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(copies.len(), 3, "treat_pre has one copy per stage");
+
+    let ev = tmp.join("event_log.tsv");
+    let store = tmp.join("store");
+    let out = run(
+        &camdl,
+        &[
+            "simulate", ir.to_str().unwrap(), "--backend", "gillespie", "--seed", "7",
+            "--param", "beta=0.4", "--param", "sigma=0.2", "--param", "gamma=0.1",
+            "--param", "mu=0.5", "--param", "K=5",
+            "--output-dir", store.to_str().unwrap(),
+            "--event-log", ev.to_str().unwrap(), "--tsv",
+        ],
+    );
+    assert!(out.status.success(), "simulate --event-log failed: {}",
+        String::from_utf8_lossy(&out.stderr));
+
+    // Columns: time, transition, multiplicity, batched, step, lineage_weights.
+    let text = std::fs::read_to_string(&ev).unwrap();
+    let mut treat_events = 0;
+    for row in text.lines().skip(4) {
+        let f: Vec<&str> = row.split('\t').collect();
+        let tr: usize = f[1].parse().unwrap();
+        if !copies.contains(&tr) {
+            continue;
+        }
+        treat_events += 1;
+        let masses: Vec<f64> = serde_json::from_str(f[5])
+            .unwrap_or_else(|e| panic!("treat event weights {:?}: {e}", f[5]));
+        assert_eq!(masses.len(), 1, "one parent pool, I_pre: {row}");
+        assert!(masses[0].is_finite() && masses[0] >= 0.0, "a finite mass: {row}");
+    }
+    assert!(treat_events > 0, "the run must fire a stage copy of treat_pre");
+
+    let ll = tmp.join("ll.tsv");
+    let realized = run(
+        &camdl,
+        &["lineage", "realize", ev.to_str().unwrap(), "--identity-seed", "7",
+          "-o", ll.to_str().unwrap()],
+    );
+    assert!(realized.status.success(), "lineage realize failed: {}",
+        String::from_utf8_lossy(&realized.stderr));
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
