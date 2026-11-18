@@ -672,8 +672,8 @@ pub fn resolve_fit_run(s: &str) -> Result<ResolvedFit, ResolveError> {
 
 /// The fit problem a `--fit` handle names, for a command that reads a fit's
 /// problem but none of its results (`pfilter`, `profile`, `survey`): the
-/// config text, where its relative paths are anchored, and the configuration
-/// parsed from it.
+/// config as the user wrote it, the configuration resolved from it, where its
+/// relative paths are anchored, and the configuration parsed.
 ///
 /// The handle forms are `fit predict`'s. A `fit.toml` names the problem the
 /// file states as it now reads (gh#896: a `fit.toml` names the run the file
@@ -681,29 +681,34 @@ pub fn resolve_fit_run(s: &str) -> Result<ResolvedFit, ResolveError> {
 /// before any fit runs keeps working; a problem a fit run's command line
 /// changed (`fit run --allow-forcing-extrapolation`) is not the file's, and is
 /// not read through it. A leaf directory, `@label`, run-id or fit-id prefix,
-/// or problem folder names a stored fit, whose archived config is read: the
-/// config the fit ran under, a flag's problem value written in (gh#1268).
+/// or problem folder names a stored fit, whose `fit.resolved.toml` is read: the
+/// config the fit ran under, a flag's problem value written in (gh#1268) and a
+/// sweep point's own `[fixed]`.
 ///
-/// Two things the archive does not hold. A sweep point's values: its folder
-/// archives the file's `[fixed]`, so a reader of `[fixed]` refuses such a
-/// handle ([`FitProblem::refuse_a_sweep_point`]). And the run's own method:
-/// the archive's `[method]` is the file's, while a folder holds every method
-/// run on its problem and a method flag (`--starts`, a sampler flag) is
-/// recorded in the leaf, not folded into the archive; `profile`, the one
-/// reader of the fit's `[method]` (its nl-* budget and `starts`), reads the
-/// file's. Both lift when a fit's resolved config is stored (D93).
+/// One thing the resolved config does not hold: the run's own method. Its
+/// `[method]` is the file's, while a folder holds every method run on its
+/// problem and a method flag (`--starts`, a sampler flag) is recorded in the
+/// leaf; `profile`, the one reader of the fit's `[method]` (its nl-* budget
+/// and `starts`), reads the file's.
 pub(crate) struct FitProblem {
     /// The handle as typed, for messages.
     pub handle: String,
-    /// The config text, read once: the fit file, or the stored fit's archived
-    /// config (`fit.toml.original`).
-    pub text: String,
+    /// The config as the user wrote it, read once: the fit file, or the stored
+    /// fit's `fit.toml.original`. What a reader that archives the config
+    /// (`profile`) stores as its own `fit.toml.original`, and hashes.
+    pub original: String,
+    /// The configuration resolved from `original`, as a fit folder stores it
+    /// ([`crate::fit::run_config::resolved_config_text`]): the stored fit's
+    /// `fit.resolved.toml`, or, for a fit file, its resolution with no
+    /// command-line value. What `profile` stores as its own
+    /// `fit.resolved.toml`.
+    pub resolved: String,
     /// The path the config's relative paths were written against: the file
     /// itself, or the stored fit's source config (`<segment>/<source_config>`).
     /// Where a reader that archives the config (`profile`'s sidecar) records
     /// it as written.
     pub anchor: PathBuf,
-    /// `text`, parsed and anchored at `anchor`.
+    /// The configuration, parsed and anchored at `anchor`.
     pub config: FitConfig,
     /// For a stored fit, the fixed values its fit folder records it ran at
     /// (`fit.meta.json` `fixed`), which [`Self::refuse_a_sweep_point`] checks
@@ -770,7 +775,12 @@ pub(crate) fn resolve_fit_problem(s: &str) -> Result<FitProblem, ResolveError> {
             .map_err(|e| ResolveError::NotFound(format!("cannot read fit config {}: {e}", path.display())))?;
         let config = FitConfig::parse_anchored_at(&text, &path, &path)
             .map_err(|e| ResolveError::NotFound(format!("cannot load fit config {}: {e}", path.display())))?;
-        return Ok(FitProblem { handle: s.to_string(), text, anchor: path, config, ran_fixed: None });
+        let no_flag = crate::fit::run_config::ProblemFlags { allow_forcing_extrapolation: false };
+        let resolved = crate::fit::run_config::resolved_config_text(&text, no_flag, &config.problem.fixed)
+            .map_err(|e| ResolveError::NotFound(format!("fit config {}: {e}", path.display())))?;
+        return Ok(FitProblem {
+            handle: s.to_string(), original: text, resolved, anchor: path, config, ran_fixed: None,
+        });
     }
     let segment = match resolve_target(s)? {
         FitTarget::Segment(seg) => seg,
@@ -778,11 +788,14 @@ pub(crate) fn resolve_fit_problem(s: &str) -> Result<FitProblem, ResolveError> {
             .map_err(ResolveError::NotFound)?
             .ok_or_else(|| ResolveError::NotFound(format!("{} is not inside a fit's directory", l.dir.display())))?,
     };
-    let (text, anchor, config) = read_segment_config(&segment).map_err(ResolveError::NotFound)?;
+    let (resolved, anchor, config) = read_segment_config(&segment).map_err(ResolveError::NotFound)?;
+    let archived = segment.join(crate::run_meta::ARCHIVED_CONFIG);
+    let original = std::fs::read_to_string(&archived)
+        .map_err(|e| ResolveError::NotFound(format!("cannot read {}: {e}", archived.display())))?;
     let ran_fixed = crate::run_meta::read_fit_sidecar(&segment)
         .map_err(ResolveError::NotFound)?
         .map(|side| side.fixed);
-    Ok(FitProblem { handle: s.to_string(), text, anchor, config, ran_fixed })
+    Ok(FitProblem { handle: s.to_string(), original, resolved, anchor, config, ran_fixed })
 }
 
 /// Recover the config for a segment reached by run-dir / `@label` / hash.
@@ -819,8 +832,8 @@ fn load_config_for_segment(segment: &Path) -> Result<FitConfig, String> {
     read_segment_config(segment).map(|(_, _, config)| config)
 }
 
-/// [`load_config_for_segment`], with the archived text it parsed and the path
-/// that text's relative paths are anchored at.
+/// [`load_config_for_segment`], with the resolved config's text it parsed and
+/// the path that text's relative paths are anchored at.
 fn read_segment_config(segment: &Path) -> Result<(String, PathBuf, FitConfig), String> {
     let side = crate::run_meta::read_fit_sidecar(segment)?.ok_or_else(|| {
         format!(

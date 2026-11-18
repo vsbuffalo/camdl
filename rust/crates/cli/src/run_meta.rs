@@ -900,11 +900,11 @@ pub fn require_resolved_config(segment: &std::path::Path) -> Result<std::path::P
 }
 
 /// Write the fit-level sidecar and archive the producing `fit.toml`
-/// ([`ARCHIVED_CONFIG`]), with no resolved config: `profile`'s write, whose
-/// folder no fit reader opens; a fit folder is written by
-/// [`write_fit_sidecar_with_config`]. The archive is best-effort: a CLI-only
-/// run (no `.toml`) has none. Idempotent; the caller writes it once per
-/// segment.
+/// ([`ARCHIVED_CONFIG`]) when `fit_toml_path` is a file, with no resolved
+/// config: the write for a CLI-only `profile`, which has no config to archive.
+/// A folder that holds a config (a fit's, or a profile's of one) is written by
+/// [`write_fit_sidecar_with_config`], which stores the resolved config too.
+/// Idempotent; the caller writes it once per segment.
 ///
 /// `source_config` and `source_model` are recorded from `fit_toml_path` and
 /// `model_path` here, each relative to `fit_segment`, when it is a file;
@@ -949,10 +949,10 @@ pub fn write_fit_sidecar_with_config(
 /// What a fit folder archives as its config, and the path its relative paths
 /// were written against.
 enum Archive<'a> {
-    /// A copy of the file at this path (a profile's folder).
+    /// A copy of the file at this path.
     CopyOf(&'a std::path::Path),
     /// `text`, read from the file at `path`, and the configuration `resolved`
-    /// from it (a fit folder).
+    /// from it.
     Resolved { path: &'a std::path::Path, text: &'a str, resolved: &'a str },
 }
 

@@ -260,7 +260,7 @@ fn run_pfilter(
     // `--dt` or `--fit` `[config] dt` that differs is refused; 1.0 when
     // nothing declares one.
     let fit_written_dt: Option<f64> =
-        fit.as_ref().and_then(|f| crate::fit::config_v2::written_config_dt(&f.text));
+        fit.as_ref().and_then(|f| crate::fit::config_v2::written_config_dt(&f.original));
     let dt = crate::dt_rule::effective_dt_for_command(
         dt_flag, fit_written_dt, model_in.simulation.dt,
     ).unwrap_or_else(|e| {

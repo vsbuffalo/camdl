@@ -543,9 +543,13 @@ fn run_profile(
             .unwrap_or_else(|e| {
                 out.fail(format!("error: --fit toml [fixed].resolve_with_model: {}", e));
             });
-        // Hash the text read for provenance. Path-independent — only the
-        // contents participate, matching the `data_hash` convention.
-        let hash = crate::hashing::sha256_hex(f.text.as_bytes());
+        // Hash the config as the user wrote it (the fit file, or a stored
+        // fit's `fit.toml.original`), as `fit run`'s `fit_toml_hash` does; it
+        // is keyed in the base. What the resolved config adds to it — a
+        // flag's `[config]` value and the folder's `[fixed]` — is keyed there
+        // as values (`allow_forcing_extrapolation`, `fixed`). Path-independent:
+        // only the contents participate, matching the `data_hash` convention.
+        let hash = crate::hashing::sha256_hex(f.original.as_bytes());
         // The likelihood every cell scores is the fit's own (`ic_free`), read
         // through the same function `fit run` uses, so a profile curve is on
         // the scale of the fit it profiles.
@@ -571,7 +575,7 @@ fn run_profile(
     // The step every cell integrates at (the one dt rule), from the model,
     // --dt and the --fit file's written `[config] dt`.
     let fit_written_dt: Option<f64> =
-        fit.as_ref().and_then(|f| crate::fit::config_v2::written_config_dt(&f.text));
+        fit.as_ref().and_then(|f| crate::fit::config_v2::written_config_dt(&f.original));
     let dt = crate::dt_rule::effective_dt_for_command(dt_flag, fit_written_dt, model_pre.simulation.dt)
         .unwrap_or_else(|e| { out.fail(format!("error: {e}")); });
 
@@ -1775,11 +1779,12 @@ fn run_profile(
             calendar,
             docs: Default::default(),
         };
-        // Archive the fit's config, the text read once (none for a CLI-only
-        // profile).
+        // Store the fit's config as a fit folder does: the user's text as
+        // `fit.toml.original`, the configuration resolved from it as
+        // `fit.resolved.toml` (none for a CLI-only profile).
         let written = match fit.as_ref() {
             Some(f) => crate::run_meta::write_fit_sidecar_with_config(
-                &base_seg, &f.anchor, &f.text, &f.text, std::path::Path::new(&ir_path), &sidecar),
+                &base_seg, &f.anchor, &f.original, &f.resolved, std::path::Path::new(&ir_path), &sidecar),
             None => crate::run_meta::write_fit_sidecar(
                 &base_seg, std::path::Path::new(""), std::path::Path::new(&ir_path), &sidecar),
         };
