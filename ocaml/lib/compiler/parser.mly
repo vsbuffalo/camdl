@@ -198,6 +198,8 @@
     let meas   = ref None in
     let covers = ref None in
     let seen   = Hashtbl.create 8 in
+    let has_projected = List.exists (function
+        | (`Proj ("projected", _, _, _), _, _) -> true | _ -> false) kvs in
     let once key ~sp ~ep =
       if Hashtbl.mem seen key then
         Parser_errors.push_error_hint ~sp ~ep ~code:"E122"
@@ -211,17 +213,28 @@
       | `Columns c     -> once "`columns`" ~sp ~ep; cols := Some c
       | `Schedule s    -> once "`emit_schedule`" ~sp ~ep; sched := Some s
       | `Proj (key, ksp, kep, p) ->
-        if key <> "projected" then
-          Parser_errors.push_error_fix ~sp:ksp ~ep:kep ~code:"E121"
-            ~msg:(Printf.sprintf
+        if key <> "projected" then begin
+          let msg = Printf.sprintf
               "observation '%s': `%s = ...` is not an observation key; the \
                value the likelihood reads is written `projected = ...`"
-              name key)
-            ~hint:(Printf.sprintf
-              "rename `%s` to `projected`, and read it as `projected` in the \
-               `~` line. The other keys are `columns { ... }`, `covers = ...`, \
-               `emit_schedule = ...` and `<column> ~ D(...)`" key)
-            ~fix:(Some (ksp, kep, "projected"))
+              name key in
+          let keys = "`columns { ... }`, `covers = ...`, `projected = ...`, \
+                      `emit_schedule = ...` and `<column> ~ D(...)`" in
+          (* Offer the rename only when it cannot collide: beside an existing
+             `projected` line it would turn this E121 into an E122. *)
+          if has_projected then
+            Parser_errors.push_error_hint ~sp:ksp ~ep:kep ~code:"E121" ~msg
+              ~hint:(Printf.sprintf
+                "this block already has a `projected` line; the keys an \
+                 observation block takes are %s" keys)
+          else
+            Parser_errors.push_error_fix ~sp:ksp ~ep:kep ~code:"E121" ~msg
+              ~hint:(Printf.sprintf
+                "rename `%s` to `projected`, and read it as `projected` in \
+                 the `~` line. The keys an observation block takes are %s"
+                key keys)
+              ~fix:(Some (ksp, kep, "projected"))
+        end
         else once "`projected`" ~sp ~ep;
         proj := Some p
       | `Covers c      -> once "`covers`" ~sp ~ep; covers := Some c

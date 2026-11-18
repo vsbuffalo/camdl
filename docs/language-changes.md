@@ -63,7 +63,8 @@ cases ~ poisson(rate = foo)     →  cases ~ poisson(rate = projected)
 and delete the duplicate line of any key given twice.
 
 **Diagnostic.** E121, "`foo = ...` is not an observation key", with a fix-it to
-`projected`; E122, "observation '…' gives `projected` twice".
+`projected` when the block has no `projected` line; E122, "observation '…' gives
+`projected` twice".
 
 ## 2026-11-17 — scenario lists need brackets; only `set`/`scale` take a block
 

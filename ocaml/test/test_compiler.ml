@@ -16135,6 +16135,35 @@ let test_obs_duplicate_measurement_is_e122 () =
     (covers_model_with (obs_stream_with_extra
       "    cases ~ poisson(rate = 2 * projected)"))
 
+(* E121's fix-it renames the key to `projected` only when the block has no
+   `projected` line: beside one, the rename would produce E122, so the
+   diagnostic names the accepted keys instead. *)
+let e121_payload src =
+  Diagnostics.json_errors_mode := true;
+  let r = Compiler.compile ~name:"test_err" src in
+  Diagnostics.json_errors_mode := false;
+  match r with
+  | Ok _ -> Alcotest.fail "expected E121"
+  | Error e -> e
+
+let test_obs_e121_no_rename_beside_projected () =
+  let src = covers_model_with (obs_stream_with_extra
+    "    cover = day(time)") in
+  let e = e121_payload src in
+  Alcotest.(check bool) "E121 reported" true
+    (contains_substring ~needle:"\"code\":\"E121\"" e);
+  Alcotest.(check bool) "no rename to `projected` offered" false
+    (contains_substring ~needle:"\"replacement\":\"projected\"" e
+     || contains_substring ~needle:"rename `cover` to `projected`" e);
+  Alcotest.(check bool) "names the accepted keys" true
+    (contains_substring ~needle:"`covers = ...`" e)
+
+let test_obs_e121_rename_when_no_projected () =
+  let e = e121_payload
+      (covers_model_with (obs_key_stream "    projeted = incidence(infection)")) in
+  Alcotest.(check bool) "fix-it renames to `projected`" true
+    (contains_substring ~needle:"\"replacement\":\"projected\"" e)
+
 let test_obs_projected_key_compiles () =
   ignore (compile_expect_ok
     (covers_model_with (obs_key_stream "    projected = incidence(infection)")))
@@ -19118,6 +19147,8 @@ let () =
       Alcotest.test_case "gh#1206 second columns → E122"         `Quick test_obs_duplicate_columns_is_e122;
       Alcotest.test_case "gh#1206 second covers → E122"          `Quick test_obs_duplicate_covers_is_e122;
       Alcotest.test_case "gh#1206 second `~` line → E122"        `Quick test_obs_duplicate_measurement_is_e122;
+      Alcotest.test_case "gh#1206 E121 no rename beside projected" `Quick test_obs_e121_no_rename_beside_projected;
+      Alcotest.test_case "gh#1206 E121 rename when none"          `Quick test_obs_e121_rename_when_no_projected;
       Alcotest.test_case "day(time) lowers to a one-day span"
         `Quick test_covers_day_lowers_to_a_one_day_span;
       Alcotest.test_case "ending_on closes one day after the label"
