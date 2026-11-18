@@ -6814,6 +6814,47 @@ let rec fold_closed_ir (ir : Ir.expr) : float option =
      | _ -> None)
   | _ -> None
 
+(* The value of a compile-time time, [ir] closed over constants and unit
+   literals, when its unit literals give it the dimension of a time (or it
+   has none, a bare number in model time units); [None] otherwise. An
+   intervention's `at [...]` entry is emitted as a number only when this
+   holds, so an entry with the wrong unit (`at [10 'per_day]`) stays an
+   expression and the dimension checker reports it (E315) at its source,
+   as it does for a parameter-dependent entry (gh#1200). *)
+let closed_time_value (ir : Ir.expr) : float option =
+  let rec go (ir : Ir.expr) : (float * (int * int) option) option =
+    match ir with
+    | Ir.Const f -> Some (f, None)
+    | Ir.UnitLiteral { value; dim_p; dim_t; _ } -> Some (value, Some (dim_p, dim_t))
+    | Ir.UnOp { op = Ir.Neg; arg } ->
+      Option.map (fun (v, d) -> (Float.neg v, d)) (go arg)
+    | Ir.BinOp { op; left; right } ->
+      (match go left, go right with
+       | Some (a, da), Some (b, db) ->
+         let sum v = match da, db with
+           | Some x, Some y when x <> y -> None
+           | Some x, _ | None, Some x -> Some (v, Some x)
+           | None, None -> Some (v, None)
+         in
+         let prod v f = match da, db with
+           | None, None -> Some (v, None)
+           | _ ->
+             let z = Option.value ~default:(0, 0) in
+             Some (v, Some (f (z da) (z db)))
+         in
+         (match op with
+          | Ir.Add -> sum (a +. b)
+          | Ir.Sub -> sum (a -. b)
+          | Ir.Mul -> prod (a *. b) (fun (p1, t1) (p2, t2) -> (p1 + p2, t1 + t2))
+          | Ir.Div -> prod (a /. b) (fun (p1, t1) (p2, t2) -> (p1 - p2, t1 - t2))
+          | _ -> None)
+       | _ -> None)
+    | _ -> None
+  in
+  match go ir with
+  | Some (v, (None | Some (0, 1))) -> Some v
+  | _ -> None
+
 (* ── Lower: the lowering functions of each time-position kind ───────────── *)
 
 (** The functions that turn a time position into a number or an IR
@@ -10003,24 +10044,25 @@ let expand_scheduled_actions ctx decls ~(kind : Ir.intervention_kind) =
           (* gh#69: parametric `at [...]` lists must reach the runtime
              with their parameter references intact. Resolve every
              entry, then: if every entry is a compile-time constant,
-             emit the legacy `Ir.AtTimes` form (existing goldens stay
-             byte-identical); otherwise emit `Ir.AtTimesExpr` with the
-             resolved IR expressions, which the Rust runtime evaluates
-             once per simulation start against the current `params`
-             vector. Mixed constant + parametric lists go through
-             `AtTimesExpr` uniformly — constants become `Ir.Const`
-             entries and the runtime evaluator handles them at zero
-             cost. *)
+             emit `Ir.AtTimes` with the values in model time units;
+             otherwise emit `Ir.AtTimesExpr` with the resolved IR
+             expressions, which the Rust runtime evaluates once per
+             simulation start against the current `params` vector.
+             Mixed constant + parametric lists go through `AtTimesExpr`
+             uniformly.
+
+             gh#1200: an entry is a compile-time constant whatever its
+             spelling — a bare number, a unit literal (`10 'days`), or
+             instant arithmetic closed over constants (`origin + 2
+             'weeks`, `date(...)`), provided its unit literals make it a
+             time ([closed_time_value]). Testing for `Ir.Const` alone
+             sent unit-literal lists down the parametric path, which the
+             exact-alignment timeline refuses. *)
           let resolved =
             Lower.instant_list_expr ctx env ~context:(label ^ " at-time") ?bare:at_bare ps in
-          let all_const = List.for_all (fun ir ->
-            match ir with Ir.Const _ -> true | _ -> false
-          ) resolved in
-          if all_const then
-            Ir.AtTimes (List.map (function
-              | Ir.Const f -> f
-              | _ -> assert false (* guarded by all_const *)
-            ) resolved)
+          let folded = List.map closed_time_value resolved in
+          if List.for_all Option.is_some folded then
+            Ir.AtTimes (List.filter_map Fun.id folded)
           else
             Ir.AtTimesExpr resolved
         | SRecurring { every; from = from_opt; until = until_opt } ->
