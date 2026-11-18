@@ -177,9 +177,6 @@ pub(crate) enum StreamRefusal {
     /// The stream's likelihood reads data columns, which have no value for a
     /// target past the data (D52).
     ReadsDataColumn { stream: String, columns: Vec<String> },
-    /// A target computed from the declaration overlaps one of the stream's
-    /// training rows.
-    OverlapsObserved { stream: String, start: f64, end: f64, row: usize },
     /// A held-out row within the reach is not one of the targets the stream's
     /// declared cadence gives (D80): refused rather than skipped, since a
     /// skipped row would silently leave a period out of the score.
@@ -212,7 +209,6 @@ impl StreamRefusal {
             StreamRefusal::NoRhythm { stream, .. }
             | StreamRefusal::NoBoundRows { stream }
             | StreamRefusal::ReadsDataColumn { stream, .. }
-            | StreamRefusal::OverlapsObserved { stream, .. }
             | StreamRefusal::OffCadenceHeldOut { stream, .. }
             | StreamRefusal::InvalidHeldOut { stream, .. }
             | StreamRefusal::ScheduleConflict { stream, .. }
@@ -267,10 +263,6 @@ impl std::fmt::Display for StreamRefusal {
                  covers [{start}, {end}), which is not one of its targets within the reach. \
                  A design row names the target it is for; one that names none is not \
                  skipped."),
-            StreamRefusal::OverlapsObserved { stream, start, end, row } => write!(f,
-                "stream '{stream}' is refused a forecast: its declared rhythm puts a \
-                 target at [{start}, {end}), which overlaps its training row {row}. The \
-                 rhythm and the rows disagree about where the stream's periods fall."),
             StreamRefusal::OffCadenceHeldOut { stream, start, end, row, source } => write!(f,
                 "stream '{stream}' is refused a forecast: its {} covers [{start}, {end}), \
                  which is not one of the periods its declared rhythm ({}) gives within the \
@@ -554,15 +546,16 @@ fn stream_targets(
     if kind == TemporalKind::Interval {
         check_schedule_agrees(s, &stream, source, &measures, reach)?;
     }
-    // A declared rhythm that lands on a training row means the rhythm and the
-    // rows disagree: refuse rather than predict a period already scored.
-    for m in &measures {
-        if let Some(row) = s.training.iter().find(|r| overlaps(m, &r.measures)) {
-            return Err(StreamRefusal::OverlapsObserved {
-                stream, start: m.start(), end: m.end(), row: row.position,
-            });
-        }
-    }
+    // No target overlaps a training row of its stream, for every source: a
+    // tiling continues from its last row, so its periods start where the
+    // rows end; an emit schedule's periods that cut across a row were
+    // refused by D82 above, and one equal to a row ends at or before the
+    // origin, so it is no target; held-out windows that overlap a row were
+    // refused by their validation; an instant target is after the origin,
+    // and every training instant at or before it.
+    debug_assert!(
+        measures.iter().all(|m| !s.training.iter().any(|r| overlaps(m, &r.measures))),
+        "a target of '{stream}' overlaps a training row");
     // D80: a held-out row within the reach names exactly one target. Under a
     // declared cadence it only selects which target is scored, so one that is
     // not a target is refused, not skipped; two naming one target are refused
