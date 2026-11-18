@@ -359,7 +359,7 @@ pub fn emit_contrasts(
             for (params_i, _, _) in &forkable {
                 let overrides: Vec<(String, f64)> =
                     params_i.iter().map(|(k, v)| (k.clone(), *v)).collect();
-                parts.push(resolve_arm(model, fit_base, run, &overrides)?.into_notice_parts());
+                parts.push(resolve_arm(model, fit_base, "contrast arm", run, &overrides)?.into_notice_parts());
             }
         }
         crate::params_resolver::emit_notices_from_parts(out, &parts);
@@ -590,7 +590,7 @@ impl Arm {
         obs_anchors: Option<ir::anchor::ObsAnchorTimes>,
         binomial: sim::rng::BinomialAlgorithm,
     ) -> Result<Arm, String> {
-        let resolved = resolve_arm(model, fit_base, run, placeholder)?;
+        let resolved = resolve_arm(model, fit_base, "contrast arm", run, placeholder)?;
         let compiled = std::sync::Arc::new(
             sim::CompiledModel::new(resolved.model)
                 .map_err(|e| format!("contrast arm '{run}': compiling model: {e:?}"))?,
@@ -624,7 +624,7 @@ impl Arm {
         // θ_i at tier 3.5 (draw row), scenario `set`/`scale` at tier 4.
         let overrides: Vec<(String, f64)> =
             params_i.iter().map(|(k, v)| (k.clone(), *v)).collect();
-        let resolved = resolve_arm(model, &self.fit_base, run, &overrides)?;
+        let resolved = resolve_arm(model, &self.fit_base, "contrast arm", run, &overrides)?;
         let mut pvec = self.compiled.default_params.clone();
         for rp in &resolved.params {
             if let Some(&idx) = self.compiled.param_index.get(rp.name.as_str()) {
@@ -682,10 +682,12 @@ impl Arm {
 /// Resolve one arm's parameters: the draw overlay at tier 3.5, the scenario
 /// `set`/`scale`/`enable`/`disable` at tier 4, overlaid on the fit's own
 /// intervention selection (`fitted` ⇒ that selection alone). Returns the
-/// filtered, valued model + the per-parameter resolution.
-fn resolve_arm(
+/// filtered, valued model + the per-parameter resolution. `who` names the
+/// arm's kind in an error (`contrast arm`, `forecast arm`).
+pub(crate) fn resolve_arm(
     model: &ir::Model,
     fit_base: &crate::util::FitBase,
+    who: &str,
     run: &str,
     overrides: &[(String, f64)],
 ) -> Result<crate::params_resolver::ResolvedParameters, String> {
@@ -695,7 +697,7 @@ fn resolve_arm(
     let scenario = if run == crate::args::FITTED { None } else { Some(run.to_string()) };
     let arm = fit_base
         .overlay(model, crate::util::ArmSelection { scenario, ..Default::default() })
-        .map_err(|e| format!("contrast arm '{run}': {e}"))?;
+        .map_err(|e| format!("{who} '{run}': {e}"))?;
     let inputs = ParameterInputs {
         model,
         scenario: arm.scenario.as_deref(),
@@ -711,7 +713,7 @@ fn resolve_arm(
         fit_toml_estimate: &empty_estimate,
         table_files: &empty_tables,
     };
-    resolve_parameters(inputs).map_err(|e| format!("contrast arm '{run}': {e}"))
+    resolve_parameters(inputs).map_err(|e| format!("{who} '{run}': {e}"))
 }
 
 // ── Derived fork ────────────────────────────────────────────────────────────────
@@ -740,7 +742,7 @@ struct ForkPlan {
 
 /// A toggled intervention's earliest scheduled fire time, or why it can't yield a
 /// single constant fork.
-enum FireTime {
+pub(crate) enum FireTime {
     /// A constant earliest fire time.
     Const(f64),
     /// A parametric `at [...]` fire time (the fork would differ per draw).
@@ -864,7 +866,7 @@ fn first_grid_instant(
 
 /// The earliest instant at which a chain-binomial run over `[t_start, t_end]`
 /// at step `dt` fires an effect declared at `times`, or `None` if none fires.
-fn earliest_grid_instant(times: &[f64], (t_start, dt, t_end): (f64, f64, f64)) -> Option<f64> {
+pub(crate) fn earliest_grid_instant(times: &[f64], (t_start, dt, t_end): (f64, f64, f64)) -> Option<f64> {
     times
         .iter()
         .filter_map(|&t| sim::effect_plan::grid_instant(t, t_start, dt, t_end))
@@ -900,7 +902,7 @@ fn toggled_across_arms(live: &[HashSet<String>]) -> Vec<String> {
 /// expansion (`sim::intervention::intervention_fire_times`) for the constant
 /// schedules; a parametric `at [...]` (any non-constant expr) or a reactive source
 /// is reported so the caller can defer loudly.
-fn intervention_earliest_fire(iv: &Intervention) -> FireTime {
+pub(crate) fn intervention_earliest_fire(iv: &Intervention) -> FireTime {
     match iv.fire.schedule() {
         None => FireTime::Reactive,
         Some(InterventionSchedule::AtTimes(ts)) => ts

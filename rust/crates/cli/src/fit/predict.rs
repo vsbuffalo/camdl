@@ -1877,6 +1877,8 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
                 seed: args.seed.unwrap_or(1),
                 binomial,
                 selection: &streams_in,
+                scenarios: &scenario_refs,
+                sweep_points: if args.sweep.is_empty() { &[] } else { &sweep_points },
             },
         )?;
         written.push(crate::fit::failures::write_report(

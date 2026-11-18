@@ -54,6 +54,50 @@ pub(crate) struct Forecast {
     /// `E[y | x, θ]` at the target, when the caller asked for it.
     #[cfg_attr(not(test), allow(dead_code))] // the command does not ask for it
     pub expected: Option<Vec<Vec<f64>>>,
+    /// Per draw, what its filter did at the stops at or before the origin:
+    /// the record two scenario arms must share (D50).
+    pub pre_origin: Vec<PreOriginTrace>,
+    /// Per draw, the particles' states and log-weights at the last stop at
+    /// or before the origin, before resampling, when the caller asked for
+    /// the expected observations (they come from the same ancestry record).
+    #[cfg_attr(not(test), allow(dead_code))] // read by the scenario-arm test
+    pub origin_states: Option<Vec<(Vec<Vec<f64>>, Vec<f64>)>>,
+}
+
+/// One draw's filter at the stops at or before the forecast origin: the
+/// log-likelihood increment and the effective sample size at each, and a
+/// SHA-256 over every particle's per-stream log-likelihood and predictive
+/// draw there. Two arms whose models agree before the origin, run with the
+/// same seed, have bit-identical traces; any difference means an arm changed
+/// what was filtered.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PreOriginTrace {
+    pub times: Vec<f64>,
+    pub ll_increments: Vec<f64>,
+    pub ess: Vec<f64>,
+    pub particles: [u8; 32],
+}
+
+impl PreOriginTrace {
+    /// Where `other` first departs from this trace: the time of the first
+    /// stop whose log-likelihood increment or ESS differs bitwise, and which;
+    /// or, when those agree everywhere, the particle record as a whole.
+    pub(crate) fn first_difference(&self, other: &PreOriginTrace) -> Option<(Option<f64>, &'static str)> {
+        let same = |a: f64, b: f64| a.to_bits() == b.to_bits();
+        if self.times.len() != other.times.len() {
+            return Some((None, "the number of stops before the origin"));
+        }
+        for i in 0..self.times.len() {
+            if !same(self.ll_increments[i], other.ll_increments[i]) {
+                return Some((Some(self.times[i]), "the log-likelihood increment"));
+            }
+            if !same(self.ess[i], other.ess[i]) {
+                return Some((Some(self.times[i]), "the effective sample size"));
+            }
+        }
+        (self.particles != other.particles)
+            .then_some((None, "the particles' log-likelihoods or predictive draws"))
+    }
 }
 
 /// Why a forecast failed (D53).
@@ -170,6 +214,10 @@ pub(crate) fn fixed_origin_forecast(
     let mut draws: Vec<Vec<f64>> = vec![Vec::with_capacity(param_sets.len() * n); at.len()];
     let mut expected: Option<Vec<Vec<f64>>> =
         config.record_expected.then(|| vec![Vec::with_capacity(param_sets.len() * n); at.len()]);
+    let before_origin: Vec<usize> = (0..n_union).filter(|i| !after_origin.contains(i)).collect();
+    let mut pre_origin: Vec<PreOriginTrace> = Vec::with_capacity(param_sets.len());
+    let mut origin_states: Option<Vec<(Vec<Vec<f64>>, Vec<f64>)>> =
+        config.record_expected.then(|| Vec::with_capacity(param_sets.len()));
     for (d, params) in param_sets.iter().enumerate() {
         let fail = |time: Option<f64>, cause: String| ForecastFailure { draw: Some(d), time, cause };
         let result = bootstrap_filter_recording_at(&process, &obs_model, params, &smc, draw_seed(config.base_seed, d), &record_at)
@@ -215,10 +263,46 @@ pub(crate) fn fixed_origin_forecast(
                 e[k].extend(anc.projections[ui].iter().map(|per_stream| per_stream[si]));
             }
         }
+        pre_origin.push(pre_origin_trace(&before_origin, &union_times, &result.ll_increments,
+            &result.ess_trace, &preq));
+        if let Some(o) = origin_states.as_mut() {
+            let anc = result.ancestry.as_ref()
+                .ok_or_else(|| fail(None, "internal error: no ancestry record".into()))?;
+            let last = *before_origin.last()
+                .ok_or_else(|| fail(None, "internal error: no stop at or before the origin".into()))?;
+            o.push((anc.states[last].clone(), anc.log_weights[last].clone()));
+        }
     }
     Ok(Forecast {
         plan, state, n_draws: param_sets.len(), n_particles: n, binomial: config.binomial, draws, expected,
+        pre_origin, origin_states,
     })
+}
+
+/// The [`PreOriginTrace`] of one draw's filter over the stops `before`.
+fn pre_origin_trace(
+    before: &[usize],
+    union_times: &[f64],
+    ll_increments: &[f64],
+    ess_trace: &[f64],
+    preq: &sim::inference::particle_filter::PrequentialRecorded,
+) -> PreOriginTrace {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for &i in before {
+        for v in preq.log_liks[i].iter()
+            .chain(preq.per_stream_log_liks[i].iter().flatten())
+            .chain(preq.per_stream_samples[i].iter().flatten())
+        {
+            h.update(v.to_bits().to_le_bytes());
+        }
+    }
+    PreOriginTrace {
+        times: before.iter().map(|&i| union_times[i]).collect(),
+        ll_increments: before.iter().map(|&i| ll_increments[i]).collect(),
+        ess: before.iter().map(|&i| ess_trace[i]).collect(),
+        particles: h.finalize().into(),
+    }
 }
 
 /// Where the driver may read `stream` at `end`: its index and the union index
