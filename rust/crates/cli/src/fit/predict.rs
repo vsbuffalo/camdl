@@ -1530,10 +1530,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     let run_id: String = crate::fit::fit_view::leaf_run_id(&run_dir)?
         .ok_or_else(|| format!("{} is not a fit run (no run.json)", run_dir.display()))?;
     // D85: the filters' particle count, the PMMH fit's own by default.
-    let fit_pmmh_particles = match config.method().ok().map(|m| &m.algorithm) {
-        Some(crate::fit::config_v2::Algorithm::PMMH { particles, .. }) => Some(*particles),
-        _ => None,
-    };
+    let fit_pmmh_particles = fit_pmmh_particles(&run_dir)?;
     let particles = PredictParticles::resolve(args.particles, fit_pmmh_particles)?;
     // The problem half is all a replay reads: model, data, fixed, estimate.
     let config = config.problem;
@@ -3743,6 +3740,42 @@ pub(crate) enum ParticlesSource {
     FitPmmh,
     /// [`DEFAULT_PREDICT_PARTICLES`].
     Default,
+}
+
+/// The particle count of a PMMH fit's own filter, read from the leaf's
+/// `run.json` (`inputs.algorithm`, written by `fit run`), as the forecast
+/// reads the fit's binomial sampler there; `None` for any other method (D85).
+pub(crate) fn fit_pmmh_particles(leaf: &Path) -> Result<Option<usize>, String> {
+    let path = leaf.join("run.json");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let record: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("{} is not JSON: {e}", path.display()))?;
+    let algorithm = record.pointer("/inputs/algorithm");
+    if algorithm.and_then(|a| a.get("algorithm")).and_then(|a| a.as_str()) != Some("pmmh") {
+        return Ok(None);
+    }
+    algorithm.and_then(|a| a.get("particles")).and_then(|n| n.as_u64())
+        .map(|n| Some(n as usize))
+        .ok_or_else(|| format!(
+            "{} records a PMMH fit but not its particle count; re-run the fit, or pass \
+             --particles", path.display()))
+}
+
+/// The options `fit predict <run>` with no flags resolves for the run whose
+/// leaf is `leaf`, run on `backend`: the defaults, with the particle count
+/// when the default mode runs the one-step band (a chain-binomial posterior).
+/// [`crate::fit::fit_view::default_predictions_dir`] addresses it.
+pub(crate) fn default_options_for(
+    leaf: &Path,
+    backend: crate::run_meta::InferenceBackend,
+) -> Result<PredictOptions, String> {
+    let filters = backend == crate::run_meta::InferenceBackend::ChainBinomial;
+    let particles = match filters {
+        true => Some(PredictParticles::resolve(None, fit_pmmh_particles(leaf)?)?.n),
+        false => None,
+    };
+    Ok(PredictOptions { particles, ..PredictOptions::defaults() })
 }
 
 /// The particle count every filter `fit predict` runs per posterior draw
