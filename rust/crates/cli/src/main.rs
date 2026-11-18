@@ -54,6 +54,7 @@ mod profile_table;    // gh#1059: the collected per-cell table a profile run pri
 mod out;           // the stream layer: notices, progress, milestones, colour
 mod survey;
 mod survey_cas;     // gh#147 (M3.3): survey CAS identity (model/config/box/seed)
+mod survey_config;  // ResolvedSurveyConfig: survey's one resolved configuration; identity and points derive from it
 mod sim_ensemble_cas; // gh#147: multi-cell simulate ensemble CAS identity (model/config/params/grid)
 mod landscape_html;
 mod lineage;        // three-layer lineage: --event-log record + realize + tree
@@ -536,17 +537,21 @@ fn main() {
     sim::run_notes::set_reporter(util::report_run_note);
     util::set_ir_cache_disabled(cli.global.no_ir_cache);
     // `simulate` sets the compile setting from its resolved configuration
-    // (`sim_config::CompileSettings`), and `fit run`, `pfilter` and `profile`
-    // pass their own to every compile they make; every other command reads it
-    // process-wide, from the flag (`util::CompileSettings::process`).
+    // (`sim_config::CompileSettings`), and `fit run`, `pfilter`, `profile` and
+    // `survey` pass their own to every compile they make; every other command
+    // reads it process-wide, from the flag (`util::CompileSettings::process`).
     if !matches!(
         cli.command,
-        Command::Simulate(_) | Command::Fit(FitCmd::Run(_)) | Command::Pfilter(_) | Command::Profile(_)
+        Command::Simulate(_)
+            | Command::Fit(FitCmd::Run(_))
+            | Command::Pfilter(_)
+            | Command::Profile(_)
+            | Command::Survey(_)
     ) {
         util::set_licm_disabled(cli.global.no_licm);
     }
     // `--no-licm`, or `CAMDL_NO_LICM`: the compile setting `fit run`,
-    // `pfilter` and `profile` resolve.
+    // `pfilter`, `profile` and `survey` resolve.
     let fit_compile = util::CompileSettings {
         licm_disabled: cli.global.no_licm || crate::env::get().vars.no_licm,
     };
@@ -564,7 +569,7 @@ fn main() {
         Command::Pfilter(a)             => pfilter::cmd_pfilter(&a, fit_compile),
         Command::If2(a)                 => if2::cmd_if2(&a),
         Command::Profile(a)             => profile::cmd_profile(&a, fit_compile),
-        Command::Survey(a)              => survey::cmd_survey(&a),
+        Command::Survey(a)              => survey::cmd_survey(&a, fit_compile),
         Command::Lineage(LineageCmd::Realize(a)) => lineage::cmd_lineage_realize(&a),
         Command::Lineage(LineageCmd::Tree(a)) => lineage::cmd_lineage_tree(&a),
         Command::Lineage(LineageCmd::Sojourn(a)) => lineage::cmd_lineage_sojourn(&a),

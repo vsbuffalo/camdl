@@ -115,55 +115,34 @@ struct ResolvedSurveyInputs {
     /// scoring, as `fit run` removes it from training (gh#1059). `None`
     /// without one, and in inline mode.
     training_rows: Option<Vec<(String, usize)>>,
-    /// `--allow-forcing-extrapolation`, or the fit config's `[config]
-    /// allow_forcing_extrapolation`, which `fit run` applied to the fit
-    /// (gh#1235). The flag alone in inline mode.
-    allow_forcing_extrapolation: bool,
 }
 
 // ─── cmd_survey entry point ──────────────────────────────────────────────────
 
-pub fn cmd_survey(a: &crate::args::SurveyArgs) {
+/// `camdl survey`, under the compile settings `compile` (`--no-licm`), which
+/// every compile of the model is given. The arguments are read once, into the
+/// resolved configuration ([`crate::survey_config::resolve`]); the run is
+/// built from it and does not see them.
+pub fn cmd_survey(a: &crate::args::SurveyArgs, compile: crate::util::CompileSettings) {
     // survey has no `--no-color`: its painters follow the environment and
     // whether each stream is a terminal.
     let mut out = crate::out::Out::new(false);
-    // Validate input mode mutual exclusion at the boundary.
-    if a.fit.is_none() {
-        if a.data.is_none() {
-            out.fail(
-                "error: camdl survey requires either --fit FIT.toml \
-                 (fit-aware mode) or --data DATA.tsv with --estimate \
-                 NAME=LO:HI flags (inline mode).\n\
-                 Got neither.");
-        }
-        if a.estimate.is_empty() {
-            out.fail(format!(
-                "error: --data {} given without any --estimate flags. \
-                 Pass --estimate NAME=LO:HI for each parameter to vary \
-                 across the LHS box (repeat for multiple parameters).",
-                a.data.as_ref().unwrap().display()));
-        }
-    }
+    let (config, outputs, execution, label, _forcing_route) = crate::survey_config::resolve(a, compile, &out);
+    run_survey(&mut out, config, outputs, execution, label);
+}
 
-    if a.eval_replicates == 0 {
-        out.fail("error: --eval-replicates must be >= 1 (got 0).");
-    }
-    if a.eval_particles == 0 && matches!(a.eval, SurveyEvalMethod::Pfilter | SurveyEvalMethod::Auto) {
-        out.fail("error: --eval-particles must be >= 1 \
-                   (in case --eval auto resolves to pfilter).");
-    }
+/// The points of one resolved `survey`, and its stored landscape.
+fn run_survey(
+    out: &mut crate::out::Out,
+    cfg: crate::survey_config::ResolvedSurveyConfig,
+    outputs: crate::survey_config::SurveyOutputs,
+    execution: crate::survey_config::SurveyExecution,
+    label_arg: Option<String>,
+) {
+    let crate::survey_config::SurveyOutputs { render } = outputs;
+    let crate::survey_config::SurveyExecution { output: output_root_arg, force, parallel } = execution;
     // n_points = 0 is the auto-scale sentinel; resolved against d
     // after model loading. Negative values can't happen — usize.
-
-    let label_arg: Option<String> = match a.label.as_deref() {
-        Some(raw) => match crate::fit::validate_label(raw) {
-            Ok(l) => Some(l),
-            Err(e) => {
-                out.fail(format!("error: invalid --label: {}", e));
-            }
-        },
-        None => None,
-    };
 
     // gh#audit-H13: --parallel / CAMDL_PARALLEL throttles the rayon thread
     // budget. Build a SCOPED local pool and run the parallel sweep inside
@@ -171,31 +150,29 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     // order-dependent and one-shot (AlreadyInitialized is swallowed) — a
     // scoped pool always throttles. parallel == 0 means "use rayon's default"
     // (all logical cores): leave the pool unset and run on the global pool.
-    let survey_pool: Option<rayon::ThreadPool> = if a.parallel > 0 {
+    let survey_pool: Option<rayon::ThreadPool> = if parallel > 0 {
         Some(
             rayon::ThreadPoolBuilder::new()
-                .num_threads(a.parallel)
+                .num_threads(parallel)
                 .build()
                 .unwrap_or_else(|e| {
-                    out.fail(format!("error: failed to build thread pool (--parallel {}): {}", a.parallel, e));
+                    out.fail(format!("error: failed to build thread pool (--parallel {}): {}", parallel, e));
                 }),
         )
     } else {
         None
     };
 
-    let resolved = match resolve_survey_inputs(&out, a) {
+    let resolved = match resolve_survey_inputs(out, &cfg) {
         Ok(r) => r,
         Err(e) => {
             out.fail(format!("error: {}", e));
         }
     };
     // The forcing-extrapolation policy every point is evaluated under and the
-    // leaf's record names, installed for the rest of the command; keyed in
-    // the survey's identity below from this value. Nothing above evaluates
-    // the model.
-    let forcing = crate::forcing_extrapolation::ForcingPolicy::new(resolved.allow_forcing_extrapolation);
-    let _forcing_route = forcing.install();
+    // leaf's record names (resolved, and installed for the command, by
+    // `survey_config::resolve`); keyed in the survey's identity below.
+    let forcing = cfg.forcing.clone();
     // A rate that collapses (a division by an empty compartment) is 0 under
     // `--allow-degenerate-rates` or the `--fit` config's `[config]
     // allow_degenerate_rates`, and fails the trajectory otherwise — under the
@@ -211,7 +188,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     // Resolved before any persistent state is written — `SurveyMeta`
     // stores the resolved method, not `Auto`.
     let objective = resolved.objective;
-    let eval_method: SurveyEvalMethod = match a.eval {
+    let eval_method: SurveyEvalMethod = match cfg.eval {
         // `ic_free = true`: only the particle filter can leave y₁'s term out
         // (the ODE skeleton scores every observation), so `auto` takes it
         // regardless of the model's process noise.
@@ -290,12 +267,12 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     // d = 8 gives 3200; d = 12 gives 7200. User can override with
     // --n-points N for fast iteration or sparse-basin models.
     let d = resolved.estimated.len();
-    let n_points: usize = if a.n_points == 0 {
+    let n_points: usize = if cfg.n_points == 0 {
         let auto = (1000usize).max(50 * d.saturating_mul(d));
         out.say(format_args!("survey: --n-points auto-scaled to {} for d={}", auto, d));
         auto
     } else {
-        a.n_points
+        cfg.n_points
     };
 
     if d > 10 {
@@ -322,7 +299,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
                 n_points, d, coverage_floor as usize, coverage_floor as usize));
         }
     }
-    if eval_method == SurveyEvalMethod::Simulate && a.eval == SurveyEvalMethod::Simulate {
+    if eval_method == SurveyEvalMethod::Simulate && cfg.eval == SurveyEvalMethod::Simulate {
         // Only warn on explicit --eval simulate. `Auto`-resolved
         // Simulate already eprintln'd that the model has no process
         // noise; doubling the warning would confuse the user.
@@ -340,7 +317,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
         .collect();
     let estimated_names: Vec<String> = resolved.estimated.iter()
         .map(|ep| ep.name.clone()).collect();
-    let stem = crate::hashing::path_stem_slug(&a.model.to_string_lossy());
+    let stem = crate::hashing::path_stem_slug(&cfg.model_path);
     let bounds_vec: Vec<(String, f64, f64)> = resolved.estimated.iter()
         .map(|ep| (ep.name.clone(), ep.bounds().0, ep.bounds().1)).collect();
     let fixed_vec: Vec<(String, f64)> = resolved.fixed.iter()
@@ -348,7 +325,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     let data_hashes_vec: Vec<(String, String)> = resolved.data_hashes.iter()
         .map(|(n, h)| (n.clone(), h.clone())).collect();
     let ir_version_str = ir::IR_VERSION.trim().to_string();
-    let model_path_str = a.model.to_string_lossy().into_owned();
+    let model_path_str = cfg.model_path.clone();
 
     // gh#147 (M3.3): resolve the content-addressed survey identity. The eval
     // count knobs (method/particles/replicates) fold into the `config` level —
@@ -356,12 +333,12 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     let survey_ctx = crate::survey_cas::SurveyCtx {
         model:           &resolved.compiled.model,
         ir_version:      &ir_version_str,
-        engine_version:  crate::version::ENGINE_ID,
+        engine:          &cfg.engine,
         stem:            stem.as_deref().unwrap_or("model"),
         data:            &data_hashes_vec,
         eval_method:     eval_method.as_str(),
-        eval_particles:  a.eval_particles as u32,
-        eval_replicates: a.eval_replicates as u32,
+        eval_particles:  cfg.eval_particles as u32,
+        eval_replicates: cfg.eval_replicates as u32,
         objective,
         allow_forcing_extrapolation: forcing.allowed(),
         allow_degenerate_rates,
@@ -370,7 +347,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
         fixed:           &fixed_vec,
         scenario:        resolved.scenario.as_deref(),
         n_points:        n_points as u32,
-        seed:            a.seed,
+        seed:            cfg.seed,
     };
     let resolved_id = match crate::survey_cas::resolve_survey(&survey_ctx) {
         Ok(r) => r,
@@ -378,7 +355,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     };
 
     let output_root = crate::run_paths::output_root(
-        a.output.as_ref().map(|p| p.to_string_lossy().into_owned()).as_deref(),
+        output_root_arg.as_deref(),
         None,
     );
     let run_dir = runid::store_path(
@@ -410,7 +387,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     // write and `finalize` left a file the check called cached while the
     // store called the leaf Stale(Incomplete). `--force` now displaces the
     // incumbent (quarantined) instead of colliding with it at claim time.
-    let policy = if a.force {
+    let policy = if force {
         crate::resolve::WritePolicy::Force
     } else {
         crate::resolve::WritePolicy::Reuse
@@ -420,7 +397,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
             out.milestone("cached", dir.display());
             crate::resolve::note_leaf_from_another_model_file(&dir, &model_path_str);
             let html_path = dir.join("landscape.html");
-            if a.render && !html_path.exists() {
+            if render && !html_path.exists() {
                 out.say("  rendering --render HTML from cached landscape.tsv …");
                 if let Err(e) = render_landscape_html(
                     &dir.join("landscape.tsv"), &html_path, &landscape_meta)
@@ -443,8 +420,10 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     // final inputs are supplied to `finalize`.
     let calendar = ir::caltime::CalendarAxis::from_model(&resolved.compiled.model)
         .unwrap_or_else(|e| crate::out::detached().fail(format!("error: {e}")));
-    let meta = crate::resolve::RecordMeta::new(
+    let mut meta = crate::resolve::RecordMeta::new(
         &ir_version_str, &model_path_str, label_arg.clone(), calendar, &forcing);
+    // The engine the leaf's identity keyed: `run.json` names its switches.
+    meta.engine = cfg.engine.clone();
     let write = match crate::resolve::begin_resolved_write(
         &store, &output_root, &resolved_artifact, &meta,
         crate::resolve::WriteMode::Streaming,
@@ -487,7 +466,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     let lhs_starts = crate::fit::init::build_lhs_chain_starts(
         &resolved.estimated,
         n_points,
-        a.seed,
+        cfg.seed,
     );
 
     // ── Parallel evaluation loop ────────────────────────────────────
@@ -552,8 +531,8 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
                 SurveyEvalMethod::Pfilter => eval_point_pfilter(
                     &process, obs_model.as_ref(),
                     &params, &resolved.estimated, draw,
-                    a.eval_particles, a.eval_replicates,
-                    smc_dt, t_start, objective, a.seed, point_id,
+                    cfg.eval_particles, cfg.eval_replicates,
+                    smc_dt, t_start, objective, cfg.seed, point_id,
                 ),
                 SurveyEvalMethod::Auto => unreachable!(
                     "Auto resolved before parallel eval loop"),
@@ -611,7 +590,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
 
     // ── SE-distribution warning (proposal §"Runtime warnings") ──────
     if eval_method == SurveyEvalMethod::Pfilter {
-        emit_se_warning(&out, &sorted);
+        emit_se_warning(out, &sorted);
     }
 
     // ── Silent-miss mitigation: bound clustering + start-rank check ─
@@ -629,24 +608,24 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     // Threshold: 5% of bound width (linear) or 5% of log-bound range
     // (Log-typed). Fires when the median of top-K values falls within
     // that fraction of either bound.
-    emit_bound_clustering_warning(&out, &sorted, &resolved.estimated, 0.10);
+    emit_bound_clustering_warning(out, &sorted, &resolved.estimated, 0.10);
 
     // Start-rank check (fit-aware mode): for each [estimate].start =
     // value present in the fit.toml, find where it falls in the LHS
     // landscape. Quick "is the user's prior best-guess even in the
     // bounds box?" sanity check.
     if let Some(starts) = &resolved.estimate_starts {
-        emit_start_rank_report(&out, &sorted, &resolved.estimated, starts);
+        emit_start_rank_report(out, &sorted, &resolved.estimated, starts);
     }
 
     // ── summary.json ────────────────────────────────────────────────
     if let Err(e) = write_summary_json(
-        &summary_path, &sorted, &feasibility, a, eval_method, d) {
+        &summary_path, &sorted, &feasibility, &cfg, eval_method, d) {
         out.say(format_args!("warning: could not write summary.json: {}", e));
     }
 
     // ── Render HTML if requested ────────────────────────────────────
-    if a.render {
+    if render {
         if let Err(e) = render_landscape_html(&landscape_path, &html_path, &landscape_meta) {
             out.say(format_args!("warning: HTML render failed: {}", e));
         } else {
@@ -664,8 +643,8 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     let model_identity = crate::resolve::model_identity_from_ir(&resolved.model_ir_json);
     let inputs_json = serde_json::json!({
         "eval_method":     eval_method.as_str(),
-        "eval_particles":  a.eval_particles,
-        "eval_replicates": a.eval_replicates,
+        "eval_particles":  cfg.eval_particles,
+        "eval_replicates": cfg.eval_replicates,
         "n_points":        n_points,
         "estimated":       resolved.roles.estimated,
         "best_loglik":     best_loglik,
@@ -723,20 +702,19 @@ fn refuse_survey_without_finite_boxes(estimated: &[EstimatedParam]) -> Result<()
         open.join(", ")))
 }
 
-fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
+fn resolve_survey_inputs(out: &crate::out::Out, cfg: &crate::survey_config::ResolvedSurveyConfig)
     -> Result<ResolvedSurveyInputs, String>
 {
-    use crate::fit::config_v2::Problem;
     use crate::fit::runner::{build_if2_params_from_specs, ParamSpec};
 
-    let model_path = a.model.to_string_lossy().into_owned();
+    let model_path = cfg.model_path.clone();
 
-    if let Some(fit_path) = a.fit.as_ref() {
-        // Fit-aware mode: load fit.toml; pull bounds from [estimate],
-        // data from [data], fixed from [fixed]; the scenario is the
-        // top-level key combined with --scenario.
-        let fit_path_str = fit_path.to_string_lossy().into_owned();
-        let config = Problem::load(&fit_path_str)?;
+    if let Some(fit) = cfg.fit.as_ref() {
+        // Fit-aware mode: the fit's problem, read once in resolution; pull
+        // bounds from [estimate], data from [data], fixed from [fixed]; the
+        // scenario is the top-level key combined with --scenario.
+        let fit_path_str = fit.handle.clone();
+        let config = &fit.config.problem;
 
         // The model is MODEL, the positional argument: `--fit` supplies the
         // bounds, data and fixed values (as for `pfilter --fit` and `profile
@@ -744,7 +722,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
         // The config's own `[model]` is not read. `mut` because the gh#92
         // [estimate].start fall-back below seeds values into
         // `model_pre.parameters[i].value` before the resolver call.
-        let (mut model_pre, model_ir_json) = crate::util::load_model(&model_path)?;
+        let (mut model_pre, model_ir_json) = crate::util::load_model_with(&model_path, cfg.compile)?;
 
         // gh#616: survey binds the fit config's `[data.observations]`, so it
         // RESOLVES a model's observation anchors instead of letting
@@ -758,7 +736,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
         // the compiled IR would re-introduce the unresolved marker (gh#616
         // regression, commit 7af5c9fa).
         let moved_any_anchor =
-            crate::obs_anchor::resolve_from_config(out, &mut model_pre, &config, SURVEY_DT)?;
+            crate::obs_anchor::resolve_from_config(out, &mut model_pre, config, SURVEY_DT)?;
         // The run is content-addressed by the IR TEXT
         // (`resolve::model_identity_from_ir`), not by `model_pre`, so the
         // substitution has to reach the text too — else two data vintages that
@@ -782,7 +760,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
         // with no `start` (`beta = {}`) is drawn within its bounds here as
         // it is there (run-spec §1.4).
         let seeded = crate::fit::runner::seed_estimate_starts(
-            &mut model_pre, &config.estimate, a.seed,
+            &mut model_pre, &config.estimate, cfg.seed,
             &std::collections::HashSet::new());
 
         // Resolve fit.toml [fixed] block via the existing config-side
@@ -808,7 +786,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
             disable: adhoc_disable,
         } = crate::util::combine_fit_scenario(
             crate::util::ScenarioChoice {
-                scenario: a.scenario.as_deref(), enable: &[], disable: &[],
+                scenario: cfg.scenario.as_deref(), enable: &[], disable: &[],
             },
             crate::util::ScenarioChoice {
                 scenario: config.scenario.as_deref(),
@@ -839,8 +817,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
         // `[estimate]` name it names is held at the value and not sampled
         // (the resolver records it in `pinned_over_estimate` and reports it at
         // info, as `profile` does).
-        let fixed_cli: Vec<(String, f64)> = a.fixed.iter()
-            .map(|p| (p.name.clone(), p.value)).collect();
+        let fixed_cli: Vec<(String, f64)> = cfg.fixed.clone();
         // ...but not over the scenario: a `--fixed` the scenario sets or
         // scales is refused (gh#571).
         crate::params_resolver::refuse_fixed_flag_over_scenario(
@@ -926,7 +903,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
                         let log_scale =
                             crate::fit::runner::derive_transform_with_bounds(kind, (lo, hi))
                                 .is_ok_and(|t| t.log_spaced());
-                        crate::fit::init::draw_start_in_bounds(lo, hi, log_scale, a.seed, name)
+                        crate::fit::init::draw_start_in_bounds(lo, hi, log_scale, cfg.seed, name)
                     }));
                     if let Some(value) = v {
                         p.value = p.value.with_value(value);
@@ -950,13 +927,11 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
         }
 
         // `--allow-degenerate-rates` or the fit config's `[config]
-        // allow_degenerate_rates`, which `fit run` applied to the fit (gh#1235).
-        let eval = sim::EvalSettings {
-            allow_degenerate_rates: a.allow_degenerate_rates || config.config.allow_degenerate_rates,
-        };
+        // allow_degenerate_rates`, which `fit run` applied to the fit (gh#1235),
+        // resolved in `survey_config::resolve`.
         let compiled = Arc::new(CompiledModel::new(model.clone())
             .map_err(|e| format!("compile error: {:?}", e))?
-            .with_eval_settings(eval));
+            .with_eval_settings(cfg.eval_settings));
         // `default_params` already carries every resolved tier, `[fixed]`
         // and the scenario included. Writing `[fixed]` over it again here
         // would put tier 2 back above tier 4 and undo a scenario that patches
@@ -1087,8 +1062,6 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
             scenario: scenario_opt,
             objective: config.likelihood_objective(),
             training_rows,
-            allow_forcing_extrapolation: a.forcing_extrapolation.allow_forcing_extrapolation
-                || config.config.allow_forcing_extrapolation,
             parameters_provenance,
             notices,
             roles,
@@ -1100,8 +1073,8 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
         })
     } else {
         // Inline mode: --estimate flags + --data (already validated).
-        let data_path = a.data.as_ref().unwrap().to_string_lossy().into_owned();
-        let (mut model_pre, model_ir_json) = crate::util::load_model(&model_path)?;
+        let data_path = cfg.data.clone().expect("inline mode has --data (checked in resolution)");
+        let (mut model_pre, model_ir_json) = crate::util::load_model_with(&model_path, cfg.compile)?;
 
         // gh#616, inline counterpart of the fit-toml branch above. Inline mode
         // binds ONE file that carries a column per declared stream, so every
@@ -1131,7 +1104,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
         // no `start` field (inline only carries bounds), so the
         // fall-back is the bounds midpoint — a defensible "neutral"
         // value that downstream LHS overwrites per-point.
-        for est in &a.estimate {
+        for est in &cfg.estimate {
             if let Some(p) = model_pre.parameters.iter_mut().find(|p| p.name == est.name) {
                 if p.value.resolved_value().is_none() {
                     p.value = p.value.with_value(0.5 * (est.lo + est.hi));
@@ -1143,16 +1116,15 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
         // entries become `fixed_cli`; the scenario flag participates in
         // tier-4 resolution. There is no fit.toml [fixed] / [estimate]
         // in inline mode.
-        let fixed_cli_vec: Vec<(String, f64)> = a.fixed.iter()
-            .map(|p| (p.name.clone(), p.value)).collect();
+        let fixed_cli_vec: Vec<(String, f64)> = cfg.fixed.clone();
         // A `--fixed` the scenario sets or scales is refused (gh#571).
         crate::params_resolver::refuse_fixed_flag_over_scenario(
-            &model_pre, a.scenario.as_deref(), &fixed_cli_vec)?;
+            &model_pre, cfg.scenario.as_deref(), &fixed_cli_vec)?;
         // ...and so is a scenario that sets or scales a parameter `--estimate`
         // samples: the box would discard the scenario's value, as `--fit`
         // mode's `[estimate]` does (run spec §1.3).
-        if let Some(scenario) = a.scenario.as_deref() {
-            let estimated: Vec<&str> = a.estimate.iter().map(|e| e.name.as_str()).collect();
+        if let Some(scenario) = cfg.scenario.as_deref() {
+            let estimated: Vec<&str> = cfg.estimate.iter().map(|e| e.name.as_str()).collect();
             if let Some(msg) = crate::params_resolver::scenario_estimate_collision(
                 &model_declared, scenario, &estimated,
                 crate::params_resolver::EstimatedBy::EstimateFlag,
@@ -1166,14 +1138,14 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
         let table_files: HashMap<String, std::path::PathBuf> = HashMap::new();
         // gh#561, as in the fit-toml branch above.
         crate::util::refuse_scenario_horizon(
-            &model_pre, a.scenario.as_deref(), "survey",
+            &model_pre, cfg.scenario.as_deref(), "survey",
             "a survey scores the likelihood at the observation times, so its \
              window comes from the data, not the model horizon",
         )?;
         let resolved = crate::params_resolver::resolve_parameters(
             crate::params_resolver::ParameterInputs {
                 model: &model_pre,
-                scenario: a.scenario.as_deref(),
+                scenario: cfg.scenario.as_deref(),
                 adhoc_enable: &[],
                 adhoc_disable: &[],
                 scenario_inline_name: None,
@@ -1197,7 +1169,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
         // draw writes over the `--fixed` value.
         let fixed_names: Vec<String> = fixed_cli_vec.iter()
             .map(|(n, _)| n.clone())
-            .filter(|n| !a.estimate.iter().any(|e| e.name == *n))
+            .filter(|n| !cfg.estimate.iter().any(|e| e.name == *n))
             .collect();
         let roles = crate::roles::RoleRecord::new(
             survey_roles(SurveyRoleDecls {
@@ -1205,20 +1177,20 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
                 fit_estimate: IndexMap::new(),
                 fit_fixed: Ok(Vec::new()),
                 simplex_groups: &[],
-                cli_estimate: a.estimate.iter().map(|e| crate::roles::EstimateDecl {
+                cli_estimate: cfg.estimate.iter().map(|e| crate::roles::EstimateDecl {
                     name: e.name.clone(), bounds: Some((e.lo, e.hi)),
                 }).collect(),
                 cli_fixed: &fixed_names,
                 scenario: None,
             })
             .map(|p| p.record(&resolved)),
-            || (a.estimate.iter().map(|e| e.name.clone()).collect(),
+            || (cfg.estimate.iter().map(|e| e.name.clone()).collect(),
                 fixed_map.iter().map(|(n, v)| (n.clone(), *v)).collect()),
         );
 
         let compiled = Arc::new(CompiledModel::new(model.clone())
             .map_err(|e| format!("compile error: {:?}", e))?
-            .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: a.allow_degenerate_rates }));
+            .with_eval_settings(cfg.eval_settings));
         let mut base_params = compiled.default_params.clone();
         for (name, &v) in &fixed_map {
             if let Some(&idx) = compiled.param_index.get(name.as_str()) {
@@ -1227,7 +1199,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
         }
 
         // Build EstimatedParam vector from --estimate flags.
-        let specs: Vec<ParamSpec> = a.estimate.iter().map(|e| ParamSpec {
+        let specs: Vec<ParamSpec> = cfg.estimate.iter().map(|e| ParamSpec {
             name: e.name.clone(),
             rw_sd: None,
             perturb_only_at_t0: false,
@@ -1284,7 +1256,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
             per_stream_times,
             data_hashes,
             fixed: fixed_map,
-            scenario: a.scenario.clone(),
+            scenario: cfg.scenario.clone(),
             parameters_provenance,
             notices,
             roles,
@@ -1293,7 +1265,6 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
             // Inline mode has no `ic_free` key: every observation is scored.
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
             training_rows: None,
-            allow_forcing_extrapolation: a.forcing_extrapolation.allow_forcing_extrapolation,
         })
     }
 }
@@ -2044,7 +2015,7 @@ fn write_summary_json(
     path: &Path,
     rows: &[LandscapeRow],
     feasibility: &FeasibilityTally,
-    a: &crate::args::SurveyArgs,
+    cfg: &crate::survey_config::ResolvedSurveyConfig,
     eval_method: SurveyEvalMethod,
     d: usize,
 ) -> std::io::Result<()> {
@@ -2068,9 +2039,9 @@ fn write_summary_json(
         "n_points": rows.len(),
         "dimensions": d,
         "eval_method": eval_method.as_str(),
-        "eval_particles": a.eval_particles,
-        "eval_replicates": a.eval_replicates,
-        "seed": a.seed,
+        "eval_particles": cfg.eval_particles,
+        "eval_replicates": cfg.eval_replicates,
+        "seed": cfg.seed,
         "top_loglik": top_loglik,
         "loglik_se_quartiles": se_q,
         "top_k_count": top_rows.len(),

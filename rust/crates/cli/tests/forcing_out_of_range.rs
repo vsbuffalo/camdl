@@ -374,11 +374,11 @@ fn a_fit_toml_handle_does_not_stand_for_a_flag_made_fit() {
 }
 
 /// The commands that read a fit's problem but none of its results (`pfilter`,
-/// `profile`), given a fit made with `--allow-forcing-extrapolation` on the
+/// `profile`, `survey`), given a fit made with `--allow-forcing-extrapolation` on the
 /// command line: named by its leaf, the fit's stored config holds the
 /// override, so the command runs past the forcing's range and records what it
-/// held (gh#1235, gh#1268). For `pfilter` it is the same computation as the
-/// file under the flag; `profile` keys the config's text as read, and the
+/// held (gh#1235, gh#1268). For `pfilter` and `survey` it is the same
+/// computation as the file under the flag; `profile` keys the config's text as read, and the
 /// stored config is the file with the override written in, so the two are
 /// stored apart (a conservative re-key, not a shared leaf). Named by its
 /// `fit.toml`, the problem is the file's, which does not hold the override
@@ -404,7 +404,7 @@ fn a_flag_made_fit_is_read_under_its_stored_override_through_its_leaf() {
     // Each command, and whether the stored override and the flag on the file
     // are one stored computation.
     type Args<'a> = Box<dyn Fn(&str) -> Vec<String> + 'a>;
-    let commands: [(&str, Args, bool); 2] = [
+    let commands: [(&str, Args, bool); 3] = [
         (
             "pfilter",
             Box::new(|fit: &str| {
@@ -425,6 +425,15 @@ fn a_flag_made_fit_is_read_under_its_stored_override_through_its_leaf() {
                 .to_vec()
             }),
             false,
+        ),
+        (
+            "survey",
+            Box::new(|fit: &str| {
+                ["survey", m, "--fit", fit, "--n-points", "4", "--eval", "simulate", "--seed", "1"]
+                    .map(String::from)
+                    .to_vec()
+            }),
+            true,
         ),
     ];
     for (name, args, one_computation) in commands {
