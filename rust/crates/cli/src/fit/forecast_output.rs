@@ -70,7 +70,7 @@ pub(crate) const FORECAST_TABLES_DIR: &str = "forecast";
 pub(crate) struct ForecastSummary {
     pub origin: SummaryPoint,
     pub horizon: SummaryHorizon,
-    pub calendar: SummaryCalendar,
+    pub calendar: ir::caltime::CalendarAxis,
     pub n_draws: usize,
     pub particles: crate::fit::predict::PredictParticles,
     /// Absent when the full posterior cloud was used.
@@ -94,12 +94,6 @@ pub(crate) struct SummaryHorizon {
     pub duration: f64,
 }
 
-/// The model's time unit, from `forecast.json`'s `calendar`.
-#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
-pub(crate) struct SummaryCalendar {
-    pub time_unit: String,
-}
-
 /// `forecast.json`'s `chain_selection` (D86).
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub(crate) struct SummaryChains {
@@ -110,12 +104,16 @@ pub(crate) struct SummaryChains {
 
 impl ForecastSummary {
     /// The forecast in `dir`: `None` when `dir` holds no `forecast.json`,
-    /// an error when it cannot be read, or carries a schema other than
-    /// [`FORECAST_SCHEMA`].
+    /// an error when it cannot be read (any I/O error but not-found,
+    /// non-UTF-8 bytes) or carries a schema other than [`FORECAST_SCHEMA`].
+    /// The error names only the file; its reader shows the directory.
     pub(crate) fn read(dir: &std::path::Path) -> Option<Result<Self, String>> {
-        let path = dir.join(FORECAST_MANIFEST);
-        let text = std::fs::read_to_string(&path).ok()?;
-        Some(Self::parse(&text).map_err(|e| format!("{}: {e}", path.display())))
+        let text = match std::fs::read_to_string(dir.join(FORECAST_MANIFEST)) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(e) => return Some(Err(format!("{FORECAST_MANIFEST}: cannot read: {e}"))),
+        };
+        Some(Self::parse(&text).map_err(|e| format!("{FORECAST_MANIFEST}: {e}")))
     }
 
     fn parse(text: &str) -> Result<Self, String> {
@@ -136,7 +134,7 @@ impl ForecastSummary {
             None => format!("t = {}", fmt_time(self.origin.t)),
         };
         let horizon = format!("{} ({} {})",
-            self.horizon.as_written, fmt_time(self.horizon.duration), self.calendar.time_unit);
+            self.horizon.as_written, fmt_time(self.horizon.duration), self.calendar.time_unit.as_str());
         let ids = |v: &[usize]| v.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(",");
         let chains = match &self.chain_selection {
             None => format!("all ({} posterior draws)", self.n_draws),
@@ -906,6 +904,22 @@ mod tests {
         ]);
         let e = ForecastSummary::parse(&doc("camdl.forecast/v2")).unwrap_err();
         assert!(e.contains("'camdl.forecast/v2'") && e.contains(FORECAST_SCHEMA), "{e}");
+    }
+
+    /// Only a missing `forecast.json` reads as "no forecast here"; one that
+    /// cannot be read is an error, named by its file alone.
+    #[test]
+    fn an_unreadable_forecast_manifest_is_an_error_and_a_missing_one_is_none() {
+        let dir = crate::test_support::unique_temp_dir("forecast_summary_read");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(ForecastSummary::read(&dir).is_none(), "no forecast.json: no forecast");
+        std::fs::write(dir.join(FORECAST_MANIFEST), b"\xff\xfe{not utf8").unwrap();
+        let e = ForecastSummary::read(&dir).expect("an unreadable manifest is reported").unwrap_err();
+        assert!(e.starts_with("forecast.json: cannot read"), "{e}");
+        assert!(!e.contains(&dir.display().to_string()), "the error names the file, not its path: {e}");
+        std::fs::write(dir.join(FORECAST_MANIFEST), r#"{"schema": "camdl.forecast/v2"}"#).unwrap();
+        let e = ForecastSummary::read(&dir).unwrap().unwrap_err();
+        assert!(e.starts_with("forecast.json: schema 'camdl.forecast/v2'"), "{e}");
     }
 
     /// The fit's sampler is the leaf's record; a leaf written before the
