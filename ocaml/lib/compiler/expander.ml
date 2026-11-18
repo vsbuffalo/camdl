@@ -12944,8 +12944,10 @@ let check_let_cycles ctx =
           Printf.sprintf
             "let bindings form a definition cycle: %s" rendered
       in
+      (* Located at [node], the binding at which the walk closed the cycle,
+         the first name of the rendered cycle. *)
       Diagnostics.error ctx.diags
-        ~code:"E201" ~loc:Diagnostics.no_loc
+        ~code:"E201" ~loc:(let_loc ctx node)
         ~message
         ~detail:(Printf.sprintf "cycle: %s" rendered)
         ~hint:"a `let` is inlined at its use site, so it may not reference \

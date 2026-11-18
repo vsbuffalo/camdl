@@ -17408,8 +17408,88 @@ let gh1202_tests = [
   "no simulate block keeps (0, 100)", test_gh1202_no_block_keeps_default;
 ]
 
+(* ── gh#1211: a cyclic `let` under an origin is E201, not a stack overflow ────
+
+   Time typing classifies a name by following its `let` body. Under an origin
+   it runs before the expander's own cycle check, and with no guard it
+   recursed until the stack overflowed, reported as an unlocated E001. The
+   model without an origin reached the E201 cycle diagnostic. Both now get
+   the same located E201. *)
+
+let cyc1211_src ~origin ~lets ~rate = Printf.sprintf {|
+time_unit = 'days
+%s
+compartments { S, I, R }
+%s
+parameters {
+  beta  : rate in [0.1, 2.0]
+  gamma : rate in [0.05, 0.5]
+}
+transitions {
+  infection : S --> I @ beta * S * I / (S + I + R) * (%s)
+  recovery  : I --> R @ gamma * I
+}
+init { S = 990  I = 10 }
+simulate { from = %s  to = %s }
+|}
+    (if origin then "origin = date(\"2020-01-01\")" else "")
+    lets rate
+    (if origin then "origin" else "0 'days")
+    (if origin then "origin + 50 'days" else "50 'days")
+
+(* Exactly one E201 with [message], on [line]; no E001. *)
+let expect_e201 ~message ~line src =
+  match compile_bounded ~name:"gh1211" src with
+  | None -> Alcotest.fail "compile did not terminate"
+  | Some _ ->
+    let ds = tp_diags src in
+    if List.exists (fun (d : Diagnostics.diagnostic) -> d.code = "E001") ds then
+      Alcotest.failf "expected no E001; got:\n%s" (tp_show ds);
+    (match List.filter (fun (d : Diagnostics.diagnostic) -> d.code = "E201") ds with
+     | [d] ->
+       Alcotest.(check string) "message" message d.message;
+       Alcotest.(check int) "located at the let" line d.loc.line
+     | [] -> Alcotest.failf "expected E201; got:\n%s" (tp_show ds)
+     | _ -> Alcotest.failf "E201 emitted more than once:\n%s" (tp_show ds))
+
+let mutual_lets = "let a = b + 1\nlet b = a + 1"
+let mutual_message = "let bindings form a definition cycle: a -> b -> a"
+
+let test_gh1211_mutual_cycle_with_origin () =
+  expect_e201 ~message:mutual_message ~line:5
+    (cyc1211_src ~origin:true ~lets:mutual_lets ~rate:"a")
+
+(* The same model without an origin, the behaviour the fix matches. *)
+let test_gh1211_mutual_cycle_without_origin () =
+  expect_e201 ~message:mutual_message ~line:5
+    (cyc1211_src ~origin:false ~lets:mutual_lets ~rate:"a")
+
+(* `is_definite_instant` follows lets too; a cycle through instant
+   arithmetic reaches it. *)
+let test_gh1211_cycle_through_instant_arithmetic () =
+  match compile_bounded ~name:"gh1211_instant" (cyc1211_src ~origin:true
+      ~lets:"let a = b + 1 'days\nlet b = a - 1 'days"
+      ~rate:"if t >= a then 0.5 else 1.0") with
+  | None -> Alcotest.fail "compile did not terminate"
+  | Some _ ->
+    let ds = tp_diags (cyc1211_src ~origin:true
+        ~lets:"let a = b + 1 'days\nlet b = a - 1 'days"
+        ~rate:"if t >= a then 0.5 else 1.0") in
+    if List.exists (fun (d : Diagnostics.diagnostic) -> d.code = "E001") ds then
+      Alcotest.failf "expected no E001; got:\n%s" (tp_show ds);
+    if not (List.exists (fun (d : Diagnostics.diagnostic) -> d.code = "E201") ds) then
+      Alcotest.failf "expected E201; got:\n%s" (tp_show ds)
+
+let gh1211_tests = [
+  "a mutual let cycle under an origin is E201", test_gh1211_mutual_cycle_with_origin;
+  "the same cycle without an origin is E201", test_gh1211_mutual_cycle_without_origin;
+  "a cycle through instant arithmetic is E201", test_gh1211_cycle_through_instant_arithmetic;
+]
+
 let () =
   Alcotest.run "compiler" [
+    "gh1211_let_cycle_under_origin",
+      List.map (fun (name, f) -> Alcotest.test_case name `Quick f) gh1211_tests;
     "gh1202_simulate_requires_to",
       List.map (fun (name, f) -> Alcotest.test_case name `Quick f) gh1202_tests;
     "gh1201_singleton_declarations",
