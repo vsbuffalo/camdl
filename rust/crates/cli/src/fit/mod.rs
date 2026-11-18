@@ -61,6 +61,7 @@ pub(crate) mod observed_rows; // one leaf's data rows, each with the instant or 
 pub(crate) mod training_partition; // which rows trained: per stream a prefix and its row digest
 pub(crate) mod forecast_plan; // what a fixed-origin forecast predicts: its origin, reach and targets
 pub(crate) mod forecast_driver; // the fixed-origin forecast: one bootstrap filter per posterior draw
+pub(crate) mod forecast_arms; // the scenario and sweep arms of a forecast, each differing only after the origin
 pub(crate) mod forecast_output; // `fit predict --mode forecast`: the plan, the driver, the artifact
 pub mod runner;
 pub mod priors_precedence;  // gh#75: shared prior-resolution chain for fit run + profile

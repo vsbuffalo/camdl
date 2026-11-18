@@ -543,3 +543,61 @@ fn the_forecast_draws_with_the_sampler_it_is_given() {
     assert_ne!(btpe.draws, btrs.draws, "the sampler must reach the particles' draws");
     assert_eq!(btrs.draws, btrs_again.draws, "and the draws are reproducible under it");
 }
+
+/// Scenario arms (D50): two arms of the same seed whose models differ only
+/// by an intervention at day 30, after the origin (day 24), share the filter
+/// before the origin bit for bit (every stop's log-likelihood increment and
+/// ESS, every particle's log-likelihood and predictive draw) and the
+/// particles' states and log-weights at the origin, so the running totals of
+/// the week under way agree too: every target ending by day 29 is identical,
+/// the week [21, 28) included. After the cull the arms differ. An arm whose
+/// intervention fires at day 20, before the origin, departs from the
+/// baseline's record before the origin, which is what the forecast's check
+/// on its arms reads.
+#[test]
+fn arms_that_differ_only_after_the_origin_share_the_filter_before_it() {
+    let s = fixture_setup(24, "arms");
+    let cull_at = |day: u32, fraction: f64| {
+        let src = fixture_source().replace("observations {", &format!(
+            "interventions {{\n  cull : transfer(fraction = {fraction}, from = I, to = R) at [{day}]\n}}\n\nobservations {{"));
+        let (daily, weekly) = daily_through(24);
+        setup(with_truth(compile(&src, &format!("arms_{day}"))), &daily, &weekly, &format!("arms_{day}")).unwrap()
+    };
+    let plan = s.plan(14.0, &["weekly_cases", "daily_cases"]);
+    let base = s.run(plan.clone(), 3, 200, 11).unwrap();
+    let late = cull_at(30, 1.0).run(plan.clone(), 3, 200, 11).unwrap();
+    let early = cull_at(20, 0.2).run(plan.clone(), 3, 200, 11).unwrap();
+
+    for d in 0..3 {
+        assert_eq!(base.pre_origin[d].first_difference(&late.pre_origin[d]), None, "draw {d}");
+        assert!(!base.pre_origin[d].times.is_empty() && base.pre_origin[d].times.iter().all(|&t| t <= 24.0));
+    }
+    assert_eq!(base.origin_states, late.origin_states, "states and log-weights at the origin");
+    let (be, le) = (base.expected.as_ref().unwrap(), late.expected.as_ref().unwrap());
+    let mut compared = 0;
+    for (k, t) in plan.targets().iter().enumerate() {
+        if t.measures.end() <= 29.0 {
+            assert_eq!(base.draws[k], late.draws[k], "{} ending {}", t.stream, t.measures.end());
+            assert_eq!(be[k], le[k], "{} ending {}", t.stream, t.measures.end());
+            compared += 1;
+        }
+    }
+    assert_eq!(compared, 6, "days 25–29 and the week [21, 28)");
+    let after = index_of(&plan, "daily_cases", 31.0);
+    assert_ne!(be[after], le[after], "the cull at day 30 changes the arm after it");
+    assert!(le[after].iter().all(|&x| x == 0.0), "no infective is left after the cull");
+
+    let departs = (0..3).find_map(|d| base.pre_origin[d].first_difference(&early.pre_origin[d]));
+    let (time, what) = departs.expect("a cull at day 20 changes the filter before the origin");
+    assert!(time.is_some_and(|t| t <= 24.0), "{what} at {time:?}");
+
+    // The forecast's check on its arms passes the late arm and fails the early one.
+    use crate::fit::forecast_arms::ArmLabel;
+    use crate::fit::forecast_output::{check_shared_past, DrawRef};
+    let refs: Vec<DrawRef> = (0..3).map(|i| DrawRef { cloud_row: i, key: None }).collect();
+    let label = |s: &str| ArmLabel { scenario: s.into(), sweep: Vec::new() };
+    assert_eq!(check_shared_past(&base, &late, &label("late"), &refs), Ok(()));
+    let err = check_shared_past(&base, &early, &label("early"), &refs).unwrap_err();
+    assert!(err.contains("the forecast arm 'early' departs from the fitted model before the forecast origin t = 24"),
+        "{err}");
+}

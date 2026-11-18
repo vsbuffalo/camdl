@@ -915,6 +915,15 @@ and fails it instead when `--stream` named it.
   they correspond to; nothing filters them.
 - `chain_selection`, under a chain selection: the block `predictive.json`
   carries.
+- `arms` (D50): the fitted model (`"baseline": true`), then each `--scenario`
+  and `--sweep` point, in the order of the tables' rows, each with its
+  `scenario`, its `sweep` values, `first_difference` (the earliest time it acts
+  differently from the fitted model, at or after the origin, or `null` when
+  nothing it changes acts within the run), and the `interventions_changed` and
+  `parameters_changed`. `forecast/<stream>.tsv` and `forecast-samples.tsv` lead
+  with a `scenario` column, and a `sweep:<param>` column per swept parameter
+  (empty on the fitted model's rows). Sample `s` is the same draw and particle
+  index in every arm.
 
 A _deterministic failure_ is a fact about the model as written that holds for
 whatever produced it regardless of how often it occurs — an unresolvable

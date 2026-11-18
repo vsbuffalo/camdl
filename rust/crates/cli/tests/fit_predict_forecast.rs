@@ -222,9 +222,9 @@ fn the_mode_and_horizon_flags_are_checked() {
 }
 
 /// The capability matrix's refused cells for a fit that exists here: an
-/// optimizer (IF2) has no posterior, and scenarios are not arms yet.
+/// optimizer (IF2) has no posterior, and a per-chain band has no forecast yet.
 #[test]
-fn single_estimate_fits_and_scenarios_are_refused_a_forecast() {
+fn single_estimate_fits_and_per_chain_bands_are_refused_a_forecast() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     fit(dir, r#"[method]
@@ -242,7 +242,7 @@ cooling = 0.7"#, "");
     let dir = tmp.path();
     fit(dir, PMMH, "");
     let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "2 weeks",
-                         "--sweep", "rho=0.4,0.6"]);
+                         "--by-chain"]);
     assert!(!out.status.success());
     assert!(stderr(&out).contains("cannot be combined with --mode forecast"), "{}", stderr(&out));
 }
@@ -460,4 +460,109 @@ fn a_forecast_past_the_models_end_records_the_extension() {
         serde_json::from_str(&std::fs::read_to_string(forecast_dir(dir).join("forecast.json")).unwrap()).unwrap();
     assert_eq!((&m["run_extent"]["model_end"]["t"], &m["run_extent"]["run_end"]["t"], &m["run_extent"]["extended"]),
         (&serde_json::json!(24.0), &serde_json::json!(38.0), &serde_json::json!(true)));
+}
+
+/// The fixture with a cull of the infectives at day 30 (`late`) or day 20
+/// (`early`), each a scenario, the cull's fraction a fixed parameter read only
+/// by the culls, and a scenario `boost` that raises `beta`. Fitted with
+/// `holdout_after = 24`.
+fn fit_with_scenarios(dir: &Path) {
+    copy_fixture(dir);
+    let model = std::fs::read_to_string(dir.join("model.camdl")).unwrap()
+        .replace("  I0    : count\n}", "  I0    : count\n  cull_frac : probability\n}")
+        .replace("simulate {", "interventions {
+  late_cull  : transfer(fraction = cull_frac, from = I, to = R) at [30]
+  early_cull : transfer(fraction = cull_frac, from = I, to = R) at [20]
+}
+
+scenarios {
+  late  { enable = [late_cull] }
+  early { enable = [early_cull] }
+  boost { set = { beta = 0.9 } }
+}
+
+simulate {");
+    std::fs::write(dir.join("model.camdl"), model).unwrap();
+    // `[fixed]` is the table open where the method block begins.
+    fit_config(dir, &format!("cull_frac = 1.0\n\n{PMMH}"), "holdout_after = 24.0\n",
+        "daily_cases = \"daily_cases.tsv\"\nweekly_cases = \"weekly_cases.tsv\"", "");
+}
+
+/// Scenario arms (D50). A scenario whose cull fires at day 30, after the
+/// origin (day 24), is forecast as a second arm: its rows match the fitted
+/// model's for every target ending by day 29 and hold no infections after the
+/// cull, and `forecast.json` names both arms and when `late` first acts. A
+/// sweep over the cull's fraction, read only by the culls, is a set of arms
+/// too. A scenario whose cull fires at day 20, one that changes `beta`, and a
+/// sweep over `rho` (read by the observation models from the start) are
+/// refused before anything is filtered.
+#[test]
+fn scenario_arms_that_act_after_the_origin_are_forecast_and_earlier_ones_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fit_with_scenarios(dir);
+    let predict = |extra: &[&str]| {
+        let mut args = vec!["fit", "predict", "--fit", "fit.toml", "--horizon", "2 weeks", "--n-draws", "4"];
+        args.extend_from_slice(extra);
+        run(dir, &args)
+    };
+
+    let out = predict(&["--scenario", "late"]);
+    assert!(out.status.success(), "fit predict: {}", stderr(&out));
+    let fdir = forecast_dir(dir);
+    let daily = rows(&fdir.join("forecast/daily_cases.tsv"));
+    let arm = |name: &str, t: &str| daily.iter()
+        .find(|r| r["scenario"] == name && r["t_stop"] == t)
+        .unwrap_or_else(|| panic!("no {name} row ending {t}"));
+    for t in 25..=29 {
+        let (f, l) = (arm("fitted", &t.to_string()), arm("late", &t.to_string()));
+        for c in ["mean", "q05", "q50", "q95"] {
+            assert_eq!(f[c], l[c], "{c} of the day ending {t}");
+        }
+    }
+    for t in 31..=38 {
+        assert_eq!(arm("late", &t.to_string())["mean"], "0", "no infective after the cull, day ending {t}");
+    }
+    assert_ne!(arm("fitted", "31")["mean"], "0");
+    let samples = rows(&fdir.join("forecast-samples.tsv"));
+    assert_eq!(samples.len(), 2 * 4 * 5 * (14 + 2), "two arms × 4 draws × 5 samples × 16 targets");
+    let m: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(fdir.join("forecast.json")).unwrap()).unwrap();
+    let arms = m["arms"].as_array().unwrap();
+    assert_eq!(arms.len(), 2);
+    assert_eq!((&arms[0]["scenario"], &arms[0]["baseline"]), (&serde_json::json!("fitted"), &serde_json::json!(true)));
+    assert_eq!((&arms[1]["scenario"], &arms[1]["first_difference"]["t"], &arms[1]["interventions_changed"]),
+        (&serde_json::json!("late"), &serde_json::json!(30.0), &serde_json::json!(["late_cull"])));
+
+    let out = predict(&["--scenario", "early"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("switches intervention 'early_cull' on or off, which first fires at t = 20, \
+        before the forecast origin t = 24"), "{}", stderr(&out));
+    let out = predict(&["--scenario", "boost"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("changes parameter 'beta', which the model reads outside any intervention"),
+        "{}", stderr(&out));
+    let out = predict(&["--sweep", "rho=0.4,0.6"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("changes parameter 'rho'"), "{}", stderr(&out));
+
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fit_with_scenarios(dir);
+    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "2 weeks", "--n-draws", "4",
+                         "--scenario", "late", "--sweep", "cull_frac=0.5,1.0"]);
+    assert!(out.status.success(), "fit predict: {}", stderr(&out));
+    let fdir = forecast_dir(dir);
+    let daily = rows(&fdir.join("forecast/daily_cases.tsv"));
+    let arms: Vec<(String, String)> = daily.iter().filter(|r| r["t_stop"] == "31")
+        .map(|r| (r["scenario"].clone(), r["sweep:cull_frac"].clone())).collect();
+    assert_eq!(arms, vec![
+        ("fitted".into(), "".into()), ("fitted".into(), "0.5".into()), ("late".into(), "0.5".into()),
+        ("fitted".into(), "1".into()), ("late".into(), "1".into()),
+    ]);
+    let mean = |s: &str, x: &str| daily.iter().find(|r| r["t_stop"] == "31" && r["scenario"] == s
+        && r["sweep:cull_frac"] == x).unwrap()["mean"].parse::<f64>().unwrap();
+    assert_eq!(mean("fitted", "0.5"), mean("fitted", ""), "the fraction is read only by a cull the fitted model does not run");
+    assert_eq!(mean("late", "1"), 0.0);
+    assert!(mean("late", "0.5") > 0.0 && mean("late", "0.5") < mean("fitted", ""));
 }

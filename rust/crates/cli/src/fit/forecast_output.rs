@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::fit::failures::{DeterministicFailure, Site, SkipReason, SkippedStream};
+use crate::fit::forecast_arms::{build_arms, ArmInputs, ArmLabel, Difference};
 use crate::fit::predict_streams::StreamSelection;
 use crate::fit::forecast_driver::{extend_run, fixed_origin_forecast, DriverConfig, Forecast, StateConditioning};
 use crate::fit::forecast_plan::{parse_reach, ForecastPlan, HeldOut, PlanStream, RowFile};
@@ -73,18 +74,16 @@ pub(crate) fn refuse_unsupported(
              backend, so there is nothing to forecast.")),
     }
     let mut asked: Vec<&str> = Vec::new();
-    if !args.scenarios.is_empty() { asked.push("--scenario"); }
     if !args.enable.is_empty() { asked.push("--enable"); }
     if !args.disable.is_empty() { asked.push("--disable"); }
-    if !args.sweep.is_empty() { asked.push("--sweep"); }
     if args.by_chain { asked.push("--by-chain"); }
     if args.quantities.is_some() { asked.push("--quantities"); }
     if !asked.is_empty() {
         return Err(format!(
-            "{} cannot be combined with --mode forecast yet: the forecast is the fitted \
-             model's, conditioned on the training rows, and writes no quantities table. \
-             Scenario arms that differ only after the forecast origin are the planned \
-             extension; until then run them with --mode free_forward.",
+            "{} cannot be combined with --mode forecast yet: a forecast writes no quantities \
+             table and no per-chain band, and its arms are the fitted model and the named \
+             scenarios. To forecast with interventions switched on or off, declare a \
+             scenario that does it and pass --scenario; or run --mode free_forward.",
             asked.join(", ")));
     }
     Ok(())
@@ -157,6 +156,10 @@ pub(crate) struct ForecastJob<'a> {
     pub binomial: sim::rng::BinomialAlgorithm,
     /// The streams this forecast covers, skips and fails before any work (D76).
     pub selection: &'a StreamSelection,
+    /// `fit predict`'s scenario list, the fitted model first (D50).
+    pub scenarios: &'a [crate::sim_job::ScenarioRef],
+    /// The `--sweep` grid, one entry per point; empty without `--sweep`.
+    pub sweep_points: &'a [Vec<(String, f64)>],
 }
 
 /// Run the forecast and write its artifact. Returns the files written, the
@@ -297,25 +300,87 @@ pub(crate) fn run_forecast(
             p
         })
         .collect();
-    let fc = fixed_origin_forecast(plan, &streams, compiled, &param_sets, DriverConfig {
+    // The arms (D50): the fitted model, then each scenario and sweep point,
+    // each refused here, before any filtering, unless it differs from the
+    // fitted model only at or after the origin.
+    let rows: Vec<&indexmap::IndexMap<String, f64>> = idx.iter().map(|&i| &job.posterior.draws()[i]).collect();
+    let arms = build_arms(ArmInputs {
+        model,
+        fit_base: job.fit_base,
+        scenarios: job.scenarios,
+        sweep_points: job.sweep_points,
+        draws: &rows,
+        baseline: &compiled,
+        baseline_params: &param_sets,
+        plan: &plan,
+        dt: job.dt,
+    })?;
+    let config = DriverConfig {
         n_particles: crate::fit::predict::PREDICT_N_PARTICLES,
         dt: job.dt,
         base_seed: job.seed,
         record_expected: false,
         binomial: job.binomial,
-    }).map_err(|f| f.describe(|d| draw_refs[d].describe()))?;
+    };
+    // Every arm runs the same draws with the same seeds; each repeats the
+    // filtering of the training rows (filtering once and forking at the
+    // origin is deferred, spec Part 7).
+    let mut forecasts: Vec<ArmForecast> = Vec::with_capacity(arms.len());
+    for arm in arms {
+        let name_arm = |s: String| match arm.label.is_baseline() {
+            true => s,
+            false => format!("{s} (forecast arm {})", arm.label.describe()),
+        };
+        let fc = fixed_origin_forecast(plan.clone(), &streams, arm.compiled.clone(), &arm.param_sets, config)
+            .map_err(|f| name_arm(f.describe(|d| draw_refs[d].describe())))?;
+        if let Some(base) = forecasts.first() {
+            check_shared_past(&base.fc, &fc, &arm.label, &draw_refs)?;
+        }
+        forecasts.push(ArmForecast { label: arm.label, difference: arm.difference, fc });
+    }
 
-    let mut written = write_tables(&fc, model, job.schema, job.out_dir, &draw_refs)?;
-    written.push(write_manifest(&fc, &job, ManifestInputs {
+    let mut written = write_tables(&forecasts, model, job.schema, job.out_dir, &draw_refs)?;
+    written.push(write_manifest(&forecasts, &job, ManifestInputs {
         record: &record, reach_as_written: raw, skipped: &skipped, failures: &failures,
         draw_refs: &draw_refs, held_out: &held_out,
     })?);
+    let fc = &forecasts[0].fc;
     out.say(format_args!(
         "fit predict: forecast from t = {} (the end of the training rows) to t = {}: {} \
-         target(s) on {} stream(s), {} draws × {} particles",
+         target(s) on {} stream(s), {} draws × {} particles, {} arm(s)",
         fc.plan.origin(), fc.plan.origin() + fc.plan.horizon(), fc.plan.targets().len(),
-        fc.plan.sources().len(), fc.n_draws, fc.n_particles));
+        fc.plan.sources().len(), fc.n_draws, fc.n_particles, forecasts.len()));
     Ok((written, failures, skipped))
+}
+
+/// One arm's forecast.
+pub(crate) struct ArmForecast {
+    pub label: ArmLabel,
+    /// `None` for the baseline.
+    pub difference: Option<Difference>,
+    pub fc: Forecast,
+}
+
+/// An arm must share the baseline's filter before the origin bit for bit
+/// (D50): the same model with the same seeds over the same rows. The static
+/// check in [`build_arms`] admits only arms whose differences act at or after
+/// the origin; this reads what the filters did, so an arm that differs before
+/// the origin by a route that check does not see fails the forecast rather
+/// than being written.
+pub(crate) fn check_shared_past(base: &Forecast, arm: &Forecast, label: &ArmLabel, draw_refs: &[DrawRef]) -> Result<(), String> {
+    for (d, (b, a)) in base.pre_origin.iter().zip(&arm.pre_origin).enumerate() {
+        if let Some((time, what)) = b.first_difference(a) {
+            let at = time.map(|t| format!(" at t = {t}")).unwrap_or_default();
+            return Err(format!(
+                "the forecast arm {} departs from the fitted model before the forecast origin \
+                 t = {}: on {}, {what} differs{at}. Every arm must share the filter through the \
+                 training rows; no arm was written. This arm passed the check of what it \
+                 changes, so the difference reached the filter by a route that check does not \
+                 see: please report it.",
+                label.describe(), base.plan.origin(), draw_refs[d].describe()));
+        }
+    }
+    Ok(())
 }
 
 fn leaf<'m>(model: &'m ir::Model, name: &str) -> &'m ir::observation::ObservationModel {
@@ -327,15 +392,40 @@ fn stratum_of(o: &ir::observation::ObservationModel) -> Vec<(String, String)> {
     o.stratum.iter().map(|k| (k.dim.clone(), k.level.clone())).collect()
 }
 
-/// `forecast/<source>.tsv` per logical stream, and `forecast-samples.tsv`.
+/// The swept parameters, in the order `--sweep` named them: the `sweep:<p>`
+/// columns of every forecast table.
+fn sweep_names(arms: &[ArmForecast]) -> Vec<String> {
+    arms.iter().find(|a| !a.label.sweep.is_empty())
+        .map(|a| a.label.sweep.iter().map(|(p, _)| p.clone()).collect())
+        .unwrap_or_default()
+}
+
+/// The `scenario` and `sweep:<p>` cells of an arm's rows; the baseline's
+/// sweep cells are empty.
+fn arm_cells(label: &ArmLabel, sweep: &[String]) -> Vec<String> {
+    std::iter::once(label.scenario.clone())
+        .chain(sweep.iter().map(|p| label.sweep.iter().find(|(q, _)| q == p)
+            .map(|(_, v)| fmt_value(*v)).unwrap_or_default()))
+        .collect()
+}
+
+fn arm_header(sweep: &[String]) -> Vec<String> {
+    std::iter::once("scenario".to_string()).chain(sweep.iter().map(|p| format!("sweep:{p}"))).collect()
+}
+
+/// `forecast/<source>.tsv` per logical stream, and `forecast-samples.tsv`,
+/// each arm's rows in turn under a leading `scenario` column (and a
+/// `sweep:<p>` column per swept parameter).
 fn write_tables(
-    fc: &Forecast,
+    arms: &[ArmForecast],
     model: &ir::Model,
     schema: Option<&crate::run_meta::ObsSchema>,
     out_dir: &std::path::Path,
     draw_refs: &[DrawRef],
 ) -> Result<Vec<PathBuf>, String> {
-    let targets = fc.plan.targets();
+    let sweep = sweep_names(arms);
+    let fc0 = &arms[0].fc;
+    let targets = fc0.plan.targets();
     // Logical stream → its targets' indices, in the plan's order.
     let mut by_source: indexmap::IndexMap<String, Vec<usize>> = indexmap::IndexMap::new();
     for (k, t) in targets.iter().enumerate() {
@@ -345,21 +435,23 @@ fn write_tables(
     for (source, ks) in &by_source {
         let first = leaf(model, &targets[ks[0]].stream);
         let dims = crate::fit::predict::index_dims_for(schema, source, &stratum_of(first).into_iter().map(|(d, _)| d).collect::<Vec<_>>());
-        let mut header: Vec<String> = dims.clone();
+        let mut header: Vec<String> = arm_header(&sweep);
+        header.extend(dims.iter().cloned());
         header.extend(["t_start", "t_stop", "horizon", "lead", "held_out_file", "held_out_row", "mean"]
             .map(String::from));
         header.extend(QUANTILE_LEVELS.iter().map(|(_, l)| l.to_string()));
         header.push("n_samples".into());
         let mut tsv = header.join("\t") + "\n";
-        for &k in ks {
+        for (arm, &k) in arms.iter().flat_map(|a| ks.iter().map(move |k| (a, k))) {
             let t = &targets[k];
             let stratum = stratum_of(leaf(model, &t.stream));
-            let ys = &fc.draws[k];
-            let qs = band(ys).map_err(|e| format!("forecast of '{}' ending at {}: {e}", t.stream, t.measures.end()))?;
+            let ys = &arm.fc.draws[k];
+            let qs = band(ys).map_err(|e| format!(
+                "forecast arm {}, '{}' ending at {}: {e}", arm.label.describe(), t.stream, t.measures.end()))?;
             let mean = ys.iter().sum::<f64>() / ys.len() as f64;
-            let mut cells: Vec<String> = dims.iter()
-                .map(|d| stratum.iter().find(|(dd, _)| dd == d).map(|(_, l)| l.clone()).unwrap_or_default())
-                .collect();
+            let mut cells: Vec<String> = arm_cells(&arm.label, &sweep);
+            cells.extend(dims.iter()
+                .map(|d| stratum.iter().find(|(dd, _)| dd == d).map(|(_, l)| l.clone()).unwrap_or_default()));
             cells.push(fmt_time(t.measures.start()));
             cells.push(fmt_time(t.measures.end()));
             cells.push(t.horizon.to_string());
@@ -376,24 +468,28 @@ fn write_tables(
 
     // Joint samples: per draw, `FORECAST_SAMPLES_PER_DRAW` particles evenly
     // strided; each sample's values across every target are one particle's.
-    let n = fc.n_particles;
+    // Sample `s` is the same draw and particle index in every arm.
+    let n = fc0.n_particles;
     let per = FORECAST_SAMPLES_PER_DRAW.min(n);
-    let mut tsv = String::from(
-        "sample\tchain\tdraw\tcloud_row\tparticle\tstream\tt_start\tt_stop\thorizon\tvalue\n");
-    let mut sample = 0usize;
-    for (d, r) in draw_refs.iter().enumerate().take(fc.n_draws) {
-        let (chain, draw) = match r.key {
-            Some((c, i)) => (c.to_string(), i.to_string()),
-            None => (String::new(), String::new()),
-        };
-        for j in 0..per {
-            let p = j * n / per;
-            for (k, t) in targets.iter().enumerate() {
-                tsv += &format!("{sample}\t{chain}\t{draw}\t{}\t{p}\t{}\t{}\t{}\t{}\t{}\n", r.cloud_row, t.stream,
-                    fmt_time(t.measures.start()), fmt_time(t.measures.end()), t.horizon,
-                    fmt_value(fc.draws[k][d * n + p]));
+    let mut tsv = arm_header(&sweep).join("\t")
+        + "\tsample\tchain\tdraw\tcloud_row\tparticle\tstream\tt_start\tt_stop\thorizon\tvalue\n";
+    for arm in arms {
+        let lead = arm_cells(&arm.label, &sweep).join("\t");
+        let mut sample = 0usize;
+        for (d, r) in draw_refs.iter().enumerate().take(arm.fc.n_draws) {
+            let (chain, draw) = match r.key {
+                Some((c, i)) => (c.to_string(), i.to_string()),
+                None => (String::new(), String::new()),
+            };
+            for j in 0..per {
+                let p = j * n / per;
+                for (k, t) in targets.iter().enumerate() {
+                    tsv += &format!("{lead}\t{sample}\t{chain}\t{draw}\t{}\t{p}\t{}\t{}\t{}\t{}\t{}\n",
+                        r.cloud_row, t.stream, fmt_time(t.measures.start()), fmt_time(t.measures.end()),
+                        t.horizon, fmt_value(arm.fc.draws[k][d * n + p]));
+                }
+                sample += 1;
             }
-            sample += 1;
         }
     }
     let path = out_dir.join("forecast-samples.tsv");
@@ -436,8 +532,9 @@ fn held_out_record(held_out: &BTreeMap<String, Vec<HeldOut>>) -> Result<Vec<serd
 }
 
 /// `forecast.json`: what the forecast predicted and what conditioned it.
-fn write_manifest(fc: &Forecast, job: &ForecastJob, m: ManifestInputs) -> Result<PathBuf, String> {
+fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) -> Result<PathBuf, String> {
     let ManifestInputs { record, reach_as_written, skipped, failures, draw_refs, held_out } = m;
+    let fc = &arms[0].fc;
     let point = |t: f64| serde_json::json!({
         "t": t,
         "date": job.calendar.date_of(t).map(ir::caltime::RenderedInstant::into_string),
@@ -528,6 +625,21 @@ fn write_manifest(fc: &Forecast, job: &ForecastJob, m: ManifestInputs) -> Result
         // The rows after each stream's training prefix. They only name the
         // targets they correspond to; nothing filters them.
         "held_out": held_out_record(held_out)?,
+        // D50: the fitted model, then each scenario and sweep arm, in the
+        // order of the tables' rows. Every arm ran the same draws with the
+        // same seeds and shares the baseline's filter through the training
+        // rows; `first_difference` is the earliest time an arm acts
+        // differently, at or after the origin (null when nothing it changes
+        // acts within the run).
+        "arms": arms.iter().map(|a| serde_json::json!({
+            "scenario": a.label.scenario,
+            "sweep": a.label.sweep.iter().map(|(p, v)| (p.clone(), serde_json::json!(v)))
+                .collect::<serde_json::Map<String, serde_json::Value>>(),
+            "baseline": a.label.is_baseline(),
+            "first_difference": a.difference.as_ref().and_then(|d| d.first).map(point),
+            "interventions_changed": a.difference.as_ref().map(|d| d.interventions.clone()).unwrap_or_default(),
+            "parameters_changed": a.difference.as_ref().map(|d| d.parameters.clone()).unwrap_or_default(),
+        })).collect::<Vec<_>>(),
         "targets": targets,
     });
     // D86: the same `chain_selection` block `predictive.json` carries, absent

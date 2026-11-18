@@ -222,7 +222,22 @@ the `q05…q95` band), `forecast-samples.tsv` (joint samples, each one trajector
 across every target), and `forecast.json` (the origin, the reach, the rows that
 conditioned the parameters and the state, and the calendar). Forecasts are
 available for chain-binomial posteriors (PMMH, PGAS); an ODE posterior,
-`--scenario`, `--sweep` and `--by-chain` are refused in this mode for now.
+`--enable`, `--disable`, `--quantities` and `--by-chain` are refused in this
+mode for now.
+
+`--scenario NAME` and `--sweep` add _arms_ to a forecast: the fitted model is
+the first arm, each scenario and each sweep point another, and every table gains
+a leading `scenario` column (and a `sweep:<param>` column per swept parameter).
+Every arm runs the same posterior draws with the same seeds, so all of them
+filter the training rows identically and start from the same particles at the
+origin; they differ only by what the scenario does after it. An arm must
+therefore differ from the fitted model only at or after the origin: a scenario
+that switches on or off an intervention firing before the origin (or at a time
+that depends on a parameter or on the state), and a scenario or sweep that
+changes a parameter the model reads outside its interventions (in the dynamics,
+the initial state, a forcing or an observation model), are refused before
+anything runs. After filtering, each arm's record before the origin is compared
+with the fitted model's, bit for bit, and any difference fails the forecast.
 
 A resumed fit reads the base run read-only and writes a _new_ run keyed on the
 extended length. It is a distinct deterministic artifact — not bit-identical to
