@@ -133,6 +133,25 @@ in `.quarantine/`. Since runs are seeded and deterministic, that error means an
 input that changes the output is missing from the identity, or the run is not
 deterministic.
 
+What a leaf's run id holds is the same whichever invocation wrote it. An
+artifact that only some invocations ask for is therefore never one of the leaf's
+own files, which the manifest lists, but a _child_: a directory under the leaf,
+declared in `run.json`'s `children` (recorded, never hashed) and passed over by
+the manifest and the exact-set check. A sim leaf has two. The synthetic
+observations (`--obs` and its siblings) are at `obs/<hash8>-<obs_seed>/`,
+addressed by the observation blocks, the `--emit-every` cadence and the file
+format, which the trajectory's run id does not cover. The lineage event log
+(`--event-log`) is at the fixed address `event_log/`, because everything it
+depends on is in the run id: the recorder draws no randomness and reads only the
+model, the parameters, the seed and the backend's settings, and the recorder and
+its file format belong to the engine, whose fingerprint the `model` level folds
+in. A child is written after the leaf commits, declared before it is written (so
+a crash leaves a declared child with nothing in it, never an undeclared
+directory that would make the leaf stale); the event log, once complete, is
+never overwritten with other bytes. The
+[`child`](rust:cli::input_class::InputClass) class names the inputs that ask for
+one.
+
 ## The hash function
 
 Every hash in the store goes through one encoder,
@@ -253,13 +272,14 @@ declared not to:
 1. **Every input is classified.** A class belongs to a (command, input) pair:
    the test-only table `SIMULATE` in [`input_class`](rust:cli::input_class)
    gives one of `keyed(level)`, `execution`, `provenance`, `presentation`,
-   `expands` or `removed` (the module's table says what each means) to every
-   field of [`SimulateArgs`](rust:cli::args::SimulateArgs), of the groups it
-   flattens ([`OutputView`](rust:cli::args::OutputView) and the rest) and of the
-   global options. `every_simulate_flag_is_classified` checks the table against
-   every argument clap accepts, both ways. Environment variables have a class
-   column in [`env::VARS`](rust:cli::env::VARS), and are read nowhere but in
-   that module (`rust/crates/cli/tests/environment_is_read_in_one_module.rs`).
+   `child`, `expands` or `removed` (the module's table says what each means) to
+   every field of [`SimulateArgs`](rust:cli::args::SimulateArgs), of the groups
+   it flattens ([`OutputView`](rust:cli::args::OutputView) and the rest) and of
+   the global options. `every_simulate_flag_is_classified` checks the table
+   against every argument clap accepts, both ways. Environment variables have a
+   class column in [`env::VARS`](rust:cli::env::VARS), and are read nowhere but
+   in that module
+   (`rust/crates/cli/tests/environment_is_read_in_one_module.rs`).
 2. **Identity and engine settings come from one value.** After its precedence
    rules (an explicit flag, a fit's provenance, a replayed fit's simulator, the
    model's own default), `run_simulate` resolves its configuration once, into
@@ -404,11 +424,14 @@ changed alone, re-keys every cell and changes the hash of the level its class
 names; an `execution` input leaves the run ids and the stored bytes unchanged;
 an `expands` input keeps the run ids of the cells common to both values; a
 presentation or provenance input, on a fixture where it does something, leaves
-the leaves unaffected, or writes none when it takes the run out of the store.
-These are regression evidence on small fixtures, not proof that no model behaves
-otherwise. The other commands' flags are not yet tested this way; the
-differential tests in `rust/crates/cli/src/resolve/tests.rs` check the hash of
-one `SimConfig` field at a time without running the simulation.
+the leaves unaffected, or writes none when it takes the run out of the store;
+and a `child` input, run after a run without it in the same store, leaves every
+leaf's run id and manifest unchanged byte for byte and writes its child at its
+address under the leaf. These are regression evidence on small fixtures, not
+proof that no model behaves otherwise. The other commands' flags are not yet
+tested this way; the differential tests in
+`rust/crates/cli/src/resolve/tests.rs` check the hash of one `SimConfig` field
+at a time without running the simulation.
 
 ## How a fit is hashed
 
