@@ -31,11 +31,11 @@
   (* The names in a scenario's `enable`/`disable`/`compose` list (spec §17.1:
      `enable = [NAME, ...]`). gh#1203: anything else used to read as the
      empty list, so `enable = boost` enabled nothing and a non-name member
-     was dropped, both silently. Each is now E118 at the field; a bare name
+     was dropped, both silently. Each is now E123 at the field; a bare name
      gets a fix-it to the bracketed form ([vsp]/[vep] span the value). *)
   let scenario_name_list ~key ~sp ~ep ~vsp ~vep v =
     let shape_error ~msg ~hint ~fix =
-      Parser_errors.push_error_fix ~sp ~ep ~code:"E118" ~msg ~hint ~fix in
+      Parser_errors.push_error_fix ~sp ~ep ~code:"E123" ~msg ~hint ~fix in
     let what = if key = "compose" then "a scenario" else "an intervention" in
     match v with
     | EList items ->
@@ -1803,7 +1803,7 @@ scenario_field:
           (* gh#1203: this used to read as `set = { k = 0 }`, setting the
              parameter to zero. The only brace-block fields are set/scale. *)
           Parser_errors.push_error_hint ~sp:$startpos ~ep:$endpos
-            ~code:"E120"
+            ~code:"E124"
             ~msg:(Printf.sprintf
               "`%s = { ... }` is not a scenario field: the only fields that \
                take a `{ ... }` block are `set` and `scale`" k)

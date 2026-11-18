@@ -82,8 +82,8 @@ compose = with_sia         →  compose = [with_sia]
 gamma   = { x = 1 }        →  set = { gamma = 0.2 }   (or scale = { gamma = 1.5 })
 ```
 
-**Diagnostic.** E118, "scenario `enable` takes a bracketed list, even for one
-name", with a fix-it to the bracketed form; E120, "`gamma = { ... }` is not a
+**Diagnostic.** E123, "scenario `enable` takes a bracketed list, even for one
+name", with a fix-it to the bracketed form; E124, "`gamma = { ... }` is not a
 scenario field".
 
 ## 2026-11-17 — constant destination weights must sum to 1
