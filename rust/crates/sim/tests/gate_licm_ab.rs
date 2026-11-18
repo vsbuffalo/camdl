@@ -117,7 +117,6 @@ fn trajectory_hash(traj: &sim::state::Trajectory) -> u64 {
 
 #[test]
 fn gate_licm_is_byte_identical() {
-    sim::eval_stats::set_allow_degenerate_rates(true);
 
     let (off, off_bytes) = load("licm_ab_off");
     let (on, on_bytes) = load("licm_ab_on");
@@ -146,8 +145,10 @@ fn gate_licm_is_byte_identical() {
     );
 
     // ── 2. SOUNDNESS ────────────────────────────────────────────────────────
-    let compiled_off = CompiledModel::new(off.clone()).expect("OFF model failed to compile");
-    let compiled_on = CompiledModel::new(on.clone()).expect("ON model failed to compile");
+    let compiled_off = CompiledModel::new(off.clone()).expect("OFF model failed to compile")
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true });
+    let compiled_on = CompiledModel::new(on.clone()).expect("ON model failed to compile")
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true });
 
     let params_off = compiled_off.default_params.clone();
     let params_on = compiled_on.default_params.clone();
@@ -334,12 +335,13 @@ fn gate_licm_inference_producer_byte_identical() {
     use std::sync::Arc;
     use sim::inference::{ChainBinomialProcess, ProcessModel};
     use sim::rng::StatefulRng;
-    sim::eval_stats::set_allow_degenerate_rates(true);
 
     let (off, _) = load("licm_ab_off");
     let (on, _) = load("licm_ab_on");
-    let compiled_off = Arc::new(CompiledModel::new(off).expect("OFF model failed to compile"));
-    let compiled_on = Arc::new(CompiledModel::new(on).expect("ON model failed to compile"));
+    let compiled_off = Arc::new(CompiledModel::new(off).expect("OFF model failed to compile")
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true }));
+    let compiled_on = Arc::new(CompiledModel::new(on).expect("ON model failed to compile")
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true }));
 
     let params_off = compiled_off.default_params.clone();
     let params_on = compiled_on.default_params.clone();
@@ -421,12 +423,13 @@ fn gate_licm_pgas_loglik_byte_identical() {
     use sim::inference::MultiStreamObsModel;
     use sim::rng::StatefulRng;
     use sim::schedule::StepPolicy;
-    sim::eval_stats::set_allow_degenerate_rates(true);
 
     let (off, _) = load("licm_ab_off");
     let (on, _) = load("licm_ab_on");
-    let compiled_off = Arc::new(CompiledModel::new(off).expect("OFF model failed to compile"));
-    let compiled_on = Arc::new(CompiledModel::new(on).expect("ON model failed to compile"));
+    let compiled_off = Arc::new(CompiledModel::new(off).expect("OFF model failed to compile")
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true }));
+    let compiled_on = Arc::new(CompiledModel::new(on).expect("ON model failed to compile")
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true }));
     assert!(
         compiled_off.resolved.per_eval_bindings.is_empty()
             && !compiled_on.resolved.per_eval_bindings.is_empty(),

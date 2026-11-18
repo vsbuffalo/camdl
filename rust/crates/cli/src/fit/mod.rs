@@ -441,9 +441,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         }
     }
     // gh#audit-C6 / gh#189: degenerate-rate handling is a keyed `[config]` field
-    // (folds into the fit-identity hash via the config blob), set before any rate
-    // evaluation. Was a CLI flag, which silently bypassed the run_id.
-    sim::eval_stats::set_allow_degenerate_rates(config.problem.config.allow_degenerate_rates);
+    // (folds into the fit-identity hash via the config blob). Every model this
+    // fit compiles carries it (`FitBackendConfig::eval_settings`): the
+    // capability scan and gradient preflight below, `FitRunConfig::build` for
+    // each method, and the `[synthetic]` generator's runs.
     // A forcing outside its range: the flag sets the keyed `[config]` field,
     // so the override reaches the fit identity either way.
     if a.forcing_extrapolation.allow_forcing_extrapolation {
@@ -833,7 +834,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         }
         let compiled = sim::CompiledModel::new(cap_model).unwrap_or_else(|e| {
             out.fail(format!("error: {:?}", e));
-        });
+        }).with_eval_settings(config.problem.config.eval_settings());
         if let Err(msg) = gate_run_method_against_model(&method.algorithm, &compiled, config.problem.config.dt) {
             out.fail(format!("error: {}", msg));
         }
@@ -1054,6 +1055,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 config.problem.compiled_ir.as_deref().unwrap_or(&config.problem.model.camdl),
                 &fit_dir,
                 config.problem.config.dt,
+                config.problem.config.eval_settings(),
                 emit_every.as_ref(),
             ).unwrap_or_else(|e| {
                 out.fail(format!("error: synthetic-data generation failed: {}", e));

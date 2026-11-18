@@ -163,6 +163,7 @@ pub fn emit_contrasts(
     obs_anchors: Option<ir::anchor::ObsAnchorTimes>,
     config_dt: f64,
     binomial: sim::rng::BinomialAlgorithm,
+    eval: sim::EvalSettings,
 ) -> Result<Vec<PathBuf>, String> {
     // The draws authority, carrying the run's chain selection: one resolve, used
     // both for the (θ, X) cloud below and for the method dir the saved paths are
@@ -344,7 +345,7 @@ pub fn emit_contrasts(
     let mut arms: HashMap<String, Arm> = HashMap::new();
     for run in &runs_union {
         if !arms.contains_key(run) {
-            arms.insert(run.clone(), Arm::build(model, fit_base, run, &placeholder, obs_anchors, binomial)?);
+            arms.insert(run.clone(), Arm::build(model, fit_base, run, &placeholder, obs_anchors, binomial, eval)?);
         }
     }
 
@@ -589,11 +590,13 @@ impl Arm {
         placeholder: &[(String, f64)],
         obs_anchors: Option<ir::anchor::ObsAnchorTimes>,
         binomial: sim::rng::BinomialAlgorithm,
+        eval: sim::EvalSettings,
     ) -> Result<Arm, String> {
         let resolved = resolve_arm(model, fit_base, "contrast arm", run, placeholder)?;
         let compiled = std::sync::Arc::new(
             sim::CompiledModel::new(resolved.model)
-                .map_err(|e| format!("contrast arm '{run}': compiling model: {e:?}"))?,
+                .map_err(|e| format!("contrast arm '{run}': compiling model: {e:?}"))?
+                .with_eval_settings(eval),
         );
         let quant_eval = QuantityEvaluator::new(&model.quantities, compiled.as_ref())
             .map_err(|e| format!("contrast arm '{run}': building quantity evaluator: {e}"))?;

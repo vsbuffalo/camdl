@@ -605,7 +605,7 @@ pub(crate) fn simulate_dataset(
     let mut denominators: Vec<Option<(String, Vec<f64>)>> = Vec::with_capacity(plans.len());
     for sp in &plans {
         let obs = declaration(&sp.name)?;
-        projected.push(crate::project_coverages(&traj, obs, &model, &sp.plan.scored())?);
+        projected.push(crate::project_coverages(&traj, obs, &model, &sp.plan.scored(), run.eval)?);
         denominators.push(match model_denominator_column(obs) {
             Some((col, flows)) => {
                 let indices = crate::flow_indices_of(&model, &flows);
@@ -622,7 +622,8 @@ pub(crate) fn simulate_dataset(
         .map_err(|e| format!("cannot create {}: {}", out_dir.display(), e))?;
 
     let compiled = Arc::new(
-        CompiledModel::new(model.clone()).map_err(|e| format!("compile error: {:?}", e))?,
+        CompiledModel::new(model.clone()).map_err(|e| format!("compile error: {:?}", e))?
+            .with_eval_settings(run.eval),
     );
     let params = compiled.default_params.clone();
     // One observation RNG, consumed in declaration order across streams — the
@@ -682,7 +683,7 @@ pub(crate) fn write_projected_dataset(
         let obs = model.observations.iter().find(|o| o.name == sp.name).ok_or_else(|| format!(
             "the observation design names stream '{}', which the model this run \
              simulated does not declare", sp.name))?;
-        projected.push(crate::project_coverages(&traj, obs, &model, &sp.plan.scored())?);
+        projected.push(crate::project_coverages(&traj, obs, &model, &sp.plan.scored(), run.eval)?);
     }
     std::fs::create_dir_all(out_dir)
         .map_err(|e| format!("cannot create {}: {}", out_dir.display(), e))?;
@@ -1290,8 +1291,8 @@ mod tests {
         let windows: Vec<(f64, Coverage)> = labels.iter()
             .map(|&t| (t, Coverage::Interval { start: t - 7.0, stop: t })).collect();
         let instants: Vec<(f64, Coverage)> = labels.iter().map(|&t| (t, Coverage::Instant)).collect();
-        let window = crate::project_coverages(&traj, stream("comm_frac"), &model, &windows).unwrap();
-        let instant = crate::project_coverages(&traj, stream("comm_frac_instant"), &model, &instants).unwrap();
+        let window = crate::project_coverages(&traj, stream("comm_frac"), &model, &windows, sim::EvalSettings::default()).unwrap();
+        let instant = crate::project_coverages(&traj, stream("comm_frac_instant"), &model, &instants, sim::EvalSettings::default()).unwrap();
 
         // The reference, from the run's own per-snapshot flow columns: a
         // snapshot's flows are the events since the previous snapshot, so a

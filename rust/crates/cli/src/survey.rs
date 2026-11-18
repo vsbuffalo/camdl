@@ -115,9 +115,6 @@ struct ResolvedSurveyInputs {
     /// scoring, as `fit run` removes it from training (gh#1059). `None`
     /// without one, and in inline mode.
     training_rows: Option<Vec<(String, usize)>>,
-    /// The fit config's `[config] allow_degenerate_rates`, which `fit run`
-    /// applied to the fit (gh#1235). `false` in inline mode.
-    fit_allow_degenerate_rates: bool,
 }
 
 // ─── cmd_survey entry point ──────────────────────────────────────────────────
@@ -194,10 +191,10 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     // `--allow-degenerate-rates` or the `--fit` config's `[config]
     // allow_degenerate_rates`, and fails the trajectory otherwise — under the
     // particle filter, a point where only some particles collapse still scores,
-    // to a different value (gh#1235). Applied before any point is scored and
-    // keyed in the survey's identity below.
-    let allow_degenerate_rates = a.allow_degenerate_rates || resolved.fit_allow_degenerate_rates;
-    sim::eval_stats::set_allow_degenerate_rates(allow_degenerate_rates);
+    // to a different value (gh#1235). Carried on the compiled model every point
+    // is scored with (`resolve_survey_inputs`), and keyed in the survey's
+    // identity below from that model.
+    let allow_degenerate_rates = resolved.compiled.eval.allow_degenerate_rates;
 
     // Resolve `--eval auto` against the compiled model. `Auto` picks
     // Pfilter when the model has stochastic process noise
@@ -943,8 +940,14 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
             fixed_resolved.insert(name.clone(), *v);
         }
 
+        // `--allow-degenerate-rates` or the fit config's `[config]
+        // allow_degenerate_rates`, which `fit run` applied to the fit (gh#1235).
+        let eval = sim::EvalSettings {
+            allow_degenerate_rates: a.allow_degenerate_rates || config.config.allow_degenerate_rates,
+        };
         let compiled = Arc::new(CompiledModel::new(model.clone())
-            .map_err(|e| format!("compile error: {:?}", e))?);
+            .map_err(|e| format!("compile error: {:?}", e))?
+            .with_eval_settings(eval));
         // `default_params` already carries every resolved tier, `[fixed]`
         // and the scenario included. Writing `[fixed]` over it again here
         // would put tier 2 back above tier 4 and undo a scenario that patches
@@ -1075,7 +1078,6 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
             scenario: scenario_opt,
             objective: config.likelihood_objective(),
             training_rows,
-            fit_allow_degenerate_rates: config.config.allow_degenerate_rates,
             parameters_provenance,
             notices,
             roles,
@@ -1204,7 +1206,8 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
         );
 
         let compiled = Arc::new(CompiledModel::new(model.clone())
-            .map_err(|e| format!("compile error: {:?}", e))?);
+            .map_err(|e| format!("compile error: {:?}", e))?
+            .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: a.allow_degenerate_rates }));
         let mut base_params = compiled.default_params.clone();
         for (name, &v) in &fixed_map {
             if let Some(&idx) = compiled.param_index.get(name.as_str()) {
@@ -1279,7 +1282,6 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
             // Inline mode has no `ic_free` key: every observation is scored.
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
             training_rows: None,
-            fit_allow_degenerate_rates: false,
         })
     }
 }

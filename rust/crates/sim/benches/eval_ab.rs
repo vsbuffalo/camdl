@@ -89,7 +89,8 @@ fn main() {
             }
         }
     }
-    let cm = CompiledModel::new(model).unwrap_or_else(|e| panic!("compile {path}: {e}"));
+    let cm = CompiledModel::new(model).unwrap_or_else(|e| panic!("compile {path}: {e}"))
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true });
     let params = cm.default_params.clone();
     let (int_s, real_s) = cm.initial_state_mean(&params).expect("initial_state_mean");
     let n_tr = cm.model.transitions.len();
@@ -103,7 +104,6 @@ fn main() {
 
     // ── Bit-exactness at the value level (independent of the trajectory gate).
     //    Both paths must agree bit-for-bit on every rate at the initial state.
-    sim::eval_stats::set_allow_degenerate_rates(true);
     let ctx = EvalCtx {
         model: &cm, int_s: &int_s, real_s: &real_s,
         params: &params, t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None,

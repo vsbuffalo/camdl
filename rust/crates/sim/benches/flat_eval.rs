@@ -81,7 +81,8 @@ fn main() {
             }
         }
     }
-    let cm = CompiledModel::new(model).unwrap_or_else(|e| panic!("compile {path}: {e}"));
+    let cm = CompiledModel::new(model).unwrap_or_else(|e| panic!("compile {path}: {e}"))
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true });
     let params = cm.default_params.clone();
     let (int_s, real_s) = cm.initial_state_mean(&params).expect("initial_state_mean");
     let n_tr = cm.model.transitions.len();
@@ -96,7 +97,6 @@ fn main() {
     let total_ops: usize = vm.rates.iter().map(|p| p.ops.len()).sum::<usize>()
         + vm.binding_progs.iter().map(|p| p.ops.len()).sum::<usize>();
 
-    sim::eval_stats::set_allow_degenerate_rates(true);
     // gh#815: stage the gh#272 per-eval prologue exactly as every forward
     // backend and inference producer does before its step loop
     // (`stage_per_eval`), and lend it into BOTH timing closures below as well as

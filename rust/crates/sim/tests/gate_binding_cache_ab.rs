@@ -83,7 +83,6 @@ fn trajectory_hash(traj: &sim::state::Trajectory) -> u64 {
 
 #[test]
 fn gate_binding_cache_is_byte_identical() {
-    sim::eval_stats::set_allow_degenerate_rates(true);
 
     let model = load("sparse_coupling_ab_folded");
 
@@ -96,7 +95,8 @@ fn gate_binding_cache_is_byte_identical() {
          model with hoisted bindings (per-patch N_p/I_agg_p)"
     );
 
-    let compiled = CompiledModel::new(model.clone()).expect("model failed to compile");
+    let compiled = CompiledModel::new(model.clone()).expect("model failed to compile")
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true });
     let params = compiled.default_params.clone();
 
     let t_start = model.simulation.t_start;

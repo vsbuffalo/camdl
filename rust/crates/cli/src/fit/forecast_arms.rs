@@ -184,7 +184,8 @@ fn resolve(
     let mut model = model.ok_or_else(|| "internal error: a forecast arm with no posterior draw".to_string())?;
     extend_run(&mut model, i.plan);
     let compiled = Arc::new(sim::CompiledModel::new(model)
-        .map_err(|e| format!("compiling forecast arm '{run}': {e:?}"))?);
+        .map_err(|e| format!("compiling forecast arm '{run}': {e:?}"))?
+        .with_eval_settings(i.baseline.eval));
     if compiled.param_index != i.baseline.param_index {
         return Err(format!(
             "internal error: forecast arm '{run}' orders its parameters differently from the fitted model"));

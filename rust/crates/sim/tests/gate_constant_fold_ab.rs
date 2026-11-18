@@ -137,7 +137,6 @@ fn gate_constant_fold_unparenthesised_quotient_is_byte_identical() {
 /// Load `<stem>_unfolded` and `<stem>_folded` and check both assertions of the
 /// module doc on them.
 fn check_fold_ab(stem: &str) {
-    sim::eval_stats::set_allow_degenerate_rates(true);
 
     let (unfolded, unfolded_bytes) = load(&format!("{stem}_unfolded"));
     let (folded, folded_bytes) = load(&format!("{stem}_folded"));
@@ -173,9 +172,11 @@ fn check_fold_ab(stem: &str) {
     // Same source, same seed, same backend: the folded and unfolded models must
     // produce a byte-identical trajectory.
     let compiled_unfolded = CompiledModel::new(unfolded.clone())
-        .expect("unfolded model failed to compile");
+        .expect("unfolded model failed to compile")
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true });
     let compiled_folded = CompiledModel::new(folded.clone())
-        .expect("folded model failed to compile");
+        .expect("folded model failed to compile")
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true });
 
     let params_unfolded = compiled_unfolded.default_params.clone();
     let params_folded = compiled_folded.default_params.clone();

@@ -76,26 +76,10 @@ fn param(name: &str, value: f64) -> Parameter {
 // OobPolicy::Error, tearing down the whole process — one bad particle could
 // crash an entire inference run. The fix routes it through the existing typed-
 // error boundary (eval_propensities): it must return a SimError, not panic.
-// ── Serialization for the degenerate-rate tests (gh#481) ─────────────────────
-//
-// `sim::eval_stats::allow_degenerate_rates` is a PROCESS-GLOBAL, and `cargo
-// test` runs the tests in a binary on parallel threads, so the tests below
-// clobber each other: one sets it `true` while another is mid-assertion that a
-// degenerate rate is *rejected*, and that one fails with the value allowed
-// through. Hold this lock for the whole of any test that touches the flag.
-//
-// The flag itself is deliberately left global — it is set once from the CLI at
-// startup and read by rayon workers, so making it thread-local would change
-// runtime semantics to fix a test-harness problem.
-static DEGENERATE_RATES_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-// Poison-tolerant: a genuine failure in one of these tests must not cascade
-// into six more by poisoning the mutex.
-fn degenerate_rates_guard() -> std::sync::MutexGuard<'static, ()> {
-    DEGENERATE_RATES_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
+/// The setting a test evaluates degenerate arithmetic under when it checks the
+/// `--allow-degenerate-rates` coercion: carried on the compiled model, so each
+/// test sets it on its own model and the tests share nothing.
+const ALLOW: sim::EvalSettings = sim::EvalSettings { allow_degenerate_rates: true };
 
 #[test]
 fn test_runtime_oob_table_lookup_returns_err_not_panic() {
@@ -350,7 +334,6 @@ fn test_binop_div() {
 
 #[test]
 fn test_div_by_zero_errors_by_default() {
-    let _degenerate_rates_guard = degenerate_rates_guard();
     // gh#audit-C6 / S1: division by zero used to silently return 0.0
     // (wrapped in Ok(_)) — masking malformed rate expressions. Now
     // it returns SimError::NumericalCollapse{DivByZero} by default;
@@ -367,16 +350,15 @@ fn test_div_by_zero_errors_by_default() {
         },
     });
     let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
-    sim::eval_stats::set_allow_degenerate_rates(false);
     let err = eval_expr(&expr, &ctx).unwrap_err();
     assert!(matches!(err, SimError::NumericalCollapse { kind: CollapseKind::DivByZero, .. }),
         "Div by zero must produce NumericalCollapse{{DivByZero}}, got {:?}", err);
 
     // Legacy silent-zero behaviour is still available under opt-in.
-    sim::eval_stats::set_allow_degenerate_rates(true);
+    let model = model.with_eval_settings(ALLOW);
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     let r = eval_expr(&expr, &ctx).unwrap();
     assert_eq!(r, 0.0, "with --allow-degenerate-rates, div-by-zero returns 0.0");
-    sim::eval_stats::set_allow_degenerate_rates(false); // reset for other tests
 }
 
 #[test]
@@ -612,7 +594,6 @@ fn test_binop_le() {
 
 #[test]
 fn test_log_nonpositive_errors_by_default() {
-    let _degenerate_rates_guard = degenerate_rates_guard();
     // gh#audit-C6 / S1, item 17: `log(x ≤ 0)` is a domain error (no real
     // result), exactly like `sqrt(neg)` — it must route through the same typed
     // NumericalCollapse under the strict default, NOT silently return −inf.
@@ -625,21 +606,19 @@ fn test_log_nonpositive_errors_by_default() {
         let expr = Expr::UnOp(UnOpWrap {
             un_op: UnOpExpr { op: UnOp::Log, arg: Box::new(Expr::Const(ConstExpr { value })) },
         });
-        sim::eval_stats::set_allow_degenerate_rates(false);
         let err = eval_expr(&expr, &ctx).unwrap_err();
         assert!(matches!(err, SimError::NumericalCollapse { kind: CollapseKind::LogNonPositive, .. }),
             "log({value}) must produce NumericalCollapse{{LogNonPositive}}, got {:?}", err);
         // --allow-degenerate-rates coerces the degenerate rate to 0, like sqrt.
-        sim::eval_stats::set_allow_degenerate_rates(true);
+        let allow_model = CompiledModel::new(minimal_model(vec![int_comp("S")], vec![])).unwrap().with_eval_settings(ALLOW);
+        let ctx = EvalCtx { model: &allow_model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
         assert_eq!(eval_expr(&expr, &ctx).unwrap(), 0.0,
             "with --allow-degenerate-rates, log({value}) coerces to 0.0");
-        sim::eval_stats::set_allow_degenerate_rates(false);
     }
 }
 
 #[test]
 fn test_sqrt_negative_errors_by_default() {
-    let _degenerate_rates_guard = degenerate_rates_guard();
     // gh#audit-C6 / S1.
     use sim::{CollapseKind, SimError};
     let model = CompiledModel::new(minimal_model(vec![int_comp("S")], vec![])).unwrap();
@@ -649,13 +628,12 @@ fn test_sqrt_negative_errors_by_default() {
         un_op: UnOpExpr { op: UnOp::Sqrt, arg: Box::new(Expr::Const(ConstExpr { value: -4.0 })) },
     });
     let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
-    sim::eval_stats::set_allow_degenerate_rates(false);
     let err = eval_expr(&expr, &ctx).unwrap_err();
     assert!(matches!(err, SimError::NumericalCollapse { kind: CollapseKind::SqrtNegative, .. }),
         "Sqrt of negative must produce NumericalCollapse{{SqrtNegative}}, got {:?}", err);
-    sim::eval_stats::set_allow_degenerate_rates(true);
+    let model = model.with_eval_settings(ALLOW);
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     assert_eq!(eval_expr(&expr, &ctx).unwrap(), 0.0);
-    sim::eval_stats::set_allow_degenerate_rates(false);
 }
 
 // item 17: the fast (pre-resolved) propensity path must reject a `log(x ≤ 0)`
@@ -663,7 +641,6 @@ fn test_sqrt_negative_errors_by_default() {
 // `is_nan` boundary guard is now caught and surfaced as a typed collapse.
 #[test]
 fn test_log_nonpositive_rate_errors_via_eval_propensities() {
-    let _degenerate_rates_guard = degenerate_rates_guard();
     use ir::transition::{StoichiometryEntry, Transition};
     use sim::propensity::eval_propensities;
 
@@ -691,7 +668,6 @@ fn test_log_nonpositive_rate_errors_via_eval_propensities() {
     let real_s = RealState::new(0);
     let mut out = Vec::new();
 
-    sim::eval_stats::set_allow_degenerate_rates(false);
     let err = eval_propensities(&model, &int_s, &real_s, &[], 0.0, 1.0, None, &mut out)
         .expect_err("log of a non-positive rate must hard-error under the strict default");
     // Must be a NumericalCollapse (the log −inf now routes through the is_finite
@@ -700,11 +676,10 @@ fn test_log_nonpositive_rate_errors_via_eval_propensities() {
     assert!(matches!(err, sim::SimError::NumericalCollapse { .. }),
         "strict log(≤0) rate must be a NumericalCollapse, not NegativePropensity; got {err:?}");
     // --allow-degenerate-rates coerces the degenerate rate to a finite 0.
-    sim::eval_stats::set_allow_degenerate_rates(true);
+    let model = model.with_eval_settings(ALLOW);
     eval_propensities(&model, &int_s, &real_s, &[], 0.0, 1.0, None, &mut out)
         .expect("with --allow-degenerate-rates the degenerate rate coerces to 0");
     assert_eq!(out, vec![0.0]);
-    sim::eval_stats::set_allow_degenerate_rates(false);
 }
 
 // item 17: a resolved propensity that is +inf (an overflow that escaped the
@@ -712,7 +687,6 @@ fn test_log_nonpositive_rate_errors_via_eval_propensities() {
 // `is_finite` boundary guard must reject it rather than push +inf.
 #[test]
 fn test_infinite_propensity_is_rejected() {
-    let _degenerate_rates_guard = degenerate_rates_guard();
     use ir::transition::{StoichiometryEntry, Transition};
     use sim::propensity::eval_propensities;
 
@@ -740,16 +714,13 @@ fn test_infinite_propensity_is_rejected() {
     let real_s = RealState::new(0);
     let mut out = Vec::new();
 
-    sim::eval_stats::set_allow_degenerate_rates(false);
     let res = eval_propensities(&model, &int_s, &real_s, &[], 0.0, 1.0, None, &mut out);
     assert!(res.is_err(),
         "a +inf resolved propensity must be rejected, not used as a rate; got {:?}", out);
-    sim::eval_stats::set_allow_degenerate_rates(false);
 }
 
 #[test]
 fn test_pow_negative_base_fractional_exp_errors_by_default() {
-    let _degenerate_rates_guard = degenerate_rates_guard();
     // gh#audit-C6 / S1.
     use sim::{CollapseKind, SimError};
     let model = CompiledModel::new(minimal_model(vec![int_comp("S")], vec![])).unwrap();
@@ -763,18 +734,16 @@ fn test_pow_negative_base_fractional_exp_errors_by_default() {
         },
     });
     let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
-    sim::eval_stats::set_allow_degenerate_rates(false);
     let err = eval_expr(&expr, &ctx).unwrap_err();
     assert!(matches!(err, SimError::NumericalCollapse { kind: CollapseKind::PowNanInf, .. }),
         "(-2)^0.5 must produce NumericalCollapse{{PowNanInf}}, got {:?}", err);
-    sim::eval_stats::set_allow_degenerate_rates(true);
+    let model = model.with_eval_settings(ALLOW);
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     assert_eq!(eval_expr(&expr, &ctx).unwrap(), 0.0);
-    sim::eval_stats::set_allow_degenerate_rates(false);
 }
 
 #[test]
 fn test_pow_zero_to_negative_errors_by_default() {
-    let _degenerate_rates_guard = degenerate_rates_guard();
     // gh#audit-C6 / S1.
     use sim::{CollapseKind, SimError};
     let model = CompiledModel::new(minimal_model(vec![int_comp("S")], vec![])).unwrap();
@@ -788,11 +757,86 @@ fn test_pow_zero_to_negative_errors_by_default() {
         },
     });
     let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
-    sim::eval_stats::set_allow_degenerate_rates(false);
     let err = eval_expr(&expr, &ctx).unwrap_err();
     assert!(matches!(err, SimError::NumericalCollapse { kind: CollapseKind::PowNanInf, .. }),
         "0^(-1) must produce NumericalCollapse{{PowNanInf}}, got {:?}", err);
-    sim::eval_stats::set_allow_degenerate_rates(true);
+    let model = model.with_eval_settings(ALLOW);
+    let ctx = EvalCtx { model: &model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     assert_eq!(eval_expr(&expr, &ctx).unwrap(), 0.0);
-    sim::eval_stats::set_allow_degenerate_rates(false);
+}
+
+/// The degenerate-rate setting belongs to the compiled model, not the process:
+/// two models of one IR, one strict and one under `allow_degenerate_rates`,
+/// evaluated at the same time on different threads, each keep their own
+/// setting on every evaluator a run reaches — the flat bytecode path and the
+/// boundary guard behind `eval_propensities`, `eval_resolved`, and the
+/// tree-walking `eval_expr`. A process-wide setting cannot pass this: whichever
+/// value it held, one of the two models would see the other's.
+#[test]
+fn two_models_in_one_process_keep_their_own_degenerate_rate_setting() {
+    use ir::transition::{StoichiometryEntry, Transition};
+    use sim::propensity::eval_propensities;
+    use sim::resolved_expr::eval_resolved;
+
+    // rate = S / (S - 1): with S = 1 a division by zero that depends on the
+    // state, so no compile-time pass can remove it.
+    let rate = Expr::BinOp(BinOpWrap { bin_op: BinOpExpr {
+        op: BinOp::Div,
+        left: Box::new(Expr::Pop(PopExpr { pop: "S".into() })),
+        right: Box::new(Expr::BinOp(BinOpWrap { bin_op: BinOpExpr {
+            op: BinOp::Sub,
+            left: Box::new(Expr::Pop(PopExpr { pop: "S".into() })),
+            right: Box::new(Expr::Const(ConstExpr { value: 1.0 })),
+        }})),
+    }});
+    let ir = || {
+        let mut m = minimal_model(vec![int_comp("S")], vec![]);
+        m.transitions.push(Transition {
+            rate_state_grad: Default::default(),
+            name: "leave_S".into(),
+            stoichiometry: vec![StoichiometryEntry("S".into(), -1)],
+            rate: rate.clone(),
+            metadata: None,
+            draw_method: Default::default(),
+            rate_grad: HashMap::new(),
+            lineage: None,
+        });
+        m
+    };
+    let strict = CompiledModel::new(ir()).unwrap();
+    let allow = CompiledModel::new(ir()).unwrap().with_eval_settings(ALLOW);
+    let int_s = IntState::from_vec(vec![1]);
+    let real_s = RealState::new(0);
+    let ctx = |model| EvalCtx {
+        model, int_s: &int_s, real_s: &real_s, params: &[], t: 0.0, dt: 1.0,
+        projected: None, aux: None, int_float_override: None, per_eval: None,
+    };
+
+    std::thread::scope(|scope| {
+        let strict_thread = scope.spawn(|| {
+            for _ in 0..2000 {
+                let mut out = Vec::new();
+                assert!(matches!(
+                    eval_propensities(&strict, &int_s, &real_s, &[], 0.0, 1.0, None, &mut out),
+                    Err(sim::SimError::NumericalCollapse { .. })
+                ), "the strict model must refuse the collapsed rate");
+                assert!(eval_resolved(&strict.resolved.rates[0], &ctx(&strict)).is_nan(),
+                    "the strict model's resolved evaluator must return the NaN the boundary refuses");
+                assert!(eval_expr(&rate, &ctx(&strict)).is_err(),
+                    "the strict model's tree evaluator must refuse the division");
+            }
+        });
+        let allow_thread = scope.spawn(|| {
+            for _ in 0..2000 {
+                let mut out = Vec::new();
+                eval_propensities(&allow, &int_s, &real_s, &[], 0.0, 1.0, None, &mut out)
+                    .expect("the allowing model must coerce the collapsed rate");
+                assert_eq!(out, vec![0.0]);
+                assert_eq!(eval_resolved(&allow.resolved.rates[0], &ctx(&allow)), 0.0);
+                assert_eq!(eval_expr(&rate, &ctx(&allow)).unwrap(), 0.0);
+            }
+        });
+        strict_thread.join().unwrap();
+        allow_thread.join().unwrap();
+    });
 }

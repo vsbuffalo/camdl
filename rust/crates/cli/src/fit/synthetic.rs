@@ -55,6 +55,7 @@ pub fn generate_synthetic_datasets(
     model_path: &str,
     fit_dir: &Path,
     dt: f64,
+    eval: sim::EvalSettings,
     emit: Option<&crate::emit_every::EmitEvery>,
 ) -> Result<Vec<SyntheticDataset>, String> {
     let data_dir = fit_dir.join("synthetic").join("data");
@@ -92,7 +93,7 @@ pub fn generate_synthetic_datasets(
         })
         .unwrap_or_default();
     let runs: Vec<crate::util::SimRun> = seeds.iter()
-        .map(|&sim_seed| synthetic_sim_run(spec, model_path, sim_seed, dt))
+        .map(|&sim_seed| synthetic_sim_run(spec, model_path, sim_seed, dt, eval))
         .collect::<Result<_, _>>()?;
     crate::util::emit_run_notices(&crate::out::detached(), &runs.iter().collect::<Vec<_>>());
     let mut out = Vec::with_capacity(seeds.len());
@@ -122,6 +123,7 @@ fn synthetic_sim_run(
     model_path: &str,
     sim_seed: u64,
     dt: f64,
+    eval: sim::EvalSettings,
 ) -> Result<SimRun, String> {
     let truth_overrides = load_params_toml(&spec.true_params)
         .map_err(|e| format!("parsing [synthetic] true_params {}: {}", spec.true_params, e))?;
@@ -143,6 +145,9 @@ fn synthetic_sim_run(
         backend: spec.backend,
         dt,
         seed: sim_seed,
+        // The fit's `[config] allow_degenerate_rates`: the data are drawn
+        // under the setting the fit then scores them under.
+        eval,
         ..SimRun::default()
     })
 }
@@ -286,7 +291,7 @@ simulate { from = 0 'days  to = 10 'days }
         let spec = spec_for(&truth_path, vec![1, 2, 3]);
         let datasets = generate_synthetic_datasets(
             &spec, ir_path.to_str().unwrap(), &fit_dir,
-            1.0, None,
+            1.0, sim::EvalSettings::default(), None,
         ).expect("generation must succeed on minimal SIR");
 
         assert_eq!(datasets.len(), 3);
@@ -318,11 +323,11 @@ simulate { from = 0 'days  to = 10 'days }
 
         let a = generate_synthetic_datasets(
             &spec, ir_path.to_str().unwrap(),
-            &tmp.path().join("run_a"), 1.0, None,
+            &tmp.path().join("run_a"), 1.0, sim::EvalSettings::default(), None,
         ).unwrap();
         let b = generate_synthetic_datasets(
             &spec, ir_path.to_str().unwrap(),
-            &tmp.path().join("run_b"), 1.0, None,
+            &tmp.path().join("run_b"), 1.0, sim::EvalSettings::default(), None,
         ).unwrap();
 
         assert_eq!(std::fs::read(&a[0].files["cases"]).unwrap(),
@@ -338,7 +343,7 @@ simulate { from = 0 'days  to = 10 'days }
         let spec = spec_for(&truth_path, vec![1, 999]);
         let ds = generate_synthetic_datasets(
             &spec, ir_path.to_str().unwrap(),
-            &tmp.path().join("fit"), 1.0, None,
+            &tmp.path().join("fit"), 1.0, sim::EvalSettings::default(), None,
         ).unwrap();
         assert_ne!(std::fs::read(&ds[0].files["cases"]).unwrap(),
                    std::fs::read(&ds[1].files["cases"]).unwrap(),

@@ -558,6 +558,7 @@ pub fn build_cell_sim_run(
         seed: process_seed,
         integrator: job.integrator, // gh#166: CLI --integrator override
         binomial: job.binomial,
+        eval: job.eval,
     }
 }
 

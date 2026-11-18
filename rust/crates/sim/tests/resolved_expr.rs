@@ -94,14 +94,12 @@ fn resolve_ctx_from(model: &CompiledModel) -> ResolveCtx<'_> {
     }
 }
 
-/// gh#audit-C6 / S1: ALLOW_DEGENERATE_RATES is process-global atomic
-/// state. Tests that toggle it must serialize via this mutex so a
-/// parallel test doesn't see the flag in the wrong state mid-eval.
-static EVAL_FLAG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// The setting the comparison tests compile their models under.
+const ALLOW: sim::EvalSettings = sim::EvalSettings { allow_degenerate_rates: true };
 
 /// Assert eval_resolved(resolve(expr)) == eval_expr(expr) for given context.
 ///
-/// Enables --allow-degenerate-rates so the degenerate-arithmetic test
+/// Evaluates under --allow-degenerate-rates so the degenerate-arithmetic test
 /// cases (div-by-zero etc.) take the legacy silent-zero path on both
 /// sides. Without the flag, eval_expr returns
 /// SimError::NumericalCollapse and eval_resolved returns NaN — they
@@ -109,15 +107,14 @@ static EVAL_FLAG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// (Result<f64> vs f64) makes equivalence assertion awkward. The
 /// comparison test isn't the right place to assert hard-fail behavior;
 /// expr_eval.rs::test_*_errors_by_default carries that load.
+/// `model` must be compiled with `allow_degenerate_rates` ([`ALLOW`]).
 fn assert_resolved_matches(expr: &Expr, model: &CompiledModel, int_s: &IntState, real_s: &RealState, params: &[f64], t: f64) {
-    let _guard = EVAL_FLAG_LOCK.lock().unwrap();
-    sim::eval_stats::set_allow_degenerate_rates(true);
+    assert!(model.eval.allow_degenerate_rates, "compile the model with `allow`");
     let rctx = resolve_ctx_from(model);
     let resolved = resolve_expr(expr, &rctx).expect("resolve_expr failed");
     let ctx = EvalCtx { model, int_s, real_s, params, t, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None };
     let expected = eval_expr(expr, &ctx).expect("eval_expr failed");
     let actual = eval_resolved(&resolved, &ctx);
-    sim::eval_stats::set_allow_degenerate_rates(false);
     assert!(
         (expected - actual).abs() < 1e-12,
         "mismatch: eval_expr={}, eval_resolved={}", expected, actual
@@ -128,7 +125,7 @@ fn assert_resolved_matches(expr: &Expr, model: &CompiledModel, int_s: &IntState,
 #[allow(clippy::approx_constant)]
 #[test]
 fn test_const() {
-    let model = CompiledModel::new(minimal_model(vec![int_comp("S")], vec![])).unwrap();
+    let model = CompiledModel::new(minimal_model(vec![int_comp("S")], vec![])).unwrap().with_eval_settings(ALLOW);
     let int_s = IntState::new(1);
     let real_s = RealState::new(0);
     let expr = Expr::Const(ConstExpr { value: 3.14 });
@@ -140,7 +137,7 @@ fn test_param() {
     let model = CompiledModel::new(minimal_model(
         vec![int_comp("S")],
         vec![param("beta", 0.5)],
-    )).unwrap();
+    )).unwrap().with_eval_settings(ALLOW);
     let int_s = IntState::new(1);
     let real_s = RealState::new(0);
     let expr = Expr::Param(ParamExpr { param: "beta".into() });
@@ -152,7 +149,7 @@ fn test_pop() {
     let model = CompiledModel::new(minimal_model(
         vec![int_comp("I"), int_comp("S")],
         vec![],
-    )).unwrap();
+    )).unwrap().with_eval_settings(ALLOW);
     let mut int_s = IntState::new(2);
     int_s.counts[0] = 42;
     int_s.counts[1] = 100;
@@ -166,7 +163,7 @@ fn test_pop_sum() {
     let model = CompiledModel::new(minimal_model(
         vec![int_comp("S"), int_comp("I"), int_comp("R")],
         vec![],
-    )).unwrap();
+    )).unwrap().with_eval_settings(ALLOW);
     let mut int_s = IntState::new(3);
     int_s.counts[0] = 100;
     int_s.counts[1] = 50;
@@ -178,7 +175,7 @@ fn test_pop_sum() {
 
 #[test]
 fn test_time() {
-    let model = CompiledModel::new(minimal_model(vec![int_comp("S")], vec![])).unwrap();
+    let model = CompiledModel::new(minimal_model(vec![int_comp("S")], vec![])).unwrap().with_eval_settings(ALLOW);
     let int_s = IntState::new(1);
     let real_s = RealState::new(0);
     let expr = Expr::Time(TimeExpr { time: () });
@@ -190,7 +187,7 @@ fn test_binop_arithmetic() {
     let model = CompiledModel::new(minimal_model(
         vec![int_comp("S")],
         vec![param("a", 3.0), param("b", 4.0)],
-    )).unwrap();
+    )).unwrap().with_eval_settings(ALLOW);
     let int_s = IntState::new(1);
     let real_s = RealState::new(0);
     let params = vec![3.0, 4.0];
@@ -217,7 +214,7 @@ fn test_unop() {
     let model = CompiledModel::new(minimal_model(
         vec![int_comp("S")],
         vec![param("x", 2.0)],
-    )).unwrap();
+    )).unwrap().with_eval_settings(ALLOW);
     let int_s = IntState::new(1);
     let real_s = RealState::new(0);
     let params = vec![2.0];
@@ -240,7 +237,7 @@ fn test_cond() {
     let model = CompiledModel::new(minimal_model(
         vec![int_comp("S")],
         vec![param("x", 5.0)],
-    )).unwrap();
+    )).unwrap().with_eval_settings(ALLOW);
     let int_s = IntState::new(1);
     let real_s = RealState::new(0);
     let params = vec![5.0];
@@ -262,7 +259,7 @@ fn test_realistic_rate_expression() {
     let model = CompiledModel::new(minimal_model(
         vec![int_comp("S"), int_comp("E"), int_comp("I"), int_comp("R")],
         vec![param("beta", 0.3)],
-    )).unwrap();
+    )).unwrap().with_eval_settings(ALLOW);
     let mut int_s = IntState::new(4);
     int_s.counts[0] = 990;  // S
     int_s.counts[1] = 5;    // E

@@ -209,16 +209,16 @@ impl RunConfig {
 pub(crate) struct EngineSettings {
     pub backend: ForwardBackend,
     pub dt: f64,
-    pub allow_degenerate_rates: bool,
+    /// The evaluator settings every cell's compiled model carries
+    /// (`SimRun::eval`, `CompiledModel::with_eval_settings`).
+    pub eval: sim::EvalSettings,
     pub allow_forcing_extrapolation: bool,
 }
 
 impl EngineSettings {
-    /// Install the process-wide evaluator settings the engine and its run-note
-    /// reporter read, while those still exist (phase 3 step 3 removes them).
-    /// Called once, before any cell runs.
+    /// Install the process-wide forcing-extrapolation policy the run-note
+    /// reporter reads. Called once, before any cell runs.
     pub fn install_evaluator_settings(&self) {
-        sim::eval_stats::set_allow_degenerate_rates(self.allow_degenerate_rates);
         crate::forcing_extrapolation::set_allowed(self.allow_forcing_extrapolation);
     }
 }
@@ -231,7 +231,7 @@ impl ResolvedSimConfig {
         EngineSettings {
             backend: forward_backend(*backend),
             dt: dt.get(),
-            allow_degenerate_rates: *allow_degenerate_rates,
+            eval: sim::EvalSettings { allow_degenerate_rates: *allow_degenerate_rates },
             allow_forcing_extrapolation: *allow_forcing_extrapolation,
         }
     }
@@ -313,7 +313,7 @@ mod tests {
             EngineSettings {
                 backend: ForwardBackend::Ode,
                 dt: 0.25,
-                allow_degenerate_rates: true,
+                eval: sim::EvalSettings { allow_degenerate_rates: true },
                 allow_forcing_extrapolation: true,
             }
         );
