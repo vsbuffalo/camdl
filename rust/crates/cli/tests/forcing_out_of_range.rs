@@ -226,6 +226,41 @@ fn fit_run_refuses_each_kind_past_its_range() {
     }
 }
 
+/// What a `run.json` records of a run that held `mult` past its range at
+/// t = 50 under the override.
+fn held_mult_past_50() -> serde_json::Value {
+    serde_json::json!({
+        "allowed": true,
+        "held": [{ "forcing": "mult", "defined_on": [0.0, 50.0], "side": "after", "held_value_at": 50.0 }],
+    })
+}
+
+/// A fit under `[config] allow_forcing_extrapolation = true` records the
+/// override and the one forcing it held in its method leaf's `run.json`, as a
+/// simulate under the flag does in its leaf's: the record is the command's,
+/// whichever way the override was given.
+#[test]
+fn the_override_records_the_forcing_it_held() {
+    let tmp = tempfile::tempdir().unwrap();
+    let m = model(tmp.path(), "linear", &ROWS_TO_50);
+    let o = fit_run(tmp.path(), &m, "allow_forcing_extrapolation = true\n");
+    assert!(o.status.success(), "{}", stderr(&o));
+    let records = statuses(&tmp.path().join("results"));
+    let method: Vec<_> = records.iter().filter(|(_, v)| v["kind"] != "fit").collect();
+    assert!(!method.is_empty(), "a method leaf was written: {records:?}");
+    for (path, v) in method {
+        assert_eq!(v["inputs"]["forcing_extrapolation"], held_mult_past_50(), "{}:\n{v:#}", path.display());
+    }
+
+    let o = simulate(tmp.path(), &m, &["--allow-forcing-extrapolation"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let records = statuses(&tmp.path().join("cas"));
+    assert!(!records.is_empty(), "the simulate leaf was written");
+    for (path, v) in records {
+        assert_eq!(v["inputs"]["forcing_extrapolation"], held_mult_past_50(), "{}:\n{v:#}", path.display());
+    }
+}
+
 /// A refused fit does not leave its claim open: the method's `run.json` is
 /// marked `failed`, with the refusal as its failure, and no lock is left
 /// behind, for each method that holds a claim while it runs.

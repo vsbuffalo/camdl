@@ -232,23 +232,26 @@ impl RunConfig {
 }
 
 /// What the engine is told, derived from a [`ResolvedSimConfig`] by
-/// [`ResolvedSimConfig::engine_settings`] and from nowhere else.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// [`ResolvedSimConfig::engine_settings`] and from nowhere else. Derived once
+/// per invocation: the forcing policy it holds is the record of what the run
+/// held, so the CAS sink writes from this instance.
+#[derive(Debug, Clone)]
 pub(crate) struct EngineSettings {
     pub backend: ForwardBackend,
     pub dt: f64,
     /// The evaluator settings every cell's compiled model carries
     /// (`SimRun::eval`, `CompiledModel::with_eval_settings`).
     pub eval: sim::EvalSettings,
-    pub allow_forcing_extrapolation: bool,
+    /// `--allow-forcing-extrapolation`, as the policy the run's forcing notes
+    /// are routed into and its leaves' records name.
+    pub forcing: crate::forcing_extrapolation::ForcingPolicy,
 }
 
 impl EngineSettings {
-    /// Install the process-wide forcing-extrapolation policy the run-note
-    /// reporter and the record writer read — the one evaluator-side setting
-    /// still process-wide. Called once, before any cell runs.
-    pub fn install_forcing_policy(&self) {
-        crate::forcing_extrapolation::set_allowed(self.allow_forcing_extrapolation);
+    /// Route the run's forcing notes into its policy until the guard drops.
+    /// Called once, before any cell runs, and held for the command.
+    pub fn install_forcing_policy(&self) -> crate::forcing_extrapolation::Installed {
+        self.forcing.install()
     }
 }
 
@@ -261,7 +264,7 @@ impl ResolvedSimConfig {
             backend: forward_backend(*backend),
             dt: dt.get(),
             eval: sim::EvalSettings { allow_degenerate_rates: *allow_degenerate_rates },
-            allow_forcing_extrapolation: *allow_forcing_extrapolation,
+            forcing: crate::forcing_extrapolation::ForcingPolicy::new(*allow_forcing_extrapolation),
         }
     }
 }
@@ -451,15 +454,11 @@ mod tests {
             run,
             arms: Vec::new(),
         };
-        assert_eq!(
-            cfg.engine_settings(),
-            EngineSettings {
-                backend: ForwardBackend::Ode,
-                dt: 0.25,
-                eval: sim::EvalSettings { allow_degenerate_rates: true },
-                allow_forcing_extrapolation: true,
-            }
-        );
+        let EngineSettings { backend, dt, eval, forcing } = cfg.engine_settings();
+        assert_eq!(backend, ForwardBackend::Ode);
+        assert_eq!(dt, 0.25);
+        assert_eq!(eval, sim::EvalSettings { allow_degenerate_rates: true });
+        assert!(forcing.allowed());
     }
 
     /// Where each field of the resolved configuration comes from: the inputs

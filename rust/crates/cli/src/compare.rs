@@ -546,7 +546,11 @@ fn positional_model_names(paths: &[String]) -> Vec<String> {
 }
 
 pub fn cmd_compare(a: &crate::args::CompareArgs) {
-    crate::forcing_extrapolation::set_allowed(a.forcing_extrapolation.allow_forcing_extrapolation);
+    // The forcing-extrapolation policy this command's evaluations run under,
+    // installed for the rest of the command.
+    let forcing =
+        crate::forcing_extrapolation::ForcingPolicy::new(a.forcing_extrapolation.allow_forcing_extrapolation);
+    let _forcing_route = forcing.install();
     // compare has no `--no-color`: its painters follow the environment and
     // whether each stream is a terminal.
     let out = crate::out::Out::new(false);

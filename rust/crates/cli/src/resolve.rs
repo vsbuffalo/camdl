@@ -236,6 +236,10 @@ pub struct RecordMeta {
     /// The model's calendar axis, recorded as `run.json`'s `calendar` block.
     /// Every record carries one, so it is a constructor argument (D59).
     pub calendar: ir::caltime::CalendarAxis,
+    /// The command's forcing-extrapolation policy: under the override, the
+    /// record says so and names the forcings the command held. Every command
+    /// that writes has one, so it is a constructor argument.
+    pub forcing: crate::forcing_extrapolation::ForcingPolicy,
 }
 
 impl RecordMeta {
@@ -245,6 +249,7 @@ impl RecordMeta {
         model_path: impl Into<String>,
         label: Option<String>,
         calendar: ir::caltime::CalendarAxis,
+        forcing: &crate::forcing_extrapolation::ForcingPolicy,
     ) -> Self {
         RecordMeta {
             ir_version: ir_version.into(),
@@ -255,6 +260,7 @@ impl RecordMeta {
             label,
             output_schema: BTreeMap::new(),
             calendar,
+            forcing: forcing.clone(),
         }
     }
 
@@ -444,6 +450,9 @@ pub enum ResolvedWrite {
 pub struct ResolvedClaim {
     claim: StreamClaim,
     record: RunRecord,
+    /// The writing command's policy ([`RecordMeta::forcing`]): the finalized
+    /// record names what it held by then.
+    forcing: crate::forcing_extrapolation::ForcingPolicy,
 }
 
 impl ResolvedClaim {
@@ -457,6 +466,11 @@ impl ResolvedClaim {
     /// `Completed` leaf whose payload file was never written.
     pub fn write(&self, name: &str, bytes: &[u8]) -> Result<(), CasError> {
         self.claim.write(name, bytes)
+    }
+
+    /// The writing command's forcing-extrapolation policy.
+    pub fn forcing(&self) -> &crate::forcing_extrapolation::ForcingPolicy {
+        &self.forcing
     }
 
     /// Attach the tabular outputs' column schema, keyed by leaf-relative path,
@@ -480,7 +494,7 @@ impl ResolvedClaim {
     /// `run.json.inputs`. (`StreamClaim::finalize` flips status and builds the
     /// exact-set manifest from the streamed files.)
     pub fn finalize(mut self, mut display_inputs: serde_json::Value) -> Result<PathBuf, CasError> {
-        crate::forcing_extrapolation::record_in(&mut display_inputs);
+        self.forcing.record_in(&mut display_inputs);
         self.record.inputs = display_inputs;
         self.claim.finalize(self.record)
     }
@@ -499,7 +513,7 @@ fn build_record(resolved: &ResolvedArtifact, meta: &RecordMeta, status: RunStatu
     // Display-only, never hashed: a run made under
     // `--allow-forcing-extrapolation` says so, and names what it held.
     let mut inputs = resolved.display_inputs.clone();
-    crate::forcing_extrapolation::record_in(&mut inputs);
+    meta.forcing.record_in(&mut inputs);
     RunRecord {
         format_version: FORMAT_VERSION,
         kind: resolved.kind,
@@ -557,7 +571,7 @@ pub fn begin_resolved_write(
         WriteMode::Streaming => {
             let record = build_record(resolved, meta, RunStatus::Running);
             let claim = store.claim_streaming(&dir, record.clone())?;
-            Ok(ResolvedWrite::Streaming(ResolvedClaim { claim, record }))
+            Ok(ResolvedWrite::Streaming(ResolvedClaim { claim, record, forcing: meta.forcing.clone() }))
         }
     }
 }

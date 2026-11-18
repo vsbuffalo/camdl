@@ -1418,7 +1418,11 @@ struct PredictOutcome {
 
 /// `camdl fit predict` — write the free-forward posterior predictive artifact.
 pub fn cmd_fit_predict(args: &crate::args::FitPredictArgs) {
-    crate::forcing_extrapolation::set_allowed(args.forcing_extrapolation.allow_forcing_extrapolation);
+    // The forcing-extrapolation policy this command's evaluations run under,
+    // installed for the rest of the command.
+    let forcing =
+        crate::forcing_extrapolation::ForcingPolicy::new(args.forcing_extrapolation.allow_forcing_extrapolation);
+    let _forcing_route = forcing.install();
     // fit predict has no `--no-color`: its painters follow the environment
     // and whether each stream is a terminal.
     let out = crate::out::Out::new(false);
@@ -1681,9 +1685,13 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     let model = model;
     // A fit made under `allow_forcing_extrapolation` is predicted under it:
     // the predictive replays the fit's own model over its own horizon.
-    if config.config.allow_forcing_extrapolation {
-        crate::forcing_extrapolation::set_allowed(true);
-    }
+    // The fit's policy replaces the command's own for the rest of the
+    // predict. A forcing the command's policy refused before this point has
+    // already ended the command, so only what is evaluated from here on
+    // differs.
+    let _fit_forcing_route = (config.config.allow_forcing_extrapolation
+        && !args.forcing_extrapolation.allow_forcing_extrapolation)
+        .then(|| crate::forcing_extrapolation::ForcingPolicy::new(true).install());
     // …and under its `allow_degenerate_rates`: a rate that collapsed to 0 in
     // the fit collapses to 0 in every replay of it (the one-step filters, the
     // free-forward replay, the forecast, the contrast forks), rather than

@@ -805,9 +805,9 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
     // The compile setting is resolved first, because the compile below reads
     // it, and it reaches the identity through the IR it produces.
     // `--allow-degenerate-rates` reaches every cell's compiled model through
-    // the resolved configuration's engine settings; the process-wide
-    // forcing-extrapolation policy is installed from them once they exist,
-    // before any cell runs (`EngineSettings::install_forcing_policy`).
+    // the resolved configuration's engine settings; the forcing-extrapolation
+    // policy they hold is installed once they exist, before any cell runs
+    // (`EngineSettings::install_forcing_policy`).
     let compile = crate::sim_config::CompileSettings { licm_disabled: global.no_licm };
     compile.install();
     // `--parallel`, `--output-dir`, `--force`: how the cells are computed and
@@ -2066,7 +2066,7 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
         }),
     );
     let engine_settings = sim_config.engine_settings();
-    engine_settings.install_forcing_policy();
+    let _forcing_route = engine_settings.install_forcing_policy();
     // What runs is what is keyed: from here on the backend and `dt` are read
     // from `engine_settings` and nowhere else; the precedence locals they
     // were resolved from are not read again.
@@ -2155,7 +2155,7 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
         // Nothing is displaced or written — `--force` is reported, not applied.
         if total_runs > 1 {
             let cas = build_simulate_cas_sink(
-                sim_config.clone(), &execution, want_obs, label_arg.clone(), fit_dep.clone(),
+                sim_config.clone(), &engine_settings, &execution, want_obs, label_arg.clone(), fit_dep.clone(),
                 emit_every.clone(), total_runs,
             );
             print_store_view(&out, &cas, &job, execution.force, a.quantities_out.is_some());
@@ -2198,6 +2198,7 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
     // mirror is layered on top by `StreamSink` (below).
     let cas_sink = build_simulate_cas_sink(
         sim_config.clone(),
+        &engine_settings,
         &execution,
         want_obs || obs_only.is_some() || obs_only_dir.is_some()
             || obs_path.is_some() || obs_dir.is_some(),
@@ -3155,6 +3156,7 @@ struct SimConfigFlags {
 /// path (a lone run or a multi-cell grid) writes it.
 fn build_simulate_cas_sink(
     sim: std::sync::Arc<crate::sim_config::ResolvedSimConfig>,
+    engine: &crate::sim_config::EngineSettings,
     execution: &crate::sim_config::Execution,
     obs_enabled: bool,
     label: Option<String>,
@@ -3167,6 +3169,7 @@ fn build_simulate_cas_sink(
     total_runs: usize,
 ) -> crate::cas_sink::CasSink {
     crate::cas_sink::CasSink {
+        engine: engine.clone(),
         sim,
         runs_dir: format!("{}/sims", execution.store_root),
         obs_enabled,
@@ -3233,7 +3236,7 @@ fn write_sim_ensemble(
         return;
     }
 
-    let engine = cas.sim.engine_settings();
+    let engine = &cas.engine;
     let ctx = crate::sim_ensemble_cas::EnsembleCtx {
         model: &cas.sim.model.ir,
         ir_version: ir::IR_VERSION.trim(),
@@ -3297,7 +3300,7 @@ fn write_sim_ensemble(
     let calendar = ir::caltime::CalendarAxis::from_model(&cas.sim.model.ir)
         .unwrap_or_else(|e| out.fail(format!("error: {e}")));
     let mut meta = crate::resolve::RecordMeta::new(
-        ir::IR_VERSION.trim(), &cas.sim.model.path, label, calendar)
+        ir::IR_VERSION.trim(), &cas.sim.model.path, label, calendar, &cas.engine.forcing)
         .with_deps(deps);
     meta.engine_version = cas.sim.model.engine.clone();
 
