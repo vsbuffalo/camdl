@@ -137,7 +137,7 @@
     site of {!Dim_sites.sites} or deliberately exempt from it, which the
     build and a test enforce together. Exponent arithmetic is checked, here
     as in the solver: an exponent outside the native integer range is the
-    single error E310, never a wrapped value. *)
+    single error E319, never a wrapped value. *)
 
 open Ir
 
@@ -154,7 +154,7 @@ let population    = make 1 0
 let time_dim      = make 0 1
 
 (* Exponent arithmetic is checked, as in the solver: an exponent that leaves
-   the native integer range raises [Dim_solve.Overflow], reported as E310,
+   the native integer range raises [Dim_solve.Overflow], reported as E319,
    never a wrapped value. *)
 let ( +! ) = Dim_solve.checked_add
 let ( *! ) = Dim_solve.checked_mul
@@ -1108,7 +1108,7 @@ let check_model_exn ?prior_args ~constant_dims ~table_dims ~typed_lets (m : mode
 let check_model ?prior_args ?(constant_dims = []) ?(table_dims = []) ?(typed_lets = []) (m : model) : result =
   try check_model_exn ?prior_args ~constant_dims ~table_dims ~typed_lets m
   with Dim_solve.Overflow msg ->
-    { diagnostics = [ { severity = Error; code = "E310"; subject = None;
+    { diagnostics = [ { severity = Error; code = "E319"; subject = None;
                         message = "a dimension exponent in this model is too large to represent";
                         detail = Some msg;
                         hint = Some "a power of a power multiplies exponents; write the \

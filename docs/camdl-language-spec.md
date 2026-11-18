@@ -6916,6 +6916,10 @@ authoritative list is whatever `ocaml/lib/compiler/` and `ocaml/lib/ir/` emit.
 | E122 | Error   | An observation block gives the same key (`columns`, `covers`, `projected`, `emit_schedule`, or the `~` line) twice (§12) |
 | E123 | Error   | A scenario `enable`/`disable`/`compose` value is not a bracketed list of names — write `enable = [NAME]` (§17.1) |
 | E124 | Error   | A scenario field other than `set`/`scale` written as a `{ ... }` block (§17.1) |
+| E101 | Error   | `origin` is not `date("YYYY-MM-DD")`                                                       |
+| E104 | Error   | Unknown likelihood family in an observation                                                |
+| E118 | Error   | The removed `likelihood = <value>` form, with a value that is not a distribution call      |
+| E120 | Error   | A built-in function or a forcing called with the wrong number of arguments                 |
 | E200 | Error   | Undeclared compartment or parameter referenced in expression                              |
 | E202 | Error   | Table arity / shape mismatch (e.g. `table '%s' expects %d indices`)                        |
 | E228 | Error   | `time_unit` is not a duration unit (`'per_day` / `'count` / `'ratio`) — see §2               |
@@ -6926,12 +6930,14 @@ authoritative list is whatever `ocaml/lib/compiler/` and `ocaml/lib/ir/` emit.
 | E302 | Error   | Addition/subtraction of mismatched dimensions                                             |
 | E304 | Error   | A likelihood argument has the wrong dimension, or a square root has odd exponents          |
 | E308 | Error   | Overdispersion σ² must have dimension T                                                    |
+| E310 | Error   | A transition with no net effect: its sources and destinations cancel                       |
 | E313 | Error   | An initial condition has the wrong dimension                                               |
 | E314 | Error   | An intervention action's `fraction`, `count` or value has the wrong dimension              |
 | E315 | Error   | An intervention or schedule time is not T, or a trigger threshold is not its stream's dimension |
 | E316 | Error   | A unit literal in a prior argument or a bound disagrees with its dimension (§2.2.3)        |
 | E317 | Error   | A quantity threshold is not its series' dimension, or a `value_at` time is not T           |
 | E318 | Error   | A typed `let`'s body does not have its declared kind or `dim` clause (§8.4)                 |
+| E319 | Error   | A dimension exponent too large to represent (a power of a power of a power …)              |
 | I316 | Info    | A log-normal `mu` or `sigma` is directly a dimensioned parameter (§2.2.3)                  |
 | E347 | Error   | Observation stream declares its temporal columns twice or by half — `: time` plus window columns, half a pair, or `covers` with window columns (§12.1.1) |
 | E348 | Error   | `covers` or window columns on a stream whose `projected` reads state at an instant (§12.1.1) |

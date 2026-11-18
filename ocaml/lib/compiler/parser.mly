@@ -1098,7 +1098,7 @@ obs_kv:
         | EFuncCall (kind, args) -> lik_of_funcall kind args ~sp:$startpos ~ep:$endpos
         | _ ->
           Parser_errors.push_error ~sp:$startpos ~ep:$endpos
-            ~code:"E104"
+            ~code:"E118"
             ~msg:"likelihood value must be a function call, e.g. cases ~ neg_binomial(mean = projected, r = k)";
           LikPoisson []) }
 
