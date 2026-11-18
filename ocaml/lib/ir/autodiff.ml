@@ -780,25 +780,25 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
                { code = URMod;
                  node = "mod expression";
                  reason = Printf.sprintf
-                   "derivative of `mod` w.r.t. parameter '%s' is not representable \
-                    in the IR grammar (floor is needed); replace mod with a \
-                    conditional guard" param }
+                   "derivative of `mod` w.r.t. parameter '%s' is undefined: \
+                    `mod` is discontinuous where it wraps, so a gradient method \
+                    cannot use it; replace mod with a conditional guard" param }
            else Known (Const 0.0)
          | WrtPop _ ->
            if hits_state b.left || hits_state b.right then
              Unsupported
                { code = URMod; node = "mod expression";
-                 reason = "derivative of `mod` w.r.t. compartment state is not \
-                           representable (floor is needed) and is nonsmooth at the \
-                           wraps; a gradient method cannot use it" }
+                 reason = "derivative of `mod` w.r.t. compartment state is \
+                           undefined: `mod` is discontinuous where it wraps, so a \
+                           gradient method cannot use it" }
            else Known (Const 0.0)
          | WrtProjected ->
            if mentions_projected b.left || mentions_projected b.right then
              Unsupported
                { code = URMod; node = "mod expression";
-                 reason = "derivative of `mod` w.r.t. the projection output is not \
-                           representable (floor is needed) and is nonsmooth at the \
-                           wraps; a gradient method cannot use it" }
+                 reason = "derivative of `mod` w.r.t. the projection output is \
+                           undefined: `mod` is discontinuous where it wraps, so a \
+                           gradient method cannot use it" }
            else Known (Const 0.0))
       (* Comparison ops: piecewise constant, derivative is 0. *)
       | Eq | Neq | Lt | Gt | Le | Ge -> Known (Const 0.0)

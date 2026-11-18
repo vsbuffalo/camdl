@@ -42,8 +42,9 @@
     sum. [0 * x] is [0] only when [x] is finite, so a factor that would
     evaluate to infinity or NaN, such as an unguarded division by an empty
     patch, folds to [0] where the unfolded model would report a numerical
-    error. A lookup whose constant index is out of range is left for the
-    runtime's out-of-bounds policy. The Rust test [gate_constant_fold_ab]
+    error. A lookup whose constant index is out of range is left in place,
+    for the runtime to report: the only out-of-bounds policy is an error
+    ([Ir.oob_policy]). The Rust test [gate_constant_fold_ab]
     checks, on a sparse-coupling model, that trajectories are identical with
     and without the pass. Setting [CAMDL_NO_CONSTANT_FOLD] in the
     environment turns it off. *)
@@ -104,8 +105,8 @@ let rec fold tbls (e : expr) : expr =
       | Const fi, Some arr ->
           let i = int_of_float (Float.floor fi) in
           if i >= 0 && i < Array.length arr then Const arr.(i)
-            (* OOB index into a literal table: leave it; the runtime's
-               out_of_bounds policy (Clamp/Wrap/Error) decides. *)
+            (* OOB index into a literal table: leave it for the runtime,
+               whose one out-of-bounds policy is an error. *)
           else TableLookup (name, [ Const fi ])
       | idx', _ -> TableLookup (name, [ idx' ]))
   | TableLookup (name, idxs) -> TableLookup (name, List.map (fold tbls) idxs)

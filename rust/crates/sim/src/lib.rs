@@ -91,12 +91,11 @@ bitflags::bitflags! {
         /// requirement makes gillespie fail dispatch rather than mislead.
         const RUNTIME_DT        = 1 << 4;
         /// gh#204. The model carries a reactive (state/observation-triggered)
-        /// fire source (`fire = Reactive(..)`). The IR represents it and the
-        /// compiler validates it, but no backend executes the reactive agenda
-        /// yet — so NO backend declares this capability, and any model with a
-        /// reactive fire source fails the capability gate at dispatch (both the
-        /// forward `simulate` path and `fit`/inference) with a clear message,
-        /// rather than silently dropping the policy. Derived from the IR by
+        /// fire source (`fire = Reactive(..)`). Only the forward chain-binomial
+        /// backend declares this capability: it runs the reactive agenda
+        /// (`reactive::ReactiveAgenda`). Every other backend, and every
+        /// inference method, fails the capability check at dispatch with a
+        /// clear message, rather than silently dropping the policy. Derived from the IR by
         /// `CompiledModel::required_capabilities()`.
         const REACTIVE_INTERVENTIONS = 1 << 5;
     }

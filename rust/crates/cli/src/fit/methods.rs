@@ -1468,7 +1468,8 @@ mod tests {
     }
 
     /// gh#204: the inference capability gate rejects an active reactive policy on
-    /// EVERY inference backend (no backend executes the reactive agenda yet), so
+    /// EVERY inference backend (only forward chain-binomial runs the reactive
+    /// agenda; no filter is reactive-aware), so
     /// fit / pfilter never silently drops the policy. Uses the committed reactive
     /// golden as the model under test.
     #[test]

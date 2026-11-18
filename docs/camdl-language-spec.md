@@ -6879,6 +6879,7 @@ authoritative list is whatever `ocaml/lib/compiler/` and `ocaml/lib/ir/` emit.
 | E302 | Error   | Addition/subtraction of mismatched dimensions                                             |
 | E304 | Error   | A likelihood argument has the wrong dimension, or a square root has odd exponents          |
 | E308 | Error   | Overdispersion σ² must have dimension T                                                    |
+| E311 | Error   | A table lookup's index is not a pure number (an index selects a level)                     |
 | E313 | Error   | An initial condition has the wrong dimension                                               |
 | E314 | Error   | An intervention action's `fraction`, `count` or value has the wrong dimension              |
 | E315 | Error   | An intervention or schedule time is not T, or a trigger threshold is not its stream's dimension |
