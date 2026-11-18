@@ -51,7 +51,7 @@ impl DrawRef {
 }
 
 /// The `schema` tag of `forecast.json`.
-pub(crate) const FORECAST_SCHEMA: &str = "camdl.forecast/v2";
+pub(crate) const FORECAST_SCHEMA: &str = "camdl.forecast/v3";
 
 /// Refuse what forecast mode does not support, before any work: the backends
 /// and options of the Stage 5 capability matrix that have no forecast yet.
@@ -306,7 +306,10 @@ pub(crate) fn run_forecast(
     }).map_err(|f| f.describe(|d| draw_refs[d].describe()))?;
 
     let mut written = write_tables(&fc, model, job.schema, job.out_dir, &draw_refs)?;
-    written.push(write_manifest(&fc, &job, &record, raw, &skipped, &failures, &draw_refs)?);
+    written.push(write_manifest(&fc, &job, ManifestInputs {
+        record: &record, reach_as_written: raw, skipped: &skipped, failures: &failures,
+        draw_refs: &draw_refs, held_out: &held_out,
+    })?);
     out.say(format_args!(
         "fit predict: forecast from t = {} (the end of the training rows) to t = {}: {} \
          target(s) on {} stream(s), {} draws × {} particles",
@@ -399,16 +402,42 @@ fn write_tables(
     Ok(written)
 }
 
+/// What `forecast.json` is written from, beside the forecast itself.
+struct ManifestInputs<'a> {
+    record: &'a crate::run_meta::TrainingPartitionRecord,
+    reach_as_written: &'a str,
+    skipped: &'a [SkippedStream],
+    failures: &'a [DeterministicFailure],
+    draw_refs: &'a [DrawRef],
+    held_out: &'a BTreeMap<String, Vec<HeldOut>>,
+}
+
+/// Each stream's held-out rows, per file: the count and the row digest of
+/// those rows in file order. They only name the targets they correspond to;
+/// nothing filters them, and no prediction depends on them.
+fn held_out_record(held_out: &BTreeMap<String, Vec<HeldOut>>) -> Result<Vec<serde_json::Value>, String> {
+    let mut out = Vec::new();
+    for (stream, rows) in held_out {
+        let mut files = Vec::new();
+        for file in [RowFile::Training, RowFile::Holdout] {
+            let of: Vec<ObservedRow> = rows.iter().filter(|h| h.file == file).map(|h| h.row.clone()).collect();
+            if of.is_empty() {
+                continue;
+            }
+            files.push(serde_json::json!({
+                "file": file.as_str(),
+                "rows": of.len(),
+                "digest": crate::fit::training_partition::row_digest(&of)?.to_hex(),
+            }));
+        }
+        out.push(serde_json::json!({ "stream": stream, "files": files }));
+    }
+    Ok(out)
+}
+
 /// `forecast.json`: what the forecast predicted and what conditioned it.
-fn write_manifest(
-    fc: &Forecast,
-    job: &ForecastJob,
-    record: &crate::run_meta::TrainingPartitionRecord,
-    reach_as_written: &str,
-    skipped: &[SkippedStream],
-    failures: &[DeterministicFailure],
-    draw_refs: &[DrawRef],
-) -> Result<PathBuf, String> {
+fn write_manifest(fc: &Forecast, job: &ForecastJob, m: ManifestInputs) -> Result<PathBuf, String> {
+    let ManifestInputs { record, reach_as_written, skipped, failures, draw_refs, held_out } = m;
     let point = |t: f64| serde_json::json!({
         "t": t,
         "date": job.calendar.date_of(t).map(ir::caltime::RenderedInstant::into_string),
@@ -431,8 +460,12 @@ fn write_manifest(
             })),
         })
     }).collect();
+    let model_end = job.model.simulation.t_end;
+    let per_draw = FORECAST_SAMPLES_PER_DRAW.min(fc.n_particles);
     let mut doc = serde_json::json!({
         "schema": FORECAST_SCHEMA,
+        // The binary that wrote this forecast, as `run.json` records it.
+        "engine_version": crate::version::VERSION_SHORT,
         "run_id": job.run_id,
         "address_key": job.address_key,
         "options": job.options,
@@ -442,6 +475,14 @@ fn write_manifest(
         "method": job.posterior.method.map(|m| m.as_str()),
         "origin": point(fc.plan.origin()),
         "horizon": { "as_written": reach_as_written, "duration": fc.plan.horizon() },
+        // D49: the run goes to the latest target end, past the model's
+        // `simulate { to }` when that is earlier, with interventions planned
+        // to that end; nothing else is extended.
+        "run_extent": {
+            "model_end": point(model_end),
+            "run_end": point(fc.plan.run_end().max(model_end)),
+            "extended": fc.plan.run_end() > model_end,
+        },
         "parameter_set": record,
         "state_set": {
             "conditioning": "filtered",
@@ -472,7 +513,21 @@ fn write_manifest(
         })).collect::<Vec<_>>(),
         "n_particles": fc.n_particles,
         "binomial": fc.binomial,
-        "samples_per_draw": FORECAST_SAMPLES_PER_DRAW.min(fc.n_particles),
+        // What `forecast-samples.tsv` holds, and what the bands are over.
+        "samples": {
+            "file": "forecast-samples.tsv",
+            "per_draw": per_draw,
+            "of_particles": fc.n_particles,
+            "description": format!(
+                "{per_draw} joint samples per posterior draw, the particles j·{n}/{per_draw} \
+                 (j = 0…{last}) of its {n}; each sample is one particle's trajectory across \
+                 every target. The bands and means in forecast/ use all {n} particles of \
+                 every draw.",
+                n = fc.n_particles, last = per_draw.saturating_sub(1)),
+        },
+        // The rows after each stream's training prefix. They only name the
+        // targets they correspond to; nothing filters them.
+        "held_out": held_out_record(held_out)?,
         "targets": targets,
     });
     // D86: the same `chain_selection` block `predictive.json` carries, absent

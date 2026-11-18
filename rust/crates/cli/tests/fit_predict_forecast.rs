@@ -126,7 +126,31 @@ fn a_forecast_starts_at_the_training_extent_and_counts_each_streams_own_periods(
 
     let manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(fdir.join("forecast.json")).unwrap()).unwrap();
-    assert_eq!(manifest["schema"], "camdl.forecast/v2");
+    assert_eq!(manifest["schema"], "camdl.forecast/v3");
+    let leaf_run: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
+        walk(&dir.join("results")).into_iter().find(|p| p.file_name().is_some_and(|n| n == "run.json")).unwrap(),
+    ).unwrap()).unwrap();
+    assert!(manifest["engine_version"].as_str().is_some_and(|v| v.contains('+')),
+        "the engine stamp is the version with its git hash: {}", manifest["engine_version"]);
+    assert_eq!(manifest["run_id"], leaf_run["run_id"]);
+    assert_eq!((&manifest["samples"]["per_draw"], &manifest["samples"]["of_particles"]),
+        (&serde_json::json!(5), &serde_json::json!(500)));
+    assert!(manifest["samples"]["description"].as_str().unwrap().contains("use all 500 particles"));
+    // The model runs to day 63, past the last target (day 52): not extended.
+    assert_eq!((&manifest["run_extent"]["model_end"]["t"], &manifest["run_extent"]["run_end"]["t"],
+                &manifest["run_extent"]["extended"]),
+        (&serde_json::json!(63.0), &serde_json::json!(63.0), &serde_json::json!(false)));
+    // The held-out rows: days 25–63 and the weeks ending 28–63, all in the
+    // training files under `holdout_after`.
+    let held: Vec<(String, String, u64)> = manifest["held_out"].as_array().unwrap().iter()
+        .flat_map(|s| s["files"].as_array().unwrap().iter().map(move |f| (
+            s["stream"].as_str().unwrap().to_string(), f["file"].as_str().unwrap().to_string(),
+            f["rows"].as_u64().unwrap())))
+        .collect();
+    assert_eq!(held, vec![("daily_cases".into(), "training".into(), 39), ("weekly_cases".into(), "training".into(), 6)]);
+    for s in manifest["held_out"].as_array().unwrap() {
+        assert_eq!(s["files"][0]["digest"].as_str().unwrap().len(), 64, "a SHA-256 row digest");
+    }
     assert_eq!(manifest["mode"], "fixed_origin");
     assert_eq!(manifest["origin"]["t"], 24.0, "the origin is the training extent");
     assert_eq!(manifest["horizon"]["duration"], 28.0);
@@ -417,4 +441,23 @@ fn a_forecast_from_a_chain_selection_records_it() {
         "chain(s) 1 left out by the chain selection: the draws are from chain(s) 0 only (1 of 2 \
          chains). Leaving chains out biases the posterior toward the retained chains' mode.");
     assert!(m["draws"].as_array().unwrap().iter().all(|d| d["chain"] == 0), "the draws are chain 0's");
+}
+
+/// D49 in the manifest: a model whose run ends at the origin (day 24) is run
+/// to the last target (day 38) and `forecast.json` says so.
+#[test]
+fn a_forecast_past_the_models_end_records_the_extension() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    copy_fixture(dir);
+    let model = std::fs::read_to_string(dir.join("model.camdl")).unwrap().replace("to = 63 'days", "to = 24 'days");
+    std::fs::write(dir.join("model.camdl"), model).unwrap();
+    fit_config(dir, PMMH, "holdout_after = 24.0\n",
+        "daily_cases = \"daily_cases.tsv\"\nweekly_cases = \"weekly_cases.tsv\"", "");
+    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "2 weeks", "--n-draws", "2"]);
+    assert!(out.status.success(), "fit predict: {}", stderr(&out));
+    let m: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(forecast_dir(dir).join("forecast.json")).unwrap()).unwrap();
+    assert_eq!((&m["run_extent"]["model_end"]["t"], &m["run_extent"]["run_end"]["t"], &m["run_extent"]["extended"]),
+        (&serde_json::json!(24.0), &serde_json::json!(38.0), &serde_json::json!(true)));
 }
