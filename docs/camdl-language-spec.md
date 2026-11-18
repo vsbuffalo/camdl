@@ -2387,7 +2387,9 @@ sampling weights are read off the rate as linear coefficients. `beta * S * I / N
 qualifies: `I` is a linear factor in the numerator, and its appearance in the
 denominator `N` is treated as a frozen normalizer. A genuinely nonlinear use of
 a parent compartment — `beta * S * (I + iota)^alpha / N` — is **E601**, which
-names the offending compartment and the subexpression it appears in. Wrapping
+names the offending compartment and the subexpression it appears in. So is a
+product of two parent counts in the numerator, `beta * S * I * I / (N * N)` or
+`beta * S * I * A / N`: its weights could not sum to the rate. Wrapping
 the rate in `overdispersed(...)` (§9.8) is transparent to this analysis: the
 environmental noise changes the counts, not the attribution.
 

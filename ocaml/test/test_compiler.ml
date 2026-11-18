@@ -10091,6 +10091,51 @@ let test_lineage_rejects_nonlinear_e601 () =
   (* Error code E601 fires, and the message names the nonlinear subterm. *)
   compile_expect_error_code ~code:"E601" ~contains:"I + iota" src
 
+(* gh#1204: a product of two parent references is not linear in the parents.
+   The weights are read off as derivatives, so for I * I the weight of I is
+   2·β·S·I/N² and weight × count is twice the rate; for I * A each pool gets
+   the whole rate. Both are E601, naming the product. *)
+let lineage_rate_src rate = Printf.sprintf {|
+    compartments { S, I, A, R }
+    parameters { beta : rate  gamma : rate  N0 : count  I0 : count }
+    let N = S + I + A + R
+    transitions {
+      #[lineage]
+      infection : S --> I  @ %s
+      recovery  : I --> R  @ gamma * I
+      clearance : A --> R  @ gamma * A
+    }
+    init { S = N0 - I0  I = I0 }
+    simulate { from = 0 'days  to = 120 'days }
+  |} rate
+
+let test_lineage_rejects_product_of_parents_e601 () =
+  (* The issue's reproduction: quadratic in I. *)
+  compile_expect_error_code ~code:"E601" ~contains:"beta * S * I * I"
+    (lineage_rate_src "beta * S * I * I / (N * N)");
+  (* Two different parents in one product. *)
+  compile_expect_error_code ~code:"E601" ~contains:"of 'A'"
+    (lineage_rate_src "beta * S * I * A / (N * N)");
+  (* A sum of parents times a parent. *)
+  compile_expect_error_code ~code:"E601" ~contains:"of 'I'"
+    (lineage_rate_src "beta * S * ((I + A) * I) / (N * N)");
+  (* A normaliser multiplied back into the numerator reads every parent
+     again there: only a denominator is a frozen normaliser. *)
+  compile_expect_error_code ~code:"E601" ~contains:"of 'I'"
+    (lineage_rate_src "beta * (S / N) * (I / N) * N")
+
+(* The product rule still admits what is linear: a parent times sources,
+   parameters and normalisers, a sum of parents times a coefficient, and a
+   parent that also appears in the denominator. *)
+let test_lineage_product_with_one_parent_still_accepted () =
+  List.iter (fun rate ->
+    let m = compile_expect_ok (lineage_rate_src rate) in
+    ignore (find_lineage m "infection"))
+    [ "beta * S * I / N";
+      "beta * S * S * I / (N * N)";
+      "beta * S * (I + A) / N";
+      "beta * (S / N) * (I / N)" ]
+
 (* (d) parent_pool_weights extraction emits the expected weight ASTs.
    For β·S·I/N (N = S+E+I+R+V), weight(I) = β·S/N. *)
 let test_lineage_weight_freq_dependent () =
@@ -17944,6 +17989,8 @@ let () =
       Alcotest.test_case "accepts multi-pool β·S·(β_I·I+β_A·A)/N"         `Quick test_lineage_accepts_multi_pool;
       Alcotest.test_case "accepts stratified contact-matrix rate"          `Quick test_lineage_accepts_stratified;
       Alcotest.test_case "E601 rejects β·S·(I+ι)^α/N at nonlinear subterm" `Quick test_lineage_rejects_nonlinear_e601;
+      Alcotest.test_case "E601 rejects a product of parents (gh#1204)"      `Quick test_lineage_rejects_product_of_parents_e601;
+      Alcotest.test_case "a product with one parent factor is accepted"   `Quick test_lineage_product_with_one_parent_still_accepted;
       Alcotest.test_case "weight(I) = β·S/N for freq-dependent"            `Quick test_lineage_weight_freq_dependent;
       Alcotest.test_case "multi-pool weights β·β_I·S/N, β·β_A·S/N"         `Quick test_lineage_weight_multi_pool;
       Alcotest.test_case "identity subgraph SEIR S→E tracks {E,I,R}"       `Quick test_lineage_identity_subgraph_seir;

@@ -31,8 +31,9 @@
     reference inside a nonlinear construct (a power other than [^ 1], [exp],
     [log], [sqrt], [abs], [floor], [ceil], the trigonometric functions, a
     conditional, [min], [max], [mod], a comparison, or a table index) is a
-    nonlinear use, and the expander refuses the transition with E601. Any
-    other reference makes the compartment a parent. {!parent_pool_weights}
+    nonlinear use, and so is a product whose two operands both read a
+    parent, such as [I * I] or [I * A]; the expander refuses the transition
+    with E601. Any other reference makes the compartment a parent. {!parent_pool_weights}
     then gives each parent's weight: the derivative of the rate's numerator
     with respect to that parent's count, divided by the rate's denominator,
     after both are simplified.
@@ -44,11 +45,13 @@
     {!Ir.transition_lineage}. The module lives in the [ir] library because it
     reads IR expressions.
 
-    The check is weaker than linearity. A product of two parent references,
-    such as [beta * S * I * I / (N * N)], passes: each factor is a parent
-    reference outside a nonlinear construct. Its weight is
-    then the derivative, which for [I * I] is [2 * beta * S * I / (N * N)],
-    so the weights times the counts sum to twice the rate, not the rate. *)
+    The product rule is what makes the numerator of degree one in the
+    parents taken together, so that the derivative is the coefficient and
+    the weights times the counts sum to the numerator. Without it,
+    [beta * S * I * I / (N * N)] would get the weight
+    [2 * beta * S * I / (N * N)], twice the rate once multiplied by [I], and
+    [beta * S * I * A / N] would attribute the whole rate to each of [I] and
+    [A]. *)
 
 open Ir
 
@@ -95,9 +98,32 @@ let pow_is_nonlinear (exponent : expr) : bool =
     A non-source Pop is:
       - Denominator-only if [in_denom] (exempt; not a parent),
       - Nonlinear-use   if [in_nonlinear] and not [in_denom] (reject),
-      - Linear parent   otherwise. *)
+      - Linear parent   otherwise.
+
+    A product outside any denominator whose two operands each read a
+    parent is a nonlinear use of the right operand's first parent. *)
 let classify_parents ~(sources : string list) (rate : expr) : classification =
   let is_source c = List.mem c sources in
+  (* The first parent compartment [e] reads outside a denominator, if any:
+     the factor that makes a product of two such operands nonlinear. *)
+  let rec first_parent (e : expr) : string option =
+    match e with
+    | Pop c -> if is_source c then None else Some c
+    | PopSum cs -> List.find_opt (fun c -> not (is_source c)) cs
+    | BinOp { op = Div; left; _ } -> first_parent left
+    | BinOp { left; right; _ } ->
+      (match first_parent left with Some _ as p -> p | None -> first_parent right)
+    | UnOp { arg; _ } -> first_parent arg
+    | UncheckedDim u -> first_parent u.inner
+    | Cond { pred; then_; else_ } ->
+      List.find_map first_parent [pred; then_; else_]
+    | Reduce terms -> List.find_map first_parent terms
+    (* A table index is a nonlinear context the walk reports on its own. *)
+    | TableLookup _ -> None
+    | Const _ | UnitLiteral _ | Param _ | ConstRef _ | Time | Dt | Projected
+    | ObsColumnRef _ | TimeFunc _ | ForcingBasis _ | ObsAnchor _ | BindingRef _
+    | PerEvalRef _ -> None
+  in
   let parents = ref [] in           (* reverse first-seen order *)
   let add_parent c =
     if not (is_source c) && not (List.mem c !parents) then
@@ -139,7 +165,16 @@ let classify_parents ~(sources : string list) (rate : expr) : classification =
       walk ~in_denom ~in_nonlinear ~enclosing left;
       (* Right operand is a normalizer/denominator: frozen, exempt. *)
       walk ~in_denom:true ~in_nonlinear ~enclosing right
-    | BinOp { op = (Mul | Add | Sub); left; right } ->
+    | BinOp { op = Mul; left; right } ->
+      (* A product of two parent-reading operands is of degree two in the
+         parents: its derivative is not its coefficient (gh#1204). *)
+      (if not in_denom && not in_nonlinear && first_parent left <> None then
+         match first_parent right with
+         | Some c -> flag_nonlinear c e
+         | None -> ());
+      walk ~in_denom ~in_nonlinear ~enclosing left;
+      walk ~in_denom ~in_nonlinear ~enclosing right
+    | BinOp { op = (Add | Sub); left; right } ->
       walk ~in_denom ~in_nonlinear ~enclosing left;
       walk ~in_denom ~in_nonlinear ~enclosing right
     | BinOp { op = Pow; left; right } ->
@@ -201,9 +236,8 @@ let rec split_frac (e : expr) : expr * expr =
    numerator (post [split_frac]) is degree-1 in [comp], this derivative is
    exactly the per-pool coefficient, in reduced form — the product rule
    drops the constant factors automatically (∂(β·S·β_i·I)/∂I = β·S·β_i,
-   with no leftover I term). [classify_parents] does not guarantee degree
-   1: it accepts a product of two parent references, and for one the
-   derivative is not the coefficient (see the module doc). *)
+   with no leftover I term). [classify_parents] guarantees degree 1: it
+   refuses a product of two parent references. *)
 let rec deriv_num_wrt_pop (comp : string) (e : expr) : expr =
   match e with
   | Pop c        -> if c = comp then Const 1.0 else Const 0.0
