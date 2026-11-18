@@ -77,6 +77,11 @@ pub(crate) enum TargetSource {
     /// The stream's `emit_schedule`: the periods between consecutive schedule
     /// times (window columns) or the schedule's instants (a state read).
     EmitSchedule,
+    /// A window-column stream with no `emit_schedule`, scored: the periods of
+    /// its held-out rows within the reach (D80). Nothing is extrapolated, and
+    /// a target's ordinal counts only the held-out rows, so it is not a
+    /// horizon comparable with a tiled stream's; compare such targets by lead.
+    HeldOutRows,
 }
 
 impl TargetSource {
@@ -84,7 +89,26 @@ impl TargetSource {
         match self {
             TargetSource::DeclaredTiling { span } => format!("declared_tiling(span = {span})"),
             TargetSource::EmitSchedule => "emit_schedule".to_string(),
+            TargetSource::HeldOutRows => "held_out_rows (each target's horizon is its position \
+                among the held-out rows, not a count of declared periods; compare by lead)"
+                .to_string(),
         }
+    }
+
+    /// Whether the stream declares a cadence of its own (§4.3, 1 and 2), so
+    /// held-out rows only select its targets.
+    fn is_declared_cadence(&self) -> bool {
+        match self {
+            TargetSource::DeclaredTiling { .. } | TargetSource::EmitSchedule => true,
+            TargetSource::HeldOutRows => false,
+        }
+    }
+}
+
+impl HeldOutRow {
+    /// How a message names the row.
+    pub(crate) fn describe(&self) -> String {
+        format!("held-out row {} of the {} file", self.position, self.file.as_str())
     }
 }
 
@@ -112,6 +136,13 @@ pub(crate) enum StreamRefusal {
     /// A target computed from the declaration overlaps one of the stream's
     /// training rows.
     OverlapsObserved { stream: String, start: f64, end: f64, row: usize },
+    /// A held-out row within the reach is not one of the targets the stream's
+    /// declared cadence gives (D80): refused rather than skipped, since a
+    /// skipped row would silently leave a period out of the score.
+    OffCadenceHeldOut { stream: String, start: f64, end: f64, row: HeldOutRow, source: TargetSource },
+    /// The held-out rows within the reach are out of order, repeat a period,
+    /// overlap each other or overlap the training rows (D80).
+    InvalidHeldOut { stream: String, row: HeldOutRow, why: String },
 }
 
 impl StreamRefusal {
@@ -121,7 +152,9 @@ impl StreamRefusal {
             StreamRefusal::NoRhythm { stream, .. }
             | StreamRefusal::NoBoundRows { stream }
             | StreamRefusal::ReadsDataColumn { stream, .. }
-            | StreamRefusal::OverlapsObserved { stream, .. } => stream,
+            | StreamRefusal::OverlapsObserved { stream, .. }
+            | StreamRefusal::OffCadenceHeldOut { stream, .. }
+            | StreamRefusal::InvalidHeldOut { stream, .. } => stream,
         }
     }
 }
@@ -159,6 +192,15 @@ impl std::fmt::Display for StreamRefusal {
                 "stream '{stream}' is refused a forecast: its declared rhythm puts a \
                  target at [{start}, {end}), which overlaps its training row {row}. The \
                  rhythm and the rows disagree about where the stream's periods fall."),
+            StreamRefusal::OffCadenceHeldOut { stream, start, end, row, source } => write!(f,
+                "stream '{stream}' is refused a forecast: its {} covers [{start}, {end}), \
+                 which is not one of the periods its declared rhythm ({}) gives within the \
+                 reach. A held-out row only selects which of those periods is scored; one \
+                 off the rhythm is not skipped, because the score would then leave it out \
+                 without saying so. Correct the row, or the declaration.",
+                row.describe(), source.describe()),
+            StreamRefusal::InvalidHeldOut { stream, row, why } => write!(f,
+                "stream '{stream}' is refused a forecast: its {} {why}.", row.describe()),
         }
     }
 }
@@ -341,6 +383,18 @@ fn stream_targets(
             }
             (TargetSource::DeclaredTiling { span }, out)
         }
+        // §4.3 (3): a window-column stream with no emit schedule, scored,
+        // takes its held-out rows' periods as targets; with no held-out row it
+        // declares no rhythm and falls to the refusal below.
+        (TemporalKind::Interval, Some(Covers::WindowColumns))
+            if s.obs.emit_schedule.is_none() && !s.held_out.is_empty() =>
+        {
+            let in_reach: Vec<&HeldOut> = s.held_out.iter()
+                .filter(|h| after_origin(h.row.measures.end()) && h.row.measures.end() <= reach)
+                .collect();
+            validate_held_out_periods(&stream, s.training, &in_reach)?;
+            (TargetSource::HeldOutRows, in_reach.iter().map(|h| h.row.measures).collect())
+        }
         (TemporalKind::Interval, _) => {
             let Some(times) = emit_times(s.obs, reach) else {
                 return Err(StreamRefusal::NoRhythm { stream, kind });
@@ -371,18 +425,77 @@ fn stream_targets(
             });
         }
     }
-    let targets = measures.into_iter().enumerate()
-        .map(|(h, m)| Target {
+    // D80: a held-out row within the reach names exactly one target. Under a
+    // declared cadence it only selects which target is scored, so one that is
+    // not a target is refused, not skipped; two naming one target are refused
+    // rather than resolved by file order.
+    let mut observed: Vec<Option<HeldOutRow>> = vec![None; measures.len()];
+    for h in s.held_out.iter().filter(|h| after_origin(h.row.measures.end()) && h.row.measures.end() <= reach) {
+        let here = HeldOutRow { file: h.file, position: h.row.position };
+        match measures.iter().position(|m| same_span(&h.row.measures, m)) {
+            Some(k) => match observed[k] {
+                None => observed[k] = Some(here),
+                Some(first) => return Err(StreamRefusal::InvalidHeldOut {
+                    stream, row: here,
+                    why: format!("repeats the period [{}, {}) of its {}; each target is scored \
+                        against one row", h.row.measures.start(), h.row.measures.end(), first.describe()),
+                }),
+            },
+            None if source.is_declared_cadence() => return Err(StreamRefusal::OffCadenceHeldOut {
+                stream, start: h.row.measures.start(), end: h.row.measures.end(), row: here, source,
+            }),
+            None => unreachable!("held-out rows within the reach are this source's targets"),
+        }
+    }
+    let targets = measures.into_iter().zip(observed).enumerate()
+        .map(|(h, (m, observed))| Target {
             stream: stream.clone(),
-            observed: s.held_out.iter()
-                .find(|h| same_span(&h.row.measures, &m))
-                .map(|h| HeldOutRow { file: h.file, position: h.row.position }),
+            observed,
             measures: m,
             horizon: h as i64,
             lead: m.end() - origin,
         })
         .collect();
     Ok((source, targets))
+}
+
+/// D80: the held-out rows within the reach of a window-column stream with no
+/// emit schedule, which become its targets, must be in order, distinct and
+/// disjoint, and must not overlap the stream's training rows. Each is a
+/// `Period`, so its endpoints are finite and ordered by construction.
+fn validate_held_out_periods(
+    stream: &str,
+    training: &[ObservedRow],
+    held: &[&HeldOut],
+) -> Result<(), StreamRefusal> {
+    let refuse = |h: &HeldOut, why: String| StreamRefusal::InvalidHeldOut {
+        stream: stream.to_string(), row: HeldOutRow { file: h.file, position: h.row.position }, why,
+    };
+    let span = |m: &Measures| format!("[{}, {})", m.start(), m.end());
+    for h in held {
+        if let Some(r) = training.iter().find(|r| overlaps(&r.measures, &h.row.measures)) {
+            return Err(refuse(h, format!(
+                "covers {}, which overlaps its training row {} ({}); a held-out window must \
+                 begin where the training rows end", span(&h.row.measures), r.position, span(&r.measures))));
+        }
+    }
+    for w in held.windows(2) {
+        let (a, b) = (&w[0].row.measures, &w[1].row.measures);
+        let first = HeldOutRow { file: w[0].file, position: w[0].row.position };
+        if same_span(a, b) {
+            return Err(refuse(w[1], format!("repeats the period {} of its {}", span(a), first.describe())));
+        }
+        if b.end() < a.end() {
+            return Err(refuse(w[1], format!(
+                "covers {}, which ends before the {} before it ({}): the held-out rows are out \
+                 of order", span(b), first.describe(), span(a))));
+        }
+        if overlaps(a, b) {
+            return Err(refuse(w[1], format!(
+                "covers {}, which overlaps {} ({})", span(b), first.describe(), span(a))));
+        }
+    }
+    Ok(())
 }
 
 /// The emit schedule's times up to `reach`, or `None` when the stream declares
@@ -686,6 +799,132 @@ mod tests {
         let obs: Vec<Option<HeldOutRow>> = plan.targets().iter().map(|t| t.observed).collect();
         let at = |position| Some(HeldOutRow { file: RowFile::Training, position });
         assert_eq!(obs, vec![at(3), at(4), None]);
+    }
+
+    /// D80: a held-out row of a stream with a declared cadence that is not
+    /// one of the stream's targets is refused, never skipped: a weekly stream
+    /// whose held-out file carries a three-day row inside the reach.
+    #[test]
+    fn a_held_out_row_off_the_declared_cadence_is_refused() {
+        let train: Vec<ObservedRow> = (0..3).map(|i| row(i, 7.0 * i as f64, 7.0 * (i + 1) as f64)).collect();
+        let rows = BTreeMap::from([("weekly".to_string(), train.clone())]);
+        let wobs = weekly();
+        let held = vec![
+            HeldOut { file: RowFile::Holdout, row: row(0, 21.0, 28.0) },
+            HeldOut { file: RowFile::Holdout, row: row(1, 28.0, 31.0) },
+        ];
+        let err = ForecastPlan::new(partition(&rows), 14.0, &[
+            PlanStream { obs: &wobs, training: &train, held_out: &held },
+        ]).unwrap_err();
+        let PlanError::NoTargets { refusals } = &err else { panic!("{err:?}") };
+        assert!(matches!(&refusals[..], [StreamRefusal::OffCadenceHeldOut {
+            row: HeldOutRow { file: RowFile::Holdout, position: 1 }, .. }]), "{refusals:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("[28, 31)") && msg.contains("declared_tiling"), "{msg}");
+        // A held-out row past the reach is not this forecast's to judge.
+        let ok = ForecastPlan::new(partition(&rows), 7.0, &[
+            PlanStream { obs: &wobs, training: &train, held_out: &held },
+        ]).unwrap();
+        assert_eq!(ok.targets()[0].observed, Some(HeldOutRow { file: RowFile::Holdout, position: 0 }));
+    }
+
+    /// D80: a held-out row of a declared-cadence stream selects a target and
+    /// does not renumber it: with the second week missing, the third keeps
+    /// horizon 2.
+    #[test]
+    fn held_out_rows_select_targets_without_renumbering_them() {
+        let train: Vec<ObservedRow> = (0..3).map(|i| row(i, 7.0 * i as f64, 7.0 * (i + 1) as f64)).collect();
+        let rows = BTreeMap::from([("weekly".to_string(), train.clone())]);
+        let wobs = weekly();
+        let held = vec![
+            HeldOut { file: RowFile::Training, row: row(3, 21.0, 28.0) },
+            HeldOut { file: RowFile::Training, row: row(4, 35.0, 42.0) },
+        ];
+        let plan = ForecastPlan::new(partition(&rows), 21.0, &[
+            PlanStream { obs: &wobs, training: &train, held_out: &held },
+        ]).unwrap();
+        let got: Vec<(i64, f64, Option<usize>)> = plan.targets().iter()
+            .map(|t| (t.horizon, t.lead, t.observed.map(|h| h.position))).collect();
+        assert_eq!(got, vec![(0, 7.0, Some(3)), (1, 14.0, None), (2, 21.0, Some(4))]);
+    }
+
+    /// D80: two held-out rows naming one target are refused, not resolved by
+    /// order.
+    #[test]
+    fn two_held_out_rows_for_one_target_are_refused() {
+        let train: Vec<ObservedRow> = (0..3).map(|i| row(i, 7.0 * i as f64, 7.0 * (i + 1) as f64)).collect();
+        let rows = BTreeMap::from([("weekly".to_string(), train.clone())]);
+        let wobs = weekly();
+        let held = vec![
+            HeldOut { file: RowFile::Training, row: row(3, 21.0, 28.0) },
+            HeldOut { file: RowFile::Holdout, row: row(0, 21.0, 28.0) },
+        ];
+        let err = ForecastPlan::new(partition(&rows), 7.0, &[
+            PlanStream { obs: &wobs, training: &train, held_out: &held },
+        ]).unwrap_err();
+        assert!(err.to_string().contains("held-out row 0 of the holdout file"), "{err}");
+    }
+
+    fn monthly_windows() -> ObservationModel {
+        obs("monthly", Some(Covers::WindowColumns), Projection::CumulativeFlow("infection".into()), None)
+    }
+
+    /// D80: a window-column stream with no `emit_schedule` takes its
+    /// held-out periods as targets when there are held-out rows; each carries
+    /// its lead, and its ordinal is labelled as not a tiled horizon.
+    #[test]
+    fn a_window_column_stream_takes_its_held_out_periods_as_targets() {
+        let train = vec![row(0, 0.0, 30.0), row(1, 30.0, 61.0)];
+        let rows = BTreeMap::from([("monthly".to_string(), train.clone())]);
+        let o = monthly_windows();
+        // A gap between the two held-out windows, and a third past the reach.
+        let held = vec![
+            HeldOut { file: RowFile::Training, row: row(2, 61.0, 92.0) },
+            HeldOut { file: RowFile::Training, row: row(3, 100.0, 130.0) },
+            HeldOut { file: RowFile::Training, row: row(4, 130.0, 200.0) },
+        ];
+        let plan = ForecastPlan::new(partition(&rows), 70.0, &[
+            PlanStream { obs: &o, training: &train, held_out: &held },
+        ]).unwrap();
+        let got: Vec<(f64, f64, i64, f64)> = plan.targets().iter()
+            .map(|t| (t.measures.start(), t.measures.end(), t.horizon, t.lead)).collect();
+        assert_eq!(got, vec![(61.0, 92.0, 0, 31.0), (100.0, 130.0, 1, 69.0)]);
+        assert_eq!(plan.sources()[0].1, TargetSource::HeldOutRows);
+        assert!(TargetSource::HeldOutRows.describe().contains("lead"));
+    }
+
+    /// The held-out periods are validated: out of order, repeated,
+    /// overlapping each other, or overlapping the training rows.
+    #[test]
+    fn held_out_periods_taken_as_targets_are_validated() {
+        let train = vec![row(0, 0.0, 30.0), row(1, 30.0, 61.0)];
+        let rows = BTreeMap::from([("monthly".to_string(), train.clone())]);
+        let o = monthly_windows();
+        let refuse = |held: Vec<(f64, f64)>, want: &str| {
+            let held: Vec<HeldOut> = held.into_iter().enumerate()
+                .map(|(i, (a, b))| HeldOut { file: RowFile::Holdout, row: row(i, a, b) }).collect();
+            let err = ForecastPlan::new(partition(&rows), 200.0, &[
+                PlanStream { obs: &o, training: &train, held_out: &held },
+            ]).unwrap_err();
+            assert!(err.to_string().contains(want), "want {want:?}: {err}");
+        };
+        refuse(vec![(100.0, 130.0), (61.0, 92.0)], "out of order");
+        refuse(vec![(61.0, 92.0), (61.0, 92.0)], "repeats");
+        refuse(vec![(61.0, 92.0), (90.0, 120.0)], "overlaps held-out row 0");
+        refuse(vec![(50.0, 92.0)], "overlaps its training row 1");
+    }
+
+    /// With no held-out rows the window-column stream still declares no
+    /// rhythm (D42).
+    #[test]
+    fn a_window_column_stream_with_no_held_out_rows_is_still_refused() {
+        let train = vec![row(0, 0.0, 30.0)];
+        let rows = BTreeMap::from([("monthly".to_string(), train.clone())]);
+        let o = monthly_windows();
+        let err = ForecastPlan::new(partition(&rows), 60.0, &[
+            PlanStream { obs: &o, training: &train, held_out: &[] },
+        ]).unwrap_err();
+        assert!(matches!(&err, PlanError::NoTargets { refusals } if matches!(refusals[..], [StreamRefusal::NoRhythm { .. }])), "{err:?}");
     }
 
     #[test]
