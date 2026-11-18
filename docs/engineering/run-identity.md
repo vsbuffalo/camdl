@@ -435,8 +435,9 @@ so runs under the override and at the sweep point's values, and `fit table`
 diffs it. A folder an older build wrote has none and is refused, naming the
 re-run that writes it; no reader falls back to `fit.toml.original`. A `fit.toml`
 handle names only the run the file alone makes, so it refuses a flag-made fit
-and names its leaf. Every `fit run` input is classified in `input_class::FIT_RUN`
-and has a case in `rust/crates/cli/tests/fit_run_input_classes.rs`.
+and names its leaf. Every `fit run` input is classified in
+`input_class::FIT_RUN` and has a case in
+`rust/crates/cli/tests/fit_run_input_classes.rs`.
 
 `pfilter`, `profile` and `survey` resolve their configurations the same way:
 [`ResolvedPfilterConfig`](rust:cli::pfilter_config::ResolvedPfilterConfig),
@@ -449,24 +450,26 @@ apart. The run is a function of those values, and the arguments are not in its
 scope. Each takes the handle forms `fit predict` takes for `--fit`
 ([`resolve_fit_problem`](rust:cli::fit::handle::resolve_fit_problem)): a leaf
 directory, problem folder, run-id or fit-id prefix or label names a stored fit,
-whose archived config is read, so a fit made with
-`--allow-forcing-extrapolation` on its command line is read under that override;
-a `fit.toml` names the file's problem as it reads, with or without a stored fit,
-and so not a flag-made fit's; any other existing file is a config too. The
-archive does not hold a `fit run --sweep` point's values (its folder archives
-the file's `[fixed]`), so `profile` and `survey`, which read `[fixed]`, refuse a
-stored fit whose folder records fixed values its archive does not state, naming
-each parameter; `pfilter` reads no `[fixed]` and accepts it. The archive's
-`[method]` is the file's too, which `profile` (reading a fit's nl-* budget and
-`starts`) reads for any leaf of the folder. The fit is read once, and its
+whose `fit.resolved.toml` is read, so a fit made with
+`--allow-forcing-extrapolation` on its command line is read under that override
+and a `fit run --sweep` point at its own `[fixed]` values; a `fit.toml` names
+the file's problem as it reads, with or without a stored fit, and so not a
+flag-made fit's; any other existing file is a config too. The resolved config's
+`[method]` is the file's, which `profile` (reading a fit's nl-* budget and
+`starts`) reads for any leaf of the folder. A profile's folder stores the same
+pair a fit folder does: the user's text as `fit.toml.original` and the resolved
+config as `fit.resolved.toml`. The fit is read once, and its
 `[config] allow_degenerate_rates` and `allow_forcing_extrapolation` are folded
 with the flags in resolution. Every input of each is classified
 (`input_class::PFILTER`, `PROFILE`, `SURVEY`) and has a case in
 `rust/crates/cli/tests/<command>_input_classes.rs`, which share one runner
-(`tests/input_class_runner/mod.rs`). A profile keys the config text it read in
-its base, so a flag-made fit named by its leaf (whose archive has the override
-written in) and the file profiled under the flag are stored apart: one
-computation under two keys, never two computations under one.
+(`tests/input_class_runner/mod.rs`). A profile keys the user's config text
+(`fit.toml.original`, or the file) in its base, as `fit run`'s `fit_toml_hash`
+hashes it; what the resolved config adds, a flag's `[config]` value and the
+folder's `[fixed]`, is keyed there as values. A sweep point named by a handle
+and a file that writes the point's value store the same bytes under two keys
+(their texts differ): one computation under two keys, never two computations
+under one.
 
 A derived artifact that only some invocations ask for is a child of the leaf at
 its own address, never one of the leaf's files:
