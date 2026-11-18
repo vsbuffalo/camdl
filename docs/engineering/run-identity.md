@@ -377,10 +377,13 @@ the fit's setting. Both remaining cases are for the commands' conversion in step
 because of the once-per-process note above.
 
 `--no-licm` is a compile setting,
-[`CompileSettings`](rust:cli::util::CompileSettings). `fit run` resolves it
-(with `CAMDL_NO_LICM`) and passes it to its compile; `simulate` installs its
-resolved value process-wide, and every other command reads the process-wide
-setting, which `main` sets from the flag.
+[`CompileSettings`](rust:cli::util::CompileSettings). `fit run`, `pfilter`,
+`profile` and `survey` resolve it (with `CAMDL_NO_LICM`) and pass it to every
+compile they make ([`load_model_with`](rust:cli::util::load_model_with),
+[`resolve_ir_path_with`](rust:cli::util::resolve_ir_path_with)); `simulate`
+installs its resolved value process-wide, and every other command (`compare`,
+`eval`, `fit predict`, `mre`, the pass-through compiler subcommands) reads the
+process-wide setting, which `main` sets from the flag.
 
 Two kinds of flag reach the identity through the model and the parameters rather
 than `RunConfig`. A flag that rewrites the model before it runs
@@ -404,11 +407,12 @@ It is hashed as one string, the build followed by each switch length-prefixed
 value can pass for another switch; with no switch on it is the build alone, so a
 default run's identity is unchanged. `run.json` keeps the build in
 `engine_version` and lists the switches in `engine_switches`, so a run this
-build made with a switch is this build's run. `simulate` and `fit run` key the
-switches (a fit at its `fit` level); the other commands key them as they are
-converted. `CAMDL_NO_CONSTANT_FOLD` and `CAMDL_NO_LICM` change the compiled IR.
-An experimental input is also listed in the `provenance.experimental` field of
-`run.json`.
+build made with a switch is this build's run. `simulate`, `fit run`, `pfilter`,
+`profile` and `survey` key the switches (a fit at its `fit` level, a pfilter or
+survey at its `model` level, a profile point in its base); the other commands
+key them as they are converted. `CAMDL_NO_CONSTANT_FOLD` and `CAMDL_NO_LICM`
+change the compiled IR. An experimental input is also listed in the
+`provenance.experimental` field of `run.json`.
 
 `fit run` resolves its configuration once, before anything runs, into
 [`ResolvedFitConfig`](rust:cli::fit::run_config::ResolvedFitConfig): the file
@@ -425,13 +429,42 @@ archive or in a file of its own is an open maintainer decision, kept behind one
 function (`ProblemFlags::stored_text`). A run-directory, label or run-id handle
 (`fit predict <leaf>`, `compare <leaf>`) recovers the problem from the archive
 and so runs under the override. A `fit.toml` handle names only the run the file
-alone makes, so it refuses a flag-made fit and names its leaf. `pfilter`,
-`profile` and `survey` `--fit` read a fit file rather than the archive and still
-refuse a flag-made fit; they are converted next. A sweep point's folder archives
-the file's `[fixed]`, not the point's values, which are in its `fit.meta.json`
-(what `fit predict` and `compare` read). Every `fit run` input is classified in
-`input_class::FIT_RUN` and has a case in
+alone makes, so it refuses a flag-made fit and names its leaf. A sweep point's
+folder archives the file's `[fixed]`, not the point's values, which are in its
+`fit.meta.json` (what `fit predict` and `compare` read). Every `fit run` input
+is classified in `input_class::FIT_RUN` and has a case in
 `rust/crates/cli/tests/fit_run_input_classes.rs`.
+
+`pfilter`, `profile` and `survey` resolve their configurations the same way:
+[`ResolvedPfilterConfig`](rust:cli::pfilter_config::ResolvedPfilterConfig),
+[`ResolvedProfileConfig`](rust:cli::profile_config::ResolvedProfileConfig) and
+[`ResolvedSurveyConfig`](rust:cli::survey_config::ResolvedSurveyConfig), each
+built by a `resolve` that destructures the command's arguments field by field
+(so an argument added to the command does not compile until it is placed), with
+the outputs written outside the store, the execution settings and the label
+apart. The run is a function of those values, and the arguments are not in its
+scope. Each takes the handle forms `fit predict` takes for `--fit`
+([`resolve_fit_problem`](rust:cli::fit::handle::resolve_fit_problem)): a leaf
+directory, problem folder, run-id or fit-id prefix or label names a stored fit,
+whose archived config is read, so a fit made with
+`--allow-forcing-extrapolation` on its command line is read under that override;
+a `fit.toml` names the file's problem as it reads, with or without a stored fit,
+and so not a flag-made fit's. The fit is read once, and its
+`[config] allow_degenerate_rates` and `allow_forcing_extrapolation` are folded
+with the flags in resolution. Every input of each is classified
+(`input_class::PFILTER`, `PROFILE`, `SURVEY`) and has a case in
+`rust/crates/cli/tests/<command>_input_classes.rs`, which share one runner
+(`tests/input_class_runner/mod.rs`). A profile keys the config text it read in
+its base, so a flag-made fit named by its leaf (whose archive has the override
+written in) and the file profiled under the flag are stored apart: one
+computation under two keys, never two computations under one.
+
+A derived artifact that only some invocations ask for is a child of the leaf at
+its own address, never one of the leaf's files:
+[`RecordedChild`](rust:cli::cas_sink::RecordedChild) writes one file and its
+record into `<leaf>/<name>/`, declared in the leaf's `run.json` `children`
+before it is written. `simulate --event-log` (`event_log/`) and
+`survey --render` (`landscape_html/`) are the two.
 
 `fit run` routes its method flags through one struct,
 [`CliMethodOverrides`](rust:cli::fit::config_v2::CliMethodOverrides), which
@@ -495,9 +528,11 @@ address under the leaf. These are regression evidence on small fixtures, not
 proof that no model behaves otherwise. `fit run`'s inputs are tested the same
 way in `rust/crates/cli/tests/fit_run_input_classes.rs`, against the `fit`,
 `method` and `seed` levels, with a `removed` case for each old spelling it
-refuses. The other commands' flags are not yet tested this way; the differential
-tests in `rust/crates/cli/src/resolve/tests.rs` check the hash of one
-`SimConfig` field at a time without running the simulation.
+refuses, and `pfilter`'s, `profile`'s and `survey`'s in
+`rust/crates/cli/tests/{pfilter,profile,survey}_input_classes.rs` against each
+command's levels. The other commands' flags are not yet tested this way; the
+differential tests in `rust/crates/cli/src/resolve/tests.rs` check the hash of
+one `SimConfig` field at a time without running the simulation.
 
 ## How a fit is hashed
 

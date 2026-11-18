@@ -627,7 +627,8 @@ pub fn set_licm_disabled(disabled: bool) {
 /// them passes them to each compile it makes ([`resolve_ir_path_with`],
 /// [`load_model_with`]); the others read the process-wide setting
 /// ([`CompileSettings::process`]), which `main` sets from `--no-licm` for every
-/// command but `simulate` and `fit run` (proposal 2026-11-17, phase 3 step 4).
+/// command but `simulate`, `fit run`, `pfilter`, `profile` and `survey`
+/// (proposal 2026-11-17, phase 3 step 4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CompileSettings {
     /// `--no-licm`, or `CAMDL_NO_LICM`: compile without loop-invariant code
