@@ -710,18 +710,30 @@ fn a_fit_config_of_any_name_is_a_config() {
     assert_eq!(by_toml, by_cfg, "the config names the same problem whatever its file name");
 }
 
-/// A point of `fit run --sweep` named by its leaf: `pfilter` reads none of
-/// the fit's `[fixed]` (the point it scores is `--params`), so the sweep
-/// point names the same problem as the file and is not refused, as
-/// `profile` and `survey`, which read `[fixed]`, refuse it.
+/// A point of `fit run --sweep` named by its leaf directory, its problem
+/// folder or its run-id prefix reads the point's problem from its fit
+/// folder's `fit.resolved.toml`, and stores the bytes a `pfilter` of
+/// a fit file that writes the point's value stores. `pfilter`
+/// reads none of the fit's `[fixed]` (the point it scores is `--params`), so
+/// the file's own value stores the same bytes too: the swept value cannot
+/// change a `pfilter` result, and this case shows every form is accepted and
+/// names the point's problem.
 #[test]
-fn a_sweep_point_handle_names_the_files_problem() {
+fn a_sweep_point_handle_names_the_points_problem() {
     let fx = fx();
     let store = tempfile::tempdir().unwrap();
     let fitted = run_into(store.path(), &Invocation::new(&fx, &["fit", "run", &fx.path("fit_plain.toml"), "--sweep", "rho=0.5,0.6"]));
     let (_, other) = sweep_points(&fitted, "rho", 0.5);
-    let by_file = run_into(store.path(), &pf_fit(&fx, "fit_plain.toml", &[])).ids(KIND);
-    let by_point = run_into(store.path(), &pf_fit(&fx, "fit_plain.toml", &[]).set("--fit", &other.dir.to_string_lossy())).ids(KIND);
-    assert!(!by_file.is_empty());
-    assert_eq!(by_file, by_point, "the sweep point and the file name one pfilter computation");
+    assert_eq!(segment_fixed(&other.dir, "rho"), Some(0.6));
+    let point_file = store.path().join("fit_rho.toml");
+    let plain = std::fs::read_to_string(fx.path("fit_plain.toml")).unwrap();
+    assert!(plain.contains("rho = 0.5\n"));
+    std::fs::write(&point_file, plain.replace("rho = 0.5\n", "rho = 0.6\n")).unwrap();
+    let written = run(&pf_fit(&fx, "fit_plain.toml", &[]).set("--fit", &point_file.to_string_lossy())).bytes(KIND);
+    assert!(!written.is_empty());
+    let segment = other.dir.parent().unwrap().parent().unwrap().to_string_lossy().into_owned();
+    for h in [other.dir.to_string_lossy().into_owned(), segment, other.run_id[..12].to_string()] {
+        let s = run_into(store.path(), &pf_fit(&fx, "fit_plain.toml", &[]).set("--fit", &h));
+        assert_eq!(s.bytes(KIND), written, "--fit {h}: the pfilter of the point's problem");
+    }
 }
