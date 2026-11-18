@@ -653,6 +653,23 @@ impl crate::engine::RunSink for CasSink {
             );
             children.insert("obs".to_string(), vec![obs_id]);
         }
+        // `simulate --event-log`: the recorded event log is a child of the
+        // leaf at its own address, as the obs subtree is, never one of the
+        // leaf's own files — so the leaf's manifest is the same whether or not
+        // any invocation asked for the log.
+        let event_log_bytes = match cell.event_log.as_ref().map(sim::lineage::event_log_io::to_tsv_bytes) {
+            None => None,
+            Some(Ok(bytes)) => {
+                children.insert(EVENT_LOG_CHILD.to_string(), vec![event_log_child_id(&rt.run_id)]);
+                Some(bytes)
+            }
+            Some(Err(e)) => {
+                self.counter += 1;
+                self.errors.push(format!("scenario={} seed={}: event log serialize: {:?}",
+                    name, spec.process_seed, e));
+                return Ok(());
+            }
+        };
 
         // Atomic write through the one resolved-writer seam (gh#241 PR D).
         // Identity (`Sim` / `levels` / `run_id`) is copied verbatim from the
@@ -679,36 +696,10 @@ impl crate::engine::RunSink for CasSink {
 
         let mut artifacts = runid::Artifacts::new();
         artifacts.insert("traj.tsv", traj_bytes);
-        // `simulate --event-log`: the recorded event log is a first-class
-        // artifact in THIS leaf, alongside `traj.tsv`, declared in the
-        // exact-set (so the on-disk `event_log.tsv` path is a valid input to
-        // `lineage realize`). The recorder is passive (Tier 2a) so the run_id
-        // is unchanged — a freshly-committed leaf a plain `simulate` would
-        // write simply gains one more artifact. Recording into a leaf that
-        // already exists WITHOUT the log is handled below by `augment`, which
-        // adds it in place; the store gained that door precisely because this
-        // case used to lose the log. (This comment previously said `--force`
-        // or a fresh identity was needed — neither was true: forcing
-        // re-commits into the same discard.)
         // Kept alongside the staged set so they can be re-added to an
         // ALREADY-COMPLETED leaf below: a cache hit discards the staged
-        // artifacts wholesale, which is how `--event-log` against an existing
-        // leaf silently lost its log.
+        // artifacts wholesale.
         let mut optional_artifacts: Vec<(&'static str, Vec<u8>)> = Vec::new();
-        if let Some(ref el) = cell.event_log {
-            match sim::lineage::event_log_io::to_tsv_bytes(el) {
-                Ok(bytes) => {
-                    optional_artifacts.push(("event_log.tsv", bytes.clone()));
-                    artifacts.insert("event_log.tsv", bytes);
-                }
-                Err(e) => {
-                    self.counter += 1;
-                    self.errors.push(format!("scenario={} seed={}: event log serialize: {:?}",
-                        name, spec.process_seed, e));
-                    return Ok(());
-                }
-            }
-        }
         // gh#204: a run with an active reactive policy declares its firing log
         // as a first-class artifact in THIS leaf alongside `traj.tsv` — present
         // even with zero firings (`Some` carries that), absent when the model
@@ -762,13 +753,10 @@ impl crate::engine::RunSink for CasSink {
 
         // A cache hit at commit returns the INCUMBENT leaf and discards
         // everything we staged, so an optional artifact this run recorded but
-        // the stored leaf lacks — `--event-log` against a leaf first written
-        // without it — would simply vanish. (The old comment here claimed
-        // `--force` was the workaround; it was not: that path re-commits and
-        // reaches the same discard.) `augment` adds it under the leaf's lock;
-        // it is a no-op when the bytes already match, which is the fresh-commit
-        // case, and it refuses divergent bytes for the same reason the commit
-        // path does.
+        // the stored leaf lacks would simply vanish. `augment` adds it under
+        // the leaf's lock; it is a no-op when the bytes already match, which is
+        // the fresh-commit case, and it refuses divergent bytes for the same
+        // reason the commit path does.
         for (artifact, bytes) in &optional_artifacts {
             if let Err(e) = store.augment(
                 &dest, &runid::LeafIdentity::new(rt.run_id), artifact, bytes)
@@ -776,6 +764,25 @@ impl crate::engine::RunSink for CasSink {
                 self.errors.push(format!(
                     "scenario={} seed={}: recording {} into {}: {}",
                     name, spec.process_seed, artifact, dest.display(), e));
+            }
+        }
+
+        // The event-log child: declared in the leaf's record first (a fresh
+        // commit already declares it; a leaf the store already held gains the
+        // declaration, which is recorded and never hashed), then written. In
+        // that order a crash leaves a declared child with no record, which
+        // the next `--event-log` run writes, never an undeclared directory,
+        // which the exact-set check would read as an orphan and stale the
+        // leaf. A failure is reported and fails the command, since the log
+        // is what `--event-log` was asked for.
+        if let Some(bytes) = &event_log_bytes {
+            let written = ensure_children_declared(
+                &dest, EVENT_LOG_CHILD, &[event_log_child_id(&rt.run_id)],
+            )
+            .and_then(|()| write_event_log_child(&dest, &rt.run_id, bytes));
+            if let Err(e) = written {
+                self.errors.push(format!("scenario={} seed={}: event log: {}",
+                    name, spec.process_seed, e));
             }
         }
 
@@ -792,7 +799,7 @@ impl crate::engine::RunSink for CasSink {
             // cadence's subtree with it. `children` is recorded, never hashed,
             // so declaring the subtree in place changes no identity.
             if let Some(ids) = children.get("obs") {
-                if let Err(e) = ensure_obs_children_declared(&dest, ids) {
+                if let Err(e) = ensure_children_declared(&dest, "obs", ids) {
                     self.errors.push(format!("scenario={} seed={}: declaring obs child: {}",
                         name, spec.process_seed, e));
                 }
@@ -1043,18 +1050,19 @@ pub(crate) fn ensure_input_listed(
     })
 }
 
-/// Ensure a leaf's `run.json` declares every id in `ids` under its `obs`
-/// child, rewriting it atomically (tmp + rename) only when one is missing.
-/// `children` is metadata, not identity — the run_id and exact-set of the
-/// leaf's own files are untouched — so this is the same in-place record
-/// update `ensure_provenance_label` performs. Idempotent: a no-op when the
-/// record already declares them (the fresh-commit case).
-fn ensure_obs_children_declared(
+/// Ensure a leaf's `run.json` declares every id in `ids` under its `child`
+/// (`obs`, [`EVENT_LOG_CHILD`]), rewriting it atomically (tmp + rename) only
+/// when one is missing. `children` is metadata, not identity — the run_id and
+/// exact-set of the leaf's own files are untouched — so this is the same
+/// in-place record update `ensure_provenance_label` performs. Idempotent: a
+/// no-op when the record already declares them (the fresh-commit case).
+fn ensure_children_declared(
     leaf_dir: &std::path::Path,
+    child: &str,
     ids: &[runid::ContentHash],
 ) -> Result<(), String> {
     rewrite_record(leaf_dir, |rec| {
-        let declared = rec.children.entry("obs".to_string()).or_default();
+        let declared = rec.children.entry(child.to_string()).or_default();
         let missing: Vec<runid::ContentHash> =
             ids.iter().filter(|id| !declared.contains(id)).copied().collect();
         if missing.is_empty() {
@@ -1063,6 +1071,94 @@ fn ensure_obs_children_declared(
         declared.extend(missing);
         Ok(true)
     })
+}
+
+// ─── Event-log child (`simulate --event-log`) ──────────────────────────────
+
+/// The name under which a leaf declares its event-log child in `run.json`'s
+/// `children`, and the directory that holds it: `<leaf>/event_log/`, with
+/// [`EVENT_LOG_FILE`] and its record [`EVENT_LOG_RECORD`].
+///
+/// A fixed name, because nothing the log depends on lies outside the leaf's
+/// run id. The recorder draws no randomness; it reads the compiled model (its
+/// `#[lineage]` annotations included), the parameters, the seed, the backend,
+/// its step and its sampler, all of which the leaf's levels key, and the
+/// recorder and its file format are the engine's, whose version the `model`
+/// level folds. One run id has one event log; what varies by invocation is
+/// only whether it was asked for, which is why it is a child rather than one
+/// of the leaf's own files.
+pub(crate) const EVENT_LOG_CHILD: &str = "event_log";
+
+/// The event log's file in the child: the TSV `lineage realize` reads.
+pub(crate) const EVENT_LOG_FILE: &str = "event_log.tsv";
+
+/// The child's record: the parent run id and the log's size and SHA-256. It
+/// is written after the log, so its presence says the child is complete.
+const EVENT_LOG_RECORD: &str = "event_log.json";
+
+/// Where a leaf's event log is: `<leaf>/event_log/event_log.tsv`. One function
+/// for the writer and every reader (`simulate`'s report, `camdl cat`).
+pub(crate) fn event_log_child_file(leaf: &std::path::Path) -> std::path::PathBuf {
+    leaf.join(EVENT_LOG_CHILD).join(EVENT_LOG_FILE)
+}
+
+/// The id a leaf's record declares for its event-log child.
+fn event_log_child_id(run_id: &runid::ContentHash) -> runid::ContentHash {
+    runid::ContentHash::digest_bytes(format!("{}:{}", run_id.to_hex(), EVENT_LOG_CHILD).as_bytes())
+}
+
+/// Write the event log into `leaf`'s child, unless the child already holds it.
+///
+/// A complete child (its record present, naming these bytes, and the file
+/// holding them) is left as it is. A record naming other bytes is refused and
+/// nothing is overwritten: one run id has one event log, so different bytes
+/// under it are an identity defect, the same rule the store's commit path
+/// applies. Anything else — no child, or a crash between the file and its
+/// record — is (re)written, each file atomically ([`runid::write_file_atomic`]).
+fn write_event_log_child(
+    leaf: &std::path::Path,
+    run_id: &runid::ContentHash,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let dir = leaf.join(EVENT_LOG_CHILD);
+    let file = dir.join(EVENT_LOG_FILE);
+    let record_path = dir.join(EVENT_LOG_RECORD);
+    let digest = runid::ContentHash::digest_bytes(bytes).to_hex().to_string();
+    match std::fs::read(&record_path) {
+        Ok(text) => {
+            let rec: serde_json::Value = serde_json::from_slice(&text).map_err(|e| {
+                format!("the event-log record {} does not parse ({e}); `--force` recomputes the leaf",
+                    record_path.display())
+            })?;
+            let stored = rec["digest"].as_str().unwrap_or_default();
+            if stored != digest {
+                return Err(format!(
+                    "the stored event log {} has SHA-256 {stored}, and this run recorded {digest} \
+                     under the same run id {}; nothing was overwritten. One run id has one event \
+                     log, so this is an identity defect: please report it. `--force` recomputes \
+                     the leaf.",
+                    file.display(), run_id.to_hex()));
+            }
+            if std::fs::read(&file).is_ok_and(|on_disk| on_disk == bytes) {
+                return Ok(());
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("cannot read {}: {e}", record_path.display())),
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    let record = serde_json::json!({
+        "parent_run_id": run_id.to_hex().to_string(),
+        "file": EVENT_LOG_FILE,
+        "bytes": bytes.len(),
+        "digest": digest,
+    });
+    let record_bytes = serde_json::to_vec_pretty(&record)
+        .map_err(|e| format!("cannot serialize the event-log record: {e}"))?;
+    for (path, bytes) in [(&file, bytes), (&record_path, record_bytes.as_slice())] {
+        runid::write_file_atomic(path, bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    }
+    Ok(())
 }
 
 // ─── Observation ensemble writer (CLI review #4) ───────────────────────────
@@ -1262,6 +1358,36 @@ fn write_obs_into_cas(
 
 #[cfg(test)]
 mod tests {
+    /// The event-log child is written once and then left alone: the same
+    /// bytes again are a no-op, other bytes under the same run id are refused
+    /// with nothing overwritten, and a log left without its record (a crash
+    /// between the two writes) is rewritten.
+    #[test]
+    fn the_event_log_child_is_written_once_and_never_overwritten() {
+        let leaf = crate::test_support::unique_temp_dir("event_log_child");
+        let run_id = runid::ContentHash::digest_bytes(b"run");
+        let file = event_log_child_file(&leaf);
+        let record = leaf.join(EVENT_LOG_CHILD).join(EVENT_LOG_RECORD);
+
+        write_event_log_child(&leaf, &run_id, b"first\n").unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"first\n");
+        let rec: serde_json::Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+        assert_eq!(rec["digest"].as_str().unwrap(),
+            runid::ContentHash::digest_bytes(b"first\n").to_hex().to_string());
+        assert_eq!(rec["parent_run_id"].as_str().unwrap(), run_id.to_hex().to_string());
+
+        write_event_log_child(&leaf, &run_id, b"first\n").unwrap();
+        let err = write_event_log_child(&leaf, &run_id, b"second\n").unwrap_err();
+        assert!(err.contains("identity defect"), "{err}");
+        assert_eq!(std::fs::read(&file).unwrap(), b"first\n", "nothing was overwritten");
+
+        std::fs::remove_file(&record).unwrap();
+        std::fs::write(&file, b"torn").unwrap();
+        write_event_log_child(&leaf, &run_id, b"first\n").unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"first\n", "an incomplete child is rewritten");
+        assert!(record.is_file());
+    }
+
     /// A leaf directory holding a minimal fit-method `run.json` with `label`.
     fn record_leaf(tag: &str, label: Option<&str>) -> std::path::PathBuf {
         let leaf = crate::test_support::unique_temp_dir(tag).join("if2-00000000").join("seed_1-00000000");

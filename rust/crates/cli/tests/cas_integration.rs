@@ -1694,15 +1694,13 @@ simulate { from = 0 'days  to = 60 'days }
     Some(ir)
 }
 
-/// `simulate --event-log` records the event log as a content-addressed
-/// artifact that sits ALONGSIDE `traj.tsv` in the SAME `Sim` leaf — not as a
-/// loose file. The recorder is passive (Tier 2a), so the leaf's run_id and
-/// `traj.tsv` bytes are identical to a plain `simulate` at the same seed; the
-/// event log is just an additional declared artifact. `--event-log PATH` also
-/// writes PATH as a byte-identical mirror (symmetric with `-o` for the
-/// trajectory).
+/// `simulate --event-log` records the event log as the `Sim` leaf's declared
+/// child, `<leaf>/event_log/event_log.tsv`. The recorder is passive (Tier 2a),
+/// so the leaf's run_id, `traj.tsv` bytes and manifest are those of a plain
+/// `simulate` at the same seed. `--event-log PATH` also writes PATH as a
+/// byte-identical mirror (symmetric with `-o` for the trajectory).
 #[test]
-fn event_log_lands_in_sim_leaf_alongside_traj() {
+fn event_log_lands_in_the_sim_leafs_child() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
     let Some(ir) = compile_lineage_model(&bin, tmp.path()) else { return; };
@@ -1721,11 +1719,13 @@ fn event_log_lands_in_sim_leaf_alongside_traj() {
     let plain_leaf = sole_leaf(&out_plain.join("sims"));
     let plain_run_id = read_meta(&plain_leaf)["run_id"].as_str().unwrap().to_string();
     let plain_traj = std::fs::read(plain_leaf.join("traj.tsv")).unwrap();
-    assert!(!plain_leaf.join("event_log.tsv").exists(),
-        "plain simulate must NOT write event_log.tsv");
+    let plain_files: Vec<String> =
+        read_meta(&plain_leaf)["artifacts"].as_object().unwrap().keys().cloned().collect();
+    assert!(!plain_leaf.join("event_log").exists(),
+        "plain simulate must NOT write an event log");
 
-    // (2) simulate --event-log PATH → leaf with traj.tsv + event_log.tsv, same
-    //     run_id and identical traj bytes; PATH is a byte-identical mirror.
+    // (2) simulate --event-log PATH → the same leaf files, run_id and traj
+    //     bytes, plus the child; PATH is a byte-identical mirror.
     let out_el = tmp.path().join("el");
     let mirror = tmp.path().join("mirror.tsv");
     let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
@@ -1741,13 +1741,14 @@ fn event_log_lands_in_sim_leaf_alongside_traj() {
         "--event-log must not change the sim run_id (passive recorder, Tier 2a)");
     assert_eq!(std::fs::read(el_leaf.join("traj.tsv")).unwrap(), plain_traj,
         "trajectory must be byte-identical with/without --event-log");
-    assert!(el_leaf.join("event_log.tsv").exists(),
-        "event_log.tsv should sit alongside traj.tsv in the leaf");
-    assert!(el_meta["artifacts"].as_object().unwrap().contains_key("event_log.tsv"),
-        "event_log.tsv must be declared in the run.json artifacts exact-set");
-    assert_eq!(std::fs::read(&mirror).unwrap(),
-               std::fs::read(el_leaf.join("event_log.tsv")).unwrap(),
-        "--event-log PATH mirror must be byte-identical to the leaf's event_log.tsv");
+    let el_files: Vec<String> = el_meta["artifacts"].as_object().unwrap().keys().cloned().collect();
+    assert_eq!(el_files, plain_files, "--event-log leaves the leaf's own files as a plain run's");
+    let child = el_leaf.join("event_log").join("event_log.tsv");
+    assert!(child.is_file(), "the event log is the leaf's event_log/ child");
+    assert!(el_meta["children"]["event_log"].is_array(),
+        "the child is declared in run.json's children");
+    assert_eq!(std::fs::read(&mirror).unwrap(), std::fs::read(&child).unwrap(),
+        "--event-log PATH mirror must be byte-identical to the child's event_log.tsv");
 }
 
 /// A `--label` passed to `simulate` must end up on the leaf's

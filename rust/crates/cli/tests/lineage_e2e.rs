@@ -72,18 +72,23 @@ fn count_tips(newick: &str) -> usize {
     newick.matches("ind").count()
 }
 
-/// A leaf first written WITHOUT an event log, then re-run with
-/// `--event-log`, must end up holding the log.
-///
-/// Before the store had an augment door this silently lost it: the second run
-/// staged `event_log.tsv` into a leaf that already existed, the commit path
-/// returned the incumbent and discarded the whole staged set, and nothing
-/// reported the loss. The in-code note claimed `--force` was the workaround;
-/// it was not — that path re-commits and reaches the same discard.
+/// The leaf's run id and its manifest (`run.json`'s `artifacts`, serialized).
+fn manifest_of(leaf: &Path) -> (String, String) {
+    let rec: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(leaf.join("run.json")).unwrap()).unwrap();
+    (rec["run_id"].as_str().unwrap().to_string(), rec["artifacts"].to_string())
+}
+
+/// `simulate --event-log` writes the event log as a child of the leaf at its
+/// own address, `<leaf>/event_log/`, so what one run id holds does not depend
+/// on whether any invocation asked for the log. A plain run, then the same
+/// command with `--event-log`, then a plain run again leave the leaf's run id
+/// and manifest byte-identical; the log is at the child address, declared in
+/// `run.json`'s `children`, and is not one of the leaf's own files.
 #[test]
-fn event_log_is_added_to_a_leaf_first_written_without_one() {
+fn the_event_log_is_a_child_and_the_leaf_manifest_never_changes() {
     let camdl = camdl_bin();
-    let tmp = tempdir("evaugment");
+    let tmp = tempdir("evchild");
     let model = tmp.join("sir.camdl");
     std::fs::write(&model, SIR_LINEAGE).unwrap();
 
@@ -106,37 +111,43 @@ fn event_log_is_added_to_a_leaf_first_written_without_one() {
         "--output-dir", store_s,
     ];
 
-    // First run: no --event-log. The leaf is committed without one.
     let first = run(&camdl, &base);
     assert!(first.status.success(), "plain simulate failed: {}",
         String::from_utf8_lossy(&first.stderr));
-
     let leaves = sim_leaves(&store);
     assert_eq!(leaves.len(), 1, "expected one sim leaf, got {leaves:?}");
-    assert!(!leaves[0].join("event_log.tsv").exists(),
-        "the first run must not have written an event log");
+    let leaf = leaves[0].clone();
+    let plain = manifest_of(&leaf);
+    let child = leaf.join("event_log").join("event_log.tsv");
+    assert!(!child.exists(), "a plain run writes no event log");
 
-    // Second run, same identity, now recording. The leaf must gain the log.
     let ev = tmp.join("ev.tsv");
     let mut args = base.clone();
     args.extend(["--event-log", ev.to_str().unwrap()]);
     let second = run(&camdl, &args);
     assert!(second.status.success(), "simulate --event-log failed: {}",
         String::from_utf8_lossy(&second.stderr));
+    assert_eq!(sim_leaves(&store), vec![leaf.clone()], "the same leaf, not a fork");
+    assert_eq!(manifest_of(&leaf), plain,
+        "--event-log leaves the leaf's run id and manifest byte-identical");
+    assert!(!leaf.join("event_log.tsv").exists(), "the log is not one of the leaf's own files");
+    assert!(child.is_file(), "the log is at the child address {}", child.display());
+    assert!(leaf.join("event_log").join("event_log.json").is_file(), "the child carries its record");
+    assert_eq!(std::fs::read(&ev).unwrap(), std::fs::read(&child).unwrap(),
+        "the --event-log PATH mirror holds the child's bytes");
+    let rec: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(leaf.join("run.json")).unwrap()).unwrap();
+    assert!(rec["children"]["event_log"].as_array().is_some_and(|ids| ids.len() == 1),
+        "run.json declares the child: {}", rec["children"]);
 
-    let leaves = sim_leaves(&store);
-    assert_eq!(leaves.len(), 1, "the re-run must reuse the same leaf, not fork one");
-    assert!(leaves[0].join("event_log.tsv").exists(),
-        "the completed leaf must GAIN event_log.tsv — this is the artifact that \
-         was silently discarded before the augment door existed");
-
-    // And it is part of the exact set, not an orphan: a third plain run still
-    // sees a valid cache hit rather than a stale leaf.
+    // A later plain run reads the leaf as a valid hit (the child is declared,
+    // so it is not an orphan of the leaf's exact set), and both survive it.
     let third = run(&camdl, &base);
     assert!(third.status.success(), "third run failed: {}",
         String::from_utf8_lossy(&third.stderr));
-    assert!(leaves[0].join("event_log.tsv").exists(),
-        "the augmented artifact must survive a later plain run");
+    assert_eq!(sim_leaves(&store), vec![leaf.clone()]);
+    assert_eq!(manifest_of(&leaf), plain, "a later plain run leaves the manifest as it was");
+    assert!(child.is_file(), "the child survives a later plain run");
 }
 
 /// Committed sim leaves (dirs holding a run.json) under `<store>/sims`.

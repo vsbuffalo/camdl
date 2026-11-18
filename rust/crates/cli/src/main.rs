@@ -2344,7 +2344,7 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
     // randomness — so the trajectory (and thus the leaf's run_id and
     // `traj.tsv` bytes) is byte-identical to a plain `simulate` at the same
     // seed (Tier 2a). The recorded log rides on the `CellResult` and `CasSink`
-    // writes it into the SAME leaf as `event_log.tsv`, alongside `traj.tsv`.
+    // writes it as the leaf's event-log child, `<leaf>/event_log/`.
     // We reuse `plan_grid` (not a hand-rolled spec) so the cell — and its
     // run_id — match the normal path exactly. `--event-log PATH` additionally
     // mirrors the log to PATH (symmetric with `-o` for the trajectory).
@@ -2463,22 +2463,21 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
     }
 
     // ── Event-log mirror + realize hint (Layer 1 → Layer 2) ─────────────────
-    // The canonical event log is the `event_log.tsv` artifact in the leaf;
-    // `--event-log PATH` additionally mirrors it to PATH. Either way, point
-    // the user at the next step (`lineage realize`).
+    // The canonical event log is the leaf's event-log child,
+    // `<leaf>/event_log/event_log.tsv`; `--event-log PATH` additionally
+    // mirrors it to PATH. Either way, point the user at the next step
+    // (`lineage realize`).
     if let Some((event_log, exact)) = recorded {
-        // The leaf's `event_log.tsv` is a real file path `lineage realize` can
-        // read directly (run_path is relative to the cas root, includes the
-        // `sims/` prefix). On a cache HIT the leaf already existed and
-        // commit_atomic discards the freshly-staged event_log.tsv, so the
-        // merge path re-adds it with the store's `augment` door — the
-        // "augment-on-recommit" this comment used to defer as a follow-up.
-        // The existence filter stays as a belt: augment is best-effort per
-        // artifact (its failure is reported, not fatal), so never hand
-        // finish_event_log a path that is not there.
+        // A real file path `lineage realize` can read directly (run_path is
+        // relative to the store root and includes the `sims/` prefix). A
+        // failed child write has already ended the command above; the
+        // existence filter only keeps a path that is not there from being
+        // printed.
         let leaf_event_log = sink.cas.completed_runs.last()
-            .map(|e| format!("{}/{}/event_log.tsv", cas_root, e.run_path))
-            .filter(|p| std::path::Path::new(p).exists());
+            .map(|e| crate::cas_sink::event_log_child_file(
+                &std::path::Path::new(&cas_root).join(&e.run_path)))
+            .filter(|p| p.exists())
+            .map(|p| p.display().to_string());
         lineage::finish_event_log(&out, a, &event_log, exact, leaf_event_log.as_deref());
     }
 

@@ -346,13 +346,13 @@ impl FsCasStore {
 
     /// Add one artifact to a leaf that is already `Completed`.
     ///
-    /// The store had no way for a finished leaf to gain a file, and the gap
-    /// was load-bearing: `simulate --event-log` methods `event_log.tsv` into a
-    /// leaf that may already exist, and the whole staged set was then
-    /// discarded as an already-completed no-op, so the log was silently lost.
-    /// The in-code note said `--force` was the workaround; it was not (that
-    /// path re-commits and hits the same discard). This is the operation both
-    /// wanted.
+    /// A commit that finds the leaf already completed discards the whole
+    /// staged set, so an artifact this run staged and the stored leaf lacks
+    /// would be silently lost; `simulate` passes its `reactive_log.tsv`
+    /// through here. This adds it in place. It is not the way to record an artifact only some
+    /// invocations ask for: that makes what one run id holds depend on the
+    /// invocation, and such an artifact is a declared child of the leaf
+    /// instead (`simulate --event-log`'s `event_log/`).
     ///
     /// Contract:
     /// - the leaf must be `Completed` AND carry `expected`'s identity — a

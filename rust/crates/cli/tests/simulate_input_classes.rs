@@ -28,6 +28,10 @@
 //!   the leaves are unaffected — same run ids, same stored bytes
 //!   ([`assert_leaf_unaffected`]) — or, for an input that leaves the store,
 //!   none is written ([`assert_writes_no_leaf`]).
+//! - `child`: run after a run without it in the same store, every leaf keeps
+//!   its run id and its manifest byte for byte and gains the child at its
+//!   address; a store first written with it holds the same leaves
+//!   ([`assert_child_written`]).
 //!
 //! These are regression evidence on small fixtures, not proof: another model
 //! could reach a path these do not (the proposal, "What tests can and cannot
@@ -312,6 +316,18 @@ struct Leaf {
     files: BTreeMap<String, String>,
     /// The names of the observation subtrees under the leaf (`obs/<name>/`).
     obs: BTreeSet<String>,
+    /// The manifest as stored: `run.json`'s `artifacts`, serialized.
+    manifest: String,
+    /// Every file under the leaf's declared children (`run.json`'s
+    /// `children`), by its path relative to the leaf.
+    child_files: BTreeSet<String>,
+}
+
+impl Leaf {
+    /// Whether a declared child holds a file at or under `address`.
+    fn has_child(&self, address: &str) -> bool {
+        self.child_files.iter().any(|f| f.starts_with(address))
+    }
 }
 
 #[derive(Debug)]
@@ -424,12 +440,28 @@ fn leaf(dir: &Path, record: &Path) -> Leaf {
     let obs = std::fs::read_dir(dir.join("obs"))
         .map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
         .unwrap_or_default();
+    let mut child_files = BTreeSet::new();
+    for name in v["children"].as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default() {
+        let mut stack = vec![dir.join(&name)];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    child_files.insert(p.strip_prefix(dir).unwrap().to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
     Leaf {
         kind: v["kind"].as_str().unwrap().to_string(),
         run_id: v["run_id"].as_str().unwrap().to_string(),
         levels,
         files,
         obs,
+        manifest: v["artifacts"].to_string(),
+        child_files,
     }
 }
 
@@ -513,6 +545,30 @@ fn assert_leaf_unaffected(input: &str, base: &Invocation, with: &Invocation, liv
     let (a, b) = (simulate(base), simulate(with));
     assert!(!a.leaves.is_empty(), "the run stores a leaf");
     assert_eq!(result(&a), result(&b), "{input} leaves the run ids and the stored bytes unchanged");
+    if let Some(p) = live {
+        assert!(p.exists(), "{input} wrote {}: the fixture exercises it", p.display());
+    }
+}
+
+/// `child`: in one store, a run with the input after a run without it leaves
+/// every leaf's run id and manifest (`run.json`'s `artifacts`, byte for byte)
+/// as they were, and puts the child at `address` under each sim leaf, where
+/// the run without it wrote nothing; and a fresh store written with the input
+/// holds the same run ids and stored bytes as one written without it, so what
+/// a run id holds does not depend on which invocation wrote it first. `live`
+/// — the input's own output outside the store — exists afterwards.
+fn assert_child_written(input: &str, base: &Invocation, with: &Invocation, address: &str, live: Option<&Path>) {
+    let store = tempfile::tempdir().unwrap();
+    let a = simulate_into(store.path(), base);
+    assert!(!a.leaves.is_empty(), "the run stores a leaf");
+    assert!(a.leaves.iter().all(|l| !l.has_child(address)), "without {input}, no child at {address}");
+    let b = simulate_into(store.path(), with);
+    let manifests = |s: &Stored| -> Vec<(String, String)> {
+        s.leaves.iter().map(|l| (l.run_id.clone(), l.manifest.clone())).collect()
+    };
+    assert_eq!(manifests(&a), manifests(&b), "{input} leaves every leaf's run id and manifest unchanged");
+    assert!(b.sims().values().all(|l| l.has_child(address)), "{input} writes the child at {address}");
+    assert_eq!(result(&a), result(&simulate(with)), "{input}: a store first written with it holds the same leaves");
     if let Some(p) = live {
         assert!(p.exists(), "{input} wrote {}: the fixture exercises it", p.display());
     }
@@ -883,38 +939,54 @@ fn presentation_output() {
     assert_leaf_unaffected("--output", &sir(&fx, &[]), &sir(&fx, &["-o", &f.to_string_lossy()]), Some(&f));
 }
 
+// ─── child ───────────────────────────────────────────────────────────────────
+
+// Each `--obs*` flag writes, besides its own mirror, the observation subtree
+// `obs/<hash8>-<obs_seed>/` under the leaf.
+
 #[test]
-fn presentation_obs() {
+fn child_obs() {
     let fx = fx();
     let out = tempfile::tempdir().unwrap();
     let f = out.path().join("obs.tsv");
-    assert_leaf_unaffected("--obs", &sir(&fx, &[]), &sir(&fx, &["--obs", &f.to_string_lossy()]), Some(&f));
+    assert_child_written("--obs", &sir(&fx, &[]), &sir(&fx, &["--obs", &f.to_string_lossy()]), "obs/", Some(&f));
 }
 
 #[test]
-fn presentation_obs_dir() {
+fn child_obs_dir() {
     let fx = fx();
     let out = tempfile::tempdir().unwrap();
     let d = out.path().join("obs");
-    assert_leaf_unaffected("--obs-dir", &sir(&fx, &[]), &sir(&fx, &["--obs-dir", &d.to_string_lossy()]), Some(&d.join("cases.tsv")));
+    assert_child_written("--obs-dir", &sir(&fx, &[]), &sir(&fx, &["--obs-dir", &d.to_string_lossy()]), "obs/", Some(&d.join("cases.tsv")));
 }
 
 #[test]
-fn presentation_obs_only() {
+fn child_obs_only() {
     let fx = fx();
     let out = tempfile::tempdir().unwrap();
     let f = out.path().join("obs.tsv");
-    assert_leaf_unaffected("--obs-only", &sir(&fx, &[]), &sir(&fx, &["--obs-only", &f.to_string_lossy()]), Some(&f));
+    assert_child_written("--obs-only", &sir(&fx, &[]), &sir(&fx, &["--obs-only", &f.to_string_lossy()]), "obs/", Some(&f));
 }
 
 #[test]
-fn presentation_obs_only_dir() {
+fn child_obs_only_dir() {
     let fx = fx();
     let out = tempfile::tempdir().unwrap();
     let d = out.path().join("obs");
     let with = sir(&fx, &["--obs-only-dir", &d.to_string_lossy()]);
-    assert_leaf_unaffected("--obs-only-dir", &sir(&fx, &[]), &with, Some(&d.join("cases.tsv")));
+    assert_child_written("--obs-only-dir", &sir(&fx, &[]), &with, "obs/", Some(&d.join("cases.tsv")));
 }
+
+#[test]
+fn child_event_log() {
+    // The recorder is passive, so the trajectory and the run id are the same;
+    // the log is the leaf's `event_log/` child, and the leaf's own files are
+    // what a plain run stores.
+    let fx = fx();
+    assert_child_written("--event-log", &sir(&fx, &[]), &sir(&fx, &["--event-log"]), "event_log/event_log.tsv", None);
+}
+
+// ─── presentation and provenance (continued) ────────────────────────────────
 
 #[test]
 fn presentation_dates() {
@@ -962,22 +1034,6 @@ fn presentation_quantities() {
     let with = sir_source(&fx, &["--quantities-out", &b.to_string_lossy(), "--quantities", &fx.path("vocabulary.camdl")]);
     assert_leaf_unaffected("--quantities", &base, &with, None);
     assert!(std::fs::read_dir(&b).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with("quantities-")), "--quantities wrote its keyed table");
-}
-
-#[test]
-fn presentation_event_log() {
-    // The recorder is passive, so the trajectory and the run id are the same,
-    // but the leaf gains an `event_log.tsv` artifact under that run id: the
-    // bytes one run id holds depend on whether any invocation asked for the
-    // log. Pinned here, so a change to it is seen; the log is to become its
-    // own addressed child artifact.
-    let fx = fx();
-    let (base, logged) = (simulate(&sir(&fx, &[])), simulate(&sir(&fx, &["--event-log"])));
-    assert_eq!(base.sim_ids(), logged.sim_ids(), "--event-log: the run id is unchanged");
-    let (bl, ll) = (&base.leaves[0], &logged.leaves[0]);
-    assert_eq!(bl.files.get("traj.tsv"), ll.files.get("traj.tsv"), "--event-log: the trajectory is unchanged");
-    let gained: Vec<&String> = ll.files.keys().filter(|k| !bl.files.contains_key(*k)).collect();
-    assert_eq!(gained, ["event_log.tsv"], "--event-log adds its log to the leaf, under the same run id");
 }
 
 #[test]

@@ -23,6 +23,9 @@
 //!                 {obs_hash[:8]}-{obs_seed}/
 //!                   <stream>.tsv              # observation draws (wide or per-stream)
 //!                   obs.json                  # obs metadata (NOT a RunRecord)
+//!               event_log/                    # optional, with `--event-log`
+//!                 event_log.tsv               # the lineage event log
+//!                 event_log.json              # parent run_id + digest (NOT a RunRecord)
 //!   fits/
 //!     {fit_stem}-{h8}/                        # FitDigest (model + data + fit-wide config)
 //!       {algorithm}-{h8}/                     # e.g. pgas-{h8}, if2-{h8}
@@ -37,7 +40,10 @@
 //! `obs/{obs_hash}-{obs_seed}/` child lets users iterate observation draws
 //! without recomputing the trajectory: the trajectory identity is the five
 //! levels above; the obs child is keyed on `(trajectory run_id, obs_hash,
-//! obs_seed)`.
+//! obs_seed)`. The event-log child has a fixed name, since nothing the log
+//! depends on lies outside the trajectory's run id
+//! (`cas_sink::EVENT_LOG_CHILD`); it is a child so that the leaf's own files
+//! are the same whether or not a run asked for the log.
 
 pub mod typed;
 
