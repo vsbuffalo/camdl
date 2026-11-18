@@ -617,21 +617,24 @@ is the user's config file byte for byte, comments included, as `fit run` read
 it; `fit_toml_hash` is its hash. It is kept for display and provenance, and no
 reader takes a fit's configuration from it. `fit.resolved.toml` is the
 configuration the folder's fits ran under, and is what every reader of a stored
-fit parses (`fit predict`, `compare`, `simulate --fit` on a run handle, and
+fit parses (`fit predict`, `compare` and `simulate --fit` on a run handle,
+`pfilter`, `profile` and `survey` `--fit` on any stored-fit handle, and
 `fit table`'s config diff): the same config with every problem-half value the
 command line set written in (today `--allow-forcing-extrapolation`, as
-`[config] allow_forcing_extrapolation =
-true`) and `[fixed]` the folder's own —
+`[config] allow_forcing_extrapolation = true`) and `[fixed]` the folder's own —
 a `--sweep` point's values applied, a `from_scenario` expanded into inline
-values. It is generated: it opens with a comment saying so, carries none of the
-file's comments or layout, and is written with the keys of every table sorted,
-so the same configuration always gives the same bytes. Its `[method]` is the
-file's: a fit folder holds every method run on its problem, and each run's own
-method settings are in its `run.json` (`inputs`). Neither file enters any
-identity. A fit folder written before camdl stored `fit.resolved.toml` is
-refused by every reader, with a message naming the fix: re-run `camdl fit run`
-on the same file with the same options, which reuses the stored results and
-writes the file.
+values. A sweep point named by its leaf, folder or run-id prefix is so read at
+its own values. A profile's folder stores the same pair for the fit it profiles:
+the user's text as `fit.toml.original` and the resolved config as
+`fit.resolved.toml`. It is generated: it opens with a comment saying so, carries
+none of the file's comments or layout, and is written with the keys of every
+table sorted, so the same configuration always gives the same bytes. Its
+`[method]` is the file's: a fit folder holds every method run on its problem,
+and each run's own method settings are in its `run.json` (`inputs`). Neither
+file enters any identity. A fit folder written before camdl stored
+`fit.resolved.toml` is refused by every reader, with a message naming the fix:
+re-run `camdl fit run` on the same file with the same options, which reuses the
+stored results and writes the file.
 
 **`source_config` and the stored configs are different files.** `source_config`
 names the user's own config file — which may since have changed or gone — and is
