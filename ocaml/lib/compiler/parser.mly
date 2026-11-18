@@ -186,19 +186,47 @@
     | _ ->
       bad "it must be a call naming the form"
 
+  (* [kvs] are the block's entries, each with its start and end position.
+     gh#1206: two checks the fold used to skip. A projection written under any
+     key other than `projected` is E121 (the key was discarded, so a typo
+     such as `projeted = ...` compiled); a key given twice is E122 (the later
+     entry used to replace the earlier one). *)
   let build_obs_decl name ibs src kvs ~doc ~sp ~ep =
     let cols   = ref None in
     let sched  = ref None in
     let proj   = ref None in
     let meas   = ref None in
     let covers = ref None in
-    List.iter (function
-      | `Columns c     -> cols   := Some c
-      | `Schedule s    -> sched  := Some s
-      | `Proj p        -> proj   := Some p
-      | `Covers c      -> covers := Some c
-      | `Measurement m -> meas   := Some m
-      | `Lik l         -> meas   := Some { om_scored = ""; om_lik = l }
+    let seen   = Hashtbl.create 8 in
+    let once key ~sp ~ep =
+      if Hashtbl.mem seen key then
+        Parser_errors.push_error_hint ~sp ~ep ~code:"E122"
+          ~msg:(Printf.sprintf
+            "observation '%s' gives %s twice; a stream has one" name key)
+          ~hint:"keep one of the two lines: the second does not add to the \
+                 first, it would replace it"
+      else Hashtbl.replace seen key ()
+    in
+    List.iter (fun (kv, sp, ep) -> match kv with
+      | `Columns c     -> once "`columns`" ~sp ~ep; cols := Some c
+      | `Schedule s    -> once "`emit_schedule`" ~sp ~ep; sched := Some s
+      | `Proj (key, ksp, kep, p) ->
+        if key <> "projected" then
+          Parser_errors.push_error_fix ~sp:ksp ~ep:kep ~code:"E121"
+            ~msg:(Printf.sprintf
+              "observation '%s': `%s = ...` is not an observation key; the \
+               value the likelihood reads is written `projected = ...`"
+              name key)
+            ~hint:(Printf.sprintf
+              "rename `%s` to `projected`, and read it as `projected` in the \
+               `~` line. The other keys are `columns { ... }`, `covers = ...`, \
+               `emit_schedule = ...` and `<column> ~ D(...)`" key)
+            ~fix:(Some (ksp, kep, "projected"))
+        else once "`projected`" ~sp ~ep;
+        proj := Some p
+      | `Covers c      -> once "`covers`" ~sp ~ep; covers := Some c
+      | `Measurement m -> once "a `~` measurement line" ~sp ~ep; meas := Some m
+      | `Lik l         -> meas := Some { om_scored = ""; om_lik = l }
     ) kvs;
     { oname = name; oindices = ibs;
       osource = src; ocolumns = !cols;
@@ -972,12 +1000,12 @@ obs_decl_sep:
    The old `name : { ... }` form is rejected by [obs_decl_colon] below with a
    migration diagnostic. *)
 obs_decl:
-  | d = doc_opt name = IDENT ibs = index_bindings_opt src = obs_source_opt LBRACE obs_kvs = list(obs_kv) RBRACE
+  | d = doc_opt name = IDENT ibs = index_bindings_opt src = obs_source_opt LBRACE obs_kvs = list(located_obs_kv) RBRACE
       { build_obs_decl name ibs src obs_kvs ~doc:d ~sp:$startpos(name) ~ep:$endpos }
   (* Migration: the stream header colon was dropped (2026-06-10 §9). Reject
      `name : { ... }` with a diagnostic that names the rewrite, not a bare
      E001. *)
-  | d = doc_opt name = IDENT ibs = index_bindings_opt src = obs_source_opt COLON LBRACE obs_kvs = list(obs_kv) RBRACE
+  | d = doc_opt name = IDENT ibs = index_bindings_opt src = obs_source_opt COLON LBRACE obs_kvs = list(located_obs_kv) RBRACE
       { Parser_errors.push_error_hint ~sp:$startpos(name) ~ep:$endpos
           ~code:"E270"
           ~msg:(Printf.sprintf
@@ -989,6 +1017,11 @@ obs_decl:
 obs_source_opt:
   | (* empty *)        { None }
   | FROM src = IDENT   { Some src }
+
+(* An observation-block entry with its source span, for the per-entry
+   diagnostics [build_obs_decl] reports. *)
+located_obs_kv:
+  | kv = obs_kv { (kv, $startpos, $endpos) }
 
 obs_kv:
   (* `columns { name : role }` — the explicit file schema (§2.2). Entries may
@@ -1038,7 +1071,8 @@ obs_kv:
             | SchedEvery _ -> "write `emit_schedule = every N 'unit` — see `camdl docs language-changes`"
             | SchedAt _    -> "write `emit_schedule = at [t1, t2, ...] 'unit` — see `camdl docs language-changes`");
         `Schedule s }
-  | IDENT EQ proj = obs_projection { `Proj proj }
+  | k = IDENT EQ proj = obs_projection
+      { `Proj (k, $startpos(k), $endpos(k), proj) }
   (* Migration: `likelihood = D(...)` → `<col> ~ D(...)` (§9). Reject with the
      rewrite naming the new operator. *)
   | LIKELIHOOD EQ e = expr

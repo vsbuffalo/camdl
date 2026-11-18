@@ -16030,6 +16030,52 @@ let cases_stream extra = Printf.sprintf {|  cases {
     cases         ~ poisson(rate = projected)
   }|} extra
 
+(* gh#1206: an observation stream whose projection line is [proj_lines]
+   (one or more `key = expr` lines). Any key used to be taken as
+   `projected`, and a second line silently replaced the first. *)
+let obs_key_stream proj_lines = Printf.sprintf {|  cases {
+    columns       { time : time, cases : count }
+    covers        = day(time)
+%s
+    emit_schedule = every 1 'days
+    cases         ~ poisson(rate = projected)
+  }|} proj_lines
+
+let test_obs_unknown_projection_key_is_e121 () =
+  compile_expect_error_code ~code:"E121" ~contains:"projected"
+    (covers_model_with (obs_key_stream "    foo = incidence(infection)"))
+
+let test_obs_misspelled_projected_is_e121_located () =
+  let src = covers_model_with (obs_key_stream "    projeted = incidence(infection)") in
+  compile_expect_error_code ~code:"E121" ~contains:"projeted" src;
+  Diagnostics.json_errors_mode := true;
+  let r = Compiler.compile ~name:"test_err" src in
+  Diagnostics.json_errors_mode := false;
+  match r with
+  | Ok _ -> Alcotest.fail "expected E121"
+  | Error e ->
+    let lines = String.split_on_char '\n' src in
+    let rec find i = function
+      | [] -> None
+      | l :: rest -> if contains_substring ~needle:"projeted" l then Some i
+                     else find (i + 1) rest in
+    Alcotest.(check (option int)) "E121 on the misspelled line"
+      (find 1 lines) (line_of_code ~code:"E121" e)
+
+let test_obs_duplicate_projected_is_e122 () =
+  compile_expect_error_code ~code:"E122" ~contains:"projected"
+    (covers_model_with (obs_key_stream
+      "    projected = incidence(infection)\n    projected = I"))
+
+let test_obs_duplicate_emit_schedule_is_e122 () =
+  compile_expect_error_code ~code:"E122" ~contains:"emit_schedule"
+    (covers_model_with (obs_key_stream
+      "    projected = incidence(infection)\n    emit_schedule = every 7 'days"))
+
+let test_obs_projected_key_compiles () =
+  ignore (compile_expect_ok
+    (covers_model_with (obs_key_stream "    projected = incidence(infection)")))
+
 (* The declared period of the model's single observation stream. *)
 let covers_of (m : Ir.model) =
   match m.Ir.observations with
@@ -18995,6 +19041,11 @@ let () =
         `Quick test_projection_indexed_let_prop_ok;
     ];
     "covers_gh833", [
+      Alcotest.test_case "gh#1206 unknown projection key → E121" `Quick test_obs_unknown_projection_key_is_e121;
+      Alcotest.test_case "gh#1206 misspelled projected, located" `Quick test_obs_misspelled_projected_is_e121_located;
+      Alcotest.test_case "gh#1206 second projected → E122"       `Quick test_obs_duplicate_projected_is_e122;
+      Alcotest.test_case "gh#1206 second emit_schedule → E122"   `Quick test_obs_duplicate_emit_schedule_is_e122;
+      Alcotest.test_case "gh#1206 projected key compiles"        `Quick test_obs_projected_key_compiles;
       Alcotest.test_case "day(time) lowers to a one-day span"
         `Quick test_covers_day_lowers_to_a_one_day_span;
       Alcotest.test_case "ending_on closes one day after the label"
