@@ -944,7 +944,12 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // Run the unified resolver.
     let fit_toml_estimate: indexmap::IndexSet<String> =
         fit_estimate.keys().cloned().collect();
-    let table_files_resolver: HashMap<String, std::path::PathBuf> = HashMap::new();
+    // `--table NAME=FILE`: the model tables the file supplies, as on
+    // `simulate` and `pfilter`. They change the resolved model, which the
+    // point's identity hashes.
+    let table_files_resolver: HashMap<String, std::path::PathBuf> = a.model_overrides.table.iter()
+        .map(|t| (t.name.clone(), t.path.clone()))
+        .collect();
     let resolved = crate::params_resolver::resolve_parameters_with_starts(
         crate::params_resolver::ParameterInputs {
             model: &model_pre,
