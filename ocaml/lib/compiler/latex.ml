@@ -1041,6 +1041,18 @@ let read_file path =
   close_in ic;
   s
 
+let usage_text = {|usage: camdlc render [--format json|document|graph] [--expand DIM[,DIM]] FILE.camdl
+
+Renders a model's mathematics, before stratification is expanded.
+
+  --format document   a standalone LaTeX document (the default; also `latex`, `tex`)
+  --format json       the same content as JSON, one KaTeX string per equation
+  --format graph      the flow graph (one edge per transition family) as JSON
+  --expand DIM[,DIM]  write the listed dimensions out level by level, keeping
+                      the others as indices (not used by --format graph)
+  --help, -h          print this help
+|}
+
 let run (args : string list) : unit =
   let expand = ref [] and files = ref [] and format = ref `Document in
   let add_dims s = expand := !expand @ List.filter (( <> ) "") (String.split_on_char ',' s) in
@@ -1057,17 +1069,19 @@ let run (args : string list) : unit =
     | "--expand" :: dims :: tl -> add_dims dims; parse tl
     | a :: tl when String.length a >= 9 && String.sub a 0 9 = "--expand=" ->
       add_dims (String.sub a 9 (String.length a - 9)); parse tl
+    | ("--help" | "-h") :: _ -> print_string usage_text; exit 0
     | "--format" :: fmt :: tl -> set_format fmt; parse tl
     | a :: tl when String.length a >= 9 && String.sub a 0 9 = "--format=" ->
       set_format (String.sub a 9 (String.length a - 9)); parse tl
     | a :: _ when String.length a > 0 && a.[0] = '-' ->
-      Printf.eprintf "camdlc render: unknown flag '%s'\n" a; exit 2
+      Printf.eprintf "camdlc render: unknown flag '%s'\n  run `camdlc render --help` for supported flags\n" a;
+      exit 2
     | f :: tl -> files := f :: !files; parse tl
   in
   parse args;
   match List.rev !files with
   | [] ->
-    prerr_endline "usage: camdlc render [--format json|document|graph] [--expand DIM[,DIM]] FILE.camdl";
+    prerr_string usage_text;
     exit 2
   | file :: _ ->
     let src = read_file file in
