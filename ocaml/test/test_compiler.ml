@@ -13314,6 +13314,53 @@ let test_init_dependency_cycle_hint_says_chain_not_loop () =
   compile_expect_error_code ~code:"E515" ~contains:"a chain, not a loop"
     (init_dep_model ~init:"A = B + 1\n  B = A - 1")
 
+(* gh#1222: the expander builds the IR's sections in a fixed order, and the
+   order is part of the output: a `let` first read by a section is hoisted
+   into the IR's bindings when that section is expanded. Here `obs_scale` is
+   first read by an observation and `cull_frac` by an intervention, so their
+   order in [bindings] is the order the two sections ran in: observations
+   before interventions. Pinned so a change to that order is a visible
+   decision, not a side effect. *)
+let test_hoisted_binding_order_follows_section_order () =
+  let m = compile_expect_ok {|
+time_unit = 'days
+compartments { S, E, I, R }
+dimensions { age = [child, adult] }
+stratify(by = age)
+let N_local[a in age] = S[a] + E[a] + I[a] + R[a]
+let obs_scale[a in age] = S[a] / (S[a] + I[a] + R[a])
+let cull_frac[a in age] = I[a] / (I[a] + S[a] + R[a])
+parameters {
+  beta  : rate in [0.001, 0.5]
+  sigma : rate in [0.01, 1.0]
+  gamma : rate in [0.01, 1.0]
+  rho   : probability in [0.0, 1.0]
+  k     : real        in [0.1, 100.0]
+}
+transitions {
+  infection[a in age] : S[a] --> E[a] @ beta * S[a] * sum(b in age, I[b] / N_local[b])
+  progression[a in age] : E[a] --> I[a]  @ sigma * E[a]
+  recovery[a in age]    : I[a] --> R[a]  @ gamma * I[a]
+}
+observations {
+  weekly_cases {
+    columns       { time : time, weekly_cases : count }
+    covers        = closing_at(time, 7 'days)
+    projected     = sum(a in age, incidence(infection[a]))
+    emit_schedule = every 7 'days
+    weekly_cases  ~ neg_binomial(mean = rho * projected * obs_scale[child], r = k)
+  }
+}
+interventions {
+  cull : transfer(fraction = cull_frac[adult], from = I[adult], to = R[adult]) at [20]
+}
+init { S[child] = 4990  S[adult] = 5000  I[child] = 10 }
+simulate { from = 0 'days  to = 100 'days }
+|} in
+  Alcotest.(check (list string)) "hoisted bindings, in IR order"
+    [ "N_local_child"; "N_local_adult"; "obs_scale_child"; "cull_frac_adult" ]
+    (List.map (fun (b : Ir.binding) -> b.bname) m.Ir.bindings)
+
 (* gh#1219: [Init_order.closed] substitutes a binding's body for every
    [BindingRef]. A cycle among bindings has no closed form; the expander never
    emits one (it reports a `let` cycle itself), so this is an IR built by
@@ -17089,6 +17136,7 @@ let () =
       Alcotest.test_case "E515 hint says chain not loop" `Quick test_init_dependency_cycle_hint_says_chain_not_loop;
       Alcotest.test_case "a chain of init references compiles" `Quick test_init_chain_is_accepted;
       Alcotest.test_case "a binding cycle in closed is named, not a stack overflow (gh#1219)" `Quick test_init_closed_binding_cycle_is_named;
+      Alcotest.test_case "hoisted binding order follows section order (gh#1222)" `Quick test_hoisted_binding_order_follows_section_order;
       Alcotest.test_case "ic_grad differentiates the closed expression" `Quick test_ic_grad_differentiates_the_closed_expression;
     ];
     "iso_date_validation", [
