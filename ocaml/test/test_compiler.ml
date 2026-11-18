@@ -4607,11 +4607,39 @@ let test_rate_state_grad_counts_repeated_popsum_member () =
              (List.length gs))
 
 let test_simplify_fixpoint_terminates_on_nan () =
-  (* (0 - 8) ^ 0.5 folds to Const nan; nan <> nan under (=). *)
-  let e = Ir.BinOp { op = Ir.Mul; left = Ir.Pop "S";
-                     right = Ir.BinOp { op = Ir.Pow; left = Ir.Const (-8.0);
-                                        right = Ir.Const 0.5 } } in
+  (* A tree that already holds a NaN must not loop: nan <> nan under (=). *)
+  let e = Ir.BinOp { op = Ir.Mul; left = Ir.Pop "S"; right = Ir.Const Float.nan } in
   ignore (Autodiff.simplify_fixpoint e)
+
+(* gh#1207: simplify never folds literals to a non-finite value. JSON has no
+   NaN or infinity, so a folded `Const nan` made the IR unreadable by the
+   runtime; the operation is left for the evaluator, which reaches it only if
+   the branch holding it is taken. A finite fold still happens. *)
+let test_simplify_does_not_fold_to_non_finite () =
+  let open Ir in
+  let pow a b = BinOp { op = Pow; left = Const a; right = Const b } in
+  let non_finite_folds = [
+    "(-8) ^ 0.5", pow (-8.0) 0.5;
+    "0 ^ -1", pow 0.0 (-1.0);
+    "1e300 * 1e300", BinOp { op = Mul; left = Const 1e300; right = Const 1e300 };
+    "1e308 + 1e308", BinOp { op = Add; left = Const 1e308; right = Const 1e308 };
+    "-1e308 - 1e308", BinOp { op = Sub; left = Const (-1e308); right = Const 1e308 };
+    "1e300 / 1e-300", BinOp { op = Div; left = Const 1e300; right = Const 1e-300 };
+    "exp(1000)", UnOp { op = Exp; arg = Const 1000.0 };
+  ] in
+  List.iter (fun (what, e) ->
+    match Autodiff.simplify_fixpoint e with
+    | Const c -> Alcotest.failf "%s folded to the literal %h" what c
+    | _ -> ()) non_finite_folds;
+  (* The guard is on the result, not the operator: a finite power still folds. *)
+  (match Autodiff.simplify_fixpoint (pow 4.0 0.5) with
+   | Const c -> Alcotest.(check (float 0.0)) "4 ^ 0.5" 2.0 c
+   | _ -> Alcotest.fail "4 ^ 0.5 did not fold");
+  (* The unfolded power is kept with its folded operands. *)
+  let e = BinOp { op = Pow; left = BinOp { op = Sub; left = Const 0.0; right = Const 8.0 };
+                  right = Const 0.5 } in
+  Alcotest.(check bool) "(0 - 8) ^ 0.5 keeps the power of -8"
+    true (Autodiff.simplify_fixpoint e = pow (-8.0) 0.5)
 
 let test_rate_state_grad_nonsmooth_refused () =
   (* Rate = floor(S) * beta. ∂/∂S reaches floor(state) — nonsmooth (a step at
@@ -17477,6 +17505,7 @@ let () =
       Alcotest.test_case "rate_state_grad: nonsmooth-of-state (floor) is refused (gh#275)" `Quick test_rate_state_grad_nonsmooth_refused;
       Alcotest.test_case "state grad counts a repeated PopSum member" `Quick test_rate_state_grad_counts_repeated_popsum_member;
       Alcotest.test_case "simplify_fixpoint terminates on a NaN constant" `Quick test_simplify_fixpoint_terminates_on_nan;
+      Alcotest.test_case "simplify does not fold literals to a non-finite value (gh#1207)" `Quick test_simplify_does_not_fold_to_non_finite;
       Alcotest.test_case "rate_state_grad: BindingRef inverts to state-bearing (gh#275)" `Quick test_rate_state_grad_through_binding;
       Alcotest.test_case "autodiff: ∂(x^c) is finite at a zero base (gh#952)" `Quick test_pow_grad_constant_exponent_at_zero_base;
       Alcotest.test_case "autodiff: ∂(I^α) is finite at a zero base (gh#952)" `Quick test_pow_grad_parameter_exponent_at_zero_base;

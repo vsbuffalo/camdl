@@ -923,8 +923,19 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
 (** Algebraic simplification: constant folding and identity elimination.
     Reduces expression size after differentiation (product rule creates many
     multiply-by-zero and add-zero terms). Applied to fixed point — repeated
-    until the expression stops changing. *)
+    until the expression stops changing.
+
+    Arithmetic on literals folds only to a finite value. [(0 - 8) ^ 0.5],
+    [exp(1000)] or an overflowing product are left as operations: JSON has
+    no NaN or infinity, so a folded non-finite literal would make the IR
+    unreadable, and the evaluator, not the compiler, decides what an
+    operation that is reached does with a degenerate value. The compiler
+    reports a non-finite literal sub-expression in a model expression as
+    E520 ({!Validate}); a gradient field can still hold one, as the
+    derivative of an expression that does not. *)
 let rec simplify (e : expr) : expr =
+  (* [Const v] when [v] is finite, otherwise the operation as it stands. *)
+  let finite v unfolded = if Float.is_finite v then Const v else unfolded in
   let e = match e with
     (* Recurse first, then simplify *)
     | BinOp b ->
@@ -949,27 +960,31 @@ let rec simplify (e : expr) : expr =
       | Pow, _, Const 0.0 -> Const 1.0
       | Pow, x, Const 1.0 -> x
       (* Constant folding *)
-      | Add, Const a, Const b -> Const (a +. b)
-      | Sub, Const a, Const b -> Const (a -. b)
-      | Mul, Const a, Const b -> Const (a *. b)
-      | Div, Const a, Const b when b <> 0.0 -> Const (a /. b)
-      | Pow, Const a, Const b -> Const (a ** b)
+      | ((Add | Sub | Mul | Div | Pow) as op), Const x, Const y ->
+        let unfolded = BinOp { op; left = l; right = r } in
+        (match op with
+         | Add -> finite (x +. y) unfolded
+         | Sub -> finite (x -. y) unfolded
+         | Mul -> finite (x *. y) unfolded
+         | Div -> if y = 0.0 then unfolded else finite (x /. y) unfolded
+         | _   -> finite (x ** y) unfolded)
       | _ -> BinOp { op = b.op; left = l; right = r }
       end
 
     | UnOp u ->
       let a = simplify u.arg in
+      let unfolded = UnOp { op = u.op; arg = a } in
       begin match u.op, a with
       | Neg, Const 0.0 -> Const 0.0
-      | Neg, Const c   -> Const (-.c)
-      | Exp, Const c   -> Const (exp c)
-      | Log, Const c when c > 0.0 -> Const (log c)
-      | Sqrt, Const c when c >= 0.0 -> Const (sqrt c)
-      | Abs, Const c   -> Const (abs_float c)
-      | Sin, Const c   -> Const (sin c)
-      | Cos, Const c   -> Const (cos c)
-      | Tanh, Const c  -> Const (tanh c)
-      | _ -> UnOp { op = u.op; arg = a }
+      | Neg, Const c   -> finite (-.c) unfolded
+      | Exp, Const c   -> finite (exp c) unfolded
+      | Log, Const c when c > 0.0 -> finite (log c) unfolded
+      | Sqrt, Const c when c >= 0.0 -> finite (sqrt c) unfolded
+      | Abs, Const c   -> finite (abs_float c) unfolded
+      | Sin, Const c   -> finite (sin c) unfolded
+      | Cos, Const c   -> finite (cos c) unfolded
+      | Tanh, Const c  -> finite (tanh c) unfolded
+      | _ -> unfolded
       end
 
     (* [Reduce] is an n-ary sum, so [Const 0.0] is its additive identity and a
@@ -1007,9 +1022,9 @@ let rec simplify (e : expr) : expr =
 
 
 (** Apply simplify to a fixed point — repeat until the expression stops changing.
-    "Stops changing" is [compare], not [=]: constant folding can produce
-    [Const nan] (`(0 - 8) ^ 0.5`), and under [=] a tree holding a NaN never
-    equals itself, so the loop would not terminate. *)
+    "Stops changing" is [compare], not [=]: an input can already hold a
+    [Const nan], and under [=] a tree holding a NaN never equals itself, so
+    the loop would not terminate. *)
 let simplify_fixpoint (e : expr) : expr =
   let rec go e =
     let e' = simplify e in
