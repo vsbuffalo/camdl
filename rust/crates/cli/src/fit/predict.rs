@@ -1521,6 +1521,17 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     // every file is attributable to one run.
     let run_id: String = crate::fit::fit_view::leaf_run_id(&run_dir)?
         .ok_or_else(|| format!("{} is not a fit run (no run.json)", run_dir.display()))?;
+    // D85: the filters' particle count, the PMMH fit's own by default.
+    let fit_pmmh_particles = match config.method().ok().map(|m| &m.algorithm) {
+        Some(crate::fit::config_v2::Algorithm::PMMH { particles, .. }) => Some(*particles),
+        _ => None,
+    };
+    let particles = PredictParticles::resolve(args.particles, fit_pmmh_particles)?;
+    if args.particles.is_some() && predict_mode(args)? == Some(crate::args::types::PredictModeArg::FreeForward) {
+        return Err("--particles sets the particle count of the one-step band's and the \
+                    forecast's filters; --mode free_forward runs no filter."
+            .into());
+    }
     // The problem half is all a replay reads: model, data, fixed, estimate.
     let config = config.problem;
 
@@ -1615,7 +1626,10 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     // there: the run, the engine, and the options as resolved (the chain
     // selection against this fit's chains, the vocabulary by its bytes). Two
     // predictions from different inputs never share it.
-    let options = PredictOptions::of(args, posterior.selection(), vocabulary.as_ref());
+    let options = PredictOptions {
+        particles: particles.address_part(fit_pmmh_particles),
+        ..PredictOptions::of(args, posterior.selection(), vocabulary.as_ref())
+    };
     let address_key = options.address_key(&run_id);
     let out_dir = crate::fit::fit_view::predictions_dir(&segment, &run_id, &address_key);
     std::fs::create_dir_all(&out_dir)
@@ -1879,6 +1893,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
                 selection: &streams_in,
                 scenarios: &scenario_refs,
                 sweep_points: if args.sweep.is_empty() { &[] } else { &sweep_points },
+                particles,
             },
         )?;
         written.push(crate::fit::failures::write_report(
@@ -2680,6 +2695,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
             binomial,
             fit,
             n_draws_cap,
+            particles.n,
             seed,
             schema.as_ref(),
             args.by_chain,
@@ -2911,6 +2927,9 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
             // D78: the binomial sampler every simulation of this predict drew
             // with — the fit's.
             "binomial": binomial,
+            // D85: the one-step band's particle count per draw and where it
+            // came from; absent when no filter ran.
+            "particles": one_step_fit.is_some().then_some(particles),
             "streams": predictive_manifest_entries,
             // D76: which declared streams (leaves) this artifact holds, which it
             // left out and why, and which failed, so a reader need not infer
@@ -3528,6 +3547,11 @@ pub(crate) struct PredictOptions {
     pub quantities: Option<String>,
     /// `--allow-forcing-extrapolation` as given on the command line.
     pub allow_forcing_extrapolation: bool,
+    /// The filters' particle count (D85), present only when it is not the
+    /// one the run determines ([`PredictParticles::address_part`]), so a
+    /// predict without `--particles` keeps its address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub particles: Option<usize>,
 }
 
 /// What [`PredictOptions::address_key`] hashes: the run, the engine that
@@ -3559,6 +3583,7 @@ impl PredictOptions {
             excluded_chains: None,
             quantities: None,
             allow_forcing_extrapolation: false,
+            particles: None,
         }
     }
 
@@ -3601,6 +3626,7 @@ impl PredictOptions {
             excluded_chains: excluded_chain_ids(excluded),
             quantities: vocabulary.map(|v| v.digest.clone()),
             allow_forcing_extrapolation: args.forcing_extrapolation.allow_forcing_extrapolation,
+            particles: None,
         }
         .normalised()
     }
@@ -3682,11 +3708,51 @@ static EMPTY_CHAIN_COUNTS: BTreeMap<usize, usize> = BTreeMap::new();
 
 // ── The one-step-ahead posterior predictive producer ───────────────────────
 
-/// Particle count for the filters `fit predict` runs per posterior draw: the
-/// one-step band's and the fixed-origin forecast's. It need not match the
-/// fit's N — the band pools across draws too, and every particle's `ỹ` is
-/// kept (the recorder retains them), so a modest N yields a dense band cheaply.
-pub(crate) const PREDICT_N_PARTICLES: usize = 500;
+/// The particle count of `fit predict`'s filters when neither `--particles`
+/// nor the fit gives one (D85): the fit is not PMMH (PGAS's conditional SMC
+/// count is not a bootstrap-filter count).
+pub(crate) const DEFAULT_PREDICT_PARTICLES: usize = 500;
+
+/// Where the particle count of `fit predict`'s filters came from (D85).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ParticlesSource {
+    /// `--particles`.
+    Flag,
+    /// The particle count of the PMMH fit's own filter.
+    FitPmmh,
+    /// [`DEFAULT_PREDICT_PARTICLES`].
+    Default,
+}
+
+/// The particle count every filter `fit predict` runs per posterior draw
+/// uses (the one-step band's and the forecast's), as resolved (D85).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct PredictParticles {
+    pub n: usize,
+    pub source: ParticlesSource,
+}
+
+impl PredictParticles {
+    /// `--particles` when given, else the PMMH fit's count, else
+    /// [`DEFAULT_PREDICT_PARTICLES`].
+    pub(crate) fn resolve(flag: Option<usize>, fit_pmmh: Option<usize>) -> Result<Self, String> {
+        match (flag, fit_pmmh) {
+            (Some(0), _) => Err("--particles must be at least 1".into()),
+            (Some(n), _) => Ok(PredictParticles { n, source: ParticlesSource::Flag }),
+            (None, Some(n)) => Ok(PredictParticles { n, source: ParticlesSource::FitPmmh }),
+            (None, None) => Ok(PredictParticles { n: DEFAULT_PREDICT_PARTICLES, source: ParticlesSource::Default }),
+        }
+    }
+
+    /// The count the output address carries: `None` when it is the one the
+    /// run itself determines (no `--particles`, or `--particles` equal to
+    /// it), since the address already keys the run.
+    pub(crate) fn address_part(&self, fit_pmmh: Option<usize>) -> Option<usize> {
+        let by_default = fit_pmmh.unwrap_or(DEFAULT_PREDICT_PARTICLES);
+        (self.n != by_default).then_some(self.n)
+    }
+}
 
 /// One chain's share of the one-step pool, plus the draw accounting a per-chain
 /// band has to report honestly (gh#794).
@@ -3986,6 +4052,7 @@ fn one_step_bands(
     binomial: sim::rng::BinomialAlgorithm,
     fit: &FilterableFit,
     n_draws_cap: usize,
+    n_particles: usize,
     base_seed: u64,
     schema: Option<&ObsSchema>,
     by_chain: bool,
@@ -4101,7 +4168,7 @@ fn one_step_bands(
     };
 
     let smc_config = SMCConfig {
-        n_particles: PREDICT_N_PARTICLES,
+        n_particles,
         dt,
         t_start: compiled.model.simulation.t_start,
         skip_first_obs_from_loglik: false,

@@ -924,6 +924,20 @@ and fails it instead when `--stream` named it.
   with a `scenario` column, and a `sweep:<param>` column per swept parameter
   (empty on the fitted model's rows). Sample `s` is the same draw and particle
   index in every arm.
+- `particles` (D85): `{"n", "source"}`, the filters' particle count per draw and
+  where it came from: `flag` (`--particles`), `fit_pmmh` (the PMMH fit's own
+  count) or `default` (500). `predictive.json` carries the same block when the
+  one-step band ran. The output address keys the count only when it differs from
+  the default the run determines, so a predict without `--particles` keeps its
+  address.
+- `filter_diagnostics` (D85): per draw, in the order of `draws`, the effective
+  sample size of the filter's weights at its last assimilation at or before the
+  origin, before resampling (`ess`), its time `t`, and `ess_over_n`. Every arm
+  shares it. It characterises the Monte Carlo reliability of the state the
+  forecast starts from; it is not a count of distinct ancestors and says nothing
+  of the forecast's accuracy. The number of distinct parents at the final
+  resampling is not recorded (`null`): the filter returns its resampling indices
+  only when it records its full ancestry.
 - `coupling` and `contrasts`, with more than one arm (D83). `coupling.method` is
   `shared_seed_per_particle_streams`: draw _m_ runs with the same seed in every
   arm and each particle with its own stream from it. `contrasts` names

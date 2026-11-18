@@ -134,8 +134,8 @@ fn a_forecast_starts_at_the_training_extent_and_counts_each_streams_own_periods(
         "the engine stamp is the version with its git hash: {}", manifest["engine_version"]);
     assert_eq!(manifest["run_id"], leaf_run["run_id"]);
     assert_eq!((&manifest["samples"]["per_draw"], &manifest["samples"]["of_particles"]),
-        (&serde_json::json!(5), &serde_json::json!(500)));
-    assert!(manifest["samples"]["description"].as_str().unwrap().contains("use all 500 particles"));
+        (&serde_json::json!(5), &serde_json::json!(100)));
+    assert!(manifest["samples"]["description"].as_str().unwrap().contains("use all 100 particles"));
     // The model runs to day 63, past the last target (day 52): not extended.
     assert_eq!((&manifest["run_extent"]["model_end"]["t"], &manifest["run_extent"]["run_end"]["t"],
                 &manifest["run_extent"]["extended"]),
@@ -177,7 +177,7 @@ fn a_forecast_starts_at_the_training_extent_and_counts_each_streams_own_periods(
     assert_eq!((daily[0]["t_start"].as_str(), daily[0]["t_stop"].as_str()), ("24", "25"));
     assert_eq!(daily[27]["horizon"], "27");
     for r in daily.iter().chain(&weekly) {
-        assert_eq!(r["n_samples"], (8 * 500).to_string());
+        assert_eq!(r["n_samples"], (8 * 100).to_string());
     }
 
     // Joint samples: one value per target per sample.
@@ -608,4 +608,70 @@ fn a_scenario_forecast_writes_the_difference_of_means_and_its_monte_carlo_error(
     assert_eq!(m["coupling"]["method"], "shared_seed_per_particle_streams");
     assert_eq!(m["contrasts"]["delta_mcse"]["kind"], "monte_carlo_standard_error");
     assert_eq!(m["contrasts"]["file"], "forecast-contrasts.tsv");
+}
+
+/// D85: the filters' particle count defaults to the PMMH fit's own (100
+/// here), `--particles` sets it, and a count other than the default keys its
+/// own directory while `--particles` equal to the default does not. Each
+/// draw records its filter's ESS at its last assimilation (day 24), before
+/// resampling, with ESS/N. The one-step band uses the same count and
+/// `predictive.json` records it.
+#[test]
+fn the_particle_count_defaults_to_the_fits_and_is_recorded_and_addressed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fit(dir, PMMH, "");
+    let predict_dirs = || -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = walk(&dir.join("results")).into_iter()
+            .filter(|p| p.file_name().is_some_and(|n| n == "forecast.json"))
+            .map(|p| p.parent().unwrap().to_path_buf()).collect();
+        v.sort();
+        v
+    };
+    let manifest = |d: &Path| -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(d.join("forecast.json")).unwrap()).unwrap()
+    };
+    let forecast = |extra: &[&str]| {
+        let mut args = vec!["fit", "predict", "--fit", "fit.toml", "--horizon", "1 weeks", "--n-draws", "3"];
+        args.extend_from_slice(extra);
+        let out = run(dir, &args);
+        assert!(out.status.success(), "fit predict: {}", stderr(&out));
+    };
+    forecast(&[]);
+    let default_dir = predict_dirs().remove(0);
+    let m = manifest(&default_dir);
+    assert_eq!(m["particles"], serde_json::json!({"n": 100, "source": "fit_pmmh"}));
+    let diag = &m["filter_diagnostics"];
+    assert_eq!(diag["n_particles"], 100);
+    let last = diag["last_assimilation"].as_array().unwrap();
+    assert_eq!(last.len(), 3);
+    for (a, d) in last.iter().zip(m["draws"].as_array().unwrap()) {
+        assert_eq!(a["cloud_row"], d["cloud_row"]);
+        assert_eq!(a["t"], 24.0, "the last training row ends at day 24");
+        let ess = a["ess"].as_f64().unwrap();
+        assert!(ess > 0.0 && ess <= 100.0 + 1e-9, "{ess}");
+        assert!((a["ess_over_n"].as_f64().unwrap() - ess / 100.0).abs() < 1e-12);
+    }
+
+    forecast(&["--particles", "100"]);
+    assert_eq!(predict_dirs(), vec![default_dir.clone()], "the default count keeps the default address");
+    assert_eq!(manifest(&default_dir)["particles"]["source"], "flag");
+    forecast(&["--particles", "40"]);
+    let dirs = predict_dirs();
+    assert_eq!(dirs.len(), 2, "another count, another directory: {dirs:?}");
+    let other = dirs.iter().find(|d| **d != default_dir).unwrap();
+    let m = manifest(other);
+    assert_eq!((&m["particles"]["n"], &m["options"]["particles"]), (&serde_json::json!(40), &serde_json::json!(40)));
+    let weekly = rows(&other.join("forecast/weekly_cases.tsv"));
+    assert_eq!(weekly[0]["n_samples"], (3 * 40).to_string());
+
+    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--mode", "one_step", "--n-draws", "3",
+                         "--particles", "40"]);
+    assert!(out.status.success(), "fit predict: {}", stderr(&out));
+    let p = walk(&dir.join("results")).into_iter().find(|p| p.file_name().is_some_and(|n| n == "predictive.json"))
+        .expect("the one-step predictive.json");
+    let pj: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
+    assert_eq!(pj["particles"], serde_json::json!({"n": 40, "source": "flag"}));
+    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward", "--particles", "40"]);
+    assert!(!out.status.success() && stderr(&out).contains("--mode free_forward runs no filter"), "{}", stderr(&out));
 }

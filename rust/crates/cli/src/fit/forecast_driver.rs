@@ -57,11 +57,26 @@ pub(crate) struct Forecast {
     /// Per draw, what its filter did at the stops at or before the origin:
     /// the record two scenario arms must share (D50).
     pub pre_origin: Vec<PreOriginTrace>,
+    /// Per draw, its filter's last assimilation (D85): `None` when no stop
+    /// before the origin held an observed value.
+    pub last_assimilation: Vec<Option<LastAssimilation>>,
     /// Per draw, the particles' states and log-weights at the last stop at
     /// or before the origin, before resampling, when the caller asked for
     /// the expected observations (they come from the same ancestry record).
     #[cfg_attr(not(test), allow(dead_code))] // read by the scenario-arm test
     pub origin_states: Option<Vec<(Vec<Vec<f64>>, Vec<f64>)>>,
+}
+
+/// A draw's filter at its last assimilation, the last stop at or before the
+/// origin that held an observed value (D85): the effective sample size of
+/// the particle weights there, before resampling, and its time. It
+/// characterises the Monte Carlo reliability of the state the forecast
+/// starts from; it says nothing of how many distinct ancestors the particles
+/// have, and nothing of the forecast's accuracy.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct LastAssimilation {
+    pub time: f64,
+    pub ess: f64,
 }
 
 /// One draw's filter at the stops at or before the forecast origin: the
@@ -216,6 +231,7 @@ pub(crate) fn fixed_origin_forecast(
         config.record_expected.then(|| vec![Vec::with_capacity(param_sets.len() * n); at.len()]);
     let before_origin: Vec<usize> = (0..n_union).filter(|i| !after_origin.contains(i)).collect();
     let mut pre_origin: Vec<PreOriginTrace> = Vec::with_capacity(param_sets.len());
+    let mut last_assimilation: Vec<Option<LastAssimilation>> = Vec::with_capacity(param_sets.len());
     let mut origin_states: Option<Vec<(Vec<Vec<f64>>, Vec<f64>)>> =
         config.record_expected.then(|| Vec::with_capacity(param_sets.len()));
     for (d, params) in param_sets.iter().enumerate() {
@@ -265,6 +281,10 @@ pub(crate) fn fixed_origin_forecast(
         }
         pre_origin.push(pre_origin_trace(&before_origin, &union_times, &result.ll_increments,
             &result.ess_trace, &preq));
+        // `ess_trace` holds each stop's ESS after the weights are set and
+        // before the resampling call.
+        last_assimilation.push(before_origin.iter().rev().find(|&&i| obs_model.assimilates_at(i))
+            .map(|&i| LastAssimilation { time: union_times[i], ess: result.ess_trace[i] }));
         if let Some(o) = origin_states.as_mut() {
             let anc = result.ancestry.as_ref()
                 .ok_or_else(|| fail(None, "internal error: no ancestry record".into()))?;
@@ -275,7 +295,7 @@ pub(crate) fn fixed_origin_forecast(
     }
     Ok(Forecast {
         plan, state, n_draws: param_sets.len(), n_particles: n, binomial: config.binomial, draws, expected,
-        pre_origin, origin_states,
+        pre_origin, last_assimilation, origin_states,
     })
 }
 
