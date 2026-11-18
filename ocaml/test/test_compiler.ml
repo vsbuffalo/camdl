@@ -318,6 +318,103 @@ let test_constant_fold_collapses_sparse_foi_reduce () =
   Alcotest.(check int) "fold collapses FOI Reduce to k=2 terms" 2 after;
   Alcotest.(check bool) "fold strictly shrank the FOI Reduce" true (after < before)
 
+(* gh#1217: a sum term whose contact-matrix cell is a literal 0 is dropped
+   however the term is parenthesised. `W[l, q] * I[q] / N[q]` parses as
+   `(W * I) / N`; before the fix its zero cells left `0 / N` and every term
+   was kept, while `W * (I / N)` folded to the k nonzero terms. *)
+let sparse_ring_unguarded_src foi = Printf.sprintf {|
+    time_unit = 'days
+    dimensions { patch = [p0, p1, p2, p3] }
+    compartments { S, I }
+    stratify(by = patch)
+    parameters { beta : rate }
+    tables {
+      W : patch × patch = [[0.0, 0.5, 0.0, 0.5],
+                           [0.5, 0.0, 0.5, 0.0],
+                           [0.0, 0.5, 0.0, 0.5],
+                           [0.5, 0.0, 0.5, 0.0]]
+    }
+    let N[l in patch] = S[l] + I[l]
+    transitions {
+      infection[l in patch] : S[l] --> I[l] @ beta * S[l] * sum(q in patch, %s)
+      recovery[l in patch] : I[l] --> S[l]  @ beta * I[l]
+    }
+    init { S_p0 = 990  I_p0 = 10  S_p1 = 1000  S_p2 = 1000  S_p3 = 1000 }
+    simulate { from = 0 'days  to = 30 'days }
+  |} foi
+
+(* Does a division with a literal-zero numerator survive anywhere in [e]? *)
+let rec zero_over_somewhere = function
+  | Ir.BinOp { op = Ir.Div; left = Ir.Const 0.0; _ } -> true
+  | Ir.BinOp { left; right; _ } -> zero_over_somewhere left || zero_over_somewhere right
+  | Ir.UnOp { arg; _ } -> zero_over_somewhere arg
+  | Ir.Reduce ts -> List.exists zero_over_somewhere ts
+  | Ir.Cond { pred; then_; else_ } -> List.exists zero_over_somewhere [pred; then_; else_]
+  | Ir.UncheckedDim { inner; _ } -> zero_over_somewhere inner
+  | _ -> false
+
+(* Largest Reduce anywhere in a grad map's entries. *)
+let max_grad_reduce_terms (gm : Ir.grad_map) =
+  List.fold_left (fun acc (_, de) ->
+    match de with Ir.DEGrad e -> max acc (max_reduce_terms e) | Ir.DEUnsupported _ -> acc)
+    0 gm
+
+let test_constant_fold_drops_zero_cells_in_either_spelling () =
+  let compile src = match Compiler.compile ~name:"sparse_ring_unguarded" src with
+    | Ok m -> m | Error e -> Alcotest.failf "compile failed: %s" e in
+  let unfolded = with_fold_disabled (fun () ->
+    compile (sparse_ring_unguarded_src "W[l, q] * I[q] / N[q]")) in
+  Alcotest.(check int) "dense 4-term FOI Reduce before the fold" 4
+    (max_foi_reduce_terms unfolded);
+  List.iter (fun foi ->
+    let m = compile (sparse_ring_unguarded_src foi) in
+    Alcotest.(check int) (foi ^ ": FOI Reduce keeps the k=2 nonzero terms") 2
+      (max_foi_reduce_terms m);
+    (* The gradients are folded alike: no 4-term sum survives in them, and
+       the derivative of a zeroed term, which is not inside a sum, leaves no
+       `0 / x` behind (`∂/∂I_q` of `(0 * I_q) / N_q`). *)
+    List.iter (fun (t : Ir.transition) ->
+      Alcotest.(check bool) (foi ^ ": " ^ t.name ^ " gradients collapsed") true
+        (max_grad_reduce_terms t.rate_grad <= 2
+         && max_grad_reduce_terms t.rate_state_grad <= 2);
+      List.iter (fun (c, de) ->
+        match de with
+        | Ir.DEGrad g ->
+          if zero_over_somewhere g then
+            Alcotest.failf "%s: d %s / d %s keeps a 0 / x" foi t.name c
+        | Ir.DEUnsupported _ -> ()) (t.rate_grad @ t.rate_state_grad))
+      m.Ir.transitions)
+    [ "W[l, q] * I[q] / N[q]";
+      "W[l, q] * (I[q] / N[q])";
+      "(W[l, q] * I[q]) / N[q]";
+      "I[q] * W[l, q] / N[q]";
+      "-(W[l, q] * I[q]) / N[q]" ]
+
+(* The rule is about a sum term that holds a zero cell, not a general
+   [0 / x -> 0]: a division whose numerator folds to zero is kept, so a zero
+   denominator there still evaluates to the runtime's numerical error. *)
+let test_constant_fold_keeps_a_zero_numerator_division () =
+  let src = Printf.sprintf {|
+    time_unit = 'days
+    dimensions { patch = [p0, p1] }
+    compartments { S, I }
+    stratify(by = patch)
+    parameters { beta : rate }
+    tables { W : patch × patch = [[0.0, 1.0], [1.0, 0.0]] }
+    let N[l in patch] = S[l] + I[l]
+    transitions {
+      infection[l in patch] : S[l] --> I[l]
+        @ beta * S[l] * sum(q in patch, W[l, q] * I[q] / N[q]) + beta * (0 * I[l]) / N[l]
+      recovery[l in patch] : I[l] --> S[l]  @ beta * I[l]
+    }
+    init { S_p0 = 990  I_p0 = 10  S_p1 = 1000 }
+    simulate { from = 0 'days  to = 30 'days }
+  |} in
+  let m = match Compiler.compile ~name:"zero_numerator" src with
+    | Ok m -> m | Error e -> Alcotest.failf "compile failed: %s" e in
+  let t = List.find (fun (t : Ir.transition) -> t.name = "infection_p0") m.Ir.transitions in
+  Alcotest.(check bool) "0 / N outside a sum is kept" true (zero_over_somewhere t.rate)
+
 (* ── gh#439: --no-state-grad gates the WrtPop state-Jacobian emission ──────────
    The state-Jacobian (rate_state_grad / projection_state_grad) is consumed only
    by the ODE forward-sensitivity gradient; forward sim, IF2, PMMH, PF, and MH
@@ -17305,6 +17402,10 @@ let () =
     "constant_fold", [
       Alcotest.test_case "sparse ring FOI Reduce P=4 collapses to k=2"
         `Quick test_constant_fold_collapses_sparse_foi_reduce;
+      Alcotest.test_case "constant_fold: zero cells drop in either spelling (gh#1217)"
+        `Quick test_constant_fold_drops_zero_cells_in_either_spelling;
+      Alcotest.test_case "constant_fold: no general 0 / x rule (gh#1217)"
+        `Quick test_constant_fold_keeps_a_zero_numerator_division;
     ];
     "no_state_grad", [
       Alcotest.test_case "--no-state-grad drops rate_state_grad, keeps rate_grad + rate (gh#439)"
