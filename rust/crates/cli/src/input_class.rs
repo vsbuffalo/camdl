@@ -18,17 +18,24 @@
 //!
 //! A class belongs to a (command, input) pair, not to a flag: a group that
 //! several commands flatten (`ForcingExtrapolationArg`, the global options) is
-//! classified in each command's table. [`SIMULATE`] is `camdl simulate`'s.
-//! `every_simulate_flag_is_classified` (below) checks it against every argument
+//! classified in each command's table. [`SIMULATE`] is `camdl simulate`'s and
+//! [`FIT_RUN`] `camdl fit run`'s. `every_simulate_flag_is_classified` and
+//! `every_fit_run_flag_is_classified` (below) check them against every argument
 //! clap accepts, both ways, and every input has a case in
 //! `rust/crates/cli/tests/simulate_input_classes.rs`
-//! (`every_simulate_input_has_a_case`).
+//! (`every_simulate_input_has_a_case`) or
+//! `rust/crates/cli/tests/fit_run_input_classes.rs`
+//! (`every_fit_run_input_has_a_case`).
 
 /// The identity level a keyed input enters at. The first five are the levels of
 /// a simulation leaf ([`runid::inputs::TrajectoryInput`]); `Obs` is the address
 /// of the synthetic-observation subtree under a leaf
 /// ([`crate::cas_sink::obs_subtree_hash`]), which a trajectory's own run id does
-/// not cover.
+/// not cover. `Fit` and `Method` are the levels of a fit method leaf
+/// ([`runid::inputs::FitMethodInput`]), whose third is `Seed`: the fit level
+/// holds the model, the data, the problem half of the configuration and the
+/// engine, so an environment variable keyed at a simulation's `Model` level
+/// enters a fit at its `Fit` level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(not(test), allow(dead_code))] // the levels other than `Model` occur only in the command tables
 pub enum Level {
@@ -38,6 +45,8 @@ pub enum Level {
     Scenario,
     Seed,
     Obs,
+    Fit,
+    Method,
 }
 
 /// What an input may do to a stored result. See the module table.
@@ -60,15 +69,15 @@ pub enum InputClass {
     /// event log (`event_log/`) are the two.
     Child,
     Expands,
-    // `Removed` joins with the first converted command that has a
-    // removed-spelling trap: `simulate` has none, and a variant nothing
-    // constructs is dead code.
+    /// An old spelling, kept only so that it is refused with a message naming
+    /// its replacement.
+    Removed,
 }
 
 #[cfg(test)]
-use InputClass::{Child, Execution, Expands, Keyed, Presentation, Provenance};
+use InputClass::{Child, Execution, Expands, Keyed, Presentation, Provenance, Removed};
 #[cfg(test)]
-use Level::{Config, Model, Obs, Params, Scenario, Seed};
+use Level::{Config, Fit, Method, Model, Obs, Params, Scenario, Seed};
 
 /// `camdl simulate`'s inputs, by clap argument id (the field name), with their
 /// classes: `SimulateArgs`, the groups it flattens and the global options.
@@ -137,6 +146,72 @@ pub const SIMULATE: &[(&str, InputClass)] = &[
     ("no_licm", Keyed(Model)),
 ];
 
+/// `camdl fit run`'s inputs, by clap argument id (the field name), with their
+/// classes: `FitRunArgs`, the group it flattens and the global options.
+///
+/// The fit configuration file is `keyed(fit)`: its problem half is the fit
+/// level, though its `[method]` table keys the method level. Every flag that
+/// writes into `[method]` (`--starts`, the sampler and dt-check flags,
+/// `--binomial`, the pfilter record flags) is `keyed(method)`;
+/// `--allow-forcing-extrapolation`, which writes into `[config]`, and the
+/// global `--no-licm`, which changes the IR, are `keyed(fit)`. `--resume` keys
+/// the method level through its target length and its dep on the base.
+/// `--emit-every` keys a synthetic fit through the data it generates, in the
+/// fit level. `--allow-nonconverged-source` lifts a refusal and changes
+/// nothing a run that starts computes, so it is `execution`.
+#[cfg(test)]
+pub const FIT_RUN: &[(&str, InputClass)] = &[
+    // FitRunArgs
+    ("config", Keyed(Fit)),
+    ("starts", Keyed(Method)),
+    ("starts_chains", Keyed(Method)),
+    ("allow_nonconverged_source", Execution),
+    ("parallel", Execution),
+    ("seed", Keyed(Seed)),
+    ("force", Execution),
+    ("resume", Keyed(Method)),
+    ("sweep", Expands),
+    ("emit_every", Keyed(Fit)),
+    ("decibans_thresh", Keyed(Method)),
+    ("_removed_stage", Removed),
+    ("_removed_init", Removed),
+    ("_removed_posterior", Removed),
+    ("_removed_mle", Removed),
+    ("_removed_params", Removed),
+    ("_removed_survey_path", Removed),
+    ("_removed_survey_top_k", Removed),
+    ("_removed_allow_nonconverged_scout", Removed),
+    ("_removed_init_method", Removed),
+    ("_removed_starts_from", Removed),
+    ("_removed_tempering", Removed),
+    ("_removed_rho", Removed),
+    ("label", Provenance),
+    ("no_dt_check", Keyed(Method)),
+    ("dt_check_strict", Keyed(Method)),
+    ("binomial", Keyed(Method)),
+    ("dt_check_halvings", Keyed(Method)),
+    ("cooling_target_iters", Keyed(Method)),
+    ("max_tree_depth", Keyed(Method)),
+    ("trajectory_warmup", Keyed(Method)),
+    ("csmc_sweeps_per_nuts", Keyed(Method)),
+    ("n_trajectories", Keyed(Method)),
+    ("diagonal_mass", Keyed(Method)),
+    ("no_nuts", Keyed(Method)),
+    ("no_ancestor_sampling", Keyed(Method)),
+    ("no_adapt", Keyed(Method)),
+    ("adapt_start", Keyed(Method)),
+    ("record_ancestry", Keyed(Method)),
+    ("record_prequential", Keyed(Method)),
+    // ForcingExtrapolationArg
+    ("allow_forcing_extrapolation", Keyed(Fit)),
+    // GlobalArgs
+    ("verbosity", Presentation),
+    ("progress", Presentation),
+    ("no_progress", Presentation),
+    ("no_ir_cache", Execution),
+    ("no_licm", Keyed(Fit)),
+];
+
 /// `camdl mre simulate`'s own input. It flattens `SimulateArgs` and writes a
 /// bundle that reproduces that simulate run, so every other input keeps the
 /// class it has in [`SIMULATE`].
@@ -187,17 +262,30 @@ mod tests {
     }
 
     #[test]
+    fn every_fit_run_flag_is_classified() {
+        assert_covers("camdl fit run", clap_args(&["fit", "run"]), FIT_RUN);
+    }
+
+    #[test]
     fn every_mre_simulate_flag_is_classified() {
         assert_covers("camdl mre simulate", clap_args(&["mre", "simulate"]), SIMULATE.iter().chain(MRE_SIMULATE_OWN));
     }
 
-    /// Environment inputs with no case, each with the reason.
+    /// Environment inputs with no `simulate` case, each with the reason.
     const NO_CASE: &[(&str, &str)] = &[
         ("skip_version_check", "every test run sets it: without it the handshake refuses a test build's camdlc"),
         ("path", "the harness needs PATH to start camdl; `execution_env_camdlc` varies the camdlc found on it"),
         ("output_dir", "not read by simulate: its store root is `--output-dir`, whose clap `env` reads CAMDL_OUTPUT_DIR"),
         ("unlabeled_threshold", "not read by simulate: `fit table` and `camdl list` read it"),
         ("ci", "not read by simulate: `fit summary` reads it"),
+    ];
+
+    /// Environment inputs with no `fit run` case, each with the reason.
+    const FIT_RUN_NO_CASE: &[(&str, &str)] = &[
+        ("skip_version_check", "every test run sets it: without it the handshake refuses a test build's camdlc"),
+        ("path", "the harness needs PATH to start camdl; `execution_env_camdlc` varies the camdlc found on it"),
+        ("unlabeled_threshold", "not read by fit run: `fit table` and `camdl list` read it"),
+        ("ci", "not read by fit run: `fit summary` reads it"),
     ];
 
     fn case_name(class: InputClass, field: &str, env: bool) -> String {
@@ -208,20 +296,51 @@ mod tests {
             InputClass::Presentation => "presentation",
             InputClass::Provenance => "provenance",
             InputClass::Child => "child",
+            InputClass::Removed => "removed",
         };
+        // A removed spelling's field is `_removed_<old name>`; its case is
+        // `removed_<old name>`.
+        let field = field.strip_prefix("_removed_").unwrap_or(field);
         format!("{class}_{}{field}", if env { "env_" } else { "" })
     }
 
-    /// The test functions of the case file whose names begin with a class.
-    fn cases() -> BTreeSet<String> {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/simulate_input_classes.rs");
+    /// The test functions of a case file whose names begin with a class.
+    fn cases(file: &str) -> BTreeSet<String> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join(file);
         let text = std::fs::read_to_string(&path).unwrap();
         text.lines()
             .filter_map(|l| l.trim_start().strip_prefix("fn "))
             .filter_map(|l| l.split('(').next())
-            .filter(|n| ["keyed_", "execution_", "expands_", "presentation_", "provenance_", "child_"].iter().any(|p| n.starts_with(p)))
+            .filter(|n| {
+                ["keyed_", "execution_", "expands_", "presentation_", "provenance_", "child_", "removed_"]
+                    .iter()
+                    .any(|p| n.starts_with(p))
+            })
             .map(str::to_string)
             .collect()
+    }
+
+    /// The cases `table` and the environment table (less `no_case`) call for,
+    /// against those `file` holds.
+    fn assert_every_input_has_a_case(what: &str, file: &str, table: &[(&str, InputClass)], no_case: &[(&str, &str)]) {
+        let mut wanted = BTreeSet::new();
+        for (field, class) in table {
+            wanted.insert(case_name(*class, field, false));
+        }
+        for v in crate::env::VARS {
+            if no_case.iter().all(|(f, _)| *f != v.field) {
+                wanted.insert(case_name(v.class, v.field, true));
+            }
+        }
+        let cases = cases(file);
+        let missing: Vec<&String> = wanted.difference(&cases).collect();
+        let stray: Vec<&String> = cases.difference(&wanted).collect();
+        assert!(
+            missing.is_empty() && stray.is_empty(),
+            "the cases and {what}'s class table disagree.\n  \
+             inputs without a case: {missing:?}\n  \
+             cases naming no such input (or the wrong class): {stray:?}"
+        );
     }
 
     /// Every input of simulate — on its command line or in its environment —
@@ -234,23 +353,14 @@ mod tests {
     /// run id and manifest are unchanged and the child is at its address.
     #[test]
     fn every_simulate_input_has_a_case() {
-        let mut wanted = BTreeSet::new();
-        for (field, class) in SIMULATE {
-            wanted.insert(case_name(*class, field, false));
-        }
-        for v in crate::env::VARS {
-            if NO_CASE.iter().all(|(f, _)| *f != v.field) {
-                wanted.insert(case_name(v.class, v.field, true));
-            }
-        }
-        let cases = cases();
-        let missing: Vec<&String> = wanted.difference(&cases).collect();
-        let stray: Vec<&String> = cases.difference(&wanted).collect();
-        assert!(
-            missing.is_empty() && stray.is_empty(),
-            "the cases and simulate's class table disagree.\n  \
-             inputs without a case: {missing:?}\n  \
-             cases naming no such input (or the wrong class): {stray:?}"
-        );
+        assert_every_input_has_a_case("simulate", "simulate_input_classes.rs", SIMULATE, NO_CASE);
+    }
+
+    /// The same for `fit run`, in `tests/fit_run_input_classes.rs`, where a
+    /// `removed` case checks that the old spelling is refused with its
+    /// message.
+    #[test]
+    fn every_fit_run_input_has_a_case() {
+        assert_every_input_has_a_case("fit run", "fit_run_input_classes.rs", FIT_RUN, FIT_RUN_NO_CASE);
     }
 }
