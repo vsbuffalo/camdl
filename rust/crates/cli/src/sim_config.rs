@@ -311,4 +311,88 @@ mod tests {
             }
         );
     }
+
+    /// Where each field of the resolved configuration comes from: the inputs
+    /// (command-line fields, and `env:`-prefixed environment fields) it is
+    /// resolved from. The exhaustive destructure below does not compile until a
+    /// new field is named, so a field cannot join the configuration without a
+    /// row here.
+    const SOURCES: &[(&str, &[&str])] = &[
+        ("model.ir", &["model", "integrator", "every", "no_licm", "to", "fit", "env:no_licm", "env:no_constant_fold"]),
+        ("model.digest", &["model", "integrator", "every", "no_licm", "to", "fit", "env:no_licm", "env:no_constant_fold"]),
+        ("model.engine", &["env:eval_unresolved", "env:no_binding_cache", "env:experimental"]),
+        ("run.backend", &["backend", "params", "fit"]),
+        ("run.dt", &["dt", "params", "fit"]),
+        ("run.output", &["model", "every"]),
+        ("run.calendar", &[]),
+        ("run.allow_degenerate_rates", &["allow_degenerate_rates"]),
+        ("run.allow_forcing_extrapolation", &["allow_forcing_extrapolation"]),
+        ("run.view", &["no_flows", "columns"]),
+        ("arms", &["scenarios", "enable", "disable", "to", "fit", "draws"]),
+    ];
+
+    /// Fields that are not configuration: readable labels of the model level
+    /// and the model file's name, recorded in `run.json`, never hashed.
+    const NON_SEMANTIC: &[&str] = &["model.stem", "model.path"];
+
+    /// A provenance, presentation or execution input is not a field of the
+    /// resolved configuration, so it cannot reach the engine through it.
+    #[test]
+    fn presentation_and_provenance_are_not_configuration() {
+        let ResolvedSimConfig {
+            model: ResolvedModel { ir: _, digest: _, engine: _, stem: _, path: _ },
+            run:
+                RunConfig {
+                    backend: _,
+                    dt: _,
+                    output: _,
+                    calendar: _,
+                    allow_degenerate_rates: _,
+                    allow_forcing_extrapolation: _,
+                    view: _,
+                },
+            arms: _,
+        } = ResolvedSimConfig {
+            model: ResolvedModel::new(crate::resolve::tiny_model(), "0.7", "e", "sir.camdl"),
+            run: RunConfig::new(
+                ForwardBackend::ChainBinomial,
+                1.0,
+                &crate::resolve::tiny_model().output.times,
+                false,
+                false,
+                view(false, &[]),
+            )
+            .unwrap(),
+            arms: Vec::new(),
+        };
+        let destructured = [
+            "model.ir", "model.digest", "model.engine", "model.stem", "model.path", "run.backend", "run.dt",
+            "run.output", "run.calendar", "run.allow_degenerate_rates", "run.allow_forcing_extrapolation",
+            "run.view", "arms",
+        ];
+        let listed: Vec<&str> = SOURCES.iter().map(|(f, _)| *f).chain(NON_SEMANTIC.iter().copied()).collect();
+        assert_eq!(
+            listed.iter().copied().collect::<std::collections::BTreeSet<_>>(),
+            destructured.iter().copied().collect(),
+            "every field of the resolved configuration has a SOURCES row or is NON_SEMANTIC"
+        );
+
+        use crate::input_class::{Classify, InputClass};
+        let cli = crate::input_class::simulate_inventory();
+        let env = crate::env::Env::inventory();
+        for (field, inputs) in SOURCES {
+            for input in *inputs {
+                let class = match input.strip_prefix("env:") {
+                    Some(f) => env.iter().find(|i| i.field == f).map(|i| i.class),
+                    None => cli.iter().find(|i| i.field == *input).map(|i| i.class),
+                };
+                let class = class.unwrap_or_else(|| panic!("{field}: `{input}` is not an input of simulate"));
+                assert!(
+                    matches!(class, InputClass::Keyed(_) | InputClass::Expands),
+                    "{field} is resolved from `{input}`, whose class is {class:?}: only a keyed or \
+                     expanding input may reach the resolved configuration"
+                );
+            }
+        }
+    }
 }

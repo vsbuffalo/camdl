@@ -131,4 +131,60 @@ mod tests {
     fn every_mre_simulate_flag_is_classified() {
         assert_covers("camdl mre simulate", clap_args(&["mre", "simulate"]), mre_simulate_inventory());
     }
+
+    /// Environment inputs of simulate whose class is differential but which
+    /// have no case, each with the reason.
+    const NO_CASE: &[(&str, &str)] = &[
+        ("skip_version_check", "every test run sets it: without it the handshake refuses a test build's camdlc"),
+        ("path", "the harness needs PATH to start camdl; `execution_env_camdlc` varies the camdlc found on it"),
+        ("output_dir", "not read by simulate: its store root is `--output-dir`, whose clap `env` reads CAMDL_OUTPUT_DIR"),
+    ];
+
+    fn case_name(class: InputClass, field: &str, env: bool) -> String {
+        let class = match class {
+            InputClass::Keyed(_) => "keyed",
+            InputClass::Execution => "execution",
+            InputClass::Expands => "expands",
+            _ => unreachable!("not a differential class"),
+        };
+        format!("{class}_{}{field}", if env { "env_" } else { "" })
+    }
+
+    fn is_differential(class: InputClass) -> bool {
+        matches!(class, InputClass::Keyed(_) | InputClass::Execution | InputClass::Expands)
+    }
+
+    /// Every `keyed`, `execution` or `expands` input of simulate — on its
+    /// command line or in its environment — has a differential case in
+    /// `tests/simulate_input_classes.rs`, named `<class>_<input>` (or
+    /// `<class>_env_<field>`), and every case there names such an input.
+    #[test]
+    fn every_differential_simulate_input_has_a_case() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/simulate_input_classes.rs");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let cases: BTreeSet<String> = text
+            .lines()
+            .filter_map(|l| l.trim_start().strip_prefix("fn "))
+            .filter_map(|l| l.split('(').next())
+            .filter(|n| ["keyed_", "execution_", "expands_"].iter().any(|p| n.starts_with(p)))
+            .map(str::to_string)
+            .collect();
+        let mut wanted = BTreeSet::new();
+        for i in simulate_inventory().into_iter().filter(|i| is_differential(i.class)) {
+            wanted.insert(case_name(i.class, i.field, false));
+        }
+        for i in crate::env::Env::inventory().into_iter().filter(|i| is_differential(i.class)) {
+            if NO_CASE.iter().all(|(f, _)| *f != i.field) {
+                wanted.insert(case_name(i.class, i.field, true));
+            }
+        }
+        let missing: Vec<&String> = wanted.difference(&cases).collect();
+        let stray: Vec<&String> = cases.difference(&wanted).collect();
+        assert!(
+            missing.is_empty() && stray.is_empty(),
+            "the differential cases and simulate's inventory disagree.\n  \
+             inputs without a case: {missing:?}\n  \
+             cases naming no such input (or the wrong class): {stray:?}"
+        );
+    }
 }
