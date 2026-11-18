@@ -6,10 +6,10 @@
 //! declared period with no value, and reads each stream's predictive draws
 //! from the observation model at each target's end. Rows ending after the
 //! origin are never handed to the filter, so nothing after the origin is
-//! assimilated; a period with no value adds nothing to the likelihood, so
-//! after the origin every particle keeps an equal weight and systematic
-//! resampling keeps each particle in its own slot (`resampling.rs`), which is
-//! what makes particle `i`'s draws across targets one joint sample.
+//! assimilated. A stop after the origin holds no observed value, so the filter
+//! does not assimilate there and skips the resampling call altogether (D72):
+//! no particle is copied into another's slot after the origin, which is what
+//! makes particle `i`'s draws across targets one joint sample.
 //!
 //! No draw is dropped (D53): a filter that fails, collapses, or loses a
 //! particle after the origin fails the forecast with the draw, the time and
