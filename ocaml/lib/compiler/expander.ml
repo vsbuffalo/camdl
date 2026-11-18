@@ -5905,9 +5905,73 @@ let resolve_lineage (ctx : context) (tr : Ast.transition_decl)
       Some { Ir.is_lineage_event = true; Ir.parent_pool_weights = weights }
   end
 
+(* How far the sum of a destination split's constant weights may sit from 1
+   before E423 rejects it (spec §9.1.2). Absolute, and the same as the
+   hyper_erlang weight check (E225): wide enough for the rounding in
+   `0.7 + 0.2 + 0.1` (0.9999999999999999) or `1/3` three times, far below any
+   weight a model would write on purpose. *)
+let branch_weight_tolerance = 1e-9
+
+(* The value of a destination weight that is known at compile time: numbers,
+   arithmetic on them, and unindexed `let` bindings whose bodies are such.
+   [None] for anything else — a parameter, a table, a forcing, the state —
+   whose value is not known until run time. Reads no IR and emits nothing. *)
+let rec branch_weight_const ctx (e : expr) : float option =
+  let both f a b =
+    match branch_weight_const ctx a, branch_weight_const ctx b with
+    | Some x, Some y -> Some (f x y)
+    | _ -> None
+  in
+  match e with
+  | EConst c -> Some c
+  | EUnOp (Neg, a) -> Option.map Float.neg (branch_weight_const ctx a)
+  | EBinOp (Add, a, b) -> both ( +. ) a b
+  | EBinOp (Sub, a, b) -> both ( -. ) a b
+  | EBinOp (Mul, a, b) -> both ( *. ) a b
+  | EBinOp (Div, a, b) -> both ( /. ) a b
+  | EBinOp (Pow, a, b) -> both ( ** ) a b
+  | EIdent (n, _) ->
+    (match classify_name ctx ~obs_aux_cols:[] ~suppress_hoist:true n with
+     | Name_let_const lb | Name_let_inlined lb -> branch_weight_const ctx lb.lbody
+     | _ -> None)
+  | _ -> None
+
+(* gh#1205: a destination split `X --> { A : w_A, B : w_B } @ r` emits one
+   flow per branch at rate w_i · r, so X leaves at (Σ w_i) · r. When every
+   weight is a compile-time constant the sum is known, and a sum other than 1
+   means the rate after `@` is not the outflow: reject it. Weights that depend
+   on a parameter or anything else known only at run time are not checked; the
+   spec states that their sum scales the outflow. *)
+let check_branch_weights_sum ctx (tr : transition_decl) =
+  match tr.trdst with
+  | DstSum _ -> ()
+  | DstBranch branches ->
+    let consts = List.map (fun (_, w) -> branch_weight_const ctx w) branches in
+    if List.for_all Option.is_some consts then begin
+      let sum = List.fold_left (fun acc w -> acc +. Option.get w) 0.0 consts in
+      if Float.abs (sum -. 1.0) > branch_weight_tolerance then begin
+        Diagnostics.error ctx.diags ~code:"E423"
+          ~loc:(diag_loc_of_ast_ctx ctx tr.trloc)
+          ~message:(Printf.sprintf
+            "transition '%s': the destination weights sum to %.12g, not 1, so \
+             the transition moves %.12g times the rate after `@`"
+            tr.trname sum sum)
+          ~detail:(Printf.sprintf
+            "each branch fires at its weight times the rate, so the total \
+             outflow is the rate times the sum of the weights; constant \
+             weights must sum to 1 (within %g)" branch_weight_tolerance)
+          ~hint:"make the weights sum to 1, e.g. write the last one as one \
+                 minus the others (`{ R : 0.5, Q : 1 - 0.5 }`); to change the \
+                 total outflow, change the rate after `@`. See `camdl docs \
+                 language-changes`"
+          ()
+      end
+    end
+
 let expand_transitions_counted ctx =
   let filtered = ref 0 in
   let expanded = List.concat_map (fun tr ->
+    check_branch_weights_sum ctx tr;
     let errors_before = count_errors ctx in
     let combos =
       cartesian_product ~loc:(diag_loc_of_ast_ctx ctx tr.trloc) tr.trindices ctx in

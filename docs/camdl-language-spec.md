@@ -2561,11 +2561,24 @@ identically under source-grouping, but the DSL intent differs and two
 transitions reads more naturally.
 
 **Weights.** The weight of each branch is any scalar expression with dimension
-`probability` (dimensionless, domain `[0, 1]`). The compiler does not enforce
-that weights sum to 1 — users can write rate-weighted branches where the sum
-differs from 1 (e.g., for a fraction of events going to an "other" compartment
-that's implicit). Most users will write `{A : p, B : 1 - p}` for binary
-branching or an explicit last entry `1 - sum-of-others` for n-way branching.
+`probability` (dimensionless, domain `[0, 1]`). Because each branch fires at
+`weight_i × rate`, the total outflow from the source is `rate × Σ weight_i`:
+the rate after `@` is the outflow only when the weights sum to 1. A sum below 1
+does not send the remainder anywhere; it lowers the outflow, and a sum above 1
+raises it.
+
+- **Constant weights must sum to 1.** When every weight is a compile-time
+  constant — numbers, arithmetic on them, and `let` bindings of such — the
+  compiler checks that the sum is within `1e-9` of 1 and otherwise rejects the
+  transition (**E423**). The tolerance absorbs floating-point rounding
+  (`0.7 + 0.2 + 0.1` is `0.9999999999999999`; `1/3` three times) and nothing a
+  model would write on purpose, so `{ A : 0.33, B : 0.33, C : 0.33 }` is an
+  error. To lower the total outflow, change the rate after `@`.
+- **Weights that depend on anything known only at run time are not checked.**
+  A parameter, a table, a forcing or the state can make the sum differ from 1,
+  and then the outflow is `rate × Σ weight_i`, exactly as written. Write the
+  last weight as one minus the others (`{A : p, B : 1 - p}`, or
+  `1 - sum-of-others` for n-way branching) and the sum is 1 for every value.
 
 ### 9.2 Indexed Transitions
 
@@ -6896,6 +6909,7 @@ authoritative list is whatever `ocaml/lib/compiler/` and `ocaml/lib/ir/` emit.
 | E358 | Error   | `prevalence(of = …, among = …)`: the two sides collapse different dimensions (§12.1) |
 | E359 | Error   | `prevalence(of = …, among = …)` reads a flow on one side (§12.1) |
 | E360 | Error   | Arithmetic with no meaning on a definite instant: `Instant + Instant`, a `sum` of instants, `k * Instant`, `Duration − Instant`, `Instant +` a unitless constant, a conditional choosing between an Instant and a duration (§2.1) |
+| E423 | Error   | A destination split's constant weights do not sum to 1 (within `1e-9`), so the rate after `@` is not the outflow (§9.1.2) |
 | W103 | Warning | Let binding name shadows a stratum value in some dimension                                |
 
 Diagnostics can be emitted as structured JSON by passing `--json-errors` to

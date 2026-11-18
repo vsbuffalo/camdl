@@ -722,8 +722,8 @@ type destination_form =
           destination. *)
   | DstBranch of (stoich_ref * expr) list
       (** One flow per branch, at the branch's weight times the transition's
-          rate. The weights are not normalised or checked: they are branch
-          probabilities only when they sum to one. *)
+          rate, so the source leaves at the rate times the sum of the
+          weights. Weights that are all constants must sum to one (E423). *)
 ```
 
 The first version mixes three things: what the type means, how the expander
