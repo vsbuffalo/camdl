@@ -302,6 +302,8 @@ pub fn declared_level(table_marker: &str, input: &str, env_model_level: &str) ->
         .find(|l| l.contains(&needle))
         .unwrap_or_else(|| panic!("`{input}` is not keyed in {file} ({table_marker})"));
     let level = line.split(&needle).nth(1).unwrap().split(')').next().unwrap().to_ascii_lowercase();
+    // `Level::Box` is spelled with its path, so it does not shadow `Box`.
+    let level = level.trim_start_matches("level::").to_string();
     match level.as_str() {
         "model" if input.starts_with("env:") => env_model_level.to_string(),
         _ => level,
