@@ -20,7 +20,7 @@ use std::sync::Arc;
 use sim::inference::multi_stream_obs::{MultiStreamObsModel, StreamSpec};
 use sim::inference::obs_attempt::ObsCellState;
 use sim::inference::traits::{ObservationModel, SMCConfig};
-use sim::inference::{bootstrap_filter, BoundObs, ChainBinomialProcess, Period, StreamTimes};
+use sim::inference::{bootstrap_filter_recording_at, BoundObs, ChainBinomialProcess, Period, PrequentialStops, StreamTimes};
 
 use super::forecast_plan::ForecastPlan;
 use super::observed_rows::Measures;
@@ -162,13 +162,17 @@ pub(crate) fn fixed_origin_forecast(
         binomial: config.binomial,
     };
 
+    // D84: keep the prequential record only where it is read below, the stops
+    // after the origin (the death check) and the targets.
+    let record_at = PrequentialStops::only(after_origin.iter().copied().chain(at.iter().map(|&(_, ui)| ui)));
+
     let n = config.n_particles;
     let mut draws: Vec<Vec<f64>> = vec![Vec::with_capacity(param_sets.len() * n); at.len()];
     let mut expected: Option<Vec<Vec<f64>>> =
         config.record_expected.then(|| vec![Vec::with_capacity(param_sets.len() * n); at.len()]);
     for (d, params) in param_sets.iter().enumerate() {
         let fail = |time: Option<f64>, cause: String| ForecastFailure { draw: Some(d), time, cause };
-        let result = bootstrap_filter(&process, &obs_model, params, &smc, draw_seed(config.base_seed, d))
+        let result = bootstrap_filter_recording_at(&process, &obs_model, params, &smc, draw_seed(config.base_seed, d), &record_at)
             .map_err(|e| {
                 let time = match &e {
                     sim::SimError::PFDegenerate { obs_window, .. } => union_times.get(*obs_window).copied(),

@@ -6,6 +6,7 @@ use super::*;
 use crate::fit::forecast_plan::{PlanStream, Target};
 use crate::fit::observed_rows::ObservedRow;
 use crate::fit::training_partition::{TrainingPartition, WholeFiles};
+use sim::inference::bootstrap_filter;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
