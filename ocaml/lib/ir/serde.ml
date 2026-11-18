@@ -1657,6 +1657,12 @@ let param_kind_of_json_string k =
 
 (* A model constant: `{"name": _, "value": _, "kind": _}`. *)
 let constant_to_json (c : constant) : Yojson.Safe.t =
+  (* As for a [Const]: JSON has no NaN or infinity, and the expander reports
+     a non-finite constant as E520. *)
+  if not (Float.is_finite c.c_value) then
+    invalid_arg (Printf.sprintf
+      "Serde.constant_to_json: constant '%s' has the non-finite value %F; JSON \
+       cannot represent it (a compiler invariant, see E520)" c.c_name c.c_value);
   obj [
     ("name",  str c.c_name);
     ("value", flt c.c_value);

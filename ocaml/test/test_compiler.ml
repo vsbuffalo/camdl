@@ -4818,6 +4818,68 @@ let test_serde_refuses_non_finite_const () =
   Alcotest.(check string) "finite Const" {|{"const":2.5}|}
     (Yojson.Safe.to_string (Serde.expr_to_json (Ir.Const 2.5)))
 
+(* gh#1207, review of #1232: a typed `let` is a model constant, evaluated by
+   the expander and written as `{"name", "value", "kind"}`, not as an
+   expression; a NaN value there made the IR unreadable just as a folded
+   `Const nan` did. It is E520, at the `let` (line 4 of [non_finite_src]). *)
+let test_non_finite_typed_let_constant_is_e520 () =
+  let src = non_finite_src ~extra_let:"\nlet k : rate = (0 - 8) ^ 0.5"
+      "if I > 1000000 'count then k * I else gamma * I" in
+  compile_expect_error_code ~code:"E520" ~contains:"constant 'k'" src;
+  compile_expect_error_code ~code:"E520" ~contains:"evaluates to NaN" src;
+  (match compile_errors src with
+   | Ok _ -> Alcotest.fail "expected E520"
+   | Error e ->
+     Alcotest.(check (option int)) "E520 is located at the let" (Some 4)
+       (line_of_code ~code:"E520" e));
+  (* A finite typed constant still compiles. *)
+  ignore (compile_expect_ok (non_finite_src ~extra_let:"\nlet k : rate = 4 ^ -0.5"
+                               "if I > 1000000 'count then k * I else gamma * I"))
+
+(* The constant writer refuses a non-finite value, like [expr_to_json]. *)
+let test_serde_refuses_non_finite_model_constant () =
+  match Serde.constant_to_json { Ir.c_name = "k"; c_value = Float.nan; c_kind = Ir.Rate } with
+  | j -> Alcotest.failf "constant NaN was written as %s" (Yojson.Safe.to_string j)
+  | exception Invalid_argument msg ->
+    Alcotest.(check bool) (Printf.sprintf "message names the invariant: %s" msg)
+      true (contains_substring ~needle:"non-finite" msg)
+
+(* E520 reaches the expressions of a quantity. *)
+let test_non_finite_literal_in_quantity_is_e520 () =
+  let src = non_finite_src "gamma * I" ^ "quantities { bad = final(I * (0 - 8) ^ 0.5) }\n" in
+  compile_expect_error_code ~code:"E520" ~contains:"quantity 'bad'" src;
+  ignore (compile_expect_ok (non_finite_src "gamma * I" ^ "quantities { ok = final(I * 4 ^ 0.5) }\n"))
+
+(* gh#1207, review of #1232: the constant fold runs after E520, on table cells
+   it substitutes, and folded `1e300 * 1e300` to infinity, which the writer
+   then refused (an uncaught exception, exit 2). An overflowing literal
+   product is left unfolded, as the unfolded model has it. *)
+let test_constant_fold_does_not_fold_an_overflow () =
+  let src = {|
+    time_unit = 'days
+    dimensions { patch = [p0, p1] }
+    compartments { S, I }
+    stratify(by = patch)
+    parameters { beta : rate }
+    tables { W : patch × patch = [[0.0, 1e300], [1e300, 0.0]] }
+    let N[l in patch] = S[l] + I[l]
+    transitions {
+      infection[l in patch] : S[l] --> I[l]
+        @ beta * S[l] * sum(q in patch, W[l, q] * 1e300 * I[q] / N[q])
+      recovery[l in patch] : I[l] --> S[l]  @ beta * I[l]
+    }
+    init { S_p0 = 990  I_p0 = 10  S_p1 = 1000 }
+    simulate { from = 0 'days  to = 30 'days }
+  |} in
+  let m = match Compiler.compile ~name:"overflow_cell" src with
+    | Ok m -> m | Error e -> Alcotest.failf "compile failed: %s" e in
+  (match Serde.model_to_string m with
+   | _ -> ()
+   | exception Invalid_argument msg -> Alcotest.failf "the IR could not be written: %s" msg);
+  (* The fold still drops the zero cells: one term per row is left, which is
+     no longer a sum. *)
+  Alcotest.(check int) "zero cells dropped" 0 (max_foi_reduce_terms m)
+
 let test_rate_state_grad_nonsmooth_refused () =
   (* Rate = floor(S) * beta. ∂/∂S reaches floor(state) — nonsmooth (a step at
      each integer) — so it must be a loud DEUnsupported (URNonsmoothState), never
@@ -17795,6 +17857,10 @@ let () =
       Alcotest.test_case "E520: a non-finite literal sub-expression (gh#1207)" `Quick test_non_finite_literal_is_e520;
       Alcotest.test_case "E520 is not raised for finite or non-literal operands" `Quick test_finite_and_non_literal_powers_compile;
       Alcotest.test_case "the IR writer refuses a non-finite Const (gh#1207)" `Quick test_serde_refuses_non_finite_const;
+      Alcotest.test_case "E520: a typed let constant that is NaN (gh#1207)" `Quick test_non_finite_typed_let_constant_is_e520;
+      Alcotest.test_case "the IR writer refuses a non-finite model constant" `Quick test_serde_refuses_non_finite_model_constant;
+      Alcotest.test_case "E520: a non-finite literal in a quantity" `Quick test_non_finite_literal_in_quantity_is_e520;
+      Alcotest.test_case "constant_fold: an overflow is not folded (gh#1207)" `Quick test_constant_fold_does_not_fold_an_overflow;
       Alcotest.test_case "rate_state_grad: BindingRef inverts to state-bearing (gh#275)" `Quick test_rate_state_grad_through_binding;
       Alcotest.test_case "autodiff: ∂(x^c) is finite at a zero base (gh#952)" `Quick test_pow_grad_constant_exponent_at_zero_base;
       Alcotest.test_case "autodiff: ∂(I^α) is finite at a zero base (gh#952)" `Quick test_pow_grad_parameter_exponent_at_zero_base;

@@ -83,15 +83,20 @@ let inline_table_values (tables : table list) : (string, float array) Hashtbl.t 
 let is_zero = function Const c -> c = 0.0 | _ -> false
 
 (* fold a binary op of two constants — total ops only; Div/Pow/Mod and
-   comparisons are left for the evaluator to handle. *)
+   comparisons are left for the evaluator to handle. A result that is not
+   finite (an overflow such as [1e300 * 1e300], from table cells E520 cannot
+   see) is not folded either: JSON cannot carry it, and the evaluator meets
+   the same operation it would in the unfolded model. *)
 let fold_bin_consts op a b : expr option =
-  match op with
-  | Add -> Some (Const (a +. b))
-  | Sub -> Some (Const (a -. b))
-  | Mul -> Some (Const (a *. b))
-  | Min -> Some (Const (Float.min a b))
-  | Max -> Some (Const (Float.max a b))
-  | _ -> None
+  let v = match op with
+    | Add -> Some (a +. b)
+    | Sub -> Some (a -. b)
+    | Mul -> Some (a *. b)
+    | Min -> Some (Float.min a b)
+    | Max -> Some (Float.max a b)
+    | _ -> None
+  in
+  match v with Some v when Float.is_finite v -> Some (Const v) | _ -> None
 
 (* The value of a cell of a literal table at a constant index, if the index
    is constant and in range. *)
