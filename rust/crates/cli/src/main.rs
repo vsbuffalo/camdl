@@ -55,6 +55,7 @@ mod sim_ensemble_cas; // gh#147: multi-cell simulate ensemble CAS identity (mode
 mod landscape_html;
 mod lineage;        // three-layer lineage: --event-log record + realize + tree
 mod mre;            // `camdl mre` — minimal-reproducible-example bundles (gh#212)
+mod input_class;    // every input of a converted command and its class: the Classify inventory
 pub mod version;
 
 /// Terminal formatting helpers. Pure ANSI SGR codes, no dependencies.
@@ -112,11 +113,20 @@ pub(crate) struct Cli {
     #[command(subcommand)]
     pub command: Command,
 
+    #[command(flatten)]
+    pub global: GlobalArgs,
+}
+
+/// The options every subcommand accepts, classified once here for every
+/// converted command's inventory ([`input_class::simulate_inventory`]).
+#[derive(clap::Args, classify_derive::Classify)]
+pub(crate) struct GlobalArgs {
     /// Log verbosity (error/warn/info/debug/trace). Overrides RUST_LOG.
     /// Defaults to `warn`; `--progress plain` auto-bumps to `info` so
     /// per-chain progress lines (`log::info!`) reach the user.
     #[arg(long, global = true, value_name = "LEVEL",
           help_heading = "Global options")]
+    #[class(presentation)]
     verbosity: Option<log::LevelFilter>,
 
     /// Progress output mode for long-running subcommands. `auto` (default)
@@ -124,17 +134,20 @@ pub(crate) struct Cli {
     /// plain lines (use under `tee`, `ssh`, or CI); `none` silences progress.
     #[arg(long, global = true, default_value_t = args::types::ProgressMode::Auto,
           value_name = "MODE", help_heading = "Global options")]
+    #[class(presentation)]
     progress: args::types::ProgressMode,
 
     /// Silence all progress output (shorthand for `--progress none`; wins over
     /// `--progress` if both are given).
     #[arg(long, global = true, help_heading = "Global options")]
+    #[class(presentation)]
     no_progress: bool,
 
     /// Bypass the compiled-IR cache: recompile the `.camdl` every run instead
     /// of reusing a cached IR keyed on (model, compiler, schema). The cache is
     /// on by default (`~/.cache/camdl/ir`, or `$CAMDL_IR_CACHE_DIR`).
     #[arg(long, global = true, help_heading = "Global options")]
+    #[class(execution)]
     no_ir_cache: bool,
 
     /// Disable loop-invariant code motion (gh#272). LICM is ON by default: it
@@ -145,6 +158,7 @@ pub(crate) struct Cli {
     /// changes the compiled IR, so a `--no-licm` run re-keys the IR cache and run
     /// identity (back to the inlined variant).
     #[arg(long, global = true, help_heading = "Global options")]
+    #[class(keyed(model))]
     no_licm: bool,
 }
 
@@ -504,7 +518,7 @@ fn main() {
     // The log filter: explicit --verbosity, else RUST_LOG, else `warn`.
     // Plain progress lines do not pass through `log` (`out::LiveHandle`,
     // GH #14's option 2), so `--progress` no longer bumps it.
-    let effective_verbosity: log::LevelFilter = cli.verbosity.unwrap_or(log::LevelFilter::Warn);
+    let effective_verbosity: log::LevelFilter = cli.global.verbosity.unwrap_or(log::LevelFilter::Warn);
 
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or(effective_verbosity.as_str())
@@ -514,12 +528,12 @@ fn main() {
     // plain-mode log lines from callbacks reach the configured filter.
     // `--no-progress` is the discoverable shorthand for `--progress none` and
     // wins when both are given.
-    out::progress::init(if cli.no_progress { args::types::ProgressMode::None } else { cli.progress });
+    out::progress::init(if cli.global.no_progress { args::types::ProgressMode::None } else { cli.global.progress });
     // What the engine meets mid-run and records once (`sim::run_notes`) is
     // said as it is first recorded, as a warning.
     sim::run_notes::set_reporter(util::report_run_note);
-    util::set_ir_cache_disabled(cli.no_ir_cache);
-    util::set_licm_disabled(cli.no_licm);
+    util::set_ir_cache_disabled(cli.global.no_ir_cache);
+    util::set_licm_disabled(cli.global.no_licm);
 
     match cli.command {
         Command::Simulate(a)            => run_simulate(&a),
