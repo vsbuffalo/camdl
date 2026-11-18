@@ -18,10 +18,36 @@
 //! a per-build nonce so it never coincides with another build's.
 //!
 //! It is a build fingerprint under one machine image, not a complete identity
-//! of the binary: the system toolchain used for native code and the
-//! dynamically linked libraries (the operating system's `exp`, `ln`, `pow`)
-//! are not in it. Proposal:
-//! `docs/dev/proposals/2026-11-17-honest-input-addressed-store.md` §1a.
+//! of the binary. Stated assumptions — what a build script cannot see, and so
+//! is not in it:
+//!
+//! - **The system toolchain and libraries**: the C compiler that builds native
+//!   code (`nlopt`) and the dynamically linked libraries (the operating
+//!   system's `exp`, `ln`, `pow`).
+//! - **Profile settings a build script is not told**: `lto`, `codegen-units`,
+//!   `overflow-checks`, `panic` and the like set in a `[profile]` table outside
+//!   this repository (the user's `~/.cargo/config.toml`) or with `cargo
+//!   --config`. Inside the repository they are covered: `rust/Cargo.toml` and
+//!   `rust/.cargo/config.toml` are build inputs. Set through the environment
+//!   (`CARGO_PROFILE_DEV_OVERFLOW_CHECKS=false`) they are covered too: every
+//!   `CARGO_PROFILE_*` variable and every `CARGO_CFG_*` the script sees enters
+//!   the profile component. The pinned toolchain (1.94.1) sets
+//!   `CARGO_CFG_DEBUG_ASSERTIONS` and `CARGO_CFG_PANIC`, but no cfg for
+//!   overflow checks, and `CARGO_CFG_PANIC` stays `unwind` under a profile's
+//!   `panic = "abort"` (measured with a probe build script).
+//! - **The resolved features of third-party crates.** Only the workspace
+//!   crates' features are in the id (`cli` and `sim`, the only ones with
+//!   features). A third-party crate's features follow from those and from
+//!   `Cargo.lock`, which is in the id; where they differ between the
+//!   workspace's feature sets today it is in `default`, `std` and `alloc`.
+//! - **A build script added without a manifest change.** Each workspace
+//!   manifest states `build = false` or `build = "build.rs"` (tested), so a
+//!   build script that takes effect is a manifest edit, which is hashed and
+//!   watched; an absent path is never watched, since cargo re-runs a script
+//!   on every build while a watched path is missing.
+//!
+//! Proposal: `docs/dev/proposals/2026-11-17-honest-input-addressed-store.md`
+//! §1a.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -163,7 +189,7 @@ pub fn is_build_input(rel: &str) -> bool {
         other => other,
     };
     match in_crate {
-        ["Cargo.toml"] | ["build.rs"] => true,
+        ["Cargo.toml"] | ["build.rs"] | [".cargo", "config.toml"] => true,
         ["src", tail @ ..] if !tail.is_empty() => {
             let (file, dirs) = tail.split_last().expect("non-empty");
             *file != "tests.rs" && !dirs.contains(&"tests")
@@ -191,6 +217,7 @@ pub fn watched_source_paths(repo_root: &Path) -> Vec<PathBuf> {
             out.push(dir.join(name));
         }
     }
+    out.push(rust.join(".cargo").join("config.toml"));
     out.push(rust.join("Cargo.lock"));
     out.push(repo_root.join("ir").join("VERSION"));
     out.retain(|p| p.exists());
@@ -343,15 +370,16 @@ pub fn watched_git_paths(repo_root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Gather [`BuildInputs`] from a build script's environment. `env` reads one
-/// variable; `rustc_vv` runs `rustc -vV`; `cli_features` are `cli`'s own
-/// enabled features, as `cli:<name>`.
+/// Gather [`BuildInputs`] from a build script's environment `vars` (every
+/// variable it sees); `rustc_vv` runs `rustc -vV`; `cli_features` are `cli`'s
+/// own enabled features, as `cli:<name>`.
 pub fn gather(
     repo_root: &Path,
-    env: &dyn Fn(&str) -> Option<String>,
+    vars: &[(String, String)],
     rustc_vv: &dyn Fn() -> Option<String>,
     cli_features: Vec<String>,
 ) -> BuildInputs {
+    let env = |k: &str| vars.iter().find(|(name, _)| name == k).map(|(_, v)| v.clone());
     // `sim`'s resolved features reach this script only through `links`
     // metadata (`sim/build.rs`): a build script sees its own package's
     // features, and `sim`'s are not `cli`'s (`io` enables `sim`'s defaults
@@ -366,12 +394,23 @@ pub fn gather(
         let out_dir = PathBuf::from(env("OUT_DIR")?);
         // OUT_DIR = <target>/[<triple>/]<profile-dir>/build/<pkg>-<hash>/out
         let profile_dir = out_dir.ancestors().nth(3)?.file_name()?.to_string_lossy().into_owned();
+        // Every `CARGO_CFG_*` the script sees (debug assertions, panic
+        // strategy, target cfgs) and every `CARGO_PROFILE_*` set in the
+        // environment, sorted. The toolchain exposes no cfg for overflow
+        // checks, so an environment override of it is caught only as the
+        // `CARGO_PROFILE_*` variable itself.
+        let mut settings: Vec<String> = vars
+            .iter()
+            .filter(|(k, _)| k.starts_with("CARGO_CFG_") || k.starts_with("CARGO_PROFILE_"))
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        settings.sort();
         Some(format!(
-            "dir={profile_dir} profile={} opt_level={} debug={} debug_assertions={}",
+            "dir={profile_dir} profile={} opt_level={} debug={} settings={}",
             env("PROFILE")?,
             env("OPT_LEVEL")?,
             env("DEBUG")?,
-            env("CARGO_CFG_DEBUG_ASSERTIONS").is_some(),
+            settings.join("\u{1f}"),
         ))
     })();
     BuildInputs {

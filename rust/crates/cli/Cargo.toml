@@ -2,6 +2,9 @@
 name = "cli"
 version = "0.1.0"
 edition = "2021"
+# Stated, not inferred: whether a build script exists is then a fact of this
+# manifest, which the engine fingerprint hashes (cli/src/engine_fingerprint.rs).
+build = "build.rs"
 
 # See `crates/sim/Cargo.toml` for the long form of the first four reasons; the
 # same idioms cross the crate boundary, because `cli` validates the same floats

@@ -2,6 +2,9 @@
 name = "runid-derive"
 version = "0.1.0"
 edition = "2021"
+# Stated, not inferred: whether a build script exists is then a fact of this
+# manifest, which the engine fingerprint hashes (cli/src/engine_fingerprint.rs).
+build = false
 
 [lib]
 proc-macro = true
