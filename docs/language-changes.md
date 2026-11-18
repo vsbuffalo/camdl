@@ -13,6 +13,25 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-11-18 — a `transfer(count = ...)` that is negative when it fires is refused
+
+**What.** A plain `transfer(count = EXPR, from = A, to = B)` whose count
+evaluated below zero used to move people from `B` back to `A`. It now stops the
+run with `NegativeCount` (cause `InterventionTransferNegative`) naming `A`, on
+every backend, as a negative `add` already did. A count of zero is still valid
+and moves nobody.
+
+**Migration.** To move people the other way, swap the endpoints:
+`transfer(count = 5, from = V, to = S)` rather than `count = -5` from `S` to
+`V`. A count that is negative only at some parameter values needs bounds or
+priors that keep it non-negative.
+
+**Diagnostic.**
+`simulation error: NegativeCount { compartment: "S",
+attempted_value: -5, t: 5.0, cause: InterventionTransferNegative }`.
+
+---
+
 ## 2026-11-18 — a stage of a `via erlang` compartment is written `stage(...)`; the generated stage dimension is not nameable
 
 **What.** `via erlang(stages = k, ...)` on a transition splits its source

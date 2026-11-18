@@ -172,6 +172,13 @@ A `GroupedTransfer` follows the same split: its fraction form carries
 its pairs; its count form carries none and is refused. Like every gradient map,
 it is not part of the model's run identity.
 
+**A negative count is refused.** An `AbsoluteTransfer` (and a `GroupedCount`)
+whose `count` resolves below zero when it fires is an error on every backend:
+`NegativeCount` with cause `InterventionTransferNegative` for the plain
+transfer, as `AddAction` is refused with `InterventionAddNegative`. The check is
+on the raw value, before rounding, so a count in (-0.5, 0) is refused rather
+than rounded to a no-op. A count of zero moves nobody.
+
 **The grouped transfer.** A compartment with an Erlang dwell
 (`via erlang(stages = k, ...)`) is one population held in `k` stage cells. A
 `transfer` out of it is one `GroupedTransfer` per population cell: `pairs`

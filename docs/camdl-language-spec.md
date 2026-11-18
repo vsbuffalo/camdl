@@ -4269,6 +4269,15 @@ When the source is a compartment with an Erlang dwell (`via erlang`, §9.4.1),
 `source` is the compartment's total over its stages: the floor is taken once
 and the stages give up their shares of it.
 
+A `transfer(count = EXPR, ...)` moves `min(round(count), source)` individuals,
+so `count` must not be negative: a negative count would move people from the
+destination back to the source. A count that evaluates below zero when the
+transfer fires (a literal, or a parameter or expression that is negative at
+the parameters in use) stops the run with a negative-count error naming the
+source compartment, on every backend, including under inference. A count of
+zero moves nobody. To move people the other way, write the transfer in the
+other direction.
+
 **Stratified compartments in actions.** `transfer(from = S, to = V)` with bare
 compartment names expands over all strata (see §25.10). `set` and `add` instead
 target a **single compartment by name**. On a stratified compartment the bare

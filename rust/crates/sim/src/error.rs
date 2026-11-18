@@ -273,8 +273,8 @@ pub enum CollapseKind {
 /// gh#audit-C5. Cause discriminator for NegativeCount.
 /// `InitialState` depends on θ alone, and the inference layer kills the
 /// offending particle — every particle, since they all start the same — which
-/// rejects θ. `InitialStateDrawn`, `InterventionAddNegative` and
-/// `InterventionNegative` are modelling or configuration errors and propagate
+/// rejects θ. `InitialStateDrawn`, `InterventionAddNegative`,
+/// `InterventionTransferNegative` and `InterventionNegative` are modelling or configuration errors and propagate
 /// regardless of caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NegativeCountCause {
@@ -300,6 +300,11 @@ pub enum NegativeCountCause {
     /// at the action site (you cannot add a negative number of
     /// individuals). Config bug; propagates regardless of caller.
     InterventionAddNegative,
+    /// A plain `transfer(count = …)` resolved to a negative count — caught
+    /// eagerly at the action site, since a transfer moves a number of
+    /// individuals out of its source and a negative one would move people
+    /// backwards. Config bug; propagates regardless of caller.
+    InterventionTransferNegative,
     /// A compartment was left negative *after* the INTERVENE/BALANCE
     /// stage — e.g. a `set()` to a value below zero, or a transfer that
     /// overdrew — caught by the centralized post-INTERVENE scan. The
@@ -335,6 +340,12 @@ fn negative_count_message(
              Fix: constrain the init expression or the law so it cannot go negative, e.g. \
              draw from a `binomial(n = N0, ...)` law, which never exceeds N0, instead of \
              subtracting a `poisson` draw from N0"
+        ),
+        NegativeCountCause::InterventionTransferNegative => format!(
+            "`transfer(count = …)` out of '{compartment}' resolved to a negative count \
+             ({value}) at t={t} (cause: InterventionTransferNegative): a transfer moves a \
+             number of individuals, which cannot be negative — write the transfer in the \
+             other direction"
         ),
         NegativeCountCause::InterventionAddNegative | NegativeCountCause::InterventionNegative => {
             format!("compartment '{compartment}' would go to {value} (cause: {cause:?}) at t={t}")
@@ -591,7 +602,10 @@ impl SimError {
             // negative initial state (`S = N - I0`) rejects that θ.
             SimError::NegativeCount { cause, .. } => match cause {
                 InitialState => false,
-                InitialStateDrawn | InterventionAddNegative | InterventionNegative => true,
+                InitialStateDrawn
+                | InterventionAddNegative
+                | InterventionTransferNegative
+                | InterventionNegative => true,
             },
 
             // Per-θ excursions, θ-dependent runtime conditions, and the

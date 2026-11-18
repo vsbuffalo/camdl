@@ -303,6 +303,18 @@ fn grouped_cells(model: &CompiledModel, gt: &GroupedTransfer) -> Result<GroupedC
     }
 }
 
+/// A plain `transfer(count = …)` that resolved to a negative count, named by
+/// its source compartment. `attempted_value` is the floor of the raw count,
+/// as for a negative `add`.
+fn transfer_negative_count_err(src: &str, v: f64, t: f64) -> SimError {
+    SimError::NegativeCount {
+        compartment: src.to_string(),
+        attempted_value: v.floor() as i64,
+        t,
+        cause: NegativeCountCause::InterventionTransferNegative,
+    }
+}
+
 /// A grouped transfer of a negative count. A count is a number of
 /// individuals to move out of the source; there is no stage to return a
 /// negative one to.
@@ -1011,6 +1023,9 @@ fn action_changes_f64(
             out.push((d, ChangeF64::Delta(x)));
         }
         Action::AbsoluteTransfer(at) => {
+            if v < 0.0 {
+                return Err(transfer_negative_count_err(&at.src, v, 0.0));
+            }
             let (s, d) = (resolve_target(model, &at.src)?, resolve_target(model, &at.dst)?);
             let x = match s {
                 Arena::Int(i) if matches!(d, Arena::Int(_)) => v.min(read_int[i]),
@@ -1595,6 +1610,11 @@ fn resolve_action(
             }
         }
         Action::AbsoluteTransfer(at) => {
+            // Guard the raw value, as `add` does: a count in (-0.5, 0) rounds
+            // to zero and would otherwise pass as a silent no-op.
+            if v < 0.0 {
+                return Err(transfer_negative_count_err(&at.src, v, t));
+            }
             match (resolve_target(model, &at.src)?, resolve_target(model, &at.dst)?) {
                 (Arena::Int(s), Arena::Int(d)) => {
                     let x = (v.round() as i64).min(snap.int.counts[s]);
@@ -2179,6 +2199,82 @@ mod tests {
         })]);
         let d = resolve(&m);
         assert_eq!(d.int, vec![IntDelta { idx: 1, delta: 0 }], "round(0.4)=0 is a no-op, not an error");
+    }
+
+    fn absolute_transfer(src: &str, dst: &str, count: f64) -> Action {
+        Action::AbsoluteTransfer(AbsoluteTransfer {
+            src: src.into(),
+            dst: dst.into(),
+            count: Expr::const_(count),
+        })
+    }
+
+    fn assert_transfer_negative(err: SimError, src: &str) {
+        match err {
+            SimError::NegativeCount { compartment, cause, .. } => {
+                assert_eq!(compartment, src);
+                assert_eq!(cause, NegativeCountCause::InterventionTransferNegative);
+            }
+            other => panic!("expected NegativeCount{{InterventionTransferNegative}}, got: {other}"),
+        }
+    }
+
+    /// gh#1278: a plain `transfer(count = <0)` on the integer arena used to
+    /// move people from the destination to the source (`min(-5, S) = -5`). It
+    /// is refused at the action site, for a count below -0.5 and for one in
+    /// (-0.5, 0) that rounds to zero.
+    #[test]
+    fn transfer_count_negative_is_hard_error_on_integer_arena() {
+        for count in [-5.0, -0.3] {
+            let m = model_with(vec![absolute_transfer("S", "I", count)]);
+            let (int_s, real_s) = states();
+            let mut out = EffectDeltas::default();
+            let err = resolve_intervention(&m, 0, &m.model.interventions[0], snap(&int_s, &real_s),
+                                           &m.default_params, 1.0, 1.0, EffectKind::Intervention, None, &mut out).unwrap_err();
+            assert_transfer_negative(err, "S");
+            assert!(out.is_empty(), "no delta may be emitted when the transfer is rejected (count {count})");
+        }
+    }
+
+    /// gh#1278, real source: the guard sits before the arena dispatch, so a
+    /// negative count is reported as such even where the endpoints would be
+    /// refused for mixing arenas.
+    #[test]
+    fn transfer_count_negative_is_hard_error_on_real_source() {
+        let m = model_with(vec![absolute_transfer("W", "I", -5.0)]);
+        let (int_s, real_s) = states();
+        let mut out = EffectDeltas::default();
+        let err = resolve_intervention(&m, 0, &m.model.interventions[0], snap(&int_s, &real_s),
+                                       &m.default_params, 1.0, 1.0, EffectKind::Intervention, None, &mut out).unwrap_err();
+        assert_transfer_negative(err, "W");
+    }
+
+    /// gh#1278, ODE: the `f64` arena's `v.min(source)` was equally negative.
+    #[test]
+    fn continuous_transfer_count_negative_is_hard_error() {
+        for (src, dst) in [("S", "I"), ("W", "I")] {
+            let m = model_with(vec![absolute_transfer(src, dst, -5.0)]);
+            let mut int_vals = vec![100.0_f64, 0.0];
+            let mut real_vals = vec![50.0_f64];
+            let err = apply_boundary_effects_continuous(&m, &mut int_vals, &mut real_vals, &m.default_params, 1.0, 1.0)
+                .unwrap_err();
+            assert_transfer_negative(err, src);
+            assert_eq!(int_vals, vec![100.0, 0.0], "state untouched when the transfer is rejected");
+            assert_eq!(real_vals, vec![50.0]);
+        }
+    }
+
+    /// gh#1278 boundary: a count of zero moves nobody and is not an error, so
+    /// the guard rejects only `v < 0`.
+    #[test]
+    fn transfer_count_zero_moves_nobody() {
+        let m = model_with(vec![absolute_transfer("S", "I", 0.0)]);
+        let d = resolve(&m);
+        assert_eq!(d.int, vec![IntDelta { idx: 0, delta: 0 }, IntDelta { idx: 1, delta: 0 }]);
+        let mut int_vals = vec![100.0_f64, 0.0];
+        let mut real_vals = vec![50.0_f64];
+        apply_boundary_effects_continuous(&m, &mut int_vals, &mut real_vals, &m.default_params, 1.0, 1.0).unwrap();
+        assert_eq!(int_vals, vec![100.0, 0.0]);
     }
 
     #[test]
