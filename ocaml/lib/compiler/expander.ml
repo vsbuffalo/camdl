@@ -1844,26 +1844,30 @@ let drains_compartment (tr : transition_decl) (comp : string) : bool =
   in
   is_src && not is_dst
 
-(* Rewrite the destination form so any inflow to [from_comp] lands in its first
-   stage. Once the source is staged, the require-full-index rule rejects a
-   destination that stops one dimension short of the stage axis, so the stage
-   level must be appended. [n_pre] is the number of index positions [from_comp]
-   carried BEFORE staging (0 for an unstratified compartment, 1 for an age-
-   stratified one, …); the stage dimension is appended last, so an inflow ref
-   that already supplies all [n_pre] pre-staging indices gets `stage1` appended:
-   `S --> I` ⇒ `I[s1]`, `S[a] --> I[a]` ⇒ `I[a, s1]`. A reference with fewer than
-   [n_pre] indices is left alone — it is the under-indexed case the existing
-   require-full-index diagnostic already rejects. *)
-let redirect_dest_to_stage1 (dst : destination_form) (from_comp : string)
-    (n_pre : int) (stage1 : string) : destination_form =
+(* Append a stage index to every destination reference to the staged
+   compartment [comp] that supplies its [n_pre] pre-staging indices and no
+   stage: `S[a] --> I[a]` becomes `I[a, <stage>]`. Once the compartment is
+   staged, the require-full-index rule rejects a destination that stops one
+   dimension short of the stage axis, so the lowering states the stage: the
+   first level for an inflow from another compartment, the source's own stage
+   for a move within the compartment. A reference with fewer than [n_pre]
+   indices is left alone; the require-full-index diagnostic rejects it. *)
+let stage_dest (dst : destination_form) (comp : string) (n_pre : int)
+    (stage : index_item) : destination_form =
   let redirect ((c, items) : stoich_ref) : stoich_ref =
-    if c = from_comp && List.length items = n_pre then
-      (c, items @ [ IPosn (EIdent (stage1, dummy_loc)) ])
+    if c = comp && List.length items = n_pre then (c, items @ [ stage ])
     else (c, items)
   in
   match dst with
   | DstSum refs        -> DstSum (List.map redirect refs)
   | DstBranch branches -> DstBranch (List.map (fun (r, w) -> (redirect r, w)) branches)
+
+(* How many indices a reference to [comp] carries before any `via` stages it:
+   one per stratification that applies to it. *)
+let population_index_count ctx (comp : string) : int =
+  List.length (List.filter (fun (sd : stratify_decl) ->
+    match sd.sonly with None -> true | Some only -> List.mem comp only)
+    ctx.stratifies)
 
 (* Rewrite every RATE-POSITION reference to a now-staged compartment [src] so it
    sums over the freshly-added stage dimension. After staging, `src` gains a
@@ -2137,11 +2141,7 @@ let lower_via_transitions ctx =
            PRE-existing strata (the same `sonly` filter [comp_dims] applies). The
            stage axis is appended LAST, so every staged reference to [src] carries
            `n_pre` inherited indices + the stage. *)
-        let n_pre =
-          List.length (List.filter (fun (sd : stratify_decl) ->
-            match sd.sonly with None -> true | Some only -> List.mem src only)
-            ctx.stratifies)
-        in
+        let n_pre = population_index_count ctx src in
         (* [src_pre_items] (bound by the match) is the via transition's own
            source indices (e.g. `[a]` from `recovery[a in age] : I[a] --> R[a]`).
            Inherited by the synthesized chain and exit so each per-stratum
@@ -2211,10 +2211,11 @@ let lower_via_transitions ctx =
         (* 4. Replace the original `via` transition with [chain; exit], and
               redirect every OTHER transition whose destination is the staged
               source to land in stage 1 (`S[a] --> I[a]` ⇒ `I[a, s1]`). *)
+        let stage1_item = IPosn (EIdent (stage1, dummy_loc)) in
         ctx.via_transitions <- (chain_tr.trname, tr.trname) :: ctx.via_transitions;
         ctx.transitions <- List.concat_map (fun (t : transition_decl) ->
           if t.trname = tr.trname then [ chain_tr; exit_tr ]
-          else [ { t with trdst = redirect_dest_to_stage1 t.trdst src n_pre stage1 } ]
+          else [ { t with trdst = stage_dest t.trdst src n_pre stage1_item } ]
         ) ctx.transitions;
         (* 5. Redirect `init { E = … }` / `init { I[a] = … }` (the full pre-staging
               index, no stage) to land in stage 1. *)
