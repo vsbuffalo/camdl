@@ -924,6 +924,18 @@ and fails it instead when `--stream` named it.
   with a `scenario` column, and a `sweep:<param>` column per swept parameter
   (empty on the fitted model's rows). Sample `s` is the same draw and particle
   index in every arm.
+- `coupling` and `contrasts`, with more than one arm (D83). `coupling.method` is
+  `shared_seed_per_particle_streams`: draw _m_ runs with the same seed in every
+  arm and each particle with its own stream from it. `contrasts` names
+  `forecast-contrasts.tsv` and defines its columns: `delta`, the arm's
+  predictive mean minus the fitted model's, and `delta_mcse`, its Monte Carlo
+  standard error. Per draw _m_, `d_m` is the arm's mean over its particles minus
+  the fitted model's; per chain _c_ with `n_c` of the _M_ draws,
+  `Var(Δ) = Σ_c (n_c / M)² · s²_c / ESS_c`, with `s²_c` the sample variance of
+  the chain's `d_m` and `ESS_c` Geyer's initial-positive-sequence effective
+  sample size over them in chain order. A chain whose `d_m` vary but carry fewer
+  than `min_ess_per_chain` (10) effective draws withholds the error, with the
+  reason in `mcse_note`. No quantile band of paired differences is published.
 
 A _deterministic failure_ is a fact about the model as written that holds for
 whatever produced it regardless of how often it occurs — an unresolvable

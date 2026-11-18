@@ -566,3 +566,46 @@ fn scenario_arms_that_act_after_the_origin_are_forecast_and_earlier_ones_refused
     assert_eq!(mean("late", "1"), 0.0);
     assert!(mean("late", "0.5") > 0.0 && mean("late", "0.5") < mean("fitted", ""));
 }
+
+/// D83: a scenario forecast writes, per arm and target, the difference of the
+/// predictive means and its Monte Carlo standard error, and records how the
+/// arms are coupled. Before the cull the arms are identical, so the
+/// difference and its error are exactly 0; after it, `late` has no infections
+/// and the difference is minus the fitted model's mean.
+#[test]
+fn a_scenario_forecast_writes_the_difference_of_means_and_its_monte_carlo_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fit_with_scenarios(dir);
+    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "2 weeks", "--n-draws", "80",
+                         "--scenario", "late"]);
+    assert!(out.status.success(), "fit predict: {}", stderr(&out));
+    let fdir = forecast_dir(dir);
+    let contrasts = rows(&fdir.join("forecast-contrasts.tsv"));
+    assert_eq!(contrasts.len(), 16, "one row per target of the one scenario arm");
+    let daily = rows(&fdir.join("forecast/daily_cases.tsv"));
+    for r in &contrasts {
+        assert_eq!(r["scenario"], "late");
+        assert_eq!(r["n_draws"], "80");
+        let means = |s: &str| daily.iter().chain(&rows(&fdir.join("forecast/weekly_cases.tsv")))
+            .find(|x| x["scenario"] == s && x["t_stop"] == r["t_stop"] && x["t_start"] == r["t_start"])
+            .map(|x| x["mean"].parse::<f64>().unwrap());
+        if let (Some(a), Some(b)) = (means("late"), means("fitted")) {
+            let delta: f64 = r["delta"].parse().unwrap();
+            assert!((delta - (a - b)).abs() <= 1e-6 * (1.0 + b.abs()), "{r:?}");
+        }
+        let end: f64 = r["t_stop"].parse().unwrap();
+        if end <= 29.0 {
+            assert_eq!((r["delta"].as_str(), r["delta_mcse"].as_str()), ("0", "0"), "{r:?}");
+        } else if r["stream"] == "daily_cases" && end >= 31.0 {
+            assert_eq!(r["mean"], "0");
+            let mcse_given = r["delta_mcse"].parse::<f64>().is_ok_and(|s| s > 0.0);
+            assert!(mcse_given || !r["mcse_note"].is_empty(), "an error, or the reason there is none: {r:?}");
+        }
+    }
+    let m: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(fdir.join("forecast.json")).unwrap()).unwrap();
+    assert_eq!(m["coupling"]["method"], "shared_seed_per_particle_streams");
+    assert_eq!(m["contrasts"]["delta_mcse"]["kind"], "monte_carlo_standard_error");
+    assert_eq!(m["contrasts"]["file"], "forecast-contrasts.tsv");
+}

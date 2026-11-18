@@ -495,7 +495,50 @@ fn write_tables(
     let path = out_dir.join("forecast-samples.tsv");
     std::fs::write(&path, tsv).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     written.push(path);
+    if arms.len() > 1 {
+        written.push(write_contrasts(arms, out_dir, draw_refs, &sweep)?);
+    }
     Ok(written)
+}
+
+/// The file of [`write_contrasts`].
+pub(crate) const FORECAST_CONTRASTS_FILE: &str = "forecast-contrasts.tsv";
+
+/// `forecast-contrasts.tsv` (D83): per scenario or sweep arm and target, the
+/// arm's predictive mean, the fitted model's, their difference `delta` and
+/// the paired Monte Carlo standard error of `delta`
+/// ([`crate::fit::forecast_contrast`]); no band of paired differences.
+fn write_contrasts(
+    arms: &[ArmForecast],
+    out_dir: &std::path::Path,
+    draw_refs: &[DrawRef],
+    sweep: &[String],
+) -> Result<PathBuf, String> {
+    use crate::fit::forecast_contrast::{paired_mean_difference, per_draw_differences};
+    let base = &arms[0].fc;
+    let n = base.n_particles;
+    let chains: Vec<Option<usize>> = draw_refs.iter().take(base.n_draws).map(|r| r.key.map(|k| k.0)).collect();
+    let mean = |ys: &[f64]| ys.iter().sum::<f64>() / ys.len() as f64;
+    let mut tsv = arm_header(sweep).join("\t")
+        + "\tstream\tt_start\tt_stop\thorizon\tlead\tmean\tmean_fitted\tdelta\tdelta_mcse\tess\tn_draws\tmcse_note\n";
+    for arm in &arms[1..] {
+        let lead = arm_cells(&arm.label, sweep).join("\t");
+        for (k, t) in base.plan.targets().iter().enumerate() {
+            let d = per_draw_differences(&arm.fc.draws[k], &base.draws[k], n);
+            let r = paired_mean_difference(&d, &chains);
+            let (se, note) = match &r.mcse {
+                Ok(se) => (fmt_value(*se), String::new()),
+                Err(why) => (String::new(), why.describe()),
+            };
+            tsv += &format!("{lead}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{se}\t{}\t{}\t{note}\n",
+                t.stream, fmt_time(t.measures.start()), fmt_time(t.measures.end()), t.horizon, fmt_time(t.lead),
+                fmt_value(mean(&arm.fc.draws[k])), fmt_value(mean(&base.draws[k])), fmt_value(r.delta),
+                if r.ess.is_finite() { fmt_value(r.ess) } else { String::new() }, d.len());
+        }
+    }
+    let path = out_dir.join(FORECAST_CONTRASTS_FILE);
+    std::fs::write(&path, tsv).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    Ok(path)
 }
 
 /// What `forecast.json` is written from, beside the forecast itself.
@@ -646,6 +689,40 @@ fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) ->
     // when the full cloud was used.
     if let Some(info) = job.posterior.selection() {
         doc["chain_selection"] = info.to_json();
+    }
+    // D83: with more than one arm, how the arms' random numbers are coupled
+    // and what `forecast-contrasts.tsv` holds.
+    if arms.len() > 1 {
+        doc["coupling"] = serde_json::json!({
+            "method": "shared_seed_per_particle_streams",
+            "description": "posterior draw m runs with the same seed in every arm, and every \
+                particle draws from its own random stream derived from that seed, so the arms \
+                share the filter through the training rows (checked bit for bit) and particle \
+                i of draw m starts every arm's forecast from the same state. After the origin \
+                an arm's streams stay aligned with the fitted model's only until its dynamics \
+                differ; how strongly the arms are coupled after that is a property of the \
+                implementation, not of the scenarios.",
+        });
+        doc["contrasts"] = serde_json::json!({
+            "file": FORECAST_CONTRASTS_FILE,
+            "baseline": crate::args::FITTED,
+            "delta": "the mean of the arm's predictive draws at the target minus the fitted \
+                model's (all particles of all draws)",
+            "delta_mcse": {
+                "kind": "monte_carlo_standard_error",
+                "description": "the Monte Carlo standard error of delta: how far it would move \
+                    were the forecast rerun with other random numbers and other posterior draws. \
+                    It is not the predictive uncertainty of either arm, nor the uncertainty of \
+                    the scenario's effect.",
+                "method": "per posterior draw, the arm's mean over its particles minus the fitted \
+                    model's; per chain, the sample variance of those differences over Geyer's \
+                    effective sample size (the chain's draws in order); chains combined as \
+                    independent, weighted by their share of the draws",
+                "min_ess_per_chain": crate::fit::forecast_contrast::CONTRAST_MIN_ESS,
+            },
+            "paired_band": "none: a band of paired differences A[s] − B[s] would be set by the \
+                coupling of the arms' random numbers, which the scenario models do not identify",
+        });
     }
     let path = job.out_dir.join("forecast.json");
     let text = serde_json::to_string_pretty(&doc).map_err(|e| format!("serializing forecast.json: {e}"))?;

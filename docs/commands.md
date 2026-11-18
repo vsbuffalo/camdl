@@ -239,6 +239,19 @@ the initial state, a forcing or an observation model), are refused before
 anything runs. After filtering, each arm's record before the origin is compared
 with the fitted model's, bit for bit, and any difference fails the forecast.
 
+With more than one arm the forecast also writes `forecast-contrasts.tsv`: per
+arm and target, the arm's predictive mean (`mean`), the fitted model's
+(`mean_fitted`), their difference `delta`, and `delta_mcse`, the Monte Carlo
+standard error of `delta`. That error is how far `delta` would move were the
+forecast rerun with other random numbers and posterior draws; it is not the
+predictive uncertainty of either arm, nor the uncertainty of the scenario's
+effect. It is computed from each draw's difference of particle means, over the
+chains' effective sample sizes, so neither the particles of a draw nor the draws
+of a chain are taken as independent; when a chain carries fewer than 10
+effective draws it is withheld and `mcse_note` says why (raise `--n-draws`). No
+band of paired differences is written: its width would be set by how the arms'
+random numbers are coupled, which the scenarios do not determine.
+
 A resumed fit reads the base run read-only and writes a _new_ run keyed on the
 extended length. It is a distinct deterministic artifact — not bit-identical to
 an uninterrupted fit of the same length (both are valid posterior samples).
