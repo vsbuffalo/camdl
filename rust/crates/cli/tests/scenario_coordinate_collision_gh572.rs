@@ -343,7 +343,7 @@ fn generated_draws_under_a_scenario_are_allowed_and_key_the_values_that_ran() {
         r#"
 time_unit = 'days
 compartments { S, D }
-parameters { mu : rate in [0.001, 5.0] }
+parameters { mu : rate in [0.001, 0.5] }
 transitions { death : S --> D @ mu * S }
 init { S = 1000  D = 0 }
 simulate { from = 0 'days  to = 20 'days }
