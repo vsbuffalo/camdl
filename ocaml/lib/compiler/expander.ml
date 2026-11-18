@@ -4125,11 +4125,11 @@ let check_index_arity ctx ~loc ?axes ~kind ~name ~declared ~provided () : bool =
 (** The index token the user WROTE, before env substitution. [None] for an
     index item that is not a plain identifier.
 
-    Diagnostics are de-duplicated on (file, line, code, message) with the hint
-    outside that key, so a hint built from the per-instantiation substitution
-    would vary across the 8 instantiations of `infection[a in age, p in patch,
-    r in risk]` and `sort_uniq` would keep an arbitrary one. What the user
-    wrote is instantiation-invariant. *)
+    The renderers merge only identical diagnostics, so a hint built from the
+    per-instantiation substitution would differ across the 8 instantiations of
+    `infection[a in age, p in patch, r in risk]` and the one mistake would be
+    reported 8 times. What the user wrote is instantiation-invariant, so the
+    8 copies are identical and shown once. *)
 let index_item_source_str item : string option =
   match item with
   | IPosn (EIdent (s, _)) | INamed (_, EIdent (s, _)) -> Some s
