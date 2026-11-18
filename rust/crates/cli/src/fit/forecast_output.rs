@@ -255,17 +255,29 @@ pub(crate) struct ForecastJob<'a> {
     pub particles: crate::fit::predict::PredictParticles,
 }
 
+/// One `--design` file as `forecast.json` records it: the stream it was
+/// given for and the SHA-256 of its bytes, never the path typed.
+#[derive(Debug, Clone, serde::Serialize)]
+struct DesignFile {
+    stream: String,
+    sha256: String,
+}
+
 /// Each `--design SOURCE=FILE`, read for every leaf whose source (or name) is
-/// SOURCE (D81): the leaf's design rows, by leaf name.
+/// SOURCE (D81): the leaf's design rows, by leaf name, and each file's
+/// content digest.
 fn prospective_design(
     model: &ir::Model,
     specs: &[String],
     time_opts: &crate::caltime_load::TimeOpts,
-) -> Result<BTreeMap<String, Vec<ObservedRow>>, String> {
+) -> Result<(BTreeMap<String, Vec<ObservedRow>>, Vec<DesignFile>), String> {
     let mut out = BTreeMap::new();
+    let mut files = Vec::with_capacity(specs.len());
     for spec in specs {
         let (name, path) = spec.split_once('=').ok_or_else(|| format!(
             "--design {spec:?}: expected SOURCE=FILE, a stream and its design file"))?;
+        let bytes = std::fs::read(path).map_err(|e| format!("--design {spec:?}: cannot read {path}: {e}"))?;
+        files.push(DesignFile { stream: name.to_string(), sha256: crate::hashing::sha256_hex(&bytes) });
         let leaves: Vec<&ir::observation::ObservationModel> = model.observations.iter()
             .filter(|o| o.source == name || o.name == name)
             .collect();
@@ -279,7 +291,7 @@ fn prospective_design(
             }
         }
     }
-    Ok(out)
+    Ok((out, files))
 }
 
 /// The options a forecast's directory is keyed by: `base`, with what the
@@ -362,7 +374,7 @@ pub(crate) fn run_forecast(
     // skipped it or, when `--stream` asked for it, failed it.
     let selection = job.selection;
     // D81: where a design-reading stream's target design values come from.
-    let design_files = prospective_design(model, &job.args.design, &time_opts)?;
+    let (design_files, design_digests) = prospective_design(model, &job.args.design, &time_opts)?;
     let design_of = |name: &str| match (job.args.realised_design, design_files.get(name)) {
         (true, _) => DesignInput::ExPost,
         (false, Some(rows)) => DesignInput::Prospective(rows),
@@ -512,7 +524,7 @@ pub(crate) fn run_forecast(
     let mut written = write_tables(&forecasts, model, job.schema, &out_dir, &draw_refs)?;
     written.push(write_manifest(&forecasts, &job, ManifestInputs {
         record: &record, reach_as_written: raw, skipped: &skipped, failures: &failures,
-        draw_refs: &draw_refs, out_dir: &out_dir, address_key: &address_key,
+        draw_refs: &draw_refs, design_files: &design_digests, out_dir: &out_dir, address_key: &address_key,
         options: &options,
     })?);
     let fc = &forecasts[0].fc;
@@ -727,6 +739,8 @@ struct ManifestInputs<'a> {
     skipped: &'a [SkippedStream],
     failures: &'a [DeterministicFailure],
     draw_refs: &'a [DrawRef],
+    /// The `--design` files, by content digest.
+    design_files: &'a [DesignFile],
     out_dir: &'a std::path::Path,
     /// The key of `out_dir` ([`crate::fit::predict::PredictOptions::address_key`]).
     address_key: &'a str,
@@ -737,7 +751,7 @@ struct ManifestInputs<'a> {
 /// `forecast.json`: what the forecast predicted and what conditioned it.
 fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) -> Result<PathBuf, String> {
     let ManifestInputs {
-        record, reach_as_written, skipped, failures, draw_refs, out_dir, address_key, options,
+        record, reach_as_written, skipped, failures, draw_refs, design_files, out_dir, address_key, options,
     } = m;
     let fc = &arms[0].fc;
     let point = |t: f64| serde_json::json!({
@@ -878,7 +892,7 @@ fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) ->
             "label": mode.label(),
             "streams": fc.plan.targets().iter().filter(|t| !t.design.is_empty())
                 .map(|t| t.stream.as_str()).collect::<std::collections::BTreeSet<_>>(),
-            "files": job.args.design,
+            "files": design_files,
         })),
     });
     // D86: the same `chain_selection` block `predictive.json` carries, absent

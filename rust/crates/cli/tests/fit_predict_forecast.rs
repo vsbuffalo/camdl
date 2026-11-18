@@ -900,6 +900,11 @@ fn a_design_reading_stream_needs_a_design_and_a_prospective_one_is_its_own_addre
     assert_eq!(manifests.len(), 3, "three addresses: no design, prospective, ex post");
     let prospective = manifests.iter().find(|m| m["design"]["mode"] == "prospective").expect("a prospective forecast");
     assert!(prospective["design"]["label"].as_str().unwrap().starts_with("a prospective forecast"));
+    // The design file is recorded by its content, not by the path typed.
+    use sha2::Digest;
+    let want = hex::encode(sha2::Sha256::digest(b"time\ttested\n28\t60\n35\t70\n"));
+    assert_eq!(prospective["design"]["files"], serde_json::json!([{ "stream": "survey", "sha256": want }]),
+        "{}", prospective["design"]);
     let tested: Vec<f64> = prospective["targets"].as_array().unwrap().iter()
         .filter(|t| t["stream"] == "survey").map(|t| t["design"]["tested"].as_f64().unwrap()).collect();
     assert_eq!(tested, vec![60.0, 70.0]);
