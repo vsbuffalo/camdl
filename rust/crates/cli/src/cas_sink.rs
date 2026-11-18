@@ -1102,6 +1102,42 @@ pub(crate) fn event_log_child_file(leaf: &std::path::Path) -> std::path::PathBuf
     leaf.join(EVENT_LOG_CHILD).join(EVENT_LOG_FILE)
 }
 
+/// The leaf's event log, when its child is complete: the record present and
+/// the file the size and SHA-256 the record names. The one check every reader
+/// makes (`camdl cat --stream event_log.tsv`, `simulate`'s `lineage realize`
+/// hint), so no reader hands on a log the writer did not finish. The error
+/// says what is wrong and how to write the log.
+pub(crate) fn complete_event_log(leaf: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let file = event_log_child_file(leaf);
+    let record_path = leaf.join(EVENT_LOG_CHILD).join(EVENT_LOG_RECORD);
+    let remedy = "re-run the same `camdl simulate` with `--event-log` to write it, or with \
+                  `--force` to recompute the leaf and its children";
+    let text = match std::fs::read(&record_path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(if file.exists() {
+                format!("the event log {} has no record ({EVENT_LOG_RECORD}), so its write did not \
+                         finish; {remedy}", file.display())
+            } else {
+                format!("the run {} has no event log; {remedy}", leaf.display())
+            });
+        }
+        Err(e) => return Err(format!("cannot read {}: {e}", record_path.display())),
+    };
+    let rec: serde_json::Value = serde_json::from_slice(&text)
+        .map_err(|e| format!("the event-log record {} does not parse ({e}); {remedy}", record_path.display()))?;
+    let bytes = std::fs::read(&file)
+        .map_err(|e| format!("cannot read the event log {}: {e}; {remedy}", file.display()))?;
+    let digest = runid::ContentHash::digest_bytes(&bytes).to_hex().to_string();
+    if rec["bytes"].as_u64() != Some(bytes.len() as u64) || rec["digest"].as_str() != Some(digest.as_str()) {
+        return Err(format!(
+            "the event log {} is {} bytes with SHA-256 {digest}, and its record names {} bytes \
+             with {}; {remedy}",
+            file.display(), bytes.len(), rec["bytes"], rec["digest"]));
+    }
+    Ok(file)
+}
+
 /// The id a leaf's record declares for its event-log child.
 fn event_log_child_id(run_id: &runid::ContentHash) -> runid::ContentHash {
     runid::ContentHash::digest_bytes(format!("{}:{}", run_id.to_hex(), EVENT_LOG_CHILD).as_bytes())

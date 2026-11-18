@@ -134,8 +134,9 @@ fn build_writer(
 ///
 /// `exact` is true for Gillespie (each event is a single transition) and false
 /// for batched backends (sub-dt batching introduces a bias that
-/// `lineage realize` quantifies).
-pub fn finish_event_log(out: &crate::out::Out, a: &SimulateArgs, event_log: &EventLog, exact: bool, leaf_event_log: Option<&str>) {
+/// `lineage realize` quantifies). `leaf_event_log` is the complete child's
+/// file ([`crate::cas_sink::complete_event_log`]).
+pub fn finish_event_log(out: &crate::out::Out, a: &SimulateArgs, event_log: &EventLog, exact: bool, leaf_event_log: &str) {
     // A real `--event-log PATH` (anything but the bare `auto` sentinel) is
     // mirrored to disk in the format implied by --tsv / --format / extension.
     let mirror = a.event_log.clone().filter(|p| p.as_os_str() != "auto");
@@ -167,27 +168,13 @@ pub fn finish_event_log(out: &crate::out::Out, a: &SimulateArgs, event_log: &Eve
             path.display(), fmt_ext,
         ));
     } else {
-        match leaf_event_log {
-            Some(path) => {
-                out.say(format_args!(
-                    "event log: {} events ({} lineage) stored as the run's event-log child; {}",
-                    event_log.events.len(), n_lineage, exactness,
-                ));
-                out.say(format_args!(
-                    "  next: camdl lineage realize {} --identity-seed <N> -o line_list.tsv", path
-                ));
-            }
-            // No child file to point at: the run was not stored (a failed
-            // child write ends the command before this), so never print a
-            // path that is not there.
-            None => {
-                out.say(format_args!(
-                    "event log: {} events ({} lineage) recorded but not stored; {}",
-                    event_log.events.len(), n_lineage, exactness,
-                ));
-                out.say("  to capture it: re-run with `--event-log <PATH>` (writes the log to PATH)");
-            }
-        }
+        out.say(format_args!(
+            "event log: {} events ({} lineage) stored as the run's event-log child; {}",
+            event_log.events.len(), n_lineage, exactness,
+        ));
+        out.say(format_args!(
+            "  next: camdl lineage realize {} --identity-seed <N> -o line_list.tsv", leaf_event_log
+        ));
     }
 }
 

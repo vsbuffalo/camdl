@@ -150,6 +150,159 @@ fn the_event_log_is_a_child_and_the_leaf_manifest_never_changes() {
     assert!(child.is_file(), "the child survives a later plain run");
 }
 
+/// A compiled lineage model and a store in a fresh directory, with the
+/// `simulate` arguments every case below shares. `None` when camdlc is
+/// unavailable (the test then skips, as the rest of this file does).
+struct Lineage {
+    camdl: PathBuf,
+    tmp: PathBuf,
+    ir: String,
+    store: String,
+}
+
+impl Lineage {
+    fn new(tag: &str) -> Option<Lineage> {
+        let camdl = camdl_bin();
+        let tmp = tempdir(tag);
+        let model = tmp.join("sir.camdl");
+        std::fs::write(&model, SIR_LINEAGE).unwrap();
+        let ir = tmp.join("sir.ir.json");
+        let compiled = run(&camdl, &["dev", "compile", model.to_str().unwrap(), "-o", ir.to_str().unwrap()]);
+        if !compiled.status.success() {
+            eprintln!("skipping: camdl compile failed (camdlc likely unavailable)");
+            return None;
+        }
+        let store = tmp.join("store").to_string_lossy().into_owned();
+        Some(Lineage { camdl, tmp, ir: ir.to_string_lossy().into_owned(), store })
+    }
+
+    /// `camdl simulate` on the model into the store, with `extra`.
+    fn simulate(&self, extra: &[&str]) -> std::process::Output {
+        let mut args: Vec<&str> = vec![
+            "simulate", &self.ir, "--backend", "gillespie", "--seed", "7",
+            "--param", "beta=0.6", "--param", "gamma=0.2", "--param", "N0=500",
+            "--output-dir", &self.store,
+        ];
+        args.extend(extra);
+        run(&self.camdl, &args)
+    }
+
+    /// `camdl cat <leaf> --stream event_log.tsv`.
+    fn cat_event_log(&self, leaf: &Path) -> std::process::Output {
+        run(&self.camdl, &["cat", leaf.to_str().unwrap(), "--root", &self.store, "--stream", "event_log.tsv"])
+    }
+
+    /// The store's one sim leaf.
+    fn leaf(&self) -> PathBuf {
+        let leaves = sim_leaves(Path::new(&self.store));
+        assert_eq!(leaves.len(), 1, "expected one sim leaf, got {leaves:?}");
+        leaves[0].clone()
+    }
+}
+
+fn ok(o: &std::process::Output, what: &str) {
+    assert!(o.status.success(), "{what} failed: {}", String::from_utf8_lossy(&o.stderr));
+}
+
+fn record(leaf: &Path) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(leaf.join("run.json")).unwrap()).unwrap()
+}
+
+/// The id a leaf declares for its event-log child is SHA-256 of
+/// `"{run_id}:event_log"`, hex: pinned, because a reader that finds the child
+/// through `children` and the writer that names it must agree.
+#[test]
+fn the_event_log_child_id_is_pinned() {
+    use sha2::{Digest, Sha256};
+    let Some(fx) = Lineage::new("evid") else { return };
+    ok(&fx.simulate(&["--event-log"]), "simulate --event-log");
+    let rec = record(&fx.leaf());
+    let run_id = rec["run_id"].as_str().unwrap();
+    let want: String = Sha256::digest(format!("{run_id}:event_log").as_bytes())
+        .iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(rec["children"]["event_log"], serde_json::json!([want]));
+}
+
+/// `--stdout` takes the run out of the store, so there is no leaf for the
+/// event log to be a child of, and the log would be dropped with exit 0. The
+/// combination is refused.
+#[test]
+fn stdout_and_event_log_are_refused_together() {
+    let Some(fx) = Lineage::new("evstdout") else { return };
+    let ev = fx.tmp.join("ev.tsv");
+    for extra in [vec!["--stdout", "--event-log"], vec!["--stdout", "--event-log", ev.to_str().unwrap()]] {
+        let o = fx.simulate(&extra);
+        assert!(!o.status.success(), "{extra:?} must be refused, not drop the log");
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(err.contains("--stdout") && err.contains("--event-log"), "the refusal names both flags: {err}");
+    }
+    assert!(!ev.exists());
+}
+
+/// `camdl cat --stream event_log.tsv` reads the child only when it is
+/// complete: its record present and its file the size the record names. A
+/// child without its record, or whose file differs from it, is a clear error
+/// that names the remedy, never a partial log on stdout.
+#[test]
+fn cat_reads_only_a_complete_event_log_child() {
+    let Some(fx) = Lineage::new("evcat") else { return };
+    ok(&fx.simulate(&["--event-log"]), "simulate --event-log");
+    let leaf = fx.leaf();
+    let file = leaf.join("event_log").join("event_log.tsv");
+    let rec = leaf.join("event_log").join("event_log.json");
+    let full = std::fs::read(&file).unwrap();
+    let o = fx.cat_event_log(&leaf);
+    ok(&o, "cat --stream event_log.tsv");
+    assert_eq!(o.stdout, full, "cat prints the child's bytes");
+
+    let refused = |what: &str| {
+        let o = fx.cat_event_log(&leaf);
+        assert!(!o.status.success(), "{what}: cat must refuse");
+        assert!(o.stdout.is_empty(), "{what}: nothing on stdout");
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(err.contains("--event-log") && err.contains("--force"), "{what}: names the remedy: {err}");
+    };
+    std::fs::write(&file, &full[..full.len() / 2]).unwrap();
+    refused("a file shorter than its record");
+    std::fs::write(&file, &full).unwrap();
+    std::fs::remove_file(&rec).unwrap();
+    refused("a file without its record");
+}
+
+/// The crash state — the child declared in `run.json` but nothing written —
+/// is readable as "not there": `cat` refuses cleanly, a plain rerun reads the
+/// leaf as a hit (its record, the declaration included, is kept), and an
+/// `--event-log` rerun writes the child.
+#[test]
+fn a_declared_but_empty_event_log_child_recovers() {
+    use sha2::{Digest, Sha256};
+    let Some(fx) = Lineage::new("evcrash") else { return };
+    ok(&fx.simulate(&[]), "plain simulate");
+    let leaf = fx.leaf();
+    let mut rec = record(&leaf);
+    let run_id = rec["run_id"].as_str().unwrap().to_string();
+    let id: String = Sha256::digest(format!("{run_id}:event_log").as_bytes())
+        .iter().map(|b| format!("{b:02x}")).collect();
+    rec["children"] = serde_json::json!({ "event_log": [id] });
+    std::fs::write(leaf.join("run.json"), serde_json::to_vec_pretty(&rec).unwrap()).unwrap();
+    let declared = std::fs::read(leaf.join("run.json")).unwrap();
+
+    let o = fx.cat_event_log(&leaf);
+    assert!(!o.status.success() && o.stdout.is_empty(), "cat refuses a declared, empty child");
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("--event-log"), "the refusal names the remedy: {err}");
+
+    ok(&fx.simulate(&[]), "plain rerun");
+    assert_eq!(fx.leaf(), leaf);
+    assert_eq!(std::fs::read(leaf.join("run.json")).unwrap(), declared,
+        "a plain rerun is a hit: the record, its declaration included, is kept as it was");
+
+    ok(&fx.simulate(&["--event-log"]), "simulate --event-log");
+    let o = fx.cat_event_log(&leaf);
+    ok(&o, "cat after the --event-log rerun");
+    assert!(o.stdout.starts_with(b"# camdl-event-log"), "the child is written");
+}
+
 /// Committed sim leaves (dirs holding a run.json) under `<store>/sims`.
 fn sim_leaves(store: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
