@@ -222,3 +222,30 @@ fn resuming_to_a_target_the_base_already_reached_is_refused() {
         }
     }
 }
+
+/// A resume continues a completed result, never an attempt that did not
+/// finish. A leaf whose run died before its commit (status `running`, its
+/// owner gone) can already hold chain checkpoints — each chain writes its
+/// state when it ends, before the leaf commits — and resuming from it used
+/// to commit an extension whose lineage names a run that never completed.
+/// It is refused before any leaf is claimed.
+#[test]
+fn resuming_from_a_run_that_never_completed_is_refused() {
+    for (tag, base, longer) in [("pmmh", pmmh(300), pmmh(500)), ("pgas", pgas(200), pgas(300))] {
+        let w = work(&format!("incomplete_{tag}"), &[("base.toml", base), ("longer.toml", longer)]);
+        let fit = ["--seed", "1", "--progress", "none"];
+        ok(camdl(&w.0, &[&["fit", "run", "base.toml"][..], &fit].concat()), "the base fit");
+        let (_, base_leaf) = leaves(&w.0).into_iter().next().unwrap();
+        // The run as a SIGKILL leaves it: checkpoints written, the record
+        // still `running`, no live owner.
+        let rec = std::fs::read_to_string(base_leaf.join("run.json")).unwrap();
+        let dead = rec.replacen("\"status\": \"completed\"", "\"status\": \"running\"", 1);
+        assert_ne!(rec, dead, "the record names its status");
+        std::fs::write(base_leaf.join("run.json"), dead).unwrap();
+        let out = camdl(&w.0, &[&["fit", "run", "longer.toml", "--resume", &base_leaf.to_string_lossy()][..], &fit].concat());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{tag}: a resume from a run that never completed ran:\n{stderr}");
+        assert!(stderr.contains("is not a completed run"), "{tag}: {stderr}");
+        assert_eq!(leaves(&w.0).len(), 1, "{tag}: a leaf was written for the refused resume");
+    }
+}
