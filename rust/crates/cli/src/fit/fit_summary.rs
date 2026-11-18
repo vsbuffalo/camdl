@@ -1082,7 +1082,7 @@ fn load_method_facts(
     }
     let stored = Some(crate::fit::report::Stored {
         leaf: crate::fit::report::display_path(dir),
-        total_seconds: crate::fit::execution::Execution::read(dir).ok().flatten()
+        total_seconds: crate::fit::execution::Execution::read_or_warn(dir)
             .and_then(|e| e.wall_time_seconds),
     });
     Ok(MethodFacts {
