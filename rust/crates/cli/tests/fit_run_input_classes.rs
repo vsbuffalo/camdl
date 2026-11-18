@@ -966,13 +966,25 @@ fn the_fit_file_is_read_once() {
     {
         let (fifo, first, edited) = (fifo.clone(), first.clone(), edited.clone());
         // Each open of the pipe for writing waits for a reader; the first
-        // reader gets the config, every later one the edit. The thread is left
-        // waiting on an open no reader makes.
+        // reader gets the config, every later one the edit. After each write
+        // the thread waits for that reader to close the pipe before it opens
+        // it again: a reader still reading when the next open succeeds would
+        // read both texts as one file. A non-blocking open for writing fails
+        // with ENXIO exactly when no reader has the pipe open. The thread is
+        // left waiting on an open no reader makes.
         std::thread::spawn(move || {
+            use std::os::unix::fs::OpenOptionsExt;
             let mut text = &first;
             while let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(&fifo) {
                 let _ = f.write_all(text.as_bytes());
+                drop(f);
                 text = &edited;
+                while let Ok(probe) =
+                    std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(&fifo)
+                {
+                    drop(probe);
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
             }
         });
     }
