@@ -6,10 +6,16 @@
 //! ```text
 //! SimulateArgs ──(precedence, in run_simulate)──► ResolvedSimConfig
 //!                                                   │             │
-//!                         cell_identity (per cell)  │             │  engine_settings()
-//!                                                   ▼             ▼
-//!                                   TrajectoryInput levels    EngineSettings
-//!                                   (run_id)                  (SimulateJob, evaluator settings)
+//!                                                   │             │  engine_settings()
+//!                                                   │             ▼
+//!                                                   │         EngineSettings ──► SimulateJob ──► SimRun (per cell)
+//!                                                   │                                              │
+//!                                                   │                              ResolvedCell::resolve
+//!                                                   │                                              ▼
+//!                         CasSink::cell_identity ◄──┴────────────────────────────────────── ResolvedCell
+//!                                   │                                                              │
+//!                                   ▼                                                              ▼
+//!                       TrajectoryInput levels (run_id)                       util::simulate_compiled (engine)
 //! ```
 //!
 //! **How a field reaches the identity.** A simulate invocation runs many cells,
@@ -25,20 +31,34 @@
 //!   three per-cell fields (`t_start`, `t_end`, `init_state`) come from the
 //!   cell's [`CellWindow`].
 //! - [`ResolvedSimConfig::arms`] are the `scenario` level of each arm.
-//! - The `params` and `seed` levels are per cell, resolved by the resolver call
-//!   and seed arithmetic the engine itself makes (`CasSink::cell_resolve`).
+//! - The per-cell parts — the window, the parameter values, the table digests,
+//!   the seed and the restored origin state — come from the cell's
+//!   [`ResolvedCell`], the value the engine runs.
 //!
 //! The proposal sketches `ResolvedSimConfig` deriving `RunInput` with each level
 //! nested inside it. It does not: a simulate invocation has many cells, and its
 //! run-wide configuration is not any one cell's identity, so what is hashed is
-//! each cell's levels. Step 1 enforces include-by-default for the run-wide part
-//! only, through the exhaustive copy of [`RunConfig`] into each cell's
-//! `SimConfig`. The per-cell parts — the parameter values and table digests,
-//! the seed, the horizon and the restored origin state — are still assembled
-//! field by field in `CasSink::cell_resolve`. A per-cell resolved value that
-//! carries them, from which both the cell's identity and its engine input
-//! derive, is planned for phase 3 step 3, with the removal of the process-wide
-//! evaluator settings.
+//! each cell's levels.
+//!
+//! **The per-cell value.** [`ResolvedCell::resolve`] resolves a cell's `SimRun`
+//! through the engine's own resolution (`util::resolve_loaded_run`): the model
+//! the cell executes, its parameter provenance, its table digests, seed and
+//! origin state, and its backend, step, sampler and evaluator settings. The
+//! engine (`util::simulate_compiled`, `ResolvedCell::compile`) and the
+//! identity (`CasSink::cell_identity`) both destructure it exhaustively; the
+//! identity's destructure ignores no field, so a field added to it does not
+//! compile until the identity uses it. The window and parameter values are read
+//! off the resolved model, so an input that moves the horizon or a parameter
+//! reaches the identity because it reaches the engine. The backend, step and
+//! evaluator settings are keyed once, by [`RunConfig`]; a cell carrying others
+//! is refused rather than keyed. The cell is resolved where each consumer needs
+//! it — over the base model for the identity, over a fresh load for the engine
+//! — by the same function, rather than held for every cell of a large grid.
+//!
+//! One limit remains: a `SimRun` field that changes the resolved model in some
+//! way other than its parameter values, window or the model level reaches the
+//! engine without reaching the identity. `ResolvedCell::resolve` names every
+//! `SimRun` field, so such a field does not compile until it is routed there.
 //!
 //! **What is not here.** The thread count, the store root and `--force` are
 //! [`Execution`]: how the result is computed, never what. `--label`, the command
@@ -235,6 +255,114 @@ impl ResolvedSimConfig {
             allow_forcing_extrapolation: *allow_forcing_extrapolation,
         }
     }
+}
+
+/// One cell, resolved: the value both the cell's identity
+/// ([`ResolvedSimConfig::cell_identity`]) and its engine run
+/// (`util::simulate_compiled`) are built from.
+///
+/// Built by [`ResolvedCell::resolve`] from the cell's `SimRun`, through the
+/// engine's own resolution (`util::resolve_loaded_run`). Both consumers
+/// destructure it exhaustively, so a field added here does not compile until
+/// the identity uses it — the identity's destructure binds every field and
+/// ignores none. A `SimRun` field reaches the engine only through this value:
+/// either as one of its fields or through the resolved `run.model`, whose
+/// parameter values and window the identity reads.
+pub(crate) struct ResolvedCell {
+    /// The parameter resolution of the cell; `run.model` is the model the cell
+    /// executes — the base model with its horizon, start, scenario, parameter
+    /// values and required snapshots applied — and `run.params` / `run.context`
+    /// say where each value came from.
+    pub run: crate::params_resolver::ResolvedParameters,
+    /// Content digests of the cell's `--table` files, sorted by table name
+    /// (the values themselves are in `run.model`).
+    pub tables: Vec<runid::inputs::DataDigest>,
+    /// The process seed the trajectory RNG starts from.
+    pub seed: u64,
+    /// The forecast-origin state the cell restores (`--init-state`).
+    pub init_state: Option<crate::util::CellInitState>,
+    pub backend: ForwardBackend,
+    pub dt: f64,
+    pub binomial: sim::rng::BinomialAlgorithm,
+    /// The evaluator settings the compiled model carries ([`ResolvedCell::compile`]).
+    pub eval: sim::EvalSettings,
+}
+
+impl ResolvedCell {
+    /// Resolve the cell `run` over `base`, the model `util::load_run_model`
+    /// returns for it.
+    pub fn resolve(base: ir::Model, run: &crate::util::SimRun) -> Result<Self, String> {
+        let crate::util::SimRun {
+            // These shape `run.model`, through `util::resolve_loaded_run`
+            // below and the `util::load_run_model` that produced `base`. The
+            // identity reads the model level from the same load, and the
+            // parameter values and window from the resolved model.
+            ir_path: _,
+            obs_anchors: _,
+            integrator: _,
+            params_files: _,
+            overrides: _,
+            point_overrides: _,
+            fit_fixed: _,
+            set_vec_entries: _,
+            scenario_name: _,
+            scenario_inline_set: _,
+            scenario_inline_scale: _,
+            adhoc_enable: _,
+            adhoc_disable: _,
+            fit_base: _,
+            t_end_override: _,
+            required_output_times: _,
+            // Display only: the scenario label and the source a notice names.
+            scenario_inline_name: _,
+            overrides_label: _,
+            // Fields of the resolved cell.
+            table_files,
+            init_state,
+            backend,
+            dt,
+            seed,
+            binomial,
+            eval,
+        } = run;
+        Ok(ResolvedCell {
+            run: crate::util::resolve_loaded_run(base, run)?,
+            tables: table_digests(table_files)?,
+            seed: *seed,
+            init_state: init_state.clone(),
+            backend: *backend,
+            dt: *dt,
+            binomial: *binomial,
+            eval: *eval,
+        })
+    }
+
+    /// The model the cell executes, compiled under its evaluator settings.
+    pub fn compile(&self) -> Result<sim::CompiledModel, String> {
+        sim::CompiledModel::new(self.run.model.clone())
+            .map_err(|e| format!("model compile error: {:?}", e))
+            .map(|c| c.with_eval_settings(self.eval))
+    }
+}
+
+/// Content digests of the `--table` files, sorted by table name, for the
+/// `params` level (`ResolvedParams.tables`). Each file's bytes are hashed, never
+/// its path, so a regenerated or edited table re-keys the run. No tables, an
+/// empty list: a plain `simulate` is unaffected.
+fn table_digests(
+    table_files: &std::collections::HashMap<String, String>,
+) -> Result<Vec<runid::inputs::DataDigest>, String> {
+    let mut names: Vec<&String> = table_files.keys().collect();
+    names.sort();
+    names
+        .iter()
+        .map(|name| {
+            let path = &table_files[*name];
+            let bytes = std::fs::read(path)
+                .map_err(|e| format!("cannot read --table file '{}' ({}): {}", name, path, e))?;
+            Ok(runid::inputs::DataDigest(runid::ContentHash::digest_bytes(&bytes)))
+        })
+        .collect()
 }
 
 /// How the result is computed, never what: not a field of

@@ -301,11 +301,12 @@ fn run_one_cell_with_progress(spec: CellSpec) -> Result<CellResult, String> {
     // would stomp each other on stderr (garbled bar; an orphaned compile-
     // spinner line left on screen, the reported Ctrl-C residue). Serializing
     // them is the fix: the compile spinner finishes and clears here, then the
-    // simulate bar starts. resolve_run_model is the same call run_one_cell
+    // simulate bar starts. This is the resolution and compile run_one_cell
     // makes via util::run_simulation, so this does not double-compile.
-    let (compiled, model) = util::resolve_run_model(&spec.sim_run)?;
+    let cell = crate::sim_config::ResolvedCell::resolve(util::load_run_model(&spec.sim_run)?, &spec.sim_run)?;
+    let compiled = cell.compile()?;
 
-    let backend = match spec.sim_run.backend {
+    let backend = match cell.backend {
         ForwardBackend::Gillespie => "gillespie",
         ForwardBackend::ChainBinomial => "chain_binomial",
         ForwardBackend::Ode => "ode",
@@ -338,8 +339,8 @@ fn run_one_cell_with_progress(spec: CellSpec) -> Result<CellResult, String> {
         crate::out::live().progress(&format!("simulate \u{b7} {backend}: running \u{2026}"));
     }
 
-    let result = util::simulate_compiled(&compiled, &model, &spec.sim_run, Some(&pb))
-        .map(|traj| CellResult { spec, traj, model, event_log: None });
+    let result = util::simulate_compiled(&compiled, &cell, Some(&pb))
+        .map(|traj| CellResult { spec, traj, model: cell.run.model, event_log: None });
 
     pb.finish_and_clear();
     result

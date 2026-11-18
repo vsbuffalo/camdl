@@ -1019,8 +1019,8 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
     // Anchored forms (`last_obs + 8 weeks`) fold over the fit's bound
     // observation data; absolute forms (number, date) resolve data-free. The
     // resolved value overrides every cell's `simulation.t_end` (applied in
-    // `resolve_run_model` after the scenario horizon) and is keyed into run
-    // identity via `ResolvedEntry.t_end`.
+    // `util::resolve_loaded_run` after the scenario horizon) and is keyed into
+    // run identity from the model each cell runs (`SimConfig::t_end`).
     //
     // gh#616: the MODEL may also be anchored (`simulate { to = last_obs + 4
     // 'weeks }`, a scenario's, or a forcing's `breakpoints`). Those resolve from
@@ -2903,12 +2903,12 @@ impl SimSink {
     /// Read a hit back from the store: the leaf `stored_hit` found, its
     /// `traj.tsv`, and the observation subtree the exact rule required.
     fn read_stored(&self, spec: &engine::CellSpec) -> Result<StoredCell, String> {
-        let (rt, _, _) = self.cas.cell_resolve(spec)?;
+        let (cell, rt) = self.cas.resolved_cell(spec)?;
         let (dir, _) = self.cas.stored_leaf(&rt);
         let traj_path = dir.join("traj.tsv");
         let traj_tsv = std::fs::read_to_string(&traj_path)
             .map_err(|e| format!("reading stored {}: {}", traj_path.display(), e))?;
-        let model = util::resolve_run_ir(&spec.sim_run)?;
+        let model = cell.run.model;
         let obs = if self.stream.obs_path.is_some() || self.stream.obs_dir.is_some() {
             let obs_dir = crate::cas_sink::obs_subtree_dir(
                 &dir, &model.observations, self.stream.emit_every.as_ref(), spec.obs_seed,
@@ -3092,10 +3092,6 @@ fn resolve_sim_config(
             disable: run.adhoc_disable.clone(),
             params: HashMap::new(),
             scale: Vec::new(),
-            // The implicit baseline is the model as written — its horizon —
-            // unless `--to` overrides it (gh#626): the override is what the
-            // cell RUNS, so it is what the cell is KEYED on.
-            t_end: run.t_end_override,
         }]
     } else {
         scenario_names.iter().map(|name| {
@@ -3105,19 +3101,10 @@ fn resolve_sim_config(
                 return Err(format!("scenario '{}' not found. Available: {}", name,
                     if available.is_empty() { "(none)".into() } else { available.join(", ") }));
             }
-            // Composed, via the single horizon authority — NOT `preset.t_end`,
-            // which misses a horizon inherited through `compose = [...]` and
-            // would then key the cell on a window it does not run (gh#561).
-            // `--to` (gh#626) wins when present — the up-front conflict rule
-            // has already refused any scenario horizon it would discard.
-            let t_end = match run.t_end_override {
-                Some(v) => Some(v),
-                None => crate::params_resolver::composed_preset_t_end(&base_model, name)
-                    .map_err(|e| e.to_string())?,
-            };
             // The effective (compose-walked, scale-bearing) delta, from the
-            // authority the preset route applies (gh#573).
-            crate::cas_sink::ResolvedEntry::from_preset(&base_model, name, t_end)
+            // authority the preset route applies (gh#573). The arm's horizon
+            // is keyed per cell, from the model the cell runs.
+            crate::cas_sink::ResolvedEntry::from_preset(&base_model, name)
         }).collect::<Result<Vec<_>, String>>()?
     };
     // A replayed fit's intervention selection is part of what each arm runs
