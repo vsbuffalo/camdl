@@ -9745,6 +9745,30 @@ let test_branch_weights_other_constant_spellings_ok () =
   List.iter (fun w -> ignore (compile_expect_ok (branch_weight_src w)))
     [ "R : 0.5 'ratio, Q : 0.5 'ratio"; "R : exp(0) - 0.5, Q : max(0.2, 0.5)" ]
 
+(** A constant weight outside [0, 1] is refused even when the weights sum
+    to 1: `{ R : 1.5, Q : -0.5 }` gave Q a negative rate. *)
+let test_branch_weights_out_of_range_rejected () =
+  compile_expect_error_code ~code:"E423" ~contains:"outside [0, 1]"
+    (branch_weight_src "R : 1.5, Q : -0.5")
+
+(** The range check applies to each constant weight, also beside a
+    parameter weight (whose sum cannot be checked). *)
+let test_branch_weights_out_of_range_beside_param_rejected () =
+  compile_expect_error_code ~code:"E423" ~contains:"outside [0, 1]"
+    (branch_weight_src "R : p, Q : 1.5")
+
+(** A non-finite constant weight is refused: `0 / 0` is NaN, and a NaN sum
+    compares false with any tolerance. *)
+let test_branch_weights_non_finite_rejected () =
+  compile_expect_error_code ~code:"E423" ~contains:"not a finite number"
+    (branch_weight_src "R : 0 / 0, Q : 1");
+  compile_expect_error_code ~code:"E423" ~contains:"not a finite number"
+    (branch_weight_src "R : p, Q : 1 / 0")
+
+(** The boundary values 0 and 1 are probabilities. *)
+let test_branch_weights_boundary_ok () =
+  ignore (compile_expect_ok (branch_weight_src "R : 1, Q : 0"))
+
 (** Parameterised weights cannot be checked at compile time and are
     accepted; the outflow is the rate times their sum. *)
 let test_branch_weights_parameterised_ok () =
@@ -17969,6 +17993,10 @@ let () =
       Alcotest.test_case "gh#1205: parameterised weights accepted"      `Quick test_branch_weights_parameterised_ok;
       Alcotest.test_case "gh#1205: unit/function/let constants checked" `Quick test_branch_weights_other_constant_spellings_rejected;
       Alcotest.test_case "gh#1205: unit/function constants summing to 1" `Quick test_branch_weights_other_constant_spellings_ok;
+      Alcotest.test_case "gh#1205: constant weight outside [0,1]"       `Quick test_branch_weights_out_of_range_rejected;
+      Alcotest.test_case "gh#1205: out of range beside a parameter"     `Quick test_branch_weights_out_of_range_beside_param_rejected;
+      Alcotest.test_case "gh#1205: non-finite constant weight"          `Quick test_branch_weights_non_finite_rejected;
+      Alcotest.test_case "gh#1205: weights 1 and 0 accepted"            `Quick test_branch_weights_boundary_ok;
     ];
     "multi_source_transitions", [
       Alcotest.test_case "parser accepts `S + I --> I + I`"              `Quick test_multi_source_parses;
