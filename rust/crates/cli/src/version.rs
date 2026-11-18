@@ -29,7 +29,11 @@ pub const GIT_HASH: &str = env!("CAMDL_GIT_HASH");
 /// uncommitted changes), `Cargo.lock`, the binary's resolved features, the
 /// profile, `rustc -vV`, `RUSTFLAGS` and the target
 /// (`engine_fingerprint.rs`). It is what a run's identity records as the
-/// engine, and what `run.json`'s `engine_version` holds.
+/// engine, and what `run.json`'s `engine_version` holds, except that a
+/// `simulate` run made with an engine switch set records and keys
+/// `ENGINE_ID` followed by the switches (`+<len>:<NAME>`, and
+/// `=<len>:<VALUE>` for an experimental input;
+/// `env::Environment::engine_identity`).
 pub const ENGINE_ID: &str = env!("CAMDL_ENGINE_ID");
 
 /// Whether this binary may serve a stored result in place of computing it.

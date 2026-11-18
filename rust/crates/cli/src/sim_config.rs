@@ -29,9 +29,16 @@
 //!   and seed arithmetic the engine itself makes (`CasSink::cell_resolve`).
 //!
 //! The proposal sketches `ResolvedSimConfig` deriving `RunInput` with each level
-//! nested inside it. That would hash new bytes (a nested type tag per level)
-//! and re-key every stored leaf; this keeps the hashed types and their bytes
-//! exactly, and gets include-by-default from the exhaustive destructure instead.
+//! nested inside it. It does not: a simulate invocation has many cells, and its
+//! run-wide configuration is not any one cell's identity, so what is hashed is
+//! each cell's levels. Step 1 enforces include-by-default for the run-wide part
+//! only, through the exhaustive copy of [`RunConfig`] into each cell's
+//! `SimConfig`. The per-cell parts — the parameter values and table digests,
+//! the seed, the horizon and the restored origin state — are still assembled
+//! field by field in `CasSink::cell_resolve`. A per-cell resolved value that
+//! carries them, from which both the cell's identity and its engine input
+//! derive, is planned for phase 3 step 3, with the removal of the process-wide
+//! evaluator settings.
 //!
 //! **What is not here.** The thread count, the store root and `--force` are
 //! [`Execution`]: how the result is computed, never what. `--label`, the command

@@ -636,14 +636,21 @@ and start from a fresh `origin/main` once that work settles.
 - A computation's result is separated from its executions; byte reproducibility
   is promised only where tested, for uninterrupted and resumed fits separately.
 - Execution and identity derive from one resolved configuration per command,
-  whose identity is include-by-default through `RunInput` (levels as nested
-  typed structs; exclusions explicitly marked non-semantic; execution parameters
-  in a separate value), and one conversion to engine settings. No generated
-  parallel configuration types; no `Identity<T>` or `ContentFile<T>` in this
-  proposal.
-- A small derive enforces classification and emits an inventory; tests are
-  ordinary Rust; the derive is kept only if the `simulate` conversion shows it
-  pays.
+  with execution parameters in a separate value and one conversion to engine
+  settings. For `simulate`, step 1 enforces this for the run-wide configuration:
+  `RunConfig` is copied exhaustively into each cell's `SimConfig` (a field added
+  to either does not compile until it is carried across), and the engine's
+  backend, step and evaluator settings come from the same value. It does not yet
+  cover the per-cell inputs — parameter values and table digests, seed, horizon,
+  restored origin state — which `CasSink::cell_resolve` still assembles field by
+  field; a per-cell resolved value carrying them is planned for step 3, with the
+  removal of the process-wide settings. No generated parallel configuration
+  types; no `Identity<T>` or `ContentFile<T>` in this proposal.
+- Classification is a table per command, keyed by (command, input), checked
+  against clap's `CommandFactory` both ways, with a class column in the
+  environment table; tests are ordinary Rust. The derive tried in step 1 was
+  dropped: a shared flattened group needs a class per command, which a derive on
+  the group cannot express.
 - Six classes, verified differently: `keyed`, `execution` and `expands` by
   differential tests; `provenance` and `presentation` structurally; `removed` by
   its message.
