@@ -20,12 +20,9 @@
     writes [min(a, b)]; a sum is a parenthesised chain of [+]; a number
     that is not an integer is printed with [%g], six significant digits,
     so [0.123456789] prints as [0.123457]; a unit literal prints as its
-    value in the model's time unit, without its unit. And an
-    {!Ir.PopSum} is printed as [S + I + R] without parentheses although
-    the printer treats it as an atom, so the rate
-    [beta * S * I / (S + I + R)] is shown by [camdlc inspect --transitions]
-    as [beta × S × I / S + I + R], which reads as a different
-    expression. *)
+    value in the model's time unit, without its unit. An {!Ir.PopSum} of
+    more than one compartment binds as a sum, so the rate
+    [beta * S * I / (S + I + R)] keeps its parentheses. *)
 
 (** Which names {!pp} prints: [Ir] prints every name as the compiled model
     holds it ([S_child]); [Dsl] prints a compartment name as the model's
@@ -50,6 +47,7 @@ let prec_binop = function
   | Ir.Eq | Ir.Neq | Ir.Lt | Ir.Gt | Ir.Le | Ir.Ge -> 4
 
 let prec_expr : Ir.expr -> int = function
+  | Ir.PopSum (_ :: _ :: _) -> prec_binop Ir.Add   (* printed as a chain of [+] *)
   | Ir.Const _ | Ir.UnitLiteral _ | Ir.Param _ | Ir.ConstRef _ | Ir.Pop _ | Ir.PopSum _
   | Ir.Time | Ir.Dt | Ir.TimeFunc _ | Ir.ForcingBasis _ | Ir.TableLookup _ | Ir.Projected
   | Ir.ObsColumnRef _ -> 10
