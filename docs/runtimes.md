@@ -278,6 +278,8 @@ fit and its forward simulations always share them — and default to
 
 ```
 simulate {
+  from = 0 'days
+  to   = 365 'days
   integrator = rk45 { atol = 1e-9 rtol = 1e-7 }
 }
 ```
