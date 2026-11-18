@@ -46,9 +46,10 @@
 //! (`fit predict <leaf>`, `compare <leaf>`) recovers the problem from it, and
 //! so runs under the override a flag set (gh#1268). A `fit.toml` handle names
 //! only the run the file alone makes (gh#896), so it refuses a flag-made fit,
-//! naming its leaf. `pfilter`, `profile` and `survey` `--fit` read a fit file,
-//! not the archive, and still refuse a flag-made fit; they are converted in
-//! step 4's next part. Two limits: a sweep point's folder archives the file's
+//! naming its leaf. `pfilter`, `profile` and `survey` take the same handle
+//! forms for `--fit` (`fit::handle::resolve_fit_problem`): a run handle reads
+//! the archive, so runs under the override, and a `fit.toml` names the file's
+//! problem, which does not hold it. Two limits: a sweep point's folder archives the file's
 //! `[fixed]`, not the point's values (those are in its `fit.meta.json`, which
 //! `fit predict` and `compare` read); and `fit_toml_hash` hashes the file as
 //! read, without a folded flag. The archive's `[method]` table is the file's:

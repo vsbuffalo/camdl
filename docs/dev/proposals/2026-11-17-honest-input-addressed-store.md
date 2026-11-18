@@ -566,9 +566,41 @@ and of coverage; the cases themselves are regression evidence.
    model in hand rather than recompiling the source; `main` no longer sets the
    process-wide setting for `fit run`. `input_class::FIT_RUN` classifies every
    input, checked against clap both ways, and `tests/fit_run_input_classes.rs`
-   has a case for each. **Next:** `pfilter`, `profile`, `survey`; the
-   process-wide LICM setting is still read by `simulate` (installed from its
-   resolved value) and every other command.
+   has a case for each.
+
+   **Done in this step, `pfilter`, `profile`, `survey`:** each resolves its
+   configuration once, before anything runs, into
+   `pfilter_config::ResolvedPfilterConfig`,
+   `profile_config::ResolvedProfileConfig` and
+   `survey_config::ResolvedSurveyConfig`, with the command's arguments
+   destructured field by field and the outputs written outside the store, the
+   execution settings and the label apart; the run is a function of those
+   values, with the arguments out of its scope. `--fit` takes `fit predict`'s
+   handle forms (`fit::handle::resolve_fit_problem`): a leaf directory, problem
+   folder, run-id or fit-id prefix or label names a stored fit, whose archived
+   config is read, so a flag-made fit is read under its stored override; a
+   `fit.toml` names the file's problem as it reads, with or without a stored
+   fit, and so never stands for a flag-made fit (it is then refused at the
+   forcing, as the file alone would be). The fit is read once, and its
+   `[config] allow_degenerate_rates` and `allow_forcing_extrapolation` are
+   folded with the flags in resolution. Each identity keys the engine switches
+   (`PfilterCtx`, `ProfilePointCtx` and `SurveyCtx` take the typed
+   `EngineIdentity`), re-keying only runs made with a switch set, and each
+   `run.json` names them. `--no-licm` is a `CompileSettings` passed to every
+   compile of the three (`util::load_model_with`); `main` no longer sets the
+   process-wide setting for them. `input_class::PFILTER`, `PROFILE` and `SURVEY`
+   classify every input, checked against clap both ways, with a case for each in
+   `tests/{pfilter,profile,survey}_input_classes.rs`. Found and fixed on the
+   way: `profile --table` was accepted and never read; `survey --render` made
+   `landscape.html` one of the leaf's files (and, on a stored survey, staled the
+   leaf), and is now the leaf's child `landscape_html/`, as the event log is;
+   the survey progress line named a best that was not the landscape's (gh#1269),
+   and `pfilter --replicates` the same for its mean. **Next:** `compare`'s
+   in-process ODE scorer and `simulate --draws posterior --fit` still build
+   their forcing policy from their own flag (gh#1235); the process-wide LICM
+   setting is still read by `simulate` (installed from its resolved value) and
+   `compare`, `eval`, `fit predict`, `mre` and the pass-through compiler
+   subcommands.
 
 The unused typed inputs in `runid/src/inputs.rs` (`PfilterEvalInput`,
 `SurveyInput`, `ProjectionInput`, `SyntheticObsInput`, `ProfilePointInput`, no
