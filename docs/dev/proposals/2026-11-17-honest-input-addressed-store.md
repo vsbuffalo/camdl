@@ -520,15 +520,23 @@ and of coverage; the cases themselves are regression evidence.
    builds an `EvalCtx` changed. `simulate` has a per-cell resolved value,
    `sim_config::ResolvedCell`: the engine runs from it and returns it, and the
    written leaf is keyed from that instance, checked against the identity the
-   cache-hit check resolved before the cell ran. **Next:** the
-   forcing-extrapolation policy becomes a per-command policy value held by
-   `EngineSettings` (and each command's equivalent); the run-note reporter
-   routes forcing notes into it through one slot, since `sim::run_notes` is
-   process-wide by design; and the identity readers read the held value, first
-   `pfilter.rs` (its leaf's `allow_forcing_extrapolation`). `--no-licm` is read
-   inside the compile helper every command calls, so it is converted per command
-   in step 4, as each command's resolved configuration gains its compile
-   settings.
+   cache-hit check resolved before the cell ran. The forcing-extrapolation
+   policy is `forcing_extrapolation::ForcingPolicy`, a value each command builds
+   from its resolved flag or fit config and installs for its duration:
+   `EngineSettings` holds simulate's, derived once per invocation and kept by
+   the CAS sink; `fit run`, `pfilter`, `profile`, `survey`, `compare`, `eval`
+   and `fit predict` build their own. It carries the forcings the run held and
+   the refusal it kept while it held a claim. The run-note reporter routes
+   forcing notes into the installed value through one routing slot, the only
+   process-wide state left of it, since `sim::run_notes` is process-wide by
+   design; every record names the value through `RecordMeta::new`, and the
+   identity readers in `pfilter`, `profile` and `survey` read the command's
+   value. The four statics and `set_allowed`/`allowed()` are gone.
+   `pfilter --fit`, `profile --fit` and `survey --fit` now read the config's
+   `[config] allow_forcing_extrapolation`, and `compare` passes the override to
+   its `camdl pfilter` child (gh#1235). **Next:** `--no-licm` is read inside the
+   compile helper every command calls, so it is converted per command in step 4,
+   as each command's resolved configuration gains its compile settings.
 4. `fit run` (classification and cases; its hashing representation is unchanged
    until the follow-up), then `pfilter`, `profile`, `survey`.
 
@@ -675,11 +683,11 @@ and start from a fresh `origin/main` once that work settles.
   assumptions are documented.
 - The process-wide evaluator settings are removed after the `simulate`
   conversion and before the other commands, by carrying the flag on the compiled
-  model. Step 3 did this for `allow_degenerate_rates`. The forcing-extrapolation
-  policy follows as a per-command policy value held by `EngineSettings`, the
-  run-note reporter routing notes into it through one slot and the identity
-  readers reading the held value; `--no-licm` is converted per command in step
-  4.
+  model. Step 3 did this for `allow_degenerate_rates`, and then for the
+  forcing-extrapolation policy as a per-command policy value held by
+  `EngineSettings`, the run-note reporter routing notes into it through one slot
+  and the identity readers reading the held value; `--no-licm` is converted per
+  command in step 4.
 - Environment variables are read in one module and classified by their effect on
   results, with a stability tag (`stable`, `experimental`, `debug`); switches
   that can change results are keyed, alternative evaluation paths included until
