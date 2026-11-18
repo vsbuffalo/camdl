@@ -171,7 +171,7 @@ pub(crate) fn resolve(
         data,
         fit,
         sweep,
-        particles: _,
+        particles,
         iterations,
         n_starts,
         starts,
@@ -184,8 +184,8 @@ pub(crate) fn resolve(
         _removed_pmmh_steps,
         _removed_pmmh_particles,
         _removed_pmmh_rho,
-        cooling: _,
-        cooling_target_iters: _,
+        cooling,
+        cooling_target_iters,
         rw_sd,
         output,
         format,
@@ -247,11 +247,20 @@ pub(crate) fn resolve(
     // The IF2-only flags are refused on an nl-* cell, and `--particles` is
     // required on an IF2 one; past this point each cell reads only its own.
     let particles = match algo {
-        ProfileAlgo::If2 => a.particles.unwrap_or_else(|| {
+        ProfileAlgo::If2 => particles.unwrap_or_else(|| {
             out.fail("error: --particles is required for an if2 profile");
         }),
         ProfileAlgo::Nlopt(_) => {
-            if let Err(e) = crate::profile::refuse_if2_flags_for_nlopt(a, algo_name) {
+            let given = crate::profile::If2Flags {
+                particles: *particles,
+                iterations: *iterations,
+                cooling: *cooling,
+                cooling_target_iters: *cooling_target_iters,
+                pf_max_substeps: *pf_max_substeps,
+                binomial: *binomial,
+                rw_sd: rw_sd.as_ref(),
+            };
+            if let Err(e) = crate::profile::refuse_if2_flags_for_nlopt(&given, algo_name) {
                 out.fail(format!("error: {e}"));
             }
             0
@@ -376,7 +385,7 @@ pub(crate) fn resolve(
         sweep: sweep.clone(),
         particles,
         iterations: iterations.unwrap_or(crate::profile::PROFILE_DEFAULT_ITERATIONS),
-        cooling: crate::profile::profile_cooling_schedule(a),
+        cooling: crate::profile::profile_cooling_schedule(*cooling, *cooling_target_iters),
         n_starts: *n_starts,
         starts: DeclaredStarts { rule, from, allow_nonconverged_source: *allow_nonconverged_source },
         nlopt: NloptBudget { tolerance, max_evals, from_fit },

@@ -3143,16 +3143,16 @@ mod tests {
     #[test]
     fn profile_cooling_is_the_fit_schedule() {
         let a = try_parse_profile(&["--iterations", "10", "--cooling", "0.5"]).unwrap();
-        let schedule = crate::profile::profile_cooling_schedule(&a);
+        let schedule = crate::profile::profile_cooling_schedule(a.cooling, a.cooling_target_iters);
         assert_eq!(schedule.target_iters, 50, "reached at 50, not at --iterations");
         assert!((schedule.multiplier_at_iter(7, 50) - 0.5).abs() < 1e-12);
         assert!(schedule.multiplier_at_iter(7, 10) > 0.5, "still cooling at the run's end");
         let a = try_parse_profile(&["--iterations", "10", "--cooling-target-iters", "10"]).unwrap();
-        assert_eq!(crate::profile::profile_cooling_schedule(&a).target_iters, 10);
+        assert_eq!(crate::profile::profile_cooling_schedule(a.cooling, a.cooling_target_iters).target_iters, 10);
         // And the IF2Config each cell runs with carries that schedule.
         let a = try_parse_profile(&["--iterations", "10", "--cooling", "0.5"]).unwrap();
         let config = crate::profile::profile_if2_config(
-            100, a.iterations.unwrap(), crate::profile::profile_cooling_schedule(&a), None,
+            100, a.iterations.unwrap(), crate::profile::profile_cooling_schedule(a.cooling, a.cooling_target_iters), None,
             Default::default(), 1.0, 0.0, vec![], false);
         assert_eq!(config.n_iterations, 10);
         assert_eq!(config.cooling,
@@ -3164,6 +3164,17 @@ mod tests {
     /// `--rw-sd` that only names the estimated set is accepted.
     #[test]
     fn profile_refuses_if2_flags_on_an_nlopt_cell() {
+        fn if2_flags(a: &crate::args::ProfileArgs) -> crate::profile::If2Flags<'_> {
+            crate::profile::If2Flags {
+                particles: a.particles,
+                iterations: a.iterations,
+                cooling: a.cooling,
+                cooling_target_iters: a.cooling_target_iters,
+                pf_max_substeps: a.inference.pf_max_substeps,
+                binomial: a.inference.binomial,
+                rw_sd: a.rw_sd.as_ref(),
+            }
+        }
         let parse = |extra: &[&str]| {
             let mut full: Vec<&str> = vec![
                 "camdl", "profile", "model.camdl", "--data", "cases.tsv",
@@ -3183,12 +3194,12 @@ mod tests {
             (&["--rw-sd", "auto", "--pf-max-substeps", "1000"][..], "--pf-max-substeps"),
             (&["--rw-sd", "beta=0.1"][..], "beta"),
         ] {
-            let err = crate::profile::refuse_if2_flags_for_nlopt(&parse(extra), "nl-sbplx")
+            let err = crate::profile::refuse_if2_flags_for_nlopt(&if2_flags(&parse(extra)), "nl-sbplx")
                 .expect_err(&format!("{flag} is refused on an nl-sbplx cell"));
             assert!(err.contains(flag) && err.contains("nl-sbplx"), "{err}");
         }
         for extra in [&["--rw-sd", "auto"][..], &["--rw-sd", "beta=auto,gamma=auto"][..]] {
-            crate::profile::refuse_if2_flags_for_nlopt(&parse(extra), "nl-sbplx")
+            crate::profile::refuse_if2_flags_for_nlopt(&if2_flags(&parse(extra)), "nl-sbplx")
                 .unwrap_or_else(|e| panic!("{extra:?} names the estimated set: {e}"));
         }
     }

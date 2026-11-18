@@ -258,21 +258,32 @@ pub(crate) fn nlopt_cell_budget(
     }
 }
 
+/// The IF2 settings as given on `profile`'s command line, each `None` when
+/// not given, and `--rw-sd`: what [`refuse_if2_flags_for_nlopt`] checks.
+#[derive(Clone, Copy)]
+pub(crate) struct If2Flags<'a> {
+    pub particles: Option<usize>,
+    pub iterations: Option<usize>,
+    pub cooling: Option<f64>,
+    pub cooling_target_iters: Option<usize>,
+    pub pf_max_substeps: Option<u64>,
+    pub binomial: Option<sim::rng::BinomialAlgorithm>,
+    pub rw_sd: Option<&'a crate::args::types::RwSd>,
+}
+
 /// Refuse the IF2-only flags on an nl-* profile: its cells run no particle
 /// filter and perturb nothing, so each would be hashed into the run and read
 /// by nothing. `--rw-sd` still names the estimated set there, so names
 /// (`NAME=auto`, or `auto`) are accepted and a step size is refused.
-pub(crate) fn refuse_if2_flags_for_nlopt(
-    a: &crate::args::ProfileArgs,
-    algorithm: &str,
-) -> Result<(), String> {
+pub(crate) fn refuse_if2_flags_for_nlopt(flags: &If2Flags<'_>, algorithm: &str) -> Result<(), String> {
+    let If2Flags { particles, iterations, cooling, cooling_target_iters, pf_max_substeps, binomial, rw_sd } = *flags;
     let given: Vec<&str> = [
-        (a.particles.is_some(), "--particles"),
-        (a.iterations.is_some(), "--iterations"),
-        (a.cooling.is_some(), "--cooling"),
-        (a.cooling_target_iters.is_some(), "--cooling-target-iters"),
-        (a.inference.pf_max_substeps.is_some(), "--pf-max-substeps"),
-        (a.inference.binomial.is_some(), "--binomial"),
+        (particles.is_some(), "--particles"),
+        (iterations.is_some(), "--iterations"),
+        (cooling.is_some(), "--cooling"),
+        (cooling_target_iters.is_some(), "--cooling-target-iters"),
+        (pf_max_substeps.is_some(), "--pf-max-substeps"),
+        (binomial.is_some(), "--binomial"),
     ]
     .into_iter()
     .filter_map(|(on, flag)| on.then_some(flag))
@@ -287,7 +298,7 @@ pub(crate) fn refuse_if2_flags_for_nlopt(
             if given.len() == 1 { "it" } else { "them" },
         ));
     }
-    if let Some(crate::args::types::RwSd::Map(m)) = &a.rw_sd {
+    if let Some(crate::args::types::RwSd::Map(m)) = rw_sd {
         let mut with_sd: Vec<&str> =
             m.iter().filter(|(_, v)| v.is_some()).map(|(k, _)| k.as_str()).collect();
         with_sd.sort();
@@ -379,13 +390,12 @@ pub(crate) fn refuse_fixed_over_fit_estimate(
 /// fit — `c` reached at `--cooling-target-iters` (default 50), whatever
 /// `--iterations` is.
 pub(crate) fn profile_cooling_schedule(
-    a: &crate::args::ProfileArgs,
+    cooling: Option<f64>,
+    cooling_target_iters: Option<usize>,
 ) -> sim::inference::if2::CoolingSchedule {
     sim::inference::if2::CoolingSchedule {
-        fraction: a.cooling.unwrap_or(PROFILE_DEFAULT_COOLING),
-        target_iters: a
-            .cooling_target_iters
-            .unwrap_or(sim::inference::if2::CoolingSchedule::POMP_TARGET_ITERS),
+        fraction: cooling.unwrap_or(PROFILE_DEFAULT_COOLING),
+        target_iters: cooling_target_iters.unwrap_or(sim::inference::if2::CoolingSchedule::POMP_TARGET_ITERS),
     }
 }
 
