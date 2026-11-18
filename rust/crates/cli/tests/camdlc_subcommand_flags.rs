@@ -5,8 +5,9 @@
 //!
 //! - `check` takes `--quantities FILE` as a compile does, and applies it, so a
 //!   model checked clean compiles clean with the same flags;
-//! - `inspect --help` and `doctest --help` print help and exit 0, as the error
-//!   for an unknown flag and the Makefile tell the reader to run them;
+//! - `inspect --help`, `doctest --help` and `render --help` print help and
+//!   exit 0, as the error for an unknown flag and the Makefile tell the
+//!   reader to run them;
 //! - `inspect --ir`, which no report read, is refused as an unknown flag;
 //! - `--count` with `--transitions` prints counts, and with `--transition NAME`
 //!   counts only the declarations that name matches.
@@ -97,7 +98,7 @@ fn check_takes_and_applies_quantities() {
 }
 
 #[test]
-fn inspect_and_doctest_take_help() {
+fn subcommands_take_help() {
     let Some(cc) = camdlc() else { return };
     let o = run(&cc, &["inspect", "--help"]);
     assert!(o.status.success(), "inspect --help: {}", all_output(&o));
@@ -106,6 +107,10 @@ fn inspect_and_doctest_take_help() {
     let o = run(&cc, &["doctest", "--help"]);
     assert!(o.status.success(), "doctest --help: {}", all_output(&o));
     assert!(stdout(&o).contains("--gate"), "doctest --help lists no flags: {}", stdout(&o));
+
+    let o = run(&cc, &["render", "--help"]);
+    assert!(o.status.success(), "render --help: {}", all_output(&o));
+    assert!(stdout(&o).contains("--format"), "render --help lists no flags: {}", stdout(&o));
 }
 
 #[test]
