@@ -252,9 +252,11 @@ let forcing_sites acc (tf : time_function) =
   | Piecewise { breakpoints; values } ->
     need_all "breakpoints" breakpoints time;
     need_all "values" values value_dim
-  | Interpolated { times; values; method_ = _ } ->
+  | Interpolated { source = Knots { times; values }; method_ = _ } ->
     need_all "times" times time;
     need_all "values" values value_dim
+  (* Read at run time as numbers in the declared unit; nothing to check. *)
+  | Interpolated { source = External_series _; method_ = _ } -> ()
   | Periodic { period; values } ->
     need "period" period time;
     need_all "values" values value_dim

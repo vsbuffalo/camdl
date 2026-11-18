@@ -100,13 +100,12 @@ pub fn cmd_eval(a: &crate::args::EvalArgs) {
     // doesn't compile tables independently).
     use crate::params_resolver::{ParameterInputs, resolve_parameters, emit_notices};
     use indexmap::{IndexMap, IndexSet};
-    use std::collections::HashMap;
 
     let fixed_cli: Vec<(String, f64)> = a.model_overrides.param.iter()
         .map(|p| (p.name.clone(), p.value)).collect();
     let fixed_files: Vec<std::path::PathBuf> = a.model_overrides.params.clone();
-    let table_files: HashMap<String, std::path::PathBuf> = a.model_overrides.table.iter()
-        .map(|t| (t.name.clone(), t.path.clone())).collect();
+    let external = crate::external_inputs::ExternalBindings::from_cli(
+        a.model_overrides.table.iter().map(|t| (t.name.clone(), t.path.clone())));
     let ftf: IndexMap<String, f64> = IndexMap::new();
     let fte: IndexSet<String> = IndexSet::new();
 
@@ -123,7 +122,7 @@ pub fn cmd_eval(a: &crate::args::EvalArgs) {
         fixed_files: &fixed_files,
         fit_toml_fixed: &ftf,
         fit_toml_estimate: &fte,
-        table_files: &table_files,
+        external: &external,
     }).unwrap_or_else(|e| {
         out.fail(format!("error: {}", e.with_flags(crate::params_resolver::FlagStyle::Params)));
     });

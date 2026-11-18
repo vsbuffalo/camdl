@@ -5,6 +5,7 @@ mod test_support;   // collision-free unique_temp_dir for unit tests (gh#153)
 mod engine_fingerprint; // ENGINE_ID's fingerprint, also compiled into build.rs; tested here
 mod util;
 mod params_resolver;  // unified parameter-value resolver (2026-05-25 CLI UX rev 2)
+mod external_inputs;  // binds external("NAME") tables and forcings to files
 mod cas_read;       // generic RunRecord reader (new-format sims); transitional alongside run_meta (gh#147)
 mod leaf_use;       // command-side checks on a read leaf: a result consumer requires a completed run
 mod cas_index;      // derived run_id→leaf index + `camdl reindex` (gh#147 M4)

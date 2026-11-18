@@ -621,7 +621,11 @@ fn forcing_exprs(k: &ir::time_func::TimeFuncKind) -> Vec<&Expr> {
     match k {
         K::Sinusoidal(s) => vec![&s.amplitude, &s.period, &s.phase, &s.baseline],
         K::Piecewise(p) => p.breakpoints.iter().chain(&p.values).collect(),
-        K::Interpolated(i) => i.times.iter().chain(&i.values).collect(),
+        K::Interpolated(i) => match &i.source {
+            ir::time_func::InterpSource::Knots { times, values } => times.iter().chain(values).collect(),
+            // Bound to knots before the model is built; it carries no expression.
+            ir::time_func::InterpSource::External(_) => Vec::new(),
+        },
         K::Periodic(p) => std::iter::once(&p.period).chain(&p.values).collect(),
         K::Fourier(f) => std::iter::once(&f.period)
             .chain(f.harmonics.iter().flat_map(|(a, b)| [a, b]))
@@ -2092,7 +2096,7 @@ impl CompiledModel {
                         .collect();
                     table_values_cache.push(vals?);
                 }
-                ir::table::TableSource::External { external } => {
+                ir::table::TableSource::External { external, .. } => {
                     // Rm5 in 2026-04-19 engine review: the CLI is
                     // responsible for replacing External with Inline
                     // before calling CompiledModel::new — unreplaced
@@ -2137,10 +2141,24 @@ impl CompiledModel {
                     CompiledTimeFuncKind::Piecewise { breakpoints: bps?, values: vals? }
                 }
                 TimeFuncKind::Interpolated(i) => {
-                    let times: Result<Vec<f64>, SimError> = i.times.iter()
+                    let (knot_times, knot_values) = match &i.source {
+                        ir::time_func::InterpSource::Knots { times, values } => (times, values),
+                        // The counterpart of an unbound external table above:
+                        // the CLI binds every external forcing before building
+                        // the model, so one reaching here is a missing binding,
+                        // refused rather than run with no knots.
+                        ir::time_func::InterpSource::External(e) => {
+                            return Err(SimError::Validation(format!(
+                                "forcing '{}' reads external(\"{}\") but no file was bound \
+                                 to it before the model was built; supply one with \
+                                 --table {}=FILE or [data.tables] {} = \"FILE\" in the fit config",
+                                tf.name, e.external, e.external, e.external)));
+                        }
+                    };
+                    let times: Result<Vec<f64>, SimError> = knot_times.iter()
                         .map(|e| eval_structural(&tf.name, "interpolation knot time", e, &param_index, &const_values, &default_params))
                         .collect();
-                    let vals: Result<Vec<f64>, SimError> = i.values.iter()
+                    let vals: Result<Vec<f64>, SimError> = knot_values.iter()
                         .map(|e| eval_structural(&tf.name, "interpolation knot value", e, &param_index, &const_values, &default_params))
                         .collect();
                     let ts = times?;
@@ -3404,11 +3422,11 @@ mod tests {
         let mut model = load_with_params("sir_basic");
         model.time_functions.push(TimeFunction {
             name: "bad_forcing".to_string(),
-            kind: TimeFuncKind::Interpolated(Interpolated {
-                times: vec![konst(0.0), konst(1.0)],
-                values: vec![konst(10.0)], // one short
-                method: InterpMethod::Linear,
-            }),
+            kind: TimeFuncKind::Interpolated(Interpolated::knots(
+                vec![konst(0.0), konst(1.0)],
+                vec![konst(10.0)], // one short
+                InterpMethod::Linear,
+            )),
             dim: (1, 0),
             lag: None,
             data_source: None,
@@ -3435,11 +3453,11 @@ mod tests {
         let mut model = load_with_params("sir_basic");
         model.time_functions.push(TimeFunction {
             name: "unsorted_forcing".to_string(),
-            kind: TimeFuncKind::Interpolated(Interpolated {
-                times: vec![konst(20.0), konst(0.0), konst(10.0)], // out of order
-                values: vec![konst(1.0), konst(2.0), konst(3.0)],
-                method: InterpMethod::Linear,
-            }),
+            kind: TimeFuncKind::Interpolated(Interpolated::knots(
+                vec![konst(20.0), konst(0.0), konst(10.0)], // out of order
+                vec![konst(1.0), konst(2.0), konst(3.0)],
+                InterpMethod::Linear,
+            )),
             dim: (1, 0),
             lag: None,
             data_source: None,
@@ -3466,11 +3484,11 @@ mod tests {
         let mut model = load_with_params("sir_basic");
         model.time_functions.push(TimeFunction {
             name: "nan_forcing".to_string(),
-            kind: TimeFuncKind::Interpolated(Interpolated {
-                times: vec![konst(0.0), konst(f64::NAN), konst(20.0)],
-                values: vec![konst(1.0), konst(2.0), konst(3.0)],
-                method: InterpMethod::Linear,
-            }),
+            kind: TimeFuncKind::Interpolated(Interpolated::knots(
+                vec![konst(0.0), konst(f64::NAN), konst(20.0)],
+                vec![konst(1.0), konst(2.0), konst(3.0)],
+                InterpMethod::Linear,
+            )),
             dim: (1, 0),
             lag: None,
             data_source: None,
@@ -3495,11 +3513,11 @@ mod tests {
         let mut model = load_with_params("sir_basic");
         model.time_functions.push(TimeFunction {
             name: "empty_forcing".to_string(),
-            kind: TimeFuncKind::Interpolated(Interpolated {
-                times: vec![],
-                values: vec![],
-                method: InterpMethod::Linear,
-            }),
+            kind: TimeFuncKind::Interpolated(Interpolated::knots(
+                vec![],
+                vec![],
+                InterpMethod::Linear,
+            )),
             dim: (1, 0),
             lag: None,
             data_source: None,
@@ -3512,6 +3530,38 @@ mod tests {
             msg.contains("empty_forcing"),
             "error must name the forcing with no knots, got: {msg}"
         );
+    }
+
+    /// An external forcing that reaches the model builder unbound is refused,
+    /// naming the forcing and the external name and saying how to bind it —
+    /// never built with no knots, which would read 0 everywhere.
+    #[test]
+    fn unbound_external_forcing_rejected() {
+        use ir::time_func::{ExternalSeries, InterpMethod, InterpSource, Interpolated, TimeFuncKind, TimeFunction};
+        let mut model = load_with_params("sir_basic");
+        model.time_functions.push(TimeFunction {
+            name: "school".to_string(),
+            kind: TimeFuncKind::Interpolated(Interpolated {
+                source: InterpSource::External(ExternalSeries {
+                    external: "calendar".into(),
+                    time_col: "date".into(),
+                    value_col: "in_term".into(),
+                    key: None,
+                    value_scale: 1.0,
+                }),
+                method: InterpMethod::Constant,
+            }),
+            dim: (0, 0),
+            lag: None,
+            data_source: None,
+        });
+        let msg = match CompiledModel::new(model) {
+            Ok(_) => panic!("an unbound external forcing must be rejected"),
+            Err(e) => format!("{e}"),
+        };
+        for want in ["forcing 'school'", "external(\"calendar\")", "--table calendar=FILE", "[data.tables]"] {
+            assert!(msg.contains(want), "error must contain {want:?}, got: {msg}");
+        }
     }
 
     /// gh#204: a model carrying a reactive (state/observation-triggered) fire

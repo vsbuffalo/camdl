@@ -611,14 +611,41 @@
           "required": ["interpolated"],
           "properties": {
             "interpolated": {
-              "type": "object",
-              "required": ["times", "values", "method"],
-              "properties": {
-                "times": { "type": "array", "items": { "$ref": "#/definitions/expr" } },
-                "values": { "type": "array", "items": { "$ref": "#/definitions/expr" } },
-                "method": { "type": "string", "enum": ["linear", "constant", "spline"] }
-              },
-              "additionalProperties": false
+              "description": "Knots known at compile time (times, values), or read when the model is run from the file bound to `external` (--table NAME=FILE, or [data.tables] in a fit config).",
+              "oneOf": [
+                {
+                  "type": "object",
+                  "required": ["times", "values", "method"],
+                  "properties": {
+                    "times": { "type": "array", "items": { "$ref": "#/definitions/expr" } },
+                    "values": { "type": "array", "items": { "$ref": "#/definitions/expr" } },
+                    "method": { "type": "string", "enum": ["linear", "constant", "spline"] }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "required": ["external", "time_col", "value_col", "value_scale", "method"],
+                  "properties": {
+                    "external": { "type": "string", "description": "The NAME of data = external(\"NAME\")." },
+                    "time_col": { "type": "string" },
+                    "value_col": { "type": "string" },
+                    "key": {
+                      "type": "object",
+                      "description": "An indexed forcing's stratum filter: only rows whose `column` holds `level`. Absent for a forcing with no index.",
+                      "required": ["column", "level"],
+                      "properties": {
+                        "column": { "type": "string" },
+                        "level": { "type": "string" }
+                      },
+                      "additionalProperties": false
+                    },
+                    "value_scale": { "type": "number", "description": "Factor converting a value in the forcing's declared unit to the model's time unit; each knot is value × value_scale." },
+                    "method": { "type": "string", "enum": ["linear", "constant", "spline"] }
+                  },
+                  "additionalProperties": false
+                }
+              ]
             }
           },
           "additionalProperties": false
@@ -832,13 +859,26 @@
       "type": "object",
       "required": ["name", "out_of_bounds"],
       "oneOf": [
-        { "required": ["values"], "not": { "required": ["external"] } },
-        { "required": ["external"], "not": { "required": ["values"] } }
+        { "required": ["values"], "not": { "anyOf": [{ "required": ["external"] }, { "required": ["shape"] }] } },
+        { "required": ["external", "shape"], "not": { "required": ["values"] } }
       ],
       "properties": {
         "name": { "type": "string" },
         "values": { "type": "array", "items": { "$ref": "#/definitions/expr" } },
         "external": { "type": "string" },
+        "shape": {
+          "description": "An external table's declared axes, in order; the bound file must hold one number per cell (the product of the levels).",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["dim", "levels"],
+            "properties": {
+              "dim": { "type": "string" },
+              "levels": { "type": "integer", "minimum": 0 }
+            },
+            "additionalProperties": false
+          }
+        },
         "out_of_bounds": { "type": "string", "enum": ["error"] },
         "cell_kind": { "type": "string" }
       },

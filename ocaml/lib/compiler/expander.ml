@@ -9014,7 +9014,12 @@ let table_source_of_expr ?table_name ctx (dim_entries : table_dim_entry list) e 
   | EFuncCall ("external", args) ->
     (match extract_path_arg ctx "external" args with
      | None -> Ir.Inline []
-     | Some name -> Ir.External name)
+     | Some name ->
+       let shape = List.map (fun de ->
+           let d = dim_name_of_entry de in
+           { Ir.axis_dim = d; Ir.axis_levels = List.length (dim_levels_or_empty ctx d) })
+           dim_entries in
+       Ir.External { name; shape })
   | _ ->
     let vals = flatten_expr_list ctx dim_entries e in
     (* gh#112: an inline table flattens to a row-major value list. Verify the
@@ -10234,10 +10239,45 @@ let expand_time_function_one ctx fname (env : (string * string) list)
                        id and that the file has rows for every level"
                 ());
          Ir.Interpolated {
-           times   = List.map (fun f -> Ir.Const f) times;
-           values  = List.map (fun f -> Ir.Const f) values;
+           source = Ir.Knots {
+             times  = List.map (fun f -> Ir.Const f) times;
+             values = List.map (fun f -> Ir.Const f) values;
+           };
            method_;
          }
+       | Some (FExpr (EFuncCall ("external", args))) ->
+         (* `data = external("NAME")`: the knots are read when the model is
+            run, from the file bound to NAME (`--table NAME=FILE` or the fit
+            config's `[data.tables]`), exactly as `data = "path"` reads them
+            here. The same `external("NAME")` form declares a runtime table,
+            so one binding mechanism serves both. The columns are recorded
+            now; whether the file has them is checked when it is bound. *)
+         let time_col  = get_file_col "time_col"  "time"  in
+         let value_col = get_file_col "value_col" "value" in
+         let key = match env with
+           | []                -> None
+           | [ (_var, level) ] -> Some { Ir.column = get_file_col "key_col" "key"; Ir.level }
+           | _ ->
+             Diagnostics.error ctx.diags ~code:"E226" ~loc:Diagnostics.no_loc
+               ~message:(Printf.sprintf
+                 "external forcing '%s' is indexed by %d dimensions, but a \
+                  data file can only be filtered by a single key column"
+                 fname (List.length env))
+               ~hint:"index the forcing by one dimension, or pre-join the data \
+                      to a single key column"
+               ();
+             None
+         in
+         (match extract_path_arg ctx "external" args with
+          | None ->
+            Ir.Interpolated { source = Ir.Knots { times = []; values = [] }; method_ }
+          | Some name ->
+            (* [value_scale] is set with the other kinds' unit scaling below. *)
+            Ir.Interpolated {
+              source = Ir.External_series
+                  { name; time_col; value_col; key; value_scale = 1.0 };
+              method_;
+            })
        | Some (FExpr (EIdent (name, _))) ->
          (* `data` names an external file; a bare word needs quotes (gh#423). *)
          Diagnostics.error ctx.diags ~code:"E410" ~loc:Diagnostics.no_loc
@@ -10245,21 +10285,25 @@ let expand_time_function_one ctx fname (env : (string * string) list)
              "forcing '%s': data must be a quoted file path — write data = \"%s\"" fname name)
            ~hint:"a quoted string names the data file (outside the model)"
            ();
-         Ir.Interpolated { times = []; values = []; method_ }
+         Ir.Interpolated { source = Ir.Knots { times = []; values = [] }; method_ }
        | Some (FExpr _) ->
          Diagnostics.error ctx.diags ~code:"E410" ~loc:Diagnostics.no_loc
            ~message:(Printf.sprintf
-             "forcing '%s': data must be a quoted file path — write data = \"...\"" fname)
-           ~hint:"a quoted string names the data file (outside the model)"
+             "forcing '%s': data must be a quoted file path or external(\"NAME\") — \
+              write data = \"...\" or data = external(\"NAME\")" fname)
+           ~hint:"a quoted string names the data file (outside the model); \
+                  external(\"NAME\") names a file supplied when the model is run"
            ();
-         Ir.Interpolated { times = []; values = []; method_ }
+         Ir.Interpolated { source = Ir.Knots { times = []; values = [] }; method_ }
        | None ->
          match List.assoc_opt "table" fargs with
          | Some (FExpr (EIdent (tbl, _))) ->
            let knots = table_backed_knots tbl in
            Ir.Interpolated {
-             times  = List.map (fun (t, _) -> Ir.Const t) knots;
-             values = List.map (fun (_, c) -> c) knots;
+             source = Ir.Knots {
+               times  = List.map (fun (t, _) -> Ir.Const t) knots;
+               values = List.map (fun (_, c) -> c) knots;
+             };
              method_;
            }
          | Some (FStr _) ->
@@ -10269,11 +10313,13 @@ let expand_time_function_one ctx fname (env : (string * string) list)
                "forcing '%s': `table` names a model construct — remove the quotes: `table = <name>`" fname)
              ~hint:"a bare word names a `tables {}` entry; quotes are for external files (gh#423)"
              ();
-           Ir.Interpolated { times = []; values = []; method_ }
+           Ir.Interpolated { source = Ir.Knots { times = []; values = [] }; method_ }
          | _ ->
            Ir.Interpolated {
-             times   = get_kw_list "times";
-             values  = get_kw_list "values";
+             source = Ir.Knots {
+               times  = get_kw_list "times";
+               values = get_kw_list "values";
+             };
              method_;
            })
     | FPeriodic ->
@@ -10649,8 +10695,10 @@ let expand_time_function_one ctx fname (env : (string * string) list)
         Ir.baseline  = scale_expr s.baseline }
     | Ir.Piecewise p ->
       Ir.Piecewise { p with Ir.values = List.map scale_expr p.values }
-    | Ir.Interpolated i ->
-      Ir.Interpolated { i with Ir.values = List.map scale_expr i.values }
+    | Ir.Interpolated ({ source = Ir.Knots k; _ } as i) ->
+      Ir.Interpolated { i with source = Ir.Knots { k with values = List.map scale_expr k.values } }
+    | Ir.Interpolated ({ source = Ir.External_series e; _ } as i) ->
+      Ir.Interpolated { i with source = Ir.External_series { e with value_scale = scale } }
     | Ir.Periodic p ->
       Ir.Periodic { p with Ir.values = List.map scale_expr p.values }
     | Ir.Fourier _ ->

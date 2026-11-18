@@ -135,10 +135,14 @@ fn collect_forcing(kind: &TimeFuncKind, out: &mut HashSet<String>) {
             p.breakpoints.iter().for_each(|e| collect(e, out));
             p.values.iter().for_each(|e| collect(e, out));
         }
-        TimeFuncKind::Interpolated(i) => {
-            i.times.iter().for_each(|e| collect(e, out));
-            i.values.iter().for_each(|e| collect(e, out));
-        }
+        TimeFuncKind::Interpolated(i) => match &i.source {
+            ir::time_func::InterpSource::Knots { times, values } => {
+                times.iter().for_each(|e| collect(e, out));
+                values.iter().for_each(|e| collect(e, out));
+            }
+            // Numbers read from a bound file: no parameter can appear.
+            ir::time_func::InterpSource::External(_) => {}
+        },
         TimeFuncKind::Periodic(p) => {
             collect(&p.period, out);
             p.values.iter().for_each(|e| collect(e, out));

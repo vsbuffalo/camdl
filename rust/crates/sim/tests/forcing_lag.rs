@@ -33,11 +33,11 @@ const XS: [f64; 6] = [0.0, 1.0, 3.0, 5.0, 8.0, 10.0];
 const YS: [f64; 6] = [2.0, 3.5, 2.8, 4.2, 3.1, 5.0];
 
 fn interpolated_kind() -> TimeFuncKind {
-    TimeFuncKind::Interpolated(Interpolated {
-        times: XS.iter().map(|&x| Expr::const_(x)).collect(),
-        values: YS.iter().map(|&y| Expr::const_(y)).collect(),
-        method: InterpMethod::Linear,
-    })
+    TimeFuncKind::Interpolated(Interpolated::knots(
+        XS.iter().map(|&x| Expr::const_(x)).collect(),
+        YS.iter().map(|&y| Expr::const_(y)).collect(),
+        InterpMethod::Linear,
+    ))
 }
 
 fn param(name: &str, value: f64) -> Parameter {

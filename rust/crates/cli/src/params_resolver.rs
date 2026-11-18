@@ -96,7 +96,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use indexmap::{IndexMap, IndexSet};
-use ir::table::TableSource;
 
 use crate::out::notice::{Notice, Notices, Severity};
 
@@ -178,7 +177,9 @@ pub struct ParameterInputs<'a> {
     pub fixed_files:        &'a [PathBuf],
     pub fit_toml_fixed:     &'a IndexMap<String, f64>,
     pub fit_toml_estimate:  &'a IndexSet<String>,
-    pub table_files:        &'a HashMap<String, PathBuf>,
+    /// The files bound to the model's `external("NAME")` tables and
+    /// forcings (`--table`, `[data.tables]`); see `crate::external_inputs`.
+    pub external:           &'a crate::external_inputs::ExternalBindings,
 }
 
 /// Where a parameter's final value came from. Serialised verbatim
@@ -474,7 +475,8 @@ pub enum ResolveError {
     UnsetRequired        { name: String, flags: FlagStyle },
     SchemaMismatch       { path: PathBuf, msg: String },
     ScenarioNotFound     { name: String, available: Vec<String> },
-    ExternalTableMissing { table: String },
+    /// The model's external tables and forcings could not be bound.
+    External(crate::external_inputs::BindError),
     BoundsViolation      { name: String, value: f64, lo: f64, hi: f64 },
     NestedCompose        { name: String },
     /// A fit config lists these names in both `[fixed]` and `[estimate]`
@@ -551,11 +553,7 @@ impl std::fmt::Display for ResolveError {
                     if available.is_empty() { "(none)".to_string() }
                     else { available.join(", ") })
             }
-            ResolveError::ExternalTableMissing { table } => {
-                write!(f,
-                    "table '{table}' is declared as external() but --table \
-                     {table}=<file> was not provided")
-            }
+            ResolveError::External(e) => write!(f, "{e}"),
             ResolveError::BoundsViolation { name, value, lo, hi } => {
                 write!(f,
                     "parameter '{name}' = {value} is outside declared bounds \
@@ -2280,26 +2278,8 @@ pub fn resolve_parameters_with_starts<'a>(
         _ => return Err(ResolveError::MultipleViolations(violations)),
     }
 
-    // ── External tables ─────────────────────────────────────────────────
-    for table in &mut model.tables {
-        if let TableSource::External { external: ref name } = table.source {
-            let logical_name = name.clone();
-            match inputs.table_files.get(&logical_name) {
-                None => return Err(ResolveError::ExternalTableMissing {
-                    table: logical_name,
-                }),
-                Some(path) => {
-                    let path_str = path.to_string_lossy().into_owned();
-                    let values = crate::util::load_table_file(&path_str)
-                        .map_err(|msg| ResolveError::SchemaMismatch {
-                            path: path.clone(),
-                            msg,
-                        })?;
-                    table.source = TableSource::Inline { values };
-                }
-            }
-        }
-    }
+    // ── External tables and forcings ────────────────────────────────────
+    crate::external_inputs::bind(&mut model, inputs.external).map_err(ResolveError::External)?;
 
     Ok(ResolvedParameters {
         params,
@@ -2846,13 +2826,13 @@ mod tests {
             fixed_files,
             fit_toml_fixed,
             fit_toml_estimate,
-            table_files: &EMPTY_TABLES,
+            external: &NO_EXTERNAL,
         }
     }
 
     use std::sync::LazyLock;
-    static EMPTY_TABLES: LazyLock<HashMap<String, PathBuf>> =
-        LazyLock::new(HashMap::new);
+    static NO_EXTERNAL: LazyLock<crate::external_inputs::ExternalBindings> =
+        LazyLock::new(crate::external_inputs::ExternalBindings::none);
 
     // ── Tier 1: model defaults ──────────────────────────────────────────
 

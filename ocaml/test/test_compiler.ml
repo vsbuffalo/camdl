@@ -565,7 +565,7 @@ let test_licm_table_cell_invariance () =
     (Licm.is_invariant state_cell_tbls
        (BinOp { op = Pow; left = TableLookup ("badtab", [Const 0.0]); right = Const 2.0 }));
   let ext_tbls = tbls_of
-    [{ name = "ext"; source = External "ext.csv"; out_of_bounds = Error; cell_kind = None }] in
+    [{ name = "ext"; source = External { name = "ext.csv"; shape = [] }; out_of_bounds = Error; cell_kind = None }] in
   Alcotest.(check bool) "lookup into external table is invariant" true
     (Licm.is_invariant ext_tbls (TableLookup ("ext", [Const 0.0])));
   Alcotest.(check bool) "lookup into unknown table is variant (conservative)" false
@@ -4101,7 +4101,7 @@ let test_gh345_indexed_file_backed_forcing () =
   in
   let values name =
     match List.find_opt (fun (tf : Ir.time_function) -> tf.name = name) m.time_functions with
-    | Some { kind = Ir.Interpolated i; _ } ->
+    | Some { kind = Ir.Interpolated { source = Ir.Knots i; _ }; _ } ->
       List.map (function Ir.Const f -> f
                        | _ -> Alcotest.failf "%s: non-const knot" name) i.values
     | Some _ -> Alcotest.failf "%s is not an interpolated forcing" name
@@ -4113,6 +4113,66 @@ let test_gh345_indexed_file_backed_forcing () =
     "north forcing gets north's own rows" [1.0; 2.0; 1.5] (values "cforce_north");
   Alcotest.(check (list (float 1e-9)))
     "south forcing gets south's own rows" [0.5; 0.8; 0.6] (values "cforce_south")
+
+(* An external forcing, `data = external("NAME")`, is the run-time
+   counterpart of `data = "path"`: no file is opened when the model compiles,
+   and the forcing records what the runtime must read — the name a binding
+   supplies a file under, the two columns, an indexed forcing's own stratum
+   filter, and the factor that converts its declared unit to model time
+   ('per_week under 'days is 1/7, 'ratio is 1). *)
+let test_external_forcing_records_what_to_read () =
+  let src = {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions { patch = [north, south] }
+    stratify(by = patch)
+    let N[p in patch] = S[p] + I[p]
+    parameters { beta : rate  gamma : rate }
+    forcing {
+      school : interpolated 'ratio {
+        data = external("school")  time_col = "date"  value_col = "in_term"  method = constant
+      }
+      imp[p in patch] : interpolated 'per_week {
+        data = external("imp")  key_col = "patch"  time_col = "t"  value_col = "v"
+      }
+    }
+    transitions {
+      infection[p in patch] : S[p] --> I[p] @ (beta * school * I[p] / N[p] + imp[p]) * S[p]
+      recovery[p in patch]  : I[p] --> S[p] @ gamma * I[p]
+    }
+    init { S[north] = 990  I[north] = 10  S[south] = 495  I[south] = 5 }
+    simulate { from = 0 'days  to = 20 'days }
+  |} in
+  let m = match Compiler.compile ~name:"ext" ~filename:"ext.camdl" src with
+    | Ok m    -> m
+    | Error e -> Alcotest.failf "compile failed: %s" e
+  in
+  let series name =
+    match List.find_opt (fun (tf : Ir.time_function) -> tf.name = name) m.time_functions with
+    | Some { kind = Ir.Interpolated { source = Ir.External_series e; method_ }; data_source; _ } ->
+      Alcotest.(check bool) (name ^ ": no compile-time file provenance") true (data_source = None);
+      (e, method_)
+    | Some _ -> Alcotest.failf "%s is not an external interpolated forcing" name
+    | None   -> Alcotest.failf "forcing %s not found" name
+  in
+  let (school, school_method) = series "school" in
+  Alcotest.(check string) "school: name" "school" school.name;
+  Alcotest.(check string) "school: time column" "date" school.time_col;
+  Alcotest.(check string) "school: value column" "in_term" school.value_col;
+  Alcotest.(check bool) "school: no index, reads every row" true (school.key = None);
+  Alcotest.(check (float 0.0)) "school: 'ratio is not scaled" 1.0 school.value_scale;
+  Alcotest.(check string) "school: method" "constant" school_method;
+  List.iter (fun level ->
+    let (imp, _) = series ("imp_" ^ level) in
+    Alcotest.(check string) ("imp_" ^ level ^ ": name") "imp" imp.name;
+    (match imp.key with
+     | Some { column; level = l } ->
+       Alcotest.(check string) ("imp_" ^ level ^ ": key column") "patch" column;
+       Alcotest.(check string) ("imp_" ^ level ^ ": its own level") level l
+     | None -> Alcotest.failf "imp_%s: an indexed forcing must filter its rows" level);
+    Alcotest.(check (float 1e-15)) ("imp_" ^ level ^ ": 'per_week under 'days")
+      (1.0 /. 7.0) imp.value_scale)
+    ["north"; "south"]
 
 (* ── gh#345 sibling: the table-backed form ──────────────────────────────────
    The per-stratum series comes from a `tables {}` matrix, not a `data =` file.
@@ -4165,7 +4225,7 @@ let test_gh345_table_backed_forcing () =
   in
   let interp name =
     match List.find_opt (fun (tf : Ir.time_function) -> tf.name = name) m.time_functions with
-    | Some { kind = Ir.Interpolated i; _ } ->
+    | Some { kind = Ir.Interpolated { source = Ir.Knots i; _ }; _ } ->
       let consts = List.map (function Ir.Const x -> x
                                     | _ -> Alcotest.failf "%s: non-const knot" name) in
       (consts i.times, consts i.values)
@@ -4279,7 +4339,7 @@ let test_table_forcing_repeated_dim_positional () =
   for i = 0 to 2 do for j = 0 to 2 do
     let name = Printf.sprintf "W_g%d_g%d" i j in
     match List.find_opt (fun (tf : Ir.time_function) -> tf.name = name) m.time_functions with
-    | Some { kind = Ir.Interpolated it; _ } ->
+    | Some { kind = Ir.Interpolated { source = Ir.Knots it; _ }; _ } ->
       let v = List.map (function Ir.Const x -> x | _ -> Alcotest.failf "%s: non-const knot" name) it.values in
       let base = float_of_int (100 * i + 10 * j) in
       Alcotest.(check (list (float 1e-9))) (name ^ " = W_data[i, j, ·]") [base; base +. 1.0] v
@@ -5231,8 +5291,9 @@ let test_structural_forcing_coeff_errors () =
      calling the data structural (the Rust runtime also rejects it at IR-load
      via eval_structural). *)
   let i : Ir.interpolated =
-    { times = [ Ir.Const 0.0; Ir.Const 1.0 ];
-      values = [ Ir.Param "knot0"; Ir.Const 1.0 ]; method_ = "linear" } in
+    { source = Ir.Knots { times = [ Ir.Const 0.0; Ir.Const 1.0 ];
+                          values = [ Ir.Param "knot0"; Ir.Const 1.0 ] };
+      method_ = "linear" } in
   let tf : Ir.time_function = { name = "g"; kind = Ir.Interpolated i; dim = (0, 0); lag = None; data_source = None } in
   let rate = Ir.TimeFunc "g" in
   match Autodiff.differentiate_rate rate [ "knot0" ] [ tf ] [] with
@@ -5333,8 +5394,9 @@ let test_obs_grad_structural_forcing_is_coded_refusal () =
      coded DEUnsupported (URStructuralForcing) — the obs path is omit-and-refuse,
      NOT the rate E600 (so forward sim / IF2 / PF still work; P5 refuses NUTS). *)
   let i : Ir.interpolated =
-    { times = [ Ir.Const 0.0; Ir.Const 1.0 ];
-      values = [ Ir.Param "knot0"; Ir.Const 1.0 ]; method_ = "linear" } in
+    { source = Ir.Knots { times = [ Ir.Const 0.0; Ir.Const 1.0 ];
+                          values = [ Ir.Param "knot0"; Ir.Const 1.0 ] };
+      method_ = "linear" } in
   let tf : Ir.time_function = { name = "g"; kind = Ir.Interpolated i; dim = (0, 0); lag = None; data_source = None } in
   let lik = Ir.Poisson { rate = { Ir.expr = Ir.TimeFunc "g"; Ir.grad = []; Ir.proj_grad = None } } in
   match Autodiff.differentiate_likelihood (Ir.CumulativeFlow "inc") lik [ "knot0" ] [ tf ] [] with
@@ -9489,11 +9551,11 @@ let test_sinusoidal_count_dim () =
 let extract_interpolated_times (m : Ir.model) name =
   let tf = List.find (fun (t : Ir.time_function) -> t.Ir.name = name) m.Ir.time_functions in
   match tf.Ir.kind with
-  | Ir.Interpolated i ->
+  | Ir.Interpolated { source = Ir.Knots i; _ } ->
     List.map (function
       | Ir.Const f -> f
       | _ -> Alcotest.fail "interpolated time knot is not a constant")
-      i.Ir.times
+      i.times
   | _ -> Alcotest.failf "forcing %s is not interpolated" name
 
 let test_interpolated_iso_date_time_col () =
@@ -17277,7 +17339,7 @@ let p_forcing (m : Ir.model) =
   List.concat_map (fun (tf : Ir.time_function) ->
     match tf.Ir.kind with
     | Ir.Piecewise p -> List.map ob_fold p.Ir.breakpoints
-    | Ir.Interpolated i -> List.map ob_fold i.Ir.times
+    | Ir.Interpolated { source = Ir.Knots i; _ } -> List.map ob_fold i.times
     | Ir.BSpline { knots = Ir.Knots_uniform { lower; upper; _ }; _ } ->
       [ob_fold lower; ob_fold upper]
     | Ir.BSpline { knots = Ir.Knots_explicit ks; _ } -> List.map ob_fold ks
@@ -18872,6 +18934,7 @@ let () =
       Alcotest.test_case "L403 quiet on same-unit rate forcing"     `Quick test_l403_no_fire_on_same_unit_forcing;
       Alcotest.test_case "L403 quiet on structural divisor"         `Quick test_l403_no_fire_on_structural_divisor;
       Alcotest.test_case "gh#345 indexed file-backed forcing"       `Quick test_gh345_indexed_file_backed_forcing;
+      Alcotest.test_case "external forcing records what to read"     `Quick test_external_forcing_records_what_to_read;
       Alcotest.test_case "gh#345 table-backed forcing"              `Quick test_gh345_table_backed_forcing;
       Alcotest.test_case "gh#345 table forcing unaccounted dim"     `Quick test_gh345_table_unaccounted_dim_rejected;
       Alcotest.test_case "table forcing: repeated dim is positional" `Quick test_table_forcing_repeated_dim_positional;

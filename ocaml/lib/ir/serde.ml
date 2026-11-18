@@ -4,7 +4,7 @@
     The file [camdlc] writes is an envelope around the model:
 
     {@json[
-      {"ir_version":"0.46","validated_by":"ocaml-compiler-v0.46","model":{"name":"licm","version":"0.3","time_unit":"days","description":null,"compartments":[
+      {"ir_version":"0.47","validated_by":"ocaml-compiler-v0.47","model":{"name":"licm","version":"0.3","time_unit":"days","description":null,"compartments":[
       {"name":"S","kind":"integer"},
       {"name":"I","kind":"integer"},
       {"name":"R","kind":"integer"}
@@ -584,12 +584,25 @@ let time_func_kind_to_json (k : time_func_kind) : Yojson.Safe.t =
       ("breakpoints", arr (List.map expr_to_json p.breakpoints));
       ("values",      arr (List.map expr_to_json p.values));
     ])]
-  | Interpolated i ->
+  | Interpolated { source = Knots k; method_ } ->
     obj [("interpolated", obj [
-      ("times",  arr (List.map expr_to_json i.times));
-      ("values", arr (List.map expr_to_json i.values));
-      ("method", str i.method_);
+      ("times",  arr (List.map expr_to_json k.times));
+      ("values", arr (List.map expr_to_json k.values));
+      ("method", str method_);
     ])]
+  | Interpolated { source = External_series e; method_ } ->
+    let key = match e.key with
+      | None -> []
+      | Some k -> [("key", obj [("column", str k.column); ("level", str k.level)])]
+    in
+    obj [("interpolated", obj ([
+      ("external",    str e.name);
+      ("time_col",    str e.time_col);
+      ("value_col",   str e.value_col);
+    ] @ key @ [
+      ("value_scale", `Float e.value_scale);
+      ("method",      str method_);
+    ]))]
   | Periodic p ->
     obj [("periodic", obj [
       ("period", expr_to_json p.period);
@@ -648,11 +661,28 @@ let time_func_kind_of_json j =
         values      = List.map expr_of_json (as_list (member "values"      v));
       }
     | "interpolated" ->
-      Interpolated {
-        times   = List.map expr_of_json (as_list (member "times"  v));
-        values  = List.map expr_of_json (as_list (member "values" v));
-        method_ = as_string (member "method" v);
-      }
+      let method_ = as_string (member "method" v) in
+      let source = match v with
+        | `Assoc kvs when List.mem_assoc "external" kvs ->
+          let key = match List.assoc_opt "key" kvs with
+            | None | Some `Null -> None
+            | Some k -> Some { column = as_string (member "column" k);
+                               level  = as_string (member "level" k) }
+          in
+          External_series {
+            name        = as_string (member "external" v);
+            time_col    = as_string (member "time_col" v);
+            value_col   = as_string (member "value_col" v);
+            key;
+            value_scale = as_float (member "value_scale" v);
+          }
+        | _ ->
+          Knots {
+            times  = List.map expr_of_json (as_list (member "times"  v));
+            values = List.map expr_of_json (as_list (member "values" v));
+          }
+      in
+      Interpolated { source; method_ }
     | "periodic" ->
       Periodic {
         period = expr_of_json (member "period" v);
@@ -747,11 +777,18 @@ let oob_policy_of_json j =
 let table_to_json (t : table) : Yojson.Safe.t =
   let source_field = match t.source with
     | Inline vs  -> ("values",   arr (List.map expr_to_json vs))
-    | External n -> ("external", str n)
+    | External { name; _ } -> ("external", str name)
+  in
+  let shape_field = match t.source with
+    | Inline _ -> []
+    | External { shape; _ } ->
+      [("shape", arr (List.map (fun a ->
+           obj [("dim", str a.axis_dim); ("levels", `Int a.axis_levels)]) shape))]
   in
   let base = [
     ("name",          str t.name);
     source_field;
+  ] @ shape_field @ [
     ("out_of_bounds", oob_policy_to_json t.out_of_bounds);
   ] in
   let with_cell_kind = match t.cell_kind with
@@ -764,7 +801,10 @@ let table_source_of_json j =
   match j with
   | `Assoc kvs when List.mem_assoc "external" kvs ->
     let name = as_string (List.assoc "external" kvs) in
-    (Ir.External name : Ir.table_source)
+    let shape = List.map (fun a ->
+        { Ir.axis_dim = as_string (member "dim" a); Ir.axis_levels = as_int (member "levels" a) })
+        (as_list (member "shape" j)) in
+    (Ir.External { name; shape } : Ir.table_source)
   | _ ->
     (Ir.Inline (List.map expr_of_json (as_list (member "values" j))) : Ir.table_source)
 

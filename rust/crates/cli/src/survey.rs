@@ -818,7 +818,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, cfg: &crate::survey_config::Reso
             &model_pre, scenario_opt.as_deref(), &fixed_cli)?;
         let fixed_files: Vec<std::path::PathBuf> = Vec::new();
         let fit_toml_estimate: IndexSet<String> = config.estimate.keys().cloned().collect();
-        let table_files: HashMap<String, std::path::PathBuf> = HashMap::new();
+        let no_external = crate::external_inputs::ExternalBindings::none();
 
         // gh#561: a survey evaluates the likelihood at grid points, so its
         // window is the observation times — the model horizon is never read.
@@ -844,7 +844,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, cfg: &crate::survey_config::Reso
                 fixed_files: &fixed_files,
                 fit_toml_fixed: &fixed_resolved_indexmap,
                 fit_toml_estimate: &fit_toml_estimate,
-                table_files: &table_files,
+                external: &no_external,
             },
         ).map_err(|e| e.to_string())?;
         let mut resolved = resolved;
@@ -1129,7 +1129,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, cfg: &crate::survey_config::Reso
         let fixed_files: Vec<std::path::PathBuf> = Vec::new();
         let ftf: IndexMap<String, f64> = IndexMap::new();
         let fte: IndexSet<String> = IndexSet::new();
-        let table_files: HashMap<String, std::path::PathBuf> = HashMap::new();
+        let no_external = crate::external_inputs::ExternalBindings::none();
         // gh#561, as in the fit-toml branch above.
         crate::util::refuse_scenario_horizon(
             &model_pre, cfg.scenario.as_deref(), "survey",
@@ -1150,7 +1150,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, cfg: &crate::survey_config::Reso
                 fixed_files: &fixed_files,
                 fit_toml_fixed: &ftf,
                 fit_toml_estimate: &fte,
-                table_files: &table_files,
+                external: &no_external,
             },
         ).map_err(|e| e.to_string())?;
         crate::params_resolver::emit_notices(out, &[&resolved]);

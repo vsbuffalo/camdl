@@ -2425,19 +2425,20 @@ mod gh90_warning_tests {
 
 // ─── Loader helpers ──────────────────────────────────────────────────────────
 
-/// Load a flat Vec<Expr::Const> from a CSV, TSV, or JSON file.
-// --table loads flat row-major float arrays (not long format).
-// Long format (read_long) is resolved at compile time by the OCaml frontend.
-// External tables supplied at runtime must match the flat order used at compile time.
-pub fn load_table_file(path: &str) -> Result<Vec<ir::expr::Expr>, String> {
+/// Parse an external table file's `content`, read from `path`, into its
+/// cells: a flat row-major list of `Expr::Const`. The format follows the
+/// extension: a JSON array (of numbers, or of arrays of numbers), otherwise
+/// CSV (`,`) or TSV (`.tsv`) numbers with blank and `#` lines skipped and no
+/// header. Long format (`read_long`) is resolved at compile time by the
+/// compiler, never here; the cell order must be the one the compiler uses for
+/// an inline table (the last index varies fastest).
+pub fn parse_table_text(content: &str, path: &std::path::Path) -> Result<Vec<ir::expr::Expr>, String> {
     use ir::expr::Expr;
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("{}: {}", path, e))?;
-    let ext = std::path::Path::new(path)
-        .extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let path = path.display();
 
     if ext == "json" {
-        let v: serde_json::Value = serde_json::from_str(&content)
+        let v: serde_json::Value = serde_json::from_str(content)
             .map_err(|e| format!("JSON parse error in {}: {}", path, e))?;
         let mut out = Vec::new();
         match &v {
@@ -3735,8 +3736,8 @@ pub fn resolve_run_parameters_typed(
     // `model.parameters[i].value` on the simulate/lineage path.
     let fixed_files: Vec<std::path::PathBuf> = run.params_files.iter()
         .map(std::path::PathBuf::from).collect();
-    let table_files: std::collections::HashMap<String, std::path::PathBuf> = run.table_files.iter()
-        .map(|(k, v)| (k.clone(), std::path::PathBuf::from(v))).collect();
+    let external = crate::external_inputs::ExternalBindings::from_cli(
+        run.table_files.iter().map(|(k, v)| (k.clone(), std::path::PathBuf::from(v))));
     let fte: indexmap::IndexSet<String> = indexmap::IndexSet::new();
 
     // The cell's scenario on top of the replayed fit's selection (a no-op
@@ -3766,7 +3767,7 @@ pub fn resolve_run_parameters_typed(
             fixed_files: &fixed_files,
             fit_toml_fixed: &run.fit_fixed,
             fit_toml_estimate: &fte,
-            table_files: &table_files,
+            external: &external,
         }
     )
     .map(|mut resolved| {

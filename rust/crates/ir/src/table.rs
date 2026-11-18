@@ -19,8 +19,20 @@ pub enum OobPolicy {
 pub enum TableSource {
     /// `{"values": [...]}` — compile-time values
     Inline { values: Vec<Expr> },
-    /// `{"external": "name"}` — runtime injection
-    External { external: String },
+    /// `{"external": "name", "shape": [{"dim": "patch", "levels": 3}]}` —
+    /// values supplied when the model is run (`--table name=FILE`, or
+    /// `[data.tables]` in a fit config). `shape` is the declaration's axes in
+    /// order: the bound file must hold exactly one number per cell, the
+    /// product of the levels (`cli::external_inputs::bind`).
+    External { external: String, shape: Vec<TableAxis> },
+}
+
+/// One axis of a table declaration: its dimension and that dimension's
+/// number of levels.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TableAxis {
+    pub dim:    String,
+    pub levels: usize,
 }
 
 impl TableSource {
@@ -33,7 +45,7 @@ impl TableSource {
 
     pub fn external_name(&self) -> Option<&str> {
         match self {
-            TableSource::External { external } => Some(external),
+            TableSource::External { external, .. } => Some(external),
             TableSource::Inline { .. } => None,
         }
     }

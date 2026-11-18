@@ -19,7 +19,6 @@ use sim::{
         MultiStreamObsModel,
     },
 };
-use std::collections::HashMap;
 
 /// What to pass when `pfilter` has no observation data bound. Named once so the
 /// anchored refusal and the ordinary missing-data refusal cannot drift apart.
@@ -366,7 +365,7 @@ fn run_pfilter(
     use indexmap::{IndexMap, IndexSet};
 
     let crate::pfilter_config::ParamFlags { param: fixed_cli, params: fixed_files, table } = param_flags;
-    let table_files: HashMap<String, std::path::PathBuf> = table.into_iter().collect();
+    let external = crate::external_inputs::ExternalBindings::from_cli(table);
     let ftf: IndexMap<String, f64> = IndexMap::new();
     let fte: IndexSet<String> = IndexSet::new();
 
@@ -383,7 +382,7 @@ fn run_pfilter(
         fixed_files: &fixed_files,
         fit_toml_fixed: &ftf,
         fit_toml_estimate: &fte,
-        table_files: &table_files,
+        external: &external,
     }).unwrap_or_else(|e| {
         out.fail(format!("error: {}", e.with_flags(crate::params_resolver::FlagStyle::Params)));
     });

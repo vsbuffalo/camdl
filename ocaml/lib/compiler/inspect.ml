@@ -1249,8 +1249,9 @@ let run_tables ppf (model : Ir.model) ctx (pattern : string option) =
     Fmt.pf ppf "@\n";
     (* ── Values ── *)
     (match t.source with
-     | Ir.External name ->
-       Fmt.pf ppf "  (values for '%s' supplied via --table at simulate time)@\n" name
+     | Ir.External { name; _ } ->
+       Fmt.pf ppf "  (values for '%s' supplied when the model is run: --table %s=FILE, \
+                   or [data.tables] in a fit config)@\n" name name
      | Ir.Inline vals ->
        match dim_levels with
        | [] ->
@@ -1329,7 +1330,10 @@ let run_forcings ppf (model : Ir.model) (pattern : string option) =
   let kind_label (tf : Ir.time_function) = match tf.kind with
     | Ir.Sinusoidal _ -> "sinusoidal"
     | Ir.Piecewise p  -> Printf.sprintf "piecewise (%d steps)" (List.length p.values)
-    | Ir.Interpolated i -> Printf.sprintf "interpolated (%d knots)" (List.length i.times)
+    | Ir.Interpolated { source = Ir.Knots k; _ } ->
+      Printf.sprintf "interpolated (%d knots)" (List.length k.times)
+    | Ir.Interpolated { source = Ir.External_series e; _ } ->
+      Printf.sprintf "interpolated (external(\"%s\"), read when run)" e.name
     | Ir.Periodic p   -> Printf.sprintf "periodic (%d bins)" (List.length p.values)
     | Ir.Fourier f    -> Printf.sprintf "fourier (%d harmonics)" (List.length f.harmonics)
     | Ir.PeriodicSpline s -> Printf.sprintf "periodic_spline (n_basis %d, degree %d%s)"
