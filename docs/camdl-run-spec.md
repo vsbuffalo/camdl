@@ -743,22 +743,26 @@ resolved to the values used: `--mode`, `--horizon`, `--n-draws`, `--seed`,
 `--stream`, `--scenario`/`--enable`/`--disable`, `--sweep`, `--by-chain`, the
 chains `--exclude-chains`/`--chains` drop from the fit's cloud (so the two
 spellings of one selection are one key), the SHA-256 of a `--quantities` file,
-and `--allow-forcing-extrapolation`. Two predictions that differ in the run, the
-engine or any of those options therefore never share a directory. The key does
-not cover the observation data: `fit predict` reads the fit's data files from
-their paths as they are now, and the fit's recorded data digests are used only
-to name a file that has gone missing, so a data file changed in place under the
-same path is not detected and its prediction is written to the same directory.
-`predictive.json`, `observed.json` and `forecast.json` record the key under
-`address_key` and the options under `options`; `run_id12` is a label for a
-person listing the folder. `fit table --quantity` reads the address its own
-free-forward derivation writes. Inside the directory, `--exclude-chains` and
-`--quantities` also name the files (`predictive-excl3/`, `quantities-<key8>/`),
-so a chain-subset or other-vocabulary table says so in its name. A forecast's
-files carry no such suffix (D86): `forecast.json`, `forecast-samples.tsv`,
-`forecast/` and `report.json` keep their names, the directory alone is keyed by
-the selection, and `forecast.json` states `options.excluded_chains` (`[]` for
-the full cloud).
+and `--allow-forcing-extrapolation`, and, for a forecast with a design-reading
+stream (D81), `options.design`: the design mode (`prospective` or `ex_post`) and
+the SHA-256 of every target's design values. Two predictions that differ in the
+run, the engine or any of those options therefore never share a directory. The
+held-out outcomes are not in the key: they change no prediction (D79), and a
+forecast whose held-out values change writes the same tables to the same
+directory. The key does not cover the observation data: `fit predict` reads the
+fit's data files from their paths as they are now, and the fit's recorded data
+digests are used only to name a file that has gone missing, so a data file
+changed in place under the same path is not detected and its prediction is
+written to the same directory. `predictive.json`, `observed.json` and
+`forecast.json` record the key under `address_key` and the options under
+`options`; `run_id12` is a label for a person listing the folder.
+`fit table --quantity` reads the address its own free-forward derivation writes.
+Inside the directory, `--exclude-chains` and `--quantities` also name the files
+(`predictive-excl3/`, `quantities-<key8>/`), so a chain-subset or
+other-vocabulary table says so in its name. A forecast's files carry no such
+suffix (D86): `forecast.json`, `forecast-samples.tsv`, `forecast/` and
+`report.json` keep their names, the directory alone is keyed by the selection,
+and `forecast.json` states `options.excluded_chains` (`[]` for the full cloud).
 
 The free-forward replay projects each row off its own recorded trajectories, so
 it records a snapshot at every time a row reads — each data time and each
@@ -959,7 +963,7 @@ is a failure. The exit status follows:
 | an eligible stream fails while it is produced (e.g. refused a forecast) | 1    |
 
 The manifest — `predictive.json` for the free-forward and one-step modes,
-`forecast.json` (`camdl.forecast/v3`) for a forecast — lists `produced` (leaf
+`forecast.json` (`camdl.forecast/v4`) for a forecast — lists `produced` (leaf
 names), `skipped` (`{"stream", "reason"}`) and `failed`
 (`{"stream", "reason"}`), so a consumer reads completeness off the artifact
 rather than the exit status. A forecast also skips an eligible stream none of
@@ -980,8 +984,25 @@ and fails it instead when `--stream` named it.
   bands and means in `forecast/` use every particle of every draw.
 - `held_out`: per stream and per file (`training` for the rows after the
   training prefix under `holdout_after`, `holdout` for a `[data.holdout]` file),
-  the number of held-out rows and their row digest. They only name the targets
-  they correspond to; nothing filters them.
+  the number of held-out rows and their row digest. They select which targets
+  have an observed value (D80); nothing filters them. The filter carries each
+  such value as a held-out cell (D79), which its scoring likelihood evaluates
+  per particle at the target's end and which enters no weight, resampling or
+  state, so the predictions do not depend on it; those log-likelihoods are not
+  written yet (forecast scoring, Stage 6).
+- `targets`: each target's `stream`, `start` and `end`, `horizon` (its position
+  among its stream's targets), `lead` (its end minus the origin), the `held_out`
+  row it corresponds to (`file`, `position`), and `design`, the design values
+  the prediction read (absent for a stream that reads none). `target_sources`
+  names each stream's source: `declared_tiling`, `emit_schedule`, or
+  `held_out_rows` for a window-column stream with no `emit_schedule`, whose
+  horizons count its held-out rows and are not comparable with a tiled stream's;
+  compare such targets by `lead`.
+- `design` (D81): `null` when no target reads a design column; otherwise `mode`
+  (`prospective`, from `--design` files; `ex_post`, from the held-out rows'
+  realised values under `--realised-design`), `label` (an ex-post forecast is
+  labelled a conditional score using realised future design, not an
+  unconditional forecast), `streams` and `files`.
 - `chain_selection`, under a chain selection: the block `predictive.json`
   carries.
 - `arms` (D50): the fitted model (`"baseline": true`), then each `--scenario`
@@ -7588,6 +7609,10 @@ camdl fit predict [FIT]
   --mode free_forward|one_step|forecast
   --horizon DURATION          the forecast's reach from the end of the training rows
                               (`4 weeks`, `28 days`); implies --mode forecast
+  --design SOURCE=FILE        forecast: a design-reading stream's design values per
+                              target, from FILE (prospective; repeatable)
+  --realised-design           forecast: design values from the held-out rows (a
+                              conditional score using realised future design)
   --n-draws N                 posterior subsample cap for both horizons (default 200)
   --particles N               particles per draw in the one-step and forecast filters
                               (default: the PMMH fit's count, else 500)
