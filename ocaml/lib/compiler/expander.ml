@@ -6832,20 +6832,51 @@ let check_calendar_cadence ctx ~loc ~field ~hint e =
         ~hint ()
     | _ -> ()
 
-(* A compile-time time value folded to model units: a constant expression, or
-   one whose resolved IR is closed arithmetic over constants and unit literals. *)
-let rec fold_closed_ir (ir : Ir.expr) : float option =
+(* The dimension of closed IR arithmetic, read from its unit literals: none
+   ([No_units], only bare numbers), one ([Units (p, t)], exponents of population
+   and time), or two that disagree in a sum ([Mixed_units], which no reading
+   rescues). *)
+type closed_dim = No_units | Units of (int * int) | Mixed_units
+
+(* The value and dimension of [ir] when it is closed arithmetic over constants
+   and unit literals (`origin + 2 'weeks` resolves to one); [None] otherwise.
+   The one compile-time folder: [fold_closed_ir] is its value, and
+   [closed_time_value] its value when the dimension is a time. *)
+let rec fold_closed_ir_dim (ir : Ir.expr) : (float * closed_dim) option =
   match ir with
-  | Ir.Const f | Ir.UnitLiteral { value = f; _ } -> Some f
-  | Ir.UnOp { op = Ir.Neg; arg } -> Option.map Float.neg (fold_closed_ir arg)
+  | Ir.Const f -> Some (f, No_units)
+  | Ir.UnitLiteral { value; dim_p; dim_t; _ } -> Some (value, Units (dim_p, dim_t))
+  | Ir.UnOp { op = Ir.Neg; arg } ->
+    Option.map (fun (v, d) -> (Float.neg v, d)) (fold_closed_ir_dim arg)
   | Ir.BinOp { op; left; right } ->
-    (match fold_closed_ir left, fold_closed_ir right, op with
-     | Some a, Some b, Ir.Add -> Some (a +. b)
-     | Some a, Some b, Ir.Sub -> Some (a -. b)
-     | Some a, Some b, Ir.Mul -> Some (a *. b)
-     | Some a, Some b, Ir.Div -> Some (a /. b)
+    (match fold_closed_ir_dim left, fold_closed_ir_dim right with
+     | Some (a, da), Some (b, db) ->
+       let sum = match da, db with
+         | Mixed_units, _ | _, Mixed_units -> Mixed_units
+         | Units x, Units y when x <> y -> Mixed_units
+         | (Units _ as d), _ | No_units, d -> d
+       in
+       let prod f = match da, db with
+         | Mixed_units, _ | _, Mixed_units -> Mixed_units
+         | No_units, No_units -> No_units
+         | _ ->
+           let z = function Units d -> d | No_units | Mixed_units -> (0, 0) in
+           Units (f (z da) (z db))
+       in
+       (match op with
+        | Ir.Add -> Some (a +. b, sum)
+        | Ir.Sub -> Some (a -. b, sum)
+        | Ir.Mul -> Some (a *. b, prod (fun (p1, t1) (p2, t2) -> (p1 + p2, t1 + t2)))
+        | Ir.Div -> Some (a /. b, prod (fun (p1, t1) (p2, t2) -> (p1 - p2, t1 - t2)))
+        | _ -> None)
      | _ -> None)
   | _ -> None
+
+(* A compile-time time value folded to model units: a constant expression, or
+   one whose resolved IR is closed arithmetic over constants and unit literals.
+   Whatever its dimension; a caller that needs a time checks it. *)
+let fold_closed_ir (ir : Ir.expr) : float option =
+  Option.map fst (fold_closed_ir_dim ir)
 
 (* The value of a compile-time time, [ir] closed over constants and unit
    literals, when its unit literals give it the dimension of a time (or it
@@ -6855,38 +6886,9 @@ let rec fold_closed_ir (ir : Ir.expr) : float option =
    expression and the dimension checker reports it (E315) at its source,
    as it does for a parameter-dependent entry (gh#1200). *)
 let closed_time_value (ir : Ir.expr) : float option =
-  let rec go (ir : Ir.expr) : (float * (int * int) option) option =
-    match ir with
-    | Ir.Const f -> Some (f, None)
-    | Ir.UnitLiteral { value; dim_p; dim_t; _ } -> Some (value, Some (dim_p, dim_t))
-    | Ir.UnOp { op = Ir.Neg; arg } ->
-      Option.map (fun (v, d) -> (Float.neg v, d)) (go arg)
-    | Ir.BinOp { op; left; right } ->
-      (match go left, go right with
-       | Some (a, da), Some (b, db) ->
-         let sum v = match da, db with
-           | Some x, Some y when x <> y -> None
-           | Some x, _ | None, Some x -> Some (v, Some x)
-           | None, None -> Some (v, None)
-         in
-         let prod v f = match da, db with
-           | None, None -> Some (v, None)
-           | _ ->
-             let z = Option.value ~default:(0, 0) in
-             Some (v, Some (f (z da) (z db)))
-         in
-         (match op with
-          | Ir.Add -> sum (a +. b)
-          | Ir.Sub -> sum (a -. b)
-          | Ir.Mul -> prod (a *. b) (fun (p1, t1) (p2, t2) -> (p1 + p2, t1 + t2))
-          | Ir.Div -> prod (a /. b) (fun (p1, t1) (p2, t2) -> (p1 - p2, t1 - t2))
-          | _ -> None)
-       | _ -> None)
-    | _ -> None
-  in
-  match go ir with
-  | Some (v, (None | Some (0, 1))) -> Some v
-  | _ -> None
+  match fold_closed_ir_dim ir with
+  | Some (v, (No_units | Units (0, 1))) -> Some v
+  | Some (_, (Units _ | Mixed_units)) | None -> None
 
 (* ── Lower: the lowering functions of each time-position kind ───────────── *)
 
