@@ -217,7 +217,7 @@ fn simulate_unchanged_on_standalone_params_file() {
 
 #[test]
 fn simulate_from_mle_params_writes_a_valid_sim_record() {
-    // simulate `--params <mle.toml> --cas` must run and write one valid sim
+    // simulate `--params <mle.toml>` must run and write one valid sim
     // RunRecord. (The sim → fit *lineage* edge — recording which fit produced
     // the params as a `dep` ArtifactRef on the fit's run_id — lands in M3,
     // when fits migrate to RunRecord. In M2 the consumed params are captured
@@ -251,7 +251,7 @@ n_particles = 500
     let status = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_pure_death().to_string_lossy(),
                "--params", &mle.to_string_lossy(),
-               "--seed", "1", "--cas",
+               "--seed", "1",
                "--output-dir", &output.to_string_lossy(),
                "-o", &tmp.path().join("t.tsv").to_string_lossy()])
         .status().expect("spawn");
@@ -279,8 +279,8 @@ n_particles = 500
 // each code path, which is useful as a UX regression guard but not
 // sufficient: a bug where the info log says "auto-matched to
 // chain_binomial" but the code silently proceeds with Gillespie would
-// pass those tests. The tests below fix that by running `simulate
-// --cas`, reading the resulting run.json, and asserting the
+// pass those tests. The tests below fix that by running `simulate`,
+// reading the resulting run.json, and asserting the
 // `kind.backend` (+ `kind.dt`) fields match what we expect under the
 // three-way matching rule.
 //
@@ -310,7 +310,7 @@ fn read_sim_config(output_root: &Path) -> (String, String) {
     (backend.to_string(), dt.to_string())
 }
 
-/// Run `simulate --cas --params <mle> [extra args...]`, return the
+/// Run `simulate --params <mle> [extra args...]`, return the
 /// output root so the caller can inspect run.json.
 fn run_simulate_cas(
     bin: &Path, tmp: &Path, mle: &Path, extra: &[&str],
@@ -319,14 +319,14 @@ fn run_simulate_cas(
     let mut args: Vec<String> = vec![
         "simulate".into(), golden_pure_death().to_string_lossy().to_string(),
         "--params".into(), mle.to_string_lossy().to_string(),
-        "--seed".into(), "1".into(), "--cas".into(),
+        "--seed".into(), "1".into(),
         "--output-dir".into(), output.to_string_lossy().to_string(),
         "-o".into(), tmp.join("t.tsv").to_string_lossy().to_string(),
     ];
     for a in extra { args.push(a.to_string()); }
     let status = Command::new(bin).env_remove("CLICOLOR_FORCE").args(&args)
         .status().expect("spawn");
-    assert!(status.success(), "simulate --cas should succeed");
+    assert!(status.success(), "simulate should succeed");
     output
 }
 

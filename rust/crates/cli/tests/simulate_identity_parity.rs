@@ -107,7 +107,7 @@ fn integrator_override_splits_the_cas_leaves() {
             .args(["--params"]).arg(&params)
             .args(["--backend", "ode", "--dt", "1", "--seed", "1",
                    "--integrator", m,
-                   "--cas", "--output-dir"]).arg(&out)
+                   "--output-dir"]).arg(&out)
             .arg("-o").arg(tmp.path().join(format!("traj_{m}.tsv")))
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .output().unwrap();
@@ -147,7 +147,7 @@ fn force_replaces_the_stored_leaf() {
         cmd.args(["simulate"]).arg(&ir)
             .args(["--params"]).arg(&params)
             .args(["--backend", "ode", "--dt", "1", "--seed", "1",
-                   "--cas", "--output-dir"]).arg(&out)
+                   "--output-dir"]).arg(&out)
             .arg("-o").arg(tmp.path().join("traj.tsv"))
             .env("CAMDL_SKIP_VERSION_CHECK", "1");
         for a in extra { cmd.arg(a); }
@@ -226,7 +226,7 @@ fn param_vec_values_split_the_cas_leaves() {
             .args(["--params"]).arg(&params)
             .args(["--seed", "1",
                    "--param-vec"]).arg(format!("beta={}", vec_file.display()))
-            .args(["--cas", "--output-dir"]).arg(&out)
+            .args(["--output-dir"]).arg(&out)
             .arg("-o").arg(tmp.path().join(format!("traj_{tag}.tsv")))
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .output().unwrap();

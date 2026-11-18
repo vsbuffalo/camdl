@@ -743,7 +743,6 @@ fn presentation_and_provenance_inputs_leave_the_leaf_unaffected() {
         ("--obs-only", vec!["--obs-only".into(), at("obs_only.tsv")]),
         ("--obs-only-dir", vec!["--obs-only-dir".into(), at("obs_only_dir")]),
         ("--label", vec!["--label".into(), "a label".into()]),
-        ("--cas", vec!["--cas".into()]),
         ("--reactive-log", vec!["--reactive-log".into(), at("reactive.tsv")]),
         ("--quantities-out", vec!["--quantities-out".into(), at("q")]),
         ("--verbosity", vec!["--verbosity".into(), "debug".into()]),

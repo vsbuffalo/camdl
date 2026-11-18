@@ -2176,8 +2176,7 @@ error: --dates requires the model to declare an `origin` (e.g. `origin = date("2
 Every run writes a leaf into the content-addressed store under `--output-dir`
 (default `./results`, env `CAMDL_OUTPUT_DIR`) and reports the leaf path plus the
 `camdl cat` that reads it back. Both lines go to **stderr**, so a `--stdout`
-pipeline stays clean. A `--cas` flag is accepted and ignored — content
-addressing is not opt-in.
+pipeline stays clean. Storing is not opt-in.
 
 ```bash
 # Default: write the leaf, print where it went.
@@ -7489,7 +7488,6 @@ Store
   --force                     re-run even if cached output exists
   --label TEXT                display label, ^[a-zA-Z0-9 ,._-]{1,64}$
   --dry-run                   print the resolved run plan without simulating
-  --cas                       no-op, accepted for compatibility (CAS is the default)
 ```
 
 There is no `--resume` flag: a multi-cell run reads back the cells the store
