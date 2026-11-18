@@ -626,10 +626,13 @@ fn fit_method_levels(ctx: &FitMethodCtx, target_length: u64) -> Result<Vec<Level
 /// (gh#1015). A base whose rows differ is a different base, since the
 /// resumed leaf holds those rows.
 ///
-/// Not the base's `fit_state.toml`: a resume does not read it, and it records
-/// the time the base finished, so its digest changed on every run of an
-/// otherwise identical base, and with it the resumed leaf's `run_id`. Two
-/// runs of one fixed-seed base write the same chain states, so they now
+/// Keyed on the carried files rather than the whole base: they are what the
+/// resumed computation continues from and copies. PGAS also reads the base's
+/// `fit_state.toml` (its best draw), but that is a function of the carried
+/// traces, so it adds nothing to the key; and keying on the consumed files,
+/// not on every byte of the base, keeps a difference in an unread record (a
+/// diagnostic's last digit on another machine) from re-keying the resumed
+/// leaf. Two runs of one fixed-seed base write the same chain states, so they
 /// address one resumed leaf, wherever the store lives.
 ///
 /// `Ok(None)` when the base has no `chain_*/resume_state.bin`: the resume
@@ -716,11 +719,12 @@ pub fn cas_leaf_file_dep(leaf: &Path, artifact: &str) -> Result<Option<ArtifactR
 /// that file the consuming fit reads as an input.
 ///
 /// The rest of `fit_state.toml` is a record of how the source run went: its
-/// finish `timestamp` and `camdl_version`, per-chain log-likelihoods,
-/// convergence diagnostics. None of it changes the starting point, so none of
-/// it may key the consumer. Digesting the whole file did: re-running the source
-/// with `--force` rewrote its timestamp, and every fit started from it
-/// re-keyed and re-ran from identical starts. (The convergence gate reads those
+/// `camdl_version`, per-chain log-likelihoods, convergence diagnostics. None
+/// of it changes the starting point, so none of it may key the consumer. The
+/// file no longer records a time, so a refit with identical inputs writes the
+/// same bytes; the key stays on the consumed values all the same, so a
+/// difference in what the consumer does not read (a diagnostic's last digit on
+/// another machine) cannot re-key it. (The convergence gate reads those
 /// diagnostics, but it decides only whether the consumer runs at all, never
 /// what it computes.)
 ///
