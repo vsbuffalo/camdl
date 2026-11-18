@@ -7,7 +7,9 @@
 use std::collections::HashMap;
 
 use ir::expr::{BinOp, Expr, ProjectedExpr, UnOp};
-use ir::intervention::{Action, Intervention, InterventionSchedule, RecurringSchedule, SetAction};
+use ir::intervention::{
+    Action, AddAction, FractionTransfer, Intervention, InterventionSchedule, RecurringSchedule, SetAction,
+};
 use ir::model::{
     BalanceSpec, Binding, Compartment, CompartmentKind, Dimension, InitialConditions, Integrator,
     Model, ModelStructure, OutputConfig, OutputSchedule, Preset, RegularOutputSchedule,
@@ -1320,9 +1322,22 @@ fn each_gradient_map_moves_the_gradient_digest_and_not_the_model_hash() {
             Likelihood::Poisson(p) => p.rate.proj_grad = Some(g(Expr::const_(1.0))),
             other => panic!("expected Poisson, got {other:?}"),
         })),
+        ("a set action's value_grad", Box::new(|m| match &mut m.interventions[0].actions[0] {
+            Action::Set(s) => { s.value_grad.insert("beta".into(), g(Expr::const_(1.0))); }
+            other => panic!("expected Set, got {other:?}"),
+        })),
+        ("an add action's count_grad", Box::new(|m| match &mut m.interventions[0].actions[0] {
+            Action::Add(a) => { a.count_grad.insert("beta".into(), g(Expr::const_(1.0))); }
+            other => panic!("expected Add, got {other:?}"),
+        })),
+        ("a fraction transfer's fraction_grad", Box::new(|m| match &mut m.interventions[0].actions[0] {
+            Action::FractionTransfer(f) => { f.fraction_grad.insert("beta".into(), g(Expr::const_(1.0))); }
+            other => panic!("expected FractionTransfer, got {other:?}"),
+        })),
     ];
-    // The sigma_sq case changes the draw method too; its base is the same
-    // draw method with no gradient.
+    // The sigma_sq case changes the draw method too, and the add and fraction
+    // transfer cases need that action; each base is the same model with an
+    // empty gradient.
     let base_for = |what: &str| {
         let mut m = representative_model();
         if what == "sigma_sq_grad" {
@@ -1330,6 +1345,21 @@ fn each_gradient_map_moves_the_gradient_digest_and_not_the_model_hash() {
                 sigma_sq: Expr::param("sigma_se"),
                 sigma_sq_grad: HashMap::new(),
             };
+        }
+        if what == "an add action's count_grad" {
+            m.interventions[0].actions[0] = Action::Add(AddAction {
+                compartment: "I".into(),
+                count: Expr::param("beta"),
+                count_grad: Default::default(),
+            });
+        }
+        if what == "a fraction transfer's fraction_grad" {
+            m.interventions[0].actions[0] = Action::FractionTransfer(FractionTransfer {
+                src: "S".into(),
+                dst: "I".into(),
+                fraction: Expr::param("beta"),
+                fraction_grad: Default::default(),
+            });
         }
         m
     };
