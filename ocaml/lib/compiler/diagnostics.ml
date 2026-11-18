@@ -28,10 +28,10 @@
     own collection with {!error}, {!warning} and {!info} as it goes; the later
     passes build values with {!mk_error} and its siblings and return them, and
     the driver adds them. {!render} is the one place they are written out: to
-    standard error, sorted by file, line, code and message, keeping one of any
-    diagnostics that agree on all four (even if their columns or hints
-    differ), either as text or, when {!json_errors_mode} is set by
-    [--json-errors], as one JSON array. Rendering never raises or exits; what
+    standard error, sorted by position, code and message, keeping one copy of
+    a diagnostic emitted more than once, either as text or, when
+    {!json_errors_mode} is set by [--json-errors], as one JSON array. The two
+    show the same fields. Rendering never raises or exits; what
     happens next is the caller's decision. *)
 
 (* ── Types ─────────────────────────────────────────────────────────────────── *)
@@ -61,9 +61,8 @@ type loc = {
 }
 
 (** A change that resolves a diagnostic, written so a program can apply it:
-    replace the source text spanned by [fix_loc] with [replacement]. It
-    appears in the JSON output only; the terminal rendering shows the hint
-    instead. *)
+    replace the source text spanned by [fix_loc] with [replacement]. The
+    terminal rendering shows it as a [= fix:] line after the hint. *)
 type fix = {
   fix_loc     : loc;
       (** The text to replace. *)
@@ -98,7 +97,7 @@ type diagnostic = {
       (** Other places that bear on the problem, each with a label, such as
           the earlier declaration a duplicate clashes with. The terminal
           rendering shows the first three and counts the rest; the JSON
-          output leaves them out. *)
+          output lists them all. *)
   fixes    : fix list;
       (** Machine-applicable fixes. The [mk_] constructors and {!error}
           accept them; {!warning} and {!info} do not. *)
@@ -201,6 +200,19 @@ let render_one ppf cache (d : diagnostic) =
    | Some s ->
      Term_style.dim_style Fmt.string ppf "  = hint: ";
      Fmt.pf ppf "%s@\n" s);
+  (* Each machine-applicable fix, so the text shows what the JSON carries. *)
+  List.iter (fun f ->
+    Term_style.dim_style Fmt.string ppf "  = fix: ";
+    (if f.replacement = "" then Fmt.pf ppf "delete the text"
+     else Fmt.pf ppf "replace with `%s`" f.replacement);
+    (if f.fix_loc.line > 0 then
+       Fmt.pf ppf " at %s"
+         (if f.fix_loc.file = "" then
+            Printf.sprintf "line %d:%d" f.fix_loc.line f.fix_loc.col
+          else
+            Printf.sprintf "%s:%d:%d" f.fix_loc.file f.fix_loc.line f.fix_loc.col));
+    Fmt.pf ppf "@\n"
+  ) d.fixes;
   let related =
     if List.length d.related > 3 then
       let n = List.length d.related - 3 in
@@ -249,6 +261,11 @@ let diagnostic_to_json (d : diagnostic) : Yojson.Safe.t =
     | None   -> fields
     | Some s -> fields @ [("hint", `String s)]
   in
+  let fields = match d.related with
+    | [] -> fields
+    | rs -> fields @ [("related", `List (List.map (fun (l, label) ->
+        `Assoc [ ("loc", loc_to_json l); ("label", `String label) ]) rs))]
+  in
   let fields = match d.fixes with
     | [] -> fields
     | fs -> fields @ [("fixes", `List (List.map (fun f ->
@@ -257,27 +274,37 @@ let diagnostic_to_json (d : diagnostic) : Yojson.Safe.t =
   in
   `Assoc fields
 
-(* Total order on diagnostics for stable, source-following output: sort
-   ascending by (file, line, code, message) so JSON and text renderers agree
-   and de-duplicate identically. *)
+(* Total order on diagnostics for stable, source-following output: by file,
+   line, column, end position, code and message, then by the whole record, so
+   that two diagnostics compare equal only when they are identical. Sorting
+   with [List.sort_uniq] under it drops exact duplicates (a check run once per
+   expanded stratum can emit the same diagnostic twice) and nothing else: two
+   uses of one undeclared name on one line are two diagnostics. *)
 let by_source_order (a : diagnostic) (b : diagnostic) : int =
   let c = compare a.loc.file b.loc.file in
   if c <> 0 then c else
   let c = compare a.loc.line b.loc.line in
   if c <> 0 then c else
+  let c = compare a.loc.col b.loc.col in
+  if c <> 0 then c else
+  let c = compare (a.loc.end_line, a.loc.end_col) (b.loc.end_line, b.loc.end_col) in
+  if c <> 0 then c else
   let c = compare a.code b.code in
   if c <> 0 then c else
-  compare a.message b.message
+  let c = compare a.message b.message in
+  if c <> 0 then c else
+  compare a b
+
+(* The diagnostics in the order both renderers show them. *)
+let in_render_order (t : t) : diagnostic list =
+  List.sort_uniq by_source_order t.diags
 
 let to_json_string (t : t) : string =
-  (* Same order and de-duplication as the text renderer. *)
-  let sorted = List.sort_uniq by_source_order t.diags in
-  let arr = `List (List.map diagnostic_to_json sorted) in
+  let arr = `List (List.map diagnostic_to_json (in_render_order t)) in
   Yojson.Safe.to_string arr
 
 let render_all t cache ppf =
-  let sorted = List.sort_uniq by_source_order t.diags in
-  List.iter (render_one ppf cache) sorted
+  List.iter (render_one ppf cache) (in_render_order t)
 
 (** Render every diagnostic in [t] to stderr, honouring [json_errors_mode]:
     a single JSON array under [--json-errors], otherwise the ANSI
