@@ -18,7 +18,8 @@
 //!
 //! A class belongs to a (command, input) pair, not to a flag: a group that
 //! several commands flatten (`ForcingExtrapolationArg`, the global options) is
-//! classified in each command's table: [`SIMULATE`], [`FIT_RUN`], [`PFILTER`].
+//! classified in each command's table: [`SIMULATE`], [`FIT_RUN`], [`PFILTER`],
+//! [`PROFILE`].
 //! `every_<command>_flag_is_classified` (below) checks each against every
 //! argument clap accepts, both ways, and `every_<command>_input_has_a_case`
 //! that every input has a case in `rust/crates/cli/tests/<command>_input_classes.rs`.
@@ -31,7 +32,13 @@
 /// ([`runid::inputs::FitMethodInput`]), whose third is `Seed`: the fit level
 /// holds the model, the data, the problem half of the configuration and the
 /// engine, so an environment variable keyed at a simulation's `Model` level
-/// enters a fit at its `Fit` level.
+/// enters a fit at its `Fit` level. A `pfilter` leaf's levels are `Model`,
+/// `Config`, `Params` and `Seed`. A profile point's are `profile`, `point`,
+/// `method`, `seed` and `start` ([`crate::profile_cas::resolve_profile_point`]);
+/// its inputs key `Profile`, `Method` or `Seed`. The profile level (the base)
+/// holds the model, the data, the problem, the sweep grid and the
+/// engine, so an environment variable keyed at `Model` enters a profile at
+/// its `Profile` level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(not(test), allow(dead_code))] // the levels other than `Model` occur only in the command tables
 pub enum Level {
@@ -43,6 +50,7 @@ pub enum Level {
     Obs,
     Fit,
     Method,
+    Profile,
 }
 
 /// What an input may do to a stored result. See the module table.
@@ -73,7 +81,7 @@ pub enum InputClass {
 #[cfg(test)]
 use InputClass::{Child, Execution, Expands, Keyed, Presentation, Provenance, Removed};
 #[cfg(test)]
-use Level::{Config, Fit, Method, Model, Obs, Params, Scenario, Seed};
+use Level::{Config, Fit, Method, Model, Obs, Params, Profile, Scenario, Seed};
 
 /// `camdl simulate`'s inputs, by clap argument id (the field name), with their
 /// classes: `SimulateArgs`, the groups it flattens and the global options.
@@ -266,6 +274,76 @@ pub const PFILTER: &[(&str, InputClass)] = &[
     ("no_licm", Keyed(Model)),
 ];
 
+/// `camdl profile`'s inputs, by clap argument id (the field name), with their
+/// classes: `ProfileArgs`, the groups it flattens and the global options.
+///
+/// A profile point's levels are `profile` (the base: the resolved model, the
+/// data, the problem, the sweep grid, the engine), `point` (the cell's focal
+/// values), `method` (how a cell is fitted), `seed` and `start`. `--sweep` is
+/// keyed, not `expands`: the grid is folded into every point's base, so a
+/// different grid is a different profile and no cell is shared with it.
+/// `--seeds` expands: each seed is its own level. Each algorithm runs on one
+/// backend, so `--backend` decides only whether the run is refused, as
+/// `--time-format` does; `--allow-nonconverged-source` lifts a refusal. All
+/// three are `execution`.
+#[cfg(test)]
+pub const PROFILE: &[(&str, InputClass)] = &[
+    // ProfileArgs
+    ("model", Keyed(Profile)),
+    ("data", Keyed(Profile)),
+    ("fit", Keyed(Profile)),
+    ("sweep", Keyed(Profile)),
+    ("particles", Keyed(Method)),
+    ("iterations", Keyed(Method)),
+    ("n_starts", Keyed(Method)),
+    ("starts", Keyed(Method)),
+    ("starts_chains", Keyed(Method)),
+    ("allow_nonconverged_source", Execution),
+    ("_removed_init", Removed),
+    ("_removed_posterior", Removed),
+    ("_removed_mle", Removed),
+    ("_removed_params", Removed),
+    ("_removed_pmmh_steps", Removed),
+    ("_removed_pmmh_particles", Removed),
+    ("_removed_pmmh_rho", Removed),
+    ("cooling", Keyed(Method)),
+    ("cooling_target_iters", Keyed(Method)),
+    ("rw_sd", Keyed(Method)),
+    ("output", Presentation),
+    ("format", Presentation),
+    ("seeds", Expands),
+    ("label", Provenance),
+    ("algorithm", Keyed(Method)),
+    ("backend", Execution),
+    // InferenceModelOverrides
+    ("fixed_cli", Keyed(Profile)),
+    ("fixed_files", Keyed(Profile)),
+    ("table", Keyed(Profile)),
+    ("_removed_param", Removed),
+    // ScenarioArgs
+    ("scenario", Keyed(Profile)),
+    ("enable", Keyed(Profile)),
+    ("disable", Keyed(Profile)),
+    // InferenceCore
+    ("dt", Keyed(Method)),
+    ("seed", Keyed(Seed)),
+    ("parallel", Execution),
+    ("allow_degenerate_rates", Keyed(Profile)),
+    ("time_format", Execution),
+    ("pf_max_substeps", Keyed(Method)),
+    ("binomial", Keyed(Method)),
+    // ForcingExtrapolationArg
+    ("allow_forcing_extrapolation", Keyed(Profile)),
+    // StreamSelection
+    ("obs", Keyed(Profile)),
+    // GlobalArgs
+    ("verbosity", Presentation),
+    ("progress", Presentation),
+    ("no_progress", Presentation),
+    ("no_ir_cache", Execution),
+    ("no_licm", Keyed(Profile)),
+];
+
 /// `camdl mre simulate`'s own input. It flattens `SimulateArgs` and writes a
 /// bundle that reproduces that simulate run, so every other input keeps the
 /// class it has in [`SIMULATE`].
@@ -326,6 +404,11 @@ mod tests {
     }
 
     #[test]
+    fn every_profile_flag_is_classified() {
+        assert_covers("camdl profile", clap_args(&["profile"]), PROFILE);
+    }
+
+    #[test]
     fn every_mre_simulate_flag_is_classified() {
         assert_covers("camdl mre simulate", clap_args(&["mre", "simulate"]), SIMULATE.iter().chain(MRE_SIMULATE_OWN));
     }
@@ -353,6 +436,14 @@ mod tests {
         ("path", "the harness needs PATH to start camdl; `execution_env_camdlc` varies the camdlc found on it"),
         ("unlabeled_threshold", "not read by pfilter: `fit table` and `camdl list` read it"),
         ("ci", "not read by pfilter: `fit summary` reads it"),
+    ];
+
+    /// Environment inputs with no `profile` case, each with the reason.
+    const PROFILE_NO_CASE: &[(&str, &str)] = &[
+        ("skip_version_check", "every test run sets it: without it the handshake refuses a test build's camdlc"),
+        ("path", "the harness needs PATH to start camdl; `execution_env_camdlc` varies the camdlc found on it"),
+        ("unlabeled_threshold", "not read by profile: `fit table` and `camdl list` read it"),
+        ("ci", "not read by profile: `fit summary` reads it"),
     ];
 
     fn case_name(class: InputClass, field: &str, env: bool) -> String {
@@ -429,6 +520,12 @@ mod tests {
     #[test]
     fn every_fit_run_input_has_a_case() {
         assert_every_input_has_a_case("fit run", "fit_run_input_classes.rs", FIT_RUN, FIT_RUN_NO_CASE);
+    }
+
+    /// The same for `profile`, in `tests/profile_input_classes.rs`.
+    #[test]
+    fn every_profile_input_has_a_case() {
+        assert_every_input_has_a_case("profile", "profile_input_classes.rs", PROFILE, PROFILE_NO_CASE);
     }
 
     /// The same for `pfilter`, in `tests/pfilter_input_classes.rs`.
