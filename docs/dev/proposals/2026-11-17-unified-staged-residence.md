@@ -125,9 +125,14 @@ progression runs unchanged alongside.
 - **Linear rates simplify, and must.** When the rate is a product in which the
   source residence reference appears exactly once as a factor, and the source
   compartment appears nowhere else in the expression, the stage rate is that
-  product with the factor replaced by `E[a, s]` (`mu * E[a, s]`). This is the
-  same value and is byte-identical to the hand-written per-stage model. All
-  other rates lower to the guarded quotient above.
+  product with the factor replaced by `E[a, s]` (`mu * E[a, s]`). A quotient
+  whose divisor does not mention the source compartment counts as a product
+  (`mu * E[a] / N_ref`). This is the same value and is byte-identical to the
+  hand-written per-stage model. All other rates lower to the guarded quotient
+  above.
+- **Families over compartments.** A transition family bound over the compartment
+  set (`bg[a in age, c in compartments] : c[a] --> @ mu * c[a]`) is a competing
+  exit for each staged member and an ordinary exit for the rest.
 - **Numerical contract.** For linear rates the compiled transitions equal the
   hand-written per-stage model exactly. For other rates the sum of the stage
   rates equals `R` to floating-point tolerance.
@@ -141,7 +146,10 @@ progression runs unchanged alongside.
   flow columns are named like any indexed family, with the stage level last
   (`death_E_pre_s1`).
 - **`stages = 1`.** The source is unstaged and the transition is an ordinary
-  second exit; nothing is rewritten.
+  second exit; nothing is rewritten. The refusals below therefore do not apply
+  at `stages = 1`: an `overdispersed(...)` second exit compiles there and is
+  refused at any larger stage count. This is the one exception to "same text for
+  every stage count", and the diagnostic says so.
 
 Refused, each with its own diagnostic naming the reason:
 
@@ -150,7 +158,9 @@ Refused, each with its own diagnostic naming the reason:
   depend on the stage count.
 - A competing exit that consumes more than one individual of the staged source
   per event (source stoichiometry above 1).
-- A transition with two or more staged sources.
+- A transition with two or more staged sources, or with a staged source beside
+  any other source (`E + S --> ...`): the allocation rule is defined for a
+  single source only.
 - A second `via` on the same source (unchanged, E246, with its message narrowed
   to this case).
 - Any competing exit or residence-reference endpoint on a `hyper_erlang`
