@@ -10,6 +10,14 @@
 
 set -e
 
+# Run the whole hook in one slot of the machine-wide test queue, as `make test`
+# does (scripts/test-slot.sh; docs/dev/testing.md, "Tiered gate"): it runs the
+# full workspace suite. Its own `make test-integration` then shares the slot.
+# CAMDL_TEST_SLOTS=0 runs it unqueued.
+if [ -z "${CAMDL_TEST_SLOT_HELD:-}" ] && [ "${CAMDL_TEST_SLOTS:-3}" != 0 ]; then
+    exec bash scripts/test-slot.sh "${CAMDL_TEST_SLOTS:-3}" bash "$0" "$@"
+fi
+
 # ── OCaml: compile + tests ────────────────────────────────────────────
 echo "pre-push: OCaml build..."
 (cd ocaml && dune build 2>&1) || {
