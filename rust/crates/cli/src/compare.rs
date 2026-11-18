@@ -161,6 +161,9 @@ struct DeriveSettings {
     /// `seed..seed+R`, combined per step by log-mean-exp; the replicate
     /// totals give the Monte-Carlo (filter-noise) SE. 1 = no replication.
     replicates: usize,
+    /// `--allow-forcing-extrapolation`: passed to each `camdl pfilter` child,
+    /// as is a fit's own `[config] allow_forcing_extrapolation`.
+    allow_forcing_extrapolation: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -575,6 +578,7 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
         force_in_sample: a.in_sample,
         draws: a.draws.max(1),
         replicates: a.replicates.max(1),
+        allow_forcing_extrapolation: a.forcing_extrapolation.allow_forcing_extrapolation,
     };
     let metrics_cli: Option<Vec<String>> = a.metrics.as_ref().map(|s|
         s.split(',').map(|t| t.trim().to_string()).collect());
@@ -2800,6 +2804,12 @@ fn derive_prequential(
         }
         if allow_degenerate_rates {
             cmd.arg("--allow-degenerate-rates");
+        }
+        // The fit's own `[config] allow_forcing_extrapolation`, which `fit
+        // run` applied to it, or compare's flag: the child is a separate
+        // process and runs under its own policy (gh#1235).
+        if derive.allow_forcing_extrapolation || config.config.allow_forcing_extrapolation {
+            cmd.arg("--allow-forcing-extrapolation");
         }
         // gh#585 (Stage 3.4): score only past the sealed training boundary,
         // the training extent (D38).

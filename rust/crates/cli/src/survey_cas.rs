@@ -47,7 +47,8 @@ pub struct SurveyCtx<'a> {
     /// The likelihood each point is scored under (`ic_free` from the fit
     /// config). It changes every stored loglik, so it is identity.
     pub objective: crate::fit::config_v2::LikelihoodObjective,
-    /// `--allow-forcing-extrapolation`: the run may hold a forcing's end value
+    /// `--allow-forcing-extrapolation` or the fit config's `[config]
+    /// allow_forcing_extrapolation`: the run may hold a forcing's end value
     /// outside its range (D44), so it is identity.
     pub allow_forcing_extrapolation: bool,
     /// `--allow-degenerate-rates` or the fit config's `[config]

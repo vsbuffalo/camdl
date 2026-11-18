@@ -261,6 +261,75 @@ fn the_override_records_the_forcing_it_held() {
     }
 }
 
+/// `pfilter`, `profile` and `survey` given `--fit` read the config's `[config]
+/// allow_forcing_extrapolation`, which `fit run` applied to the fit: under it
+/// alone each runs past the forcing's range, records what it held, and is the
+/// same computation as under the flag, so the second run adds no run id
+/// (gh#1235).
+#[test]
+fn fit_aware_commands_read_the_configs_override() {
+    let tmp = tempfile::tempdir().unwrap();
+    let m = model(tmp.path(), "linear", &ROWS_TO_50);
+    let toml = fit_toml(tmp.path(), &m, "allow_forcing_extrapolation = true\n");
+    std::fs::write(tmp.path().join("params.toml"), "beta = 0.3\ngamma = 0.1\nrho = 0.6\n").unwrap();
+    let params = tmp.path().join("params.toml");
+    let (m, toml, params) = (m.to_str().unwrap(), toml.to_str().unwrap(), params.to_str().unwrap());
+    let prof = tmp.path().join("prof");
+    let prof = prof.to_str().unwrap();
+    let commands: [(&str, Vec<&str>); 3] = [
+        ("pfilter", vec!["pfilter", m, "--fit", toml, "--params", params, "--particles", "50", "--seed", "1", "--dt", "1"]),
+        ("profile", vec![
+            "profile", m, "--fit", toml, "--sweep", "gamma=0.1,0.2", "--particles", "8", "--iterations", "2",
+            "--n-starts", "1", "--seed", "1", "-o", prof,
+        ]),
+        ("survey", vec!["survey", m, "--fit", toml, "--n-points", "4", "--eval", "simulate", "--seed", "1"]),
+    ];
+    for (name, args) in commands {
+        let before = run_ids(tmp.path());
+        let o = camdl(tmp.path(), &args);
+        let err = stderr(&o);
+        assert!(o.status.success(), "{name}: the config's override lets it run:\n{err}");
+        assert_eq!(warnings(&err), 1, "{name}: one warning for the one forcing:\n{err}");
+        let after = run_ids(tmp.path());
+        assert!(after.len() > before.len(), "{name}: stored a run");
+        let new: Vec<_> = statuses(tmp.path())
+            .into_iter()
+            .filter(|(_, v)| v["run_id"].as_str().is_some_and(|id| !before.contains(id)))
+            .filter(|(_, v)| v["status"] == "completed" && v["kind"] != "profile_invocation")
+            .collect();
+        assert!(!new.is_empty(), "{name}: a completed leaf");
+        for (path, v) in &new {
+            assert_eq!(v["inputs"]["forcing_extrapolation"], held_mult_past_50(), "{name}: {}:\n{v:#}", path.display());
+        }
+        let mut flagged = args.clone();
+        flagged.push("--allow-forcing-extrapolation");
+        let o = camdl(tmp.path(), &flagged);
+        assert!(o.status.success(), "{name}: under the flag too:\n{}", stderr(&o));
+        assert_eq!(run_ids(tmp.path()), after, "{name}: the config's override and the flag are one computation");
+    }
+}
+
+/// `compare` scores a chain-binomial fit with a `camdl pfilter` child at its
+/// posterior draws. A fit made under `[config] allow_forcing_extrapolation`
+/// is scored under it, so the child holds the forcing rather than refusing
+/// it (gh#1235).
+#[test]
+fn compare_scores_a_fit_under_its_configs_override() {
+    let tmp = tempfile::tempdir().unwrap();
+    let m = model(tmp.path(), "linear", &ROWS_TO_50);
+    let o = fit_run(tmp.path(), &m, "allow_forcing_extrapolation = true\n");
+    assert!(o.status.success(), "{}", stderr(&o));
+    let leaf = statuses(&tmp.path().join("results"))
+        .into_iter()
+        .find(|(p, v)| v["kind"] != "fit" && p.to_string_lossy().contains("pgas-"))
+        .map(|(p, _)| p.parent().unwrap().to_string_lossy().into_owned())
+        .expect("the fit's method leaf");
+    let o = camdl(tmp.path(), &["compare", &leaf, &leaf]);
+    let err = stderr(&o);
+    assert!(!err.contains("camdl does not extend a forcing past its range"), "the child must not refuse:\n{err}");
+    assert!(o.status.success(), "{err}");
+}
+
 /// A refused fit does not leave its claim open: the method's `run.json` is
 /// marked `failed`, with the refusal as its failure, and no lock is left
 /// behind, for each method that holds a claim while it runs.

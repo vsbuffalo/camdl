@@ -148,11 +148,6 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // whether each stream is a terminal.
     let out = crate::out::Out::new(false);
     let _eval_stats_guard = crate::util::EvalStatsReportGuard::start();  // gh#audit-H5
-    // The forcing-extrapolation policy this command's evaluations run under
-    // and its store writes record, installed for the rest of the command.
-    let forcing =
-        crate::forcing_extrapolation::ForcingPolicy::new(a.inference.forcing_extrapolation.allow_forcing_extrapolation);
-    let _forcing_route = forcing.install();
     let ir_path = a.model.to_string_lossy().into_owned();
     let n_particles = a.particles;
     let seed = a.inference.seed;
@@ -194,6 +189,17 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         allow_degenerate_rates: a.inference.allow_degenerate_rates
             || fit_problem.as_ref().is_some_and(|p| p.config.allow_degenerate_rates),
     };
+    // A forcing evaluated outside its range holds its end value under
+    // `--allow-forcing-extrapolation` or the `--fit` config's `[config]
+    // allow_forcing_extrapolation`, which `fit run` applied to the fit, and
+    // is refused otherwise. The policy the filter runs under and the leaf's
+    // record names, installed for the rest of the command and keyed in the
+    // leaf below from this value. Nothing above evaluates the model.
+    let forcing = crate::forcing_extrapolation::ForcingPolicy::new(
+        a.inference.forcing_extrapolation.allow_forcing_extrapolation
+            || fit_problem.as_ref().is_some_and(|p| p.config.allow_forcing_extrapolation),
+    );
+    let _forcing_route = forcing.install();
     let objective = fit_problem
         .as_ref()
         .map(|p| p.likelihood_objective())
