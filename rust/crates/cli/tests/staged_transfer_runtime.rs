@@ -246,7 +246,7 @@ fn the_ode_moves_the_same_real_amount_at_any_stage_count() {
 #[test]
 fn the_backends_agree_where_the_real_valued_shares_are_whole() {
     let tmp = tempfile::tempdir().unwrap();
-    let init = "E[s1] = 300  E[s2] = 500  E[s3] = 200";
+    let init = "stage(E, 1) = 300  stage(E, 2) = 500  stage(E, 3) = 200";
     for (name, amount, cells) in [
         ("frac", "fraction = 0.25", [225.0, 375.0, 150.0, 250.0]),
         ("count", "count = 100", [270.0, 450.0, 180.0, 100.0]),
@@ -279,7 +279,7 @@ fn five_people_in_three_stages_at_two_fifths() {
             let tag = format!("worked_{backend}_{block}");
             let run = Run {
                 tag: &tag,
-                src: model(3, 0.0, "E[s1] = 3  E[s2] = 1  E[s3] = 1", &pull_block(block, "fraction = 0.4")),
+                src: model(3, 0.0, "stage(E, 1) = 3  stage(E, 2) = 1  stage(E, 3) = 1", &pull_block(block, "fraction = 0.4")),
                 backend,
                 seed: 1,
                 enable: enabled(block),
@@ -404,7 +404,7 @@ fn two_transfers_out_of_one_staged_compartment_at_one_instant_are_refused() {
     let halves = "events {\n  a : transfer(fraction = 0.5, from = E, to = Q) at [5 'days]\n  \
                   b : transfer(fraction = 0.5, from = E, to = R) at [5 'days]\n}";
     for backend in ["chain_binomial", "gillespie", "ode"] {
-        for (state, init) in [("one_each", "E[s1] = 1  E[s2] = 1"), ("many", "E[s1] = 400  E[s2] = 600")] {
+        for (state, init) in [("one_each", "stage(E, 1) = 1  stage(E, 2) = 1"), ("many", "stage(E, 1) = 400  stage(E, 2) = 600")] {
             let tag = format!("shared_{backend}_{state}");
             let run = Run { tag: &tag, src: model(2, 0.0, init, halves), backend, seed: 1, enable: &[] };
             let o = simulate(tmp.path(), &run);
@@ -423,7 +423,7 @@ fn two_transfers_out_of_one_staged_compartment_at_one_instant_are_refused() {
                  b : transfer(fraction = 0.5, from = E, to = R) at [5 'days]\n}";
     let run = Run {
         tag: "shared_apart",
-        src: model(2, 0.0, "E[s1] = 1  E[s2] = 1", apart),
+        src: model(2, 0.0, "stage(E, 1) = 1  stage(E, 2) = 1", apart),
         backend: "chain_binomial",
         seed: 1,
         enable: &[],

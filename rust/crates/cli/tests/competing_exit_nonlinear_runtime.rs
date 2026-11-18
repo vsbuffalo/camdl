@@ -173,7 +173,7 @@ fn chain_binomial_stage_flows_sum_to_the_flow_of_the_written_rate() {
     let per_person = cmax * k / (k + e);
     let h = STAGES as f64 * SIGMA + per_person;
     let p_treat = (1.0 - (-h).exp()) * per_person / h;
-    let src = model(cmax, k, 0.0, "E[s1] = 15000  E[s2] = 9000  E[s3] = 6000", 1);
+    let src = model(cmax, k, 0.0, "stage(E, 1) = 15000  stage(E, 2) = 9000  stage(E, 3) = 6000", 1);
     let n_seeds = 60;
     let mut totals = Vec::new();
     let mut by_stage = [0.0f64; STAGES];
