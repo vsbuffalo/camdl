@@ -36,7 +36,7 @@
     - no sub-expression made only of literals has a value that is NaN or
       infinite ({!first_non_finite}), in any expression walked for
       references and also in shared bindings, derived projections,
-      overdispersion variances and initial conditions;
+      overdispersion variances, initial conditions and quantities;
     - every initial condition names a compartment, its law suits the
       compartment's kind, no drawn compartment is the balance target, and
       the initial conditions do not read each other in a cycle
@@ -60,6 +60,7 @@ type site =
   | InIntervention of string  (** An intervention or event. *)
   | InBinding     of string   (** A shared binding (a hoisted [let]), by name. *)
   | InInit        of string   (** The initial condition of the named compartment. *)
+  | InQuantity    of string   (** A generated quantity, by name. *)
 
 (** One structural defect of an expanded model. The compiler's code for each
     is given in brackets. *)
@@ -235,6 +236,37 @@ let first_non_finite (e : expr) : (expr * float) option =
   in
   ignore (go e);
   !found
+
+(** A quantity's scalar arithmetic as an {!expr}, for {!first_non_finite}:
+    a number stays a number, and a reference to a parameter or another
+    quantity becomes a non-literal leaf. *)
+let rec scalar_as_expr (e : scalar_expr) : expr =
+  match e with
+  | SConst v -> Const v
+  | SParam p -> Param p
+  | SQRef _ -> Time
+  | SUnOp { op; arg } -> UnOp { op; arg = scalar_as_expr arg }
+  | SBinOp { op; left; right } ->
+    BinOp { op; left = scalar_as_expr left; right = scalar_as_expr right }
+  | SCond { pred; then_; else_ } ->
+    Cond { pred = scalar_as_expr pred; then_ = scalar_as_expr then_;
+           else_ = scalar_as_expr else_ }
+
+(** Every expression a quantity's body holds: the series, the threshold or
+    time of its reduction, or its scalar arithmetic. *)
+let quantity_exprs (q : quantity) : expr list =
+  match q.q_body with
+  | QBDerived s -> [scalar_as_expr s]
+  | QBReduced { source; reduce } ->
+    let src = match source with QSState e -> [e] | QSObservation _ -> [] in
+    let red = match reduce with
+      | Some (RValue (VCountAbove c | VCountBelow c))
+      | Some (RTime (FirstAbove c | FirstBelow c | LastAbove c | LastBelow c)) -> [c]
+      | Some (RValue (VValueAt (ATime t))) -> [t]
+      | Some (RValue (VFinal | VMax | VMin | VMean | VValueAt (AObs _)))
+      | Some (RTime (TimeOfMax | TimeOfMin)) | Some RIntegral | None -> []
+    in
+    src @ red
 
 (** Record an E520 error for the first non-finite literal of [e]. *)
 let check_finite ~site errors e =
@@ -440,6 +472,12 @@ let validate (m : model) : (unit, error list) result =
                                check_expr_r ~site a.add_count
     ) iv.actions
   ) m.interventions;
+
+  (* Quantities: a non-finite literal in a reported summary is the same
+     mistake (E520) as in a rate. *)
+  List.iter (fun (q : quantity) ->
+    List.iter (check_finite ~site:(InQuantity q.q_name) errors) (quantity_exprs q)
+  ) m.quantities;
 
   if !errors = [] then Ok ()
   else Error (List.rev !errors)

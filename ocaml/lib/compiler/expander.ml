@@ -7789,8 +7789,27 @@ let expand_constants ctx : Ir.constant list =
     match let_constant_kind lb with
     | Some pk ->
       check_constant_units ctx lb pk;
+      let v = eval_const_expr ctx lb.lbody in
+      (* gh#1207: a constant whose value is NaN or infinite is the E520
+         mistake [Validate] reports for an expression; a model constant is
+         evaluated here, so it is reported here, at the [let]. *)
+      if not (Float.is_finite v) then
+        Diagnostics.error ctx.diags
+          ~code:"E520" ~loc:(diag_loc_of_ast_ctx ctx lb.lloc)
+          ~message:(Printf.sprintf
+            "in constant '%s', the constant expression `%s` evaluates to %s, \
+             which is not a number a model can use"
+            lb.lname (Time_typing.show_source lb.lbody)
+            (if Float.is_nan v then "NaN" else if v > 0.0 then "infinity"
+             else "-infinity"))
+          ~hint:"this expression is made only of numbers, so its value is fixed \
+                 when the model compiles. A negative number to a fractional power, \
+                 the log of zero, a division by zero and a result too large for a \
+                 float each produce one. Correct the arithmetic, or write the \
+                 finite value you mean"
+          ();
       Some { Ir.c_name  = lb.lname;
-             Ir.c_value = eval_const_expr ctx lb.lbody;
+             Ir.c_value = v;
              Ir.c_kind  = ir_param_kind_of_ast pk; }
     | None -> None
   ) ctx.let_bindings

@@ -439,6 +439,7 @@ let diagnose_validate_error ctx (err : Validate.error) : Diagnostics.diagnostic 
     | Validate.InIntervention n -> interv_loc n
     | Validate.InBinding      b -> Expander.let_loc ctx b
     | Validate.InInit         c -> comp_loc c
+    | Validate.InQuantity     q -> Expander.quantity_loc ctx q
   in
   let (code, message, hint, loc) = match err with
     | DuplicateCompartment s ->
@@ -511,6 +512,7 @@ let diagnose_validate_error ctx (err : Validate.error) : Diagnostics.diagnostic 
         | Validate.InIntervention n -> Printf.sprintf "intervention '%s'" n
         | Validate.InBinding      b -> Printf.sprintf "let '%s'" b
         | Validate.InInit         c -> Printf.sprintf "the initial value of '%s'" c
+        | Validate.InQuantity     q -> Printf.sprintf "quantity '%s'" q
       in
       let value =
         if Float.is_nan v then "NaN"
