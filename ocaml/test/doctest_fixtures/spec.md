@@ -98,3 +98,32 @@ transitions {
   recovery[p in patch] : I[p] --> R[p] @ gamma * I[p]
 }
 ```
+
+## 9. complete model with a syntax error (an unclosed block) → fail (E001)
+
+```camdl
+compartments { S, I, R }
+parameters {
+  beta  : rate
+  gamma : rate
+}
+transitions {
+  infection : S --> I @ beta * S * I
+  recovery  : I --> R @ gamma * I
+```
+
+## 10. fragment whose comment mentions compartments → skip:fragment
+
+```camdl
+# the force of infection, summed over all compartments
+let foi = beta * I / N
+transitions {
+  infection : S --> I @ foi * S
+}
+```
+
+## 11. legend iterating over compartments, not declaring them → skip:parse
+
+```camdl
+[c in compartments]     iterate over integer compartment names
+```

@@ -7122,7 +7122,7 @@ the full per-parameter listing use `camdlc inspect --parameters`.)
 
 The language is built on these composable primitives:
 
-```camdl
+```camdl ignore
 # State
 compartments { NAME, ... }           integer-valued populations
 compartments { NAME : real }         continuous-valued state

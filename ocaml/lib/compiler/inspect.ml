@@ -924,6 +924,8 @@ let run_transition_count ppf (model : Ir.model) ctx (pattern : string option) ~a
       | Some pat ->
         List.length (List.filter (fun (t : Ir.transition) -> glob_match pat t.name) all_expanded)
     in
+    (* A pattern selects the declarations it matches, as in [--transitions]. *)
+    if pattern <> None && matching_n = 0 then () else begin
     (* Header *)
     Term_style.bold (Term_style.transition Fmt.string) ppf base;
     if orig_tr.trindices <> [] then pp_indices ppf orig_tr.trindices;
@@ -977,6 +979,7 @@ let run_transition_count ppf (model : Ir.model) ctx (pattern : string option) ~a
          pat (fmt_number matching_n)
      | None -> ());
     Fmt.pf ppf "@\n"
+    end
   ) ctx.Expander.orig_transitions
 
 (* ── --let NAME ──────────────────────────────────────────────────────────── *)
@@ -1378,7 +1381,7 @@ type inspect_cmd =
   | Parameters                          (** [--parameters]: the parameters grouped by kind, with bounds and priors where declared. *)
   | Transitions of string option        (** [--transitions [PATTERN]]: each transition as written, with the expanded transitions and their rates. *)
   | TransitionRate of string            (** [--transition NAME]: one expanded transition, by its expanded name such as [infection_a], with its stoichiometry, its rate and the [let] definitions the rate uses. *)
-  | TransitionCount of string option    (** [--count]: how many expanded transitions each declaration yields, before and after its [where] filter. The command line never sets the pattern: it would come from [--transitions PATTERN], but [--transitions] takes precedence over [--count], and [--transition NAME] does not set it, so the report always covers every transition. *)
+  | TransitionCount of string option    (** [--count]: how many expanded transitions each declaration yields, before and after its [where] filter. With a pattern ([--count] with [--transitions PATTERN] or [--transition NAME]), only the declarations with a matching expanded transition, and how many match. *)
   | LetBinding of string                (** [--let NAME]: one [let] definition, its expanded entries and the transitions that use it. *)
   | Dims                                (** [--dims]: the physical dimension inferred for each parameter, such as [T^-1] for a rate; not the model's [dimensions]. *)
   | Tables of string option             (** [--tables [PATTERN]]: each table's source and values, labelled by level. *)
@@ -1388,7 +1391,6 @@ type inspect_cmd =
 (** The options of one [camdlc inspect] run. *)
 type inspect_opts = {
   cmd      : inspect_cmd;  (** The report to print. *)
-  ir_mode  : bool;   (** [--ir]: meant to print expanded names. It is parsed and stored, but no report reads it, so it has no effect. *)
   ascii    : bool;   (** [--ascii]: write operators in ASCII, [*] rather than [×]. Only the [--transitions] and [--count] reports read it. *)
   no_color : bool;   (** [--no-color]: turn colour off, overriding the environment. *)
 }
@@ -1442,12 +1444,16 @@ let run_inspect path opts =
     [Compiler.compile] and [Compiler.collect_diagnostics] also use, so it
     runs the stages a compile runs (parsing, expansion, validation,
     dimension checking, lints, differentiation) and cannot disagree with a
-    compile about a model's validity. *)
-let run_check path =
+    compile about a model's validity. [quantities] is the path of a
+    [--quantities] vocabulary file, which replaces the model's own
+    [quantities { }] block as it does in a compile. *)
+let run_check ?quantities path =
   let name = Filename.basename path |> Filename.remove_extension in
   let src  = Compiler.read_file path in
+  let quantities = Option.map (fun q -> (q, Compiler.read_file q)) quantities in
   Term_style.apply_policy ();
-  let (detail, diags, source) = Compiler.collect_detail ~name ~filename:path src in
+  let (detail, diags, source) =
+    Compiler.collect_detail ~name ~filename:path ?quantities src in
   match detail with
   | None ->
     (* lex/parse/expand structurally failed; [diags] holds the E001.

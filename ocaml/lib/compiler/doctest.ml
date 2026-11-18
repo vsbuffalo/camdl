@@ -38,18 +38,19 @@
     {!verdict}. The rules are heuristics over the error codes, applied in
     order: a block marked [ignore] is skipped; a block with no errors
     passes; a block with a data-file error ([E200]) is skipped; a block
-    that names a preamble fails on any other error; a block whose only
-    errors are syntax errors ([E001]) is skipped as a fragment that cannot
-    parse alone; a block whose text does not contain [compartments] is
-    skipped as a fragment; anything else fails. A preamble that is not
-    defined, or an exception from the compiler, is a failure too. {!run}
-    prints one line per failure (per block under [--verbose]) and a summary,
-    and under [--gate] exits 1 if anything failed.
+    that names a preamble fails on any other error; a block that declares
+    no [compartments { }] block is a fragment, skipped as one that cannot
+    parse alone when its only errors are syntax errors ([E001]) and as a
+    fragment otherwise; a block that declares compartments fails. Whether a
+    block declares compartments is read from its code, not its comments
+    ({!declares_compartments}). A preamble that is not defined, or an
+    exception from the compiler, is a failure too. {!run} prints one line
+    per failure (per block under [--verbose]) and a summary, and under
+    [--gate] exits 1 if anything failed.
 
-    Two of these rules let a broken model through. A complete model with a
-    syntax error is skipped, not failed, unless it names a preamble; and a
-    block is judged a fragment by whether the word [compartments] appears
-    anywhere in its text, comments included. *)
+    A data comment's path must be relative and must not contain a [..]
+    segment, so every file is written inside the temporary directory; a
+    document with any other path fails ({!bad_data_paths}). *)
 
 (* ── string helpers (no Str dependency) ──────────────────────────────────── *)
 
@@ -126,7 +127,7 @@ type block = {
 type doc = {
   blocks    : block list;  (** The camdl blocks, in document order. *)
   preambles : (string * string) list;  (** Each preamble comment's label and text. Every block of the document can use every preamble, wherever it appears; when a label is defined twice, the first definition is used. *)
-  datas     : (string * string) list;  (** Each data comment's path, relative to the block's directory, and its contents. The path is not checked, so one with [..] is written outside the temporary directory. *)
+  datas     : (string * string) list;  (** Each data comment's path, relative to the block's directory, and its contents. A path {!bad_data_paths} rejects is never written. *)
 }
 
 let parse_preamble toks =
@@ -229,12 +230,67 @@ let parse_doc file : doc =
     preambles = List.rev !preambles;
     datas = List.rev !datas }
 
+(** The data-comment paths that would be written outside the temporary
+    directory: an absolute path, or one with a [..] segment. *)
+let bad_data_paths (datas : (string * string) list) : string list =
+  let escapes path =
+    (not (Filename.is_relative path))
+    || List.mem ".." (String.split_on_char '/' path)
+  in
+  List.filter_map (fun (path, _) -> if escapes path then Some path else None) datas
+
 (* Materialise inline data chunks into a fresh temp dir; returns its path.
-   Block `read("data/x.tsv")` paths resolve against this dir. *)
+   Block `read("data/x.tsv")` paths resolve against this dir. A path
+   [bad_data_paths] rejects is not written; [run] reports it as a failure. *)
 let materialize_data datas =
   let dir = make_temp_dir () in
-  List.iter (fun (path, content) -> write_file (Filename.concat dir path) content) datas;
+  let bad = bad_data_paths datas in
+  List.iter
+    (fun (path, content) ->
+       if not (List.mem path bad) then write_file (Filename.concat dir path) content)
+    datas;
   dir
+
+(** Whether [src] declares a [compartments { }] block, read from its code:
+    a [#] comment (other than a [#\[] attribute) is dropped to the end of
+    its line, and [compartments] counts only as a whole word followed,
+    after any whitespace, by [{], so neither a comment that mentions
+    compartments nor an index over them ([c in compartments]) counts. This
+    is what separates a complete model from a fragment. *)
+let declares_compartments (src : string) : bool =
+  let code =
+    String.split_on_char '\n' src
+    |> List.map (fun line ->
+           let n = String.length line in
+           let rec cut i =
+             if i >= n then line
+             else if line.[i] = '#' && not (i + 1 < n && line.[i + 1] = '[') then
+               String.sub line 0 i
+             else cut (i + 1)
+           in
+           cut 0)
+    |> String.concat "\n"
+  in
+  let kw = "compartments" in
+  let n = String.length code and k = String.length kw in
+  let ident c =
+    (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c = '_'
+  in
+  let rec next_non_space j =
+    if j < n && (code.[j] = ' ' || code.[j] = '\t' || code.[j] = '\n' || code.[j] = '\r')
+    then next_non_space (j + 1)
+    else j
+  in
+  let rec from i =
+    if i + k > n then false
+    else if String.sub code i k = kw
+         && (i = 0 || not (ident code.[i - 1]))
+         && (i + k = n || not (ident code.[i + k]))
+         && (let j = next_non_space (i + k) in j < n && code.[j] = '{')
+    then true
+    else from (i + 1)
+  in
+  from 0
 
 (* ── classification ───────────────────────────────────────────────────────── *)
 
@@ -243,9 +299,9 @@ let materialize_data datas =
 type verdict =
   | Pass                                 (** The block compiled with no errors. *)
   | Skip_ignore                          (** The block is marked [ignore]. *)
-  | Skip_parse                           (** Every error is a syntax error ([E001]) and the block names no preamble. *)
+  | Skip_parse                           (** Every error is a syntax error ([E001]), and the block names no preamble and declares no compartments. *)
   | Skip_data                            (** An error is a data file that could not be read ([E200]). *)
-  | Skip_fragment                        (** The block has errors, names no preamble, and does not contain the word [compartments]. *)
+  | Skip_fragment                        (** The block has errors, names no preamble, and declares no compartments. *)
   | Fail of Diagnostics.diagnostic list  (** The block has errors that no skip rule covers: the error diagnostics. *)
   | Ice of string                        (** The block names an undefined preamble, or the compiler raised an exception: the message. *)
 
@@ -282,9 +338,12 @@ let classify ~preambles ~basedir (b : block) : verdict =
            if List.mem "E200" codes then Skip_data
            (* a preamble asserts the block compiles — residual error is a FAIL *)
            else if b.preamble <> None then Fail errors
+           (* a block that declares compartments is a complete model, and a
+              complete model that does not compile fails, syntax errors
+              included *)
+           else if declares_compartments b.source then Fail errors
            else if List.for_all (fun c -> c = "E001") codes then Skip_parse
-           else if not (contains ~sub:"compartments" b.source) then Skip_fragment
-           else Fail errors
+           else Skip_fragment
          end)
 
 (* ── report / entry point ─────────────────────────────────────────────────── *)
@@ -297,6 +356,14 @@ let run ~gate ~verbose files =
        let doc = parse_doc file in
        let basedir = materialize_data doc.datas in
        Printf.printf "\n%s — %d camdl block(s)\n" file (List.length doc.blocks);
+       List.iter
+         (fun path ->
+            incr nfail;
+            Printf.printf
+              "  FAIL   data comment '%s': the path must be relative and must not \
+               contain '..'; it was not written\n"
+              path)
+         (bad_data_paths doc.datas);
        List.iter
          (fun b ->
             incr total;
@@ -331,20 +398,48 @@ let run ~gate ~verbose files =
     exit 1
   end
 
+let usage_text = {|usage: camdlc doctest [--gate] [--verbose] FILE.md ...
+
+Compiles every ```camdl block of each Markdown file with the real compiler.
+
+  --gate          exit 1 if any block fails
+  --verbose, -v   print a line for every block, not only for failures
+  --help, -h      print this help
+
+A block's verdict:
+  pass            it compiles with no errors
+  skip (ignore)   its info string has the word `ignore` (```camdl ignore)
+  skip (data)     it reads a data file that is not supplied
+  skip (parse)    it declares no `compartments { }`, names no preamble, and
+                  its only errors are syntax errors (E001): a legend or an
+                  expression shown alone
+  skip (fragment) it declares no `compartments { }` and names no preamble
+  FAIL            anything else: a block that declares compartments, or names
+                  a preamble (```camdl preamble=LABEL), must compile
+
+Two HTML comments, which the rendered page does not show, supply what a
+block needs; each ends at a line that is exactly `-->`:
+  <!-- camdl-doctest-preamble: LABEL   declarations a block may borrow
+  <!-- camdl-doctest-data: PATH        a file a block reads; PATH must be
+                                       relative, without `..`
+|}
+
 let main args =
   let gate = ref false and verbose = ref false and files = ref [] in
   List.iter
     (fun a ->
        match a with
+       | "--help" | "-h" -> print_string usage_text; exit 0
        | "--gate" -> gate := true
        | "--verbose" | "-v" -> verbose := true
        | s when String.length s > 0 && s.[0] = '-' ->
-         Printf.eprintf "doctest: unknown flag %s\n" s; exit 1
+         Printf.eprintf "doctest: unknown flag %s\n  run `camdlc doctest --help` for supported flags\n" s;
+         exit 1
        | s -> files := s :: !files)
     args;
   let files = List.rev !files in
   if files = [] then begin
-    print_endline "usage: camdlc doctest [--gate] [--verbose] FILE.md ...";
+    print_string usage_text;
     exit 1
   end;
   run ~gate:!gate ~verbose:!verbose files
