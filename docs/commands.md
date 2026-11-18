@@ -240,10 +240,10 @@ _prospective_ forecast. `--realised-design` reads it from each target's held-out
 row instead: the result is labelled _a conditional score using realised future
 design_, since those values were known only after the origin, and is not an
 unconditional forecast. A target with no value of a design column is refused,
-never filled in; without either flag such a stream is refused. The design values
-the targets read are part of the output address; the held-out outcomes are not,
-so a forecast whose held-out values change writes the same predictions to the
-same directory.
+never filled in; without either flag such a stream is refused. The target set,
+with the design values the targets read, is part of the output address; the
+held-out outcomes are not, so a forecast whose held-out values change writes the
+same predictions to the same directory.
 
 It writes `forecast/<stream>.tsv` (one row per target: `t_start`, `t_stop`,
 `horizon`, `lead`, the held-out row it corresponds to, the mean and the

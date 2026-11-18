@@ -821,7 +821,7 @@ fn survey_held(pos: [f64; 2], tested: [f64; 2]) -> Vec<HeldOut> {
 fn held_out_outcomes_change_only_the_scores_and_never_the_samples_or_the_address() {
     use crate::fit::forecast_plan::DesignMode;
     use crate::fit::forecast_score::marginal_log_scores;
-    use crate::fit::predict::{DesignKey, PredictOptions};
+    use crate::fit::predict::PredictOptions;
     let model = with_truth(compile(&survey_source(), "survey"));
     let (daily, weekly) = daily_through(24);
     let compiled = Arc::new(sim::CompiledModel::new(model.clone()).unwrap());
@@ -849,10 +849,8 @@ fn held_out_outcomes_change_only_the_scores_and_never_the_samples_or_the_address
         }).collect();
         ForecastPlan::new(partition, 14.0, &ps).unwrap()
     };
-    let address = |plan: &ForecastPlan| PredictOptions {
-        design: Some(DesignKey { mode: plan.design_mode().unwrap(), digest: plan.design_digest().unwrap() }),
-        ..PredictOptions::defaults()
-    }.address_key("run-under-test");
+    let address = |plan: &ForecastPlan| crate::fit::forecast_output::forecast_options(
+        &PredictOptions::defaults(), plan).address_key("run-under-test");
     let forecast = |held: &[HeldOut]| {
         let plan = plan_of(held);
         let rows = BTreeMap::from([("survey".to_string(), held.to_vec()),

@@ -857,7 +857,7 @@ fn a_realised_design_forecast_is_labelled_and_its_address_ignores_held_out_outco
     assert!(m["design"]["label"].as_str().unwrap().contains("a conditional score using realised future design"),
         "{}", m["design"]);
     assert_eq!(m["design"]["streams"], serde_json::json!(["survey"]));
-    assert_eq!(m["options"]["design"]["mode"], "ex_post");
+    assert_eq!(m["options"]["forecast"]["design_mode"], "ex_post");
     let survey: Vec<&serde_json::Value> = m["targets"].as_array().unwrap().iter()
         .filter(|t| t["stream"] == "survey").collect();
     let tested: Vec<(f64, f64)> = survey.iter()

@@ -282,6 +282,21 @@ fn prospective_design(
     Ok(out)
 }
 
+/// The options a forecast's directory is keyed by: `base`, with what the
+/// plan contributes to the predictions' inputs.
+pub(crate) fn forecast_options(
+    base: &crate::fit::predict::PredictOptions,
+    plan: &ForecastPlan,
+) -> crate::fit::predict::PredictOptions {
+    crate::fit::predict::PredictOptions {
+        forecast: Some(crate::fit::predict::ForecastKey {
+            targets: plan.targets_digest(),
+            design_mode: plan.design_mode(),
+        }),
+        ..base.clone()
+    }
+}
+
 /// Run the forecast and write its artifact. Returns the directory it was
 /// written to (keyed by the options with the forecast's design inputs), the
 /// files written, the streams that failed (asked for and unbound, or refused a
@@ -378,11 +393,7 @@ pub(crate) fn run_forecast(
     let held_out_values = HeldOutValues::from_rows(&plan, &held_out)?;
     // The address (D81, D86): the options with the design inputs that
     // determine the predictions. The held-out outcomes are not among them.
-    let options = crate::fit::predict::PredictOptions {
-        design: plan.design_mode().zip(plan.design_digest())
-            .map(|(mode, digest)| crate::fit::predict::DesignKey { mode, digest }),
-        ..job.options.clone()
-    };
+    let options = forecast_options(job.options, &plan);
     let address_key = options.address_key(job.run_id);
     let out_dir = crate::fit::fit_view::predictions_dir(job.segment, job.run_id, &address_key);
     std::fs::create_dir_all(&out_dir)
