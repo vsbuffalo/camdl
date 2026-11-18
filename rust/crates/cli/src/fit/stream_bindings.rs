@@ -121,7 +121,7 @@ impl StreamBindings {
         } else {
             training.values().map(|(_, h)| DataDigest(*h)).collect()
         };
-        Ok(BoundDataDigests { training, holdout, identity_training })
+        Ok(BoundDataDigests { training, holdout, identity_training, tables: BTreeMap::new() })
     }
 
     /// The training files keyed as the run identities of `fit`, `survey`,
@@ -159,6 +159,9 @@ pub(crate) struct BoundDataDigests {
     /// `FitDigest.data`, in the layout [`StreamBindings::identity_keyed_training`]
     /// gives it.
     identity_training: Vec<DataDigest>,
+    /// The files bound to the model's external inputs, by external name
+    /// ([`BoundDataDigests::with_tables`]).
+    tables: BTreeMap<String, ContentHash>,
 }
 
 impl BoundDataDigests {
@@ -166,6 +169,23 @@ impl BoundDataDigests {
     /// key, in key order.
     pub(crate) fn identity_training(&self) -> Vec<DataDigest> {
         self.identity_training.clone()
+    }
+
+    /// These digests with the files `bound` read for the model's external
+    /// inputs, so the fit level keys on them as on its data.
+    pub(crate) fn with_tables(mut self, bound: &crate::external_inputs::BoundFiles) -> Self {
+        self.tables = bound.iter().map(|(n, f)| (n.to_string(), f.digest)).collect();
+        self
+    }
+
+    /// `FitDigest.tables`, in external-name order.
+    pub(crate) fn identity_tables(&self) -> Vec<DataDigest> {
+        self.tables.values().map(|h| DataDigest(*h)).collect()
+    }
+
+    /// External input name → full hex digest of its bound file.
+    pub(crate) fn tables_hex(&self) -> BTreeMap<String, String> {
+        self.tables.iter().map(|(n, h)| (n.clone(), h.to_hex())).collect()
     }
 
     /// `FitDigest.holdout_data`: one digest per holdout source, in source

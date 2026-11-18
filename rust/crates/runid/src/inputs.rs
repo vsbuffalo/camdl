@@ -499,7 +499,13 @@ pub struct SyntheticObsInput {
 /// fit.toml + engine. Hashing the *whole* canonicalized document (not an
 /// enumerated subset) is the include-by-default posture — dropping a field
 /// like `ic_free`/`holdout`/fit-level `dt` would under-invalidate θ̂.
+///
+/// `schema_version = 2`: added `tables`, the content digests of the files
+/// `[data.tables]` binds to the model's external inputs. Every fit re-keys
+/// once, empty `tables` included, in the same change as `ir/VERSION` 0.47,
+/// which re-keys every run anyway.
 #[derive(Debug, Clone, PartialEq, Eq, RunInput)]
+#[run_input(schema_version = 2)]
 pub struct FitDigest {
     pub model: ModelDigest,
     /// Content digest of each resolved *training* observation stream.
@@ -511,6 +517,12 @@ pub struct FitDigest {
     /// Empty when no explicit holdout is configured. Sorted by stream name in
     /// the builder for a stable order.
     pub holdout_data: Vec<DataDigest>,
+    /// Content digest of each file bound to the model's external inputs
+    /// (`[data.tables]`), sorted by external name. By content, never by path:
+    /// the paths are left out of `fit_toml`, so the same bytes under another
+    /// path are the same fit, and one changed byte is another. Empty for a
+    /// model with no external input.
+    pub tables: Vec<DataDigest>,
     /// Content digest of the whole canonicalized fit.toml document.
     pub fit_toml: ContentHash,
     pub engine: EngineIdentity,

@@ -519,6 +519,7 @@ fn run_profile(
     // `[data.holdout]` files are checked to lie after them.
     let mut fit_holdout_after: Option<crate::fit::config_v2::TimeSpecToml> = None;
     let mut fit_holdout_files: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
+    let mut fit_tables = crate::external_inputs::ExternalBindings::none();
     let (fit_estimate, fit_toml_hash, fit_toml_fixed_indexmap, fit_scenario, fit_simplex_groups,
          objective, fit_fixed_via):
         (indexmap::IndexMap<String, crate::fit::config_v2::EstimateSpecV2>,
@@ -550,6 +551,7 @@ fn run_profile(
         // through the same function `fit run` uses, so a profile curve is on
         // the scale of the fit it profiles.
         let objective = fit_cfg.likelihood_objective();
+        fit_tables = fit_cfg.external_bindings();
         // The fit's holdout, applied once the data are loaded (gh#1059).
         if let Some(data) = fit_cfg.data.as_ref() {
             fit_holdout_after = data.holdout_after.clone();
@@ -810,7 +812,7 @@ fn run_profile(
     // Run the unified resolver.
     let fit_toml_estimate: indexmap::IndexSet<String> =
         fit_estimate.keys().cloned().collect();
-    let no_external = crate::external_inputs::ExternalBindings::from_cli(tables);
+    let external = fit_tables.overlay(crate::external_inputs::ExternalBindings::from_cli(tables));
     let resolved = crate::params_resolver::resolve_parameters_with_starts(
         crate::params_resolver::ParameterInputs {
             model: &model_pre,
@@ -825,7 +827,7 @@ fn run_profile(
             fixed_files: &fixed_files_vec,
             fit_toml_fixed: &fit_toml_fixed_indexmap,
             fit_toml_estimate: &fit_toml_estimate,
-            external: &no_external,
+            external: &external,
         },
         starts_values.as_ref().map(|(origin, values)|
             crate::params_resolver::StartsValues { origin, values }),
@@ -1748,6 +1750,8 @@ fn run_profile(
             // Stamped by `write_fit_sidecar`.
             schema_version: crate::run_meta::FIT_META_SCHEMA_VERSION,
             label: label_arg.clone(),
+            // profile binds no fit folder's external inputs (its leaves record their own).
+            table_hashes: Default::default(),
             // Recorded by `write_fit_sidecar`, relative to the segment.
             source_model: None,
             source_config: None,

@@ -438,13 +438,14 @@ inputs, and their manifests record that run's full `run_id`.
 **What the fit hash covers.** The fit level is a `FitDigest` over the whole
 model IR digest (which itself folds `ir/VERSION` and the engine version), the
 content digests of every training data stream, the content digests of every
-explicit `[data.holdout]` stream, the engine version, and the canonical JSON of
-the resolved fit config with three slices normalized out: `method` (the method
-level owns it), `fit_seeds` (the seed level owns the seed), and `output_dir`
-(pure write-location provenance). The fit level therefore hashes the _problem_
-alone: two `fit.toml` files that share a problem and differ in `[method]` share
-one fit hash and are separated on disk only by their stems, and editing a
-`[method]` key re-keys that file's method leaf and nothing else.
+explicit `[data.holdout]` stream, the content digests of every `[data.tables]`
+file, the engine version, and the canonical JSON of the resolved fit config with
+three slices normalized out: `method` (the method level owns it), `fit_seeds`
+(the seed level owns the seed), and `output_dir` (pure write-location
+provenance). The fit level therefore hashes the _problem_ alone: two `fit.toml`
+files that share a problem and differ in `[method]` share one fit hash and are
+separated on disk only by their stems, and editing a `[method]` key re-keys that
+file's method leaf and nothing else.
 
 Data files enter by **content**, not path: rewriting a holdout or training TSV
 in place re-keys the fit, so a stale held-out score cannot be reused. The same
@@ -1464,7 +1465,8 @@ pub struct SimulateJob {
     pub fit_fixed: IndexMap<String, f64>,
     /// `--param-vec PREFIX=FILE` entries (CLI only).
     pub set_vec_entries: Vec<(String, String)>,
-    /// `--table NAME=FILE` entries (CLI only).
+    /// `--table NAME=FILE` entries, and under `--draws … --fit` the fit's
+    /// own bound files beneath them.
     pub table_files: Vec<(String, String)>,
     /// Synthetic-observation output mode.
     pub obs: ObsOutput,
@@ -2145,7 +2147,7 @@ refused rather than resolved (§3.2). See §5.4.
 --params FILE              # load a parameter TOML (may be repeated; applied in order)
 --param NAME=VALUE         # override a single parameter (may be repeated)
 --param-vec PREFIX=FILE    # override an indexed parameter family from a file
---table NAME=FILE          # supply the data for a table declared `external("NAME")`
+--table NAME=FILE          # supply the file for an external input `external("NAME")`
 ```
 
 A model declaring `C : patch × patch = external("contact")` requires the
@@ -2156,16 +2158,22 @@ camdl simulate sir_ext_table.camdl --scenario baseline --seed 1
 ```
 
 ```
-error: table 'contact' is declared as external() but --table contact=<file> was not provided
+error: external input 'contact' has no file: table 'C' reads it.
+  Fix: bind one with `--table contact=FILE`, or in the fit config `[data.tables] contact = "FILE"`.
 ```
 
 ```bash
 camdl simulate sir_ext_table.camdl --scenario baseline --seed 1 --table contact=contact.tsv
 ```
 
-The table file is a headerless numeric TSV whose shape matches the declared
-dimensions; the file's bytes enter the run identity, so editing it produces a
-new leaf.
+The table file is a headerless numeric TSV holding one number per cell of the
+declared dimensions; a file with more or fewer is refused. The same flag binds a
+forcing declared `data = external("NAME")`, whose file is read as a
+`data = "path"` forcing's is (language spec §7). A `--table` naming an input the
+model does not declare is refused. The file's bytes enter the run identity, so
+editing it produces a new leaf. `pfilter`, `profile` and `simulate --fit` take
+`--table` over the fit config's `[data.tables]`
+([`docs/fit-toml.md`](fit-toml.md)).
 
 **Backend and integration knobs.**
 
@@ -5012,14 +5020,16 @@ different models (the `model` level; `config` is unchanged).
 
 **`FitMethod` levels** (`fit::cas::resolve_fit_method`):
 
-- `fit` — `FitDigest`: the `ModelDigest`; the content digest of each resolved
-  _training_ stream; the content digest of each `[data.holdout]` stream; the
-  digest of the whole canonicalized fit.toml **less** `method`, `fit_seeds` and
-  `output_dir`; the engine version; and the version of the rule that decides
-  which rows train (`PARTITION_RULE_VERSION`, §6.2), so a change to the rule
-  re-keys every fit. The fit level hashes the problem alone, so two files that
-  differ only in `[method]` share it. Model and data _paths_ stay in the blob —
-  a rename over-invalidates harmlessly.
+- `fit` — `FitDigest`: the `ModelDigest` (of the model with its external inputs
+  bound); the content digest of each resolved _training_ stream; the content
+  digest of each `[data.holdout]` stream; the content digest of each
+  `[data.tables]` file, by input name; the digest of the whole canonicalized
+  fit.toml **less** `method`, `fit_seeds`, `output_dir` and the `[data.tables]`
+  paths; the engine version; and the version of the rule that decides which rows
+  train (`PARTITION_RULE_VERSION`, §6.2), so a change to the rule re-keys every
+  fit. The fit level hashes the problem alone, so two files that differ only in
+  `[method]` share it. Model and data _paths_ stay in the blob — a rename
+  over-invalidates harmlessly.
 - `method` — `MethodLevel` = `MethodConfig` folded with `deps`. `MethodConfig`
   carries the digest of `Method::identity_payload()` — the algorithm block and
   the resolved `starts` rule — re-augmented with `n_trajectories`, plus

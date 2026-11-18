@@ -829,7 +829,7 @@ fn cas_identity_pins() {
         // reads no gradient, and its pfilter and profile hold
         // `allow_degenerate_rates` at its default.
         ("sim", "19d799378e6bcf65a3fd4c9db8ed924f9390a172fead9b9edbd256c96d0451d0"),
-        ("fit", "671990c3342dca98df7775586e0cb87f0ce922a49b8cac0f45a9451f033db6b0"),
+        ("fit", "8880ba88775f07e1fddf25a2d1edf5c25b752837ac15aff5101982ba48fb7628"),
         ("pfilter", "d8e8bc0581a729abd89658d893194d57d26df1010c993c70b6d4420a0d4d535d"),
         ("survey", "9981ba175436b50b9795e6efa5b0877145983b9cbef5498527e8cd3336e3577a"),
         ("sim_ensemble", "5ae698ae436b20c3ca386ece61c65d6e6d053e6cf3651fa9c341e26f4bdfb22a"),

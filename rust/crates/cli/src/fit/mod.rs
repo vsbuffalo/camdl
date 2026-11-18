@@ -50,6 +50,42 @@ fn resolve_anchors_into_temp_ir(
     Ok(out.to_string_lossy().into_owned())
 }
 
+/// Bind the model at `ir_path` to the files the fit config's `[data.tables]`
+/// names, and re-emit it to a fresh temp IR, so every downstream loader (the
+/// runner, each sweep point, the synthetic generator, the archived copy) reads
+/// one bound model and no later read of the files can disagree with the
+/// first. The anchors' counterpart ([`resolve_anchors_into_temp_ir`]). A model
+/// with no external input and a config binding none returns `ir_path`
+/// unchanged; a binding the model does not declare, or an input left unbound,
+/// is refused here, before anything runs.
+fn bind_tables_into_temp_ir(
+    ir_path: &str,
+    config: &config_v2::Problem,
+) -> Result<(String, crate::external_inputs::BoundFiles), String> {
+    let src = std::fs::read_to_string(ir_path)
+        .map_err(|e| format!("cannot read compiled IR {ir_path}: {e}"))?;
+    let mut env = ir::envelope_from_str(&src)
+        .map_err(|e| format!("IR load error from {ir_path}: {e}"))?;
+    let bound = crate::external_inputs::bind(&mut env.model, &config.external_bindings())
+        .map_err(|e| e.to_string())?;
+    if bound.is_empty() {
+        return Ok((ir_path.to_string(), bound));
+    }
+    let out = std::env::temp_dir().join(format!(
+        "camdl_bound_{}_{}.ir.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let json = serde_json::to_string(&env)
+        .map_err(|e| format!("re-emitting the bound IR: {e}"))?;
+    std::fs::write(&out, json)
+        .map_err(|e| format!("writing the bound IR to {}: {e}", out.display()))?;
+    Ok((out.to_string_lossy().into_owned(), bound))
+}
+
 pub mod cas;  // gh#147 M3.2: fit-method CAS identity (resolve_fit_method)
 pub mod coeff_guard;  // gh#342 P4: NUTS guard — param reaching a coefficient only via an init
 pub mod config_v2;
@@ -423,6 +459,7 @@ fn run_fit(
         config_text,
         config,
         model,
+        tables,
         engine,
         forcing,
         seeds: fit_seeds,
@@ -654,8 +691,9 @@ fn run_fit(
         Ok(ds) => read_data_digests(ds, &model).unwrap_or_else(|e| {
             out.fail(format!("error: fit-level identity: {}", e));
         }),
-        Err(_) => Default::default(),
-    };
+        Err(_) => stream_bindings::BoundDataDigests::default(),
+    }
+    .with_tables(&tables);
     let parent_fit_hash_ch = cas::fit_level_hash(
         &model,
         &announce_ir_version,
@@ -815,6 +853,9 @@ fn run_fit(
                 observations,
                 holdout_after: None,
                 holdout: None,
+                // Generated data replaces the observations only: the model's
+                // external inputs stay bound to the files the config names.
+                tables: config.problem.data.as_ref().map(|d| d.tables.clone()).unwrap_or_default(),
             };
             for &fs in &fit_seeds {
                 out.push(Cell {
@@ -994,7 +1035,7 @@ fn run_fit(
             None => fit_data_digests.clone(),
             Some(_) => read_data_digests(data_spec, &model).unwrap_or_else(|e| {
                 out.fail(format!("error: {}", e));
-            }),
+            }).with_tables(&tables),
         };
         // The method level's `deps`: the content of a sourced `starts` rule's
         // file, so a regenerated source re-keys this run (gh#541), plus the
@@ -1176,6 +1217,12 @@ fn run_fit(
                     &seg_sidecar,
                 ) {
                     out.say(format_args!("warning: cannot write fit-level sidecar {}: {}", seg.display(), e));
+                }
+                // The bytes each external input was bound to, read once at
+                // resolution: what a replay of this fit binds.
+                if let Err(e) = crate::run_meta::store_bound_inputs(seg, &tables) {
+                    out.fail(format!("error: cannot store the fit's bound input files in {}: {e}",
+                        seg.display()));
                 }
                 // gh#322: archive the compiled base-model IR in the fit segment so
                 // downstream verbs (`fit predict`) are self-contained and the run
@@ -2631,6 +2678,7 @@ fn build_fit_sidecar(
         .collect();
     let calendar = ir::caltime::CalendarAxis::from_model(model).map_err(|e| e.to_string())?;
     Ok(crate::run_meta::FitSidecar {
+        table_hashes: data.tables_hex(),
         // A fit's label is its run's, on the leaf (gh#896); the sidecar
         // describes the problem.
         label: None,
@@ -2843,11 +2891,15 @@ pub fn cmd_fit_new(a: &crate::args::FitNewArgs) {
     // (`{method}-{h8}/seed_N-{h8}`) needs the method + seed hashes, so we name
     // the segment and defer the leaf to `camdl list`.
     if let Ok(cfg) = config_v2::Problem::load(&from) {
-        let seg = crate::util::load_model(&cfg.model.camdl).ok().and_then(|(m, _)| {
+        let seg = crate::util::load_model(&cfg.model.camdl).ok().and_then(|(mut m, _)| {
             let ir_version = ir::IR_VERSION.trim().to_string();
+            // The model the fit hashed is the bound one, with the bound files'
+            // digests beside it.
+            let tables = crate::external_inputs::bind(&mut m, &cfg.external_bindings()).ok()?;
             let data = cfg.data_spec().ok()
                 .and_then(|ds| read_data_digests(ds, &m).ok())
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .with_tables(&tables);
             cas::fit_level_hash(&m, &ir_version, &fit_engine(), &cfg, &data)
                 .ok()
                 .map(|h| {

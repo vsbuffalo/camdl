@@ -339,6 +339,17 @@ pub struct DataSpec {
     /// Mutually exclusive with `holdout_after`.
     #[serde(default)]
     pub holdout: Option<IndexMap<String, String>>,
+
+    /// The files bound to the model's external inputs: `NAME = "path"`
+    /// supplies the model's `external("NAME")` table or `data =
+    /// external("NAME")` forcing, as `--table NAME=path` does on the command
+    /// line (which wins over this where both bind a name). Paths are relative
+    /// to this config, as for `[data.observations]`. Only the files' bytes are
+    /// identity — `FitDigest.tables`, by content, never by path — so the
+    /// paths are left out of the hashed config blob (`fit::cas`); the
+    /// skip keeps a config without the section serializing as before.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub tables: IndexMap<String, String>,
 }
 
 /// A time value in `fit.toml` that feeds the shared time-spec grammar
@@ -3640,6 +3651,9 @@ impl Problem {
             for (stream, src) in &data.observations {
                 check(&format!("[data.observations] {stream}"), src);
             }
+            for (name, src) in &data.tables {
+                check(&format!("[data.tables] {name}"), src);
+            }
         }
         out
     }
@@ -3688,6 +3702,9 @@ impl Problem {
                     *v = crate::util::resolve_relative_to_toml(toml_path, v);
                 }
             }
+            for v in data.tables.values_mut() {
+                *v = crate::util::resolve_relative_to_toml(toml_path, v);
+            }
         }
     }
 
@@ -3714,6 +3731,13 @@ impl Problem {
     /// source is present (should be caught by `validate()`, but
     /// callers downstream of validation still need a concrete
     /// `DataSpec`).
+    /// The files `[data.tables]` binds to the model's external inputs; none
+    /// when the config has no `[data]` (a `[synthetic]` fit).
+    pub fn external_bindings(&self) -> crate::external_inputs::ExternalBindings {
+        crate::external_inputs::ExternalBindings::from_fit_config(
+            self.data.iter().flat_map(|d| d.tables.iter().map(|(n, p)| (n.clone(), p.clone()))))
+    }
+
     pub fn data_spec(&self) -> Result<&DataSpec, String> {
         match (&self.data, &self.synthetic) {
             (Some(d), _)    => Ok(d),

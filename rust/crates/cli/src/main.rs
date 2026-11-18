@@ -1417,6 +1417,22 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
             }
             _ => None,
         };
+    // The files the `--fit` bound to the model's external inputs: a stored
+    // fit's own copies (so a replay reads the bytes it was fitted under), or a
+    // fit config's `[data.tables]` for draws taken from a config. `--table`
+    // replaces any of them by name, as on every command that reads a fit.
+    let mut table_files = table_files;
+    if let (Some(source), Some(fit_ref)) = (draws_path.as_deref(), fit_path_for_draws.as_ref()) {
+        if source != "uniform" {
+            let handle = posterior_fit_ref.as_deref().unwrap_or(fit_ref);
+            let fit_tables = fit_table_files(handle).unwrap_or_else(|e| {
+                out.fail(format!("error: --fit {fit_ref}: {e}"));
+            });
+            for (name, path) in fit_tables {
+                table_files.entry(name).or_insert(path);
+            }
+        }
+    }
     let mut integrator = a.backend.integrator;
     if let Some((fit_name, fitted)) = &fitted_simulator {
         let flags = crate::fit::fitted_model::SimulatorFlags {
@@ -2521,6 +2537,26 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
                  (enable one with a scenario or --enable); nothing to mirror"),
         }
     }
+}
+
+/// The files a `--fit` handle binds to the model's external inputs, by name:
+/// for a fit config file its `[data.tables]`, for a stored fit the copies its
+/// folder holds (`fit::handle` points the recovered config at them). A bare
+/// directory of draws outside any fit binds nothing.
+fn fit_table_files(fit_ref: &str) -> Result<Vec<(String, String)>, String> {
+    let tables = |p: &crate::fit::config_v2::Problem| -> Vec<(String, String)> {
+        p.data.iter().flat_map(|d| d.tables.iter().map(|(n, f)| (n.clone(), f.clone()))).collect()
+    };
+    let path = std::path::Path::new(fit_ref);
+    if path.is_file() {
+        let problem = crate::fit::config_v2::Problem::load(fit_ref)?;
+        return Ok(tables(&problem));
+    }
+    if path.join("draws.tsv").is_file() && crate::fit::handle::resolve_fit(fit_ref).is_err() {
+        return Ok(Vec::new());
+    }
+    let resolved = crate::fit::handle::resolve_fit(fit_ref).map_err(|e| e.to_string())?;
+    Ok(tables(&resolved.config.problem))
 }
 
 /// Write `simulate --quantities-out`'s sidecar: the rendered tables plus the

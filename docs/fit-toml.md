@@ -101,6 +101,39 @@ files checked against the bound training data by the same tail-only rule.
 `[synthetic]` may stand beside `[data]`: `fit run` then fits the real data, and
 the synthetic block records the truth a recovery check reads.
 
+**`[data.tables]`** — one key per external input the model declares, each mapped
+to the file that supplies it. A model declares an external input as a table,
+`C : patch × patch = external("contact")`, or as a forcing's data,
+`data = external("school")` (language spec §6.5 and §7). Each needs a file when
+the model is run, and `[data.tables]` is where a fit config gives it:
+
+```toml
+[data.tables]
+school  = "../data/build/calendar/school_c1.tsv"
+contact = "../data/build/contact.tsv"
+```
+
+Every command that reads a fit config binds these files: `fit run`,
+`pfilter --fit`, `profile --fit`, `survey --fit`, and through a stored fit
+`fit predict` and `simulate --draws posterior --fit`. A `--table NAME=FILE` on
+the command line replaces the config's file for that name, as `--data` replaces
+a `[data.observations]` entry. A run is refused, naming the input, when the
+model declares an external input that nothing binds, when `[data.tables]` or
+`--table` names one the model does not declare, or when the file does not hold
+what the declaration reads: a forcing's file without its `time_col`, `value_col`
+or `key_col`, or with no row for one of its levels; a table's file without
+exactly one number per cell.
+
+A bound file enters the fit's identity by its bytes, not its path: the same
+bytes under another path are the same fit (and are reused), and one changed byte
+is another fit. The fit folder records each file's SHA-256 in `fit.meta.json`
+(`table_hashes`) and keeps a copy of its bytes in `inputs/NAME.EXT`. What a fit
+replays (`fit predict`, `simulate --fit`) is the model as it was bound, so
+editing the source file after the fit cannot change a past fit's predictions;
+`--table` on a replay is how to run it under another file on purpose. A config
+with `[synthetic]` and no `[data]` has nowhere to write `[data.tables]`, so its
+model cannot declare an external input.
+
 **`[estimate]`** — the parameters to infer. Each value is an inline table:
 
 | key                         | meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
@@ -158,11 +191,64 @@ every boundary on the grid, or fit with `if2` or `pmmh`. There is no setting for
 this: `[config] obs_alignment` is removed, and a file that carries it is
 refused.
 
+## One model under several covariate files
+
+A model of measles in a school-age population scales transmission by a daily "in
+term" indicator, read from whichever school calendar the run is given:
+
+```camdl
+forcing {
+  term : interpolated 'ratio {
+    data      = external("school")
+    time_col  = "date"
+    value_col = "in_term"
+    method    = constant
+  }
+}
+```
+
+Two fit configs differ only in the calendar they bind:
+
+```toml
+# fit_c1.toml
+[model]
+camdl = "measles.camdl"
+
+[data.observations]
+cases = "../data/build/cases.tsv"
+
+[data.tables]
+school = "../data/build/calendar/school_c1.tsv"
+
+# … [estimate], [fixed] and [method] as for any fit
+```
+
+```toml
+# fit_c2.toml: the same file, except
+[data.tables]
+school = "../data/build/calendar/school_c2.tsv"
+```
+
+```bash
+camdl fit run fit_c1.toml
+camdl fit run fit_c2.toml
+```
+
+There is one model file, so `camdl compare` and the store see one model fitted
+twice: the two fits differ in their `table_hashes`, their run ids and their
+likelihoods, and in nothing that came from the model. A third calendar is a
+third config or, for a quick likelihood at fixed parameters, a flag:
+
+```bash
+camdl pfilter measles.camdl --fit fit_c1.toml --params theta.toml \
+  --table school=../data/build/calendar/school_c3.tsv
+```
+
 ## How paths resolve
 
 **Every path written in the `fit.toml` is relative to the `fit.toml` itself** —
-`[model].camdl`, `[data].file`, each `[data.observations]` and `[data.holdout]`
-stream, `output_dir`, and a `starts` source that is a file
+`[model].camdl`, `[data].file`, each `[data.observations]`, `[data.holdout]` and
+`[data.tables]` stream, `output_dir`, and a `starts` source that is a file
 (`from_params = "theta.toml"`). Absolute paths pass through unchanged (and draw
 a portability warning, since they pin the config to one machine's layout).
 

@@ -57,6 +57,7 @@ fn golden_fixtures() -> Vec<(&'static str, ContentHash)> {
         model: model.clone(),
         data: vec![DataDigest(ContentHash::from_bytes([1; 32]))],
         holdout_data: vec![DataDigest(ContentHash::from_bytes([2; 32]))],
+        tables: vec![],
         fit_toml: ContentHash::from_bytes([3; 32]),
         engine: EngineIdentity::of_build("0.3.0"),
         partition_rule_version: 1,
@@ -139,14 +140,14 @@ fn canonical_encoding_is_pinned() {
         // (the fixture now carries one factor, so the encoding of a non-empty
         // scale is pinned too). `run_id(Sim)` moves with it.
         ("ResolvedScenario", "70f54a6326061e3bf051a3e194f77fc838355dad6d417687d026a46220e82c34"),
-        ("FitDigest", "f9532ef3e134f4ba30240a43a592162a8072a3eeb57b9a891bd2f2c0b60f1fc7"),
+        ("FitDigest", "27d26e9de8ee08b0acc6aa1312325a1d61e486234de9af04a17a1eb1d9d49b50"),
         // The `[stages]` -> `[method]` rename: the type is `MethodConfig`, not
         // `StageConfig`, and the derive hashes the fully-qualified type name as
         // its domain tag. Same fields, same bytes, new tag; `run_id(FitMethod)`
         // moves with it. Nothing else here moves.
         ("MethodConfig", "c38bc16d49909053ea81929aacbe727ad6c7606d54eb279bb36a97688d6a219d"),
         ("run_id(Sim)", "b0e9103c574bb0a78d4c812dd1c5108eec595dd407620c13162e7b303e131ce6"),
-        ("run_id(FitMethod)", "2f53a2131e782ee427fb9b11c2a0a2c9501c954a2526fa0c3729c34ff941c58a"),
+        ("run_id(FitMethod)", "a80b43d5e8604cfb6402a862aff713b70c9ba973b452ba8fec8469f66351554f"),
     ];
     let actual = golden_fixtures();
     assert_eq!(actual.len(), expected.len(), "fixture/expected count drift");
@@ -246,6 +247,7 @@ fn fit_digest_holdout_content_is_keyed() {
         model: model.clone(),
         data: vec![DataDigest(ContentHash::from_bytes([1; 32]))],
         holdout_data: vec![DataDigest(ContentHash::from_bytes([2; 32]))],
+        tables: vec![],
         fit_toml: ContentHash::from_bytes([3; 32]),
         engine: EngineIdentity::of_build("0.3.0"),
         partition_rule_version: 1,
@@ -263,6 +265,16 @@ fn fit_digest_holdout_content_is_keyed() {
 
     // No spurious sensitivity: identical holdout content → identical hash.
     assert_eq!(base.content_hash(), base.clone().content_hash());
+
+    // A bound external file's content is fit identity too, and so is its
+    // absence: binding one where there was none, or changing its bytes,
+    // re-keys.
+    let mut one_table = base.clone();
+    one_table.tables = vec![DataDigest(ContentHash::from_bytes([4; 32]))];
+    let mut other_table = base.clone();
+    other_table.tables = vec![DataDigest(ContentHash::from_bytes([6; 32]))];
+    assert_ne!(base.content_hash(), one_table.content_hash(), "a bound table must enter the fit identity");
+    assert_ne!(one_table.content_hash(), other_table.content_hash(), "a table's bytes must key the fit");
 }
 
 #[test]

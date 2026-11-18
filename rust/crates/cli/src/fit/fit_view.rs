@@ -417,6 +417,7 @@ mod tests {
         }
         let sidecar = FitSidecar {
             label: Some("a fit".into()),
+            table_hashes: Default::default(),
             model_identity: "f00d".repeat(16),
             schema_version: crate::run_meta::FIT_META_SCHEMA_VERSION,
             source_config: None,

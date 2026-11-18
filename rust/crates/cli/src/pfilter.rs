@@ -365,7 +365,10 @@ fn run_pfilter(
     use indexmap::{IndexMap, IndexSet};
 
     let crate::pfilter_config::ParamFlags { param: fixed_cli, params: fixed_files, table } = param_flags;
-    let external = crate::external_inputs::ExternalBindings::from_cli(table);
+    let external = fit.as_ref()
+        .map(|f| f.config.problem.external_bindings())
+        .unwrap_or_default()
+        .overlay(crate::external_inputs::ExternalBindings::from_cli(table));
     let ftf: IndexMap<String, f64> = IndexMap::new();
     let fte: IndexSet<String> = IndexSet::new();
 
