@@ -242,7 +242,10 @@ let rec expr_to_short_string (e : expr) : string =
     else Printf.sprintf "%g" f
   | Param s | ConstRef s -> s
   | Pop s -> s
-  | PopSum ss -> String.concat " + " ss
+  (* A sum of several compartments is parenthesised like the other binary
+     operations here, so it reads as one operand wherever it stands. *)
+  | PopSum [ s ] -> s
+  | PopSum ss -> "(" ^ String.concat " + " ss ^ ")"
   | Time -> "t"
   | Dt -> "dt"
   | TimeFunc s -> Printf.sprintf "%s(t)" s

@@ -1510,8 +1510,33 @@ let test_forcing_argument_wrong_dimension () =
       ~rate:"beta * seasonal * S * I / (S + I + R)") in
   Alcotest.(check bool) "E312: a literal factor does not absorb a rate" true (has_code "E312" ds)
 
+(* The E300 note quotes the rate. A compartment sum is a sum: as a divisor it
+   needs its parentheses, or `beta * S / (S + I + R)` reads as
+   `beta * S / S + I + R` (the gh#1208 printer defect, at dimcheck's own
+   printer). *)
+let test_e300_note_parenthesises_a_compartment_sum () =
+  let m = empty_model
+    ~compartments:[mk_compartment "S"; mk_compartment "I"; mk_compartment "R"]
+    ~parameters:[mk_param ~kind:(Some Ir.Rate) "beta"]
+    ~transitions:[mk_transition "infection"
+                    (param "beta" *. pop "S" /. PopSum [ "S"; "I"; "R" ])]
+    () in
+  let r = Dimcheck.check_model m in
+  let note =
+    List.find_map (fun (d : Dimcheck.diagnostic) ->
+      if d.code = "E300" then d.detail else None) r.diagnostics in
+  match note with
+  | None -> Alcotest.fail "expected an E300 with a detail"
+  | Some s ->
+    Alcotest.(check bool) ("the sum keeps its parentheses: " ^ s) true
+      (contains s "rate = ((beta * S) / (S + I + R))")
+
 let () =
   Alcotest.run "dimcheck" [
+    "messages", [
+      Alcotest.test_case "E300 note parenthesises a compartment sum (gh#1208)" `Quick
+        test_e300_note_parenthesises_a_compartment_sum;
+    ];
     "visited_positions", [
       Alcotest.test_case "init value determines"     `Quick test_init_value_determines;
       Alcotest.test_case "init value wrong dimension" `Quick test_init_value_wrong_dimension;
