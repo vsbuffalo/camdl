@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Where the latest `fit predict` of a run in `seg` wrote:
-/// `<seg>/predict/<run id>[-<options key>]/` (gh#896), the directory whose
+/// `<seg>/predict/<run id>-<address key>/` (gh#896), the directory whose
 /// `report*.json` (one written by every predict) is newest. A path that does not
 /// exist while nothing has been predicted.
 fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
@@ -140,12 +140,12 @@ fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
 }
 
 fn find_artifact(root: &Path, sub: &str, stream: &str) -> Option<PathBuf> {
-    // results/fits/<stem>-<hash>/predict/<run id>/<sub>/<stream>.tsv
+    // results/fits/<stem>-<hash>/predict/<run id>-<address key>/<sub>/<stream>.tsv
     let fits = root.join("fits");
     let entries = std::fs::read_dir(&fits).ok()?;
     for e in entries.flatten() {
         // gh#896: the latest `fit predict` of the run writes under
-        // `<segment>/predict/<run id>[-<options key>]/`.
+        // `<segment>/predict/<run id>-<address key>/`.
         let p = predict_out(&e.path()).join(sub).join(format!("{stream}.tsv"));
         if p.is_file() {
             return Some(p);
@@ -159,7 +159,7 @@ fn find_segment_file(root: &Path, file: &str) -> Option<PathBuf> {
     let fits = root.join("fits");
     for e in std::fs::read_dir(&fits).ok()?.flatten() {
         // A segment-level file (`model.ir.json`), or a predict output under
-        // the run's `predict/<run id>/` (gh#896).
+        // the run's `predict/<run id>-<address key>/` (gh#896).
         for p in [e.path().join(file), predict_out(&e.path()).join(file)] {
             if p.is_file() {
                 return Some(p);

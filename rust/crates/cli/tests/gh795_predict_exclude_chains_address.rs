@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Where the latest `fit predict` of a run in `seg` wrote:
-/// `<seg>/predict/<run id>[-<options key>]/` (gh#896), the directory whose
+/// `<seg>/predict/<run id>-<address key>/` (gh#896), the directory whose
 /// `report*.json` (one written by every predict) is newest. A path that does not
 /// exist while nothing has been predicted.
 fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
@@ -225,7 +225,7 @@ impl Fixture {
     }
 
     /// The predictive/quantities artifact names directly under the run's
-    /// predictions directory (`<segment>/predict/<run id>/`, gh#896),
+    /// predictions directory (`<segment>/predict/<run id>-<address key>/`, gh#896),
     /// sorted. This IS the run directory as a reader (`ls`, `camdl-scope`) sees
     /// it, which is the surface the bug corrupts.
     fn artifact_names(&self) -> Vec<String> {
