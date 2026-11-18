@@ -39,7 +39,7 @@ fn tempdir(tag: &str) -> PathBuf {
     p
 }
 
-/// Newest `fits/<segment>/predict/<run id>/` directory holding `sub/name.tsv`.
+/// Newest `fits/<segment>/predict/<run id>-<address key>/` directory holding `sub/name.tsv`.
 fn find_artifact(root: &Path, sub: &str, name: &str) -> Option<PathBuf> {
     for seg in std::fs::read_dir(root.join("fits")).ok()?.flatten() {
         for d in std::fs::read_dir(seg.path().join("predict")).into_iter().flatten().flatten() {

@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Where the latest `fit predict` of a run in `seg` wrote:
-/// `<seg>/predict/<run id>[-<options key>]/` (gh#896), the directory whose
+/// `<seg>/predict/<run id>-<address key>/` (gh#896), the directory whose
 /// `report*.json` (one written by every predict) is newest. A path that does not
 /// exist while nothing has been predicted.
 fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
@@ -92,11 +92,11 @@ fn tempdir(tag: &str) -> PathBuf {
     p
 }
 
-/// `results/fits/<stem>-<hash>/predict/<run id>/<sub>/<stream>.tsv`.
+/// `results/fits/<stem>-<hash>/predict/<run id>-<address key>/<sub>/<stream>.tsv`.
 fn find_artifact(root: &Path, sub: &str, stream: &str) -> Option<PathBuf> {
     for e in std::fs::read_dir(root.join("fits")).ok()?.flatten() {
         // gh#896: the latest `fit predict` of the run writes under
-        // `<segment>/predict/<run id>[-<options key>]/`.
+        // `<segment>/predict/<run id>-<address key>/`.
         let p = predict_out(&e.path()).join(sub).join(format!("{stream}.tsv"));
         if p.is_file() {
             return Some(p);

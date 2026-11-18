@@ -574,7 +574,7 @@ fn predict_writes_under_the_run_it_read() {
         "nothing is written into the shared folder");
     for (leaf, draws) in [(&short, 6), (&long, 12)] {
         let (id, _, _) = record(leaf);
-        // `--mode free_forward` keys the address: `<id12>-<options key>`.
+        // `--mode free_forward` keys the address: `<id12>-<address key>`.
         let out = std::fs::read_dir(segment.join("predict")).unwrap().flatten()
             .map(|e| e.path())
             .find(|d| d.file_name().unwrap().to_string_lossy().starts_with(&id[..12]))
