@@ -122,7 +122,8 @@ impl std::fmt::Display for ResolveError {
                 write!(
                     f,
                     "  A run another build made is not used in place of this build's. Name one \
-                     by its run-id prefix or its leaf directory, or run `camdl fit run {handle}`."
+                     by its leaf directory (the last field of its line), or by its run-id prefix \
+                     when the store is ./results; or run `camdl fit run {handle}`."
                 )
             }
         }
@@ -178,7 +179,7 @@ fn build_of(r: &crate::cas_read::Leaf) -> String {
         crate::version::BuildRelation::Stale => format!("stale: built by {v}"),
         crate::version::BuildRelation::UncommittedChanges => format!("built from uncommitted changes: {v}"),
         crate::version::BuildRelation::Same => {
-            format!("built by {v} with another build configuration (features, profile, toolchain or flags)")
+            format!("{}: {v}", crate::version::ANOTHER_CONFIGURATION)
         }
     }
 }
@@ -1403,6 +1404,26 @@ cooling    = 0.70
             crate::version::ENGINE_ID, crate::version::VERSION_SHORT);
         let got = resolve_config(&toml_path).map(|r| r.0.dir).unwrap_or_else(|e| panic!("resolves: {e}"));
         assert_eq!(std::fs::canonicalize(got).unwrap(), std::fs::canonicalize(mine).unwrap());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A run another build made whose readable version is this build's (same
+    /// commit, same uncommitted changes) differs in its build configuration,
+    /// dependencies included: an uncommitted `Cargo.lock` change moves
+    /// `ENGINE_ID` and not the label. The advice leads with the leaf
+    /// directory, which names a run from any store; a run-id prefix is looked
+    /// for under `./results` only.
+    #[test]
+    fn another_builds_run_with_this_builds_label_names_its_configuration() {
+        let (tmp, toml_path, seg) = portable_project("same_label_other_engine");
+        std::fs::write(&toml_path, ARCHIVED).unwrap();
+        plant_run_built_by(&seg, "if2-00000000", &"ab".repeat(32), ARCHIVED,
+            &"0".repeat(32), crate::version::VERSION_SHORT);
+        let err = resolve_config(&toml_path).map(|r| r.0.dir).expect_err("another build").to_string();
+        assert!(err.contains("another build configuration") && err.contains("dependencies"), "{err}");
+        let dir = err.find("leaf directory").unwrap_or_else(|| panic!("{err}"));
+        let prefix = err.find("run-id prefix").unwrap_or_else(|| panic!("{err}"));
+        assert!(dir < prefix, "the leaf directory is the advice that always works: {err}");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
