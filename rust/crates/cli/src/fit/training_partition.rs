@@ -88,6 +88,13 @@ pub(crate) fn row_digest(rows: &[ObservedRow]) -> Result<RowDigest, String> {
                 h.write_u8(1);
                 h.write_f64_bits(finite(v, "observed value")?.get());
             }
+            // A row read from a file holds no held-out cell (D79 cells are
+            // made for the filter, from rows); were one hashed, it is tagged
+            // apart so it never digests equal to an observed row.
+            Some(sim::inference::ObsCell::HeldOut(v)) => {
+                h.write_u8(2);
+                h.write_f64_bits(finite(v, "held-out value")?.get());
+            }
         }
         let mut aux: Vec<&(String, f64)> = row.aux.iter().collect();
         aux.sort_by(|a, b| a.0.cmp(&b.0));

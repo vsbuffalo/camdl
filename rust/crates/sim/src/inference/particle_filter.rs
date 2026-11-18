@@ -135,6 +135,14 @@ pub struct PrequentialRecorded {
     /// There is no cross-stream sum: accuracy and calibration are scored per
     /// stream only.
     pub per_stream_samples: Vec<Vec<Vec<f64>>>,
+    /// `[obs_idx][stream][particle]` = the scoring likelihood of a held-out
+    /// value (D79), log p(y^stream_held_out | x_t^(p), θ), from
+    /// [`ObservationModel::held_out_log_likelihood_per_stream`]; NaN for a
+    /// stream holding no held-out value there. Evaluated on the same
+    /// particles as `per_stream_log_liks`, before anything is assimilated at
+    /// the stop; it enters no weight. Empty (length 0) at a stop that holds no
+    /// held-out value or whose record is not kept.
+    pub per_stream_held_out_log_liks: Vec<Vec<Vec<f64>>>,
 }
 
 /// The stops of the observation axis at which the bootstrap filter keeps its
@@ -422,6 +430,10 @@ pub fn bootstrap_filter_recording_at<P: ProcessModel<State = ParticleState>>(
     let mut preq_per_stream_samples: Vec<Vec<Vec<f64>>> = if config.record_prequential {
         Vec::with_capacity(n_obs)
     } else { Vec::new() };
+    // D79: the scoring likelihood of held-out values, `[obs][stream][particle]`.
+    let mut preq_per_stream_held_out: Vec<Vec<Vec<f64>>> = if config.record_prequential {
+        Vec::with_capacity(n_obs)
+    } else { Vec::new() };
 
     // gh#audit-C5 / C6. Particles that hit a per-particle-recoverable
     // SimError (NumericalCollapse, NegativeCount{BinomialOvershoot})
@@ -633,13 +645,31 @@ pub fn bootstrap_filter_recording_at<P: ProcessModel<State = ParticleState>>(
                         ps_log_liks[si].push(v);
                     }
                 }
+                // SCORING loop (D79; no RNG, no state change): a held-out
+                // value's log-likelihood under each particle, read by a
+                // scorer and by nothing the filter does. Only at a stop that
+                // holds one, so a run with none does no extra work.
+                let ps_held_out: Vec<Vec<f64>> = if obs_model.holds_held_out_at(obs_idx) {
+                    let mut v: Vec<Vec<f64>> = vec![Vec::with_capacity(n_particles); n_streams];
+                    for s in swarm.states.iter() {
+                        let per_stream = obs_model.held_out_log_likelihood_per_stream(s, obs_idx, params);
+                        for (si, &x) in per_stream.iter().enumerate() {
+                            v[si].push(x);
+                        }
+                    }
+                    v
+                } else {
+                    Vec::new()
+                };
                 preq_log_liks.push(swarm.log_weights.clone());
                 preq_per_stream_samples.push(ps_samples);
                 preq_per_stream_log_liks.push(ps_log_liks);
+                preq_per_stream_held_out.push(ps_held_out);
             } else {
                 preq_log_liks.push(Vec::new());
                 preq_per_stream_samples.push(Vec::new());
                 preq_per_stream_log_liks.push(Vec::new());
+                preq_per_stream_held_out.push(Vec::new());
             }
         }
 
@@ -821,6 +851,7 @@ pub fn bootstrap_filter_recording_at<P: ProcessModel<State = ParticleState>>(
             stream_names: obs_model.stream_names(),
             per_stream_log_liks: preq_per_stream_log_liks,
             per_stream_samples: preq_per_stream_samples,
+            per_stream_held_out_log_liks: preq_per_stream_held_out,
         })
     } else {
         None

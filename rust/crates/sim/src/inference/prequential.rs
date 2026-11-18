@@ -189,6 +189,7 @@ mod tests {
             obs_times: vec![7.0, 14.0, 21.0],
             log_liks: vec![vec![-2.0, -2.0]; 3],
             stream_names: vec!["a".into(), "b".into()],
+            per_stream_held_out_log_liks: Vec::new(),
             per_stream_log_liks: vec![vec![vec![-1.0, -1.0], vec![-1.0, -1.0]]; 3],
             per_stream_samples: vec![
                 vec![vec![10.0, 12.0], vec![3.0, 3.0]]; 3
@@ -240,6 +241,7 @@ mod tests {
             obs_times: vec![7.0, 14.0],
             log_liks: vec![vec![-2.0, -2.0]; 2],
             stream_names: vec!["inc".into(), "prev".into()],
+            per_stream_held_out_log_liks: Vec::new(),
             per_stream_log_liks: vec![vec![vec![-1.0, -1.0], vec![-1.0, -1.0]]; 2],
             per_stream_samples: vec![vec![vec![10.0, 12.0], vec![3.0, 3.0]]; 2],
         };
@@ -358,6 +360,7 @@ mod tests {
             obs_times: vec![1.0],
             log_liks: vec![vec![-1.0; 4]],
             stream_names: vec!["s0".to_string()],
+            per_stream_held_out_log_liks: Vec::new(),
             per_stream_log_liks: vec![vec![vec![-1.0; 4]]],
             per_stream_samples: vec![vec![vec![1.0, 2.0, 2.0, 3.0]]],
         };
@@ -392,6 +395,7 @@ mod tests {
             obs_times: vec![1.0, 2.0, 3.0],
             log_liks: vec![vec![-1.0; 4]; 3],
             stream_names: vec!["a".to_string(), "b".to_string()],
+            per_stream_held_out_log_liks: Vec::new(),
             per_stream_log_liks: vec![vec![vec![-1.0; 4]; 2]; 3],
             per_stream_samples: vec![
                 vec![vec![1.0, 2.0, 2.0, 3.0], vec![0.0, 4.0, 4.0, 8.0]],
@@ -473,6 +477,7 @@ mod tests {
             // Single-stream recorded: the stream's per-particle log-liks ARE
             // the joint ones (one stream ⇒ joint = the stream).
             stream_names: vec!["s0".to_string()],
+            per_stream_held_out_log_liks: Vec::new(),
             per_stream_log_liks: vec![
                 vec![vec![-1.0, -2.0, -0.5, -3.0]],
                 vec![vec![-0.1, -0.2, -0.3, -0.4]],
@@ -526,6 +531,7 @@ mod tests {
             obs_times: vec![1.0, 2.0],
             log_liks: vec![vec![-1.0; 4]; 2],
             stream_names: vec!["s0".to_string()],
+            per_stream_held_out_log_liks: Vec::new(),
             per_stream_log_liks: vec![vec![vec![-1.0; 4]]; 2],
             per_stream_samples: vec![vec![vec![0.5, 1.0, 1.5, 2.0]]; 2],
         };
@@ -558,6 +564,7 @@ mod tests {
             obs_times: vec![1.0, 2.0],
             log_liks: vec![vec![-1.0; 4]; 2],
             stream_names: vec!["s0".to_string()],
+            per_stream_held_out_log_liks: Vec::new(),
             per_stream_log_liks: vec![vec![vec![-1.0; 4]]; 2],
             per_stream_samples: vec![vec![vec![0.5, 1.0, 1.5, 2.0]]; 2],
         };
@@ -591,6 +598,7 @@ mod tests {
             obs_times: vec![1.0, 2.0, 3.0],
             log_liks: vec![vec![-1.0; 4]; 3],
             stream_names: vec!["s0".to_string()],
+            per_stream_held_out_log_liks: Vec::new(),
             per_stream_log_liks: vec![vec![vec![-1.0; 4]]; 3],
             per_stream_samples: vec![vec![vec![0.5, 1.0, 1.5, 2.0]]; 3],
         };

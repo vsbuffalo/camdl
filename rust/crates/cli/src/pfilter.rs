@@ -2398,7 +2398,7 @@ mod tests {
         let obs = state_stream();
         let rows = crate::fit::observed_rows::observed_rows(path, &obs, &[&obs], opts)?;
         Ok(rows.iter().map(|r| (r.measures.end(), r.cell.map(|c| match c {
-            sim::inference::ObsCell::Scalar(v) => v,
+            sim::inference::ObsCell::Scalar(v) | sim::inference::ObsCell::HeldOut(v) => v,
         }))).collect())
     }
 

@@ -106,16 +106,23 @@ pub enum ObsCellState {
     /// marginalized, not scored as zero — but the accumulator reset still
     /// fires on schedule.
     Hole,
+    /// Scheduled here with a held-out value (D79): evaluated by the scoring
+    /// likelihood, never assimilated, so to the filter it is a hole.
+    HeldOut {
+        #[serde(with = "score::num::json_f64")]
+        y_held_out: f64,
+    },
     /// Not scheduled at this union index: a sibling stream's cadence.
     NotScheduled,
 }
 
 impl ObsCellState {
-    /// The observed value, when there is one.
+    /// The observed value the filter scored, when there is one. A held-out
+    /// value is not one.
     pub fn y_obs(&self) -> Option<f64> {
         match self {
             ObsCellState::Scored { y_obs } => Some(*y_obs),
-            ObsCellState::Hole | ObsCellState::NotScheduled => None,
+            ObsCellState::Hole | ObsCellState::HeldOut { .. } | ObsCellState::NotScheduled => None,
         }
     }
 }
@@ -235,6 +242,9 @@ impl std::fmt::Display for StreamAttempt {
         match &self.cell {
             ObsCellState::NotScheduled => return write!(f, ": not scheduled here"),
             ObsCellState::Hole => return write!(f, ": scheduled, value missing (no term)"),
+            ObsCellState::HeldOut { y_held_out } => {
+                return write!(f, ": held out ({y_held_out}; scored only, never assimilated)")
+            }
             ObsCellState::Scored { y_obs } => write!(f, ": observed {y_obs}")?,
         }
         match (self.projected_max, self.projected_median) {
