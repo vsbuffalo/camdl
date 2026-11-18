@@ -9889,18 +9889,31 @@ let resolve_action_target ctx ~name ~loc ~verb env comp idxs =
    (E277) so a family and a typo do not collapse into one vague message. *)
 let check_action_target ctx ~name ~loc ~verb ~base ~concrete =
   if not (Hashtbl.mem ctx.expanded_comp_tbl concrete) then begin
-    if Hashtbl.mem ctx.comp_tbl base then
-      let cells = expand_compartment_name ctx base in
-      Diagnostics.error ctx.diags ~code:"E265" ~loc
-        ~message:(Printf.sprintf
-          "intervention '%s' %s '%s', which is not a single expanded \
-           compartment — '%s' is stratified"
-          name verb concrete base)
-        ~hint:(Printf.sprintf
-          "name one expanded cell, e.g. %s   (cells: %s)"
-          (List.hd cells) (String.concat ", " cells))
-        ()
-    else
+    if Hashtbl.mem ctx.comp_tbl base then begin
+      match expand_compartment_name ctx base with
+      | [] ->
+        (* No cells: a dimension the compartment is stratified by has no
+           levels, typically because its data file could not be read, which
+           is reported where the dimension is read (gh#1228). *)
+        Diagnostics.error ctx.diags ~code:"E265" ~loc
+          ~message:(Printf.sprintf
+            "intervention '%s' %s '%s', a cell of compartment '%s', which has \
+             no cells: a dimension it is stratified by has no levels"
+            name verb concrete base)
+          ~hint:"fix the dimension's levels first (a `read(...)` whose file \
+                 is missing is reported on its own)"
+          ()
+      | first :: _ as cells ->
+        Diagnostics.error ctx.diags ~code:"E265" ~loc
+          ~message:(Printf.sprintf
+            "intervention '%s' %s '%s', which is not a single expanded \
+             compartment — '%s' is stratified"
+            name verb concrete base)
+          ~hint:(Printf.sprintf
+            "name one expanded cell, e.g. %s   (cells: %s)"
+            first (String.concat ", " cells))
+          ()
+    end else
       Diagnostics.error ctx.diags ~code:"E265" ~loc
         ~message:(Printf.sprintf
           "intervention '%s' %s '%s', which is not a declared compartment"
