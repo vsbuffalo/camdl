@@ -296,12 +296,11 @@ type draw_method =
           rounded to the nearest integer, with no noise. *)
 
 (** How a [#[lineage]] transition chooses which existing individual caused
-    each firing, so that the runtime can record a genealogy. The compiler is
-    meant to refuse a [#[lineage]] transition whose rate is not linear in the
-    counts of its parent compartments, but its check accepts a parent that
-    appears more than once in a product: for [beta * S * I * I / (N * N)] it
-    writes the weight [2 * beta * S * I / (N * N)], and the weights times the
-    parent counts then sum to twice the rate. *)
+    each firing, so that the runtime can record a genealogy. The compiler
+    refuses (E601) a [#[lineage]] transition whose rate is not linear in the
+    counts of its parent compartments, including a product of two parent
+    counts such as [beta * S * I * I / (N * N)], so the weights times the
+    parent counts sum to the rate. *)
 type transition_lineage = {
   is_lineage_event:    bool;
       (** Always [true]: the compiler writes a lineage record only for a

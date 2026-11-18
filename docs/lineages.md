@@ -61,7 +61,8 @@ rate; at `realize` time a parent is sampled from those weights.
 compartments. `β·S·I/N` compiles (`I` is a linear parent in the numerator; its
 appearance in the `N` denominator is a frozen normalizer — denominator
 precedence). `β·S·(I+ι)^α/N` does **not** (the power is a genuine nonlinear use
-of `I`) and errors with `E601`. Nonlinear mixing is future work.
+of `I`) and errors with `E601`, as does a product of two parent counts in the
+numerator, `β·S·I·I/N²` or `β·S·I·A/N`. Nonlinear mixing is future work.
 
 **Overdispersion is transparent.** `overdispersed(β·S·I/N, σ²)` on a
 `#[lineage]` transition compiles: the classifier sees through the noise wrapper
