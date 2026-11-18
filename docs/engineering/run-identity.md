@@ -247,7 +247,7 @@ that embeds the struct, and that is scheduled with a version bump (below).
 ## From a command-line flag to the hash
 
 The derive guarantees that every field of `SimConfig` reaches the hash. For
-`simulate`, three more things guarantee that every input reaches it, or is
+`simulate`, four more things guarantee that every input reaches it, or is
 declared not to:
 
 1. **Every input is classified.** A class belongs to a (command, input) pair:
@@ -273,22 +273,48 @@ declared not to:
    destructures `RunConfig` exhaustively, so a field added to either struct does
    not compile until it is carried across.
    [`ResolvedSimConfig::engine_settings`](rust:cli::sim_config::ResolvedSimConfig)
-   is the one conversion to what runs: the job's backend and `dt`, and the
-   process-wide evaluator settings, which are installed from it and from nowhere
-   else. The thread count, the store root and `--force` travel in a separate
+   is the one conversion to what runs: the job's backend, `dt` and evaluator
+   settings ([`EvalSettings`](rust:sim::compiled_model::EvalSettings), which
+   every cell's compiled model carries), and the forcing-extrapolation policy,
+   which is still process-wide and is installed from it and from nowhere else.
+   The thread count, the store root and `--force` travel in a separate
    [`Execution`](rust:cli::sim_config::Execution) value.
-3. **Every input has a case.** `rust/crates/cli/tests/simulate_input_classes.rs`
+3. **A cell's identity and its run come from one value.**
+   [`ResolvedCell::resolve`](rust:cli::sim_config::ResolvedCell) resolves a
+   cell's `SimRun` through the engine's own resolution
+   ([`resolve_loaded_run`](rust:cli::util::resolve_loaded_run)) into the model
+   the cell executes, its table digests, seed and restored origin state, and its
+   backend, step, sampler and evaluator settings. The engine
+   ([`simulate_compiled`](rust:cli::util::simulate_compiled)) runs from it, and
+   `CasSink::cell_identity` builds the cell's `TrajectoryInput` from it with a
+   destructure that ignores no field, so a field added to the cell does not
+   compile until the identity uses it. The window and the parameter values are
+   read off the resolved model; a cell carrying a backend, step or evaluator
+   setting other than the run's `RunConfig` is refused rather than keyed.
+4. **Every input has a case.** `rust/crates/cli/tests/simulate_input_classes.rs`
    runs camdl into fresh stores, in a cleared environment, once per input and
    checks what its class predicts (below); `every_simulate_input_has_a_case`
    fails if one has no case.
 
 The configuration is not hashed as one value: a run has many cells, and each
 part reaches the level of a cell that it belongs to. The exhaustive copy of
-`RunConfig` makes the run-wide part include-by-default. The per-cell parts (the
-parameter values and table digests, the seed, the horizon and the restored
-origin state) are still assembled field by field in `cell_resolve`; a per-cell
-resolved value carrying them is planned with the removal of the process-wide
-settings (proposal phase 3 step 3).
+`RunConfig` makes the run-wide part include-by-default, and the exhaustive
+destructure of `ResolvedCell` the per-cell part (the window, the parameter
+values and table digests, the seed and the restored origin state). One limit
+remains: a `SimRun` field that changed the resolved model other than through its
+parameter values, its window or the model level would reach the engine without
+reaching the identity. `ResolvedCell::resolve` names every `SimRun` field, so
+such a field cannot be added without being routed there.
+
+`--allow-degenerate-rates` is not a process-wide setting: it is a field of the
+compiled model
+([`CompiledModel::with_eval_settings`](rust:sim::compiled_model::CompiledModel::with_eval_settings)),
+read by every evaluator from the model it evaluates, so two models in one
+process can differ. Every command sets it on the models it compiles from the
+value it keys. Two process-wide settings remain, both set once per command: the
+forcing-extrapolation policy (`cli/src/forcing_extrapolation.rs`, which the
+run-note reporter and the record writer read) and `--no-licm`, which the
+compiler invocation reads (`util::set_licm_disabled`).
 
 Two kinds of flag reach the identity through the model and the parameters rather
 than `RunConfig`. A flag that rewrites the model before it runs
