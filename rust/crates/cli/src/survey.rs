@@ -545,7 +545,10 @@ fn run_survey(
                     smc_dt, point_id,
                 ),
             };
-            bar.inc(1);
+            // The point's value is folded into the running best before its
+            // count is ticked (gh#1269): the line printed at the last count
+            // reads the best after every point's value is in, since each
+            // point's fold precedes its tick and the ticks are ordered.
             if row.loglik.is_finite() {
                 if let Ok(mut b) = best.lock() {
                     if row.loglik > *b {
@@ -554,6 +557,7 @@ fn run_survey(
                     }
                 }
             }
+            bar.inc(1);
             row
         })
         .collect();
