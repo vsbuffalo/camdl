@@ -10611,6 +10611,12 @@ let check_action_target ctx ~name ~loc ~verb ~base ~concrete =
     unrelated strata. A reference with only some of its population indices
     never becomes an endpoint; it is refused (E287) when it is resolved.
 
+    An endpoint that names one expanded cell, or indexes every dimension,
+    denotes exactly one cell and carries no dimensions, so it pairs one to
+    one with any other single cell: [from = I_pre_s3, to = Q[pre]]. The
+    dimensions of a bare family are still the declared ones, even when the
+    family happens to have one cell.
+
     A staged compartment is paired over its population dimensions only. Its
     stages are where an individual is in the dwell, not a stratum, so a
     residence reference ([E[pre]], or bare [E]) denotes one population cell
@@ -10620,7 +10626,8 @@ type endpoint = {
       (** The compartment as written, without indices. *)
   ep_dims  : string list;
       (** Its declared population dimensions when written bare; [[]] when
-          written with indices. *)
+          written with indices or as the name of one expanded cell
+          ([S_pre], [I_pre_s3]). *)
   ep_cells : string list list;
       (** One entry per population cell the reference denotes. An entry is
           the stage cells of a residence reference, in dwell order, and a
@@ -10679,7 +10686,10 @@ let resolve_action_endpoint ctx env ~name:iv_name ~loc (e : expr) : endpoint opt
           [Ir.PopSum] for a family with exactly one cell, so keying on the
           constructor would give a one-level dimension `ep_dims = []` and let
           it pair with anything. *)
-       let dims_of b = if bare then comp_dims ctx b else [] in
+       let is_cell_name =
+         Hashtbl.mem ctx.expanded_comp_tbl base
+         && not (Hashtbl.mem ctx.comp_tbl base) in
+       let dims_of b = if bare && not is_cell_name then comp_dims ctx b else [] in
        match resolve_expr ctx env e with
        | Ir.Pop n     -> Some { ep_base = base; ep_dims = dims_of base; ep_cells = [ [ n ] ] }
        | Ir.PopSum ns ->
@@ -10776,10 +10786,36 @@ let resolve_intervention_action ctx env ~name ~family ~loc ~binders (action : ac
            | []   -> Printf.sprintf "'%s' (unstratified, or a single cell)" ep.ep_base
            | dims -> Printf.sprintf "'%s' stratified by [%s]"
                        ep.ep_base (String.concat ", " dims) in
+         (* A staged compartment, written bare or as one of its stage cells,
+            is a population held in several cells; naming one stage is the
+            way to make it a single cell. *)
+         let stage_hint =
+           let residence_of_ep ep =
+             match residence_of ctx ep.ep_base with
+             | Some r -> Some r
+             | None ->
+               List.find_opt (fun (r : residence) ->
+                 List.mem ep.ep_base (expand_compartment_name ctx r.res_compartment))
+                 ctx.residences
+           in
+           match List.find_map residence_of_ep [ s_ep; d_ep ] with
+           | None -> ""
+           | Some r ->
+             let items =
+               List.filter_map (fun d ->
+                 if d = r.res_stage_dim then None
+                 else match dim_levels_or_empty ctx d with
+                   | l :: _ -> Some l
+                   | [] -> None)
+                 (comp_dims ctx r.res_compartment) in
+             Printf.sprintf "; to move one stage of '%s', name it as `%s`"
+               r.res_compartment
+               (stage_reference_text r.res_compartment items 1)
+         in
          let hint =
            "give both endpoints the same dimensions, or index the transfer \
             explicitly (e.g. `vacc[a in age] : transfer(from = S[a], to = \
-            V[a], …)`)" in
+            V[a], …)`)" ^ stage_hint in
          Diagnostics.error ctx.diags ~code:"E237" ~loc
            ~message:(Printf.sprintf
              "intervention '%s': transfer endpoints have different stratum \

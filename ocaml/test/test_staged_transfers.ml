@@ -292,6 +292,82 @@ let test_shape_mismatch_names_population_dimensions_only () =
     ~absent:[ "__latency_stage"; "E_s1" ]
     (age_src "  bad : transfer(fraction = cov, from = E, to = S[pre]) at [10 'days]\n")
 
+(* ── Cell names against indexed references ───────────────────────────────── *)
+
+(* Age-stratified S, I, R, Q, U with I staged in three stages. [only] is the
+   `only = [...]` list of the stratify declaration, which leaves the rest
+   unstratified. [effects] is the body of the interventions block. *)
+let cells_src ?(only = "") effects =
+  Printf.sprintf
+    "time_unit = 'days\n\
+     dimensions { age = [pre, sch] }\n\
+     compartments { S, I, R, Q, U }\n\
+     stratify(by = age%s)\n\
+     parameters { beta : rate  gamma : rate }\n\
+     transitions {\n\
+    \  infection[a in age] : S[a] --> I[a] @ beta * S[a]\n\
+    \  recovery[a in age]  : I[a] --> R[a] via erlang(stages = 3, rate = gamma)\n\
+     }\n\
+     init { S[pre] = 500  S[sch] = 490  I[pre] = 10 }\n\
+     interventions {\n%s}\n\
+     simulate { from = 0 'days  to = 10 'days }\n"
+    only effects
+
+let transfer_between ?only ~from_ ~to_ () =
+  cells_src ?only (Printf.sprintf
+    "  iso : transfer(fraction = 0.8, from = %s, to = %s) at [3]\n" from_ to_)
+
+(* Both endpoints denote one cell, so they pair one to one whichever way each
+   is written: a cell name, an indexed reference, a stage form, or the bare
+   name of a compartment that is not stratified. *)
+let test_single_cell_endpoints_pair_whatever_the_notation () =
+  List.iter (fun (from_, to_, expected) ->
+    let m = compile_ok (transfer_between ~only:", only = [S, I, R, Q]" ~from_ ~to_ ()) in
+    check_actions m "iso" [ expected ])
+    [ ("I_pre_s3", "Q[pre]", "fraction 0.8 [I_pre_s3>Q_pre]");
+      ("S_pre", "Q[pre]", "fraction 0.8 [S_pre>Q_pre]");
+      ("S[pre]", "Q_pre", "fraction 0.8 [S_pre>Q_pre]");
+      ("Q[pre]", "S_pre", "fraction 0.8 [Q_pre>S_pre]");
+      ("S_pre", "Q_pre", "fraction 0.8 [S_pre>Q_pre]");
+      ("S[pre]", "U", "fraction 0.8 [S_pre>U]");
+      ("U", "S_pre", "fraction 0.8 [U>S_pre]");
+      ("I_pre_s3", "U", "fraction 0.8 [I_pre_s3>U]");
+      ("stage(I[pre], 3)", "Q[pre]", "fraction 0.8 [I_pre_s3>Q_pre]") ]
+
+(* The notations that name a cell, with every compartment stratified. A cell
+   name used to claim the dimensions of its compartment's stratify
+   declaration, so it was refused against an indexed reference. *)
+let test_cell_name_against_an_indexed_reference_pairs () =
+  List.iter (fun (from_, to_, expected) ->
+    let m = compile_ok (transfer_between ~from_ ~to_ ()) in
+    check_actions m "iso" [ expected ])
+    [ ("I_pre_s3", "Q[pre]", "fraction 0.8 [I_pre_s3>Q_pre]");
+      ("S_pre", "Q[pre]", "fraction 0.8 [S_pre>Q_pre]");
+      ("S[pre]", "Q_pre", "fraction 0.8 [S_pre>Q_pre]");
+      ("Q[pre]", "S_pre", "fraction 0.8 [Q_pre>S_pre]");
+      ("stage(I[pre], 3)", "Q[pre]", "fraction 0.8 [I_pre_s3>Q_pre]") ]
+
+(* A cell name against a bare stratified family is a shape mismatch, as it is
+   for an indexed reference: one cell cannot pair with two. The second pair
+   used to pass the shape check and fail in the pairing with an internal
+   error. *)
+let test_cell_name_against_a_family_is_still_refused () =
+  expect_error ~code:"E237"
+    ~mentions:[ "'S_pre' (unstratified, or a single cell)"; "'Q' stratified by [age]" ]
+    (transfer_between ~from_:"S_pre" ~to_:"Q" ());
+  expect_error ~code:"E237"
+    ~mentions:[ "'Q' stratified by [age]"; "'S_pre' (unstratified, or a single cell)" ]
+    (transfer_between ~from_:"Q" ~to_:"S_pre" ());
+  expect_error ~code:"E237" ~mentions:[ "'U' stratified by [age]" ]
+    (transfer_between ~from_:"S_pre" ~to_:"U" ())
+
+(* A bare staged family against one cell names the way to take one stage. *)
+let test_shape_mismatch_hint_names_the_stage_form () =
+  expect_error ~code:"E237" ~mentions:[ "stage(I[pre], 1)" ]
+    (transfer_between ~from_:"I" ~to_:"Q[pre]" ());
+  (* The text the hint suggests compiles. *)
+  ignore (compile_ok (transfer_between ~from_:"stage(I[pre], 1)" ~to_:"Q[pre]" ()))
+
 (* ── count ───────────────────────────────────────────────────────────────── *)
 
 let test_count_from_a_staged_source_is_one_grouped_count () =
@@ -524,7 +600,15 @@ let () =
          Alcotest.test_case "bare staged endpoint in a family → E239" `Quick
            test_bare_staged_endpoint_in_a_family_is_e239;
          Alcotest.test_case "shape mismatch → E237, population dimensions only" `Quick
-           test_shape_mismatch_names_population_dimensions_only ]);
+           test_shape_mismatch_names_population_dimensions_only;
+         Alcotest.test_case "single-cell endpoints pair in any notation" `Quick
+           test_single_cell_endpoints_pair_whatever_the_notation;
+         Alcotest.test_case "cell name against an indexed reference pairs" `Quick
+           test_cell_name_against_an_indexed_reference_pairs;
+         Alcotest.test_case "cell name against a family → E237" `Quick
+           test_cell_name_against_a_family_is_still_refused;
+         Alcotest.test_case "E237 hint names the stage form" `Quick
+           test_shape_mismatch_hint_names_the_stage_form ]);
       ("count",
        [ Alcotest.test_case "one grouped count; bare stratified → E238" `Quick
            test_count_from_a_staged_source_is_one_grouped_count ]);

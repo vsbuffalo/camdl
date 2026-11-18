@@ -4275,7 +4275,9 @@ mismatch — one endpoint stratified and the other not, different dimensions, or
 the same dimensions in a different order — is **E237**, which names both shapes.
 A fully-indexed endpoint denotes one cell and carries no dimensions, so
 `transfer(from = S[child], to = S[adult])` and `transfer(from = S[child], to =
-V)` with `V` unstratified are ordinary single-cell transfers, not fan-outs. The
+V)` with `V` unstratified are ordinary single-cell transfers, not fan-outs. An endpoint written as the name of one expanded cell
+(`S_pre`, or a stage cell `I_pre_s3`) is a single cell too, and pairs with an
+indexed single cell: `transfer(from = I_pre_s3, to = Q[pre])`. The
 `fraction` is one expression shared by every cell; for coverage that varies by
 stratum, write the indexed family form (§13.3).
 
