@@ -4006,7 +4006,7 @@ pub fn simulate_compiled(
             )
         }
         ForwardBackend::ChainBinomial => {
-            let cfg = ChainBinomialConfig { t_start, t_end, dt: dt, binomial: binomial };
+            let cfg = ChainBinomialConfig { t_start, t_end, dt, binomial };
             sim::chain_binomial::run_chain_binomial_with_observer(
                 compiled, &params, seed, &cfg, None, tick_opt.as_deref_mut(),
                 sim::chain_binomial::Resume {
@@ -4019,7 +4019,7 @@ pub fn simulate_compiled(
             if start_state.is_some() {
                 return Err(unseamed_backend_msg("ode"));
             }
-            let cfg = OdeConfig { t_start, t_end, dt: dt };
+            let cfg = OdeConfig { t_start, t_end, dt };
             // Forward simulate never coarsens — coarse burn-in is a fit-time
             // likelihood option (see `compute_ode_loglik`), not a simulate surface.
             sim::ode::run_ode(compiled, &params, &cfg, tick_opt, None)
