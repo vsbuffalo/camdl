@@ -242,22 +242,23 @@ design_, since those values were known only after the origin, and is not an
 unconditional forecast. A target with no value of a design column is refused,
 never filled in; without either flag such a stream is refused. The target set,
 with the design values the targets read, is part of the output address; the
-held-out outcomes are not, so a forecast whose held-out values change writes the
-same files, byte for byte, to the same directory. The outputs hold only inputs
-to the predictions: which held-out row a target matched, and its value, belong
-to the score artifact. A held-out value is scored only where it can be: a
-prospective forecast scores none of a design-reading stream's (its values were
-realised under their own design), and a value the data checks refuse, such as a
-count above its trials, is left unscored, never refusing the prediction.
+held-out outcomes are not. The forecast's files record nothing about held-out
+rows, so a forecast whose held-out rows change, or are removed, writes the same
+files, byte for byte, to the same directory: which targets have a held-out row,
+which row it is and its value belong to the score artifact. A held-out value is
+scored only where it can be: a prospective forecast scores none of a
+design-reading stream's (its values were realised under their own design), and a
+value the data checks refuse, such as a count above its trials, is left
+unscored, never refusing the prediction.
 
 It writes `forecast/<stream>.tsv` (one row per target: `t_start`, `t_stop`,
-`horizon`, `lead`, `has_held_out_row`, the mean and the `q05…q95` band),
-`forecast-samples.tsv` (joint samples, each one trajectory across every target),
-and `forecast.json` (the origin, the reach, the rows that conditioned the
-parameters and the state, each target's design values and the design mode with
-its label, and the calendar). Forecasts are available for chain-binomial
-posteriors (PMMH, PGAS); an ODE posterior, `--enable`, `--disable`,
-`--quantities` and `--by-chain` are refused in this mode for now.
+`horizon`, `lead`, the mean and the `q05…q95` band), `forecast-samples.tsv`
+(joint samples, each one trajectory across every target), and `forecast.json`
+(the origin, the reach, the rows that conditioned the parameters and the state,
+each target's design values and the design mode with its label, and the
+calendar). Forecasts are available for chain-binomial posteriors (PMMH, PGAS);
+an ODE posterior, `--enable`, `--disable`, `--quantities` and `--by-chain` are
+refused in this mode for now.
 
 `--scenario NAME` and `--sweep` add _arms_ to a forecast: the fitted model is
 the first arm, each scenario and each sweep point another, and every table gains

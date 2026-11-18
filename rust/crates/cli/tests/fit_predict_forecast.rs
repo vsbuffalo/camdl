@@ -141,12 +141,11 @@ fn a_forecast_starts_at_the_training_extent_and_counts_each_streams_own_periods(
                 &manifest["run_extent"]["extended"]),
         (&serde_json::json!(63.0), &serde_json::json!(63.0), &serde_json::json!(false)));
     // The held-out rows (days 25–63 and the weeks ending 28–63, all in the
-    // training files under `holdout_after`) are not described here: the
-    // file holds only inputs to the predictions. Each target says whether
-    // one measures its period.
-    assert!(manifest.get("held_out").is_none(), "no held-out outcome digests in forecast.json");
+    // training files under `holdout_after`) are not described here: forecast
+    // artifacts record nothing about held-out rows.
+    assert!(manifest.get("held_out").is_none(), "no held-out record in forecast.json");
     assert!(manifest["targets"].as_array().unwrap().iter()
-        .all(|t| t["has_held_out_row"] == true && t.get("held_out").is_none()));
+        .all(|t| t.get("held_out").is_none() && t.get("has_held_out_row").is_none()));
     assert_eq!(manifest["mode"], "fixed_origin");
     assert_eq!(manifest["origin"]["t"], 24.0, "the origin is the training extent");
     assert_eq!(manifest["horizon"]["duration"], 28.0);
@@ -158,16 +157,17 @@ fn a_forecast_starts_at_the_training_extent_and_counts_each_streams_own_periods(
         "the state set is the training rows: no row ending after the origin is filtered");
 
     let weekly = rows(&fdir.join("forecast/weekly_cases.tsv"));
-    let spans: Vec<(&str, &str, &str, &str, &str)> = weekly.iter()
+    let spans: Vec<(&str, &str, &str, &str)> = weekly.iter()
         .map(|r| (r["t_start"].as_str(), r["t_stop"].as_str(), r["horizon"].as_str(),
-                  r["lead"].as_str(), r["has_held_out_row"].as_str()))
+                  r["lead"].as_str()))
         .collect();
     assert_eq!(spans, vec![
-        ("21", "28", "0", "4", "true"),
-        ("28", "35", "1", "11", "true"),
-        ("35", "42", "2", "18", "true"),
-        ("42", "49", "3", "25", "true"),
-    ], "the week under way is horizon 0; horizons count weeks; held-out rows mark their targets");
+        ("21", "28", "0", "4"),
+        ("28", "35", "1", "11"),
+        ("35", "42", "2", "18"),
+        ("42", "49", "3", "25"),
+    ], "the week under way is horizon 0; horizons count weeks");
+    assert!(weekly.iter().all(|r| !r.keys().any(|k| k.contains("held_out"))), "no held-out column");
     let daily = rows(&fdir.join("forecast/daily_cases.tsv"));
     assert_eq!(daily.len(), 28, "daily horizons 0–27");
     assert_eq!((daily[0]["t_start"].as_str(), daily[0]["t_stop"].as_str()), ("24", "25"));
@@ -243,21 +243,21 @@ cooling = 0.7"#, "");
     assert!(stderr(&out).contains("cannot be combined with --mode forecast"), "{}", stderr(&out));
 }
 
-/// A held-out row marks its target whether it is in the training file under
-/// `holdout_after = 24` or in a `[data.holdout]` file. Which row it is (its
-/// file and position) is not in the forecast's outputs: the outputs hold only
-/// inputs to the predictions, and the row's identity belongs to the score
-/// artifact (Stage 6).
+/// Held-out rows in the training file under `holdout_after = 24`, or in a
+/// `[data.holdout]` file, leave no trace in the forecast's tables: which
+/// targets they measure, which rows they are and their values belong to the
+/// score artifact (Stage 6). Either way the week under way is the first
+/// target.
 #[test]
-fn a_held_out_row_in_either_file_marks_its_target() {
+fn held_out_rows_in_either_file_leave_no_trace_in_the_forecast_tables() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     fit(dir, PMMH, "");
     let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "1 weeks", "--n-draws", "2"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let week = rows(&forecast_dir(dir).join("forecast/weekly_cases.tsv")).remove(0);
-    assert_eq!((week["t_start"].as_str(), week["has_held_out_row"].as_str()), ("21", "true"));
-    assert!(!week.contains_key("held_out_row") && !week.contains_key("held_out_file"));
+    assert_eq!(week["t_start"].as_str(), "21");
+    assert!(!week.keys().any(|k| k.contains("held_out")), "{:?}", week.keys());
 
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
@@ -284,7 +284,8 @@ fn a_held_out_row_in_either_file_marks_its_target() {
     let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "1 weeks", "--n-draws", "2"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let week = rows(&forecast_dir(dir).join("forecast/weekly_cases.tsv")).remove(0);
-    assert_eq!((week["t_start"].as_str(), week["has_held_out_row"].as_str()), ("21", "true"));
+    assert_eq!(week["t_start"].as_str(), "21");
+    assert!(!week.keys().any(|k| k.contains("held_out")), "{:?}", week.keys());
 }
 
 /// Every file under `root`.
@@ -682,6 +683,33 @@ fn the_particle_count_defaults_to_the_fits_and_is_recorded_and_addressed() {
     let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward", "--particles", "40"]);
     assert!(!out.status.success(), "{}", stderr(&out));
     assert!(stderr(&out).contains("this predict runs neither (--mode free_forward)"), "{}", stderr(&out));
+}
+
+/// Forecast artifacts record nothing about held-out rows: removing the
+/// weekly stream's trailing held-out rows (the weeks ending 42 to 63) after
+/// the fit writes every forecast file byte-identical to the same address.
+#[test]
+fn removing_held_out_rows_changes_nothing_the_forecast_writes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fit(dir, PMMH, "");
+    let snapshot = || {
+        let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "4 weeks", "--n-draws", "2"]);
+        assert!(out.status.success(), "fit predict: {}", stderr(&out));
+        let d = forecast_dir(dir);
+        ["forecast.json", "forecast-samples.tsv", "forecast/weekly_cases.tsv", "forecast/daily_cases.tsv"]
+            .map(|f| (f, std::fs::read(d.join(f)).unwrap()))
+    };
+    let before = snapshot();
+    let weekly = std::fs::read_to_string(dir.join("weekly_cases.tsv")).unwrap();
+    let kept: Vec<&str> = weekly.lines()
+        .filter(|l| l.split('\t').next().unwrap().parse::<f64>().map_or(true, |t| t <= 35.0))
+        .collect();
+    assert!(kept.len() < weekly.lines().count(), "rows were removed");
+    std::fs::write(dir.join("weekly_cases.tsv"), kept.join("\n") + "\n").unwrap();
+    for ((name, a), (_, b)) in snapshot().iter().zip(&before) {
+        assert!(a == b, "{name} is byte-identical when trailing held-out rows are removed");
+    }
 }
 
 /// A `[data.holdout]` file's values are outcomes, not inputs to the
