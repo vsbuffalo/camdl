@@ -295,9 +295,11 @@ declared not to:
    [`ResolvedSimConfig::engine_settings`](rust:cli::sim_config::ResolvedSimConfig)
    is the one conversion to what runs: the job's backend, `dt` and evaluator
    settings ([`EvalSettings`](rust:sim::compiled_model::EvalSettings), which
-   every cell's compiled model carries), and the forcing-extrapolation policy,
-   which is still process-wide and is installed from it and from nowhere else.
-   The thread count, the store root and `--force` travel in a separate
+   every cell's compiled model carries), and the forcing-extrapolation policy
+   ([`ForcingPolicy`](rust:cli::forcing_extrapolation::ForcingPolicy)). It is
+   called once per invocation, and the CAS sink keeps that instance, so every
+   leaf's record names the policy the run's forcing notes went into. The thread
+   count, the store root and `--force` travel in a separate
    [`Execution`](rust:cli::sim_config::Execution) value.
 3. **A cell's identity and its run come from one value.**
    [`ResolvedCell::resolve`](rust:cli::sim_config::ResolvedCell) resolves a
@@ -342,9 +344,27 @@ compiled model
 ([`CompiledModel::with_eval_settings`](rust:sim::compiled_model::CompiledModel::with_eval_settings)),
 read by every evaluator from the model it evaluates, so two models in one
 process can differ. Every command sets it on the models it compiles from the
-value it keys. Two process-wide settings remain, both set once per command: the
-forcing-extrapolation policy (`cli/src/forcing_extrapolation.rs`, which the
-run-note reporter and the record writer read) and `--no-licm`, which the
+value it keys.
+
+The forcing-extrapolation policy is a value too:
+[`ForcingPolicy`](rust:cli::forcing_extrapolation::ForcingPolicy), built by each
+command from its resolved `--allow-forcing-extrapolation` or its fit config's
+`[config] allow_forcing_extrapolation`, and holding what the run held and the
+refusal it kept while it held a store claim. The command keys its leaf from the
+value's `allowed()`, passes the value to every record it writes
+([`RecordMeta::new`](rust:cli::resolve::RecordMeta::new)), and installs it for
+its duration. Installing is needed because the engine's run notes reach the
+command through `sim::run_notes`, whose reporter is one function installed at
+start-up: the reporter routes each forcing note into the installed policy
+through one routing slot, which is the policy's only process-wide state. With
+none installed, a note is refused. `sim::run_notes` also says each distinct note
+once per process, so a second policy installed in the same process would not be
+told of a forcing the first was told of. Every command installs one policy;
+`fit predict` alone replaces it, with an allowing one, once it has read the
+stored fit's config, and a refusal under the first has already ended the
+command.
+
+One process-wide setting remains, set once per command: `--no-licm`, which the
 compiler invocation reads (`util::set_licm_disabled`).
 
 Two kinds of flag reach the identity through the model and the parameters rather
