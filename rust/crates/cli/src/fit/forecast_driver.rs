@@ -189,6 +189,13 @@ pub(crate) fn fixed_origin_forecast(
         // log-likelihood is 0 for a live particle; a dead particle's
         // log-weight is −∞. So any −∞ after the origin is a death.
         for &i in &after_origin {
+            // An unselected stop's record is empty, and an empty record would
+            // pass this check without looking: refuse rather than go blind.
+            if preq.log_liks[i].len() != n {
+                return Err(fail(Some(union_times[i]), format!(
+                    "internal error: the death check has {} of {n} particles' weights at this stop",
+                    preq.log_liks[i].len())));
+            }
             if let Some(p) = preq.log_liks[i].iter().position(|w| !w.is_finite()) {
                 return Err(fail(Some(union_times[i]), format!(
                     "particle {p} died after the forecast origin t = {origin} (a numerical \
