@@ -572,6 +572,10 @@ let shared_codes : (string * string list) list = [
   "E200", ["doctest.ml"; "expander.ml"];
   (* an unknown or repeated keyword argument *)
   "E251", ["expander.ml"; "parser.mly"];
+  (* a constant expression whose value is NaN or infinite: compiler.ml
+     renders Validate's report for an expression, expander.ml reports a typed
+     `let` constant, which it evaluates itself (gh#1207) *)
+  "E520", ["compiler.ml"; "expander.ml"];
   (* the dimension checker: dim_sites.ml generates the sites, dimcheck.ml
      the equations *)
   "E297", ["dim_sites.ml"; "dimcheck.ml"];
