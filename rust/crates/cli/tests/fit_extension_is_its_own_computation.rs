@@ -1,7 +1,8 @@
 //! A fit extended to a longer target is a different computation, and the
 //! shorter fit is left exactly as it was.
 //!
-//! PMMH and PGAS (and `mh`) can be extended: `fit run --resume <base>` with a
+//! PMMH and PGAS can be extended (`mh` cannot: `fit run` refuses `--resume`
+//! for every other method): `fit run --resume <base>` with a
 //! longer `iterations` / `sweeps` continues each chain from the state the base
 //! recorded at its end (`chain_N/resume_state.bin`, the checkpoint). Four
 //! things are kept distinct:
