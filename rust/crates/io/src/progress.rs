@@ -312,6 +312,11 @@ struct Shared {
     /// it is taken a handful of times per chain per run, never on the sweep
     /// path, so it cannot contend with the sampler.
     chains: std::sync::Mutex<Vec<Option<ChainState>>>,
+    /// Held across each write of the file, so the timer thread and a
+    /// [`publish`](Heartbeat::publish) from a worker never write the shared
+    /// temp file at once, and each write reads `step` after the one before it
+    /// — the counter on disk never moves backward.
+    write: std::sync::Mutex<()>,
 }
 
 impl Shared {
@@ -319,6 +324,18 @@ impl Shared {
     fn chain_liveness(&self) -> Option<ChainLiveness> {
         let slots = self.chains.lock().expect("no thread panicked holding the chain slots");
         if slots.is_empty() { None } else { Some(ChainLiveness::of(&slots)) }
+    }
+
+    /// Write the current `Running` state now. Best effort, like every
+    /// progress write: this is a diagnostic.
+    fn write_running(&self) {
+        let _w = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        let step = self.step.load(Ordering::Relaxed);
+        let p = Progress::now(
+            RunState::Running { phase: self.rule.at(step), step, total: self.total },
+            self.chain_liveness(),
+        );
+        let _ = write_progress(&self.dir, &p);
     }
 }
 
@@ -351,6 +368,7 @@ impl Heartbeat {
             step: AtomicU64::new(0),
             stop: AtomicBool::new(false),
             chains: std::sync::Mutex::new(vec![None; n_chains]),
+            write: std::sync::Mutex::new(()),
         });
         let s = Arc::clone(&shared);
         let handle = std::thread::Builder::new()
@@ -359,16 +377,7 @@ impl Heartbeat {
                 // Sleep in short ticks so `stop` is responsive without a condvar.
                 let tick = Duration::from_millis(250).min(interval);
                 loop {
-                    let step = s.step.load(Ordering::Relaxed);
-                    let p = Progress::now(
-                        RunState::Running {
-                            phase: s.rule.at(step),
-                            step,
-                            total: s.total,
-                        },
-                        s.chain_liveness(),
-                    );
-                    let _ = write_progress(&s.dir, &p);
+                    s.write_running();
                     let mut waited = Duration::ZERO;
                     while waited < interval {
                         if s.stop.load(Ordering::Relaxed) {
@@ -408,7 +417,9 @@ impl Heartbeat {
         Self::spawn(dir, PhaseRule::Fixed(Phase::Optimizing), total, interval, 0)
     }
 
-    /// Profile heartbeat: a single `Profiling` phase. `total` is the grid size.
+    /// Profile heartbeat: a single `Profiling` phase. `total` is the number of
+    /// jobs the invocation runs — grid cells × starts × seeds — and a step is
+    /// one job finished, a cached one included.
     pub fn profiling(dir: PathBuf, total: u64, interval: Duration) -> Heartbeat {
         Self::spawn(dir, PhaseRule::Fixed(Phase::Profiling), total, interval, 0)
     }
@@ -437,9 +448,17 @@ impl Heartbeat {
         self.shared.step.fetch_max(step, Ordering::Relaxed);
     }
 
+    /// Write the current `Running` state now, between the timer's writes —
+    /// for a loop whose unit of work is coarse enough that a reader should see
+    /// each one land (a profile's jobs). Does I/O; not for a hot loop.
+    pub fn publish(&self) {
+        self.shared.write_running();
+    }
+
     /// Stop the timer and write the clean terminal state (`Done` / `Failed`).
     pub fn finish(mut self, state: RunState) {
         self.stop_thread();
+        let _w = self.shared.write.lock().unwrap_or_else(|e| e.into_inner());
         let chains = self.shared.chain_liveness();
         let _ = write_progress(&self.shared.dir, &Progress::now(state, chains));
     }
@@ -537,6 +556,15 @@ impl HeartbeatGuard {
     pub fn bump(&self, step: u64) {
         if let Some(hb) = self.slot().as_ref() {
             hb.bump(step);
+        }
+    }
+
+    /// Write the current `Running` state now — see [`Heartbeat::publish`]. A
+    /// no-op once a terminal state is written, so a late worker cannot
+    /// overwrite `done` with `running`.
+    pub fn publish(&self) {
+        if let Some(hb) = self.slot().as_ref() {
+            hb.publish();
         }
     }
 
