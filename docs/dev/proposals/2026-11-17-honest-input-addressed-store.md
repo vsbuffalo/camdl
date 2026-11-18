@@ -544,6 +544,29 @@ and of coverage; the cases themselves are regression evidence.
 4. `fit run` (classification and cases; its hashing representation is unchanged
    until the follow-up), then `pfilter`, `profile`, `survey`.
 
+   **Done in this step, `fit run`:** the engine switches are a typed field of
+   the engine identity, `runid::inputs::EngineIdentity { build, switches }`,
+   which hashes exactly the bytes the old appended string did, so no stored run
+   re-keys; `run.json`'s `engine_version` is the build alone and
+   `engine_switches` lists the switches, so a run this build made with a switch
+   is not reported as another build's. `fit run` resolves its configuration
+   once, into `fit::run_config::ResolvedFitConfig` (flags, file and defaults,
+   before anything runs), from which its identity and its runners are built,
+   with every field named in the destructure. Its identity now keys the engine
+   switches, at the fit level. The fit folder stores the resolved config: a flag
+   that set a value of the problem half is written into the archived
+   `fit.toml.original` (gh#1268); the archive's `[method]` stays the file's,
+   since a folder holds every method run on its problem and a method's own
+   settings are its leaf's. `--no-licm` is a compile setting
+   (`util::CompileSettings`) that `fit run` passes to its compile, and the
+   end-of-run report reads the calendar from the model in hand rather than
+   recompiling the source; `main` no longer sets the process-wide setting for
+   `fit run`. `input_class::FIT_RUN` classifies every input, checked against
+   clap both ways, and `tests/fit_run_input_classes.rs` has a case for each.
+   **Next:** `pfilter`, `profile`, `survey`; the process-wide LICM setting is
+   still read by `simulate` (installed from its resolved value) and every other
+   command.
+
 The unused typed inputs in `runid/src/inputs.rs` (`PfilterEvalInput`,
 `SurveyInput`, `ProjectionInput`, `SyntheticObsInput`, `ProfilePointInput`, no
 users in `cli`) are adopted or deleted in their own commit before step 4.

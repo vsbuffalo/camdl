@@ -376,8 +376,11 @@ the fit's setting. Both remaining cases are for the commands' conversion in step
 4; the in-process `compare` case cannot be met by installing a policy per fit,
 because of the once-per-process note above.
 
-One process-wide setting remains, set once per command: `--no-licm`, which the
-compiler invocation reads (`util::set_licm_disabled`).
+`--no-licm` is a compile setting,
+[`CompileSettings`](rust:cli::util::CompileSettings). `fit run` resolves it
+(with `CAMDL_NO_LICM`) and passes it to its compile; `simulate` installs its
+resolved value process-wide, and every other command reads the process-wide
+setting, which `main` sets from the flag.
 
 Two kinds of flag reach the identity through the model and the parameters rather
 than `RunConfig`. A flag that rewrites the model before it runs
@@ -392,14 +395,32 @@ call the engine makes.
 
 An environment variable that can change a result is keyed. The alternative
 evaluation paths (`CAMDL_EVAL_UNRESOLVED`, `CAMDL_NO_BINDING_CACHE`) and every
-set `CAMDL_EXPERIMENTAL_<NAME>` are appended to the engine string the model
-level folds, each length-prefixed (`+<len>:<NAME>`, and `=<len>:<VALUE>` for an
-experimental input) so that no value can pass for another switch
-([`Environment::engine_identity`](rust:cli::env::Environment::engine_identity)),
-so a run made with one never shares a leaf with a default run, whose identity is
-unchanged; `CAMDL_NO_CONSTANT_FOLD` and `CAMDL_NO_LICM` change the compiled IR.
+set `CAMDL_EXPERIMENTAL_<NAME>` are the engine switches: a typed field of the
+engine identity beside the build,
+[`EngineIdentity`](rust:runid::inputs::EngineIdentity) `{ build, switches }`
+([`Environment::engine_identity`](rust:cli::env::Environment::engine_identity)).
+It is hashed as one string, the build followed by each switch length-prefixed
+(`+<len>:<NAME>`, and `=<len>:<VALUE>` for an experimental input) so that no
+value can pass for another switch; with no switch on it is the build alone, so a
+default run's identity is unchanged. `run.json` keeps the build in
+`engine_version` and lists the switches in `engine_switches`, so a run this
+build made with a switch is this build's run. `simulate` and `fit run` key the
+switches (a fit at its `fit` level); the other commands key them as they are
+converted. `CAMDL_NO_CONSTANT_FOLD` and `CAMDL_NO_LICM` change the compiled IR.
 An experimental input is also listed in the `provenance.experimental` field of
-`run.json`. The other commands key these as they are converted.
+`run.json`.
+
+`fit run` resolves its configuration once, before anything runs, into
+[`ResolvedFitConfig`](rust:cli::fit::run_config::ResolvedFitConfig): the file
+with every flag applied, the compiled model, the engine identity, the seeds, the
+sweep and the chain-starts rule. Its identity and its runners are built from
+that value, and `cmd_fit_run_v2` destructures it with every field named. The fit
+folder stores the resolved config: a flag that set a value of the problem half
+(`--allow-forcing-extrapolation`) is written into the archived
+`fit.toml.original`, so `fit predict` and the other readers of a stored config
+see the setting the fit was keyed under. Every `fit run` input is classified in
+`input_class::FIT_RUN` and has a case in
+`rust/crates/cli/tests/fit_run_input_classes.rs`.
 
 `fit run` routes its method flags through one struct,
 [`CliMethodOverrides`](rust:cli::fit::config_v2::CliMethodOverrides), which
@@ -460,10 +481,12 @@ the leaves unaffected, or writes none when it takes the run out of the store;
 and a `child` input, run after a run without it in the same store, leaves every
 leaf's run id and manifest unchanged byte for byte and writes its child at its
 address under the leaf. These are regression evidence on small fixtures, not
-proof that no model behaves otherwise. The other commands' flags are not yet
-tested this way; the differential tests in
-`rust/crates/cli/src/resolve/tests.rs` check the hash of one `SimConfig` field
-at a time without running the simulation.
+proof that no model behaves otherwise. `fit run`'s inputs are tested the same
+way in `rust/crates/cli/tests/fit_run_input_classes.rs`, against the `fit`,
+`method` and `seed` levels, with a `removed` case for each old spelling it
+refuses. The other commands' flags are not yet tested this way; the differential
+tests in `rust/crates/cli/src/resolve/tests.rs` check the hash of one
+`SimConfig` field at a time without running the simulation.
 
 ## How a fit is hashed
 
@@ -521,7 +544,7 @@ Which set is chosen by which version moves, and each move is deliberate:
 | a struct's `#[run_input(schema_version = N)]`                                         | that type's hash, after its type tag                | every leaf whose input embeds the type                                   |
 | [`HASH_VERSION`](rust:runid::hash::HASH_VERSION)                                      | every root hash and every `run_id`                  | every leaf of every kind                                                 |
 | `ir/VERSION`                                                                          | the `ir_version` field of `ModelDigest`             | every leaf with a model level: every kind at present                     |
-| the engine version (`VERSION_SHORT`, release and git hash)                            | the `engine` field of `ModelDigest` and `FitDigest` | every leaf with a model level, whenever camdl is built at another commit |
+| the engine identity (`ENGINE_ID`, the build fingerprint, and the engine switches)     | the `engine` field of `ModelDigest` and `FitDigest` | every leaf with a model level, whenever camdl is built from other source |
 | [`PARTITION_RULE_VERSION`](rust:cli::fit::training_partition::PARTITION_RULE_VERSION) | `FitDigest`                                         | every fit                                                                |
 
 A leaf written under an older `HASH_VERSION` stays readable, so `camdl show`,
