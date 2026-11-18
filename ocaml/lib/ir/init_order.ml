@@ -160,8 +160,12 @@ let topo (ic : Ir.initial_conditions) ~(bindings : Ir.binding list)
     law closes over the law's mean ({!Ir.init_spec_mean_expr}), the value
     the deterministic ODE path starts from.
 
-    Raises [Failure] on a cycle, which {!Validate} reports before the
-    compiler calls this. *)
+    Raises [Failure] on a cycle among the init entries, which {!Validate}
+    reports (E515) before the compiler calls this, and on a cycle among the
+    bindings, naming it ([a -> b -> a]). The expander never emits a binding
+    cycle (it reports a [let] cycle itself), so the second is an IR built by
+    hand or by a drifted expander; without the check the substitution would
+    not terminate. *)
 let closed (ic : Ir.initial_conditions) ~(bindings : Ir.binding list)
   : (string * Ir.expr) list =
   match topo ic ~bindings with
@@ -182,7 +186,11 @@ let closed (ic : Ir.initial_conditions) ~(bindings : Ir.binding list)
         SM.empty bindings
     in
     let built = ref SM.empty in
-    let rec subst (e : Ir.expr) : Ir.expr =
+    (* [path] is the bindings being substituted, innermost first: a binding
+       re-entered on it is a cycle. A binding read twice off the path (a
+       diamond) is not. *)
+    let rec subst_on (path : string list) (e : Ir.expr) : Ir.expr =
+      let subst = subst_on path in
       match e with
       | Ir.Const _ | Ir.Param _ | Ir.ConstRef _ | Ir.Time | Ir.Dt | Ir.TimeFunc _ | Ir.ForcingBasis _ | Ir.Projected
       | Ir.ObsColumnRef _ | Ir.ObsAnchor _ -> e
@@ -202,8 +210,22 @@ let closed (ic : Ir.initial_conditions) ~(bindings : Ir.binding list)
       | Ir.PerEvalRef _ ->
         failwith "PerEvalRef in an initial condition (gh#272 compiler invariant)"
       | Ir.BindingRef n ->
-        (match SM.find_opt n body_of with Some b -> subst b | None -> e)
+        if List.mem n path then begin
+          let rec upto = function
+            | [] -> []
+            | x :: rest -> if x = n then [x] else x :: upto rest
+          in
+          let cycle = List.rev (upto path) in
+          failwith (Printf.sprintf
+            "binding cycle in an initial condition: %s (the IR's bindings must \
+             be acyclic)"
+            (String.concat " -> " (cycle @ [n])))
+        end else
+          (match SM.find_opt n body_of with
+           | Some b -> subst_on (n :: path) b
+           | None -> e)
     in
+    let subst = subst_on [] in
     List.iter
       (fun name -> built := SM.add name (subst (SM.find name entry)) !built)
       order;
