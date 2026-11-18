@@ -428,6 +428,38 @@ let test_bare_const_is_dimensionless () =
   let r = Dimcheck.check_model m in
   Alcotest.(check bool) "bare const * pop OK" true (no_errors r)
 
+(* gh#1212: zero takes any dimension, and so does a product with a zero
+   factor, as `0 / I` already did. [gamma * I + 0 * I] used to give the second
+   term the dimension of I (P) and report a false E302 against the rate. *)
+let test_zero_times_x_any () =
+  let m = empty_model
+    ~compartments:[mk_compartment "I"]
+    ~parameters:[mk_param ~kind:(Some Ir.Rate) "gamma"]
+    ~transitions:[mk_transition "t1"
+        ((param "gamma" *. pop "I") +. (const 0.0 *. pop "I"))]
+    () in
+  let r = Dimcheck.check_model m in
+  Alcotest.(check bool) "gamma*I + 0*I OK" true (no_errors r);
+  let m = empty_model
+    ~compartments:[mk_compartment "I"]
+    ~parameters:[mk_param ~kind:(Some Ir.Rate) "gamma"]
+    ~transitions:[mk_transition "t1"
+        ((param "gamma" *. pop "I") +. (pop "I" *. const 0.0))]
+    () in
+  let r = Dimcheck.check_model m in
+  Alcotest.(check bool) "gamma*I + I*0 OK" true (no_errors r)
+
+(* A nonzero literal factor is still a pure number: [2 * I] is a count. *)
+let test_nonzero_times_x_checked () =
+  let m = empty_model
+    ~compartments:[mk_compartment "I"]
+    ~parameters:[mk_param ~kind:(Some Ir.Rate) "gamma"]
+    ~transitions:[mk_transition "t1"
+        ((param "gamma" *. pop "I") +. (const 2.0 *. pop "I"))]
+    () in
+  let r = Dimcheck.check_model m in
+  Alcotest.(check bool) "gamma*I + 2*I is E302" true (has_error "E302" r)
+
 (* ── Conditionals ──────────────────────────────────────────────────────── *)
 
 let test_cond_branches_match () =
@@ -1530,6 +1562,8 @@ let () =
     ];
     "constants_zero", [
       Alcotest.test_case "zero + pop"               `Quick test_zero_compatible_with_pop;
+      Alcotest.test_case "0 * x has any dimension (gh#1212)" `Quick test_zero_times_x_any;
+      Alcotest.test_case "2 * x is still checked (gh#1212)" `Quick test_nonzero_times_x_checked;
       Alcotest.test_case "bare const * pop"          `Quick test_bare_const_is_dimensionless;
     ];
     "conditionals", [

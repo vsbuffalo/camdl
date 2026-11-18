@@ -484,7 +484,8 @@ are dimensionless (**E301**); a square root, or a power `x^(p/q)`, needs
 dimension exponents that 2, or q, divides (**E304**).
 
 **Literals.** A numeric literal is dimensionless, with two exceptions. Zero
-takes any dimension. A literal, or a constant expression of literals
+takes any dimension, and so does a product with a zero factor or a quotient
+with a zero numerator (`0 * I`, `0 / I`). A literal, or a constant expression of literals
 (arithmetic, `min`/`max`, `sqrt`, and the other functions of numbers), that is an entire
 additive term of a rate, derivative, balance, initial value, count-valued
 likelihood argument, intervention count or quantity threshold takes that
