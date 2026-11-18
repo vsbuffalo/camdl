@@ -601,25 +601,35 @@ fn refuse_coincident_sets(model: &CompiledModel, event_idx: &[usize], t: f64) ->
 /// the source compartment, its event, where the transfer's amount expression
 /// lives, and whether it moves a count (`AbsoluteTransfer`) or a share
 /// (`FractionTransfer`). A `GroupedTransfer` is one of these per source cell,
-/// by its amount form.
+/// by its amount form, marked `grouped`.
 struct Drain<'m> {
     src: &'m str,
     event: &'m str,
     iv_idx: usize,
     action_idx: usize,
     is_count: bool,
+    grouped: bool,
 }
 
-/// The `k`-th compartment `action` drains, and whether it moves a count: one
-/// for a plain transfer, every source cell for a grouped transfer, none for
-/// `add` and `set`. `None` past the last.
-fn drain_source(action: &Action, k: usize) -> Option<(&str, bool)> {
+/// How one action drains one compartment.
+struct DrainSource<'m> {
+    src: &'m str,
+    is_count: bool,
+    grouped: bool,
+}
+
+/// The `k`-th compartment `action` drains: one for a plain transfer, every
+/// source cell for a grouped transfer, none for `add` and `set`. `None` past
+/// the last.
+fn drain_source(action: &Action, k: usize) -> Option<DrainSource<'_>> {
     match action {
-        Action::FractionTransfer(ft) => (k == 0).then_some((ft.src.as_str(), false)),
-        Action::AbsoluteTransfer(at) => (k == 0).then_some((at.src.as_str(), true)),
+        Action::FractionTransfer(ft) => (k == 0)
+            .then_some(DrainSource { src: ft.src.as_str(), is_count: false, grouped: false }),
+        Action::AbsoluteTransfer(at) => (k == 0)
+            .then_some(DrainSource { src: at.src.as_str(), is_count: true, grouped: false }),
         Action::GroupedTransfer(gt) => {
             let is_count = matches!(gt.amount, GroupedAmount::Count { .. });
-            gt.pairs.get(k).map(|(src, _)| (src.as_str(), is_count))
+            gt.pairs.get(k).map(|(src, _)| DrainSource { src: src.as_str(), is_count, grouped: true })
         }
         Action::Add(_) | Action::Set(_) => None,
     }
@@ -662,7 +672,21 @@ fn event_list(drains: &[&Drain<'_>]) -> String {
 /// sum (`n · ε` for `n` fractions), so ten drains of 0.1 are not refused.
 ///
 /// A grouped transfer drains every one of its source cells, with its one
-/// fraction (or count) on each.
+/// fraction (or count) on each, and two more rules follow from how it divides
+/// its total ([`allocate_by_occupancy`]):
+///
+///   - two grouped transfers that share a source cell are refused, whatever
+///     their fractions and whatever the cell holds. Each gives the individuals
+///     left over by its own division to the stages with the largest
+///     remainders, so both can take the same individual: from stages (1, 1),
+///     two transfers of one half each take stage 1;
+///   - a grouped fraction transfer beside plain fraction transfers from one
+///     of its cells cannot overdraw when the fractions sum to at most 1, and
+///     is checked by that sum alone. From a cell holding `n`, the grouped one
+///     takes at most `ceil(n·f)` and the plain ones `floor(n·f')` each; if
+///     `n·f` is whole these sum to at most `n·(f + Σf')`, and if it is not,
+///     the floors sum to a whole number below `n − n·f`, so to at most
+///     `n − ceil(n·f)`.
 ///
 /// Drains into a compartment, and a single drain capped by its source, are not
 /// this function's concern; a `set` beside a `transfer` is refused by
@@ -679,12 +703,13 @@ fn refuse_overdrawing_drains<A: EventArena>(
         event_idx.iter().flat_map(move |&iv_idx| {
             let iv = &model.model.interventions[iv_idx];
             iv.actions.iter().enumerate().flat_map(move |(action_idx, a)| {
-                (0..).map_while(move |k| drain_source(a, k)).map(move |(src, is_count)| Drain {
-                    src,
+                (0..).map_while(move |k| drain_source(a, k)).map(move |d| Drain {
+                    src: d.src,
                     event: iv.name.as_str(),
                     iv_idx,
                     action_idx,
-                    is_count,
+                    is_count: d.is_count,
+                    grouped: d.grouped,
                 })
             })
         })
@@ -711,6 +736,16 @@ fn refuse_overdrawing_drains<A: EventArena>(
                  each move people out of it at the same instant, and at least one moves a \
                  fixed count, so the model does not say what happens when there are not \
                  enough people for {both} — give them different times or merge them into \
+                 one transfer",
+                names = event_list(&same),
+            )));
+        }
+        if same.iter().filter(|e| e.grouped).count() >= 2 {
+            return Err(SimError::Validation(format!(
+                "more than one `transfer` out of a staged compartment draws from '{comp}' at \
+                 t={t}: events {names} each divide their own total among its stages at the \
+                 same instant, and can each take the same individual from one stage, so the \
+                 model does not say who goes — give them different times or merge them into \
                  one transfer",
                 names = event_list(&same),
             )));

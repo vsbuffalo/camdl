@@ -598,31 +598,128 @@ fn as_an_intervention_actions_apply_in_declaration_order() {
 }
 
 #[test]
-fn grouped_fractions_summing_above_one_are_refused_like_fraction_transfers() {
+fn a_grouped_drain_beside_a_plain_drain_is_checked_like_two_fraction_transfers() {
     let want_plain = {
         let m = model(vec![
-            ("a", vec![fraction("E1", "R", Expr::const_(0.6))]),
-            ("b", vec![fraction("E1", "Q", Expr::const_(0.6))]),
+            ("a", vec![fraction("E2", "R", Expr::const_(0.6))]),
+            ("b", vec![fraction("E2", "Q", Expr::const_(0.6))]),
         ]);
         events_discrete(&m, &[0, 1], [3, 1, 1, 0, 0], [0.0; 4]).unwrap_err().to_string()
     };
-    assert!(want_plain.contains("`transfer` fractions from compartment 'E1' sum to 1.2"), "{want_plain}");
-    let to_q = [("E1", "Q"), ("E2", "Q"), ("E3", "Q")];
-    let m = model(vec![
-        ("a", vec![grouped_fraction(&E_TO_R, Expr::const_(0.6))]),
-        ("b", vec![grouped_fraction(&to_q, Expr::const_(0.6))]),
-    ]);
-    let e = events_discrete(&m, &[0, 1], [3, 1, 1, 0, 0], [0.0; 4]).unwrap_err();
-    assert_eq!(e.to_string(), want_plain, "the same refusal as two fraction transfers from E1");
-    let e = events_continuous(&m, &[0, 1], [3.0, 1.0, 1.0, 0.0, 0.0], [0.0; 4]).unwrap_err();
-    assert_eq!(e.to_string(), want_plain);
-    // A grouped drain beside a plain drain of one of its stages.
+    assert!(want_plain.contains("`transfer` fractions from compartment 'E2' sum to 1.2"), "{want_plain}");
+    // A grouped drain beside a plain drain of one of its stages: the same
+    // refusal when the fractions sum above 1, on both arenas.
     let m = model(vec![
         ("a", vec![grouped_fraction(&E_TO_R, Expr::const_(0.6))]),
         ("b", vec![fraction("E2", "Q", Expr::const_(0.6))]),
     ]);
     let e = events_discrete(&m, &[0, 1], [3, 1, 1, 0, 0], [0.0; 4]).unwrap_err();
-    assert!(e.to_string().contains("`transfer` fractions from compartment 'E2' sum to 1.2"), "{e}");
+    assert_eq!(e.to_string(), want_plain);
+    let e = events_continuous(&m, &[0, 1], [3.0, 1.0, 1.0, 0.0, 0.0], [0.0; 4]).unwrap_err();
+    assert_eq!(e.to_string(), want_plain);
+    // And applied when they sum to at most 1: both read (40, 20, 20); the
+    // grouped one takes 20 as (10, 5, 5), the plain one floor(20 · 0.5) = 10.
+    let m = model(vec![
+        ("a", vec![grouped_fraction(&E_TO_R, Expr::const_(0.25))]),
+        ("b", vec![fraction("E2", "Q", Expr::const_(0.5))]),
+    ]);
+    let (int, _) = events_discrete(&m, &[0, 1], [40, 20, 20, 0, 0], [0.0; 4]).unwrap();
+    assert_eq!(int, vec![30, 5, 15, 20, 10]);
+}
+
+/// Two grouped transfers due at one instant that share a source cell are
+/// refused whatever the state and whatever their fractions: each divides its
+/// own total among the stages, and both can give the individual left over to
+/// the same stage (from (1, 1), two halves both take stage 1).
+#[test]
+fn two_grouped_drains_sharing_a_source_cell_are_refused_up_front() {
+    let to_q = [("E1", "Q"), ("E2", "Q"), ("E3", "Q")];
+    let want = "more than one `transfer` out of a staged compartment draws from 'E1' at t=1: \
+                events 'a', 'b'";
+    for (fa, fb) in [(0.5, 0.5), (0.25, 0.5), (0.6, 0.6), (0.0, 0.0)] {
+        let m = model(vec![
+            ("a", vec![grouped_fraction(&E_TO_R, Expr::const_(fa))]),
+            ("b", vec![grouped_fraction(&to_q, Expr::const_(fb))]),
+        ]);
+        // The state does not matter: refused where nothing could overdraw too.
+        for int in [[1, 1, 0, 0, 0], [40, 20, 20, 0, 0], [0, 0, 0, 0, 0]] {
+            let e = events_discrete(&m, &[0, 1], int, [0.0; 4]).unwrap_err();
+            assert!(e.to_string().contains(want), "{fa} + {fb} from {int:?}: {e}");
+            let e = events_continuous(&m, &[0, 1], int.map(|n| n as f64), [0.0; 4]).unwrap_err();
+            assert!(e.to_string().contains(want), "{fa} + {fb} from {int:?} on the ODE: {e}");
+        }
+    }
+    // One shared cell is enough, and the refusal names it.
+    let m = model(vec![
+        ("a", vec![grouped_fraction(&[("E1", "R"), ("E2", "R")], Expr::const_(0.2))]),
+        ("b", vec![grouped_fraction(&[("E2", "Q"), ("E3", "Q")], Expr::const_(0.2))]),
+    ]);
+    let e = events_discrete(&m, &[0, 1], [40, 20, 20, 0, 0], [0.0; 4]).unwrap_err();
+    assert!(e.to_string().contains("draws from 'E2' at t=1: events 'a', 'b'"), "{e}");
+    // Grouped transfers of different compartments do not collide.
+    let m = model(vec![
+        ("a", vec![grouped_fraction(&[("E1", "R"), ("E2", "R")], Expr::const_(0.5))]),
+        ("b", vec![grouped_fraction(&[("E3", "Q"), ("R", "Q")], Expr::const_(0.5))]),
+    ]);
+    let (int, _) = events_discrete(&m, &[0, 1], [4, 2, 6, 8, 0], [0.0; 4]).unwrap();
+    assert_eq!(int, vec![2, 1, 3, 4 + 3, 3 + 4]);
+    // Nor do they as scheduled interventions, which apply one after another.
+    let m = model(vec![
+        ("a", vec![grouped_fraction(&E_TO_R, Expr::const_(0.5))]),
+        ("b", vec![grouped_fraction(&to_q, Expr::const_(0.5))]),
+    ]);
+    assert_eq!(interventions_discrete(&m, &[0, 1], [1, 1, 0, 0, 0]), vec![0, 1, 0, 1, 0]);
+}
+
+/// A grouped fraction transfer and a plain fraction transfer from one of its
+/// stages, with fractions summing to at most 1, never take more than the
+/// stage holds: the plain one takes floor(n · f'), and the grouped one at most
+/// ceil(n · f), which is below n − floor(n · f') + 1.
+#[test]
+fn a_grouped_and_a_plain_fraction_drain_never_overdraw_a_stage() {
+    let mut rng = SplitMix(0xD2A1);
+    let mut tight = 0u32;
+    for case in 0..200_000 {
+        let k = 1 + rng.below(6) as usize;
+        let scale = [2u64, 3, 7, 10, 100, 100_000][rng.below(6) as usize];
+        let counts: Vec<i64> = (0..k)
+            .map(|_| if rng.below(5) == 0 { 0 } else { rng.below(scale) as i64 })
+            .collect();
+        let total: i64 = counts.iter().sum();
+        // Fractions as the runtime sees them: f64s whose sum passes the
+        // overdraw check. Rationals with small denominators land the
+        // products on and beside whole numbers, where rounding bites.
+        let den = [2u64, 3, 4, 5, 7, 10, 100, 1 << 20][rng.below(8) as usize];
+        let a = rng.below(den + 1);
+        let b = rng.below(den - a + 1);
+        let (f, f_plain) = match rng.below(3) {
+            0 => (a as f64 / den as f64, b as f64 / den as f64),
+            1 => (a as f64 / den as f64, 1.0 - a as f64 / den as f64),
+            _ => {
+                let f = rng.next() as f64 / u64::MAX as f64;
+                (f, (1.0 - f) * (rng.next() as f64 / u64::MAX as f64))
+            }
+        };
+        let mut sorted = [f, f_plain];
+        sorted.sort_by(|x, y| x.total_cmp(y));
+        if sorted[0] + sorted[1] > 1.0 + 2.0 * f64::EPSILON {
+            continue; // the overdraw check refuses this pair
+        }
+        // The grouped transfer's total, as `resolve_action` forms it.
+        let moved = (((total as f64) * f.clamp(0.0, 1.0)).floor() as i64).min(total);
+        let shares = allocate_by_occupancy(&counts, moved).unwrap();
+        for (i, (&n, &g)) in counts.iter().zip(&shares).enumerate() {
+            // A plain fraction transfer of this stage, as `resolve_action` forms it.
+            let plain = ((n as f64) * f_plain.clamp(0.0, 1.0)).floor() as i64;
+            assert!(
+                g + plain <= n,
+                "case {case}: stage {i} holds {n}; grouped f = {f} takes {g}, plain f' = {f_plain} \
+                 takes {plain} (stages {counts:?})"
+            );
+            tight += u32::from(n > 0 && g + plain == n);
+        }
+    }
+    assert!(tight > 1_000, "the bound is reached often ({tight}), so the check is not slack");
 }
 
 #[test]
@@ -650,32 +747,4 @@ fn a_set_on_a_stage_beside_a_grouped_transfer_is_refused() {
     let m = model(vec![("a", vec![set]), ("b", vec![grouped_fraction(&E_TO_R, Expr::const_(0.5))])]);
     let e = events_discrete(&m, &[0, 1], [3, 1, 1, 0, 0], [0.0; 4]).unwrap_err();
     assert!(e.to_string().contains("a `set` and a `transfer` on compartment 'R'"), "{e}");
-}
-
-#[test]
-fn grouped_fractions_summing_to_at_most_one_are_applied() {
-    let to_q = [("E1", "Q"), ("E2", "Q"), ("E3", "Q")];
-    let m = model(vec![
-        ("a", vec![grouped_fraction(&E_TO_R, Expr::const_(0.25))]),
-        ("b", vec![grouped_fraction(&to_q, Expr::const_(0.5))]),
-    ]);
-    // Both read (40, 20, 20): 20 as (10, 5, 5) and 40 as (20, 10, 10).
-    let (int, _) = events_discrete(&m, &[0, 1], [40, 20, 20, 0, 0], [0.0; 4]).unwrap();
-    assert_eq!(int, vec![10, 5, 5, 20, 40]);
-}
-
-#[test]
-fn two_grouped_drains_can_ask_one_stage_for_the_same_individual() {
-    // Fractions summing to exactly 1 pass the overdraw check, and each drain
-    // alone respects every stage, but both give the individual left over to
-    // the earlier of two tied stages: from (1, 1) each takes stage 1. The
-    // resolver reports the changes it was asked for; the integer backends'
-    // scan after the effects refuses the negative count.
-    let to_q = [("E1", "Q"), ("E2", "Q")];
-    let m = model(vec![
-        ("a", vec![grouped_fraction(&[("E1", "R"), ("E2", "R")], Expr::const_(0.5))]),
-        ("b", vec![grouped_fraction(&to_q, Expr::const_(0.5))]),
-    ]);
-    let (int, _) = events_discrete(&m, &[0, 1], [1, 1, 0, 0, 0], [0.0; 4]).unwrap();
-    assert_eq!(int, vec![-1, 1, 0, 1, 1]);
 }

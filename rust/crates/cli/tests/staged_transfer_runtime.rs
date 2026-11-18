@@ -343,9 +343,11 @@ fn a_transfer_beside_an_add_at_the_same_time() {
     }
 }
 
-/// Two events draining `E` at one instant with fractions summing above 1 are
-/// refused at any stage count, on every backend, with the refusal two plain
-/// fraction transfers get; so is a count beside another drain.
+/// Two events draining `E` at one instant are refused on every backend. At one
+/// stage they are two plain fraction transfers, refused because the fractions
+/// sum above 1; at three they are two transfers out of one staged compartment,
+/// refused whatever their fractions. A count beside another drain is refused
+/// at either stage count.
 #[test]
 fn overdrawing_drains_of_a_staged_compartment_are_refused() {
     let tmp = tempfile::tempdir().unwrap();
@@ -354,7 +356,10 @@ fn overdrawing_drains_of_a_staged_compartment_are_refused() {
     let with_count = "events {\n  a : transfer(count = 5, from = E, to = Q) at [5 'days]\n  \
                       b : transfer(fraction = 0.1, from = E, to = R) at [5 'days]\n}";
     for backend in ["chain_binomial", "gillespie", "ode"] {
-        for (stages, cell) in [(1u32, "'E'"), (3, "'E_s1'")] {
+        for (stages, cell, why) in [
+            (1u32, "'E'", "`transfer` fractions from compartment 'E' sum to 1.2"),
+            (3, "'E_s1'", "more than one `transfer` out of a staged compartment draws from 'E_s1'"),
+        ] {
             let tag = format!("over_frac_{backend}_{stages}");
             let run = Run {
                 tag: &tag,
@@ -366,11 +371,7 @@ fn overdrawing_drains_of_a_staged_compartment_are_refused() {
             let o = simulate(tmp.path(), &run);
             let err = stderr(&o);
             assert!(!o.status.success(), "{tag} must be refused:\n{err}");
-            assert!(
-                err.contains(&format!("`transfer` fractions from compartment {cell} sum to 1.2"))
-                    && err.contains("events 'a', 'b'"),
-                "{tag}: {err}"
-            );
+            assert!(err.contains(why) && err.contains("events 'a', 'b'"), "{tag}: {err}");
 
             let tag = format!("over_count_{backend}_{stages}");
             let run = Run {
@@ -392,29 +393,43 @@ fn overdrawing_drains_of_a_staged_compartment_are_refused() {
     }
 }
 
-/// Two transfers out of one staged compartment at one instant, with fractions
-/// summing to exactly 1, can both take the individual left over from the same
-/// stage. The integer backends stop with an error naming the stage; they never
-/// record a negative count.
+/// Two transfers out of one staged compartment at one instant are refused
+/// before anything moves, even with fractions summing to exactly 1: each
+/// divides its own total among the stages, and from stages (1, 1) two halves
+/// would both take the individual in stage 1. The refusal names both events
+/// and the shared cell, on every backend, and does not depend on the state.
 #[test]
-fn two_drains_taking_the_same_leftover_individual_stop_the_run() {
+fn two_transfers_out_of_one_staged_compartment_at_one_instant_are_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let halves = "events {\n  a : transfer(fraction = 0.5, from = E, to = Q) at [5 'days]\n  \
                   b : transfer(fraction = 0.5, from = E, to = R) at [5 'days]\n}";
-    for backend in ["chain_binomial", "gillespie"] {
-        let tag = format!("leftover_{backend}");
-        let run = Run {
-            tag: &tag,
-            src: model(2, 0.0, "E[s1] = 1  E[s2] = 1", halves),
-            backend,
-            seed: 1,
-            enable: &[],
-        };
-        let o = simulate(tmp.path(), &run);
-        let err = stderr(&o);
-        assert!(!o.status.success(), "{tag} must stop:\n{err}");
-        assert!(err.contains("NegativeCount") && err.contains("E_s1"), "{tag}: {err}");
+    for backend in ["chain_binomial", "gillespie", "ode"] {
+        for (state, init) in [("one_each", "E[s1] = 1  E[s2] = 1"), ("many", "E[s1] = 400  E[s2] = 600")] {
+            let tag = format!("shared_{backend}_{state}");
+            let run = Run { tag: &tag, src: model(2, 0.0, init, halves), backend, seed: 1, enable: &[] };
+            let o = simulate(tmp.path(), &run);
+            let err = stderr(&o);
+            assert!(!o.status.success(), "{tag} must be refused:\n{err}");
+            assert!(
+                err.contains("more than one `transfer` out of a staged compartment draws from 'E_s1' at t=5")
+                    && err.contains("events 'a', 'b'"),
+                "{tag}: {err}"
+            );
+            assert!(!err.contains("NegativeCount"), "{tag}: refused before any count goes negative:\n{err}");
+        }
     }
+    // The same two transfers at different times run.
+    let apart = "events {\n  a : transfer(fraction = 0.5, from = E, to = Q) at [4 'days]\n  \
+                 b : transfer(fraction = 0.5, from = E, to = R) at [5 'days]\n}";
+    let run = Run {
+        tag: "shared_apart",
+        src: model(2, 0.0, "E[s1] = 1  E[s2] = 1", apart),
+        backend: "chain_binomial",
+        seed: 1,
+        enable: &[],
+    };
+    let row = row_at(tmp.path(), &run, 5.0);
+    assert_eq!([row.get("E_s1"), row.get("E_s2"), row.get("Q"), row.get("R")], [0.0, 1.0, 1.0, 0.0]);
 }
 
 // ── Trace ───────────────────────────────────────────────────────────────────
