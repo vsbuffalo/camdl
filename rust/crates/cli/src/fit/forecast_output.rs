@@ -431,7 +431,7 @@ fn write_manifest(
             })),
         })
     }).collect();
-    let doc = serde_json::json!({
+    let mut doc = serde_json::json!({
         "schema": FORECAST_SCHEMA,
         "run_id": job.run_id,
         "address_key": job.address_key,
@@ -475,6 +475,11 @@ fn write_manifest(
         "samples_per_draw": FORECAST_SAMPLES_PER_DRAW.min(fc.n_particles),
         "targets": targets,
     });
+    // D86: the same `chain_selection` block `predictive.json` carries, absent
+    // when the full cloud was used.
+    if let Some(info) = job.posterior.selection() {
+        doc["chain_selection"] = info.to_json();
+    }
     let path = job.out_dir.join("forecast.json");
     let text = serde_json::to_string_pretty(&doc).map_err(|e| format!("serializing forecast.json: {e}"))?;
     std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;

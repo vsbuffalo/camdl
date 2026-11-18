@@ -892,10 +892,13 @@ run-store, DSL, or likelihood knowledge.
 draws it replays and declares, per stream, which columns are join coordinates
 versus band versus per-cell diagnostics, the `value_kind`, and the band's
 quantile levels; it also carries a `chain_selection` block when
-`--exclude-chains` narrowed the cloud, so a chain-subset band is never
-mistakable for a full-cloud one. Its `produced`, `skipped` and `failed` lists
-name the model's observation streams (by leaf name) this artifact holds, leaves
-out and could not produce; they follow the stream contract below.
+`--exclude-chains` or `--chains` narrowed the cloud, so a chain-subset band is
+never mistakable for a full-cloud one. The block is `excluded`, `kept`,
+`n_total` and `summary`, a sentence naming the chains left out and the bias
+toward the retained chains' mode; `forecast.json` carries the same block, from
+the same function. Its `produced`, `skipped` and `failed` lists name the model's
+observation streams (by leaf name) this artifact holds, leaves out and could not
+produce; they follow the stream contract below.
 
 **The tag is load-bearing, and a stored artifact must be read under its own.**
 The three versions do not carry the same numbers under the same column names:
