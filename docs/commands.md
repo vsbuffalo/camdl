@@ -216,19 +216,43 @@ each stream's periods ending within the reach are predicted, the period under
 way at the origin included. A target's `horizon` counts its stream's own periods
 from that one (0, 1, …); `lead` is the time from the origin to the target's end.
 The targets are the periods the stream declares — a uniform `covers` form
-continues its tiling, window columns use `emit_schedule` — and a stream with
-neither, or whose likelihood reads a data column such as a binomial's `n`, is
-refused a forecast: it is listed under `failed`, named in `report.json`, and the
-exit status is 1. A stream none of whose periods ends within the reach is
-skipped with the reason `no_target_within_horizon` (a failure if `--stream`
-named it). It writes `forecast/<stream>.tsv` (one row per target: `t_start`,
-`t_stop`, `horizon`, `lead`, the held-out row it corresponds to, the mean and
-the `q05…q95` band), `forecast-samples.tsv` (joint samples, each one trajectory
+continues its tiling, window columns use `emit_schedule` — and the rows after
+the training rows (the _held-out_ rows) only select which of those targets have
+an observed value; they never renumber them. A held-out row within the reach
+whose period is not one of the stream's targets is refused, not skipped, and so
+are two held-out rows naming one target. A stream with window columns and no
+`emit_schedule` takes its held-out rows' windows within the reach as its
+targets, which must be in order, distinct and disjoint, and must not overlap its
+training rows; their `horizon` counts the held-out rows, not declared periods,
+so compare such targets by `lead`. A stream whose rows and `emit_schedule` give
+different periods over the same reporting interval is refused, with both periods
+and where each comes from. A stream with no declared rhythm and no held-out rows
+is refused. A refused stream is listed under `failed`, named in `report.json`,
+and the exit status is 1. A stream none of whose periods ends within the reach
+is skipped with the reason `no_target_within_horizon` (a failure if `--stream`
+named it).
+
+A stream whose likelihood reads a design column, such as a binomial's
+`n = tested`, needs that column's value at every target. `--design SOURCE=FILE`
+(repeatable) supplies it from a file in the stream's own format holding its time
+(or window) columns and the design columns, with no outcome column: a
+_prospective_ forecast. `--realised-design` reads it from each target's held-out
+row instead: the result is labelled _a conditional score using realised future
+design_, since those values were known only after the origin, and is not an
+unconditional forecast. A target with no value of a design column is refused,
+never filled in; without either flag such a stream is refused. The design values
+the targets read are part of the output address; the held-out outcomes are not,
+so a forecast whose held-out values change writes the same predictions to the
+same directory.
+
+It writes `forecast/<stream>.tsv` (one row per target: `t_start`, `t_stop`,
+`horizon`, `lead`, the held-out row it corresponds to, the mean and the
+`q05…q95` band), `forecast-samples.tsv` (joint samples, each one trajectory
 across every target), and `forecast.json` (the origin, the reach, the rows that
-conditioned the parameters and the state, and the calendar). Forecasts are
-available for chain-binomial posteriors (PMMH, PGAS); an ODE posterior,
-`--enable`, `--disable`, `--quantities` and `--by-chain` are refused in this
-mode for now.
+conditioned the parameters and the state, each target's design values and the
+design mode with its label, and the calendar). Forecasts are available for
+chain-binomial posteriors (PMMH, PGAS); an ODE posterior, `--enable`,
+`--disable`, `--quantities` and `--by-chain` are refused in this mode for now.
 
 `--scenario NAME` and `--sweep` add _arms_ to a forecast: the fitted model is
 the first arm, each scenario and each sweep point another, and every table gains
