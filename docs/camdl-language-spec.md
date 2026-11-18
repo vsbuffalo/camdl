@@ -2941,8 +2941,9 @@ transitions {
 
 The members for `c = E` expand per stage (`bg_pre_E_s1`, …; `ageing` keeps the
 stage), and `incidence(bg[a, E])` reads all of them. The refusals below apply
-to the staged member; leave it out of the family with `where c != E` to write
-its exit separately.
+to the staged member. A `where` guard cannot name a compartment (`E217`), so a
+family that must treat the staged member differently is written as separate
+transitions instead.
 
 Refused, each with its own diagnostic: a competing exit with
 `overdispersed(...)` noise (`E361` — the noise multiplier is drawn per
