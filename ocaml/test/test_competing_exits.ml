@@ -305,6 +305,61 @@ let test_no_restart_warning_without_a_second_staged_compartment () =
   Alcotest.(check int) "no W107" 0
     (List.length (warnings_of ~code:"W107" (age_src ~stages:3 ())))
 
+(* An Erlang-staged `E` beside a `hyper_erlang`-staged `H`. [early] is the
+   competing exit's destination, [latency_dst] the `via` exit's, and
+   [hyper_first] puts the `hyper_erlang` transition before the `via erlang`
+   one, which changes the order the two are lowered in. *)
+let erlang_to_hyper_src ?(hyper_first = false) ?(early = "H") ?(latency_dst = "I") () =
+  let hyper =
+    "  hold      : H --> R via hyper_erlang(\n\
+    \    branch(label = a, weight = p, stages = 2, mean = 3 'days),\n\
+    \    branch(label = b, stages = 1, mean = 9 'days))\n" in
+  let erlang =
+    Printf.sprintf
+      "  latency   : E --> %s via erlang(stages = 3, rate = sigma)\n\
+      \  early     : E --> %s @ eps * E\n" latency_dst early in
+  "time_unit = 'days\n\
+   compartments { S, E, H, I, R }\n\
+   parameters { beta : rate  sigma : rate  gamma : rate  eps : rate  p : probability }\n\
+   transitions {\n\
+  \  infection : S --> E @ beta * S * I / (S + E + H + I + R)\n"
+  ^ (if hyper_first then hyper ^ erlang else erlang ^ hyper)
+  ^ "  recovery  : I --> R @ gamma * I\n\
+     }\n\
+     init { S = 990  E = 5 }\n"
+
+(* A `hyper_erlang` compartment restarts on entry too: arrivals are split by
+   the branch weights into each branch's first stage. The warning says so in
+   either declaration order, and its hint names a destination that compiles
+   and is not warned about. *)
+let test_exit_into_a_hyper_erlang_compartment_warns () =
+  List.iter (fun hyper_first ->
+    let label = if hyper_first then "hyper first" else "erlang first" in
+    match warnings_of ~code:"W107" (erlang_to_hyper_src ~hyper_first ()) with
+    | [ w ] ->
+      Alcotest.(check string) (label ^ ": message")
+        "transition 'early' moves individuals from the staged compartment 'E' \
+         into the `hyper_erlang` compartment 'H': this movement restarts 'H', \
+         splitting the arrivals across its branches' first stages by branch \
+         weight" w.Diagnostics.message;
+      let hint = Option.value ~default:"" w.Diagnostics.hint in
+      List.iter (fun needle ->
+        Alcotest.(check bool) (label ^ ": hint mentions " ^ needle) true
+          (contains ~needle hint))
+        [ "no stage dimension"; "`H__a__2`" ]
+    | ws -> Alcotest.failf "%s: expected one W107, got %d" label (List.length ws))
+    [ false; true ];
+  Alcotest.(check int) "the hinted destination compiles and is not warned about" 0
+    (List.length (warnings_of ~code:"W107" (erlang_to_hyper_src ~early:"H__a__2" ())))
+
+(* The `via` transition's own exit into a `hyper_erlang` compartment does not
+   warn. *)
+let test_via_exit_into_a_hyper_erlang_compartment_does_not_warn () =
+  List.iter (fun hyper_first ->
+    let src = erlang_to_hyper_src ~hyper_first ~latency_dst:"H" ~early:"I" () in
+    Alcotest.(check int) "no W107" 0 (List.length (warnings_of ~code:"W107" src)))
+    [ false; true ]
+
 (* ── Propensity preservation ─────────────────────────────────────────────── *)
 
 (* Treatment that saturates: the hazard per person falls as the compartment
@@ -691,7 +746,11 @@ let () =
          Alcotest.test_case "exit to another staged compartment restarts, W107" `Quick
            test_exit_to_other_staged_compartment_restarts_and_warns;
          Alcotest.test_case "no W107 without a second staged compartment" `Quick
-           test_no_restart_warning_without_a_second_staged_compartment ]);
+           test_no_restart_warning_without_a_second_staged_compartment;
+         Alcotest.test_case "exit into a hyper_erlang compartment restarts, W107" `Quick
+           test_exit_into_a_hyper_erlang_compartment_warns;
+         Alcotest.test_case "the via exit into a hyper_erlang compartment: no W107" `Quick
+           test_via_exit_into_a_hyper_erlang_compartment_does_not_warn ]);
       ("propensity",
        [ Alcotest.test_case "nonlinear exit: stage rates sum to the written rate" `Quick
            test_nonlinear_exit_preserves_the_propensity;

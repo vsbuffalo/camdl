@@ -2901,7 +2901,11 @@ A move into a different staged compartment restarts that compartment's dwell at
 its first stage, as every inflow does. Because the modeller may have meant the
 progression to continue (an isolation compartment that mirrors the infectious
 period), the compiler says so with warning `W107`. The `via` transition's own
-exit into a staged compartment does not warn.
+exit into a staged compartment does not warn. A `hyper_erlang` destination
+warns too: its arrivals are split by the branch weights into each branch's
+first stage. It has no stage dimension, so the way to continue into a branch is
+to name that branch's stage compartment as the destination (`H__fast__2`),
+which bypasses the branch weights.
 
 *What `mean` and `rate` mean with a competing exit.* The `via` law's `mean` is
 the dwell time absent the competing exit, not the mean time spent in the

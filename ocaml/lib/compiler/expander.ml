@@ -1904,29 +1904,56 @@ let via_spec_of_call ctx (tr : transition_decl) ((law, args) : via_call)
 let has_source (tr : transition_decl) (comp : string) : bool =
   List.exists (fun (c, _) -> c = comp) tr.trsrc
 
+(** How a staged destination of a W107 is entered, which sets the wording:
+    an Erlang chain is entered at its stage 1; a [hyper_erlang] mixture is
+    entered at each branch's first stage, split by the branch weights, and has
+    no stage dimension for [stage(...)] to address. [Hyper_erlang cell] carries
+    one branch stage compartment's name, for the hint's example. *)
+type restart_dest =
+  | Erlang_dest
+  | Hyper_erlang_dest of string
+
 (** W107: a movement out of the staged compartment [src] into a different
-    staged compartment [dst] enters [dst] at stage 1. [what] names the
+    staged compartment [dst] restarts [dst]'s dwell. [what] names the
     construct that moves the individuals ("transition 'early'"). *)
-let warn_dwell_restart ctx ~loc ~(what : string) ~(src : string) ~(dst : string) =
-  let message =
-    Printf.sprintf
-      "%s moves individuals from the staged compartment '%s' into the staged \
-       compartment '%s': this movement restarts '%s' at stage 1"
-      what src dst dst in
+let warn_dwell_restart ctx ~loc ~(what : string) ~(src : string) ~(dst : string)
+    ~(dst_kind : restart_dest) =
+  let message = match dst_kind with
+    | Erlang_dest ->
+      Printf.sprintf
+        "%s moves individuals from the staged compartment '%s' into the staged \
+         compartment '%s': this movement restarts '%s' at stage 1"
+        what src dst dst
+    | Hyper_erlang_dest _ ->
+      Printf.sprintf
+        "%s moves individuals from the staged compartment '%s' into the \
+         `hyper_erlang` compartment '%s': this movement restarts '%s', \
+         splitting the arrivals across its branches' first stages by branch \
+         weight"
+        what src dst dst in
+  let hint = match dst_kind with
+    | Erlang_dest ->
+      Printf.sprintf
+        "if the progression is meant to continue, move each stage on its \
+         own with `stage(...)` endpoints: `stage(%s, 1)` to `stage(%s, 1)`, \
+         and so on, each with its population indices. An endpoint written \
+         with `stage(...)` states its location and is not warned about"
+        src dst
+    | Hyper_erlang_dest cell ->
+      Printf.sprintf
+        "'%s' has no stage dimension, so `stage(...)` cannot place individuals \
+         in it, and its entry is fixed by the branch weights. To continue the \
+         progression into one branch, name that branch's stage compartment as \
+         the destination (for example `%s`), which bypasses the branch weights \
+         and is not warned about; otherwise accept the restart"
+        dst cell in
   (* Once per declaration: a family reaches here once per member. *)
   let reported =
     List.exists (fun (d : Diagnostics.diagnostic) ->
       d.Diagnostics.code = "W107" && d.Diagnostics.message = message)
       ctx.diags.Diagnostics.diags in
   if not reported then
-    Diagnostics.warning ctx.diags ~code:"W107" ~loc ~message
-      ~hint:(Printf.sprintf
-        "if the progression is meant to continue, move each stage on its \
-         own with `stage(...)` endpoints: `stage(%s, 1)` to `stage(%s, 1)`, \
-         and so on, each with its population indices. An endpoint written \
-         with `stage(...)` states its location and is not warned about"
-        src dst)
-      ()
+    Diagnostics.warning ctx.diags ~code:"W107" ~loc ~message ~hint ()
 
 (* Append a stage index to every destination reference to the staged
    compartment [comp] that supplies its [n_pre] pre-staging indices and no
@@ -2425,6 +2452,47 @@ let lower_via_transitions ctx =
       ) via_trs
     in
 
+    (* W107: a competing exit of an Erlang-staged compartment that ends in a
+       different staged compartment restarts that compartment's dwell. The
+       warning is raised here, before any lowering, because the lowering of a
+       `hyper_erlang` destination rewrites the exit's destination into its
+       branch stage compartments, after which the destination is no longer
+       recognisable. The `via` transition's own exit is not an `@` exit and is
+       not considered. *)
+    List.iter (fun ((tr : transition_decl), spec) ->
+      match tr.trsrc, spec with
+      | [ (src, _) ], Erlang { stages; _ } when Pos_int.to_int stages > 1 ->
+        let n_pre = population_index_count ctx src in
+        let dst_kind dst =
+          if List.mem dst erlang_staged then Some Erlang_dest
+          else
+            List.find_map (fun ((t : transition_decl), sp) ->
+              match t.trsrc, sp with
+              | [ (c, _) ], Some (HyperErlang { branches = b :: _ }) when c = dst ->
+                Some (Hyper_erlang_dest (Printf.sprintf "%s__%s__%d" dst
+                  b.hb_label (Pos_int.to_int b.hb_stages)))
+              | _ -> None) via_trs
+        in
+        List.iter (fun (t : transition_decl) ->
+          match t.trsrc, t.trdyn with
+          | [ (c, items) ], Rate _ when c = src && List.length items = n_pre ->
+            let dests = match t.trdst with
+              | DstSum refs        -> List.map fst refs
+              | DstBranch branches -> List.map (fun ((c, _), _) -> c) branches
+            in
+            List.iter (fun dst ->
+              if dst <> src && not (List.mem (t.trname, dst) ctx.stage_dests_written)
+              then
+                match dst_kind dst with
+                | Some dst_kind ->
+                  warn_dwell_restart ctx ~loc:(diag_loc_of_ast_ctx ctx t.trloc)
+                    ~what:(Printf.sprintf "transition '%s'" t.trname)
+                    ~src ~dst ~dst_kind
+                | None -> ())
+              (List.sort_uniq compare dests)
+          | _ -> ()) ctx.transitions
+      | _ -> ()) to_lower;
+
     (* For each well-formed `via erlang`, synthesize the stage dimension, the
        stratify entry, the consecutive chain + exit, and redirect inflow/init. We
        build the SAME AST a user writes manually, so all downstream machinery is
@@ -2567,25 +2635,12 @@ let lower_via_transitions ctx =
             trdst     = stage_dest t.trdst src n_pre exit_item;
             trdyn     = Rate rate }
         in
-        let warn_restart (t : transition_decl) =
-          let dests = match t.trdst with
-            | DstSum refs        -> List.map fst refs
-            | DstBranch branches -> List.map (fun ((c, _), _) -> c) branches
-          in
-          List.iter (fun dst ->
-            if dst <> src && List.mem dst erlang_staged
-               && not (List.mem (t.trname, dst) ctx.stage_dests_written) then
-              warn_dwell_restart ctx ~loc:(diag_loc_of_ast_ctx ctx t.trloc)
-                ~what:(Printf.sprintf "transition '%s'" t.trname) ~src ~dst)
-            (List.sort_uniq compare dests)
-        in
         ctx.via_transitions <- (chain_tr.trname, tr.trname) :: ctx.via_transitions;
         let exits = ref [] in
         ctx.transitions <- List.concat_map (fun (t : transition_decl) ->
           if t.trname = tr.trname then [ chain_tr; exit_tr ]
           else match residence_exit t with
             | Some (items, rate) ->
-              warn_restart t;
               exits := t.trname :: !exits;
               [ stage_copies t items rate ]
             | None -> [ { t with trdst = stage_dest t.trdst src n_pre stage1_item } ]
@@ -6683,7 +6738,8 @@ let binder_stage_copies ctx (tr : transition_decl) env
           if dst <> src && residence_of ctx dst <> None
              && not (List.mem (tr.trname, dst) ctx.stage_dests_written) then
             warn_dwell_restart ctx ~loc
-              ~what:(Printf.sprintf "transition '%s'" tr.trname) ~src ~dst)
+              ~what:(Printf.sprintf "transition '%s'" tr.trname) ~src ~dst
+              ~dst_kind:Erlang_dest)
           (List.sort_uniq compare dest_bases);
         let copy =
           { tr with
@@ -10930,7 +10986,7 @@ let resolve_intervention_action ctx env ~name ~family ~loc ~binders (action : ac
            if restarts then
              warn_dwell_restart ctx ~loc
                ~what:(Printf.sprintf "the transfer of '%s'" family)
-               ~src:s_ep.ep_base ~dst:d_ep.ep_base;
+               ~src:s_ep.ep_base ~dst:d_ep.ep_base ~dst_kind:Erlang_dest;
            (* A fraction is scale-free, so the same value applies to every
               population cell — exactly the spec §25.10 expansion. *)
            let amount = match amt with
