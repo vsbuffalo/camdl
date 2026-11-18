@@ -3,10 +3,12 @@
 //!
 //! For each posterior draw it runs the existing bootstrap particle filter over
 //! the training rows plus the plan's targets, each appended to its stream as a
-//! declared period with no value, and reads each stream's predictive draws
-//! from the observation model at each target's end. Rows ending after the
-//! origin are never handed to the filter, so nothing after the origin is
-//! assimilated. A stop after the origin holds no observed value, so the filter
+//! declared period with no value the filter assimilates, and reads each
+//! stream's predictive draws from the observation model at each target's end.
+//! A target with a held-out value carries it as a held-out cell (D79), which
+//! only the filter's scoring likelihood reads. Rows ending after the origin
+//! are never handed to the filter as observations, so nothing after the origin
+//! is assimilated. A stop after the origin holds no observed value, so the filter
 //! does not assimilate there and skips the resampling call altogether (D72):
 //! no particle is copied into another's slot after the origin, which is what
 //! makes particle `i`'s draws across targets one joint sample.
@@ -50,6 +52,13 @@ pub(crate) struct Forecast {
     /// (the plan's order), sample `s = draw · n_particles + particle`. One `s`
     /// across targets is one particle's trajectory (D54).
     pub draws: Vec<Vec<f64>>,
+    /// Per target, in the plan's order: each sample's log-likelihood of the
+    /// target's held-out value (D79), `ℓ[s] = log p(y_held_out | x_s, θ_m)`,
+    /// in the layout of `draws`; `None` for a target with no held-out value.
+    /// Evaluated by the filter's own likelihood at the target's end, before
+    /// anything could be assimilated there (D56); it enters no weight, so no
+    /// other field of the forecast depends on the held-out values.
+    pub held_out_log_liks: Vec<Option<Vec<f64>>>,
     /// The same layout, holding each particle's expected observation
     /// `E[y | x, θ]` at the target, when the caller asked for it.
     #[cfg_attr(not(test), allow(dead_code))] // the command does not ask for it
@@ -182,20 +191,71 @@ pub(crate) fn draw_seed(base_seed: u64, draw: usize) -> u64 {
     base_seed ^ (0x9E37_79B9_7F4A_7C15u64.wrapping_mul(draw as u64 + 1))
 }
 
+/// Each target's held-out value, in the plan's order (D79): the value of the
+/// held-out row the target names, `None` where it names none or the row is
+/// `NA`. The values only reach the scoring likelihood; the driver binds each
+/// as an [`ObsCell::HeldOut`](sim::inference::ObsCell::HeldOut), which the
+/// filter never assimilates.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct HeldOutValues(Vec<Option<f64>>);
+
+impl HeldOutValues {
+    /// No held-out value at any target: a forecast that is not scored.
+    #[cfg(test)]
+    pub(crate) fn none(plan: &ForecastPlan) -> Self {
+        HeldOutValues(vec![None; plan.targets().len()])
+    }
+
+    /// The values of the rows `plan`'s targets name, read from `held_out`
+    /// (each stream's rows after its training prefix, by file).
+    pub(crate) fn from_rows(
+        plan: &ForecastPlan,
+        held_out: &std::collections::BTreeMap<String, Vec<super::forecast_plan::HeldOut>>,
+    ) -> Result<Self, String> {
+        use sim::inference::ObsCell;
+        plan.targets().iter().map(|t| {
+            let Some(at) = t.observed else { return Ok(None) };
+            let row = held_out.get(&t.stream).and_then(|rows| rows.iter()
+                .find(|h| h.file == at.file && h.row.position == at.position))
+                .ok_or_else(|| format!(
+                    "internal error: target of '{}' ending at {} names its {}, which was not read",
+                    t.stream, t.measures.end(), at.describe()))?;
+            match row.row.cell {
+                Some(ObsCell::Scalar(v)) => Ok(Some(v)),
+                None => Ok(None),
+                Some(ObsCell::HeldOut(_)) => Err(format!(
+                    "internal error: the {} of '{}' was read as a held-out cell; a row read \
+                     from a file holds an observed value or NA", at.describe(), t.stream)),
+            }
+        }).collect::<Result<_, _>>().map(HeldOutValues)
+    }
+
+    /// The value at target `k`.
+    pub(crate) fn at(&self, k: usize) -> Option<f64> {
+        self.0[k]
+    }
+}
+
 /// Run the forecast `plan` describes. `training` is every bound stream, each
-/// cut to its training prefix; `compiled` is the fitted model with its run
-/// extent reaching the plan's latest target end (D49); `param_sets` holds one
-/// parameter vector per posterior draw.
+/// cut to its training prefix; `held_out` holds each target's held-out value
+/// ([`HeldOutValues::none`] for a forecast that is not scored); `compiled` is
+/// the fitted model with its run extent reaching the plan's latest target end
+/// (D49); `param_sets` holds one parameter vector per posterior draw.
 pub(crate) fn fixed_origin_forecast(
     plan: ForecastPlan,
     training: &[ObsStream],
+    held_out: &HeldOutValues,
     compiled: Arc<sim::CompiledModel>,
     param_sets: &[Vec<f64>],
     config: DriverConfig,
 ) -> Result<Forecast, ForecastFailure> {
     let origin = plan.origin();
+    if held_out.0.len() != plan.targets().len() {
+        return Err(setup(format!(
+            "internal error: {} held-out values for {} targets", held_out.0.len(), plan.targets().len())));
+    }
     let state = conditioning(&plan, training)?;
-    let specs = specs_with_targets(&plan, training)?;
+    let specs = specs_with_targets(&plan, training, held_out)?;
     let names: Vec<String> = training.iter().map(|s| s.name.clone()).collect();
     let t_start = compiled.model.simulation.t_start;
     let (bound, _report) = BoundObs::bind(t_start, specs)
@@ -238,6 +298,9 @@ pub(crate) fn fixed_origin_forecast(
 
     let n = config.n_particles;
     let mut draws: Vec<Vec<f64>> = vec![Vec::with_capacity(param_sets.len() * n); at.len()];
+    let mut held_out_log_liks: Vec<Option<Vec<f64>>> = (0..at.len())
+        .map(|k| held_out.at(k).map(|_| Vec::with_capacity(param_sets.len() * n)))
+        .collect();
     let mut expected: Option<Vec<Vec<f64>>> =
         config.record_expected.then(|| vec![Vec::with_capacity(param_sets.len() * n); at.len()]);
     let before_origin: Vec<usize> = (0..n_union).filter(|i| !after_origin.contains(i)).collect();
@@ -260,7 +323,8 @@ pub(crate) fn fixed_origin_forecast(
         }
         let preq = result.prequential
             .ok_or_else(|| fail(None, "internal error: no prequential record".into()))?;
-        // After the origin every cell is a row with no value, whose
+        // After the origin every cell is a row with no value the filter
+        // assimilates (a hole or a held-out value), whose joint
         // log-likelihood is 0 for a live particle; a dead particle's
         // log-weight is −∞. So any −∞ after the origin is a death.
         for &i in &after_origin {
@@ -284,6 +348,21 @@ pub(crate) fn fixed_origin_forecast(
                     "particle {p}'s draw for stream '{}' is not finite ({})", names[si], ys[p])));
             }
             draws[k].extend_from_slice(ys);
+            if let Some(ll) = held_out_log_liks[k].as_mut() {
+                // The stop holds this target's held-out value, so the filter
+                // kept its scoring likelihood there for every particle.
+                let lls = preq.per_stream_held_out_log_liks.get(ui).and_then(|v| v.get(si))
+                    .filter(|v| v.len() == n)
+                    .ok_or_else(|| fail(Some(union_times[ui]), format!(
+                        "internal error: the filter kept no held-out log-likelihood for stream '{}' \
+                         at this target", names[si])))?;
+                if let Some(p) = lls.iter().position(|l| l.is_nan()) {
+                    return Err(fail(Some(union_times[ui]), format!(
+                        "particle {p}'s log-likelihood of the held-out value of stream '{}' is NaN",
+                        names[si])));
+                }
+                ll.extend_from_slice(lls);
+            }
             if let Some(e) = expected.as_mut() {
                 let anc = result.ancestry.as_ref()
                     .ok_or_else(|| fail(None, "internal error: no ancestry record".into()))?;
@@ -307,8 +386,8 @@ pub(crate) fn fixed_origin_forecast(
         }
     }
     Ok(Forecast {
-        plan, state, n_draws: param_sets.len(), n_particles: n, binomial: config.binomial, draws, expected,
-        pre_origin, last_assimilation, origin_states,
+        plan, state, n_draws: param_sets.len(), n_particles: n, binomial: config.binomial, draws,
+        held_out_log_liks, expected, pre_origin, last_assimilation, origin_states,
     })
 }
 
@@ -362,7 +441,12 @@ pub(crate) fn declared_read(
         .ok_or_else(|| setup(format!("stream '{stream}' is not bound")))?;
     let ui = (0..obs_model.n_observations())
         .find(|&i| (obs_model.obs_time(i) - end).abs() <= TIME_TIE_EPS)
-        .filter(|&i| obs_model.cell_state(si, i) == ObsCellState::Hole)
+        // A declared period carrying no value the filter assimilates: a hole,
+        // or a held-out value (D79), which the filter treats as one.
+        .filter(|&i| match obs_model.cell_state(si, i) {
+            ObsCellState::Hole | ObsCellState::HeldOut { .. } => true,
+            ObsCellState::Scored { .. } | ObsCellState::NotScheduled => false,
+        })
         .ok_or_else(|| setup(format!(
             "a prediction of stream '{stream}' at t = {end} was requested, but no declared \
              period of that stream with no value ends there; only the forecast plan \
@@ -397,16 +481,21 @@ fn conditioning(plan: &ForecastPlan, training: &[ObsStream]) -> Result<StateCond
     Ok(StateConditioning::Filtered { through, rows })
 }
 
-/// Each training stream's spec with its targets appended as rows with no
-/// value.
-fn specs_with_targets(plan: &ForecastPlan, training: &[ObsStream]) -> Result<Vec<StreamSpec>, ForecastFailure> {
+/// Each training stream's spec with its targets appended as rows carrying no
+/// value the filter assimilates: a hole, or the target's held-out value as a
+/// held-out cell (D79).
+fn specs_with_targets(
+    plan: &ForecastPlan,
+    training: &[ObsStream],
+    held_out: &HeldOutValues,
+) -> Result<Vec<StreamSpec>, ForecastFailure> {
     let mut specs = crate::fit::runner::stream_specs_from_obs_streams(training);
     for spec in &mut specs {
         let name = spec.ir_model.name.clone();
         // An empty aux list means the stream reads no data column; `bind`
         // sizes it. A sized one gains an empty entry per target.
         let sized_aux = !spec.aux.is_empty();
-        for t in plan.targets_of(&name) {
+        for (k, t) in plan.targets().iter().enumerate().filter(|(_, t)| t.stream == name) {
             match (&mut spec.times, t.measures) {
                 (StreamTimes::Intervals(ps), Measures::Period(p)) => {
                     ps.push(Period::new(p.start(), p.stop()).map_err(setup)?);
@@ -415,7 +504,7 @@ fn specs_with_targets(plan: &ForecastPlan, training: &[ObsStream]) -> Result<Vec
                 _ => return Err(setup(format!(
                     "internal error: a target of '{name}' does not match what its rows measure"))),
             }
-            spec.observations.push(None);
+            spec.observations.push(held_out.at(k).map(sim::inference::ObsCell::HeldOut));
             if sized_aux {
                 spec.aux.push(Vec::new());
             }

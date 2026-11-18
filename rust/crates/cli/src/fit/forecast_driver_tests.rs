@@ -145,7 +145,7 @@ impl Setup {
               n_particles: usize, seed: u64) -> Result<Forecast, ForecastFailure>
     {
         let params = vec![self.params(); n_draws];
-        fixed_origin_forecast(plan, &self.streams, compiled, &params, DriverConfig {
+        fixed_origin_forecast(plan.clone(), &self.streams, &HeldOutValues::none(&plan), compiled, &params, DriverConfig {
             n_particles, dt: 1.0, base_seed: seed, record_expected: true, trace_pre_origin: true,
             binomial: sim::rng::BinomialAlgorithm::Btpe,
         })
@@ -344,7 +344,7 @@ fn a_reading_that_ends_no_declared_period_is_refused() {
     assert!(declared_read(&bare, &names, "daily_cases", 24.0).is_err());
     // Declared through the plan, the same reading is allowed.
     let plan = s.plan(7.0, &["weekly_cases"]);
-    let declared = model_of(specs_with_targets(&plan, &s.streams).unwrap());
+    let declared = model_of(specs_with_targets(&plan, &s.streams, &HeldOutValues::none(&plan)).unwrap());
     assert!(declared_read(&declared, &names, "weekly_cases", 28.0).is_ok());
 }
 
@@ -475,7 +475,7 @@ fn conditioning_check(m: usize) -> String {
 fn a_targets_start_leaves_the_observed_likelihood_unchanged() {
     let filter = |s: &Setup, plan: Option<&ForecastPlan>| {
         let specs = match plan {
-            Some(p) => specs_with_targets(p, &s.streams).unwrap(),
+            Some(p) => specs_with_targets(p, &s.streams, &HeldOutValues::none(p)).unwrap(),
             None => crate::fit::runner::stream_specs_from_obs_streams(&s.streams),
         };
         let compiled = match plan { Some(p) => s.extended(p), None => s.compiled.clone() };
@@ -534,7 +534,7 @@ fn the_forecast_draws_with_the_sampler_it_is_given() {
     let run = |binomial| {
         let plan = s.plan(7.0, &["weekly_cases"]);
         let compiled = s.extended(&plan);
-        fixed_origin_forecast(plan, &s.streams, compiled, &[s.params(), s.params()], DriverConfig {
+        fixed_origin_forecast(plan.clone(), &s.streams, &HeldOutValues::none(&plan), compiled, &[s.params(), s.params()], DriverConfig {
             n_particles: 100, dt: 1.0, base_seed: 3, record_expected: false, trace_pre_origin: false, binomial,
         }).unwrap()
     };
@@ -612,7 +612,7 @@ fn a_single_arm_forecast_is_the_same_under_the_narrowed_stop_list() {
     let s = fixture_setup(24, "narrowed");
     let plan = s.plan(14.0, &["weekly_cases", "daily_cases"]);
     let run = |trace_pre_origin| {
-        fixed_origin_forecast(plan.clone(), &s.streams, s.extended(&plan), &vec![s.params(); 3], DriverConfig {
+        fixed_origin_forecast(plan.clone(), &s.streams, &HeldOutValues::none(&plan), s.extended(&plan), &vec![s.params(); 3], DriverConfig {
             n_particles: 200, dt: 1.0, base_seed: 7, record_expected: true, trace_pre_origin,
             binomial: sim::rng::BinomialAlgorithm::Btpe,
         }).unwrap()
@@ -631,4 +631,154 @@ fn a_single_arm_forecast_is_the_same_under_the_narrowed_stop_list() {
     let label = ArmLabel { scenario: "late".into(), sweep: Vec::new() };
     let err = check_shared_past(&every, &narrow, &label, &refs).unwrap_err();
     assert!(err.contains("recorded no trace before the origin"), "{err}");
+}
+
+// ── D79: held-out values and the log scores ──────────────────────────────
+
+use crate::fit::forecast_plan::{HeldOut, RowFile};
+
+/// A held-out row of the holdout file covering `[start, end)` with value `v`.
+fn held(position: usize, start: f64, end: f64, v: Option<f64>) -> HeldOut {
+    HeldOut {
+        file: RowFile::Holdout,
+        row: ObservedRow {
+            position,
+            label: end,
+            measures: Measures::Period(Period::new(start, end).unwrap()),
+            temporal: vec![crate::caltime_load::TemporalCell::Number(end)],
+            cell: v.map(sim::inference::ObsCell::Scalar),
+            aux: vec![],
+        },
+    }
+}
+
+/// The weekly targets [21, 28) and [28, 35) and the daily days 25 to 28,
+/// held out, each value scaled by `f`; day 26 is `NA`.
+fn held_out_rows(f: f64) -> BTreeMap<String, Vec<HeldOut>> {
+    BTreeMap::from([
+        ("weekly_cases".to_string(), vec![held(0, 21.0, 28.0, Some((60.0 * f).round())),
+                                          held(1, 28.0, 35.0, Some((45.0 * f).round()))]),
+        ("daily_cases".to_string(), vec![held(0, 24.0, 25.0, Some((9.0 * f).round())),
+                                         held(1, 25.0, 26.0, None),
+                                         held(2, 26.0, 27.0, Some((8.0 * f).round())),
+                                         held(3, 27.0, 28.0, Some((7.0 * f).round()))]),
+    ])
+}
+
+impl Setup {
+    /// A plan over both streams with `held` as their held-out rows.
+    fn plan_held(&self, horizon: f64, held: &BTreeMap<String, Vec<HeldOut>>) -> ForecastPlan {
+        let partition = TrainingPartition::whole(&self.rows, WholeFiles::NoHoldout).unwrap();
+        let streams: Vec<PlanStream> = self.model.observations.iter()
+            .map(|o| PlanStream { obs: o, training: &self.rows[&o.name], held_out: &held[&o.name] })
+            .collect();
+        ForecastPlan::new(partition, horizon, &streams).unwrap()
+    }
+
+    fn run_held(&self, plan: &ForecastPlan, values: &HeldOutValues, seed: u64) -> Forecast {
+        fixed_origin_forecast(plan.clone(), &self.streams, values, self.extended(plan), &vec![self.params(); 3],
+            DriverConfig {
+                n_particles: 200, dt: 1.0, base_seed: seed, record_expected: true, trace_pre_origin: true,
+                binomial: sim::rng::BinomialAlgorithm::Btpe,
+            }).unwrap()
+    }
+}
+
+/// D79 at the driver: two sets of held-out values, and none, leave the
+/// forecast bit-identical (its predictive draws, the particles' expected
+/// observations, the states at the origin, the last assimilation and the
+/// pre-origin trace of every draw's filter) and change only the held-out
+/// log-likelihoods, which exist exactly at the targets with a value.
+#[test]
+fn held_out_values_change_only_the_forecasts_held_out_log_likelihoods() {
+    let s = fixture_setup(24, "held_out");
+    let (rows_a, rows_b) = (held_out_rows(1.0), held_out_rows(1.6));
+    let plan = s.plan_held(14.0, &rows_a);
+    assert_eq!(plan.targets(), s.plan_held(14.0, &rows_b).targets(), "the targets do not depend on the values");
+    let (va, vb) = (HeldOutValues::from_rows(&plan, &rows_a).unwrap(),
+                    HeldOutValues::from_rows(&plan, &rows_b).unwrap());
+    for seed in [3, 11] {
+        let (a, b, none) = (s.run_held(&plan, &va, seed), s.run_held(&plan, &vb, seed),
+                            s.run_held(&plan, &HeldOutValues::none(&plan), seed));
+        for other in [&b, &none] {
+            assert_eq!(a.draws, other.draws, "seed {seed}: predictive draws");
+            assert_eq!(a.expected, other.expected, "seed {seed}: expected observations");
+            assert_eq!(a.origin_states, other.origin_states, "seed {seed}: states at the origin");
+            assert_eq!(a.last_assimilation, other.last_assimilation);
+            assert_eq!(a.pre_origin, other.pre_origin, "seed {seed}: the filter before the origin");
+        }
+        assert!(a.draws.iter().flatten().any(|&y| y > 0.0), "a vacuous comparison of zeros");
+        assert!(none.held_out_log_liks.iter().all(Option::is_none));
+        let scored: Vec<bool> = a.held_out_log_liks.iter().map(Option::is_some).collect();
+        let want: Vec<bool> = (0..plan.targets().len()).map(|k| va.at(k).is_some()).collect();
+        assert_eq!(scored, want, "a held-out log-likelihood exactly where a target has a value");
+        assert_eq!(scored.iter().filter(|x| **x).count(), 5, "two weeks and three days (day 26 is NA)");
+        for (k, (la, lb)) in a.held_out_log_liks.iter().zip(&b.held_out_log_liks).enumerate() {
+            if let (Some(la), Some(lb)) = (la, lb) {
+                assert_ne!(la, lb, "seed {seed}: target {k}'s values move its log-likelihoods");
+            }
+        }
+    }
+}
+
+/// The held-out log-likelihood is the observation model's density of the
+/// held-out value at each particle's state, recomputed here from the
+/// particle's expected observation `E[y | x, θ] = ρ·projected` with the
+/// families written out: negative binomial (dispersion k) for the weekly
+/// stream, Poisson for the daily. The marginal log score is
+/// `logsumexp − log(MN)` over all draws' particles, and the joint score of a
+/// week and a day sums each sample's two log-likelihoods first; both agree
+/// with a direct computation, and the joint is not the sum of the marginals.
+#[test]
+fn the_held_out_log_likelihoods_and_scores_agree_with_an_independent_computation() {
+    use crate::fit::forecast_score::{joint_log_score, marginal_log_scores, LogScoreKind};
+    let s = fixture_setup(24, "held_out_oracle");
+    let rows = held_out_rows(1.0);
+    let plan = s.plan_held(14.0, &rows);
+    let values = HeldOutValues::from_rows(&plan, &rows).unwrap();
+    let fc = s.run_held(&plan, &values, 5);
+    let expected = fc.expected.as_ref().unwrap();
+    let k_disp = TRUTH.iter().find(|(n, _)| *n == "k").unwrap().1;
+    for (k, t) in plan.targets().iter().enumerate() {
+        let Some(ll) = &fc.held_out_log_liks[k] else { continue };
+        let y = values.at(k).unwrap();
+        for (i, (&l, &mean)) in ll.iter().zip(&expected[k]).enumerate() {
+            let want = match t.stream.as_str() {
+                "weekly_cases" => sim::inference::negbin_logpmf(y, mean, k_disp),
+                "daily_cases" => sim::inference::obs_loglik::poisson_logpmf(y, mean),
+                other => panic!("{other}"),
+            };
+            assert!((l - want).abs() <= 1e-12 * want.abs().max(1.0),
+                "target {k} ({}, end {}), sample {i}: {l} vs {want}", t.stream, t.measures.end());
+        }
+    }
+    // The scores, against a direct max-shifted computation in f64.
+    let direct = |xs: &[f64]| {
+        let m = xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        m + (xs.iter().map(|x| (x - m).exp()).sum::<f64>() / xs.len() as f64).ln()
+    };
+    let marginals = marginal_log_scores(&fc).unwrap();
+    assert_eq!(marginals.len(), 5);
+    for m in &marginals {
+        assert_eq!((m.kind, m.n_samples), (LogScoreKind::Marginal, 3 * 200));
+        let ll = fc.held_out_log_liks[m.targets[0]].as_ref().unwrap();
+        assert!((m.log_score - direct(ll)).abs() < 1e-10, "{} vs {}", m.log_score, direct(ll));
+        // Never below the mean of the draws' own log scores (Jensen).
+        let per_draw: f64 = ll.chunks(200).map(direct).sum::<f64>() / 3.0;
+        assert!(m.log_score >= per_draw - 1e-12);
+    }
+    let (wk, day) = (index_of(&plan, "weekly_cases", 28.0), index_of(&plan, "daily_cases", 28.0));
+    let joint = joint_log_score(&fc, &[day, wk]).unwrap();
+    let mut both = vec![wk, day];
+    both.sort_unstable();
+    assert_eq!((joint.kind.as_str(), joint.targets.clone(), joint.n_samples), ("joint_log_score", both, 600));
+    let (lw, ld) = (fc.held_out_log_liks[wk].as_ref().unwrap(), fc.held_out_log_liks[day].as_ref().unwrap());
+    let summed: Vec<f64> = lw.iter().zip(ld).map(|(a, b)| a + b).collect();
+    assert!((joint.log_score - direct(&summed)).abs() < 1e-10);
+    let sum_of_marginals = direct(lw) + direct(ld);
+    assert!((joint.log_score - sum_of_marginals).abs() > 1e-6,
+        "the joint score is not the sum of the marginals ({} vs {sum_of_marginals})", joint.log_score);
+    // A target with no held-out value cannot enter a joint score.
+    let na = index_of(&plan, "daily_cases", 26.0);
+    assert!(joint_log_score(&fc, &[wk, na]).unwrap_err().contains("no held-out value"));
 }

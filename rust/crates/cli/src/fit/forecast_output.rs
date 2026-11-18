@@ -20,7 +20,7 @@ use std::sync::Arc;
 use crate::fit::failures::{DeterministicFailure, Site, SkipReason, SkippedStream};
 use crate::fit::forecast_arms::{build_arms, ArmInputs, ArmLabel, Difference};
 use crate::fit::predict_streams::StreamSelection;
-use crate::fit::forecast_driver::{extend_run, fixed_origin_forecast, DriverConfig, Forecast, StateConditioning};
+use crate::fit::forecast_driver::{extend_run, fixed_origin_forecast, DriverConfig, Forecast, HeldOutValues, StateConditioning};
 use crate::fit::forecast_plan::{parse_reach, ForecastPlan, HeldOut, PlanStream, RowFile};
 use crate::fit::observed_rows::{Measures, ObservedRow};
 use crate::fit::predict::PosteriorDraws;
@@ -329,6 +329,10 @@ pub(crate) fn run_forecast(
             o.name));
     }
     let plan = ForecastPlan::new(partition, reach, &plan_streams).map_err(|e| e.to_string())?;
+    // Each target's held-out value (D79), bound as a held-out cell: the
+    // filter's scoring likelihood evaluates it and nothing else reads it, so
+    // the predictions below do not depend on it.
+    let held_out_values = HeldOutValues::from_rows(&plan, &held_out)?;
     // An eligible stream the plan refused is a failure; one with no target
     // within the reach is skipped, unless `--stream` asked for it.
     let mut failures: Vec<DeterministicFailure> = selection.failures.clone();
@@ -428,7 +432,7 @@ pub(crate) fn run_forecast(
             true => s,
             false => format!("{s} (forecast arm {})", arm.label.describe()),
         };
-        let fc = fixed_origin_forecast(plan.clone(), &streams, arm.compiled.clone(), &arm.param_sets, config)
+        let fc = fixed_origin_forecast(plan.clone(), &streams, &held_out_values, arm.compiled.clone(), &arm.param_sets, config)
             .map_err(|f| name_arm(f.describe(|d| draw_refs[d].describe())))?;
         if let Some(base) = forecasts.first() {
             check_shared_past(&base.fc, &fc, &arm.label, &draw_refs)?;
