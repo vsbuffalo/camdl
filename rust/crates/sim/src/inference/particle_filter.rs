@@ -112,6 +112,11 @@ impl std::fmt::Display for FilterCollapse {
 /// p(x_t | y_{1:t-1}). In the bootstrap filter the pre-obs weights
 /// are uniform (reset to 0 at the end of the previous step), so the
 /// caller can compute log-score = logsumexp(log_liks) − log N.
+///
+/// Under [`PrequentialStops::only`], `log_liks[i]`, `per_stream_log_liks[i]`
+/// and `per_stream_samples[i]` are empty at an unselected stop `i` (length 0,
+/// not `n_streams` empty vectors), so indexing a stream there panics;
+/// `obs_times` keeps every stop.
 pub struct PrequentialRecorded {
     /// Observation time for each recorded step, length = n_obs.
     pub obs_times: Vec<f64>,
