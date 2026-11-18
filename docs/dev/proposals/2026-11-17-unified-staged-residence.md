@@ -1,7 +1,7 @@
 # Proposal: a unified model for staged residences
 
-**Status:** Accepted **Date:** 2026-11-17 **Motivation:** A compartment given an
-Erlang dwell time with `via erlang(...)` should behave like any other
+**Status:** Implemented **Date:** 2026-11-17 **Motivation:** A compartment given
+an Erlang dwell time with `via erlang(...)` should behave like any other
 compartment when people are moved into it, out of it, or between its strata,
 without the modeller writing stage bookkeeping.
 
@@ -274,14 +274,40 @@ init { stage(E[pre], 2) = 10 }
   expression and as a transition, transfer, `add`, `set` and `init` endpoint.
   For `hyper_erlang` a location is a branch and a phase; that form is reserved
   and refused with a diagnostic until gh#333.
-- `stages(C)` is valid only as a binder domain (`[st in stages(E)]`). A variable
-  bound over `stages(E)` cannot index `stage(I[...], st)`, nor a population
-  dimension.
+- `stages(C)` is valid only as a binder domain (`[st in stages(E)]`), on a
+  declaration and in `sum(st in stages(E), ...)`. A variable bound over
+  `stages(E)` cannot index `stage(I[...], st)` (E371), nor a population
+  dimension, a parameter, a table or a flow, and is not a value (E372). The one
+  other thing it indexes is a `let` family declared over `stages(E)`.
 - At `stages = 1`, `stages(E)` has one element and `stage(E[pre], 1)` is
-  `E[pre]`.
+  `E[pre]`. The same holds for a compartment with no `via` law. A declaration
+  bound over a one-element `stages(E)` is the single declaration it would be
+  without the binder: `move[st in stages(E)]` is `move`, not `move_s1`, as a
+  competing exit is `death_E_pre` there and not `death_E_pre_s1`.
 - An out-of-range literal, a location for the wrong compartment, or `stage` on
   an unstaged compartment with a location other than 1, is an error naming the
-  compartment's stage count.
+  compartment's stage count (E370). A literal location above 1 therefore does
+  not compile at `stages = 1`: "same text for every stage count" holds for a
+  model written with location 1 and stage variables.
+- **The reference.** The first argument of `stage` is a residence reference
+  written with the compartment's own name. A compartment bound by
+  `c in compartments`, or a reference with a population dimension left
+  unindexed, is refused (E369).
+- **Families over stages.** The stage binder of a transition goes last in its
+  expanded names, wherever it is written (`shift_pre_s2`), as the stage level
+  does for a competing exit, and a flow reference to the transition as written
+  reads its stage members by the same rule.
+- **`init`.** `stage(E, 2) = 10` is an `init` entry. A binder over `stages(E)`
+  in the bracket form (`E[st in stages(E)] = ...`) is refused (E374): the
+  bracket binds population indices.
+- **Observation streams.** A binder over `stages(E)` on a stream header is
+  refused (E374): a stream family is matched to a data column per index, and
+  data has no column for a stage. A stream reads one location with
+  `projected = stage(E, 1)`.
+- **The declared model.** The declared-model section records `stage(E[a], 2)` as
+  `E` indexed by `a` and the call `stage(2)`, and `st in stages(E)` as a binder
+  whose domain is the text `stages(E)`. Its schema (version 1) has no
+  constructor for either; one would be a schema change of its own.
 - There is no stage-count accessor. A transfer fraction or rate must not depend
   on the number of stages; the grouped transfer and the allocation rule remove
   the legitimate reasons to compute one.
@@ -293,9 +319,14 @@ people infected between two dates.
 ### Existing spellings
 
 - `[st in __latency_stage]`, and any user-written reference to a generated stage
-  dimension by name: refused, with a diagnostic naming `stages(<compartment>)`.
-- A stage level name as an index (`E[pre, s2]`): refused, with a diagnostic
-  naming `stage(E[pre], 2)`.
+  dimension by name: refused (E375), with a diagnostic naming
+  `stages(<compartment>)`. This holds at `stages = 1` too, where the dimension
+  is not generated. A parameter or table declared over the dimension has no
+  replacement: nothing is declared over stages.
+- A stage level name as an index (`E[pre, s2]`): refused (E376), with a
+  diagnostic naming `stage(E[pre], 2)`.
+- The refusal is made on the declarations as parsed, before the `via` lowering
+  writes its own references into the stage dimension, so it cannot reach them.
 - Expanded cell names (`E_pre_s2`): unchanged. They are how every stratified
   cell is named in trajectory columns and may still be written where a cell name
   is accepted; they do not exist at `stages = 1`.
