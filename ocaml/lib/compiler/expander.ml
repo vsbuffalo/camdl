@@ -6015,41 +6015,65 @@ let resolve_lineage (ctx : context) (tr : Ast.transition_decl)
 let branch_weight_tolerance = 1e-9
 
 (* gh#1205: a destination split `X --> { A : w_A, B : w_B } @ r` emits one
-   flow per branch at rate w_i · r, so X leaves at (Σ w_i) · r. When every
-   weight is a compile-time constant the sum is known, and a sum other than 1
-   means the rate after `@` is not the outflow: reject it. Weights that depend
-   on a parameter or anything else known only at run time are not checked; the
-   spec states that their sum scales the outflow. *)
-let check_branch_weights_sum ctx (tr : transition_decl) =
+   flow per branch at rate w_i · r, so X leaves at (Σ w_i) · r. Constant
+   weights must form a probability distribution, and E423 reports the first
+   way they fail to, in this order:
+   - a constant weight that is not a finite number (`0 / 0`, `1 / 0`), which
+     would compare false against any bound;
+   - a constant weight outside [0, 1], which gives its branch a negative rate
+     or more than the whole outflow, even when the sum is 1;
+   - when every weight is constant, a sum more than [branch_weight_tolerance]
+     from 1, which makes the outflow differ from the rate after `@`.
+   The first two apply to each constant weight, also beside parameter weights.
+   Weights known only at run time are not checked; the spec states that
+   their sum scales the outflow. *)
+let check_branch_weights ctx (tr : transition_decl) =
   match tr.trdst with
   | DstSum _ -> ()
   | DstBranch branches ->
-    let consts = List.map (fun (_, w) -> const_value ctx w) branches in
-    if List.for_all Option.is_some consts then begin
-      let sum = List.fold_left (fun acc w -> acc +. Option.get w) 0.0 consts in
-      if Float.abs (sum -. 1.0) > branch_weight_tolerance then begin
-        Diagnostics.error ctx.diags ~code:"E423"
-          ~loc:(diag_loc_of_ast_ctx ctx tr.trloc)
-          ~message:(Printf.sprintf
-            "transition '%s': the destination weights sum to %.12g, not 1, so \
-             the transition moves %.12g times the rate after `@`"
-            tr.trname sum sum)
-          ~detail:(Printf.sprintf
-            "each branch fires at its weight times the rate, so the total \
-             outflow is the rate times the sum of the weights; constant \
-             weights must sum to 1 (within %g)" branch_weight_tolerance)
-          ~hint:"make the weights sum to 1, e.g. write the last one as one \
-                 minus the others (`{ R : 0.5, Q : 1 - 0.5 }`); to change the \
-                 total outflow, change the rate after `@`. See `camdl docs \
-                 language-changes`"
-          ()
+    let consts =
+      List.map (fun (((dst, _) : stoich_ref), w) -> (dst, const_value ctx w)) branches in
+    let err message =
+      Diagnostics.error ctx.diags ~code:"E423"
+        ~loc:(diag_loc_of_ast_ctx ctx tr.trloc)
+        ~message:(Printf.sprintf
+          "transition '%s': the destination weights are not a probability \
+           distribution: %s" tr.trname message)
+        ~detail:(Printf.sprintf
+          "each branch fires at its weight times the rate, so the total \
+           outflow is the rate times the sum of the weights; constant weights \
+           must each lie in [0, 1] and together sum to 1 (within %g)"
+          branch_weight_tolerance)
+        ~hint:"write each weight as a probability and the last one as one \
+               minus the others (`{ R : 0.5, Q : 1 - 0.5 }`); to change the \
+               total outflow, change the rate after `@`. See `camdl docs \
+               language-changes`"
+        ()
+    in
+    let non_finite = List.find_opt (function
+        | (_, Some w) -> not (Float.is_finite w) | _ -> false) consts in
+    let out_of_range = List.find_opt (function
+        | (_, Some w) -> w < 0.0 || w > 1.0 | _ -> false) consts in
+    match non_finite, out_of_range with
+    | Some (dst, w), _ ->
+      err (Printf.sprintf "the weight of `%s` is not a finite number (%g)"
+             dst (Option.get w))
+    | None, Some (dst, w) ->
+      err (Printf.sprintf "the weight of `%s` is %.12g, outside [0, 1]"
+             dst (Option.get w))
+    | None, None ->
+      if List.for_all (fun (_, w) -> Option.is_some w) consts then begin
+        let sum = List.fold_left (fun acc (_, w) -> acc +. Option.get w) 0.0 consts in
+        if Float.abs (sum -. 1.0) > branch_weight_tolerance then
+          err (Printf.sprintf
+            "they sum to %.12g, not 1, so the transition moves %.12g times \
+             the rate after `@`" sum sum)
       end
-    end
 
 let expand_transitions_counted ctx =
   let filtered = ref 0 in
   let expanded = List.concat_map (fun tr ->
-    check_branch_weights_sum ctx tr;
+    check_branch_weights ctx tr;
     let errors_before = count_errors ctx in
     let combos =
       cartesian_product ~loc:(diag_loc_of_ast_ctx ctx tr.trloc) tr.trindices ctx in

@@ -86,17 +86,18 @@ gamma   = { x = 1 }        →  set = { gamma = 0.2 }   (or scale = { gamma = 1.
 name", with a fix-it to the bracketed form; E124, "`gamma = { ... }` is not a
 scenario field".
 
-## 2026-11-17 — constant destination weights must sum to 1
+## 2026-11-17 — constant destination weights must be a probability distribution
 
 **What.** A destination split `X --> { A : w_A, B : w_B } @ r` emits one flow
 per branch at `w_i × r`, so `X` leaves at `r × Σ w_i`. When every weight is a
 compile-time constant (numbers and unit literals, arithmetic, built-in math
 functions and `min`/`max`/`mod` on them, `let` bindings of such) and the weights
-do not sum to 1 within `1e-9`, the transition is now rejected. Before,
-`I --> { R : 0.5, Q : 0.7 } @ gamma * I` compiled and drained `I` at
-`1.2 × gamma × I`, not the `gamma × I` written after `@`. Weights that depend on
-a parameter, a table, a forcing or the state are not checked; their sum scales
-the outflow (spec §9.1.2).
+do not sum to 1 within `1e-9`, the transition is now rejected, as it is when any
+constant weight is outside `[0, 1]` or not a finite number (even beside
+parameter weights). Before, `I --> { R : 0.5, Q : 0.7 } @ gamma * I` compiled
+and drained `I` at `1.2 × gamma × I`, not the `gamma × I` written after `@`.
+Weights that depend on a parameter, a table, a forcing or the state are not
+checked; their sum scales the outflow (spec §9.1.2).
 
 **Migration.** Make the weights sum to 1, most simply by writing the last one as
 one minus the others:
@@ -106,11 +107,15 @@ recovery : I --> { R : 0.5, Q : 0.7 } @ gamma * I        # old: outflow 1.2 γI
 recovery : I --> { R : 0.5, Q : 1 - 0.5 } @ gamma * I    # new: outflow γI
 ```
 
-To change the total outflow, change the rate after `@` (`@ 1.2 * gamma * I`).
+To change the total outflow, change the rate after `@` (`@ 1.2 * gamma * I`). A
+weight outside `[0, 1]`, such as `{ R : 1.5, Q : -0.5 }` (which sums to 1 but
+gave `Q` a negative rate), has no migration that keeps its meaning: write the
+branch probabilities the model intends.
 
-**Diagnostic.**
-`E423: transition 'recovery': the destination weights sum to
-1.2, not 1, …`.
+**Diagnostic.** E423, "transition 'recovery': the destination weights are not a
+probability distribution: they sum to 1.2, not 1, …"; for a weight out of range,
+"… the weight of R is 1.5, outside [0, 1]"; for `0 / 0`, "… is not a finite
+number".
 
 ## 2026-11-17 — the one-step calendar rule: a single month or year step in a date position is its calendar date
 

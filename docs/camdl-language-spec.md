@@ -2569,15 +2569,18 @@ the rate after `@` is the outflow only when the weights sum to 1. A sum below 1
 does not send the remainder anywhere; it lowers the outflow, and a sum above 1
 raises it.
 
-- **Constant weights must sum to 1.** When every weight is a compile-time
-  constant — numbers (with or without a unit literal such as `'ratio`),
-  arithmetic on them, the built-in math functions (`exp`, `log`, `sqrt`, …) and
-  `min`/`max`/`mod` applied to them, and unindexed `let` bindings of such — the
-  compiler checks that the sum is within `1e-9` of 1 and otherwise rejects the
-  transition (**E423**). The tolerance absorbs floating-point rounding
-  (`0.7 + 0.2 + 0.1` is `0.9999999999999999`; `1/3` three times) and nothing a
-  model would write on purpose, so `{ A : 0.33, B : 0.33, C : 0.33 }` is an
-  error. To lower the total outflow, change the rate after `@`.
+- **Constant weights must be a probability distribution.** A weight is a
+  compile-time constant when it is a number (with or without a unit literal
+  such as `'ratio`), arithmetic on such, a built-in math function (`exp`, `log`,
+  `sqrt`, …) or `min`/`max`/`mod` applied to such, or an unindexed `let` binding
+  of such. Each constant weight must be a finite number in `[0, 1]`, even
+  beside parameter weights — `{ R : 1.5, Q : -0.5 }` sums to 1 but gives `Q` a
+  negative rate — and when every weight is constant their sum must be within
+  `1e-9` of 1. Otherwise the transition is rejected (**E423**). The tolerance
+  absorbs floating-point rounding (`0.7 + 0.2 + 0.1` is `0.9999999999999999`;
+  `1/3` three times) and nothing a model would write on purpose, so
+  `{ A : 0.33, B : 0.33, C : 0.33 }` is an error. To lower the total outflow,
+  change the rate after `@`.
 - **Weights that depend on anything known only at run time are not checked.**
   A parameter, a table, a forcing or the state can make the sum differ from 1,
   and then the outflow is `rate × Σ weight_i`, exactly as written. Write the
@@ -6938,7 +6941,7 @@ authoritative list is whatever `ocaml/lib/compiler/` and `ocaml/lib/ir/` emit.
 | E358 | Error   | `prevalence(of = …, among = …)`: the two sides collapse different dimensions (§12.1) |
 | E359 | Error   | `prevalence(of = …, among = …)` reads a flow on one side (§12.1) |
 | E360 | Error   | Arithmetic with no meaning on a definite instant: `Instant + Instant`, a `sum` of instants, `k * Instant`, `Duration − Instant`, `Instant +` a unitless constant, a conditional choosing between an Instant and a duration (§2.1) |
-| E423 | Error   | A destination split's constant weights do not sum to 1 (within `1e-9`), so the rate after `@` is not the outflow (§9.1.2) |
+| E423 | Error   | A destination split's constant weights are not a probability distribution: a weight is not finite or lies outside [0, 1], or all are constant and do not sum to 1 (within `1e-9`) (§9.1.2) |
 | W103 | Warning | Let binding name shadows a stratum value in some dimension                                |
 
 Diagnostics can be emitted as structured JSON by passing `--json-errors` to
