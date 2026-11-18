@@ -581,7 +581,10 @@ and of coverage; the cases themselves are regression evidence.
    config is read, so a flag-made fit is read under its stored override; a
    `fit.toml` names the file's problem as it reads, with or without a stored
    fit, and so never stands for a flag-made fit (it is then refused at the
-   forcing, as the file alone would be). The fit is read once, and its
+   forcing, as the file alone would be). A `fit run --sweep` point, whose folder
+   archives the file's `[fixed]`, is refused by `profile` and `survey` (which
+   read `[fixed]`), naming each parameter's archived and run value, until a
+   fit's resolved config is stored (D93). The fit is read once, and its
    `[config] allow_degenerate_rates` and `allow_forcing_extrapolation` are
    folded with the flags in resolution. Each identity keys the engine switches
    (`PfilterCtx`, `ProfilePointCtx` and `SurveyCtx` take the typed
