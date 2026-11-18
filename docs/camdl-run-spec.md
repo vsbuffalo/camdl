@@ -1006,7 +1006,8 @@ and fails it instead when `--stream` named it.
   (`prospective`, from `--design` files; `ex_post`, from the held-out rows'
   realised values under `--realised-design`), `label` (an ex-post forecast is
   labelled a conditional score using realised future design, not an
-  unconditional forecast), `streams` and `files`.
+  unconditional forecast), `streams`, and `files`: each `--design` file's
+  `stream` and the `sha256` of its bytes (the path typed is not recorded).
 - `chain_selection`, under a chain selection: the block `predictive.json`
   carries.
 - `arms` (D50): the fitted model (`"baseline": true`), then each `--scenario`
