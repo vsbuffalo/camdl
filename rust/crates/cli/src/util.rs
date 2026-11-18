@@ -3870,14 +3870,22 @@ pub fn run_simulation_with_progress(
     run: &SimRun,
     progress: Option<&indicatif::ProgressBar>,
 ) -> Result<(Trajectory, ir::Model), String> {
-    // Resolve/compile first, THEN run. Callers that show a simulate progress
-    // bar must compile before the bar exists (see `simulate_compiled` and
-    // `engine::run_one_cell_with_progress`) — but for the no-bar path the order
-    // is immaterial, so this thin wrapper is byte-identical to the old body.
+    run_cell(run, progress).map(|(traj, cell)| (traj, cell.run.model))
+}
+
+/// Resolve `run` into its [`crate::sim_config::ResolvedCell`], compile it and
+/// run it: the trajectory, and the resolved cell it came from. Callers that
+/// show a simulate progress bar must compile before the bar exists (see
+/// `simulate_compiled` and `engine::run_one_cell_with_progress`); for the
+/// no-bar path the order is immaterial.
+pub fn run_cell(
+    run: &SimRun,
+    progress: Option<&indicatif::ProgressBar>,
+) -> Result<(Trajectory, crate::sim_config::ResolvedCell), String> {
     let cell = crate::sim_config::ResolvedCell::resolve(load_run_model(run)?, run)?;
     let compiled = cell.compile()?;
     let traj = simulate_compiled(&compiled, &cell, progress)?;
-    Ok((traj, cell.run.model))
+    Ok((traj, cell))
 }
 
 /// Run an **already-resolved** model, optionally driving a per-timestep
@@ -3908,6 +3916,8 @@ pub fn simulate_compiled(
         binomial,
         // Carried on `compiled` (`ResolvedCell::compile`).
         eval: _,
+        // Applied to `model` (`resolve_loaded_run`).
+        required_output_times: _,
     } = cell;
     let (seed, backend, dt, binomial) = (*seed, *backend, *dt, *binomial);
     let params  = compiled.default_params.clone();
@@ -4104,7 +4114,7 @@ pub fn unseamed_backend_msg(backend: &str) -> String {
 /// no randomness, so the simulation is literally unchanged.
 pub fn run_simulation_event_log(
     run: &SimRun,
-) -> Result<(Trajectory, ir::Model, sim::lineage::EventLog, bool), String> {
+) -> Result<(Trajectory, crate::sim_config::ResolvedCell, sim::lineage::EventLog, bool), String> {
     use crate::args::types::ForwardBackend;
     use sim::lineage::EventRecorder;
 
@@ -4245,7 +4255,7 @@ pub fn run_simulation_event_log(
 
     let exact = matches!(cell.backend, ForwardBackend::Gillespie);
     let event_log = recorder.into_event_log();
-    Ok((traj, cell.run.model, event_log, exact))
+    Ok((traj, cell, event_log, exact))
 }
 
 /// Which trajectory *data* columns to emit (compartments + flows), derived

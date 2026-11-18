@@ -93,17 +93,26 @@ pub struct CellSpec {
     pub sim_run: SimRun,
 }
 
-/// A completed cell: its spec plus the simulated trajectory and resolved
-/// model. Handed to [`RunSink::merge_cell`] in canonical order.
+/// A completed cell: its spec, the simulated trajectory, and the resolved
+/// cell it ran ([`crate::sim_config::ResolvedCell`]) — the one value a store
+/// sink builds the written leaf's identity from. Handed to
+/// [`RunSink::merge_cell`] in canonical order.
 pub struct CellResult {
     pub spec: CellSpec,
     pub traj: sim::Trajectory,
-    pub model: ir::Model,
+    pub cell: crate::sim_config::ResolvedCell,
     /// The recorded identity-free event log, present only for the
     /// `simulate --event-log` path (the recorder is passive — Tier 2a — so a
     /// cell carrying `Some(..)` has the same `traj`/run_id as one carrying
     /// `None`). A `CasSink` writes it into the leaf as `event_log.tsv`.
     pub event_log: Option<sim::lineage::EventLog>,
+}
+
+impl CellResult {
+    /// The model the cell ran: scenario, horizon and parameter values applied.
+    pub fn model(&self) -> &ir::Model {
+        &self.cell.run.model
+    }
 }
 
 /// The grid shape, computed once up front so a sink can size headers /
@@ -273,8 +282,8 @@ pub fn run_job(job: &SimulateJob, sink: &mut dyn RunSink) -> Result<(), String> 
 
 /// Run a single planned cell to a [`CellResult`].
 fn run_one_cell(spec: CellSpec) -> Result<CellResult, String> {
-    let (traj, model) = util::run_simulation(&spec.sim_run)?;
-    Ok(CellResult { spec, traj, model, event_log: None })
+    let (traj, cell) = util::run_cell(&spec.sim_run, None)?;
+    Ok(CellResult { spec, traj, cell, event_log: None })
 }
 
 /// Run a lone cell with a per-timestep `t/t_end` + ETA progress bar on stderr.
@@ -340,7 +349,7 @@ fn run_one_cell_with_progress(spec: CellSpec) -> Result<CellResult, String> {
     }
 
     let result = util::simulate_compiled(&compiled, &cell, Some(&pb))
-        .map(|traj| CellResult { spec, traj, model: cell.run.model, event_log: None });
+        .map(|traj| CellResult { spec, traj, cell, event_log: None });
 
     pb.finish_and_clear();
     result

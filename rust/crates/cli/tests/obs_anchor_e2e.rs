@@ -6,8 +6,8 @@
 //!     `breakpoints = [last_obs]` runs a *different* forcing under two data
 //!     vintages, so the two runs must not share a `run_id` — otherwise the CAS
 //!     serves the first vintage's trajectory for the second. The model's
-//!     `simulate { to }` is a LITERAL here on purpose: the config level
-//!     (`ResolvedEntry.t_end`) is then byte-identical between the two runs, and
+//!     `simulate { to }` is a LITERAL here on purpose: the config level (the
+//!     window `SimConfig::t_end`) is then byte-identical between the two runs, and
 //!     the only thing that can distinguish them is the substituted model. That
 //!     makes this test the empirical proof that resolving into the hashed
 //!     `base_model` is sufficient, with no extra hashed identity level.

@@ -1140,14 +1140,14 @@ impl PredictiveSink {
 
 impl crate::engine::RunSink for PredictiveSink {
     fn merge_cell(&mut self, cell: &crate::engine::CellResult) -> Result<(), String> {
-        let model = &cell.model;
+        let model = cell.model();
         // The cell's parameter vector for the observation sampler. Load-bearing on
         // TWO axes: (1) it must read the DRAW's parameters (e.g. an estimated
         // reporting rate), so the posterior predictive carries observation-
         // parameter uncertainty; (2) it must read the SCENARIO's overlay (e.g.
         // `set = { rho = 0.3 }`), so a counterfactual that changes an
         // observation-only parameter actually shifts the predictive bands. The
-        // engine resolved BOTH into `cell.model.parameters` (the scenario via
+        // engine resolved BOTH into `cell.model().parameters` (the scenario via
         // `apply_scenario_filter`/`params_resolver`, the draw via the cell's
         // point_overrides), so we read the resolved values from there — the single
         // source of truth — rather than re-deriving from default_params + the draw

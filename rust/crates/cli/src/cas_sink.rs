@@ -114,7 +114,7 @@ pub(crate) struct CasSink {
     /// is built from it ([`CasSink::cell_resolve`]), and the engine's settings
     /// come from the same value (`ResolvedSimConfig::engine_settings`).
     ///
-    /// The base model (`sim.model.ir`) is never `cell.model` (which has the
+    /// The base model (`sim.model.ir`) is never `cell.model()` (which has the
     /// scenario and the sweep point applied), and it is the model each cell's
     /// parameter values are resolved over. There is deliberately no base
     /// parameter map: a cell's `params` level is read off the model the cell
@@ -152,6 +152,13 @@ pub(crate) struct CasSink {
     /// inert case (single cell, or `--progress none`/tests). Honours the
     /// `--progress` mode via [`crate::out::progress::Task`].
     pub(crate) progress: Option<crate::out::progress::Task>,
+    /// The run id each planned cell resolved to before it ran, by `run_idx`.
+    /// The cache-hit check has to ask before anything runs, so it resolves
+    /// the cell from its `SimRun` over the base model (`should_run`); the
+    /// leaf written in `merge_cell` is keyed from the cell the engine ran
+    /// (`CellResult::cell`), and the two must agree — a cell whose pre-run
+    /// and post-run identities differ is refused, not written.
+    pub(crate) pre_run: HashMap<usize, runid::ContentHash>,
 }
 
 /// The overall cells bar for a multi-cell run, or `None` for a single cell
@@ -189,12 +196,17 @@ impl CasSink {
             .unwrap_or_else(|| std::path::PathBuf::from("."))
     }
 
-    /// Resolve a cell's trajectory identity + factored store path.
+    /// Resolve a cell's trajectory identity + factored store path before it
+    /// runs: the cell resolved from its `SimRun` over the base model the
+    /// `model` level is computed from, by the resolution the engine itself
+    /// runs ([`crate::sim_config::ResolvedCell`]), and
+    /// [`CasSink::cell_identity`] over it.
     ///
-    /// The cell is resolved once ([`crate::sim_config::ResolvedCell`]), over
-    /// the base model the `model` level is computed from, by the resolution
-    /// the engine itself runs; [`CasSink::cell_identity`] builds the identity
-    /// from that value.
+    /// This pre-run resolution is what a lookup uses when nothing has run: the
+    /// cache-hit check (`should_run`, which records it in `pre_run`), a skipped
+    /// cell's read-back and `--dry-run`. A cell that runs is keyed in
+    /// `merge_cell` from the cell the engine ran, and refused if that differs
+    /// from the recorded pre-run identity.
     ///
     /// `pub(crate)` for `simulate`'s read-back of a stored cell and for the
     /// `--dry-run` store view (`main::SimSink::read_stored`, `main::print_store_view`).
@@ -219,23 +231,27 @@ impl CasSink {
         Ok((cell, rt))
     }
 
-    /// The trajectory identity of one resolved cell: the invocation's `model`
-    /// level and run-wide `config` (`self.sim`), and the cell's own window,
-    /// parameter values, table digests, scenario arm and seed — each read from
-    /// `cell`, the value the engine runs.
+    /// The trajectory identity of one resolved cell. From `self.sim`: the
+    /// invocation's `model` level, run-wide `config` and the cell's scenario
+    /// arm (`self.sim.arms`, found by the spec's scenario name). From `cell`,
+    /// the value the engine runs: the window, parameter values, table digests,
+    /// origin state and seed.
     ///
-    /// The destructure of `cell` names every field and ignores none: a field
-    /// added to [`crate::sim_config::ResolvedCell`] does not compile here until
-    /// the identity uses it. The backend, the step and the evaluator settings
-    /// are keyed by the run-wide `config` level; a cell that would run other
-    /// values is refused rather than keyed on a computation it did not make.
+    /// The destructure of `cell` names every field and binds none to `_`: a
+    /// field added to [`crate::sim_config::ResolvedCell`] does not compile here
+    /// until it is named, and naming it means using it or refusing on it. What
+    /// the identity takes from `self.sim` rather than `cell` is checked against
+    /// the cell: a cell whose backend, step, evaluator settings, sampler,
+    /// required snapshot times or intervention set differ from what the run
+    /// and its arm are keyed on is refused rather than keyed on a computation
+    /// it did not make.
     fn cell_identity(
         &self,
         spec: &crate::engine::CellSpec,
         cell: &crate::sim_config::ResolvedCell,
     ) -> Result<crate::resolve::ResolvedTrajectory, String> {
         let crate::sim_config::ResolvedCell {
-            run, tables, seed, init_state, backend, dt, binomial, eval,
+            run, tables, seed, init_state, backend, dt, binomial, eval, required_output_times,
         } = cell;
         let engine = self.sim.engine_settings();
         if *backend != engine.backend || dt.to_bits() != engine.dt.to_bits() || *eval != engine.eval {
@@ -250,11 +266,30 @@ impl CasSink {
             return Err(format!(
                 "internal error: a cell runs the {binomial:?} binomial sampler, which has no run identity"));
         }
+        // Extra snapshot times change the trajectory and have no identity
+        // route (`fit predict` sets them, and its replay writes no leaf).
+        if !required_output_times.is_empty() {
+            return Err("internal error: a cell records snapshots beyond the model's schedule \
+                        (`required_output_times`), which have no run identity".to_string());
+        }
 
         let name = spec.scenario.name();
         let arm = self.sim.arms.iter()
             .find(|s| s.name == name || s.route.as_deref() == Some(name))
             .ok_or_else(|| format!("cell scenario '{}' not among the resolved scenarios", name))?;
+        // The `scenario` level keys the arm's enable / disable lists; the
+        // engine filtered the cell's interventions from its own scenario,
+        // inline lists and replayed fit (`SimRun::scenario_name`,
+        // `adhoc_enable`, `adhoc_disable`, `fit_base`). A cell running
+        // another set of interventions than the arm describes is refused.
+        let mut keyed = self.sim.model.ir.clone();
+        crate::util::apply_scenario_filter(&mut keyed, &arm.enable, &arm.disable)?;
+        let names = |m: &ir::Model| m.interventions.iter().map(|iv| iv.name.clone()).collect::<Vec<_>>();
+        if names(&keyed) != names(&run.model) {
+            return Err(format!(
+                "internal error: the cell runs interventions {:?}, but its scenario '{}' is keyed \
+                 as {:?}", names(&run.model), name, names(&keyed)));
+        }
 
         // The `params` level is the cell's RESOLVED parameter values — every
         // tier (model default, `--params`, draw/sweep point, scenario,
@@ -440,6 +475,16 @@ impl CasSink {
         spec: &crate::engine::CellSpec,
     ) -> Result<Option<std::path::PathBuf>, String> {
         let (cell, rt) = self.resolved_cell(spec)?;
+        self.stored_hit_of(spec, &cell, &rt)
+    }
+
+    /// [`CasSink::stored_hit`] for a cell already resolved.
+    fn stored_hit_of(
+        &self,
+        spec: &crate::engine::CellSpec,
+        cell: &crate::sim_config::ResolvedCell,
+        rt: &crate::resolve::ResolvedTrajectory,
+    ) -> Result<Option<std::path::PathBuf>, String> {
         // A build whose identity is incomplete serves no stored cell.
         if crate::resolve::engine_write_policy(crate::resolve::WritePolicy::Reuse, version::ENGINE_REUSE)
             == crate::resolve::WritePolicy::Force
@@ -481,6 +526,12 @@ impl CasSink {
 
 impl crate::engine::RunSink for CasSink {
     fn should_run(&mut self, spec: &crate::engine::CellSpec) -> bool {
+        // The pre-run resolution (see `pre_run`): the only one a cache hit
+        // ever has, and the one a cell that runs is checked against.
+        let resolved = self.resolved_cell(spec);
+        if let Ok((_, rt)) = &resolved {
+            self.pre_run.insert(spec.run_idx, rt.run_id);
+        }
         if self.displaces() {
             // Through the one policy seam: under Force the incumbent is
             // displaced (quarantined) HERE, so the recompute lands on a clean
@@ -488,7 +539,7 @@ impl crate::engine::RunSink for CasSink {
             // recomputed bytes were discarded at commit as an
             // already-completed no-op, which is why `--force` could not change
             // a stored artifact. A failure surfaces in `merge_cell`.
-            if let Ok((rt, _, _)) = self.cell_resolve(spec) {
+            if let Ok((_, rt)) = &resolved {
                 let root = self.root();
                 let store = runid::FsCasStore::new(&root);
                 let artifact = crate::resolve::ResolvedArtifact {
@@ -506,7 +557,10 @@ impl crate::engine::RunSink for CasSink {
         // `true` means RUN: run unless the store holds everything this run
         // asks for. A failed resolve runs too; its error surfaces in
         // `merge_cell`.
-        !matches!(self.stored_hit(spec), Ok(Some(_)))
+        match &resolved {
+            Ok((cell, rt)) => !matches!(self.stored_hit_of(spec, cell, rt), Ok(Some(_))),
+            Err(_) => true,
+        }
     }
 
     fn on_skip(&mut self, spec: &crate::engine::CellSpec) {
@@ -546,8 +600,19 @@ impl crate::engine::RunSink for CasSink {
         let spec = &cell.spec;
         let name = spec.scenario.name().to_string();
 
-        let (rt, _dir, _rel) = match self.cell_resolve(spec) {
-            Ok(x) => x,
+        // The written leaf is keyed from the cell the engine ran, and must
+        // agree with the identity the cache-hit check resolved before it ran.
+        let identity = self.cell_identity(spec, &cell.cell).and_then(|rt| {
+            match self.pre_run.get(&spec.run_idx) {
+                Some(pre) if *pre != rt.run_id => Err(format!(
+                    "internal error: the cell was looked up in the store as {} before it ran \
+                     but resolves to {} from what ran; nothing was written",
+                    pre.to_hex(), rt.run_id.to_hex())),
+                _ => Ok(rt),
+            }
+        });
+        let rt = match identity {
+            Ok(rt) => rt,
             Err(e) => {
                 self.counter += 1;
                 self.errors.push(format!("scenario={} seed={}: {}", name, spec.process_seed, e));
@@ -555,7 +620,7 @@ impl crate::engine::RunSink for CasSink {
             }
         };
 
-        let cols = self.sim.run.view.cols(&cell.model);
+        let cols = self.sim.run.view.cols(&cell.model());
         let traj_bytes = crate::util::traj_tsv_bytes(&cell.traj, &cols);
         let traj_digest = runid::ContentHash::digest_bytes(&traj_bytes);
 
@@ -566,14 +631,14 @@ impl crate::engine::RunSink for CasSink {
         // obs-child RunRecord identity is a follow-up.
         let mut children: std::collections::BTreeMap<String, Vec<runid::ContentHash>> =
             std::collections::BTreeMap::new();
-        let has_obs = self.obs_enabled && !cell.model.observations.is_empty();
+        let has_obs = self.obs_enabled && !cell.model().observations.is_empty();
         if has_obs {
             let obs_seed = spec.process_seed ^ crate::util::SEED_MIX_OBS;
             // The SAME hash `write_obs_into_cas` names the subtree with — a
             // declared child that did not match the directory written beside it
             // would be provenance pointing at nothing.
             let obs_hash = match obs_subtree_hash(
-                &cell.model.observations, self.emit_every.as_ref(),
+                &cell.model().observations, self.emit_every.as_ref(),
             ) {
                 Ok(h) => h,
                 Err(e) => {
@@ -737,7 +802,7 @@ impl crate::engine::RunSink for CasSink {
             // every ordinary cell.
             let restart_origin = spec.sim_run.init_state.as_ref().map(|i| i.origin_t);
             if let Err(e) = write_obs_into_cas(
-                &dest, &cell.model, &cell.traj, spec.process_seed, restart_origin,
+                &dest, &cell.model(), &cell.traj, spec.process_seed, restart_origin,
                 self.emit_every.as_ref(), spec.sim_run.eval,
             ) {
                 self.errors.push(format!("scenario={} seed={}: obs ensemble: {}",
@@ -1369,7 +1434,11 @@ mod tests {
     /// between cells is the cell's own `SimRun` (its `--table` map, its point),
     /// which is where `cell_resolve` reads them from.
     fn sink(runs_dir: &str) -> CasSink {
-        let model = tiny_model();
+        sink_over(tiny_model(), runs_dir)
+    }
+
+    /// [`sink`] over `model`.
+    fn sink_over(model: Model, runs_dir: &str) -> CasSink {
         let run = crate::sim_config::RunConfig::new(
             crate::args::types::ForwardBackend::ChainBinomial,
             1.0,
@@ -1407,6 +1476,7 @@ mod tests {
             label: None,
             fit_dep: Vec::new(),
             progress: None,
+            pre_run: HashMap::new(),
         }
     }
 
@@ -1561,6 +1631,83 @@ mod tests {
             .contains("binomial sampler"));
         sink(runs_dir).cell_resolve(&baseline_spec(HashMap::new()))
             .expect("the cell the run is keyed on resolves");
+    }
+
+    /// The leaf a cell writes is keyed from the cell the engine ran, and that
+    /// identity is checked against the one the cache-hit check resolved before
+    /// the cell ran: a cell whose run drifted from its lookup is refused, and
+    /// nothing is written.
+    #[test]
+    fn a_cell_whose_run_differs_from_its_lookup_is_not_written() {
+        use crate::engine::RunSink;
+        let dir = tempfile::tempdir().unwrap();
+        let runs_dir = dir.path().join("sims");
+        let runs_dir = runs_dir.to_str().unwrap();
+        let ran = |spec: &crate::engine::CellSpec| {
+            let cell = crate::sim_config::ResolvedCell::resolve(tiny_model(), &spec.sim_run).unwrap();
+            let traj = crate::util::simulate_compiled(&cell.compile().unwrap(), &cell, None).unwrap();
+            crate::engine::CellResult { spec: spec.clone(), traj, cell, event_log: None }
+        };
+
+        // The control: what ran is what was looked up.
+        let spec = baseline_spec(HashMap::new());
+        let mut s = sink(runs_dir);
+        assert!(s.should_run(&spec), "an empty store holds no hit");
+        s.merge_cell(&ran(&spec)).unwrap();
+        assert!(s.errors.is_empty(), "{:?}", s.errors);
+        assert_eq!(s.completed_runs.len(), 1);
+
+        // What ran drifted from the lookup (another seed): refused.
+        let mut s = sink(runs_dir);
+        let mut other = baseline_spec(HashMap::new());
+        other.run_idx = 1;
+        let _ = s.should_run(&other); // records the pre-run identity
+        let mut drifted = other.clone();
+        drifted.sim_run.seed = 99;
+        s.merge_cell(&crate::engine::CellResult { spec: other.clone(), ..ran(&drifted) }).unwrap();
+        assert!(s.errors.iter().any(|e| e.contains("looked up in the store as")), "{:?}", s.errors);
+        assert!(s.completed_runs.is_empty(), "a refused cell writes nothing");
+    }
+
+    /// The `scenario` level keys the arm's enable / disable lists. A cell
+    /// running another set of interventions than its arm describes is
+    /// refused rather than keyed as the arm.
+    #[test]
+    fn a_cell_running_other_interventions_than_its_arm_is_refused() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../ocaml/golden/seir_vaccine.ir.json");
+        let (mut model, _) = crate::util::load_model(path.to_str().unwrap()).unwrap();
+        for p in &mut model.parameters {
+            if p.value.resolved_value().is_none() {
+                let v = p.value.bounds().map(|(lo, hi)| 0.5 * (lo + hi)).unwrap_or(0.1);
+                p.value = p.value.with_value(v);
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let runs_dir = dir.path().join("sims");
+        let runs_dir = runs_dir.to_str().unwrap();
+        let s = sink_over(model, runs_dir);
+
+        s.cell_resolve(&baseline_spec(HashMap::new())).expect("the arm's own interventions resolve");
+        let mut enabled = baseline_spec(HashMap::new());
+        enabled.sim_run.adhoc_enable = vec!["sia_round_1".to_string()];
+        match s.cell_resolve(&enabled) {
+            Ok(_) => panic!("a cell enabling `sia_round_1` under an arm that keys none must be refused"),
+            Err(e) => assert!(e.contains("sia_round_1"), "{e}"),
+        }
+    }
+
+    /// Extra snapshot times change the trajectory and have no identity route.
+    #[test]
+    fn a_cell_with_required_output_times_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs_dir = dir.path().join("sims");
+        let mut spec = baseline_spec(HashMap::new());
+        spec.sim_run.required_output_times = vec![2.5];
+        match sink(runs_dir.to_str().unwrap()).cell_resolve(&spec) {
+            Ok(_) => panic!("a cell with required snapshot times must be refused"),
+            Err(e) => assert!(e.contains("required_output_times"), "{e}"),
+        }
     }
 
     /// gh#241 PR E2 — THE dedupe proof. A `[design.*]` cell and a normal

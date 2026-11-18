@@ -44,21 +44,29 @@
 //! through the engine's own resolution (`util::resolve_loaded_run`): the model
 //! the cell executes, its parameter provenance, its table digests, seed and
 //! origin state, and its backend, step, sampler and evaluator settings. The
-//! engine (`util::simulate_compiled`, `ResolvedCell::compile`) and the
-//! identity (`CasSink::cell_identity`) both destructure it exhaustively; the
-//! identity's destructure ignores no field, so a field added to it does not
-//! compile until the identity uses it. The window and parameter values are read
-//! off the resolved model, so an input that moves the horizon or a parameter
-//! reaches the identity because it reaches the engine. The backend, step and
-//! evaluator settings are keyed once, by [`RunConfig`]; a cell carrying others
-//! is refused rather than keyed. The cell is resolved where each consumer needs
-//! it — over the base model for the identity, over a fresh load for the engine
-//! — by the same function, rather than held for every cell of a large grid.
+//! engine (`util::simulate_compiled`, `ResolvedCell::compile`) runs from it
+//! and hands it back in `engine::CellResult`; `CasSink::merge_cell` keys the
+//! written leaf from that instance (`CasSink::cell_identity`), whose
+//! destructure binds no field to `_`, so a field added to the cell does not
+//! compile there until it is named and used. The window and parameter values
+//! are read off the resolved model, so an input that moves the horizon or a
+//! parameter reaches the identity because it reaches the engine. What the
+//! identity keys from the invocation rather than the cell — the backend, step
+//! and evaluator settings ([`RunConfig`]), the intervention set (the scenario
+//! arm) — is checked against the cell, and a cell that differs is refused, as
+//! is one with required snapshot times. A lookup before anything runs (the
+//! cache-hit check) resolves the cell over the base model; the written leaf's
+//! identity is checked against that pre-run one.
 //!
-//! One limit remains: a `SimRun` field that changes the resolved model in some
-//! way other than its parameter values, window or the model level reaches the
-//! engine without reaching the identity. `ResolvedCell::resolve` names every
-//! `SimRun` field, so such a field does not compile until it is routed there.
+//! Two limits remain. The model level is computed once from the sink's base
+//! model (`util::load_run_model` of the job's run), not from each cell's own
+//! load, so `ir_path`, `integrator` and `obs_anchors` are keyed from the
+//! base: every cell copies them from the job, but a cell carrying other
+//! values would not be told apart. And a `SimRun` field that changes the
+//! resolved model other than through its parameter values, window or
+//! interventions reaches the engine without reaching the identity.
+//! `ResolvedCell::resolve` names every `SimRun` field, but a field named
+//! there as `field: _` compiles, so the name is a review point, not a proof.
 //!
 //! **What is not here.** The thread count, the store root and `--force` are
 //! [`Execution`]: how the result is computed, never what. `--label`, the command
@@ -237,8 +245,9 @@ pub(crate) struct EngineSettings {
 
 impl EngineSettings {
     /// Install the process-wide forcing-extrapolation policy the run-note
-    /// reporter reads. Called once, before any cell runs.
-    pub fn install_evaluator_settings(&self) {
+    /// reporter and the record writer read — the one evaluator-side setting
+    /// still process-wide. Called once, before any cell runs.
+    pub fn install_forcing_policy(&self) {
         crate::forcing_extrapolation::set_allowed(self.allow_forcing_extrapolation);
     }
 }
@@ -257,17 +266,18 @@ impl ResolvedSimConfig {
     }
 }
 
-/// One cell, resolved: the value both the cell's identity
-/// ([`ResolvedSimConfig::cell_identity`]) and its engine run
-/// (`util::simulate_compiled`) are built from.
+/// One cell, resolved: the value both the cell's engine run
+/// (`util::simulate_compiled`) and its identity (`CasSink::cell_identity`)
+/// are built from — for a cell that runs, the same instance, carried back in
+/// `engine::CellResult`.
 ///
 /// Built by [`ResolvedCell::resolve`] from the cell's `SimRun`, through the
 /// engine's own resolution (`util::resolve_loaded_run`). Both consumers
-/// destructure it exhaustively, so a field added here does not compile until
-/// the identity uses it — the identity's destructure binds every field and
-/// ignores none. A `SimRun` field reaches the engine only through this value:
-/// either as one of its fields or through the resolved `run.model`, whose
-/// parameter values and window the identity reads.
+/// destructure it exhaustively, and the identity's destructure binds no field
+/// to `_`, so a field added here does not compile there until it is named and
+/// used. A `SimRun` field reaches the engine only through this value: either as
+/// one of its fields or through the resolved `run.model`, whose parameter
+/// values, window and interventions the identity reads or checks.
 pub(crate) struct ResolvedCell {
     /// The parameter resolution of the cell; `run.model` is the model the cell
     /// executes — the base model with its horizon, start, scenario, parameter
@@ -286,6 +296,10 @@ pub(crate) struct ResolvedCell {
     pub binomial: sim::rng::BinomialAlgorithm,
     /// The evaluator settings the compiled model carries ([`ResolvedCell::compile`]).
     pub eval: sim::EvalSettings,
+    /// Snapshot times the run must record beyond the model's own schedule
+    /// (`fit predict`'s forecast rows); applied to `run.model`, and refused by
+    /// the store identity, which has no route for them.
+    pub required_output_times: Vec<f64>,
 }
 
 impl ResolvedCell {
@@ -312,7 +326,6 @@ impl ResolvedCell {
             adhoc_disable: _,
             fit_base: _,
             t_end_override: _,
-            required_output_times: _,
             // Display only: the scenario label and the source a notice names.
             scenario_inline_name: _,
             overrides_label: _,
@@ -324,6 +337,7 @@ impl ResolvedCell {
             seed,
             binomial,
             eval,
+            required_output_times,
         } = run;
         Ok(ResolvedCell {
             run: crate::util::resolve_loaded_run(base, run)?,
@@ -334,6 +348,7 @@ impl ResolvedCell {
             dt: *dt,
             binomial: *binomial,
             eval: *eval,
+            required_output_times: required_output_times.clone(),
         })
     }
 

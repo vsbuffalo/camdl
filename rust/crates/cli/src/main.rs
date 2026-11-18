@@ -803,10 +803,11 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
     let out = crate::out::Out::new(false);
     let _eval_stats_guard = crate::util::EvalStatsReportGuard::start();
     // The compile setting is resolved first, because the compile below reads
-    // it, and it reaches the identity through the IR it produces. The evaluator
-    // settings (`--allow-degenerate-rates`, `--allow-forcing-extrapolation`)
-    // are installed from the resolved configuration once it exists, before any
-    // cell runs (`EngineSettings::install_evaluator_settings`).
+    // it, and it reaches the identity through the IR it produces.
+    // `--allow-degenerate-rates` reaches every cell's compiled model through
+    // the resolved configuration's engine settings; the process-wide
+    // forcing-extrapolation policy is installed from them once they exist,
+    // before any cell runs (`EngineSettings::install_forcing_policy`).
     let compile = crate::sim_config::CompileSettings { licm_disabled: global.no_licm };
     compile.install();
     // `--parallel`, `--output-dir`, `--force`: how the cells are computed and
@@ -2065,7 +2066,7 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
         }),
     );
     let engine_settings = sim_config.engine_settings();
-    engine_settings.install_evaluator_settings();
+    engine_settings.install_forcing_policy();
     // What runs is what is keyed: from here on the backend and `dt` are read
     // from `engine_settings` and nowhere else; the precedence locals they
     // were resolved from are not read again.
@@ -2356,11 +2357,11 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
         let spec = specs.into_iter().next().expect("len checked == 1");
         util::emit_run_notices(&out, &[&spec.sim_run]);
         sink.on_start(&grid);
-        let (traj, model, event_log, exact) =
+        let (traj, resolved, event_log, exact) =
             util::run_simulation_event_log(&spec.sim_run).unwrap_or_else(|e| {
                 out.fail(format!("error: {}", e));
             });
-        let cell = engine::CellResult { spec, traj, model, event_log: Some(event_log) };
+        let cell = engine::CellResult { spec, traj, cell: resolved, event_log: Some(event_log) };
         sink.merge_cell(&cell).unwrap_or_else(|e| {
             out.fail(format!("error: {}", e));
         });
@@ -2785,7 +2786,7 @@ impl SimQuantities {
     fn push_cell(&mut self, cell: &engine::CellResult) -> Result<(), String> {
         if self.eval.is_none() {
             let compiled = std::sync::Arc::new(
-                sim::CompiledModel::new(cell.model.clone())
+                sim::CompiledModel::new(cell.model().clone())
                     .map_err(|e| format!("compiling model for quantities: {e:?}"))?
                     .with_eval_settings(cell.spec.sim_run.eval),
             );
@@ -2797,7 +2798,7 @@ impl SimQuantities {
         let compiled = self.compiled.as_ref().expect("compiled set above");
         let eval = self.eval.as_ref().expect("eval set above");
         let mut params = vec![f64::NAN; compiled.param_index.len()];
-        for p in &cell.model.parameters {
+        for p in &cell.model().parameters {
             if let Some(&idx) = compiled.param_index.get(p.name.as_str()) {
                 if let Some(v) = p.value.resolved_value() {
                     params[idx] = v;
@@ -2829,7 +2830,7 @@ impl SimQuantities {
         } else {
             Some(materialize_obs_for_quantities(
                 &obs_streams,
-                &cell.model,
+                &cell.model(),
                 &cell.traj,
                 compiled,
                 &params,
@@ -3048,8 +3049,8 @@ fn resolve_sim_config(
         return Err(
             "internal: a content-addressed simulate cannot carry required \
              output times — they change the recorded trajectory but not the \
-             run identity. Fold them into `ResolvedEntry` before routing a \
-             CAS-writing path through them."
+             run identity. Give them an identity route from `ResolvedCell` \
+             before routing a CAS-writing path through them."
                 .to_string(),
         );
     }
@@ -3185,6 +3186,7 @@ fn build_simulate_cas_sink(
         // bar — otherwise the ensemble runs silently. The `Task` honours
         // `--progress none`/`plain` internally.
         progress: crate::cas_sink::cells_progress(total_runs, "simulate"),
+        pre_run: HashMap::new(),
     }
 }
 
@@ -3621,7 +3623,7 @@ impl engine::RunSink for StreamSink {
 
     fn merge_cell(&mut self, cell: &engine::CellResult) -> Result<(), String> {
         let traj = &cell.traj;
-        let model = &cell.model;        let run_idx = cell.spec.run_idx;
+        let model = cell.model();        let run_idx = cell.spec.run_idx;
         let coords = CellCoords::of(&cell.spec, &self.shape.axis)?;
 
         // Diagnostics (first run only).
@@ -5699,24 +5701,37 @@ fn print_store_view(
     let rel_of = |dir: &std::path::Path| {
         dir.strip_prefix(&root).unwrap_or(dir).to_string_lossy().into_owned()
     };
-    let mut hits = 0usize;
-    let mut cells: Vec<(bool, String)> = Vec::with_capacity(specs.len());
+    // A cell whose identity cannot be resolved is neither a hit nor a miss:
+    // it would fail when it ran, so it is counted apart.
+    let (mut hits, mut misses, mut unresolved) = (0usize, 0usize, 0usize);
+    let mut cells: Vec<(&str, String)> = Vec::with_capacity(specs.len());
     for spec in &specs {
         let entry = match cas.stored_hit(spec) {
             Ok(Some(dir)) => {
                 hits += 1;
-                (true, rel_of(&dir))
+                ("hit ", rel_of(&dir))
             }
-            Ok(None) => (false, cas.cell_resolve(spec).map(|(_, _, rel)| rel).unwrap_or_default()),
-            Err(e) => (false, format!("(identity unresolved: {e})")),
+            Ok(None) => match cas.cell_resolve(spec) {
+                Ok((_, _, rel)) => {
+                    misses += 1;
+                    ("miss", rel)
+                }
+                Err(e) => {
+                    unresolved += 1;
+                    ("fail", format!("(identity unresolved: {e})"))
+                }
+            },
+            Err(e) => {
+                unresolved += 1;
+                ("fail", format!("(identity unresolved: {e})"))
+            }
         };
         cells.push(entry);
     }
-    let misses = cells.len() - hits;
     out.say("");
     out.say(format_args!("{} {}", d("store:"), root.display()));
-    for (hit, rel) in &cells {
-        out.say(format_args!("  [{}] {}", if *hit { "hit " } else { "miss" }, rel));
+    for (status, rel) in &cells {
+        out.say(format_args!("  [{}] {}", status, rel));
     }
     if force {
         out.say(format_args!("  {} in the store; --force recomputes every cell ({} runs)", hits, cells.len()));
@@ -5727,6 +5742,9 @@ fn print_store_view(
         ));
     } else {
         out.say(format_args!("  {} cache hits → read back, {} misses → would simulate", hits, misses));
+    }
+    if unresolved > 0 {
+        out.say(format_args!("  {} cells whose identity does not resolve → would fail", unresolved));
     }
     out.say("(dry run — no simulation, no files written.)");
 }
