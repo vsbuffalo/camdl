@@ -353,7 +353,7 @@ mod tests {
     use super::*;
 
     fn draw(chain: Option<usize>, draw: Option<usize>) -> crate::KeyedDraw {
-        crate::KeyedDraw { chain, draw, params: HashMap::from([("beta".to_string(), 0.3)]) }
+        crate::KeyedDraw { row: 0, chain, draw, params: HashMap::from([("beta".to_string(), 0.3)]) }
     }
 
     #[test]

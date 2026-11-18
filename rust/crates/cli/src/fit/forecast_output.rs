@@ -285,11 +285,12 @@ pub(crate) fn run_forecast(
             "fit predict: forecast — subsampling {} of {} posterior draws (raise with --n-draws)",
             idx.len(), job.posterior.n_draws()));
     }
+    // Each draw is named by its row of draws.tsv, which under a chain
+    // selection is not its place `i` in the retained cloud.
+    let keys = job.posterior.keys()
+        .ok_or("internal error: the posterior cloud carries no draws.tsv rows to name its draws by")?;
     let draw_refs: Vec<DrawRef> = idx.iter()
-        .map(|&i| DrawRef {
-            cloud_row: i,
-            key: job.posterior.keys().and_then(|k| k.per_draw[i]),
-        })
+        .map(|&i| DrawRef { cloud_row: keys.rows[i], key: keys.per_draw[i] })
         .collect();
     let param_sets: Vec<Vec<f64>> = idx.iter()
         .map(|&i| {

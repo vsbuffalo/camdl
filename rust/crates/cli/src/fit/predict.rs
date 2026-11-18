@@ -232,6 +232,11 @@ pub struct DrawKeys {
     /// Per draw, in cloud order: its `(chain, draw)` key, or `None` for a
     /// param-only `draws.tsv` with no key columns.
     pub per_draw: Vec<Option<(usize, usize)>>,
+    /// Per draw, in cloud order: its row of `draws.tsv` (0-based, the header
+    /// not counted). Under a chain selection this is not the draw's place in
+    /// the cloud, which holds only the retained rows; an artifact that names
+    /// a draw by row reads it here.
+    pub rows: Vec<usize>,
 }
 
 /// Which draws actually have a smoothing path ON DISK — [`DrawKeys`] narrowed
@@ -303,11 +308,12 @@ impl PosteriorDraws {
     /// the cloud — an off-by-one here pairs draw *i*'s parameters with draw
     /// *i+1*'s inferred state and still produces a plausible band.
     pub fn with_keys(mut self, keys: DrawKeys) -> Result<Self, String> {
-        if keys.per_draw.len() != self.draws.len() {
+        if keys.per_draw.len() != self.draws.len() || keys.rows.len() != self.draws.len() {
             return Err(format!(
-                "internal: {} posterior keys for {} draws — the key list must be 1:1 \
-                 with the cloud",
+                "internal: {} posterior keys and {} draws.tsv rows for {} draws — the key \
+                 lists must be 1:1 with the cloud",
                 keys.per_draw.len(),
+                keys.rows.len(),
                 self.draws.len()
             ));
         }
@@ -723,7 +729,9 @@ impl FitResult {
                 let (rows, sel_info) = pref.load_keyed_with_info()?;
                 let mut draws: Vec<IndexMap<String, f64>> = Vec::with_capacity(rows.len());
                 let mut keys: Vec<Option<(usize, usize)>> = Vec::with_capacity(rows.len());
+                let mut cloud_rows: Vec<usize> = Vec::with_capacity(rows.len());
                 for r in rows {
+                    cloud_rows.push(r.row);
                     keys.push(match (r.chain, r.draw) {
                         (Some(c), Some(d)) => Some((c, d)),
                         _ => None,
@@ -762,7 +770,7 @@ impl FitResult {
                         convergence,
                     )?
                     .with_selection_info(sel_info)
-                    .with_keys(DrawKeys { method_dir, per_draw: keys })?,
+                    .with_keys(DrawKeys { method_dir, per_draw: keys, rows: cloud_rows })?,
                 ))
             }
             // No cloud: classify as a point-estimate fit, naming the method

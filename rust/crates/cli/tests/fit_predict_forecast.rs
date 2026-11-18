@@ -738,3 +738,39 @@ fn the_held_out_digest_of_a_holdout_file_follows_its_values() {
     assert_eq!(file(&a, "daily_cases"), file(&b, "daily_cases"));
     assert_eq!(a["state"], b["state"], "the training rows are unchanged");
 }
+
+fn read_json(p: &Path) -> serde_json::Value {
+    serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
+}
+
+/// Under a chain selection a forecast names each draw by its row of the fit's
+/// `draws.tsv`, not by its place in the retained subset. Chain 0's rows come
+/// first in `draws.tsv`, so dropping it shifts every retained draw's place:
+/// a subset index cannot pass for a `draws.tsv` row.
+#[test]
+fn a_chain_subset_forecast_names_each_draw_by_its_draws_tsv_row() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fit(dir, PMMH, "");
+    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "1 weeks", "--n-draws", "4",
+                         "--exclude-chains", "0"]);
+    assert!(out.status.success(), "fit predict: {}", stderr(&out));
+    let fdir = forecast_dir(dir);
+    let manifest = read_json(&fdir.join("forecast.json"));
+    let draws_tsv = walk(&dir.join("results")).into_iter()
+        .find(|p| p.file_name().is_some_and(|n| n == "draws.tsv"))
+        .expect("the fit wrote draws.tsv");
+    let cloud = rows(&draws_tsv);
+    let draws = manifest["draws"].as_array().unwrap();
+    assert_eq!(draws.len(), 4);
+    for d in draws {
+        let (row, chain, draw) = (d["cloud_row"].as_u64().unwrap() as usize,
+            d["chain"].as_u64().unwrap(), d["draw"].as_u64().unwrap());
+        assert_eq!(chain, 1, "chain 0 was dropped: {d}");
+        assert_eq!((cloud[row]["chain"].parse::<u64>().unwrap(), cloud[row]["draw"].parse::<u64>().unwrap()),
+            (chain, draw), "cloud_row {row} is not this draw's row of draws.tsv");
+    }
+    let samples = rows(&fdir.join("forecast-samples.tsv"));
+    assert_eq!(samples[0]["cloud_row"].parse::<u64>().unwrap(), draws[0]["cloud_row"].as_u64().unwrap());
+    assert_eq!(samples[0]["chain"], "1");
+}
