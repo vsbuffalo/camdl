@@ -314,11 +314,15 @@ pub(crate) fn write_diagnostics_then_fail(
 /// terminal record" true rather than nearly true.
 /// Stop a method whose run was refused for evaluating a forcing outside its
 /// range ([`crate::out::Out::forcing_refusal`]): its claim is failed with
-/// the refusal. Polled once per iteration by the samplers' progress callbacks
-/// and once before the finalize, which covers every method.
+/// the refusal. Polled once per iteration by the samplers' progress
+/// callbacks, on every chain; the command polls its own policy once more
+/// before the finalize, which covers every method.
 pub(crate) fn stop_if_refused(out: &crate::out::Out) {
-    if let Some(message) = out.forcing_refusal() {
-        abandon_method(out, message);
+    match out.forcing_refusal() {
+        crate::out::ForcingRefusal::Refused(message) => abandon_method(out, message),
+        // Outside a held claim nothing defers a refusal: the reporter has
+        // already ended the command.
+        crate::out::ForcingRefusal::Clear | crate::out::ForcingRefusal::NoClaim => {}
     }
 }
 
@@ -2421,7 +2425,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             attempt.record(sampling);
         }
         attempt.write(&method_dir).unwrap_or_else(|e| abandon_method(&out, format!("error: {e}")));
-        stop_if_refused(&out);
+        // The command's own policy, whether or not `out` still holds the
+        // claim: a refusal kept at any point of the run fails it here.
+        if let Some(message) = forcing.refused() {
+            abandon_method(&out, message);
+        }
         let mut write = out.take_claim().expect("the claim is held from the claim to here");
         // A run that completes under `--label L` is stamped as it completes,
         // under the store's label lock, and so becomes `@L`; the holder it

@@ -84,6 +84,25 @@ pub struct Out {
     /// An error reported while it is held marks it `failed` with the error's
     /// sentence, `process::exit` included, as the method's heartbeat is.
     command_heartbeat: std::sync::Mutex<Option<Arc<io::HeartbeatGuard>>>,
+    /// The forcing-extrapolation policy of the held claim's command, from
+    /// [`hold_claim`](Self::hold_claim) to [`take_claim`](Self::take_claim).
+    /// Kept apart from the claim, which the first error takes: every chain
+    /// still polling after that must still see the refusal and stop.
+    forcing: Option<crate::forcing_extrapolation::ForcingPolicy>,
+}
+
+/// What [`Out::forcing_refusal`] finds.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ForcingRefusal {
+    /// No claim is held, from [`Out::hold_claim`] to [`Out::take_claim`]:
+    /// no refusal is being kept for one, so a refusal has ended the command
+    /// where it was met.
+    NoClaim,
+    /// A claim is held and its command has refused nothing.
+    Clear,
+    /// A claim is held and its run evaluated a forcing outside its range
+    /// without the override; the refusal, to fail the claim with.
+    Refused(String),
 }
 
 /// The operation context of a streamed run: the store claim on its leaf, and
@@ -128,6 +147,7 @@ impl Out {
             events: None,
             claim: std::sync::Mutex::new(None),
             command_heartbeat: std::sync::Mutex::new(None),
+            forcing: None,
         }
     }
 
@@ -223,22 +243,27 @@ impl Out {
     /// ([`take_claim`](Self::take_claim)). Until then, an error reported
     /// through this handle marks the leaf `failed` and releases its lock.
     pub fn hold_claim(&mut self, claim: crate::resolve::ResolvedClaim, operation: impl Into<String>) {
+        self.forcing = Some(claim.forcing().clone());
         *self.claim.get_mut().unwrap_or_else(|e| e.into_inner()) =
             Some(HeldClaim { claim, operation: operation.into() });
     }
 
     /// The refusal the held claim's command kept for it
-    /// ([`ForcingPolicy::refused`](crate::forcing_extrapolation::ForcingPolicy::refused)):
-    /// its run evaluated a forcing outside its range without the override.
-    /// `None` when nothing was refused or no claim is held.
-    pub fn forcing_refusal(&self) -> Option<String> {
-        let held = self.claim.lock().unwrap_or_else(|e| e.into_inner());
-        held.as_ref().and_then(|h| h.claim.forcing().refused())
+    /// ([`ForcingPolicy::refused`](crate::forcing_extrapolation::ForcingPolicy::refused)).
+    /// Read from the policy held since [`hold_claim`](Self::hold_claim), not
+    /// from the claim, so it is still seen after an error has taken the
+    /// claim to fail it.
+    pub fn forcing_refusal(&self) -> ForcingRefusal {
+        match &self.forcing {
+            None => ForcingRefusal::NoClaim,
+            Some(policy) => policy.refused().map_or(ForcingRefusal::Clear, ForcingRefusal::Refused),
+        }
     }
 
     /// Hand back the claim [`hold_claim`](Self::hold_claim) took, for the
     /// run to finalize.
     pub fn take_claim(&mut self) -> Option<crate::resolve::ResolvedClaim> {
+        self.forcing = None;
         self.claim.get_mut().unwrap_or_else(|e| e.into_inner()).take().map(|h| h.claim)
     }
 
