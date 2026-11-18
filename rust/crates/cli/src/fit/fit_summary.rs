@@ -3985,4 +3985,37 @@ mod tests {
             assert!(line.contains(want) && !line.contains(not), "{recorded}: {line}");
         }
     }
+
+    /// A run recorded under this build's readable version but another
+    /// `ENGINE_ID` (its `run.json`'s `engine_version`) was built with another
+    /// configuration — features, profile, toolchain, flags or dependencies —
+    /// and the report says so rather than nothing.
+    #[test]
+    fn a_report_names_another_build_configuration_under_the_same_label() {
+        let dir = crate::test_support::unique_temp_dir("report_other_engine");
+        std::fs::create_dir_all(&dir).unwrap();
+        let rec = serde_json::json!({
+            "format_version": 1, "kind": "fit_method", "run_id": "ab".repeat(32),
+            "hash_version": 1, "calendar": {"days_per_unit": 1.0, "origin": null, "time_unit": "days"},
+            "ir_version": "0.7", "engine_version": "0".repeat(32),
+            "levels": [], "status": "completed", "artifacts": {}, "inputs": {"method": "if2"},
+            "provenance": {"camdl_version": crate::version::VERSION_SHORT},
+        });
+        std::fs::write(dir.join("run.json"), rec.to_string()).unwrap();
+        let mut state = synthetic_fit_state();
+        state.camdl_version = Some(crate::version::VERSION_SHORT.to_string());
+        let method_dir = dir.to_string_lossy().into_owned();
+        let run = If2Run::from_state(&dir, &state, state.n_chains, 0);
+        let block = plain_formatter().method_block("", "scout", &method_dir, &run).text;
+        assert!(block.contains("another build configuration"), "{block}");
+        let report = if2_method_report("scout", &method_dir, &run, &CalendarContext::default());
+        assert!(render_md_method(&report).contains("another build configuration"));
+
+        // The same record under this build's own id says nothing.
+        std::fs::write(dir.join("run.json"),
+            rec.to_string().replace(&"0".repeat(32), crate::version::ENGINE_ID)).unwrap();
+        let block = plain_formatter().method_block("", "scout", &method_dir, &run).text;
+        assert!(!block.contains("⚠ stale") && !block.contains("another build"), "{block}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -87,14 +87,25 @@ pub fn build_relation(recorded: &str, current: &str) -> BuildRelation {
 /// from uncommitted changes: produced by X, current is Y` when only the
 /// uncommitted changes differ. `quote` wraps each version (backticks in
 /// Markdown).
-pub fn build_note(recorded: &str, quote: impl Fn(&str) -> String) -> Option<String> {
+///
+/// `recorded_engine` is the run's `ENGINE_ID` (its `run.json`'s
+/// `engine_version`), when it is known: under the same readable version and
+/// another id, the run was built with [`ANOTHER_CONFIGURATION`].
+pub fn build_note(recorded: &str, recorded_engine: Option<&str>, quote: impl Fn(&str) -> String) -> Option<String> {
     let what = match build_relation(recorded, VERSION_SHORT) {
+        BuildRelation::Same if recorded_engine.is_some_and(|e| e != ENGINE_ID) => ANOTHER_CONFIGURATION,
         BuildRelation::Same => return None,
         BuildRelation::UncommittedChanges => "built from uncommitted changes",
         BuildRelation::Stale => "stale",
     };
     Some(format!("{what}: produced by {}, current is {}", quote(recorded), quote(VERSION_SHORT)))
 }
+
+/// What differs between two builds whose readable versions agree and whose
+/// `ENGINE_ID`s do not: the build configuration, which the label leaves out
+/// (an uncommitted `Cargo.lock` change moves the id and not the label).
+pub const ANOTHER_CONFIGURATION: &str =
+    "built with another build configuration (features, profile, toolchain, flags or dependencies)";
 
 #[cfg(test)]
 mod tests {
@@ -119,5 +130,14 @@ mod tests {
         assert!(ENGINE_ID.bytes().all(|b| b.is_ascii_hexdigit()), "{ENGINE_ID}");
         assert_ne!(ENGINE_ID, GIT_HASH);
         assert!(VERSION_SHORT.starts_with(env!("CARGO_PKG_VERSION")));
+    }
+
+    /// The build under test determined every component of its fingerprint:
+    /// a broken wiring (sim's `links` metadata not reaching cli's build
+    /// script, `rustc -vV` failing) would make every binary fail closed and
+    /// silently never reuse a stored run.
+    #[test]
+    fn this_build_has_a_reusable_engine_identity() {
+        assert!(ENGINE_REUSE.allows_reuse(), "{ENGINE_REUSE:?}");
     }
 }
