@@ -449,7 +449,13 @@ directory, problem folder, run-id or fit-id prefix or label names a stored fit,
 whose archived config is read, so a fit made with
 `--allow-forcing-extrapolation` on its command line is read under that override;
 a `fit.toml` names the file's problem as it reads, with or without a stored fit,
-and so not a flag-made fit's. The fit is read once, and its
+and so not a flag-made fit's; any other existing file is a config too. The
+archive does not hold a `fit run --sweep` point's values (its folder archives
+the file's `[fixed]`), so `profile` and `survey`, which read `[fixed]`, refuse a
+stored fit whose folder records fixed values its archive does not state, naming
+each parameter; `pfilter` reads no `[fixed]` and accepts it. The archive's
+`[method]` is the file's too, which `profile` (reading a fit's nl-* budget and
+`starts`) reads for any leaf of the folder. The fit is read once, and its
 `[config] allow_degenerate_rates` and `allow_forcing_extrapolation` are folded
 with the flags in resolution. Every input of each is classified
 (`input_class::PFILTER`, `PROFILE`, `SURVEY`) and has a case in
