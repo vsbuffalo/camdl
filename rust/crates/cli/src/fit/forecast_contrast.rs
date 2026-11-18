@@ -20,7 +20,7 @@
 //! since every draw has the same number of particles). Per chain `c`, with
 //! `n_c` of the forecast's draws in chain order, the variance of the chain's
 //! mean of `d` is `s²_c / ESS_c`, with `s²_c` the sample variance and `ESS_c`
-//! the effective sample size of Geyer's initial-positive-sequence estimator
+//! the effective sample size of a variant of Geyer's initial-positive-sequence estimator
 //! ([`sim::inference::pmmh::mcmc_ess`], the one the fit reports per chain).
 //! The chains are independent, so
 //! `Var(Δ) = Σ_c (n_c / M)² · s²_c / ESS_c` over the `M` draws.

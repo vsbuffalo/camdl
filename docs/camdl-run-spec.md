@@ -1013,10 +1013,11 @@ and fails it instead when `--stream` named it.
   standard error. Per draw _m_, `d_m` is the arm's mean over its particles minus
   the fitted model's; per chain _c_ with `n_c` of the _M_ draws,
   `Var(Δ) = Σ_c (n_c / M)² · s²_c / ESS_c`, with `s²_c` the sample variance of
-  the chain's `d_m` and `ESS_c` Geyer's initial-positive-sequence effective
-  sample size over them in chain order. A chain whose `d_m` vary but carry fewer
-  than `min_ess_per_chain` (10) effective draws withholds the error, with the
-  reason in `mcse_note`. No quantile band of paired differences is published.
+  the chain's `d_m` and `ESS_c` the effective sample size of a variant of
+  Geyer's initial-positive-sequence estimator, over them in chain order. A chain
+  whose `d_m` vary but carry fewer than `min_ess_per_chain` (10) effective draws
+  withholds the error, with the reason in `mcse_note`. No quantile band of
+  paired differences is published.
 
 A _deterministic failure_ is a fact about the model as written that holds for
 whatever produced it regardless of how often it occurs — an unresolvable
