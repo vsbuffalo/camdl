@@ -16110,6 +16110,31 @@ let test_obs_duplicate_emit_schedule_is_e122 () =
     (covers_model_with (obs_key_stream
       "    projected = incidence(infection)\n    emit_schedule = every 7 'days"))
 
+(* A stream with one extra [line] after its usual entries, for E122 on the
+   keys [obs_key_stream] does not vary. *)
+let obs_stream_with_extra extra = Printf.sprintf {|  cases {
+    columns       { time : time, cases : count }
+    covers        = day(time)
+    projected     = incidence(infection)
+    emit_schedule = every 1 'days
+    cases         ~ poisson(rate = projected)
+%s
+  }|} extra
+
+let test_obs_duplicate_columns_is_e122 () =
+  compile_expect_error_code ~code:"E122" ~contains:"`columns` twice"
+    (covers_model_with (obs_stream_with_extra
+      "    columns { time : time, cases : count }"))
+
+let test_obs_duplicate_covers_is_e122 () =
+  compile_expect_error_code ~code:"E122" ~contains:"`covers` twice"
+    (covers_model_with (obs_stream_with_extra "    covers = day(time)"))
+
+let test_obs_duplicate_measurement_is_e122 () =
+  compile_expect_error_code ~code:"E122" ~contains:"measurement line twice"
+    (covers_model_with (obs_stream_with_extra
+      "    cases ~ poisson(rate = 2 * projected)"))
+
 let test_obs_projected_key_compiles () =
   ignore (compile_expect_ok
     (covers_model_with (obs_key_stream "    projected = incidence(infection)")))
@@ -19090,6 +19115,9 @@ let () =
       Alcotest.test_case "gh#1206 second projected → E122"       `Quick test_obs_duplicate_projected_is_e122;
       Alcotest.test_case "gh#1206 second emit_schedule → E122"   `Quick test_obs_duplicate_emit_schedule_is_e122;
       Alcotest.test_case "gh#1206 projected key compiles"        `Quick test_obs_projected_key_compiles;
+      Alcotest.test_case "gh#1206 second columns → E122"         `Quick test_obs_duplicate_columns_is_e122;
+      Alcotest.test_case "gh#1206 second covers → E122"          `Quick test_obs_duplicate_covers_is_e122;
+      Alcotest.test_case "gh#1206 second `~` line → E122"        `Quick test_obs_duplicate_measurement_is_e122;
       Alcotest.test_case "day(time) lowers to a one-day span"
         `Quick test_covers_day_lowers_to_a_one_day_span;
       Alcotest.test_case "ending_on closes one day after the label"
