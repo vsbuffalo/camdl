@@ -326,3 +326,69 @@ fn a_forecast_uses_the_binomial_sampler_its_fit_ran() {
     assert_eq!((forecasts[0].0.as_str(), forecasts[1].0.as_str()), ("btpe", "btrs"));
     assert_ne!(forecasts[0].1, forecasts[1].1, "the two samplers give different draws");
 }
+
+type Sample = std::collections::HashMap<(String, String), f64>;
+
+/// Joint samples on the written draws (D54): each sample in
+/// `forecast-samples.tsv` is one particle's trajectory. The fixture gains
+/// three streams reported without noise (`binomial(p = 1)`, so a draw is the
+/// compartment itself), `S`, `I` and `R`, each observed once, at `t = 0`,
+/// where the state is known exactly, so they condition nothing. Per sample,
+/// `S + I + R` is the population at every target (one particle across
+/// streams), `S` never increases and `R` never decreases across targets (one
+/// particle across time). Pairing sample `s`'s `S` with sample `s + 1`'s `I`
+/// and `R` breaks the sum, so the check is not vacuous.
+#[test]
+fn each_written_joint_sample_is_one_particles_trajectory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    copy_fixture(dir);
+    let model = std::fs::read_to_string(dir.join("model.camdl")).unwrap();
+    let exact: String = ["S", "I", "R"].iter().map(|c| format!(r#"
+  {c}_count {{
+    columns       {{ time : time, {c}_count : count }}
+    projected     = {c}
+    emit_schedule = every 7 'days
+    {c}_count ~ binomial(n = projected, p = 1.0)
+  }}"#)).collect();
+    let at = model.rfind('}').unwrap();
+    std::fs::write(dir.join("model.camdl"), format!("{}{exact}\n}}\n", &model[..at])).unwrap();
+    for (c, v) in [("S", 995), ("I", 5), ("R", 0)] {
+        std::fs::write(dir.join(format!("{c}.tsv")), format!("time\t{c}_count\n0\t{v}\n")).unwrap();
+    }
+    fit_config(dir, PMMH, "holdout_after = 24.0\n",
+        "daily_cases = \"daily_cases.tsv\"\nweekly_cases = \"weekly_cases.tsv\"\n\
+         S_count = \"S.tsv\"\nI_count = \"I.tsv\"\nR_count = \"R.tsv\"",
+        "");
+    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "4 weeks", "--n-draws", "4"]);
+    assert!(out.status.success(), "fit predict: {}", stderr(&out));
+
+    let mut by_sample: std::collections::BTreeMap<u64, Sample> = std::collections::BTreeMap::new();
+    for r in rows(&forecast_dir(dir).join("forecast-samples.tsv")) {
+        by_sample.entry(r["sample"].parse().unwrap()).or_default()
+            .insert((r["stream"].clone(), r["t_stop"].clone()), r["value"].parse().unwrap());
+    }
+    assert_eq!(by_sample.len(), 4 * 5, "five joint samples per draw");
+    let samples: Vec<&Sample> = by_sample.values().collect();
+    let v = |s: &Sample, stream: &str, t: u32| -> f64 {
+        *s.get(&(stream.to_string(), t.to_string()))
+            .unwrap_or_else(|| panic!("no {stream} target at {t}"))
+    };
+    let weeks = [28, 35, 42, 49];
+    for (i, s) in samples.iter().enumerate() {
+        for &t in &weeks {
+            assert_eq!(v(s, "S_count", t) + v(s, "I_count", t) + v(s, "R_count", t), 1000.0,
+                "sample {i} at t = {t}: S + I + R is the population");
+        }
+        let series = |c: &str| weeks.iter().map(|&t| v(s, c, t)).collect::<Vec<f64>>();
+        assert!(series("S_count").windows(2).all(|w| w[0] >= w[1]), "sample {i}: S increased");
+        assert!(series("R_count").windows(2).all(|w| w[0] <= w[1]), "sample {i}: R decreased");
+    }
+    let n = samples.len();
+    let mixed = |i: usize, t: u32| {
+        let o = samples[(i + 1) % n];
+        v(samples[i], "S_count", t) + v(o, "I_count", t) + v(o, "R_count", t)
+    };
+    assert!((0..n).any(|i| weeks.iter().any(|&t| mixed(i, t) != 1000.0)),
+        "pairing one sample's S with another's I and R must break the sum");
+}
