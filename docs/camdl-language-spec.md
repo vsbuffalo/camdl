@@ -3372,6 +3372,13 @@ KIND(...)` (the `~` operator, function-call form with named arguments).
 `emit_schedule` is the simulate-only emission cadence; a fit-only model omits
 it (the data file's `time` column drives the fit).
 
+These are the only keys an observation block takes — `columns`, `covers`,
+`projected`, `emit_schedule` and the `~` measurement — and each appears at most
+once. The projected value is written under the key `projected` and read by that
+name in the `~` line; any other key assigned a value (`foo = incidence(…)`,
+`projeted = …`) is an error (**E121**) with a fix-it to `projected`, and a key
+given twice is an error (**E122**).
+
 ### 12.1 Projections
 
 ```camdl
@@ -6890,6 +6897,8 @@ authoritative list is whatever `ocaml/lib/compiler/` and `ocaml/lib/ir/` emit.
 | E100 | Error   | Reserved name used as a declaration; unknown index value; undeclared name/function         |
 | E118 | Error   | A scenario `enable`/`disable`/`compose` value is not a bracketed list of names — write `enable = [NAME]` (§17.1) |
 | E120 | Error   | A scenario field other than `set`/`scale` written as a `{ ... }` block (§17.1) |
+| E121 | Error   | An observation block assigns a value under a key other than `projected` (§12) |
+| E122 | Error   | An observation block gives the same key (`columns`, `covers`, `projected`, `emit_schedule`, or the `~` line) twice (§12) |
 | E200 | Error   | Undeclared compartment or parameter referenced in expression                              |
 | E202 | Error   | Table arity / shape mismatch (e.g. `table '%s' expects %d indices`)                        |
 | E228 | Error   | `time_unit` is not a duration unit (`'per_day` / `'count` / `'ratio`) — see §2               |

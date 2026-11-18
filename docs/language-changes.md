@@ -13,6 +13,26 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-11-17 — an observation's projection is written `projected = …`, once
+
+**What.** In an observation block, a value assigned under any key was taken as
+the stream's projection, with the key discarded: `foo = incidence(infection)`
+and the misspelling `projeted = …` both compiled as `projected = …`. A key given
+twice (two `projected` lines, two `emit_schedule` lines, …) kept the later one
+silently. Both are now errors.
+
+**Migration.**
+
+```
+foo = incidence(infection)      →  projected = incidence(infection)
+cases ~ poisson(rate = foo)     →  cases ~ poisson(rate = projected)
+```
+
+and delete the duplicate line of any key given twice.
+
+**Diagnostic.** E121, "`foo = ...` is not an observation key", with a fix-it to
+`projected`; E122, "observation '…' gives `projected` twice".
+
 ## 2026-11-17 — scenario lists need brackets; only `set`/`scale` take a block
 
 **What.** In a scenario, `enable`, `disable` and `compose` must be bracketed
