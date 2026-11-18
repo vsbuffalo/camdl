@@ -709,3 +709,26 @@ fn every_fit_handle_names_the_fits_problem() {
     assert!(!counts[0].is_empty(), "the profile stored its points");
     assert!(counts.iter().all(|c| *c == counts[0]), "every handle names one problem: {counts:?}");
 }
+
+/// A point of `fit run --sweep` other than the file's own value is refused
+/// by every handle form, naming the parameter with both values: its fit
+/// folder archives the file's `[fixed]`, so profiling it would compute the
+/// un-swept problem under the point's name. The point at the file's value
+/// agrees with its archive and is profiled.
+#[test]
+fn a_sweep_point_handle_is_refused() {
+    let fx = fx();
+    let store = tempfile::tempdir().unwrap();
+    let fitted = run_into(store.path(), &Invocation::new(&fx.fx, &["fit", "run", &fx.fx.path("fit_plain.toml"), "--sweep", "rho=0.5,0.6"]));
+    let (same, other) = sweep_points(&fitted, "rho", 0.5);
+    let segment = other.dir.parent().unwrap().parent().unwrap().to_string_lossy().into_owned();
+    for h in [other.dir.to_string_lossy().into_owned(), segment, other.run_id[..12].to_string()] {
+        let out = run_in(store.path(), &prof(&fx, &[]).set("--fit", &h));
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "--fit {h}: the sweep point is refused:\n{err}");
+        assert!(err.contains("rho = 0.5 in the archive, 0.6 in the run"), "names the parameter and both values:\n{err}");
+        assert!(err.contains("sweep point cannot be named by a handle"), "{err}");
+    }
+    let s = run_into(store.path(), &prof(&fx, &[]).set("--fit", &same.dir.to_string_lossy()));
+    assert!(!s.ids(KIND).is_empty(), "the point at the archived value is profiled");
+}
