@@ -390,7 +390,7 @@ pub(crate) fn run_forecast(
     // Each target's held-out value (D79), bound as a held-out cell: the
     // filter's scoring likelihood evaluates it and nothing else reads it, so
     // the predictions below do not depend on it.
-    let held_out_values = HeldOutValues::from_rows(&plan, &held_out)?;
+    let held_out_values = HeldOutValues::from_rows(&plan, &held_out, model)?;
     // The address (D81, D86): the options with the design inputs that
     // determine the predictions. The held-out outcomes are not among them.
     let options = forecast_options(job.options, &plan);
