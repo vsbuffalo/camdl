@@ -1085,7 +1085,8 @@ fn ensure_children_declared(
 /// child is derived from the leaf's result alone, so one run id has one of
 /// it, and what varies by invocation is only whether it was asked for. That
 /// is why it is a child and never one of the leaf's own files. The event log
-/// ([`EVENT_LOG`]) is one.
+/// ([`EVENT_LOG`]) and a survey's rendered landscape ([`LANDSCAPE_HTML`]) are
+/// two.
 pub(crate) struct RecordedChild {
     /// The name under `children`, and the child's directory.
     pub name: &'static str,
@@ -1103,6 +1104,16 @@ pub(crate) const EVENT_LOG: RecordedChild = RecordedChild {
     file: "event_log.tsv",
     record: "event_log.json",
     what: "event log",
+};
+
+/// `survey --render`'s child: `<leaf>/landscape_html/landscape.html`, the
+/// interactive pair-plot rendered from the leaf's `landscape.tsv` and its
+/// identity (the HTML names the run's short hash), and from nothing else.
+pub(crate) const LANDSCAPE_HTML: RecordedChild = RecordedChild {
+    name: "landscape_html",
+    file: "landscape.html",
+    record: "landscape_html.json",
+    what: "rendered landscape",
 };
 
 impl RecordedChild {
