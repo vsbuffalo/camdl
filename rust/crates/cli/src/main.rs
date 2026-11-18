@@ -2063,19 +2063,19 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
     );
     let engine_settings = sim_config.engine_settings();
     engine_settings.install_evaluator_settings();
-    // What runs is what is keyed: the backend and `dt` below come from the
-    // resolved configuration, not from the precedence locals they began as.
-    let (backend, dt) = (engine_settings.backend, engine_settings.dt);
-    base_sim_run.backend = backend;
-    base_sim_run.dt = dt;
+    // What runs is what is keyed: from here on the backend and `dt` are read
+    // from `engine_settings` and nowhere else; the precedence locals they
+    // were resolved from are not read again.
+    base_sim_run.backend = engine_settings.backend;
+    base_sim_run.dt = engine_settings.dt;
 
     let job = SimulateJob {
         // The pre-compiled IR: each engine cell loads this directly (no
         // per-cell camdlc — see the resolve-once at the top of the function).
         model: ir_path_compiled.clone(),
         params_files: base_sim_run.params_files.clone(),
-        backend,
-        dt,
+        backend: engine_settings.backend,
+        dt: engine_settings.dt,
         binomial: base_sim_run.binomial,
         integrator, // gh#166: --integrator, checked against the replayed fit above
         source,
@@ -2137,7 +2137,7 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
     // ── Dry run ─────────────────────────────────────────────────────────────
     if dry_run {
         print_dry_run(&out,
-            &ir_path, &ir_path_compiled, base_sim_run.backend, dt, seed,
+            &ir_path, &ir_path_compiled, engine_settings.backend, engine_settings.dt, seed,
             &base_sim_run.params_files, &base_sim_run.overrides,
             &scenario_list, &seeds, &draws_path,
             n_draws, replicates, total_runs,
@@ -2175,7 +2175,7 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
         if let Err(e) = simulate_on_bound_design(&out,
             design_toml, &base_sim_run, &draws, draws_path.is_some(),
             obs_dir.as_ref().map(std::path::Path::new),
-            a.projected_out.as_deref(), dt,
+            a.projected_out.as_deref(), engine_settings.dt,
         ) {
             out.fail(format!("error: {e}"));
         }
