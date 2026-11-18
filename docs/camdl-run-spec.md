@@ -413,8 +413,8 @@ results/fits/{stem}-{fit_hash8}/
   synthetic/truth.toml              # [synthetic] fits only
   synthetic/data/ds_NN/<stream>.tsv # [synthetic] fits only, one directory per
                                     #   sim seed, one file per stream
-  predict/{run_id12}[-{opts8}]/     # `fit predict` output for one run (§2.2.2),
-                                    #   keyed by non-default predict options
+  predict/{run_id12}-{key}/         # `fit predict` output for one run (§2.2.2),
+                                    #   keyed by the run, engine and options
     predictive/<stream>.tsv
     predictive.json                 #   records the full run_id it replays
     observed/<stream>.tsv
@@ -672,15 +672,18 @@ resolved to the values used: `--mode`, `--horizon`, `--n-draws`, `--seed`,
 `--stream`, `--scenario`/`--enable`/`--disable`, `--sweep`, `--by-chain`, the
 chains `--exclude-chains`/`--chains` drop from the fit's cloud (so the two
 spellings of one selection are one key), the SHA-256 of a `--quantities` file,
-and `--allow-forcing-extrapolation`. Two predictions computed from different
-inputs therefore never share a directory, and a reader that locates one by its
-key reads the prediction those inputs produce. `predictive.json`,
-`observed.json` and `forecast.json` record the key under `address_key` and the
-options under `options`; `run_id12` is a label for a person listing the folder.
-`fit table --quantity` reads the address its own free-forward derivation writes.
-Inside the directory, `--exclude-chains` and `--quantities` also name the files
-(`predictive-excl3/`, `quantities-<key8>/`), so a chain-subset or
-other-vocabulary table says so in its name.
+and `--allow-forcing-extrapolation`. Two predictions that differ in the run, the
+engine or any of those options therefore never share a directory. The key does
+not cover the observation data: `fit predict` reads the fit's data files from
+their paths as they are now, and the fit's recorded data digests are used only
+to name a file that has gone missing, so a data file changed in place under the
+same path is not detected and its prediction is written to the same directory.
+`predictive.json`, `observed.json` and `forecast.json` record the key under
+`address_key` and the options under `options`; `run_id12` is a label for a
+person listing the folder. `fit table --quantity` reads the address its own
+free-forward derivation writes. Inside the directory, `--exclude-chains` and
+`--quantities` also name the files (`predictive-excl3/`, `quantities-<key8>/`),
+so a chain-subset or other-vocabulary table says so in its name.
 
 The free-forward replay projects each row off its own recorded trajectories, so
 it records a snapshot at every time a row reads — each data time and each
