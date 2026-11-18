@@ -3,7 +3,7 @@
 //! chain-binomial SIR with a daily and a weekly incidence stream.
 
 use super::*;
-use crate::fit::forecast_plan::{PlanStream, Target};
+use crate::fit::forecast_plan::{DesignInput, PlanStream, Target};
 use crate::fit::observed_rows::ObservedRow;
 use crate::fit::training_partition::{TrainingPartition, WholeFiles};
 use sim::inference::bootstrap_filter;
@@ -114,7 +114,7 @@ impl Setup {
         let partition = TrainingPartition::whole(&self.rows, WholeFiles::NoHoldout).unwrap();
         let streams: Vec<PlanStream> = self.model.observations.iter()
             .filter(|o| with_targets.contains(&o.name.as_str()))
-            .map(|o| PlanStream { obs: o, training: &self.rows[&o.name], held_out: &[] })
+            .map(|o| PlanStream { obs: o, training: &self.rows[&o.name], held_out: &[], design: DesignInput::NotSupplied })
             .collect();
         ForecastPlan::new(partition, horizon, &streams).unwrap()
     }
@@ -648,6 +648,7 @@ fn held(position: usize, start: f64, end: f64, v: Option<f64>) -> HeldOut {
             temporal: vec![crate::caltime_load::TemporalCell::Number(end)],
             cell: v.map(sim::inference::ObsCell::Scalar),
             aux: vec![],
+            design: vec![],
         },
     }
 }
@@ -670,7 +671,7 @@ impl Setup {
     fn plan_held(&self, horizon: f64, held: &BTreeMap<String, Vec<HeldOut>>) -> ForecastPlan {
         let partition = TrainingPartition::whole(&self.rows, WholeFiles::NoHoldout).unwrap();
         let streams: Vec<PlanStream> = self.model.observations.iter()
-            .map(|o| PlanStream { obs: o, training: &self.rows[&o.name], held_out: &held[&o.name] })
+            .map(|o| PlanStream { obs: o, training: &self.rows[&o.name], held_out: &held[&o.name], design: DesignInput::NotSupplied })
             .collect();
         ForecastPlan::new(partition, horizon, &streams).unwrap()
     }
@@ -781,4 +782,106 @@ fn the_held_out_log_likelihoods_and_scores_agree_with_an_independent_computation
     // A target with no held-out value cannot enter a joint score.
     let na = index_of(&plan, "daily_cases", 26.0);
     assert!(joint_log_score(&fc, &[wk, na]).unwrap_err().contains("no held-out value"));
+}
+
+// ── D81: a design-reading stream, and the acceptance test of D79/D81 ─────
+
+/// The committed fixture `survey_sir.camdl`: the two-cadence SIR with a
+/// survey, `positives ~ binomial(n = tested, p = I/N)` every 7 days, whose
+/// likelihood reads the design column `tested`.
+fn survey_source() -> String {
+    std::fs::read_to_string(fixture_dir().join("survey_sir.camdl")).unwrap()
+}
+
+/// The survey's held-out rows at days 28 and 35, `tested` fixed and the
+/// positives given.
+fn survey_held(pos: [f64; 2], tested: [f64; 2]) -> Vec<HeldOut> {
+    [(28.0, 0), (35.0, 1)].iter().map(|&(t, i)| HeldOut {
+        file: RowFile::Holdout,
+        row: ObservedRow {
+            position: i,
+            label: t,
+            measures: Measures::Instant(t),
+            temporal: vec![crate::caltime_load::TemporalCell::Number(t)],
+            cell: Some(sim::inference::ObsCell::Scalar(pos[i])),
+            aux: vec![("tested".to_string(), tested[i])],
+            design: vec![("tested".to_string(), tested[i])],
+        },
+    }).collect()
+}
+
+/// The acceptance test (D79, D81): changing the held-out outcomes, with the
+/// training data, the design inputs and the targets fixed, leaves the
+/// predictive samples and the prediction's address identical and changes
+/// only the held-out log-likelihoods and the scores. The design-reading
+/// survey is forecast ex post, from the held-out rows' realised `tested`
+/// (D81); a change of design, by contrast, moves both the samples and the
+/// address.
+#[test]
+fn held_out_outcomes_change_only_the_scores_and_never_the_samples_or_the_address() {
+    use crate::fit::forecast_plan::DesignMode;
+    use crate::fit::forecast_score::marginal_log_scores;
+    use crate::fit::predict::{DesignKey, PredictOptions};
+    let model = with_truth(compile(&survey_source(), "survey"));
+    let (daily, weekly) = daily_through(24);
+    let compiled = Arc::new(sim::CompiledModel::new(model.clone()).unwrap());
+    let dir = crate::test_support::unique_temp_dir("forecast_survey_data");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = |n: &str, body: &str| { let p = dir.join(n); std::fs::write(&p, body).unwrap(); p.to_string_lossy().into_owned() };
+    let effective: indexmap::IndexMap<String, String> = [
+        ("daily_cases".to_string(), path("daily.tsv", &daily)),
+        ("weekly_cases".to_string(), path("weekly.tsv", &weekly)),
+        ("survey".to_string(), path("survey.tsv", "time\tpositives\ttested\n7\t1\t40\n14\t5\t40\n21\t8\t40\n")),
+    ].into_iter().collect();
+    let time_opts = crate::caltime_load::TimeOpts {
+        origin: None, time_unit: "days", dt: 1.0, t_start: 0.0, format: crate::caltime_load::TimeFormat::Auto,
+    };
+    let streams = crate::fit::runner::resolve_and_load_obs_streams(&model, &compiled, &effective, &time_opts).unwrap();
+    let s = Setup { rows: streams.iter().map(|x| (x.name.clone(), x.rows.clone())).collect(), model, compiled, streams };
+
+    let none: Vec<HeldOut> = Vec::new();
+    let plan_of = |held: &[HeldOut]| {
+        let partition = TrainingPartition::whole(&s.rows, WholeFiles::NoHoldout).unwrap();
+        let ps: Vec<PlanStream> = s.model.observations.iter().map(|o| PlanStream {
+            obs: o, training: &s.rows[&o.name],
+            held_out: if o.name == "survey" { held } else { &none },
+            design: DesignInput::ExPost,
+        }).collect();
+        ForecastPlan::new(partition, 14.0, &ps).unwrap()
+    };
+    let address = |plan: &ForecastPlan| PredictOptions {
+        design: Some(DesignKey { mode: plan.design_mode().unwrap(), digest: plan.design_digest().unwrap() }),
+        ..PredictOptions::defaults()
+    }.address_key("run-under-test");
+    let forecast = |held: &[HeldOut]| {
+        let plan = plan_of(held);
+        let rows = BTreeMap::from([("survey".to_string(), held.to_vec()),
+            ("daily_cases".to_string(), vec![]), ("weekly_cases".to_string(), vec![])]);
+        let values = HeldOutValues::from_rows(&plan, &rows).unwrap();
+        let fc = s.run_held(&plan, &values, 13);
+        (address(&plan), fc)
+    };
+
+    let (key_a, a) = forecast(&survey_held([2.0, 1.0], [40.0, 50.0]));
+    let (key_b, b) = forecast(&survey_held([9.0, 6.0], [40.0, 50.0]));
+    assert_eq!(a.plan.design_mode(), Some(DesignMode::ExPost));
+    let k28 = index_of(&a.plan, "survey", 28.0);
+    assert_eq!(a.plan.targets()[k28].design, vec![("tested".to_string(), 40.0)]);
+    assert_eq!(a.plan.targets(), b.plan.targets(), "the targets, and their design values, are fixed");
+    assert_eq!(a.draws, b.draws, "identical predictive samples");
+    assert_eq!(a.expected, b.expected);
+    assert_eq!(a.origin_states, b.origin_states, "the state conditioning is unchanged");
+    assert_eq!(key_a, key_b, "identical predict address");
+    assert!(a.draws[k28].iter().any(|&y| y > 0.0) && a.draws[k28].iter().all(|&y| y <= 40.0),
+        "the survey's draws read tested = 40");
+    assert_ne!(a.held_out_log_liks[k28], b.held_out_log_liks[k28], "the held-out log-likelihoods change");
+    let (sa, sb) = (marginal_log_scores(&a).unwrap(), marginal_log_scores(&b).unwrap());
+    assert_eq!(sa.len(), 2);
+    assert!(sa.iter().zip(&sb).all(|(x, y)| x.targets == y.targets && x.log_score != y.log_score),
+        "the scores change: {sa:?} vs {sb:?}");
+
+    // The control: a design value is an input to the prediction.
+    let (key_c, c) = forecast(&survey_held([2.0, 1.0], [80.0, 50.0]));
+    assert_ne!(a.draws[k28], c.draws[k28], "a design change moves the samples");
+    assert_ne!(key_a, key_c, "and the address");
 }

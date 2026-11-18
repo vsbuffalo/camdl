@@ -71,6 +71,12 @@ pub(crate) struct ObservedRow {
     /// The auxiliary values the likelihood reads (a binomial denominator, an
     /// offset). Empty for a hole.
     pub aux: Vec<(String, f64)>,
+    /// The same columns as read, kept for a hole too: the row's design (D81).
+    /// An ex-post forecast reads a held-out row's realised design here, so
+    /// whether its outcome is `NA` cannot decide whether its design is known.
+    /// A column whose own cell is `NA` is absent. Not hashed by the row
+    /// digest, which hashes `aux`.
+    pub design: Vec<(String, f64)>,
 }
 
 /// Whether the file wrote `rows`' time cells as ISO dates. Read off each row's
@@ -122,12 +128,28 @@ pub(crate) fn observed_rows(
         }
         (times, written, cells, aux)
     };
+    let design = aux.clone();
     for (cell, row_aux) in cells.iter().zip(aux.iter_mut()) {
         if cell.is_none() {
             row_aux.clear();
         }
     }
+    assemble(obs, path, opts, labels, written, cells, aux, design)
+}
 
+/// The rows of `labels`, with what each measures (read off `obs`'s
+/// declaration and, for per-row windows, the file's window starts).
+#[allow(clippy::too_many_arguments)]
+fn assemble(
+    obs: &ObservationModel,
+    path: &str,
+    opts: &TimeOpts,
+    labels: Vec<f64>,
+    written: Vec<TemporalCell>,
+    cells: Vec<Option<ObsCell>>,
+    aux: Vec<Vec<(String, f64)>>,
+    design: Vec<Vec<(String, f64)>>,
+) -> Result<Vec<ObservedRow>, String> {
     let window_starts = crate::pfilter::load_window_starts_if_windowed(obs, path, opts)?;
     let measures = measures_of(
         obs,
@@ -140,19 +162,54 @@ pub(crate) fn observed_rows(
     let mut start_written = window_starts.map(|(_, written)| written.into_iter());
     Ok(labels.into_iter()
         .zip(written)
-        .zip(cells.into_iter().zip(aux))
+        .zip(cells.into_iter().zip(aux).zip(design))
         .zip(measures)
         .enumerate()
-        .map(|(position, (((label, written), (cell, aux)), measures))| {
+        .map(|(position, (((label, written), ((cell, aux), design)), measures))| {
             // `measures_of` refused a window column whose length differs from
             // the time column's, so a start exists for every row.
             let temporal = match start_written.as_mut().and_then(Iterator::next) {
                 Some(start) => vec![start, written],
                 None => vec![written],
             };
-            ObservedRow { position, label, measures, temporal, cell, aux }
+            ObservedRow { position, label, measures, temporal, cell, aux, design }
         })
         .collect())
+}
+
+/// Read a prospective design file for `obs` (D81): each row's period or
+/// instant, from the stream's own time (and window) columns, and the design
+/// columns its likelihood reads (a binomial's `n = tested`). The outcome
+/// column is not read and need not be present; every row's `cell` is `None`
+/// and its values are in `design`. Only a wide file (one stream per file) is
+/// read: a long-form stratified file is refused.
+pub(crate) fn design_rows(
+    path: &str,
+    obs: &ObservationModel,
+    opts: &TimeOpts,
+) -> Result<Vec<ObservedRow>, String> {
+    if crate::pfilter::is_long_form_stream(obs) {
+        return Err(format!(
+            "--design {path}: stream '{}' reads its data in long (stratified) form, and a \
+             design file is read only in wide form (one stream per file) so far",
+            obs.name));
+    }
+    let columns = crate::pfilter::stream_aux_columns(obs);
+    let Some(first) = columns.first() else {
+        return Err(format!(
+            "--design {path}: stream '{}' reads no design column, so it needs no design file",
+            obs.name));
+    };
+    let time_col = crate::pfilter::obs_time_column(obs)?;
+    let domain = crate::pfilter::CellDomain::of(obs, first);
+    let (labels, written, _) = crate::pfilter::load_data_tsv_column_cells_as_written(
+        path, time_col, first, domain, opts)?;
+    let aux_cols: Vec<(String, crate::pfilter::CellDomain)> = columns.into_iter()
+        .map(|c| { let d = crate::pfilter::CellDomain::of(obs, &c); (c, d) })
+        .collect();
+    let (design, _) = crate::pfilter::load_stream_aux(path, &aux_cols, labels.len())?;
+    let n = labels.len();
+    assemble(obs, path, opts, labels, written, vec![None; n], vec![Vec::new(); n], design)
 }
 
 /// What each row of `obs` measures, given the rows' labels (their time cells in

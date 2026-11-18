@@ -126,7 +126,7 @@ fn a_forecast_starts_at_the_training_extent_and_counts_each_streams_own_periods(
 
     let manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(fdir.join("forecast.json")).unwrap()).unwrap();
-    assert_eq!(manifest["schema"], "camdl.forecast/v3");
+    assert_eq!(manifest["schema"], "camdl.forecast/v4");
     let leaf_run: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
         walk(&dir.join("results")).into_iter().find(|p| p.file_name().is_some_and(|n| n == "run.json")).unwrap(),
     ).unwrap()).unwrap();
@@ -809,4 +809,118 @@ fn a_chain_selection_keys_the_forecasts_directory_and_not_its_file_names() {
     }
     excluded.sort_by_key(|v| v.as_array().unwrap().len());
     assert_eq!(excluded, vec![serde_json::json!([]), serde_json::json!([1])]);
+}
+
+// ── D81: a stream whose likelihood reads a design column ─────────────────
+
+/// A PMMH fit of `survey_sir.camdl` in `dir`, `holdout_after = 24`: the
+/// survey's rows on days 28, 35 and 42 are held out in its own file.
+fn fit_survey(dir: &Path) {
+    copy_fixture(dir);
+    std::fs::copy(fixture("survey_sir.camdl"), dir.join("model.camdl")).unwrap();
+    std::fs::copy(fixture("survey.tsv"), dir.join("survey.tsv")).unwrap();
+    fit_config(dir, PMMH, "holdout_after = 24.0\n",
+        "daily_cases = \"daily_cases.tsv\"\nweekly_cases = \"weekly_cases.tsv\"\nsurvey = \"survey.tsv\"", "");
+}
+
+/// Every predict directory under `dir` holding a `forecast.json`.
+fn forecast_dirs(dir: &Path) -> Vec<PathBuf> {
+    let mut d: Vec<PathBuf> = walk(&dir.join("results")).into_iter()
+        .filter(|p| p.file_name().is_some_and(|n| n == "forecast.json"))
+        .map(|p| p.parent().unwrap().to_path_buf())
+        .collect();
+    d.sort();
+    d
+}
+
+/// D81, ex post, end to end: the survey is forecast from its held-out rows'
+/// realised `tested`, labelled a conditional score using realised future
+/// design. Changing the held-out positives (the outcomes), with the training
+/// rows, the design values and the targets fixed, writes to the same address
+/// and leaves the forecast's tables and samples byte-identical.
+#[test]
+fn a_realised_design_forecast_is_labelled_and_its_address_ignores_held_out_outcomes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fit_survey(dir);
+    let predict = || {
+        let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "2 weeks", "--n-draws", "2",
+                             "--realised-design"]);
+        assert!(out.status.success(), "fit predict: {}", stderr(&out));
+    };
+    predict();
+    let d = forecast_dirs(dir);
+    assert_eq!(d.len(), 1);
+    let m = read_json(&d[0].join("forecast.json"));
+    assert_eq!(m["schema"], "camdl.forecast/v4");
+    assert_eq!(m["design"]["mode"], "ex_post");
+    assert!(m["design"]["label"].as_str().unwrap().contains("a conditional score using realised future design"),
+        "{}", m["design"]);
+    assert_eq!(m["design"]["streams"], serde_json::json!(["survey"]));
+    assert_eq!(m["options"]["design"]["mode"], "ex_post");
+    let survey: Vec<&serde_json::Value> = m["targets"].as_array().unwrap().iter()
+        .filter(|t| t["stream"] == "survey").collect();
+    let tested: Vec<(f64, f64)> = survey.iter()
+        .map(|t| (t["end"]["t"].as_f64().unwrap(), t["design"]["tested"].as_f64().unwrap())).collect();
+    assert_eq!(tested, vec![(28.0, 40.0), (35.0, 50.0)]);
+    let snapshot = |d: &Path| ["forecast-samples.tsv", "forecast/survey.tsv", "forecast/weekly_cases.tsv"]
+        .map(|f| std::fs::read(d.join(f)).unwrap());
+    let before = snapshot(&d[0]);
+
+    // The outcomes of the held-out rows change; nothing else does.
+    let text = std::fs::read_to_string(dir.join("survey.tsv")).unwrap()
+        .replace("28\t6\t40", "28\t19\t40").replace("35\t2\t50", "35\t11\t50");
+    std::fs::write(dir.join("survey.tsv"), text).unwrap();
+    predict();
+    let after = forecast_dirs(dir);
+    assert_eq!(after, d, "the same address: no second directory");
+    let m2 = read_json(&after[0].join("forecast.json"));
+    assert_eq!(m2["address_key"], m["address_key"]);
+    assert_eq!(snapshot(&after[0]), before, "the tables and samples are byte-identical");
+    assert_ne!(m2["held_out"], m["held_out"], "the held-out rows did change");
+}
+
+/// D81: without a design the survey is refused, naming both ways to supply
+/// it, and the other streams are still forecast (exit status 1, D76). With
+/// `--design survey=FILE` the forecast is prospective, reads the file's
+/// `tested` (the file has no outcome column), and is a different address
+/// from the ex-post forecast.
+#[test]
+fn a_design_reading_stream_needs_a_design_and_a_prospective_one_is_its_own_address() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fit_survey(dir);
+    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "2 weeks", "--n-draws", "2"]);
+    assert_eq!(out.status.code(), Some(1), "fit predict: {}", stderr(&out));
+    let m = read_json(&forecast_dirs(dir)[0].join("forecast.json"));
+    let failed = m["failed"].to_string();
+    assert!(failed.contains("survey"), "{failed}");
+    assert!(stderr(&out).contains("--design") && stderr(&out).contains("--realised-design"), "{}", stderr(&out));
+    assert!(m["design"].is_null());
+    assert!(m["produced"].as_array().unwrap().contains(&serde_json::json!("weekly_cases")));
+
+    std::fs::write(dir.join("design.tsv"), "time\ttested\n28\t60\n35\t70\n").unwrap();
+    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "2 weeks", "--n-draws", "2",
+                         "--design", "survey=design.tsv"]);
+    assert!(out.status.success(), "fit predict: {}", stderr(&out));
+    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "2 weeks", "--n-draws", "2",
+                         "--realised-design"]);
+    assert!(out.status.success(), "fit predict: {}", stderr(&out));
+    let manifests: Vec<serde_json::Value> = forecast_dirs(dir).iter().map(|d| read_json(&d.join("forecast.json"))).collect();
+    assert_eq!(manifests.len(), 3, "three addresses: no design, prospective, ex post");
+    let prospective = manifests.iter().find(|m| m["design"]["mode"] == "prospective").expect("a prospective forecast");
+    assert!(prospective["design"]["label"].as_str().unwrap().starts_with("a prospective forecast"));
+    let tested: Vec<f64> = prospective["targets"].as_array().unwrap().iter()
+        .filter(|t| t["stream"] == "survey").map(|t| t["design"]["tested"].as_f64().unwrap()).collect();
+    assert_eq!(tested, vec![60.0, 70.0]);
+
+    // A design row missing for a target is refused, not filled in.
+    std::fs::write(dir.join("design.tsv"), "time\ttested\n28\t60\n").unwrap();
+    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "2 weeks", "--n-draws", "2",
+                         "--design", "survey=design.tsv"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("has no value of the design column 'tested'"), "{}", stderr(&out));
+    // Outside forecast mode the flags are refused.
+    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward", "--realised-design"]);
+    assert!(!out.status.success() && stderr(&out).contains("not a forecast"), "{}", stderr(&out));
 }

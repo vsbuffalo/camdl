@@ -1,0 +1,71 @@
+# Base: two_cadence_sir.camdl
+# Adds: a serosurvey stream whose likelihood reads a design column (tested)
+# Changes: nothing else
+#
+# A closed SIR epidemic in a population of 1000, simulated on the
+# chain-binomial backend at one-day steps. Susceptibles become infected at
+# rate beta·S·I/N and infected individuals recover at rate gamma·I.
+#
+# Fitted to (or, in the forecast tests, conditioned on):
+# - daily_cases: new infections reported each day, a Poisson count with mean
+#   rho times the day's infections; each row covers the day that closes at its
+#   time.
+# - weekly_cases: the same infections reported as weekly totals, a
+#   negative-binomial count with mean rho times the week's infections and
+#   dispersion k; each row covers the seven days that close at its time.
+# - survey: a weekly prevalence survey, the number positive out of the number
+#   tested, a binomial count whose trials are the row's `tested` column and
+#   whose probability is the infected fraction I/N at the row's time. The
+#   number tested is a design value, not an outcome: a forecast of this
+#   stream needs it supplied for every target.
+
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  beta  : rate        in [0.05, 2.0]  ~ log_normal(mu = -0.7, sigma = 0.3)
+  gamma : rate        in [0.05, 1.0]  ~ log_normal(mu = -1.4, sigma = 0.3)
+  rho   : probability in [0.05, 1.0]  ~ beta(alpha = 5.0, beta = 5.0)
+  k     : positive    in [1.0, 100.0] ~ half_normal(sigma = 20.0)
+  N0    : count
+  I0    : count
+}
+
+transitions {
+  infection : S --> I  @ beta * S * I / N
+  recovery  : I --> R  @ gamma * I
+}
+
+init {
+  S = N0 - I0
+  I = I0
+  R = 0
+}
+
+simulate { from = 0 'days  to = 63 'days }
+
+observations {
+  daily_cases {
+    columns       { time : time, daily_cases : count }
+    covers        = closing_at(time, 1 'days)
+    projected     = incidence(infection)
+    emit_schedule = every 1 'days
+    daily_cases ~ poisson(rate = rho * projected)
+  }
+  weekly_cases {
+    columns       { time : time, weekly_cases : count }
+    covers        = closing_at(time, 7 'days)
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    weekly_cases ~ neg_binomial(mean = rho * projected, r = k)
+  }
+  survey {
+    columns       { time : time, positives : count, tested : count }
+    projected     = I / N
+    emit_schedule = every 7 'days
+    positives     ~ binomial(n = tested, p = projected)
+  }
+}
