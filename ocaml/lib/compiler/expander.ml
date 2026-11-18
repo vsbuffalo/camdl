@@ -2044,6 +2044,9 @@ let same_index_items (a : index_item list) (b : index_item list) : bool =
      expression a hand-written per-stage model holds. A quotient whose
      divisor does not mention [src] counts as a product: `mu * E[a] / N_ref`
      gives `mu * E[a, s] / N_ref`.
+   - A sum or difference of such products is linear term by term:
+     `cmax * E[a] + mu * E[a]` gives `cmax * E[a, s] + mu * E[a, s]`. Every
+     term must be one; `cmax * E[a] + mu * K` is not.
    - Otherwise the share is the quotient, guarded so an empty cell gives zero
      rather than 0/0: `if E > 0 then rate * E_s / E else 0`.
 
@@ -2065,13 +2068,18 @@ let competing_stage_rate ~(src : string) ~(items : index_item list)
     | EBinOp (Div, l, r) when source_free_divisor r -> factors l @ [ r ]
     | e -> [ e ]
   in
-  let fs = factors rate in
-  let linear =
+  let linear_term t =
+    let fs = factors t in
     List.length (List.filter whole_cell fs) = 1
     && List.for_all (fun f -> whole_cell f || not (mentions_compartment src f)) fs
   in
-  if linear then begin
+  let rec terms = function
+    | EBinOp ((Add | Sub), l, r) -> terms l @ terms r
+    | e -> [ e ]
+  in
+  if List.for_all linear_term (terms rate) then begin
     let rec subst = function
+      | EBinOp ((Add | Sub) as op, l, r) -> EBinOp (op, subst l, subst r)
       | EBinOp (Mul, l, r) -> EBinOp (Mul, subst l, subst r)
       | EBinOp (Div, l, r) when source_free_divisor r -> EBinOp (Div, subst l, r)
       | (EIdent (_, l) | EIndex (_, _, l)) as e when whole_cell e ->

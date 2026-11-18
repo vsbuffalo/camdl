@@ -249,6 +249,61 @@ let test_quotient_by_a_source_free_divisor_is_linear () =
     [ ("pre", "s1"); ("pre", "s2"); ("pre", "s3");
       ("sch", "s1"); ("sch", "s2"); ("sch", "s3") ]
 
+(* A sum or difference of terms, each linear in the source by the product
+   rule and the source nowhere else, lowers term by term: the stage rate is
+   the written sum with the residence reference replaced by the stage cell in
+   every term, as a hand-written per-stage model has it. A sum with a term
+   that is not linear takes the guarded quotient. *)
+let sum_src =
+  "  both[a in age]  : E[a] --> T[a] @ cmax * E[a] + mu * E[a] / K - ar * E[a]\n\
+  \  mixed[a in age] : E[a] --> T[a] @ cmax * E[a] + mu * E[a] * E[a] / K\n\
+  \  plus[a in age]  : E[a] --> T[a] @ cmax * E[a] + mu * K\n"
+
+let test_sum_of_linear_terms_is_linear () =
+  let m = compile_ok (age_src ~stages:3 ~extra:sum_src ()) in
+  let open Ir in
+  List.iter (fun (age, stage) ->
+    let cell = Printf.sprintf "E_%s_%s" age stage in
+    let both = transition m (Printf.sprintf "both_%s_%s" age stage) in
+    let expected =
+      BinOp { op = Sub;
+              left = BinOp { op = Add;
+                             left = BinOp { op = Mul; left = Param "cmax"; right = Pop cell };
+                             right = BinOp { op = Div;
+                                             left = BinOp { op = Mul; left = Param "mu";
+                                                            right = Pop cell };
+                                             right = Param "K" } };
+              right = BinOp { op = Mul; left = Param "ar"; right = Pop cell } } in
+    Alcotest.(check bool) (both.name ^ ": the written sum, term by term, over " ^ cell)
+      true (both.rate = expected);
+    List.iter (fun name ->
+      let t = transition m (Printf.sprintf "%s_%s_%s" name age stage) in
+      Alcotest.(check bool) (t.name ^ ": a term not linear in E takes the guarded quotient")
+        true (match t.rate with Cond _ -> true | _ -> false))
+      [ "mixed"; "plus" ])
+    [ ("pre", "s1"); ("pre", "s2"); ("pre", "s3");
+      ("sch", "s1"); ("sch", "s2"); ("sch", "s3") ]
+
+(* The sum rule is an identity: the stage rates sum to the written rate at
+   every state, an empty source included. *)
+let test_sum_of_linear_terms_preserves_the_propensity () =
+  let m = compile_ok (age_src ~stages:3 ~extra:sum_src ()) in
+  let params = [ ("cmax", 7.0); ("mu", 0.3); ("K", 20.0); ("ar", 0.05) ] in
+  let stages = [ "s1"; "s2"; "s3" ] in
+  List.iter (fun (e_pre : float list) ->
+    let pops = List.map2 (fun s v -> ("E_pre_" ^ s, v)) stages e_pre in
+    let total = List.fold_left ( +. ) 0.0 e_pre in
+    let written = 7.0 *. total +. 0.3 *. total /. 20.0 -. 0.05 *. total in
+    let rates = List.map (fun s ->
+        eval ~pops ~params m (transition m ("both_pre_" ^ s)).Ir.rate) stages in
+    Alcotest.(check (float 1e-12)) "stage rates sum to the written rate"
+      written (List.fold_left ( +. ) 0.0 rates);
+    List.iter2 (fun r n ->
+      Alcotest.(check (float 1e-12)) "stage rate is proportional to occupancy"
+        (if total > 0.0 then written *. n /. total else 0.0) r)
+      rates e_pre)
+    [ [ 3.0; 1.0; 1.0 ]; [ 0.0; 12.0; 0.0 ]; [ 40.0; 7.0; 250.0 ]; [ 0.0; 0.0; 0.0 ] ]
+
 (* ── Residence mapping ───────────────────────────────────────────────────── *)
 
 (* A move between strata of the same staged compartment keeps the stage. *)
@@ -939,7 +994,11 @@ let () =
          Alcotest.test_case "linear rate is the per-stage product" `Quick
            test_linear_rate_is_per_stage_product;
          Alcotest.test_case "quotient by a source-free divisor is linear" `Quick
-           test_quotient_by_a_source_free_divisor_is_linear ]);
+           test_quotient_by_a_source_free_divisor_is_linear;
+         Alcotest.test_case "a sum of linear terms is linear" `Quick
+           test_sum_of_linear_terms_is_linear;
+         Alcotest.test_case "a sum of linear terms preserves the propensity" `Quick
+           test_sum_of_linear_terms_preserves_the_propensity ]);
       ("residence mapping",
        [ Alcotest.test_case "same-compartment move keeps the stage" `Quick
            test_same_compartment_move_keeps_the_stage;

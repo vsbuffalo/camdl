@@ -132,9 +132,12 @@ progression runs unchanged alongside.
   compartment appears nowhere else in the expression, the stage rate is that
   product with the factor replaced by `E[a, s]` (`mu * E[a, s]`). A quotient
   whose divisor does not mention the source compartment counts as a product
-  (`mu * E[a] / N_ref`). This is the same value and is byte-identical to the
-  hand-written per-stage model. All other rates lower to the guarded quotient
-  above.
+  (`mu * E[a] / N_ref`). A sum or difference of such products, every term one,
+  lowers term by term (`cmax * E[a] + mu * E[a]` gives
+  `cmax * E[a, s] + mu * E[a, s]`); a term that does not read the source
+  (`cmax * E[a] + mu * K`) makes the rate nonlinear. This is the same value and
+  is byte-identical to the hand-written per-stage model. All other rates lower
+  to the guarded quotient above.
 - **Families over compartments.** A transition family bound over the compartment
   set (`bg[a in age, c in compartments] : c[a] --> @ mu * c[a]`) is a competing
   exit for each staged member and an ordinary exit for the rest.

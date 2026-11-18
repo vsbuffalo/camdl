@@ -2890,8 +2890,10 @@ compartment appears nowhere else — `mu * E[a]` — the share is that product w
 the factor replaced by the stage cell, `mu * E[a, s]`, which is exactly what a
 hand-written per-stage model holds. A quotient whose divisor does not mention
 the compartment counts as such a product: `mu * E[a] / N_ref` gives
-`mu * E[a, s] / N_ref`. Any other rate (`treat` above) lowers to the guarded
-quotient.
+`mu * E[a, s] / N_ref`. A sum or difference of such products is replaced term
+by term: `cmax * E[a] + mu * E[a]` gives `cmax * E[a, s] + mu * E[a, s]`, but
+`cmax * E[a] + mu * K`, whose second term does not read the source, does not.
+Any other rate (`treat` above) lowers to the guarded quotient.
 
 Where the people go follows from the destination:
 
