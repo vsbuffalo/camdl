@@ -221,6 +221,34 @@ let test_linear_rate_is_per_stage_product () =
     [ ("pre", "s1"); ("pre", "s2"); ("pre", "s3");
       ("sch", "s1"); ("sch", "s2"); ("sch", "s3") ]
 
+(* A quotient whose divisor does not mention the staged compartment is a
+   product for the linear rule: the stage rate is the written quotient with the
+   residence reference replaced by the stage cell, as a hand-written per-stage
+   model has it. A divisor that does mention it takes the guarded quotient. *)
+let test_quotient_by_a_source_free_divisor_is_linear () =
+  let m = compile_ok (age_src ~stages:3
+    ~extra:"  scaled[a in age] : E[a] --> T[a] @ mu * E[a] / K\n\
+           \  nested[a in age] : E[a] --> T[a] @ mu * (E[a] / K)\n\
+           \  satur[a in age]  : E[a] --> T[a] @ cmax * E[a] / (K + E[a])\n" ()) in
+  List.iter (fun (age, stage) ->
+    let cell = Printf.sprintf "E_%s_%s" age stage in
+    let scaled = transition m (Printf.sprintf "scaled_%s_%s" age stage) in
+    Alcotest.(check bool) (scaled.Ir.name ^ ": rate is mu * " ^ cell ^ " / K") true
+      (scaled.Ir.rate
+       = Ir.BinOp { op = Ir.Div;
+                    left = Ir.BinOp { op = Ir.Mul; left = Ir.Param "mu"; right = Ir.Pop cell };
+                    right = Ir.Param "K" });
+    let nested = transition m (Printf.sprintf "nested_%s_%s" age stage) in
+    Alcotest.(check bool) (nested.Ir.name ^ ": rate is mu * (" ^ cell ^ " / K)") true
+      (nested.Ir.rate
+       = Ir.BinOp { op = Ir.Mul; left = Ir.Param "mu";
+                    right = Ir.BinOp { op = Ir.Div; left = Ir.Pop cell; right = Ir.Param "K" } });
+    let satur = transition m (Printf.sprintf "satur_%s_%s" age stage) in
+    Alcotest.(check bool) (satur.Ir.name ^ ": a divisor reading E takes the guarded quotient")
+      true (match satur.Ir.rate with Ir.Cond _ -> true | _ -> false))
+    [ ("pre", "s1"); ("pre", "s2"); ("pre", "s3");
+      ("sch", "s1"); ("sch", "s2"); ("sch", "s3") ]
+
 (* ── Residence mapping ───────────────────────────────────────────────────── *)
 
 (* A move between strata of the same staged compartment keeps the stage. *)
@@ -539,7 +567,9 @@ let () =
        [ Alcotest.test_case "linear exit and ageing equal the hand-written model" `Quick
            test_linear_exit_equals_manual;
          Alcotest.test_case "linear rate is the per-stage product" `Quick
-           test_linear_rate_is_per_stage_product ]);
+           test_linear_rate_is_per_stage_product;
+         Alcotest.test_case "quotient by a source-free divisor is linear" `Quick
+           test_quotient_by_a_source_free_divisor_is_linear ]);
       ("residence mapping",
        [ Alcotest.test_case "same-compartment move keeps the stage" `Quick
            test_same_compartment_move_keeps_the_stage;

@@ -1940,7 +1940,9 @@ let same_index_items (a : index_item list) (b : index_item list) : bool =
    - When [rate] is a product with the reference `src[items]` as exactly one
      factor and no other mention of [src], the share is that product with the
      factor replaced by `E_s`: `mu * E[a]` gives `mu * E[a, s]`, the
-     expression a hand-written per-stage model holds.
+     expression a hand-written per-stage model holds. A quotient whose
+     divisor does not mention [src] counts as a product: `mu * E[a] / N_ref`
+     gives `mu * E[a, s] / N_ref`.
    - Otherwise the share is the quotient, guarded so an empty cell gives zero
      rather than 0/0: `if E > 0 then rate * E_s / E else 0`.
 
@@ -1954,8 +1956,12 @@ let competing_stage_rate ~(src : string) ~(items : index_item list)
     | EIndex (n, its, _)   -> n = src && same_index_items its items
     | _ -> false
   in
+  (* A divisor that does not read [src] scales the product like any other
+     factor: `mu * E[a] / N_ref` is the product of `mu`, `E[a]` and `1 / N_ref`. *)
+  let source_free_divisor r = not (mentions_compartment src r) in
   let rec factors = function
     | EBinOp (Mul, l, r) -> factors l @ factors r
+    | EBinOp (Div, l, r) when source_free_divisor r -> factors l @ [ r ]
     | e -> [ e ]
   in
   let fs = factors rate in
@@ -1966,6 +1972,7 @@ let competing_stage_rate ~(src : string) ~(items : index_item list)
   if linear then begin
     let rec subst = function
       | EBinOp (Mul, l, r) -> EBinOp (Mul, subst l, subst r)
+      | EBinOp (Div, l, r) when source_free_divisor r -> EBinOp (Div, subst l, r)
       | (EIdent (_, l) | EIndex (_, _, l)) as e when whole_cell e ->
         EIndex (src, items @ [ stage ], l)
       | e -> e

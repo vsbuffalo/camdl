@@ -2884,8 +2884,10 @@ to `R`, and the `via` progression runs unchanged alongside. When the rate is a
 product in which the source reference appears exactly once as a factor and the
 compartment appears nowhere else — `mu * E[a]` — the share is that product with
 the factor replaced by the stage cell, `mu * E[a, s]`, which is exactly what a
-hand-written per-stage model holds. Any other rate (`treat` above) lowers to the
-guarded quotient.
+hand-written per-stage model holds. A quotient whose divisor does not mention
+the compartment counts as such a product: `mu * E[a] / N_ref` gives
+`mu * E[a, s] / N_ref`. Any other rate (`treat` above) lowers to the guarded
+quotient.
 
 Where the people go follows from the destination:
 
