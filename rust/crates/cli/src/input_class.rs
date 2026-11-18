@@ -18,14 +18,10 @@
 //!
 //! A class belongs to a (command, input) pair, not to a flag: a group that
 //! several commands flatten (`ForcingExtrapolationArg`, the global options) is
-//! classified in each command's table. [`SIMULATE`] is `camdl simulate`'s and
-//! [`FIT_RUN`] `camdl fit run`'s. `every_simulate_flag_is_classified` and
-//! `every_fit_run_flag_is_classified` (below) check them against every argument
-//! clap accepts, both ways, and every input has a case in
-//! `rust/crates/cli/tests/simulate_input_classes.rs`
-//! (`every_simulate_input_has_a_case`) or
-//! `rust/crates/cli/tests/fit_run_input_classes.rs`
-//! (`every_fit_run_input_has_a_case`).
+//! classified in each command's table: [`SIMULATE`], [`FIT_RUN`], [`PFILTER`].
+//! `every_<command>_flag_is_classified` (below) checks each against every
+//! argument clap accepts, both ways, and `every_<command>_input_has_a_case`
+//! that every input has a case in `rust/crates/cli/tests/<command>_input_classes.rs`.
 
 /// The identity level a keyed input enters at. The first five are the levels of
 /// a simulation leaf ([`runid::inputs::TrajectoryInput`]); `Obs` is the address
@@ -212,6 +208,64 @@ pub const FIT_RUN: &[(&str, InputClass)] = &[
     ("no_licm", Keyed(Fit)),
 ];
 
+/// `camdl pfilter`'s inputs, by clap argument id (the field name), with their
+/// classes: `PfilterArgs`, the groups it flattens and the global options.
+///
+/// A pfilter leaf's levels are `model` (the resolved model, with the engine),
+/// `config` (the scoring setup and the data), `params` (the scored point) and
+/// `seed`. `--fit` keys the config level through what its problem supplies:
+/// the objective, the data, the two policies. `--table` and a scenario change
+/// the resolved model. `--save-final-state` writes a file, and under the fit's
+/// `holdout_after` cuts the bound rows to the training rows, which the config
+/// level keys. `--pf-max-substeps` and `--time-format` decide whether a run is
+/// refused, never what a run that completes stores, so they are `execution`.
+#[cfg(test)]
+pub const PFILTER: &[(&str, InputClass)] = &[
+    // PfilterArgs
+    ("model", Keyed(Model)),
+    ("particles", Keyed(Config)),
+    ("data", Keyed(Config)),
+    ("fit", Keyed(Config)),
+    ("replicates", Keyed(Config)),
+    ("trace", Presentation),
+    ("pf_health", Presentation),
+    ("output", Presentation),
+    ("save_final_state", Keyed(Config)),
+    ("save_paths", Presentation),
+    ("n_paths", Presentation),
+    ("save_filtering", Presentation),
+    ("save_prequential", Presentation),
+    ("score_from", Presentation),
+    ("no_save_samples", Presentation),
+    ("no_store", Presentation),
+    // ModelOverrides
+    ("params", Keyed(Params)),
+    ("param", Keyed(Params)),
+    ("table", Keyed(Model)),
+    // ScenarioArgs
+    ("scenario", Keyed(Model)),
+    ("enable", Keyed(Model)),
+    ("disable", Keyed(Model)),
+    // InferenceCore
+    ("dt", Keyed(Config)),
+    ("seed", Keyed(Seed)),
+    ("parallel", Execution),
+    ("allow_degenerate_rates", Keyed(Config)),
+    ("time_format", Execution),
+    ("pf_max_substeps", Execution),
+    ("binomial", Keyed(Config)),
+    // ForcingExtrapolationArg
+    ("allow_forcing_extrapolation", Keyed(Config)),
+    // StreamSelection
+    ("obs", Keyed(Config)),
+    // GlobalArgs
+    ("verbosity", Presentation),
+    ("progress", Presentation),
+    ("no_progress", Presentation),
+    ("no_ir_cache", Execution),
+    ("no_licm", Keyed(Model)),
+];
+
 /// `camdl mre simulate`'s own input. It flattens `SimulateArgs` and writes a
 /// bundle that reproduces that simulate run, so every other input keeps the
 /// class it has in [`SIMULATE`].
@@ -267,6 +321,11 @@ mod tests {
     }
 
     #[test]
+    fn every_pfilter_flag_is_classified() {
+        assert_covers("camdl pfilter", clap_args(&["pfilter"]), PFILTER);
+    }
+
+    #[test]
     fn every_mre_simulate_flag_is_classified() {
         assert_covers("camdl mre simulate", clap_args(&["mre", "simulate"]), SIMULATE.iter().chain(MRE_SIMULATE_OWN));
     }
@@ -286,6 +345,14 @@ mod tests {
         ("path", "the harness needs PATH to start camdl; `execution_env_camdlc` varies the camdlc found on it"),
         ("unlabeled_threshold", "not read by fit run: `fit table` and `camdl list` read it"),
         ("ci", "not read by fit run: `fit summary` reads it"),
+    ];
+
+    /// Environment inputs with no `pfilter` case, each with the reason.
+    const PFILTER_NO_CASE: &[(&str, &str)] = &[
+        ("skip_version_check", "every test run sets it: without it the handshake refuses a test build's camdlc"),
+        ("path", "the harness needs PATH to start camdl; `execution_env_camdlc` varies the camdlc found on it"),
+        ("unlabeled_threshold", "not read by pfilter: `fit table` and `camdl list` read it"),
+        ("ci", "not read by pfilter: `fit summary` reads it"),
     ];
 
     fn case_name(class: InputClass, field: &str, env: bool) -> String {
@@ -362,5 +429,11 @@ mod tests {
     #[test]
     fn every_fit_run_input_has_a_case() {
         assert_every_input_has_a_case("fit run", "fit_run_input_classes.rs", FIT_RUN, FIT_RUN_NO_CASE);
+    }
+
+    /// The same for `pfilter`, in `tests/pfilter_input_classes.rs`.
+    #[test]
+    fn every_pfilter_input_has_a_case() {
+        assert_every_input_has_a_case("pfilter", "pfilter_input_classes.rs", PFILTER, PFILTER_NO_CASE);
     }
 }
