@@ -754,7 +754,11 @@ same path is not detected and its prediction is written to the same directory.
 person listing the folder. `fit table --quantity` reads the address its own
 free-forward derivation writes. Inside the directory, `--exclude-chains` and
 `--quantities` also name the files (`predictive-excl3/`, `quantities-<key8>/`),
-so a chain-subset or other-vocabulary table says so in its name.
+so a chain-subset or other-vocabulary table says so in its name. A forecast's
+files carry no such suffix (D86): `forecast.json`, `forecast-samples.tsv`,
+`forecast/` and `report.json` keep their names, the directory alone is keyed by
+the selection, and `forecast.json` states `options.excluded_chains` (`[]` for
+the full cloud).
 
 The free-forward replay projects each row off its own recorded trajectories, so
 it records a snapshot at every time a row reads — each data time and each

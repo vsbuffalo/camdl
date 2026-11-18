@@ -774,3 +774,39 @@ fn a_chain_subset_forecast_names_each_draw_by_its_draws_tsv_row() {
     assert_eq!(samples[0]["cloud_row"].parse::<u64>().unwrap(), draws[0]["cloud_row"].as_u64().unwrap());
     assert_eq!(samples[0]["chain"], "1");
 }
+
+/// D86: a forecast's identity is its keyed directory. The same forecast with
+/// and without `--exclude-chains 1` writes to two directories, each with the
+/// same unsuffixed file names (`forecast.json`, `report.json`), and
+/// `forecast.json` states `options.excluded_chains` either way.
+#[test]
+fn a_chain_selection_keys_the_forecasts_directory_and_not_its_file_names() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fit(dir, PMMH, "");
+    for extra in [&[][..], &["--exclude-chains", "1"][..]] {
+        let mut args = vec!["fit", "predict", "--fit", "fit.toml", "--horizon", "1 weeks", "--n-draws", "2"];
+        args.extend_from_slice(extra);
+        let out = run(dir, &args);
+        assert!(out.status.success(), "fit predict: {}", stderr(&out));
+    }
+    let mut dirs: Vec<PathBuf> = walk(&dir.join("results")).into_iter()
+        .filter(|p| p.file_name().is_some_and(|n| n == "forecast.json"))
+        .map(|p| p.parent().unwrap().to_path_buf())
+        .collect();
+    dirs.sort();
+    assert_eq!(dirs.len(), 2, "two selections, two directories: {dirs:?}");
+    let mut excluded: Vec<serde_json::Value> = Vec::new();
+    for d in &dirs {
+        let names: Vec<String> = std::fs::read_dir(d).unwrap().flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert!(names.iter().all(|n| !n.contains("-excl")), "no selection suffix in {d:?}: {names:?}");
+        assert!(d.join("report.json").is_file(), "report.json in {d:?}: {names:?}");
+        let m = read_json(&d.join("forecast.json"));
+        assert_eq!(m["address_key"].as_str().unwrap(),
+            d.file_name().unwrap().to_str().unwrap().rsplit('-').next().unwrap(), "{d:?}");
+        excluded.push(m["options"]["excluded_chains"].clone());
+    }
+    excluded.sort_by_key(|v| v.as_array().unwrap().len());
+    assert_eq!(excluded, vec![serde_json::json!([]), serde_json::json!([1])]);
+}

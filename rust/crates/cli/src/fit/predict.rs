@@ -1915,7 +1915,9 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
         )?;
         written.push(crate::fit::failures::write_report(
             &out_dir,
-            &crate::chain_selection::artifact_name("report", posterior.selection()),
+            // D86: the directory is keyed by the chain selection; the name
+            // carries none.
+            "report",
             &failures,
             &skipped,
         )?);
