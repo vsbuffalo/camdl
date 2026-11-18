@@ -191,10 +191,16 @@ pub fn predictions_label(run_id: &str) -> &str {
 }
 
 /// The directory `fit predict <run>` with every option at its default writes
-/// to, under this engine.
+/// to, under this engine. The default options carry the particle count the
+/// run resolves when the default mode runs a filter (D85), so the run's leaf
+/// is read; a run that cannot be found or read falls back to the options
+/// with no particle count.
 pub fn default_predictions_dir(segment: &Path, run_id: &str) -> PathBuf {
-    let key = crate::fit::predict::PredictOptions::defaults().address_key(run_id);
-    predictions_dir(segment, run_id, &key)
+    let options = FitView::read(segment)
+        .and_then(|v| v.methods.into_iter().find(|m| m.run_id == run_id))
+        .and_then(|m| crate::fit::predict::default_options_for(&m.method_dir, m.backend).ok())
+        .unwrap_or_else(crate::fit::predict::PredictOptions::defaults);
+    predictions_dir(segment, run_id, &options.address_key(run_id))
 }
 
 /// The `run_id` (full hex) a fit leaf's `run.json` records; `Ok(None)` when
