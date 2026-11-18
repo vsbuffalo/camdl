@@ -294,6 +294,24 @@ let contains ~sub s =
   let rec go i = i + n <= m && (String.sub s i n = sub || go (i + 1)) in
   go 0
 
+(* [s] without ANSI CSI escape sequences (ESC '[' ... final byte in @..~). *)
+let strip_ansi s =
+  let b = Buffer.create (String.length s) in
+  let n = String.length s in
+  let rec go i =
+    if i >= n then ()
+    else if s.[i] = '\027' && i + 1 < n && s.[i + 1] = '[' then
+      let rec skip j =
+        if j >= n then n
+        else if s.[j] >= '@' && s.[j] <= '~' then j + 1
+        else skip (j + 1)
+      in
+      go (skip (i + 2))
+    else (Buffer.add_char b s.[i]; go (i + 1))
+  in
+  go 0;
+  Buffer.contents b
+
 let test_fix_in_text () =
   let t = Diagnostics.create () in
   Diagnostics.error t ~code:"E117" ~loc:(mk_loc 1 1 4)
@@ -306,8 +324,10 @@ let test_fix_in_text () =
         ignore (Diagnostics.render t
                   (Source_cache.of_string ~filename:"m.camdl" "x\n"))))
   in
+  (* The renderer styles its labels when colour is on (CLICOLOR_FORCE, a
+     terminal), so match on the text with the escape sequences removed. *)
   Alcotest.(check bool) "text names the fix's replacement" true
-    (contains ~sub:"fix: replace with `positive dim 1/T`" captured)
+    (contains ~sub:"= fix: replace with `positive dim 1/T`" (strip_ansi captured))
 
 let () =
   Alcotest.run "json_errors" [
