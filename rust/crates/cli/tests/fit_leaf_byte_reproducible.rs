@@ -348,3 +348,26 @@ fn nl_sbplx_killed_and_rerun_writes_the_uninterrupted_bytes() {
     assert_same("nl-sbplx", "an uninterrupted and a killed-and-rerun run", &a, &b);
 }
 
+
+/// The execution record is outside the manifest, so nothing protects it: a
+/// record that exists and does not parse is said, never read silently as no
+/// record (which would report the run's wall time as unknown without saying
+/// why).
+#[test]
+fn an_unreadable_execution_record_is_warned_about() {
+    let w = work("bad_execution", &pmmh(150));
+    run_fit(&w.0);
+    let leaf = method_leaf(&w.0);
+    std::fs::write(leaf.join("execution.json"), b"{ not json").unwrap();
+    let out = Command::new(camdl())
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDLC", camdlc())
+        .current_dir(&w.0)
+        .args(["fit", "summary", &leaf.to_string_lossy()])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "fit summary: {stderr}");
+    assert!(stderr.contains("warning:") && stderr.contains("execution.json"),
+        "an unparseable execution record was read silently:\n{stderr}");
+}
