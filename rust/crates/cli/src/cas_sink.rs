@@ -620,7 +620,7 @@ impl crate::engine::RunSink for CasSink {
             }
         };
 
-        let cols = self.sim.run.view.cols(&cell.model());
+        let cols = self.sim.run.view.cols(cell.model());
         let traj_bytes = crate::util::traj_tsv_bytes(&cell.traj, &cols);
         let traj_digest = runid::ContentHash::digest_bytes(&traj_bytes);
 
@@ -802,7 +802,7 @@ impl crate::engine::RunSink for CasSink {
             // every ordinary cell.
             let restart_origin = spec.sim_run.init_state.as_ref().map(|i| i.origin_t);
             if let Err(e) = write_obs_into_cas(
-                &dest, &cell.model(), &cell.traj, spec.process_seed, restart_origin,
+                &dest, cell.model(), &cell.traj, spec.process_seed, restart_origin,
                 self.emit_every.as_ref(), spec.sim_run.eval,
             ) {
                 self.errors.push(format!("scenario={} seed={}: obs ensemble: {}",

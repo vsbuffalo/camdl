@@ -2830,7 +2830,7 @@ impl SimQuantities {
         } else {
             Some(materialize_obs_for_quantities(
                 &obs_streams,
-                &cell.model(),
+                cell.model(),
                 &cell.traj,
                 compiled,
                 &params,
