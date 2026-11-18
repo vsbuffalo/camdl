@@ -9921,6 +9921,92 @@ let test_branching_indexed_by_age () =
     "indexed branching expands to |age|*|branches| transitions"
     4 (List.length m.Ir.transitions)
 
+(* ── Destination-split weights must sum to 1 (gh#1205) ─────────────────── *)
+
+(* A destination split whose weights are written [w] in the transition
+   `recovery : I --> { R : w_R, Q : w_Q } @ gamma * I` (line 12 of the source),
+   with an optional extra declaration block. *)
+let branch_weight_src ?(extra = "") weights = Printf.sprintf {|time_unit = 'days
+compartments { S, I, R, Q }
+let N = S + I + R + Q
+parameters {
+  beta  : rate        in [0.001, 2.0]
+  gamma : rate        in [0.001, 1.0]
+  p     : probability in [0.01, 0.99]
+}
+%s
+transitions {
+  infection : S --> I  @ beta * S * (I / N)
+  recovery  : I --> { %s } @ gamma * I
+}
+init {
+  S = 990
+  I = 10
+}
+simulate { from = 0 'days
+  to = 50 'days }
+|} extra weights
+
+(** The reproduction from gh#1205: constant weights summing to 1.2 drain I
+    at 1.2·γI. Rejected, located on the transition, naming the sum. *)
+let test_branch_weights_over_one_rejected () =
+  let src = branch_weight_src "R : 0.5, Q : 0.7" in
+  compile_expect_error_code ~code:"E423" ~contains:"1.2" src;
+  Diagnostics.json_errors_mode := true;
+  let r = Compiler.compile ~name:"test_err" src in
+  Diagnostics.json_errors_mode := false;
+  match r with
+  | Ok _ -> Alcotest.fail "expected E423"
+  | Error e ->
+    Alcotest.(check (option int)) "E423 is located on the transition"
+      (Some 12) (line_of_code ~code:"E423" e)
+
+(** A sum below 1 lowers the outflow just as a sum above raises it. *)
+let test_branch_weights_under_one_rejected () =
+  compile_expect_error_code ~code:"E423" ~contains:"0.9"
+    (branch_weight_src "R : 0.6, Q : 0.3")
+
+(** A `let`-bound constant is a compile-time constant too. *)
+let test_branch_weights_let_constant_rejected () =
+  compile_expect_error_code ~code:"E423" ~contains:"recovery"
+    (branch_weight_src ~extra:"let w = 0.7" "R : 0.5, Q : w")
+
+(** Constant weights summing to 1, including through arithmetic and a let. *)
+let test_branch_weights_sum_to_one_ok () =
+  List.iter (fun w -> ignore (compile_expect_ok (branch_weight_src w)))
+    [ "R : 0.9, Q : 0.1"; "R : 1 / 4, Q : 3 / 4"; "R : 0.25, Q : 1 - 0.25" ];
+  ignore (compile_expect_ok
+    (branch_weight_src ~extra:"let w = 0.3" "R : w, Q : 1 - w"))
+
+(** Within the tolerance (1e-9): sums that are 1 on paper but not in
+    floating point (0.7 + 0.2 + 0.1 is 0.9999999999999999; 1/3 three times),
+    and ten-digit decimals. *)
+let test_branch_weights_within_tolerance_ok () =
+  let three = {|time_unit = 'days
+compartments { I, A, B, C }
+parameters { gamma : rate in [0.001, 1.0] }
+transitions {
+  split : I --> { A : 1 / 3, B : 1 / 3, C : 1 / 3 } @ gamma * I
+  again : A --> { B : 0.7, C : 0.2, I : 0.1 } @ gamma * A
+  close : B --> { A : 0.3333333333, C : 0.6666666667 } @ gamma * B
+}
+init { I = 10 }
+simulate { from = 0 'days
+  to = 5 'days }
+|} in
+  ignore (compile_expect_ok three)
+
+(** Just outside the tolerance is rejected: 0.5 + 0.500001. *)
+let test_branch_weights_outside_tolerance_rejected () =
+  compile_expect_error_code ~code:"E423" ~contains:"recovery"
+    (branch_weight_src "R : 0.5, Q : 0.500001")
+
+(** Parameterised weights cannot be checked at compile time and are
+    accepted; the outflow is the rate times their sum. *)
+let test_branch_weights_parameterised_ok () =
+  List.iter (fun w -> ignore (compile_expect_ok (branch_weight_src w)))
+    [ "R : p, Q : 1 - p"; "R : p, Q : 0.5" ]
+
 (* ── diagnostic_test likelihood sugar (Wave 1 / #4) ──────────────────────── *)
 
 (** Minimal model exercising `diagnostic_test(base = binomial, sens, spec)`. *)
@@ -18508,6 +18594,13 @@ let () =
       Alcotest.test_case "parser accepts `X --> {Y:p, Z:1-p}`"         `Quick test_branching_parses;
       Alcotest.test_case "desugars to two weight-scaled transitions"    `Quick test_branching_equivalent_to_two_transitions;
       Alcotest.test_case "indexed `[a in age]` expands per age × branch" `Quick test_branching_indexed_by_age;
+      Alcotest.test_case "gh#1205: constant weights over 1 → E423"      `Quick test_branch_weights_over_one_rejected;
+      Alcotest.test_case "gh#1205: constant weights under 1 → E423"     `Quick test_branch_weights_under_one_rejected;
+      Alcotest.test_case "gh#1205: let-constant weight checked"         `Quick test_branch_weights_let_constant_rejected;
+      Alcotest.test_case "gh#1205: constant weights summing to 1"       `Quick test_branch_weights_sum_to_one_ok;
+      Alcotest.test_case "gh#1205: within tolerance accepted"           `Quick test_branch_weights_within_tolerance_ok;
+      Alcotest.test_case "gh#1205: outside tolerance rejected"          `Quick test_branch_weights_outside_tolerance_rejected;
+      Alcotest.test_case "gh#1205: parameterised weights accepted"      `Quick test_branch_weights_parameterised_ok;
     ];
     "multi_source_transitions", [
       Alcotest.test_case "parser accepts `S + I --> I + I`"              `Quick test_multi_source_parses;

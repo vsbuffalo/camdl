@@ -45,6 +45,30 @@ one. A model that compiled before kept the later one, so deleting the earlier
 one keeps its behaviour.
 
 **Diagnostic.** ``error[E140]: `simulate { }` is declared twice``.
+## 2026-11-17 — constant destination weights must sum to 1
+
+**What.** A destination split `X --> { A : w_A, B : w_B } @ r` emits one flow
+per branch at `w_i × r`, so `X` leaves at `r × Σ w_i`. When every weight is a
+compile-time constant (numbers, arithmetic on them, `let` bindings of such) and
+the weights do not sum to 1 within `1e-9`, the transition is now rejected.
+Before, `I --> { R : 0.5, Q : 0.7 } @ gamma * I` compiled and drained `I` at
+`1.2 × gamma × I`, not the `gamma × I` written after `@`. Weights that depend on
+a parameter, a table, a forcing or the state are not checked; their sum scales
+the outflow (spec §9.1.2).
+
+**Migration.** Make the weights sum to 1, most simply by writing the last one as
+one minus the others:
+
+```
+recovery : I --> { R : 0.5, Q : 0.7 } @ gamma * I        # old: outflow 1.2 γI
+recovery : I --> { R : 0.5, Q : 1 - 0.5 } @ gamma * I    # new: outflow γI
+```
+
+To change the total outflow, change the rate after `@` (`@ 1.2 * gamma * I`).
+
+**Diagnostic.**
+`E423: transition 'recovery': the destination weights sum to
+1.2, not 1, …`.
 
 ## 2026-11-17 — the one-step calendar rule: a single month or year step in a date position is its calendar date
 
