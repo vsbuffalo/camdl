@@ -552,7 +552,7 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
     let sv = resolve_survey(&SurveyCtx {
         model,
         ir_version: IRV,
-        engine_version: ENGV,
+        engine: &runid::inputs::EngineIdentity::of_build(ENGV),
         stem: "sir",
         data: &data,
         eval_method: "pfilter",
