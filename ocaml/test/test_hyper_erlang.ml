@@ -386,6 +386,50 @@ let test_err_weight_out_of_range () =
         branch(label = typical, weight = 1.5, stages = 2, mean = tau_typ), \
         branch(label = prolonged, stages = 1, mean = tau_pro))")
 
+(* E225 reads its constant weights through the compiler's shared constant
+   evaluator ([const_value]). What it caught before must still be caught, and
+   what it accepted must still be accepted. *)
+let test_e225_sum_past_one_still_rejected () =
+  compile_expect_error_code ~code:"E225" ~contains:"clearance"
+    (polio_with_clearance
+       "clearance : I --> R via hyper_erlang(\
+        branch(label = a, weight = 0.6, stages = 2, mean = tau_typ), \
+        branch(label = b, weight = 0.6, stages = 1, mean = tau_pro), \
+        branch(label = c, stages = 1, mean = tau_pro))")
+
+let test_e225_in_range_constants_accepted () =
+  ignore (compile_ok
+    (polio_with_clearance
+       "clearance : I --> R via hyper_erlang(\
+        branch(label = a, weight = 0.3, stages = 2, mean = tau_typ), \
+        branch(label = b, weight = 1 / 2, stages = 1, mean = tau_pro), \
+        branch(label = c, stages = 1, mean = tau_pro))"))
+
+(* Constant spellings the old local folder did not see, so a weight of 1.5 or
+   more slipped through: a unit literal, a constant function, a `let`. *)
+let polio_with_let_and_clearance letline clearance =
+  Printf.sprintf
+    "time_unit = 'weeks\n\
+     compartments { S, I, R, D }\n\
+     parameters { beta : rate  p : probability  tau_typ : positive  tau_pro : positive }\n\
+     %s\n\
+     transitions {\n\
+    \  infection : S --> I @ beta * S * I / (S + I + R)\n\
+    \  %s\n\
+     }\n\
+     init { S = 990  I = 10 }\n" letline clearance
+
+let test_e225_other_constant_spellings_rejected () =
+  List.iter (fun (letline, w) ->
+    compile_expect_error_code ~code:"E225" ~contains:"clearance"
+      (polio_with_let_and_clearance letline
+         (Printf.sprintf
+            "clearance : I --> R via hyper_erlang(\
+             branch(label = typical, weight = %s, stages = 2, mean = tau_typ), \
+             branch(label = prolonged, stages = 1, mean = tau_pro))" w)))
+    [ ("", "1.5 'ratio"); ("", "exp(0.5)"); ("", "max(0.2, 1.5)");
+      ("let w = 1.5", "w"); ("", "-0.2") ]
+
 (* An inflow with MULTIPLE destinations into a hyper-staged source — `S --> I + W` —
    cannot be split across the entry branches: the lowering would weight-1 the
    sibling and double the source's drain. Rejected loudly (the single-destination
@@ -647,6 +691,12 @@ let () =
             test_err_branch_neither_mean_nor_rate;
           Alcotest.test_case "weight out of [0,1] → E225" `Quick
             test_err_weight_out_of_range;
+          Alcotest.test_case "E225: constant weights summing past 1" `Quick
+            test_e225_sum_past_one_still_rejected;
+          Alcotest.test_case "E225: in-range constants accepted" `Quick
+            test_e225_in_range_constants_accepted;
+          Alcotest.test_case "E225: unit, function, let, negated constants" `Quick
+            test_e225_other_constant_spellings_rejected;
           Alcotest.test_case "multi-dest inflow into staged source → E224" `Quick
             test_err_multidest_inflow_into_staged;
           Alcotest.test_case "branching inflow into staged source → E224 (no E503 cascade)" `Quick

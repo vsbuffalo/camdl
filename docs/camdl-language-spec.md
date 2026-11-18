@@ -2568,7 +2568,9 @@ does not send the remainder anywhere; it lowers the outflow, and a sum above 1
 raises it.
 
 - **Constant weights must sum to 1.** When every weight is a compile-time
-  constant — numbers, arithmetic on them, and `let` bindings of such — the
+  constant — numbers (with or without a unit literal such as `'ratio`),
+  arithmetic on them, the built-in math functions (`exp`, `log`, `sqrt`, …) and
+  `min`/`max`/`mod` applied to them, and unindexed `let` bindings of such — the
   compiler checks that the sum is within `1e-9` of 1 and otherwise rejects the
   transition (**E423**). The tolerance absorbs floating-point rounding
   (`0.7 + 0.2 + 0.1` is `0.9999999999999999`; `1/3` three times) and nothing a
