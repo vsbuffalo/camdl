@@ -421,19 +421,22 @@ sweep and the chain-starts rule. Its identity and its runners are built from
 that value, and `run_fit` destructures it with every field named; the command
 line itself is read only before it, so no argument reaches a runner except
 through the resolved value, the execution settings (`--parallel`, `--force`) or
-the label. The fit file is read once: every fit folder the run writes archives
-that text as `fit.toml.original`, with any problem-half value the command line
-set (`--allow-forcing-extrapolation`) written in, and takes its `fit_toml_hash`
-and config identity from the same text. Whether a resolved config belongs in the
-archive or in a file of its own is an open maintainer decision, kept behind one
-function (`ProblemFlags::stored_text`). A run-directory, label or run-id handle
-(`fit predict <leaf>`, `compare <leaf>`) recovers the problem from the archive
-and so runs under the override. A `fit.toml` handle names only the run the file
-alone makes, so it refuses a flag-made fit and names its leaf. A sweep point's
-folder archives the file's `[fixed]`, not the point's values, which are in its
-`fit.meta.json` (what `fit predict` and `compare` read). Every `fit run` input
-is classified in `input_class::FIT_RUN` and has a case in
-`rust/crates/cli/tests/fit_run_input_classes.rs`.
+the label. The fit file is read once, and every fit folder the run writes keeps
+two configs: `fit.toml.original`, that text byte for byte (its `fit_toml_hash`
+and the run's config identity are taken from it), and `fit.resolved.toml`, the
+configuration the folder's fits ran under
+([`resolved_config_text`](rust:cli::fit::run_config::resolved_config_text)): the
+text with every problem-half value the command line set
+(`--allow-forcing-extrapolation`) and the folder's own `[fixed]` (a sweep
+point's values) written in, keys sorted, marked as generated. Neither enters an
+identity. Every reader of a stored fit's config reads the resolved file: a
+run-directory, label or run-id handle (`fit predict <leaf>`, `compare <leaf>`)
+so runs under the override and at the sweep point's values, and `fit table`
+diffs it. A folder an older build wrote has none and is refused, naming the
+re-run that writes it; no reader falls back to `fit.toml.original`. A `fit.toml`
+handle names only the run the file alone makes, so it refuses a flag-made fit
+and names its leaf. Every `fit run` input is classified in `input_class::FIT_RUN`
+and has a case in `rust/crates/cli/tests/fit_run_input_classes.rs`.
 
 `pfilter`, `profile` and `survey` resolve their configurations the same way:
 [`ResolvedPfilterConfig`](rust:cli::pfilter_config::ResolvedPfilterConfig),
