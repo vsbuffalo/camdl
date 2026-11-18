@@ -55,11 +55,11 @@
     the model's own statement, so [W[p, q] * I[q] / N[q]] with a zero cell
     and an empty patch [q] contributes nothing, in either spelling, where
     the unfolded model would evaluate [0 / 0]. A lookup whose constant
-    index is out of range is left for the runtime's out-of-bounds policy.
-    The Rust test [gate_constant_fold_ab] checks, on a sparse-coupling model
-    in both spellings, that trajectories are identical with and without the
-    pass. Setting [CAMDL_NO_CONSTANT_FOLD] in the environment turns it
-    off. *)
+    index is out of range is left in place, for the runtime to report: the
+    only out-of-bounds policy is an error ([Ir.oob_policy]). The Rust test
+    [gate_constant_fold_ab] checks, on a sparse-coupling model in both
+    spellings, that trajectories are identical with and without the pass.
+    Setting [CAMDL_NO_CONSTANT_FOLD] in the environment turns it off. *)
 
 open Ir
 
@@ -150,8 +150,8 @@ and fold tbls (e : expr) : expr =
       | Const fi, Some arr ->
           let i = int_of_float (Float.floor fi) in
           if i >= 0 && i < Array.length arr then Const arr.(i)
-            (* OOB index into a literal table: leave it; the runtime's
-               out_of_bounds policy (Clamp/Wrap/Error) decides. *)
+            (* OOB index into a literal table: leave it for the runtime,
+               whose one out-of-bounds policy is an error. *)
           else TableLookup (name, [ Const fi ])
       | idx', _ -> TableLookup (name, [ idx' ]))
   | TableLookup (name, idxs) -> TableLookup (name, List.map (fold tbls) idxs)

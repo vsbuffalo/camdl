@@ -138,7 +138,7 @@ intervention: {
   base_name: string | null,          -- pre-expansion name (e.g. "vaccination" for "vaccination_child")
   schedule: intervention_schedule,
   actions: [action],
-  kind: "scenario" | "event"     -- "event" fires every substep; "scenario" is enable/disable-gated
+  kind: "scenario" | "event"     -- both fire at their schedule; "event" always, "scenario" when enabled
 }
 
 intervention_schedule :=

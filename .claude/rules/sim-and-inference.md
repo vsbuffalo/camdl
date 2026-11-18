@@ -106,7 +106,11 @@ for the Gillespie/ODE/discrete-time specifics. The key constraint: after a
 Gillespie intervention, propensities must be fully recomputed from the modified
 state; do not resume with remaining exponential time.
 
-`events {}` is the sister construct to `interventions {}` but fires every
-substep (`add()`, `transfer()`, `set()` actions); `balance {}` is the
-population-conservation constraint, applied last in each substep after
+`events {}` is the sister construct to `interventions {}` (`add()`,
+`transfer()`, `set()` actions). An event fires at its own schedule
+(`at = [...]`), like an intervention, but unconditionally: no scenario enables
+or disables it. Its actions are resolved against the start-of-step state and
+fused with the step's draw, where an intervention's are applied to the state
+after the step (`EffectBatch`, `rust/crates/sim/src/schedule.rs`). `balance {}`
+is the population-conservation constraint, applied last in each substep after
 transitions and events.

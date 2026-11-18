@@ -2270,8 +2270,9 @@ impl CompiledModel {
         let fire_times: Vec<Vec<f64>> = model.interventions.iter()
             .map(|iv| match iv.fire.schedule() {
                 // Reactive fire sources have no static schedule — their fire
-                // times are discovered at runtime (and the capability gate
-                // rejects reactive models before any backend runs).
+                // times are discovered at runtime by the reactive agenda
+                // (forward chain-binomial; every other backend rejects a
+                // reactive model at dispatch).
                 None => Vec::new(),
                 Some(ir::intervention::InterventionSchedule::AtTimes(ts)) => ts.clone(),
                 Some(ir::intervention::InterventionSchedule::AtTimesExpr(_)) => Vec::new(),

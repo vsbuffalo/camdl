@@ -161,8 +161,10 @@ pub enum TriggerThreshold {
 /// comparisons. A dedicated ADT rather than the shared `Expr`: it is
 /// boolean-valued *by construction* (so a non-boolean `when` is unrepresentable,
 /// not merely rejected), and its `observed(...)` leaves cannot leak into rate
-/// expressions. Evaluated by no backend yet — the capability gate rejects
-/// reactive models at dispatch (PR1).
+/// expressions. Evaluated by the forward chain-binomial backend's reactive
+/// agenda (`sim::reactive::ReactiveAgenda`); every other backend, and every
+/// inference method, rejects a reactive model at dispatch by the capability
+/// check (`REACTIVE_INTERVENTIONS`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TriggerExpr {
@@ -207,8 +209,11 @@ pub struct ReactiveTrigger {
 /// How an intervention's fire times are produced (gh#204). Orthogonal to
 /// [`InterventionKind`] (the toggling/structural axis): a reactive policy is
 /// `kind = Scenario, fire = Reactive(..)`. Splitting the fire source from the
-/// kind makes the illegal pairings unrepresentable — a scheduled time list on
-/// a reactive policy, or a trigger on an `Event`, cannot be constructed.
+/// kind makes one illegal pairing unrepresentable: a reactive policy cannot
+/// also carry a scheduled time list. The kind and the fire source are
+/// independent fields of [`Intervention`], so `kind = Event, fire =
+/// Reactive(..)` can be constructed; the compiler never emits it (a
+/// `reactive_interventions {}` policy lowers to `kind = Scenario`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FireSource {
@@ -216,16 +221,16 @@ pub enum FireSource {
     /// `Scenario` and `Event` interventions.
     Scheduled(InterventionSchedule),
     /// State/observation-triggered policy. Fire times are discovered at runtime
-    /// by the reactive agenda; no backend executes them yet — the capability
-    /// gate rejects reactive models at dispatch (PR1).
+    /// by the reactive agenda, which the forward chain-binomial backend runs;
+    /// every other backend rejects a reactive model at dispatch.
     Reactive(ReactiveTrigger),
 }
 
 impl FireSource {
     /// The static schedule, if this is a scheduled fire source. `Reactive`
     /// sources have no static schedule (their fire times are discovered at
-    /// runtime), so the fire-time machinery skips them — and the capability
-    /// gate rejects reactive models before any backend runs.
+    /// runtime), so the static fire-time machinery skips them; the reactive
+    /// agenda discovers them as the run proceeds.
     pub fn schedule(&self) -> Option<&InterventionSchedule> {
         match self {
             FireSource::Scheduled(s) => Some(s),
@@ -254,7 +259,8 @@ pub enum InterventionKind {
     /// `interventions {}` — toggled by enable/disable/set/scale scenarios.
     #[default]
     Scenario,
-    /// `events {}` — fires unconditionally every substep.
+    /// `events {}` — fires at its schedule unconditionally: no scenario
+    /// enables or disables it.
     Event,
 }
 

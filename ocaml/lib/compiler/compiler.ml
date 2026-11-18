@@ -277,7 +277,7 @@ let splice_quantities (diags : Diagnostics.t) ~(file : string)
       Diagnostics.error diags ~code:"E340" ~loc:file_loc
         ~message:(Printf.sprintf
           "the quantities file '%s' declares no quantities" file)
-        ~hint:"--quantities REPLACES the model's own `quantities { }` block, so \
+        ~hint:"--quantities replaces the model's own `quantities { }` block, so \
                an empty vocabulary would report nothing; drop the flag to use \
                the model's own block"
         ();
@@ -623,9 +623,12 @@ let diagnose_validate_error ctx (err : Validate.error) : Diagnostics.diagnostic 
 
 (** Run the structural validation of the expanded model.
 
-    It runs before the dimension checker, which fails on an unknown
-    parameter, so that such a model gets "unknown parameter 'foo'" rather
-    than an internal error. *)
+    It runs before the dimension checker, and the compile stops on its
+    errors. The dimension checker does not check that a name exists: an
+    unknown parameter is an unconstrained dimension variable to it
+    ([Dimcheck], the [Param] case), so on a structurally broken model it
+    would judge dimensions with the defect in place. Stopping here reports
+    "unknown parameter 'foo'" alone. *)
 let run_validate (d : compile_detail) : Diagnostics.diagnostic list =
   match Validate.validate d.model with
   | Ok () -> []
@@ -814,8 +817,9 @@ let maybe_licm (m : Ir.model) : Ir.model =
    validate → dimcheck → lint → autodiff-transitions, in that order, with the
    short-circuit structure [compile] and `check` must share. Each stage emits
    its diagnostics into [d.ctx.diags] (the accumulator [has_errors]/[render]
-   read); the sequence stops after Validate (dimcheck fails on unknown params,
-   so a structural error must halt first), and after dimcheck+lint / autodiff
+   read); the sequence stops after Validate (dimcheck does not check that
+   names exist, so a structural error must halt first; see [run_validate]),
+   and after dimcheck+lint / autodiff
    on any Error-severity diagnostic.
 
    Returns [Some (qdims, transitions)] on the all-clear path — the resolved
@@ -1063,7 +1067,8 @@ let write_depfile ~(path : string) ~(model : string)
 
    The pipeline short-circuits exactly as [compile] does: a structural
    [Validate] error stops before dimcheck (Validate runs first because
-   dimcheck fails on unknown params). On the no-error path, all of
+   dimcheck does not check that names exist; see [run_validate]). On the
+   no-error path, all of
    dimcheck, lint, and autodiff run, so non-blocking warnings/lints (e.g.
    L402 on a clean-compiling model) are captured.
 
