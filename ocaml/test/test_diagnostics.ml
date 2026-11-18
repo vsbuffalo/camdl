@@ -800,6 +800,95 @@ let test_pending_errors_survive_front_end_stop () =
   Alcotest.(check bool) "the comma error is reported" true
     (comma_error_reported ds)
 
+(* ── gh#1213: scenario, forcing, table and no-net-effect diagnostics are
+   located ───────────────────────────────────────────────────────────────────
+
+   These used to be reported with no source location (`line: 0` in the JSON),
+   though the scenario declaration, the transition, the forcing and the table
+   all carry one. Each case states the line its diagnostic must point at. *)
+
+let sir_with ~transitions ~extra = Printf.sprintf {camdl|time_unit = 'days
+compartments { S, I, R }
+let N = S + I + R
+parameters {
+  beta  : rate  in [0.001, 2.0]
+  gamma : rate  in [0.001, 1.0]
+}
+%s
+transitions {
+  infection : S --> I  @ beta * S * (I / N)
+  %s
+}
+init {
+  S = 990
+  I = 10
+}
+simulate {
+  from = 0 'days
+  to   = 80 'days
+}
+|camdl} extra transitions
+
+let lines_of_code code src =
+  Compiler.collect_diagnostics ~name:"m" ~filename:"m.camdl" src
+  |> List.filter (fun (d : Diagnostics.diagnostic) -> d.code = code)
+  |> List.map (fun (d : Diagnostics.diagnostic) -> d.loc.line)
+  |> List.sort_uniq compare
+
+let check_located ~code ~line src () =
+  Alcotest.(check (list int)) (code ^ " points at its declaration") [line]
+    (lines_of_code code src)
+
+let recovery = "recovery  : I --> R  @ gamma * I"
+
+let located_cases = [
+  "E310 no net effect, at the transition", "E310", 11,
+  sir_with ~extra:"" ~transitions:"recovery : I + S --> I + S @ gamma * I";
+  "E268 scenario set, at the scenario", "E268", 22,
+  sir_with ~extra:"" ~transitions:recovery
+  ^ "scenarios {\n  baseline { set = { beta = 0.3\n    gammma = 0.1 } }\n}\n";
+  "E354 scenario extends, at the scenario", "E354", 22,
+  sir_with ~extra:"" ~transitions:recovery
+  ^ "scenarios {\n  child { extends = parentt }\n}\n";
+  "E291 reserved scenario name, at the scenario", "E291", 22,
+  sir_with ~extra:"" ~transitions:recovery
+  ^ "scenarios {\n  fitted { set = { beta = 0.3 } }\n}\n";
+  "E312 forcing argument, at the forcing", "E312", 8,
+  sir_with ~transitions:recovery
+    ~extra:"forcing { school : periodic 'ratio { period = 365 'count  \
+            values = [1.0, 0.5] } }";
+  "E302 table cell, at the table", "E302", 9,
+  sir_with ~transitions:recovery
+    ~extra:"dimensions { age = [young, old] }\ntables { mu : age 'count = [beta, beta] }";
+]
+
+(* No diagnostic the fixtures produce is unlocated, except for the codes
+   listed here, which no fix has reached yet. *)
+let unlocated_allowed = [
+  "E200";  (* a data file that cannot be read *)
+  "E310";  (* a dimension exponent too large to represent *)
+  "E314";  (* an intervention action's dimension *)
+  "E315";  (* an intervention or schedule time's dimension *)
+  "I300";  (* an undetermined dimension *)
+  "W104";  (* a data file's header *)
+]
+
+let test_fixture_diagnostics_located () =
+  let files = camdl_files_under ~skip_dirs:["data"] diagnostics_dir in
+  let offenders =
+    List.concat_map (fun path ->
+      Compiler.collect_diagnostics ~name:(Filename.basename path)
+        ~filename:path (read_file path)
+      |> List.filter (fun (d : Diagnostics.diagnostic) ->
+           d.loc.line = 0 && not (List.mem d.code unlocated_allowed))
+      |> List.map (fun (d : Diagnostics.diagnostic) ->
+           Printf.sprintf "%s: %s %s" (fixture_name path) d.code d.message))
+      files
+  in
+  if offenders <> [] then
+    Alcotest.failf "diagnostics with no source location:\n  %s"
+      (String.concat "\n  " offenders)
+
 (* ── Driver ──────────────────────────────────────────────────────────────── *)
 
 let () =
@@ -817,6 +906,12 @@ let () =
       Alcotest.test_case "scanner flags code-shaped non-codes (gh#920)"
         `Quick test_invalid_code_scanner;
     ];
+    "located-gh1213",
+      (List.map (fun (name, code, line, src) ->
+         Alcotest.test_case name `Quick (check_located ~code ~line src))
+         located_cases
+       @ [ Alcotest.test_case "fixture diagnostics have a location" `Quick
+             test_fixture_diagnostics_located ]);
     "pending-errors-gh1210", [
       Alcotest.test_case "kept when a later syntax error stops the parse"
         `Quick test_pending_errors_survive_syntax_error;

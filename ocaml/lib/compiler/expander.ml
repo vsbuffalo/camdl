@@ -1150,6 +1150,19 @@ let obs_loc ctx name =
     ~name_of:(fun (o : obs_decl) -> o.oname)
     ~loc_of:(fun o -> o.oloc) name
 
+(* A forcing by IR name (an indexed forcing expands to one per stratum), and a
+   table by any of the names its declaration gives it. *)
+let forcing_loc ctx name =
+  find_decl_loc ctx ~decls:ctx.func_decls
+    ~name_of:(fun (f : func_decl) -> f.fname)
+    ~loc_of:(fun f -> f.fspan) name
+
+let table_loc ctx name =
+  match List.find_opt (fun (td : table_decl) -> List.mem name td.tnames)
+          ctx.table_decls with
+  | Some td -> diag_loc_of_ast_ctx ctx td.tloc
+  | None -> Diagnostics.no_loc
+
 (* Scheduled interventions and events share [intervention_decl] and both lower
    into `model.interventions`, so one lookup spans both blocks (gh#461). *)
 let interv_loc ctx name =
@@ -6175,7 +6188,7 @@ let expand_transitions_counted ctx =
           if stoich = [] && (src_names <> [] || dst_names <> []) then begin
             Diagnostics.error ctx.diags
               ~code:"E310"
-              ~loc:Diagnostics.no_loc
+              ~loc:(diag_loc_of_ast_ctx ctx tr.trloc)
               ~message:(Printf.sprintf
                 "transition '%s' has no net effect: sources and destinations cancel"
                 tr.trname)
@@ -13690,6 +13703,15 @@ let suggest_scenario_name (candidates : string list) (target : string) : string 
   |> List.filter (fun (_, d) -> d <= 3)
   |> (function (name, _) :: _ -> Some name | [] -> None)
 
+(* The source span of the scenario declared as [name]: where every diagnostic
+   about that scenario points. [Diagnostics.no_loc] only for a name no
+   scenario declares. *)
+let scenario_loc ctx name =
+  match List.find_opt (fun (sd : scenario_decl) -> sd.scname = name)
+          ctx.scenario_decls with
+  | Some sd -> diag_loc_of_ast_ctx ctx sd.scspan
+  | None -> Diagnostics.no_loc
+
 (** Merge parent fields under the child's. For each field, apply the
     rule documented in the plan:
     - label / t_end: child overrides parent (if child specified)
@@ -13721,7 +13743,8 @@ let merge_fields ctx ~child ~parent ~parent_name =
      contributes more entries. *)
   let changed name cl ml =
     if ml <> cl then
-      Diagnostics.warning ctx.diags ~code:"W310" ~loc:Diagnostics.no_loc
+      Diagnostics.warning ctx.diags ~code:"W310"
+        ~loc:(scenario_loc ctx child.rs_name)
         ~message:(Printf.sprintf
           "scenario '%s' inherits %s from '%s': resolved %s = [%s] \
            (child declared [%s])"
@@ -13794,7 +13817,8 @@ let resolve_parents ctx (decl_map : (string * scenario_decl) list) (own : resolv
     | Some parent_name ->
       if List.mem parent_name visiting then begin
         let chain = (scen.rs_name :: visiting |> List.rev) @ [parent_name] in
-        Diagnostics.error ctx.diags ~code:"E353" ~loc:Diagnostics.no_loc
+        Diagnostics.error ctx.diags ~code:"E353"
+          ~loc:(scenario_loc ctx scen.rs_name)
           ~message:(Printf.sprintf "scenario extends cycle: %s"
                       (String.concat " → " chain))
           ~hint:"remove one of the `extends` in the cycle."
@@ -13802,7 +13826,8 @@ let resolve_parents ctx (decl_map : (string * scenario_decl) list) (own : resolv
         { scen with rs_parent = None }   (* stop descent after error *)
       end
       else if depth >= max_depth then begin
-        Diagnostics.error ctx.diags ~code:"E355" ~loc:Diagnostics.no_loc
+        Diagnostics.error ctx.diags ~code:"E355"
+          ~loc:(scenario_loc ctx scen.rs_name)
           ~message:(Printf.sprintf
             "scenario '%s' extends chain exceeds %d — refactor, or submit a \
              feature request for multi-parent composition"
@@ -13821,7 +13846,8 @@ let resolve_parents ctx (decl_map : (string * scenario_decl) list) (own : resolv
             | Some s -> Printf.sprintf "Did you mean '%s'?" s
             | None -> "No scenario by that name is defined in this model."
           in
-          Diagnostics.error ctx.diags ~code:"E354" ~loc:Diagnostics.no_loc
+          Diagnostics.error ctx.diags ~code:"E354"
+            ~loc:(scenario_loc ctx scen.rs_name)
             ~message:(Printf.sprintf "scenario '%s' extends unknown scenario '%s'"
                         scen.rs_name parent_name)
             ~hint:hint
@@ -13910,7 +13936,7 @@ let expand_scenarios ctx : Ir.preset list =
   let report_unknown ~code ~field ~scope ~scenario_name name names_tbl =
     Diagnostics.error ctx.diags
       ~code
-      ~loc:Diagnostics.no_loc
+      ~loc:(scenario_loc ctx scenario_name)
       ~message:(Printf.sprintf
         "scenario '%s': %s names unknown %s '%s'"
         scenario_name field scope name)
@@ -13944,7 +13970,7 @@ let expand_scenarios ctx : Ir.preset list =
     if name = "fitted" then
       Diagnostics.error ctx.diags
         ~code:"E291"
-        ~loc:Diagnostics.no_loc
+        ~loc:(diag_loc_of_ast_ctx ctx sd.scspan)
         ~message:(Printf.sprintf
           "scenario name '%s' is reserved" name)
         ~hint:"`fitted` labels the no-overlay row (the fitted model, no \
@@ -14111,7 +14137,8 @@ let expand_scenarios ctx : Ir.preset list =
        (* Selected sets differ iff some listed time lies in (lo, hi]. *)
        let changes = List.exists (fun a -> a > lo && a <= hi) ats in
        if not changes then
-         Diagnostics.warning ctx.diags ~code:"W106" ~loc:Diagnostics.no_loc
+         Diagnostics.warning ctx.diags ~code:"W106"
+           ~loc:(diag_loc_of_ast_ctx ctx sd.scspan)
            ~message:(Printf.sprintf
              "scenario '%s' sets `to = %g`, but the model emits only the times \
               listed in `at = [...]` and none of them lies between the model \
