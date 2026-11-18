@@ -890,12 +890,31 @@ is a failure. The exit status follows:
 | an eligible stream fails while it is produced (e.g. refused a forecast) | 1    |
 
 The manifest — `predictive.json` for the free-forward and one-step modes,
-`forecast.json` (`camdl.forecast/v2`) for a forecast — lists `produced` (leaf
+`forecast.json` (`camdl.forecast/v3`) for a forecast — lists `produced` (leaf
 names), `skipped` (`{"stream", "reason"}`) and `failed`
 (`{"stream", "reason"}`), so a consumer reads completeness off the artifact
 rather than the exit status. A forecast also skips an eligible stream none of
 whose periods ends within the reach, with the reason `no_target_within_horizon`,
 and fails it instead when `--stream` named it.
+
+`forecast.json` also records what made the forecast and what it holds:
+
+- `engine_version`: the binary that wrote it, as `run.json` records it, beside
+  the `run_id` whose draws it ran.
+- `run_extent`: the model's `simulate { to }` (`model_end`), the end the run
+  went to (`run_end`, the latest target end when that is later) and whether it
+  was `extended` (D49). Interventions are planned to `run_end`; nothing else is
+  extended.
+- `samples`: what `forecast-samples.tsv` holds. Each posterior draw contributes
+  `per_draw` joint samples (5), evenly strided over its `of_particles`
+  particles; each sample is one particle's trajectory across every target. The
+  bands and means in `forecast/` use every particle of every draw.
+- `held_out`: per stream and per file (`training` for the rows after the
+  training prefix under `holdout_after`, `holdout` for a `[data.holdout]` file),
+  the number of held-out rows and their row digest. They only name the targets
+  they correspond to; nothing filters them.
+- `chain_selection`, under a chain selection: the block `predictive.json`
+  carries.
 
 A _deterministic failure_ is a fact about the model as written that holds for
 whatever produced it regardless of how often it occurs — an unresolvable
