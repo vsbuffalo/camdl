@@ -13282,6 +13282,32 @@ simulate { from = 0 'days  to = 10 'days }
   Alcotest.(check bool) "no E001 (no exception escaped)" false (List.mem "E001" codes);
   Alcotest.(check bool) "the missing file is reported (E200)" true (List.mem "E200" codes)
 
+(* gh#1228, the same crash at an intervention's or event's `add`/`set` target:
+   the target-membership check built its hint with `List.hd` of the
+   compartment's cells, which are none when the dimension's file is missing. *)
+let test_action_target_on_unread_dimension_reports_the_file () =
+  let model block = Printf.sprintf {|
+time_unit = 'days
+compartments { S, I }
+dimensions { patch = read("data/missing-for-action-test.tsv", column = "patch") }
+stratify(by = patch)
+parameters { gamma : rate in [0.01, 1.0] }
+transitions {
+  recovery[p in patch] : I[p] --> S[p] @ gamma * I[p]
+}
+%s
+simulate { from = 0 'days  to = 10 'days }
+|} block in
+  List.iter (fun (what, block) ->
+    let diags = Compiler.collect_diagnostics ~name:"action_unread_dim" (model block) in
+    let codes = List.map (fun (d : Diagnostics.diagnostic) -> d.code) diags in
+    Alcotest.(check bool) (what ^ ": no E001 (no exception escaped)") false
+      (List.mem "E001" codes);
+    Alcotest.(check bool) (what ^ ": the missing file is reported (E200)") true
+      (List.mem "E200" codes))
+    [ ("intervention add", "interventions { seed : add(I[north], 1) at [1] }");
+      ("event set", "events { zap : { I[north] = 0  at = [1] } }") ]
+
 (* ── gh#733: an init entry may read another compartment's initial value ──────
    The entries are evaluated in dependency order against the partially built
    state, so `S = N0 - I` reads the `I` that was just seeded. Two things follow
@@ -17110,6 +17136,7 @@ let () =
       Alcotest.test_case "concrete cell init S[child] ok" `Quick test_init_concrete_cell_ok;
       Alcotest.test_case "single diagnostic for one root cause" `Quick test_init_bare_stratified_single_diagnostic;
       Alcotest.test_case "init on an unread dimension reports the file" `Quick test_init_on_unread_dimension_reports_the_file;
+      Alcotest.test_case "action target on an unread dimension reports the file" `Quick test_action_target_on_unread_dimension_reports_the_file;
     ];
     "init_laws", [
       Alcotest.test_case "all four laws compile" `Quick
