@@ -2925,6 +2925,25 @@ copies are named like any indexed family, with the stage level last
 With `stages = 1` the source is not staged and the transition is an ordinary
 second exit: the same model text compiles at every stage count.
 
+*Families over compartments.* A transition family bound over the compartment
+set is a competing exit for each staged member and an ordinary exit for the
+rest, so background mortality or ageing is written once for every compartment:
+
+```camdl preamble=via-competing
+transitions {
+  infection[a in age] : S[a] --> E[a] @ beta * S[a]
+  latency[a in age]   : E[a] --> I[a] via erlang(stages = 3, rate = sigma)
+  bg[a in age, c in compartments] : c[a] --> @ mu * c[a]
+  ageing[(a, a_next) in consecutive(age), c in compartments]
+    : c[a] --> c[a_next] @ ar * c[a]
+}
+```
+
+The members for `c = E` expand per stage (`bg_pre_E_s1`, …; `ageing` keeps the
+stage), and `incidence(bg[a, E])` reads all of them. The refusals below apply
+to the staged member; leave it out of the family with `where c != E` to write
+its exit separately.
+
 Refused, each with its own diagnostic: a competing exit with
 `overdispersed(...)` noise (`E361` — the noise multiplier is drawn per
 transition, so the variance of the total would depend on the stage count); one

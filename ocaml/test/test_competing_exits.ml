@@ -495,6 +495,119 @@ let test_same_text_at_one_and_three_stages () =
     ignore (compile_ok ~dim_check:true (age_src ~stages ~extra:treat ~obs ())))
     [ 1; 3 ]
 
+(* ── Families over compartments ──────────────────────────────────────────── *)
+
+(* A family bound over the compartment set, beside a staged `E`. *)
+let family_src ?(obs = "") ~stages family =
+  Printf.sprintf
+    "time_unit = 'days\n\
+     dimensions { age = [pre, sch] }\n\
+     compartments { S, E, I }\n\
+     stratify(by = age)\n\
+     parameters {\n\
+    \  beta  : rate in [0.001, 2.0]\n\
+    \  sigma : rate in [0.01, 1.0]\n\
+    \  mu    : rate in [0.0, 1.0]\n\
+    \  ar    : rate in [0.0, 1.0]\n\
+    \  K     : count in [1, 100]\n\
+    \  k_nb  : positive in [0.1, 100]\n\
+     }\n\
+     transitions {\n\
+    \  infection[a in age] : S[a] --> E[a] @ beta * S[a]\n\
+    \  latency[a in age]   : E[a] --> I[a] via erlang(stages = %d, rate = sigma)\n\
+     %s\
+     }\n\
+     init { S[pre] = 990  S[sch] = 900  E[pre] = 5  E[sch] = 5 }\n\
+     %s\
+     simulate { from = 0 'days  to = 160 'days }\n"
+    stages family obs
+
+let bg = "  bg[a in age, c in compartments] : c[a] --> @ mu * c[a]\n"
+
+(* The member of the family for the staged compartment is a competing exit,
+   one copy per stage with the linear per-stage rate; the other members are
+   ordinary transitions. *)
+let test_family_over_compartments_expands_its_staged_member () =
+  let m = compile_ok (family_src ~stages:3 bg) in
+  let mu_times cell = Ir.BinOp { op = Ir.Mul; left = Ir.Param "mu"; right = Ir.Pop cell } in
+  List.iter (fun age ->
+    List.iter (fun s ->
+      let cell = Printf.sprintf "E_%s_%s" age s in
+      let t = transition m (Printf.sprintf "bg_%s_E_%s" age s) in
+      Alcotest.(check (list (pair string int))) (t.Ir.name ^ ": drains its stage")
+        [ (cell, -1) ] (stoich t);
+      Alcotest.(check bool) (t.Ir.name ^ ": rate is mu * " ^ cell) true
+        (t.Ir.rate = mu_times cell))
+      [ "s1"; "s2"; "s3" ];
+    List.iter (fun c ->
+      let cell = Printf.sprintf "%s_%s" c age in
+      let t = transition m (Printf.sprintf "bg_%s_%s" age c) in
+      Alcotest.(check (list (pair string int))) (t.Ir.name ^ ": ordinary exit")
+        [ (cell, -1) ] (stoich t);
+      Alcotest.(check bool) (t.Ir.name ^ ": rate is mu * " ^ cell) true
+        (t.Ir.rate = mu_times cell))
+      [ "S"; "I" ])
+    [ "pre"; "sch" ];
+  Alcotest.(check bool) "no unexpanded member for E" false
+    (List.mem "bg_pre_E" (transition_names m))
+
+(* Ageing written once for every compartment keeps the stage of the staged one. *)
+let test_family_over_compartments_keeps_the_stage_within_a_compartment () =
+  let m = compile_ok (family_src ~stages:3
+    "  ageing[(a, an) in consecutive(age), c in compartments] : c[a] --> c[an] @ ar * c[a]\n") in
+  List.iter (fun s ->
+    Alcotest.(check (list (pair string int))) ("ageing_pre_E_" ^ s)
+      [ ("E_pre_" ^ s, -1); ("E_sch_" ^ s, 1) ]
+      (stoich (transition m ("ageing_pre_E_" ^ s))))
+    [ "s1"; "s2"; "s3" ];
+  Alcotest.(check (list (pair string int))) "ageing_pre_S"
+    [ ("S_pre", -1); ("S_sch", 1) ] (stoich (transition m "ageing_pre_S"))
+
+(* A nonlinear rate through the binder is allocated in proportion to
+   occupancy, and sums to the written rate, an empty compartment included. *)
+let test_family_over_compartments_nonlinear_rate () =
+  let m = compile_ok (family_src ~stages:3
+    "  bg[a in age, c in compartments] : c[a] --> @ mu * c[a] * K / (K + c[a])\n") in
+  let stages = [ "s1"; "s2"; "s3" ] in
+  List.iter (fun (e_pre : float list) ->
+    let pops = List.map2 (fun s v -> ("E_pre_" ^ s, v)) stages e_pre in
+    let total = List.fold_left ( +. ) 0.0 e_pre in
+    let written = 0.5 *. total *. 20.0 /. (20.0 +. total) in
+    let rates = List.map (fun s ->
+      eval ~pops ~params:[ ("mu", 0.5); ("K", 20.0) ] m
+        (transition m ("bg_pre_E_" ^ s)).Ir.rate) stages in
+    Alcotest.(check (float 1e-12)) "stage rates sum to the written rate"
+      written (List.fold_left ( +. ) 0.0 rates);
+    List.iter2 (fun r n ->
+      Alcotest.(check (float 1e-12)) "stage rate is proportional to occupancy"
+        (if total > 0.0 then written *. n /. total else 0.0) r) rates e_pre)
+    [ [ 3.0; 1.0; 1.0 ]; [ 0.0; 0.0; 0.0 ] ]
+
+(* A flow reference to the staged member reads its stage copies; one to an
+   unstaged member reads the single transition. *)
+let test_family_over_compartments_flow_reference () =
+  let obs c = obs_block ~index:"[a in age]" ~cols:"age : dim, "
+      (Printf.sprintf "incidence(bg[a, %s])" c) in
+  Alcotest.(check bool) "incidence(bg[a, E]) sums the stage copies" true
+    (projections (compile_ok (family_src ~stages:3 ~obs:(obs "E") bg))
+     = [ flow_sum [ "bg_pre_E_s1"; "bg_pre_E_s2"; "bg_pre_E_s3" ];
+         flow_sum [ "bg_sch_E_s1"; "bg_sch_E_s2"; "bg_sch_E_s3" ] ]);
+  Alcotest.(check bool) "incidence(bg[a, S]) is the single transition" true
+    (projections (compile_ok (family_src ~stages:3 ~obs:(obs "S") bg))
+     = [ Ir.CumulativeFlow "bg_pre_S"; Ir.CumulativeFlow "bg_sch_S" ])
+
+(* The same family compiles at one stage, where nothing is staged. *)
+let test_family_over_compartments_at_one_stage () =
+  let m = compile_ok (family_src ~stages:1 bg) in
+  Alcotest.(check (list (pair string int))) "bg_pre_E is an ordinary exit"
+    [ ("E_pre", -1) ] (stoich (transition m "bg_pre_E"))
+
+(* The refusals of a written competing exit apply to the staged member. *)
+let test_family_over_compartments_overdispersed_is_refused () =
+  expect_error ~code:"E361" ~mentions:[ "bg"; "`c = E`"; "where c != E" ]
+    (family_src ~stages:3
+       "  bg[a in age, c in compartments] : c[a] --> @ overdispersed(mu * c[a], k_nb)\n")
+
 (* ── Refusals ────────────────────────────────────────────────────────────── *)
 
 let test_overdispersed_exit_is_refused () =
@@ -606,6 +719,19 @@ let () =
            test_one_stage_is_an_ordinary_second_exit;
          Alcotest.test_case "same text at stages = 1 and stages = 3" `Quick
            test_same_text_at_one_and_three_stages ]);
+      ("families over compartments",
+       [ Alcotest.test_case "staged member is a competing exit" `Quick
+           test_family_over_compartments_expands_its_staged_member;
+         Alcotest.test_case "a move within the compartment keeps the stage" `Quick
+           test_family_over_compartments_keeps_the_stage_within_a_compartment;
+         Alcotest.test_case "nonlinear rate sums to the written rate" `Quick
+           test_family_over_compartments_nonlinear_rate;
+         Alcotest.test_case "flow reference reads the stage copies" `Quick
+           test_family_over_compartments_flow_reference;
+         Alcotest.test_case "same text at stages = 1" `Quick
+           test_family_over_compartments_at_one_stage;
+         Alcotest.test_case "overdispersed staged member → E361" `Quick
+           test_family_over_compartments_overdispersed_is_refused ]);
       ("refusals",
        [ Alcotest.test_case "overdispersed exit → E361" `Quick
            test_overdispersed_exit_is_refused;

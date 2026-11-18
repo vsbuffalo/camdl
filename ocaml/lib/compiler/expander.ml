@@ -1879,6 +1879,18 @@ let via_spec_of_call ctx (tr : transition_decl) ((law, args) : via_call)
 let has_source (tr : transition_decl) (comp : string) : bool =
   List.exists (fun (c, _) -> c = comp) tr.trsrc
 
+(** W107: a movement out of the staged compartment [src] into a different
+    staged compartment [dst] enters [dst] at stage 1. [what] names the
+    construct that moves the individuals ("transition 'early'"). *)
+let warn_dwell_restart ctx ~loc ~(what : string) ~(src : string) ~(dst : string) =
+  Diagnostics.warning ctx.diags ~code:"W107" ~loc
+    ~message:(Printf.sprintf
+      "%s moves individuals from the staged compartment '%s' into the staged \
+       compartment '%s': this movement restarts '%s' at stage 1"
+      what src dst dst)
+    ~hint:"use explicit `stage(...)` endpoints if continuation is intended"
+    ()
+
 (* Append a stage index to every destination reference to the staged
    compartment [comp] that supplies its [n_pre] pre-staging indices and no
    stage: `S[a] --> I[a]` becomes `I[a, <stage>]`. Once the compartment is
@@ -2510,16 +2522,8 @@ let lower_via_transitions ctx =
           in
           List.iter (fun dst ->
             if dst <> src && List.mem dst erlang_staged then
-              Diagnostics.warning ctx.diags ~code:"W107"
-                ~loc:(diag_loc_of_ast_ctx ctx t.trloc)
-                ~message:(Printf.sprintf
-                  "transition '%s' moves individuals from the staged \
-                   compartment '%s' into the staged compartment '%s': this \
-                   movement restarts '%s' at stage 1"
-                  t.trname src dst dst)
-                ~hint:"use explicit `stage(...)` endpoints if continuation is \
-                       intended"
-                ())
+              warn_dwell_restart ctx ~loc:(diag_loc_of_ast_ctx ctx t.trloc)
+                ~what:(Printf.sprintf "transition '%s'" t.trname) ~src ~dst)
             (List.sort_uniq compare dests)
         in
         ctx.via_transitions <- (chain_tr.trname, tr.trname) :: ctx.via_transitions;
@@ -3443,6 +3447,28 @@ let dims_of_index_bindings (bs : index_binding list) : string list =
 let stage_expansion ctx (tname : string) : residence option =
   List.find_opt (fun (r : residence) -> List.mem tname r.res_exits) ctx.residences
 
+(** The residence of compartment [comp], when a [via erlang] law with more
+    than one stage staged it. *)
+let residence_of ctx (comp : string) : residence option =
+  List.find_opt (fun (r : residence) -> r.res_compartment = comp) ctx.residences
+
+(** Whether [items], the indices written on a reference to the staged
+    compartment of [r], make it a residence reference: every population
+    dimension indexed and no stage. *)
+let is_residence_ref (r : residence) (items : index_item list) : bool =
+  List.length items = r.res_n_pop
+  && not (List.exists (function
+       | INamed (d, _) -> d = r.res_stage_dim
+       | IPosn _ -> false) items)
+
+(** The stage index to append to a residence reference written with [items],
+    named when the reference names its dimensions. *)
+let stage_index_item (r : residence) (items : index_item list) (level : string)
+    : index_item =
+  let e = EIdent (level, dummy_loc) in
+  if List.exists (function INamed _ -> true | IPosn _ -> false) items
+  then INamed (r.res_stage_dim, e) else IPosn e
+
 (** The binders a transition was declared with: its binders without the stage
     binder the [via] lowering appended to a transition it expanded per
     stage. *)
@@ -3473,8 +3499,22 @@ let transition_dims ctx tname : string list =
     declared. *)
 let flow_members ctx ~(tname : string) (concrete : string) : string list =
   match stage_expansion ctx tname with
-  | None -> [ concrete ]
   | Some r -> List.map (fun level -> concrete ^ "_" ^ level) r.res_stage_levels
+  | None ->
+    (* A family over the compartment set has stage copies for its staged
+       members only ([binder_stage_copies]), so whether [concrete] is one is
+       read from the names the family expanded to. *)
+    let emitted =
+      Option.value ~default:[] (List.assoc_opt tname ctx.emitted_transitions) in
+    if List.mem concrete emitted then [ concrete ]
+    else
+      let copies_over (r : residence) =
+        let names = List.map (fun level -> concrete ^ "_" ^ level) r.res_stage_levels in
+        if List.for_all (fun n -> List.mem n emitted) names then Some names else None
+      in
+      match List.find_map copies_over ctx.residences with
+      | Some names -> names
+      | None -> [ concrete ]
 
 (** Declared dimensions of an observation stream, by name. Like
     [transition_dims], no accessor existed. *)
@@ -5266,6 +5306,17 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
        cell. Without the guard it fell through to name-mangling (`E_adult`)
        and was then E100'd against a synthetic compartment the user never
        wrote. [partial_index_error] is shared with the projection head. *)
+    (match residence_of ctx base_name with
+     | Some r when r.res_n_pop > 0 && is_residence_ref r items ->
+       (* A residence reference read as a value is the sum over its stages.
+          The `via` lowering rewrites the ones written with the compartment's
+          own name; this is the same sum for one reached through a
+          `c in compartments` binder. *)
+       let v = r.res_stage_dim ^ "_s" in
+       let staged =
+         EIndex (name, items @ [ stage_index_item r items v ], l) in
+       resolve_expr ctx env (ESum (v, r.res_stage_dim, None, staged, l))
+     | _ ->
     if empty_index_error ctx ~loc:idx_loc ~base:base_name ~items
        || partial_index_error ctx env ~loc:idx_loc ~base:base_name ~items then
       Ir.Const 0.0  (* placeholder — keep collecting diagnostics this pass *)
@@ -5275,7 +5326,7 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
                   ~dims:(comp_dims ctx base_name) items in
     let idx_vals = List.map (index_item_to_str env) items in
     let concrete = String.concat "_" (base_name :: idx_vals) in
-    resolve_ident_name ctx concrete ~loc:idx_loc
+    resolve_ident_name ctx concrete ~loc:idx_loc)
   )
   | EBinOp (op, l, r) ->
     (* A comparison with model time compares `t` with a date
@@ -6443,6 +6494,111 @@ let check_branch_weights ctx (tr : transition_decl) =
              the rate after `@`" sum sum)
       end
 
+(** The stage copies of one member of a transition family bound over the
+    compartment set, when that member's source is a staged compartment
+    (proposal 2026-11-17-unified-staged-residence, "Families over
+    compartments").
+
+    In `bg[a in age, c in compartments] : c[a] --> @ mu * c[a]` the member
+    with `c = E`, where `E` has an Erlang dwell, is a competing exit from `E`:
+    it becomes one transition per stage, exactly as the `via` lowering expands
+    an exit written with the compartment's own name ([competing_stage_rate],
+    [stage_dest]). The lowering cannot do it, because which compartment `c`
+    stands for is known only per member. Every other member is an ordinary
+    transition and gives [None].
+
+    Each copy is returned with the environment to expand it under: the
+    member's, extended with the stage. The stage binder comes after the
+    family's own, so the expanded name ends in the stage level
+    (`bg_pre_E_s1`). A member the rules refuse reports the diagnostic of the
+    corresponding written exit and gives no copies. *)
+let binder_stage_copies ctx (tr : transition_decl) env
+    : (transition_decl * (string * string) list) list option =
+  let through_binder (c, items) =
+    if not (List.exists (function IComp v -> v = c | _ -> false) tr.trindices)
+    then None
+    else match List.assoc_opt c env with
+      | None -> None
+      | Some base ->
+        (match residence_of ctx base with
+         | Some r when is_residence_ref r items -> Some (c, items, r)
+         | _ -> None)
+  in
+  match List.filter_map through_binder tr.trsrc, tr.trdyn with
+  | [], _ | _, Via _ -> None
+  | (binder, items, r) :: _, Rate rate ->
+    let src = r.res_compartment in
+    let loc = diag_loc_of_ast_ctx ctx tr.trloc in
+    let refuse ~code ~message ~hint =
+      Diagnostics.error ctx.diags ~code ~loc ~message ~hint (); Some [] in
+    let member = Printf.sprintf "transition '%s', for `%s = %s`," tr.trname binder src in
+    if List.length tr.trsrc > 1 then begin
+      if List.for_all (fun (c, _) -> c = binder) tr.trsrc then
+        refuse ~code:"E362"
+          ~message:(Printf.sprintf
+            "%s consumes %d individuals of the staged compartment '%s' per event"
+            member (List.length tr.trsrc) src)
+          ~hint:(Printf.sprintf
+            "'%s' has an Erlang dwell (`via` on '%s'), so each individual is in \
+             one of its stages, and an event that takes several would have to \
+             say which stages they come from. Write the source once, or leave \
+             '%s' out of the family with `where %s != %s`"
+            src r.res_via src binder src)
+      else
+        refuse ~code:"E365"
+          ~message:(Printf.sprintf
+            "%s takes the staged compartment '%s' together with another source"
+            member src)
+          ~hint:(Printf.sprintf
+            "'%s' has an Erlang dwell (`via` on '%s'). A second exit from it is \
+             expanded over its stages only when it is the transition's single \
+             source: leave '%s' out of the family with `where %s != %s` and \
+             write its exit as a transition of its own"
+            src r.res_via src binder src)
+    end else begin
+      match rate with
+      | EFuncCall ("overdispersed", _) ->
+        refuse ~code:"E361"
+          ~message:(Printf.sprintf
+            "%s leaves the staged compartment '%s' with `overdispersed(...)` noise"
+            member src)
+          ~hint:(Printf.sprintf
+            "'%s' has an Erlang dwell (`via` on '%s'), so this exit is expanded \
+             to one transition per stage, and the noise multiplier is drawn \
+             once per transition: the variance of the total would depend on \
+             the number of stages. Leave '%s' out of the family with \
+             `where %s != %s`, and write its exit without `overdispersed(...)`"
+            src r.res_via src binder src)
+      | _ ->
+        let stage_var = r.res_stage_dim ^ "_x" in
+        let stage = stage_index_item r items stage_var in
+        let share = competing_stage_rate ~src:binder ~items ~stage in
+        let rate = match rate with
+          | EFuncCall ("deterministic", [ ("", inner) ]) ->
+            EFuncCall ("deterministic", [ ("", share inner) ])
+          | e -> share e
+        in
+        let dest_bases = match tr.trdst with
+          | DstSum refs        -> List.map fst refs
+          | DstBranch branches -> List.map (fun ((c, _), _) -> c) branches
+        in
+        List.iter (fun c ->
+          let dst = Option.value ~default:c (List.assoc_opt c env) in
+          if dst <> src && residence_of ctx dst <> None then
+            warn_dwell_restart ctx ~loc
+              ~what:(Printf.sprintf "transition '%s'" tr.trname) ~src ~dst)
+          (List.sort_uniq compare dest_bases);
+        let copy =
+          { tr with
+            trindices = tr.trindices @ [ IBind (stage_var, r.res_stage_dim) ];
+            trsrc     = [ (binder, items @ [ stage ]) ];
+            trdst     = stage_dest tr.trdst binder r.res_n_pop stage;
+            trdyn     = Rate rate }
+        in
+        Some (List.map (fun level -> (copy, env @ [ (stage_var, level) ]))
+                r.res_stage_levels)
+    end
+
 let expand_transitions_counted ctx =
   let filtered = ref 0 in
   let expanded = List.concat_map (fun tr ->
@@ -6451,13 +6607,11 @@ let expand_transitions_counted ctx =
     let combos =
       cartesian_product ~loc:(diag_loc_of_ast_ctx ctx tr.trloc) tr.trindices ctx in
     let tr_filtered = ref 0 in
-    let results = List.map (fun env ->
-      let pass_guard = match tr.trguard with
-        | None   -> true
-        | Some g -> eval_guard ctx env g
-      in
-      if not pass_guard then (incr filtered; incr tr_filtered; [])
-      else begin
+    let family = tr in
+    (* One member of the family: the transition(s) [tr] gives under [env].
+       [tr] is the family as declared, or one stage copy of a member whose
+       source is a staged compartment reached through a compartment binder. *)
+    let expand_member (tr : transition_decl) env =
         let src_names = List.map (resolve_stoich_ref ctx env) tr.trsrc in
         (* By here a `via` transition has been desugared by [lower_via_transitions]
            (run before this pass), so the dynamics is always an ordinary `@ rate`.
@@ -6596,7 +6750,17 @@ let expand_transitions_counted ctx =
             let scaled_rate = Ast.EBinOp (Ast.Mul, weight, raw_rate) in
             emit_one [dst_ref] scaled_rate (Some dst_base)
           ) branches
-      end
+    in
+    let results = List.map (fun env ->
+      let pass_guard = match family.trguard with
+        | None   -> true
+        | Some g -> eval_guard ctx env g
+      in
+      if not pass_guard then (incr filtered; incr tr_filtered; [])
+      else match binder_stage_copies ctx family env with
+        | None -> expand_member family env
+        | Some copies ->
+          List.concat_map (fun (copy, env) -> expand_member copy env) copies
     ) combos in
     check_transition_family_distinct ctx tr ~errors_before
       (List.combine combos results);
