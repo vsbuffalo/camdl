@@ -73,6 +73,11 @@ and the handle that selects each, and `cat` on a folder holding several runs is
 refused with them listed, unless the stream is a file of the folder itself
 (`fit.meta.json`, or a `predict/<run id>-<key>/…` path). Without `--stream`,
 `cat` on a run prints its `fit_state.toml` and on a folder its `fit.meta.json`.
+Both views end with a `forecasts` block when `fit predict --mode forecast` has
+written one: each forecast's `predict/<run id>-<key>/` directory with its
+origin, horizon, the chains its draws came from and the particle count per draw,
+read from its `forecast.json`; a `forecast.json` that cannot be read is listed
+with the reason.
 
 **Selecting chains.** Every reader of a posterior cloud takes `--chains IDS`
 (keep only those chains) or `--exclude-chains IDS` (drop those), never both:
