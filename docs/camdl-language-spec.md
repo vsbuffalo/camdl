@@ -6874,7 +6874,7 @@ authoritative list is whatever `ocaml/lib/compiler/` and `ocaml/lib/ir/` emit.
 | E104 | Error   | Unknown likelihood family in an observation                                                |
 | E118 | Error   | The removed `likelihood = <value>` form, with a value that is not a distribution call      |
 | E120 | Error   | A built-in function or a forcing called with the wrong number of arguments                 |
-| E200 | Error   | Undeclared compartment or parameter referenced in expression                              |
+| E200 | Error   | A `read()` data file is not found, or `read()` has no positional path argument             |
 | E202 | Error   | Table arity / shape mismatch (e.g. `table '%s' expects %d indices`)                        |
 | E228 | Error   | `time_unit` is not a duration unit (`'per_day` / `'count` / `'ratio`) — see §2               |
 | E265 | Error   | Intervention `set`/`add` targets a name that is not one expanded compartment               |
