@@ -3617,9 +3617,11 @@ impl PredictOptions {
 
     /// The address key of a prediction of `run_id` with these options by this
     /// engine: the first [`PREDICT_KEY_HEX`] hex digits (128 bits) of the
-    /// SHA-256 of [`PredictAddress`]'s JSON.
+    /// SHA-256 of [`PredictAddress`]'s JSON. The engine is the build
+    /// fingerprint [`crate::version::ENGINE_ID`], so a build with uncommitted
+    /// changes never reads or overwrites another build's prediction.
     pub(crate) fn address_key(&self, run_id: &str) -> String {
-        self.address_key_by(run_id, crate::version::VERSION_SHORT)
+        self.address_key_by(run_id, crate::version::ENGINE_ID)
     }
 
     fn address_key_by(&self, run_id: &str, engine: &str) -> String {
