@@ -765,6 +765,57 @@ fn every_fit_handle_names_the_fits_problem() {
     assert!(counts.iter().all(|c| *c == counts[0]), "every handle names one problem: {counts:?}");
 }
 
+/// The folders under `root` that hold a `fit.meta.json` and lie beneath a
+/// directory named `kind_dir` (`fits` or `profiles`).
+fn sidecar_folders(root: &std::path::Path, kind_dir: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.file_name().is_some_and(|n| n == "fit.meta.json")
+                && p.strip_prefix(root).unwrap().components().any(|c| c.as_os_str() == kind_dir)
+            {
+                out.push(p.parent().unwrap().to_path_buf());
+            }
+        }
+    }
+    out
+}
+
+/// A profile's folder stores the config as a fit folder does: the user's
+/// text, byte for byte, as `fit.toml.original` and the resolved
+/// configuration as `fit.resolved.toml`. Named by a sweep point's leaf, the
+/// pair is the fit folder's own pair (the file's text, and the point's
+/// resolved config); named by the file, the file's text and its resolution.
+#[test]
+fn a_profile_stores_the_original_and_the_resolved_config() {
+    let fx = fx();
+    let store = tempfile::tempdir().unwrap();
+    let fitted = run_into(store.path(), &Invocation::new(&fx.fx, &["fit", "run", &fx.fx.path("fit_plain.toml"), "--sweep", "rho=0.5,0.6"]));
+    let (_, other) = sweep_points(&fitted, "rho", 0.5);
+    let fit_folder = other.dir.parent().unwrap().parent().unwrap().to_path_buf();
+    let profiled = tempfile::tempdir().unwrap();
+    run_into(profiled.path(), &prof(&fx, &[]).set("--fit", &other.dir.to_string_lossy()));
+    let folders = sidecar_folders(profiled.path(), "profiles");
+    assert_eq!(folders.len(), 1, "one profile folder: {folders:?}");
+    let read = |d: &std::path::Path, f: &str| std::fs::read_to_string(d.join(f)).unwrap_or_else(|e| panic!("{}: {e}", d.join(f).display()));
+    assert_eq!(read(&folders[0], "fit.toml.original"), std::fs::read_to_string(fx.fx.path("fit_plain.toml")).unwrap(),
+        "the profile's original is the user's file, byte for byte");
+    assert_eq!(read(&folders[0], "fit.toml.original"), read(&fit_folder, "fit.toml.original"));
+    assert_eq!(read(&folders[0], "fit.resolved.toml"), read(&fit_folder, "fit.resolved.toml"),
+        "the profile's resolved config is the sweep point's");
+    let by_file = tempfile::tempdir().unwrap();
+    run_into(by_file.path(), &prof(&fx, &[]));
+    let folders = sidecar_folders(by_file.path(), "profiles");
+    assert_eq!(folders.len(), 1, "one profile folder: {folders:?}");
+    assert_eq!(read(&folders[0], "fit.toml.original"), std::fs::read_to_string(fx.fx.path("fit_plain.toml")).unwrap());
+    let resolved = read(&folders[0], "fit.resolved.toml");
+    assert!(resolved.starts_with("# fit.resolved.toml:"), "{resolved}");
+}
+
 /// A point of `fit run --sweep` named by its leaf directory, its problem
 /// folder or its run-id prefix is profiled at the point's own value, which
 /// its fit folder's `fit.resolved.toml` holds: every form stores the bytes a
