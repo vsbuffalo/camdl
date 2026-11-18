@@ -6911,15 +6911,15 @@ authoritative list is whatever `ocaml/lib/compiler/` and `ocaml/lib/ir/` emit.
 | ---- | ------- | ----------------------------------------------------------------------------------------- |
 | E001 | Error   | Parse / lexer syntax error (including using a keyword as a name)                           |
 | E100 | Error   | Reserved name used as a declaration; unknown index value; undeclared name/function         |
-| E140 | Error   | A singleton declaration (`time_unit`, `description`, `origin`, `simulate`, `output`, `balance`) written twice |
-| E121 | Error   | An observation block assigns a value under a key other than `projected` (§12) |
-| E122 | Error   | An observation block gives the same key (`columns`, `covers`, `projected`, `emit_schedule`, or the `~` line) twice (§12) |
-| E123 | Error   | A scenario `enable`/`disable`/`compose` value is not a bracketed list of names — write `enable = [NAME]` (§17.1) |
-| E124 | Error   | A scenario field other than `set`/`scale` written as a `{ ... }` block (§17.1) |
 | E101 | Error   | `origin` is not `date("YYYY-MM-DD")`                                                       |
 | E104 | Error   | Unknown likelihood family in an observation                                                |
 | E118 | Error   | The removed `likelihood = <value>` form, with a value that is not a distribution call      |
 | E120 | Error   | A built-in function or a forcing called with the wrong number of arguments                 |
+| E121 | Error   | An observation block assigns a value under a key other than `projected` (§12) |
+| E122 | Error   | An observation block gives the same key (`columns`, `covers`, `projected`, `emit_schedule`, or the `~` line) twice (§12) |
+| E123 | Error   | A scenario `enable`/`disable`/`compose` value is not a bracketed list of names — write `enable = [NAME]` (§17.1) |
+| E124 | Error   | A scenario field other than `set`/`scale` written as a `{ ... }` block (§17.1) |
+| E140 | Error   | A singleton declaration (`time_unit`, `description`, `origin`, `simulate`, `output`, `balance`) written twice |
 | E200 | Error   | A `read()` data file is not found, or `read()` has no positional path argument             |
 | E202 | Error   | Table arity / shape mismatch (e.g. `table '%s' expects %d indices`)                        |
 | E228 | Error   | `time_unit` is not a duration unit (`'per_day` / `'count` / `'ratio`) — see §2               |
