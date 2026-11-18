@@ -4433,15 +4433,22 @@ particles" today. A future particle-local `scope` reading latent state is
 deferred; until then there is no `scope` key.
 
 A reactive intervention is a **policy** (like `interventions {}`, not `events {}`):
-it is scenario-toggleable, so a `baseline` scenario can omit it and a
-`with_response` scenario can `enable` it, which is exactly how prospective
-policy analysis compares responding vs non-responding worlds.
+it is toggled per run, so a run without it and a run with `--enable` of it
+compare the non-responding and responding worlds, as prospective policy
+analysis requires.
 
 **Reactive interventions are policy interventions and are inactive by default.**
-Enable them with scenarios or `--enable`, exactly like `interventions {}`. A
-reactive policy that is not enabled is dropped from the run (the same toggle
-semantics as a scheduled intervention), so a plain `simulate` with no scenario
-runs the baseline without it.
+Enable one with `--enable` on the command line. A reactive policy that is not
+enabled is dropped from the run (the same toggle semantics as a scheduled
+intervention), so a plain `simulate` runs the baseline without it.
+
+A scenario cannot enable or disable a reactive policy: naming one in a
+scenario's `enable` or `disable` list is **E267** (unknown intervention), as
+only `interventions {}` names are in scope there. The reason is the trigger's
+input: the emission times its stream is read at are fixed when the model is
+compiled, ending at the model's `simulate { to }` horizon, so a scenario that
+moved the horizon would run the dynamics past the last time the policy can
+observe.
 
 > **Status (gh#204).** Reactive interventions are parsed, dimension-checked, and
 > represented in the IR. Forward simulation on the **chain-binomial** backend
