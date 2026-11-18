@@ -475,7 +475,7 @@ per-attempt records, and a fourth for an NLopt leaf:
 | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `execution.json` | the execution record (`camdl.execution/v1`): `started_at`, `finished_at`, the method's `wall_time_seconds`, `pid`, `host`, `threads`; PMMH and `mh` add `cost`, PGAS `sampling_seconds`; a resumed leaf `earlier_segments` |
 | `progress.json`  | the liveness heartbeat, rewritten on a wall-clock timer while the method runs (§10.10)                                                                                                                                     |
-| `events.jsonl`   | the event log, one line per event the run reports (§10.11)                                                                                                                                                                 |
+| `events.jsonl`   | what the run reported, one line per event (§10.11); not the lineage event log of `simulate --event-log`                                                                                                                    |
 | `opt_trace.tsv`  | an NLopt leaf's live search trace: each search's running best log-likelihood, a row every 25 evaluations or 2 seconds (§10.13)                                                                                             |
 
 The run writes `execution.json` when it claims the leaf and again, with its
@@ -1339,13 +1339,14 @@ observation ensemble as a child at `obs/{obs_hash8}-{obs_seed}/`, holding one
 `<stream>.tsv` per observation stream plus an `obs.json` provenance file. That
 child is keyed on the model's observation blocks alone, so changing a reporting
 parameter re-samples the observations without invalidating the cached
-trajectory. `simulate --event-log` writes the lineage event log as a second
-child, at the fixed address `event_log/` (`event_log.tsv` plus an
-`event_log.json` record), since nothing the log depends on lies outside the
-trajectory's run id. Both are children rather than files of the leaf so that the
-leaf's own files, and its manifest, are the same whichever invocation wrote it
-first. Reach them through the parent's `children` map, not by walking the tree
-for `run.json` files.
+trajectory. `simulate --event-log` writes the lineage event log (the record of
+every transition that `camdl lineage realize` replays, not a fit's
+`events.jsonl` of reported events) as a second child, at the fixed address
+`event_log/` (`event_log.tsv` plus an `event_log.json` record), since nothing
+the log depends on lies outside the trajectory's run id. Both are children
+rather than files of the leaf so that the leaf's own files, and its manifest,
+are the same whichever invocation wrote it first. Reach them through the
+parent's `children` map, not by walking the tree for `run.json` files.
 
 ### 2.6 Store-root files
 
@@ -2082,15 +2083,16 @@ camdl simulate seir_vaccine.camdl --params params.toml --scenario with_sia --par
 
 **Other exclusions enforced at parse time:**
 
-| combination                                                                                                                               | why                                           |
-| ----------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
-| `--seed` × `--seeds`                                                                                                                      | one base seed vs an explicit seed list        |
-| `--seeds` × `--replicates`                                                                                                                | explicit seeds vs derived seeds               |
-| `--stdout` × `--seeds` / `--replicates` / `--draws` / `--sweep` / `--sweep-file`                                                          | `--stdout` is single-cell only                |
-| `--stdout` × `-o` / `--obs*`                                                                                                              | those mirror the store `--stdout` opts out of |
-| `--event-log` × `--seeds` / `--replicates` / `--draws` / `--sweep` / `--sweep-file`                                                       | event-log recording is single-run only        |
-| `--draws-out` without `--draws`                                                                                                           | it writes the rows `--draws` generated        |
-| `--obs` × `--obs-dir` / `--obs-only`; `--obs-dir` × `--obs-only`; `--obs-only` × `--obs-only-dir`; `--obs-only` / `--obs-only-dir` × `-o` | one observation output form at a time         |
+| combination                                                                                                                               | why                                                    |
+| ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| `--seed` × `--seeds`                                                                                                                      | one base seed vs an explicit seed list                 |
+| `--seeds` × `--replicates`                                                                                                                | explicit seeds vs derived seeds                        |
+| `--stdout` × `--seeds` / `--replicates` / `--draws` / `--sweep` / `--sweep-file`                                                          | `--stdout` is single-cell only                         |
+| `--stdout` × `-o` / `--obs*`                                                                                                              | those mirror the store `--stdout` opts out of          |
+| `--event-log` × `--seeds` / `--replicates` / `--draws` / `--sweep` / `--sweep-file`                                                       | event-log recording is single-run only                 |
+| `--event-log` × `--stdout`                                                                                                                | `--stdout` writes no leaf for the log to be a child of |
+| `--draws-out` without `--draws`                                                                                                           | it writes the rows `--draws` generated                 |
+| `--obs` × `--obs-dir` / `--obs-only`; `--obs-dir` × `--obs-only`; `--obs-only` × `--obs-only-dir`; `--obs-only` / `--obs-only-dir` × `-o` | one observation output form at a time                  |
 
 The `--obs*` combinations are clap conflicts like the rest (§3.1.1), rejected at
 parse time. Two checks need the compiled model and run after it, exiting 1 with
@@ -5133,7 +5135,12 @@ about the store:
   (`obs/…`, `event_log/`): a run that asks for one writes it beside a leaf that
   already exists and declares it in the leaf's `run.json` `children`, which is
   recorded and not hashed, so the leaf's run id and manifest are the same
-  whichever invocation wrote it first.
+  whichever invocation wrote it first. A recompute of the leaf — `--force`, or a
+  leaf read as stale — moves the whole directory aside, children included, so a
+  child is written again only by a run that asks for it. A reader uses the event
+  log only when its `event_log.json` record is present and names the file's size
+  and SHA-256; otherwise `camdl cat --stream event_log.tsv` refuses and names
+  `--event-log` and `--force` as the remedy.
 - `--label` is the one recorded field refreshed on a hit: the leaf's
   `run.json.provenance.label` is rewritten in place when it differs.
 
