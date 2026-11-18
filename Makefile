@@ -116,13 +116,58 @@ dev-camdlc: build-ocaml
 
 # ── Test ──────────────────────────────────────────────────────────────────────
 
-.PHONY: test lint test-ocaml test-rust test-inference test-integration test-docs test-cli-docs test-data-spec test-dates-doc test-install
+# Machine-wide queue for the heavy targets (docs/dev/testing.md, "Tiered gate").
+# Many sessions and agents share one machine, and seven concurrent `make test`
+# runs once drove a 16-core machine to a load of ~145. `test`, `test-rust`,
+# `test-inference` and `test-integration` therefore each run inside one of
+# CAMDL_TEST_SLOTS slots held by scripts/test-slot.sh, waiting while all are
+# taken; test-fast and targeted cargo runs are not queued.
+#
+# Nesting takes one slot, not one per sub-target: the queued form of a target
+# re-runs `make <target>` inside the slot, and test-slot.sh exports
+# CAMDL_TEST_SLOT_HELD=1 to it, under which the real rules (each guarded by
+# `ifeq ($(TEST_SLOT_QUEUED),)` below) apply and run straight through, so
+# `test`'s own test-rust, test-inference and test-integration share its slot.
+# The prerequisites (builds included) run inside the slot too.
+#
+# CAMDL_TEST_SLOTS=0 disables the queue; CI sets it, one job per machine.
+# While the queue is on, two more limits apply, each overridden by an explicit
+# value in the environment:
+#   - cargo builds with at most 6 jobs (CARGO_BUILD_JOBS; cargo's default is
+#     one per core, per run). Not `build.jobs` in rust/.cargo/config.toml: that
+#     sets the job count rather than capping it, so a 6 would oversubscribe
+#     CI's 4-core runners.
+#   - the test recipes (test-fast, test-rust, test-inference, test-integration)
+#     run with RAYON_NUM_THREADS=2, so each test binary and each `camdl` it
+#     spawns uses two Rayon threads, not one per core. Tests that compare
+#     thread counts build their own pools of an explicit size. Not in
+#     rust/.cargo/config.toml's [env]: cargo applies that to `cargo run` and
+#     `cargo bench` too, which would silently time parallel code on two threads.
+CAMDL_TEST_SLOTS ?= 3
+TEST_SLOT_QUEUED := $(if $(CAMDL_TEST_SLOT_HELD),,$(filter-out 0,$(CAMDL_TEST_SLOTS)))
+QUEUED_TESTS := test test-rust test-inference test-integration
+ifneq ($(TEST_SLOT_QUEUED),)
+$(QUEUED_TESTS):
+	@bash scripts/test-slot.sh $(CAMDL_TEST_SLOTS) $(MAKE) $@
+endif
+TEST_ENV :=
+ifneq ($(filter-out 0,$(CAMDL_TEST_SLOTS)),)
+ifeq ($(origin CARGO_BUILD_JOBS),undefined)
+CARGO_BUILD_JOBS := $(shell n=$$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 6); [ "$$n" -lt 6 ] && echo "$$n" || echo 6)
+endif
+export CARGO_BUILD_JOBS
+TEST_ENV := RAYON_NUM_THREADS=$(or $(RAYON_NUM_THREADS),2)
+endif
+
+.PHONY: test lint test-ocaml test-rust test-inference test-integration test-docs test-cli-docs test-data-spec test-dates-doc test-install test-slot-queue
 
 # `make test` runs the full surface. The Rust suite is split into two groups so
 # CI can run and badge them independently (see .github/workflows/): test-rust =
 # everything except the sim crate; test-inference = the sim crate (simulation
 # engine + the inference stack). Their union is the whole workspace.
-test: lint test-ocaml check-reactive-golden check-quantities-golden check-contrasts-golden check-declared-names-golden check-hoisted-identity-golden check-diff-pairs-golden test-rust test-inference test-integration test-docs test-cli-docs test-install
+ifeq ($(TEST_SLOT_QUEUED),)
+test: lint test-ocaml check-reactive-golden check-quantities-golden check-contrasts-golden check-declared-names-golden check-hoisted-identity-golden check-diff-pairs-golden test-rust test-inference test-integration test-docs test-cli-docs test-install test-slot-queue
+endif
 
 # Clippy, the same invocation CI's `test` job runs as its second step. Kept in
 # `make test` because CI aborts that job on a lint error before a single test
@@ -165,7 +210,7 @@ test-fast: build-ocaml build-rust
 	@mkdir -p $(CAMDLC_BIN)
 	@ln -sf $(CAMDLC_ABS) $(CAMDLC_BIN)/camdlc
 	cd rust && PATH="$(CAMDLC_BIN):$$PATH" CAMDL_SKIP_VERSION_CHECK=1 \
-	  CAMDL="$(abspath $(CAMDL))" $(CARGO_WRAP) \
+	  CAMDL="$(abspath $(CAMDL))" $(CARGO_WRAP) $(TEST_ENV) \
 	  cargo test --no-fail-fast --workspace
 
 # build-ocaml regenerates the gitignored ir_version_generated.ml from
@@ -206,26 +251,32 @@ CARGO_WRAP := $(if $(SCCACHE),RUSTC_WRAPPER=$(SCCACHE),)
 # rust/target/release/camdl. Without this dep `make test` runs them against a
 # stale release binary (false red/green — gh#178). build-rust is shared with
 # test-integration's `build`, so make runs it once.
+ifeq ($(TEST_SLOT_QUEUED),)
 test-rust: build-ocaml build-rust
 	@mkdir -p $(CAMDLC_BIN)
 	@ln -sf $(CAMDLC_ABS) $(CAMDLC_BIN)/camdlc
 	cd rust && PATH="$(CAMDLC_BIN):$$PATH" CAMDL_SKIP_VERSION_CHECK=1 \
-	  CAMDL="$(abspath $(CAMDL))" $(CARGO_WRAP) \
+	  CAMDL="$(abspath $(CAMDL))" $(CARGO_WRAP) $(TEST_ENV) \
 	  cargo test --no-fail-fast --workspace --exclude sim
+endif
 
 # The sim crate — simulation engine (Gillespie/tau-leap/ODE/chain-binomial) plus
 # the inference stack (particle filter, IF2, PGAS, PMMH, NUTS, gradient checks)
 # — is the heaviest, highest-stakes test group, so CI gives it its own workflow
 # and badge. Same camdlc-on-PATH shim as test-rust (some sim tests compile .camdl
 # fixtures via camdlc). `make test` runs this alongside test-rust.
+ifeq ($(TEST_SLOT_QUEUED),)
 test-inference: build-ocaml build-rust
 	@mkdir -p $(CAMDLC_BIN)
 	@ln -sf $(CAMDLC_ABS) $(CAMDLC_BIN)/camdlc
-	cd rust && PATH="$(CAMDLC_BIN):$$PATH" CAMDL_SKIP_VERSION_CHECK=1 $(CARGO_WRAP) \
+	cd rust && PATH="$(CAMDLC_BIN):$$PATH" CAMDL_SKIP_VERSION_CHECK=1 $(CARGO_WRAP) $(TEST_ENV) \
 	  cargo test --no-fail-fast -p sim
+endif
 
+ifeq ($(TEST_SLOT_QUEUED),)
 test-integration: build
-	CAMDLC="$(CAMDLC)" CAMDL="$(CAMDL)" bash tests/test_ocaml_to_rust.sh
+	$(TEST_ENV) CAMDLC="$(CAMDLC)" CAMDL="$(CAMDL)" bash tests/test_ocaml_to_rust.sh
+endif
 
 # Compile every ```camdl block in the specs against the real compiler and gate
 # on any complete-model block that fails (drift detector for documented
@@ -303,6 +354,13 @@ test-install:
 	  echo "shellcheck not found — skipping lint (CI installs it)"; \
 	fi
 	bash tests/install_sh_test.sh
+
+# The machine-wide test queue (scripts/test-slot.sh, see the top of this
+# section): concurrency, release on SIGKILL, exit status, bypass. Offline,
+# about six seconds, private slot directories only. CI's `test` job runs it
+# on Linux, which exercises the flock path; locally it exercises lockf.
+test-slot-queue:
+	bash tests/test_slot_test.sh
 
 # ── Golden file management ────────────────────────────────────────────────────
 

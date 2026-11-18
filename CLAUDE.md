@@ -47,6 +47,10 @@ make test-integration # cross-language CLI shell-out (slow)
 cd rust && cargo test --test expr_eval    # one Rust test file
 ```
 
+`test`, `test-rust`, `test-inference` and `test-integration` queue for one of
+three machine-wide slots shared by every session; "waiting for a test slot" is
+the queue, not a hang (`docs/dev/testing.md`, "Tiered gate").
+
 **Never lower the bar to make something pass.** No `--no-verify`, no weakening
 an assertion, no skipping a check, no widening a tolerance to get green. If
 something fails, find the cause.

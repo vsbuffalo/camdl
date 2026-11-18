@@ -368,6 +368,44 @@ pre-push hook (which now diff `tests/fixtures/reactive/ir` and
 cross-language integration → `ci.yml`; doc / CLI-doc gates → Doctest / CLI-docs
 workflows. Nothing the fast tier skips is un-gated.
 
+**The heavy targets queue for a machine-wide slot.** Many sessions and agents
+share one machine, and seven concurrent `make test` runs once drove a 16-core
+machine to a load of about 145. So `make test`, `make test-rust`,
+`make test-inference`, `make test-integration` and the pre-push hook each run
+inside one of `CAMDL_TEST_SLOTS` slots (default 3), held by
+`scripts/test-slot.sh`. When all are taken the run prints
+`waiting for a test slot (3 in use; …)` once and polls until one frees.
+`make test-fast` and targeted `cargo test` runs are not queued.
+
+- **One slot per run, however nested.** The queued target re-runs
+  `make <target>` inside its slot with `CAMDL_TEST_SLOT_HELD=1` exported, and
+  under that marker every queued target runs straight through. So `make test`
+  takes one slot for its builds, its `test-rust`, `test-inference` and
+  `test-integration` together.
+- **The slot is freed when the run ends, however it ends.** A slot is an
+  exclusive `flock(2)` on a file (`lockf` on macOS, `flock` on Linux) held by
+  the wrapper process, so it is released on exit, Ctrl-C or `kill -9`. Nothing
+  needs cleaning up after a crashed session.
+- **The slot directory is shared by every Claude Code session.** It is
+  `/tmp/claude-<uid>/camdl-test-slots/` when that temp directory exists, else
+  `${TMPDIR:-/tmp}/camdl-test-slots/`; `CAMDL_TEST_SLOT_DIR` overrides it.
+- **`CAMDL_TEST_SLOTS=0` turns the queue off.** CI sets it in `ci.yml`,
+  `inference.yml` and `release.yml`, where one job has the runner to itself.
+- **While the queue is on, each run also uses fewer threads.** cargo builds with
+  at most 6 jobs (`CARGO_BUILD_JOBS`), and the test recipes set
+  `RAYON_NUM_THREADS=2`, so a test binary, and each `camdl` it spawns, uses two
+  Rayon threads rather than one per core; `rust/.cargo/config.toml` already caps
+  each test binary at 4 test threads. An explicit value in the environment wins
+  for all three. The Rayon limit is set in the Makefile rather than in
+  `rust/.cargo/config.toml` because cargo applies that file's `[env]` to
+  `cargo run` and `cargo bench` too, which would time parallel code on two
+  threads without saying so.
+
+`make test-slot-queue` (part of `make test`, and of CI's `test` job on Linux)
+tests the queue itself: with two slots and three jobs, at most two run at once
+and two do; a holder killed with SIGKILL frees its slot; a process left behind
+by the command does not hold it; the exit status is the command's.
+
 **Pre-push hook (`.githooks/pre-push`, installed via `core.hooksPath`).**
 Mirrors CI — runs locally on every `git push`:
 

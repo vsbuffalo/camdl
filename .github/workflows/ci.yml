@@ -24,6 +24,11 @@ on:
   pull_request:
     branches: [main]
 
+# One job per runner: the machine-wide test queue (scripts/test-slot.sh) has
+# nothing to share the runner with, so it is off.
+env:
+  CAMDL_TEST_SLOTS: "0"
+
 jobs:
   changes:
     runs-on: ubuntu-latest
@@ -110,6 +115,11 @@ jobs:
 
       - name: Integration tests
         run: opam exec -- make test-integration
+
+      - name: Test-slot queue (Linux flock path)
+        # The queue is off in CI, but its script is still tested here: this is
+        # the only place its flock branch runs (local macOS runs use lockf).
+        run: make test-slot-queue
 
   # Always-runs required gate. Passes when `test` succeeded OR was skipped
   # (doc-only change); fails only when `test` genuinely failed or was cancelled,

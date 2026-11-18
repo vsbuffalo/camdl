@@ -34,6 +34,11 @@ on:
       - "ocaml/**"
       - ".github/workflows/inference.yml"
 
+# One job per runner: the machine-wide test queue (scripts/test-slot.sh) has
+# nothing to share the runner with, so it is off.
+env:
+  CAMDL_TEST_SLOTS: "0"
+
 jobs:
   test-inference:
     runs-on: ubuntu-latest
