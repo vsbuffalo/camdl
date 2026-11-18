@@ -649,6 +649,20 @@ fn every_fit_handle_names_the_fits_problem() {
     assert_eq!(ids.iter().collect::<std::collections::BTreeSet<_>>().len(), 1, "every handle names one problem: {ids:?}");
 }
 
+/// A fit config not named `*.toml` is still a config: an existing regular
+/// file names the problem it states, as it did before `--fit` took handles.
+#[test]
+fn a_fit_config_of_any_name_is_a_config() {
+    let fx = fx();
+    let store = tempfile::tempdir().unwrap();
+    let cfg = store.path().join("fit_plain.cfg");
+    std::fs::copy(fx.path("fit_plain.toml"), &cfg).unwrap();
+    let by_toml = run_into(store.path(), &pf_fit(&fx, "fit_plain.toml", &[])).ids(KIND);
+    let by_cfg = run_into(store.path(), &pf_fit(&fx, "fit_plain.toml", &[]).set("--fit", &cfg.to_string_lossy())).ids(KIND);
+    assert!(!by_toml.is_empty());
+    assert_eq!(by_toml, by_cfg, "the config names the same problem whatever its file name");
+}
+
 /// A point of `fit run --sweep` named by its leaf: `pfilter` reads none of
 /// the fit's `[fixed]` (the point it scores is `--params`), so the sweep
 /// point names the same problem as the file and is not refused, as
