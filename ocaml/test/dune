@@ -224,6 +224,13 @@
  (libraries compiler ir alcotest yojson))
 
 
+; Transfers and `add` on a staged compartment (proposal
+; 2026-11-17-unified-staged-residence): residence-reference endpoints, the
+; grouped transfer they lower to, and each diagnostic.
+(test
+ (name test_staged_transfers)
+ (modules test_staged_transfers)
+ (libraries compiler ir alcotest yojson))
 ; The `grouped_transfer` IR action (proposal
 ; 2026-11-17-unified-staged-residence): JSON, the validator's shape rules
 ; (E521) and the derivative of its fraction.

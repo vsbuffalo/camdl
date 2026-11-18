@@ -2963,15 +2963,72 @@ integer is `E244`; giving both or neither of `mean`/`rate` is `E245`; an unknown
 last branch (or a missing one on any earlier branch) is `E256`; and duplicate
 branch labels are `E258`.
 
-**Entering and targeting a staged compartment.** Filling a staged compartment is
-asymmetric with reading it. `init` and inflow transitions (`--> E`) land in
-**stage 1** automatically — write the bare name and the compiler routes the
-arrival to `E_s1`. An intervention is stricter: `transfer(to = E)` naming the
-bare staged compartment is **`E237`**, because the stage axis is synthesized per
-`via` transition and is private to it, so it never pairs cell-for-cell with the
-other endpoint's shape — name the explicit stage (`transfer(to = E_s1, …)`)
-instead, which is what the diagnostic's hint suggests. Reads are unaffected: a
-bare `E` still sums every stage (the bare-name rule, §5.1).
+**Moving people into and out of a staged compartment.** `init`, inflow
+transitions (`--> E`), `transfer` and `add` treat a compartment with an Erlang
+dwell like any other: write the compartment, indexed exactly as it was declared
+and with no stage (`E[a]`, or bare `E` when `E` is not stratified), and the
+compiler decides which stages the people come from and go to. This holds in
+`interventions {}`, `events {}` and `reactive_interventions {}` alike (§13).
+
+```camdl preamble=via-competing
+transitions {
+  infection[a in age] : S[a] --> E[a] @ beta * S[a]
+  latency[a in age]   : E[a] --> I[a] via erlang(stages = 3, rate = sigma)
+}
+interventions {
+  promote : transfer(fraction = 0.2, from = E[pre], to = E[sch]) at [30 'days]  # keeps the stage
+  expose  : transfer(fraction = 0.1, from = S[pre], to = E[pre]) at [40 'days]  # enters stage 1
+  treat   : transfer(fraction = 0.5, from = E, to = T)           at [50 'days]  # from every stage, per age
+  remove[a in age] : transfer(count = 3, from = E[a], to = T[a]) at [60 'days]
+  import  : add(E[pre], 5)                                       at [70 'days]  # enters stage 1
+}
+```
+
+| Movement                                         | Stage                                 |
+| ------------------------------------------------ | ------------------------------------- |
+| `init`, an inflow transition, `add`              | Enter stage 1                         |
+| `transfer` from an unstaged compartment          | Enter stage 1                         |
+| `transfer` within the compartment (`promote`)    | Kept: `E[pre, s]` to `E[sch, s]`      |
+| `transfer` to an unstaged compartment (`treat`)  | Drawn from every stage                |
+| `transfer` to a *different* staged compartment   | Drawn from every stage, enter stage 1 |
+
+*One amount for the whole compartment.* A `transfer` out of a staged compartment
+is one action over all its stages (a *grouped transfer*). Its `fraction` or
+`count` is evaluated once and applies to the compartment's total `N`, the sum
+of the stages. On integer compartments the number moved is `floor(N * fraction)`
+or `min(round(count), N)`, and it is then taken from the stages in proportion
+to their occupancy: stage `i` gives `floor(M * n_i / N)`, and the individuals
+left over go one each to the stages with the largest remainders, the earlier
+stage first on a tie. So 5 people in stages (3, 1, 1) at `fraction = 0.4` give
+up `floor(5 * 0.4) = 2`, as (1, 1, 0). No stage gives more than it holds. The
+number moved therefore does not depend on `stages`, and the same text compiles
+at `stages = 1`, where it is an ordinary transfer.
+
+The floor is applied once, to the compartment total. This is a deliberate
+restriction of what a staged `transfer` can express: it cannot floor each
+stage separately. A transfer that names its cells one at a time does that, and
+is unchanged: a transfer between unstaged compartments, or one written with an
+explicit stage on its source (`from = E[pre, s2]`), still moves
+`floor(source * fraction)` of that one cell. On real compartments, and on the
+ODE backend, nothing is rounded: each stage gives `n_i * fraction`, or
+`min(count, N) * n_i / N`.
+
+*Population dimensions are never pooled.* `transfer(from = E, to = T)` with
+both stratified by `age` pairs cell for cell over `age`, as for any bare
+stratified transfer (§13.1), and groups only the stages within each age cell.
+`count` on such a bare transfer is still `E238`, and a bare staged endpoint
+inside an indexed family is still `E239`.
+
+*What is refused.* A `set` on the compartment (`{ E[pre] = 5 ... }`) is `E366`:
+a total has no single meaning across the stages; set a stage by its cell name
+(`E_pre_s1 = ...`). A source that names its stage with a destination in the same
+compartment that does not (`from = E[pre, s2], to = E[sch]`) is `E367`: name the
+destination stage as well. A `transfer`, `add` or `set` on a `hyper_erlang`
+compartment is `E368`. A transfer from one staged compartment into a different
+one restarts the destination's dwell and warns (`W107`), as the corresponding
+transition does; a source that names its stage does not warn.
+
+Reads are unaffected: a bare `E`, or `E[a]`, sums every stage (§5.1).
 
 #### 9.4.2 Aging across a stratified model (canonical use case)
 
@@ -4107,12 +4164,18 @@ NAME : { COMP = EXPR  at = [...] }                                    # override
 
 `transfer` is atomic: `delta = floor(source * fraction)` computed from
 pre-intervention state, then `source -= delta, dest += delta` applied together.
+When the source is a compartment with an Erlang dwell (`via erlang`, §9.4.1),
+`source` is the compartment's total over its stages: the floor is taken once
+and the stages give up their shares of it.
 
 **Stratified compartments in actions.** `transfer(from = S, to = V)` with bare
 compartment names expands over all strata (see §25.10). `set` and `add` instead
 target a **single compartment by name**. On a stratified compartment the bare
 name (e.g. `I`) is not a single compartment after expansion, so write the
 **expanded stratum name** directly (`I_child_p1 = ...`, `add(I_child_p1, 5)`).
+A compartment with an Erlang dwell is the exception for `add`, which enters its
+first stage (`add(E[pre], 5)`), and is refused for `set` (**E366**); see
+§9.4.1.
 The compiler verifies both verbs' targets against the expanded compartment
 table and rejects a stratified family or an unknown name with **E265**; the
 family case lists the available cells. A target may also be written indexed,
@@ -4633,6 +4696,17 @@ drains different times or merge them into one transfer. A single
 `transfer(count = n, ...)` moves at most what its source holds: from `X = 10`,
 `count = 50` moves 10. A stage that leaves an integer compartment negative
 (a `set` to a negative value, say) is also an error, on every backend.
+
+A `transfer` out of a compartment with an Erlang dwell (§9.4.1) takes part in
+these rules as a drain of each of its stages, with its one `fraction` (or
+`count`) on each: two such transfers of 0.6 from one compartment at one instant
+are refused as two transfers of 0.6 from an unstaged compartment are. One case
+is caught later than the others. Two transfers out of the same staged
+compartment at the same instant, with fractions summing to at most 1, each
+divide their own total among the stages, and both can give the individual left
+over to the same stage: from stages (1, 1), two transfers of 0.5 each take
+stage 1. The non-negativity check then stops the run with an error naming the
+stage. Give them different times or merge them into one transfer.
 
 **At `t_start`.** The effects due at the start of the run (§13.2) apply to the
 `init {}` state in the same order, without a transition stage, on every

@@ -422,6 +422,9 @@ type context = {
           compartment it stands in for. *)
   mutable residences           : residence list;
       (** Each compartment the [via erlang] lowering staged, newest first. *)
+  mutable hyper_staged         : (string * string) list;
+      (** Each compartment a [via hyper_erlang] law replaced by per-branch
+          compartments, with the [via] transition that did. *)
   mutable emitted_transitions  : (string * string list) list;
       (** Each transition declaration after the lowering, with the expanded
           transitions it produced. *)
@@ -500,6 +503,7 @@ let empty_context ?(source_dir = "") ?(filename = "<input>") () = {
   site_tallies         = [];
   via_transitions      = [];
   residences           = [];
+  hyper_staged         = [];
   via_cells            = [];
   emitted_transitions  = [];
   emitted_observations = [];
@@ -1883,13 +1887,20 @@ let has_source (tr : transition_decl) (comp : string) : bool =
     staged compartment [dst] enters [dst] at stage 1. [what] names the
     construct that moves the individuals ("transition 'early'"). *)
 let warn_dwell_restart ctx ~loc ~(what : string) ~(src : string) ~(dst : string) =
-  Diagnostics.warning ctx.diags ~code:"W107" ~loc
-    ~message:(Printf.sprintf
+  let message =
+    Printf.sprintf
       "%s moves individuals from the staged compartment '%s' into the staged \
        compartment '%s': this movement restarts '%s' at stage 1"
-      what src dst dst)
-    ~hint:"use explicit `stage(...)` endpoints if continuation is intended"
-    ()
+      what src dst dst in
+  (* Once per declaration: a family reaches here once per member. *)
+  let reported =
+    List.exists (fun (d : Diagnostics.diagnostic) ->
+      d.Diagnostics.code = "W107" && d.Diagnostics.message = message)
+      ctx.diags.Diagnostics.diags in
+  if not reported then
+    Diagnostics.warning ctx.diags ~code:"W107" ~loc ~message
+      ~hint:"use explicit `stage(...)` endpoints if continuation is intended"
+      ()
 
 (* Append a stage index to every destination reference to the staged
    compartment [comp] that supplies its [n_pre] pre-staging indices and no
@@ -2090,10 +2101,11 @@ let rec sum_hyper_refs ~src ~(cells : string list) (e : expr) : expr =
 
     Two deliberate exclusions:
 
-    - **Action ENDPOINTS** (`from =` / `to =`) are not rewritten, only value
-      operands (`fraction` / `count` / a `set`/`add` amount). An endpoint names a
-      compartment and a staged source has no single cell to name, so rewriting one
-      would turn E100 into E264 (gh#463). Expanding a staged endpoint is gh#460.
+    - **Action ENDPOINTS** (`from =` / `to =`, a `set`/`add` target) are not
+      rewritten, only value operands (`fraction` / `count` / a `set`/`add`
+      amount). An endpoint names cells, not a sum: a residence reference there
+      is resolved to its stage cells where the action is lowered
+      ([resolve_action_endpoint], [resolve_action_target]).
     - **A reactive trigger predicate** ([rxwhen]) is not rewritten. It reads
       `observed(stream)` against a static threshold and can never carry a
       compartment reference — every non-trigger construct there is already
@@ -2848,7 +2860,8 @@ let lower_via_transitions ctx =
                 compartment would shadow the Add-chain (and dangle, since no
                 transition fills it). *)
           ctx.comp_decls <- List.filter (fun (cd : compartment_decl) ->
-            cd.cname <> src) ctx.comp_decls
+            cd.cname <> src) ctx.comp_decls;
+          ctx.hyper_staged <- (src, tr.trname) :: ctx.hyper_staged
         end
 
       | _ -> ()  (* unreachable: to_lower only holds single-source via specs *)
@@ -3460,6 +3473,27 @@ let is_residence_ref (r : residence) (items : index_item list) : bool =
   && not (List.exists (function
        | INamed (d, _) -> d = r.res_stage_dim
        | IPosn _ -> false) items)
+
+(** E368: an action names a compartment whose dwell a [via hyper_erlang] law
+    sets. Returns whether it reported, so the caller resolves nothing more. *)
+let refuse_hyper_action_target ctx ~loc ~name ~(what : string) (comp : string) : bool =
+  match List.assoc_opt comp ctx.hyper_staged with
+  | None -> false
+  | Some via ->
+    Diagnostics.error ctx.diags ~code:"E368" ~loc
+      ~message:(Printf.sprintf
+        "intervention '%s' %s '%s', whose dwell time is set by `via \
+         hyper_erlang(...)` on '%s'"
+        name what comp via)
+      ~hint:(Printf.sprintf
+        "a `hyper_erlang` compartment is held in separate chains of stages, \
+         one per branch, and moving individuals into or out of it as a whole \
+         is not supported. Use `via erlang(...)` on '%s', whose stages a \
+         `transfer` or `add` handles, or name one branch stage by its \
+         compartment name"
+        comp)
+      ();
+    true
 
 (** The stage index to append to a residence reference written with [items],
     named when the reference names its dimensions. *)
@@ -10399,6 +10433,35 @@ let resolve_action_target ctx ~name ~loc ~verb env comp idxs =
     | Some bound when Hashtbl.mem ctx.comp_tbl bound -> bound
     | _ -> comp
   in
+  if refuse_hyper_action_target ctx ~loc ~name ~what:verb base then None else
+  match residence_of ctx base with
+  | Some r when is_residence_ref r idxs ->
+    (* A residence reference: the compartment with its population dimensions
+       indexed and no stage (proposal 2026-11-17-unified-staged-residence,
+       "Residence mapping rules"). `add` enters stage 1, as every inflow does;
+       `set` is refused, because a total has no single meaning across the
+       stages. *)
+    let pop_dims = List.filter (fun d -> d <> r.res_stage_dim) (comp_dims ctx base) in
+    let items = resolve_index_order ctx ~loc
+        ~what:(Printf.sprintf "%s target '%s'" verb base) ~dims:pop_dims idxs in
+    let cell = String.concat "_" (base :: List.map (index_item_to_str env) items) in
+    let stage1 = List.hd r.res_stage_levels in
+    if verb = "sets" then begin
+      Diagnostics.error ctx.diags ~code:"E366" ~loc
+        ~message:(Printf.sprintf
+          "intervention '%s' sets '%s', which has an Erlang dwell (`via` on \
+           '%s') and is held in %d stages: a total has no single meaning \
+           across them"
+          name cell r.res_via (List.length r.res_stage_levels))
+        ~hint:(Printf.sprintf
+          "set a stage by its cell name (`%s_%s = ...`), or move individuals \
+           with `add(...)`, which enters stage 1, or `transfer(...)`, which \
+           draws from every stage in proportion to its occupancy"
+          cell stage1)
+        ();
+      None
+    end else Some (base, cell ^ "_" ^ stage1)
+  | _ ->
   match idxs with
   | [] -> Some (base, base)
   | _ ->
@@ -10482,36 +10545,84 @@ let check_action_target ctx ~name ~loc ~verb ~base ~concrete =
     and [ep_dims] comes from the declaration, never from the cell names:
     two dimensions with the same level names ([age = [low, high]] and
     [risk = [low, high]]) would otherwise pair [S_low] with [V_low] across
-    unrelated strata. A reference with only some of its indices never
-    becomes an endpoint; it is refused (E287) when it is resolved. *)
+    unrelated strata. A reference with only some of its population indices
+    never becomes an endpoint; it is refused (E287) when it is resolved.
+
+    A staged compartment is paired over its population dimensions only. Its
+    stages are where an individual is in the dwell, not a stratum, so a
+    residence reference ([E[pre]], or bare [E]) denotes one population cell
+    held in several stage cells. *)
 type endpoint = {
   ep_base  : string;
       (** The compartment as written, without indices. *)
   ep_dims  : string list;
-      (** Its declared dimensions when written bare; [[]] when written
-          with indices. *)
-  ep_cells : string list;
-      (** The compartment cells the reference denotes. *)
+      (** Its declared population dimensions when written bare; [[]] when
+          written with indices. *)
+  ep_cells : string list list;
+      (** One entry per population cell the reference denotes. An entry is
+          the stage cells of a residence reference, in dwell order, and a
+          single cell for anything else: an unstaged compartment, or a
+          reference that names its stage. *)
 }
 
 (* [None] when the expression is not a compartment reference at all — the
    caller emits E264, preserving the existing diagnostic for `from = S + R`. *)
-let resolve_action_endpoint ctx env (e : expr) : endpoint option =
-  let base, bare = match e with
-    | EIdent  (s, _)    -> Some s, true    (* `S`    — the whole family *)
-    | EIndex  (s, _, _) -> Some s, false   (* `S[c]` — one named cell *)
-    | _                 -> None,   false
+let resolve_action_endpoint ctx env ~name:iv_name ~loc (e : expr) : endpoint option =
+  let written = match e with
+    | EIdent  (s, _)        -> Some (s, [], true)      (* `S`    — the whole family *)
+    | EIndex  (s, items, _) -> Some (s, items, false)  (* `S[c]` — one named cell *)
+    | _                     -> None
   in
-  (* The dimensions come from the DECLARATION, and whether they apply depends on
-     how the endpoint was written, not on how many cells it happens to have.
-     `resolve_expr` returns [Ir.Pop] rather than [Ir.PopSum] for a family with
-     exactly one cell, so keying on the constructor would give a one-level
-     dimension `ep_dims = []` and let it pair with anything. *)
-  let dims_of b = if bare then comp_dims ctx b else [] in
-  match base, resolve_expr ctx env e with
-  | Some b, Ir.Pop n     -> Some { ep_base = b; ep_dims = dims_of b; ep_cells = [n] }
-  | Some b, Ir.PopSum ns -> Some { ep_base = b; ep_dims = comp_dims ctx b; ep_cells = ns }
-  | _                    -> None
+  match written with
+  | None -> None
+  | Some (name, items, bare) ->
+    let base = match List.assoc_opt name env with
+      | Some bound when Hashtbl.mem ctx.comp_tbl bound -> bound
+      | _ -> name
+    in
+    if refuse_hyper_action_target ctx ~loc ~name:iv_name
+         ~what:"transfers from or into" base then None else
+    (match residence_of ctx base with
+     | Some r when bare ->
+       (* Every population cell, each with its stages. The stage dimension is
+          the last one, so the cells come stage-major within a population
+          cell. *)
+       let k = List.length r.res_stage_levels in
+       let rec groups = function
+         | [] -> []
+         | cells ->
+           let group = List.filteri (fun i _ -> i < k) cells in
+           group :: groups (List.filteri (fun i _ -> i >= k) cells)
+       in
+       Some { ep_base = base;
+              ep_dims = List.filter (fun d -> d <> r.res_stage_dim) (comp_dims ctx base);
+              ep_cells = groups (expand_compartment_name ctx base) }
+     | Some r when is_residence_ref r items ->
+       let stage_cell level =
+         match resolve_expr ctx env
+                 (EIndex (name, items @ [ stage_index_item r items level ], dummy_loc)) with
+         | Ir.Pop n -> Some n
+         | _ -> None
+       in
+       let cells = List.map stage_cell r.res_stage_levels in
+       if List.for_all Option.is_some cells then
+         Some { ep_base = base; ep_dims = [];
+                ep_cells = [ List.filter_map Fun.id cells ] }
+       else None
+     | _ ->
+       (* The dimensions come from the DECLARATION, and whether they apply
+          depends on how the endpoint was written, not on how many cells it
+          happens to have. `resolve_expr` returns [Ir.Pop] rather than
+          [Ir.PopSum] for a family with exactly one cell, so keying on the
+          constructor would give a one-level dimension `ep_dims = []` and let
+          it pair with anything. *)
+       let dims_of b = if bare then comp_dims ctx b else [] in
+       match resolve_expr ctx env e with
+       | Ir.Pop n     -> Some { ep_base = base; ep_dims = dims_of base; ep_cells = [ [ n ] ] }
+       | Ir.PopSum ns ->
+         Some { ep_base = base; ep_dims = comp_dims ctx base;
+                ep_cells = List.map (fun n -> [ n ]) ns }
+       | _ -> None)
 
 (** How much a [transfer(...)] action moves. A transfer with neither
     argument has no amount ([None]).
@@ -10573,9 +10684,16 @@ let resolve_intervention_action ctx env ~name ~family ~loc ~binders (action : ac
       match List.assoc_opt key kwargs with
       | None   -> None
       | Some e ->
-        (match resolve_action_endpoint ctx env e with
+        let errors_before = count_errors ctx in
+        (match resolve_action_endpoint ctx env ~name ~loc e with
          | Some ep -> Some ep
-         | None    -> ignore (resolve_comp_name ctx env e); None)
+         | None ->
+           (* An endpoint that failed to resolve has said why (E287 for a
+              partial index); only one that resolved to something other than
+              a compartment still needs E264. *)
+           if count_errors ctx = errors_before then
+             ignore (resolve_comp_name ctx env e);
+           None)
     in
     let amount =
       match List.assoc_opt "fraction" kwargs, List.assoc_opt "count" kwargs with
@@ -10590,34 +10708,15 @@ let resolve_intervention_action ctx env ~name ~family ~loc ~binders (action : ac
           dimensions that share level names and transfer across them silently
           (gh#459's hazard); comparing declarations cannot. *)
        if s_ep.ep_dims <> d_ep.ep_dims then begin
-         (* A `via erlang(...)` / `via hyper_erlang(...)` residence axis is
-            synthesized as `__<transition>_stage` (see the dim_name built during
-            via lowering). It is private to that transition and never pairs with
-            anything, so naming it in the diagnostic would show the user an
-            identifier they never wrote and the generic "give both endpoints the
-            same dimensions" advice would be impossible to follow. Point at the
-            explicit stage cell instead, per spec §9.4.1. *)
-         let staged ep =
-           List.exists (fun d -> String.length d > 2 && String.sub d 0 2 = "__")
-             ep.ep_dims in
          let shape ep =
-           if staged ep then
-             Printf.sprintf "'%s' (given a staged residence by `via`)" ep.ep_base
-           else match ep.ep_dims with
+           match ep.ep_dims with
            | []   -> Printf.sprintf "'%s' (unstratified, or a single cell)" ep.ep_base
            | dims -> Printf.sprintf "'%s' stratified by [%s]"
                        ep.ep_base (String.concat ", " dims) in
          let hint =
-           if staged s_ep || staged d_ep then
-             Printf.sprintf
-               "a `via`-staged compartment is expanded over a residence axis \
-                private to its own transition, so it never pairs with another \
-                endpoint — name the explicit stage instead (e.g. `%s_s1`)"
-               (if staged d_ep then d_ep.ep_base else s_ep.ep_base)
-           else
-             "give both endpoints the same dimensions, or index the transfer \
-              explicitly (e.g. `vacc[a in age] : transfer(from = S[a], to = \
-              V[a], …)`)" in
+           "give both endpoints the same dimensions, or index the transfer \
+            explicitly (e.g. `vacc[a in age] : transfer(from = S[a], to = \
+            V[a], …)`)" in
          Diagnostics.error ctx.diags ~code:"E237" ~loc
            ~message:(Printf.sprintf
              "intervention '%s': transfer endpoints have different stratum \
@@ -10650,15 +10749,67 @@ let resolve_intervention_action ctx env ~name ~family ~loc ~binders (action : ac
          []
        end else begin
          (* Equal declared dimensions ⇒ [expand_compartment_name] enumerated
-            both in the same order, so zipping is a keyed join. *)
+            both in the same order, so zipping is a keyed join over the
+            population cells. Each pair is then lowered by the residence
+            mapping rules (proposal 2026-11-17-unified-staged-residence):
+
+              one cell          → one cell            plain transfer
+              one cell          → staged              plain transfer into stage 1
+              staged            → one cell            grouped, every stage to it
+              staged            → same compartment    grouped, stage to stage
+              staged            → other staged        grouped, every stage to
+                                                      its stage 1 (W107)
+
+            A staged source is one population held in several cells, so its
+            stages move under one grouped transfer: the amount is evaluated
+            once and applied to their total. *)
          let pairs = List.combine s_ep.ep_cells d_ep.ep_cells in
+         let same_compartment = s_ep.ep_base = d_ep.ep_base in
+         let restarts =
+           (not same_compartment)
+           && List.exists (fun (src, dst) ->
+                List.length src > 1 && List.length dst > 1) pairs in
+         let stage_into_residence =
+           same_compartment
+           && List.exists (fun (src, dst) ->
+                List.length src = 1 && List.length dst > 1) pairs in
+         (* How one population pair moves: plain (source, destination), or the
+            (source, destination) cell of every stage. *)
+         let lower_pair (src, dst) =
+           match src, dst with
+           | [ s ], d :: _ -> `Plain (s, d)
+           | stages, [ d ] -> `Grouped (List.map (fun s -> (s, d)) stages)
+           | stages, dstages when same_compartment -> `Grouped (List.combine stages dstages)
+           | stages, d :: _ -> `Grouped (List.map (fun s -> (s, d)) stages)
+           | _, [] -> `Grouped []   (* no cells: an empty dimension, reported where it is read *)
+         in
+         if stage_into_residence then begin
+           let src_cell = List.hd (fst (List.hd pairs)) in
+           (* The destination as written, with a stage index added. *)
+           let stage1 = match residence_of ctx d_ep.ep_base with
+             | Some r -> List.hd r.res_stage_levels
+             | None -> "s1" in
+           let dst_staged = match List.assoc_opt "to" kwargs with
+             | Some (EIndex (_, items, _)) ->
+               Printf.sprintf "%s[%s]" d_ep.ep_base
+                 (String.concat ", "
+                    (List.map (index_item_to_str env) items @ [ stage1 ]))
+             | _ -> Printf.sprintf "%s[%s]" d_ep.ep_base stage1 in
+           Diagnostics.error ctx.diags ~code:"E367" ~loc
+             ~message:(Printf.sprintf
+               "intervention '%s': `from` names one stage of the staged \
+                compartment '%s' (%s) but `to` does not say which stage of \
+                '%s' receives it"
+               name s_ep.ep_base src_cell d_ep.ep_base)
+             ~hint:(Printf.sprintf
+               "name the destination stage as well (e.g. `to = %s`), or \
+                write `from` without a stage to move every stage to the same \
+                stage of the destination"
+               dst_staged)
+             ();
+           []
+         end else
          match amt with
-         | TFraction fe ->
-           (* A fraction is scale-free, so the same value applies to every
-              cell — exactly the spec §25.10 expansion. *)
-           let fraction = resolve_expr ctx env fe in
-           List.map (fun (src, dst) ->
-             Ir.FractionTransfer { Ir.src; Ir.dst; Ir.fraction; Ir.fraction_grad = [] }) pairs
          | TCount _ when List.length pairs > 1 ->
            (* A count is ABSOLUTE. Fanning it out would move `count` people out
               of EVERY stratum, multiplying the intended total by the number of
@@ -10679,10 +10830,30 @@ let resolve_intervention_action ctx env ~name ~family ~loc ~binders (action : ac
                     S[a], to = V[a], …)`)"
              ();
            []
-         | TCount ce ->
-           let count = resolve_expr ctx env ce in
-           List.map (fun (src, dst) ->
-             Ir.AbsoluteTransfer { Ir.src; Ir.dst; Ir.count }) pairs
+         | TFraction _ | TCount _ ->
+           if restarts then
+             warn_dwell_restart ctx ~loc
+               ~what:(Printf.sprintf "the transfer of '%s'" family)
+               ~src:s_ep.ep_base ~dst:d_ep.ep_base;
+           (* A fraction is scale-free, so the same value applies to every
+              population cell — exactly the spec §25.10 expansion. *)
+           let amount = match amt with
+             | TFraction fe -> `Fraction (resolve_expr ctx env fe)
+             | TCount ce    -> `Count (resolve_expr ctx env ce)
+           in
+           List.map (fun pair ->
+             match lower_pair pair, amount with
+             | `Plain (src, dst), `Fraction fraction ->
+               Ir.FractionTransfer { Ir.src; Ir.dst; Ir.fraction; Ir.fraction_grad = [] }
+             | `Plain (src, dst), `Count count ->
+               Ir.AbsoluteTransfer { Ir.src; Ir.dst; Ir.count }
+             | `Grouped pairs, `Fraction fraction ->
+               Ir.GroupedTransfer
+                 { Ir.pairs;
+                   Ir.amount = Ir.GroupedFraction { fraction; fraction_grad = [] } }
+             | `Grouped pairs, `Count count ->
+               Ir.GroupedTransfer { Ir.pairs; Ir.amount = Ir.GroupedCount { count } })
+             pairs
        end
      | _ -> [])
   | ASet (comp, idxs, expr) ->

@@ -424,6 +424,21 @@ _different_ staged compartment enters its first stage, restarting that dwell;
 the compiler warns (**W107**) because continuing the progression may be what was
 meant.
 
+**Interventions and events on an Erlang-staged compartment are written on the
+compartment too.** `transfer(fraction = 0.2, from = E[pre], to = E[sch])`,
+`transfer(fraction = cov, from = E, to = R)` and `add(E[pre], 5)` all compile
+whatever `stages` is. A transfer out of the compartment is one action over its
+stages: the amount applies to the compartment's total, and on integer
+compartments the floor is taken once for that total (`floor(N * fraction)`) and
+the stages give up their shares in proportion to occupancy. Do not write one
+transfer per stage
+(`[st in __latency_stage] : transfer(from = E[pre, st], ...)`): that floors each
+stage separately, so the number moved shrinks as `stages` grows (three stages of
+10 at a fraction of 0.2/3 move nobody, where the compartment form moves 2), and
+it stops compiling at `stages = 1`. `transfer` and `add` into the compartment
+enter its first stage. A `set` on the compartment is refused (**E366**): a total
+has no single meaning across stages.
+
 **Backend choice for fits.** Use `chain_binomial` — the production fit backend.
 Gillespie is for forward-simulation sanity checks, not fits (too slow).
 

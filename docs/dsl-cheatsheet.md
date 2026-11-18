@@ -251,6 +251,12 @@ outcome   : I via hyper_erlang(
 latency[a in age] : E[a] --> I[a]  via erlang(stages = 3, rate = sigma)
 death_E[a in age] : E[a] -->       @ mu * E[a]         # competing exit, from any stage
 aging_E           : E[pre] --> E[sch] @ ar * E[pre]    # same compartment: keeps the stage
+
+# interventions / events on it: write the compartment, not a stage
+promote : transfer(fraction = 0.2, from = E[pre], to = E[sch]) at [30 'days]  # keeps the stage
+expose  : transfer(fraction = 0.1, from = S[pre], to = E[pre]) at [40 'days]  # enters stage 1
+treat   : transfer(fraction = 0.5, from = E, to = T)           at [50 'days]  # every stage, per age
+import  : add(E[pre], 5)                                       at [70 'days]  # enters stage 1
 ```
 
 `erlang(stages = k, mean | rate)`: give exactly one of `mean` / `rate`; `stages`
@@ -270,6 +276,19 @@ different staged compartment is entered at stage 1 (warning `W107`).
 text compiles at `stages = 1`. With a competing exit the law's `mean` is the
 dwell absent that exit: at a constant hazard `mu` the fraction completing an
 Erlang-`k` dwell of stage rate `k * sigma` is `(k*sigma / (k*sigma + mu))^k`.
+
+**Transfers and `add`.** A `transfer` out of a staged compartment is one action
+over all its stages: `fraction` / `count` is evaluated once and applied to the
+compartment total `N`. On integer compartments it moves `floor(N * fraction)`
+(or `min(round(count), N)`), taken from the stages in proportion to occupancy
+(largest remainder, earlier stage on a tie), so the number moved does not depend
+on `stages`: 5 people in stages (3, 1, 1) at 0.4 give up 2, as (1, 1, 0). The
+floor is taken once for the compartment, never per stage; a transfer that names
+one cell (an unstaged compartment, or `from = E[pre, s2]`) is unchanged and
+floors that cell. Into a staged compartment, `transfer` and `add` enter stage 1;
+within it, the stage is kept. `set` on it is `E366` (set a stage cell:
+`E_pre_s1 = ...`); `from = E[pre, s2], to = E[sch]` is `E367`; an action on a
+`hyper_erlang` compartment is `E368`.
 
 Diagnostics: `E243` unknown law, `E244` stages, `E245` mean-XOR-rate, `E246`
 second `via` on one source, `E255` <2 branches, `E256` last-branch weight,

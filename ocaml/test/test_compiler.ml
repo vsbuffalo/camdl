@@ -2677,7 +2677,7 @@ let transfer_pairs (m : Ir.model) name =
   List.filter_map (function
     | Ir.FractionTransfer t -> Some (t.Ir.src, t.Ir.dst)
     | Ir.AbsoluteTransfer t -> Some (t.Ir.src, t.Ir.dst)
-    | _ -> None) iv.Ir.actions
+    | Ir.GroupedTransfer _ | Ir.Set _ | Ir.AddAction _ -> None) iv.Ir.actions
 
 let test_bare_stratified_transfer_expands_per_stratum () =
   let src = strat_transfer_model
@@ -3077,10 +3077,10 @@ let test_transfer_indexed_cell_into_unstratified_compiles () =
     Alcotest.(check (list (pair string string)))
       "one transfer, S_child -> V" [ ("S_child", "V") ] (transfer_pairs m "drain")
 
-let test_staged_endpoint_hint_names_the_stage () =
-  (* A `via`-staged compartment must not leak its synthesized `__x_stage` axis
-     into the diagnostic, and the hint must be followable — "give both endpoints
-     the same dimensions" is impossible for a residence axis. *)
+let test_transfer_into_a_staged_compartment_enters_stage_one () =
+  (* A transfer from an unstaged compartment into a `via`-staged one lands in
+     its first stage, as every inflow does (proposal
+     2026-11-17-unified-staged-residence, "Transfers and `add`"). *)
   let src = {|
     time_unit = 'days
     compartments { S, V }
@@ -3090,17 +3090,11 @@ let test_staged_endpoint_hint_names_the_stage () =
     init { S = 100  V = 10 }
     simulate { from = 0 'days to = 10 'days }
   |} in
-  Diagnostics.json_errors_mode := true;
-  let result = Compiler.compile ~name:"staged_endpoint" src in
-  Diagnostics.json_errors_mode := false;
-  (match result with
-   | Ok _ -> Alcotest.fail "expected E237 for a staged endpoint"
-   | Error e ->
-     Alcotest.(check bool) "E237" true (contains_substring ~needle:"E237" e);
-     Alcotest.(check bool) "no synthesized axis name leaked"
-       false (contains_substring ~needle:"__waning_stage" e);
-     Alcotest.(check bool) "hint names the explicit stage"
-       true (contains_substring ~needle:"V_s1" e))
+  match Compiler.compile ~name:"staged_endpoint" src with
+  | Error e -> Alcotest.failf "a transfer into a staged compartment should compile: %s" e
+  | Ok m ->
+    Alcotest.(check (list (pair string string)))
+      "one transfer, S -> V_s1" [ ("S", "V_s1") ] (transfer_pairs m "vacc")
 
 let test_event_bare_stratified_transfer_expands () =
   (* events {} shares the action resolver, so it must fan out identically. *)
@@ -14909,13 +14903,22 @@ let test_reactive_rolling_method_unsupported () =
 
 let test_reactive_unknown_action_target_rejected () =
   (* The action target is validated by the SAME resolver as scheduled
-     interventions — a transfer to an undeclared compartment is rejected
-     (E264 from `resolve_comp_name`), not a reactive-specific path. *)
-  compile_expect_error_code ~code:"E264" ~contains:""
-    (reactive_model_with
+     interventions — a transfer to an undeclared compartment is rejected as
+     the undeclared name it is (E100), not by a reactive-specific path, and
+     without a second diagnostic about the placeholder the first one leaves. *)
+  let src = reactive_model_with
       "sia : when observed(weekly) >= thr {\n\
        \  action = transfer(fraction = cov, from = S, to = Nowhere)\n\
-       }")
+       }" in
+  compile_expect_error_code ~code:"E100" ~contains:"Nowhere" src;
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"reactive_unknown_target" src in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> Alcotest.fail "expected E100"
+  | Error e ->
+    Alcotest.(check bool) "no E264 beside the E100" false
+      (contains_substring ~needle:"E264" e)
 
 (* ── Declaration doc comments (#') ────────────────────────────────────────
    `#'` doc comments attach prose to the following compartment / parameter
@@ -18688,8 +18691,8 @@ let () =
         `Quick test_transfer_single_level_dimensions_rejected;
       Alcotest.test_case "indexed cell into unstratified compiles (gh#460)"
         `Quick test_transfer_indexed_cell_into_unstratified_compiles;
-      Alcotest.test_case "staged endpoint hint names the stage (gh#460)"
-        `Quick test_staged_endpoint_hint_names_the_stage;
+      Alcotest.test_case "transfer into a staged compartment enters stage 1"
+        `Quick test_transfer_into_a_staged_compartment_enters_stage_one;
       Alcotest.test_case "events {} bare stratified transfer expands (gh#460)"
         `Quick test_event_bare_stratified_transfer_expands;
       Alcotest.test_case "binder-indexed family emits one transfer each (gh#460)"
@@ -18764,7 +18767,7 @@ let () =
         `Quick test_reactive_non_comparison_when_rejected;
       Alcotest.test_case "E001 .rolling() method syntax is unsupported"
         `Quick test_reactive_rolling_method_unsupported;
-      Alcotest.test_case "E264 unknown action target is rejected (shared resolver)"
+      Alcotest.test_case "E100 unknown action target is rejected (shared resolver)"
         `Quick test_reactive_unknown_action_target_rejected;
     ];
     "recurring_interventions", [
