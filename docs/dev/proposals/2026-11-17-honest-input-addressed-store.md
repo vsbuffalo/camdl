@@ -534,9 +534,13 @@ and of coverage; the cases themselves are regression evidence.
    value. The four statics and `set_allowed`/`allowed()` are gone.
    `pfilter --fit`, `profile --fit` and `survey --fit` now read the config's
    `[config] allow_forcing_extrapolation`, and `compare` passes the override to
-   its `camdl pfilter` child (gh#1235). **Next:** `--no-licm` is read inside the
-   compile helper every command calls, so it is converted per command in step 4,
-   as each command's resolved configuration gains its compile settings.
+   its `camdl pfilter` child (part of gh#1235).
+   `simulate --draws posterior
+   --fit` and `compare`'s in-process ODE scorer
+   still build their policy from their own flag alone, not the replayed fit's
+   config; they are converted in step 4. **Next:** `--no-licm` is read inside
+   the compile helper every command calls, so it is converted per command in
+   step 4, as each command's resolved configuration gains its compile settings.
 4. `fit run` (classification and cases; its hashing representation is unchanged
    until the follow-up), then `pfilter`, `profile`, `survey`.
 
