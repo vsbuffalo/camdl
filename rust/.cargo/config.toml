@@ -4,3 +4,11 @@
 # local builds catch the same issues.
 [build]
 rustflags = ["-D", "warnings"]
+
+# The test harness runs each test binary's tests on one thread per core by
+# default, so every agent running `cargo test` asks for all 16 cores; four at
+# once measured ~50 runnable threads on 16 cores. Four threads per run lets
+# about four runs share the machine. `force = false`: an explicit
+# RUST_TEST_THREADS in the environment (or `-- --test-threads=N`) still wins.
+[env]
+RUST_TEST_THREADS = { value = "4", force = false }

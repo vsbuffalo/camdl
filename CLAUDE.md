@@ -52,8 +52,11 @@ an assertion, no skipping a check, no widening a tolerance to get green. If
 something fails, find the cause.
 
 `cargo-nextest` is **not** used — its parallel launch burst wedges macOS
-syspolicyd/code-signing; `cargo test` is sequential and safe. `sccache` is
-optional (`brew install sccache`); the Makefile uses it only when on PATH.
+syspolicyd/code-signing; `cargo test` runs test binaries one at a time and is
+safe. Within a binary, tests run in parallel on `RUST_TEST_THREADS` threads,
+capped at 4 in `rust/.cargo/config.toml` so parallel agents share the cores.
+`sccache` is optional (`brew install sccache`); the Makefile uses it only when
+on PATH.
 
 ## "camdlc version mismatch" is environmental, not your diff
 
