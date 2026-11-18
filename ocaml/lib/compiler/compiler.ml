@@ -109,7 +109,8 @@ let read_file path = In_channel.with_open_bin path In_channel.input_all
      the downstream pipeline.
 
    Return shape: [(detail, diags, source)]. [detail] is [None] when
-   lex/parse/expand structurally failed (then [diags] holds the E001);
+   lex/parse/expand structurally failed (then [diags] holds the E001, and
+   the W100 / parser-action diagnostics recorded before the failure);
    [Some d] when expansion produced a model (then [diags] is [d.ctx.diags],
    which may itself carry expansion-phase errors/warnings and the drained
    W100 / parser-action diagnostics — the caller decides whether to
@@ -304,6 +305,38 @@ let front_end_collect ?(name = "model") ?(filename = "<input>")
   Lexer.pending_warnings := [];
   Parser_errors.pending_errors := [];
   let parse_diags = Diagnostics.create () in
+  (* Move what the lexer and the parser actions recorded into [diags]: the
+     W100 lex warnings, and the errors parser actions reported while parsing
+     went on (see [Parser_errors]). Every return path drains, so a later
+     syntax error or an expansion failure does not hide the errors reported
+     before it (gh#1210).
+
+     A position is attributed to the unit it was lexed from: with a
+     `--quantities` vocabulary file there are two units in one compile, and
+     [Lexing.set_filename] stamped each position with its own path. A
+     position with no stamp falls back to the model filename. *)
+  let drain_pending (diags : Diagnostics.t) =
+    let unit_file (sp : Lexing.position) =
+      if sp.Lexing.pos_fname = "" then filename else sp.Lexing.pos_fname in
+    List.iter (fun (sp, ep, msg) ->
+      Diagnostics.warning diags ~code:"W100"
+        ~loc:(Diagnostics.loc_of_positions ~file:(unit_file sp) sp ep)
+        ~message:msg ()
+    ) (List.rev !Lexer.pending_warnings);
+    Lexer.pending_warnings := [];
+    List.iter (fun (sp, ep, code, msg, hint, fix) ->
+      let fixes = match fix with
+        | None -> []
+        | Some (fsp, fep, replacement) ->
+          [ { Diagnostics.fix_loc =
+                Diagnostics.loc_of_positions ~file:(unit_file fsp) fsp fep;
+              replacement } ] in
+      Diagnostics.error diags ~code
+        ~loc:(Diagnostics.loc_of_positions ~file:(unit_file sp) sp ep)
+        ~message:msg ?hint ~fixes ()
+    ) (List.rev !Parser_errors.pending_errors);
+    Parser_errors.pending_errors := []
+  in
   match
     capture_e001 parse_diags (fun () ->
        let t_parse = Sys.time () in
@@ -319,7 +352,7 @@ let front_end_collect ?(name = "model") ?(filename = "<input>")
        Passtime.record "parse" (Sys.time () -. t_parse);
        decls)
   with
-  | Error () -> (None, parse_diags, source)
+  | Error () -> drain_pending parse_diags; (None, parse_diags, source)
   | Ok decls ->
     let source_dir =
       if filename = "<input>" then "" else Filename.dirname filename
@@ -329,35 +362,9 @@ let front_end_collect ?(name = "model") ?(filename = "<input>")
           Ok (Passtime.time "expand"
                 (fun () -> Expander.expand_detail ~source_dir ~filename name decls)))
      with
-     | Error () -> (None, parse_diags, source)
+     | Error () -> drain_pending parse_diags; (None, parse_diags, source)
      | Ok (model, ctx, summary) ->
-       (* Both drains attribute a position to the unit it was lexed from: with a
-          `--quantities` vocabulary file there are two units in one compile, and
-          [Lexing.set_filename] stamped each position with its own path. Fall
-          back to the model filename for a position with no stamp. *)
-       let unit_file (sp : Lexing.position) =
-         if sp.Lexing.pos_fname = "" then filename else sp.Lexing.pos_fname in
-       (* Drain lex-phase warnings (e.g. inconsistent digit grouping)
-          collected before the expander's ctx.diags was available. *)
-       List.iter (fun (sp, ep, msg) ->
-         Diagnostics.warning ctx.diags ~code:"W100"
-           ~loc:(Diagnostics.loc_of_positions ~file:(unit_file sp) sp ep)
-           ~message:msg ()
-       ) (List.rev !Lexer.pending_warnings);
-       Lexer.pending_warnings := [];
-       (* Drain the errors parser actions recorded (see [Parser_errors]). *)
-       List.iter (fun (sp, ep, code, msg, hint, fix) ->
-         let fixes = match fix with
-           | None -> []
-           | Some (fsp, fep, replacement) ->
-             [ { Diagnostics.fix_loc =
-                   Diagnostics.loc_of_positions ~file:(unit_file fsp) fsp fep;
-                 replacement } ] in
-         Diagnostics.error ctx.diags ~code
-           ~loc:(Diagnostics.loc_of_positions ~file:(unit_file sp) sp ep)
-           ~message:msg ?hint ~fixes ()
-       ) (List.rev !Parser_errors.pending_errors);
-       Parser_errors.pending_errors := [];
+       drain_pending ctx.diags;
        (Some { model; ctx; summary; source; decls;
                declared = lazy (Declared_emit.build_detail ~source ctx decls) },
         ctx.diags, source))
