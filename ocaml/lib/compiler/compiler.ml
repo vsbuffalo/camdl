@@ -655,6 +655,7 @@ let run_dimcheck_full (d : compile_detail)
       | Some (Dimcheck.SLet l)         -> Expander.let_loc         d.ctx l
       | Some (Dimcheck.SForcing f)     -> Expander.forcing_loc     d.ctx f
       | Some (Dimcheck.STable t)       -> Expander.table_loc       d.ctx t
+      | Some (Dimcheck.SBalance _)     -> Expander.balance_loc     d.ctx
       | Some (Dimcheck.SBinding _) | None -> Diagnostics.no_loc
     in
     let result =

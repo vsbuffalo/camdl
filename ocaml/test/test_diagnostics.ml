@@ -1020,18 +1020,71 @@ let located_cases = [
   "E302 table cell, at the table", "E302", 9,
   sir_with ~transitions:recovery
     ~extra:"dimensions { age = [young, old] }\ntables { mu : age 'count = [beta, beta] }";
+  "E305 balance expression, at the balance", "E305", 21,
+  sir_with ~extra:"" ~transitions:recovery ^ "balance {\n  R = beta\n}\n";
 ]
 
-(* No diagnostic the fixtures produce is unlocated, except for the codes
-   listed here, which no fix has reached yet. *)
+(* The calendar checks (E321: an instant plus a calendar duration) on a model
+   with an origin, one line above the plain model's lines. *)
+let anchored src = "origin = date(\"2020-02-24\")\n" ^ src
+let instant_plus_months = "date(\"2020-02-24\") + 6 'months"
+
+let calendar_located_cases = [
+  "E321 in a let body, at the let", "E321", 9,
+  anchored (sir_with ~transitions:recovery
+              ~extra:("let bad = " ^ instant_plus_months));
+  "E321 in a forcing argument, at the forcing", "E321", 9,
+  anchored (sir_with ~transitions:recovery
+              ~extra:("forcing { school : sinusoid 'ratio { amplitude = 0.1  \
+                       baseline = " ^ instant_plus_months
+                      ^ "  period = 365 'days  phase = 0 'days } }"));
+  "E321 in a balance, at the balance", "E321", 22,
+  anchored (sir_with ~extra:"" ~transitions:recovery
+            ^ "balance {\n  R = " ^ instant_plus_months ^ "\n}\n");
+  "E321 in an ODE derivative, at the equation", "E321", 23,
+  anchored (Printf.sprintf {camdl|time_unit = 'days
+compartments { S, I, R, W : real }
+let N = S + I + R
+parameters {
+  beta  : rate  in [0.001, 2.0]
+  gamma : rate  in [0.001, 1.0]
+}
+transitions {
+  infection : S --> I  @ beta * S * (I / N)
+  recovery  : I --> R  @ gamma * I
+}
+init {
+  S = 990
+  I = 10
+  W = 0
+}
+simulate {
+  from = 0 'days
+  to   = 80 'days
+}
+ode {
+  W = %s
+}
+|camdl} instant_plus_months);
+]
+
+(* No diagnostic the fixtures produce is unlocated, except for these
+   (fixture, code) pairs, which no fix has reached yet. Keyed by fixture so
+   that a code located at some sites cannot lose its location at another. *)
 let unlocated_allowed = [
-  "E120";  (* a built-in called with the wrong arguments: a call has no span *)
-  "E200";  (* a data file that cannot be read *)
-  "E319";  (* a dimension exponent too large to represent *)
-  "E314";  (* an intervention action's dimension *)
-  "E315";  (* an intervention or schedule time's dimension *)
-  "I300";  (* an undetermined dimension *)
-  "W104";  (* a data file's header *)
+  (* a built-in called with the wrong arguments: a call has no span *)
+  "semantic/e120_builtin_arity.camdl", "E120";
+  (* a data file that cannot be read, and its absolute path *)
+  "lints/w104_read_absolute_path.camdl", "E200";
+  "lints/w104_read_absolute_path.camdl", "W104";
+  (* a dimension exponent too large to represent: a whole-model failure *)
+  "dimcheck/powers/pw_exponent_overflow.camdl", "E319";
+  (* a parameter whose dimension could not be determined *)
+  "dimcheck/observations/normal_count_noise_he2010.camdl", "I300";
+  "dimcheck/priors/pr_units_theta_undetermined.camdl", "I300";
+  "dimcheck/solver/jointly_undetermined.camdl", "I300";
+  "dimcheck/solver/solve_contradiction.camdl", "I300";
+  "dimcheck/solver/solve_not_integral.camdl", "I300";
 ]
 
 let test_fixture_diagnostics_located () =
@@ -1041,7 +1094,8 @@ let test_fixture_diagnostics_located () =
       Compiler.collect_diagnostics ~name:(Filename.basename path)
         ~filename:path (read_file path)
       |> List.filter (fun (d : Diagnostics.diagnostic) ->
-           d.loc.line = 0 && not (List.mem d.code unlocated_allowed))
+           d.loc.line = 0
+           && not (List.mem (fixture_name path, d.code) unlocated_allowed))
       |> List.map (fun (d : Diagnostics.diagnostic) ->
            Printf.sprintf "%s: %s %s" (fixture_name path) d.code d.message))
       files
@@ -1076,7 +1130,7 @@ let () =
     "located-gh1213",
       (List.map (fun (name, code, line, src) ->
          Alcotest.test_case name `Quick (check_located ~code ~line src))
-         located_cases
+         (located_cases @ calendar_located_cases)
        @ [ Alcotest.test_case "fixture diagnostics have a location" `Quick
              test_fixture_diagnostics_located ]);
     "pending-errors-gh1210", [

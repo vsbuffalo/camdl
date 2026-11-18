@@ -1157,6 +1157,11 @@ let forcing_loc ctx name =
     ~name_of:(fun (f : func_decl) -> f.fname)
     ~loc_of:(fun f -> f.fspan) name
 
+let balance_loc ctx =
+  match ctx.balance_decl with
+  | Some bd -> diag_loc_of_ast_ctx ctx bd.bspan
+  | None -> Diagnostics.no_loc
+
 let table_loc ctx name =
   match List.find_opt (fun (td : table_decl) -> List.mem name td.tnames)
           ctx.table_decls with
@@ -1166,9 +1171,17 @@ let table_loc ctx name =
 (* Scheduled interventions and events share [intervention_decl] and both lower
    into `model.interventions`, so one lookup spans both blocks (gh#461). *)
 let interv_loc ctx name =
-  find_decl_loc ctx ~decls:(ctx.interv_decls @ ctx.event_decls)
-    ~name_of:(fun (iv : intervention_decl) -> iv.ivname)
-    ~loc_of:(fun iv -> iv.ivloc) name
+  match
+    find_decl_loc ctx ~decls:(ctx.interv_decls @ ctx.event_decls)
+      ~name_of:(fun (iv : intervention_decl) -> iv.ivname)
+      ~loc_of:(fun iv -> iv.ivloc) name
+  with
+  | l when l.Diagnostics.line > 0 -> l
+  | _ ->
+    (* A reactive trigger lowers into the same list of interventions. *)
+    find_decl_loc ctx ~decls:ctx.reactive_decls
+      ~name_of:(fun (rx : reactive_decl) -> rx.rxname)
+      ~loc_of:(fun rx -> rx.rxloc) name
 
 (* Resolve a contrast name back to its declaration loc — used by the dimcheck
    contrast-dimension diagnostic (which runs on the IR and has no source spans).
@@ -6327,18 +6340,18 @@ let rec literal_units (e : expr) =
    would otherwise be read as 21 days. A bare number is a time in model units;
    anything else that is not a unit literal is left to the checks of its
    position. *)
-let check_time_units ctx ~what (e : expr) =
+let check_time_units ctx ~loc ~what (e : expr) =
   let show (p, t) = Dimcheck.display_dim (Dimcheck.make p t) in
   match literal_units e with
   | `Units (0, 1) | `Bare | `Other -> ()
   | `Units d ->
-    Diagnostics.error ctx.diags ~code:"E315" ~loc:Diagnostics.no_loc
+    Diagnostics.error ctx.diags ~code:"E315" ~loc
       ~message:(Printf.sprintf "%s must be a time, but its unit literal has dimension %s"
                   what (show d))
       ~hint:"write it with a time unit ('days, 'weeks, ...) or as a bare number in the model's time unit"
       ()
   | `Conflict (a, b) ->
-    Diagnostics.error ctx.diags ~code:"E315" ~loc:Diagnostics.no_loc
+    Diagnostics.error ctx.diags ~code:"E315" ~loc
       ~message:(Printf.sprintf "%s: its unit literals disagree, %s combined with %s"
                   what (show a) (show b))
       ()
@@ -7100,7 +7113,7 @@ module Lower = struct
   let instant_checks ctx ~context ?bare ?units (p : Time_pos.instant Time_pos.t) =
     let e = Time_pos.expr p in
     let loc = loc ctx p in
-    Option.iter (fun what -> check_time_units ctx ~what e) units;
+    Option.iter (fun what -> check_time_units ctx ~loc ~what e) units;
     let refused =
       if mentions_obs_anchor e then false
       else begin
@@ -7180,7 +7193,7 @@ module Lower = struct
     let e = Time_pos.expr p in
     ignore (judge ctx p (fun () ->
       let loc = loc ctx p in
-      check_time_units ctx ~what e;
+      check_time_units ctx ~loc ~what e;
       check_instant_arithmetic ctx ~loc ~context e;
       (* The hint's `calendar_months` is the literal's own count of months. *)
       let months = match calendar_literal ctx e with
@@ -7200,7 +7213,8 @@ module Lower = struct
   let runtime_offset ctx ~rx_name ~field (p : Time_pos.runtime_offset Time_pos.t) : float =
     let e = Time_pos.expr p in
     ignore (judge ctx p (fun () ->
-      check_time_units ctx ~what:(Printf.sprintf "`%s` of '%s'" field rx_name) e;
+      check_time_units ctx ~loc:(loc ctx p)
+        ~what:(Printf.sprintf "`%s` of '%s'" field rx_name) e;
       (if ctx.origin <> None then
          match Time_typing.classify (time_env ctx) e with
          | Time_typing.TCalendar ->
@@ -7233,7 +7247,7 @@ module Lower = struct
   let trigger_window ctx ~rx_name (p : Time_pos.span Time_pos.t) : float =
     let e = Time_pos.expr p in
     ignore (judge ctx p (fun () ->
-      check_time_units ctx ~what:"a trigger's `window`" e;
+      check_time_units ctx ~loc:(loc ctx p) ~what:"a trigger's `window`" e;
       (if ctx.origin <> None then
          match Time_typing.classify (time_env ctx) e with
          | Time_typing.TCalendar ->
@@ -7285,7 +7299,7 @@ module Lower = struct
     let e = Time_pos.expr p in
     ignore (judge ctx p (fun () ->
       let loc = loc ctx p in
-      check_time_units ctx ~what:"a schedule's `at_day`" e;
+      check_time_units ctx ~loc ~what:"a schedule's `at_day`" e;
       check_instant_arithmetic ctx ~loc ~context e;
       (* `at_day` is folded to one offset from the start of each
          period, so a calendar duration would become the average month or
@@ -7328,7 +7342,7 @@ module Lower = struct
   let length ctx ~context (p : Time_pos.length Time_pos.t) : float =
     let e = Time_pos.expr p in
     ignore (judge ctx p (fun () ->
-      check_time_units ctx ~what:"`simulate.dt`" e;
+      check_time_units ctx ~loc:(loc ctx p) ~what:"`simulate.dt`" e;
       check_instant_arithmetic ctx ~loc:(loc ctx p) ~context e;
       false));
     fold ctx e
@@ -13539,7 +13553,7 @@ let check_surface_time_typing ctx =
 
   (* ── ODE derivatives ────────────────────────────────────────────────── *)
   List.iter (fun (od : ode_decl) ->
-    walk ~loc:Diagnostics.no_loc
+    walk ~loc:(diag_loc_of_ast_ctx ctx od.odspan)
       ~context:(Printf.sprintf "ODE d(%s)/dt" od.ocomp) od.oderiv
   ) ctx.ode_decls;
 
@@ -13577,7 +13591,7 @@ let check_surface_time_typing ctx =
        `classify`'s let-table lookup; this walk catches
        `let bad = date("2020-02-24") + 6 'months` itself. ── *)
   List.iter (fun (lb : let_binding) ->
-    walk ~loc:Diagnostics.no_loc
+    walk ~loc:(diag_loc_of_ast_ctx ctx lb.lloc)
       ~context:(Printf.sprintf "let binding '%s'" lb.lname) lb.lbody
   ) ctx.let_bindings;
 
@@ -13606,14 +13620,15 @@ let check_surface_time_typing ctx =
   (* The keywords whose role is a time are positions, judged by [Lower]. *)
   List.iter (fun (fd : func_decl) ->
     List.iter
-      (walk ~loc:Diagnostics.no_loc ~context:(Printf.sprintf "forcing '%s'" fd.fname))
+      (walk ~loc:(diag_loc_of_ast_ctx ctx fd.fspan)
+         ~context:(Printf.sprintf "forcing '%s'" fd.fname))
       (Time_census.Forcing_schema.value_exprs fd)
   ) ctx.func_decls;
 
   (* ── balance ────────────────────────────────────────────────────────── *)
   (match ctx.balance_decl with
    | Some bd ->
-     walk ~loc:Diagnostics.no_loc
+     walk ~loc:(diag_loc_of_ast_ctx ctx bd.bspan)
        ~context:(Printf.sprintf "balance '%s'" bd.bcomp) bd.bexpr
    | None -> ());
 
