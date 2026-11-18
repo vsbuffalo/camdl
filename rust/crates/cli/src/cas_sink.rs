@@ -116,31 +116,19 @@ pub(crate) struct RunEntry {
 /// them); `simulate`'s own sink (`main::SimSink`) delegates to it and reads a
 /// skipped cell back for the combined outputs.
 pub(crate) struct CasSink {
-    /// Resolved scenario arms, looked up by name for the
-    /// hash-relevant enable/disable/params delta.
-    pub(crate) resolved_scenarios: Vec<ResolvedEntry>,
-    pub(crate) model_path: String,
-    pub(crate) model_stem: Option<String>,
-    /// The **base** model — its whole-IR digest is the (constant-across-cells)
-    /// model level. Never `cell.model` (which has scenario + sweep applied).
-    /// Loaded through the same seam the engine loads from
-    /// (`util::load_run_model`), and it is also the model each cell's
-    /// parameter values are resolved over.
+    /// The invocation's resolved configuration: the base model and its
+    /// `model` level, the run-wide `config` level (backend, `dt`, the column
+    /// view, the evaluator flags) and the scenario arms. Every cell's identity
+    /// is built from it ([`CasSink::cell_resolve`]), and the engine's settings
+    /// come from the same value (`ResolvedSimConfig::engine_settings`).
     ///
-    /// There is deliberately no base parameter map here. A cell's `params`
-    /// level is resolved from the cell's own `SimRun` — the object the engine
-    /// runs — through `util::resolve_run_parameters`, the resolver call the
-    /// engine makes (gh#583). A parallel map rebuilt beside it put a draw/sweep
-    /// value above `--param` where the resolver puts it below.
-    pub(crate) base_model: ir::Model,
-    pub(crate) backend: crate::args::types::ForwardBackend,
-    pub(crate) dt: f64,
-    pub(crate) allow_degenerate_rates: bool,
-    /// Output view (gh#156): the resolved `--no-flows` / `--columns` filter,
-    /// applied to both this cell's leaf `traj.tsv` (writer) and its `config`
-    /// identity (`cell_resolve`). Default = full output. `--output-every` is
-    /// not here — it is lowered into the model schedule upstream.
-    pub(crate) output_cols: crate::util::OutputColumns,
+    /// The base model (`sim.model.ir`) is never `cell.model` (which has the
+    /// scenario and the sweep point applied), and it is the model each cell's
+    /// parameter values are resolved over. There is deliberately no base
+    /// parameter map: a cell's `params` level is resolved from the cell's own
+    /// `SimRun` through `util::resolve_run_parameters`, the resolver call the
+    /// engine makes (gh#583).
+    pub(crate) sim: std::sync::Arc<crate::sim_config::ResolvedSimConfig>,
     /// Absolute `<output>/sims` subtree.
     pub(crate) runs_dir: String,
     pub(crate) obs_enabled: bool,
@@ -253,11 +241,11 @@ impl CasSink {
         spec: &crate::engine::CellSpec,
     ) -> Result<(crate::resolve::ResolvedTrajectory, std::path::PathBuf, String), String> {
         let name = spec.scenario.name();
-        let resolved = self.resolved_scenarios.iter()
+        let resolved = self.sim.arms.iter()
             .find(|s| s.name == name || s.route.as_deref() == Some(name))
             .ok_or_else(|| format!("cell scenario '{}' not among the resolved scenarios", name))?;
 
-        let resolved_params = crate::util::resolve_run_parameters(&self.base_model, &spec.sim_run)?;
+        let resolved_params = crate::util::resolve_run_parameters(&self.sim.model.ir, &spec.sim_run)?;
         let params: HashMap<String, f64> =
             crate::util::resolved_parameter_values(&resolved_params.model).into_iter().collect();
 
@@ -275,23 +263,13 @@ impl CasSink {
             .collect();
         let param_label = params_path_label(&ran_point);
 
-        let ctx = crate::resolve::TrajectoryCtx {
-            model: &self.base_model,
-            model_stem: self.model_stem.as_deref().unwrap_or("model"),
-            ir_version: ir::IR_VERSION.trim(),
-            engine_version: version::ENGINE_ID,
-            backend: self.backend,
-            dt: self.dt,
+        let base = &self.sim.model.ir;
+        let window = crate::sim_config::CellWindow::new(
             // gh#641: the cell's EFFECTIVE start, not the base model's. A run
             // seeded from a filtered state begins at that state's origin and
             // therefore covers a different window — the same argument the
             // horizon override makes below, from the other end.
-            t_start: spec
-                .sim_run
-                .init_state
-                .as_ref()
-                .map(|i| i.origin_t)
-                .unwrap_or(self.base_model.simulation.t_start),
+            spec.sim_run.init_state.as_ref().map(|i| i.origin_t).unwrap_or(base.simulation.t_start),
             // gh#561: the cell's EFFECTIVE horizon, not the base model's. A
             // scenario declaring its own `simulate { to }` produces a different
             // trajectory, so it must re-key (`feedback: count-in-the-key`) —
@@ -303,12 +281,23 @@ impl CasSink {
             // rather than adding a field to the scenario level, so it costs
             // nothing for models that don't use the feature: a preset with no
             // `to`, or one equal to the model horizon, hashes exactly as before.
-            t_end: resolved.t_end.unwrap_or(self.base_model.simulation.t_end),
-            output: &self.base_model.output.times,
-            allow_degenerate_rates: self.allow_degenerate_rates,
-            allow_forcing_extrapolation: crate::forcing_extrapolation::allowed(),
-            no_flows: self.output_cols.no_flows,
-            columns: &self.output_cols.allow,
+            resolved.t_end.unwrap_or(base.simulation.t_end),
+            // gh#641 / gh#697: the state this cell restored. The origin
+            // ENSEMBLE's content digest and the restored ROW both key the run —
+            // a re-filtered / re-fitted ensemble under an unchanged model must
+            // not serve the cached forecast, and two cells sharing a
+            // `process_seed` (`--seeds 7,7`) must not collide while starting
+            // from different rows. `None` for every cell without `--init-state`.
+            spec.sim_run.init_state.as_ref().map(|i| runid::inputs::InitStateDigest {
+                ensemble: runid::inputs::DataDigest(i.ensemble_digest),
+                row: i.row,
+            }),
+        )
+        .map_err(|e| format!("resolve error: {e}"))?;
+        let ctx = crate::resolve::TrajectoryCtx {
+            model: self.sim.model.digest.clone(),
+            model_stem: &self.sim.model.stem,
+            config: self.sim.run.cell_config(window),
             params: &params,
             table_digests: Self::table_digests(&spec.sim_run.table_files)?,
             enable: &resolved.enable,
@@ -319,18 +308,6 @@ impl CasSink {
             scenario_label,
             base_seed: spec.process_seed,
             process_seed: spec.process_seed,
-            // gh#641 / gh#697: the state this cell restored. The origin
-            // ENSEMBLE's content digest and the restored ROW both key the run —
-            // a re-filtered / re-fitted ensemble under an unchanged model must
-            // not serve the cached forecast, and two cells sharing a
-            // `process_seed` (`--seeds 7,7`) must not collide while starting
-            // from different rows. `None` for every cell without `--init-state`.
-            init_state: spec.sim_run.init_state.as_ref().map(|i| {
-                runid::inputs::InitStateDigest {
-                    ensemble: runid::inputs::DataDigest(i.ensemble_digest),
-                    row: i.row,
-                }
-            }),
         };
         let mut rt = crate::resolve::resolve_trajectory(&ctx).map_err(|e| format!("resolve error: {e}"))?;
         // Display-only, never hashed (the run_id is fixed above, from the
@@ -363,7 +340,7 @@ impl CasSink {
         let root = self.root();
         let dir = match runid::find_leaf(&root, runid::ArtifactKind::Sim, &rt.levels) {
             Some(dir) => {
-                crate::resolve::note_leaf_from_another_model_file(&dir, &self.model_path);
+                crate::resolve::note_leaf_from_another_model_file(&dir, &self.sim.model.path);
                 dir
             }
             None => runid::store_path(&root, runid::ArtifactKind::Sim, &rt.levels),
@@ -472,7 +449,7 @@ impl CasSink {
         let Some(dir) = runid::find_leaf(&self.root(), runid::ArtifactKind::Sim, &rt.levels) else {
             return Ok(None);
         };
-        if self.obs_enabled && !self.base_model.observations.is_empty() {
+        if self.obs_enabled && !self.sim.model.ir.observations.is_empty() {
             let model = crate::util::resolve_run_ir(&spec.sim_run)?;
             let obs_dir = obs_subtree_dir(
                 &dir, &model.observations, self.emit_every.as_ref(), spec.obs_seed,
@@ -486,7 +463,7 @@ impl CasSink {
                 }
             }
         }
-        crate::resolve::note_leaf_from_another_model_file(&dir, &self.model_path);
+        crate::resolve::note_leaf_from_another_model_file(&dir, &self.sim.model.path);
         Ok(Some(dir))
     }
 }
@@ -578,7 +555,7 @@ impl crate::engine::RunSink for CasSink {
             }
         };
 
-        let cols = self.output_cols.cols(&cell.model);
+        let cols = self.sim.run.view.cols(&cell.model);
         let traj_bytes = crate::util::traj_tsv_bytes(&cell.traj, &cols);
         let traj_digest = runid::ContentHash::digest_bytes(&traj_bytes);
 
@@ -625,10 +602,10 @@ impl crate::engine::RunSink for CasSink {
         };
         // The base model's axis: a scenario or sweep changes parameters, never
         // the time unit or the origin.
-        let calendar = ir::caltime::CalendarAxis::from_model(&self.base_model)
+        let calendar = ir::caltime::CalendarAxis::from_model(&self.sim.model.ir)
             .map_err(|e| e.to_string())?;
         let mut meta = crate::resolve::RecordMeta::new(
-            ir::IR_VERSION.trim(), self.model_path.clone(), self.label.clone(), calendar)
+            ir::IR_VERSION.trim(), self.sim.model.path.clone(), self.label.clone(), calendar)
             .with_deps(self.fit_dep.clone())
             .with_children(children.clone());
 
@@ -1385,23 +1362,34 @@ mod tests {
     /// between cells is the cell's own `SimRun` (its `--table` map, its point),
     /// which is where `cell_resolve` reads them from.
     fn sink(runs_dir: &str) -> CasSink {
+        let model = tiny_model();
+        let run = crate::sim_config::RunConfig::new(
+            crate::args::types::ForwardBackend::ChainBinomial,
+            1.0,
+            &model.output.times,
+            false,
+            false,
+            crate::util::OutputColumns::default(),
+        )
+        .unwrap();
+        let mut resolved_model = crate::sim_config::ResolvedModel::new(
+            model, ir::IR_VERSION.trim(), version::ENGINE_ID, "model.ir.json",
+        );
+        resolved_model.stem = "sir".to_string();
         CasSink {
-            resolved_scenarios: vec![ResolvedEntry {
-                name: "baseline".to_string(),
-                route: None,
-                enable: vec![],
-                disable: vec![],
-                params: HashMap::new(),
-                scale: Vec::new(),
-                t_end: None,
-            }],
-            model_path: "model.ir.json".to_string(),
-            model_stem: Some("sir".to_string()),
-            base_model: tiny_model(),
-            backend: crate::args::types::ForwardBackend::ChainBinomial,
-            dt: 1.0,
-            allow_degenerate_rates: false,
-            output_cols: crate::util::OutputColumns::default(),
+            sim: std::sync::Arc::new(crate::sim_config::ResolvedSimConfig {
+                model: resolved_model,
+                run,
+                arms: vec![ResolvedEntry {
+                    name: "baseline".to_string(),
+                    route: None,
+                    enable: vec![],
+                    disable: vec![],
+                    params: HashMap::new(),
+                    scale: Vec::new(),
+                    t_end: None,
+                }],
+            }),
             runs_dir: runs_dir.to_string(),
             obs_enabled: false,
             emit_every: None,
@@ -1526,7 +1514,7 @@ mod tests {
     #[test]
     fn every_simrun_field_has_an_identity_route() {
         let crate::util::SimRun {
-            // model level: `base_model` is `util::load_run_model` of this path.
+            // model level: `sim.model.ir` is `util::load_run_model` of this path.
             ir_path: _,
             // model level: substituted and applied inside `load_run_model`.
             obs_anchors: _,

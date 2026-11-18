@@ -31,6 +31,7 @@ mod roles;         // parameter roles: the partition, resolved from role declara
 mod sweep;         // the design axis: --sweep / --sweep-file expansion, checks, the resolved design
 mod engine;        // run_job: the engine behind simulate's cell grid (run-spec §3.1)
 mod cas_sink;      // CasSink: the content-addressed store sink for simulate's cells
+mod sim_config;    // ResolvedSimConfig: simulate's one resolved configuration; identity and engine settings derive from it
 mod eval;
 mod dt_rule;      // the one integration-step rule: the model's declared dt, else the written one
 mod pfilter;        // used internally by fit runner for data loading
@@ -533,10 +534,14 @@ fn main() {
     // said as it is first recorded, as a warning.
     sim::run_notes::set_reporter(util::report_run_note);
     util::set_ir_cache_disabled(cli.global.no_ir_cache);
-    util::set_licm_disabled(cli.global.no_licm);
+    // `simulate` sets the compile setting from its resolved configuration
+    // (`sim_config::CompileSettings`); every other command, from the flag.
+    if !matches!(cli.command, Command::Simulate(_)) {
+        util::set_licm_disabled(cli.global.no_licm);
+    }
 
     match cli.command {
-        Command::Simulate(a)            => run_simulate(&a),
+        Command::Simulate(a)            => run_simulate(&a, &cli.global),
         Command::Fit(FitCmd::Run(a))    => fit::cmd_fit_run_v2(&a),
         Command::Fit(FitCmd::Summary(a))=> fit::cmd_fit_summary(&a),
         Command::Fit(FitCmd::Diff(a))   => fit::cmd_fit_diff(&a),
@@ -793,13 +798,32 @@ fn resolve_paired_posterior(
     )
 }
 
-fn run_simulate(a: &args::SimulateArgs) {
+fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
     // simulate has no `--no-color`: its painters follow the environment and
     // whether each stream is a terminal.
     let out = crate::out::Out::new(false);
     let _eval_stats_guard = crate::util::EvalStatsReportGuard::start();
-    sim::eval_stats::set_allow_degenerate_rates(a.allow_degenerate_rates);  // gh#audit-C6
-    crate::forcing_extrapolation::set_allowed(a.forcing_extrapolation.allow_forcing_extrapolation);
+    // The compile setting is resolved first, because the compile below reads
+    // it, and it reaches the identity through the IR it produces. The evaluator
+    // settings (`--allow-degenerate-rates`, `--allow-forcing-extrapolation`)
+    // are installed from the resolved configuration once it exists, before any
+    // cell runs (`EngineSettings::install_evaluator_settings`).
+    let compile = crate::sim_config::CompileSettings { licm_disabled: global.no_licm };
+    compile.install();
+    // `--parallel`, `--output-dir`, `--force`: how the cells are computed and
+    // where they are stored, never what (`sim_config::Execution`).
+    let execution = crate::sim_config::Execution {
+        // `--parallel N` / CAMDL_PARALLEL: the Rayon thread count for the
+        // simulation phase of a multi-cell run. Absent → sequential; 0 → every
+        // core, as the other verbs read it.
+        threads: match a.parallel {
+            None => 1,
+            Some(0) => std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
+            Some(n) => n,
+        },
+        store_root: a.output_dir.to_string_lossy().into_owned(),
+        force: a.force,
+    };
     // ── Extract typed args into locals that match the rest of the function ─
     let ir_path          = a.model.to_string_lossy().into_owned();
     // Compile `.camdl` → IR EXACTLY ONCE for the whole command. Every
@@ -889,19 +913,12 @@ fn run_simulate(a: &args::SimulateArgs) {
     let model_dt: Option<f64> = util::peek_simulation_dt(&ir_path_compiled);
     let mut dt           = a.backend.dt.or(model_dt).unwrap_or(1.0_f64);
     let seed             = a.seed;
-    // `--parallel N` / CAMDL_PARALLEL: the Rayon thread count for the
-    // simulation phase of a multi-cell run. Absent → sequential; 0 → every
-    // core, as the other verbs read it. The engine's Rayon branch runs on the
-    // global pool, which defaults to every core, so the pool is capped here
-    // (mirrors fit/pfilter/profile/survey); `build_global` is one-shot per
-    // process and an already-initialised Err is ignored as those verbs do.
-    let parallel: usize = match a.parallel {
-        None => 1,
-        Some(0) => std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
-        Some(n) => n,
-    };
-    if parallel > 1 {
-        let _ = rayon::ThreadPoolBuilder::new().num_threads(parallel).build_global();
+    // The engine's Rayon branch runs on the global pool, which defaults to
+    // every core, so the pool is capped here (mirrors fit/pfilter/profile/
+    // survey); `build_global` is one-shot per process and an
+    // already-initialised Err is ignored as those verbs do.
+    if execution.threads > 1 {
+        let _ = rayon::ThreadPoolBuilder::new().num_threads(execution.threads).build_global();
     }
     let overrides: HashMap<String, f64> = a.model_overrides.param.iter()
         .map(|p| (p.name.clone(), p.value)).collect();
@@ -936,7 +953,6 @@ fn run_simulate(a: &args::SimulateArgs) {
     // `--cas` is accepted (and ignored) for compatibility; `--output`/`--obs`
     // are additive mirrors of the store, never replacements.
     let _ = a.cas;
-    let output_dir_arg: Option<String> = Some(a.output_dir.to_string_lossy().into_owned());
 
     // --obs-only implies --obs or --obs-dir (infer from path: trailing / or existing dir → obs-dir)
     if let Some(ref path) = obs_only {
@@ -1210,8 +1226,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         out.fail("error: --fit requires --draws (or an anchored --to, or an anchored model).");
     }
 
-    let cas_root = output_dir_arg.clone()
-        .unwrap_or_else(|| run_paths::DEFAULT_OUTPUT_ROOT.to_string());
+    let cas_root = execution.store_root.clone();
 
     // ── Backend-provenance guardrail ─────────────────────────────
     //
@@ -2025,6 +2040,38 @@ fn run_simulate(a: &args::SimulateArgs) {
         ObsOutput::None
     };
 
+    // ── The resolved configuration ──────────────────────────────────────────
+    //
+    // Every precedence rule above has been applied, so the run-wide settings
+    // are final. They are resolved once, into `ResolvedSimConfig`, and from
+    // here on both the identity of every cell (the CAS sink) and what the
+    // engine is told (the job, the evaluator settings) are derived from it.
+    let sim_config = std::sync::Arc::new(
+        resolve_sim_config(
+            &base_sim_run,
+            &ir_path,
+            &scenario_names,
+            &adhoc_label,
+            SimConfigFlags {
+                backend,
+                dt,
+                allow_degenerate_rates: a.allow_degenerate_rates,
+                allow_forcing_extrapolation: a.forcing_extrapolation.allow_forcing_extrapolation,
+                view: output_cols,
+            },
+        )
+        .unwrap_or_else(|e| {
+            out.fail(format!("error preparing CAS: {}", e));
+        }),
+    );
+    let engine_settings = sim_config.engine_settings();
+    engine_settings.install_evaluator_settings();
+    // What runs is what is keyed: the backend and `dt` below come from the
+    // resolved configuration, not from the precedence locals they began as.
+    let (backend, dt) = (engine_settings.backend, engine_settings.dt);
+    base_sim_run.backend = backend;
+    base_sim_run.dt = dt;
+
     let job = SimulateJob {
         // The pre-compiled IR: each engine cell loads this directly (no
         // per-cell camdlc — see the resolve-once at the top of the function).
@@ -2051,7 +2098,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         // a function of its grid position, and the engine merges cells in
         // canonical order, so the writers see the sequence a serial run
         // produces (run-spec §4.4).
-        parallel,
+        parallel: execution.threads,
     };
 
     // Refuse what the run would refuse — a scenario touching a `--draws <file>`
@@ -2105,13 +2152,10 @@ fn run_simulate(a: &args::SimulateArgs) {
         // Nothing is displaced or written — `--force` is reported, not applied.
         if total_runs > 1 {
             let cas = build_simulate_cas_sink(
-                &base_sim_run, &ir_path, &scenario_names, &adhoc_label, &cas_root,
-                want_obs, a.force, label_arg.clone(), fit_dep.clone(),
-                a.allow_degenerate_rates, output_cols.clone(), emit_every.clone(), total_runs,
-            ).unwrap_or_else(|e| {
-                out.fail(format!("error preparing CAS: {}", e));
-            });
-            print_store_view(&out, &cas, &job, a.force, a.quantities_out.is_some());
+                sim_config.clone(), &execution, want_obs, label_arg.clone(), fit_dep.clone(),
+                emit_every.clone(), total_runs,
+            );
+            print_store_view(&out, &cas, &job, execution.force, a.quantities_out.is_some());
         }
         return;
     }
@@ -2149,27 +2193,16 @@ fn run_simulate(a: &args::SimulateArgs) {
     // identity via `resolve::resolve_trajectory`, then `commit_atomic`, plus
     // the per-cell obs child). The `--output`/`--obs`
     // mirror is layered on top by `StreamSink` (below).
-    let cas_sink = match build_simulate_cas_sink(
-        &base_sim_run,
-        &ir_path,
-        &scenario_names,
-        &adhoc_label,
-        &cas_root,
+    let cas_sink = build_simulate_cas_sink(
+        sim_config.clone(),
+        &execution,
         want_obs || obs_only.is_some() || obs_only_dir.is_some()
             || obs_path.is_some() || obs_dir.is_some(),
-        a.force,
         label_arg.clone(),
         fit_dep,
-        a.allow_degenerate_rates,
-        output_cols.clone(),
         emit_every.clone(),
         total_runs,
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            out.fail(format!("error preparing CAS: {}", e));
-        }
-    };
+    );
 
     // The trajectory mirror, accumulated in memory. The canonical bytes live
     // in the store (per-cell leaves + multi-run ensemble); this buffer is the
@@ -2210,7 +2243,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         traj_out,
         undated_out,
         traj_header_written: false,
-        output_cols: output_cols.clone(),
+        output_cols: sim_config.run.view.clone(),
         dates: a.dates,
         dates_render: None,
         obs_path: job.obs.file_path().map(|p| p.to_string_lossy().into_owned()),
@@ -2972,20 +3005,21 @@ impl engine::RunSink for SimSink {
     }
 }
 
-/// Build the simulate-side [`crate::cas_sink::CasSink`] so each cell's leaf is
-/// keyed on exactly what ran, whichever path (a lone run or a multi-cell
-/// grid) writes it.
+/// Resolve `simulate`'s configuration once: the base model and its `model`
+/// level, the run-wide `config` level, and the scenario arms. Both the run
+/// identity of every cell (through [`crate::cas_sink::CasSink`]) and the
+/// engine's settings (`ResolvedSimConfig::engine_settings`) are derived from
+/// the value this returns.
 ///
 /// The identity inputs:
-///   - `base_model` is the model as `util::load_run_model` loads it for the
+///   - the base model is the model as `util::load_run_model` loads it for the
 ///     engine (observation anchors substituted, `--integrator` applied; params
 ///     NOT applied), so the model level digest is constant across the grid
 ///     and carries no param values — those live in the `params` level, which
 ///     `CasSink::cell_resolve` resolves per cell from the cell's own `SimRun`.
-///   - `resolved_scenarios` carry the hash-relevant enable/disable/params
-///     delta (a model preset's own fields, or the CLI ad-hoc patch).
-#[allow(clippy::too_many_arguments)]
-fn build_simulate_cas_sink(
+///   - each arm carries the hash-relevant enable/disable/params delta (a model
+///     preset's own fields, or the CLI ad-hoc patch).
+fn resolve_sim_config(
     run: &util::SimRun,
     // The original source path (e.g. `sir.camdl`) for the human-readable store
     // prefix + provenance. `run.ir_path` is the pre-compiled `.ir.json`, whose
@@ -2997,20 +3031,8 @@ fn build_simulate_cas_sink(
     // when `scenario_names` is empty; the same string the job's
     // `ScenarioRef::Inline` carries, so the sink finds the cell's entry.
     adhoc_label: &str,
-    cas_root: &str,
-    obs_enabled: bool,
-    force: bool,
-    label: Option<String>,
-    fit_dep: Vec<runid::inputs::ArtifactRef>,
-    allow_degenerate_rates: bool,
-    output_cols: crate::util::OutputColumns,
-    // gh#656: `--emit-every`. It names the obs subtree (`obs_subtree_hash`) as
-    // well as setting the emitted times, so two cadences are two addressable
-    // artifacts under one shared trajectory leaf — the leaf itself does NOT
-    // re-key, because its bytes do not depend on the emission cadence.
-    emit_every: Option<crate::emit_every::EmitEvery>,
-    total_runs: usize,
-) -> Result<crate::cas_sink::CasSink, String> {
+    flags: SimConfigFlags,
+) -> Result<crate::sim_config::ResolvedSimConfig, String> {
     // A required output time adds a recorded snapshot, and can raise the
     // integration end to reach it — it changes the leaf's bytes. The leaf is
     // keyed off the model as loaded here, not off the schedule
@@ -3059,7 +3081,7 @@ fn build_simulate_cas_sink(
     // matching a model preset reads its effective delta via
     // `ResolvedEntry::from_preset` (preset route); the no-scenario case is the
     // CLI ad-hoc baseline.
-    let resolved_scenarios: Vec<crate::cas_sink::ResolvedEntry> = if scenario_names.is_empty() {
+    let arms: Vec<crate::cas_sink::ResolvedEntry> = if scenario_names.is_empty() {
         vec![crate::cas_sink::ResolvedEntry {
             name: adhoc_label.to_string(),
             route: None,
@@ -3099,38 +3121,67 @@ fn build_simulate_cas_sink(
     // (`util::FitBase::overlay`), so it is part of what each arm is keyed on:
     // its lists lead each arm's, in the order the overlay applies them. An
     // empty base leaves every entry, and so every `run_id`, unchanged.
-    let resolved_scenarios = if run.fit_base.is_empty() {
-        resolved_scenarios
+    let arms = if run.fit_base.is_empty() {
+        arms
     } else {
         let (base_enable, base_disable) =
             run.fit_base.lists(&base_model).map_err(|e| e.to_string())?;
-        resolved_scenarios.into_iter().map(|mut e| {
+        arms.into_iter().map(|mut e| {
             e.enable = base_enable.iter().cloned().chain(e.enable).collect();
             e.disable = base_disable.iter().cloned().chain(e.disable).collect();
             e
         }).collect()
     };
 
+    let SimConfigFlags { backend, dt, allow_degenerate_rates, allow_forcing_extrapolation, view } = flags;
+    let run_config = crate::sim_config::RunConfig::new(
+        backend, dt, &base_model.output.times,
+        allow_degenerate_rates, allow_forcing_extrapolation, view,
+    )
+    .map_err(|e| format!("resolve error: {e}"))?;
     // Display prefix + provenance source path come from the ORIGINAL model
     // path, not the compiled temp IR (`run.ir_path`), so the store layout and
     // `run.json` provenance show the model's real name (gh#51 cross-check
     // parity with the pre-hoist behaviour).
-    let model_stem = hashing::path_stem_slug(display_path);
-    let runs_dir = format!("{}/sims", cas_root);
+    let model = crate::sim_config::ResolvedModel::new(
+        base_model, ir::IR_VERSION.trim(), version::ENGINE_ID, display_path,
+    );
+    Ok(crate::sim_config::ResolvedSimConfig { model, run: run_config, arms })
+}
 
-    Ok(crate::cas_sink::CasSink {
-        resolved_scenarios,
-        model_path: display_path.to_string(),
-        model_stem,
-        base_model,
-        backend: run.backend,
-        dt: run.dt,
-        allow_degenerate_rates,
-        output_cols,
-        runs_dir,
+/// The run-wide settings `simulate` resolved by its precedence rules (an
+/// explicit flag, a fit's provenance, a replayed fit's simulator, the model's
+/// own default), handed to [`resolve_sim_config`] as one value.
+struct SimConfigFlags {
+    backend: args::types::ForwardBackend,
+    dt: f64,
+    allow_degenerate_rates: bool,
+    allow_forcing_extrapolation: bool,
+    view: crate::util::OutputColumns,
+}
+
+/// Build the simulate-side [`crate::cas_sink::CasSink`] over the resolved
+/// configuration, so each cell's leaf is keyed on exactly what ran, whichever
+/// path (a lone run or a multi-cell grid) writes it.
+fn build_simulate_cas_sink(
+    sim: std::sync::Arc<crate::sim_config::ResolvedSimConfig>,
+    execution: &crate::sim_config::Execution,
+    obs_enabled: bool,
+    label: Option<String>,
+    fit_dep: Vec<runid::inputs::ArtifactRef>,
+    // gh#656: `--emit-every`. It names the obs subtree (`obs_subtree_hash`) as
+    // well as setting the emitted times, so two cadences are two addressable
+    // artifacts under one shared trajectory leaf — the leaf itself does NOT
+    // re-key, because its bytes do not depend on the emission cadence.
+    emit_every: Option<crate::emit_every::EmitEvery>,
+    total_runs: usize,
+) -> crate::cas_sink::CasSink {
+    crate::cas_sink::CasSink {
+        sim,
+        runs_dir: format!("{}/sims", execution.store_root),
         obs_enabled,
         emit_every,
-        force,
+        force: execution.force,
         total: total_runs,
         counter: 0,
         completed_runs: Vec::new(),
@@ -3144,7 +3195,7 @@ fn build_simulate_cas_sink(
         // bar — otherwise the ensemble runs silently. The `Task` honours
         // `--progress none`/`plain` internally.
         progress: crate::cas_sink::cells_progress(total_runs, "simulate"),
-    })
+    }
 }
 
 /// Store the combined-across-cells wide-format TSV of a multi-cell `simulate`
@@ -3191,13 +3242,14 @@ fn write_sim_ensemble(
         return;
     }
 
+    let engine = cas.sim.engine_settings();
     let ctx = crate::sim_ensemble_cas::EnsembleCtx {
-        model: &cas.base_model,
+        model: &cas.sim.model.ir,
         ir_version: ir::IR_VERSION.trim(),
-        engine_version: version::ENGINE_ID,
-        stem: cas.model_stem.as_deref().unwrap_or("model"),
-        backend: cas.backend,
-        dt: cas.dt,
+        engine_version: &cas.sim.model.engine,
+        stem: &cas.sim.model.stem,
+        backend: engine.backend,
+        dt: engine.dt,
         cells: &cells,
         design,
     };
@@ -3251,10 +3303,10 @@ fn write_sim_ensemble(
         run_id: resolved.run_id,
         display_inputs: inputs,
     };
-    let calendar = ir::caltime::CalendarAxis::from_model(&cas.base_model)
+    let calendar = ir::caltime::CalendarAxis::from_model(&cas.sim.model.ir)
         .unwrap_or_else(|e| out.fail(format!("error: {e}")));
     let meta = crate::resolve::RecordMeta::new(
-        ir::IR_VERSION.trim(), &cas.model_path, label, calendar)
+        ir::IR_VERSION.trim(), &cas.sim.model.path, label, calendar)
         .with_deps(deps);
 
     let mut artifacts = runid::Artifacts::new();

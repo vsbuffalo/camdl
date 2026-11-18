@@ -21,8 +21,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use runid::inputs::{
-    Backend, CalendarMode, DataDigest, EngineVersion, InterventionId, ModelDigest, ParamId,
-    ResolvedOutputSchedule, ResolvedParams, ResolvedScenario, Seed, SimConfig,
+    DataDigest, InterventionId, ModelDigest, ParamId, ResolvedParams, ResolvedScenario, Seed,
+    SimConfig,
 };
 use runid::{run_id, ArtifactKind, ContentHash, FiniteF64, LevelId, ResolveError};
 
@@ -46,27 +46,15 @@ pub struct ResolvedTrajectory {
 /// Inputs to [`resolve_trajectory`], all already resolved by the caller. The
 /// labels are provenance (readable path segments); identity rides in the
 /// hashes.
+///
+/// The model and config levels arrive whole: `model` is the invocation's
+/// [`ModelDigest`] (`sim_config::ResolvedModel::digest`) and `config` the cell's
+/// [`SimConfig`] (`sim_config::RunConfig::cell_config`), so this bridge copies no
+/// configuration field by hand.
 pub struct TrajectoryCtx<'a> {
-    pub model: &'a ir::Model,
+    pub model: ModelDigest,
     pub model_stem: &'a str,
-    /// IR schema version string (e.g. `"0.7"`), matching `ir/VERSION`.
-    pub ir_version: &'a str,
-    pub engine_version: &'a str,
-    /// Resolved config.
-    pub backend: crate::args::types::ForwardBackend,
-    pub dt: f64,
-    pub t_start: f64,
-    pub t_end: f64,
-    pub output: &'a ir::model::OutputSchedule,
-    pub allow_degenerate_rates: bool,
-    /// `--allow-forcing-extrapolation`: the run may hold a forcing's end value
-    /// outside its range (D44), so it is identity.
-    pub allow_forcing_extrapolation: bool,
-    /// Output view (gh#156): the trajectory column filter, folded into the
-    /// `config` level so a column-subset leaf re-keys. `--output-every` is NOT
-    /// here — it is lowered into `output` (the schedule) upstream.
-    pub no_flows: bool,
-    pub columns: &'a std::collections::BTreeSet<String>,
+    pub config: SimConfig,
     /// The cell's resolved parameter values (name → value) — every tier
     /// applied, as `util::resolve_run_parameters` hands them to the engine —
     /// plus the table-file digests.
@@ -86,21 +74,6 @@ pub struct TrajectoryCtx<'a> {
     /// (the actual trajectory driver, and the only seed value hashed).
     pub base_seed: u64,
     pub process_seed: u64,
-    /// gh#641 / gh#697: the inferred state this cell was seeded from (`simulate
-    /// --init-state`), or `None` when it built its initial state from the
-    /// model's `init {}`. The origin ensemble's content digest plus the restored
-    /// row — see [`runid::inputs::InitStateDigest`] for why both are identity.
-    pub init_state: Option<runid::inputs::InitStateDigest>,
-}
-
-/// Map a CLI backend to the resolved `runid` backend.
-fn backend(b: crate::args::types::ForwardBackend) -> Backend {
-    use crate::args::types::ForwardBackend as B;
-    match b {
-        B::Gillespie => Backend::Gillespie,
-        B::ChainBinomial => Backend::ChainBinomial,
-        B::Ode => Backend::Ode,
-    }
 }
 
 /// The model's *structural* content identity, hex-encoded: the `runid` model
@@ -138,26 +111,7 @@ pub fn model_identity_from_ir(model_ir_json: &str) -> String {
     }
 }
 
-fn finite(x: f64) -> Result<FiniteF64, ResolveError> {
-    FiniteF64::new(x).map_err(ResolveError::from)
-}
-
-fn resolve_output(sched: &ir::model::OutputSchedule) -> Result<ResolvedOutputSchedule, ResolveError> {
-    use ir::model::OutputSchedule as O;
-    Ok(match sched {
-        O::Regular(r) => ResolvedOutputSchedule::Regular {
-            start: finite(r.start)?,
-            step: finite(r.step)?,
-        },
-        O::AtTimes(ts) => {
-            let mut v = Vec::with_capacity(ts.len());
-            for t in ts {
-                v.push(finite(*t)?);
-            }
-            ResolvedOutputSchedule::AtTimes(v)
-        }
-    })
-}
+use crate::sim_config::finite;
 
 fn resolve_params(
     values: &HashMap<String, f64>,
@@ -192,37 +146,18 @@ fn resolve_scenario(
     Ok(ResolvedScenario { enabled, disabled, patch: p, scale: sc })
 }
 
-/// The readable config label: `{backend}-dt{dt}` (e.g. `chain_binomial-dt1`).
-fn config_label(b: crate::args::types::ForwardBackend, dt: f64) -> String {
-    format!("{}-dt{}", b.as_str(), dt)
-}
-
 use crate::fit::cas::{level, structural_level_hash};
 
 /// Resolve a trajectory leaf's identity: its `TrajectoryInput`, the five
 /// factored levels (model/config/params/scenario/seed, in path order), and
 /// the `run_id` derived from them.
 pub fn resolve_trajectory(ctx: &TrajectoryCtx) -> Result<ResolvedTrajectory, ResolveError> {
-    let model = ModelDigest::from_model(
-        ctx.model,
-        ctx.ir_version.to_string(),
-        EngineVersion(ctx.engine_version.to_string()),
+    let config = &ctx.config;
+    let config_label = format!(
+        "{}-dt{}",
+        crate::sim_config::forward_backend(config.backend).as_str(),
+        config.dt.get()
     );
-    let config = SimConfig {
-        backend: backend(ctx.backend),
-        dt: finite(ctx.dt)?,
-        t_start: finite(ctx.t_start)?,
-        t_end: finite(ctx.t_end)?,
-        output: resolve_output(ctx.output)?,
-        // Placeholder until the calendar-time work lands and the resolver
-        // produces a concrete mode (M2 decision: minimal, provisional).
-        calendar: CalendarMode::Numeric,
-        allow_degenerate_rates: ctx.allow_degenerate_rates,
-        allow_forcing_extrapolation: ctx.allow_forcing_extrapolation,
-        no_flows: ctx.no_flows,
-        columns: ctx.columns.clone(),
-        init_state: ctx.init_state.clone(),
-    };
     let params = resolve_params(ctx.params, ctx.table_digests.clone())?;
     let scenario = resolve_scenario(ctx.enable, ctx.disable, ctx.scen_params, ctx.scen_scale)?;
     let seed = Seed { process_seed: ctx.process_seed, base_seed: ctx.base_seed };
@@ -230,8 +165,8 @@ pub fn resolve_trajectory(ctx: &TrajectoryCtx) -> Result<ResolvedTrajectory, Res
     // Each level hashes a disjoint slice of the input; the union is the whole
     // resolved input set. The label is provenance, the hash is identity.
     let levels = vec![
-        level("model", ctx.model_stem, structural_level_hash(&model)),
-        level("config", &config_label(ctx.backend, ctx.dt), structural_level_hash(&config)),
+        level("model", ctx.model_stem, structural_level_hash(&ctx.model)),
+        level("config", &config_label, structural_level_hash(config)),
         level("params", ctx.param_label, structural_level_hash(&params)),
         level("scenario", ctx.scenario_label, structural_level_hash(&scenario)),
         level("seed", &format!("seed_{}", ctx.base_seed), structural_level_hash(&seed)),
@@ -626,3 +561,5 @@ pub fn begin_resolved_write(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::tiny_model;

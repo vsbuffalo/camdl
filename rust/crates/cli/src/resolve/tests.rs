@@ -18,7 +18,7 @@ use ir::model::{
     InitialConditions, Model, OutputConfig, OutputSchedule, RegularOutputSchedule, SimulationConfig,
 };
 
-fn tiny_model() -> Model {
+pub(crate) fn tiny_model() -> Model {
     Model {
         constants: vec![],
         ic_grad: Default::default(),
@@ -69,20 +69,19 @@ fn ctx<'a>(
     base_seed: u64,
     process_seed: u64,
 ) -> TrajectoryCtx<'a> {
-    TrajectoryCtx {
-        model,
-        model_stem: "sir",
-        ir_version: "0.7",
-        engine_version: "0.3.0+test",
-        backend: ForwardBackend::ChainBinomial,
-        dt: 1.0,
-        t_start: 0.0,
-        t_end,
+    let run = crate::sim_config::RunConfig::new(
+        ForwardBackend::ChainBinomial,
+        1.0,
         output,
-        allow_degenerate_rates: false,
-        allow_forcing_extrapolation: false,
-        no_flows: false,
-        columns: columns_empty(),
+        false,
+        false,
+        crate::sim_config::view(false, &[]),
+    )
+    .unwrap();
+    TrajectoryCtx {
+        model: test_model_digest(model),
+        model_stem: "sir",
+        config: run.cell_config(crate::sim_config::CellWindow::new(0.0, t_end, None).unwrap()),
         params,
         table_digests: vec![],
         enable: &[],
@@ -93,27 +92,26 @@ fn ctx<'a>(
         scenario_label: "baseline",
         base_seed,
         process_seed,
-        init_state: None,
     }
+}
+
+/// The `model` level of a trajectory under the fixed IR-version and engine
+/// strings the pins below were recorded with.
+fn test_model_digest(m: &Model) -> ModelDigest {
+    crate::sim_config::ResolvedModel::new(m.clone(), "0.7", "0.3.0+test", "sir.camdl").digest
 }
 
 /// The `model`-level digest hash under fixed versions — the unit the
 /// presentation / gradient inertness tests compare. Goes through the real
 /// `ModelDigest::from_model`, which owns the presentation strip (gh#442).
 fn model_digest_hash(m: &Model) -> ContentHash {
-    ModelDigest::from_model(m, "0.7".into(), EngineVersion("0.3.0".into())).content_hash()
+    ModelDigest::from_model(m, "0.7".into(), runid::inputs::EngineVersion("0.3.0".into())).content_hash()
 }
 
 fn params_empty() -> &'static HashMap<String, f64> {
     use std::sync::OnceLock;
     static EMPTY: OnceLock<HashMap<String, f64>> = OnceLock::new();
     EMPTY.get_or_init(HashMap::new)
-}
-
-fn columns_empty() -> &'static std::collections::BTreeSet<String> {
-    use std::sync::OnceLock;
-    static EMPTY: OnceLock<std::collections::BTreeSet<String>> = OnceLock::new();
-    EMPTY.get_or_init(std::collections::BTreeSet::new)
 }
 
 #[test]
@@ -362,20 +360,21 @@ impl SimInputs {
     }
 
     fn run_id(&self) -> ContentHash {
+        let run = crate::sim_config::RunConfig::new(
+            self.backend,
+            self.dt,
+            &self.output,
+            self.allow_degenerate_rates,
+            false,
+            crate::util::OutputColumns { no_flows: self.no_flows, allow: self.columns.clone() },
+        )
+        .expect("run config");
+        let window = crate::sim_config::CellWindow::new(self.t_start, self.t_end, self.init_state.clone())
+            .expect("window");
         resolve_trajectory(&TrajectoryCtx {
-            model: &self.model,
+            model: test_model_digest(&self.model),
             model_stem: &self.model_stem,
-            ir_version: "0.7",
-            engine_version: "0.3.0+test",
-            backend: self.backend,
-            dt: self.dt,
-            t_start: self.t_start,
-            t_end: self.t_end,
-            output: &self.output,
-            allow_degenerate_rates: self.allow_degenerate_rates,
-            allow_forcing_extrapolation: false,
-            no_flows: self.no_flows,
-            columns: &self.columns,
+            config: run.cell_config(window),
             params: &self.base_params,
             table_digests: vec![],
             enable: &self.enable,
@@ -386,7 +385,6 @@ impl SimInputs {
             scenario_label: &self.scenario_label,
             base_seed: self.base_seed,
             process_seed: self.process_seed,
-            init_state: self.init_state.clone(),
         })
         .expect("resolve")
         .run_id
