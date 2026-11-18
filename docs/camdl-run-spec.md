@@ -405,7 +405,8 @@ lands in a sibling segment named by its own stem:
 ```
 results/fits/{stem}-{fit_hash8}/
   fit.meta.json                     # fit-wide provenance sidecar (§2.2.1)
-  fit.toml.original                 # archived producing config
+  fit.toml.original                 # the producing config, byte for byte
+  fit.resolved.toml                 # the configuration the fits ran under (generated)
   model.camdl.original              # archived model source (when given as .camdl)
   model.ir.json                     # archived compiled IR
   model.render.json                 # archived display render (when given as .camdl)
@@ -611,15 +612,34 @@ observation/dimension schema below), and `docs` (the model's `#'` documentation
 dictionary, keyed by declaration name, so a consumer can label any output
 column).
 
-**`source_config` and the archived config are two different files.**
-`fit.toml.original`, beside `fit.meta.json`, is the archived copy of the
-config's text, and is what every reader of a stored fit parses. `source_config`
+**A fit folder keeps two configs.** `fit.toml.original`, beside `fit.meta.json`,
+is the user's config file byte for byte, comments included, as `fit run` read
+it; `fit_toml_hash` is its hash. It is kept for display and provenance, and no
+reader takes a fit's configuration from it. `fit.resolved.toml` is the
+configuration the folder's fits ran under, and is what every reader of a stored
+fit parses (`fit predict`, `compare`, `simulate --fit` on a run handle, and
+`fit table`'s config diff): the same config with every problem-half value the
+command line set written in (today `--allow-forcing-extrapolation`, as
+`[config] allow_forcing_extrapolation =
+true`) and `[fixed]` the folder's own —
+a `--sweep` point's values applied, a `from_scenario` expanded into inline
+values. It is generated: it opens with a comment saying so, carries none of the
+file's comments or layout, and is written with the keys of every table sorted,
+so the same configuration always gives the same bytes. Its `[method]` is the
+file's: a fit folder holds every method run on its problem, and each run's own
+method settings are in its `run.json` (`inputs`). Neither file enters any
+identity. A fit folder written before camdl stored `fit.resolved.toml` is
+refused by every reader, with a message naming the fix: re-run `camdl fit run`
+on the same file with the same options, which reuses the stored results and
+writes the file.
+
+**`source_config` and the stored configs are different files.** `source_config`
 names the user's own config file — which may since have changed or gone — and is
-recorded only for its location: the archive's relative `[model]` and `[data]`
-paths were written against the source config's directory, so a reader resolves
-them against `<fit folder>/<source_config>`, exactly as `fit run` resolved them
-against the config file. `fit run` computes the relative path between the
-canonical (symlink-resolved) fit folder and config, e.g.
+recorded only for its location: the stored configs' relative `[model]` and
+`[data]` paths were written against the source config's directory, so a reader
+resolves them against `<fit folder>/<source_config>`, exactly as `fit run`
+resolved them against the config file. `fit run` computes the relative path
+between the canonical (symlink-resolved) fit folder and config, e.g.
 `../../../fits/sir.toml` for `fits/sir.toml` and `results/fits/sir-1a2b3c4d/`,
 so it names the same file from any working directory and after the project
 directory moves as a whole. A fit whose `results/` is moved apart from its
@@ -680,20 +700,19 @@ order, and the spelling of a float all discarded, `[estimate]` /
 run records that identity for each config it was written or reused from, in its
 `run.json` as `inputs.config_identities`, and a `fit.toml` handle names the run
 whose list holds the file's identity as the file now reads — not the run the
-problem folder's `fit.toml.original` (the latest run's config) describes. The
-match is exact: the run named is the one this camdl build made (its
-`engine_version` is this binary's engine identity), the run `camdl fit run` of
-the file would reuse. A run another build made — another commit, or the same
-commit with other uncommitted changes — is never used in its place: when only
-other builds' runs match, the verb refuses and lists them, each with how its
-build differs ("stale" for another commit, "built from uncommitted changes" for
-the same one) and how to name it, by its run-id prefix or leaf directory.
-Several runs by this build (several fit seeds, a `--starts` override) are
-listed. A run stored before runs recorded the identity cannot be matched by file
-and is named by its directory or `run_id`. Reflowing a comment changes
-`fit_toml_hash` and leaves the lookup identity alone; changing a particle count
-or a data path changes the identity and the config no longer resolves to that
-run.
+problem folder's stored config (the latest run's) describes. The match is exact:
+the run named is the one this camdl build made (its `engine_version` is this
+binary's engine identity), the run `camdl fit run` of the file would reuse. A
+run another build made — another commit, or the same commit with other
+uncommitted changes — is never used in its place: when only other builds' runs
+match, the verb refuses and lists them, each with how its build differs ("stale"
+for another commit, "built from uncommitted changes" for the same one) and how
+to name it, by its run-id prefix or leaf directory. Several runs by this build
+(several fit seeds, a `--starts` override) are listed. A run stored before runs
+recorded the identity cannot be matched by file and is named by its directory or
+`run_id`. Reflowing a comment changes `fit_toml_hash` and leaves the lookup
+identity alone; changing a particle count or a data path changes the identity
+and the config no longer resolves to that run.
 
 The `schema` block lets a consumer facet any stream and label panels with no DSL
 parsing:
@@ -3576,7 +3595,7 @@ three levels (`fit/cas.rs`, module comment):
 ```
 <root>/fits/<stem>-<h8>/                          fit level
         model.ir.json  model.render.json  model.graph.json
-        model.camdl.original  fit.toml.original  fit.meta.json
+        model.camdl.original  fit.toml.original  fit.resolved.toml  fit.meta.json
     <method>-<h8>/                                method level
         <seed_N>-<h8>/                            seed level (the leaf)
             run.json  fit_state.toml  chain_starts.tsv
@@ -5099,6 +5118,7 @@ done by `FiniteF64`'s constructor.
     {fit_stem}-{h8}/               # the fit level; also holds fit-wide sidecars
       fit.meta.json
       fit.toml.original
+      fit.resolved.toml
       model.camdl.original
       model.ir.json
       model.graph.json
@@ -5840,7 +5860,8 @@ checked):
 | file                   | content                                                                                                                                                                                                         |
 | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `fit.meta.json`        | source model + `model_identity`, source config (both relative to the fit folder) + hash, per-stream data hashes, estimated/fixed sets, resolved priors, parameter provenance, and the observation-stream schema |
-| `fit.toml.original`    | verbatim copy of the config as run                                                                                                                                                                              |
+| `fit.resolved.toml`    | the configuration the fits ran under: the config with the command line's problem values and the folder's own `[fixed]` written in (generated)                                                                   |
+| `fit.toml.original`    | verbatim copy of the config as read                                                                                                                                                                             |
 | `model.camdl.original` | verbatim copy of the model source                                                                                                                                                                               |
 | `model.ir.json`        | the compiled IR the fit ran against                                                                                                                                                                             |
 | `model.graph.json`     | the model flow graph                                                                                                                                                                                            |
@@ -6584,8 +6605,8 @@ applies it — `simulate --draws posterior --fit`, `fit predict` (the `fitted`
 arm, every `--scenario` arm, the one-step filter), the contrast arms,
 `pfilter
 --fit` and the prequential `compare` derives. For a stored fit the
-selection is read from its archived `fit.toml.original`; the fit's `run_id`
-already hashes it, as part of the config's problem half.
+selection is read from its `fit.resolved.toml`; the fit's `run_id` already
+hashes it, as part of the config's problem half.
 
 On the replaying commands each arm's own changes apply **on top of** the fit's
 selection, the way a scenario `compose`s a sub-scenario: the fit's
