@@ -210,15 +210,16 @@ impl Environment {
         Environment { vars }
     }
 
-    /// The engine switches that are on, as `NAME` or `NAME=VALUE`, in [`VARS`]
-    /// order: the variables whose route is [`Route::Engine`].
-    fn engine_switches(&self) -> Vec<String> {
+    /// The engine switches that are on, each as its name and, for an
+    /// experimental input, its value, in [`VARS`] order: the keyed variables
+    /// whose route is [`Route::Engine`].
+    fn engine_switches(&self) -> Vec<(String, Option<String>)> {
         let mut on = Vec::new();
         for v in VARS.iter().filter(|v| matches!(v.class, Keyed(_)) && v.route == Route::Engine) {
             match v.field {
-                "eval_unresolved" if self.vars.eval_unresolved => on.push(v.name.to_string()),
-                "no_binding_cache" if self.vars.no_binding_cache => on.push(v.name.to_string()),
-                "experimental" => on.extend(self.vars.experimental.iter().map(|(k, x)| format!("{k}={x}"))),
+                "eval_unresolved" if self.vars.eval_unresolved => on.push((v.name.to_string(), None)),
+                "no_binding_cache" if self.vars.no_binding_cache => on.push((v.name.to_string(), None)),
+                "experimental" => on.extend(self.vars.experimental.iter().map(|(k, x)| (k.clone(), Some(x.clone())))),
                 "eval_unresolved" | "no_binding_cache" => {}
                 other => unreachable!("`{other}` is routed to the engine identity but not read into it"),
             }
@@ -227,13 +228,18 @@ impl Environment {
     }
 
     /// The engine identity a run's model level folds: `engine_id` (the build
-    /// fingerprint) followed by `+SWITCH` for each engine switch that is on.
-    /// Unchanged when none is, so a default run keeps its identity.
+    /// fingerprint) followed, for each engine switch that is on, by
+    /// `+<len>:<NAME>` and, for an experimental input, `=<len>:<VALUE>`, the
+    /// lengths in bytes. Unchanged when no switch is on, so a default run keeps
+    /// its identity. The lengths make the encoding injective: a value that
+    /// spells `+` or `=` cannot pass for a second switch or a longer name.
     pub fn engine_identity(&self, engine_id: &str) -> String {
         let mut id = engine_id.to_string();
-        for s in self.engine_switches() {
-            id.push('+');
-            id.push_str(&s);
+        for (name, value) in self.engine_switches() {
+            id.push_str(&format!("+{}:{name}", name.len()));
+            if let Some(value) = value {
+                id.push_str(&format!("={}:{value}", value.len()));
+            }
         }
         id
     }
@@ -351,19 +357,32 @@ mod tests {
         assert_eq!(with(&[]).engine_identity("0.4.0+abc"), "0.4.0+abc");
         assert_eq!(
             with(&[("CAMDL_EVAL_UNRESOLVED", "1")]).engine_identity("0.4.0+abc"),
-            "0.4.0+abc+CAMDL_EVAL_UNRESOLVED"
+            "0.4.0+abc+21:CAMDL_EVAL_UNRESOLVED"
         );
         assert_eq!(
             with(&[("CAMDL_NO_BINDING_CACHE", ""), ("CAMDL_EVAL_UNRESOLVED", "x")]).engine_identity("e"),
-            "e+CAMDL_EVAL_UNRESOLVED+CAMDL_NO_BINDING_CACHE"
+            "e+21:CAMDL_EVAL_UNRESOLVED+22:CAMDL_NO_BINDING_CACHE"
         );
         assert_eq!(
             with(&[("CAMDL_EXPERIMENTAL_FOO", "2")]).engine_identity("e"),
-            "e+CAMDL_EXPERIMENTAL_FOO=2"
+            "e+22:CAMDL_EXPERIMENTAL_FOO=1:2"
         );
         // A diagnostic changes no result, and a compile switch is keyed
         // through the IR, so neither touches the engine string.
         assert_eq!(with(&[("CAMDL_TRACE_STEPS", "1"), ("CAMDL_NO_LICM", "1")]).engine_identity("e"), "e");
+    }
+
+    /// Two different switch sets never give one engine identity, whatever the
+    /// values hold: one variable whose value spells a second variable is not
+    /// the two variables.
+    #[test]
+    fn the_engine_identity_is_injective_in_the_switches() {
+        let spelled = with(&[("CAMDL_EXPERIMENTAL_A", "1+CAMDL_EXPERIMENTAL_B=2")]).engine_identity("e");
+        let two = with(&[("CAMDL_EXPERIMENTAL_A", "1"), ("CAMDL_EXPERIMENTAL_B", "2")]).engine_identity("e");
+        assert_ne!(spelled, two);
+        let eq_in_value = with(&[("CAMDL_EXPERIMENTAL_A", "1=2")]).engine_identity("e");
+        let eq_in_name = with(&[("CAMDL_EXPERIMENTAL_A=1", "2")]).engine_identity("e");
+        assert_ne!(eq_in_value, eq_in_name);
     }
 
     #[test]
