@@ -923,7 +923,9 @@ and fails it instead when `--stream` named it.
   `parameters_changed`. `forecast/<stream>.tsv` and `forecast-samples.tsv` lead
   with a `scenario` column, and a `sweep:<param>` column per swept parameter
   (empty on the fitted model's rows). Sample `s` is the same draw and particle
-  index in every arm.
+  index in every arm. A per-sample difference across arms, `A[s] − B[s]`, is not
+  a supported quantity: its spread is set by how the arms' random numbers are
+  coupled (D83). Only the difference of means in `forecast-contrasts.tsv` is.
 - `particles` (D85): `{"n", "source"}`, the filters' particle count per draw and
   where it came from: `flag` (`--particles`), `fit_pmmh` (the PMMH fit's own
   count) or `default` (500). `predictive.json` carries the same block when the
