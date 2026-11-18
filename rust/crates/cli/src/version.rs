@@ -8,7 +8,10 @@ pub const VERSION: &str = concat!(
     " (", env!("CAMDL_BUILD_DATE"), ")"
 );
 
-/// Short version for embedding in output files: "0.1.0+ce78a5e"
+/// Short version for embedding in output files: "0.1.0+ce78a5e". Never
+/// [`VERSION`] in a file a run stores: two builds of one commit have one engine
+/// identity and different build dates, so a dated header would make their
+/// stored bytes differ for the same computation.
 pub const VERSION_SHORT: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     "+", env!("CAMDL_GIT_HASH"),

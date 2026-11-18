@@ -173,7 +173,33 @@ fn twice_uninterrupted(tag: &str, fit_toml: &str) -> (Leaves, Leaves) {
     std::thread::sleep(Duration::from_millis(1100));
     let b = work(&format!("{tag}_b"), fit_toml);
     run_fit(&b.0);
+    assert_no_build_date(tag, &method_leaf(&a.0));
     (leaves(&method_leaf(&a.0)), leaves(&method_leaf(&b.0)))
+}
+
+/// The build date `camdl --version` prints, `(2026-11-17)`. A rebuild of the
+/// same source with the same engine identity has another, so no stored file
+/// may carry it.
+fn build_date() -> String {
+    let out = Command::new(camdl()).arg("--version").output().unwrap();
+    let v = String::from_utf8_lossy(&out.stdout).into_owned();
+    let open = v.find('(').unwrap_or_else(|| panic!("no build date in `camdl --version`: {v}"));
+    v[open..=v.find(')').unwrap()].to_string()
+}
+
+/// No manifested file of the leaf, or of a child leaf, holds the build date.
+fn assert_no_build_date(tag: &str, leaf: &Path) {
+    let date = build_date();
+    let mut hits = Vec::new();
+    for (rel, (_, _, files)) in leaves(leaf) {
+        for f in files.keys() {
+            let p = leaf.join(&rel).join(f);
+            if String::from_utf8_lossy(&std::fs::read(&p).unwrap()).contains(&date) {
+                hits.push(format!("{rel}/{f}"));
+            }
+        }
+    }
+    assert!(hits.is_empty(), "{tag}: stored files carry the build date {date}: {hits:?}");
 }
 
 fn assert_same(tag: &str, what: &str, a: &Leaves, b: &Leaves) {

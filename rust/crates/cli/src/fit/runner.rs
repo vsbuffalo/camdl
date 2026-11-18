@@ -2461,7 +2461,7 @@ fn run_one_chain(
             std::fs::File::create(&path).ok().map(|f| {
                 use std::io::Write;
                 let mut w = std::io::BufWriter::new(f);
-                let _ = writeln!(w, "# {}", crate::version::VERSION);
+                let _ = writeln!(w, "# {}", crate::version::VERSION_SHORT);
                 let _ = write!(w, "iteration\tloglik\tif2_perturbed_loglik");
                 for spec in if2_params {
                     let _ = write!(w, "\t{}", spec.name);
@@ -3453,7 +3453,7 @@ pub fn write_chain_outputs(
         if !std::path::Path::new(&trace_path).exists() {
             let mut f = std::fs::File::create(&trace_path)
                 .map_err(|e| format!("cannot write {}: {}", trace_path, e))?;
-            writeln!(f, "# {}", crate::version::VERSION).unwrap();
+            writeln!(f, "# {}", crate::version::VERSION_SHORT).unwrap();
             write!(f, "iteration\tloglik\tif2_perturbed_loglik").unwrap();
             for spec in if2_params { write!(f, "\t{}", spec.name).unwrap(); }
             writeln!(f).unwrap();
@@ -3476,7 +3476,7 @@ pub fn write_chain_outputs(
         let toml_path = format!("{}/final_params.toml", chain_dir);
         let mut f = std::fs::File::create(&toml_path)
             .map_err(|e| format!("cannot write {}: {}", toml_path, e))?;
-        writeln!(f, "# {}", crate::version::VERSION).unwrap();
+        writeln!(f, "# {}", crate::version::VERSION_SHORT).unwrap();
         writeln!(f, "# Chain {} final parameters", chain).unwrap();
         let header_ll = chain_score.map(|s| s.loglik).unwrap_or(result.final_loglik);
         if let Some(s) = chain_score {
@@ -3542,7 +3542,7 @@ pub fn write_clean_eval_tsv(
     let path = format!("{}/chain_evaluations.tsv", dir);
     let mut f = std::fs::File::create(&path)
         .map_err(|e| format!("cannot write {}: {}", path, e))?;
-    writeln!(f, "# {}", crate::version::VERSION).unwrap();
+    writeln!(f, "# {}", crate::version::VERSION_SHORT).unwrap();
     write!(f, "chain\tloglik\tse\tess_mean\tess_min\tess_min_step\tn_neg_inf_incr").unwrap();
     for spec in if2_params { write!(f, "\t{}", spec.name).unwrap(); }
     writeln!(f).unwrap();
@@ -3577,7 +3577,7 @@ pub fn write_run_root_final_params(
     let path = format!("{}/final_params.toml", dir);
     let mut f = std::fs::File::create(&path)
         .map_err(|e| format!("cannot write {}: {}", path, e))?;
-    writeln!(f, "# {}", crate::version::VERSION).unwrap();
+    writeln!(f, "# {}", crate::version::VERSION_SHORT).unwrap();
     writeln!(f, "# winner: chain={}", s.chain_id).unwrap();
     writeln!(f, "# loglik = {:.2} ± {:.2} (clean-eval re-score of IF2 final-iter mean)",
         s.loglik, s.se).unwrap();
@@ -3623,7 +3623,7 @@ pub fn write_iteration_trace(dir: &str, results: &[(usize, IF2Result)]) -> Resul
     let path = format!("{}/diagnostics.tsv", dir);
     let mut f = std::fs::File::create(&path)
         .map_err(|e| format!("cannot write {}: {}", path, e))?;
-    writeln!(f, "# {}", crate::version::VERSION).unwrap();
+    writeln!(f, "# {}", crate::version::VERSION_SHORT).unwrap();
     writeln!(f, "chain\titeration\tloglik\tif2_perturbed_loglik").unwrap();
     for (chain_id, result) in results {
         for it in &result.iterations {
