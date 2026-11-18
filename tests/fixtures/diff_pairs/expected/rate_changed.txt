@@ -1,5 +1,5 @@
-left   base.ir.json  model 1dd91f83b9234d83
-right  rate_changed.ir.json  model def06d9429c036b0
+left   base.ir.json  model 69e6cb9131e7d693
+right  rate_changed.ir.json  model c7d1d4c9a50b88d2
 
 Model: different.
 Reported quantities and contrasts: identical.

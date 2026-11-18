@@ -1,5 +1,5 @@
-left   base.ir.json  model 1dd91f83b9234d83
-right  let_renamed.ir.json  model 1dd91f83b9234d83
+left   base.ir.json  model 69e6cb9131e7d693
+right  let_renamed.ir.json  model 69e6cb9131e7d693
 
 Model: written differently; the two compile to the same model.
 Reported quantities and contrasts: identical.

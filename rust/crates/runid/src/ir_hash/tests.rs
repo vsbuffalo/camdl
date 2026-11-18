@@ -310,7 +310,8 @@ fn model_golden_hash() {
     // alone.
     // HASH_VERSION 5 -> 6 (D72): the version alone.
     // HASH_VERSION 6 -> 7 (D77): the version alone.
-    const GOLDEN: &str = "2efbc49858d1c9990c6905e8907c27d399a5e0a7a0f379267747be896be2687c";
+    // HASH_VERSION 7 -> 8 (proposal 2026-11-17): the version alone.
+    const GOLDEN: &str = "4e8a459e18ba6744e0d26f06b6db922b23a2647134b1ca9b55f74074defca20e";
     let got = representative_model().content_hash().to_hex();
     assert_eq!(got, GOLDEN, "ir Model golden hash changed (got {got})");
 }
@@ -1184,26 +1185,27 @@ fn projection_variant_hashes_are_pinned() {
     // each time for the same header reason — no projection's own encoding
     // changed. And once more at HASH_VERSION 1 -> 2 (gh#1018), which every
     // root hash folds, and at 2 -> 3 (gh#1046), 3 -> 4 (D43), 4 -> 5
-    // (temporal Stage 2), 5 -> 6 (D72) and 6 -> 7 (D77) for the same reason.
+    // (temporal Stage 2), 5 -> 6 (D72), 6 -> 7 (D77) and 7 -> 8 (proposal
+    // 2026-11-17) for the same reason.
     assert_eq!(
         hex(Projection::CumulativeFlow("x".into())),
-        "51b0420c39d87ae49dace3d01a43b0b985c195ed61f7431a05589c71ea3f3d78"
+        "0af21a77757d3101e36b138581352a838343836eb068a895343dd41b9b7034bc"
     );
     assert_eq!(
         hex(Projection::CurrentPop("x".into())),
-        "6eb26238e4b59d7880f372a0c2807613c3526c3a994a5c94f70f99cb12a586e3"
+        "e8f2e6faf3757b7f5a37e73f882d04808da6cd412b43400213f42704abf8bcff"
     );
     assert_eq!(
         hex(Projection::CurrentPopSum(vec!["x".into()])),
-        "250cc0c71ead6450e454de48a7df083036df09561853ed4e2613850d3562b250"
+        "59d44bc65f134c5d4368b6c067ba38e9637e6031b269e29f1b01d6e5d2a81bbf"
     );
     assert_eq!(
         hex(Projection::DerivedExpr(Expr::const_(1.0))),
-        "eeaf9397a8498fce370d8b5b986d3fe6d3c821d3012b23338a99f3993ebd0f89"
+        "1d9027de9b3e38e249186acd9c96537205e6e833c9086afba07a773754c73819"
     );
     assert_eq!(
         hex(Projection::CumulativeFlowSum(vec!["x".into()])),
-        "6e35c6a63dbe59b17fe55e2477cd113d99c94f86df80a6bf5d1433e9ec65463b"
+        "39620efbb8dae24b00812454108d2786669a9696c95c7c40658adad262a639c8"
     );
     // Proposal 2026-09-09 (proportion of flows over a window): appended at 5.
     // The five pins above are unchanged by the addition — that is the
@@ -1213,7 +1215,7 @@ fn projection_variant_hashes_are_pinned() {
             numerator: vec!["x".into()],
             denominator: vec!["x".into(), "y".into()],
         }),
-        "95423079e97b819ba2fa99c22458542f092e68cad39f24daeea0e185e34f3eb4"
+        "0f8fb355dd5c5a17a7b59020868ac586d3c676be9c6038dac6c3161f3f70e870"
     );
     // The two sides are hashed in order, so swapping them is a different
     // projection — `a / (a + b)` and `(a + b) / a` must not share a run_id.

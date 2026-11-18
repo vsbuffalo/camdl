@@ -824,12 +824,17 @@ fn cas_identity_pins() {
         // version alone. It declares that the bootstrap filter and IF2 no
         // longer resample on exactly equal weights, and that a binomial
         // `0` of `0` row is bound as a hole.
-        ("sim", "9a252a6421aab7756627ebd97b40583cbd577e6cc7a8e3346bfbeb98ab3c835a"),
-        ("fit", "0a69d0db38dd80a2eb317cb74ab71958705d9d0d48947652681c7487844317b5"),
-        ("pfilter", "0dbf0a413122b69058add9f327298974f3f4a48e1618e2a1df1760dc83d6dc50"),
-        ("survey", "dd18b414b62c974436fbf6de6f2789c4730eb8564de8d14bccc2418797cbfa63"),
-        ("sim_ensemble", "4847e1bf2862356d2e2af3a12b5c523942673758489a77a35c93a58fb47291a5"),
-        ("profile", "8601e6f12fd57c073a3deb5578c24c487ef8e7299ff3a1768cc9fabfb76e334b"),
+        //
+        // HASH_VERSION 7 -> 8 (proposal 2026-11-17 §1b, §1c) moved every kind
+        // once more, for the version alone: this fixture's fit is IF2, which
+        // reads no gradient, and its pfilter and profile hold
+        // `allow_degenerate_rates` at its default.
+        ("sim", "19d799378e6bcf65a3fd4c9db8ed924f9390a172fead9b9edbd256c96d0451d0"),
+        ("fit", "671990c3342dca98df7775586e0cb87f0ce922a49b8cac0f45a9451f033db6b0"),
+        ("pfilter", "d8e8bc0581a729abd89658d893194d57d26df1010c993c70b6d4420a0d4d535d"),
+        ("survey", "9981ba175436b50b9795e6efa5b0877145983b9cbef5498527e8cd3336e3577a"),
+        ("sim_ensemble", "5ae698ae436b20c3ca386ece61c65d6e6d053e6cf3651fa9c341e26f4bdfb22a"),
+        ("profile", "b1c05d0b02e800bdce2ad31d1cabf5422d2dc9499b598ac4585325e5d1471fa8"),
     ];
     // Compared as whole lists so a failure reports EVERY kind that moved, not
     // just the first — the re-key scope is the thing under review.
