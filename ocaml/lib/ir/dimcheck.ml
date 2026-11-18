@@ -54,7 +54,8 @@
     - an index of a table lookup is a pure number (E311).
 
     Literals follow the position, not the neighbours. A literal [0] matches
-    any dimension (the {!value} [Any]). Any other literal is a pure number,
+    any dimension (the {!value} [Any]), and so do a product with a zero
+    factor and a quotient with a zero numerator. Any other literal is a pure number,
     except that at a position whose {!Dim_sites.literals} is [Whole_terms]
     (a rate, an initial value, a count) a literal, or a constant expression
     of literals, that forms a whole additive term takes the position's
@@ -492,7 +493,10 @@ let binop st ~site ~code ~what (op : bin_op) ?exponent ?literals l r : value =
     equate st ~site ~code ~op:(Printf.sprintf "%s in %s" opname what) ?literals l r;
     F (const_form dimensionless)
   | Mul ->
-    (match l, r with Any, d | d, Any -> d | F a, F b -> F (form_add a b))
+    (* A factor is never a whole term, so an [Any] factor is a zero (the
+       literal, or [0 / x], ...) and the product is a zero of any dimension,
+       as [0 / x] is (gh#1212). *)
+    (match l, r with Any, _ | _, Any -> Any | F a, F b -> F (form_add a b))
   | Div ->
     (match l, r with
      | Any, _ -> Any
