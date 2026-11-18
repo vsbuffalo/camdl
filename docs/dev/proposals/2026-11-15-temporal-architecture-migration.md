@@ -599,7 +599,8 @@ _Landed:_ #1114.
     (such as a binomial's `n`) is refused a forecast tail unless a design file
     supplies the column for the target periods; reuse `fit predict`'s existing
     design handling if it fits, otherwise refuse with a message naming the
-    column.
+    column. When scoring, the held-out rows supply it, labelled as realised
+    future design (D81).
   - **Restarts stay conservative.** `simulate --init-state` refuses to emit any
     period that began before the restart (T3, gh#1081; R2, gh#1085).
     `pfilter --save-final-state` honours `holdout_after` or refuses under it
@@ -701,21 +702,24 @@ _Landed:_ #1114.
   Forecasts come from the Stage 5 driver unchanged.
 - **The log score (D56).** CRPS, quantiles and the weighted interval score come
   from the predictive draws. The log score is
-  `logsumexp_i log p(y | x_i, θ_i) − log N` over the predictive particles at the
-  target's end, evaluated with the same likelihood code as fitting
-  (`log_likelihood_per_stream`) and before the observation could be assimilated.
-  The implementer compares three ways of obtaining it and takes the first that
-  works without duplicating likelihood code: (1) record each particle's
-  projected value at each target's end and evaluate the existing per-stream
-  likelihood afterwards with the held-out value; (2) a filter switch that
-  evaluates a row's likelihood without reweighting on it (a change in
-  `particle_filter.rs`, a high-risk file); (3) exporting each observation
-  family's parameters to the `score` crate. None changes the forecast contract
-  of Stage 5.
-- **Red tests.** A forecast score's targets equal the held-out rows' periods;
-  the forecast never binds a row ending after the origin; scores at different
-  horizons are never summed; the log score at a target equals an independent
-  computation from the same particles' likelihoods.
+  `logsumexp_{m,i} log p(y | x_{m,i}, θ_m) − log(MN)` over all _N_ particles of
+  all _M_ posterior draws (D79) at the target's end, evaluated with the same
+  likelihood code as fitting (`log_likelihood_per_stream`) and before the
+  observation could be assimilated. D79 and D84 settle the route as (2), a
+  held-out cell evaluated in the filter's prequential record at the selected
+  stops. The routes considered were: (1) record each particle's projected value
+  at each target's end and evaluate the existing per-stream likelihood
+  afterwards with the held-out value; (2) a filter switch that evaluates a row's
+  likelihood without reweighting on it (a change in `particle_filter.rs`, a
+  high-risk file); (3) exporting each observation family's parameters to the
+  `score` crate. None changes the forecast contract of Stage 5.
+- **Red tests.** A forecast score's targets are the plan's targets that held-out
+  rows select (D80); the forecast never binds a row ending after the origin;
+  scores at different horizons are never summed; the log score at a target
+  equals an independent computation from the same particles' likelihoods;
+  changing the held-out outcomes, with the training data, design inputs and
+  targets fixed, leaves the predictive samples identical and changes only the
+  scores (D79).
 - **Docs:** `docs/inference.md` ("Out-of-sample validation"), the score-artifact
   schema documentation.
 
@@ -1037,6 +1041,84 @@ Recorded in the maintainer's docket; each is reflected in the spec and above.
   explicitly overridden, every downstream simulation inherits the stochastic
   configuration recorded by its parent fit. The guarantee is the same sampler
   and recorded configuration, not identical realised draws.
+
+- **D79** (2026-11-17). A held-out value is a distinct `ObsCell` variant, so
+  every match on the cell type must say whether it assimilates or only
+  evaluates. A held-out value contributes to predictive scores and never to
+  filtering weights, resampling or state conditioning: the joint assimilation
+  likelihood ignores it and the scoring likelihood evaluates it. Changing
+  held-out values changes scores and nothing else; the filtered state, the
+  predictive samples and the random streams are bit-identical (a required test).
+  The log score at a target integrates over the whole predictive ensemble of _M_
+  posterior draws by _N_ particles,
+  `log p̂(y_t) = logsumexp_{m,i} ℓ_{m,i,t} − log(MN)`, never an average of
+  per-draw log scores. A joint multistream log score sums each particle's
+  per-stream log likelihoods before the log-sum-exp. Marginal and joint scores
+  are labelled distinctly.
+- **D80** (2026-11-17). Targets are built by one function under a hybrid rule
+  (spec §4.3). A stream with a declared cadence (a uniform tiling or an
+  `emit_schedule`) keeps its declared targets and their numbering; held-out rows
+  only select which targets are scored, and a held-out row off that cadence is
+  refused, not skipped. A window-column stream with no declared cadence takes
+  its held-out periods as targets, validated for order, uniqueness, overlap and
+  endpoints. Every target carries its lead time (its end minus the origin)
+  independently of its ordinal, so the second of two irregular targets is not a
+  horizon-2 forecast in the sense of a tiled stream; outputs across data sets
+  with missing periods are compared by lead time.
+- **D81** (2026-11-17). A stream whose likelihood reads a design column (such as
+  `binomial(n = tested, …)`) is forecast and scored, superseding the refusal of
+  D52. Two modes are distinguished and labelled: a prospective forecast, whose
+  design values are supplied at the origin; and an ex-post conditional
+  evaluation, whose design values were realised after the origin and which is
+  labelled a conditional score using realised future design, never an
+  unconditional forecast. Required design columns are validated and a missing
+  value is refused. Forecast outcomes reach neither state conditioning nor the
+  design values. The design inputs that determine predictions are in the
+  prediction's identity; held-out outcomes are in the score artifact's identity
+  only.
+- **D82** (2026-11-17). When the periods a stream's data implies and its
+  `emit_schedule` disagree over the same reporting interval, the forecast and a
+  restart are refused, with a diagnostic naming the stream, the conflicting
+  periods and the source of each. There is no precedence rule; deliberately
+  different historical and prospective schedules would need an explicit
+  prospective schedule declaration, a separate feature.
+- **D83** (2026-11-17). A scenario forecast publishes each arm's full predictive
+  distribution and the difference of predictive means,
+  `Δ = E[Y_A | D] − E[Y_B | D]`, with its paired Monte Carlo standard error. No
+  quantile band of paired differences `A[s] − B[s]` is published: its spread is
+  set by the cross-scenario coupling of the random streams, which the separate
+  scenario models do not identify. The coupling method is recorded. The paired
+  standard error accounts for shared posterior draws, several particles per draw
+  and the chains' autocorrelation, and is labelled Monte Carlo error, not
+  predictive or intervention-effect uncertainty. A band of the conditional
+  effect (the expected difference within each posterior draw and origin state,
+  from inner replicates, summarised over the posterior) is a later feature.
+- **D84** (2026-11-17). The bootstrap filter gains an opt-in list of stops at
+  which it keeps prequential records; the default is unchanged. Recording draws
+  from the observation model and so consumes diagnostic random numbers; the
+  first implementation keeps that consumption at every stop and discards the
+  records of unselected stops, with a test that the selected stops' records are
+  bit-identical to a full recording, on sparse, irregular, multistream and
+  held-out data. Likelihood evaluations that consume no random numbers and
+  change no state may be skipped. A stop-keyed diagnostic stream that removes
+  the skipped draws would be an intentional reproducibility change, made
+  separately.
+- **D85** (2026-11-17). `fit predict` takes `--particles`; its resolved value is
+  in the output identity and recorded as used. The default is the fit's
+  filtering particle count where it has one (PMMH's), else 500 (PGAS's
+  conditional SMC count is not a bootstrap-filter count; D51 refuses IF2). Each
+  draw records the effective sample size at its last assimilation, before
+  resampling, with that time, the particle count and ESS/N, and the number of
+  distinct parents at its final resampling. Neither is described as lineage
+  diversity, and neither guarantees forecast accuracy; both characterise Monte
+  Carlo reliability.
+- **D86** (2026-11-17). A forecast's identity is its input-addressed directory,
+  `predict/<run12>-<key>/` (#1225); file names stay stable and carry no
+  chain-selection suffix. `forecast.json` records `address_key` and
+  `options.excluded_chains`. The predictive and forecast manifests share one
+  human-readable `chain_selection` block. The predictive's per-file suffixes
+  converge on the keyed directory later. The forecast's `cloud_row` is the
+  draw's row in `draws.tsv` under any chain selection.
 
 ## Part 9. Documents this plan changes
 

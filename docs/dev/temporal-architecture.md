@@ -552,22 +552,36 @@ of every multi-stream score.
 _Not yet built (Phase B)._ There is no forecast plan, target list or
 fixed-origin driver in the code.
 
-For each stream, the targets after the forecast origin are, in order:
+For each stream, one function builds the targets after the forecast origin
+(D80):
 
-1. **Held-out rows**, when scoring: the periods of the rows that did not train.
-   Nothing is extrapolated.
-2. **The declared tiling**, for a stream with a uniform `covers` form: the
+1. **The declared tiling**, for a stream with a uniform `covers` form: the
    periods continue the stream's tiling at its declared width. Because a uniform
    stream's periods tile without gaps (§2.2), its phase is fixed by any of its
    rows; the first target is the period under way at the origin.
-3. **The emit schedule**, for a stream with window columns and an
+2. **The emit schedule**, for a stream with window columns and an
    `emit_schedule`: the periods between consecutive schedule times. The emit
    schedule already means "the times at which this stream reports" for
-   `simulate --obs`; forecasting reads the same declaration.
+   `simulate --obs`; forecasting reads the same declaration. Where the periods
+   the stream's rows imply and its schedule disagree over the same reporting
+   interval, the forecast and a restart are refused, naming the stream, both
+   periods and the source of each (D82).
+3. **Held-out rows**, when scoring a window-column stream with no
+   `emit_schedule`: the periods of the rows that did not train, validated for
+   order, uniqueness, overlap and endpoints. Nothing is extrapolated.
 4. **Refusal** otherwise (D42): a window-column stream with no `emit_schedule`
    declares no rhythm, and the forecast tail is refused with a message naming
    the two ways to declare one. A stream with no bound rows is refused too: it
    has no phase.
+
+When scoring a stream with a declared cadence (1 or 2), the held-out rows only
+select which targets are scored; they do not renumber them, so a missing week
+does not shift the horizon of later weeks. A held-out row whose period is not
+one of the stream's targets is refused, never skipped. Every target carries its
+lead time (its end minus the origin) apart from its ordinal: for targets taken
+from irregular held-out rows (3), the ordinal is not a horizon comparable with a
+tiled stream's, and comparisons across data sets with missing periods use lead
+time.
 
 The most common gap between observations is never a target source. The horizon
 only truncates the list.
