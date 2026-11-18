@@ -400,11 +400,6 @@ let dims_of = List.concat_map (function DDimensions ds -> ds | _ -> [])
 
 let dst_refs = function DstSum refs -> refs | DstBranch bs -> List.map fst bs
 
-(* For a compartment family, one line \dot{X}_a = <signed rates>, collected over
-   every transition that produces (+) or consumes (-) it. A catalyst (same
-   family on both sides) nets to zero and is skipped. The free index is the
-   binder var of a contributing transition, kept symbolic — so the strata are
-   quantified away rather than enumerated. *)
 (* Distinct compartment instances (base + rendered index) referenced by the
    transitions, in first-occurrence order. Symbolic mode gives one per family
    (X[a]); under --expand, one per enumerated cell (X[child], X[adult]). Deduped
@@ -419,27 +414,65 @@ let comp_instances (transitions : transition_decl list) (comps : compartment_dec
            let key = n ^ "|" ^ index_tex items in
            if Hashtbl.mem seen key then None else (Hashtbl.add seen key (); Some r))
 
+(* The signed terms one transition contributes to the derivative of the
+   instance [matches] selects, as (gained?, magnitude), following the
+   stoichiometry the expander emits for it.
+
+   A plain destination changes the instance by its net count: the number of
+   times it appears among the destinations less the number among the sources.
+   So a catalyst (`S + I --> S + I`) contributes nothing, and `S + I --> I + I`
+   contributes one rate to I. A split destination `{ A : w_1, B : w_2 }` is one
+   transition per branch at rate `w_k * rate`, each consuming the sources, so
+   branch k changes the instance by its own net count times `w_k * rate`. When
+   every weight is a number and the instance changes by the same count in every
+   branch (a source that no branch returns to), the branches are one term with
+   the sum of the weights as its factor, which a split whose weights sum to one
+   drops. Otherwise each branch is its own term: the weights need not sum to
+   one, and a symbolic sum such as `p + (1 - p)` is not simplified. *)
+let ode_terms (matches : stoich_ref -> bool) (t : transition_decl) : (bool * string) list =
+  let count refs = List.length (List.filter matches refs) in
+  let n_src = count t.trsrc in
+  (* [factor] multiplies the rate; [None] is a factor of one. *)
+  let magnitude (factor : expr option) =
+    match (factor, t.trdyn) with
+    | None, d -> rate_tex d
+    | Some f, Rate e -> tex (EBinOp (Mul, f, e))
+    | Some f, (Via _ as d) -> tex ~prec:7 f ^ "\\," ^ rate_tex d
+  in
+  let term net (weight : expr option) =
+    if net = 0 then None
+    else
+      let n = abs net in
+      let factor =
+        match weight with
+        | None -> if n = 1 then None else Some (EConst (float_of_int n))
+        | Some w -> if n = 1 then Some w else Some (EBinOp (Mul, EConst (float_of_int n), w))
+      in
+      Some (net > 0, magnitude factor)
+  in
+  match t.trdst with
+  | DstSum refs -> Option.to_list (term (count refs - n_src) None)
+  | DstBranch bs ->
+    let nets = List.map (fun (r, _) -> (if matches r then 1 else 0) - n_src) bs in
+    let numeric = List.filter_map (function (_, EConst w) -> Some w | _ -> None) bs in
+    (match nets with
+     | k :: rest
+       when List.for_all (( = ) k) rest && List.length numeric = List.length bs ->
+       let total = List.fold_left ( +. ) 0.0 numeric in
+       if Float.abs (total -. 1.0) <= 1e-12 then Option.to_list (term k None)
+       else Option.to_list (term k (Some (EConst total)))
+     | _ -> List.filter_map Fun.id (List.map2 (fun net (_, w) -> term net (Some w)) nets bs))
+
 (* One line \dot{X}_i = <signed rates> for a compartment instance, over every
-   transition that produces (+) or consumes (-) exactly that instance; a catalyst
-   (same instance both sides) nets to zero and is dropped. *)
-(* The compartment's derivative split into its LHS (`\dot{X}_i`) and signed-rate
-   RHS, plus the compartment base name — so the document assembles the aligned
-   `\dot{X}_i &= …` while the web shape keys each equation by its state. *)
+   transition that changes exactly that instance ({!ode_terms}), split into its
+   LHS (`\dot{X}_i`) and signed-rate RHS, plus the compartment base name — so
+   the document assembles the aligned `\dot{X}_i &= …` while the web shape keys
+   each equation by its state. *)
 let derived_ode_parts (transitions : transition_decl list) ((base, items) : stoich_ref) :
     string * string * string =
   let idx_str = index_tex items in
   let matches (n, its) = n = base && index_tex its = idx_str in
-  let terms =
-    List.filter_map
-      (fun t ->
-        let in_src = List.exists matches t.trsrc in
-        let in_dst = List.exists matches (dst_refs t.trdst) in
-        match (in_src, in_dst) with
-        | true, false -> Some (false, rate_tex t.trdyn) (* consumed *)
-        | false, true -> Some (true, rate_tex t.trdyn) (* produced *)
-        | _ -> None (* untouched, or catalyst (net zero) *))
-      transitions
-  in
+  let terms = List.concat_map (ode_terms matches) transitions in
   let bt, isubs = sym_parts base in
   let dot =
     Printf.sprintf "\\dot{%s}%s" bt (subs_join (isubs @ if idx_str = "" then [] else [ idx_str ]))

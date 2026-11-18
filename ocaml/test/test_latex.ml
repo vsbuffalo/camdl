@@ -196,6 +196,69 @@ let test_derived_ode_signs () =
   has ~doc:"S loses FOI"  "\\dot{S} &= -\\frac{β\\,S\\,I}{N}" out;
   has ~doc:"R gains gamma*I" "\\dot{R} &= γ\\,I" out
 
+(* gh#1208. A compartment on both sides of a transition changes by its net
+   stoichiometry (`S + I --> I + I` is a gain of one I), and a split
+   destination carries its branch weight: the expander emits one transition
+   per branch with rate `weight * rate`, each consuming the source. *)
+let catalytic_split = {|
+time_unit = 'days
+compartments { S, I, R, D }
+let N = S + I + R
+parameters {
+  beta  : rate     in [0.001, 2.0]
+  gamma : rate     in [0.001, 1.0]
+}
+transitions {
+  infection : S + I --> I + I  @ beta * S * I / N
+  recovery  : I --> { R : 0.9, D : 0.1 } @ gamma * I
+}
+|}
+
+let symbolic_split = {|
+time_unit = 'days
+compartments { S, A, B }
+parameters {
+  r : rate        in [0.001, 2.0]
+  p : probability in [0, 1]
+}
+transitions {
+  split : S --> { A : p, B : 1 - p } @ r * S
+}
+|}
+
+let test_derived_ode_net_stoichiometry () =
+  let out = render catalytic_split in
+  has ~doc:"S loses the infection" "\\dot{S} &= -\\frac{\\beta\\,S\\,I}{N}" out;
+  has ~doc:"I gains the infection, loses all recovery"
+    "\\dot{I} &= \\frac{\\beta\\,S\\,I}{N} - \\gamma\\,I" out;
+  has ~doc:"R gains the 0.9 branch" "\\dot{R} &= 0.9\\,\\gamma\\,I" out;
+  has ~doc:"D gains the 0.1 branch" "\\dot{D} &= 0.1\\,\\gamma\\,I" out;
+  let out = render symbolic_split in
+  (* Weights that are not numbers are not summed: each branch's consumption
+     of the source is its own term, as the expander emits it. *)
+  has ~doc:"S loses each branch"
+    "\\dot{S} &= -p\\,r\\,S - \\left(1 - p\\right)\\,r\\,S" out;
+  has ~doc:"A gains p" "\\dot{A} &= p\\,r\\,S" out;
+  has ~doc:"B gains 1 - p" "\\dot{B} &= \\left(1 - p\\right)\\,r\\,S" out
+
+(* gh#1208. The other display path, the [Pp_expr] printer behind
+   `camdlc inspect`: a compartment sum is a sum, and as the operand of a
+   tighter operator it needs its parentheses. *)
+let test_pp_expr_popsum_parens () =
+  let s = Pp_expr.to_string in
+  let pops = Ir.PopSum [ "S"; "I"; "R" ] in
+  let div l r = Ir.BinOp { op = Ir.Div; left = l; right = r } in
+  let mul l r = Ir.BinOp { op = Ir.Mul; left = l; right = r } in
+  let add l r = Ir.BinOp { op = Ir.Add; left = l; right = r } in
+  Alcotest.(check string) "denominator" "beta * S * I / (S + I + R)"
+    (s (div (mul (mul (Ir.Param "beta") (Ir.Pop "S")) (Ir.Pop "I")) pops));
+  Alcotest.(check string) "factor" "(S + I + R) * beta" (s (mul pops (Ir.Param "beta")));
+  Alcotest.(check string) "whole expression" "S + I + R" (s pops);
+  Alcotest.(check string) "left of a sum" "S + I + R + beta" (s (add pops (Ir.Param "beta")));
+  Alcotest.(check string) "right of a sum" "beta + (S + I + R)" (s (add (Ir.Param "beta") pops));
+  Alcotest.(check string) "a sum of one is a name" "beta / S"
+    (s (div (Ir.Param "beta") (Ir.PopSum [ "S" ])))
+
 (* Negative control: without @symbol the same names fall back to \beta / \gamma,
    and the literal-unicode forms must NOT appear — this proves the override in
    the tests above is load-bearing, not incidental. *)
@@ -423,7 +486,11 @@ let () =
         [ Alcotest.test_case "let -> Definitions block" `Quick
             test_let_becomes_definition;
           Alcotest.test_case "derived-ODE signs from stoichiometry" `Quick
-            test_derived_ode_signs ] );
+            test_derived_ode_signs;
+          Alcotest.test_case "derived ODEs: net stoichiometry + branch weights (gh#1208)"
+            `Quick test_derived_ode_net_stoichiometry;
+          Alcotest.test_case "inspect printer parenthesises a compartment sum (gh#1208)"
+            `Quick test_pp_expr_popsum_parens ] );
       ( "indexing",
         [ Alcotest.test_case "merged subscripts on indexed refs" `Quick
             test_indexed_subscripts;
