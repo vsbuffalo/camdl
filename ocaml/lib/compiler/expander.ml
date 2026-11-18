@@ -5220,7 +5220,7 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
       match args with
       | [("", arg)] -> Ir.UnOp { op; arg = resolve_expr ctx env arg }
       | _ ->
-        Diagnostics.error ctx.diags ~code:"E101" ~loc:Diagnostics.no_loc
+        Diagnostics.error ctx.diags ~code:"E120" ~loc:Diagnostics.no_loc
           ~message:(Printf.sprintf "built-in function '%s' takes exactly one argument" fname)
           ~hint:(Printf.sprintf "usage: %s(expr)" fname) ();
         Ir.Const 0.0
@@ -5230,7 +5230,7 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
       | [("", a); ("", b)] ->
         Ir.BinOp { op = Ir.Mod; left = resolve_expr ctx env a; right = resolve_expr ctx env b }
       | _ ->
-        Diagnostics.error ctx.diags ~code:"E101" ~loc:Diagnostics.no_loc
+        Diagnostics.error ctx.diags ~code:"E120" ~loc:Diagnostics.no_loc
           ~message:"built-in function 'mod' takes exactly two arguments"
           ~hint:"usage: mod(a, b)" ();
         Ir.Const 0.0
@@ -5246,7 +5246,7 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
       | [("", a); ("", b)] ->
         Ir.BinOp { op; left = resolve_expr ctx env a; right = resolve_expr ctx env b }
       | _ ->
-        Diagnostics.error ctx.diags ~code:"E101" ~loc:Diagnostics.no_loc
+        Diagnostics.error ctx.diags ~code:"E120" ~loc:Diagnostics.no_loc
           ~message:(Printf.sprintf "built-in function '%s' takes exactly two arguments" fname)
           ~hint:(Printf.sprintf "usage: %s(a, b)" fname) ();
         Ir.Const 0.0
@@ -5259,7 +5259,7 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
         | _ -> false
       in
       if not ok then
-        Diagnostics.error ctx.diags ~code:"E101" ~loc:Diagnostics.no_loc
+        Diagnostics.error ctx.diags ~code:"E120" ~loc:Diagnostics.no_loc
           ~message:(Printf.sprintf "forcing function '%s' takes no arguments, or (t) for the current simulation time" fname)
           ~hint:(Printf.sprintf "write '%s' or '%s(t)'" fname fname) ();
       Ir.TimeFunc fname

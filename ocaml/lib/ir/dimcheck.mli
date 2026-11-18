@@ -123,5 +123,5 @@ val check_model :
     use instead of declared, and the unit literals of constant priors are not
     checked, since the IR holds those arguments only as numbers.
 
-    An exponent too large for a native integer gives one error, E310, in
+    An exponent too large for a native integer gives one error, E319, in
     place of every other result. *)

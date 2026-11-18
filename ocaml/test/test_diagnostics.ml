@@ -544,6 +544,166 @@ let test_invalid_code_scanner () =
   Alcotest.(check (list string)) "only the placeholders are flagged"
     ["E25x"; "E2x"; "W1ab"] got
 
+(* ── Piece 4b: one code, one kind of diagnostic (gh#1214) ────────────────────
+
+   A code names one kind of problem, so documentation, `--json-errors`
+   consumers and tests can refer to it. The reuse this guards against is a
+   code taken over by a second, unrelated check, which in practice lands in
+   another stage's source file: E310 named both a transition with no net
+   effect (the expander) and an overflowing dimension exponent (the dimension
+   checker); E101 both an invalid `origin` (the parser) and a built-in called
+   with the wrong arguments (the expander).
+
+   So every code's literal must appear in one source file under ocaml/lib,
+   unless the code is listed below with the exact set of files. A file that
+   only reads a code (the doctest classifier) counts as a site, so it is
+   listed too. A listed set that no longer matches the sources also fails,
+   so the lists cannot go stale. Reuse inside one file (E104 named two
+   likelihood errors, both in parser.mly) is not detectable this way; the
+   catalog's one row per code is the check there. *)
+
+(* Codes emitted from several files with one meaning. *)
+let shared_codes : (string * string list) list = [
+  (* undeclared name; diagnostics.ml has it only in a doc-comment example *)
+  "E100", ["diagnostics.ml"; "expander.ml"];
+  (* a malformed `simulate`, `output` or reactive configuration block *)
+  "E106", ["expander.ml"; "parser.mly"];
+  (* expander.ml reports it; doctest.ml reads it to skip data blocks *)
+  "E200", ["doctest.ml"; "expander.ml"];
+  (* an unknown or repeated keyword argument *)
+  "E251", ["expander.ml"; "parser.mly"];
+  (* the dimension checker: dim_sites.ml generates the sites, dimcheck.ml
+     the equations *)
+  "E297", ["dim_sites.ml"; "dimcheck.ml"];
+  "E300", ["dim_sites.ml"; "dimcheck.ml"];
+  "E301", ["dim_sites.ml"; "dimcheck.ml"];
+  "E302", ["dim_sites.ml"; "dimcheck.ml"];
+  "E304", ["dim_sites.ml"; "dimcheck.ml"];
+  "E316", ["dim_sites.ml"; "dimcheck.ml"];
+  (* a time that is not a time *)
+  "E315", ["dim_sites.ml"; "expander.ml"];
+  (* a malformed `covers` declaration *)
+  "E349", ["expander.ml"; "parser.mly"];
+]
+
+(* Codes emitted from several files with more than one meaning, not yet
+   split. Nothing may be added here; an entry leaves when its code is split. *)
+let known_reuse : (string * string list) list = [
+  (* a syntax error, and an internal error (an exception the front end
+     caught, or the expander's unlowered `via`) *)
+  "E001", ["compiler.ml"; "doctest.ml"; "expander.ml"; "parser.mly"];
+  (* E270-E274 each name an observation-surface migration (parser.mly) and
+     unrelated expander errors: a list or range in a scalar position, an
+     unindexed stratified compartment in a stoichiometry, a shaped `let`'s
+     index count, and reactive-trigger errors. *)
+  "E270", ["expander.ml"; "parser.mly"];
+  "E271", ["expander.ml"; "parser.mly"];
+  "E272", ["expander.ml"; "parser.mly"];
+  "E273", ["expander.ml"; "parser.mly"];
+  "E274", ["expander.ml"; "parser.mly"];
+]
+
+let code_files () : (string * string list) list =
+  let tbl : (string, SS.t) Hashtbl.t = Hashtbl.create 256 in
+  List.iter (fun f ->
+    let base = Filename.basename f in
+    List.iter (fun c ->
+      let prev = Option.value (Hashtbl.find_opt tbl c) ~default:SS.empty in
+      Hashtbl.replace tbl c (SS.add base prev)) (codes_in_source (read_file f)))
+    (source_files_under (root_path "ocaml/lib"));
+  Hashtbl.fold (fun c fs acc -> (c, SS.elements fs) :: acc) tbl []
+  |> List.sort compare
+
+(* The rule, separated from the sources so it can be tested on its own. *)
+let code_reuse_violations ~listed (files : (string * string list) list) =
+  let multi = List.filter (fun (_, fs) -> List.length fs > 1) files in
+  let unlisted =
+    List.filter_map (fun (c, fs) ->
+      match List.assoc_opt c listed with
+      | Some lfs when List.sort compare lfs = fs -> None
+      | Some lfs ->
+        Some (Printf.sprintf "%s is listed as emitted from %s but is emitted from %s"
+                c (String.concat ", " lfs) (String.concat ", " fs))
+      | None ->
+        Some (Printf.sprintf "%s is emitted from %s" c (String.concat ", " fs)))
+      multi
+  in
+  let stale =
+    List.filter_map (fun (c, _) ->
+      if List.mem_assoc c multi then None
+      else Some (Printf.sprintf "%s is listed but is emitted from one file or none" c))
+      listed
+  in
+  unlisted @ stale
+
+let test_one_code_one_kind () =
+  let violations =
+    code_reuse_violations ~listed:(shared_codes @ known_reuse) (code_files ()) in
+  if violations <> [] then
+    Alcotest.failf
+      "a diagnostic code names one kind of problem. Give a new meaning its \
+       own code (and a row in docs/dev/warning-catalog.md); if the sites \
+       really are one kind, add the code to [shared_codes]:\n  %s"
+      (String.concat "\n  " violations)
+
+(* The second meanings of E104 and E101 have their own codes. Pinned by the
+   message, since the placeholder these errors recover to produces further
+   diagnostics a fixture's code set would have to list. *)
+let obs_model lik = Printf.sprintf {camdl|time_unit = 'days
+compartments { S, I, R }
+let N = S + I + R
+parameters {
+  beta  : rate
+  gamma : rate
+  k     : positive
+}
+transitions {
+  infection : S --> I  @ beta * S * I / N
+  recovery  : I --> R  @ gamma * I
+}
+observations {
+  cases {
+    columns       { time : time, cases : count }
+    projected     = I
+    emit_schedule = every 7 'days
+    %s
+  }
+}
+init {
+  S = 990
+  I = 10
+}
+simulate { from = 0 'days  to = 100 'days }
+|camdl} lik
+
+let code_of_message ~prefix src =
+  Compiler.collect_diagnostics ~name:"m" ~filename:"m.camdl" src
+  |> List.filter_map (fun (d : Diagnostics.diagnostic) ->
+       if starts_with ~prefix d.message then Some d.code else None)
+
+let test_split_codes () =
+  Alcotest.(check (list string)) "unknown likelihood family is E104" ["E104"]
+    (code_of_message ~prefix:"unknown likelihood"
+       (obs_model "cases ~ negbinomial(mean = projected, r = k)"));
+  Alcotest.(check (list string)) "a likelihood value that is not a call is E118"
+    ["E118"]
+    (code_of_message ~prefix:"likelihood value must be a function call"
+       (obs_model "likelihood = projected"));
+  Alcotest.(check (list string)) "an invalid origin is E101" ["E101"]
+    (code_of_message ~prefix:"invalid origin declaration"
+       ("origin = date(2020, 3, 1)\n" ^ obs_model "cases ~ poisson(rate = projected)"))
+
+let test_one_code_one_kind_rule () =
+  let listed = [ "E002", ["a.ml"; "b.ml"]; "E003", ["a.ml"; "b.ml"] ] in
+  let files = [ "E001", ["a.ml"; "b.ml"];   (* reused, unlisted *)
+                "E002", ["a.ml"; "b.ml"];   (* listed, matches *)
+                "E003", ["a.ml"];           (* listed, stale *)
+                "E004", ["a.ml"] ] in       (* one file *)
+  Alcotest.(check (list string)) "unlisted reuse and stale entries flagged"
+    [ "E001 is emitted from a.ml, b.ml";
+      "E003 is listed but is emitted from one file or none" ]
+    (code_reuse_violations ~listed files)
+
 (* ── Piece 5: check ↔ compile parity (gh#170) ────────────────────────────────
 
    `camdl check` and a full compile must never disagree on whether a model
@@ -865,8 +1025,9 @@ let located_cases = [
 (* No diagnostic the fixtures produce is unlocated, except for the codes
    listed here, which no fix has reached yet. *)
 let unlocated_allowed = [
+  "E120";  (* a built-in called with the wrong arguments: a call has no span *)
   "E200";  (* a data file that cannot be read *)
-  "E310";  (* a dimension exponent too large to represent *)
+  "E319";  (* a dimension exponent too large to represent *)
   "E314";  (* an intervention action's dimension *)
   "E315";  (* an intervention or schedule time's dimension *)
   "I300";  (* an undetermined dimension *)
@@ -905,6 +1066,12 @@ let () =
       Alcotest.test_case "emit sites ↔ warning-catalog.md" `Quick test_catalog_consistency;
       Alcotest.test_case "scanner flags code-shaped non-codes (gh#920)"
         `Quick test_invalid_code_scanner;
+      Alcotest.test_case "one code, one kind of diagnostic (gh#1214)"
+        `Quick test_one_code_one_kind;
+      Alcotest.test_case "the one-code rule on synthetic input"
+        `Quick test_one_code_one_kind_rule;
+      Alcotest.test_case "E104/E118 and E101 name one error each (gh#1214)"
+        `Quick test_split_codes;
     ];
     "located-gh1213",
       (List.map (fun (name, code, line, src) ->
