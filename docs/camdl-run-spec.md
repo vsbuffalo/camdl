@@ -503,9 +503,10 @@ not proof: a model that reaches a different parallel reduction, scheduling path
 or platform mathematics routine may not reproduce its bytes, and the guarantee
 is stated for one machine image.
 
-**A resumed or extended fit.** PMMH, `mh` and PGAS can be extended:
-`fit run --resume <base>` with a longer `iterations` / `sweeps` continues each
-chain of `<base>` from its checkpoint. Four things are distinct:
+**A resumed or extended fit.** PMMH and PGAS can be extended (`fit run` refuses
+`--resume` for every other method, `mh` included): `fit run --resume <base>`
+with a longer `iterations` / `sweeps` continues each chain of `<base>` from its
+checkpoint. Four things are distinct:
 
 - the _computation's identity_ includes its target length: the extended fit is a
   different computation, with its own `run_id` (the target length is folded into
