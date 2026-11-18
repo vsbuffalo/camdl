@@ -2089,10 +2089,20 @@ fn render_landscape_child(
     meta: &crate::landscape_html::LandscapeMeta,
 ) {
     let child = &crate::cas_sink::LANDSCAPE_HTML;
-    let written = crate::landscape_html::render_bytes(&leaf.join("landscape.tsv"), meta)
+    // The page's title is the leaf's model label, from its record: the model
+    // file this invocation named may be another name for the stored model,
+    // and a title from it would make the child's bytes depend on the
+    // invocation.
+    let stem = crate::leaf_use::read(leaf)
+        .ok()
+        .flatten()
+        .and_then(|l| l.record.levels.first().map(|lv| lv.label.clone()));
+    let meta = crate::landscape_html::LandscapeMeta { stem, ..meta.clone() };
+    let written = crate::landscape_html::render_bytes(&leaf.join("landscape.tsv"), &meta)
         .and_then(|html| child.declare_and_write(leaf, run_id, &html));
     match written {
-        Ok(()) => out.say(format_args!("survey: wrote {}", child.file_in(leaf).display())),
+        Ok(true) => out.say(format_args!("survey: wrote {}", child.file_in(leaf).display())),
+        Ok(false) => out.say(format_args!("survey: already rendered {}", child.file_in(leaf).display())),
         Err(e) => out.say(format_args!("warning: HTML render failed: {}", e)),
     }
 }

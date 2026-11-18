@@ -115,3 +115,34 @@ fn rendering_a_stored_survey_leaves_it_reusable() {
     let err = String::from_utf8_lossy(&o.stderr);
     assert!(err.contains("cached") && !err.contains("stored "), "the survey is still served from the store:\n{err}");
 }
+
+/// The rendered landscape is made from the leaf alone: the same survey run
+/// from a copy of the model under another file name is the stored survey,
+/// and rendering it finds the child already holding its HTML, rather than
+/// reporting different bytes under one run id as an identity defect (the
+/// page's title was the model file's name). A second render says so.
+#[test]
+fn the_rendered_landscape_depends_on_the_leaf_alone() {
+    let tmp = setup();
+    let dir = tmp.path();
+    std::fs::copy(dir.join("m.ir.json"), dir.join("other.ir.json")).unwrap();
+    survey(dir, &["--render"]);
+    let o = survey(dir, &["--render"]);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("already rendered"), "a second render writes nothing and says so:\n{err}");
+    let o = Command::new(bin("../../target/release/camdl"))
+        .current_dir(dir)
+        .env_remove("CLICOLOR_FORCE")
+        .env_remove("CAMDL_OUTPUT_DIR")
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .args(["survey", "other.ir.json", "--data", "cases.tsv", "--estimate", "beta=0.1:0.9"])
+        .args(["--fixed", "gamma=0.2", "--fixed", "N0=1000", "--n-points", "4", "--eval", "simulate"])
+        .args(["--progress", "none", "--render"])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(o.status.success(), "{err}");
+    assert!(err.contains("cached"), "the same survey under another model file name is the stored one:\n{err}");
+    assert!(!err.contains("identity defect") && !err.contains("HTML render failed"), "no defect reported:\n{err}");
+    assert!(err.contains("already rendered"), "{err}");
+}
