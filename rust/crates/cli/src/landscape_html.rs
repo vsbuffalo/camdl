@@ -21,6 +21,7 @@ use std::collections::HashMap;
 /// The render-side projection of a survey's display fields — the subset the
 /// pair-plot needs. Decouples `landscape_html` from the (now content-addressed)
 /// survey inputs (gh#147 M3.3); the caller fills it from the resolved survey.
+#[derive(Clone)]
 pub struct LandscapeMeta {
     /// Page title (model stem); `None` → "camdl survey".
     pub stem: Option<String>,

@@ -1130,13 +1130,14 @@ impl RecordedChild {
     /// Declare the child in `leaf`'s record, then write `bytes` into it. In
     /// that order a crash leaves a declared child with no record, which the
     /// next request writes, never an undeclared directory, which the exact-set
-    /// check would read as an orphan and stale the leaf.
+    /// check would read as an orphan and stale the leaf. `Ok(false)` when the
+    /// child already held these bytes and nothing was written.
     pub(crate) fn declare_and_write(
         &self,
         leaf: &std::path::Path,
         run_id: &runid::ContentHash,
         bytes: &[u8],
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         ensure_children_declared(leaf, self.name, &[self.id(run_id)])?;
         self.write(leaf, run_id, bytes)
     }
@@ -1150,7 +1151,7 @@ impl RecordedChild {
     /// path applies. Anything else — no child, or a crash between the file and
     /// its record — is (re)written, each file atomically
     /// ([`runid::write_file_atomic`]).
-    fn write(&self, leaf: &std::path::Path, run_id: &runid::ContentHash, bytes: &[u8]) -> Result<(), String> {
+    fn write(&self, leaf: &std::path::Path, run_id: &runid::ContentHash, bytes: &[u8]) -> Result<bool, String> {
         let RecordedChild { name, file, record, what } = *self;
         let dir = leaf.join(name);
         let file_path = dir.join(file);
@@ -1172,7 +1173,7 @@ impl RecordedChild {
                         file_path.display(), run_id.to_hex()));
                 }
                 if std::fs::read(&file_path).is_ok_and(|on_disk| on_disk == bytes) {
-                    return Ok(());
+                    return Ok(false);
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -1190,7 +1191,7 @@ impl RecordedChild {
         for (path, bytes) in [(&file_path, bytes), (&record_path, record_bytes.as_slice())] {
             runid::write_file_atomic(path, bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
         }
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -1272,7 +1273,7 @@ fn write_event_log_child(
     run_id: &runid::ContentHash,
     bytes: &[u8],
 ) -> Result<(), String> {
-    EVENT_LOG.write(leaf, run_id, bytes)
+    EVENT_LOG.write(leaf, run_id, bytes).map(|_| ())
 }
 
 // ─── Observation ensemble writer (CLI review #4) ───────────────────────────
