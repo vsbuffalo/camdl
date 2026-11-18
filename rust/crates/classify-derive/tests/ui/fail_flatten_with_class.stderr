@@ -1,0 +1,5 @@
+error: `group` is flattened: its inputs are classified where its struct is declared, so it takes no #[class(...)] here
+  --> tests/ui/fail_flatten_with_class.rs:12:5
+   |
+12 |     #[class(keyed(config))]
+   |     ^^^^^^^^^^^^^^^^^^^^^^^

@@ -1,0 +1,5 @@
+error: unknown class: expected keyed(<level>), execution, provenance, presentation, expands or removed
+ --> tests/ui/fail_unknown_class.rs:6:13
+  |
+6 |     #[class(semantic)]
+  |             ^^^^^^^^

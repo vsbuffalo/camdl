@@ -1,0 +1,17 @@
+error[E0277]: the trait bound `Group: Classify` is not satisfied
+  --> tests/ui/fail_flatten_unclassified_group.rs:13:12
+   |
+13 |     group: Group,
+   |            ^^^^^ unsatisfied trait bound
+   |
+help: the trait `Classify` is not implemented for `Group`
+  --> tests/ui/fail_flatten_unclassified_group.rs:6:1
+   |
+ 6 | struct Group {
+   | ^^^^^^^^^^^^
+help: the trait `Classify` is implemented for `Surface`
+  --> tests/ui/fail_flatten_unclassified_group.rs:10:10
+   |
+10 | #[derive(Classify)]
+   |          ^^^^^^^^
+   = note: this error originates in the derive macro `Classify` (in Nightly builds, run with -Z macro-backtrace for more info)

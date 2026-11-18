@@ -1,0 +1,5 @@
+error: input `parallel` has no class: mark it #[class(keyed(<level>))], #[class(execution)], #[class(provenance)], #[class(presentation)], #[class(expands)] or #[class(removed)]
+ --> tests/ui/fail_unclassified.rs:8:5
+  |
+8 |     parallel: usize,
+  |     ^^^^^^^^

@@ -10,6 +10,7 @@ publish = false
 [workspace]
 members = [
   ".",
+  "crates/classify-derive",
   "crates/cli",
   "crates/declared",
   "crates/diff",
