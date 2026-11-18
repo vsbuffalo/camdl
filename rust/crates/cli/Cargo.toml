@@ -30,7 +30,6 @@ path = "src/main.rs"
 
 [dependencies]
 bincode = "1"
-classify-derive = { path = "../classify-derive" }
 clap = { version = "4", features = ["derive", "env"] }
 # Table formatting for `camdl list` — automatic width/wrapping, preserves
 # ANSI styling. Single TTY-detection dep (crossterm) — no big tree.

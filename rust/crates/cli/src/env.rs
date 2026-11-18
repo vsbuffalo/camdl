@@ -1,10 +1,10 @@
 //! The environment: every environment variable camdl reads, read once, here
 //! (`docs/dev/proposals/2026-11-17-honest-input-addressed-store.md`, part E).
 //!
-//! Each variable is a field of [`Env`], classified by its effect on results
-//! like a command-line flag (`#[derive(Classify)]`, [`crate::input_class`]),
-//! and listed in [`VARS`] with its name, a stability tag and, for a variable
-//! that can change a result, the route by which it enters the run identity.
+//! Each variable is a field of [`Env`], listed in [`VARS`] with its name, its
+//! class by effect on results (as a command-line flag is classified,
+//! [`crate::input_class`]), a stability tag and, for a variable that can change
+//! a result, the route by which it enters the run identity.
 //! [`get`] reads them all on first use and holds the values for the life of the
 //! process; nothing else in `cli` or `sim` reads the environment
 //! (`rust/crates/cli/tests/environment_is_read_in_one_module.rs`). The engine
@@ -73,103 +73,89 @@ pub(crate) struct Var {
     pub name: &'static str,
     /// The [`Env`] field it is read into.
     pub field: &'static str,
+    /// What it may do to a stored result.
+    pub class: InputClass,
     pub stability: Stability,
     pub route: Route,
 }
 
-const fn var(name: &'static str, field: &'static str, stability: Stability, route: Route) -> Var {
-    Var { name, field, stability, route }
+const fn var(name: &'static str, field: &'static str, class: InputClass, stability: Stability, route: Route) -> Var {
+    Var { name, field, class, stability, route }
 }
+
+use crate::input_class::InputClass::{self, Execution, Keyed, Presentation};
+use crate::input_class::Level::Model;
 
 /// Every variable, in [`Env`] field order.
 pub(crate) const VARS: &[Var] = &[
-    var("CAMDL_TRACE_STEPS", "trace_steps", Stability::Debug, Route::None),
-    var("CAMDL_EVAL_UNRESOLVED", "eval_unresolved", Stability::Debug, Route::Engine),
-    var("CAMDL_NO_BINDING_CACHE", "no_binding_cache", Stability::Debug, Route::Engine),
-    var(EXPERIMENTAL_PREFIX, "experimental", Stability::Experimental, Route::Engine),
-    var("CAMDL_NO_CONSTANT_FOLD", "no_constant_fold", Stability::Debug, Route::CompiledModel),
-    var("CAMDL_NO_LICM", "no_licm", Stability::Debug, Route::CompiledModel),
-    var("CAMDL_NO_IR_CACHE", "no_ir_cache", Stability::Stable, Route::None),
-    var("CAMDL_IR_CACHE_DIR", "ir_cache_dir", Stability::Stable, Route::None),
-    var("CAMDL_SKIP_VERSION_CHECK", "skip_version_check", Stability::Debug, Route::None),
-    var("CAMDLC_PATH", "camdlc_path", Stability::Stable, Route::None),
-    var("CAMDLC", "camdlc", Stability::Stable, Route::None),
-    var("CAMDL_OUTPUT_DIR", "output_dir", Stability::Stable, Route::None),
-    var("CAMDL_UNLABELED_THRESHOLD", "unlabeled_threshold", Stability::Stable, Route::None),
-    var("PATH", "path", Stability::Stable, Route::None),
-    var("XDG_CACHE_HOME", "xdg_cache_home", Stability::Stable, Route::None),
-    var("HOME", "home", Stability::Stable, Route::None),
-    var("NO_COLOR", "no_color", Stability::Stable, Route::None),
-    var("CLICOLOR_FORCE", "clicolor_force", Stability::Stable, Route::None),
-    var("CI", "ci", Stability::Stable, Route::None),
+    var("CAMDL_TRACE_STEPS", "trace_steps", Presentation, Stability::Debug, Route::None),
+    var("CAMDL_EVAL_UNRESOLVED", "eval_unresolved", Keyed(Model), Stability::Debug, Route::Engine),
+    var("CAMDL_NO_BINDING_CACHE", "no_binding_cache", Keyed(Model), Stability::Debug, Route::Engine),
+    var(EXPERIMENTAL_PREFIX, "experimental", Keyed(Model), Stability::Experimental, Route::Engine),
+    var("CAMDL_NO_CONSTANT_FOLD", "no_constant_fold", Keyed(Model), Stability::Debug, Route::CompiledModel),
+    var("CAMDL_NO_LICM", "no_licm", Keyed(Model), Stability::Debug, Route::CompiledModel),
+    var("CAMDL_NO_IR_CACHE", "no_ir_cache", Execution, Stability::Stable, Route::None),
+    var("CAMDL_IR_CACHE_DIR", "ir_cache_dir", Execution, Stability::Stable, Route::None),
+    var("CAMDL_SKIP_VERSION_CHECK", "skip_version_check", Execution, Stability::Debug, Route::None),
+    var("CAMDLC_PATH", "camdlc_path", Execution, Stability::Stable, Route::None),
+    var("CAMDLC", "camdlc", Execution, Stability::Stable, Route::None),
+    var("CAMDL_OUTPUT_DIR", "output_dir", Execution, Stability::Stable, Route::None),
+    var("CAMDL_UNLABELED_THRESHOLD", "unlabeled_threshold", Presentation, Stability::Stable, Route::None),
+    var("PATH", "path", Execution, Stability::Stable, Route::None),
+    var("XDG_CACHE_HOME", "xdg_cache_home", Execution, Stability::Stable, Route::None),
+    var("HOME", "home", Execution, Stability::Stable, Route::None),
+    var("NO_COLOR", "no_color", Presentation, Stability::Stable, Route::None),
+    var("CLICOLOR_FORCE", "clicolor_force", Presentation, Stability::Stable, Route::None),
+    var("CI", "ci", Presentation, Stability::Stable, Route::None),
 ];
 
 /// The value of every variable in [`VARS`], typed.
-#[derive(Debug, Clone, Default, classify_derive::Classify)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct Env {
     /// `CAMDL_TRACE_STEPS=1`: one stderr row per chain-binomial substep and one
     /// line per effect action (`sim::trace`). A diagnostic; writes nothing kept.
-    #[class(presentation)]
     pub trace_steps: bool,
     /// `CAMDL_EVAL_UNRESOLVED` (any value): propensities through the slow
     /// string-keyed evaluator, an alternative path meant to agree with the
     /// default.
-    #[class(keyed(model))]
     pub eval_unresolved: bool,
     /// `CAMDL_NO_BINDING_CACHE` (any value): bindings recomputed on demand
     /// instead of cached, an alternative path meant to agree with the default.
-    #[class(keyed(model))]
     pub no_binding_cache: bool,
     /// Every set `CAMDL_EXPERIMENTAL_<NAME>`, by full name, with its value.
-    #[class(keyed(model))]
     pub experimental: BTreeMap<String, String>,
     /// `CAMDL_NO_CONSTANT_FOLD` (any value): camdlc skips constant folding. It
     /// reads the variable itself; camdl reads it to key the IR cache.
-    #[class(keyed(model))]
     pub no_constant_fold: bool,
     /// `CAMDL_NO_LICM` (any value): the equivalent of `--no-licm`.
-    #[class(keyed(model))]
     pub no_licm: bool,
     /// `CAMDL_NO_IR_CACHE` (any value): the equivalent of `--no-ir-cache`.
-    #[class(execution)]
     pub no_ir_cache: bool,
     /// `CAMDL_IR_CACHE_DIR`: where the compiled-IR cache lives.
-    #[class(execution)]
     pub ir_cache_dir: Option<PathBuf>,
     /// `CAMDL_SKIP_VERSION_CHECK` (any value): skip the camdl/camdlc version
     /// handshake. The IR the compiler emits is still hashed in the model level.
-    #[class(execution)]
     pub skip_version_check: bool,
     /// `CAMDLC_PATH`, then `CAMDLC`: the compiler to run, when it is not beside
     /// the camdl binary.
-    #[class(execution)]
     pub camdlc_path: Option<PathBuf>,
-    #[class(execution)]
     pub camdlc: Option<PathBuf>,
     /// `CAMDL_OUTPUT_DIR`: the store root for a command without
     /// `--output-dir` and a config that names none.
-    #[class(execution)]
     pub output_dir: Option<PathBuf>,
     /// `CAMDL_UNLABELED_THRESHOLD`: how many unlabelled fits `fit table` lists
     /// before it suggests labels.
-    #[class(presentation)]
     pub unlabeled_threshold: Option<String>,
     /// `PATH`: where a `camdlc` on the path is looked for.
-    #[class(execution)]
     pub path: Option<OsString>,
     /// `XDG_CACHE_HOME`, then `HOME`: the base of the default IR cache directory.
-    #[class(execution)]
     pub xdg_cache_home: Option<PathBuf>,
-    #[class(execution)]
     pub home: Option<PathBuf>,
     /// `NO_COLOR` (any value): no colour (no-color.org).
-    #[class(presentation)]
     pub no_color: bool,
     /// `CLICOLOR_FORCE` (any value): colour even when not on a terminal.
-    #[class(presentation)]
     pub clicolor_force: bool,
     /// `CI`: `true` or `1` turns on `fit summary --strict`.
-    #[class(presentation)]
     pub ci: Option<String>,
 }
 
@@ -228,7 +214,7 @@ impl Environment {
     /// order: the variables whose route is [`Route::Engine`].
     fn engine_switches(&self) -> Vec<String> {
         let mut on = Vec::new();
-        for v in VARS.iter().filter(|v| v.route == Route::Engine) {
+        for v in VARS.iter().filter(|v| matches!(v.class, Keyed(_)) && v.route == Route::Engine) {
             match v.field {
                 "eval_unresolved" if self.vars.eval_unresolved => on.push(v.name.to_string()),
                 "no_binding_cache" if self.vars.no_binding_cache => on.push(v.name.to_string()),
@@ -280,24 +266,50 @@ pub(crate) fn install_engine_switches(env: &Env) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::input_class::{Classify, InputClass, Level};
+    use crate::input_class::Level;
     use std::cell::RefCell;
     use std::collections::BTreeSet;
 
     #[test]
     fn every_field_has_one_variable_and_every_variable_one_field() {
-        let fields: Vec<&str> = Env::inventory().iter().map(|i| i.field).collect();
+        // An exhaustive destructure: a field added to `Env` does not compile
+        // until it is named here, and the list below must then name it too.
+        let Env {
+            trace_steps: _,
+            eval_unresolved: _,
+            no_binding_cache: _,
+            experimental: _,
+            no_constant_fold: _,
+            no_licm: _,
+            no_ir_cache: _,
+            ir_cache_dir: _,
+            skip_version_check: _,
+            camdlc_path: _,
+            camdlc: _,
+            output_dir: _,
+            unlabeled_threshold: _,
+            path: _,
+            xdg_cache_home: _,
+            home: _,
+            no_color: _,
+            clicolor_force: _,
+            ci: _,
+        } = Env::default();
+        let fields = [
+            "trace_steps", "eval_unresolved", "no_binding_cache", "experimental", "no_constant_fold", "no_licm",
+            "no_ir_cache", "ir_cache_dir", "skip_version_check", "camdlc_path", "camdlc", "output_dir",
+            "unlabeled_threshold", "path", "xdg_cache_home", "home", "no_color", "clicolor_force", "ci",
+        ];
         let listed: Vec<&str> = VARS.iter().map(|v| v.field).collect();
-        assert_eq!(fields, listed, "VARS lists Env's fields, in order");
+        assert_eq!(fields.to_vec(), listed, "VARS lists Env's fields, in order");
         let names: BTreeSet<&str> = VARS.iter().map(|v| v.name).collect();
         assert_eq!(names.len(), VARS.len(), "a variable is listed once");
     }
 
     #[test]
     fn a_variable_that_can_change_a_result_has_an_identity_route() {
-        let inventory = Env::inventory();
         for v in VARS {
-            let class = inventory.iter().find(|i| i.field == v.field).unwrap().class;
+            let class = v.class;
             let keyed = matches!(class, InputClass::Keyed(_));
             assert_eq!(keyed, v.route != Route::None, "{}: keyed exactly when routed into identity", v.name);
             if keyed {
@@ -357,7 +369,7 @@ mod tests {
     #[test]
     fn every_engine_routed_variable_is_an_engine_switch() {
         // Each `Route::Engine` variable, set, appears in the engine identity.
-        for v in VARS.iter().filter(|v| v.route == Route::Engine) {
+        for v in VARS.iter().filter(|v| matches!(v.class, Keyed(_)) && v.route == Route::Engine) {
             let name = if v.name == EXPERIMENTAL_PREFIX { format!("{EXPERIMENTAL_PREFIX}Z") } else { v.name.to_string() };
             let env = with(&[(name.as_str(), "1")]);
             assert_ne!(env.engine_identity("e"), "e", "{} is routed to the engine but does not key it", v.name);

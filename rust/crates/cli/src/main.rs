@@ -56,7 +56,7 @@ mod sim_ensemble_cas; // gh#147: multi-cell simulate ensemble CAS identity (mode
 mod landscape_html;
 mod lineage;        // three-layer lineage: --event-log record + realize + tree
 mod mre;            // `camdl mre` — minimal-reproducible-example bundles (gh#212)
-mod input_class;    // every input of a converted command and its class: the Classify inventory
+mod input_class;    // every input of a converted command and its class, checked against clap
 mod env;            // part E: every environment variable camdl reads, read once, classified
 pub mod version;
 
@@ -119,16 +119,15 @@ pub(crate) struct Cli {
     pub global: GlobalArgs,
 }
 
-/// The options every subcommand accepts, classified once here for every
-/// converted command's inventory ([`input_class::simulate_inventory`]).
-#[derive(clap::Args, classify_derive::Classify)]
+/// The options every subcommand accepts. Each converted command classifies
+/// them in its own table ([`input_class::SIMULATE`]).
+#[derive(clap::Args)]
 pub(crate) struct GlobalArgs {
     /// Log verbosity (error/warn/info/debug/trace). Overrides RUST_LOG.
     /// Defaults to `warn`; `--progress plain` auto-bumps to `info` so
     /// per-chain progress lines (`log::info!`) reach the user.
     #[arg(long, global = true, value_name = "LEVEL",
           help_heading = "Global options")]
-    #[class(presentation)]
     verbosity: Option<log::LevelFilter>,
 
     /// Progress output mode for long-running subcommands. `auto` (default)
@@ -136,20 +135,17 @@ pub(crate) struct GlobalArgs {
     /// plain lines (use under `tee`, `ssh`, or CI); `none` silences progress.
     #[arg(long, global = true, default_value_t = args::types::ProgressMode::Auto,
           value_name = "MODE", help_heading = "Global options")]
-    #[class(presentation)]
     progress: args::types::ProgressMode,
 
     /// Silence all progress output (shorthand for `--progress none`; wins over
     /// `--progress` if both are given).
     #[arg(long, global = true, help_heading = "Global options")]
-    #[class(presentation)]
     no_progress: bool,
 
     /// Bypass the compiled-IR cache: recompile the `.camdl` every run instead
     /// of reusing a cached IR keyed on (model, compiler, schema). The cache is
     /// on by default (`~/.cache/camdl/ir`, or `$CAMDL_IR_CACHE_DIR`).
     #[arg(long, global = true, help_heading = "Global options")]
-    #[class(execution)]
     no_ir_cache: bool,
 
     /// Disable loop-invariant code motion (gh#272). LICM is ON by default: it
@@ -160,7 +156,6 @@ pub(crate) struct GlobalArgs {
     /// changes the compiled IR, so a `--no-licm` run re-keys the IR cache and run
     /// identity (back to the inlined variant).
     #[arg(long, global = true, help_heading = "Global options")]
-    #[class(keyed(model))]
     no_licm: bool,
 }
 
