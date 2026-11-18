@@ -216,13 +216,15 @@ filters a weekly `closing_at(time, 7 'days)` stream through data closing 11, 18
 and 25, under `emit_schedule = every 7 'days`, whose periods close 7, 14, 21,
 28. The data's period `[4, 11)` overlaps the schedule's `[0, 7)` and `[7, 14)`
 without being either, so under D82 a restart that writes this stream is refused,
-naming `[4, 11)` (training row 0) and `[0, 7)` (the emit schedule). Inferred
-from reading `check_schedule_agrees` against F6 as gh#1081 describes it, with
-the schedule starting at the model's `t_start = 0`; test 7 in §10 runs it. The
-straddling case this proposal completes is the one where data and schedule agree
-and `T` falls inside the stream's period because another stream observed later
-(spec §2.5, Figure 3): weekly data closing 7, 14, 21 beside a daily stream
-observed through day 25, so `T = 26` and the week `[21, 28)` is under way.
+naming `[4, 11)` (training row 0) and `[0, 7)` (the emit schedule). Verified
+(run) for the forecast: `camdlc` lowers F6's `every 7 'days` to
+`Regular { start: 0, step: 7 }`, and `ForecastPlan::new` on F6's three rows
+under that schedule refuses the stream with exactly that message (§13). The
+restart's refusal is §10 test 7. The straddling case this proposal completes is
+the one where data and schedule agree and `T` falls inside the stream's period
+because another stream observed later (spec §2.5, Figure 3): weekly data closing
+7, 14, 21 beside a daily stream observed through day 25, so `T = 26` and the
+week `[21, 28)` is under way.
 
 **`--emit-every`.** The override replaces a stream's `emit_schedule` cadence at
 its consumption sites (`rust/crates/cli/src/emit_every.rs:209`,
@@ -803,6 +805,13 @@ summarized.
 - `gh issue view 1081`, `gh issue view 1085` → the reproduction (run) of gh#1081
   and the inferred gh#1085 cited in §2.
 
-Not run for this proposal: every test in §10, the D82 refusal of F6 (inferred
-from reading `check_schedule_agrees`), and the gh#1085 window-column truncation,
-which its issue records as inferred.
+- F6 under D82: `camdlc` on F6's weekly stream gives
+  `emit_schedule = {"regular": {"start": 0.0, "step": 7.0}}` and
+  `covers = until(offset 0, span 7)`; a scratch unit test (not committed)
+  calling `ForecastPlan::new` with rows `[4, 11)`, `[11, 18)`, `[18, 25)` under
+  that schedule, built from `origin/main`, prints "stream 'weekly' is refused a
+  forecast: its data imply the period [4, 11) (training row 0), but its
+  emit_schedule gives [0, 7) over the same reporting interval."
+
+Not run for this proposal: every test in §10, and the gh#1085 window-column
+truncation, which its issue records as inferred.
