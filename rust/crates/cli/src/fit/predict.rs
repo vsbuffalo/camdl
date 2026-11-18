@@ -3226,7 +3226,9 @@ fn load_leaf_obs(
         let observed: Vec<Option<f64>> = cells
             .iter()
             .map(|c| c.as_ref().map(|cell| match cell {
-                sim::inference::ObsCell::Scalar(v) => *v,
+                // The observed series as the file wrote it; a row read from a file
+                // holds no held-out cell, and its value is what it is either way.
+                sim::inference::ObsCell::Scalar(v) | sim::inference::ObsCell::HeldOut(v) => *v,
             }))
             .collect();
         let stratum: Vec<(String, String)> =
@@ -4928,6 +4930,7 @@ mod tests {
                 obs_times: vec![7.0, 14.0],
                 log_liks: vec![vec![-5.0, -5.0], vec![-5.0, -5.0]],
                 stream_names: vec!["cases".into()],
+                per_stream_held_out_log_liks: Vec::new(),
                 per_stream_log_liks: vec![vec![vec![-5.0, -5.0]], vec![vec![-5.0, -5.0]]],
                 per_stream_samples: vec![per_time(base), per_time(base)],
             }),

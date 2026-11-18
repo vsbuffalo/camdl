@@ -207,15 +207,33 @@ fn trials_label(e: &ir::expr::Expr) -> String {
 /// A hole is NOT an observed zero: `None` ≠ `Some(Scalar(0.0))`. The former
 /// omits the likelihood factor; the latter scores the density at `y = 0`.
 ///
-/// Only `Scalar` exists today. The cell-variant axis is the scored OUTCOME
-/// shape — a `Vector` variant (multinomial / compositional outcomes) is the
-/// planned extension. A per-observation denominator/offset is NOT a cell
-/// variant: it is a declared aux column bound from `columns { }` and read by
-/// the likelihood by name (observation data-entry proposal, Stage 2).
+/// `Some(ObsCell::HeldOut(v))` is a held-out value `v` (D79): a row the
+/// filter must not learn from, kept so a forecast can be scored against it. It
+/// contributes to nothing the filter does (no assimilation event, no term in
+/// the weights, no resampling, no state conditioning), so for every filtering
+/// purpose it is a hole; only the scoring likelihood
+/// ([`MultiStreamObsModel::held_out_log_likelihood_per_stream_from_flows_and_counts`])
+/// evaluates it. It is a separate variant rather than a flag so that every
+/// match on a cell says whether it assimilates or only evaluates.
+///
+/// A per-observation denominator/offset is NOT a cell variant: it is a
+/// declared aux column bound from `columns { }` and read by the likelihood by
+/// name (observation data-entry proposal, Stage 2).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ObsCell {
-    /// A single observed scalar value.
+    /// A single observed scalar value, assimilated by the filter.
     Scalar(f64),
+    /// A held-out scalar value, evaluated by the scoring likelihood only.
+    HeldOut(f64),
+}
+
+/// Which cells a likelihood evaluation reads (D79): the filter's joint
+/// assimilation likelihood reads the observed values and ignores held-out
+/// ones; the scoring likelihood reads the held-out values only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LikelihoodUse {
+    Assimilate,
+    ScoreHeldOut,
 }
 
 /// Dense-convenience: wrap a dense `Vec<f64>` of observed values into the
@@ -1138,11 +1156,17 @@ impl BoundObs {
             for (i, (cell, aux_row)) in
                 spec.observations.iter().zip(spec.aux.iter()).enumerate()
             {
-                let observed = match cell {
+                // A held-out value is checked as an observed one is: its
+                // likelihood is evaluated for scoring, so `binomial(n = NaN)`
+                // must be as unconstructible there. It is not counted in the
+                // zero-trials warning below, which is about rows the filter
+                // treats as `NA`.
+                let (observed, held_out) = match cell {
                     // A hole scores no term; the missing-together rule made it a
                     // hole upstream, so no aux check applies here.
                     None => continue,
-                    Some(ObsCell::Scalar(v)) => *v,
+                    Some(ObsCell::Scalar(v)) => (*v, false),
+                    Some(ObsCell::HeldOut(v)) => (*v, true),
                 };
                 // present-together: every referenced aux column must be present
                 // at a scored cell. (A missing aux should have been turned into
@@ -1211,7 +1235,9 @@ impl BoundObs {
                                 ),
                             });
                         } else if n == 0.0 {
-                            zero_denom_rows.push(i);
+                            if !held_out {
+                                zero_denom_rows.push(i);
+                            }
                             if observed > 0.0 {
                                 findings.push(Finding {
                                     severity: Severity::Error,
@@ -1288,9 +1314,13 @@ impl BoundObs {
         for spec in &mut streams {
             let Some(n_expr) = trials_expr(&spec.ir_model.likelihood) else { continue };
             for (cell, aux_row) in spec.observations.iter_mut().zip(spec.aux.iter()) {
-                if matches!(cell, Some(ObsCell::Scalar(v)) if *v == 0.0)
-                    && static_trials(n_expr, aux_row) == Some(0.0)
-                {
+                // Only an observed value: a held-out one is already missing to
+                // the filters, and scoring it at zero trials gives exactly 0.
+                let zero_count = match cell {
+                    Some(ObsCell::Scalar(v)) => *v == 0.0,
+                    Some(ObsCell::HeldOut(_)) | None => false,
+                };
+                if zero_count && static_trials(n_expr, aux_row) == Some(0.0) {
                     *cell = None;
                 }
             }
@@ -1419,7 +1449,23 @@ impl BoundObs {
     /// from it.
     pub fn assimilates_at(&self, union_idx: usize) -> bool {
         self.streams.iter().any(|s| match s.at_union[union_idx] {
-            Some(local) => s.cells[local].is_some(),
+            Some(local) => match s.cells[local] {
+                Some(ObsCell::Scalar(_)) => true,
+                // D79: a held-out value is never assimilated.
+                Some(ObsCell::HeldOut(_)) | None => false,
+            },
+            None => false,
+        })
+    }
+
+    /// Whether some stream scheduled at union index `union_idx` holds a
+    /// held-out value (D79), which the scoring likelihood evaluates there.
+    pub fn holds_held_out_at(&self, union_idx: usize) -> bool {
+        self.streams.iter().any(|s| match s.at_union[union_idx] {
+            Some(local) => match s.cells[local] {
+                Some(ObsCell::HeldOut(_)) => true,
+                Some(ObsCell::Scalar(_)) | None => false,
+            },
             None => false,
         })
     }
@@ -1695,6 +1741,9 @@ pub struct MultiStreamObsModel {
     /// Per union index, whether it is an assimilation event
     /// ([`BoundObs::assimilates_at`], recorded at construction).
     assimilation: Vec<bool>,
+    /// Per union index, whether some stream holds a held-out value there
+    /// ([`BoundObs::holds_held_out_at`], recorded at construction; D79).
+    held_out: Vec<bool>,
 }
 
 /// Where a stream's bins live in the dense `acc` vector: `len` consecutive
@@ -1726,7 +1775,9 @@ struct IntervalSlot {
 /// Specification for building one observation stream.
 ///
 /// `observations` is the per-grid-time cell vector: `None` = hole (no term,
-/// reset still fires), `Some(ObsCell::Scalar(v))` = observed value `v`. Dense
+/// reset still fires), `Some(ObsCell::Scalar(v))` = observed value `v`,
+/// `Some(ObsCell::HeldOut(v))` = a held-out value, scored and never
+/// assimilated (D79). Dense
 /// call sites build it with [`dense_cells`] (all observed, no holes); only the
 /// CLI loader emits `None` from an `NA` token.
 pub struct StreamSpec {
@@ -1806,6 +1857,7 @@ impl MultiStreamObsModel {
             interval_slots: vec![],
             stream_bins: vec![],
             assimilation: vec![],
+            held_out: vec![],
         }
     }
 
@@ -1825,6 +1877,8 @@ impl MultiStreamObsModel {
     ) -> Result<Self, crate::error::SimError> {
         let assimilation: Vec<bool> =
             (0..bound.times.len()).map(|u| bound.assimilates_at(u)).collect();
+        let held_out: Vec<bool> =
+            (0..bound.times.len()).map(|u| bound.holds_held_out_at(u)).collect();
         let BoundObs { times: obs_times, streams: bound_streams } = bound;
 
         let mut streams = Vec::with_capacity(bound_streams.len());
@@ -1888,6 +1942,7 @@ impl MultiStreamObsModel {
             interval_slots,
             stream_bins,
             assimilation,
+            held_out,
         })
     }
 
@@ -2105,7 +2160,8 @@ impl MultiStreamObsModel {
                     .map(|s| match s.at_union[union_idx] {
                         Some(local) => match s.observations[local] {
                             Some(ObsCell::Scalar(v)) => v,
-                            None => 0.0,
+                            // D79: not an observation the filter scored.
+                            Some(ObsCell::HeldOut(_)) | None => 0.0,
                         },
                         None => 0.0,
                     })
@@ -2134,7 +2190,8 @@ impl MultiStreamObsModel {
                     .map(|s| match s.at_union[union_idx] {
                         Some(local) => match s.observations[local] {
                             Some(ObsCell::Scalar(v)) => v,
-                            None => f64::NAN,
+                            // D79: not an observation the filter scored.
+                            Some(ObsCell::HeldOut(_)) | None => f64::NAN,
                         },
                         None => f64::NAN,
                     })
@@ -2153,14 +2210,17 @@ impl MultiStreamObsModel {
     pub fn first_observation_opens_after_run_start(&self, run_start: f64) -> bool {
         let Some(idx) = self.first_observation_idx() else { return false };
         self.streams.iter().any(|s| match s.at_union[idx] {
-            Some(local) if s.observations[local].is_some() => {
-                match s.times.coverage(local) {
+            Some(local) => match s.observations[local] {
+                Some(ObsCell::Scalar(_)) => match s.times.coverage(local) {
                     Coverage::Interval { start, .. } => start > run_start,
                     Coverage::Instant => self.obs_times[idx] > run_start,
                     Coverage::Unrecorded => false,
-                }
-            }
-            _ => false,
+                },
+                // `idx` is an assimilation event; a held-out value or a hole
+                // there is not what was assimilated.
+                Some(ObsCell::HeldOut(_)) | None => false,
+            },
+            None => false,
         })
     }
 
@@ -2190,13 +2250,25 @@ impl MultiStreamObsModel {
     /// omitted-factor convention. The JOINT log-likelihood is `.iter().sum()`
     /// of this vector (gh#269: per-stream prequential reads the breakdown, the
     /// joint reads the sum; ONE seam, so `joint == Σ per_stream` structurally).
+    ///
+    /// `use_` says which cells are read (D79). Under
+    /// [`LikelihoodUse::Assimilate`] a held-out value is omitted like a hole,
+    /// so the joint the filter weights with never sees it. Under
+    /// [`LikelihoodUse::ScoreHeldOut`] only held-out values are evaluated, and
+    /// every other entry (not scheduled, a hole, an observed value) is NaN: a
+    /// scorer must not read a missing term as a log-likelihood of 0.
     fn score_streams(
         &self,
         obs_idx: usize,
         counts: &[i64],
         params: &[f64],
+        use_: LikelihoodUse,
         project: impl Fn(usize, f64) -> f64,
     ) -> Vec<f64> {
+        let absent = match use_ {
+            LikelihoodUse::Assimilate => 0.0,
+            LikelihoodUse::ScoreHeldOut => f64::NAN,
+        };
         let t = self.obs_times[obs_idx];
         (0..self.streams.len()).map(|si| {
             let s = &self.streams[si];
@@ -2205,16 +2277,21 @@ impl MultiStreamObsModel {
             // ⇒ omit the term entirely.
             let local = match s.at_union[obs_idx] {
                 Some(l) => l,
-                None => return 0.0,
+                None => return absent,
             };
             // Hole: scheduled but value missing. Omit the likelihood factor
             // (log-contribution 0) — marginalized, NOT scored as zero. The
             // projection + accumulator reset are NOT gated on value presence:
             // the filter loop resets per-obs-index regardless, so a hole still
             // closes the fixed incidence bin on schedule (pomp `accumvars`).
-            let observed = match s.observations[local] {
-                Some(ObsCell::Scalar(v)) => v,
-                None => return 0.0,
+            // D79: a held-out value is a hole to the assimilation likelihood
+            // and the only thing the scoring likelihood reads.
+            let observed = match (s.observations[local], use_) {
+                (Some(ObsCell::Scalar(v)), LikelihoodUse::Assimilate) => v,
+                (Some(ObsCell::HeldOut(v)), LikelihoodUse::ScoreHeldOut) => v,
+                (Some(ObsCell::HeldOut(_)), LikelihoodUse::Assimilate)
+                | (Some(ObsCell::Scalar(_)), LikelihoodUse::ScoreHeldOut)
+                | (None, _) => return absent,
             };
             let projected = project(si, t);
             // GitHub #6 fix: the likelihood's p/mean/sd expressions can
@@ -2247,7 +2324,7 @@ impl MultiStreamObsModel {
         obs_idx: usize,
         params: &[f64],
     ) -> f64 {
-        self.score_streams(obs_idx, counts, params, |si, t| {
+        self.score_streams(obs_idx, counts, params, LikelihoodUse::Assimilate, |si, t| {
             self.project_stream_from_acc(si, acc, counts, params, t)
         }).iter().sum()
     }
@@ -2263,7 +2340,25 @@ impl MultiStreamObsModel {
         obs_idx: usize,
         params: &[f64],
     ) -> Vec<f64> {
-        self.score_streams(obs_idx, counts, params, |si, t| {
+        self.score_streams(obs_idx, counts, params, LikelihoodUse::Assimilate, |si, t| {
+            self.project_stream_from_acc(si, acc, counts, params, t)
+        })
+    }
+
+    /// The scoring likelihood (D79): per stream, the log-likelihood of the
+    /// held-out value at union index `obs_idx` under this particle's state,
+    /// through the same `score_streams` seam the filter's likelihood uses, so a
+    /// held-out value is evaluated by exactly the code that would have scored
+    /// it had it been assimilated (D56). NaN for a stream holding no held-out
+    /// value here. Uses no RNG and changes no state.
+    pub fn held_out_log_likelihood_per_stream_from_flows_and_counts(
+        &self,
+        acc: &[u64],
+        counts: &[i64],
+        obs_idx: usize,
+        params: &[f64],
+    ) -> Vec<f64> {
+        self.score_streams(obs_idx, counts, params, LikelihoodUse::ScoreHeldOut, |si, t| {
             self.project_stream_from_acc(si, acc, counts, params, t)
         })
     }
@@ -2278,7 +2373,7 @@ impl MultiStreamObsModel {
         obs_idx: usize,
         params: &[f64],
     ) -> f64 {
-        self.score_streams(obs_idx, counts, params, |si, t| {
+        self.score_streams(obs_idx, counts, params, LikelihoodUse::Assimilate, |si, t| {
             self.project_stream_from_acc_real(si, acc, counts, params, t)
         }).iter().sum()
     }
@@ -2295,7 +2390,7 @@ impl MultiStreamObsModel {
         obs_idx: usize,
         params: &[f64],
     ) -> Vec<f64> {
-        self.score_streams(obs_idx, counts, params, |si, t| {
+        self.score_streams(obs_idx, counts, params, LikelihoodUse::Assimilate, |si, t| {
             self.project_stream_from_acc_real(si, acc, counts, params, t)
         })
     }
@@ -2374,6 +2469,7 @@ impl MultiStreamObsModel {
             None => ObsCellState::NotScheduled,
             Some(local) => match s.observations[local] {
                 Some(ObsCell::Scalar(v)) => ObsCellState::Scored { y_obs: v },
+                Some(ObsCell::HeldOut(v)) => ObsCellState::HeldOut { y_held_out: v },
                 None => ObsCellState::Hole,
             },
         }
@@ -2491,7 +2587,7 @@ impl MultiStreamObsModel {
             // ONE call to the scoring seam per particle, so the per-stream
             // terms explained below are the terms the filter actually weighted
             // with — `score_streams` stays the single authority.
-            let scores = self.score_streams(obs_idx, counts, params, |si, ti| {
+            let scores = self.score_streams(obs_idx, counts, params, LikelihoodUse::Assimilate, |si, ti| {
                 self.project_stream_from_acc(si, acc, counts, params, ti)
             });
             for si in 0..n_streams {
@@ -2585,10 +2681,11 @@ impl MultiStreamObsModel {
                 None => continue,
             };
             // Hole: no term, so no gradient contribution (∂/∂θ of an omitted
-            // factor is 0).
+            // factor is 0). A held-out value is no term of the fitting
+            // likelihood either (D79).
             let observed = match s.observations[local] {
                 Some(ObsCell::Scalar(v)) => v,
-                None => continue,
+                Some(ObsCell::HeldOut(_)) | None => continue,
             };
             let projected = self.project_stream_from_acc(si, acc, counts, params, t);
             with_scratch_int_from_counts(counts, |int_s| {
@@ -2690,9 +2787,10 @@ impl MultiStreamObsModel {
                     Some(l) => l,
                     None => continue,
                 };
+                // A held-out value is no term of the fitting likelihood (D79).
                 let observed = match s.observations[local] {
                     Some(ObsCell::Scalar(v)) => v,
-                    None => continue,
+                    Some(ObsCell::HeldOut(_)) | None => continue,
                 };
                 // Continuous `projected` and `∂projected/∂θ`, read off the record.
                 let (projected, dproj): (f64, Vec<f64>) = match &s.projection {
@@ -2841,6 +2939,19 @@ impl ObservationModel<ParticleState> for MultiStreamObsModel {
         self.log_likelihood_per_stream_from_flows_and_counts(
             &state.acc, &state.counts, obs_idx, params,
         )
+    }
+
+    fn held_out_log_likelihood_per_stream(
+        &self, state: &ParticleState, obs_idx: usize, params: &[f64],
+    ) -> Vec<f64> {
+        self.held_out_log_likelihood_per_stream_from_flows_and_counts(
+            &state.acc, &state.counts, obs_idx, params,
+        )
+    }
+
+    /// Recorded from [`BoundObs::holds_held_out_at`] at construction.
+    fn holds_held_out_at(&self, union_idx: usize) -> bool {
+        self.held_out[union_idx]
     }
 
     fn collapse_attempts(

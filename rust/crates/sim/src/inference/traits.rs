@@ -185,6 +185,22 @@ pub trait ObservationModel<S>: Send + Sync {
         Vec::new()
     }
 
+    /// The scoring likelihood (D79): per stream, the log-likelihood of the
+    /// held-out value at `obs_idx` under `state`, NaN for a stream holding no
+    /// held-out value there. It never enters the weights. Default is empty (an
+    /// impl with no held-out values). Uses no RNG.
+    fn held_out_log_likelihood_per_stream(
+        &self, _state: &S, _obs_idx: usize, _params: &[f64],
+    ) -> Vec<f64> {
+        Vec::new()
+    }
+
+    /// Whether some stream holds a held-out value at `obs_idx` (D79). Default
+    /// `false`: an observation model with no held-out values.
+    fn holds_held_out_at(&self, _obs_idx: usize) -> bool {
+        false
+    }
+
     /// What the live particles managed at observation `obs_idx`, one record
     /// per declared stream, for a filter whose every weight there was `-inf`:
     /// the projection range, how many particles scored `-inf`, and which guard

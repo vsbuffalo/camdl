@@ -1663,7 +1663,9 @@ pub(crate) fn observation_columns(
             time: r.label,
             value: match r.cell {
                 Some(sim::inference::ObsCell::Scalar(v)) => v,
-                None => 0.0,
+                // A placeholder view, never scored: a held-out value shows as
+                // the hole it is to the filter.
+                Some(sim::inference::ObsCell::HeldOut(_)) | None => 0.0,
             },
         })
         .collect();

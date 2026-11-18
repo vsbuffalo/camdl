@@ -104,6 +104,10 @@ pub fn ode_prequential_recorded(
         stream_names: obs_model.stream_names(),
         per_stream_log_liks: Vec::with_capacity(obs_times.len()),
         per_stream_samples: Vec::with_capacity(obs_times.len()),
+        // No held-out value reaches the ODE prequential: the forecast that
+        // binds them runs the bootstrap filter only (ODE forecasts are
+        // refused), so this record holds no stop's scoring likelihood.
+        per_stream_held_out_log_liks: Vec::new(),
     };
     walk_ode_observations(
         compiled, obs_model, obs_times, dt, params, burnin_dt,
