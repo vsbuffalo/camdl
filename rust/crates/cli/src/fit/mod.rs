@@ -1299,6 +1299,18 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             if let Err(e) = crate::chain_index::refuse_one_based_layout(&base) {
                 out.fail(format!("error: --resume: {e}"));
             }
+            // A resume continues a completed result. A run that died before
+            // its commit can already hold chain checkpoints (each chain writes
+            // its state when it ends, before the leaf commits); an extension of
+            // it would name a parent that never completed. A directory that is
+            // no store leaf at all is keyed by its contents (`cas_resume_dep`).
+            match crate::leaf_use::read(&base) {
+                Ok(Some(leaf)) => if let Err(e) = crate::leaf_use::require_completed(&leaf) {
+                    out.fail(format!("error: --resume: {e}"));
+                },
+                Ok(None) => {}
+                Err(e) => out.fail(format!("error: --resume: {e}")),
+            }
             // A checkpoint is never served as a completed result. Resuming
             // toward a target the base has already reached would address a
             // leaf for that target holding the base's whole, longer chain —
