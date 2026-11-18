@@ -90,9 +90,10 @@ impl Painter {
     /// value (on, the convention `ls`, `grep` and `git` use when piped through
     /// `less -R`), then whether `stream` is a terminal.
     pub fn for_stream(stream: Stream, no_color_flag: bool) -> Self {
-        let color = if no_color_flag || std::env::var_os("NO_COLOR").is_some() {
+        let env = &crate::env::get().vars;
+        let color = if no_color_flag || env.no_color {
             false
-        } else if std::env::var_os("CLICOLOR_FORCE").is_some() {
+        } else if env.clicolor_force {
             true
         } else {
             match stream {

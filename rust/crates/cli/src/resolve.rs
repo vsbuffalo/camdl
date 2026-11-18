@@ -522,6 +522,9 @@ fn build_record(resolved: &ResolvedArtifact, meta: &RecordMeta, status: RunStatu
             created_at: Some(crate::cas::iso8601_utc(std::time::SystemTime::now())),
             camdl_version: Some(crate::version::VERSION_SHORT.to_string()),
             source_paths: meta.source_paths.clone(),
+            // An experimental input is listed on every record it reaches
+            // (proposal 2026-11-17, part E); empty, and absent, otherwise.
+            experimental: crate::env::get().experimental_inputs(),
             ..Default::default()
         },
     }

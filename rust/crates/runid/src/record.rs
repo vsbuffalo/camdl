@@ -262,6 +262,11 @@ pub struct Provenance {
     pub thread_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_paths: Vec<String>,
+    /// The experimental inputs set for the run (`CAMDL_EXPERIMENTAL_<NAME>`
+    /// variables), by name, with their values. Absent when none was set, so a
+    /// record without one is the record camdl wrote before the field existed.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub experimental: BTreeMap<String, String>,
 }
 
 /// The leaf's `run.json`. Read by prefix resolution and `show`/`cat`, never

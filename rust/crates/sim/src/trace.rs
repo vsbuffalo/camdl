@@ -7,14 +7,20 @@
 //! interface"). These traces are the exception because they are not a report
 //! of a run: they are a firehose a developer switches on to watch the engine
 //! step, emitted at the point the value exists, with no effect on results. Each
-//! is one function here, which reads its variable once and writes to stderr.
+//! is one function here, which writes to stderr.
 //!
-//! - `CAMDL_TRACE_STEPS=1`: one TSV row per chain-binomial substep
-//!   ([`step`], with a header row before the first) and one line per
-//!   intervention or event action ([`effect_action`]).
-//! - `CAMDL_EVAL_UNRESOLVED` (any value): the propensity evaluator takes the
-//!   slow string-keyed path ([`eval_unresolved`]), and says so once.
+//! The library reads no environment variable: the command-line crate reads
+//! them once (`cli::env`) and passes the switches here with [`configure`],
+//! before any model runs. Off until then.
+//!
+//! - `CAMDL_TRACE_STEPS=1` ([`Switches::steps`]): one TSV row per
+//!   chain-binomial substep ([`step`], with a header row before the first) and
+//!   one line per intervention or event action ([`effect_action`]).
+//! - `CAMDL_EVAL_UNRESOLVED` ([`Switches::eval_unresolved`]): the propensity
+//!   evaluator takes the slow string-keyed path ([`eval_unresolved`]), and says
+//!   so once.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use ir::intervention::Action;
@@ -22,10 +28,28 @@ use ir::intervention::Action;
 use crate::compiled_model::CompiledModel;
 use crate::effects::EffectKind;
 
-/// Whether `CAMDL_TRACE_STEPS=1` is set. Read once and cached.
+/// The developer switches this module serves, set by the caller.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Switches {
+    /// Trace every chain-binomial substep and effect action to stderr.
+    pub steps: bool,
+    /// Route the propensity hot path through the string-keyed evaluator.
+    pub eval_unresolved: bool,
+}
+
+static STEPS: AtomicBool = AtomicBool::new(false);
+static EVAL_UNRESOLVED: AtomicBool = AtomicBool::new(false);
+
+/// Set the switches for this process. Called once, by the command-line crate,
+/// before any model runs.
+pub fn configure(switches: Switches) {
+    STEPS.store(switches.steps, Ordering::Relaxed);
+    EVAL_UNRESOLVED.store(switches.eval_unresolved, Ordering::Relaxed);
+}
+
+/// Whether the substep trace is on ([`Switches::steps`]).
 pub fn steps_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("CAMDL_TRACE_STEPS").is_ok_and(|v| v == "1"))
+    STEPS.load(Ordering::Relaxed)
 }
 
 /// Under `CAMDL_TRACE_STEPS=1`, one row for the chain-binomial substep that
@@ -86,10 +110,10 @@ pub fn effect_action(kind: EffectKind, iv_name: &str, action: &Action, v: f64, t
 
 /// Bench / differential-validation switch: route the propensity hot path
 /// through the slow string-keyed `eval_expr` instead of the pre-resolved
-/// `eval_resolved`. Enabled by setting the env var `CAMDL_EVAL_UNRESOLVED`
-/// (any value). Read once and cached, so it costs an atomic load — hoisted
-/// out of the per-transition loop in `eval_propensities`, so the default
-/// (off) path is unchanged. The first read says on stderr that it is on.
+/// `eval_resolved` ([`Switches::eval_unresolved`], which `CAMDL_EVAL_UNRESOLVED`
+/// sets). It costs an atomic load — hoisted out of the per-transition loop in
+/// `eval_propensities`, so the default (off) path is unchanged. The first read
+/// that finds it on says so on stderr.
 ///
 /// Two uses:
 ///  - **benching**: time a `pfilter`/`fit` run with the var off vs on to
@@ -103,15 +127,15 @@ pub fn effect_action(kind: EffectKind, iv_name: &str, action: &Action, v: f64, t
 /// real models at full scale, not just hand-built expressions.
 #[inline]
 pub fn eval_unresolved() -> bool {
-    static EVAL_UNRESOLVED: OnceLock<bool> = OnceLock::new();
-    *EVAL_UNRESOLVED.get_or_init(|| {
-        let on = std::env::var_os("CAMDL_EVAL_UNRESOLVED").is_some();
-        if on {
+    let on = EVAL_UNRESOLVED.load(Ordering::Relaxed);
+    if on {
+        static SAID: OnceLock<()> = OnceLock::new();
+        SAID.get_or_init(|| {
             eprintln!(
                 "[camdl] CAMDL_EVAL_UNRESOLVED set — propensity eval routed through \
                  the slow string-keyed eval_expr (bench/validation mode)"
             );
-        }
-        on
-    })
+        });
+    }
+    on
 }

@@ -45,9 +45,14 @@ pub const DEFAULT_OUTPUT_ROOT: &str = "results";
 /// keep dev runs separate shouldn't have it silently override an
 /// explicit `output_dir = "results/he2010"` in a fit.toml.
 pub fn output_root(cli: Option<&str>, config: Option<&str>) -> PathBuf {
+    output_root_with(cli, config, crate::env::get().vars.output_dir.as_deref())
+}
+
+/// [`output_root`] with the `CAMDL_OUTPUT_DIR` value given.
+fn output_root_with(cli: Option<&str>, config: Option<&str>, env: Option<&std::path::Path>) -> PathBuf {
     cli.map(PathBuf::from)
         .or_else(|| config.map(PathBuf::from))
-        .or_else(|| std::env::var("CAMDL_OUTPUT_DIR").ok().map(PathBuf::from))
+        .or_else(|| env.map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from(DEFAULT_OUTPUT_ROOT))
 }
 
@@ -71,36 +76,6 @@ pub fn display_absolute(p: &std::path::Path) -> PathBuf {
 mod tests {
     use super::*;
 
-    /// Serialize env-touching tests in this file. `output_root` reads
-    /// `CAMDL_OUTPUT_DIR`, so any test that asserts its return value
-    /// must hold this lock to prevent another test setting the env
-    /// concurrently. (Rust's test runner parallelizes by default;
-    /// env state is process-global.)
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// RAII helper: snapshot `CAMDL_OUTPUT_DIR` on construction,
-    /// restore it on Drop. Use inside a test that wants to mutate
-    /// the env var, to leave the process state clean for sibling
-    /// tests after this one finishes (whether by success or panic).
-    struct EnvSnapshot {
-        prior: Option<String>,
-    }
-    impl EnvSnapshot {
-        fn take_and_clear() -> Self {
-            let prior = std::env::var("CAMDL_OUTPUT_DIR").ok();
-            std::env::remove_var("CAMDL_OUTPUT_DIR");
-            Self { prior }
-        }
-    }
-    impl Drop for EnvSnapshot {
-        fn drop(&mut self) {
-            match self.prior.take() {
-                Some(v) => std::env::set_var("CAMDL_OUTPUT_DIR", v),
-                None => std::env::remove_var("CAMDL_OUTPUT_DIR"),
-            }
-        }
-    }
-
     /// gh#507: the announced output path must be absolute even when the
     /// root came from the `results/` default or `CAMDL_OUTPUT_DIR` (neither
     /// of which is anchored at the fit.toml), and must survive a path that
@@ -120,61 +95,46 @@ mod tests {
 
     #[test]
     fn output_root_precedence_no_env() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _snap = EnvSnapshot::take_and_clear();
-
         // No env, no overrides: hits the default.
-        assert_eq!(output_root(None, None), PathBuf::from(DEFAULT_OUTPUT_ROOT));
+        assert_eq!(output_root_with(None, None, None), PathBuf::from(DEFAULT_OUTPUT_ROOT));
         assert_eq!(DEFAULT_OUTPUT_ROOT, "results",
             "default output root is 'results/' (pairs with 'data/')");
         // Config wins over default.
-        assert_eq!(output_root(None, Some("results")), PathBuf::from("results"));
+        assert_eq!(output_root_with(None, Some("results"), None), PathBuf::from("results"));
         // CLI wins over default.
-        assert_eq!(output_root(Some("/tmp/abc"), None), PathBuf::from("/tmp/abc"));
+        assert_eq!(output_root_with(Some("/tmp/abc"), None, None), PathBuf::from("/tmp/abc"));
         // CLI wins over config.
-        assert_eq!(output_root(Some("/cli"), Some("/config")), PathBuf::from("/cli"));
+        assert_eq!(output_root_with(Some("/cli"), Some("/config"), None), PathBuf::from("/cli"));
     }
 
     #[test]
     fn output_root_uses_env_when_cli_and_config_absent() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _snap = EnvSnapshot::take_and_clear();
-
-        std::env::set_var("CAMDL_OUTPUT_DIR", "/tmp/from-env");
-
         // Env fires when CLI + config are both absent (the regression
         // this layer was added to fix — `fit run` and `profile`
         // calling `output_root(None, ...)` previously fell straight
         // through to DEFAULT_OUTPUT_ROOT).
-        assert_eq!(output_root(None, None), PathBuf::from("/tmp/from-env"));
+        let env = Some(std::path::Path::new("/tmp/from-env"));
+        assert_eq!(output_root_with(None, None, env), PathBuf::from("/tmp/from-env"));
     }
 
     #[test]
     fn output_root_config_beats_env() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _snap = EnvSnapshot::take_and_clear();
-
-        std::env::set_var("CAMDL_OUTPUT_DIR", "/tmp/from-env");
-
         // Config (fit.toml's `output_dir`) is project-specific and
         // more authoritative than
         // ambient shell state. Setting CAMDL_OUTPUT_DIR must NOT
         // silently redirect a fit that explicitly declared
         // `output_dir = "..."` in its toml.
-        assert_eq!(output_root(None, Some("results/he2010")),
+        let env = Some(std::path::Path::new("/tmp/from-env"));
+        assert_eq!(output_root_with(None, Some("results/he2010"), env),
             PathBuf::from("results/he2010"));
     }
 
     #[test]
     fn output_root_cli_beats_env() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _snap = EnvSnapshot::take_and_clear();
-
-        std::env::set_var("CAMDL_OUTPUT_DIR", "/tmp/from-env");
-
         // Explicit CLI override sits above env.
-        assert_eq!(output_root(Some("/cli/dir"), None), PathBuf::from("/cli/dir"));
-        assert_eq!(output_root(Some("/cli/dir"), Some("/config")),
+        let env = Some(std::path::Path::new("/tmp/from-env"));
+        assert_eq!(output_root_with(Some("/cli/dir"), None, env), PathBuf::from("/cli/dir"));
+        assert_eq!(output_root_with(Some("/cli/dir"), Some("/config"), env),
             PathBuf::from("/cli/dir"));
     }
 

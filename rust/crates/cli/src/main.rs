@@ -57,6 +57,7 @@ mod landscape_html;
 mod lineage;        // three-layer lineage: --event-log record + realize + tree
 mod mre;            // `camdl mre` — minimal-reproducible-example bundles (gh#212)
 mod input_class;    // every input of a converted command and its class: the Classify inventory
+mod env;            // part E: every environment variable camdl reads, read once, classified
 pub mod version;
 
 /// Terminal formatting helpers. Pure ANSI SGR codes, no dependencies.
@@ -515,6 +516,9 @@ fn main() {
     }
 
     let cli = Cli::parse();
+    // The environment is read once (`env`), and the engine is told its
+    // evaluator switches before any command runs a model.
+    env::install_engine_switches(&env::get().vars);
 
     // The log filter: explicit --verbosity, else RUST_LOG, else `warn`.
     // Plain progress lines do not pass through `log` (`out::LiveHandle`,
@@ -3144,7 +3148,7 @@ fn resolve_sim_config(
     // `run.json` provenance show the model's real name (gh#51 cross-check
     // parity with the pre-hoist behaviour).
     let model = crate::sim_config::ResolvedModel::new(
-        base_model, ir::IR_VERSION.trim(), version::ENGINE_ID, display_path,
+        base_model, ir::IR_VERSION.trim(), &crate::env::get().engine_identity(version::ENGINE_ID), display_path,
     );
     Ok(crate::sim_config::ResolvedSimConfig { model, run: run_config, arms })
 }
@@ -3305,9 +3309,10 @@ fn write_sim_ensemble(
     };
     let calendar = ir::caltime::CalendarAxis::from_model(&cas.sim.model.ir)
         .unwrap_or_else(|e| out.fail(format!("error: {e}")));
-    let meta = crate::resolve::RecordMeta::new(
+    let mut meta = crate::resolve::RecordMeta::new(
         ir::IR_VERSION.trim(), &cas.sim.model.path, label, calendar)
         .with_deps(deps);
+    meta.engine_version = cas.sim.model.engine.clone();
 
     let mut artifacts = runid::Artifacts::new();
     artifacts.insert("ensemble.tsv", combined_bytes.to_vec());
