@@ -539,10 +539,33 @@ type set_action        = { compartment: string; value: expr;
 type add_action        = { add_compartment: string; add_count: expr;
                            add_count_grad: (string * deriv_entry) list }
 
+(** How much a {!grouped_transfer} moves out of its source cells together. *)
+type grouped_amount =
+  | GroupedFraction of { fraction : expr;
+                         fraction_grad : (string * deriv_entry) list }
+      (** [fraction = f]: the share [f] of the cells' total. [fraction_grad]
+          is as on {!fraction_transfer}. *)
+  | GroupedCount of { count : expr }
+      (** [count = n]: [n] individuals, or the cells' total if that is
+          smaller. Not smooth, so it carries no gradient, like
+          {!absolute_transfer}. *)
+
+(** A transfer out of the stages of one cell of a staged compartment, which
+    are one population: [transfer(fraction = f, from = E[pre], to = R[pre])]
+    where [E] has an Erlang dwell. [pairs] lists, in stage order, each source
+    stage cell with the cell its individuals go to. The amount is evaluated
+    once and applies to the sum of the source cells; on integer compartments
+    the runtime rounds that total once and then divides it among the stages in
+    proportion to their occupancy, so the number moved does not depend on how
+    many stages there are. *)
+type grouped_transfer = { pairs : (string * string) list;
+                          amount : grouped_amount }
+
 (** One change an intervention or event makes to the state when it fires. *)
 type action =
   | FractionTransfer of fraction_transfer
   | AbsoluteTransfer of absolute_transfer
+  | GroupedTransfer  of grouped_transfer
   | Set              of set_action
   | AddAction        of add_action
 

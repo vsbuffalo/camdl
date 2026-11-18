@@ -34,7 +34,7 @@ pub enum InterventionSchedule {
 
 // ── Actions ───────────────────────────────────────────────────────────────────
 //
-// The three smooth-jump actions carry `∂amount/∂θ` (`*_grad`, a
+// The smooth-jump actions carry `∂amount/∂θ` (`*_grad`, a
 // [`ParamGradMap`](crate::deriv::ParamGradMap)): the source term of the
 // event-jump sensitivity `S⁺ = ∂Φ/∂x·S⁻ + ∂Φ/∂θ` the ODE gradient path applies
 // when the effect fires (gh#275 §1g). The `rate_grad` analogue for an action's
@@ -43,7 +43,8 @@ pub enum InterventionSchedule {
 // serialized `DerivEntry::Unsupported` the gradient gate refuses on. Omitted on
 // the wire when empty (a constant amount). `AbsoluteTransfer` carries none: its
 // jump `min(count, source)` is nonsmooth, so the gate refuses it rather than
-// differentiate it. Not run identity (gradient maps are compiler-derived;
+// differentiate it. A `GroupedTransfer` follows the same split: its fraction
+// form carries `fraction_grad`, its count form nothing. Not run identity (gradient maps are compiler-derived;
 // `runid::ir_hash`, SV = 2).
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -61,6 +62,99 @@ pub struct AbsoluteTransfer {
     pub src:   String,
     pub dst:   String,
     pub count: Expr,
+}
+
+/// How much a [`GroupedTransfer`] moves out of its source cells together.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GroupedAmount {
+    /// `fraction = f`: the share `f` of the cells' total. `fraction_grad` is
+    /// `∂fraction/∂θ`, as on [`FractionTransfer`].
+    Fraction { fraction: Expr, fraction_grad: crate::deriv::ParamGradMap },
+    /// `count = n`: `n` individuals, or the cells' total if that is smaller.
+    /// Nonsmooth, so it carries no gradient, like [`AbsoluteTransfer`].
+    Count { count: Expr },
+}
+
+/// A transfer out of the stages of one cell of a staged compartment, which
+/// are one population: `transfer(fraction = f, from = E[pre], to = R[pre])`
+/// where `E` has an Erlang dwell. `pairs` lists, in stage order, each source
+/// stage cell with the cell its individuals go to.
+///
+/// The amount is evaluated once per firing and applies to the sum of the
+/// source cells. On integer compartments that total is rounded once and then
+/// divided among the stages in proportion to their occupancy, so the number
+/// moved does not depend on the number of stages; `sim::effects` holds the
+/// rules.
+///
+/// On the wire: `{"pairs": [["E_s1","R"], ...], "fraction": ..}` (with
+/// `fraction_grad` when it is not empty) or `{"pairs": .., "count": ..}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "GroupedTransferWire", into = "GroupedTransferWire")]
+pub struct GroupedTransfer {
+    pub pairs:  Vec<(String, String)>,
+    pub amount: GroupedAmount,
+}
+
+impl GroupedTransfer {
+    /// The source cells, in stage order.
+    pub fn sources(&self) -> impl Iterator<Item = &str> {
+        self.pairs.iter().map(|(s, _)| s.as_str())
+    }
+
+    /// The amount expression: the fraction or the count.
+    pub fn amount_expr(&self) -> &Expr {
+        match &self.amount {
+            GroupedAmount::Fraction { fraction, .. } => fraction,
+            GroupedAmount::Count { count } => count,
+        }
+    }
+}
+
+/// The JSON object of a [`GroupedTransfer`]: the amount's fields beside
+/// `pairs`, exactly one of `fraction` and `count` present.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GroupedTransferWire {
+    pairs: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fraction: Option<Expr>,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    fraction_grad: crate::deriv::ParamGradMap,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    count: Option<Expr>,
+}
+
+impl TryFrom<GroupedTransferWire> for GroupedTransfer {
+    type Error = String;
+    fn try_from(w: GroupedTransferWire) -> Result<Self, String> {
+        let amount = match (w.fraction, w.count) {
+            (Some(fraction), None) => {
+                GroupedAmount::Fraction { fraction, fraction_grad: w.fraction_grad }
+            }
+            (None, Some(count)) if w.fraction_grad.is_empty() => GroupedAmount::Count { count },
+            (None, Some(_)) => {
+                return Err("grouped_transfer: `fraction_grad` beside `count`".into());
+            }
+            (Some(_), Some(_)) | (None, None) => {
+                return Err(
+                    "grouped_transfer must have exactly one of `fraction` and `count`".into(),
+                );
+            }
+        };
+        Ok(GroupedTransfer { pairs: w.pairs, amount })
+    }
+}
+
+impl From<GroupedTransfer> for GroupedTransferWire {
+    fn from(g: GroupedTransfer) -> Self {
+        let (fraction, fraction_grad, count) = match g.amount {
+            GroupedAmount::Fraction { fraction, fraction_grad } => {
+                (Some(fraction), fraction_grad, None)
+            }
+            GroupedAmount::Count { count } => (None, Default::default(), Some(count)),
+        };
+        GroupedTransferWire { pairs: g.pairs, fraction, fraction_grad, count }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -86,6 +180,7 @@ pub struct AddAction {
 pub enum Action {
     FractionTransfer(FractionTransfer),
     AbsoluteTransfer(AbsoluteTransfer),
+    GroupedTransfer(GroupedTransfer),
     Set(SetAction),
     Add(AddAction),
 }
@@ -375,6 +470,65 @@ mod reactive_serde_tests {
         });
         let s = serde_json::to_string(&plain).unwrap();
         assert!(!s.contains("count_grad"), "an empty amount gradient must be omitted: {s}");
+    }
+
+    /// Pins the wire shape of a grouped transfer as `camdlc` writes it: the
+    /// amount's fields sit beside `pairs`, `fraction` (with `fraction_grad`
+    /// when it is not empty) or `count`.
+    #[test]
+    fn grouped_transfer_round_trips_camdlc_wire_shape() {
+        use crate::deriv::DerivEntry;
+        let fraction = r#"{"grouped_transfer":{"pairs":[["E_pre_s1","E_sch_s1"],["E_pre_s2","E_sch_s2"]],"fraction":{"param":"cov"},"fraction_grad":{"cov":{"grad":{"const":1.0}}}}}"#;
+        let a: Action = serde_json::from_str(fraction).expect("deserialize the fraction form");
+        match &a {
+            Action::GroupedTransfer(GroupedTransfer {
+                pairs,
+                amount: GroupedAmount::Fraction { fraction, fraction_grad },
+            }) => {
+                assert_eq!(pairs, &vec![
+                    ("E_pre_s1".to_string(), "E_sch_s1".to_string()),
+                    ("E_pre_s2".to_string(), "E_sch_s2".to_string()),
+                ]);
+                assert_eq!(fraction, &Expr::param("cov"));
+                assert_eq!(fraction_grad.get("cov"), Some(&DerivEntry::Grad(Expr::const_(1.0))));
+            }
+            other => panic!("expected a grouped fraction transfer, got {other:?}"),
+        }
+        assert_eq!(serde_json::to_string(&a).unwrap(), fraction, "the fraction form re-serializes as written");
+
+        let count = r#"{"grouped_transfer":{"pairs":[["E_s1","R"],["E_s2","R"]],"count":{"const":5.0}}}"#;
+        let a: Action = serde_json::from_str(count).expect("deserialize the count form");
+        assert!(matches!(&a, Action::GroupedTransfer(GroupedTransfer {
+            amount: GroupedAmount::Count { count }, ..
+        }) if count == &Expr::const_(5.0)));
+        assert_eq!(serde_json::to_string(&a).unwrap(), count, "the count form re-serializes as written");
+
+        // A constant fraction has no gradient, and none is written.
+        let plain = Action::GroupedTransfer(GroupedTransfer {
+            pairs: vec![("E_s1".into(), "R".into()), ("E_s2".into(), "R".into())],
+            amount: GroupedAmount::Fraction {
+                fraction: Expr::const_(0.5),
+                fraction_grad: Default::default(),
+            },
+        });
+        assert!(!serde_json::to_string(&plain).unwrap().contains("fraction_grad"));
+    }
+
+    /// A grouped transfer has exactly one amount; anything else is refused at
+    /// the boundary and never read as one form or the other.
+    #[test]
+    fn grouped_transfer_with_no_single_amount_is_refused() {
+        let pairs = r#""pairs":[["E_s1","R"],["E_s2","R"]]"#;
+        for (what, body) in [
+            ("both amounts", format!(r#"{{{pairs},"fraction":{{"const":0.5}},"count":{{"const":5.0}}}}"#)),
+            ("no amount", format!("{{{pairs}}}")),
+            ("a gradient beside a count", format!(r#"{{{pairs},"count":{{"const":5.0}},"fraction_grad":{{"p":{{"grad":{{"const":1.0}}}}}}}}"#)),
+            ("an unknown field", format!(r#"{{{pairs},"fraction":{{"const":0.5}},"src":"E_s1"}}"#)),
+            ("a pair of three cells", r#"{"pairs":[["E_s1","R","Q"],["E_s2","R"]],"fraction":{"const":0.5}}"#.to_string()),
+        ] {
+            let json = format!(r#"{{"grouped_transfer":{body}}}"#);
+            assert!(serde_json::from_str::<Action>(&json).is_err(), "{what} must be refused: {json}");
+        }
     }
 
     /// The compound predicate variants (and/or/not) and the other reducers /

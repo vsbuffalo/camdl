@@ -1250,8 +1250,9 @@ pub struct ResolvedModel {
     /// Per-intervention, per-action resolved `∂amount/∂θ` (the action's
     /// `*_grad`), model-param-indexed — the source term of the event-jump
     /// sensitivity `S⁺ = ∂Φ/∂x·S⁻ + ∂Φ/∂θ` the ODE gradient path applies when
-    /// the effect fires (gh#275 §1g). `None` for an `AbsoluteTransfer`, which
-    /// carries no gradient (the gradient gate refuses it). Built via the shared
+    /// the effect fires (gh#275 §1g). `None` for an `AbsoluteTransfer` and for
+    /// a `GroupedTransfer` of a count, which carry no gradient (the gradient
+    /// gate refuses them). Built via the shared
     /// `resolve_grad_map`, so an unknown-parameter key is rejected loudly, as a
     /// rate's is. In lockstep with `intervention_exprs`.
     pub intervention_amount_grads: Vec<Vec<Option<crate::resolved_expr::ResolvedGradMap>>>,
@@ -2480,6 +2481,7 @@ impl CompiledModel {
                         ir::intervention::Action::Set(s) => &s.value,
                         ir::intervention::Action::FractionTransfer(ft) => &ft.fraction,
                         ir::intervention::Action::AbsoluteTransfer(at) => &at.count,
+                        ir::intervention::Action::GroupedTransfer(gt) => gt.amount_expr(),
                     };
                     resolve_expr(expr, &resolve_ctx)
                 }).collect::<Result<Vec<_>, _>>()
@@ -2498,6 +2500,12 @@ impl CompiledModel {
                             ir::intervention::Action::Set(s) => &s.value_grad,
                             ir::intervention::Action::FractionTransfer(ft) => &ft.fraction_grad,
                             ir::intervention::Action::AbsoluteTransfer(_) => return Ok(None),
+                            ir::intervention::Action::GroupedTransfer(gt) => match &gt.amount {
+                                ir::intervention::GroupedAmount::Fraction { fraction_grad, .. } => {
+                                    fraction_grad
+                                }
+                                ir::intervention::GroupedAmount::Count { .. } => return Ok(None),
+                            },
                         };
                         crate::resolved_expr::resolve_grad_map(grad, &resolve_ctx)
                             .map(Some)

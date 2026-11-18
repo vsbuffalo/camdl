@@ -187,6 +187,11 @@ let referenced_compartments (m : model) : (string, unit) Hashtbl.t =
         add src; add dst; add_expr fraction
       | AbsoluteTransfer { src; dst; count } ->
         add src; add dst; add_expr count
+      | GroupedTransfer { pairs; amount } ->
+        List.iter (fun (src, dst) -> add src; add dst) pairs;
+        (match amount with
+         | GroupedFraction { fraction; _ } -> add_expr fraction
+         | GroupedCount { count } -> add_expr count)
       | Set { compartment; value; _ } ->
         add compartment; add_expr value
       | AddAction { add_compartment; add_count; _ } ->

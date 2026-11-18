@@ -10,6 +10,18 @@ use crate::effect_plan::{EffectPlan, FireClock, Origin};
 use crate::schedule::{Schedule, StepPolicy};
 use ir::intervention::{Action, InterventionSchedule};
 
+/// `E_s1 -> R, E_s2 -> R`: the first and last pairs of a grouped transfer,
+/// which is enough to name the cells it spans.
+pub(crate) fn grouped_pairs_label(g: &ir::intervention::GroupedTransfer) -> String {
+    match (g.pairs.first(), g.pairs.last()) {
+        (Some((s0, d0)), Some((s1, d1))) if g.pairs.len() > 1 => {
+            format!("{s0} -> {d0} .. {s1} -> {d1}")
+        }
+        (Some((s, d)), _) => format!("{s} -> {d}"),
+        (None, _) => "(no cells)".to_string(),
+    }
+}
+
 /// Short human label for an action, for diagnostics (`"set V"`,
 /// `"transfer S -> I (fraction)"`). Error-path only.
 fn action_label(action: &Action) -> String {
@@ -18,6 +30,13 @@ fn action_label(action: &Action) -> String {
         Action::Set(a) => format!("set {}", a.compartment),
         Action::FractionTransfer(t) => format!("transfer {} -> {} (fraction)", t.src, t.dst),
         Action::AbsoluteTransfer(t) => format!("transfer {} -> {} (absolute)", t.src, t.dst),
+        Action::GroupedTransfer(g) => {
+            let form = match g.amount {
+                ir::intervention::GroupedAmount::Fraction { .. } => "fraction",
+                ir::intervention::GroupedAmount::Count { .. } => "absolute",
+            };
+            format!("transfer {} ({form}, over {} stages)", grouped_pairs_label(g), g.pairs.len())
+        }
     }
 }
 

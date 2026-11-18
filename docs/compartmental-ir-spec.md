@@ -148,6 +148,11 @@ intervention_schedule :=
 action :=
   | FractionTransfer(src, dst, fraction: expr, fraction_grad: grad_map)   -- move fraction of src to dst
   | AbsoluteTransfer(src, dst, count: expr)                               -- move fixed count
+  | GroupedTransfer(pairs: [(src, dst)], amount: grouped_amount)          -- move out of the stages of one cell
+
+grouped_amount :=
+  | GroupedFraction(fraction: expr, fraction_grad: grad_map)
+  | GroupedCount(count: expr)
   | Set(compartment, value: expr, value_grad: grad_map)                   -- override compartment value
   | AddAction(compartment, count: expr, count_grad: grad_map)             -- add count unconditionally (importation, birth)
 ```
@@ -155,14 +160,61 @@ action :=
 The `expr` in interventions can reference parameters and current state, but not
 time (time is the trigger, not an input to the action).
 
-The `*_grad` map on the three smooth actions is the compiler's `∂amount/∂θ`
-(parameter name → `deriv_entry`, the `rate_grad` analogue; absent key = genuine
-zero, omitted on the wire when empty). It is the source term of the event-jump
+The `*_grad` map on the smooth actions is the compiler's `∂amount/∂θ` (parameter
+name → `deriv_entry`, the `rate_grad` analogue; absent key = genuine zero,
+omitted on the wire when empty). It is the source term of the event-jump
 sensitivity `S⁺ = ∂Φ/∂x·S⁻ + ∂Φ/∂θ` the ODE gradient path applies when the
 effect fires, so a scheduled amount that depends on an estimated parameter
 contributes to the gradient. `AbsoluteTransfer` carries none: its jump
 `min(count, source)` is nonsmooth, and the gradient capability check refuses it.
-Like every gradient map, it is not part of the model's run identity.
+A `GroupedTransfer` follows the same split: its fraction form carries
+`fraction_grad` and has the sensitivity rule of `FractionTransfer` on each of
+its pairs; its count form carries none and is refused. Like every gradient map,
+it is not part of the model's run identity.
+
+**The grouped transfer.** A compartment with an Erlang dwell
+(`via erlang(stages = k, ...)`) is one population held in `k` stage cells. A
+`transfer` out of it is one `GroupedTransfer` per population cell: `pairs`
+lists, in stage order, each source stage cell with the cell its individuals go
+to (the same stage of another stratum, one unstaged cell, or the first stage of
+a different staged compartment). On the wire the amount's fields sit beside
+`pairs`:
+
+```json
+{"grouped_transfer": {"pairs": [["E_pre_s1","E_sch_s1"], ["E_pre_s2","E_sch_s2"]],
+                      "fraction": {"param": "cov"}, "fraction_grad": {...}}}
+{"grouped_transfer": {"pairs": [["E_s1","R"], ["E_s2","R"]], "count": {"const": 5.0}}}
+```
+
+Both validators require at least two pairs, distinct source cells, declared
+cells, and cells that are all integer or all real (E521). The amount is
+evaluated once per firing. With `n_i` the value of source cell `i` in the state
+the action reads and `N` their sum:
+
+| Cells                                | Amount       | Moved from source `i`                    |
+| ------------------------------------ | ------------ | ---------------------------------------- |
+| integer                              | fraction `f` | its share of `M = floor(N * clamp(f))`   |
+| integer                              | count `c`    | its share of `M = min(round(c), N)`      |
+| real, or any cell on the ODE backend | fraction `f` | `n_i * clamp(f)`                         |
+| real, or any cell on the ODE backend | count `c`    | `min(c, N) * n_i / N`, zero when `N = 0` |
+
+`clamp` is to `[0, 1]`. The integer total `M` is rounded once, for the whole
+compartment, and then divided by the largest-remainder method in integer
+arithmetic: stage `i` gets `floor(M * n_i / N)`, and the `M - sum` individuals
+left over go one each to the stages with the largest remainders `M * n_i mod N`,
+a tie going to the earlier stage. No stage gives more than it holds, and with
+`N = 0` nothing moves. The number moved therefore does not depend on the number
+of stages, which separate `FractionTransfer`s (one floor per stage) do not give:
+three stages of 10 at a fraction of 0.2/3 move `floor(30 * 0.2/3) = 2`, where
+three fraction transfers move `floor(10 * 0.2/3) = 0` each. A negative count is
+an error.
+
+A grouped transfer reads the same state, runs in the same phase and obeys the
+same ordering as a `FractionTransfer` or `AbsoluteTransfer` in its position
+(language spec §13.10). The checks on effects due at one instant treat it as a
+drain of every source cell: with its fraction on each for the
+fractions-sum-above-one refusal, as a count drain for the count form, and as a
+`transfer` on every source and destination cell beside a `set`.
 
 #### 2.3.1 Engineering Challenges for Scheduled Interventions
 

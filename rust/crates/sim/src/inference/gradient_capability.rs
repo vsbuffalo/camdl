@@ -602,6 +602,18 @@ fn preflight_scheduled_effects(
                         alt.to_string().replacen("Use", "use", 1)
                     )));
                 }
+                Action::GroupedTransfer(gt) => match &gt.amount {
+                    ir::intervention::GroupedAmount::Fraction { fraction, fraction_grad } => {
+                        ("transfer(fraction = …)", fraction, fraction_grad)
+                    }
+                    ir::intervention::GroupedAmount::Count { .. } => {
+                        return Err(SimError::Validation(format!(
+                            "ODE gradient (nl-lbfgs): {} `{}` moves a fixed count out of the                              stages of a staged compartment ({}; `transfer(count = …)`). Its                              jump moves min(count, source), which is not differentiable in                              the source compartment, so the forward sensitivity cannot cross                              it (gh#275 §1g). Write the transfer as a fraction of the source,                              or {}",
+                            noun(iv), iv.name, crate::intervention::grouped_pairs_label(gt),
+                            alt.to_string().replacen("Use", "use", 1)
+                        )));
+                    }
+                },
             };
             // An amount that reads compartment state (directly or through a
             // hoisted binding): ∂amount/∂state is not emitted.
@@ -933,6 +945,60 @@ mod tests {
         let msg = gate_err(m, &["beta"]);
         assert!(
             msg.contains("evacuate") && msg.contains("transfer(count") && msg.contains("min(count, source)"),
+            "{msg}"
+        );
+    }
+
+    fn grouped(amount: ir::intervention::GroupedAmount) -> Action {
+        Action::GroupedTransfer(ir::intervention::GroupedTransfer {
+            pairs: vec![("E".into(), "R".into()), ("I".into(), "R".into())],
+            amount,
+        })
+    }
+
+    /// A grouped transfer of a fraction is treated as a fraction transfer is:
+    /// admitted with a fixed fraction, and with an estimated one only when its
+    /// ∂fraction/∂θ was emitted.
+    #[test]
+    fn treats_a_grouped_fraction_transfer_as_a_fraction_transfer() {
+        use ir::intervention::GroupedAmount;
+        let mut m = base_model();
+        m.interventions = vec![event("clear", vec![14.0], vec![grouped(GroupedAmount::Fraction {
+            fraction: Expr::const_(0.1),
+            fraction_grad: Default::default(),
+        })])];
+        gate_ok(m, &["beta", "gamma", "k"]);
+
+        let mut m = base_model();
+        add_param(&mut m, "cov", 0.3);
+        m.interventions = vec![event("clear", vec![14.0], vec![grouped(GroupedAmount::Fraction {
+            fraction: Expr::param("cov"),
+            fraction_grad: HashMap::from([("cov".to_string(), DerivEntry::Grad(Expr::const_(1.0)))]),
+        })])];
+        gate_ok(m, &["beta", "cov"]);
+
+        let mut m = base_model();
+        add_param(&mut m, "cov", 0.3);
+        m.interventions = vec![event("clear", vec![14.0], vec![grouped(GroupedAmount::Fraction {
+            fraction: Expr::param("cov"),
+            fraction_grad: Default::default(),
+        })])];
+        let msg = gate_err(m, &["beta", "cov"]);
+        assert!(msg.contains("clear") && msg.contains("no usable") && msg.contains("cov"), "{msg}");
+    }
+
+    /// A grouped transfer of a count is refused by name, as a plain
+    /// `transfer(count = …)` is.
+    #[test]
+    fn refuses_a_grouped_count_transfer_by_name() {
+        let mut m = base_model();
+        m.interventions = vec![event("evacuate", vec![14.0], vec![grouped(
+            ir::intervention::GroupedAmount::Count { count: Expr::const_(3.0) },
+        )])];
+        let msg = gate_err(m, &["beta"]);
+        assert!(
+            msg.contains("evacuate") && msg.contains("transfer(count") && msg.contains("min(count, source)")
+                && msg.contains("E -> R .. I -> R"),
             "{msg}"
         );
     }

@@ -337,7 +337,9 @@ fn action_verbs(actions: &[ir::intervention::Action]) -> String {
     actions
         .iter()
         .map(|a| match a {
-            Action::FractionTransfer(_) | Action::AbsoluteTransfer(_) => "transfer",
+            Action::FractionTransfer(_)
+            | Action::AbsoluteTransfer(_)
+            | Action::GroupedTransfer(_) => "transfer",
             Action::Set(_) => "set",
             Action::Add(_) => "add",
         })

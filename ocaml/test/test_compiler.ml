@@ -5131,6 +5131,9 @@ let test_action_grad_emitted_per_smooth_action () =
     | Ir.Set s -> List.map fst s.Ir.value_grad
     | Ir.FractionTransfer ft -> List.map fst ft.Ir.fraction_grad
     | Ir.AbsoluteTransfer _ -> []
+    | Ir.GroupedTransfer { amount = Ir.GroupedFraction { fraction_grad; _ }; _ } ->
+      List.map fst fraction_grad
+    | Ir.GroupedTransfer { amount = Ir.GroupedCount _; _ } -> []
   in
   let add = d (Ir.AddAction { Ir.add_compartment = "I"; Ir.add_count = Ir.Param "seed";
                               Ir.add_count_grad = [] }) in

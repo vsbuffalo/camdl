@@ -78,6 +78,12 @@ pub enum ValidationError {
     #[error("intervention '{intervention}' action references unknown compartment '{compartment}'")]
     UnknownCompartmentInIntervention { intervention: String, compartment: String },
 
+    /// E521 in the OCaml validator. A grouped transfer moves individuals out of
+    /// the stages of one cell of a staged compartment: at least two pairs,
+    /// each source cell once, all cells integer or all real.
+    #[error("the grouped transfer of intervention '{intervention}' {reason}")]
+    MalformedGroupedTransfer { intervention: String, reason: String },
+
     #[error("balance constraint targets unknown compartment '{0}'")]
     UnknownCompartmentInBalance(String),
 
@@ -353,6 +359,38 @@ pub fn validate(model: &Model) -> Result<(), Vec<ValidationError>> {
                     check_target(&at.src, &mut errors);
                     check_target(&at.dst, &mut errors);
                     check_expr(&at.count, &ctx, false, &mut errors);
+                }
+                Action::GroupedTransfer(gt) => {
+                    let malformed = |reason: String, errors: &mut Vec<ValidationError>| {
+                        errors.push(ValidationError::MalformedGroupedTransfer {
+                            intervention: iv.name.clone(),
+                            reason,
+                        });
+                    };
+                    for (src, dst) in &gt.pairs {
+                        check_target(src, &mut errors);
+                        check_target(dst, &mut errors);
+                    }
+                    if gt.pairs.len() < 2 {
+                        malformed(
+                            "lists fewer than two (source, destination) pairs".into(),
+                            &mut errors,
+                        );
+                    }
+                    let mut seen: HashSet<&str> = HashSet::new();
+                    if let Some(dup) = gt.sources().find(|s| !seen.insert(s)) {
+                        malformed(
+                            format!("lists the source cell '{dup}' more than once"),
+                            &mut errors,
+                        );
+                    }
+                    let cells = || gt.pairs.iter().flat_map(|(s, d)| [s.as_str(), d.as_str()]);
+                    if cells().any(|c| real_comps.contains(c))
+                        && cells().any(|c| int_comps.contains(c))
+                    {
+                        malformed("mixes integer and real compartments".into(), &mut errors);
+                    }
+                    check_expr(gt.amount_expr(), &ctx, false, &mut errors);
                 }
                 Action::Set(s) => {
                     check_target(&s.compartment, &mut errors);
@@ -791,6 +829,7 @@ fn check_misplaced_forcing_basis(model: &Model, errors: &mut Vec<ValidationError
             sites.push(match action {
                 Action::FractionTransfer(a) => &a.fraction,
                 Action::AbsoluteTransfer(a) => &a.count,
+                Action::GroupedTransfer(a) => a.amount_expr(),
                 Action::Set(a) => &a.value,
                 Action::Add(a) => &a.count,
             });
@@ -1211,6 +1250,54 @@ mod tests {
                 ValidationError::UnknownCompartmentInIntervention { intervention, compartment }
                     if intervention == "import" && compartment == "Nowhere")),
             "expected UnknownCompartmentInIntervention for 'import'/'Nowhere', got: {:?}", errs);
+    }
+
+    /// A grouped transfer must list at least two pairs, each source cell once,
+    /// in declared compartments of one representation. Each is refused with
+    /// its reason; a well-formed one passes.
+    #[test]
+    fn grouped_transfer_shape_is_validated() {
+        use crate::intervention::{GroupedAmount, GroupedTransfer};
+        let with_pairs = |pairs: &[(&str, &str)]| {
+            let mut m = load_sir();
+            m.interventions.push(Intervention {
+                name: "move".into(),
+                base_name: None,
+                fire: crate::intervention::FireSource::Scheduled(InterventionSchedule::AtTimes(vec![1.0])),
+                actions: vec![Action::GroupedTransfer(GroupedTransfer {
+                    pairs: pairs.iter().map(|(s, d)| ((*s).to_string(), (*d).to_string())).collect(),
+                    amount: GroupedAmount::Fraction {
+                        fraction: Expr::const_(0.1),
+                        fraction_grad: Default::default(),
+                    },
+                })],
+                kind: crate::intervention::InterventionKind::Event,
+            });
+            m
+        };
+        let reasons = |m: &Model| -> Vec<String> {
+            match validate(m) {
+                Ok(()) => vec![],
+                Err(errs) => errs.iter().map(|e| e.to_string()).collect(),
+            }
+        };
+        assert_eq!(reasons(&with_pairs(&[("S", "R"), ("I", "R")])), Vec::<String>::new());
+        let one = reasons(&with_pairs(&[("S", "R")]));
+        assert!(one.iter().any(|e| e.contains("'move' lists fewer than two")), "{one:?}");
+        let dup = reasons(&with_pairs(&[("S", "R"), ("S", "I")]));
+        assert!(dup.iter().any(|e| e.contains("lists the source cell 'S' more than once")), "{dup:?}");
+        let unknown = with_pairs(&[("S", "R"), ("I", "Nowhere")]);
+        let errs = validate(&unknown).expect_err("an undeclared destination");
+        assert!(
+            errs.iter().any(|e| matches!(e,
+                ValidationError::UnknownCompartmentInIntervention { intervention, compartment }
+                    if intervention == "move" && compartment == "Nowhere")),
+            "{errs:?}");
+        let mut mixed = with_pairs(&[("S", "R"), ("I", "R")]);
+        mixed.compartments.iter_mut().find(|c| c.name == "I").unwrap().kind =
+            CompartmentKind::Real;
+        let mixed = reasons(&mixed);
+        assert!(mixed.iter().any(|e| e.contains("mixes integer and real compartments")), "{mixed:?}");
     }
 
     /// (2) A balance constraint whose target compartment does not exist must be

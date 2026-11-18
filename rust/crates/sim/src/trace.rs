@@ -105,6 +105,18 @@ pub fn effect_action(kind: EffectKind, iv_name: &str, action: &Action, v: f64, t
             "{k} '{iv_name}' at t={t:.1}: transfer {} -> {} (raw={v:.2})",
             at.src, at.dst
         ),
+        Action::GroupedTransfer(g) => {
+            let cells = crate::intervention::grouped_pairs_label(g);
+            match g.amount {
+                ir::intervention::GroupedAmount::Fraction { .. } => eprintln!(
+                    "{k} '{iv_name}' at t={t:.1}: grouped transfer {cells} (frac={:.2})",
+                    v.clamp(0.0, 1.0)
+                ),
+                ir::intervention::GroupedAmount::Count { .. } => eprintln!(
+                    "{k} '{iv_name}' at t={t:.1}: grouped transfer {cells} (raw={v:.2})"
+                ),
+            }
+        }
     }
 }
 

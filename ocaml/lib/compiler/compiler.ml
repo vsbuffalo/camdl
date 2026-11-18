@@ -593,6 +593,16 @@ let diagnose_validate_error ctx (err : Validate.error) : Diagnostics.diagnostic 
       Some "a count law (poisson, binomial, neg_binomial) seeds an integer \
             compartment and a continuous law (normal) seeds a real one",
       Diagnostics.no_loc
+    | MalformedGroupedTransfer (iv, what) ->
+      "E521",
+      Printf.sprintf "the grouped transfer of intervention '%s' %s" iv what,
+      Some "a grouped transfer moves individuals out of the stages of one cell \
+            of a staged compartment: at least two (source, destination) pairs, \
+            each source cell once, all cells integer or all real. The compiler \
+            writes it from a `transfer(...)` whose source is a staged \
+            compartment — a bare E521 here means the IR was hand-written or \
+            has drifted",
+      Diagnostics.no_loc
     | InitLawOnBalanceTarget comp ->
       "E517",
       Printf.sprintf

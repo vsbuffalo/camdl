@@ -30,7 +30,7 @@ use crate::{
     resolved_expr::eval_resolved,
     state::{IntState, RealState},
 };
-use ir::intervention::{Action, Intervention};
+use ir::intervention::{Action, GroupedAmount, GroupedTransfer, Intervention};
 
 /// Immutable read view over the two compartment arenas. A resolver takes this
 /// and *cannot* mutate state — the purity half of the seam, type-enforced.
@@ -107,7 +107,8 @@ pub enum EffectKind {
 ///     against the start-of-step snapshot, like the transition draw, and summed
 ///     into the state with the transition deltas.
 ///   - [`EventPhase::Residual`] selects DRAINING / assignment actions
-///     (`FractionTransfer`, `AbsoluteTransfer`, `Set`): resolved against the
+///     (`FractionTransfer`, `AbsoluteTransfer`, `GroupedTransfer`, `Set`):
+///     resolved against the
 ///     POST-TRANSITION residual state, so a draining transfer moves a fraction
 ///     of what survived the interval — matching ODE / Gillespie.
 ///
@@ -116,16 +117,17 @@ pub enum EffectKind {
 pub enum EventPhase {
     /// Inflow `Add` only, resolved against the start-of-step snapshot.
     Snapshot,
-    /// `FractionTransfer` / `AbsoluteTransfer` / `Set`, resolved against the
-    /// post-transition residual.
+    /// `FractionTransfer` / `AbsoluteTransfer` / `GroupedTransfer` / `Set`,
+    /// resolved against the post-transition residual.
     Residual,
 }
 
 /// Classify one event action by the read-state it must resolve against (gh#217).
 ///
 /// `Add` is an INFLOW construct (cannot over-draw) → [`EventPhase::Snapshot`].
-/// `FractionTransfer` / `AbsoluteTransfer` drain their `from` side and `Set`
-/// overwrites the post-dynamics value → [`EventPhase::Residual`].
+/// `FractionTransfer` / `AbsoluteTransfer` / `GroupedTransfer` drain their
+/// `from` side and `Set` overwrites the post-dynamics value →
+/// [`EventPhase::Residual`].
 ///
 /// NOTE (follow-up, out of scope for gh#217): a NEGATIVE-amount `Add` used as a
 /// drain is classified `Snapshot` here like any other `Add`. Such an `Add` is
@@ -135,9 +137,10 @@ pub enum EventPhase {
 fn action_phase(action: &Action) -> EventPhase {
     match action {
         Action::Add(_) => EventPhase::Snapshot,
-        Action::FractionTransfer(_) | Action::AbsoluteTransfer(_) | Action::Set(_) => {
-            EventPhase::Residual
-        }
+        Action::FractionTransfer(_)
+        | Action::AbsoluteTransfer(_)
+        | Action::GroupedTransfer(_)
+        | Action::Set(_) => EventPhase::Residual,
     }
 }
 
@@ -199,6 +202,141 @@ fn resolve_target(model: &CompiledModel, name: &str) -> Result<Arena, SimError> 
         Ok(Arena::Real(i))
     } else {
         Err(SimError::UnknownCompartment(name.to_string()))
+    }
+}
+
+// ── Grouped transfers ───────────────────────────────────────────────────────
+//
+// A grouped transfer moves individuals out of the stages of one cell of a
+// staged compartment (proposal 2026-11-17-unified-staged-residence, "The
+// grouped transfer action"). The stages are one population, so its amount
+// applies to their total `N = Σ n_i`:
+//
+//   integer cells, fraction f (clamped to [0, 1])   M = floor(N · f)
+//   integer cells, count c                          M = min(round(c), N)
+//   then stage i gives up its share of M ([`allocate_by_occupancy`])
+//
+//   real cells (and the ODE's f64 state), fraction  x_i = n_i · f
+//   real cells (and the ODE's f64 state), count     x_i = min(c, N) · n_i / N,
+//                                                   0 when N = 0
+//
+// The integer total is rounded once, for the compartment, and not once per
+// stage: eight stages of 10 at a fraction of 0.2/3 move floor(80 · 0.2/3) = 5,
+// where eight separate fraction transfers move floor(10 · 0.2/3) = 0 each.
+
+/// Divide `m` individuals among stages holding `counts`, in proportion to
+/// occupancy, by the largest-remainder method in integer arithmetic.
+///
+/// With `N = Σ counts`, stage `i` gets `floor(m · n_i / N)`, and the
+/// `m − Σ floor(…)` individuals left over go one each to the stages with the
+/// largest remainders `m · n_i mod N`, a tie going to the earlier stage. The
+/// result sums to `m` and never exceeds `counts[i]` at stage `i`: a stage
+/// that gets an extra individual has a non-zero remainder, so its exact share
+/// `m · n_i / N` is not a whole number and lies strictly below `n_i`.
+///
+/// `None` unless every count is non-negative and `0 ≤ m ≤ N`. With `N = 0`
+/// (so `m = 0`) nothing moves.
+fn allocate_by_occupancy(counts: &[i64], m: i64) -> Option<Vec<i64>> {
+    if counts.iter().any(|&n| n < 0) {
+        return None;
+    }
+    let total: i128 = counts.iter().map(|&n| n as i128).sum();
+    if m < 0 || (m as i128) > total {
+        return None;
+    }
+    if total == 0 {
+        return Some(vec![0; counts.len()]);
+    }
+    let m = m as i128;
+    let mut shares: Vec<i64> = Vec::with_capacity(counts.len());
+    let mut remainders: Vec<i128> = Vec::with_capacity(counts.len());
+    for &n in counts {
+        let exact = m * n as i128;
+        // The quotient is at most `n`, so it fits an i64.
+        shares.push((exact / total) as i64);
+        remainders.push(exact % total);
+    }
+    // Σ remainders = left · N and each is below N, so at least `left` stages
+    // have a non-zero remainder: the extra individuals all land on one.
+    let left = (m - shares.iter().map(|&s| s as i128).sum::<i128>()) as usize;
+    let mut order: Vec<usize> = (0..counts.len()).collect();
+    // Stable, so equal remainders keep stage order: the earlier stage first.
+    order.sort_by(|&a, &b| remainders[b].cmp(&remainders[a]));
+    for &i in order.iter().take(left) {
+        shares[i] += 1;
+    }
+    Some(shares)
+}
+
+/// The cells of a grouped transfer as `(source, destination)` local indices,
+/// all in the integer arena or all in the real one.
+enum GroupedCells {
+    Int(Vec<(usize, usize)>),
+    Real(Vec<(usize, usize)>),
+}
+
+fn grouped_cells(model: &CompiledModel, gt: &GroupedTransfer) -> Result<GroupedCells, SimError> {
+    let mut int = Vec::new();
+    let mut real = Vec::new();
+    // The first source of each representation, to name both in a refusal.
+    let (mut first_int, mut first_real) = (None, None);
+    for (src, dst) in &gt.pairs {
+        match (resolve_target(model, src)?, resolve_target(model, dst)?) {
+            (Arena::Int(s), Arena::Int(d)) => {
+                first_int.get_or_insert(src);
+                int.push((s, d));
+            }
+            (Arena::Real(s), Arena::Real(d)) => {
+                first_real.get_or_insert(src);
+                real.push((s, d));
+            }
+            _ => return Err(mixed_arena_err(src, dst)),
+        }
+    }
+    match (first_int, first_real) {
+        (Some(_), None) => Ok(GroupedCells::Int(int)),
+        (None, Some(_)) => Ok(GroupedCells::Real(real)),
+        (Some(a), Some(b)) => Err(mixed_arena_err(a, b)),
+        (None, None) => Err(SimError::Validation(
+            "a grouped transfer lists no (source, destination) pairs".into(),
+        )),
+    }
+}
+
+/// A grouped transfer of a negative count. A count is a number of
+/// individuals to move out of the source; there is no stage to return a
+/// negative one to.
+fn grouped_negative_count_err(gt: &GroupedTransfer, v: f64) -> SimError {
+    SimError::Validation(format!(
+        "transfer ({}) has a negative count {v}: a `transfer(count = …)` out of a staged \
+         compartment moves a number of individuals, which cannot be negative — write the \
+         transfer in the other direction",
+        crate::intervention::grouped_pairs_label(gt)
+    ))
+}
+
+/// The amount each source cell of a grouped transfer gives up in `f64`
+/// arithmetic, given the resolved amount `v` and the cells' values `n`: the
+/// real-valued rules of the table above, shared by the real arena of the
+/// discrete resolver and the ODE's continuous state.
+fn grouped_amounts_f64(gt: &GroupedTransfer, v: f64, n: &[f64]) -> Result<Vec<f64>, SimError> {
+    match gt.amount {
+        GroupedAmount::Fraction { .. } => {
+            let frac = v.clamp(0.0, 1.0);
+            Ok(n.iter().map(|&n_i| n_i * frac).collect())
+        }
+        GroupedAmount::Count { .. } => {
+            if v < 0.0 {
+                return Err(grouped_negative_count_err(gt, v));
+            }
+            let total: f64 = n.iter().sum();
+            if total > 0.0 {
+                let moved = v.min(total);
+                Ok(n.iter().map(|&n_i| moved * n_i / total).collect())
+            } else {
+                Ok(vec![0.0; n.len()])
+            }
+        }
     }
 }
 
@@ -422,6 +560,13 @@ fn refuse_coincident_sets(model: &CompiledModel, event_idx: &[usize], t: f64) ->
                         targets.entry(comp).or_default().first_transfer.get_or_insert(name);
                     }
                 }
+                Action::GroupedTransfer(gt) => {
+                    for (src, dst) in &gt.pairs {
+                        for comp in [src.as_str(), dst.as_str()] {
+                            targets.entry(comp).or_default().first_transfer.get_or_insert(name);
+                        }
+                    }
+                }
                 Action::Add(_) => {}
             }
         }
@@ -452,15 +597,32 @@ fn refuse_coincident_sets(model: &CompiledModel, event_idx: &[usize], t: f64) ->
     Ok(())
 }
 
-/// One draining `transfer` among the events due at an instant: its source
-/// compartment, its event, where its amount expression lives, and whether it
-/// moves a count (`AbsoluteTransfer`) or a share (`FractionTransfer`).
+/// One compartment a `transfer` drains among the events due at an instant:
+/// the source compartment, its event, where the transfer's amount expression
+/// lives, and whether it moves a count (`AbsoluteTransfer`) or a share
+/// (`FractionTransfer`). A `GroupedTransfer` is one of these per source cell,
+/// by its amount form.
 struct Drain<'m> {
     src: &'m str,
     event: &'m str,
     iv_idx: usize,
     action_idx: usize,
     is_count: bool,
+}
+
+/// The `k`-th compartment `action` drains, and whether it moves a count: one
+/// for a plain transfer, every source cell for a grouped transfer, none for
+/// `add` and `set`. `None` past the last.
+fn drain_source(action: &Action, k: usize) -> Option<(&str, bool)> {
+    match action {
+        Action::FractionTransfer(ft) => (k == 0).then_some((ft.src.as_str(), false)),
+        Action::AbsoluteTransfer(at) => (k == 0).then_some((at.src.as_str(), true)),
+        Action::GroupedTransfer(gt) => {
+            let is_count = matches!(gt.amount, GroupedAmount::Count { .. });
+            gt.pairs.get(k).map(|(src, _)| (src.as_str(), is_count))
+        }
+        Action::Add(_) | Action::Set(_) => None,
+    }
 }
 
 /// `'a', 'b'` — the distinct event names of `drains`, in declaration order.
@@ -499,6 +661,9 @@ fn event_list(drains: &[&Drain<'_>]) -> String {
 /// depend on declaration order) and compared with 1 plus the rounding of that
 /// sum (`n · ε` for `n` fractions), so ten drains of 0.1 are not refused.
 ///
+/// A grouped transfer drains every one of its source cells, with its one
+/// fraction (or count) on each.
+///
 /// Drains into a compartment, and a single drain capped by its source, are not
 /// this function's concern; a `set` beside a `transfer` is refused by
 /// [`refuse_coincident_sets`].
@@ -513,13 +678,14 @@ fn refuse_overdrawing_drains<A: EventArena>(
     let drain_actions = || {
         event_idx.iter().flat_map(move |&iv_idx| {
             let iv = &model.model.interventions[iv_idx];
-            iv.actions.iter().enumerate().filter_map(move |(action_idx, a)| {
-                let (src, is_count) = match a {
-                    Action::FractionTransfer(ft) => (ft.src.as_str(), false),
-                    Action::AbsoluteTransfer(at) => (at.src.as_str(), true),
-                    Action::Add(_) | Action::Set(_) => return None,
-                };
-                Some(Drain { src, event: iv.name.as_str(), iv_idx, action_idx, is_count })
+            iv.actions.iter().enumerate().flat_map(move |(action_idx, a)| {
+                (0..).map_while(move |k| drain_source(a, k)).map(move |(src, is_count)| Drain {
+                    src,
+                    event: iv.name.as_str(),
+                    iv_idx,
+                    action_idx,
+                    is_count,
+                })
             })
         })
     };
@@ -819,6 +985,25 @@ fn action_changes_f64(
             out.push((s, ChangeF64::Delta(-x)));
             out.push((d, ChangeF64::Delta(x)));
         }
+        Action::GroupedTransfer(gt) => {
+            // The ODE holds integer compartments as f64, so both arenas take
+            // the real-valued rules. Two changes per pair, in pair order.
+            let (cells, values): (Vec<(Arena, Arena)>, Vec<f64>) = match grouped_cells(model, gt)? {
+                GroupedCells::Int(cells) => (
+                    cells.iter().map(|&(s, d)| (Arena::Int(s), Arena::Int(d))).collect(),
+                    cells.iter().map(|&(s, _)| read_int[s]).collect(),
+                ),
+                GroupedCells::Real(cells) => (
+                    cells.iter().map(|&(s, d)| (Arena::Real(s), Arena::Real(d))).collect(),
+                    cells.iter().map(|&(s, _)| read_real[s]).collect(),
+                ),
+            };
+            let amounts = grouped_amounts_f64(gt, v, &values)?;
+            for (&(s, d), &x) in cells.iter().zip(&amounts) {
+                out.push((s, ChangeF64::Delta(-x)));
+                out.push((d, ChangeF64::Delta(x)));
+            }
+        }
     }
     Ok(())
 }
@@ -932,6 +1117,9 @@ pub struct ContinuousArena<'a> {
 ///                               x_s -= x,  x_d += x   S[s,:] -= dx,  S[d,:] += dx
 /// ```
 ///
+/// A grouped transfer of a fraction is the last rule on each of its
+/// (source, destination) pairs, with the one `f` and `∂f/∂θ`.
+///
 /// Every read a rule makes — the amount `v`, the source `x_s`, the row `S[s,:]`
 /// — is taken from the same snapshot the value change reads (the phase snapshot
 /// for events, the live state for sequential interventions), and where several
@@ -940,7 +1128,8 @@ pub struct ContinuousArena<'a> {
 /// the value computation beside it. The clamp's derivative is taken on its
 /// closed active piece `[0, 1]` and is zero outside it, where the value is
 /// locally constant in θ. An amount that reads compartment state, a
-/// `transfer(count = …)` (a nonsmooth `min`) and a real-compartment target have
+/// `transfer(count = …)`, grouped or not (a nonsmooth `min`), and a
+/// real-compartment target have
 /// no rule here: the gradient capability gate refuses them before this path
 /// runs, and reaching one is an internal error, never a silently incomplete `S`.
 pub struct SensBlock<'a> {
@@ -1040,6 +1229,39 @@ fn action_changes_sens(
             out.push(dx.iter().map(|x| -x).collect());
             out.push(dx);
         }
+        Action::GroupedTransfer(gt) => match gt.amount {
+            GroupedAmount::Fraction { .. } => {
+                // The fraction transfer's rule on each pair: two changes,
+                // `x_s -= x` then `x_d += x`, with `x = x_s · clamp(v)`.
+                if changes.len() != 2 * gt.pairs.len() {
+                    return Err(SimError::Validation(
+                        "internal: a grouped transfer did not make two changes per pair".into(),
+                    ));
+                }
+                let frac = v.clamp(0.0, 1.0);
+                let active = (0.0..=1.0).contains(&v);
+                for pair in changes.chunks_exact(2) {
+                    let s = int_target(pair[0].0)?;
+                    int_target(pair[1].0)?;
+                    let dx: Vec<f64> = (0..d)
+                        .map(|p| {
+                            let through_state = frac * snap_sens[s * d + p];
+                            if active { through_state + read_int[s] * dv[p] } else { through_state }
+                        })
+                        .collect();
+                    out.push(dx.iter().map(|x| -x).collect());
+                    out.push(dx);
+                }
+            }
+            GroupedAmount::Count { .. } => {
+                return Err(SimError::Validation(
+                    "internal: the ODE gradient path reached a grouped `transfer(count = …)`, \
+                     whose jump min(count, source) has no sensitivity rule; the gradient \
+                     capability gate should have refused this model"
+                        .into(),
+                ));
+            }
+        },
         Action::AbsoluteTransfer(_) => {
             return Err(SimError::Validation(
                 "internal: the ODE gradient path reached a `transfer(count = …)`, whose \
@@ -1352,6 +1574,43 @@ fn resolve_action(
                 _ => return Err(mixed_arena_err(&at.src, &at.dst)),
             }
         }
+        Action::GroupedTransfer(gt) => match grouped_cells(model, gt)? {
+            GroupedCells::Int(cells) => {
+                let counts: Vec<i64> = cells.iter().map(|&(s, _)| snap.int.counts[s]).collect();
+                let total: i64 = counts.iter().sum();
+                let moved = match gt.amount {
+                    GroupedAmount::Fraction { .. } => {
+                        // `.min(total)`: above 2^53 the product can round up.
+                        (((total as f64) * v.clamp(0.0, 1.0)).floor() as i64).min(total)
+                    }
+                    GroupedAmount::Count { .. } => {
+                        if v < 0.0 {
+                            return Err(grouped_negative_count_err(gt, v));
+                        }
+                        (v.round() as i64).min(total)
+                    }
+                };
+                let shares = allocate_by_occupancy(&counts, moved).ok_or_else(|| {
+                    SimError::Validation(format!(
+                        "internal: grouped transfer ({}) at t={t} cannot divide {moved} among \
+                         stages holding {counts:?}; a stage count is negative",
+                        crate::intervention::grouped_pairs_label(gt)
+                    ))
+                })?;
+                for (&(s, d), &x) in cells.iter().zip(&shares) {
+                    out.int.push(IntDelta { idx: s, delta: -x });
+                    out.int.push(IntDelta { idx: d, delta: x });
+                }
+            }
+            GroupedCells::Real(cells) => {
+                let values: Vec<f64> = cells.iter().map(|&(s, _)| snap.real.values[s]).collect();
+                let amounts = grouped_amounts_f64(gt, v, &values)?;
+                for (&(s, d), &x) in cells.iter().zip(&amounts) {
+                    out.real.push(RealDelta { idx: s, delta: -x });
+                    out.real.push(RealDelta { idx: d, delta: x });
+                }
+            }
+        },
     }
     Ok(())
 }
@@ -1379,6 +1638,9 @@ fn mixed_arena_err(src: &str, dst: &str) -> SimError {
          representation (both integer or both real compartments)"
     ))
 }
+
+#[cfg(test)]
+mod grouped_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1503,6 +1765,11 @@ mod tests {
                         Action::AbsoluteTransfer(at) => {
                             vec![(at.src.as_str(), name, false), (at.dst.as_str(), name, false)]
                         }
+                        Action::GroupedTransfer(gt) => gt
+                            .pairs
+                            .iter()
+                            .flat_map(|(s, d)| [(s.as_str(), name, false), (d.as_str(), name, false)])
+                            .collect(),
                         Action::Add(_) => vec![],
                     };
                     v.into_iter()

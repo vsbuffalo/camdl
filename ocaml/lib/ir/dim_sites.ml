@@ -324,6 +324,9 @@ let action_sites acc ?subject ~role:what (a : action) =
   | FractionTransfer { src = _; dst = _; fraction; _ } ->
     add acc ?subject ~role:(role "fraction") ~code:"E314" (Has dimensionless) (E fraction)
   | AbsoluteTransfer { src = _; dst = _; count = c } -> count "count" c
+  | GroupedTransfer { pairs = _; amount = GroupedFraction { fraction; _ } } ->
+    add acc ?subject ~role:(role "fraction") ~code:"E314" (Has dimensionless) (E fraction)
+  | GroupedTransfer { pairs = _; amount = GroupedCount { count = c } } -> count "count" c
   | Set { compartment = _; value; _ } -> count "value" value
   | AddAction { add_compartment = _; add_count; _ } -> count "count" add_count
 

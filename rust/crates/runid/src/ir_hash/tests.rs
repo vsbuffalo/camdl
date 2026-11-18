@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use ir::expr::{BinOp, Expr, ProjectedExpr, UnOp};
 use ir::intervention::{
-    Action, AddAction, FractionTransfer, Intervention, InterventionSchedule, RecurringSchedule, SetAction,
+    Action, AddAction, FractionTransfer, GroupedAmount, GroupedTransfer, Intervention, InterventionSchedule, RecurringSchedule, SetAction,
 };
 use ir::model::{
     BalanceSpec, Binding, Compartment, CompartmentKind, Dimension, InitialConditions, Integrator,
@@ -1334,6 +1334,12 @@ fn each_gradient_map_moves_the_gradient_digest_and_not_the_model_hash() {
             Action::FractionTransfer(f) => { f.fraction_grad.insert("beta".into(), g(Expr::const_(1.0))); }
             other => panic!("expected FractionTransfer, got {other:?}"),
         })),
+        ("a grouped transfer's fraction_grad", Box::new(|m| match &mut m.interventions[0].actions[0] {
+            Action::GroupedTransfer(GroupedTransfer {
+                amount: GroupedAmount::Fraction { fraction_grad, .. }, ..
+            }) => { fraction_grad.insert("beta".into(), g(Expr::const_(1.0))); }
+            other => panic!("expected a grouped fraction transfer, got {other:?}"),
+        })),
     ];
     // The sigma_sq case changes the draw method too, and the add and fraction
     // transfer cases need that action; each base is the same model with an
@@ -1360,6 +1366,12 @@ fn each_gradient_map_moves_the_gradient_digest_and_not_the_model_hash() {
                 fraction: Expr::param("beta"),
                 fraction_grad: Default::default(),
             });
+        }
+        if what == "a grouped transfer's fraction_grad" {
+            m.interventions[0].actions[0] = grouped(
+                &[("S", "R"), ("I", "R")],
+                GroupedAmount::Fraction { fraction: Expr::param("beta"), fraction_grad: Default::default() },
+            );
         }
         m
     };
@@ -1422,4 +1434,45 @@ fn the_gradient_mode_is_off_by_default_and_restored_after() {
     let mut with = m.clone();
     with.transitions[0].rate_grad.insert("beta".into(), ir::deriv::DerivEntry::Grad(Expr::pop("S")));
     assert_eq!(m.content_hash(), with.content_hash());
+}
+
+fn grouped(pairs: &[(&str, &str)], amount: GroupedAmount) -> Action {
+    Action::GroupedTransfer(GroupedTransfer {
+        pairs: pairs.iter().map(|(s, d)| ((*s).to_string(), (*d).to_string())).collect(),
+        amount,
+    })
+}
+
+/// Everything a grouped transfer does to the state is model identity: which
+/// cells it pairs, in which order (the order breaks allocation ties), whether
+/// the amount is a fraction or a count, and the amount.
+#[test]
+fn a_grouped_transfer_is_model_identity_in_every_field() {
+    use crate::inputs::model_ir_hash;
+    let frac = |f: f64| GroupedAmount::Fraction { fraction: Expr::const_(f), fraction_grad: Default::default() };
+    let with = |a: Action| {
+        let mut m = representative_model();
+        m.interventions[0].actions[0] = a;
+        model_ir_hash(&m)
+    };
+    let base = with(grouped(&[("S", "R"), ("I", "R")], frac(0.5)));
+    assert_eq!(base, with(grouped(&[("S", "R"), ("I", "R")], frac(0.5))), "the hash is a function of the action");
+    for (what, other) in [
+        ("the pair order", grouped(&[("I", "R"), ("S", "R")], frac(0.5))),
+        ("a destination", grouped(&[("S", "R"), ("I", "S")], frac(0.5))),
+        ("a source", grouped(&[("S", "R"), ("R", "R")], frac(0.5))),
+        ("the number of pairs", grouped(&[("S", "R"), ("I", "R"), ("R", "R")], frac(0.5))),
+        ("the fraction", grouped(&[("S", "R"), ("I", "R")], frac(0.25))),
+        ("fraction against count", grouped(&[("S", "R"), ("I", "R")], GroupedAmount::Count { count: Expr::const_(0.5) })),
+    ] {
+        assert_ne!(base, with(other), "{what} must re-key the model");
+    }
+    // Two plain fraction transfers over the same cells are a different model:
+    // they floor per cell.
+    let mut plain = representative_model();
+    plain.interventions[0].actions = vec![
+        Action::FractionTransfer(FractionTransfer { src: "S".into(), dst: "R".into(), fraction: Expr::const_(0.5), fraction_grad: Default::default() }),
+        Action::FractionTransfer(FractionTransfer { src: "I".into(), dst: "R".into(), fraction: Expr::const_(0.5), fraction_grad: Default::default() }),
+    ];
+    assert_ne!(base, model_ir_hash(&plain));
 }

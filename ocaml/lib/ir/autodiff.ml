@@ -1230,9 +1230,11 @@ let differentiate_ic = differentiate_coeff
 
 (** Fill a scheduled action's ∂amount/∂θ ([*_grad]) — the event-jump sensitivity
     source term the ODE gradient path applies when the effect fires (gh#275 §1g).
-    [AddAction]/[Set]/[FractionTransfer] carry a smooth jump map and are
-    differentiated; [AbsoluteTransfer]'s [min(count, source)] is nonsmooth (the
-    fit-time gradient gate refuses it), so it is passed through untouched. The
+    [AddAction]/[Set]/[FractionTransfer] and a [GroupedTransfer] of a
+    fraction carry a smooth jump map and are differentiated;
+    [AbsoluteTransfer]'s [min(count, source)], and a [GroupedTransfer] of a
+    count, are nonsmooth (the fit-time gradient gate refuses them), so they
+    are passed through untouched. The
     amount is differentiated as written — a compartment it reads ([Pop]) is a
     constant here, as in a rate — so an amount that depends on state has no
     ∂amount/∂state emitted; the gradient gate refuses such an action. *)
@@ -1247,7 +1249,12 @@ let differentiate_action (param_names : string list)
   | AddAction aa ->
     AddAction
       { aa with add_count_grad = differentiate_coeff aa.add_count param_names tfs tbls }
-  | AbsoluteTransfer _ -> a
+  | GroupedTransfer ({ amount = GroupedFraction { fraction; _ }; _ } as gt) ->
+    GroupedTransfer
+      { gt with amount = GroupedFraction
+          { fraction;
+            fraction_grad = differentiate_coeff fraction param_names tfs tbls } }
+  | AbsoluteTransfer _ | GroupedTransfer { amount = GroupedCount _; _ } -> a
 
 (** Fill the [grad] of every differentiable argument of an initial-state law
     (`I ~ poisson(rate = I0)`), so `∂/∂θ log p(x₀ | θ)` has a compiler-emitted

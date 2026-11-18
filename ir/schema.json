@@ -1042,6 +1042,37 @@
           "additionalProperties": false
         },
         {
+          "required": ["grouped_transfer"],
+          "properties": {
+            "grouped_transfer": {
+              "type": "object",
+              "description": "A transfer out of the stages of one cell of a staged compartment. `pairs` lists, in stage order, each source stage cell with its destination cell: at least two pairs, distinct sources, all cells integer or all real. Exactly one of `fraction` and `count` gives the amount, evaluated once and applied to the sum of the source cells",
+              "required": ["pairs"],
+              "properties": {
+                "pairs": {
+                  "type": "array",
+                  "minItems": 2,
+                  "items": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "minItems": 2,
+                    "maxItems": 2
+                  }
+                },
+                "fraction": { "$ref": "#/definitions/expr" },
+                "fraction_grad": { "$ref": "#/definitions/grad_map", "description": "∂fraction/∂θ, as on fraction_transfer; absent when empty" },
+                "count": { "$ref": "#/definitions/expr" }
+              },
+              "oneOf": [
+                { "required": ["fraction"], "not": { "required": ["count"] } },
+                { "required": ["count"], "not": { "anyOf": [{ "required": ["fraction"] }, { "required": ["fraction_grad"] }] } }
+              ],
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
           "required": ["set"],
           "properties": {
             "set": {

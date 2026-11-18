@@ -50,7 +50,8 @@ use ir::expr::{
     UnitLiteralWrap,
 };
 use ir::intervention::{
-    AbsoluteTransfer, Action, AddAction, CmpOp, FractionTransfer, SetAction, FireSource, Intervention, InterventionKind,
+    AbsoluteTransfer, Action, AddAction, CmpOp, FractionTransfer, GroupedAmount, GroupedTransfer,
+    SetAction, FireSource, Intervention, InterventionKind,
     InterventionSchedule, ObsReducer, ReactiveTrigger, RecurringSchedule, TriggerExpr,
     TriggerQuantity, TriggerThreshold,
 };
@@ -1256,6 +1257,25 @@ impl ContentAddressed for Action {
                 h.write_str(src);
                 h.write_str(dst);
                 count.hash_into(h);
+            }
+            Action::GroupedTransfer(GroupedTransfer { pairs, amount }) => {
+                h.write_u32(4);
+                h.write_len(pairs.len() as u64);
+                for (src, dst) in pairs {
+                    h.write_str(src);
+                    h.write_str(dst);
+                }
+                match amount {
+                    GroupedAmount::Fraction { fraction, fraction_grad } => {
+                        h.write_u32(0);
+                        fraction.hash_into(h);
+                        hash_grad_map(h, fraction_grad);
+                    }
+                    GroupedAmount::Count { count } => {
+                        h.write_u32(1);
+                        count.hash_into(h);
+                    }
+                }
             }
             Action::Set(SetAction { compartment, value, value_grad }) => {
                 h.write_u32(2);

@@ -828,6 +828,15 @@ let action_to_json (a : action) : Yojson.Safe.t =
       ("dst",   str at_.dst);
       ("count", expr_to_json at_.count);
     ])]
+  | GroupedTransfer gt ->
+    let pairs =
+      `List (List.map (fun (src, dst) -> `List [ str src; str dst ]) gt.pairs) in
+    obj [("grouped_transfer", obj (("pairs", pairs) ::
+      (match gt.amount with
+       | GroupedFraction { fraction; fraction_grad } ->
+         ("fraction", expr_to_json fraction)
+         :: grad_field "fraction_grad" fraction_grad
+       | GroupedCount { count } -> [ ("count", expr_to_json count) ])))]
   | Set sa ->
     obj [("set", obj ([
       ("compartment", str sa.compartment);
@@ -856,6 +865,22 @@ let action_of_json j =
         dst   = as_string (member "dst"   v);
         count = expr_of_json (member "count" v);
       }
+    | "grouped_transfer" ->
+      let pairs =
+        List.map (fun p ->
+          match as_list p with
+          | [ src; dst ] -> (as_string src, as_string dst)
+          | _ -> fail "grouped_transfer: each pair must be [source, destination]")
+          (as_list (member "pairs" v)) in
+      let amount =
+        match member_opt "fraction" v, member_opt "count" v with
+        | Some f, None ->
+          GroupedFraction { fraction = expr_of_json f;
+                            fraction_grad = grad_field_of v "fraction_grad" }
+        | None, Some c -> GroupedCount { count = expr_of_json c }
+        | _ -> fail "grouped_transfer must have exactly one of 'fraction' and 'count'"
+      in
+      GroupedTransfer { pairs; amount }
     | "set" ->
       Set {
         compartment = as_string (member "compartment" v);

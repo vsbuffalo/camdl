@@ -92,6 +92,10 @@ type error =
       (** [E516]: (compartment, law family, the kind of compartment the law
           seeds); an integer law on a real compartment or the reverse. *)
   | InitLawOnBalanceTarget of string          (** [E517]: a compartment both drawn from a law and set by the balance, which overwrites the draw. *)
+  | MalformedGroupedTransfer of string * string
+      (** [E521]: (intervention, what is wrong) for a grouped transfer with
+          fewer than two pairs, a repeated source cell, or cells that are
+          not all integer or all real. *)
   | NonFiniteConstant of expr * float * site
       (** [E520]: a sub-expression made only of literals whose value is NaN or
           infinite, such as [(0 - 8) ^ 0.5], with that value. The innermost
@@ -131,6 +135,8 @@ let error_to_string = function
   | InitLawOnBalanceTarget comp ->
     Printf.sprintf "initial condition '%s' is drawn from a law but is the balance target"
       comp
+  | MalformedGroupedTransfer (iv, what) ->
+    Printf.sprintf "grouped transfer of '%s' %s" iv what
   | NonFiniteConstant (_, v, _) ->
     Printf.sprintf "a sub-expression of literals evaluates to %F" v
 
@@ -468,6 +474,26 @@ let validate (m : model) : (unit, error list) result =
                                check_expr_r ~site ft.fraction
       | AbsoluteTransfer at -> check_target at.src; check_target at.dst;
                                check_expr_r ~site at.count
+      | GroupedTransfer gt ->
+        let malformed what =
+          errors := MalformedGroupedTransfer (iv.name, what) :: !errors in
+        let sources = List.map fst gt.pairs in
+        let cells = sources @ List.map snd gt.pairs in
+        List.iter check_target cells;
+        if List.length gt.pairs < 2 then
+          malformed "lists fewer than two (source, destination) pairs";
+        (match List.find_opt (fun c ->
+           List.length (List.filter (( = ) c) sources) > 1) sources with
+         | Some c ->
+           malformed (Printf.sprintf "lists the source cell '%s' more than once" c)
+         | None -> ());
+        let declared = List.filter (fun c -> SS.mem c comp_names) cells in
+        if List.exists (fun c -> SS.mem c real_comps) declared
+           && List.exists (fun c -> not (SS.mem c real_comps)) declared then
+          malformed "mixes integer and real compartments";
+        (match gt.amount with
+         | GroupedFraction { fraction; _ } -> check_expr_r ~site fraction
+         | GroupedCount { count } -> check_expr_r ~site count)
       | Set s               -> check_target s.compartment;
                                check_expr_r ~site s.value
       | AddAction a         -> check_target a.add_compartment;

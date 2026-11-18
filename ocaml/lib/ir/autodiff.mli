@@ -51,11 +51,12 @@ val differentiate_ic :
 
 (** Fill a scheduled action's derivative of its amount with respect to each
     parameter (its [*_grad]): the term the ODE gradient adds to the state
-    sensitivities when the effect fires. [AddAction], [Set] and
-    [FractionTransfer] are differentiated with the same rules as
-    [differentiate_ic]; [AbsoluteTransfer], whose jump [min(count, source)]
-    is not smooth and which the gradient gate refuses, is returned
-    unchanged. *)
+    sensitivities when the effect fires. [AddAction], [Set],
+    [FractionTransfer] and a [GroupedTransfer] of a fraction are
+    differentiated with the same rules as [differentiate_ic];
+    [AbsoluteTransfer] and a [GroupedTransfer] of a count, whose jump
+    [min(count, source)] is not smooth and which the gradient gate refuses,
+    are returned unchanged. *)
 val differentiate_action :
   string list -> time_function list -> table list -> action -> action
 

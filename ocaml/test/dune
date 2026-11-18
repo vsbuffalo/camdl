@@ -222,3 +222,12 @@
  (name test_competing_exits)
  (modules test_competing_exits)
  (libraries compiler ir alcotest yojson))
+
+
+; The `grouped_transfer` IR action (proposal
+; 2026-11-17-unified-staged-residence): JSON, the validator's shape rules
+; (E521) and the derivative of its fraction.
+(test
+ (name test_grouped_transfer_ir)
+ (modules test_grouped_transfer_ir)
+ (libraries compiler ir alcotest yojson))
