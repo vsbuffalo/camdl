@@ -93,10 +93,11 @@ let lub_dur a b =
     their kinds. The expander builds it from its context once the lookup
     tables exist.
 
-    [classify] follows a [let] into its body without a guard against cycles,
-    so it does not terminate on a [let] defined in terms of itself; the
-    expander reports such a [let] (E201) before these checks run but leaves
-    it in [let_tbl]. *)
+    [classify] and [is_definite_instant] follow a [let] into its body and
+    stop at a [let] already being followed, which then has the class of an
+    expression with no time meaning ([TOther], not definite): a [let]
+    defined in terms of itself is left in [let_tbl], and the expander
+    reports it (E201) whichever check reaches it first (gh#1211). *)
 type env = {
   let_tbl : (string, let_binding) Hashtbl.t;
       (** The model's [let]s by name. *)
@@ -134,9 +135,14 @@ let param_kind_of_name env name =
     The answer depends only on the expression's structure and the
     declarations it names, so one expression gets one class wherever it
     appears; the bounds of a parameter declaration never affect the class of
-    its uses. An indexed reference has the class of its unindexed name. Does
-    not terminate on a cyclic [let]: see {!env}. *)
-let rec classify env (e : expr) : tclass =
+    its uses. An indexed reference has the class of its unindexed name. A
+    cyclic [let] classifies as [TOther] at the point it recurs: see {!env}. *)
+let rec classify_in env (seen : string list) (e : expr) : tclass =
+  (* [seen]: the lets being followed, innermost first. *)
+  let classify env e = classify_in env seen e in
+  let follow name (lb : let_binding) =
+    if List.mem name seen then TOther else classify_in env (name :: seen) lb.lbody
+  in
   match e with
   | EConst _ -> TOther
   | EUnit (_, Days)    | EUnit (_, Weeks)    -> TExact
@@ -147,10 +153,10 @@ let rec classify env (e : expr) : tclass =
        the reference (E327) when it resolves it. *)
     TInstant
   | EIdent (name, _) ->
-    (* A let takes its body's class (no cycle guard; see [env]), then a
-       parameter its kind's, then TOther. *)
+    (* A let takes its body's class (TOther where it recurs; see [env]),
+       then a parameter its kind's, then TOther. *)
     (match Hashtbl.find_opt env.let_tbl name with
-     | Some lb -> classify env lb.lbody
+     | Some lb -> follow name lb
      | None ->
        match param_kind_of_name env name with
        | Some `Instant  -> TInstant
@@ -159,7 +165,7 @@ let rec classify env (e : expr) : tclass =
   | EIndex (name, _, _) ->
     (* Indexed param/let — kind doesn't depend on the index. *)
     (match Hashtbl.find_opt env.let_tbl name with
-     | Some lb -> classify env lb.lbody
+     | Some lb -> follow name lb
      | None ->
        match param_kind_of_name env name with
        | Some `Instant  -> TInstant
@@ -204,6 +210,8 @@ let rec classify env (e : expr) : tclass =
   | EList _ | ERange _ -> TOther
   | EObsAccess _ -> TOther
   | ERunMember _ -> TOther   (* a contrast operand — not a time/duration *)
+
+let classify env (e : expr) : tclass = classify_in env [] e
 
 (* ── Sink walk: Rule 1 at Instant ± Duration nodes ──────────────────── *)
 
@@ -292,11 +300,15 @@ let is_classified_duration = function
   | TExact | TCalendar -> true
   | TInstant | TOther  -> false
 
-let rec is_definite_instant env (e : expr) : bool =
+(* [seen]: the lets being followed; a let that recurs is not definite (see
+   [env]). *)
+let rec is_definite_instant_in env (seen : string list) (e : expr) : bool =
+  let is_definite_instant env e = is_definite_instant_in env seen e in
   match e with
   | EIdent (name, _) | EIndex (name, _, _) ->
     (match Hashtbl.find_opt env.let_tbl name with
-     | Some lb -> is_definite_instant env lb.lbody
+     | Some _ when List.mem name seen -> false
+     | Some lb -> is_definite_instant_in env (name :: seen) lb.lbody
      | None -> classify env e = TInstant)
   | EBinOp (Add, l, r) ->
     (is_definite_instant env l && is_classified_duration (classify env r))
@@ -306,6 +318,8 @@ let rec is_definite_instant env (e : expr) : bool =
   | ECond (_, a, b) -> is_definite_instant env a && is_definite_instant env b
   | EFuncCall _ -> classify env e = TInstant
   | _ -> false
+
+let is_definite_instant env (e : expr) : bool = is_definite_instant_in env [] e
 
 (* The misuse at this node, if any. Only the node itself is judged; the
    walk below visits every sub-expression. *)
