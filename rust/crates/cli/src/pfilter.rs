@@ -904,7 +904,9 @@ fn run_pfilter(
                 ).unwrap_or_else(|e| {
                     out.error(filter_failed(format!("pfilter replicate {} error: {:?}", rep + 1, e))).exit();
                 });
-                bar.inc(1);
+                // The replicate is added to the running mean before its count
+                // is ticked, so the line printed at the last count names the
+                // mean of every finite replicate (the sibling of gh#1269).
                 if result.log_likelihood.is_finite() {
                     if let Ok(mut g) = acc.lock() {
                         g.0 += result.log_likelihood;
@@ -913,6 +915,7 @@ fn run_pfilter(
                         bar.set(crate::out::progress::ll(g.0 / g.1 as f64));
                     }
                 }
+                bar.inc(1);
                 (result.log_likelihood, collapse_message(&result))
             }).unzip()
         });

@@ -86,3 +86,75 @@ fn the_last_plain_progress_line_is_the_total() {
     assert_eq!(counts.iter().filter(|l| l.contains("40/40")).count(), 1,
         "and the total is printed once: {counts:?}");
 }
+
+/// The best log-likelihood the last plain progress line names is the best in
+/// the stored landscape (gh#1269). A point's value was folded into the running
+/// best after its count was ticked, so the line printed at the last count
+/// could miss the last point's value. One thread visits the points in order,
+/// so a landscape whose best is its last point shows it on some of these
+/// seeds.
+#[test]
+fn the_last_plain_progress_line_names_the_landscapes_best() {
+    let ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let tmp = Tmp(std::env::temp_dir()
+        .join(format!("camdl_survey_best_{}_{ns}", std::process::id())));
+    let dir = &tmp.0;
+    std::fs::create_dir_all(dir).unwrap();
+    let src = dir.join("m.camdl");
+    std::fs::write(&src, MODEL).unwrap();
+    let out = Command::new(camdlc_bin()).env_remove("CLICOLOR_FORCE").arg(&src).output().unwrap();
+    assert!(out.status.success(), "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
+    std::fs::write(dir.join("m.ir.json"), &out.stdout).unwrap();
+    std::fs::write(dir.join("cases.tsv"),
+        "time\tcases\n1\t12\n2\t14\n3\t17\n4\t19\n5\t22\n6\t24\n").unwrap();
+
+    for seed in 1..=8 {
+        let store = dir.join(format!("seed{seed}"));
+        std::fs::create_dir_all(&store).unwrap();
+        let out = Command::new(camdl_bin())
+            .current_dir(&store)
+            .env_remove("CLICOLOR_FORCE")
+            .env_remove("CAMDL_OUTPUT_DIR")
+            .env("CAMDL_SKIP_VERSION_CHECK", "1")
+            .args(["--progress", "plain", "survey", "../m.ir.json", "--data", "../cases.tsv",
+                   "--estimate", "beta=0.1:0.9", "--fixed", "gamma=0.2", "--fixed", "N0=1000",
+                   "--n-points", "3", "--eval", "simulate", "--parallel", "1",
+                   "--seed", &seed.to_string()])
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "survey failed:\n{err}");
+        let printed = err.lines().rev()
+            .find_map(|l| l.split("best ll=").nth(1))
+            .map(|v| v.split_whitespace().next().unwrap_or_default().to_string())
+            .unwrap_or_else(|| panic!("a progress line names the best:\n{err}"));
+        let landscape = find(&store, "landscape.tsv").expect("the stored landscape");
+        let text = std::fs::read_to_string(&landscape).unwrap();
+        let mut lines = text.lines().filter(|l| !l.starts_with('#'));
+        let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+        let col = header.iter().position(|h| *h == "loglik").expect("a loglik column");
+        let best = lines
+            .filter_map(|l| l.split('\t').nth(col).and_then(|v| v.parse::<f64>().ok()))
+            .filter(|v| v.is_finite())
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert_eq!(printed, format!("{best:.1}"),
+            "seed {seed}: the progress line's best is the landscape's ({}):\n{err}", landscape.display());
+    }
+}
+
+/// The first file named `name` under `root`.
+fn find(root: &Path, name: &str) -> Option<PathBuf> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).ok()?.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.file_name().is_some_and(|n| n == name) {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
