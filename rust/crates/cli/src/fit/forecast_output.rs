@@ -323,6 +323,8 @@ pub(crate) fn run_forecast(
         dt: job.dt,
         base_seed: job.seed,
         record_expected: false,
+        // Arms are compared before the origin only when there are arms.
+        trace_pre_origin: arms.len() > 1,
         binomial: job.binomial,
     };
     // Every arm runs the same draws with the same seeds; each repeats the
@@ -374,6 +376,12 @@ pub(crate) struct ArmForecast {
 /// written. It does not hash the latent states: a pre-origin difference that
 /// no observation reads before the origin is not caught here.
 pub(crate) fn check_shared_past(base: &Forecast, arm: &Forecast, label: &ArmLabel, draw_refs: &[DrawRef]) -> Result<(), String> {
+    if base.pre_origin.len() != base.n_draws || arm.pre_origin.len() != arm.n_draws {
+        return Err(format!(
+            "internal error: the forecast arm {} cannot be checked against the fitted model: \
+             a filter recorded no trace before the origin",
+            label.describe()));
+    }
     for (d, (b, a)) in base.pre_origin.iter().zip(&arm.pre_origin).enumerate() {
         if let Some((time, what)) = b.first_difference(a) {
             let at = time.map(|t| format!(" at t = {t}")).unwrap_or_default();

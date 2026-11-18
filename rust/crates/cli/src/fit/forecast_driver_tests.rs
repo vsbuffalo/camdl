@@ -146,7 +146,7 @@ impl Setup {
     {
         let params = vec![self.params(); n_draws];
         fixed_origin_forecast(plan, &self.streams, compiled, &params, DriverConfig {
-            n_particles, dt: 1.0, base_seed: seed, record_expected: true,
+            n_particles, dt: 1.0, base_seed: seed, record_expected: true, trace_pre_origin: true,
             binomial: sim::rng::BinomialAlgorithm::Btpe,
         })
     }
@@ -535,7 +535,7 @@ fn the_forecast_draws_with_the_sampler_it_is_given() {
         let plan = s.plan(7.0, &["weekly_cases"]);
         let compiled = s.extended(&plan);
         fixed_origin_forecast(plan, &s.streams, compiled, &[s.params(), s.params()], DriverConfig {
-            n_particles: 100, dt: 1.0, base_seed: 3, record_expected: false, binomial,
+            n_particles: 100, dt: 1.0, base_seed: 3, record_expected: false, trace_pre_origin: false, binomial,
         }).unwrap()
     };
     let (btpe, btrs, btrs_again) = (run(Btpe), run(Btrs), run(Btrs));
@@ -600,4 +600,35 @@ fn arms_that_differ_only_after_the_origin_share_the_filter_before_it() {
     let err = check_shared_past(&base, &early, &label("early"), &refs).unwrap_err();
     assert!(err.contains("the forecast arm 'early' departs from the fitted model before the forecast origin t = 24"),
         "{err}");
+}
+
+/// D84 for a single-arm forecast: recording only the stops after the origin
+/// and the targets, instead of every stop, leaves the forecast bit-identical
+/// (its draws, expected observations, origin states and last-assimilation
+/// ESS) and builds no pre-origin trace; with no trace, the check on arms
+/// refuses rather than passing.
+#[test]
+fn a_single_arm_forecast_is_the_same_under_the_narrowed_stop_list() {
+    let s = fixture_setup(24, "narrowed");
+    let plan = s.plan(14.0, &["weekly_cases", "daily_cases"]);
+    let run = |trace_pre_origin| {
+        fixed_origin_forecast(plan.clone(), &s.streams, s.extended(&plan), &vec![s.params(); 3], DriverConfig {
+            n_particles: 200, dt: 1.0, base_seed: 7, record_expected: true, trace_pre_origin,
+            binomial: sim::rng::BinomialAlgorithm::Btpe,
+        }).unwrap()
+    };
+    let (narrow, every) = (run(false), run(true));
+    assert_eq!(narrow.draws, every.draws);
+    assert_eq!(narrow.expected, every.expected);
+    assert_eq!(narrow.origin_states, every.origin_states);
+    assert_eq!(narrow.last_assimilation, every.last_assimilation);
+    assert!(narrow.draws.iter().flatten().any(|&y| y > 0.0), "a vacuous comparison of zeros");
+    assert_eq!((narrow.pre_origin.len(), every.pre_origin.len()), (0, 3));
+
+    use crate::fit::forecast_arms::ArmLabel;
+    use crate::fit::forecast_output::{check_shared_past, DrawRef};
+    let refs: Vec<DrawRef> = (0..3).map(|i| DrawRef { cloud_row: i, key: None }).collect();
+    let label = ArmLabel { scenario: "late".into(), sweep: Vec::new() };
+    let err = check_shared_past(&every, &narrow, &label, &refs).unwrap_err();
+    assert!(err.contains("recorded no trace before the origin"), "{err}");
 }

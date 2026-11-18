@@ -55,7 +55,8 @@ pub(crate) struct Forecast {
     #[cfg_attr(not(test), allow(dead_code))] // the command does not ask for it
     pub expected: Option<Vec<Vec<f64>>>,
     /// Per draw, what its filter did at the stops at or before the origin:
-    /// the record two scenario arms must share (D50).
+    /// the record two scenario arms must share (D50). Empty unless
+    /// [`DriverConfig::trace_pre_origin`] asked for it.
     pub pre_origin: Vec<PreOriginTrace>,
     /// Per draw, its filter's last assimilation (D85): `None` when no stop
     /// before the origin held an observed value.
@@ -162,6 +163,11 @@ pub(crate) struct DriverConfig {
     /// Records the filter's ancestry, whose memory grows with particles ×
     /// compartments × steps; tests read it, the command does not.
     pub record_expected: bool,
+    /// Record every stop and build each draw's [`PreOriginTrace`], which
+    /// scenario arms are compared by. Only a forecast with more than one arm
+    /// needs it; without it the filter keeps its record only where the
+    /// forecast reads it (D84).
+    pub trace_pre_origin: bool,
     /// The binomial sampler the propagation draws use (gh#747): the one the
     /// fit's method ran, so a forecast continues the process the fit
     /// filtered with the same draws.
@@ -221,11 +227,14 @@ pub(crate) fn fixed_origin_forecast(
         binomial: config.binomial,
     };
 
-    // D84: keep the prequential record only where it is read below: every
-    // stop. Those at or before the origin feed each draw's
-    // [`PreOriginTrace`], which scenario arms are checked against; those
-    // after it, the death check and the targets.
-    let record_at = PrequentialStops::every();
+    // D84: keep the prequential record only where it is read below: the
+    // stops after the origin (the death check) and the targets, and, when
+    // scenario arms are to be compared, every stop at or before the origin
+    // too, which feeds each draw's [`PreOriginTrace`].
+    let record_at = match config.trace_pre_origin {
+        true => PrequentialStops::every(),
+        false => PrequentialStops::only(after_origin.iter().copied().chain(at.iter().map(|&(_, ui)| ui))),
+    };
 
     let n = config.n_particles;
     let mut draws: Vec<Vec<f64>> = vec![Vec::with_capacity(param_sets.len() * n); at.len()];
@@ -281,8 +290,10 @@ pub(crate) fn fixed_origin_forecast(
                 e[k].extend(anc.projections[ui].iter().map(|per_stream| per_stream[si]));
             }
         }
-        pre_origin.push(pre_origin_trace(&before_origin, &union_times, &result.ll_increments,
-            &result.ess_trace, &preq, n).map_err(|e| fail(None, e))?);
+        if config.trace_pre_origin {
+            pre_origin.push(pre_origin_trace(&before_origin, &union_times, &result.ll_increments,
+                &result.ess_trace, &preq, n).map_err(|e| fail(None, e))?);
+        }
         // `ess_trace` holds each stop's ESS after the weights are set and
         // before the resampling call.
         last_assimilation.push(before_origin.iter().rev().find(|&&i| obs_model.assimilates_at(i))
