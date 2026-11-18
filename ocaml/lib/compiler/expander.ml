@@ -289,9 +289,6 @@ type context = {
   mutable filename        : string;         (* source filename for diagnostic locs *)
       (** The model file's name, written into every diagnostic location
           whose [file] the parser left empty. *)
-  mutable expanded_comp_cache : string list;
-      (** Every expanded compartment name, in order. Written by
-          [build_lookup_tables] and read nowhere. *)
   mutable dim_decls       : dimensions_entry list;
       (** The [dimensions] entries as written. *)
   mutable dim_registry    : (string * string list) list;
@@ -435,7 +432,6 @@ let empty_context ?(source_dir = "") ?(filename = "<input>") () = {
   file_sha256          = Hashtbl.create 8;
   source_dir;
   filename;
-  expanded_comp_cache  = [];
   dim_decls            = [];
   dim_registry         = [];
   reported_undeclared_dims = Hashtbl.create 8;
@@ -2701,12 +2697,10 @@ let build_lookup_tables ctx =
   let ft = Hashtbl.create (List.length ctx.func_decls) in
   List.iter (fun (fd : func_decl) -> Hashtbl.replace ft fd.fname fd) ctx.func_decls;
   ctx.func_tbl <- ft;
-  (* expanded compartment names: prime the hash table and cache *)
+  (* expanded compartment names: prime the hash table *)
   let ec = Hashtbl.create 64 in
-  let expanded = all_expanded_compartments ctx in
-  List.iter (fun n -> Hashtbl.replace ec n ()) expanded;
-  ctx.expanded_comp_tbl <- ec;
-  ctx.expanded_comp_cache <- expanded
+  List.iter (fun n -> Hashtbl.replace ec n ()) (all_expanded_compartments ctx);
+  ctx.expanded_comp_tbl <- ec
 
 (* ── Table helpers ───────────────────────────────────────────────────────── *)
 
@@ -4451,7 +4445,7 @@ end = struct
       Some (Runtime { name = n; desc = "an observation anchor" })
     else
       let env = Time_typing.env_of_ctx ~let_tbl:ctx.let_tbl
-          ~param_decls:ctx.param_decls ~origin_set:(ctx.origin <> None) in
+          ~param_decls:ctx.param_decls in
       match Time_typing.param_kind_of_name env n with
       | Some `Instant -> Some (Runtime { name = n; desc = "an instant parameter" })
       | Some `Duration | None -> None
@@ -4615,8 +4609,7 @@ let calendar_instant_expr ctx (e : expr) : expr =
    `Time_census.instant_env_of` reads from the declarations, so the expander
    and the census find the same comparisons with model time. *)
 let census_env ctx : Time_census.instant_env =
-  let env = Time_typing.env_of_ctx ~let_tbl:ctx.let_tbl ~param_decls:ctx.param_decls
-      ~origin_set:(ctx.origin <> None) in
+  let env = Time_typing.env_of_ctx ~let_tbl:ctx.let_tbl ~param_decls:ctx.param_decls in
   { Time_census.instant_name =
       (fun n -> Time_typing.param_kind_of_name env n = Some `Instant);
     let_body = (fun n ->
@@ -6307,7 +6300,6 @@ let rec mentions_calendar_unit = function
 
 let time_env ctx =
   Time_typing.env_of_ctx ~let_tbl:ctx.let_tbl ~param_decls:ctx.param_decls
-    ~origin_set:(ctx.origin <> None)
 
 (* The affine day-equivalent of a calendar duration, for the hints that offer a
    fixed span. Folded from the literal, so `5 'years` suggests 1826 days and
