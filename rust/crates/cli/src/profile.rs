@@ -1779,7 +1779,7 @@ fn run_profile(
         // profile).
         let written = match fit.as_ref() {
             Some(f) => crate::run_meta::write_fit_sidecar_with_config(
-                &base_seg, &f.anchor, &f.text, std::path::Path::new(&ir_path), &sidecar),
+                &base_seg, &f.anchor, &f.text, &f.text, std::path::Path::new(&ir_path), &sidecar),
             None => crate::run_meta::write_fit_sidecar(
                 &base_seg, std::path::Path::new(""), std::path::Path::new(&ir_path), &sidecar),
         };

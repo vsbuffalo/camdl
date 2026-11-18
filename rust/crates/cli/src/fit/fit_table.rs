@@ -61,7 +61,7 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
     };
     let baseline_loaded = baseline_idx.and_then(|i| {
         let entry = pre_filtered[i];
-        load_archived_fit_toml(&entry.fit_dir)
+        load_resolved_config(&entry.fit_dir)
             .ok()
             .map(|cfg| (entry, cfg))
     });
@@ -70,7 +70,7 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
     let mut rows: Vec<TableRow> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
     for entry in &pre_filtered {
-        let cfg = match load_archived_fit_toml(&entry.fit_dir) {
+        let cfg = match load_resolved_config(&entry.fit_dir) {
             Ok(c) => Some(c),
             Err(e) => {
                 errors.push(format!("{}: {}", entry.fit_dir.display(), e));
@@ -322,23 +322,15 @@ mod unlabelled_hint_tests {
     }
 }
 
-/// Load the fit.toml archived inside `<fit_dir>/fit.toml.original`.
-/// Hard-cut on a missing archive: per the back-compat-is-a-non-goal
-/// posture the reader errors with an actionable message rather than
-/// silently falling back to the source config (`FitView.source_config`,
-/// which can move or change).
-fn load_archived_fit_toml(fit_dir: &std::path::Path) -> Result<FitConfig, String> {
-    let archive = fit_dir.join("fit.toml.original");
-    if !archive.exists() {
-        return Err(format!(
-            "no fit.toml.original at {} (predates step 6 of the \
-             experiment-management proposal, 2026-04-28). Re-run the \
-             fit (the content hash is stable, so the re-run lands in \
-             the same fit_dir and writes the missing artifact) or \
-             remove the directory.",
-            archive.display()));
-    }
-    FitConfig::load(&archive.to_string_lossy())
+/// Load the configuration a fit folder's fits ran under, its
+/// `fit.resolved.toml`. Hard-cut on a missing file: per the
+/// back-compat-is-a-non-goal posture the reader errors with an actionable
+/// message rather than falling back to the verbatim `fit.toml.original` or the
+/// source config (`FitView.source_config`, which can move or change), neither
+/// of which holds a command-line override or a sweep point's values.
+fn load_resolved_config(fit_dir: &std::path::Path) -> Result<FitConfig, String> {
+    let resolved = crate::run_meta::require_resolved_config(fit_dir)?;
+    FitConfig::load(&resolved.to_string_lossy())
 }
 
 fn matches_outer_filters(entry: &FitDirEntry, args: &FitTableArgs) -> bool {
@@ -811,14 +803,14 @@ mod tests {
     #[test]
     fn an_archived_config_with_a_now_refused_key_still_loads() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("fit.toml.original"), "\
+        std::fs::write(dir.path().join(crate::run_meta::RESOLVED_CONFIG), "\
 [model]\ncamdl = \"m.camdl\"\n\
 [estimate]\nbeta = { bounds = [0.01, 2.0], prior = { half_normal = { sigma = 1.0 } } }\n\
 [fixed]\nN0 = 1000\n\
 [method]\nalgorithm = \"pgas\"\nbackend = \"chain_binomial\"\nchains = 2\n\
 particles = 100\nsweeps = 10\nuse_nuts = false\nmax_tree_depth = 8\n").unwrap();
-        load_archived_fit_toml(dir.path())
-            .expect("fit table and handle resolution read the archived config");
+        load_resolved_config(dir.path())
+            .expect("fit table and handle resolution read the stored config");
     }
     use std::path::{Path, PathBuf};
 

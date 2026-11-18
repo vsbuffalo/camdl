@@ -441,11 +441,6 @@ fn run_fit(
         file_only: run_config::FileOnly { method: file_method, seeds: file_seeds },
     } = resolved;
     let method: config_v2::Method = config.inference.method.clone().expect("resolved with a method");
-    // The config every fit folder this run writes stores: the text resolved,
-    // with what the command line set in the problem half (gh#1268); never the
-    // file read again.
-    let stored_config: String = problem_flags.stored_text(&config_text)
-        .unwrap_or_else(|e| out.fail(format!("error: {e}")));
 
     // ── Validate sweeps ───────────────────────────────────────────────────
     // Validate: swept params must be in [fixed], not [estimate]
@@ -858,7 +853,7 @@ fn run_fit(
         .unwrap_or_else(|| "fit".to_string());
     let ir_version_str = ir::IR_VERSION.trim().to_string();
     // gh#147 (M3.2): fit segments whose fit-level sidecar (label + model hash
-    // + the `fit.toml.original` config-diff archive) has been written this
+    // + `fit.toml.original` and `fit.resolved.toml`) has been written this
     // run. The fit level is a path segment with no CAS record, so this sidecar
     // is the fit-wide home `walk_fits_root` / `table_row` read; write it once
     // per segment (each sweep point keys its own FitDigest → its own segment).
@@ -1168,10 +1163,19 @@ fn run_fit(
                 seg_sidecar.estimated = roles.estimated;
                 seg_sidecar.fixed = roles.fixed;
                 seg_sidecar.partition = Some(roles.partition);
+                // The folder keeps the text read once, as written, and the
+                // configuration its fits ran under: that text with what the
+                // command line set in the problem half (gh#1268) and the
+                // folder's own `[fixed]`, a sweep point's values applied.
+                let resolved_config = run_config::resolved_config_text(
+                    &config_text, problem_flags, &sweep_config.fixed,
+                )
+                .unwrap_or_else(|e| out.fail(format!("error: {e}")));
                 if let Err(e) = crate::run_meta::write_fit_sidecar_with_config(
                     seg,
                     std::path::Path::new(&fit_path),
-                    &stored_config,
+                    &config_text,
+                    &resolved_config,
                     std::path::Path::new(&sweep_config.model.camdl),
                     &seg_sidecar,
                 ) {
