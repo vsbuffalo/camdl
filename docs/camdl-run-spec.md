@@ -7393,8 +7393,9 @@ camdl fit predict [FIT]
                             NAME=PATH` binds by name. Mixing the forms is an error
 --obs NAME                  stream a bare `--data FILE` binds to
 --fit PATH                  fit.toml supplying [data.observations] (used only when
-                            no --data flag was given) and the likelihood objective
-                            (`ic_free`, always used)
+                            no --data flag was given), the likelihood objective
+                            (`ic_free`, always used) and [config]
+                            allow_degenerate_rates (on if it or the flag is)
 --time-format auto|numeric|date
 --pf-max-substeps N         deterministic per-call compute budget
 --binomial btpe|btrs        chain-binomial sampler (default btpe); btrs is
@@ -7543,6 +7544,8 @@ part of the leaf's identity, and the full objective leaves the key unchanged.
 --render                    also write an interactive landscape.html
 --output DIR                output root (default ./results)
 --label TEXT   --force   --parallel N
+--allow-degenerate-rates    a collapsing rate is 0; also set by the --fit
+                            config's [config] allow_degenerate_rates. Keyed
 ```
 
 ### `camdl compare [PATHS…]`

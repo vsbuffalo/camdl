@@ -2243,6 +2243,15 @@ pub struct SurveyArgs {
     #[command(flatten)]
     pub forcing_extrapolation: ForcingExtrapolationArg,
 
+    /// Evaluate a rate that collapses (a division by an empty compartment, a
+    /// power that is NaN) as 0 instead of failing the trajectory, as
+    /// `pfilter` and `profile` do under the same flag. A `--fit` config sets
+    /// it as `[config] allow_degenerate_rates = true`; either turns it on. It
+    /// changes every point's log-likelihood, so it is part of the survey's
+    /// run identity.
+    #[arg(long, default_value_t = false)]
+    pub allow_degenerate_rates: bool,
+
     /// fit.toml supplying [estimate] bounds and [data] (fit-aware mode).
     /// The model scored is MODEL; the config's [model] is not read. A
     /// `[data] holdout_after` removes every row ending after the cutoff from every

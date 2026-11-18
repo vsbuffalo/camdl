@@ -115,6 +115,9 @@ struct ResolvedSurveyInputs {
     /// scoring, as `fit run` removes it from training (gh#1059). `None`
     /// without one, and in inline mode.
     training_rows: Option<Vec<(String, usize)>>,
+    /// The fit config's `[config] allow_degenerate_rates`, which `fit run`
+    /// applied to the fit (gh#1235). `false` in inline mode.
+    fit_allow_degenerate_rates: bool,
 }
 
 // ─── cmd_survey entry point ──────────────────────────────────────────────────
@@ -187,6 +190,14 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
             out.fail(format!("error: {}", e));
         }
     };
+    // A rate that collapses (a division by an empty compartment) is 0 under
+    // `--allow-degenerate-rates` or the `--fit` config's `[config]
+    // allow_degenerate_rates`, and fails the trajectory otherwise — under the
+    // particle filter, a point where only some particles collapse still scores,
+    // to a different value (gh#1235). Applied before any point is scored and
+    // keyed in the survey's identity below.
+    let allow_degenerate_rates = a.allow_degenerate_rates || resolved.fit_allow_degenerate_rates;
+    sim::eval_stats::set_allow_degenerate_rates(allow_degenerate_rates);
 
     // Resolve `--eval auto` against the compiled model. `Auto` picks
     // Pfilter when the model has stochastic process noise
@@ -347,6 +358,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
         eval_replicates: a.eval_replicates as u32,
         objective,
         allow_forcing_extrapolation: crate::forcing_extrapolation::allowed(),
+        allow_degenerate_rates,
         training_rows:   resolved.training_rows.as_deref(),
         bounds:          &bounds_vec,
         fixed:           &fixed_vec,
@@ -1063,6 +1075,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
             scenario: scenario_opt,
             objective: config.likelihood_objective(),
             training_rows,
+            fit_allow_degenerate_rates: config.config.allow_degenerate_rates,
             parameters_provenance,
             notices,
             roles,
@@ -1266,6 +1279,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, a: &crate::args::SurveyArgs)
             // Inline mode has no `ic_free` key: every observation is scored.
             objective: crate::fit::config_v2::LikelihoodObjective::Full,
             training_rows: None,
+            fit_allow_degenerate_rates: false,
         })
     }
 }
