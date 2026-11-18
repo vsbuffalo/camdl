@@ -688,3 +688,53 @@ fn the_particle_count_defaults_to_the_fits_and_is_recorded_and_addressed() {
     assert!(!out.status.success(), "{}", stderr(&out));
     assert!(stderr(&out).contains("this predict runs neither (--mode free_forward)"), "{}", stderr(&out));
 }
+
+/// `forecast.json`'s `held_out` record for a `[data.holdout]` file: the
+/// weekly rows after day 24 in their own file are counted and digested under
+/// `holdout` (the daily rows end at day 24). Changing one held-out value
+/// (the week ending 35, 127 → 128) changes that digest and nothing else in
+/// the record: the count stays, and the daily stream's record and the
+/// training rows' digests are unchanged.
+#[test]
+fn the_held_out_digest_of_a_holdout_file_follows_its_values() {
+    let record = |week_35: &str| -> serde_json::Value {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        copy_fixture(dir);
+        let text = std::fs::read_to_string(dir.join("weekly_cases.tsv")).unwrap();
+        let mut lines = text.lines();
+        let header = lines.next().unwrap().to_string();
+        let (mut train, mut hold) = (vec![header.clone()], vec![header]);
+        for l in lines {
+            let t: f64 = l.split('\t').next().unwrap().parse().unwrap();
+            let l = if t == 35.0 { format!("35\t{week_35}") } else { l.to_string() };
+            if t <= 24.0 { train.push(l) } else { hold.push(l) }
+        }
+        std::fs::write(dir.join("weekly_cases.tsv"), train.join("\n") + "\n").unwrap();
+        std::fs::write(dir.join("weekly_hold.tsv"), hold.join("\n") + "\n").unwrap();
+        let daily = std::fs::read_to_string(dir.join("daily_cases.tsv")).unwrap();
+        let daily: Vec<&str> = daily.lines().enumerate()
+            .filter(|(i, l)| *i == 0 || l.split('\t').next().unwrap().parse::<f64>().unwrap() <= 24.0)
+            .map(|(_, l)| l).collect();
+        std::fs::write(dir.join("daily_cases.tsv"), daily.join("\n") + "\n").unwrap();
+        fit_config(dir, PMMH, "",
+            "daily_cases = \"daily_cases.tsv\"\nweekly_cases = \"weekly_cases.tsv\"",
+            "\n[data.holdout]\nweekly_cases = \"weekly_hold.tsv\"\n");
+        let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "1 weeks", "--n-draws", "2"]);
+        assert!(out.status.success(), "fit predict: {}", stderr(&out));
+        let m: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(forecast_dir(dir).join("forecast.json")).unwrap()).unwrap();
+        serde_json::json!({ "held_out": m["held_out"], "state": m["state_set"]["streams"] })
+    };
+    let (a, b) = (record("127"), record("128"));
+    let file = |r: &serde_json::Value, stream: &str| -> serde_json::Value {
+        r["held_out"].as_array().unwrap().iter().find(|s| s["stream"] == stream).unwrap()["files"].clone()
+    };
+    let weekly = file(&a, "weekly_cases");
+    assert_eq!(weekly.as_array().unwrap().len(), 1);
+    assert_eq!((&weekly[0]["file"], &weekly[0]["rows"]), (&serde_json::json!("holdout"), &serde_json::json!(6)));
+    assert_eq!(file(&b, "weekly_cases")[0]["rows"], 6);
+    assert_ne!(weekly[0]["digest"], file(&b, "weekly_cases")[0]["digest"], "the digest follows the held-out values");
+    assert_eq!(file(&a, "daily_cases"), file(&b, "daily_cases"));
+    assert_eq!(a["state"], b["state"], "the training rows are unchanged");
+}
