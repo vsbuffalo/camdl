@@ -1,0 +1,74 @@
+# A/B fixture for the sparse-coupling constant-fold pass, unparenthesised
+# spelling (gh#1217). It is sparse_coupling_ab.camdl with the spatial term
+# written W[l,q] * I_agg[q] / N[q], which parses as (W * I_agg) / N: a zero
+# cell zeroes the numerator of a quotient rather than a factor of a product.
+# The expander emits a dense 8-term FOI Reduce; the fold collapses it to the
+# 2 nonzero-W terms, as it does for the guarded W * (...) spelling. Every
+# patch starts populated and the model has no movement between patches, so
+# no N[q] is ever zero and the unfolded model evaluates every term.
+#
+# Regenerate both .ir.json siblings with the camdlc under test:
+#   CAMDL_NO_CONSTANT_FOLD=1 camdlc sparse_coupling_ab_div.camdl --no-dim-check \
+#       > sparse_coupling_ab_div_unfolded.ir.json
+#   camdlc sparse_coupling_ab_div.camdl --no-dim-check \
+#       > sparse_coupling_ab_div_folded.ir.json
+
+time_unit = 'days
+
+compartments { S, E, I, R }
+
+dimensions {
+  patch = [p0, p1, p2, p3, p4, p5, p6, p7]
+  age   = [a0]
+}
+
+stratify(by = patch)
+stratify(by = age)
+
+let N[l in patch]     = sum(a in age, S[l, a] + E[l, a] + I[l, a] + R[l, a])
+let I_agg[l in patch] = sum(a in age, I[l, a])
+
+let beta = 2.145
+let seas = 0.75 + 0.5 * school(t)
+
+forcing {
+  school : periodic 'ratio {
+    period = 365.25 'days
+    step   = 1 'days
+    on     = [0:182]
+  }
+}
+
+tables {
+  W : patch × patch = [[0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5],
+                        [0.5, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0],
+                        [0.0, 0.5, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0],
+                        [0.0, 0.0, 0.5, 0.0, 0.5, 0.0, 0.0, 0.0],
+                        [0.0, 0.0, 0.0, 0.5, 0.0, 0.5, 0.0, 0.0],
+                        [0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.5, 0.0],
+                        [0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.5],
+                        [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0]]
+}
+
+transitions {
+  infection[l in patch, a in age] : S[l, a] --> E[l, a]
+    @ beta * seas * S[l, a] * (
+        (I_agg[l] + 0.0000001) / N[l]
+      + 0.05 * sum(q in patch, W[l, q] * I_agg[q] / N[q])
+      )
+
+  progression[l in patch, a in age] : E[l, a] --> I[l, a] @ 0.125 * E[l, a]
+  recovery[l in patch, a in age]    : I[l, a] --> R[l, a] @ 0.143 * I[l, a]
+}
+
+init {
+  S[l in patch, a in age] = 900
+  E[l in patch, a in age] = 10
+  I[l in patch, a in age] = 10
+  R[l in patch, a in age] = 80
+}
+
+simulate {
+  from = 0 'days
+  to   = 365 'days
+}

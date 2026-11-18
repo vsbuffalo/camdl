@@ -10,9 +10,13 @@
 //! Two committed fixtures compiled from the SAME source
 //! (`sparse_coupling_ab.camdl`, a sparse ring W with K=2 neighbours per patch):
 //!   - `sparse_coupling_ab_unfolded.ir.json` — `camdlc` with the fold OFF
-//!   - `sparse_coupling_ab_folded.ir.json`   — `camdlc CAMDL_CONSTANT_FOLD=1`
+//!   - `sparse_coupling_ab_folded.ir.json`   — `camdlc` with the fold ON
 //!
-//! See the source header for the exact regeneration commands. The fixtures are
+//! and a second pair, `sparse_coupling_ab_div_{unfolded,folded}.ir.json`, from
+//! `sparse_coupling_ab_div.camdl`, the same model with the spatial term written
+//! `W[l, q] * I_agg[q] / N[q]` (gh#1217).
+//!
+//! See the sources' headers for the regeneration commands. The fixtures are
 //! static IR (the test does not recompile), so the default-flag flip is
 //! decoupled from this gate.
 //!
@@ -110,10 +114,33 @@ fn trajectory_hash(traj: &sim::state::Trajectory) -> u64 {
 
 #[test]
 fn gate_constant_fold_is_byte_identical() {
+    check_fold_ab("sparse_coupling_ab");
+}
+
+/// gh#1217: the unparenthesised spelling `W[l, q] * I_agg[q] / N[q]` parses as
+/// `(W * I_agg) / N`, so a zero cell zeroes a quotient's numerator rather than
+/// a factor. The fold drops those terms as it does for the guarded
+/// `W * (...)` spelling — the same number of FOI terms survive — and the
+/// trajectory is byte-identical to the unfolded model's.
+#[test]
+fn gate_constant_fold_unparenthesised_quotient_is_byte_identical() {
+    check_fold_ab("sparse_coupling_ab_div");
+    let (guarded, _) = load("sparse_coupling_ab_folded");
+    let (quotient, _) = load("sparse_coupling_ab_div_folded");
+    assert_eq!(
+        max_foi_reduce_terms(&quotient),
+        max_foi_reduce_terms(&guarded),
+        "the two spellings of the sparse FOI sum fold to different term counts"
+    );
+}
+
+/// Load `<stem>_unfolded` and `<stem>_folded` and check both assertions of the
+/// module doc on them.
+fn check_fold_ab(stem: &str) {
     sim::eval_stats::set_allow_degenerate_rates(true);
 
-    let (unfolded, unfolded_bytes) = load("sparse_coupling_ab_unfolded");
-    let (folded, folded_bytes) = load("sparse_coupling_ab_folded");
+    let (unfolded, unfolded_bytes) = load(&format!("{stem}_unfolded"));
+    let (folded, folded_bytes) = load(&format!("{stem}_folded"));
 
     // ── 1. NON-VACUITY ──────────────────────────────────────────────────────
     // The fold must actually have fired on this fixture, or the soundness check

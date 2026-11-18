@@ -4,30 +4,38 @@
 
     The expander turns [sum(q in patch, W[p, q] * ...)] into one
     {!Ir.Reduce} with a term for every patch, each holding a
-    {!Ir.TableLookup} of [W] at constant indices. {!fold_model} writes the
-    cell's value in place of each such lookup, then applies a few identities
-    bottom-up: [0 * x] and [x * 0] become [0], [1 * x] and [x * 1] become
-    [x], [0 + x], [x + 0] and [x - 0] become [x], [+], [-], [*], [min] and
-    [max] of two literals become their value, and a [Reduce] loses its zero
-    terms. With [W] sparse, a sum over [P] patches keeps the [k] nonzero
-    terms per row. The runtime needs no sparse evaluator: it evaluates the
-    same {!Ir.Reduce}, with fewer terms.
+    {!Ir.TableLookup} of [W] at constant indices. {!fold_model} first
+    replaces by [0] every quotient whose numerator is structurally zero, and
+    drops every term of a [Reduce] that is ({!structurally_zero}): a
+    product with a factor that is a lookup of a zero cell, or a quotient
+    with such a numerator. It writes each remaining cell's value in place
+    of its lookup and applies a few identities bottom-up: [0 * x] and
+    [x * 0] become [0], [1 * x] and [x * 1] become [x], [0 + x], [x + 0]
+    and [x - 0] become [x], [+], [-], [*], [min] and [max] of two literals
+    become their value, and a [Reduce] loses its zero terms. With [W]
+    sparse, a sum over [P] patches keeps the [k] nonzero terms per row,
+    however the term is parenthesised: in
+
+    {@camdl[
+      infection[p in patch] : S[p] --> I[p] @ beta * S[p] * sum(q in patch, W[p, q] * I[q] / N[q])
+    ]}
+
+    the term parses as [(W[p, q] * I[q]) / N[q]], and a zero [W[p, q]] in
+    the numerator makes it structurally zero, as it does in
+    [W[p, q] * (I[q] / N[q])]. The same holds for the derivatives of such a
+    term in the gradient maps, which are not inside a [Reduce]. The runtime
+    needs no sparse evaluator: it evaluates the same {!Ir.Reduce}, with
+    fewer terms.
 
     The pass changes the IR only when the model has an inline table whose
     every cell is a numeric literal. Otherwise {!fold_model} returns the
     model unchanged, and the identities are not applied anywhere. A table
     with a parameter in a cell is left as lookups. Division, powers, [mod] and
     comparisons of literals are not folded, so that their handling of
-    degenerate values stays the evaluator's, and there is no [0 / x] rule.
-    The collapse therefore depends on how the term is written: in
-
-    {@camdl[
-      infection[p in patch] : S[p] --> I[p] @ beta * S[p] * sum(q in patch, W[p, q] * I[q] / N[q])
-    ]}
-
-    the term parses as [(W[p, q] * I[q]) / N[q]], so a zero cell leaves
-    [0 / N_a] behind and the term is kept; written
-    [W[p, q] * (I[q] / N[q])], it folds to [0] and is dropped.
+    degenerate values stays the evaluator's, and there is no [0 / x] rule:
+    a division whose numerator folds to [0] outside a dropped sum term,
+    such as [beta * (0 * I) / N], is kept, and a zero [N] there is still
+    the runtime's numerical error.
 
     The pass runs after differentiation and before loop-invariant code
     motion, so it folds the gradient fields as well, and never meets an
@@ -42,11 +50,16 @@
     sum. [0 * x] is [0] only when [x] is finite, so a factor that would
     evaluate to infinity or NaN, such as an unguarded division by an empty
     patch, folds to [0] where the unfolded model would report a numerical
-    error. A lookup whose constant index is out of range is left for the
-    runtime's out-of-bounds policy. The Rust test [gate_constant_fold_ab]
-    checks, on a sparse-coupling model, that trajectories are identical with
-    and without the pass. Setting [CAMDL_NO_CONSTANT_FOLD] in the
-    environment turns it off. *)
+    error. A structurally zero sum term is dropped on the same terms: the
+    contribution of a patch the contact matrix does not couple is zero by
+    the model's own statement, so [W[p, q] * I[q] / N[q]] with a zero cell
+    and an empty patch [q] contributes nothing, in either spelling, where
+    the unfolded model would evaluate [0 / 0]. A lookup whose constant
+    index is out of range is left for the runtime's out-of-bounds policy.
+    The Rust test [gate_constant_fold_ab] checks, on a sparse-coupling model
+    in both spellings, that trajectories are identical with and without the
+    pass. Setting [CAMDL_NO_CONSTANT_FOLD] in the environment turns it
+    off. *)
 
 open Ir
 
@@ -80,7 +93,35 @@ let fold_bin_consts op a b : expr option =
   | Max -> Some (Const (Float.max a b))
   | _ -> None
 
-let rec fold tbls (e : expr) : expr =
+(* The value of a cell of a literal table at a constant index, if the index
+   is constant and in range. *)
+let rec literal_cell tbls name idx : float option =
+  match (fold tbls idx, Hashtbl.find_opt tbls name) with
+  | Const fi, Some arr ->
+      let i = int_of_float (Float.floor fi) in
+      if i >= 0 && i < Array.length arr then Some arr.(i) else None
+  | _ -> None
+
+(** Whether an expression is zero by the structure of its arithmetic
+    rather than by evaluation: a lookup of a zero cell of a literal table, a
+    product with a structurally zero factor, a quotient with a structurally
+    zero numerator, the negation of one, or a sum or difference of two.
+    [(W[p, q] * I[q]) / N[q]] with a zero [W[p, q]] is one, and so is
+    [W[p, q] * (I[q] / N[q])]. {!fold} asks of a [Reduce] term and of a
+    quotient's numerator before folding them, so a denominator is never
+    evaluated for a contribution the table zeroes. *)
+and structurally_zero tbls (e : expr) : bool =
+  match e with
+  | TableLookup (name, [ idx ]) -> literal_cell tbls name idx = Some 0.0
+  | BinOp { op = Mul; left; right } -> structurally_zero tbls left || structurally_zero tbls right
+  | BinOp { op = Div; left; _ } -> structurally_zero tbls left
+  | BinOp { op = Add | Sub; left; right } -> structurally_zero tbls left && structurally_zero tbls right
+  | UnOp { op = Neg; arg } -> structurally_zero tbls arg
+  | UncheckedDim r -> structurally_zero tbls r.inner
+  | Reduce terms -> List.for_all (structurally_zero tbls) terms
+  | _ -> false
+
+and fold tbls (e : expr) : expr =
   match e with
   (* `ObsAnchor` is a leaf here and must stay one — its value is not
      known until a run binds its data, so folding it to a number at compile time
@@ -109,6 +150,10 @@ let rec fold tbls (e : expr) : expr =
           else TableLookup (name, [ Const fi ])
       | idx', _ -> TableLookup (name, [ idx' ]))
   | TableLookup (name, idxs) -> TableLookup (name, List.map (fold tbls) idxs)
+  (* A quotient whose numerator a zero cell zeroes is the zero it would be
+     written as [W * (x / y)]; the test is on the unfolded numerator, so a
+     numerator that only evaluates to zero keeps its division. *)
+  | BinOp { op = Div; left; _ } when structurally_zero tbls left -> Const 0.0
   | BinOp { op; left; right } -> (
       let l = fold tbls left and r = fold tbls right in
       match (op, l, r) with
@@ -122,7 +167,15 @@ let rec fold tbls (e : expr) : expr =
       | Sub, x, c when is_zero c -> x
       | _ -> BinOp { op; left = l; right = r })
   | Reduce terms ->
-      let kept = List.filter_map (fun t -> let t' = fold tbls t in if is_zero t' then None else Some t') terms in
+      let kept =
+        List.filter_map
+          (fun t ->
+            if structurally_zero tbls t then None
+            else
+              let t' = fold tbls t in
+              if is_zero t' then None else Some t')
+          terms
+      in
       (match kept with [] -> Const 0.0 | [ t ] -> t | _ -> Reduce kept)
 
 (* Fold a deriv_entry / grad_map: only a real [DEGrad] expression carries an
