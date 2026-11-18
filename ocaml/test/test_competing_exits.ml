@@ -976,6 +976,30 @@ let test_lineage_parent_weights_split_across_stages () =
     [ (4.0, 0.0, 9.0, 11.0); (1.0, 1.0, 1.0, 3.0); (0.0, 0.0, 25.0, 0.0);
       (0.0, 0.0, 0.0, 11.0) ]
 
+(* A rate nonlinear in a real parent is E601 at every stage count; on the
+   stage copies it is reported once per written member, by its written name,
+   showing the rate as written rather than the share. *)
+let test_lineage_e601_names_the_member () =
+  let rate = "mu * E[a] * I[a] * I[a] / (K + E[a]) / K" in
+  let messages stages =
+    List.map (fun (d : Diagnostics.diagnostic) -> d.message)
+      (diags_with ~code:"E601" (lineage_src ~stages rate)) in
+  Alcotest.(check int) "stages = 1: one E601 per member" 2 (List.length (messages 1));
+  let ms = messages 3 in
+  Alcotest.(check int) "stages = 3: one E601 per member" 2 (List.length ms);
+  List.iter2 (fun m (member, written) ->
+    List.iter (fun needle ->
+      if not (contains ~needle m) then
+        Alcotest.failf "E601 should contain %S, got: %s" needle m)
+      [ Printf.sprintf "transition '%s'" member; written ];
+    List.iter (fun needle ->
+      if contains ~needle m then
+        Alcotest.failf "E601 should not contain %S, got: %s" needle m)
+      [ "_s1"; "_s2"; "_s3" ])
+    ms
+    [ ("treat_pre", "mu * E[pre] * I[pre] * I[pre] / (K + E[pre]) / K");
+      ("treat_sch", "mu * E[sch] * I[sch] * I[sch] / (K + E[sch]) / K") ]
+
 (* A rate that cannot be differentiated (E600) is reported once per written
    member of a competing exit, by its written name. *)
 let test_competing_exit_e600_names_the_member () =
@@ -1084,4 +1108,6 @@ let () =
        [ Alcotest.test_case "the source is the whole compartment cell" `Quick
            test_lineage_source_is_the_whole_cell;
          Alcotest.test_case "parent weights split across the stages" `Quick
-           test_lineage_parent_weights_split_across_stages ]) ]
+           test_lineage_parent_weights_split_across_stages;
+         Alcotest.test_case "E601 names the member" `Quick
+           test_lineage_e601_names_the_member ]) ]

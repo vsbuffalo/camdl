@@ -6651,31 +6651,44 @@ let sole_with_sign (stoich : (string * int) list) (sign : int) : string option =
    nonlinear use of a parent count is rejected with E601 pointing at the
    transition; a structurally-valid (empty-weights) lineage record is still
    emitted so compilation continues collecting diagnostics, while the E601
-   blocks a successful compile. *)
+   blocks a successful compile.
+
+   [written] is the member as written when the [via] lowering made the
+   transition ({!written_source}): the refusal then names that member and
+   shows its rate as written, and the copies of one member report it once. *)
 let resolve_lineage (ctx : context) (tr : Ast.transition_decl)
+    ?(written : Dimcheck.transition_source option)
     ~(sources : string list) ~(tr_name : string) (rate : Ir.expr) : Ir.transition_lineage option =
   if not tr.trlineage then None
   else begin
     let cls = Lineage.classify_parents ~sources rate in
     match cls.Lineage.nonlinear with
     | Some nl ->
-      Diagnostics.error ctx.diags
-        ~code:"E601"
-        ~loc:(diag_loc_of_ast_ctx ctx tr.trloc)
-        ~message:(Printf.sprintf
+      let name, where = match written with
+        | Some src ->
+          (src.member, Printf.sprintf "in its rate as written, `%s`" src.rate)
+        | None ->
+          (tr_name, Printf.sprintf "in the rate expression (inside %s)"
+                      (Pp_expr.to_string nl.Lineage.context)) in
+      let message = Printf.sprintf
           "lineage tracking on transition '%s' requires linear \
            dependence on parent compartments. Found nonlinear use \
-           of '%s' in the rate expression (inside %s)."
-          tr_name nl.Lineage.comp
-          (Pp_expr.to_string nl.Lineage.context))
-        ~hint:"options: (1) rewrite the rate so the parent appears \
-               as a top-level linear factor, absorbing the \
-               nonlinearity into other parameters; (2) remove the \
-               #[lineage] annotation — v1 lineage tracking does not \
-               support nonlinear parent dependence; (3) wait for \
-               Phase 4 lineage support (nonlinear rates with \
-               explicit attribution semantics)."
-        ();
+           of '%s' %s."
+          name nl.Lineage.comp where in
+      if not (List.exists (fun (d : Diagnostics.diagnostic) ->
+                d.code = "E601" && d.message = message) ctx.diags.diags) then
+        Diagnostics.error ctx.diags
+          ~code:"E601"
+          ~loc:(diag_loc_of_ast_ctx ctx tr.trloc)
+          ~message
+          ~hint:"options: (1) rewrite the rate so the parent appears \
+                 as a top-level linear factor, absorbing the \
+                 nonlinearity into other parameters; (2) remove the \
+                 #[lineage] annotation — v1 lineage tracking does not \
+                 support nonlinear parent dependence; (3) wait for \
+                 Phase 4 lineage support (nonlinear rates with \
+                 explicit attribution semantics)."
+          ();
       Some { Ir.is_lineage_event = true; Ir.parent_pool_weights = [] }
     | None ->
       let weights = Lineage.parent_pool_weights ~sources rate in
@@ -7052,9 +7065,9 @@ let expand_transitions_counted ctx =
             | None -> base_name
             | Some s -> base_name ^ "_" ^ s
           in
+          let written = written_source ctx ~family ~binder_copy env name_suffix in
           Option.iter (fun src ->
-            ctx.lowered_sources <- (tr_name, src) :: ctx.lowered_sources)
-            (written_source ctx ~family ~binder_copy env name_suffix);
+            ctx.lowered_sources <- (tr_name, src) :: ctx.lowered_sources) written;
           (* A stage copy of a competing exit takes its share of the whole
              compartment cell, so lineage takes every stage of the cell as
              the source, as it takes the cell when it is unstaged. *)
@@ -7068,7 +7081,8 @@ let expand_transitions_counted ctx =
                   r.res_stage_levels
               | _ -> src_names
           in
-          let lineage = resolve_lineage ctx tr ~sources:lineage_sources ~tr_name rate in
+          let lineage =
+            resolve_lineage ctx tr ?written ~sources:lineage_sources ~tr_name rate in
           {
             Ir.name            = tr_name;
             Ir.stoichiometry   = stoich;
