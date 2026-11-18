@@ -14049,7 +14049,7 @@ let expand_scenarios ctx : Ir.preset list =
     | Some { out_trajectories = Some ot; _ } ->
       (match ot.otschedule with
        | SchedAt (_ :: _ as ts) ->
-         Some (Lower.instant_list_const ctx ~what:"a scenario time"
+         Some (Lower.instant_list_const ctx ~what:"an output time"
                  ~context:"output trajectories.at" ts)
        | _ -> None)
     | _ -> None
