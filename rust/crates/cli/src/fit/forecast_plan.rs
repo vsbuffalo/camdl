@@ -676,8 +676,12 @@ fn target_design(
 /// held-out rows and, for a declared tiling, the targets the tiling continues
 /// to) against the periods between consecutive times of its `emit_schedule`.
 /// A data period that overlaps a schedule period without being it is a
-/// conflict. A stream with no emit schedule, or a schedule with no period over
-/// a data period, has nothing to disagree with.
+/// conflict. Only the reporting intervals this forecast reaches are judged,
+/// the reach D80 uses: data periods ending at or before `reach` (a held-out
+/// row past it is not this forecast's), against every schedule period that
+/// overlaps them, one crossing the reach included. A stream with no emit
+/// schedule, or a schedule with no period over a data period, has nothing to
+/// disagree with.
 fn check_schedule_agrees(
     s: &PlanStream,
     stream: &str,
@@ -685,10 +689,14 @@ fn check_schedule_agrees(
     targets: &[Measures],
     reach: f64,
 ) -> Result<(), StreamRefusal> {
-    let last_data = s.training.iter().map(|r| r.measures.end())
-        .chain(s.held_out.iter().map(|h| h.row.measures.end()))
-        .fold(reach, f64::max);
-    let Some(times) = emit_times(s.obs, last_data) else { return Ok(()) };
+    let Some(mut times) = emit_times(s.obs, reach) else { return Ok(()) };
+    // The schedule period that crosses the reach, so a data period ending at
+    // or before it is compared with every period it overlaps.
+    if let Some(ObservationSchedule::Regular(r)) = s.obs.emit_schedule.as_ref() {
+        if let Some(&last) = times.last() {
+            times.push(last + r.step);
+        }
+    }
     let schedule: Vec<Measures> = times.windows(2)
         .filter(|w| w[1] > w[0])
         .map(|w| Measures::Period(period(w[0], w[1])))
@@ -703,7 +711,8 @@ fn check_schedule_agrees(
         .map(|r| (r.measures, format!("training row {}", r.position)))
         .chain(s.held_out.iter()
             .map(|h| (h.row.measures, HeldOutRow { file: h.file, position: h.row.position }.describe())))
-        .chain(tiled);
+        .chain(tiled)
+        .filter(|(m, _)| m.end() <= reach);
     for (m, from) in data {
         if let Some(q) = schedule.iter().find(|q| overlaps(&m, q) && !same_span(&m, q)) {
             return Err(StreamRefusal::ScheduleConflict {
@@ -1175,6 +1184,27 @@ mod tests {
         ]).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("[21, 28)") && msg.contains("declared tiling") && msg.contains("[21, 30)"), "{msg}");
+    }
+
+    /// D82 judges the reporting intervals this forecast reaches, as D80
+    /// does: a held-out row past the reach that cuts across the schedule
+    /// does not refuse a forecast whose targets agree with it.
+    #[test]
+    fn a_schedule_conflict_past_the_reach_does_not_refuse_the_forecast() {
+        let train: Vec<ObservedRow> = (0..3).map(|i| row(i, 7.0 * i as f64, 7.0 * (i + 1) as f64)).collect();
+        let rows = BTreeMap::from([("weekly".to_string(), train.clone())]);
+        let mut wobs = weekly();
+        wobs.emit_schedule = Some(ObservationSchedule::Regular(RegularSchedule { start: 0.0, step: 7.0, end: 63.0 }));
+        let held = vec![HeldOut { file: RowFile::Holdout, row: row(0, 50.0, 57.0) }];
+        let plan = ForecastPlan::new(partition(&rows), 14.0, &[
+            PlanStream { obs: &wobs, training: &train, held_out: &held, design: DesignInput::NotSupplied },
+        ]).unwrap();
+        assert_eq!(plan.targets().len(), 2);
+        // Within the reach the same row is refused.
+        let err = ForecastPlan::new(partition(&rows), 42.0, &[
+            PlanStream { obs: &wobs, training: &train, held_out: &held, design: DesignInput::NotSupplied },
+        ]).unwrap_err();
+        assert!(matches!(&err, PlanError::NoTargets { refusals } if matches!(refusals[..], [StreamRefusal::ScheduleConflict { .. }])), "{err:?}");
     }
 
     /// D80: a held-out row of a stream with a declared cadence that is not
