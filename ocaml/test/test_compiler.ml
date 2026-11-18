@@ -17851,7 +17851,57 @@ let test_gh1243_accepted_unchanged () =
        ~rec_from:"5" ~rec_to:"90 'days"
        ~out_at:"date_range(origin, count = 2, calendar_months = 1)" ())
 
+(* The anchored instants (`last_obs + …`) decide their offset's dimension in
+   [classify_anchor], from the offset alone: anything but a time is E335 at
+   the position, with or without an origin. Pinned beside the folded instants
+   of gh#1243, which accepted a non-time unit by another path. *)
+let anchored_refused ~what src =
+  compile_expect_error_code ~code:"E335" ~contains:what src
+
+let anchored_rate = "last_obs + 4 'per_day"
+let anchored_mixed = "last_obs + 4 'days + 1 'per_day"
+let anchored_mixed_paren = "last_obs + (4 'days + 1 'per_day)"
+
+let test_gh1243_anchored_simulate_to () =
+  List.iter (fun off ->
+    anchored_refused ~what:"observation anchor"
+      (anchored_horizon_src off);
+    anchored_refused ~what:"observation anchor"
+      (anchored_horizon_src ~extra:"origin = date(\"2020-01-01\")" off))
+    [anchored_rate; anchored_mixed; anchored_mixed_paren];
+  anchored_refused ~what:"must be a duration (dimension T)"
+    (anchored_horizon_src anchored_rate)
+
+let test_gh1243_anchored_scenario_to () =
+  List.iter (fun off ->
+    anchored_refused ~what:"observation anchor"
+      (anchored_horizon_src ~extra:(Printf.sprintf
+         "scenarios { forecast { simulate { to = %s } } }" off) "80 'days"))
+    [anchored_rate; anchored_mixed; anchored_mixed_paren]
+
+let test_gh1243_anchored_breakpoint () =
+  List.iter (fun off ->
+    anchored_refused ~what:"observation anchor"
+      (anchored_forcing_src (Printf.sprintf
+         "        breakpoints = [30 'days, %s]\n\
+         \        values      = [1.0, 0.8, 0.6]" off)))
+    [anchored_rate; anchored_mixed; anchored_mixed_paren]
+
+let test_gh1243_anchored_window_end () =
+  List.iter (fun off ->
+    anchored_refused ~what:"observation anchor"
+      (bspline_model (Printf.sprintf {|'per_day {
+        window  = [0 'days, %s]
+        n_basis = 4
+        coefs   = [0.3, 0.4, 0.5, 0.3]
+      }|} off)))
+    [anchored_rate; anchored_mixed; anchored_mixed_paren]
+
 let gh1243_tests = [
+  "an anchored simulate.to with a non-time offset is E335", test_gh1243_anchored_simulate_to;
+  "an anchored scenario to with a non-time offset is E335", test_gh1243_anchored_scenario_to;
+  "an anchored breakpoint with a non-time offset is E335", test_gh1243_anchored_breakpoint;
+  "an anchored window end with a non-time offset is E335", test_gh1243_anchored_window_end;
   "simulate.from: a non-time unit beside origin is E315", test_gh1243_simulate_from;
   "simulate.to: a non-time unit beside origin is E315", test_gh1243_simulate_to;
   "a scenario's to: a non-time unit beside origin is E315", test_gh1243_scenario_to;
