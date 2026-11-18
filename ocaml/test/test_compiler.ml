@@ -13973,6 +13973,43 @@ let test_init_closed_binding_cycle_is_named () =
   Alcotest.(check bool) "a diamond closes over its parameter" true
     (closed = [ ("A", add (Ir.Param "N0") (Ir.Param "N0")) ])
 
+(* The same guard in [Autodiff.binding_reach], which the state derivative
+   uses to ask whether a binding's body reaches a compartment: on a cycle among
+   bindings its recursion did not end. Reached through
+   [differentiate_rate_state] on a rate that reads a cyclic binding. *)
+let test_binding_reach_cycle_is_named () =
+  let b name e : Ir.binding = { bname = name; bexpr = e } in
+  let add l r = Ir.BinOp { op = Ir.Add; left = l; right = r } in
+  let bindings =
+    [ b "a" (Ir.BindingRef "b"); b "b" (add (Ir.BindingRef "a") (Ir.Pop "S")) ] in
+  let rate = Ir.BinOp { op = Ir.Mul; left = Ir.Param "beta"; right = Ir.BindingRef "a" } in
+  (* Two routes to the bindings: the derivative recursing into a body, and,
+     under a nonsmooth operator, [binding_reach] asking whether the body
+     reaches the state at all. *)
+  let under_abs =
+    Ir.BinOp { op = Ir.Mul; left = Ir.Param "beta";
+               right = Ir.UnOp { op = Ir.Abs; arg = Ir.BindingRef "a" } } in
+  List.iter (fun (what, rate) ->
+    let prev = Sys.signal Sys.sigalrm
+        (Sys.Signal_handle (fun _ -> raise Compile_timed_out)) in
+    let restore () = ignore (Unix.alarm 0); Sys.set_signal Sys.sigalrm prev in
+    match ignore (Unix.alarm 5);
+      Autodiff.differentiate_rate_state rate [ "S" ] [] [] bindings with
+    | _ -> restore (); Alcotest.failf "%s: a binding cycle was differentiated" what
+    | exception Failure msg ->
+      restore ();
+      Alcotest.(check bool) (what ^ ": names the cycle: " ^ msg) true
+        (contains_substring ~needle:"a -> b -> a" msg)
+    | exception Compile_timed_out ->
+      restore (); Alcotest.failf "%s: did not terminate on a binding cycle" what
+    | exception Stack_overflow ->
+      restore (); Alcotest.failf "%s: stack overflow on a binding cycle" what)
+    [ ("derivative", rate); ("binding_reach under abs", under_abs) ];
+  (* Non-vacuity: the acyclic version differentiates, with a term for S. *)
+  let acyclic = [ b "b" (add (Ir.Param "k") (Ir.Pop "S")); b "a" (Ir.BindingRef "b") ] in
+  Alcotest.(check bool) "an acyclic chain reaches S" true
+    (List.mem_assoc "S" (Autodiff.differentiate_rate_state rate [ "S" ] [] [] acyclic))
+
 let test_init_chain_is_accepted () =
   (* Non-vacuity for the two above: the same shape without the back edge is a
      legal chain and must compile. *)
@@ -18189,6 +18226,7 @@ let () =
       Alcotest.test_case "a chain of init references compiles" `Quick test_init_chain_is_accepted;
       Alcotest.test_case "a binding cycle in closed is named, not a stack overflow (gh#1219)" `Quick test_init_closed_binding_cycle_is_named;
       Alcotest.test_case "hoisted binding order follows section order (gh#1222)" `Quick test_hoisted_binding_order_follows_section_order;
+      Alcotest.test_case "a binding cycle in binding_reach is named (gh#1219)" `Quick test_binding_reach_cycle_is_named;
       Alcotest.test_case "ic_grad differentiates the closed expression" `Quick test_ic_grad_differentiates_the_closed_expression;
     ];
     "iso_date_validation", [

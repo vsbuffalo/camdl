@@ -217,27 +217,42 @@ let find_tf tfs name = Hashtbl.find_opt (tf_index tfs) name
 let find_table tbls name = Hashtbl.find_opt (table_index tbls) name
 
 (* The compartments a binding's body reaches, directly or through other
-   bindings, computed once per binding. Bindings are acyclic by construction
-   (topo-ordered; enforced at validate/dimcheck), so the recursion terminates. *)
+   bindings, computed once per binding. The expander emits bindings acyclic
+   (it reports a `let` cycle itself, E201), but nothing after it checks that:
+   Validate checks only the init entries for a cycle (E515). So the recursion
+   carries the bindings on its current path and fails naming a cycle
+   ([a -> b -> a]) rather than recursing without end on an IR built by hand or
+   by a drifted expander. *)
 let binding_reach : binding list -> string -> SS.t =
   memo_on_list (fun bindings ->
     let memo = Hashtbl.create 64 in
-    let rec reach name =
+    let rec reach path name =
       match Hashtbl.find_opt memo name with
       | Some r -> r
       | None ->
+        if List.mem name path then begin
+          let rec upto = function
+            | [] -> []
+            | x :: rest -> if x = name then [x] else x :: upto rest
+          in
+          failwith (Printf.sprintf
+            "binding cycle in the state derivative: %s (the IR's bindings must \
+             be acyclic)"
+            (String.concat " -> " (List.rev (upto path) @ [name])))
+        end;
         let r = match find_binding bindings name with
-          | Some b -> pops SS.empty b.bexpr
+          | Some b -> pops (name :: path) SS.empty b.bexpr
           | None -> SS.empty
         in
         Hashtbl.add memo name r; r
-    and pops acc (e : expr) =
+    and pops path acc (e : expr) =
+      let pops = pops path in
       match e with
       | Pop n -> SS.add n acc
       | PopSum members -> List.fold_left (fun a m -> SS.add m a) acc members
       | Param _ | ConstRef _ | Const _ | Time | Dt | Projected | ObsColumnRef _
       | ObsAnchor _ | TimeFunc _ | ForcingBasis _ | UnitLiteral _ -> acc
-      | BindingRef name -> SS.union (reach name) acc
+      | BindingRef name -> SS.union (reach path name) acc
       | TableLookup (_, args) | Reduce args -> List.fold_left pops acc args
       | BinOp b -> pops (pops acc b.left) b.right
       | UnOp u -> pops acc u.arg
@@ -245,7 +260,7 @@ let binding_reach : binding list -> string -> SS.t =
       | UncheckedDim u -> pops acc u.inner
       | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
     in
-    reach)
+    reach [])
 
 (** Does compartment [c]'s state reach [e] — directly ([Pop c] or a [PopSum]
     containing [c]) or through a hoisted binding's body? The [WrtPop] analogue of
@@ -388,6 +403,10 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
     | WrtParam _ | WrtProjected -> false
     | WrtPop c -> mentions_pop bindings c e
   in
+  (* The bindings whose bodies are being differentiated, innermost first: a
+     [BindingRef] to one of them is a cycle among the bindings (see
+     [BindingRef] below). *)
+  let binding_path = ref [] in
   let rec spline_deriv param fname what structural coefs link =
     if List.exists (mentions param) structural then
       Unsupported
@@ -902,10 +921,11 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
     (* Hoisted bindings are param-free (state-only), so ∂/∂param = 0 (WrtParam).
        For WrtPop the premise inverts — a binding body is a function of state (a
        hoisted force-of-infection is exactly where the coupling lives), so we
-       resolve the reference and recurse into its body. Bindings are acyclic by
-       construction (topo-ordered; enforced at validate/dimcheck), so the
-       recursion terminates; an unresolved name (never emitted for a valid model)
-       is a genuine zero. *)
+       resolve the reference and recurse into its body. The expander emits
+       bindings acyclic (it reports a `let` cycle, E201), but nothing after it
+       checks that (Validate checks only the init entries, E515), so a cycle is
+       caught here and named rather than recursed into without end; an
+       unresolved name (never emitted for a valid model) is a genuine zero. *)
     | BindingRef name ->
       (match target with
        (* Bindings are dynamics surfaces: param-free under WrtParam, and never
@@ -913,7 +933,21 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
        | WrtParam _ | WrtProjected -> Known (Const 0.0)
        | WrtPop _ ->
          (match find_binding bindings name with
-          | Some b -> d b.bexpr
+          | Some b ->
+            if List.mem name !binding_path then begin
+              let rec upto = function
+                | [] -> []
+                | x :: rest -> if x = name then [x] else x :: upto rest
+              in
+              failwith (Printf.sprintf
+                "binding cycle in the state derivative: %s (the IR's bindings \
+                 must be acyclic)"
+                (String.concat " -> " (List.rev (upto !binding_path) @ [name])))
+            end;
+            let saved = !binding_path in
+            binding_path := name :: saved;
+            Fun.protect ~finally:(fun () -> binding_path := saved)
+              (fun () -> d b.bexpr)
           | None -> Known (Const 0.0)))
     | PerEvalRef _ -> failwith "PerEvalRef before LICM (gh#272 compiler invariant)"
   in
