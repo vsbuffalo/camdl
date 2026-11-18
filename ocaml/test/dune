@@ -212,3 +212,13 @@
  (modules test_declared_emit)
  (libraries compiler ir alcotest yojson)
  (deps (source_tree ../golden)))
+
+; Competing exits from a staged compartment (proposal
+; 2026-11-17-unified-staged-residence): an ordinary `@` transition beside a
+; `via erlang(...)` transition expands to one copy per stage. Compares the
+; compiled IR with a hand-written per-stage model, evaluates compiled rates,
+; and asserts each refusal.
+(test
+ (name test_competing_exits)
+ (modules test_competing_exits)
+ (libraries compiler ir alcotest yojson))

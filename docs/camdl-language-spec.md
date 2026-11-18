@@ -2837,10 +2837,103 @@ The clause also has a **block form**, mirroring the brace body used elsewhere,
 with `rate` and `via` mutually exclusive:
 `onset : E --> I { via = erlang(stages = 3, rate = sigma) }`.
 
-**Scope and diagnostics.** A staged compartment must be drained by exactly one
-`via` transition; a second draining exit — another `via`, or an ordinary `@`
-racing with the dwell — is the *competing-exit* case, rejected with `E246` and
-left to the manual per-stage form for now. The laws that ship are `erlang` and
+**Other exits from a staged compartment.** People can leave a compartment with
+an Erlang dwell before the dwell completes: they die, are treated, or age into
+another stratum. Write that as an ordinary `@` transition whose single source is
+the staged compartment, indexed exactly as it was declared and with no stage
+(`E[a]`, or bare `E` when `E` is not stratified). Such a transition is a
+*competing exit*: a hazard that acts throughout the dwell and does not depend on
+the stage.
+
+<!-- camdl-doctest-preamble: via-competing
+dimensions { age = [pre, sch] }
+compartments { S, E, I, T }
+stratify(by = age)
+parameters {
+  beta  : rate
+  sigma : rate
+  mu    : rate
+  ar    : rate
+  cmax  : rate
+  K     : count
+}
+-->
+
+```camdl preamble=via-competing
+transitions {
+  infection[a in age] : S[a] --> E[a] @ beta * S[a]
+  latency[a in age]   : E[a] --> I[a] via erlang(stages = 3, rate = sigma)
+  death_E[a in age]   : E[a] --> @ mu * E[a]                          # leaves from any stage
+  treat[a in age]     : E[a] --> T[a] @ cmax * E[a] * K / (K + E[a])  # saturating
+  aging_E             : E[pre] --> E[sch] @ ar * E[pre]               # keeps the stage
+}
+```
+
+The rate `R` you write is the total propensity out of the whole cell, as
+everywhere in camdl, and `E[a]` in it is the sum over the stages. The compiler
+expands the transition to one copy per stage and gives stage `s` the share of
+`R` in proportion to its occupancy:
+
+```
+R_s = R * E_s / E     if E > 0
+R_s = 0               if E = 0
+```
+
+Every stage then faces the same hazard per person, `R / E`, the stage rates sum
+to `R`, and the `via` progression runs unchanged alongside. When the rate is a
+product in which the source reference appears exactly once as a factor and the
+compartment appears nowhere else — `mu * E[a]` — the share is that product with
+the factor replaced by the stage cell, `mu * E[a, s]`, which is exactly what a
+hand-written per-stage model holds. Any other rate (`treat` above) lowers to the
+guarded quotient.
+
+Where the people go follows from the destination:
+
+| Movement                                         | Stage                                 |
+| ------------------------------------------------ | ------------------------------------- |
+| Same compartment, different stratum (`aging_E`)  | Kept: `E[pre, s]` to `E[sch, s]`      |
+| To an unstaged compartment (`death_E`, `treat`)  | Drawn from every stage                |
+| To a *different* staged compartment              | Drawn from every stage, enter stage 1 |
+
+A move into a different staged compartment restarts that compartment's dwell at
+its first stage, as every inflow does. Because the modeller may have meant the
+progression to continue (an isolation compartment that mirrors the infectious
+period), the compiler says so with warning `W107`. The `via` transition's own
+exit into a staged compartment does not warn.
+
+*What `mean` and `rate` mean with a competing exit.* The `via` law's `mean` is
+the dwell time absent the competing exit, not the mean time spent in the
+compartment, which is shorter. With a constant hazard `mu` per person beside an
+Erlang-`k` dwell of stage rate `k * sigma`, a person advances from each stage
+with probability `k*sigma / (k*sigma + mu)`, so the fraction that completes the
+dwell is
+
+```
+(k*sigma / (k*sigma + mu))^k
+```
+
+*Flows.* A flow reference to the transition as written reads all its stage
+copies: `incidence(death_E[a])` is the deaths from `E[a]` at any stage. The
+stage is not a population stratum, so this pools nothing you declared and `E280`
+(§12.1) does not apply to it; a bare `incidence(death_E)` on the age-stratified
+family is still `E280`, for pooling `age`. In trajectory and flow columns the
+copies are named like any indexed family, with the stage level last
+(`death_E_pre_s1`).
+
+With `stages = 1` the source is not staged and the transition is an ordinary
+second exit: the same model text compiles at every stage count.
+
+Refused, each with its own diagnostic: a competing exit with
+`overdispersed(...)` noise (`E361` — the noise multiplier is drawn per
+transition, so the variance of the total would depend on the stage count); one
+that consumes more than one individual of the staged compartment per event
+(`E362`); a transition with two or more staged sources (`E363`); a staged
+source together with an unstaged one (`E365`); and any `@` transition out of a
+`hyper_erlang` compartment (`E364`), whose branches are separate chains rather
+than one stage dimension.
+
+**Scope and diagnostics.** A compartment takes one `via` law: a second `via`
+transition on the same source is `E246`. The laws that ship are `erlang` and
 `hyper_erlang`; any other law (`coxian`, `fixed`, …) is `E243`. `hyper_erlang`
 on an already-stratified source is a later sub-phase, rejected today with `E248`.
 Argument mistakes each get a named code: a `stages` that is not a positive
@@ -3591,6 +3684,8 @@ same tag: `let N = S + I + R` read by a projection is `E280` at the use, and
 `let N = sum(S + I + R)` (or `sum(N)` at the use) states it. Residence
 structure is exempt: on a `via erlang` compartment `I` pools only its stages,
 and `I[child]` on an age-stratified staged `I` pools that stratum's stages;
+likewise `incidence(death[child])` on a transition out of a staged compartment
+reads that stratum's stage copies (§9.4.1);
 hand-rolled staging declared in `dimensions {}` is a population stratum and is
 not. Model dynamics are untouched — in a force of infection a bare `I` _is_ the
 definition, and no second reading exists.

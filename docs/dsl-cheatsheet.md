@@ -246,6 +246,11 @@ clearance : I --> R  via hyper_erlang(
 outcome   : I via hyper_erlang(
   branch(label = fatal,   weight = cfr, stages = 3, mean =  8 'days, to = D),
   branch(label = recover,               stages = 3, mean = 12 'days, to = R))
+
+# other exits from an erlang-staged compartment: write the compartment, not a stage
+latency[a in age] : E[a] --> I[a]  via erlang(stages = 3, rate = sigma)
+death_E[a in age] : E[a] -->       @ mu * E[a]         # competing exit, from any stage
+aging_E           : E[pre] --> E[sch] @ ar * E[pre]    # same compartment: keeps the stage
 ```
 
 `erlang(stages = k, mean | rate)`: give exactly one of `mean` / `rate`; `stages`
@@ -253,10 +258,25 @@ is a positive-integer literal (structure, not fittable — `mean`/`rate`/`weight
 are). Each `branch(label, stages, mean | rate, weight?, to?)`; `label` required,
 only the **last** branch omits `weight` (⇒ `1 −` the others). A **bare**
 reference to the staged source sums its stages automatically. Block form:
-`{ via = erlang(...) }`. Diagnostics: `E243` unknown law, `E244` stages, `E245`
-mean-XOR-rate, `E246` single-exit, `E255` <2 branches, `E256` last-branch
-weight, `E258` duplicate labels, `E248` stratified `hyper_erlang` (deferred).
-Full section: language spec §9.4.1.
+`{ via = erlang(...) }`.
+
+**Competing exits.** An ordinary `@` transition whose single source is the
+staged compartment (`E[a]`, no stage) is expanded to one copy per stage. Its
+rate is the total for the whole cell; stage `s` gets the share `R * E_s / E`
+(zero when the cell is empty), which for a product such as `mu * E[a]` is
+exactly `mu * E[a, s]`. A destination in the same compartment keeps the stage; a
+different staged compartment is entered at stage 1 (warning `W107`).
+`incidence(death_E[a])` sums the stage copies (`death_E_pre_s1`, …). The same
+text compiles at `stages = 1`. With a competing exit the law's `mean` is the
+dwell absent that exit: at a constant hazard `mu` the fraction completing an
+Erlang-`k` dwell of stage rate `k * sigma` is `(k*sigma / (k*sigma + mu))^k`.
+
+Diagnostics: `E243` unknown law, `E244` stages, `E245` mean-XOR-rate, `E246`
+second `via` on one source, `E255` <2 branches, `E256` last-branch weight,
+`E258` duplicate labels, `E248` stratified `hyper_erlang` (deferred). Competing
+exits: `E361` `overdispersed(...)`, `E362` takes more than one individual,
+`E363` two staged sources, `E364` out of a `hyper_erlang` compartment, `E365`
+staged plus unstaged source. Full section: language spec §9.4.1.
 
 ## Generated quantities — `quantities {}`
 

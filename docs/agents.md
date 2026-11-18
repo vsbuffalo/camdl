@@ -402,6 +402,28 @@ so "what is this model?" is answerable without opening the file. It is envelope
 metadata, so correcting it never re-keys a fit — write real content, and fix it
 when it is wrong.
 
+**A second exit from an Erlang-staged compartment is written on the compartment,
+never on its stages.** When `E` has `via erlang(stages = 3, ...)`, write deaths,
+treatment or ageing out of it as an ordinary transition from `E[a]`:
+
+```camdl
+latency[a in age] : E[a] --> I[a] via erlang(stages = 3, rate = sigma)
+death_E[a in age] : E[a] --> @ mu * E[a]
+```
+
+The compiler expands `death_E` over the stages and splits its rate in proportion
+to stage occupancy, so every stage faces the same hazard per person, and
+`incidence(death_E[a])` reads all the stage copies. Do not index the generated
+stage dimension (`E[a, s2]`, `[st in __latency_stage]`): it does not exist at
+`stages = 1`, so the model stops compiling when the stage count changes. Two
+things to state when you report such a model. The law's `mean` is the dwell time
+absent the competing exit, and the time actually spent in `E` is shorter: at a
+constant hazard `mu` the fraction that completes an Erlang-`k` dwell of stage
+rate `k * sigma` is `(k*sigma / (k*sigma + mu))^k`. And an exit into a
+_different_ staged compartment enters its first stage, restarting that dwell;
+the compiler warns (**W107**) because continuing the progression may be what was
+meant.
+
 **Backend choice for fits.** Use `chain_binomial` — the production fit backend.
 Gillespie is for forward-simulation sanity checks, not fits (too slow).
 

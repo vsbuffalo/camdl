@@ -30,7 +30,9 @@
       then drops the [sum(X)] markers those checks read.
     + [lower_via_transitions] rewrites each [via] transition into explicit
       stage compartments, a stage dimension and the chain of transitions
-      between stages, so no later step sees [via].
+      between stages, so no later step sees [via]. It expands every other
+      transition out of a staged compartment over the stages, and records
+      each staged compartment as a {!residence}.
     + [check_origin] validates the origin date; [resolve_dimensions] builds
       the dimension registry from the [dimensions] block;
       [check_table_dimensions] reports a table over an undeclared
@@ -181,6 +183,44 @@ let site_check_code = function
   | Empty_reduction _ -> "W202"
   | Proportion_outside _ -> "E357"
 
+(** A compartment that a [via erlang(...)] transition with more than one
+    stage gave an Erlang dwell time. The lowering splits it into one
+    sub-compartment per stage by stratifying it over a generated stage
+    dimension, appended after the dimensions the modeller declared. In
+
+    {@camdl[
+      latency[a in age] : E[a] --> I[a] via erlang(stages = 3, rate = sigma)
+      death_E[a in age] : E[a] --> @ mu * E[a]
+    ]}
+
+    [E] is the compartment, with one population index ([age]), stage
+    dimension [__latency_stage] and levels [s1], [s2], [s3]; [latency] is the
+    [via] transition and [death_E] an exit expanded per stage. A compartment
+    with [stages = 1] is not staged and has no record, and neither has one
+    staged by [hyper_erlang], which makes separate compartments per branch
+    rather than a stage dimension. *)
+type residence = {
+  res_compartment  : string;
+      (** The staged compartment, as declared. *)
+  res_n_pop        : int;
+      (** How many indices a reference to the compartment carried before it
+          was staged: its population dimensions. A reference with exactly
+          this many indices and no stage is a residence reference. *)
+  res_stage_dim    : string;
+      (** The generated stage dimension, [__<via transition>_stage]. *)
+  res_stage_levels : string list;
+      (** The levels of the stage dimension in dwell order, [s1] first. *)
+  res_law          : via_spec;
+      (** The law the [via] transition declared. *)
+  res_via          : string;
+      (** The [via] transition that staged the compartment. *)
+  res_exits        : string list;
+      (** The other transitions out of the compartment that the lowering
+          expanded to one copy per stage, by declared name. Each gained a
+          binder over [res_stage_dim] after the binders it declared, so its
+          expanded names end in the stage level. *)
+}
+
 (** Everything the expander knows about the model it is expanding, threaded
     through every function of the module and returned to the driver.
 
@@ -223,7 +263,9 @@ type context = {
   mutable transitions     : transition_decl list;
       (** The transition declarations, with every [via] transition replaced
           by the stage compartments' chain once [lower_via_transitions] has
-          run. Each is still one declaration per family, not per cell. *)
+          run, and every other transition out of a staged compartment given
+          a binder over the stage. Each is still one declaration per family,
+          not per cell. *)
   mutable orig_transitions: transition_decl list;
       (** The transition declarations that diagnostics and the
           declared-model records refer to. It holds the declarations as
@@ -378,6 +420,8 @@ type context = {
   mutable via_cells            : (string * string) list;
       (** Each stage compartment the [via] lowering made, with the declared
           compartment it stands in for. *)
+  mutable residences           : residence list;
+      (** Each compartment the [via erlang] lowering staged, newest first. *)
   mutable emitted_transitions  : (string * string list) list;
       (** Each transition declaration after the lowering, with the expanded
           transitions it produced. *)
@@ -455,6 +499,7 @@ let empty_context ?(source_dir = "") ?(filename = "<input>") () = {
   table_index          = Hashtbl.create 16;
   site_tallies         = [];
   via_transitions      = [];
+  residences           = [];
   via_cells            = [];
   emitted_transitions  = [];
   emitted_observations = [];
@@ -1830,19 +1875,9 @@ let via_spec_of_call ctx (tr : transition_decl) ((law, args) : via_call)
              yet — express the residence with manual sub-stage compartments for \
              now" ()
 
-(* The single-exit invariant (proposal §3): a staged compartment must be drained
-   by EXACTLY ONE transition. A second draining transition (another `via`, or an
-   ordinary `@` exit racing with the dwell) is the competing-exit case (§7),
-   rejected with a diagnostic naming the compartment. A transition drains a
-   compartment when that compartment is a source with no matching destination
-   appearance (so a within-compartment self-loop does not count). *)
-let drains_compartment (tr : transition_decl) (comp : string) : bool =
-  let is_src = List.exists (fun (c, _) -> c = comp) tr.trsrc in
-  let is_dst = match tr.trdst with
-    | DstSum refs        -> List.exists (fun (c, _) -> c = comp) refs
-    | DstBranch branches -> List.exists (fun ((c, _), _) -> c = comp) branches
-  in
-  is_src && not is_dst
+(* Whether [comp] is among the sources of [tr], whatever its indices. *)
+let has_source (tr : transition_decl) (comp : string) : bool =
+  List.exists (fun (c, _) -> c = comp) tr.trsrc
 
 (* Append a stage index to every destination reference to the staged
    compartment [comp] that supplies its [n_pre] pre-staging indices and no
@@ -1868,6 +1903,84 @@ let population_index_count ctx (comp : string) : int =
   List.length (List.filter (fun (sd : stratify_decl) ->
     match sd.sonly with None -> true | Some only -> List.mem comp only)
     ctx.stratifies)
+
+(* Whether [e] mentions compartment [comp] anywhere, indexed or bare. *)
+let rec mentions_compartment (comp : string) (e : expr) : bool =
+  let go = mentions_compartment comp in
+  let go_item = function IPosn e | INamed (_, e) -> go e in
+  match e with
+  | EIdent (n, _) -> n = comp
+  | EIndex (n, items, _) -> n = comp || List.exists go_item items
+  | EBinOp (_, l, r) | ERange (l, r) -> go l || go r
+  | EUnOp (_, a) | ESum (_, _, _, a, _) -> go a
+  | ECond (p, a, b) -> go p || go a || go b
+  | EFuncCall (_, args) -> List.exists (fun (_, a) -> go a) args
+  | EList es -> List.exists go es
+  | EConst _ | EUnit _ | EObsAccess _ | ERunMember _ -> false
+
+(* Whether two index lists are the same variables or levels, item for item.
+   Anything but a bare name in an index compares unequal. *)
+let same_index_items (a : index_item list) (b : index_item list) : bool =
+  List.length a = List.length b
+  && List.for_all2 (fun x y ->
+       match x, y with
+       | IPosn (EIdent (v, _)), IPosn (EIdent (w, _)) -> v = w
+       | INamed (d, EIdent (v, _)), INamed (d', EIdent (w, _)) -> d = d' && v = w
+       | _ -> false) a b
+
+(* The rate of one stage copy of a competing exit (proposal
+   2026-11-17-unified-staged-residence, "Competing exits").
+
+   [rate] is the rate as written: the total propensity out of the source cell
+   `src[items]`, which is the sum of its stages. Stage `s` gets the share
+   `rate * E_s / E`, where `E_s` is `src[items, stage]` and `E` the whole
+   cell, so every stage faces the same hazard per person and the shares sum
+   to [rate].
+
+   - When [rate] is a product with the reference `src[items]` as exactly one
+     factor and no other mention of [src], the share is that product with the
+     factor replaced by `E_s`: `mu * E[a]` gives `mu * E[a, s]`, the
+     expression a hand-written per-stage model holds.
+   - Otherwise the share is the quotient, guarded so an empty cell gives zero
+     rather than 0/0: `if E > 0 then rate * E_s / E else 0`.
+
+   References to the whole cell left in the result are summed over the stages
+   by [sum_staged_refs] afterwards (bare `src`, when it has no population
+   index, by the bare-name rule). *)
+let competing_stage_rate ~(src : string) ~(items : index_item list)
+    ~(stage : index_item) (rate : expr) : expr =
+  let whole_cell = function
+    | EIdent (n, _)        -> n = src && items = []
+    | EIndex (n, its, _)   -> n = src && same_index_items its items
+    | _ -> false
+  in
+  let rec factors = function
+    | EBinOp (Mul, l, r) -> factors l @ factors r
+    | e -> [ e ]
+  in
+  let fs = factors rate in
+  let linear =
+    List.length (List.filter whole_cell fs) = 1
+    && List.for_all (fun f -> whole_cell f || not (mentions_compartment src f)) fs
+  in
+  if linear then begin
+    let rec subst = function
+      | EBinOp (Mul, l, r) -> EBinOp (Mul, subst l, subst r)
+      | (EIdent (_, l) | EIndex (_, _, l)) as e when whole_cell e ->
+        EIndex (src, items @ [ stage ], l)
+      | e -> e
+    in
+    subst rate
+  end else begin
+    let whole = match items with
+      | [] -> EIdent (src, dummy_loc)
+      | _  -> EIndex (src, items, dummy_loc)
+    in
+    let in_stage = EIndex (src, items @ [ stage ], dummy_loc) in
+    ECond (EBinOp (Gt, whole, EConst 0.0),
+           EBinOp (Div, EBinOp (Mul, rate, in_stage), whole),
+           EConst 0.0)
+  end
 
 (* Rewrite every RATE-POSITION reference to a now-staged compartment [src] so it
    sums over the freshly-added stage dimension. After staging, `src` gains a
@@ -2034,7 +2147,10 @@ let apply_via_rewrite ctx (rw : expr -> expr) : unit =
    container via [apply_via_rewrite], to rewrite partial references to the staged
    compartment into stage-sums ([sum_staged_refs]). The original `via` transition
    is replaced by the consecutive chain + exit, so no `via` transition survives to
-   reach [expand_transitions_counted] (its E243 placeholder becomes unreachable). *)
+   reach [expand_transitions_counted] (its E243 placeholder becomes unreachable).
+   Every other transition whose single source is the staged compartment becomes a
+   family over the stage ([competing_stage_rate]), and each compartment staged by
+   `erlang` is recorded in ctx.residences. *)
 let lower_via_transitions ctx =
   (* Collect the `via` transitions and their typed specs first; bail out early
      if there are none (the common, golden-neutral path: zero AST touched). A
@@ -2050,41 +2166,173 @@ let lower_via_transitions ctx =
   in
   if via_trs = [] then ()
   else begin
-    (* Validate each `via` transition's STRUCTURE: a single, real source
-       (stratified or not), drained by exactly this one transition (single-exit,
-       §3). A stratified source is staged by COMPOSING the stage dimension onto
-       its existing stratification (age × stage); rate-position references to it
-       are rewritten to sum over the stages by the pass itself (proposal §7).
-       Returns whether the transition is structurally well-formed; every problem
-       surfaces (a diagnostic fires) even on a transition we then skip. We only
-       SYNTHESIZE the chain for transitions that pass BOTH spec and structure —
-       so a rejected `via` produces just its own diagnostic, never a cascade of
-       follow-on E100/E272/E277 noise from a half-applied stratification. *)
-    let structurally_ok (tr : transition_decl) : bool =
+    (* The compartments a valid `via` law stages: by `erlang` with more than
+       one stage (a stage dimension), or by `hyper_erlang` (per-branch
+       compartments). `erlang(stages = 1)` stages nothing. *)
+    let staged_by law_staged =
+      List.filter_map (fun ((tr : transition_decl), spec) ->
+        match tr.trsrc, spec with
+        | [ (src, _) ], Some sp when law_staged sp -> Some src
+        | _ -> None) via_trs
+    in
+    let erlang_staged =
+      staged_by (function
+        | Erlang { stages; _ } -> Pos_int.to_int stages > 1
+        | HyperErlang _ -> false) in
+    let hyper_staged =
+      staged_by (function HyperErlang _ -> true | Erlang _ -> false) in
+    let quoted names =
+      String.concat " and " (List.map (Printf.sprintf "'%s'") names) in
+    (* The ordinary `@` transitions out of the staged compartment [src] of the
+       `via` transition [tr] that the lowering cannot expand per stage, each
+       reported at the transition. A competing exit is expanded when the
+       residence reference `src[<population indices>]` is its single source
+       (proposal 2026-11-17-unified-staged-residence, "Competing exits"). A
+       transition that names a stage of [src] itself, with the stage index
+       written, is not a residence reference and is left as written. Returns
+       whether every exit can be expanded. *)
+    let erlang_exits_ok (tr : transition_decl) (src : string) : bool =
+      let n_pre = population_index_count ctx src in
+      let ok = ref true in
+      let refuse (t : transition_decl) ~code ~message ~hint =
+        ok := false;
+        Diagnostics.error ctx.diags ~code
+          ~loc:(diag_loc_of_ast_ctx ctx t.trloc) ~message ~hint ()
+      in
+      List.iter (fun (t : transition_decl) ->
+        let from_src = List.filter (fun (c, _) -> c = src) t.trsrc in
+        let residence_ref =
+          List.exists (fun (_, items) -> List.length items = n_pre) from_src in
+        match t.trdyn with
+        | Rate rate when t.trname <> tr.trname && residence_ref ->
+          let others =
+            List.sort_uniq compare
+              (List.filter_map (fun (c, _) -> if c = src then None else Some c)
+                 t.trsrc) in
+          let staged_others =
+            List.filter (fun c -> List.mem c erlang_staged || List.mem c hyper_staged)
+              others in
+          if List.length from_src > 1 then
+            refuse t ~code:"E362"
+              ~message:(Printf.sprintf
+                "transition '%s' consumes %d individuals of the staged \
+                 compartment '%s' per event"
+                t.trname (List.length from_src) src)
+              ~hint:(Printf.sprintf
+                "'%s' has an Erlang dwell (`via` on '%s'), so each individual \
+                 is in one of its stages, and an event that takes several \
+                 would have to say which stages they come from. A transition \
+                 out of a staged compartment takes one individual: write '%s' \
+                 once as the source"
+                src tr.trname src)
+          else if staged_others <> [] then
+            refuse t ~code:"E363"
+              ~message:(Printf.sprintf
+                "transition '%s' has more than one staged source: %s"
+                t.trname (quoted (List.sort compare (src :: staged_others))))
+              ~hint:"each of these compartments has a dwell time set by a `via` \
+                     transition, and an event that consumes one individual of \
+                     each would have to pair their stages. A transition may \
+                     have at most one staged source: split it into one \
+                     transition per staged compartment"
+          else if others <> [] then
+            refuse t ~code:"E365"
+              ~message:(Printf.sprintf
+                "transition '%s' takes the staged compartment '%s' together \
+                 with %s as sources"
+                t.trname src (quoted others))
+              ~hint:(Printf.sprintf
+                "'%s' has an Erlang dwell (`via` on '%s'). A second exit from \
+                 it is expanded over its stages only when '%s' is the \
+                 transition's single source: write the other compartment's \
+                 effect in the rate (`%s --> ... @ k * %s * %s`) and move it \
+                 in a transition of its own"
+                src tr.trname src src src (List.hd others));
+          (match rate with
+           | EFuncCall ("overdispersed", _) ->
+             refuse t ~code:"E361"
+               ~message:(Printf.sprintf
+                 "transition '%s' leaves the staged compartment '%s' with \
+                  `overdispersed(...)` noise"
+                 t.trname src)
+               ~hint:(Printf.sprintf
+                 "'%s' has an Erlang dwell (`via` on '%s'), so this exit is \
+                  expanded to one transition per stage, and the noise \
+                  multiplier is drawn once per transition: the variance of \
+                  the total would depend on the number of stages. Write the \
+                  rate without `overdispersed(...)`"
+                 src tr.trname)
+           | _ -> ())
+        | _ -> ()
+      ) ctx.transitions;
+      !ok
+    in
+    (* `hyper_erlang` makes separate compartments per branch, not a stage
+       dimension, so no other transition can leave its compartment. *)
+    let hyper_exits_ok (tr : transition_decl) (src : string) : bool =
+      let ok = ref true in
+      List.iter (fun (t : transition_decl) ->
+        match t.trdyn with
+        | Rate _ when t.trname <> tr.trname && has_source t src ->
+          ok := false;
+          Diagnostics.error ctx.diags ~code:"E364"
+            ~loc:(diag_loc_of_ast_ctx ctx t.trloc)
+            ~message:(Printf.sprintf
+              "transition '%s' leaves compartment '%s', whose dwell time is \
+               set by `via hyper_erlang(...)` on '%s'"
+              t.trname src tr.trname)
+            ~hint:(Printf.sprintf
+              "a second exit from a `hyper_erlang` compartment is not \
+               supported: its branches are separate chains of different \
+               lengths. Use `via erlang(...)` on '%s', which accepts other \
+               exits, or write the branches as compartments of your own"
+              src)
+            ()
+        | _ -> ()
+      ) ctx.transitions;
+      !ok
+    in
+    (* Validate each `via` transition's structure: a single source (stratified
+       or not), no second `via` on that source, and no other transition out of
+       it that the lowering cannot expand. Returns whether the transition is
+       well-formed; every problem is reported, including on a transition that
+       is then skipped. The chain is synthesized only for a transition that
+       passes both the law's validation and this, so a rejected `via` produces
+       its own diagnostic and not a cascade of E100/E272/E277 from a
+       half-applied stratification. *)
+    let structurally_ok (tr : transition_decl) (spec : via_spec option) : bool =
       let loc = diag_loc_of_ast_ctx ctx tr.trloc in
       match tr.trsrc with
       | [ (src, _) ] ->
-        begin
-          (* Single-exit: no OTHER transition may drain this source. *)
-          let other_drainers =
-            List.filter (fun (other : transition_decl) ->
-              other.trname <> tr.trname && drains_compartment other src)
-              ctx.transitions
-          in
-          match other_drainers with
-          | other :: _ ->
+        let other_via =
+          List.find_opt (fun (other : transition_decl) ->
+            other.trname <> tr.trname && has_source other src
+            && (match other.trdyn with Via _ -> true | Rate _ -> false))
+            ctx.transitions
+        in
+        let one_via = match other_via with
+          | Some other ->
             Diagnostics.error ctx.diags ~code:"E246" ~loc
               ~message:(Printf.sprintf
-                "compartment '%s' has a staged residence (`via` on '%s') but \
-                 is also drained by transition '%s'" src tr.trname other.trname)
-              ~hint:"a staged compartment must be drained by exactly one `via` \
-                     transition; a second exit racing with the dwell is the \
-                     competing-exit case — express it with manual per-stage \
-                     compartments for now"
+                "compartment '%s' is the source of two `via` transitions, \
+                 '%s' and '%s'" src tr.trname other.trname)
+              ~hint:(Printf.sprintf
+                "a `via` law sets the dwell time of its source compartment, \
+                 and a compartment has one dwell time: keep one `via` on \
+                 '%s'. A second exit that competes with the dwell is an \
+                 ordinary transition: `%s --> ... @ rate * %s`"
+                src src src)
               ();
             false
-          | [] -> true
-        end
+          | None -> true
+        in
+        let exits_ok = match spec with
+          | Some (Erlang { stages; _ }) when Pos_int.to_int stages > 1 ->
+            erlang_exits_ok tr src
+          | Some (HyperErlang _) -> hyper_exits_ok tr src
+          | Some (Erlang _) | None -> true
+        in
+        one_via && exits_ok
       | _ ->
         Diagnostics.error ctx.diags ~code:"E249" ~loc
           ~message:(Printf.sprintf
@@ -2099,7 +2347,7 @@ let lower_via_transitions ctx =
        surface) but keep only the fully-valid ones for synthesis. *)
     let to_lower =
       List.filter_map (fun (tr, spec) ->
-        let struct_ok = structurally_ok tr in
+        let struct_ok = structurally_ok tr spec in
         match spec with
         | Some s when struct_ok -> Some (tr, s)
         | _ -> None
@@ -2160,6 +2408,7 @@ let lower_via_transitions ctx =
         let chain_var      = dim_name ^ "_i" in
         let chain_var_next = dim_name ^ "_n" in
         let sum_var        = dim_name ^ "_s" in
+        let exit_var       = dim_name ^ "_x" in
         (* Per-stage rate COEFFICIENT: `Rate ρ ⇒ k·ρ`, `Mean τ ⇒ k/τ`. *)
         let k_const = EConst (float_of_int k) in
         let coeff = match mean with
@@ -2209,14 +2458,83 @@ let lower_via_transitions ctx =
              (`R[a]`) and index bindings (`[a in age]`). *)
         } in
         (* 4. Replace the original `via` transition with [chain; exit], and
-              redirect every OTHER transition whose destination is the staged
-              source to land in stage 1 (`S[a] --> I[a]` ⇒ `I[a, s1]`). *)
+              rewrite every other transition by the residence mapping rules
+              (proposal 2026-11-17-unified-staged-residence).
+
+              A transition whose single source is the residence reference
+              `src[<population indices>]` is a competing exit, or a move
+              within the compartment. It becomes a family over the stage: the
+              source is the stage cell, a destination in the same compartment
+              keeps the stage (`E[pre] --> E[sch]` ⇒ `E[pre, s] --> E[sch, s]`),
+              and the rate is that stage's share of the written rate
+              ([competing_stage_rate]). The stage binder is appended after the
+              binders the modeller wrote, so the expanded names end in the
+              stage level (`death_E_pre_s1`).
+
+              Any other transition's destination in the staged compartment
+              lands in stage 1 (`S[a] --> I[a]` ⇒ `I[a, s1]`). That includes a
+              competing exit of another staged compartment, whose own lowering
+              reports that the dwell here restarts. *)
+        let exit_item = IPosn (EIdent (exit_var, dummy_loc)) in
         let stage1_item = IPosn (EIdent (stage1, dummy_loc)) in
+        let residence_exit (t : transition_decl) =
+          match t.trsrc, t.trdyn with
+          | [ (c, items) ], Rate rate when c = src && List.length items = n_pre ->
+            Some (items, rate)
+          | _ -> None
+        in
+        let stage_copies (t : transition_decl) items rate : transition_decl =
+          let share = competing_stage_rate ~src ~items ~stage:exit_item in
+          let rate = match rate with
+            | EFuncCall ("deterministic", [ ("", inner) ]) ->
+              EFuncCall ("deterministic", [ ("", share inner) ])
+            | r -> share r
+          in
+          { t with
+            trindices = t.trindices @ [ IBind (exit_var, dim_name) ];
+            trsrc     = [ (src, items @ [ exit_item ]) ];
+            trdst     = stage_dest t.trdst src n_pre exit_item;
+            trdyn     = Rate rate }
+        in
+        let warn_restart (t : transition_decl) =
+          let dests = match t.trdst with
+            | DstSum refs        -> List.map fst refs
+            | DstBranch branches -> List.map (fun ((c, _), _) -> c) branches
+          in
+          List.iter (fun dst ->
+            if dst <> src && List.mem dst erlang_staged then
+              Diagnostics.warning ctx.diags ~code:"W107"
+                ~loc:(diag_loc_of_ast_ctx ctx t.trloc)
+                ~message:(Printf.sprintf
+                  "transition '%s' moves individuals from the staged \
+                   compartment '%s' into the staged compartment '%s': this \
+                   movement restarts '%s' at stage 1"
+                  t.trname src dst dst)
+                ~hint:"use explicit `stage(...)` endpoints if continuation is \
+                       intended"
+                ())
+            (List.sort_uniq compare dests)
+        in
         ctx.via_transitions <- (chain_tr.trname, tr.trname) :: ctx.via_transitions;
+        let exits = ref [] in
         ctx.transitions <- List.concat_map (fun (t : transition_decl) ->
           if t.trname = tr.trname then [ chain_tr; exit_tr ]
-          else [ { t with trdst = stage_dest t.trdst src n_pre stage1_item } ]
+          else match residence_exit t with
+            | Some (items, rate) ->
+              warn_restart t;
+              exits := t.trname :: !exits;
+              [ stage_copies t items rate ]
+            | None -> [ { t with trdst = stage_dest t.trdst src n_pre stage1_item } ]
         ) ctx.transitions;
+        ctx.residences <-
+          { res_compartment  = src;
+            res_n_pop        = n_pre;
+            res_stage_dim    = dim_name;
+            res_stage_levels = stage_levels;
+            res_law          = spec;
+            res_via          = tr.trname;
+            res_exits        = List.rev !exits }
+          :: ctx.residences;
         (* 5. Redirect `init { E = … }` / `init { I[a] = … }` (the full pre-staging
               index, no stage) to land in stage 1. *)
         ctx.init_entries <- List.map (fun (ie : init_entry) ->
@@ -3112,16 +3430,44 @@ let dims_of_index_bindings (bs : index_binding list) : string list =
     | IConsec (_, _, d) -> Some d
     | IComp _           -> None) bs
 
-(** Declared dimensions of a transition, by name. No helper existed — the
-    transition's indices live on [tr.trindices] as an [index_binding list],
-    while compartments/tables/parameters each had their own [string list]
-    accessor. Returns [] for an unknown name; the reference is diagnosed
-    elsewhere. *)
+(** The residence whose stages the [via] lowering expanded transition
+    [tname] over, when it is a competing exit or a move within a staged
+    compartment. *)
+let stage_expansion ctx (tname : string) : residence option =
+  List.find_opt (fun (r : residence) -> List.mem tname r.res_exits) ctx.residences
+
+(** The binders a transition was declared with: its binders without the stage
+    binder the [via] lowering appended to a transition it expanded per
+    stage. *)
+let declared_binders ctx (t : transition_decl) : index_binding list =
+  match stage_expansion ctx t.trname with
+  | None -> t.trindices
+  | Some r ->
+    List.filter (function
+      | IBind (_, d) -> d <> r.res_stage_dim
+      | IConsec _ | IComp _ -> true) t.trindices
+
+(** Declared dimensions of a transition, by name: the dimensions a reference
+    to it is indexed by, which leaves out a stage dimension the [via]
+    lowering appended. Returns [] for an unknown name; the reference is
+    diagnosed elsewhere. *)
 let transition_dims ctx tname : string list =
   match List.find_opt (fun (t : transition_decl) -> t.trname = tname)
           ctx.orig_transitions with
-  | Some t -> dims_of_index_bindings t.trindices
+  | Some t -> dims_of_index_bindings (declared_binders ctx t)
   | None   -> []
+
+(** The expanded transitions a flow reference reads. [concrete] is the member
+    of the family [tname] that the reference names by its declared indices
+    ([death_E_pre] for [death_E[pre]]). A transition the [via] lowering
+    expanded per stage has one copy of that member per stage, and the
+    reference reads them all: the stage is where an individual is in its
+    dwell, not a population stratum, so summing it pools nothing the modeller
+    declared. *)
+let flow_members ctx ~(tname : string) (concrete : string) : string list =
+  match stage_expansion ctx tname with
+  | None -> [ concrete ]
+  | Some r -> List.map (fun level -> concrete ^ "_" ^ level) r.res_stage_levels
 
 (** Declared dimensions of an observation stream, by name. Like
     [transition_dims], no accessor existed. *)
@@ -11555,6 +11901,21 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
       else
         Ir.CurrentPop concrete  (* Unknown — let the Rust side emit a clean diagnostic. *)
     in
+    (* Whether the only expansion of transition [base] is the stage copies the
+       `via` lowering made: it was declared with no index and one destination.
+       A bare reference to it names one declared flow, so reading every stage
+       copy pools no population stratum and E280 does not apply. *)
+    let stages_only base =
+      match List.find_opt (fun tr -> tr.trname = base) ctx.transitions with
+      | Some tr ->
+        stage_expansion ctx base <> None && declared_binders ctx tr = []
+        && (match tr.trdst with DstSum _ -> true | DstBranch _ -> false)
+      | None -> false
+    in
+    let flow_projection = function
+      | [ single ] -> Ir.CumulativeFlow single
+      | many       -> Ir.CumulativeFlowSum many
+    in
     (* `incidence(X)` with a bare (un-indexed) transition name. If X is a
        stratified transition family, the user means "sum over all strata,"
        symmetric to a bare stratified compartment name (§25.4).
@@ -11567,7 +11928,13 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
       | None         -> Ir.CumulativeFlow base
       | Some []      -> Ir.CumulativeFlow base
       | Some [single] -> Ir.CumulativeFlow single
+      | Some many when stages_only base -> Ir.CumulativeFlowSum many
       | Some many    ->
+        (* The strata of the family as declared: the stage copies of a
+           transition expanded per stage are one stratum. *)
+        let n_strata = match stage_expansion ctx base with
+          | Some r -> List.length many / List.length r.res_stage_levels
+          | None -> List.length many in
         (* Cross-strata aggregation rule (§5.2). A bare incidence projection
            over a STRATIFIED transition family sums all its strata, and that
            decision must be explicit — whether or not the stream is indexed.
@@ -11583,7 +11950,7 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
                             ctx.transitions with
             | Some tr -> List.filter_map
                            (function IBind (v, d) -> Some (v, d) | _ -> None)
-                           tr.trindices
+                           (declared_binders ctx tr)
             | None -> [] in
           let stream = List.filter_map (function
               | IBind (v, d) | IConsec (v, _, d) -> Some (v, d)
@@ -11616,7 +11983,7 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
                all %d strata"
               od.oname
               (String.concat ", " (List.map snd stream))
-              base base (List.length many))
+              base base n_strata)
             ~hint:(if shared then Printf.sprintf
               "index the family by the stream's binder, so each row reads its \
                own stratum:\n\
@@ -11643,7 +12010,7 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
                                 ctx.transitions with
             | Some tr -> List.filter_map
                            (function IBind (v, d) -> Some (v, d) | _ -> None)
-                           tr.trindices
+                           (declared_binders ctx tr)
             | None -> [] in
           let binders = if binders = [] then [("p", "<dim>")] else binders in
           let idx = String.concat ", " (List.map fst binders) in
@@ -11664,7 +12031,7 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
             ~message:(Printf.sprintf
               "observation '%s' is un-indexed, but `incidence(%s)` would silently \
                sum all %d strata of '%s' and apply reporting uniformly"
-              od.oname base (List.length many) base)
+              od.oname base n_strata base)
             ~hint:(Printf.sprintf
               "pooling across %s is a modelling decision, so state it. Either:\n\
               \  • one pooled column, one reporting rate — sum the per-stratum \
@@ -11770,8 +12137,9 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
              let idxs = resolve_index_order ctx ~loc:Diagnostics.no_loc
                           ~what:(Printf.sprintf "transition '%s'" tr)
                           ~dims:(transition_dims ctx tr) idxs in
-             Some [ String.concat "_"
-                      (tr :: List.map (index_item_to_str local_env) idxs) ]
+             Some (flow_members ctx ~tname:tr
+                     (String.concat "_"
+                        (tr :: List.map (index_item_to_str local_env) idxs)))
            (* A bare transition name is admissible only when it names ONE flow.
               A stratified family reached bare would silently pool its strata —
               the very thing E280 exists to refuse — so it is left to
@@ -11780,6 +12148,7 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
              (match expand_transition_name ctx tr with
               | None | Some []  -> Some [ tr ]
               | Some [ single ] -> Some [ single ]
+              | Some many when stages_only tr -> Some many
               | Some _          -> None)
            | _ -> None)
         | _ -> None
@@ -11989,7 +12358,7 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
         let idx_vals = List.map (index_item_to_str env) idxs in
         let concrete = if idx_vals = [] then name
           else String.concat "_" (name :: idx_vals) in
-        Ir.CumulativeFlow concrete
+        flow_projection (flow_members ctx ~tname:name concrete)
       | ProjDerived (EFuncCall ("incidence", args)) ->
         (* `incidence(...)` names exactly ONE flow. Reading its argument with
            `List.assoc_opt ""` returned the FIRST positional argument and threw
@@ -12045,7 +12414,9 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
            let idxs = resolve_index_order ctx ~loc:od_loc
                         ~what:(Printf.sprintf "transition '%s'" n)
                         ~dims:(transition_dims ctx n) idxs in
-           Ir.CumulativeFlow (String.concat "_" (n :: List.map (index_item_to_str env) idxs))
+           flow_projection
+             (flow_members ctx ~tname:n
+                (String.concat "_" (n :: List.map (index_item_to_str env) idxs)))
          | [] ->
            (* Without this E250 the projection kept
               the sentinel name `"?"` and surfaced downstream as
@@ -12141,6 +12512,8 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
           Ir.CurrentPop name
         else if Hashtbl.mem ctx.comp_tbl name then
           prevalence_projection name []
+        else if stages_only name then
+          flow_projection (flow_members ctx ~tname:name name)
         else
           Ir.CumulativeFlow name
       | ProjDerived (EIndex (name, idxs, idx_l) as e) ->
@@ -12178,7 +12551,7 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
           prevalence_projection ~items:idxs
             ~loc:(diag_loc_of_ast_ctx ctx idx_l) name idx_vals
         else
-          Ir.CumulativeFlow concrete
+          flow_projection (flow_members ctx ~tname:name concrete)
       | ProjDerived (EBinOp (Div, l, r) as e) when mentions_incidence e ->
         (* `num / den` where both sides are unit-weighted flow sums: the
            fraction of the window's events that were of the numerator's kind

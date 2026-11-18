@@ -324,8 +324,10 @@ let test_err_neither_mean_nor_rate () =
   compile_expect_error_code ~code:"E245" ~contains:"onset"
     (model_with_onset "onset : E --> I via erlang(stages = 3)")
 
-let test_err_single_exit_violation () =
-  (* E drained by both the `via` and an ordinary `@` exit. *)
+let test_err_second_via_on_one_source () =
+  (* E is the source of two `via` transitions: two dwell laws for one
+     compartment. An ordinary `@` exit beside a `via` is a competing exit and
+     compiles (test_competing_exits). *)
   let src =
     "time_unit = 'days\n\
      compartments { S, E, I, R, D }\n\
@@ -333,7 +335,7 @@ let test_err_single_exit_violation () =
      transitions {\n\
     \  infection : S --> E @ beta * S * I / (S + E + I + R)\n\
     \  onset     : E --> I via erlang(stages = 3, rate = sigma)\n\
-    \  death     : E --> D @ mu * E\n\
+    \  death     : E --> D via erlang(stages = 2, rate = mu)\n\
     \  recovery  : I --> R @ gamma * I\n\
      }\n\
      init { S = 990  E = 5  I = 5 }\n"
@@ -634,8 +636,8 @@ let () =
             test_err_both_mean_and_rate;
           Alcotest.test_case "neither mean nor rate → E245" `Quick
             test_err_neither_mean_nor_rate;
-          Alcotest.test_case "single-exit violation → E246" `Quick
-            test_err_single_exit_violation;
+          Alcotest.test_case "second via on one source → E246" `Quick
+            test_err_second_via_on_one_source;
           Alcotest.test_case "unknown erlang keyword → E247" `Quick
             test_err_unknown_erlang_keyword;
           Alcotest.test_case "via with >1 source → E249" `Quick
