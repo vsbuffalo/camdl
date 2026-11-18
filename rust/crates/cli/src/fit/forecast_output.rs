@@ -741,8 +741,9 @@ fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) ->
                     It is not the predictive uncertainty of either arm, nor the uncertainty of \
                     the scenario's effect.",
                 "method": "per posterior draw, the arm's mean over its particles minus the fitted \
-                    model's; per chain, the sample variance of those differences over Geyer's \
-                    effective sample size (the chain's draws in order); chains combined as \
+                    model's; per chain, the sample variance of those differences over the \
+                    effective sample size of a variant of Geyer's initial-positive-sequence \
+                    estimator (the chain's draws in order); chains combined as \
                     independent, weighted by their share of the draws",
                 "min_ess_per_chain": crate::fit::forecast_contrast::CONTRAST_MIN_ESS,
             },
