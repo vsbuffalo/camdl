@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.45",
-  "validated_by": "ocaml-compiler-v0.45",
+  "ir_version": "0.46",
+  "validated_by": "ocaml-compiler-v0.46",
   "model": {
     "name": "seed_timing",
     "version": "0.3",

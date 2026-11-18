@@ -4,7 +4,7 @@
     The file [camdlc] writes is an envelope around the model:
 
     {@json[
-      {"ir_version":"0.45","validated_by":"ocaml-compiler-v0.45","model":{"name":"licm","version":"0.3","time_unit":"days","description":null,"compartments":[
+      {"ir_version":"0.46","validated_by":"ocaml-compiler-v0.46","model":{"name":"licm","version":"0.3","time_unit":"days","description":null,"compartments":[
       {"name":"S","kind":"integer"},
       {"name":"I","kind":"integer"},
       {"name":"R","kind":"integer"}
