@@ -18,9 +18,11 @@
 //! The fixture is a closed SIR on the chain-binomial backend with two
 //! incidence streams on different irregular cadences: `weekly` (negative
 //! binomial) and `aux` (Poisson). Held-out cells sit at a stop where the other
-//! stream assimilates in the same joint update (t = 30), at a stop that holds
-//! nothing else (t = 35), and on trailing periods after the last observation
-//! (t = 67, 74, 81), the shape a forecast's targets take.
+//! stream assimilates an observed value in the same joint update (t = 42: aux
+//! held out, weekly observed), at stops where the other stream is not
+//! scheduled (t = 30 for aux, t = 35 for weekly), and on trailing periods
+//! after the last observation (t = 67, 74, 81), the shape a forecast's targets
+//! take.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -177,8 +179,8 @@ enum HeldOutValues {
 
 /// The two streams. `weekly`'s rows at t = 35 and its trailing periods at
 /// t = 67, 74, 81 are held out; `aux`'s row at t = 30, where `weekly` is not
-/// scheduled, is held out too, and `weekly`'s at t = 21, an observed value
-/// in the same update as nothing else, is not.
+/// scheduled, is held out, and so is its row at t = 42, where `weekly`'s
+/// observed row is assimilated in the same joint update.
 fn bind(compiled: &Arc<CompiledModel>, held: HeldOutValues) -> MultiStreamObsModel {
     let inf = compiled.model.transitions.iter().position(|t| t.name == "infection").unwrap();
     let cell = |v: f64, held_out: bool| -> Option<ObsCell> {
@@ -193,7 +195,7 @@ fn bind(compiled: &Arc<CompiledModel>, held: HeldOutValues) -> MultiStreamObsMod
     let w_held = [false, false, false, false, true, false, false, false, true, true, true];
     let a_ends = [3.0, 9.0, 12.0, 17.0, 30.0, 33.0, 42.0, 55.0, 60.0];
     let a_vals = [2.0, 30.0, 70.0, 110.0, 1100.0, 1200.0, 700.0, 250.0, 60.0];
-    let a_held = [false, false, false, false, true, false, false, false, false];
+    let a_held = [false, false, false, false, true, false, true, false, false];
     let specs = vec![
         StreamSpec::dense_covering(StreamProjection::FlowSum(vec![inf]),
             compiled.model.observations[0].clone(),
@@ -263,6 +265,7 @@ fn assert_same_filter(a: &PFilterResult, b: &PFilterResult, what: &str) {
 fn held_out_cells(obs: &MultiStreamObsModel) -> Vec<(usize, usize)> {
     vec![
         (1, index_of(obs, 30.0)),
+        (1, index_of(obs, 42.0)),
         (0, index_of(obs, 35.0)),
         (0, index_of(obs, 67.0)),
         (0, index_of(obs, 74.0)),
@@ -293,7 +296,11 @@ fn held_out_values_change_only_the_held_out_log_likelihoods() {
         assert!(a.holds_held_out_at(ui) && !missing.holds_held_out_at(ui));
     }
     assert!(!a.assimilates_at(index_of(&a, 35.0)) && !a.assimilates_at(index_of(&a, 67.0)));
-    assert!(a.assimilates_at(index_of(&a, 30.0)) || a.assimilates_at(index_of(&a, 21.0)));
+    // t = 42: one stream observed, the other held out, in one joint update.
+    let joint = index_of(&a, 42.0);
+    assert!(a.assimilates_at(joint) && a.holds_held_out_at(joint));
+    assert!(matches!(a.cell_state(0, joint), ObsCellState::Scored { .. }));
+    assert!(matches!(a.cell_state(1, joint), ObsCellState::HeldOut { .. }));
 
     for seed in SEEDS {
         let what = format!("seed {seed}");
