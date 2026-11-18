@@ -414,11 +414,22 @@ An experimental input is also listed in the `provenance.experimental` field of
 [`ResolvedFitConfig`](rust:cli::fit::run_config::ResolvedFitConfig): the file
 with every flag applied, the compiled model, the engine identity, the seeds, the
 sweep and the chain-starts rule. Its identity and its runners are built from
-that value, and `cmd_fit_run_v2` destructures it with every field named. The fit
-folder stores the resolved config: a flag that set a value of the problem half
-(`--allow-forcing-extrapolation`) is written into the archived
-`fit.toml.original`, so `fit predict` and the other readers of a stored config
-see the setting the fit was keyed under. Every `fit run` input is classified in
+that value, and `run_fit` destructures it with every field named; the command
+line itself is read only before it, so no argument reaches a runner except
+through the resolved value, the execution settings (`--parallel`, `--force`) or
+the label. The fit file is read once: every fit folder the run writes archives
+that text as `fit.toml.original`, with any problem-half value the command line
+set (`--allow-forcing-extrapolation`) written in, and takes its `fit_toml_hash`
+and config identity from the same text. Whether a resolved config belongs in the
+archive or in a file of its own is an open maintainer decision, kept behind one
+function (`ProblemFlags::stored_text`). A run-directory, label or run-id handle
+(`fit predict <leaf>`, `compare <leaf>`) recovers the problem from the archive
+and so runs under the override. A `fit.toml` handle names only the run the file
+alone makes, so it refuses a flag-made fit and names its leaf. `pfilter`,
+`profile` and `survey` `--fit` read a fit file rather than the archive and still
+refuse a flag-made fit; they are converted next. A sweep point's folder archives
+the file's `[fixed]`, not the point's values, which are in its `fit.meta.json`
+(what `fit predict` and `compare` read). Every `fit run` input is classified in
 `input_class::FIT_RUN` and has a case in
 `rust/crates/cli/tests/fit_run_input_classes.rs`.
 
