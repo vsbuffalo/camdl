@@ -373,11 +373,14 @@ fn a_fit_toml_handle_does_not_stand_for_a_flag_made_fit() {
     }
 }
 
-/// The commands that read a fit's problem but none of its results — `pfilter`
-/// here — given a fit made with `--allow-forcing-extrapolation` on the command
-/// line: named by its leaf, the fit's stored config holds the override, so the
-/// command runs past the forcing's range, records what it held, and is the
-/// same computation as under the flag (gh#1235, gh#1268). Named by its
+/// The commands that read a fit's problem but none of its results (`pfilter`,
+/// `profile`), given a fit made with `--allow-forcing-extrapolation` on the
+/// command line: named by its leaf, the fit's stored config holds the
+/// override, so the command runs past the forcing's range and records what it
+/// held (gh#1235, gh#1268). For `pfilter` it is the same computation as the
+/// file under the flag; `profile` keys the config's text as read, and the
+/// stored config is the file with the override written in, so the two are
+/// stored apart (a conservative re-key, not a shared leaf). Named by its
 /// `fit.toml`, the problem is the file's, which does not hold the override
 /// (gh#896), so the same command is refused at the forcing rather than run as
 /// the flag-made fit.
@@ -396,15 +399,35 @@ fn a_flag_made_fit_is_read_under_its_stored_override_through_its_leaf() {
         .map(|(p, _)| p.parent().unwrap().to_path_buf())
         .expect("the fit's method leaf");
     let (m, toml, params, leaf) = (m.to_str().unwrap(), toml.to_str().unwrap(), params.to_str().unwrap(), leaf.to_str().unwrap());
-    let commands: [(&str, Box<dyn Fn(&str) -> Vec<String>>); 1] = [(
-        "pfilter",
-        Box::new(|fit: &str| {
-            ["pfilter", m, "--fit", fit, "--params", params, "--particles", "50", "--seed", "1", "--dt", "1"]
+    let prof = tmp.path().join("prof");
+    let prof = prof.to_str().unwrap();
+    // Each command, and whether the stored override and the flag on the file
+    // are one stored computation.
+    type Args<'a> = Box<dyn Fn(&str) -> Vec<String> + 'a>;
+    let commands: [(&str, Args, bool); 2] = [
+        (
+            "pfilter",
+            Box::new(|fit: &str| {
+                ["pfilter", m, "--fit", fit, "--params", params, "--particles", "50", "--seed", "1", "--dt", "1"]
+                    .map(String::from)
+                    .to_vec()
+            }),
+            true,
+        ),
+        (
+            "profile",
+            Box::new(|fit: &str| {
+                [
+                    "profile", m, "--fit", fit, "--sweep", "gamma=0.1,0.2", "--particles", "8", "--iterations", "2",
+                    "--n-starts", "1", "--seed", "1", "-o", prof,
+                ]
                 .map(String::from)
                 .to_vec()
-        }),
-    )];
-    for (name, args) in commands {
+            }),
+            false,
+        ),
+    ];
+    for (name, args, one_computation) in commands {
         let before = run_ids(tmp.path());
         let by_leaf = args(leaf);
         let o = camdl(tmp.path(), &by_leaf.iter().map(String::as_str).collect::<Vec<_>>());
@@ -425,7 +448,9 @@ fn a_flag_made_fit_is_read_under_its_stored_override_through_its_leaf() {
         flagged.push("--allow-forcing-extrapolation".into());
         let o = camdl(tmp.path(), &flagged.iter().map(String::as_str).collect::<Vec<_>>());
         assert!(o.status.success(), "{name} --fit fit.toml under the flag:\n{}", stderr(&o));
-        assert_eq!(run_ids(tmp.path()), after, "{name}: the stored override and the flag are one computation");
+        if one_computation {
+            assert_eq!(run_ids(tmp.path()), after, "{name}: the stored override and the flag are one computation");
+        }
         let o = camdl(tmp.path(), &args(toml).iter().map(String::as_str).collect::<Vec<_>>());
         let err = stderr(&o);
         assert!(!o.status.success(), "{name} --fit fit.toml: the file holds no override:\n{err}");

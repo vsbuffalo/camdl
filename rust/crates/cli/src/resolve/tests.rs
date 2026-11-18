@@ -607,7 +607,7 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
     let pr = resolve_profile_point(&ProfilePointCtx {
         model,
         ir_version: IRV,
-        engine_version: ENGV,
+        engine: &runid::inputs::EngineIdentity::of_build(ENGV),
         stem: "sir",
         method_name: "if2",
         data: &data,
@@ -906,7 +906,7 @@ fn a_profile_points_method_level_is_named_method_and_naming_it_rekeys_nothing() 
     let pr = resolve_profile_point(&ProfilePointCtx {
         model: &model,
         ir_version: IRV,
-        engine_version: ENGV,
+        engine: &runid::inputs::EngineIdentity::of_build(ENGV),
         stem: "sir",
         method_name: "if2",
         data: &[],
