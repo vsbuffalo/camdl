@@ -766,8 +766,8 @@ pub fn resolve_preset_delta(
 /// `model.simulation.t_end` (gh#561).
 ///
 /// **The single authority for "what horizon does this scenario run to."** Every
-/// consumer goes through here — the window (`util::apply_scenario_horizon`), the
-/// run identity (`cas_sink::ResolvedEntry::t_end`), and the two guards that refuse a
+/// consumer goes through here — the window (`util::apply_scenario_horizon`, which
+/// the run identity reads back off the model a cell runs), and the two guards that refuse a
 /// horizon where reductions are differenced (`fit::contrasts`, `fit::predict`).
 /// Before this existed, four sites each did their own `model.presets` lookup and
 /// agreed only by coincidence; a window/identity divergence is a silent-wrong

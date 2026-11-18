@@ -3731,7 +3731,7 @@ pub fn resolve_run_parameters_typed(
 /// ([`crate::params_resolver::notices`]): an override every cell shares is one
 /// line, with its value range when the values differ by cell.
 ///
-/// Called by each entry point that runs [`resolve_run_ir`]'s cells, before
+/// Called by each entry point that runs [`resolve_loaded_run`]'s cells, before
 /// they run. A cell whose parameters do not resolve contributes nothing here;
 /// its error surfaces when the cell itself resolves.
 pub fn emit_run_notices(out: &crate::out::Out, runs: &[&SimRun]) {
@@ -3760,24 +3760,23 @@ pub fn resolved_parameter_values(model: &ir::Model) -> std::collections::BTreeMa
 /// ([`run_simulation_lineage`]) so both see byte-identical parameter
 /// resolution.
 pub fn resolve_run_model(run: &SimRun) -> Result<(CompiledModel, ir::Model), String> {
-    let model = resolve_run_ir(run)?;
-    let compiled = CompiledModel::new(model.clone())
-        .map_err(|e| format!("model compile error: {:?}", e))?
-        .with_eval_settings(run.eval);
-    Ok((compiled, model))
+    let cell = crate::sim_config::ResolvedCell::resolve(load_run_model(run)?, run)?;
+    let compiled = cell.compile()?;
+    Ok((compiled, cell.run.model))
 }
 
 /// The `ir::Model` a cell runs — scenario horizon, `--to`, `--init-state`
 /// origin, every parameter tier and the required snapshots applied — before
-/// it is compiled. [`resolve_run_model`] is this plus the compile; a caller
-/// that needs the resolved model but not its compiled form (the store sink
-/// addressing a cell's observation subtree, which is keyed on the resolved
-/// `observations` blocks) reads it here, so the two cannot describe different
-/// models.
-pub fn resolve_run_ir(run: &SimRun) -> Result<ir::Model, String> {
-    // The shared load (anchors + `--integrator`), so this model and the CAS
-    // `base_model` are one load by construction (gh#583 item C).
-    let mut model = load_run_model(run)?;
+/// it is compiled, over `model` as [`load_run_model`] returned it (the shared
+/// load of anchors and `--integrator`, so the model level and the model that
+/// runs are one load by construction, gh#583 item C). The returned `model` is
+/// the model the run executes; `params` / `context` say where each value came
+/// from. The one resolution of a cell ([`crate::sim_config::ResolvedCell`]),
+/// which both the cell's identity and its engine run are built from.
+pub fn resolve_loaded_run(
+    mut model: ir::Model,
+    run: &SimRun,
+) -> Result<crate::params_resolver::ResolvedParameters, String> {
     // gh#561: a named scenario may declare its own horizon (`scenarios { x {
     // simulate { to = … } } }`). Applying it HERE — onto `simulation.t_end`,
     // before validate/compile — is the whole of the runtime change: `t_end` is
@@ -3829,27 +3828,27 @@ pub fn resolve_run_ir(run: &SimRun) -> Result<ir::Model, String> {
     // Notices are not emitted here: this runs once per cell (and again for a
     // stored cell's read-back), so the caller that owns the whole run emits
     // them once over every cell ([`emit_run_notices`]).
-    let resolved = resolve_run_parameters(&model, run)?;
+    let mut resolved = resolve_run_parameters(&model, run)?;
 
-    let mut model = resolved.model;
+    let model = &mut resolved.model;
     // The baked-end refusal runs HERE — after the resolver's scenario filter
     // has removed every intervention this scenario does not fire — so it sees
     // exactly the campaigns that would actually run (gh#561; the pre-filter
     // version over-refused a horizon menu over an unrelated intervention
     // library).
     check_baked_recurring_ends(
-        &model,
+        model,
         run.scenario_name.as_deref(),
         pre_scenario_end,
         run.t_end_override.is_some(),
     )?;
     if run.t_end_override.is_some() {
-        check_reactive_baked_emit_end(&model, pre_scenario_end, model.simulation.t_end)?;
+        check_reactive_baked_emit_end(model, pre_scenario_end, model.simulation.t_end)?;
     }
     // The caller's required snapshots, after the two guards above and before
     // compile — see [`apply_required_output_times`] for both reasons.
-    apply_required_output_times(&mut model, &run.required_output_times);
-    Ok(model)
+    apply_required_output_times(model, &run.required_output_times);
+    Ok(resolved)
 }
 
 /// Run a simulation and return the full trajectory.
@@ -3875,9 +3874,10 @@ pub fn run_simulation_with_progress(
     // bar must compile before the bar exists (see `simulate_compiled` and
     // `engine::run_one_cell_with_progress`) — but for the no-bar path the order
     // is immaterial, so this thin wrapper is byte-identical to the old body.
-    let (compiled, model) = resolve_run_model(run)?;
-    let traj = simulate_compiled(&compiled, &model, run, progress)?;
-    Ok((traj, model))
+    let cell = crate::sim_config::ResolvedCell::resolve(load_run_model(run)?, run)?;
+    let compiled = cell.compile()?;
+    let traj = simulate_compiled(&compiled, &cell, progress)?;
+    Ok((traj, cell.run.model))
 }
 
 /// Run an **already-resolved** model, optionally driving a per-timestep
@@ -3894,10 +3894,22 @@ pub fn run_simulation_with_progress(
 /// path (the tick is RNG-free; see `tests/progress_tick_invariance.rs`).
 pub fn simulate_compiled(
     compiled: &CompiledModel,
-    model: &ir::Model,
-    run: &SimRun,
+    cell: &crate::sim_config::ResolvedCell,
     progress: Option<&indicatif::ProgressBar>,
 ) -> Result<Trajectory, String> {
+    let crate::sim_config::ResolvedCell {
+        run: crate::params_resolver::ResolvedParameters { model, .. },
+        // The values are in `model`; the digests are identity only.
+        tables: _,
+        seed,
+        init_state,
+        backend,
+        dt,
+        binomial,
+        // Carried on `compiled` (`ResolvedCell::compile`).
+        eval: _,
+    } = cell;
+    let (seed, backend, dt, binomial) = (*seed, *backend, *dt, *binomial);
     let params  = compiled.default_params.clone();
     let t_start = model.simulation.t_start;
     let t_end   = model.simulation.t_end;
@@ -3906,12 +3918,12 @@ pub fn simulate_compiled(
 
     // Check backend compatibility before running (same gate as the
     // trait-dispatch path; kept so the error wording is unchanged).
-    let backend: &dyn Simulate = match run.backend {
+    let simulator: &dyn Simulate = match backend {
         ForwardBackend::Gillespie     => &GillespieSim,
         ForwardBackend::ChainBinomial => &ChainBinomialSim,
         ForwardBackend::Ode           => &OdeSim,
     };
-    let caps = backend.capabilities();
+    let caps = simulator.capabilities();
     let required = compiled.required_capabilities();
     if !caps.contains(required) {
         let missing = required.difference(caps);
@@ -3924,19 +3936,19 @@ pub fn simulate_compiled(
             .collect();
         return Err(format!(
             "backend {:?} does not support required capabilities:\n  - {}",
-            run.backend,
+            backend,
             features.join("\n  - "),
         ));
     }
     // gh#166 B2: warn (once) if a `dt`-in-rate model runs on ODE with first-order
     // Euler incidence — every other model gets high-order augmented flow.
-    if matches!(run.backend, ForwardBackend::Ode) {
+    if matches!(backend, ForwardBackend::Ode) {
         crate::fit::methods::warn_if_ode_euler_flow(compiled);
     }
     // gh#95: warn (once) if a time-varying-rate model runs on gillespie — its
     // next-event draw freezes the total rate over each exponential wait, so a
     // seasonal/forced/bare-`t` rate is a piecewise-constant approximation.
-    if matches!(run.backend, ForwardBackend::Gillespie) {
+    if matches!(backend, ForwardBackend::Gillespie) {
         crate::fit::methods::warn_if_gillespie_time_dep(compiled);
     }
     // gh#125 review: an `at = [...]` output list entirely beyond the horizon is
@@ -3974,7 +3986,7 @@ pub fn simulate_compiled(
     // refuses such a model), so `reals` is empty there — which is exactly what
     // a model with no real compartments builds anyway. A fit-sourced origin
     // (gh#697) carries whatever the saved latent path recorded.
-    let start_state = run.init_state.as_ref().map(|init| sim::chain_binomial::StartState {
+    let start_state = init_state.as_ref().map(|init| sim::chain_binomial::StartState {
         int_s: sim::IntState::from_vec(init.state.counts.clone()),
         real_s: sim::RealState::from_vec(init.state.reals.clone()),
         // Fresh RNG from this cell's process seed. The seam's RNG-restore path
@@ -3983,20 +3995,20 @@ pub fn simulate_compiled(
         rng: None,
     });
 
-    let traj = match run.backend {
+    let traj = match backend {
         ForwardBackend::Gillespie => {
             if start_state.is_some() {
                 return Err(unseamed_backend_msg("gillespie"));
             }
             let cfg = GillespieConfig { t_start, t_end, output_dt: None };
             sim::gillespie::run_gillespie_with_observer(
-                compiled, &params, run.seed, &cfg, None, tick_opt.as_deref_mut(),
+                compiled, &params, seed, &cfg, None, tick_opt.as_deref_mut(),
             )
         }
         ForwardBackend::ChainBinomial => {
-            let cfg = ChainBinomialConfig { t_start, t_end, dt: run.dt, binomial: run.binomial };
+            let cfg = ChainBinomialConfig { t_start, t_end, dt: dt, binomial: binomial };
             sim::chain_binomial::run_chain_binomial_with_observer(
-                compiled, &params, run.seed, &cfg, None, tick_opt.as_deref_mut(),
+                compiled, &params, seed, &cfg, None, tick_opt.as_deref_mut(),
                 sim::chain_binomial::Resume {
                     start: start_state.as_ref(),
                     capture_final_rng: None,
@@ -4007,7 +4019,7 @@ pub fn simulate_compiled(
             if start_state.is_some() {
                 return Err(unseamed_backend_msg("ode"));
             }
-            let cfg = OdeConfig { t_start, t_end, dt: run.dt };
+            let cfg = OdeConfig { t_start, t_end, dt: dt };
             // Forward simulate never coarsens — coarse burn-in is a fit-time
             // likelihood option (see `compute_ode_loglik`), not a simulate surface.
             sim::ode::run_ode(compiled, &params, &cfg, tick_opt, None)
@@ -4096,8 +4108,8 @@ pub fn run_simulation_event_log(
     use crate::args::types::ForwardBackend;
     use sim::lineage::EventRecorder;
 
-    // gh#641. This function shares `resolve_run_model` with the ordinary
-    // simulate path, so an `--init-state` run arrives here with
+    // gh#641. This function shares the cell resolution (`ResolvedCell::resolve`)
+    // with the ordinary simulate path, so an `--init-state` run arrives here with
     // `simulation.t_start` ALREADY moved to the forecast origin — but it builds
     // its state from the model below (`initial_state_mean`) and passes
     // `Resume::default()`, so the state itself is never restored. Unguarded
@@ -4142,7 +4154,11 @@ pub fn run_simulation_event_log(
         }
     };
 
-    let (compiled, model) = resolve_run_model(run)?;
+    // The cell resolved and compiled as every forward run is; what runs is
+    // read from it, as the cell's identity is.
+    let cell = crate::sim_config::ResolvedCell::resolve(load_run_model(run)?, run)?;
+    let compiled = cell.compile()?;
+    let model = &cell.run.model;
 
     if model.identity_tracked_compartments.is_empty() {
         return Err(
@@ -4182,28 +4198,28 @@ pub fn run_simulation_event_log(
     // t_start snapshot and fails loudly if the two ever diverge.
     // Chain-binomial draws it with the run's binomial sampler; Gillespie with
     // the default one.
-    let init_binomial = match run.backend {
-        ForwardBackend::ChainBinomial => run.binomial,
+    let init_binomial = match cell.backend {
+        ForwardBackend::ChainBinomial => cell.binomial,
         _ => sim::rng::BinomialAlgorithm::default(),
     };
-    let mut init_rng = sim::rng::StatefulRng::new(run.seed).with_binomial(init_binomial);
+    let mut init_rng = sim::rng::StatefulRng::new(cell.seed).with_binomial(init_binomial);
     let (initial_int, _initial_real) = compiled
         .initial_state_draw(&params, &mut init_rng)
         .map_err(|e| format!("initial state error: {:?}", e))?;
     let mut recorder = EventRecorder::new(&compiled, &initial_int)
         .map_err(|e| format!("event recorder init error: {:?}", e))?;
 
-    let traj = match run.backend {
+    let traj = match cell.backend {
         ForwardBackend::Gillespie => {
             let cfg = GillespieConfig { t_start, t_end, output_dt: None };
             sim::gillespie::run_gillespie_with_observer(
-                &compiled, &params, run.seed, &cfg, Some(&mut recorder), None,
+                &compiled, &params, cell.seed, &cfg, Some(&mut recorder), None,
             )
         }
         ForwardBackend::ChainBinomial => {
-            let cfg = ChainBinomialConfig { t_start, t_end, dt: run.dt, binomial: run.binomial };
+            let cfg = ChainBinomialConfig { t_start, t_end, dt: cell.dt, binomial: cell.binomial };
             sim::chain_binomial::run_chain_binomial_with_observer(
-                &compiled, &params, run.seed, &cfg, Some(&mut recorder), None,
+                &compiled, &params, cell.seed, &cfg, Some(&mut recorder), None,
                 sim::chain_binomial::Resume::default(),
             )
         }
@@ -4221,15 +4237,15 @@ pub fn run_simulation_event_log(
             return Err(format!(
                 "internal error: the lineage recorder's initial pool does not match \
                  the run's own t={} state ({:?} vs {:?}). The `--event-log` path \
-                 reproduces the backend's initial draw from `run.seed`; a backend \
+                 reproduces the backend's initial draw from `cell.seed`; a backend \
                  that changed how it constructs its RNG has broken that.",
                 t_start, initial_int.counts, first.int_state.counts));
         }
     }
 
-    let exact = matches!(run.backend, ForwardBackend::Gillespie);
+    let exact = matches!(cell.backend, ForwardBackend::Gillespie);
     let event_log = recorder.into_event_log();
-    Ok((traj, model, event_log, exact))
+    Ok((traj, cell.run.model, event_log, exact))
 }
 
 /// Which trajectory *data* columns to emit (compartments + flows), derived

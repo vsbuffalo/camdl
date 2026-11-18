@@ -31,6 +31,10 @@ use crate::version;
 /// the same authority the value resolver applies on the preset route, so the
 /// run identity cannot disagree with what runs (gh#573). For an ad-hoc patch
 /// they are the patch itself, which is also what runs.
+///
+/// The arm's horizon is not here: each cell's window is read off the model it
+/// runs ([`crate::sim_config::ResolvedCell`]), where the scenario's own
+/// `simulate { to }` and `--to` are applied.
 #[derive(Debug, Clone)]
 pub struct ResolvedEntry {
     pub name: String,
@@ -41,25 +45,14 @@ pub struct ResolvedEntry {
     /// `scale` factors in application order. Always empty for an ad-hoc
     /// patch: an inline `[[scenario]]` has no `scale` spelling.
     pub scale: Vec<(String, f64)>,
-    /// The scenario's own simulation horizon (`scenarios { x { simulate { to
-    /// = … } } }`), when it declares one — otherwise the cell inherits
-    /// `model.simulation.t_end` (gh#561).
-    ///
-    /// Identity-relevant: it changes the stored trajectory, so it is folded
-    /// into the cell's `config` level by [`CasSink::cell_resolve`]. A model
-    /// preset carries whatever it declared; an inline ad-hoc scenario is
-    /// always `None`, because a horizon is a model-file declaration and there
-    /// is no CLI spelling for one.
-    pub t_end: Option<f64>,
 }
 
 impl ResolvedEntry {
     /// The entry for the model preset `name`, routed through the preset
     /// branch of the value resolver. The hashed delta comes from
     /// [`crate::params_resolver::resolve_preset_delta`] — the authority that
-    /// branch applies — and `t_end` is supplied by the caller, because
-    /// `simulate --to` may override the preset's composed horizon.
-    pub fn from_preset(model: &ir::Model, name: &str, t_end: Option<f64>) -> Result<Self, String> {
+    /// branch applies.
+    pub fn from_preset(model: &ir::Model, name: &str) -> Result<Self, String> {
         let delta = crate::params_resolver::resolve_preset_delta(model, name)
             .map_err(|e| e.to_string())?;
         Ok(ResolvedEntry {
@@ -69,7 +62,6 @@ impl ResolvedEntry {
             disable: delta.disable,
             params: delta.params.into_iter().collect(),
             scale: delta.scale,
-            t_end,
         })
     }
 }
@@ -125,9 +117,9 @@ pub(crate) struct CasSink {
     /// The base model (`sim.model.ir`) is never `cell.model` (which has the
     /// scenario and the sweep point applied), and it is the model each cell's
     /// parameter values are resolved over. There is deliberately no base
-    /// parameter map: a cell's `params` level is resolved from the cell's own
-    /// `SimRun` through `util::resolve_run_parameters`, the resolver call the
-    /// engine makes (gh#583).
+    /// parameter map: a cell's `params` level is read off the model the cell
+    /// runs, resolved from its own `SimRun` by `sim_config::ResolvedCell::resolve`,
+    /// the resolution the engine makes (gh#583).
     pub(crate) sim: std::sync::Arc<crate::sim_config::ResolvedSimConfig>,
     /// Absolute `<output>/sims` subtree.
     pub(crate) runs_dir: String,
@@ -197,42 +189,12 @@ impl CasSink {
             .unwrap_or_else(|| std::path::PathBuf::from("."))
     }
 
-    /// Content digests of the external `--table` files, sorted by table name,
-    /// for folding into the `params` level (`ResolvedParams.tables`). Each
-    /// file's *bytes* are hashed (never its path), so a regenerated or edited
-    /// table re-keys the run and a stale cached trajectory is never served.
-    ///
-    /// Mirrors `profile_cas::data_digests`: sort by name, `digest_bytes` per
-    /// file (= `ContentHash::from_hex(sha256_hex(bytes))`). Empty `table_files`
-    /// → empty vec, identical to the no-`--table` path (so a plain `simulate`
-    /// is unaffected). Read from the cell's `SimRun::table_files` — the map the
-    /// resolver loads the tables from when the cell runs.
-    fn table_digests(
-        table_files: &HashMap<String, String>,
-    ) -> Result<Vec<runid::inputs::DataDigest>, String> {
-        let mut names: Vec<&String> = table_files.keys().collect();
-        names.sort();
-        names
-            .iter()
-            .map(|name| {
-                let path = &table_files[*name];
-                let bytes = std::fs::read(path)
-                    .map_err(|e| format!("cannot read --table file '{}' ({}): {}", name, path, e))?;
-                Ok(runid::inputs::DataDigest(runid::ContentHash::digest_bytes(&bytes)))
-            })
-            .collect()
-    }
-
     /// Resolve a cell's trajectory identity + factored store path.
     ///
-    /// The model level is the **base** model digest (constant across the
-    /// sweep — never `cell.model`, which has scenario + sweep applied). The
-    /// `params` level is the cell's RESOLVED parameter values — every tier
-    /// (model default, `--params`, draw/sweep point, scenario, `--param`,
-    /// `--param-vec`) applied in the resolver's order by the resolver itself,
-    /// over the cell's own `SimRun`, exactly as the engine resolves them when
-    /// it runs the cell. The named scenario's enable/disable/params is the
-    /// `scenario` level. `process_seed` is engine-resolved.
+    /// The cell is resolved once ([`crate::sim_config::ResolvedCell`]), over
+    /// the base model the `model` level is computed from, by the resolution
+    /// the engine itself runs; [`CasSink::cell_identity`] builds the identity
+    /// from that value.
     ///
     /// `pub(crate)` for `simulate`'s read-back of a stored cell and for the
     /// `--dry-run` store view (`main::SimSink::read_stored`, `main::print_store_view`).
@@ -240,19 +202,71 @@ impl CasSink {
         &self,
         spec: &crate::engine::CellSpec,
     ) -> Result<(crate::resolve::ResolvedTrajectory, std::path::PathBuf, String), String> {
+        let (_, rt) = self.resolved_cell(spec)?;
+        let root = self.root();
+        let dir = runid::store_path(&root, runid::ArtifactKind::Sim, &rt.levels);
+        let rel = dir.strip_prefix(&root).unwrap_or(&dir).to_string_lossy().into_owned();
+        Ok((rt, dir, rel))
+    }
+
+    /// The cell resolved, and its identity built from it.
+    pub(crate) fn resolved_cell(
+        &self,
+        spec: &crate::engine::CellSpec,
+    ) -> Result<(crate::sim_config::ResolvedCell, crate::resolve::ResolvedTrajectory), String> {
+        let cell = crate::sim_config::ResolvedCell::resolve(self.sim.model.ir.clone(), &spec.sim_run)?;
+        let rt = self.cell_identity(spec, &cell)?;
+        Ok((cell, rt))
+    }
+
+    /// The trajectory identity of one resolved cell: the invocation's `model`
+    /// level and run-wide `config` (`self.sim`), and the cell's own window,
+    /// parameter values, table digests, scenario arm and seed — each read from
+    /// `cell`, the value the engine runs.
+    ///
+    /// The destructure of `cell` names every field and ignores none: a field
+    /// added to [`crate::sim_config::ResolvedCell`] does not compile here until
+    /// the identity uses it. The backend, the step and the evaluator settings
+    /// are keyed by the run-wide `config` level; a cell that would run other
+    /// values is refused rather than keyed on a computation it did not make.
+    fn cell_identity(
+        &self,
+        spec: &crate::engine::CellSpec,
+        cell: &crate::sim_config::ResolvedCell,
+    ) -> Result<crate::resolve::ResolvedTrajectory, String> {
+        let crate::sim_config::ResolvedCell {
+            run, tables, seed, init_state, backend, dt, binomial, eval,
+        } = cell;
+        let engine = self.sim.engine_settings();
+        if *backend != engine.backend || dt.to_bits() != engine.dt.to_bits() || *eval != engine.eval {
+            return Err(format!(
+                "internal error: a cell runs on backend {backend:?} at dt = {dt} with {eval:?}, \
+                 but the run is keyed on backend {:?} at dt = {} with {:?}",
+                engine.backend, engine.dt, engine.eval));
+        }
+        // Only the default sampler has an identity; another is refused on the
+        // store-writing path before any cell is planned (`resolve_sim_config`).
+        if *binomial != sim::rng::BinomialAlgorithm::Btpe {
+            return Err(format!(
+                "internal error: a cell runs the {binomial:?} binomial sampler, which has no run identity"));
+        }
+
         let name = spec.scenario.name();
-        let resolved = self.sim.arms.iter()
+        let arm = self.sim.arms.iter()
             .find(|s| s.name == name || s.route.as_deref() == Some(name))
             .ok_or_else(|| format!("cell scenario '{}' not among the resolved scenarios", name))?;
 
-        let resolved_params = crate::util::resolve_run_parameters(&self.sim.model.ir, &spec.sim_run)?;
+        // The `params` level is the cell's RESOLVED parameter values — every
+        // tier (model default, `--params`, draw/sweep point, scenario,
+        // `--param`, `--param-vec`) applied in the resolver's order, read off
+        // the model the cell runs.
         let params: HashMap<String, f64> =
-            crate::util::resolved_parameter_values(&resolved_params.model).into_iter().collect();
+            crate::util::resolved_parameter_values(&run.model).into_iter().collect();
 
-        let scenario_label = if resolved.name.is_empty() {
+        let scenario_label = if arm.name.is_empty() {
             crate::sim_job::IMPLICIT_ARM_LABEL
         } else {
-            resolved.name.as_str()
+            arm.name.as_str()
         };
         // The label names the point's parameters at the values the cell RAN
         // (resolved), not the values the point asked for: a `--param` or a
@@ -263,32 +277,22 @@ impl CasSink {
             .collect();
         let param_label = params_path_label(&ran_point);
 
-        let base = &self.sim.model.ir;
         let window = crate::sim_config::CellWindow::new(
-            // gh#641: the cell's EFFECTIVE start, not the base model's. A run
-            // seeded from a filtered state begins at that state's origin and
-            // therefore covers a different window — the same argument the
-            // horizon override makes below, from the other end.
-            spec.sim_run.init_state.as_ref().map(|i| i.origin_t).unwrap_or(base.simulation.t_start),
-            // gh#561: the cell's EFFECTIVE horizon, not the base model's. A
-            // scenario declaring its own `simulate { to }` produces a different
-            // trajectory, so it must re-key (`feedback: count-in-the-key`) —
-            // otherwise a horizon menu whose scenarios carry no `set`/`enable`
-            // delta resolves every cell to one `run_id` and the store serves
-            // one trajectory for all of them.
-            //
-            // This folds the RESOLVED VALUE into the existing `SimConfig::t_end`
-            // rather than adding a field to the scenario level, so it costs
-            // nothing for models that don't use the feature: a preset with no
-            // `to`, or one equal to the model horizon, hashes exactly as before.
-            resolved.t_end.unwrap_or(base.simulation.t_end),
+            // The cell's EFFECTIVE start and horizon, read off the model it
+            // runs: a run seeded from a filtered state begins at that state's
+            // origin (gh#641), and a scenario's own `simulate { to }` or `--to`
+            // moves the end (gh#561, gh#626). A different window is a different
+            // trajectory, so it re-keys; a cell on the model's own window
+            // hashes the base model's values.
+            run.model.simulation.t_start,
+            run.model.simulation.t_end,
             // gh#641 / gh#697: the state this cell restored. The origin
             // ENSEMBLE's content digest and the restored ROW both key the run —
             // a re-filtered / re-fitted ensemble under an unchanged model must
             // not serve the cached forecast, and two cells sharing a
             // `process_seed` (`--seeds 7,7`) must not collide while starting
             // from different rows. `None` for every cell without `--init-state`.
-            spec.sim_run.init_state.as_ref().map(|i| runid::inputs::InitStateDigest {
+            init_state.as_ref().map(|i| runid::inputs::InitStateDigest {
                 ensemble: runid::inputs::DataDigest(i.ensemble_digest),
                 row: i.row,
             }),
@@ -299,15 +303,15 @@ impl CasSink {
             model_stem: &self.sim.model.stem,
             config: self.sim.run.cell_config(window),
             params: &params,
-            table_digests: Self::table_digests(&spec.sim_run.table_files)?,
-            enable: &resolved.enable,
-            disable: &resolved.disable,
-            scen_params: &resolved.params,
-            scen_scale: &resolved.scale,
+            table_digests: tables.clone(),
+            enable: &arm.enable,
+            disable: &arm.disable,
+            scen_params: &arm.params,
+            scen_scale: &arm.scale,
             param_label: &param_label,
             scenario_label,
-            base_seed: spec.process_seed,
-            process_seed: spec.process_seed,
+            base_seed: *seed,
+            process_seed: *seed,
         };
         let mut rt = crate::resolve::resolve_trajectory(&ctx).map_err(|e| format!("resolve error: {e}"))?;
         // Display-only, never hashed (the run_id is fixed above, from the
@@ -315,18 +319,14 @@ impl CasSink {
         // tier's value by another's, and the notices this cell's resolution
         // reported.
         if let Some(obj) = rt.display_inputs.as_object_mut() {
-            let provenance =
-                crate::run_meta::ParameterProvenance::of_all(&resolved_params.params);
+            let provenance = crate::run_meta::ParameterProvenance::of_all(&run.params);
             obj.insert("parameters_provenance".into(),
                 serde_json::to_value(&provenance).map_err(|e| e.to_string())?);
-            let notices = crate::params_resolver::notices(&[&resolved_params]);
+            let notices = crate::params_resolver::notices(&[run]);
             obj.insert("notices".into(),
                 serde_json::to_value(&notices).map_err(|e| e.to_string())?);
         }
-        let root = self.root();
-        let dir = runid::store_path(&root, runid::ArtifactKind::Sim, &rt.levels);
-        let rel = dir.strip_prefix(&root).unwrap_or(&dir).to_string_lossy().into_owned();
-        Ok((rt, dir, rel))
+        Ok(rt)
     }
 
     /// Where the store holds a committed leaf of this identity — found by its
@@ -431,15 +431,15 @@ impl CasSink {
     /// without it would be reported "cached" for observations it never wrote
     /// (the gh#738 / gh#599 class). The check is the EXACT subtree
     /// `obs/<hash8>-<obs_seed>/` — addressed from the scenario-applied model
-    /// the cell runs ([`crate::util::resolve_run_ir`], the same model
-    /// `merge_cell` writes from), with every requested stream file and its
+    /// the cell runs (the resolved cell's model, the one `merge_cell` writes
+    /// from), with every requested stream file and its
     /// `obs.json` present. A leaf holding another cadence's or seed's subtree
     /// is a miss, and directory presence alone is not a hit.
     pub(crate) fn stored_hit(
         &self,
         spec: &crate::engine::CellSpec,
     ) -> Result<Option<std::path::PathBuf>, String> {
-        let (rt, _, _) = self.cell_resolve(spec)?;
+        let (cell, rt) = self.resolved_cell(spec)?;
         // A build whose identity is incomplete serves no stored cell.
         if crate::resolve::engine_write_policy(crate::resolve::WritePolicy::Reuse, version::ENGINE_REUSE)
             == crate::resolve::WritePolicy::Force
@@ -450,7 +450,7 @@ impl CasSink {
             return Ok(None);
         };
         if self.obs_enabled && !self.sim.model.ir.observations.is_empty() {
-            let model = crate::util::resolve_run_ir(&spec.sim_run)?;
+            let model = &cell.run.model;
             let obs_dir = obs_subtree_dir(
                 &dir, &model.observations, self.emit_every.as_ref(), spec.obs_seed,
             )?;
@@ -1394,7 +1394,6 @@ mod tests {
                     disable: vec![],
                     params: HashMap::new(),
                     scale: Vec::new(),
-                    t_end: None,
                 }],
             }),
             runs_dir: runs_dir.to_string(),
@@ -1513,60 +1512,55 @@ mod tests {
         }
     }
 
-    /// gh#583 item C's guard. `SimRun` is everything the engine runs a cell
-    /// from, so every field of it must reach the cell's identity or say why it
-    /// does not. The destructure is exhaustive: a new `SimRun` field does not
-    /// compile here until someone classifies it — the decision whose absence
-    /// let `--integrator` and `--param-vec` run without being hashed.
+    /// The identity reads a cell's window from the model the cell runs, so a
+    /// per-cell input that moves the window reaches the identity because it
+    /// reaches the engine: a cell whose `SimRun` carries a `--to` horizon keys
+    /// on that horizon though the scenario arm records none. (The identity
+    /// used to take the horizon from the arm, a separate copy that had to be
+    /// kept equal to what the engine applied.)
     #[test]
-    fn every_simrun_field_has_an_identity_route() {
-        let crate::util::SimRun {
-            // model level: `sim.model.ir` is `util::load_run_model` of this path.
-            ir_path: _,
-            // model level: substituted and applied inside `load_run_model`.
-            obs_anchors: _,
-            integrator: _,
-            // params level: resolved by `util::resolve_run_parameters`, the
-            // engine's own resolver call (tiers 3, 5, 3.5, 5, and 4).
-            params_files: _,
-            overrides: _,
-            point_overrides: _,
-            fit_fixed: _,
-            set_vec_entries: _,
-            scenario_name: _,
-            scenario_inline_set: _,
-            scenario_inline_scale: _,
-            // params level: each file's content digest (`table_digests`).
-            table_files: _,
-            // scenario level: the `ResolvedEntry` enable / disable delta.
-            adhoc_enable: _,
-            adhoc_disable: _,
-            // scenario level: its lists lead every `ResolvedEntry`'s
-            // enable / disable (`resolve_sim_config`).
-            fit_base: _,
-            // provenance: the scenario label only; its values are above.
-            scenario_inline_name: _,
-            // provenance: names the source of `overrides` in a notice only;
-            // the values are above.
-            overrides_label: _,
-            // config level: `SimConfig::t_end` via `ResolvedEntry::t_end`.
-            t_end_override: _,
-            // config level: `SimConfig::t_start` and the `init_state` digest.
-            init_state: _,
-            // config level: the job's backend and dt, which
-            // `engine::build_cell_sim_run` copies onto every cell.
-            backend: _,
-            dt: _,
-            // seed level: `CellSpec::process_seed`, the value copied here.
-            seed: _,
-            // refused on the CAS-writing path (`resolve_sim_config`):
-            // it changes the trajectory and has no identity route yet.
-            required_output_times: _,
-            // refused on the CAS-writing path unless BTPE
-            // (`resolve_sim_config`): only `fit predict` sets another
-            // sampler, and its replay writes no leaf.
-            binomial: _,
-        } = crate::util::SimRun::default();
+    fn a_cell_is_keyed_on_the_window_it_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs_dir = dir.path().join("sims");
+        let runs_dir = runs_dir.to_str().unwrap();
+        let base = baseline_spec(HashMap::new());
+        let mut shorter = baseline_spec(HashMap::new());
+        shorter.sim_run.t_end_override = Some(50.0);
+
+        let (rt_base, _, _) = sink(runs_dir).cell_resolve(&base).unwrap();
+        let (rt_shorter, _, _) = sink(runs_dir).cell_resolve(&shorter).unwrap();
+        assert_ne!(rt_base.run_id, rt_shorter.run_id,
+            "a cell run to t = 50 must not share the run id of the cell run to the model's horizon");
+        let config = |rt: &crate::resolve::ResolvedTrajectory| {
+            rt.levels.iter().find(|l| l.name == "config").map(|l| l.hash)
+        };
+        assert_ne!(config(&rt_base), config(&rt_shorter), "the window is in the config level");
+    }
+
+    /// The backend, the step and the evaluator settings are keyed once, by the
+    /// run-wide `config` level. A cell that would run other values is refused,
+    /// not keyed on a computation it did not make.
+    #[test]
+    fn a_cell_running_other_engine_settings_than_the_run_is_keyed_on_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs_dir = dir.path().join("sims");
+        let runs_dir = runs_dir.to_str().unwrap();
+        let refused = |edit: &dyn Fn(&mut crate::util::SimRun)| {
+            let mut spec = baseline_spec(HashMap::new());
+            edit(&mut spec.sim_run);
+            match sink(runs_dir).cell_resolve(&spec) {
+                Ok(_) => panic!("a cell whose engine settings differ from the keyed run must be refused"),
+                Err(e) => e,
+            }
+        };
+        assert!(refused(&|r| r.backend = crate::args::types::ForwardBackend::Ode).contains("backend Ode"));
+        assert!(refused(&|r| r.dt = 0.5).contains("dt = 0.5"));
+        assert!(refused(&|r| r.eval = sim::EvalSettings { allow_degenerate_rates: true })
+            .contains("allow_degenerate_rates: true"));
+        assert!(refused(&|r| r.binomial = sim::rng::BinomialAlgorithm::Btrs)
+            .contains("binomial sampler"));
+        sink(runs_dir).cell_resolve(&baseline_spec(HashMap::new()))
+            .expect("the cell the run is keyed on resolves");
     }
 
     /// gh#241 PR E2 — THE dedupe proof. A `[design.*]` cell and a normal

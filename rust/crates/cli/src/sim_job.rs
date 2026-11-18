@@ -52,8 +52,8 @@ pub struct SimulateJob {
     /// [`IMPLICIT_ARM_LABEL`] (run-spec §3.6).
     pub scenarios: Vec<ScenarioRef>,
     /// gh#626: the resolved `--to` horizon override (model time), applied to
-    /// every cell after the scenario horizon in `resolve_run_model`, and keyed
-    /// into run identity via `ResolvedEntry.t_end`. `None` = no override.
+    /// every cell after the scenario horizon in `util::resolve_loaded_run`, and
+    /// keyed into run identity from the model each cell runs. `None` = no override.
     pub t_end_override: Option<f64>,
     /// Times every cell must record a trajectory snapshot at, beyond the
     /// model's own `output { trajectories { … } }` schedule — copied verbatim
