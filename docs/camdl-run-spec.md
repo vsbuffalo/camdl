@@ -983,20 +983,20 @@ and fails it instead when `--stream` named it.
   `per_draw` joint samples (5), evenly strided over its `of_particles`
   particles; each sample is one particle's trajectory across every target. The
   bands and means in `forecast/` use every particle of every draw.
-- No held-out outcome is recorded: the file holds only inputs to the
-  predictions, so it is byte-identical when only held-out values change. The
-  held-out rows (after the training prefix under `holdout_after`, or in a
-  `[data.holdout]` file) select which targets have an observed value (D80);
-  nothing filters them. The filter carries each value it can score as a held-out
-  cell (D79), which its scoring likelihood evaluates per particle at the
-  target's end and which enters no weight, resampling or state. A value the data
-  checks refuse, and in a prospective forecast every value of a design-reading
-  stream, is not scored, never refusing the prediction. The held-out rows'
-  digests, which row matched which target, and the log-likelihoods belong to the
-  score artifact (forecast scoring, Stage 6).
+- Nothing about held-out rows is recorded, here or in the tables: the files hold
+  only inputs to the predictions, so they are byte-identical when held-out rows
+  change or are removed. The held-out rows (after the training prefix under
+  `holdout_after`, or in a `[data.holdout]` file) select which targets have an
+  observed value (D80); nothing filters them. The filter carries each value it
+  can score as a held-out cell (D79), which its scoring likelihood evaluates per
+  particle at the target's end and which enters no weight, resampling or state.
+  A value the data checks refuse, and in a prospective forecast every value of a
+  design-reading stream, is not scored, never refusing the prediction. The
+  held-out rows' digests, which targets they measure and which row matched which
+  target, and the log-likelihoods belong to the score artifact (forecast
+  scoring, Stage 6).
 - `targets`: each target's `stream`, `start` and `end`, `horizon` (its position
-  among its stream's targets), `lead` (its end minus the origin),
-  `has_held_out_row` (whether a held-out row measures its period), and `design`,
+  among its stream's targets), `lead` (its end minus the origin), and `design`,
   the design values the prediction read (absent for a stream that reads none).
   `target_sources` names each stream's source: `declared_tiling`,
   `emit_schedule`, or `held_out_rows` for a window-column stream with no

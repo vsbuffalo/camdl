@@ -628,7 +628,7 @@ fn write_tables(
         let dims = crate::fit::predict::index_dims_for(schema, source, &stratum_of(first).into_iter().map(|(d, _)| d).collect::<Vec<_>>());
         let mut header: Vec<String> = arm_header(&sweep);
         header.extend(dims.iter().cloned());
-        header.extend(["t_start", "t_stop", "horizon", "lead", "has_held_out_row", "mean"]
+        header.extend(["t_start", "t_stop", "horizon", "lead", "mean"]
             .map(String::from));
         header.extend(QUANTILE_LEVELS.iter().map(|(_, l)| l.to_string()));
         header.push("n_samples".into());
@@ -647,7 +647,6 @@ fn write_tables(
             cells.push(fmt_time(t.measures.end()));
             cells.push(t.horizon.to_string());
             cells.push(fmt_time(t.lead));
-            cells.push(t.observed.is_some().to_string());
             cells.push(fmt_value(mean));
             cells.extend(qs.iter().map(|q| fmt_value(*q)));
             cells.push(ys.len().to_string());
@@ -770,11 +769,6 @@ fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) ->
             "end": point(t.measures.end()),
             "horizon": t.horizon,
             "lead": t.lead,
-            // Whether a held-out row measures this target's period. Which row
-            // it is, and its value, belong to the score artifact: this file
-            // holds only inputs to the predictions, so a change of held-out
-            // outcomes leaves it byte-identical.
-            "has_held_out_row": t.observed.is_some(),
             // D81: the design values the prediction read; absent for a
             // stream whose likelihood reads none.
             "design": (!t.design.is_empty()).then(|| t.design.iter()
