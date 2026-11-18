@@ -1010,15 +1010,41 @@ mod tests {
         );
     }
 
+    /// Poll `progress.json` until `done` accepts it, returning that record, or
+    /// `None` once `bound` has passed. A missing or half-written file counts as
+    /// "not yet".
+    fn wait_for_progress(
+        dir: &Path,
+        bound: Duration,
+        done: impl Fn(&Progress) -> bool,
+    ) -> Option<Progress> {
+        let start = std::time::Instant::now();
+        loop {
+            if let Ok(p) = read_progress(dir) {
+                if done(&p) {
+                    return Some(p);
+                }
+            }
+            if start.elapsed() >= bound {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
     #[test]
     fn heartbeat_writes_then_finish_marks_terminal() {
         let dir = tempfile::tempdir().unwrap();
         // optimizing: fixed phase, step 12 of 30.
         let hb = Heartbeat::optimizing(dir.path().to_path_buf(), 30, Duration::from_millis(20));
-        std::thread::sleep(Duration::from_millis(40));
         hb.bump(12);
-        std::thread::sleep(Duration::from_millis(40));
-        let mid = read_progress(dir.path()).unwrap();
+        // The timer thread, not this thread, writes the step. Wait for that
+        // write to be observable rather than for a fixed time to pass; the
+        // bound only keeps a broken timer from hanging the suite.
+        let mid = wait_for_progress(dir.path(), Duration::from_secs(30), |p| {
+            matches!(p.state, RunState::Running { step: 12, .. })
+        })
+        .expect("the timer thread should write step 12 within 30 s");
         assert!(matches!(mid.state, RunState::Running { step: 12, phase: Phase::Optimizing, .. }));
         hb.finish(RunState::Done);
         assert_eq!(read_progress(dir.path()).unwrap().state, RunState::Done);
