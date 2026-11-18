@@ -18,7 +18,10 @@
 //!
 //! These are regression evidence on small fixtures, not proof. Each survey
 //! is four points of a six-day SIR model, scored by its ODE skeleton or by a
-//! twenty-particle filter.
+//! twenty-particle filter; every execution, child, presentation and
+//! provenance case runs on both. The sampled box (beta 1.5 to 4 a day) is a
+//! fast epidemic, whose skeleton at the survey's step of one day depends on
+//! the step, so an input that leaked into the step would move the landscape.
 //!
 //! The fixtures: `sir.camdl`, an SIR model with a vaccination intervention, a
 //! scenario that enables it, a parameter-only rate factor that loop-invariant
@@ -38,7 +41,7 @@ const SIR: &str = r#"
 time_unit = 'days
 compartments { S, I, R, V }
 parameters {
-  beta  : rate        in [0.01, 1.0]
+  beta  : rate        in [0.01, 5.0]
   gamma : rate        in [0.01, 1.0]
   k     : probability in [0.01, 0.99]
 }
@@ -129,11 +132,11 @@ fn fx() -> Arc<Fixture> {
     fx
 }
 
-/// `camdl survey <model> --data cases.tsv --estimate beta=0.1:0.9` over four
+/// `camdl survey <model> --data cases.tsv --estimate beta=1.5:4.0` over four
 /// points, scored by the ODE skeleton, seed 1.
 fn sv_on(fx: &Arc<Fixture>, model: &str, extra: &[&str]) -> Invocation {
     let (m, d) = (fx.path(model), fx.path("cases.tsv"));
-    Invocation::new(fx, &["survey", &m, "--data", &d, "--estimate", "beta=0.1:0.9", "--fixed", "gamma=0.2", "--fixed", "k=0.3"])
+    Invocation::new(fx, &["survey", &m, "--data", &d, "--estimate", "beta=1.5:4.0", "--fixed", "gamma=0.2", "--fixed", "k=0.3"])
         .with(&["--n-points", "4", "--eval", "simulate", "--seed", "1"])
         .with(extra)
 }
@@ -205,7 +208,7 @@ fn keyed_fit() {
 #[test]
 fn keyed_estimate() {
     let fx = fx();
-    assert_rekeys("estimate", &sv(&fx, &[]), &sv(&fx, &[]).set("--estimate", "beta=0.2:0.9"));
+    assert_rekeys("estimate", &sv(&fx, &[]), &sv(&fx, &[]).set("--estimate", "beta=1.6:4.0"));
 }
 
 #[test]
@@ -317,80 +320,108 @@ fn keyed_env_experimental() {
 }
 
 // ─── execution ───────────────────────────────────────────────────────────────
+//
+// Every execution, child, presentation and provenance case runs on both
+// evaluation methods, the ODE skeleton and the particle filter ([`bases_on`]).
+
+/// Both evaluation methods on `model`.
+fn bases_on(fx: &Arc<Fixture>, model: &str) -> [Invocation; 2] {
+    let simulate = sv_on(fx, model, &[]);
+    let pfilter = simulate.set("--eval", "pfilter").with(&["--eval-particles", "20", "--eval-replicates", "1"]);
+    [simulate, pfilter]
+}
+
+fn bases(fx: &Arc<Fixture>) -> [Invocation; 2] {
+    bases_on(fx, "sir.ir.json")
+}
 
 /// The points are scored on the scoped pool `--parallel` sizes: by the ODE
 /// skeleton and by the particle filter.
 #[test]
 fn execution_parallel() {
     let fx = fx();
-    assert_same(&sv(&fx, &["--parallel", "1"]), &sv(&fx, &["--parallel", "4"]));
-    assert_same(&sv_pf(&fx, &["--parallel", "1"]), &sv_pf(&fx, &["--parallel", "4"]));
+    for b in bases(&fx) {
+        assert_same(&b.with(&["--parallel", "1"]), &b.with(&["--parallel", "4"]));
+    }
 }
 
 #[test]
 fn execution_force() {
     let fx = fx();
-    let store = tempfile::tempdir().unwrap();
-    let first = run_into(store.path(), &sv(&fx, &[]));
-    let forced = run_into(store.path(), &sv(&fx, &["--force"]));
-    assert_same_result(KIND, &first, &forced);
-    assert!(store.path().join("results/.quarantine").is_dir(), "--force displaced the incumbent");
+    for b in bases(&fx) {
+        let store = tempfile::tempdir().unwrap();
+        let first = run_into(store.path(), &b);
+        let forced = run_into(store.path(), &b.with(&["--force"]));
+        assert_same_result(KIND, &first, &forced);
+        assert!(store.path().join("results/.quarantine").is_dir(), "--force displaced the incumbent");
+    }
 }
 
 /// `--output` is the store root: the same leaf under another root.
 #[test]
 fn execution_output() {
     let fx = fx();
-    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let root = b.path().join("elsewhere");
-    let (x, y) = (run_into(a.path(), &sv(&fx, &[])), run_into(b.path(), &sv(&fx, &["--output", &root.to_string_lossy()])));
-    assert!(y.of(KIND).values().all(|l| l.dir.starts_with(&root)), "the store root moved");
-    assert_same_result(KIND, &x, &y);
+    for b in bases(&fx) {
+        let (x, y) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let root = y.path().join("elsewhere");
+        let (sx, sy) = (run_into(x.path(), &b), run_into(y.path(), &b.with(&["--output", &root.to_string_lossy()])));
+        assert!(sy.of(KIND).values().all(|l| l.dir.starts_with(&root)), "the store root moved");
+        assert_same_result(KIND, &sx, &sy);
+    }
 }
 
 #[test]
 fn execution_no_ir_cache() {
     let fx = fx();
-    assert_same(&sv_on(&fx, "sir.camdl", &[]), &sv_on(&fx, "sir.camdl", &["--no-ir-cache"]));
+    for b in bases_on(&fx, "sir.camdl") {
+        assert_same(&b, &b.with(&["--no-ir-cache"]));
+    }
 }
 
 #[test]
 fn execution_env_no_ir_cache() {
     let fx = fx();
-    assert_same(&sv_on(&fx, "sir.camdl", &[]), &sv_on(&fx, "sir.camdl", &[]).env("CAMDL_NO_IR_CACHE", "1"));
+    for b in bases_on(&fx, "sir.camdl") {
+        assert_same(&b, &b.clone().env("CAMDL_NO_IR_CACHE", "1"));
+    }
 }
 
 #[test]
 fn execution_env_ir_cache_dir() {
     let fx = fx();
     let elsewhere = tempfile::tempdir().unwrap();
-    let moved = sv_on(&fx, "sir.camdl", &[]).env("CAMDL_IR_CACHE_DIR", &elsewhere.path().to_string_lossy());
-    assert_same(&sv_on(&fx, "sir.camdl", &[]), &moved);
+    for b in bases_on(&fx, "sir.camdl") {
+        assert_same(&b, &b.clone().env("CAMDL_IR_CACHE_DIR", &elsewhere.path().to_string_lossy()));
+    }
 }
 
 #[test]
 fn execution_env_xdg_cache_home() {
     let fx = fx();
-    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let under = |d: &std::path::Path| {
-        sv_on(&fx, "sir.camdl", &[]).without("CAMDL_IR_CACHE_DIR").env("XDG_CACHE_HOME", &d.to_string_lossy())
-    };
-    assert_same(&under(a.path()), &under(b.path()));
+    let (x, y) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    for b in bases_on(&fx, "sir.camdl") {
+        let under = |d: &std::path::Path| b.clone().without("CAMDL_IR_CACHE_DIR").env("XDG_CACHE_HOME", &d.to_string_lossy());
+        assert_same(&under(x.path()), &under(y.path()));
+    }
 }
 
 #[test]
 fn execution_env_home() {
     let fx = fx();
-    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let under = |d: &std::path::Path| sv_on(&fx, "sir.camdl", &[]).without("CAMDL_IR_CACHE_DIR").env("HOME", &d.to_string_lossy());
-    assert_same(&under(a.path()), &under(b.path()));
+    let (x, y) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    for b in bases_on(&fx, "sir.camdl") {
+        let under = |d: &std::path::Path| b.clone().without("CAMDL_IR_CACHE_DIR").env("HOME", &d.to_string_lossy());
+        assert_same(&under(x.path()), &under(y.path()));
+    }
 }
 
 #[test]
 fn execution_env_camdlc_path() {
     let fx = fx();
     let camdlc = fx.camdlc.to_string_lossy().into_owned();
-    assert_same(&sv_on(&fx, "sir.camdl", &[]), &sv_on(&fx, "sir.camdl", &[]).env("CAMDLC_PATH", &camdlc));
+    for b in bases_on(&fx, "sir.camdl") {
+        assert_same(&b, &b.clone().env("CAMDLC_PATH", &camdlc));
+    }
 }
 
 #[test]
@@ -399,19 +430,22 @@ fn execution_env_camdlc() {
     let bin = tempfile::tempdir().unwrap();
     std::os::unix::fs::symlink(&fx.camdlc, bin.path().join("camdlc")).unwrap();
     let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap_or_default());
-    let on_path = sv_on(&fx, "sir.camdl", &[]).without("CAMDLC").env("PATH", &path);
-    assert_same(&sv_on(&fx, "sir.camdl", &[]), &on_path);
+    for b in bases_on(&fx, "sir.camdl") {
+        assert_same(&b, &b.clone().without("CAMDLC").env("PATH", &path));
+    }
 }
 
 #[test]
 fn execution_env_output_dir() {
     let fx = fx();
-    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let elsewhere = b.path().join("elsewhere");
-    let moved = sv(&fx, &[]).env("CAMDL_OUTPUT_DIR", &elsewhere.to_string_lossy());
-    let (x, y) = (run_into(a.path(), &sv(&fx, &[])), run_into(b.path(), &moved));
-    assert!(y.of(KIND).values().all(|l| l.dir.starts_with(&elsewhere)), "the store root moved");
-    assert_same_result(KIND, &x, &y);
+    for b in bases(&fx) {
+        let (x, y) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let elsewhere = y.path().join("elsewhere");
+        let moved = b.clone().env("CAMDL_OUTPUT_DIR", &elsewhere.to_string_lossy());
+        let (sx, sy) = (run_into(x.path(), &b), run_into(y.path(), &moved));
+        assert!(sy.of(KIND).values().all(|l| l.dir.starts_with(&elsewhere)), "the store root moved");
+        assert_same_result(KIND, &sx, &sy);
+    }
 }
 
 // ─── child ───────────────────────────────────────────────────────────────────
@@ -421,13 +455,15 @@ fn execution_env_output_dir() {
 #[test]
 fn child_render() {
     let fx = fx();
-    let (sa, sb) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let (a, b) = (run_into(sa.path(), &sv(&fx, &[])), run_into(sb.path(), &sv(&fx, &["--render"])));
-    assert_eq!(a.result(KIND), b.result(KIND), "the leaf's run id and files are unchanged");
-    let leaf = b.of(KIND).into_values().next().unwrap().clone();
-    assert!(leaf.dir.join("landscape_html/landscape.html").is_file(), "the child is at its address");
-    assert!(leaf.dir.join("landscape_html/landscape_html.json").is_file(), "with its record");
-    assert_eq!(leaf.record["children"]["landscape_html"].as_array().map(Vec::len), Some(1), "declared");
+    for b in bases(&fx) {
+        let (sa, sb) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (x, y) = (run_into(sa.path(), &b), run_into(sb.path(), &b.with(&["--render"])));
+        assert_eq!(x.result(KIND), y.result(KIND), "the leaf's run id and files are unchanged");
+        let leaf = y.of(KIND).into_values().next().unwrap().clone();
+        assert!(leaf.dir.join("landscape_html/landscape.html").is_file(), "the child is at its address");
+        assert!(leaf.dir.join("landscape_html/landscape_html.json").is_file(), "with its record");
+        assert_eq!(leaf.record["children"]["landscape_html"].as_array().map(Vec::len), Some(1), "declared");
+    }
 }
 
 // ─── presentation and provenance ────────────────────────────────────────────
@@ -435,44 +471,57 @@ fn child_render() {
 #[test]
 fn provenance_label() {
     let fx = fx();
-    assert_unaffected("--label", &sv(&fx, &[]), &sv(&fx, &["--label", "a-label"]));
+    for b in bases(&fx) {
+        assert_unaffected("--label", &b, &b.with(&["--label", "a-label"]));
+    }
 }
 
 #[test]
 fn presentation_verbosity() {
     let fx = fx();
-    assert_unaffected("--verbosity", &sv(&fx, &[]), &sv(&fx, &["--verbosity", "debug"]));
+    for b in bases(&fx) {
+        assert_unaffected("--verbosity", &b, &b.with(&["--verbosity", "debug"]));
+    }
 }
 
 #[test]
 fn presentation_progress() {
     let fx = fx();
-    assert_unaffected("--progress", &sv(&fx, &["--progress", "none"]), &sv(&fx, &["--progress", "plain"]));
+    for b in bases(&fx) {
+        assert_unaffected("--progress", &b.with(&["--progress", "none"]), &b.with(&["--progress", "plain"]));
+    }
 }
 
 #[test]
 fn presentation_no_progress() {
     let fx = fx();
-    assert_unaffected("--no-progress", &sv(&fx, &["--progress", "plain"]), &sv(&fx, &["--no-progress"]));
+    for b in bases(&fx) {
+        assert_unaffected("--no-progress", &b.with(&["--progress", "plain"]), &b.with(&["--no-progress"]));
+    }
 }
 
 #[test]
 fn presentation_env_trace_steps() {
     let fx = fx();
-    // On the particle filter, which steps the chain-binomial backend.
-    assert_unaffected("CAMDL_TRACE_STEPS", &sv_pf(&fx, &[]), &sv_pf(&fx, &[]).env("CAMDL_TRACE_STEPS", "1"));
+    for b in bases(&fx) {
+        assert_unaffected("CAMDL_TRACE_STEPS", &b, &b.clone().env("CAMDL_TRACE_STEPS", "1"));
+    }
 }
 
 #[test]
 fn presentation_env_no_color() {
     let fx = fx();
-    assert_unaffected("NO_COLOR", &sv(&fx, &[]), &sv(&fx, &[]).env("NO_COLOR", "1"));
+    for b in bases(&fx) {
+        assert_unaffected("NO_COLOR", &b, &b.clone().env("NO_COLOR", "1"));
+    }
 }
 
 #[test]
 fn presentation_env_clicolor_force() {
     let fx = fx();
-    assert_unaffected("CLICOLOR_FORCE", &sv(&fx, &[]), &sv(&fx, &[]).env("CLICOLOR_FORCE", "1"));
+    for b in bases(&fx) {
+        assert_unaffected("CLICOLOR_FORCE", &b, &b.clone().env("CLICOLOR_FORCE", "1"));
+    }
 }
 
 // ─── the --fit handle ────────────────────────────────────────────────────────

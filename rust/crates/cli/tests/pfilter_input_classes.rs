@@ -410,71 +410,98 @@ fn keyed_env_experimental() {
 }
 
 // ─── execution ───────────────────────────────────────────────────────────────
+//
+// Every execution and presentation case runs on both of the filter's paths,
+// one run and `--replicates 3` ([`bases_on`]), except the outputs that
+// describe one run, which the replicate path refuses (gh#686).
+
+/// Both paths of the filter on `model`: one run, and the replicate path.
+fn bases_on(fx: &Arc<Fixture>, model: &str) -> [Invocation; 2] {
+    [pf_on(fx, model, &[]), pf_on(fx, model, &["--replicates", "3"])]
+}
+
+fn bases(fx: &Arc<Fixture>) -> [Invocation; 2] {
+    bases_on(fx, "sir.ir.json")
+}
 
 /// The filter runs its particles, and the replicate path its replicates, on
 /// the scoped pool `--parallel` sizes.
 #[test]
 fn execution_parallel() {
     let fx = fx();
-    assert_same(&pf(&fx, &["--parallel", "1"]), &pf(&fx, &["--parallel", "4"]));
-    assert_same(&pf(&fx, &["--replicates", "3", "--parallel", "1"]), &pf(&fx, &["--replicates", "3", "--parallel", "4"]));
+    for b in bases(&fx) {
+        assert_same(&b.with(&["--parallel", "1"]), &b.with(&["--parallel", "4"]));
+    }
 }
 
 #[test]
 fn execution_time_format() {
     let fx = fx();
-    assert_same(&pf(&fx, &[]), &pf(&fx, &["--time-format", "numeric"]));
+    for b in bases(&fx) {
+        assert_same(&b, &b.with(&["--time-format", "numeric"]));
+    }
 }
 
 #[test]
 fn execution_pf_max_substeps() {
     let fx = fx();
-    assert_same(&pf(&fx, &[]), &pf(&fx, &["--pf-max-substeps", "100000000"]));
+    for b in bases(&fx) {
+        assert_same(&b, &b.with(&["--pf-max-substeps", "100000000"]));
+    }
 }
 
 #[test]
 fn execution_no_ir_cache() {
     let fx = fx();
-    assert_same(&pf_on(&fx, "sir.camdl", &[]), &pf_on(&fx, "sir.camdl", &["--no-ir-cache"]));
+    for b in bases_on(&fx, "sir.camdl") {
+        assert_same(&b, &b.with(&["--no-ir-cache"]));
+    }
 }
 
 #[test]
 fn execution_env_no_ir_cache() {
     let fx = fx();
-    assert_same(&pf_on(&fx, "sir.camdl", &[]), &pf_on(&fx, "sir.camdl", &[]).env("CAMDL_NO_IR_CACHE", "1"));
+    for b in bases_on(&fx, "sir.camdl") {
+        assert_same(&b, &b.clone().env("CAMDL_NO_IR_CACHE", "1"));
+    }
 }
 
 #[test]
 fn execution_env_ir_cache_dir() {
     let fx = fx();
     let elsewhere = tempfile::tempdir().unwrap();
-    let moved = pf_on(&fx, "sir.camdl", &[]).env("CAMDL_IR_CACHE_DIR", &elsewhere.path().to_string_lossy());
-    assert_same(&pf_on(&fx, "sir.camdl", &[]), &moved);
+    for b in bases_on(&fx, "sir.camdl") {
+        assert_same(&b, &b.clone().env("CAMDL_IR_CACHE_DIR", &elsewhere.path().to_string_lossy()));
+    }
 }
 
 #[test]
 fn execution_env_xdg_cache_home() {
     let fx = fx();
-    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let under = |d: &std::path::Path| {
-        pf_on(&fx, "sir.camdl", &[]).without("CAMDL_IR_CACHE_DIR").env("XDG_CACHE_HOME", &d.to_string_lossy())
-    };
-    assert_same(&under(a.path()), &under(b.path()));
+    let (x, y) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    for b in bases_on(&fx, "sir.camdl") {
+        let under = |d: &std::path::Path| b.clone().without("CAMDL_IR_CACHE_DIR").env("XDG_CACHE_HOME", &d.to_string_lossy());
+        assert_same(&under(x.path()), &under(y.path()));
+    }
 }
 
 #[test]
 fn execution_env_home() {
     let fx = fx();
-    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let under = |d: &std::path::Path| pf_on(&fx, "sir.camdl", &[]).without("CAMDL_IR_CACHE_DIR").env("HOME", &d.to_string_lossy());
-    assert_same(&under(a.path()), &under(b.path()));
+    let (x, y) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    for b in bases_on(&fx, "sir.camdl") {
+        let under = |d: &std::path::Path| b.clone().without("CAMDL_IR_CACHE_DIR").env("HOME", &d.to_string_lossy());
+        assert_same(&under(x.path()), &under(y.path()));
+    }
 }
 
 #[test]
 fn execution_env_camdlc_path() {
     let fx = fx();
     let camdlc = fx.camdlc.to_string_lossy().into_owned();
-    assert_same(&pf_on(&fx, "sir.camdl", &[]), &pf_on(&fx, "sir.camdl", &[]).env("CAMDLC_PATH", &camdlc));
+    for b in bases_on(&fx, "sir.camdl") {
+        assert_same(&b, &b.clone().env("CAMDLC_PATH", &camdlc));
+    }
 }
 
 #[test]
@@ -483,19 +510,22 @@ fn execution_env_camdlc() {
     let bin = tempfile::tempdir().unwrap();
     std::os::unix::fs::symlink(&fx.camdlc, bin.path().join("camdlc")).unwrap();
     let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap_or_default());
-    let on_path = pf_on(&fx, "sir.camdl", &[]).without("CAMDLC").env("PATH", &path);
-    assert_same(&pf_on(&fx, "sir.camdl", &[]), &on_path);
+    for b in bases_on(&fx, "sir.camdl") {
+        assert_same(&b, &b.clone().without("CAMDLC").env("PATH", &path));
+    }
 }
 
 #[test]
 fn execution_env_output_dir() {
     let fx = fx();
-    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let elsewhere = b.path().join("elsewhere");
-    let moved = pf(&fx, &[]).env("CAMDL_OUTPUT_DIR", &elsewhere.to_string_lossy());
-    let (x, y) = (run_into(a.path(), &pf(&fx, &[])), run_into(b.path(), &moved));
-    assert!(y.leaves.iter().all(|l| l.dir.starts_with(&elsewhere)), "the store root moved");
-    assert_same_result(KIND, &x, &y);
+    for b in bases(&fx) {
+        let (x, y) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let elsewhere = y.path().join("elsewhere");
+        let moved = b.clone().env("CAMDL_OUTPUT_DIR", &elsewhere.to_string_lossy());
+        let (sx, sy) = (run_into(x.path(), &b), run_into(y.path(), &moved));
+        assert!(sy.leaves.iter().all(|l| l.dir.starts_with(&elsewhere)), "the store root moved");
+        assert_same_result(KIND, &sx, &sy);
+    }
 }
 
 // ─── presentation ────────────────────────────────────────────────────────────
@@ -512,10 +542,13 @@ fn presentation_pf_health() {
     assert_unaffected("--pf-health", &pf(&fx, &[]), &pf(&fx, &["--pf-health", "health.tsv"]));
 }
 
+/// On one run the log-likelihood, on the replicate path each replicate's.
 #[test]
 fn presentation_output() {
     let fx = fx();
-    assert_unaffected("--output", &pf(&fx, &[]), &pf(&fx, &["--output", "ll.txt"]));
+    for b in bases(&fx) {
+        assert_unaffected("--output", &b, &b.with(&["--output", "ll.txt"]));
+    }
 }
 
 #[test]
@@ -567,52 +600,66 @@ fn presentation_no_save_samples() {
 }
 
 /// `--no-store` asks for the evaluation without a stored leaf: none is
-/// written, and the log-likelihood printed is the stored run's.
+/// written, and what is printed is the stored run's.
 #[test]
 fn presentation_no_store() {
     let fx = fx();
-    let store = tempfile::tempdir().unwrap();
-    let out = run_in(store.path(), &pf(&fx, &["--no-store"]));
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(leaves(store.path()).is_empty(), "--no-store writes no leaf");
-    let stored = run_in(tempfile::tempdir().unwrap().path(), &pf(&fx, &[]));
-    assert_eq!(out.stdout, stored.stdout, "the same log-likelihood");
+    for b in bases(&fx) {
+        let store = tempfile::tempdir().unwrap();
+        let out = run_in(store.path(), &b.with(&["--no-store"]));
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(leaves(store.path()).is_empty(), "--no-store writes no leaf");
+        let stored = run_in(tempfile::tempdir().unwrap().path(), &b);
+        assert_eq!(out.stdout, stored.stdout, "the same log-likelihood");
+    }
 }
 
 #[test]
 fn presentation_verbosity() {
     let fx = fx();
-    assert_unaffected("--verbosity", &pf(&fx, &[]), &pf(&fx, &["--verbosity", "debug"]));
+    for b in bases(&fx) {
+        assert_unaffected("--verbosity", &b, &b.with(&["--verbosity", "debug"]));
+    }
 }
 
 #[test]
 fn presentation_progress() {
     let fx = fx();
-    assert_unaffected("--progress", &pf(&fx, &["--progress", "none"]), &pf(&fx, &["--progress", "plain"]));
+    for b in bases(&fx) {
+        assert_unaffected("--progress", &b.with(&["--progress", "none"]), &b.with(&["--progress", "plain"]));
+    }
 }
 
 #[test]
 fn presentation_no_progress() {
     let fx = fx();
-    assert_unaffected("--no-progress", &pf(&fx, &["--progress", "plain"]), &pf(&fx, &["--no-progress"]));
+    for b in bases(&fx) {
+        assert_unaffected("--no-progress", &b.with(&["--progress", "plain"]), &b.with(&["--no-progress"]));
+    }
 }
 
 #[test]
 fn presentation_env_trace_steps() {
     let fx = fx();
-    assert_unaffected("CAMDL_TRACE_STEPS", &pf(&fx, &[]), &pf(&fx, &[]).env("CAMDL_TRACE_STEPS", "1"));
+    for b in bases(&fx) {
+        assert_unaffected("CAMDL_TRACE_STEPS", &b, &b.clone().env("CAMDL_TRACE_STEPS", "1"));
+    }
 }
 
 #[test]
 fn presentation_env_no_color() {
     let fx = fx();
-    assert_unaffected("NO_COLOR", &pf(&fx, &[]), &pf(&fx, &[]).env("NO_COLOR", "1"));
+    for b in bases(&fx) {
+        assert_unaffected("NO_COLOR", &b, &b.clone().env("NO_COLOR", "1"));
+    }
 }
 
 #[test]
 fn presentation_env_clicolor_force() {
     let fx = fx();
-    assert_unaffected("CLICOLOR_FORCE", &pf(&fx, &[]), &pf(&fx, &[]).env("CLICOLOR_FORCE", "1"));
+    for b in bases(&fx) {
+        assert_unaffected("CLICOLOR_FORCE", &b, &b.clone().env("CLICOLOR_FORCE", "1"));
+    }
 }
 
 // ─── the --fit handle ────────────────────────────────────────────────────────
