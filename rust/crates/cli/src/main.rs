@@ -47,6 +47,7 @@ mod model_diff;     // `camdl diff A B`: gathers two models' inputs for the `dif
 mod if2;
 mod profile;
 mod profile_cas;     // gh#147 M3.3: profile-point CAS identity (resolve_profile_point)
+mod profile_config;  // ResolvedProfileConfig: profile's one resolved configuration; identity and cells derive from it
 mod profile_diagnostics;
 mod profile_invocation; // profiles/<base>/invocations/<id>/: the grid an invocation runs, and its heartbeat
 mod profile_table;    // gh#1059: the collected per-cell table a profile run prints
@@ -535,14 +536,17 @@ fn main() {
     sim::run_notes::set_reporter(util::report_run_note);
     util::set_ir_cache_disabled(cli.global.no_ir_cache);
     // `simulate` sets the compile setting from its resolved configuration
-    // (`sim_config::CompileSettings`), and `fit run` and `pfilter` pass their
-    // own to every compile they make; every other command reads it
+    // (`sim_config::CompileSettings`), and `fit run`, `pfilter` and `profile`
+    // pass their own to every compile they make; every other command reads it
     // process-wide, from the flag (`util::CompileSettings::process`).
-    if !matches!(cli.command, Command::Simulate(_) | Command::Fit(FitCmd::Run(_)) | Command::Pfilter(_)) {
+    if !matches!(
+        cli.command,
+        Command::Simulate(_) | Command::Fit(FitCmd::Run(_)) | Command::Pfilter(_) | Command::Profile(_)
+    ) {
         util::set_licm_disabled(cli.global.no_licm);
     }
-    // `--no-licm`, or `CAMDL_NO_LICM`: the compile setting `fit run` and
-    // `pfilter` resolve.
+    // `--no-licm`, or `CAMDL_NO_LICM`: the compile setting `fit run`,
+    // `pfilter` and `profile` resolve.
     let fit_compile = util::CompileSettings {
         licm_disabled: cli.global.no_licm || crate::env::get().vars.no_licm,
     };
@@ -559,7 +563,7 @@ fn main() {
         Command::Label(a)               => fit::cmd_label(&a),
         Command::Pfilter(a)             => pfilter::cmd_pfilter(&a, fit_compile),
         Command::If2(a)                 => if2::cmd_if2(&a),
-        Command::Profile(a)             => profile::cmd_profile(&a),
+        Command::Profile(a)             => profile::cmd_profile(&a, fit_compile),
         Command::Survey(a)              => survey::cmd_survey(&a),
         Command::Lineage(LineageCmd::Realize(a)) => lineage::cmd_lineage_realize(&a),
         Command::Lineage(LineageCmd::Tree(a)) => lineage::cmd_lineage_tree(&a),

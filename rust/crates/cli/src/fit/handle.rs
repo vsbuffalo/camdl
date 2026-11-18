@@ -672,7 +672,8 @@ pub fn resolve_fit_run(s: &str) -> Result<ResolvedFit, ResolveError> {
 
 /// The fit problem a `--fit` handle names, for a command that reads a fit's
 /// problem but none of its results (`pfilter`, `profile`, `survey`): the
-/// config text and the configuration parsed from it.
+/// config text, where its relative paths are anchored, and the configuration
+/// parsed from it.
 ///
 /// The handle forms are `fit predict`'s. A `fit.toml` names the problem the
 /// file states as it now reads (gh#896: a `fit.toml` names the run the file
@@ -688,6 +689,11 @@ pub(crate) struct FitProblem {
     /// The config text, read once: the fit file, or the stored fit's archived
     /// config (`fit.toml.original`).
     pub text: String,
+    /// The path the config's relative paths were written against: the file
+    /// itself, or the stored fit's source config (`<segment>/<source_config>`).
+    /// Where a reader that archives the config (`profile`'s sidecar) records
+    /// it as written.
+    pub anchor: PathBuf,
     /// `text`, parsed and anchored at `anchor`.
     pub config: FitConfig,
 }
@@ -710,7 +716,7 @@ pub(crate) fn resolve_fit_problem(s: &str) -> Result<FitProblem, ResolveError> {
             .map_err(|e| ResolveError::NotFound(format!("cannot read fit config {}: {e}", path.display())))?;
         let config = FitConfig::parse_anchored_at(&text, &path, &path)
             .map_err(|e| ResolveError::NotFound(format!("cannot load fit config {}: {e}", path.display())))?;
-        return Ok(FitProblem { handle: s.to_string(), text, config });
+        return Ok(FitProblem { handle: s.to_string(), text, anchor: path, config });
     }
     let segment = match resolve_target(s)? {
         FitTarget::Segment(seg) => seg,
@@ -718,8 +724,8 @@ pub(crate) fn resolve_fit_problem(s: &str) -> Result<FitProblem, ResolveError> {
             .map_err(ResolveError::NotFound)?
             .ok_or_else(|| ResolveError::NotFound(format!("{} is not inside a fit's directory", l.dir.display())))?,
     };
-    let (text, _anchor, config) = read_segment_config(&segment).map_err(ResolveError::NotFound)?;
-    Ok(FitProblem { handle: s.to_string(), text, config })
+    let (text, anchor, config) = read_segment_config(&segment).map_err(ResolveError::NotFound)?;
+    Ok(FitProblem { handle: s.to_string(), text, anchor, config })
 }
 
 /// Recover the config for a segment reached by run-dir / `@label` / hash.

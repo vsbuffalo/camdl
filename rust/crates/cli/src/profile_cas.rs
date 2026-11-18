@@ -36,7 +36,10 @@ pub struct ResolvedProfilePoint {
 pub struct ProfilePointCtx<'a> {
     pub model: &'a ir::Model,
     pub ir_version: &'a str,
-    pub engine_version: &'a str,
+    /// The engine the base folds: the build and the engine switches set
+    /// (`env::Environment::engine_identity`). A point computed with a switch
+    /// never shares a leaf with a default point, whose key is the build's alone.
+    pub engine: &'a EngineIdentity,
     /// Provenance label for the `profile` path segment (the model stem).
     pub stem: &'a str,
     /// Display label for the `method` segment (the method name, e.g. `if2`).
@@ -97,12 +100,12 @@ pub fn resolve_profile_point(ctx: &ProfilePointCtx) -> Result<ResolvedProfilePoi
         model: ModelDigest::from_model(
             ctx.model,
             ctx.ir_version.to_string(),
-            EngineIdentity::of_build(ctx.engine_version),
+            ctx.engine.clone(),
         ),
         data: data_digests(ctx.data)?,
         base_config: ctx.base_config.into_inner(),
         grid,
-        engine: EngineIdentity::of_build(ctx.engine_version),
+        engine: ctx.engine.clone(),
         deps: Deps(ctx.deps.clone()),
     };
 
