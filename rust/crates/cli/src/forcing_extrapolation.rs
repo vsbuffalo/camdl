@@ -77,13 +77,12 @@ impl ForcingPolicy {
 
     /// Route the engine's forcing notes into this policy until the returned
     /// guard drops. Installed before the command evaluates its model, and
-    /// held for the rest of the command. Installing another policy replaces
-    /// this one (a command that learns from its fit config that the override
-    /// is on); a guard empties the slot only while its own policy is the one
-    /// installed, so the replaced policy's guard leaves the new one in place.
+    /// held for the rest of the command. An install nests: `fit predict`
+    /// installs the stored fit's policy inside its own, and the inner guard's
+    /// drop puts back the policy it replaced.
     pub fn install(&self) -> Installed {
-        *ROUTE.lock().unwrap_or_else(|e| e.into_inner()) = Some(self.clone());
-        Installed(self.clone())
+        let previous = ROUTE.lock().unwrap_or_else(|e| e.into_inner()).replace(self.clone());
+        Installed { policy: self.clone(), previous }
     }
 
     /// Say a new [`OutsideRange`]: under the override a warning, otherwise
@@ -95,17 +94,13 @@ impl ForcingPolicy {
         let s = &self.0;
         if !s.allowed {
             if s.deferred.load(Ordering::Relaxed) {
-                if let Ok(mut r) = s.refusal.lock() {
-                    r.get_or_insert_with(|| refusal(o));
-                }
+                s.refusal.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(|| refusal(o));
                 s.refused.store(true, Ordering::Release);
                 return;
             }
             crate::out::detached().fail(refusal(o));
         }
-        if let Ok(mut held) = s.held.lock() {
-            held.push(o.clone());
-        }
+        s.held.lock().unwrap_or_else(|e| e.into_inner()).push(o.clone());
         crate::out::live().notice(&crate::out::notice::Notice {
             severity: crate::out::notice::Severity::Warning,
             code: CODE,
@@ -130,7 +125,7 @@ impl ForcingPolicy {
         if !self.0.refused.load(Ordering::Acquire) {
             return None;
         }
-        self.0.refusal.lock().ok().and_then(|r| r.clone())
+        self.0.refusal.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Record the override, and the forcings held so far, in a `run.json`'s
@@ -145,35 +140,39 @@ impl ForcingPolicy {
             .0
             .held
             .lock()
-            .map(|h| {
-                h.iter()
-                    .map(|o| {
-                        serde_json::json!({
-                            "forcing": o.forcing,
-                            "defined_on": [o.lo, o.hi],
-                            "side": match o.side {
-                                sim::forcing_range::Side::Before => "before",
-                                sim::forcing_range::Side::After => "after",
-                            },
-                            "held_value_at": o.held_end(),
-                        })
-                    })
-                    .collect()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|o| {
+                serde_json::json!({
+                    "forcing": o.forcing,
+                    "defined_on": [o.lo, o.hi],
+                    "side": match o.side {
+                        sim::forcing_range::Side::Before => "before",
+                        sim::forcing_range::Side::After => "after",
+                    },
+                    "held_value_at": o.held_end(),
+                })
             })
-            .unwrap_or_default();
+            .collect();
         obj.insert("forcing_extrapolation".into(), serde_json::json!({ "allowed": true, "held": held }));
     }
 }
 
 /// The guard [`ForcingPolicy::install`] returns.
 #[must_use = "the policy is uninstalled when the guard drops"]
-pub struct Installed(ForcingPolicy);
+pub struct Installed {
+    policy: ForcingPolicy,
+    /// What the install replaced, put back when the guard drops.
+    previous: Option<ForcingPolicy>,
+}
 
 impl Drop for Installed {
+    /// Put back the policy this install replaced, while this guard's policy
+    /// is still the one installed (guards drop innermost first).
     fn drop(&mut self) {
         let mut route = ROUTE.lock().unwrap_or_else(|e| e.into_inner());
-        if route.as_ref().is_some_and(|p| Arc::ptr_eq(&p.0, &self.0 .0)) {
-            *route = None;
+        if route.as_ref().is_some_and(|p| Arc::ptr_eq(&p.0, &self.policy.0)) {
+            *route = self.previous.take();
         }
     }
 }
@@ -290,20 +289,61 @@ mod tests {
         assert_eq!(held(&record), vec!["routed"]);
     }
 
-    /// A command that widens its policy (its fit config turns the override
-    /// on) installs the wider one; dropping the first guard leaves it.
+    /// A nested install (`fit predict` installs the stored fit's policy
+    /// inside the command's own) routes into the inner policy while its
+    /// guard lives; dropping that guard puts the outer one back, and
+    /// dropping the outer one empties the slot.
     #[test]
-    fn a_replacing_install_survives_the_first_guard() {
+    fn a_nested_install_restores_the_outer_policy() {
         let _slot = SLOT.lock().unwrap_or_else(|e| e.into_inner());
-        let mut policy = ForcingPolicy::new(false);
-        let mut _route = policy.install();
-        policy = ForcingPolicy::new(true);
-        _route = policy.install();
-        report(&past_end("widened"));
+        let installed = || ROUTE.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let outer = ForcingPolicy::new(true);
+        let inner = ForcingPolicy::new(true);
+        {
+            let _outer_route = outer.install();
+            {
+                let _inner_route = inner.install();
+                report(&past_end("inner"));
+            }
+            assert!(installed().is_some_and(|p| Arc::ptr_eq(&p.0, &outer.0)),
+                "dropping the inner guard puts the outer policy back");
+            report(&past_end("outer"));
+        }
+        assert!(installed().is_none(), "dropping the outer guard empties the slot");
+        let names = |p: &ForcingPolicy| {
+            let mut record = serde_json::json!({});
+            p.record_in(&mut record);
+            held(&record)
+        };
+        assert_eq!(names(&inner), vec!["inner"]);
+        assert_eq!(names(&outer), vec!["outer"]);
+    }
+
+    /// A refusal kept while a thread that held the policy's locks panicked is
+    /// still a refusal, and a held forcing still recorded: a poisoned lock
+    /// does not read as "nothing refused" or "nothing held".
+    #[test]
+    fn a_poisoned_lock_does_not_hide_a_refusal_or_a_hold() {
+        let refusing = ForcingPolicy::new(false);
+        let allowing = ForcingPolicy::new(true);
+        for p in [&refusing, &allowing] {
+            let q = p.clone();
+            let _ = std::thread::spawn(move || {
+                let _r = q.0.refusal.lock().unwrap();
+                let _h = q.0.held.lock().unwrap();
+                panic!("poison the policy's locks");
+            })
+            .join();
+            assert!(p.0.refusal.is_poisoned() && p.0.held.is_poisoned());
+        }
+        {
+            let _deferred = refusing.defer_while_claimed();
+            refusing.say(&past_end("refused"));
+        }
+        assert!(refusing.refused().is_some_and(|m| m.contains("refused")), "the refusal is kept");
+        allowing.say(&past_end("held"));
         let mut record = serde_json::json!({});
-        policy.record_in(&mut record);
-        assert_eq!(held(&record), vec!["widened"]);
-        drop(_route);
-        assert!(ROUTE.lock().unwrap().is_none(), "the last guard empties the slot");
+        allowing.record_in(&mut record);
+        assert_eq!(held(&record), vec!["held"], "the hold is recorded");
     }
 }
