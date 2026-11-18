@@ -39,10 +39,9 @@
     zero offset is the bare string ["last_obs"]. An end time taken from an
     anchor the run has not yet resolved (the simulation's, a scenario's, a
     recurring intervention's) is held as NaN, written as [null], since JSON
-    has no NaN, and read back as NaN. No other non-finite number is
-    handled: a [Const] whose value is NaN is written
-    as the bare token [NaN], which is not JSON, and the Rust reader refuses
-    the file.
+    has no NaN, and read back as NaN. A [Const] that is NaN or infinite is
+    refused with [Invalid_argument]: the compiler does not produce one
+    (E520), and writing it would give a file that is not JSON.
 
     The reader is lenient: an absent optional member takes its default (an absent [time_unit] is ["days"]),
     an integer is accepted where a float is expected, and an integral float
@@ -179,6 +178,13 @@ let un_op_str = function
 
 let rec expr_to_json (e : expr) : Yojson.Safe.t =
   match e with
+  | Const v when not (Float.is_finite v) ->
+    (* JSON has no NaN or infinity: Yojson would write the bare token, and the
+       runtime would refuse the whole file at a column number. E520 and
+       [Autodiff.simplify] keep a compiled model from holding one. *)
+    invalid_arg (Printf.sprintf
+      "Serde.expr_to_json: non-finite constant %F in an IR expression; JSON \
+       cannot represent it (a compiler invariant, see E520)" v)
   | Const v      -> obj [("const", flt v)]
   | Param p      -> obj [("param", str p)]
   | ConstRef c   -> obj [("const_ref", str c)]

@@ -4704,6 +4704,23 @@ let test_finite_and_non_literal_powers_compile () =
   ignore (compile_expect_ok (non_finite_src "gamma * I * log(I / N)"));
   ignore (compile_expect_ok (non_finite_src "gamma * I / (I - I)"))
 
+(* gh#1207: the writer refuses a non-finite [Const] rather than emit the
+   bare token NaN or Infinity, which is not JSON and which the runtime cannot
+   read. E520 and [simplify] keep a compiled model from holding one, so this
+   is an internal invariant: the failure names it instead of producing an
+   unreadable file. *)
+let test_serde_refuses_non_finite_const () =
+  List.iter (fun v ->
+    match Serde.expr_to_json (Ir.BinOp { op = Ir.Mul; left = Ir.Pop "S"; right = Ir.Const v }) with
+    | j -> Alcotest.failf "Const %h was written as %s" v (Yojson.Safe.to_string j)
+    | exception Invalid_argument msg ->
+      Alcotest.(check bool) (Printf.sprintf "message names the invariant: %s" msg)
+        true (contains_substring ~needle:"non-finite" msg))
+    [Float.nan; Float.infinity; Float.neg_infinity];
+  (* A finite constant is written as before. *)
+  Alcotest.(check string) "finite Const" {|{"const":2.5}|}
+    (Yojson.Safe.to_string (Serde.expr_to_json (Ir.Const 2.5)))
+
 let test_rate_state_grad_nonsmooth_refused () =
   (* Rate = floor(S) * beta. ∂/∂S reaches floor(state) — nonsmooth (a step at
      each integer) — so it must be a loud DEUnsupported (URNonsmoothState), never
@@ -17631,6 +17648,7 @@ let () =
       Alcotest.test_case "simplify does not fold literals to a non-finite value (gh#1207)" `Quick test_simplify_does_not_fold_to_non_finite;
       Alcotest.test_case "E520: a non-finite literal sub-expression (gh#1207)" `Quick test_non_finite_literal_is_e520;
       Alcotest.test_case "E520 is not raised for finite or non-literal operands" `Quick test_finite_and_non_literal_powers_compile;
+      Alcotest.test_case "the IR writer refuses a non-finite Const (gh#1207)" `Quick test_serde_refuses_non_finite_const;
       Alcotest.test_case "rate_state_grad: BindingRef inverts to state-bearing (gh#275)" `Quick test_rate_state_grad_through_binding;
       Alcotest.test_case "autodiff: ∂(x^c) is finite at a zero base (gh#952)" `Quick test_pow_grad_constant_exponent_at_zero_base;
       Alcotest.test_case "autodiff: ∂(I^α) is finite at a zero base (gh#952)" `Quick test_pow_grad_parameter_exponent_at_zero_base;
