@@ -401,7 +401,7 @@ simulate.dry	stderr	line	Parameters	(4):
 simulate.dry	stderr	line	beta	0.600000  truth.toml
 simulate.refused	stderr	line	error: unknown parameter	'zzz' from --param.
 simulate.refused	stderr	line	Available parameters:	beta, gamma, rho, N0
-simulate.events	stderr	line	event log:	185 events (99 lineage); stored as event_log.tsv in the run leaf, mirrored to ev.tsv (tsv); exact (Gillespie)
+simulate.events	stderr	line	event log:	185 events (99 lineage); stored as the run's event-log child, mirrored to ev.tsv (tsv); exact (Gillespie)
 simulate.events	stderr	line	next:	camdl lineage realize ev.tsv --identity-seed <N> -o line_list.tsv
 lineage.realize	stderr	line	lineage realize:	identity-seed 7, 99 edges, log P(line list | event log) = -664.457449
 lineage.realize	stderr	line	sub-dt bias:	0.000 (exact — Gillespie event log)

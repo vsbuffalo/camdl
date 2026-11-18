@@ -3,8 +3,8 @@
 //! Entry points:
 //!   - [`finish_event_log`]: the `camdl simulate --event-log` follow-up
 //!     (Layer 1). The recorder runs in the engine (`main::run_simulate`) and
-//!     `CasSink` stores the [`sim::lineage::EventLog`] as the `event_log.tsv`
-//!     artifact in the run leaf; this writes the optional `--event-log PATH`
+//!     `CasSink` stores the [`sim::lineage::EventLog`] as the run leaf's
+//!     event-log child; this writes the optional `--event-log PATH`
 //!     mirror and prints the `lineage realize` hint. No identities are drawn.
 //!   - [`cmd_lineage_realize`]: the offline `camdl lineage realize` path
 //!     (Layer 2). Replays an event log at `--identity-seed`, sampling identity
@@ -127,9 +127,10 @@ fn build_writer(
 }
 
 /// `camdl simulate --event-log` follow-up (Layer 1 → Layer 2). The recorded
-/// event log is the system of record as the `event_log.tsv` artifact in the
-/// run leaf (written by `CasSink`, alongside `traj.tsv`); this only writes the
-/// optional `--event-log PATH` mirror and prints the `lineage realize` hint.
+/// event log is the system of record as the run leaf's event-log child,
+/// `<leaf>/event_log/event_log.tsv` (written by `CasSink`); this only writes
+/// the optional `--event-log PATH` mirror and prints the `lineage realize`
+/// hint.
 ///
 /// `exact` is true for Gillespie (each event is a single transition) and false
 /// for batched backends (sub-dt batching introduces a bias that
@@ -158,7 +159,7 @@ pub fn finish_event_log(out: &crate::out::Out, a: &SimulateArgs, event_log: &Eve
             out.fail(format!("error: writing event log mirror: {:?}", e));
         });
         out.say(format_args!(
-            "event log: {} events ({} lineage); stored as event_log.tsv in the run leaf, mirrored to {} ({}); {}",
+            "event log: {} events ({} lineage); stored as the run's event-log child, mirrored to {} ({}); {}",
             event_log.events.len(), n_lineage, path.display(), fmt_ext, exactness,
         ));
         out.say(format_args!(
@@ -167,30 +168,24 @@ pub fn finish_event_log(out: &crate::out::Out, a: &SimulateArgs, event_log: &Eve
         ));
     } else {
         match leaf_event_log {
-            // Fresh run: the event log was stored in the leaf alongside traj.tsv.
             Some(path) => {
                 out.say(format_args!(
-                    "event log: {} events ({} lineage) stored as event_log.tsv in the run leaf; {}",
+                    "event log: {} events ({} lineage) stored as the run's event-log child; {}",
                     event_log.events.len(), n_lineage, exactness,
                 ));
                 out.say(format_args!(
                     "  next: camdl lineage realize {} --identity-seed <N> -o line_list.tsv", path
                 ));
             }
-            // Cache HIT (gh#241): the trajectory leaf already existed, so
-            // commit_atomic discarded our freshly-staged event_log.tsv — the
-            // leaf does NOT contain it. Be honest and actionable instead of
-            // claiming it was stored and pointing at a missing file. (Proper
-            // fix — event log as a child sub-artifact like obs, or
-            // augment-on-recommit — is a store-protocol follow-up.)
+            // No child file to point at: the run was not stored (a failed
+            // child write ends the command before this), so never print a
+            // path that is not there.
             None => {
                 out.say(format_args!(
-                    "event log: {} events ({} lineage) recorded, but the trajectory was already \
-                     cached so it was not stored in the leaf; {}",
+                    "event log: {} events ({} lineage) recorded but not stored; {}",
                     event_log.events.len(), n_lineage, exactness,
                 ));
-                out.say("  to capture it: re-run with `--event-log <PATH>` (writes the log to PATH), \
-                     or `--force` to recompute and store it in the leaf");
+                out.say("  to capture it: re-run with `--event-log <PATH>` (writes the log to PATH)");
             }
         }
     }

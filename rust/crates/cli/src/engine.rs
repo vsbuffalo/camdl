@@ -104,7 +104,8 @@ pub struct CellResult {
     /// The recorded identity-free event log, present only for the
     /// `simulate --event-log` path (the recorder is passive — Tier 2a — so a
     /// cell carrying `Some(..)` has the same `traj`/run_id as one carrying
-    /// `None`). A `CasSink` writes it into the leaf as `event_log.tsv`.
+    /// `None`). A `CasSink` writes it as the leaf's event-log child,
+    /// `<leaf>/event_log/event_log.tsv`.
     pub event_log: Option<sim::lineage::EventLog>,
 }
 

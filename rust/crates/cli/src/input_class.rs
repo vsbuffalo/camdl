@@ -12,6 +12,7 @@
 //! | `execution`    | changes how the result is computed, not what (`--parallel`)  | differential: run id and stored bytes stay the same      |
 //! | `provenance`   | how the run was asked for (`--label`)                        | structural, plus the leaf is unaffected                  |
 //! | `presentation` | how output is written outside the store (`-o`)               | structural, plus the leaf is unaffected or none written  |
+//! | `child`        | asks for a derived child of the leaf (`--event-log`, `--obs`) | the leaf's run id and manifest are unchanged, the child is at its address |
 //! | `expands`      | defines the set of runs (`--seeds`, `--sweep`)               | differential: cells common to both keep their run ids    |
 //! | `removed`      | refuses an old spelling with a migration message             | the flag fails with the message                          |
 //!
@@ -51,6 +52,13 @@ pub enum InputClass {
     Execution,
     Provenance,
     Presentation,
+    /// Asks for a child of the leaf: an artifact derived from the leaf's
+    /// result, stored under the leaf at its own address and declared in the
+    /// leaf's `run.json` `children`, never one of the leaf's own files. So
+    /// whether an invocation asked for it never changes what the leaf's run
+    /// id holds. The observation subtree (`obs/<hash8>-<obs_seed>/`) and the
+    /// event log (`event_log/`) are the two.
+    Child,
     Expands,
     // `Removed` joins with the first converted command that has a
     // removed-spelling trap: `simulate` has none, and a variant nothing
@@ -58,7 +66,7 @@ pub enum InputClass {
 }
 
 #[cfg(test)]
-use InputClass::{Execution, Expands, Keyed, Presentation, Provenance};
+use InputClass::{Child, Execution, Expands, Keyed, Presentation, Provenance};
 #[cfg(test)]
 use Level::{Config, Model, Obs, Params, Scenario, Seed};
 
@@ -89,10 +97,10 @@ pub const SIMULATE: &[(&str, InputClass)] = &[
     ("output", Presentation),
     ("stdout", Presentation),
     ("emit_every", Keyed(Obs)),
-    ("obs", Presentation),
-    ("obs_dir", Presentation),
-    ("obs_only", Presentation),
-    ("obs_only_dir", Presentation),
+    ("obs", Child),
+    ("obs_dir", Child),
+    ("obs_only", Child),
+    ("obs_only_dir", Child),
     ("design_from", Presentation),
     ("projected_out", Presentation),
     ("dates", Presentation),
@@ -103,7 +111,7 @@ pub const SIMULATE: &[(&str, InputClass)] = &[
     ("parallel", Execution),
     ("force", Execution),
     ("label", Provenance),
-    ("event_log", Presentation),
+    ("event_log", Child),
     ("format", Presentation),
     ("tsv", Presentation),
     ("reactive_log", Presentation),
@@ -199,6 +207,7 @@ mod tests {
             InputClass::Expands => "expands",
             InputClass::Presentation => "presentation",
             InputClass::Provenance => "provenance",
+            InputClass::Child => "child",
         };
         format!("{class}_{}{field}", if env { "env_" } else { "" })
     }
@@ -210,7 +219,7 @@ mod tests {
         text.lines()
             .filter_map(|l| l.trim_start().strip_prefix("fn "))
             .filter_map(|l| l.split('(').next())
-            .filter(|n| ["keyed_", "execution_", "expands_", "presentation_", "provenance_"].iter().any(|p| n.starts_with(p)))
+            .filter(|n| ["keyed_", "execution_", "expands_", "presentation_", "provenance_", "child_"].iter().any(|p| n.starts_with(p)))
             .map(str::to_string)
             .collect()
     }
@@ -221,7 +230,8 @@ mod tests {
     /// such an input with its class. A `keyed`, `execution` or `expands` case
     /// runs camdl twice and compares; a `presentation` or `provenance` case
     /// checks, on a fixture where the input is live, that the leaf is
-    /// unaffected or that none is written.
+    /// unaffected or that none is written; a `child` case, that the leaf's
+    /// run id and manifest are unchanged and the child is at its address.
     #[test]
     fn every_simulate_input_has_a_case() {
         let mut wanted = BTreeSet::new();
