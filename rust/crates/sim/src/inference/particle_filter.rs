@@ -132,6 +132,56 @@ pub struct PrequentialRecorded {
     pub per_stream_samples: Vec<Vec<Vec<f64>>>,
 }
 
+/// The stops of the observation axis at which the bootstrap filter keeps its
+/// prequential record (D84): every stop, or only the listed union indices.
+///
+/// A record holds `(2·n_streams + 1)·n_particles` values per stop, so a long
+/// run whose caller reads a few stops (a forecast reads its targets) keeps
+/// most of its memory for nothing. Selecting stops changes what is kept and
+/// nothing else: the predictive draw that fills a record is still made at
+/// every stop, from the same diagnostic stream, so the records kept are
+/// bit-identical to a full recording's at those stops and every later draw is
+/// where it would be. The per-stream log-likelihoods, which draw nothing and
+/// change no state, are computed only where they are kept.
+///
+/// The record stays aligned with the observation axis: `obs_times` has every
+/// stop, and at a stop that is not kept `log_liks`, `per_stream_log_liks` and
+/// `per_stream_samples` hold an empty vector.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PrequentialStops {
+    /// `None`: every stop. `Some`: these union indices, ascending and distinct.
+    only: Option<Vec<usize>>,
+}
+
+impl PrequentialStops {
+    /// Keep the record at every stop (what [`bootstrap_filter`] does).
+    pub fn every() -> Self {
+        PrequentialStops { only: None }
+    }
+
+    /// Keep the record only at these union indices (in any order; repeats
+    /// are kept once).
+    pub fn only(stops: impl IntoIterator<Item = usize>) -> Self {
+        let mut v: Vec<usize> = stops.into_iter().collect();
+        v.sort_unstable();
+        v.dedup();
+        PrequentialStops { only: Some(v) }
+    }
+
+    /// Whether the record at union index `obs_idx` is kept.
+    pub fn keeps(&self, obs_idx: usize) -> bool {
+        match &self.only {
+            None => true,
+            Some(v) => v.binary_search(&obs_idx).is_ok(),
+        }
+    }
+
+    /// The last listed stop when it is at or past `n_obs`, the axis length.
+    fn past_end(&self, n_obs: usize) -> Option<usize> {
+        self.only.as_ref().and_then(|v| v.last().copied()).filter(|&i| i >= n_obs)
+    }
+}
+
 /// Run the bootstrap particle filter.
 ///
 /// # Arguments
@@ -147,9 +197,29 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
     config: &SMCConfig,
     seed: u64,
 ) -> Result<PFilterResult, SimError> {
+    bootstrap_filter_recording_at(process, obs_model, params, config, seed, &PrequentialStops::every())
+}
+
+/// [`bootstrap_filter`], keeping the prequential record (when
+/// `config.record_prequential` asks for one) only at the stops `record_at`
+/// lists (D84). Every other output, and the records kept, are bit-identical to
+/// [`bootstrap_filter`]'s with the same arguments; see [`PrequentialStops`].
+/// A listed stop past the end of the observation axis is a caller error.
+pub fn bootstrap_filter_recording_at<P: ProcessModel<State = ParticleState>>(
+    process: &P,
+    obs_model: &(dyn ObservationModel<ParticleState> + Sync),
+    params: &[f64],
+    config: &SMCConfig,
+    seed: u64,
+    record_at: &PrequentialStops,
+) -> Result<PFilterResult, SimError> {
     let n_particles = config.n_particles;
     let dt = config.dt;
     let n_obs = obs_model.n_observations();
+    if let Some(i) = record_at.past_end(n_obs) {
+        return Err(SimError::Validation(format!(
+            "a prequential record was asked for at stop {i}, but the observation axis has {n_obs} stops")));
+    }
     let n_int = process.n_compartments();
     let n_tr = process.n_transitions();
     // Per-Interval-stream `acc` bins (multi-cadence Phase 2a): one `u64` per
@@ -520,38 +590,52 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
         // logsumexp(log_liks) − log N. Samples come from the same
         // particles via obs_model.sample and feed CRPS/PIT.
         if config.record_prequential {
-            let log_liks: Vec<f64> = swarm.log_weights.clone();
+            // D84: the record is kept only at the stops `record_at` lists, but
+            // the SAMPLE loop runs at every stop, so the diagnostic streams
+            // advance exactly as under a full recording.
+            let keep = record_at.keeps(obs_idx);
             let n_streams = obs_model.n_streams();
             // gh#269 per-stream tensors, shape [stream][particle]. The joint
             // log-lik is `swarm.log_weights` (= joint `log_likelihood`).
             // `obs_model.sample(...)` is called EXACTLY ONCE per particle per
             // step — its per-stream Vec is split, not redrawn.
-            let mut ps_samples: Vec<Vec<f64>> =
-                vec![Vec::with_capacity(n_particles); n_streams];
-            let mut ps_log_liks: Vec<Vec<f64>> =
-                vec![Vec::with_capacity(n_particles); n_streams];
+            let mut ps_samples: Vec<Vec<f64>> = if keep {
+                vec![Vec::with_capacity(n_particles); n_streams]
+            } else {
+                Vec::new()
+            };
             // SAMPLE loop (consumes RNG, once per particle). A not-scheduled
             // stream's draw is NaN (multi-cadence); `build_trace` scores only
             // the streams present at the step.
             for (i, s) in swarm.states.iter().enumerate() {
                 let per_stream = obs_model.sample(s, obs_idx, params, &mut diag_rngs[i]);
-                for (si, &v) in per_stream.iter().enumerate() {
-                    ps_samples[si].push(v);
-                }
-            }
-            // LOG-LIK loop (no RNG): per-stream contributions whose sum is the
-            // joint `log_likelihood` (gh#269 invariant, enforced at the
-            // `score_streams` seam).
-            for s in swarm.states.iter() {
-                let per_stream = obs_model.log_likelihood_per_stream(s, obs_idx, params);
-                for (si, &v) in per_stream.iter().enumerate() {
-                    ps_log_liks[si].push(v);
+                if keep {
+                    for (si, &v) in per_stream.iter().enumerate() {
+                        ps_samples[si].push(v);
+                    }
                 }
             }
             preq_times.push(obs_time);
-            preq_log_liks.push(log_liks);
-            preq_per_stream_samples.push(ps_samples);
-            preq_per_stream_log_liks.push(ps_log_liks);
+            if keep {
+                // LOG-LIK loop (no RNG): per-stream contributions whose sum is
+                // the joint `log_likelihood` (gh#269 invariant, enforced at the
+                // `score_streams` seam).
+                let mut ps_log_liks: Vec<Vec<f64>> =
+                    vec![Vec::with_capacity(n_particles); n_streams];
+                for s in swarm.states.iter() {
+                    let per_stream = obs_model.log_likelihood_per_stream(s, obs_idx, params);
+                    for (si, &v) in per_stream.iter().enumerate() {
+                        ps_log_liks[si].push(v);
+                    }
+                }
+                preq_log_liks.push(swarm.log_weights.clone());
+                preq_per_stream_samples.push(ps_samples);
+                preq_per_stream_log_liks.push(ps_log_liks);
+            } else {
+                preq_log_liks.push(Vec::new());
+                preq_per_stream_samples.push(Vec::new());
+                preq_per_stream_log_liks.push(Vec::new());
+            }
         }
 
         // Record pre-resample filtering state (states + weights) so

@@ -46,7 +46,7 @@ mod nuts_target_tests;  // the per-parameter NUTS target against analytic densit
 // Re-exports
 pub use types::{ParticleState, ParticleSwarm};
 pub use obs_loglik::{negbin_logpmf, normal_logpdf, discretized_normal_logpmf, normal_cdf, normal_quantile};
-pub use particle_filter::bootstrap_filter;
+pub use particle_filter::{bootstrap_filter, bootstrap_filter_recording_at, PrequentialStops};
 pub use traits::{ProcessModel, DensityProcess, ObservationModel, Resettable, SMCConfig, InferenceConfig};
 pub use chain_binomial_process::ChainBinomialProcess;
 pub use multi_stream_obs::{
