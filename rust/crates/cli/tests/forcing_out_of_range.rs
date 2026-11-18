@@ -335,12 +335,44 @@ fn compare_scores_a_fit_under_its_configs_override() {
 /// behind, for each method that holds a claim while it runs.
 #[test]
 fn a_refused_fit_marks_its_claim_failed() {
+    refused_fit_marks_its_claim_failed(1);
+}
+
+/// With two chains, the chain that meets the refusal ends the run and the
+/// other chain stops at its next poll: it does not go on sweeping, so the
+/// failed leaf holds no chain's resume state.
+#[test]
+fn a_refused_two_chain_fit_stops_every_chain() {
+    let leaves = refused_fit_marks_its_claim_failed(2);
+    for (algorithm, leaf, _tmp) in leaves {
+        assert!(leaf.join("run.json").is_file(), "{algorithm}: the leaf {}", leaf.display());
+        let mut stack = vec![leaf.clone()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    assert!(p.file_name().is_none_or(|n| n != "resume_state.bin"),
+                        "{algorithm}: a chain went on after the refusal and wrote {}", p.display());
+                }
+            }
+        }
+    }
+}
+
+/// The checks of [`a_refused_fit_marks_its_claim_failed`] for a fit of
+/// `chains` chains, under each method that holds a claim while it runs;
+/// returns each method's failed leaf.
+fn refused_fit_marks_its_claim_failed(chains: usize) -> Vec<(&'static str, PathBuf, tempfile::TempDir)> {
+    let mut leaves = Vec::new();
     for algorithm in ["pgas", "pmmh"] {
         let tmp = tempfile::tempdir().unwrap();
         let m = model(tmp.path(), "linear", &ROWS_TO_50);
         let toml = fit_toml(tmp.path(), &m, "");
         let src = std::fs::read_to_string(&toml).unwrap().replace("algorithm = \"pgas\"", &format!("algorithm = \"{algorithm}\""));
         let src = if algorithm == "pmmh" { src.replace("sweeps = 4", "iterations = 4") } else { src };
+        let src = src.replace("chains = 1", &format!("chains = {chains}"));
         std::fs::write(&toml, src).unwrap();
         let o = camdl(tmp.path(), &["fit", "run", toml.to_str().unwrap()]);
         let err = stderr(&o);
@@ -355,7 +387,9 @@ fn a_refused_fit_marks_its_claim_failed() {
             assert!(failure.contains("forcing `mult`"), "{algorithm}: the failure records the refusal:\n{v:#}");
             assert!(!path.with_file_name(".lock").exists(), "{algorithm}: no lock left at {}", path.display());
         }
+        leaves.push((algorithm, method[0].0.parent().unwrap().to_path_buf(), tmp));
     }
+    leaves
 }
 
 /// Every `run.json` under `root`, with its path.
