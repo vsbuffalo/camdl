@@ -648,3 +648,19 @@ fn every_fit_handle_names_the_fits_problem() {
     }
     assert_eq!(ids.iter().collect::<std::collections::BTreeSet<_>>().len(), 1, "every handle names one problem: {ids:?}");
 }
+
+/// A point of `fit run --sweep` named by its leaf: `pfilter` reads none of
+/// the fit's `[fixed]` (the point it scores is `--params`), so the sweep
+/// point names the same problem as the file and is not refused, as
+/// `profile` and `survey`, which read `[fixed]`, refuse it.
+#[test]
+fn a_sweep_point_handle_names_the_files_problem() {
+    let fx = fx();
+    let store = tempfile::tempdir().unwrap();
+    let fitted = run_into(store.path(), &Invocation::new(&fx, &["fit", "run", &fx.path("fit_plain.toml"), "--sweep", "rho=0.5,0.6"]));
+    let (_, other) = sweep_points(&fitted, "rho", 0.5);
+    let by_file = run_into(store.path(), &pf_fit(&fx, "fit_plain.toml", &[])).ids(KIND);
+    let by_point = run_into(store.path(), &pf_fit(&fx, "fit_plain.toml", &[]).set("--fit", &other.dir.to_string_lossy())).ids(KIND);
+    assert!(!by_file.is_empty());
+    assert_eq!(by_file, by_point, "the sweep point and the file name one pfilter computation");
+}

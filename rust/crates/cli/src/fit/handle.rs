@@ -683,6 +683,15 @@ pub fn resolve_fit_run(s: &str) -> Result<ResolvedFit, ResolveError> {
 /// not read through it. A leaf directory, `@label`, run-id or fit-id prefix,
 /// or problem folder names a stored fit, whose archived config is read: the
 /// config the fit ran under, a flag's problem value written in (gh#1268).
+///
+/// Two things the archive does not hold. A sweep point's values: its folder
+/// archives the file's `[fixed]`, so a reader of `[fixed]` refuses such a
+/// handle ([`FitProblem::refuse_a_sweep_point`]). And the run's own method:
+/// the archive's `[method]` is the file's, while a folder holds every method
+/// run on its problem and a method flag (`--starts`, a sampler flag) is
+/// recorded in the leaf, not folded into the archive; `profile`, the one
+/// reader of the fit's `[method]` (its nl-* budget and `starts`), reads the
+/// file's. Both lift when a fit's resolved config is stored (D93).
 pub(crate) struct FitProblem {
     /// The handle as typed, for messages.
     pub handle: String,
@@ -696,9 +705,47 @@ pub(crate) struct FitProblem {
     pub anchor: PathBuf,
     /// `text`, parsed and anchored at `anchor`.
     pub config: FitConfig,
+    /// For a stored fit, the fixed values its fit folder records it ran at
+    /// (`fit.meta.json` `fixed`), which [`Self::refuse_a_sweep_point`] checks
+    /// against the archived config; `None` for a `fit.toml`.
+    pub ran_fixed: Option<std::collections::BTreeMap<String, f64>>,
 }
 
 impl FitProblem {
+    /// Refuse a stored fit whose fit folder ran at fixed values its archived
+    /// config does not state: a point of `fit run --sweep`, whose folder
+    /// archives the file's `[fixed]`, not the point's. A reader that takes the
+    /// problem's `[fixed]` (`profile`, `survey`) would otherwise compute the
+    /// un-swept problem under the point's name. The refusal names each
+    /// parameter with the archived and the run value. A `fit.toml`, and a
+    /// stored fit whose record agrees with its archive, pass.
+    pub fn refuse_a_sweep_point(&self) -> Result<(), String> {
+        let Some(ran) = &self.ran_fixed else { return Ok(()) };
+        let problem = &self.config.problem;
+        let archived = problem.fixed.resolve().unwrap_or_else(|_| problem.fixed.values.clone());
+        let differs: Vec<String> = ran
+            .iter()
+            .filter_map(|(name, &v)| match archived.get(name) {
+                Some(&a) if a != v => Some(format!("{name} = {a} in the archive, {v} in the run")),
+                None if problem.estimate.contains_key(name) => {
+                    Some(format!("{name} estimated in the archive, fixed at {v} in the run"))
+                }
+                _ => None,
+            })
+            .collect();
+        if differs.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "--fit {} names a fit that ran at fixed values its stored config does not state \
+             ({}): a point of `fit run --sweep`, whose fit folder archives the file's [fixed], \
+             not the point's. A sweep point cannot be named by a handle yet. Name the \
+             problem by a fit.toml whose [fixed] holds the point's values.",
+            self.handle,
+            differs.join("; ")
+        ))
+    }
+
     /// The config's file name, for messages (`fit.toml`, or
     /// `fit.toml.original` of a stored fit).
     pub fn name(&self) -> String {
@@ -716,7 +763,7 @@ pub(crate) fn resolve_fit_problem(s: &str) -> Result<FitProblem, ResolveError> {
             .map_err(|e| ResolveError::NotFound(format!("cannot read fit config {}: {e}", path.display())))?;
         let config = FitConfig::parse_anchored_at(&text, &path, &path)
             .map_err(|e| ResolveError::NotFound(format!("cannot load fit config {}: {e}", path.display())))?;
-        return Ok(FitProblem { handle: s.to_string(), text, anchor: path, config });
+        return Ok(FitProblem { handle: s.to_string(), text, anchor: path, config, ran_fixed: None });
     }
     let segment = match resolve_target(s)? {
         FitTarget::Segment(seg) => seg,
@@ -725,7 +772,10 @@ pub(crate) fn resolve_fit_problem(s: &str) -> Result<FitProblem, ResolveError> {
             .ok_or_else(|| ResolveError::NotFound(format!("{} is not inside a fit's directory", l.dir.display())))?,
     };
     let (text, anchor, config) = read_segment_config(&segment).map_err(ResolveError::NotFound)?;
-    Ok(FitProblem { handle: s.to_string(), text, anchor, config })
+    let ran_fixed = crate::run_meta::read_fit_sidecar(&segment)
+        .map_err(ResolveError::NotFound)?
+        .map(|side| side.fixed);
+    Ok(FitProblem { handle: s.to_string(), text, anchor, config, ran_fixed })
 }
 
 /// Recover the config for a segment reached by run-dir / `@label` / hash.

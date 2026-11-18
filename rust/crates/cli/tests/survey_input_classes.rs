@@ -509,3 +509,32 @@ fn every_fit_handle_names_the_fits_problem() {
     assert!(!ids[0].is_empty(), "the survey stored its leaf");
     assert!(ids.iter().all(|i| *i == ids[0]), "every handle names one problem: {ids:?}");
 }
+
+/// A point of `fit run --sweep` other than the file's own value is refused
+/// by every handle form, naming the parameter with both values: its fit
+/// folder archives the file's `[fixed]`, so surveying it would hold the
+/// un-swept value under the point's name. The point at the file's value
+/// agrees with its archive and is surveyed.
+#[test]
+fn a_sweep_point_handle_is_refused() {
+    let fx = fx();
+    let store = tempfile::tempdir().unwrap();
+    let with_method = format!(
+        "{}[method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\nchains = 1\nparticles = 20\niterations = 2\ncooling = 0.9\n",
+        std::fs::read_to_string(fx.path("fit_a.toml")).unwrap()
+    );
+    let fit_path = store.path().join("fit_a.toml");
+    std::fs::write(&fit_path, with_method).unwrap();
+    let fitted = run_into(store.path(), &Invocation::new(&fx, &["fit", "run", &fit_path.to_string_lossy(), "--sweep", "gamma=0.2,0.25"]));
+    let (same, other) = sweep_points(&fitted, "gamma", 0.2);
+    let segment = other.dir.parent().unwrap().parent().unwrap().to_string_lossy().into_owned();
+    for h in [other.dir.to_string_lossy().into_owned(), segment, other.run_id[..12].to_string()] {
+        let out = run_in(store.path(), &sv_fit(&fx, "fit_a.toml", &[]).set("--fit", &h));
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "--fit {h}: the sweep point is refused:\n{err}");
+        assert!(err.contains("gamma = 0.2 in the archive, 0.25 in the run"), "names the parameter and both values:\n{err}");
+        assert!(err.contains("sweep point cannot be named by a handle"), "{err}");
+    }
+    let s = run_into(store.path(), &sv_fit(&fx, "fit_a.toml", &[]).set("--fit", &same.dir.to_string_lossy()));
+    assert!(!s.ids(KIND).is_empty(), "the point at the archived value is surveyed");
+}

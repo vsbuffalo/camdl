@@ -354,6 +354,25 @@ pub fn assert_removed(spelling: &str, with: &Invocation) {
     assert!(leaves(store.path()).is_empty(), "a refused run stores nothing");
 }
 
+/// The value the fit folder holding the fit leaf `leaf` records for the fixed
+/// parameter `name` (`fit.meta.json` `fixed`): a sweep point's value.
+pub fn segment_fixed(leaf: &Path, name: &str) -> Option<f64> {
+    let segment = leaf.parent()?.parent()?;
+    let meta: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(segment.join("fit.meta.json")).ok()?).ok()?;
+    meta["fixed"][name].as_f64()
+}
+
+/// The fit leaves of a `fit run --sweep NAME=a,b` in `stored`, as the leaf at
+/// the file's own value `archived` and the leaf at the other point.
+pub fn sweep_points(stored: &Stored, name: &str, archived: f64) -> (Leaf, Leaf) {
+    let fits: Vec<Leaf> = stored.of("fit_method").into_values().cloned().collect();
+    assert_eq!(fits.len(), 2, "one fit leaf per sweep point");
+    let (same, other): (Vec<Leaf>, Vec<Leaf>) =
+        fits.into_iter().partition(|l| segment_fixed(&l.dir, name) == Some(archived));
+    assert_eq!((same.len(), other.len()), (1, 1), "one point at the archived value, one elsewhere");
+    (same.into_iter().next().unwrap(), other.into_iter().next().unwrap())
+}
+
 /// The entries of a private IR cache that hold compiled IR.
 pub fn cached_ir(cache: &Path) -> Vec<PathBuf> {
     std::fs::read_dir(cache)
