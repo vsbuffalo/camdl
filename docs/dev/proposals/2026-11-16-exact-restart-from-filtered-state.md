@@ -296,7 +296,7 @@ scoring is unchanged. **`particle_filter.rs` is not edited.** Carry slots are
 built only by `pfilter --save-final-state` (on the binder output of
 `pfilter.rs:632-637`); every other binder caller passes none, so `acc` and every
 inference path are unchanged for them. The carry slots of an emitted stream the
-filter does not bind are subject to Decision 1 (§11).
+filter does not bind are subject to the decision in §11.
 
 **When `a` is not already a stop.** The fold happens once per union interval, so
 a total can open only at a union time. When `a` is already one (another stream's
@@ -461,16 +461,17 @@ dt = <got>. A chain-binomial model at another step is another process.
 Per cell, because a sweep point or scenario resolves its own parameters and
 interventions, the cell is compared with the filtered model by the rule a
 forecast arm is compared with the fitted model (D50): the cell may differ only
-in what first acts at or after `T` (Decision 2, §11). The filtered model is
-rebuilt from the file (the model, its `intervention` set, its `param` values).
-The comparison is `first_difference` (`fit/forecast_arms.rs:198`), which today
-takes its baseline from `ArmInputs`; it is narrowed to take the two compiled
-models, their parameter vectors, the origin and `dt`, so the forecast arms and
-the restart call one function. It refuses a switched intervention that first
-fires before `T` or at a time that is not fixed before the run, and a changed
-parameter the model reads outside interventions or inside one that fires before
-`T` (`:226-262`, verified by reading). Its reason is printed under a restart's
-own sentence:
+in what first acts at or after `T`. Anything else is refused, naming what
+differs and when it first acts. The filtered model is rebuilt from the file (the
+model, its `intervention` set, its `param` values). The comparison is
+`first_difference` (`fit/forecast_arms.rs:198`), which today takes its baseline
+from `ArmInputs`; it is narrowed to take the two compiled models, their
+parameter vectors, the origin and `dt`, so the forecast arms and the restart
+call one function. It refuses a switched intervention that first fires before
+`T` or at a time that is not fixed before the run, and a changed parameter the
+model reads outside interventions or inside one that fires before `T`
+(`:226-262`, verified by reading). Its reason is printed under a restart's own
+sentence:
 
 ```
 error: --init-state: this run<cell label> changes parameter 'beta', which the
@@ -594,7 +595,9 @@ bytes (`main.rs:1547`) through `InitStateDigest { ensemble, row }`
 `InitStateEnsemble { origin_t, rows: Vec<InitStateRow { chain, draw, counts, reals }> }`
 (`:117-144`). `HASH_VERSION` is 8 (`runid/src/hash.rs:171`).
 
-**v2.** Both sources hash one structure built from parsed values (Decision 3):
+**v2.** Both sources hash one structure built from parsed values, not the file's
+bytes: the display-only `source` line and the file's formatting are
+presentation, and one structure keeps the two sources from drifting apart.
 
 ```rust
 pub struct InitStateEnsemble {
@@ -622,9 +625,10 @@ display (`source`, which `run.json` records unhashed as the restart's source).
 **Version.** This changes stored bytes for unchanged identity inputs: a
 fit-source restart whose origin is inside a period now writes a row it did not
 write before, under the `InitStateEnsemble` today's code would hash. Under D58
-the implementing change bumps `HASH_VERSION` from 8 to 9, with a doc-comment
-entry naming the changes (the new row, the carry and data periods in the key).
-File-source runs cannot alias old ones, since v1 files are refused.
+the implementing change bumps `HASH_VERSION` once, from 8 to 9, for both
+sources, with a doc-comment entry naming the changes (the new row, the parsed
+file-source key, the carry and data periods in the key). File-source runs cannot
+alias old ones, since v1 files are refused.
 
 **The pfilter leaf.** Unchanged, as is its key: an inserted stop changes no byte
 the leaf stores (§5).
@@ -709,9 +713,9 @@ Existing tests that write v1 files by hand (`gh641_init_state_forecast.rs`,
 `runid/src/inputs/tests.rs`) produce their files through `pfilter` or the
 library writer instead; only the refusal tests in 5 and 10 write a file by hand.
 
-## 11. Decisions for the maintainer
+## 11. Decision for the maintainer
 
-**Decision 1. Emitted streams the filter does not bind.** A model stream with an
+**Emitted streams the filter does not bind.** A model stream with an
 `emit_schedule` but no `--data` binding at `pfilter` time is still written by
 `simulate --obs`. It has no rows, so a uniform stream has no phase for
 `stream_periods` (`StreamRefusal::NoBoundRows`), while `plan_emission` takes its
@@ -723,20 +727,6 @@ bound streams (D76). (b) Refuse a restart that writes such a stream across a
 period under way, and write it unchanged at a boundary. Recommendation: (a),
 leaning; it costs one integer per stream per particle, and (b) would refuse a
 row the filter could have completed.
-
-**Decision 2. Scenario and parameter differences at restart.** The state at `T`
-reflects the interventions and parameters in force before `T`. (a) Refuse any
-difference. (b) Apply the forecast arms' rule (D50) through the same function:
-allow a difference that first acts at or after `T`, refuse the rest (§7.2). (c)
-Warn and proceed. Recommendation: (b), solid; it is the rule `fit predict`
-already enforces for the same situation, and (a) forbids the main use of a
-restart, comparing interventions that start after now.
-
-**Decision 3. What the file source's identity hashes.** (a) Keep the SHA-256 of
-the file's bytes: simplest, but a display-only field (`source`) and formatting
-enter the key. (b) Hash the parsed ensemble, one structure for both sources
-(§9): formatting is presentation, and the two sources cannot drift. Either way
-`HASH_VERSION` is bumped once. Recommendation: (b), solid.
 
 ## 12. What changes in the runbook and the spec
 
