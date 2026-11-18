@@ -10058,6 +10058,20 @@ let test_branch_weights_outside_tolerance_rejected () =
   compile_expect_error_code ~code:"E423" ~contains:"recovery"
     (branch_weight_src "R : 0.5, Q : 0.500001")
 
+(** Every compile-time-constant spelling is checked, not only bare numbers:
+    a unit literal, a constant function, `min`/`max`, a let of such. *)
+let test_branch_weights_other_constant_spellings_rejected () =
+  List.iter (fun (extra, w) ->
+    compile_expect_error_code ~code:"E423" ~contains:"recovery"
+      (branch_weight_src ~extra w))
+    [ ("", "R : 0.5 'ratio, Q : 0.7 'ratio");
+      ("", "R : exp(0), Q : min(0.5, 0.9)");
+      ("let w = max(0.2, 0.7)", "R : 0.5, Q : w") ]
+
+let test_branch_weights_other_constant_spellings_ok () =
+  List.iter (fun w -> ignore (compile_expect_ok (branch_weight_src w)))
+    [ "R : 0.5 'ratio, Q : 0.5 'ratio"; "R : exp(0) - 0.5, Q : max(0.2, 0.5)" ]
+
 (** Parameterised weights cannot be checked at compile time and are
     accepted; the outflow is the rate times their sum. *)
 let test_branch_weights_parameterised_ok () =
@@ -18711,6 +18725,8 @@ let () =
       Alcotest.test_case "gh#1205: within tolerance accepted"           `Quick test_branch_weights_within_tolerance_ok;
       Alcotest.test_case "gh#1205: outside tolerance rejected"          `Quick test_branch_weights_outside_tolerance_rejected;
       Alcotest.test_case "gh#1205: parameterised weights accepted"      `Quick test_branch_weights_parameterised_ok;
+      Alcotest.test_case "gh#1205: unit/function/let constants checked" `Quick test_branch_weights_other_constant_spellings_rejected;
+      Alcotest.test_case "gh#1205: unit/function constants summing to 1" `Quick test_branch_weights_other_constant_spellings_ok;
     ];
     "multi_source_transitions", [
       Alcotest.test_case "parser accepts `S + I --> I + I`"              `Quick test_multi_source_parses;

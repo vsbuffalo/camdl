@@ -1369,6 +1369,140 @@ let stoich_ref_of_to_expr (e : expr) : (stoich_ref, string) result =
   | EIndex (n, idx, _) -> Ok (n, idx)
   | _ -> Error "must be a compartment name (e.g. `to = D` or `to = D[a]`)"
 
+(* ── Unit conversion ─────────────────────────────────────────────────────── *)
+
+(* Number of days represented by each unit literal. Used as the universal
+   intermediate: to convert between any two units, go via days. *)
+(* Gregorian average year = 365.2425 days. Used as the universal intermediate
+   for all unit conversions. Must match parse_date_to_float above. *)
+let days_per = function
+  | Days     -> 1.0              | PerDay   -> 1.0
+  | Weeks    -> 7.0              | PerWeek  -> 7.0
+  | Months   -> 365.2425 /. 12.0 | PerMonth -> 365.2425 /. 12.0
+  | Years    -> 365.2425          | PerYear  -> 365.2425
+  | Count | Ratio ->
+    (* `days_per` is the time-scale machinery; non-time units don't
+       have a time-per-unit ratio. Callers must dispatch on the unit
+       kind and avoid calling this on `'count` / `'ratio`. *)
+    invalid_arg "days_per: non-time unit has no time scale"
+
+(* Convert a unit literal expression to a float in the model's declared
+   time_unit.  The computation goes through days as the universal intermediate:
+     duration:  f 'u  = (f × days_per(u)) / days_per(time_unit)
+     rate:      f 'pu = (f / days_per(u)) × days_per(time_unit)
+
+   With time_unit = 'days (the common case) days_per(Days) = 1.0, so the
+   division/multiplication is a no-op and the result is identical to the
+   old hardcoded behaviour.  With time_unit = 'weeks, 80 'days → 80/7 ≈ 11.4
+   and 0.3 'per_day → 0.3 × 7 = 2.1. *)
+let unit_to_model_time ctx f u =
+  let tu = days_per ctx.time_unit in
+  match u with
+  | Days | Weeks | Months | Years ->
+    f *. days_per u /. tu
+  | PerDay | PerWeek | PerMonth | PerYear ->
+    f /. days_per u *. tu
+  | Count | Ratio ->
+    (* Tier-3 non-time units (GH #8). No time scale; values pass
+       through unchanged. The dimension information is captured via
+       `unit_lit_to_dim` and stored on the `time_function.dim` field
+       for the dim-checker to consume. *)
+    f
+
+(* Pure math functions that are safe to evaluate at compile time. *)
+let is_const_func = function
+  | "exp" | "log" | "sqrt" | "abs" | "floor" | "ceil" -> true
+  | "sin" | "cos" | "tanh" -> true  (* gh#58 *)
+  | _ -> false
+
+let rec is_const_expr = function
+  | EConst _ | EUnit _ -> true
+  | EUnOp (_, e) -> is_const_expr e
+  | EBinOp (_, l, r) -> is_const_expr l && is_const_expr r
+  | EFuncCall (fname, args) when is_const_func fname ->
+    (* Pure math functions are const-foldable iff all args are const.
+       The parser emits EFuncCall for log/exp/sqrt/etc.; EUnOp(Log,_) is
+       dead unless another AST-level pass rewrites them. *)
+    List.for_all (fun (_, e) -> is_const_expr e) args
+  | _ -> false
+
+let rec eval_const_expr ctx = function
+  | EConst f -> f
+  | EUnit (f, u) -> unit_to_model_time ctx f u
+  | EUnOp (Neg, e) -> -. (eval_const_expr ctx e)
+  | EUnOp (Total, e) -> eval_const_expr ctx e
+  | EUnOp (Exp, e) -> exp (eval_const_expr ctx e)
+  | EUnOp (Log, e) -> log (eval_const_expr ctx e)
+  | EUnOp (Sqrt, e) -> sqrt (eval_const_expr ctx e)
+  | EUnOp (Abs, e) -> abs_float (eval_const_expr ctx e)
+  | EUnOp (Floor, e) -> floor (eval_const_expr ctx e)
+  | EUnOp (Ceil, e) -> ceil (eval_const_expr ctx e)
+  | EUnOp (Sin, e)  -> sin (eval_const_expr ctx e)
+  | EUnOp (Cos, e)  -> cos (eval_const_expr ctx e)
+  | EUnOp (Tanh, e) -> tanh (eval_const_expr ctx e)
+  | EBinOp (Add, l, r) -> eval_const_expr ctx l +. eval_const_expr ctx r
+  | EBinOp (Sub, l, r) -> eval_const_expr ctx l -. eval_const_expr ctx r
+  | EBinOp (Mul, l, r) -> eval_const_expr ctx l *. eval_const_expr ctx r
+  | EBinOp (Div, l, r) -> eval_const_expr ctx l /. eval_const_expr ctx r
+  | EBinOp (Pow, l, r) -> eval_const_expr ctx l ** eval_const_expr ctx r
+  | EFuncCall (fname, [(_, e)]) when is_const_func fname ->
+    let v = eval_const_expr ctx e in
+    (match fname with
+     | "exp"   -> exp v
+     | "log"   -> log v
+     | "sqrt"  -> sqrt v
+     | "abs"   -> abs_float v
+     | "floor" -> floor v
+     | "ceil"  -> ceil v
+     | "sin"   -> sin v
+     | "cos"   -> cos v
+     | "tanh"  -> tanh v
+     | _       -> 0.0 (* unreachable — is_const_func filters these *))
+  | _ -> 0.0  (* unreachable — guarded by is_const_expr *)
+
+(* ── Compile-time constants ──────────────────────────────────────────────── *)
+
+(* The value of an expression known at compile time, for the checks that
+   need one before any IR exists: the destination-split weights (E423) and
+   the hyper_erlang branch weights (E225). An expression is a compile-time
+   constant when [is_const_expr] accepts it once every unindexed `let` it
+   names is replaced by that let's body, recursively; `min`, `max` and `mod`
+   of constants are folded too. [eval_const_expr] gives the value. [None]
+   for anything else: a parameter, a table, a forcing, the state, `t`.
+
+   Lets are looked up in [ctx.let_bindings], the declaration list, because
+   the hyper_erlang check runs in the `via` lowering, before the lookup
+   tables and the let-cycle check (E201) exist; [visiting] stops a cyclic
+   let from recursing (E201 reports it later). Reads no IR, emits nothing. *)
+let const_value ctx (e : expr) : float option =
+  let rec inline visiting e =
+    let both a b k = match inline visiting a, inline visiting b with
+      | Some a, Some b -> Some (k a b)
+      | _ -> None in
+    match e with
+    | EConst _ | EUnit _ -> Some e
+    | EUnOp (op, a) -> Option.map (fun a -> EUnOp (op, a)) (inline visiting a)
+    | EBinOp (op, a, b) -> both a b (fun a b -> EBinOp (op, a, b))
+    | EFuncCall (f, [(_, a)]) when is_const_func f ->
+      Option.map (fun a -> EFuncCall (f, [("", a)])) (inline visiting a)
+    | EFuncCall (("min" | "max" | "mod") as f, [("", a); ("", b)]) ->
+      both a b (fun a b ->
+        let x = eval_const_expr ctx a and y = eval_const_expr ctx b in
+        EConst (match f with
+          | "min" -> Float.min x y
+          | "max" -> Float.max x y
+          | _     -> Float.rem x y))
+    | EIdent (n, _) when not (List.mem n visiting) ->
+      (match List.find_opt (fun (lb : let_binding) -> lb.lname = n) ctx.let_bindings with
+       | Some lb when lb.lindices = [] && lb.lshape = None ->
+         inline (n :: visiting) lb.lbody
+       | _ -> None)
+    | _ -> None
+  in
+  match inline [] e with
+  | Some e' when is_const_expr e' -> Some (eval_const_expr ctx e')
+  | _ -> None
+
 (* Build one validated [hyper_branch] from a `branch(...)` call's keyword args.
    Mirrors the erlang validation (stages = pos-int; exactly one of mean/rate)
    plus the branch-only keywords (`label` required; `weight`/`to` optional). An
@@ -1642,16 +1776,8 @@ let via_spec_of_call ctx (tr : transition_decl) ((law, args) : via_call)
             weight 1 − Σ stays ≥ 0). A `: probability` param weight is bounded by the
             param system; an unfoldable expression is left to that layer. An
             out-of-range constant gives a NEGATIVE entry rate / initial population. *)
-         let rec weight_const = function
-           | EConst c -> Some c
-           | EBinOp (Add, a, b) -> (match weight_const a, weight_const b with Some x, Some y -> Some (x +. y) | _ -> None)
-           | EBinOp (Sub, a, b) -> (match weight_const a, weight_const b with Some x, Some y -> Some (x -. y) | _ -> None)
-           | EBinOp (Mul, a, b) -> (match weight_const a, weight_const b with Some x, Some y -> Some (x *. y) | _ -> None)
-           | EBinOp (Div, a, b) -> (match weight_const a, weight_const b with Some x, Some y when y <> 0.0 -> Some (x /. y) | _ -> None)
-           | _ -> None
-         in
          let explicit  = List.filter_map (fun b -> b.hb_weight) branches in
-         let folded    = List.map weight_const explicit in
+         let folded    = List.map (const_value ctx) explicit in
          let any_out   = List.exists (function Some w -> w < 0.0 || w > 1.0 | None -> false) folded in
          let all_const = explicit <> [] && List.for_all Option.is_some folded in
          let sum_const = List.fold_left (fun acc -> function Some w -> acc +. w | None -> acc) 0.0 folded in
@@ -2500,46 +2626,6 @@ let resolve_dimensions ctx =
         ()
   ) ctx.stratifies
 
-(* ── Unit conversion ─────────────────────────────────────────────────────── *)
-
-(* Number of days represented by each unit literal. Used as the universal
-   intermediate: to convert between any two units, go via days. *)
-(* Gregorian average year = 365.2425 days. Used as the universal intermediate
-   for all unit conversions. Must match parse_date_to_float above. *)
-let days_per = function
-  | Days     -> 1.0              | PerDay   -> 1.0
-  | Weeks    -> 7.0              | PerWeek  -> 7.0
-  | Months   -> 365.2425 /. 12.0 | PerMonth -> 365.2425 /. 12.0
-  | Years    -> 365.2425          | PerYear  -> 365.2425
-  | Count | Ratio ->
-    (* `days_per` is the time-scale machinery; non-time units don't
-       have a time-per-unit ratio. Callers must dispatch on the unit
-       kind and avoid calling this on `'count` / `'ratio`. *)
-    invalid_arg "days_per: non-time unit has no time scale"
-
-(* Convert a unit literal expression to a float in the model's declared
-   time_unit.  The computation goes through days as the universal intermediate:
-     duration:  f 'u  = (f × days_per(u)) / days_per(time_unit)
-     rate:      f 'pu = (f / days_per(u)) × days_per(time_unit)
-
-   With time_unit = 'days (the common case) days_per(Days) = 1.0, so the
-   division/multiplication is a no-op and the result is identical to the
-   old hardcoded behaviour.  With time_unit = 'weeks, 80 'days → 80/7 ≈ 11.4
-   and 0.3 'per_day → 0.3 × 7 = 2.1. *)
-let unit_to_model_time ctx f u =
-  let tu = days_per ctx.time_unit in
-  match u with
-  | Days | Weeks | Months | Years ->
-    f *. days_per u /. tu
-  | PerDay | PerWeek | PerMonth | PerYear ->
-    f /. days_per u *. tu
-  | Count | Ratio ->
-    (* Tier-3 non-time units (GH #8). No time scale; values pass
-       through unchanged. The dimension information is captured via
-       `unit_lit_to_dim` and stored on the `time_function.dim` field
-       for the dim-checker to consume. *)
-    f
-
 (** Dimension tuple (P_exp, T_exp) for a unit literal. Used when a
     unit literal annotates a tier-3 declaration (tables, forcing
     functions — GH #8) to drive dimensional analysis. *)
@@ -3181,23 +3267,6 @@ let shape_index ctx ~loc shape items env =
   done;
   List.fold_left (fun acc (i, (idx, _)) -> acc + idx * strides.(i))
     0 (List.mapi (fun i p -> (i, p)) pairs)
-
-(* Pure math functions that are safe to evaluate at compile time. *)
-let is_const_func = function
-  | "exp" | "log" | "sqrt" | "abs" | "floor" | "ceil" -> true
-  | "sin" | "cos" | "tanh" -> true  (* gh#58 *)
-  | _ -> false
-
-let rec is_const_expr = function
-  | EConst _ | EUnit _ -> true
-  | EUnOp (_, e) -> is_const_expr e
-  | EBinOp (_, l, r) -> is_const_expr l && is_const_expr r
-  | EFuncCall (fname, args) when is_const_func fname ->
-    (* Pure math functions are const-foldable iff all args are const.
-       The parser emits EFuncCall for log/exp/sqrt/etc.; EUnOp(Log,_) is
-       dead unless another AST-level pass rewrites them. *)
-    List.for_all (fun (_, e) -> is_const_expr e) args
-  | _ -> false
 
 (* ── Compile-time integer evaluator (for add_calendar_* and date_range) ───── *)
 
@@ -5945,30 +6014,6 @@ let resolve_lineage (ctx : context) (tr : Ast.transition_decl)
    weight a model would write on purpose. *)
 let branch_weight_tolerance = 1e-9
 
-(* The value of a destination weight that is known at compile time: numbers,
-   arithmetic on them, and unindexed `let` bindings whose bodies are such.
-   [None] for anything else — a parameter, a table, a forcing, the state —
-   whose value is not known until run time. Reads no IR and emits nothing. *)
-let rec branch_weight_const ctx (e : expr) : float option =
-  let both f a b =
-    match branch_weight_const ctx a, branch_weight_const ctx b with
-    | Some x, Some y -> Some (f x y)
-    | _ -> None
-  in
-  match e with
-  | EConst c -> Some c
-  | EUnOp (Neg, a) -> Option.map Float.neg (branch_weight_const ctx a)
-  | EBinOp (Add, a, b) -> both ( +. ) a b
-  | EBinOp (Sub, a, b) -> both ( -. ) a b
-  | EBinOp (Mul, a, b) -> both ( *. ) a b
-  | EBinOp (Div, a, b) -> both ( /. ) a b
-  | EBinOp (Pow, a, b) -> both ( ** ) a b
-  | EIdent (n, _) ->
-    (match classify_name ctx ~obs_aux_cols:[] ~suppress_hoist:true n with
-     | Name_let_const lb | Name_let_inlined lb -> branch_weight_const ctx lb.lbody
-     | _ -> None)
-  | _ -> None
-
 (* gh#1205: a destination split `X --> { A : w_A, B : w_B } @ r` emits one
    flow per branch at rate w_i · r, so X leaves at (Σ w_i) · r. When every
    weight is a compile-time constant the sum is known, and a sum other than 1
@@ -5979,7 +6024,7 @@ let check_branch_weights_sum ctx (tr : transition_decl) =
   match tr.trdst with
   | DstSum _ -> ()
   | DstBranch branches ->
-    let consts = List.map (fun (_, w) -> branch_weight_const ctx w) branches in
+    let consts = List.map (fun (_, w) -> const_value ctx w) branches in
     if List.for_all Option.is_some consts then begin
       let sum = List.fold_left (fun acc w -> acc +. Option.get w) 0.0 consts in
       if Float.abs (sum -. 1.0) > branch_weight_tolerance then begin
@@ -6206,40 +6251,6 @@ let ir_param_kind_of_ast : Ast.param_type -> Ir.param_kind = function
   | PReal        -> Ir.Real
   | PInstant     -> Ir.Instant
   | PDuration    -> Ir.Duration
-
-let rec eval_const_expr ctx = function
-  | EConst f -> f
-  | EUnit (f, u) -> unit_to_model_time ctx f u
-  | EUnOp (Neg, e) -> -. (eval_const_expr ctx e)
-  | EUnOp (Total, e) -> eval_const_expr ctx e
-  | EUnOp (Exp, e) -> exp (eval_const_expr ctx e)
-  | EUnOp (Log, e) -> log (eval_const_expr ctx e)
-  | EUnOp (Sqrt, e) -> sqrt (eval_const_expr ctx e)
-  | EUnOp (Abs, e) -> abs_float (eval_const_expr ctx e)
-  | EUnOp (Floor, e) -> floor (eval_const_expr ctx e)
-  | EUnOp (Ceil, e) -> ceil (eval_const_expr ctx e)
-  | EUnOp (Sin, e)  -> sin (eval_const_expr ctx e)
-  | EUnOp (Cos, e)  -> cos (eval_const_expr ctx e)
-  | EUnOp (Tanh, e) -> tanh (eval_const_expr ctx e)
-  | EBinOp (Add, l, r) -> eval_const_expr ctx l +. eval_const_expr ctx r
-  | EBinOp (Sub, l, r) -> eval_const_expr ctx l -. eval_const_expr ctx r
-  | EBinOp (Mul, l, r) -> eval_const_expr ctx l *. eval_const_expr ctx r
-  | EBinOp (Div, l, r) -> eval_const_expr ctx l /. eval_const_expr ctx r
-  | EBinOp (Pow, l, r) -> eval_const_expr ctx l ** eval_const_expr ctx r
-  | EFuncCall (fname, [(_, e)]) when is_const_func fname ->
-    let v = eval_const_expr ctx e in
-    (match fname with
-     | "exp"   -> exp v
-     | "log"   -> log v
-     | "sqrt"  -> sqrt v
-     | "abs"   -> abs_float v
-     | "floor" -> floor v
-     | "ceil"  -> ceil v
-     | "sin"   -> sin v
-     | "cos"   -> cos v
-     | "tanh"  -> tanh v
-     | _       -> 0.0 (* unreachable — is_const_func filters these *))
-  | _ -> 0.0  (* unreachable — guarded by is_const_expr *)
 
 (* The dimension a constant body's unit literals give it: [`Units d] when
    they alone determine it; [`Bare] for bare numbers only; [`Conflict (a, b)]
