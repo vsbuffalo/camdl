@@ -221,9 +221,11 @@ pub(crate) fn fixed_origin_forecast(
         binomial: config.binomial,
     };
 
-    // D84: keep the prequential record only where it is read below, the stops
-    // after the origin (the death check) and the targets.
-    let record_at = PrequentialStops::only(after_origin.iter().copied().chain(at.iter().map(|&(_, ui)| ui)));
+    // D84: keep the prequential record only where it is read below: every
+    // stop. Those at or before the origin feed each draw's
+    // [`PreOriginTrace`], which scenario arms are checked against; those
+    // after it, the death check and the targets.
+    let record_at = PrequentialStops::every();
 
     let n = config.n_particles;
     let mut draws: Vec<Vec<f64>> = vec![Vec::with_capacity(param_sets.len() * n); at.len()];
@@ -280,7 +282,7 @@ pub(crate) fn fixed_origin_forecast(
             }
         }
         pre_origin.push(pre_origin_trace(&before_origin, &union_times, &result.ll_increments,
-            &result.ess_trace, &preq));
+            &result.ess_trace, &preq, n).map_err(|e| fail(None, e))?);
         // `ess_trace` holds each stop's ESS after the weights are set and
         // before the resampling call.
         last_assimilation.push(before_origin.iter().rev().find(|&&i| obs_model.assimilates_at(i))
@@ -306,10 +308,18 @@ fn pre_origin_trace(
     ll_increments: &[f64],
     ess_trace: &[f64],
     preq: &sim::inference::particle_filter::PrequentialRecorded,
-) -> PreOriginTrace {
+    n_particles: usize,
+) -> Result<PreOriginTrace, String> {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     for &i in before {
+        // A stop the filter kept no record of would hash as nothing, and the
+        // check on the arms would pass vacuously there.
+        if preq.log_liks[i].len() != n_particles {
+            return Err(format!(
+                "internal error: the filter kept no per-particle record at stop {i} before the \
+                 origin, which the check on scenario arms reads"));
+        }
         for v in preq.log_liks[i].iter()
             .chain(preq.per_stream_log_liks[i].iter().flatten())
             .chain(preq.per_stream_samples[i].iter().flatten())
@@ -317,12 +327,12 @@ fn pre_origin_trace(
             h.update(v.to_bits().to_le_bytes());
         }
     }
-    PreOriginTrace {
+    Ok(PreOriginTrace {
         times: before.iter().map(|&i| union_times[i]).collect(),
         ll_increments: before.iter().map(|&i| ll_increments[i]).collect(),
         ess: before.iter().map(|&i| ess_trace[i]).collect(),
         particles: h.finalize().into(),
-    }
+    })
 }
 
 /// Where the driver may read `stream` at `end`: its index and the union index
