@@ -441,21 +441,26 @@ impl ForecastPlan {
         self.design_mode
     }
 
-    /// The SHA-256 of every target's design values, in the plan's order:
-    /// the design inputs that determine the predictions (D81), for the
-    /// prediction's address. `None` when no target carries any. Held-out
-    /// outcomes do not enter it.
-    pub(crate) fn design_digest(&self) -> Option<String> {
-        self.design_mode?;
+    /// The SHA-256 of the target set, in the plan's order: each target's
+    /// stream, whether it is a period or an instant, its start and end, and
+    /// its design values where it reads any. These are inputs to the
+    /// predictions (D80: under held-out-row targets the set follows the
+    /// held-out periods; D81: the design values), so they key the forecast's
+    /// address. Held-out outcomes do not enter it.
+    pub(crate) fn targets_digest(&self) -> String {
         let mut h = String::new();
-        for t in self.targets.iter().filter(|t| !t.design.is_empty()) {
-            h += &format!("{}\t{:016x}\t{:016x}", t.stream, t.measures.start().to_bits(), t.measures.end().to_bits());
+        for t in &self.targets {
+            let kind = match t.measures {
+                Measures::Period(_) => "period",
+                Measures::Instant(_) => "instant",
+            };
+            h += &format!("{}\t{kind}\t{:016x}\t{:016x}", t.stream, t.measures.start().to_bits(), t.measures.end().to_bits());
             for (c, v) in &t.design {
                 h += &format!("\t{c}={:016x}", v.to_bits());
             }
             h += "\n";
         }
-        Some(crate::hashing::sha256_hex(h.as_bytes()))
+        crate::hashing::sha256_hex(h.as_bytes())
     }
 
     pub(crate) fn refusals(&self) -> &[StreamRefusal] {
@@ -1105,10 +1110,9 @@ mod tests {
         assert_eq!(pa.design_mode(), Some(DesignMode::ExPost));
         assert_eq!(pa.targets(), pb.targets(), "outcomes change no target or design value");
         assert_eq!(pa.targets(), pna.targets(), "an NA outcome keeps its row's design");
-        assert_eq!(pa.design_digest(), pb.design_digest());
-        assert!(pa.design_digest().is_some());
+        assert_eq!(pa.targets_digest(), pb.targets_digest());
         let changed = plan_of(&held(Some(3.0), Some(4.0), 51.0), 14.0).unwrap();
-        assert_ne!(pa.design_digest(), changed.design_digest(), "the design values key the prediction");
+        assert_ne!(pa.targets_digest(), changed.targets_digest(), "the design values key the prediction");
         let err = plan_of(&a, 21.0).unwrap_err().to_string();
         assert!(err.contains("[35, 42)") && err.contains("no held-out row measures it"), "{err}");
     }
@@ -1263,6 +1267,33 @@ mod tests {
         assert_eq!(got, vec![(61.0, 92.0, 0, 31.0), (100.0, 130.0, 1, 69.0)]);
         assert_eq!(plan.sources()[0].1, TargetSource::HeldOutRows);
         assert!(TargetSource::HeldOutRows.describe().contains("lead"));
+    }
+
+    /// The target set is an input to the predictions, so it keys the
+    /// forecast's address: splitting the held-out window [28, 35) of a
+    /// window-column stream with no `emit_schedule` into [28, 31) and
+    /// [31, 35) changes the targets, and so must change the address. The
+    /// held-out outcomes do not.
+    #[test]
+    fn the_target_set_keys_the_forecasts_address() {
+        let train = vec![row(0, 0.0, 14.0), row(1, 14.0, 28.0)];
+        let rows = BTreeMap::from([("monthly".to_string(), train.clone())]);
+        let o = monthly_windows();
+        let address = |held: Vec<(f64, f64, f64)>| {
+            let held: Vec<HeldOut> = held.into_iter().enumerate()
+                .map(|(i, (a, b, y))| HeldOut { file: RowFile::Holdout, row: ObservedRow {
+                    cell: Some(sim::inference::ObsCell::Scalar(y)), ..row(i, a, b) } })
+                .collect();
+            let plan = ForecastPlan::new(partition(&rows), 14.0, &[
+                PlanStream { obs: &o, training: &train, held_out: &held, design: DesignInput::NotSupplied },
+            ]).unwrap();
+            crate::fit::forecast_output::forecast_options(&crate::fit::predict::PredictOptions::defaults(), &plan)
+                .address_key("run")
+        };
+        let whole = address(vec![(28.0, 35.0, 7.0)]);
+        assert_ne!(whole, address(vec![(28.0, 31.0, 7.0), (31.0, 35.0, 0.0)]), "a different target set");
+        assert_ne!(whole, address(vec![(29.0, 35.0, 7.0)]), "one target, a different period");
+        assert_eq!(whole, address(vec![(28.0, 35.0, 3.0)]), "the same targets, another outcome");
     }
 
     /// The held-out periods are validated: out of order, repeated,

@@ -3585,19 +3585,22 @@ pub(crate) struct PredictOptions {
     /// addresses the same output as no flag.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub particles: Option<usize>,
-    /// A forecast's design inputs (D81): how its design-reading streams'
-    /// design values were supplied and the digest of the values its targets
-    /// read ([`crate::fit::forecast_plan::ForecastPlan::design_digest`]).
-    /// Absent when no target reads one. Held-out outcomes never enter it.
+    /// What a forecast's plan contributes to its predictions' inputs: the
+    /// target set (with each target's design values) and the design mode.
+    /// Absent outside forecast mode. Held-out outcomes never enter it.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub design: Option<DesignKey>,
+    pub forecast: Option<ForecastKey>,
 }
 
-/// The design half of a forecast's address (D81).
+/// The plan's half of a forecast's address (D80, D81).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
-pub(crate) struct DesignKey {
-    pub mode: crate::fit::forecast_plan::DesignMode,
-    pub digest: String,
+pub(crate) struct ForecastKey {
+    /// [`crate::fit::forecast_plan::ForecastPlan::targets_digest`]: every
+    /// target's stream, period or instant, and design values.
+    pub targets: String,
+    /// Where the design values came from, when any target reads one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub design_mode: Option<crate::fit::forecast_plan::DesignMode>,
 }
 
 /// What [`PredictOptions::address_key`] hashes: the run, the engine that
@@ -3630,7 +3633,7 @@ impl PredictOptions {
             quantities: None,
             allow_forcing_extrapolation: false,
             particles: None,
-            design: None,
+            forecast: None,
         }
     }
 
@@ -3674,7 +3677,7 @@ impl PredictOptions {
             quantities: vocabulary.map(|v| v.digest.clone()),
             allow_forcing_extrapolation: args.forcing_extrapolation.allow_forcing_extrapolation,
             particles: None,
-            design: None,
+            forecast: None,
         }
         .normalised()
     }
@@ -4574,20 +4577,19 @@ mod tests {
             ("quantities", PredictOptions { quantities: Some("ab".repeat(32)), ..base.clone() }),
             ("allow_forcing_extrapolation",
              PredictOptions { allow_forcing_extrapolation: true, ..base.clone() }),
-            ("design", PredictOptions {
-                design: Some(DesignKey {
-                    mode: crate::fit::forecast_plan::DesignMode::ExPost, digest: "cd".repeat(32),
-                }),
+            ("forecast", PredictOptions {
+                forecast: Some(ForecastKey { targets: "cd".repeat(32), design_mode: None }),
                 ..base.clone()
             }),
         ];
-        let design = |mode, digest: &str| PredictOptions {
-            design: Some(DesignKey { mode, digest: digest.to_string() }),
+        let forecast = |design_mode, targets: &str| PredictOptions {
+            forecast: Some(ForecastKey { targets: targets.to_string(), design_mode }),
             ..base.clone()
         }.address_key_by(RUN, ENGINE);
         use crate::fit::forecast_plan::DesignMode::{ExPost, Prospective};
-        assert_ne!(design(ExPost, "ab"), design(Prospective, "ab"), "the design mode keys the address");
-        assert_ne!(design(ExPost, "ab"), design(ExPost, "ac"), "and the design values");
+        assert_ne!(forecast(Some(ExPost), "ab"), forecast(Some(Prospective), "ab"), "the design mode keys the address");
+        assert_ne!(forecast(None, "ab"), forecast(Some(Prospective), "ab"));
+        assert_ne!(forecast(None, "ab"), forecast(None, "ac"), "and the target set");
         for (what, o) in &varied {
             assert_ne!(o.address_key_by(RUN, ENGINE), k, "{what} must move the key");
         }

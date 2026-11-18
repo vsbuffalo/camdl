@@ -743,9 +743,10 @@ resolved to the values used: `--mode`, `--horizon`, `--n-draws`, `--seed`,
 `--stream`, `--scenario`/`--enable`/`--disable`, `--sweep`, `--by-chain`, the
 chains `--exclude-chains`/`--chains` drop from the fit's cloud (so the two
 spellings of one selection are one key), the SHA-256 of a `--quantities` file,
-and `--allow-forcing-extrapolation`, and, for a forecast with a design-reading
-stream (D81), `options.design`: the design mode (`prospective` or `ex_post`) and
-the SHA-256 of every target's design values. Two predictions that differ in the
+and `--allow-forcing-extrapolation`, and, for a forecast, `options.forecast`:
+the SHA-256 of its target set (each target's stream, period or instant, and
+design values where it reads any; D80, D81) and, when a target reads a design,
+the design mode (`prospective` or `ex_post`). Two predictions that differ in the
 run, the engine or any of those options therefore never share a directory. The
 held-out outcomes are not in the key: they change no prediction (D79), and a
 forecast whose held-out values change writes the same tables to the same
