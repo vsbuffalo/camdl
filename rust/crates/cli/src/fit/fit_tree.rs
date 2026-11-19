@@ -311,7 +311,7 @@ mod tests {
         // The view is pre-parsed (derived from the method leaves); `methods_declared`
         // comes from the leaves' method levels. gh#147: `estimated`/`fixed`/priors
         // are config detail not carried on the leaves, so they default empty —
-        // config-diff reads the archived `fit.toml.original` for those.
+        // config-diff reads the stored `fit.resolved.toml` for those.
         assert_eq!(entries[0].view.methods_declared, vec!["if2"]);
         assert!(!entries[0].view.fit_hash.is_empty());
         assert_eq!(entries[0].view.methods.len(), 1);

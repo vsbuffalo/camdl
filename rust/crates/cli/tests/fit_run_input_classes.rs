@@ -1000,13 +1000,22 @@ fn the_fit_file_is_read_once() {
         stored.fits().values().map(|l| l.dir.parent().unwrap().parent().unwrap().to_path_buf()).collect();
     assert_eq!(segments.len(), 2, "one fit folder per sweep point");
     let hash = hex(&Sha256::digest(first.as_bytes()));
+    let mut swept: Vec<f64> = Vec::new();
     for seg in segments {
         let archived = std::fs::read_to_string(seg.join("fit.toml.original")).unwrap();
-        assert_eq!(archived, first, "{}: the archive is the text resolved", seg.display());
+        assert_eq!(archived, first, "{}: the archive is the text read", seg.display());
         let meta: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(seg.join("fit.meta.json")).unwrap()).unwrap();
-        assert_eq!(meta["fit_toml_hash"], serde_json::json!(hash), "{}: the hash is the text resolved's", seg.display());
+        assert_eq!(meta["fit_toml_hash"], serde_json::json!(hash), "{}: the hash is the text read's", seg.display());
+        // The folder's resolved config names its own sweep point's value, the
+        // one its fit.meta.json records, never the file's.
+        let resolved: toml::Table = std::fs::read_to_string(seg.join("fit.resolved.toml")).unwrap().parse().unwrap();
+        let k = resolved["fixed"]["k"].as_float().expect("[fixed] k in the resolved config");
+        assert_eq!(serde_json::json!(k), meta["fixed"]["k"], "{}: the resolved k is the point's", seg.display());
+        swept.push(k);
     }
+    swept.sort_by(f64::total_cmp);
+    assert_eq!(swept, [0.3, 0.4], "each folder's resolved config names its own point");
 }
 
 /// `camdl show` on a fit run names the engine that computed it: the build,

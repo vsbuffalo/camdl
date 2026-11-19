@@ -693,9 +693,9 @@ pub const FIT_META_SCHEMA_VERSION: u32 = 3;
 /// projection of inputs already hashed into the leaf identity (the `FitDigest`
 /// — different priors already produce a different fit identity). It is written
 /// post-identity and is never fed back into any hash. The producing `fit.toml`
-/// is archived beside it as `fit.toml.original`: the config-diff source for
-/// `fit table`, the config a run handle recovers, and — canonicalised at lookup
-/// time — what a `fit.toml` handle is matched against (gh#653).
+/// is archived beside it byte for byte as `fit.toml.original`, and the
+/// configuration the folder's fits ran under as `fit.resolved.toml`: the
+/// config-diff source for `fit table` and the config a run handle recovers.
 ///
 /// Every field except `calendar` and `resolved_priors`-class provenance
 /// defaults, so partial sidecars round-trip; [`crate::fit::fit_view::FitView`]
@@ -727,9 +727,10 @@ pub struct FitSidecar {
     /// sidecar** (`fits/{stem}-{h8}/`), e.g. `../../../fits/sir.toml`; set by
     /// [`write_fit_sidecar`]. Not the archived copy: that is
     /// `fit.toml.original` in the same folder ([`ARCHIVED_CONFIG`]), which
-    /// carries the config's text but not its location.
+    /// carries the config's text but not its location, as does the resolved
+    /// config ([`RESOLVED_CONFIG`]).
     ///
-    /// Load-bearing: the archive's relative `[model]` / `[data]` paths were
+    /// Load-bearing: the stored configs' relative `[model]` / `[data]` paths were
     /// written against the source config's directory, so recovering the config
     /// from the segment anchors them at `<fit folder>/<source_config>` (gh#652,
     /// [`crate::fit::config_v2::FitConfigV2::load_anchored_at`]) — from any
@@ -738,14 +739,16 @@ pub struct FitSidecar {
     /// no directory to anchor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_config: Option<String>,
-    /// SHA-256 of the producing config's raw bytes — **provenance**: which exact
-    /// bytes produced this fit, down to the whitespace. Nothing looks a fit up
-    /// by it.
+    /// SHA-256 of the producing config's raw bytes, as read — the bytes of
+    /// `fit.toml.original`, not of `fit.resolved.toml`. **Provenance**: which
+    /// exact bytes produced this fit, down to the whitespace. Nothing looks a
+    /// fit up by it.
     ///
     /// The neighbouring question — does a config in hand MEAN what this fit was
     /// run from? — is a different fact and has a different answer: the canonical
     /// hash of the parsed value tree ([`crate::fit::cas::config_identity_hash`]),
-    /// computed from `fit.toml.original` when a `fit.toml` handle is resolved.
+    /// which each run records in `inputs.config_identities` and a `fit.toml`
+    /// handle is matched against.
     /// Reflowing a comment changes this field and not that one, which is the
     /// point: it is why the raw hash cannot serve as identity (gh#653) and why
     /// the canonical hash cannot serve as provenance.
@@ -874,13 +877,42 @@ impl Default for FitSidecar {
     }
 }
 
-/// The producing config's archived copy inside a fit folder.
+/// The producing config's archived copy inside a fit folder: the user's file
+/// byte for byte, for display and provenance. No reader takes a fit's
+/// configuration from it; that is [`RESOLVED_CONFIG`].
 pub const ARCHIVED_CONFIG: &str = "fit.toml.original";
 
+/// The configuration a fit folder's fits ran under
+/// ([`crate::fit::run_config::resolved_config_text`]): the archived file with
+/// the command line's problem-half values and the folder's own `[fixed]`
+/// written in. What every reader of a stored fit's config reads.
+pub const RESOLVED_CONFIG: &str = "fit.resolved.toml";
+
+/// `Err` naming the fit folder `segment` as written by an older camdl when it
+/// holds no [`RESOLVED_CONFIG`], and how to give it one. Re-running the fit
+/// reuses its stored results and writes the file; a reader never takes the
+/// configuration from [`ARCHIVED_CONFIG`] in its place, which may not be what
+/// the fit ran under.
+pub fn require_resolved_config(segment: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let path = segment.join(RESOLVED_CONFIG);
+    if path.is_file() {
+        return Ok(path);
+    }
+    Err(format!(
+        "{} has no {RESOLVED_CONFIG}, the configuration its fits ran under: it was \
+         written by an older camdl.\n  Re-run the fit (`camdl fit run` on its fit file, \
+         with the same options): its stored results are reused, and the folder gains \
+         the file.",
+        segment.display()
+    ))
+}
+
 /// Write the fit-level sidecar and archive the producing `fit.toml`
-/// ([`ARCHIVED_CONFIG`], the config-diff source `fit table` loads). The archive
-/// is best-effort: a CLI-only fit (no `.toml`) has none and config-diff degrades
-/// to identity. Idempotent; the caller writes it once per fit segment.
+/// ([`ARCHIVED_CONFIG`]) when `fit_toml_path` is a file, with no resolved
+/// config: the write for a CLI-only `profile`, which has no config to archive.
+/// A folder that holds a config (a fit's, or a profile's of one) is written by
+/// [`write_fit_sidecar_with_config`], which stores the resolved config too.
+/// Idempotent; the caller writes it once per segment.
 ///
 /// `source_config` and `source_model` are recorded from `fit_toml_path` and
 /// `model_path` here, each relative to `fit_segment`, when it is a file;
@@ -936,18 +968,22 @@ pub fn store_bound_inputs(
     Ok(())
 }
 
-/// [`write_fit_sidecar`] for a config already read: `config_text`, read once
-/// from `fit_toml_path`, is the archive, and the file is not read again.
-/// `fit run` stores this way, so every fit folder it writes holds the text
-/// it resolved, whatever happens to the file while it runs.
+/// [`write_fit_sidecar`] for a config already read, and resolved: `config_text`,
+/// read once from `fit_toml_path`, is the archive ([`ARCHIVED_CONFIG`]), and
+/// `resolved_text` the configuration the folder's fits ran under
+/// ([`RESOLVED_CONFIG`]); the file is not read again. `fit run` stores this
+/// way, so every fit folder it writes holds the text it read and the
+/// configuration it ran, whatever happens to the file while it runs.
 pub fn write_fit_sidecar_with_config(
     fit_segment: &std::path::Path,
     fit_toml_path: &std::path::Path,
     config_text: &str,
+    resolved_text: &str,
     model_path: &std::path::Path,
     sidecar: &FitSidecar,
 ) -> std::io::Result<()> {
-    write_fit_sidecar_archiving(fit_segment, Some(Archive::Text(fit_toml_path, config_text)), model_path, sidecar)
+    let archive = Archive::Resolved { path: fit_toml_path, text: config_text, resolved: resolved_text };
+    write_fit_sidecar_archiving(fit_segment, Some(archive), model_path, sidecar)
 }
 
 /// What a fit folder archives as its config, and the path its relative paths
@@ -955,8 +991,9 @@ pub fn write_fit_sidecar_with_config(
 enum Archive<'a> {
     /// A copy of the file at this path.
     CopyOf(&'a std::path::Path),
-    /// This text, read from the file at this path.
-    Text(&'a std::path::Path, &'a str),
+    /// `text`, read from the file at `path`, and the configuration `resolved`
+    /// from it.
+    Resolved { path: &'a std::path::Path, text: &'a str, resolved: &'a str },
 }
 
 fn write_fit_sidecar_archiving(
@@ -979,8 +1016,9 @@ fn write_fit_sidecar_archiving(
                 std::fs::copy(path, fit_segment.join(ARCHIVED_CONFIG))?;
                 path
             }
-            Archive::Text(path, text) => {
+            Archive::Resolved { path, text, resolved } => {
                 std::fs::write(fit_segment.join(ARCHIVED_CONFIG), text)?;
+                std::fs::write(fit_segment.join(RESOLVED_CONFIG), resolved)?;
                 path
             }
         };

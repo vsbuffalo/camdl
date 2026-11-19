@@ -34,25 +34,25 @@
 //! `--resume` through the method level's target length and its dep on the base.
 //!
 //! **What the fit folder stores.** The file is read once, in [`resolve`]
-//! ([`ResolvedFitConfig::config_text`]); every fit folder the run writes
-//! archives that text as `fit.toml.original`, with any problem-half value the
-//! command line set written in ([`ProblemFlags::stored_text`], the one place
-//! the stored form is decided: whether a resolved config belongs in the
-//! archive or in a file of its own is an open maintainer decision). Its
-//! `fit_toml_hash` and config identity are taken from the same text, so an
-//! edit to the file while the fit runs reaches no folder.
+//! ([`ResolvedFitConfig::config_text`]), and every fit folder the run writes
+//! keeps two configs. `fit.toml.original` is that text byte for byte, comments
+//! included: what the user wrote, for display and provenance; the folder's
+//! `fit_toml_hash` is its hash. `fit.resolved.toml` is the configuration the
+//! folder's fits ran under ([`resolved_config_text`]): the text with every
+//! problem-half value the command line set written in ([`ProblemFlags`]) and
+//! the folder's own `[fixed]` (a sweep point's values applied), deterministic
+//! and marked as generated. An edit to the file while the fit runs reaches
+//! neither.
 //!
-//! Who reads the archive today: a run-directory, label or run-id handle
+//! Who reads the resolved config: a run-directory, label or run-id handle
 //! (`fit predict <leaf>`, `compare <leaf>`) recovers the problem from it, and
-//! so runs under the override a flag set (gh#1268). A `fit.toml` handle names
+//! so runs under the override a flag set (gh#1268) and at a sweep point's own
+//! values; `fit table`'s config diff compares it. A `fit.toml` handle names
 //! only the run the file alone makes (gh#896), so it refuses a flag-made fit,
 //! naming its leaf. `pfilter`, `profile` and `survey` take the same handle
 //! forms for `--fit` (`fit::handle::resolve_fit_problem`): a run handle reads
-//! the archive, so runs under the override, and a `fit.toml` names the file's
-//! problem, which does not hold it. Two limits: a sweep point's folder archives the file's
-//! `[fixed]`, not the point's values (those are in its `fit.meta.json`, which
-//! `fit predict` and `compare` read); and `fit_toml_hash` hashes the file as
-//! read, without a folded flag. The archive's `[method]` table is the file's:
+//! the resolved config, and a `fit.toml` names the file's problem, which does
+//! not hold a flag's value. The resolved config's `[method]` table is the file's:
 //! a fit folder holds every method run on its problem, so a method's own
 //! resolved settings are its leaf's (`run.json`'s `inputs`).
 //!
@@ -66,8 +66,9 @@ use super::config_v2::{self, FitConfig};
 
 /// The resolved configuration of one `camdl fit run`.
 pub(crate) struct ResolvedFitConfig {
-    /// The fit file's text, read once: what `config` was parsed from, what the
-    /// fit folder stores ([`ProblemFlags::stored_text`]), and what its config
+    /// The fit file's text, read once: what `config` was parsed from, what each
+    /// fit folder keeps as `fit.toml.original` and builds its
+    /// `fit.resolved.toml` from ([`resolved_config_text`]), and what its config
     /// identity and `fit_toml_hash` are taken from. Nothing after resolution
     /// reads the file again, so an edit to it while the fit runs reaches no
     /// leaf.
@@ -109,7 +110,7 @@ pub(crate) struct ResolvedFitConfig {
     /// model cannot run NUTS. Their values are in `config`'s method.
     pub nuts_tuning_flags: Vec<&'static str>,
     /// What the command line set in the problem half of `config`, for the
-    /// stored config.
+    /// resolved config each fit folder stores.
     pub problem_flags: ProblemFlags,
     /// How each `[fixed]` name reached the config, read before the
     /// `from_scenario` expansion, for the fit's partition.
@@ -144,7 +145,7 @@ pub(crate) struct FileOnly {
 }
 
 /// What the command line set in the problem half of the configuration: the
-/// part a fit folder's stored config holds. Each field is `true` when the flag
+/// part a fit folder's `fit.resolved.toml` holds. Each field is `true` when the flag
 /// set a value the file did not already hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ProblemFlags {
@@ -154,15 +155,6 @@ pub(crate) struct ProblemFlags {
 }
 
 impl ProblemFlags {
-    /// The config text a fit folder stores for a fit read from `text`: `text`
-    /// itself, or, when the command line set a value of the problem half,
-    /// `text` with that value written in ([`Self::fold_into`]). The one place
-    /// the stored form is decided, so that a separate resolved-config file can
-    /// replace the fold (an open maintainer decision) by changing this alone.
-    pub fn stored_text(&self, text: &str) -> Result<String, String> {
-        Ok(self.fold_into(text)?.unwrap_or_else(|| text.to_string()))
-    }
-
     /// `problem` without what the command line set in it: the problem the fit
     /// file alone resolves to, for the run `fit run <file>` with no option
     /// would make (gh#896). Each field is the inverse of the fold in
@@ -176,26 +168,93 @@ impl ProblemFlags {
         file
     }
 
-    /// The config text a fit folder stores, when it differs from the file: `text` (the file) with every value
-    /// the command line set in the problem half written into it, or `None`
-    /// when the command line set none, and the file is stored as it is,
-    /// comments included. A folded file is re-written from its parsed tables,
-    /// so its comments and layout are not kept; what it says is the file's,
-    /// with the flags' values.
-    fn fold_into(&self, text: &str) -> Result<Option<String>, String> {
+    /// Write every value the command line set in the problem half into `doc`,
+    /// the fit file's tables. Each field is the fold [`resolve`] applied to the
+    /// typed config.
+    fn fold_into(&self, doc: &mut toml::Table) -> Result<(), String> {
         let ProblemFlags { allow_forcing_extrapolation } = *self;
-        if !allow_forcing_extrapolation {
-            return Ok(None);
+        if allow_forcing_extrapolation {
+            table_mut(doc, "config")?
+                .insert("allow_forcing_extrapolation".to_string(), toml::Value::Boolean(true));
         }
-        let mut doc: toml::Table = text.parse().map_err(|e| format!("cannot parse the config to store it: {e}"))?;
-        let section = doc
-            .entry("config")
-            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
-            .as_table_mut()
-            .ok_or("cannot store the config: its `config` is not a table")?;
-        section.insert("allow_forcing_extrapolation".to_string(), toml::Value::Boolean(true));
-        toml::to_string(&doc).map(Some).map_err(|e| format!("cannot write the config to store it: {e}"))
+        Ok(())
     }
+}
+
+/// The comment `fit.resolved.toml` opens with: what the file is, and that it is
+/// generated.
+pub(crate) const RESOLVED_CONFIG_HEADER: &str = "\
+# fit.resolved.toml: the configuration the fits in this folder ran under.
+# Generated by `camdl fit run`; do not edit. It is the fit file as read (kept
+# byte for byte beside it as fit.toml.original) with every value the command
+# line set in the problem half written in, and [fixed] this folder's own: a
+# sweep point's values applied, a `from_scenario` expanded. Relative paths
+# resolve against the fit file's directory (`source_config` in fit.meta.json).
+# [method] is the file's; each run's own method settings are in its run.json.
+";
+
+/// The text of a fit folder's `fit.resolved.toml`
+/// ([`crate::run_meta::RESOLVED_CONFIG`]): the configuration its fits ran
+/// under, which every reader of a stored fit's config reads.
+///
+/// It is `text` (the fit file, as read once) with every value of the problem
+/// half that `flags` set written in, and its `[fixed]` replaced by `fixed`, the
+/// folder's own: `from_file` as written, the inline values as the fit resolved
+/// them (a `from_scenario` expanded into them, a sweep point's values applied).
+/// It is written from the parsed tables with the keys of every table sorted, so
+/// it keeps no comment or layout of the file's and the same configuration
+/// always gives the same bytes; it opens with [`RESOLVED_CONFIG_HEADER`].
+pub(crate) fn resolved_config_text(
+    text: &str,
+    flags: ProblemFlags,
+    fixed: &config_v2::FixedParams,
+) -> Result<String, String> {
+    let mut doc: toml::Table = text.parse().map_err(|e| format!("cannot parse the config to store it: {e}"))?;
+    flags.fold_into(&mut doc)?;
+    let config_v2::FixedParams { from_file, from_scenario, values } = fixed;
+    let mut table = toml::Table::new();
+    if let Some(path) = from_file {
+        table.insert("from_file".to_string(), toml::Value::String(path.clone()));
+    }
+    if let Some(scenario) = from_scenario {
+        table.insert("from_scenario".to_string(), toml::Value::String(scenario.clone()));
+    }
+    for (name, value) in values {
+        table.insert(name.clone(), toml::Value::Float(*value));
+    }
+    // Written even when empty: the parser requires a `[fixed]` table.
+    doc.insert("fixed".to_string(), toml::Value::Table(table));
+    let body = toml::to_string(&sorted(doc)).map_err(|e| format!("cannot write the config to store it: {e}"))?;
+    let text = format!("{RESOLVED_CONFIG_HEADER}\n{body}");
+    // Every reader parses it with the production parser; a text it refuses
+    // is refused here, before a fit folder holds a config no reader can open.
+    FitConfig::from_toml_str_named(&text, "fit.resolved.toml")
+        .map_err(|e| format!("the resolved config this fit would store does not parse back: {e}"))?;
+    Ok(text)
+}
+
+/// The table `doc[key]`, made when absent.
+fn table_mut<'a>(doc: &'a mut toml::Table, key: &str) -> Result<&'a mut toml::Table, String> {
+    doc.entry(key)
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| format!("cannot store the config: its `{key}` is not a table"))
+}
+
+/// `doc` with the keys of every table, at every depth, in sorted order, so its
+/// text does not depend on the order the file wrote them in (whichever map
+/// `toml::Table` is built on).
+fn sorted(doc: toml::Table) -> toml::Table {
+    fn value(v: toml::Value) -> toml::Value {
+        match v {
+            toml::Value::Table(t) => toml::Value::Table(sorted(t)),
+            toml::Value::Array(a) => toml::Value::Array(a.into_iter().map(value).collect()),
+            other => other,
+        }
+    }
+    let mut entries: Vec<(String, toml::Value)> = doc.into_iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries.into_iter().map(|(k, v)| (k, value(v))).collect()
 }
 
 /// Resolve `fit run`'s configuration from its arguments, its file and the
@@ -620,23 +679,71 @@ pub(crate) fn resolve(
 mod tests {
     use super::*;
 
-    #[test]
-    fn no_flag_stores_the_file_as_it_is() {
-        let flags = ProblemFlags { allow_forcing_extrapolation: false };
-        let text = "# a comment\n[config]\ndt = 1.0\n";
-        assert_eq!(flags.stored_text(text).unwrap(), text);
+    const NO_FLAG: ProblemFlags = ProblemFlags { allow_forcing_extrapolation: false };
+
+    /// The least a fit file can hold, ending inside its `[fixed]` table.
+    const PROBLEM: &str = "[model]\ncamdl = \"m.camdl\"\n[estimate]\nbeta = { bounds = [0.01, 1.0] }\n[fixed]\n";
+
+    fn fixed(values: &[(&str, f64)]) -> config_v2::FixedParams {
+        config_v2::FixedParams {
+            from_file: None,
+            from_scenario: None,
+            values: values.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+        }
+    }
+
+    fn parse(text: &str) -> toml::Table {
+        text.parse().unwrap_or_else(|e| panic!("{e}\n{text}"))
     }
 
     #[test]
-    fn the_forcing_flag_is_written_into_the_stored_config() {
+    fn the_forcing_flag_is_written_into_the_resolved_config() {
         let flags = ProblemFlags { allow_forcing_extrapolation: true };
-        for text in ["[model]\ncamdl = \"m.camdl\"\n", "[model]\ncamdl = \"m.camdl\"\n[config]\ndt = 0.5\n"] {
-            let stored = flags.fold_into(text).unwrap().expect("a flag folds");
-            let doc: toml::Table = stored.parse().unwrap();
+        let with_dt = format!("{PROBLEM}[config]\ndt = 0.5\n");
+        for text in [PROBLEM, with_dt.as_str()] {
+            let stored = resolved_config_text(text, flags, &fixed(&[])).unwrap();
+            let doc = parse(&stored);
             assert_eq!(doc["config"]["allow_forcing_extrapolation"].as_bool(), Some(true), "{stored}");
             assert_eq!(doc["model"]["camdl"].as_str(), Some("m.camdl"), "the rest is the file's: {stored}");
         }
-        let doc: toml::Table = flags.fold_into("[config]\ndt = 0.5\n").unwrap().unwrap().parse().unwrap();
+        let doc = parse(&resolved_config_text(&with_dt, flags, &fixed(&[])).unwrap());
         assert_eq!(doc["config"]["dt"].as_float(), Some(0.5));
+        let doc = parse(&resolved_config_text(&with_dt, NO_FLAG, &fixed(&[])).unwrap());
+        assert!(doc["config"].get("allow_forcing_extrapolation").is_none(), "no flag, no value written");
+    }
+
+    /// `[fixed]` is the folder's own: a sweep point's value replaces the
+    /// file's, and the rest of the file's values stay.
+    #[test]
+    fn the_folders_fixed_values_replace_the_files() {
+        let text = "[model]\ncamdl = \"m.camdl\"\n[estimate]\nbeta = { bounds = [0.01, 1.0] }\n\
+                    [fixed]\nk = 0.3\ngamma = 2\n";
+        let stored = resolved_config_text(text, NO_FLAG, &fixed(&[("k", 0.4), ("gamma", 2.0)])).unwrap();
+        let doc = parse(&stored);
+        assert_eq!(doc["fixed"]["k"].as_float(), Some(0.4), "{stored}");
+        assert_eq!(doc["fixed"]["gamma"].as_float(), Some(2.0), "{stored}");
+        let config = FitConfig::from_toml_str(&stored).unwrap();
+        assert_eq!(config.problem.fixed.values.get("k"), Some(&0.4));
+        // An empty [fixed] is kept: the parser requires the table.
+        let empty = "[model]\ncamdl = \"m.camdl\"\n[estimate]\nbeta = { bounds = [0.01, 1.0] }\n[fixed]\n";
+        let stored = resolved_config_text(empty, NO_FLAG, &fixed(&[])).unwrap();
+        assert!(parse(&stored)["fixed"].as_table().is_some_and(|t| t.is_empty()), "{stored}");
+        FitConfig::from_toml_str(&stored).unwrap_or_else(|e| panic!("an empty [fixed] parses back: {e}\n{stored}"));
+    }
+
+    /// The text is generated, says so, and depends on the configuration only:
+    /// comments, layout, key order and number spelling do not reach it.
+    #[test]
+    fn the_resolved_config_is_canonical_and_marked_generated() {
+        let a = format!("# my fit\n{PROBLEM}k = 0.30\n\n[config]\ndt = 0.50\nallow_forcing_extrapolation = false\n");
+        let b = "[config]\nallow_forcing_extrapolation = false\ndt = 0.5 # half a day\n[fixed]\nk = 0.3\n\
+                 [estimate]\nbeta = { bounds = [0.01, 1.0] }\n[model]\n  camdl = \"m.camdl\"\n";
+        let ra = resolved_config_text(&a, NO_FLAG, &fixed(&[("k", 0.3)])).unwrap();
+        let rb = resolved_config_text(b, NO_FLAG, &fixed(&[("k", 0.3)])).unwrap();
+        assert_eq!(ra, rb);
+        assert!(ra.starts_with(RESOLVED_CONFIG_HEADER), "{ra}");
+        assert!(ra.contains("Generated by `camdl fit run`"), "{ra}");
+        assert!(!ra.contains("my fit") && !ra.contains("half a day"), "{ra}");
+        assert_eq!(resolved_config_text(&a, NO_FLAG, &fixed(&[("k", 0.3)])).unwrap(), ra, "same bytes every time");
     }
 }

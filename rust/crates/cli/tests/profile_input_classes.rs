@@ -765,25 +765,28 @@ fn every_fit_handle_names_the_fits_problem() {
     assert!(counts.iter().all(|c| *c == counts[0]), "every handle names one problem: {counts:?}");
 }
 
-/// A point of `fit run --sweep` other than the file's own value is refused
-/// by every handle form, naming the parameter with both values: its fit
-/// folder archives the file's `[fixed]`, so profiling it would compute the
-/// un-swept problem under the point's name. The point at the file's value
-/// agrees with its archive and is profiled.
+/// A point of `fit run --sweep` named by its leaf directory, its problem
+/// folder or its run-id prefix is profiled at the point's own value, which
+/// its fit folder's `fit.resolved.toml` holds: every form stores the bytes a
+/// profile of `fit_rho.toml`, whose file writes the point's value, stores, and
+/// not those of the file's own value. The forms name one computation.
 #[test]
-fn a_sweep_point_handle_is_refused() {
+fn a_sweep_point_handle_profiles_at_the_points_value() {
     let fx = fx();
     let store = tempfile::tempdir().unwrap();
     let fitted = run_into(store.path(), &Invocation::new(&fx.fx, &["fit", "run", &fx.fx.path("fit_plain.toml"), "--sweep", "rho=0.5,0.6"]));
-    let (same, other) = sweep_points(&fitted, "rho", 0.5);
+    let (_, other) = sweep_points(&fitted, "rho", 0.5);
+    assert_eq!(segment_fixed(&other.dir, "rho"), Some(0.6));
+    let written = run(&prof(&fx, &[]).set("--fit", &fx.fx.path("fit_rho.toml"))).bytes(KIND);
+    let unswept = run(&prof(&fx, &[]).set("--fit", &fx.fx.path("fit_plain.toml"))).bytes(KIND);
+    assert!(!written.is_empty());
+    assert_ne!(written, unswept, "the swept value changes what a profile stores");
     let segment = other.dir.parent().unwrap().parent().unwrap().to_string_lossy().into_owned();
+    let mut ids = Vec::new();
     for h in [other.dir.to_string_lossy().into_owned(), segment, other.run_id[..12].to_string()] {
-        let out = run_in(store.path(), &prof(&fx, &[]).set("--fit", &h));
-        let err = String::from_utf8_lossy(&out.stderr);
-        assert!(!out.status.success(), "--fit {h}: the sweep point is refused:\n{err}");
-        assert!(err.contains("rho = 0.5 in the archive, 0.6 in the run"), "names the parameter and both values:\n{err}");
-        assert!(err.contains("sweep point cannot be named by a handle"), "{err}");
+        let s = run_into(store.path(), &prof(&fx, &[]).set("--fit", &h));
+        assert_eq!(s.bytes(KIND), written, "--fit {h}: the profile of the point's value");
+        ids.push(s.ids(KIND));
     }
-    let s = run_into(store.path(), &prof(&fx, &[]).set("--fit", &same.dir.to_string_lossy()));
-    assert!(!s.ids(KIND).is_empty(), "the point at the archived value is profiled");
+    assert!(ids.iter().all(|i| *i == ids[0]), "every handle names one computation: {ids:?}");
 }
