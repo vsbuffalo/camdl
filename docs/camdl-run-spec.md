@@ -622,17 +622,26 @@ fit parses (`fit predict`, `compare` and `simulate --fit` on a run handle,
 `pfilter`, `profile` and `survey` `--fit` on any stored-fit handle, and
 `fit table`'s config diff): the same config with every problem-half value the
 command line set written in (today `--allow-forcing-extrapolation`, as
-`[config] allow_forcing_extrapolation = true`) and `[fixed]` the folder's own —
-a `--sweep` point's values applied, a `from_scenario` expanded into inline
-values. A sweep point named by its leaf, folder or run-id prefix is so read at
-its own values. A profile's folder stores the same pair for the fit it profiles:
-the user's text as `fit.toml.original` and the resolved config as
-`fit.resolved.toml`. It is generated: it opens with a comment saying so, carries
-none of the file's comments or layout, and is written with the keys of every
-table sorted, so the same configuration always gives the same bytes. Its
-`[method]` is the file's: a fit folder holds every method run on its problem,
-and each run's own method settings are in its `run.json` (`inputs`). Neither
-file enters any identity. A fit folder written before camdl stored
+`[config] allow_forcing_extrapolation = true`) and `[fixed]` the folder's own
+values — a `--sweep` point's applied, a `from_scenario` expanded and a
+`from_file` read in, so the stored config names no fixed-values file and does
+not depend on that file's later contents. A sweep point named by its leaf,
+folder or run-id prefix is so read at its own values. A profile's folder stores
+the same pair for the fit it profiles, whichever form names it: the user's text
+as `fit.toml.original` and the resolved config as `fit.resolved.toml`. It is
+generated: it opens with a comment saying so, carries none of the file's
+comments or layout, and is written with the keys of every table sorted except
+`[estimate]`, `[data.observations]` and `[data.holdout]`, which keep the file's
+order because camdl reads them in order; so the same configuration always gives
+the same bytes. Relative `[model]`, `[data]` and `output_dir` paths in it
+resolve against the fit file's directory, below. Reading a stored config checks
+its `[fixed]` against the values `fit.meta.json` records the fit running at and
+refuses a difference, naming each parameter. A command that can run without a
+fit (`simulate --draws posterior --fit` on a bare directory of draws) refuses a
+fit folder whose stored config cannot be read, rather than running without it.
+Its `[method]` is the file's: a fit folder holds every method run on its
+problem, and each run's own method settings are in its `run.json` (`inputs`).
+Neither file enters any identity. A fit folder written before camdl stored
 `fit.resolved.toml` is refused by every reader, with a message naming the fix:
 re-run `camdl fit run` on the same file with the same options, which reuses the
 stored results and writes the file.
@@ -5084,7 +5093,8 @@ data, fixed, scenario}`, plus
 `objective` when it is conditional (`ic_free`), `training_rows` (the training
 rows a `holdout_after` cutoff leaves each stream) when the fit config declares
 one, and `allow_forcing_extrapolation` when the override is on; `box` digests
-`{bounds, n_points}`.
+`{bounds, n_points}`, the bounds in the estimated parameters' declaration order,
+which is the order the Latin hypercube draws its columns in.
 
 **Lineage.** `deps` is a set of `ArtifactRef { run_id, kind, artifact, digest }`
 hashed **sorted by `run_id`** (the one documented exception to the
