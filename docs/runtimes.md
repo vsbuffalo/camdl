@@ -176,24 +176,29 @@ bounded by the compartment size, and the split between competing outflows is
 proportional to their rates.
 
 Transitions are precomputed into **source groups** at model compilation time
-(`CompiledModel::source_groups`). For a source compartment with k competing
-outflows at per-capita probabilities p₁, …, p_k:
+(`CompiledModel::source_groups`). For a source compartment holding `n_src`
+individuals with k competing outflows, each step is pomp's `reulermultinom`:
 
-1. Compute per-capita rate for each outflow: `r_i = propensity_i / n_src`
-2. Convert to probability: `p_i = 1 − exp(−r_i · Δt)`
-3. Draw sequentially (conditional binomial decomposition):
-   - `count_1 ~ Binom(n_remaining, p_1 / (1 − 0))`
-   - `count_2 ~ Binom(n_remaining − count_1, p_2 / (1 − p_1))`
-   - `count_3 ~ Binom(n_remaining − count_1 − count_2, p_3 / (1 − p_1 − p_2))`
-4. Guarantee: `Σ count_i ≤ n_src` (no overdraw)
+1. Compute the per-capita rate of each outflow: `r_i = propensity_i / n_src`
+   (times the Gamma multiplier for an `overdispersed` outflow, below).
+2. Draw the total number leaving the compartment from one exact binomial on the
+   summed rate: `n_exit ~ Binom(n_src, 1 − exp(−(r_1 + … + r_k) · Δt))`.
+3. Split `n_exit` among the outflows in proportion to their rates, by
+   conditional binomials:
+   - `count_1 ~ Binom(n_exit, r_1 / (r_1 + … + r_k))`
+   - `count_2 ~ Binom(n_exit − count_1, r_2 / (r_2 + … + r_k))`
+   - and so on; the last outflow takes the remainder.
+4. Guarantee: `Σ count_i = n_exit ≤ n_src` (no overdraw).
 
-This sequential decomposition is exact for the multinomial distribution. For
-source groups of size 1 (single outflow), it reduces to a standard binomial.
+This is not the same as drawing each outflow with its own probability
+`p_i = 1 − exp(−r_i · Δt)`: because `1 − exp(−x)` is subadditive, those
+probabilities sum to more than the probability of leaving at all, and the total
+would be over-counted. For a source with a single outflow the step is one
+binomial, `Binom(n_src, 1 − exp(−r · Δt))`.
 
-**Poisson approximation for draws.** Individual draws use `Poisson(n · p)`
-capped at `n`, which approximates `Binomial(n, p)` for large n. This is adequate
-for epidemic models where compartments typically hold hundreds to millions of
-individuals.
+**Exact binomial draws.** Every binomial above is an exact draw, not a Poisson
+approximation: BTPE (Kachitvichyanukul & Schmeiser 1988) by default, or BTRS
+(Hörmann 1993) when a PGAS fit selects it. A draw never exceeds its `n`.
 
 **Inflows.** Transitions with no source compartment (births, importation) are
 not part of any source group. They draw from the total propensity directly via
@@ -205,9 +210,11 @@ before converting to probability. This is critical: using the total propensity
 directly would give `p = 1 − exp(−mu·S·dt) ≈ 1.0` for large compartments,
 killing the entire population in one step.
 
-**Overdispersion.** When a transition has `overdispersed(rate, σ²)`, the Gamma
-multiplier is applied to the per-capita rate before probability conversion:
-`effective_rate = per_capita × G` where `G ~ Gamma(dt/σ², σ²/dt)`.
+**Overdispersion.** When a transition has `overdispersed(rate, σ²)`, a Gamma
+multiplier is applied to its per-capita rate before the source's exit draw:
+`effective_rate = per_capita × G` where
+`G ~ Gamma(shape = Δt/σ², scale =
+σ²/Δt)`, drawn once per transition per step.
 
 **Real compartments.** Advanced with RK4 _before_ the multinomial draws (using
 the start-of-step integer state): for chain-binomial, the continuous dynamics
@@ -426,22 +433,26 @@ and ODE are rejected at runtime — use chain-binomial.
 ## Extra-demographic stochasticity (overdispersion)
 
 Transitions wrapped in `overdispersed(rate, σ²)` receive Gamma-distributed
-multiplicative noise on their rate (He et al. 2010). The Poisson-Gamma compound
-produces NegBinomial event counts with mean = rate × Δt and variance inflated by
-σ²_SE.
+multiplicative noise on their rate (He et al. 2010): over a step of length Δt
+the rate is multiplied by a Gamma variable of mean 1 and variance σ²/Δt, so the
+step's event count keeps its mean and gains variance.
 
-**Chain-binomial implementation.** For each overdispersed transition per step,
-the same Gamma multiplier is applied to the per-capita rate before probability
-conversion:
+**Chain-binomial implementation.** For each overdispersed transition per step:
 
-1. Evaluate propensity λ and overdispersion σ² from the current state
-2. Draw a Gamma-distributed rate multiplier: G ~ Gamma(dt/σ², σ²/dt)
-3. Convert to probability and draw: the expected count n·p (where p = 1 −
-   exp(−G·per_capita·Δt)) is sampled, capped at the source population
+1. Evaluate the propensity λ and the intensity σ² at the start-of-step state
+2. Draw a rate multiplier G ~ Gamma(shape = Δt/σ², scale = σ²/Δt), which has
+   mean 1 and variance σ²/Δt
+3. For a transition out of a compartment, multiply its per-capita rate by G and
+   draw the source's exits exactly as above (one binomial for the total, then
+   the proportional split), so the count stays bounded by the source. For an
+   inflow (no source compartment), draw `Poisson(G · λ · Δt)`.
 
-This is equivalent to a NegBinomial event count with mean = λΔt and size =
-λΔt/σ². When σ² → 0, the Gamma concentrates at its mean and the draw converges
-to the plain Poisson/binomial limit.
+For an inflow this is a Poisson–Gamma mixture, a negative-binomial count with
+mean λΔt and size Δt/σ² (variance λΔt + (λΔt)²σ²/Δt). For an exit it is a
+binomial whose hazard is Gamma-perturbed, as in He et al. (2010) and its pomp
+implementation (`rgammawn` noise on the rate passed to `reulermultinom`). When
+σ² → 0 the Gamma concentrates at 1 and the draw converges to the plain binomial
+or Poisson draw.
 
 **Backend capability system.** Each model declares required capabilities
 (derived from the IR at compile time). Each backend declares what it supports.

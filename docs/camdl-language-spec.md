@@ -3985,7 +3985,7 @@ for an existing file — is specified in `camdl docs data` ("What a row covers")
 ```camdl
 neg_binomial(mean = EXPR, r = EXPR)            overdispersed counts
 poisson(rate = EXPR)                           Poisson counts
-normal(mean = EXPR, sd = EXPR)                 continuous
+normal(mean = EXPR, sd = EXPR)                 counts, as a rounded normal
 binomial(n = EXPR, p = EXPR)                   bounded counts
 beta_binomial(n = EXPR, alpha = EXPR, beta = EXPR)          overdispersed prevalence (raw)
 beta_binomial(n = EXPR, mean = EXPR, concentration = EXPR)  overdispersed prevalence (mean/concentration)
@@ -3999,6 +3999,16 @@ zero_inflated(base = neg_binomial(mean = EXPR, r = EXPR), pi = EXPR)
 parameterization: the mean is `μ` and the variance is `μ + μ²/r`, so a smaller
 `r` means more overdispersion and `r → ∞` recovers `poisson(μ)`. A prior on `r`
 is therefore a prior on the quadratic excess variance — pin it deliberately.
+
+`normal(mean = μ, sd = σ)` is a **discretized normal for counts** (He et al.
+2010), not a continuous density. A filter or fit scores an observed count `y`
+as the probability that a normal variable rounds to it,
+`P(y − 0.5 < X < y + 0.5)` with `X ~ Normal(μ, σ²)`, and `y = 0` as
+`P(X < 0.5)`; an observation is rounded to the nearest non-negative integer
+before scoring, and the probability is floored at `1e-18`. Simulated
+observations are a normal draw rounded to the nearest integer and floored at
+0. A non-integer observation is scored as its rounded value, with a run note
+saying so once.
 
 **Count arguments carry the count dimension `[P]`.** `neg_binomial`'s `mean`,
 `poisson`'s `rate`, and `binomial`/`beta_binomial`'s `n` are all *expected
