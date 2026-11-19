@@ -111,6 +111,14 @@ struct SurveyBoxLevel<'a> {
     n_points: u32,
 }
 
+/// The `box` level's hash. The bounds are keyed in their declaration order,
+/// not sorted: the Latin hypercube draws its columns in that order, so two
+/// orders of one set are two landscapes.
+fn box_hash(bounds: &[(String, f64, f64)], n_points: u32) -> Result<crate::fit::cas::LevelHash, String> {
+    let bounds: Vec<(&str, f64, f64)> = bounds.iter().map(|(n, lo, hi)| (n.as_str(), *lo, *hi)).collect();
+    canonical_config_hash(&SurveyBoxLevel { bounds: &bounds, n_points }, &[])
+}
+
 /// Resolve a survey leaf's identity: the four factored levels and the `run_id`.
 pub fn resolve_survey(ctx: &SurveyCtx) -> Result<ResolvedSurvey, String> {
     // config level — eval setup + problem context. The eval count knobs are
@@ -135,12 +143,6 @@ pub fn resolve_survey(ctx: &SurveyCtx) -> Result<ResolvedSurvey, String> {
         training_rows: ctx.training_rows,
     };
 
-    // box level — the LHS sampling spec.
-    let mut bounds_sorted: Vec<(&str, f64, f64)> =
-        ctx.bounds.iter().map(|(n, lo, hi)| (n.as_str(), *lo, *hi)).collect();
-    bounds_sorted.sort_by(|a, b| a.0.cmp(b.0));
-    let box_level = SurveyBoxLevel { bounds: &bounds_sorted, n_points: ctx.n_points };
-
     let model_digest = ModelDigest::from_model(
         ctx.model,
         ctx.ir_version.to_string(),
@@ -155,7 +157,7 @@ pub fn resolve_survey(ctx: &SurveyCtx) -> Result<ResolvedSurvey, String> {
     let levels = vec![
         level("model", ctx.stem, structural_level_hash(&model_digest)),
         level("config", &config_label, canonical_config_hash(&config_level, &[])?),
-        level("box", &box_label, canonical_config_hash(&box_level, &[])?),
+        level("box", &box_label, box_hash(ctx.bounds, ctx.n_points)?),
         level("seed", &format!("seed_{}", ctx.seed), structural_level_hash(&seed)),
     ];
     let level_hashes: Vec<ContentHash> = levels.iter().map(|l| l.hash).collect();
@@ -189,9 +191,14 @@ mod tests {
     }
 
     fn box_level(bounds: &[(&str, f64, f64)], n_points: u32) -> crate::fit::cas::LevelHash {
-        let mut b: Vec<(&str, f64, f64)> = bounds.to_vec();
-        b.sort_by(|a, x| a.0.cmp(x.0));
+        let b: Vec<(&str, f64, f64)> = bounds.to_vec();
         canonical_config_hash(&serde_json::json!({ "bounds": b, "n_points": n_points }), &[]).unwrap()
+    }
+
+    /// `box_hash` over `bounds`, as `resolve_survey` keys them.
+    fn box_of(bounds: &[(&str, f64, f64)], n_points: u32) -> crate::fit::cas::LevelHash {
+        let b: Vec<(String, f64, f64)> = bounds.iter().map(|(n, lo, hi)| (n.to_string(), *lo, *hi)).collect();
+        box_hash(&b, n_points).unwrap()
     }
 
     /// Byte-neutrality of the struct rewrite: `SurveyConfigLevel` /
@@ -323,18 +330,22 @@ mod tests {
     }
 
     /// The LHS box distinguishes leaves: different bounds or n_points → a
-    /// distinct `box` hash; identical is stable + order-independent.
+    /// distinct `box` hash; identical is stable. The order of the bounds is
+    /// the order the hypercube draws its columns in, so it is keyed.
     #[test]
     fn box_distinguishes_bounds_and_n_points() {
         let a = box_level(&[("beta", 0.1, 0.9)], 100);
         assert_ne!(a, box_level(&[("beta", 0.1, 0.5)], 100), "different bounds → distinct box");
         assert_ne!(a, box_level(&[("beta", 0.1, 0.9)], 200), "different n_points → distinct box");
         assert_eq!(a, box_level(&[("beta", 0.1, 0.9)], 100), "stable");
-        assert_eq!(
-            box_level(&[("beta", 0.1, 0.9), ("gamma", 0.0, 1.0)], 100),
-            box_level(&[("gamma", 0.0, 1.0), ("beta", 0.1, 0.9)], 100),
-            "bound order must not change the box hash"
+        assert_ne!(
+            box_of(&[("beta", 0.1, 0.9), ("gamma", 0.0, 1.0)], 100),
+            box_of(&[("gamma", 0.0, 1.0), ("beta", 0.1, 0.9)], 100),
+            "the bound order is the hypercube's column order, so it changes the box hash"
         );
+        assert_eq!(box_of(&[("beta", 0.1, 0.9), ("gamma", 0.0, 1.0)], 100),
+            box_level(&[("beta", 0.1, 0.9), ("gamma", 0.0, 1.0)], 100),
+            "bounds already in sorted order keep the key they had");
     }
 
     /// The `seed` level hashes the resolved seed.
