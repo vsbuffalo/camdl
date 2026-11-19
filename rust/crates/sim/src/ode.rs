@@ -71,6 +71,34 @@ fn stage_in_support(int_vals: &[f64], real_vals: &[f64]) -> bool {
     !int_vals.iter().chain(real_vals).any(|&x| x < 0.0)
 }
 
+/// Refuse a starting state with an integer compartment below zero, as the
+/// chain-binomial and Gillespie backends do: the same `NegativeCount` error,
+/// naming the compartment and its value, with the cause read off `init {}`
+/// ([`CompiledModel::negative_initial_state_cause`]). Called on the state the
+/// first step integrates from, after the effects at `t_start` have applied.
+///
+/// Without it a negative start is integrated: `rk4_step` charges a step only
+/// for the negative part it creates, so the first step runs a negative flow
+/// out of the compartment and clamps it to zero, and every compartment whose
+/// `init {}` entry subtracted it (`R = N0 - S - I`) keeps the excess, so the
+/// population total is wrong for the whole run.
+///
+/// An integer compartment is negative here when it rounds below zero, the
+/// test the stochastic backends apply to the rounded start; the balance target
+/// is exempt, as there.
+fn refuse_negative_start(model: &CompiledModel, int_vals: &[f64], t: f64) -> Result<(), SimError> {
+    let bal_idx = model.balance.as_ref().map(|b| b.local_int_idx);
+    match int_vals.iter().enumerate().find(|&(i, &x)| x.round() < 0.0 && Some(i) != bal_idx) {
+        Some((i, &x)) => Err(SimError::NegativeCount {
+            compartment: model.int_compartment_name(i),
+            attempted_value: x.round() as i64,
+            t,
+            cause: model.negative_initial_state_cause(i),
+        }),
+        None => Ok(()),
+    }
+}
+
 /// Evaluate ODE derivatives at the current (int_vals, real_vals) state.
 ///
 /// RM8 in 2026-04-19 engine review: integer compartments are read at
@@ -873,6 +901,7 @@ pub fn run_ode(
             model, ivs, a, params, cfg.t_start, cfg.dt,
         ),
     )?;
+    refuse_negative_start(model, &state.int, cfg.t_start)?;
 
     // Coarse burn-in (gh#396 follow-on): active only when the caller passed a
     // genuinely larger `burnin_dt` AND there is an unscored warm-up window. When
@@ -1252,6 +1281,7 @@ pub(crate) fn integrate_obs_sensitivity(
             model, ivs, a, params, cfg.t_start, cfg.dt,
         ),
     )?;
+    refuse_negative_start(model, &st.ode.int, cfg.t_start)?;
     let schedule = Schedule::exact_forward(cfg.dt, cfg.t_end, output_times, plan.effect_times());
     let mut cursor = Cursor::default();
 
@@ -1635,6 +1665,41 @@ mod tests {
             }
             other => panic!("expected OdeStepNegative from run_ode, got {other:?}"),
         }
+    }
+
+    /// A negative starting count is refused on both ODE paths — the value path
+    /// (`run_ode`, under simulate and `compute_ode_loglik`) and the
+    /// forward-sensitivity path — with the stochastic backends' error, naming
+    /// the compartment and its value. Before, the start was integrated: the
+    /// first step ran a negative flow out of `N` and clamped it to zero.
+    /// `N = 2 - k`, a function of the parameters alone, so the cause is
+    /// `InitialState` and a fit rejects the θ rather than aborting.
+    #[test]
+    fn both_ode_paths_refuse_a_negative_starting_count() {
+        let mut model = load_golden("pure_death");
+        *model.initial_conditions.0.get_mut("N").unwrap() = ir::model::InitSpec::Deterministic(
+            Expr::bin_op(ir::expr::BinOp::Sub, Expr::const_(2.0), Expr::param("mu")),
+        );
+        let cm = CompiledModel::new(model).expect("compiles");
+        let mu_idx = cm.model.parameters.iter().position(|p| p.name == "mu").unwrap();
+        let mut params = vec![0.0; cm.model.parameters.len()];
+        params[mu_idx] = 7.0;
+        let cfg = OdeConfig { t_start: 0.0, t_end: 3.0, dt: 1.0 };
+        let check = |res: Result<(), SimError>, path: &str| match res {
+            Err(e @ SimError::NegativeCount { cause: crate::error::NegativeCountCause::InitialState, .. }) => {
+                assert!(!e.is_structural(), "{path}: must reject the θ, not abort the fit: {e}");
+                assert!(e.to_string().contains("'N' starts at -5"), "{path}: {e}");
+            }
+            other => panic!("{path}: expected NegativeCount(InitialState) on N, got {other:?}"),
+        };
+        check(run_ode(&cm, &params, &cfg, None, None).map(|_| ()), "run_ode");
+        check(
+            integrate_obs_sensitivity(&cm, &params, &[mu_idx], &[0.0], &cfg, &[1.0, 2.0], cfg.dt).map(|_| ()),
+            "integrate_obs_sensitivity",
+        );
+        // At a θ whose start is non-negative both paths run.
+        params[mu_idx] = 0.5;
+        assert!(run_ode(&cm, &params, &cfg, None, None).is_ok());
     }
 
     fn load_golden(name: &str) -> ir::Model {
