@@ -559,16 +559,20 @@ and of coverage; the cases themselves are regression evidence.
    a flag set written in (gh#1268) and the folder's own `[fixed]` (a sweep
    point's values), deterministic and marked as generated. Every reader of a
    stored fit's config reads the resolved file (run-directory, label and run-id
-   handles; `fit table`); a folder without one is refused, naming the re-run
-   that writes it. A `fit.toml` handle names only the run the file alone makes
-   and refuses a flag-made fit, naming it. The resolved config's `[method]`
-   stays the file's. `--resume` is part of the resolved value; nothing after
-   resolution reads the command line. `--no-licm` is a compile setting
-   (`util::CompileSettings`) that `fit run` passes to its compile, and the
-   end-of-run report reads the calendar from the model in hand rather than
-   recompiling the source; `main` no longer sets the process-wide setting for
-   `fit run`. `input_class::FIT_RUN` classifies every input, checked against
-   clap both ways, and `tests/fit_run_input_classes.rs` has a case for each.
+   handles; `fit table`). Every folder records a store layout (D98:
+   `store_layout` in `run.json` and `fit.meta.json`, `runid::STORE_LAYOUT`), and
+   a folder written before the resolved file is layout 0, refused by those
+   readers naming `camdl dev migrate`, which writes the file from the folder's
+   own records (`store_migrate`, the run spec's §2.7). A `fit.toml` handle names
+   only the run the file alone makes and refuses a flag-made fit, naming it. The
+   resolved config's `[method]` stays the file's. `--resume` is part of the
+   resolved value; nothing after resolution reads the command line. `--no-licm`
+   is a compile setting (`util::CompileSettings`) that `fit run` passes to its
+   compile, and the end-of-run report reads the calendar from the model in hand
+   rather than recompiling the source; `main` no longer sets the process-wide
+   setting for `fit run`. `input_class::FIT_RUN` classifies every input, checked
+   against clap both ways, and `tests/fit_run_input_classes.rs` has a case for
+   each.
 
    **Done in this step, `pfilter`, `profile`, `survey`:** each resolves its
    configuration once, before anything runs, into
