@@ -754,6 +754,14 @@ pub(crate) struct FitProblem {
 }
 
 impl FitProblem {
+    /// The text [`Self::config`] was parsed from: a stored fit's
+    /// `fit.resolved.toml`, or the fit file. What a reader that asks what the
+    /// config writes (`[config] dt`, [`crate::fit::config_v2::written_config_dt`])
+    /// reads, so a stored fit answers as it ran.
+    pub fn config_text(&self) -> &str {
+        self.resolved.as_deref().unwrap_or(&self.original)
+    }
+
     /// The handle's file name, for messages.
     pub fn name(&self) -> String {
         Path::new(&self.handle)
@@ -788,7 +796,22 @@ pub(crate) fn resolve_fit_problem(s: &str) -> Result<FitProblem, ResolveError> {
     let (resolved, anchor, config) = read_segment_config(&segment)?;
     let archived = segment.join(crate::run_meta::ARCHIVED_CONFIG);
     let original = std::fs::read_to_string(&archived)
-        .map_err(|e| ResolveError::NotFound(format!("cannot read {}: {e}", archived.display())))?;
+        .map_err(|e| ResolveError::StoredConfig(format!("cannot read {}: {e}", archived.display())))?;
+    // `profile` keys and stores these bytes as the fit's file: they must be
+    // the file the fit read, which `fit_toml_hash` records.
+    let recorded = crate::run_meta::read_fit_sidecar(&segment)
+        .map_err(ResolveError::StoredConfig)?
+        .map(|side| side.fit_toml_hash)
+        .unwrap_or_default();
+    let found = crate::hashing::sha256_hex(original.as_bytes());
+    if found != recorded {
+        return Err(ResolveError::StoredConfig(format!(
+            "{}: fit.toml.original is not the file the fit read: its SHA-256 is {found}, and \
+             fit.meta.json records {} (fit_toml_hash).",
+            segment.display(),
+            if recorded.is_empty() { "none" } else { &recorded }
+        )));
+    }
     Ok(FitProblem { handle: s.to_string(), original, resolved: Some(resolved), anchor, config })
 }
 

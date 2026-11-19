@@ -545,7 +545,8 @@ fn run_profile(
                 out.fail(format!("error: --fit toml [fixed].resolve_with_model: {}", e));
             });
         // Hash the config as the user wrote it (the fit file, or a stored
-        // fit's `fit.toml.original`), as `fit run`'s `fit_toml_hash` does; it
+        // fit's `fit.toml.original`, checked against its `fit_toml_hash` by
+        // `resolve_fit_problem`), as `fit run`'s `fit_toml_hash` does; it
         // is keyed in the base. What the resolved config adds to it reaches
         // the base too: a flag's `[config]` value as
         // `allow_forcing_extrapolation`, the folder's `[fixed]` values through
@@ -579,7 +580,7 @@ fn run_profile(
     // The step every cell integrates at (the one dt rule), from the model,
     // --dt and the --fit file's written `[config] dt`.
     let fit_written_dt: Option<f64> =
-        fit.as_ref().and_then(|f| crate::fit::config_v2::written_config_dt(&f.original));
+        fit.as_ref().and_then(|f| crate::fit::config_v2::written_config_dt(f.config_text()));
     let dt = crate::dt_rule::effective_dt_for_command(dt_flag, fit_written_dt, model_pre.simulation.dt)
         .unwrap_or_else(|e| { out.fail(format!("error: {e}")); });
 
