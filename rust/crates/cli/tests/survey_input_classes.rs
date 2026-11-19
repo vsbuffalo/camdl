@@ -559,6 +559,69 @@ fn every_fit_handle_names_the_fits_problem() {
     assert!(ids.iter().all(|i| *i == ids[0]), "every handle names one problem: {ids:?}");
 }
 
+/// A fit whose `[fixed]` is read `from_file` stores the values it read: a
+/// survey of its leaf, from another working directory after the file is
+/// edited, is the survey of the values the fit ran at (`fit_a.toml`'s), not
+/// the edited file's (`fit_b.toml`'s).
+#[test]
+fn a_from_file_fit_is_surveyed_at_the_values_it_read() {
+    let fx = fx();
+    let store = tempfile::tempdir().unwrap();
+    let text = std::fs::read_to_string(fx.path("fit_a.toml")).unwrap();
+    assert!(text.contains("[fixed]\ngamma = 0.2\nk = 0.3\n"));
+    let with_method = format!(
+        "{}[method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\nchains = 1\nparticles = 20\niterations = 2\ncooling = 0.9\n",
+        text.replace("[fixed]\ngamma = 0.2\nk = 0.3\n", "[fixed]\nfrom_file = \"fixed.toml\"\n")
+    );
+    let fit_path = store.path().join("fit_from_file.toml");
+    std::fs::write(&fit_path, with_method).unwrap();
+    std::fs::write(store.path().join("fixed.toml"), "gamma = 0.2\nk = 0.3\n").unwrap();
+    let fitted = run_into(store.path(), &Invocation::new(&fx, &["fit", "run", &fit_path.to_string_lossy()]));
+    let leaf = fitted.of("fit_method").into_values().next().expect("the fit's leaf").clone();
+    std::fs::write(store.path().join("fixed.toml"), "gamma = 0.25\nk = 0.3\n").unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let by_leaf = run_into(elsewhere.path(), &sv_fit(&fx, "fit_a.toml", &[]).set("--fit", &leaf.dir.to_string_lossy())).bytes(KIND);
+    let ran = run(&sv_fit(&fx, "fit_a.toml", &[])).bytes(KIND);
+    let edited = run(&sv_fit(&fx, "fit_b.toml", &[])).bytes(KIND);
+    assert_ne!(ran, edited, "the edit changes what a survey stores");
+    assert_eq!(by_leaf, ran, "the leaf is surveyed at the values the fit read");
+}
+
+/// Two fit files that differ only in the order of `[estimate]` draw different
+/// Latin-hypercube points, so they key different surveys; and a stored fit,
+/// whose resolved config keeps the file's order, keys the same survey as its
+/// file.
+#[test]
+fn the_estimate_order_keys_the_survey() {
+    let fx = fx();
+    let store = tempfile::tempdir().unwrap();
+    let two = "[estimate]\nbeta = { bounds = [0.1, 0.9], start = 0.4 }\n";
+    let text = std::fs::read_to_string(fx.path("fit_a.toml")).unwrap();
+    assert!(text.contains(two));
+    let est = |order: [&str; 2]| {
+        let lines: Vec<&str> = order.iter().map(|n| match *n {
+            "beta" => "beta = { bounds = [0.1, 0.9], start = 0.4 }",
+            _ => "k = { bounds = [0.1, 0.9], start = 0.3 }",
+        }).collect();
+        format!(
+            "{}[method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\nchains = 1\nparticles = 20\niterations = 2\ncooling = 0.9\n",
+            text.replace(two, &format!("[estimate]\n{}\n", lines.join("\n"))).replace("k = 0.3\n", "")
+        )
+    };
+    let (kb, bk) = (store.path().join("kb.toml"), store.path().join("bk.toml"));
+    std::fs::write(&kb, est(["k", "beta"])).unwrap();
+    std::fs::write(&bk, est(["beta", "k"])).unwrap();
+    let survey = |fit: &std::path::Path| run(&sv_fit(&fx, "fit_a.toml", &[]).set("--fit", &fit.to_string_lossy()));
+    let (s_kb, s_bk) = (survey(&kb), survey(&bk));
+    assert_ne!(s_kb.bytes(KIND), s_bk.bytes(KIND), "the order changes the landscape");
+    assert_ne!(s_kb.ids(KIND), s_bk.ids(KIND), "so it keys the survey");
+    let fitted = run_into(store.path(), &Invocation::new(&fx, &["fit", "run", &kb.to_string_lossy()]));
+    let leaf = fitted.of("fit_method").into_values().next().expect("the fit's leaf").clone();
+    let by_leaf = run(&sv_fit(&fx, "fit_a.toml", &[]).set("--fit", &leaf.dir.to_string_lossy()));
+    assert_eq!(by_leaf.ids(KIND), s_kb.ids(KIND), "the stored fit keys its file's survey");
+    assert_eq!(by_leaf.bytes(KIND), s_kb.bytes(KIND));
+}
+
 /// A point of `fit run --sweep` named by its leaf directory, its problem
 /// folder or its run-id prefix is surveyed at the point's own value, which
 /// its fit folder's `fit.resolved.toml` holds: every form stores the bytes a

@@ -1430,9 +1430,16 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
         match (draws_path.as_deref(), fit_path_for_draws.as_ref()) {
             (Some("posterior"), Some(fit_handle)) => {
                 // A bare directory holding a `draws.tsv` outside any fit has no
-                // fit record, so no simulator to replay on (said in the arm).
-                crate::fit::handle::resolve_fit(posterior_fit_ref.as_deref().unwrap_or_default())
-                    .ok()
+                // fit record, so no simulator to replay on (said in the arm). A
+                // fit folder whose stored config cannot be read is refused: the
+                // fit is there, and its simulator is not what runs without it.
+                match crate::fit::handle::resolve_fit(posterior_fit_ref.as_deref().unwrap_or_default()) {
+                    Ok(r) => Some(r),
+                    Err(e @ crate::fit::handle::ResolveError::StoredConfig(_)) => {
+                        out.fail(format!("error: --fit {fit_handle}: {e}"));
+                    }
+                    Err(_) => None,
+                }
                     .map(|r| crate::fit::fitted_model::stored_fit_simulator(&r))
                     .transpose()
                     .unwrap_or_else(|e| {
@@ -1900,6 +1907,11 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
                             base_sim_run.fit_base.describe()
                         ));
                     }
+                }
+                // A fit folder whose stored config cannot be read is refused,
+                // never run without the fit's selection.
+                Err(e @ crate::fit::handle::ResolveError::StoredConfig(_)) => {
+                    out.fail(format!("error: --fit {fit_handle}: {e}"));
                 }
                 // A bare directory holding a `draws.tsv` outside any fit
                 // carries no fit config, so there is no selection to apply.

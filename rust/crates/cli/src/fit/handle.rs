@@ -81,12 +81,20 @@ pub enum ResolveError {
     /// its place. Each is listed with how its engine differs and how to name
     /// it.
     OtherEngines { handle: String, runs: Vec<crate::cas_read::Leaf> },
+    /// The handle names a fit folder whose stored config cannot be read as the
+    /// fit ran it: no `fit.resolved.toml`, one that does not parse, a data file
+    /// gone, or a `[fixed]` other than the one the fit recorded. Unlike
+    /// [`Self::NotFound`] (no fit there), a reader that can run without a fit
+    /// must not pass over it, since the fit is there and would run otherwise.
+    StoredConfig(String),
 }
 
 impl std::fmt::Display for ResolveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ResolveError::NotFound(msg) | ResolveError::NotCompleted(msg) => write!(f, "{msg}"),
+            ResolveError::NotFound(msg) | ResolveError::NotCompleted(msg) | ResolveError::StoredConfig(msg) => {
+                write!(f, "{msg}")
+            }
             ResolveError::Ambiguous { handle, candidates } => {
                 writeln!(f, "{} resolves to {} fits:", handle, candidates.len())?;
                 for c in candidates {
@@ -650,7 +658,7 @@ pub fn resolve_fit(s: &str) -> Result<ResolvedFit, ResolveError> {
         Some(c) => c,
         // A segment handle (run-dir / @label / hash) has no caller-supplied
         // config; recover one whose data paths resolve correctly.
-        None => load_config_for_segment(&segment).map_err(ResolveError::NotFound)?,
+        None => load_config_for_segment(&segment)?,
     };
     Ok(ResolvedFit { segment, leaf, config })
 }
@@ -697,12 +705,12 @@ pub(crate) struct FitProblem {
     /// fit's `fit.toml.original`. What a reader that archives the config
     /// (`profile`) stores as its own `fit.toml.original`, and hashes.
     pub original: String,
-    /// The configuration resolved from `original`, as a fit folder stores it
-    /// ([`crate::fit::run_config::resolved_config_text`]): the stored fit's
-    /// `fit.resolved.toml`, or, for a fit file, its resolution with no
-    /// command-line value. What `profile` stores as its own
-    /// `fit.resolved.toml`.
-    pub resolved: String,
+    /// The stored fit's `fit.resolved.toml`, what `profile` stores as its own;
+    /// `None` for a fit file, whose resolution needs the model (a
+    /// `from_scenario` is expanded from it), so `profile` builds it
+    /// ([`crate::fit::run_config::resolved_config_text`]) with the `[fixed]`
+    /// values it resolved.
+    pub resolved: Option<String>,
     /// The path the config's relative paths were written against: the file
     /// itself, or the stored fit's source config (`<segment>/<source_config>`).
     /// Where a reader that archives the config (`profile`'s sidecar) records
@@ -736,12 +744,7 @@ pub(crate) fn resolve_fit_problem(s: &str) -> Result<FitProblem, ResolveError> {
             .map_err(|e| ResolveError::NotFound(format!("cannot read fit config {}: {e}", path.display())))?;
         let config = FitConfig::parse_anchored_at(&text, &path, &path)
             .map_err(|e| ResolveError::NotFound(format!("cannot load fit config {}: {e}", path.display())))?;
-        let no_flag = crate::fit::run_config::ProblemFlags { allow_forcing_extrapolation: false };
-        let resolved = crate::fit::run_config::resolved_config_text(&text, no_flag, &config.problem.fixed)
-            .map_err(|e| ResolveError::NotFound(format!("fit config {}: {e}", path.display())))?;
-        return Ok(FitProblem {
-            handle: s.to_string(), original: text, resolved, anchor: path, config,
-        });
+        return Ok(FitProblem { handle: s.to_string(), original: text, resolved: None, anchor: path, config });
     }
     let segment = match resolve_target(s)? {
         FitTarget::Segment(seg) => seg,
@@ -749,11 +752,11 @@ pub(crate) fn resolve_fit_problem(s: &str) -> Result<FitProblem, ResolveError> {
             .map_err(ResolveError::NotFound)?
             .ok_or_else(|| ResolveError::NotFound(format!("{} is not inside a fit's directory", l.dir.display())))?,
     };
-    let (resolved, anchor, config) = read_segment_config(&segment).map_err(ResolveError::NotFound)?;
+    let (resolved, anchor, config) = read_segment_config(&segment)?;
     let archived = segment.join(crate::run_meta::ARCHIVED_CONFIG);
     let original = std::fs::read_to_string(&archived)
         .map_err(|e| ResolveError::NotFound(format!("cannot read {}: {e}", archived.display())))?;
-    Ok(FitProblem { handle: s.to_string(), original, resolved, anchor, config })
+    Ok(FitProblem { handle: s.to_string(), original, resolved: Some(resolved), anchor, config })
 }
 
 /// Recover the config for a segment reached by run-dir / `@label` / hash.
@@ -786,44 +789,51 @@ pub(crate) fn resolve_fit_problem(s: &str) -> Result<FitProblem, ResolveError> {
 /// A fit run entirely from the CLI has no `fit.toml` at all: `write_fit_sidecar`
 /// records no `source_config` and archives nothing. That is a real gap, not a
 /// lookup miss, so it gets its own named error rather than a wrong path.
-fn load_config_for_segment(segment: &Path) -> Result<FitConfig, String> {
+///
+/// Errors come in two kinds. A directory with no `fit.meta.json`, and a
+/// CLI-only fit, hold no config to recover: [`ResolveError::NotFound`]. A fit
+/// folder whose config cannot be read as the fit ran it — its `fit.meta.json`
+/// unreadable, no `fit.resolved.toml` or one that does not parse, a data file
+/// gone, or a `[fixed]` that is not the one the fit recorded running at — is
+/// [`ResolveError::StoredConfig`], which no reader may pass over.
+fn load_config_for_segment(segment: &Path) -> Result<FitConfig, ResolveError> {
     read_segment_config(segment).map(|(_, _, config)| config)
 }
 
 /// [`load_config_for_segment`], with the resolved config's text it parsed and
 /// the path that text's relative paths are anchored at.
-fn read_segment_config(segment: &Path) -> Result<(String, PathBuf, FitConfig), String> {
-    let side = crate::run_meta::read_fit_sidecar(segment)?.ok_or_else(|| {
-        format!(
-            "{} is not a complete fit directory: no fit.meta.json",
-            segment.display()
-        )
-    })?;
+fn read_segment_config(segment: &Path) -> Result<(String, PathBuf, FitConfig), ResolveError> {
+    let side = crate::run_meta::read_fit_sidecar(segment)
+        .map_err(ResolveError::StoredConfig)?
+        .ok_or_else(|| {
+            ResolveError::NotFound(format!("{} is not a complete fit directory: no fit.meta.json", segment.display()))
+        })?;
     let Some(source_config) = side.source_config.as_deref() else {
-        return Err(format!(
+        return Err(ResolveError::NotFound(format!(
             "{} was produced without a fit.toml (a CLI-only run), so it carries \
              no config to recover: no archived config and no recorded config \
              directory to resolve its data paths against.\n  \
              Pass the fit toml, or re-run the fit from one.",
             segment.display()
-        ));
+        )));
     };
-    let resolved = crate::run_meta::require_resolved_config(segment)?;
+    let resolved = crate::run_meta::require_resolved_config(segment).map_err(ResolveError::StoredConfig)?;
     let anchor = segment.join(source_config);
     let unreadable = |e: String| {
-        format!(
+        ResolveError::StoredConfig(format!(
             "{} is a fit directory but its resolved config could not be read: {e}\n  \
              (expected {})",
             segment.display(),
             resolved.display()
-        )
+        ))
     };
     let text = std::fs::read_to_string(&resolved)
         .map_err(|e| unreadable(format!("cannot read {}: {e}", resolved.display())))?;
     let config = FitConfig::parse_anchored_at(&text, &resolved, &anchor).map_err(unreadable)?;
-    refuse_missing_data(&config, &side, &anchor)?;
+    refuse_fixed_not_run(&config, &side, segment).map_err(ResolveError::StoredConfig)?;
+    refuse_missing_data(&config, &side, &anchor).map_err(ResolveError::StoredConfig)?;
     let mut config = config;
-    bind_stored_inputs(&mut config, segment, &side)?;
+    bind_stored_inputs(&mut config, segment, &side).map_err(ResolveError::StoredConfig)?;
     Ok((text, anchor, config))
 }
 
@@ -854,6 +864,40 @@ fn bind_stored_inputs(
         *path = stored.to_string_lossy().into_owned();
     }
     Ok(())
+}
+
+/// `Err` naming every parameter whose value in the stored config's `[fixed]`
+/// is not the value `fit.meta.json` records the fit running at (`fixed`),
+/// with both values: a config that would not compute the stored fit. A name
+/// the record holds that the config's `[fixed]` lacks passes unless the config
+/// estimates it. The config's `[fixed]` is resolved as the fit resolves it.
+fn refuse_fixed_not_run(
+    config: &FitConfig,
+    side: &crate::run_meta::FitSidecar,
+    segment: &Path,
+) -> Result<(), String> {
+    let problem = &config.problem;
+    let stored = problem.fixed.resolve()?;
+    let differs: Vec<String> = side
+        .fixed
+        .iter()
+        .filter_map(|(name, &ran)| match stored.get(name) {
+            Some(&v) if v != ran => Some(format!("{name} = {v} in the stored config, {ran} in the run")),
+            None if problem.estimate.contains_key(name) => {
+                Some(format!("{name} estimated in the stored config, fixed at {ran} in the run"))
+            }
+            _ => None,
+        })
+        .collect();
+    if differs.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{}: the stored config's [fixed] is not what the fit ran at ({}), as recorded in its \
+         fit.meta.json, so it would not compute the stored fit.",
+        segment.display(),
+        differs.join("; ")
+    ))
 }
 
 /// `Err` naming every data file the recovered config binds that is not on
@@ -1119,11 +1163,31 @@ cooling = 0.7
         side: &crate::run_meta::FitSidecar,
     ) -> std::io::Result<()> {
         let text = std::fs::read_to_string(toml_path)?;
-        let fixed = FitConfig::from_toml_str(&text).expect("a fit file").problem.fixed;
+        let fixed = FitConfig::from_toml_str(&text).expect("a fit file").problem.fixed.resolve().expect("[fixed]");
         let no_flag = crate::fit::run_config::ProblemFlags { allow_forcing_extrapolation: false };
         let resolved = crate::fit::run_config::resolved_config_text(&text, no_flag, &fixed)
             .expect("a resolved config");
         crate::run_meta::write_fit_sidecar_with_config(seg, toml_path, &text, &resolved, Path::new(""), side)
+    }
+
+    /// A stored config whose `[fixed]` is not what `fit.meta.json` records the
+    /// fit running at is refused, as a stored config, naming the parameter and
+    /// both values; one that agrees resolves.
+    #[test]
+    fn a_stored_config_whose_fixed_is_not_the_runs_is_refused() {
+        let (tmp, toml_path, seg) = portable_project("fixed_not_run");
+        let side = |gamma: f64| crate::run_meta::FitSidecar {
+            fixed: std::collections::BTreeMap::from([("gamma".to_string(), gamma)]),
+            ..Default::default()
+        };
+        write_fit_folder(&seg, &toml_path, &side(0.2)).unwrap();
+        resolve_fit(&seg.to_string_lossy()).unwrap_or_else(|e| panic!("the record agrees: {e}"));
+        write_fit_folder(&seg, &toml_path, &side(0.3)).unwrap();
+        let err = resolve_fit(&seg.to_string_lossy()).err().expect("the record disagrees");
+        assert!(matches!(err, ResolveError::StoredConfig(_)), "{err}");
+        let err = err.to_string();
+        assert!(err.contains("gamma = 0.2 in the stored config, 0.3 in the run"), "{err}");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// A fit folder an older camdl wrote, with `fit.toml.original` but no
@@ -1136,7 +1200,9 @@ cooling = 0.7
         resolve_fit(&seg.to_string_lossy()).unwrap_or_else(|e| panic!("a current folder resolves: {e}"));
         std::fs::remove_file(seg.join(crate::run_meta::RESOLVED_CONFIG)).unwrap();
         assert!(seg.join(crate::run_meta::ARCHIVED_CONFIG).is_file());
-        let err = resolve_fit(&seg.to_string_lossy()).err().expect("no resolved config").to_string();
+        let err = resolve_fit(&seg.to_string_lossy()).err().expect("no resolved config");
+        assert!(matches!(err, ResolveError::StoredConfig(_)), "a fit folder, not a miss: {err}");
+        let err = err.to_string();
         assert!(err.contains("has no fit.resolved.toml"), "{err}");
         assert!(err.contains("written by an older camdl"), "{err}");
         assert!(err.contains("Re-run the fit"), "{err}");
