@@ -1768,6 +1768,7 @@ fn run_profile(
         let sidecar = crate::run_meta::FitSidecar {
             // Stamped by `write_fit_sidecar`.
             schema_version: crate::run_meta::FIT_META_SCHEMA_VERSION,
+            store_layout: runid::STORE_LAYOUT,
             label: label_arg.clone(),
             // profile binds no fit folder's external inputs (its leaves record their own).
             table_hashes: Default::default(),

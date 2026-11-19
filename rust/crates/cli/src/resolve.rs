@@ -523,6 +523,7 @@ fn build_record(resolved: &ResolvedArtifact, meta: &RecordMeta, status: RunStatu
         kind: resolved.kind,
         run_id: resolved.run_id,
         hash_version: HASH_VERSION,
+        store_layout: runid::STORE_LAYOUT,
         ir_version: meta.ir_version.clone(),
         engine_version: meta.engine.build.clone(),
         engine_switches: meta.engine.switches.clone(),

@@ -2500,6 +2500,7 @@ mod tests {
             kind: runid::ArtifactKind::Sim,
             run_id,
             hash_version: runid::HASH_VERSION,
+            store_layout: runid::STORE_LAYOUT,
             ir_version: "0.7".into(),
             engine_version: "test".into(),
             engine_switches: Vec::new(),

@@ -56,6 +56,7 @@ fn record(kind: ArtifactKind, run_id: ContentHash, status: RunStatus) -> RunReco
         kind,
         run_id,
         hash_version: HASH_VERSION,
+        store_layout: crate::STORE_LAYOUT,
         ir_version: "0.7".into(),
         engine_version: "0.3.0".into(),
         engine_switches: Vec::new(),

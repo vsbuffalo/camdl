@@ -85,7 +85,7 @@ pub use leaf::{
 };
 pub use record::{
     predates_calendar, renamed_kind, Failure, FileChecksum, LevelId, Provenance, RecordedOutcome, RunRecord,
-    RunStatus, FORMAT_VERSION,
+    RunStatus, FORMAT_VERSION, STORE_LAYOUT,
 };
 pub use runid_derive::RunInput;
 pub use store::{
