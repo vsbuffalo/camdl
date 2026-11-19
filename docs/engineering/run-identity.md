@@ -437,11 +437,13 @@ running at, and a fit folder whose stored config cannot be read is
 reader passes over as "no fit". Every reader of a stored fit's config reads the
 resolved file: a run-directory, label or run-id handle (`fit predict <leaf>`,
 `compare <leaf>`) so runs under the override and at the sweep point's values,
-and `fit table` diffs it. A folder an older build wrote has none and is refused,
-naming the re-run that writes it; no reader falls back to `fit.toml.original`. A
-`fit.toml` handle names only the run the file alone makes, so it refuses a
-flag-made fit and names its leaf. Every `fit run` input is classified in
-`input_class::FIT_RUN` and has a case in
+and `fit table` diffs it. A folder an older build wrote has none: it is at store
+layout 0, and every such reader refuses it naming `camdl dev migrate`
+([`check_layout`](rust:cli::store_migrate::check_layout), the run spec's §2.7),
+which derives the file from what the folder records; no reader falls back to
+`fit.toml.original`. A `fit.toml` handle names only the run the file alone
+makes, so it refuses a flag-made fit and names its leaf. Every `fit run` input
+is classified in `input_class::FIT_RUN` and has a case in
 `rust/crates/cli/tests/fit_run_input_classes.rs`.
 
 `pfilter`, `profile` and `survey` resolve their configurations the same way:

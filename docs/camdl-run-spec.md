@@ -574,19 +574,20 @@ which is not alphabetical), and the keys inside each map (`data_hashes`,
 so two identical runs produce byte-identical sidecars and a diff of two runs'
 metadata is meaningful.
 
-Fields: `schema_version` (2; below), `label` (a profile's label only; a fit's
-label lives on its runs' `run.json` and moves between them, see §6.8),
-`source_model` (the model file the fit ran on, a `.camdl` or `.ir.json`, as a
-path relative to the fit folder by the same rule as `source_config`; absent when
-the model was not a file; the archived copies are the folder's
-`model.camdl.original` and `model.ir.json`), `model_identity` (the hex
-structural model hash), `source_config` (the producing config file, as a path
-relative to the fit folder that holds this `fit.meta.json`, below; absent for a
-CLI-only fit), `fit_toml_hash` (SHA-256 of the producing config's raw bytes —
-provenance, i.e. which exact bytes produced this fit; a `fit.toml` handle is NOT
-looked up by it, see below), `data_hashes`, `holdout_hashes`, `estimated`,
-`fixed`, `partition` (the run's parameter roles, below), `resolved_priors` (one
-`{param, source}` entry per estimated parameter,
+Fields: `schema_version` (2; below), `store_layout` (the folder's store layout,
+§2.7; absent, and so 0, in a record written before layouts were numbered),
+`label` (a profile's label only; a fit's label lives on its runs' `run.json` and
+moves between them, see §6.8), `source_model` (the model file the fit ran on, a
+`.camdl` or `.ir.json`, as a path relative to the fit folder by the same rule as
+`source_config`; absent when the model was not a file; the archived copies are
+the folder's `model.camdl.original` and `model.ir.json`), `model_identity` (the
+hex structural model hash), `source_config` (the producing config file, as a
+path relative to the fit folder that holds this `fit.meta.json`, below; absent
+for a CLI-only fit), `fit_toml_hash` (SHA-256 of the producing config's raw
+bytes — provenance, i.e. which exact bytes produced this fit; a `fit.toml`
+handle is NOT looked up by it, see below), `data_hashes`, `holdout_hashes`,
+`estimated`, `fixed`, `partition` (the run's parameter roles, below),
+`resolved_priors` (one `{param, source}` entry per estimated parameter,
 `source ∈ {fit_toml, model_ir, flat_explicit, flat_fallback}`, plus
 `overridden_model_prior` when the fit.toml's prior displaced a model `~` prior;
 recorded whichever method ran, because every method run on the problem shares
@@ -642,9 +643,21 @@ fit folder whose stored config cannot be read, rather than running without it.
 Its `[method]` is the file's: a fit folder holds every method run on its
 problem, and each run's own method settings are in its `run.json` (`inputs`).
 Neither file enters any identity. A fit folder written before camdl stored
-`fit.resolved.toml` is refused by every reader, with a message naming the fix:
-re-run `camdl fit run` on the same file with the same options, which reuses the
-stored results and writes the file.
+`fit.resolved.toml` is at store layout 0 (§2.7), and every reader of a stored
+fit's config refuses it, naming `camdl dev migrate <folder>`, which writes the
+file from what the folder records. Re-running the fit does not repair such a
+folder: the engine build is in every fit's identity, so a newer camdl's run
+writes a new folder beside it. A folder at the current layout without the file
+is refused as incomplete.
+
+**A stored table is checked before it is bound.** A fit binds each
+`[data.tables]` file once, folds its SHA-256 into the fit's identity
+(`FitDigest.tables`), records it in `table_hashes`, and keeps the bytes in the
+folder as `inputs/NAME.EXT`. `fit.resolved.toml` keeps the `[data.tables]` paths
+the file wrote; a reader of the stored fit binds each input to its stored copy
+instead, so an edit to the source file after the fit does not reach a replay,
+and refuses a copy whose SHA-256 is not the recorded one, naming the input and
+both digests.
 
 **`source_config` and the stored configs are different files.** `source_config`
 names the user's own config file — which may since have changed or gone — and is
@@ -1416,6 +1429,96 @@ aspirational.
 
 `<root>/.staging/` holds in-flight atomic commits (§2.3.1). Entries left behind
 by a crash are inert debris; they are never read.
+
+### 2.7 Store layout and `camdl dev migrate`
+
+A store's folders change shape between camdl versions in two ways. A change to
+what a record or a result means is a new identity or a new record format
+(`hash_version`, `format_version`, `fit.meta.json`'s `schema_version`), and an
+older folder of that kind is recomputed rather than read. A change to what a
+folder holds _beside_ its record, derivable from what the folder already
+records, is a new **store layout**: an older folder is brought up to date in
+place instead.
+
+**The number.** Every folder records the layout it was written at, as an integer
+`store_layout`: a leaf in its `run.json` (§9.5), a fit or profile folder, which
+has no `run.json`, in its `fit.meta.json` (§2.2.1). Every command that writes a
+folder writes the current layout; a rewrite of a record that was read back (a
+recorded training partition, a relabel) keeps the layout it read, so an update
+to an older folder never claims what a newer layout promises. A record without
+the field is layout 0; only the migration reads that absence.
+
+| layout | what it adds                                                                                                                                                    |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0      | layouts not yet numbered                                                                                                                                        |
+| 1      | a fit folder that keeps its fit file (`fit.toml.original`) keeps `fit.resolved.toml` beside it, the configuration its fits ran under (§2.2.1). The current one. |
+
+**Readers.** Every reader of a stored fit's configuration (`fit predict`,
+`compare` and `simulate --fit` on a run handle; `pfilter`, `profile` and
+`survey` `--fit` on a stored-fit handle; `fit table`'s config diff) refuses a
+fit folder at any layout but the current one. An older folder is refused naming
+the command that brings it up to date:
+
+```
+error: results/fits/sir-1a2b3c4d is at store layout 0, older than this camdl's layout 1: it was written by an older camdl, and lacks what a reader here needs (a fit folder's fit.resolved.toml, the configuration its fits ran under). Run `camdl dev migrate results/fits/sir-1a2b3c4d`, which adds it from what the folder records.
+```
+
+A newer folder is refused as written by a newer camdl. No other reader checks
+the layout today, because nothing else a layout-0 folder holds differs from
+layout 1; a step that changes what another kind of folder holds adds the check
+to that kind's readers.
+
+**`camdl dev migrate PATH [--dry-run]`** takes every folder at or under `PATH` —
+one run folder, one fit folder with its runs, or a whole store — through each
+step from its layout to the current one. Each step has a precondition, a
+derivation that reads only what the folder already records, and a verification
+of what it derived, run before anything is written. Each file a step writes goes
+to a temporary file in the same directory and is renamed over its name, and the
+folder's layout is raised last, the same way, so a crash leaves the folder at
+its old layout. A file a migration writes opens with a comment naming the step
+and the records it was derived from, so it is told apart from one the folder's
+own command wrote. A folder whose records are missing or disagree is refused
+with the reason and left as it was; the others are migrated, and the command
+exits 1. A record the store already treats as stale (an older `format_version`
+or `hash_version`, a renamed `kind`) is left as it is and said; it is
+recomputed, never read. `--dry-run` derives and verifies the first step of each
+folder, lists what it would write, and writes nothing.
+
+```
+$ camdl dev migrate results
+migrated results/fits/sir-1a2b3c4d: store layout 0 to 1, writing fit.resolved.toml
+migrated results/fits/sir-1a2b3c4d/pmmh-955d9298/seed_1-91d7d8da: store layout 0 to 1
+2 folder(s) migrated, 0 already at layout 1, 0 stale left as they are, 0 refused
+```
+
+**Step 0 to 1.** A fit folder (its runs are `fit_method` leaves) with a fit file
+gains `fit.resolved.toml`, built by the function `fit run` builds it with, from
+three records: `fit.toml.original`, whose SHA-256 must be the recorded
+`fit_toml_hash`; the `[fixed]` values `fit.meta.json`'s `partition` records the
+folder running at (each parameter its `[fixed]` declared, inline, from a file or
+from a scenario, and a sweep point's design parameters, at the recorded value);
+and whether the folder's runs record forcing extrapolation as allowed
+(`inputs.forcing_extrapolation` in each `run.json`, which must agree), the one
+command-line value of the problem half. The result is verified as a reader
+parses it: its `[fixed]` against the values the record says the fit ran at, its
+estimated names against `estimated`, every inline `[fixed]` value of the file
+against it, and, when the folder already holds a `fit.resolved.toml` (one the
+fit wrote, or one a migration wrote before it stopped), that file's text below
+its header against the derived text; an agreeing file is kept as written. A
+CLI-only fit holds no configuration and a leaf holds nothing that changed, so
+both have their layout raised alone. So does a profile folder: no reader takes a
+configuration from one, and its resolved configuration cannot be derived from
+what it records (a profile of a stored fit stores that fit's, under the fit's
+flags rather than its own), so a profile folder migrated from layout 0 keeps
+only its `fit.toml.original`.
+
+**Adding a step.** Raise `runid::STORE_LAYOUT`, append a step to
+`store_migrate::STEPS` whose `from` is the previous layout (precondition,
+derivation from recorded facts only, verification), add a row to the table
+above, and make every reader of what the new layout adds refuse another layout
+(`store_migrate::check_layout`). **Retiring steps.** Before 1.0, a step older
+than the previous release may be dropped from the front of `STEPS`; a folder at
+a layout older than the oldest step kept is refused with its layout number.
 
 ---
 
@@ -5509,23 +5612,24 @@ carries no step: draw `k` of chain `c` is the `k`-th retained row of
 
 **Fields.**
 
-| field            | type                                       | meaning                                                                                        |
-| ---------------- | ------------------------------------------ | ---------------------------------------------------------------------------------------------- |
-| `format_version` | u16                                        | `run.json` schema version; a mismatch is `Stale(SchemaDrift)`                                  |
-| `kind`           | snake-case `ArtifactKind`                  | `sim`, `fit_method`, `pfilter`, `survey`, `profile_point`, `obs`, `projection`, `sim_ensemble` |
-| `run_id`         | 64-hex                                     | the leaf address; the identity gate on every lookup                                            |
-| `hash_version`   | u16                                        | `HASH_VERSION` of the encoding that produced the hashes                                        |
-| `ir_version`     | string                                     | `ir/VERSION` at write time (e.g. `"0.30"`)                                                     |
-| `engine_version` | string                                     | the engine's build fingerprint (`ENGINE_ID`, 32 hex); `provenance.camdl_version` is readable   |
-| `levels`         | `[{name, label, hash, schema_version}]`    | the factored identity in path order                                                            |
-| `deps`           | `[{run_id, kind, artifact, digest}]`       | consumed upstreams; omitted when empty                                                         |
-| `status`         | `"running"` \| `"completed"` \| `"failed"` | a plain string, not an object                                                                  |
-| `failure`        | `{message, operation}`                     | on a `"failed"` record camdl stopped: its error, and what was running; omitted otherwise       |
-| `artifacts`      | map path → `{bytes, mtime, digest}`        | EXACT SET over the leaf's own files; `mtime` is `"{secs}.{nanos:09}"`                          |
-| `output_schema`  | map path → `{role, columns}`               | declared column roles (§10.9); omitted when empty                                              |
-| `children`       | map namespace → `[hash]`                   | declared child sub-artifact dirs (`obs`, `event_log`); omitted when empty                      |
-| `inputs`         | arbitrary JSON                             | display/audit summary, **never hashed**; omitted when null                                     |
-| `provenance`     | object                                     | `argv`, `label`, `created_at`, `camdl_version`, `source_paths` — all recorded, never hashed    |
+| field            | type                                       | meaning                                                                                              |
+| ---------------- | ------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| `format_version` | u16                                        | `run.json` schema version; a mismatch is `Stale(SchemaDrift)`                                        |
+| `kind`           | snake-case `ArtifactKind`                  | `sim`, `fit_method`, `pfilter`, `survey`, `profile_point`, `obs`, `projection`, `sim_ensemble`       |
+| `run_id`         | 64-hex                                     | the leaf address; the identity gate on every lookup                                                  |
+| `hash_version`   | u16                                        | `HASH_VERSION` of the encoding that produced the hashes                                              |
+| `store_layout`   | u32                                        | the folder's store layout (§2.7); absent, and so 0, in a record written before layouts were numbered |
+| `ir_version`     | string                                     | `ir/VERSION` at write time (e.g. `"0.30"`)                                                           |
+| `engine_version` | string                                     | the engine's build fingerprint (`ENGINE_ID`, 32 hex); `provenance.camdl_version` is readable         |
+| `levels`         | `[{name, label, hash, schema_version}]`    | the factored identity in path order                                                                  |
+| `deps`           | `[{run_id, kind, artifact, digest}]`       | consumed upstreams; omitted when empty                                                               |
+| `status`         | `"running"` \| `"completed"` \| `"failed"` | a plain string, not an object                                                                        |
+| `failure`        | `{message, operation}`                     | on a `"failed"` record camdl stopped: its error, and what was running; omitted otherwise             |
+| `artifacts`      | map path → `{bytes, mtime, digest}`        | EXACT SET over the leaf's own files; `mtime` is `"{secs}.{nanos:09}"`                                |
+| `output_schema`  | map path → `{role, columns}`               | declared column roles (§10.9); omitted when empty                                                    |
+| `children`       | map namespace → `[hash]`                   | declared child sub-artifact dirs (`obs`, `event_log`); omitted when empty                            |
+| `inputs`         | arbitrary JSON                             | display/audit summary, **never hashed**; omitted when null                                           |
+| `provenance`     | object                                     | `argv`, `label`, `created_at`, `camdl_version`, `source_paths` — all recorded, never hashed          |
 
 `status` transitions depend on the write mode. `sim` and `sim_ensemble` commit
 **atomically**: the leaf appears only once complete, and there is no
