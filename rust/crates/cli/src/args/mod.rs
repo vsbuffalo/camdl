@@ -2800,6 +2800,44 @@ pub struct ReindexArgs {
     pub root: PathBuf,
 }
 
+#[derive(Args)]
+#[command(after_help = colored_help!("\
+Every folder of a store records the store layout it was written at: a run
+folder in its `run.json` (`store_layout`), a fit or profile folder in its
+`fit.meta.json`. A folder written before layouts were numbered has none, and is
+layout 0. A command that reads a stored fit's configuration refuses a folder at
+an older layout, naming this command.
+
+`migrate` takes every folder at or under PATH, a single run folder or a whole
+store, through each step from its layout to the current one. A step derives
+what the folder lacks only from what it already records, checks the result
+against those records before writing, and writes each file whole (to a
+temporary file, then renamed), raising the folder's layout last. A file it
+writes says in its header that a migration wrote it, and from what. A folder
+whose records are missing or disagree is refused with the reason and left as it
+was; the rest are migrated, and the command exits 1.
+
+Layout 1 adds `fit.resolved.toml` to a fit folder, from its
+`fit.toml.original`, the fixed values `fit.meta.json` records, and whether its
+runs record forcing extrapolation as allowed. Other folders have their layout
+number raised alone.
+
+Examples:
+  # See what would change in the default ./results store, writing nothing
+  camdl dev migrate results --dry-run
+
+  # Migrate one fit folder a reader refused
+  camdl dev migrate results/fits/sir-0123abcd
+"))]
+pub struct MigrateArgs {
+    /// A run folder, a fit folder, or a store root: every folder at or under it
+    pub path: PathBuf,
+
+    /// List what would change, and write nothing
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
 // ─── compare ──────────────────────────────────────────────────────────────────
 
 /// `camdl compare` — multi-model prequential comparison table.

@@ -12,6 +12,7 @@ mod cas_index;      // derived run_id→leaf index + `camdl reindex` (gh#147 M4)
 mod hashing;
 mod resolve;        // Resolve bridge: CLI inputs → runid identity (CAS run-identity refactor, gh#147)
 mod output_schema;  // run.json output_schema: column roles for tabular outputs (proposal 2026-07-15)
+mod store_migrate;  // `camdl dev migrate`: raise store folders to the current layout, in place
 mod run_meta;       // cross-cutting run-metadata value types (FitAlgorithm, Backend, provenance records, FitSidecar)
 mod posterior_draws; // resolve a fit run's canonical posterior draws (--draws posterior, fit predict)
 mod chain_index;    // the chain number, counted from 0: the one index base every fit surface names (gh#990)
@@ -300,6 +301,9 @@ Render a model for reading or display (delegates to camdlc).
 pub(crate) enum DevCmd {
     /// Rebuild the derived run index (`<root>/index.json`)
     Reindex(args::ReindexArgs),
+
+    /// Bring store folders an older camdl wrote up to the current store layout
+    Migrate(args::MigrateArgs),
 
     /// Evaluate time-dependent expressions against a model
     Eval(args::EvalArgs),
@@ -606,6 +610,7 @@ fn main() {
         Command::Mre(MreCmd::Simulate(a)) => mre::cmd_mre_simulate(&a),
         Command::CheckUpdate            => check_update::cmd_check_update(),
         Command::Dev(DevCmd::Reindex(a)) => cmd_reindex(&a),
+        Command::Dev(DevCmd::Migrate(a)) => store_migrate::cmd_migrate(&a),
         Command::Dev(DevCmd::Eval(a))    => eval::cmd_eval(&a),
         Command::Dev(DevCmd::Compile(a)) => {
             let refs: Vec<&str> = a.args.iter().map(String::as_str).collect();

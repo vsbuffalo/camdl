@@ -809,6 +809,8 @@ mod tests {
 [fixed]\nN0 = 1000\n\
 [method]\nalgorithm = \"pgas\"\nbackend = \"chain_binomial\"\nchains = 2\n\
 particles = 100\nsweeps = 10\nuse_nuts = false\nmax_tree_depth = 8\n").unwrap();
+        let side = crate::run_meta::FitSidecar { store_layout: runid::STORE_LAYOUT, ..Default::default() };
+        crate::run_meta::store_fit_sidecar(dir.path(), &side).unwrap();
         load_resolved_config(dir.path())
             .expect("fit table and handle resolution read the stored config");
     }

@@ -898,22 +898,28 @@ pub const ARCHIVED_CONFIG: &str = "fit.toml.original";
 /// written in. What every reader of a stored fit's config reads.
 pub const RESOLVED_CONFIG: &str = "fit.resolved.toml";
 
-/// `Err` naming the fit folder `segment` as written by an older camdl when it
-/// holds no [`RESOLVED_CONFIG`], and how to give it one. Re-running the fit
-/// reuses its stored results and writes the file; a reader never takes the
-/// configuration from [`ARCHIVED_CONFIG`] in its place, which may not be what
-/// the fit ran under.
+/// The path of the fit folder `segment`'s [`RESOLVED_CONFIG`], the
+/// configuration its fits ran under, for a reader of that configuration; `Err`
+/// when the folder is not at the current store layout ([`runid::STORE_LAYOUT`],
+/// recorded in its `fit.meta.json`), naming the migration that brings an older
+/// one up to date or the newer camdl that wrote it
+/// ([`crate::store_migrate::check_layout`]), and when a folder at the current
+/// layout lacks the file. A reader never takes the configuration from
+/// [`ARCHIVED_CONFIG`] in its place, which may not be what the fit ran under.
 pub fn require_resolved_config(segment: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let side = read_fit_sidecar(segment)?
+        .ok_or_else(|| format!("{} is not a complete fit directory: no fit.meta.json", segment.display()))?;
+    crate::store_migrate::check_layout(segment, side.store_layout)?;
     let path = segment.join(RESOLVED_CONFIG);
     if path.is_file() {
         return Ok(path);
     }
     Err(format!(
-        "{} has no {RESOLVED_CONFIG}, the configuration its fits ran under: it was \
-         written by an older camdl.\n  Re-run the fit (`camdl fit run` on its fit file, \
-         with the same options): its stored results are reused, and the folder gains \
-         the file.",
-        segment.display()
+        "{} is at store layout {} but has no {RESOLVED_CONFIG}, the configuration its fits \
+         ran under: the folder is incomplete, or was changed after it was written. Re-run \
+         the fit.",
+        segment.display(),
+        side.store_layout
     ))
 }
 
@@ -1076,7 +1082,9 @@ pub fn store_fit_sidecar(fit_segment: &std::path::Path, sidecar: &FitSidecar) ->
     merged.training_partition = sidecar.training_partition.clone()
         .or_else(|| on_disk.and_then(|s| s.training_partition));
     let bytes = serde_json::to_vec_pretty(&merged).map_err(std::io::Error::other)?;
-    std::fs::write(fit_segment.join("fit.meta.json"), bytes)
+    // Whole or not at all: a reader (or `camdl dev migrate`, which bumps the
+    // layout here last) never sees a torn record.
+    runid::write_file_atomic(&fit_segment.join("fit.meta.json"), &bytes).map_err(std::io::Error::other)
 }
 
 /// `to` as a path relative to the directory `from`, computed between the two

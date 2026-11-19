@@ -891,7 +891,7 @@ fn bind_stored_inputs(
 /// with both values: a config that would not compute the stored fit. A name
 /// the record holds that the config's `[fixed]` lacks passes unless the config
 /// estimates it. The config's `[fixed]` is resolved as the fit resolves it.
-fn refuse_fixed_not_run(
+pub(crate) fn refuse_fixed_not_run(
     config: &FitConfig,
     side: &crate::run_meta::FitSidecar,
     segment: &Path,
@@ -1210,22 +1210,38 @@ cooling = 0.7
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// A fit folder an older camdl wrote, with `fit.toml.original` but no
-    /// `fit.resolved.toml`, is refused, naming the re-run that writes it; the
-    /// verbatim file is never read in its place.
+    /// A fit folder at an older store layout (an older camdl wrote it, with
+    /// `fit.toml.original` and no `fit.resolved.toml`) is refused as a stored
+    /// config, naming the migration that brings it up to date; the verbatim
+    /// file is never read in its place. A folder from a newer camdl is refused
+    /// naming that, and one at the current layout without the file as
+    /// incomplete.
     #[test]
-    fn a_fit_folder_without_a_resolved_config_is_refused_naming_the_rerun() {
-        let (tmp, toml_path, seg) = portable_project("no_resolved");
+    fn a_fit_folder_at_another_store_layout_is_refused_naming_the_migration() {
+        let (tmp, toml_path, seg) = portable_project("old_layout");
         write_fit_folder(&seg, &toml_path, &Default::default()).unwrap();
         resolve_fit(&seg.to_string_lossy()).unwrap_or_else(|e| panic!("a current folder resolves: {e}"));
+        let at_layout = |layout: u32| {
+            let mut side = crate::run_meta::read_fit_sidecar(&seg).unwrap().unwrap();
+            side.store_layout = layout;
+            crate::run_meta::store_fit_sidecar(&seg, &side).unwrap();
+            let err = resolve_fit(&seg.to_string_lossy()).err().expect("another layout");
+            assert!(matches!(err, ResolveError::StoredConfig(_)), "a fit folder, not a miss: {err}");
+            err.to_string()
+        };
+
         std::fs::remove_file(seg.join(crate::run_meta::RESOLVED_CONFIG)).unwrap();
         assert!(seg.join(crate::run_meta::ARCHIVED_CONFIG).is_file());
-        let err = resolve_fit(&seg.to_string_lossy()).err().expect("no resolved config");
-        assert!(matches!(err, ResolveError::StoredConfig(_)), "a fit folder, not a miss: {err}");
-        let err = err.to_string();
-        assert!(err.contains("has no fit.resolved.toml"), "{err}");
-        assert!(err.contains("written by an older camdl"), "{err}");
-        assert!(err.contains("Re-run the fit"), "{err}");
+        let err = at_layout(0);
+        assert!(err.contains("store layout 0") && err.contains("written by an older camdl"), "{err}");
+        assert!(err.contains(&format!("camdl dev migrate {}", seg.display())), "{err}");
+
+        let err = at_layout(runid::STORE_LAYOUT);
+        assert!(err.contains("has no fit.resolved.toml") && err.contains("incomplete"), "{err}");
+
+        write_fit_folder(&seg, &toml_path, &Default::default()).unwrap();
+        let err = at_layout(runid::STORE_LAYOUT + 1);
+        assert!(err.contains("written by a newer camdl"), "{err}");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
