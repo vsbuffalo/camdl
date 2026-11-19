@@ -175,7 +175,7 @@ const BASELINES: &[(&str, &str, u64)] = &[
     ("multi_index_beta", "ode", 0x85f898d465a420b5),
     ("polio_shedding_bimodal", "gillespie", 0xef5d276a6774bc31),
     ("polio_shedding_bimodal", "chain_binomial", 0xdd348d9d5a752f05),
-    ("polio_shedding_bimodal", "ode", 0x4b0e6b49f73269b4),
+    ("polio_shedding_bimodal", "ode", 0xb0528614cb69d353),
     ("polio_spatial_5", "gillespie", 0x5516309d3eedfda4),
     ("polio_spatial_5", "chain_binomial", 0x3b8831126ad37aeb),
     ("ross_macdonald", "gillespie", 0xb8a901ca29312b3e),

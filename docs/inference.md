@@ -1191,11 +1191,13 @@ every other method.
 This is the part that surprises people, and it is worth understanding before
 reading a posterior for an initial-state parameter.
 
-An integer compartment's initial value is **rounded**. Written `I = I0`, the
-compartment starts at `round(I0)`, so `I0 = 50.0` and `I0 = 50.4` produce the
-_same_ initial state, the _same_ trajectory density, and the _same_ likelihood.
-The likelihood is a **step function** of `I0`: its derivative is zero almost
-everywhere, and non-existent at the boundaries.
+On the stochastic backends an integer compartment's initial value is
+**rounded**. (The ODE backend is the exception: it starts from `I0` itself, so
+none of this section applies to an ODE fit.) Written `I = I0`, the compartment
+starts at `round(I0)`, so `I0 = 50.0` and `I0 = 50.4` produce the _same_ initial
+state, the _same_ trajectory density, and the _same_ likelihood. The likelihood
+is a **step function** of `I0`: its derivative is zero almost everywhere, and
+non-existent at the boundaries.
 
 Two consequences follow, and both show up in a posterior:
 
@@ -1459,12 +1461,9 @@ observed data.
 
 **Initial conditions drawn from a law.** The ODE backend is deterministic, so an
 `init` entry such as `S ~ binomial(n = N0, p = s0)` starts at the law's mean,
-$N_0 s_0$. The value path (`mh`, `nl-sbplx`) rounds that mean to an integer
-count; the gradient path starts from the unrounded mean and seeds
-$\partial S(t_0)/\partial s_0 = N_0$, so its likelihood is a smooth function of
-$s_0$ and `nl-lbfgs` admits the model. The two objectives differ by that
-rounding (less than half a person in the initial state), which matters only when
-the initial count is small.
+$N_0 s_0$, unrounded, under every ODE method. The gradient path seeds
+$\partial S(t_0)/\partial s_0 = N_0$, so the likelihood is a smooth function of
+$s_0$ and `nl-lbfgs` admits the model.
 
 The gate answers about the model the run will integrate, not the model as
 written. `interventions { }` is toggleable and defaults off, so a fit that

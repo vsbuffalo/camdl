@@ -5219,10 +5219,11 @@ independent — the dispersion `r` controls how much more variable the count is
 than a Poisson of the same mean, and large `r` recovers Poisson.
 
 **`~` is not merely a stochastic flourish; it changes what the data can tell you
-about the parameter.** An integer compartment written with `=` is *rounded*, so
-`I = I0` starts at `round(I0)` and the likelihood is a step function of `I0` —
-flat within each rounding bin, so a fit learns much less about the seed than the
-data contain. A drawn initial condition is smooth in its parameter and does not
+about the parameter.** On the stochastic backends an integer compartment written
+with `=` is *rounded*, so `I = I0` starts at `round(I0)` and the likelihood is a
+step function of `I0` — flat within each rounding bin, so a fit learns much less
+about the seed than the data contain. (The ODE backend starts from `I0` itself,
+unrounded.) A drawn initial condition is smooth in its parameter and does not
 have this problem. See "Initial-state parameters" in
 [`docs/inference.md`](inference.md) for what that means when reading a
 posterior.

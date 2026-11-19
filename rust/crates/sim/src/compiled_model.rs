@@ -2777,18 +2777,15 @@ impl CompiledModel {
     /// makes "added to one, forgotten in the others" a compile-visible gap
     /// rather than a silently-zero coordinate in the NUTS gradient.
     ///
-    /// Call this only where the *mean* is what is wanted. Today that is the
-    /// deterministic ODE path (`ode.rs::run_ode`), `render`, the fit-time
-    /// preflight, and structural quantities derived from the initial state — a
-    /// total, a denominator — which must be the same number for every
-    /// particle. Every stochastic forward path calls
-    /// [`Self::initial_state_draw`] instead.
+    /// This is the start of a discrete backend whose `init {}` declares no
+    /// law: [`Self::initial_state_draw`] returns it unchanged in that case.
+    /// The ODE backend does not call it — it starts from the un-rounded
+    /// [`Self::initial_state_continuous`].
     ///
     /// A DRAWN entry (`I ~ poisson(rate = I0)`) contributes its law's **mean**
     /// here — `rate` for Poisson, `n·p` for Binomial, `mean` for NegBinomial
-    /// and Normal ([`InitSpec::mean_expr`]). That is the same expression the
-    /// `∂init/∂θ` forward-sensitivity seed differentiates, so the ODE skeleton
-    /// and its gradient agree about where the model starts.
+    /// and Normal ([`InitSpec::mean_expr`]), the same expression the
+    /// `∂init/∂θ` forward-sensitivity seed differentiates.
     ///
     /// Entries are evaluated in dependency order ([`Self::init_order`]) against
     /// the state built so far, so `init { I = I0   S = N0 - I }` reads the `I`
@@ -3152,22 +3149,20 @@ impl CompiledModel {
         Ok(grad)
     }
 
-    /// Continuous initial compartment values for the ODE **gradient** path
-    /// (gh#275 §1c): the un-rounded initial state, returned as
-    /// `(int_as_f64, real)`.
+    /// Continuous initial compartment values for the ODE backend — the value
+    /// path (`ode::run_ode`) and the forward-sensitivity path
+    /// (`ode::integrate_obs_sensitivity`, gh#275 §1c): the un-rounded initial
+    /// state, returned as `(int_as_f64, real)`.
     ///
     /// [`Self::initial_state_mean`] rounds integer compartments to `i64`,
-    /// correct for the discrete backends. The deterministic ODE forward
-    /// sensitivity must instead start from the *continuous* initial value:
-    /// rounding an initial condition to an integer makes the likelihood
-    /// piecewise-constant in the IC parameter, which contradicts the
-    /// `∂init/∂θ` seed (`ic_grad`) and would make the reported gradient
-    /// inconsistent with the value it differentiates (an FD of the rounded value
-    /// is ~0 or a boundary spike, never the analytic seed). For a block of
-    /// literals this returns exactly `initial_state_mean`'s values; the two
-    /// paths diverge only where an entry evaluates to a
-    /// non-integer, where the continuous value is the correct one for the ODE
-    /// skeleton.
+    /// correct for the discrete backends. The deterministic ODE must instead
+    /// start from the *continuous* initial value: rounding an initial condition
+    /// to an integer makes the likelihood piecewise-constant in the IC
+    /// parameter, which contradicts the `∂init/∂θ` seed (`ic_grad`) — a finite
+    /// difference of the rounded value is ~0 or a boundary spike, never the
+    /// analytic seed. For a block of integer-valued entries this returns
+    /// exactly `initial_state_mean`'s values; the two differ only where an
+    /// entry evaluates to a non-integer.
     ///
     /// This is the un-rounded *sibling* of `initial_state_mean`, not a fifth
     /// question of the initial-state seam: there is no continuous "draw",

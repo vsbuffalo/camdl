@@ -1121,9 +1121,9 @@ mod tests {
 
     /// An initial condition drawn from a law (`R ~ binomial(n = N0, p = p_imm)`)
     /// enters the ODE path through its MEAN `N0·p_imm`, which the compiler
-    /// differentiates into `ic_grad`; the gate admits it on that seed. (The
-    /// value path rounds the mean to an integer; the gradient path uses it
-    /// unrounded — see `CompiledModel::initial_state_continuous`.)
+    /// differentiates into `ic_grad`; the gate admits it on that seed. (Both
+    /// ODE paths start from the unrounded mean — see
+    /// `CompiledModel::initial_state_continuous`.)
     #[test]
     fn admits_a_drawn_initial_condition_through_its_mean_seed() {
         use ir::model::{InitCountLaw, InitSpec};

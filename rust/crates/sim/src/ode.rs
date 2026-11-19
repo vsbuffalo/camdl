@@ -874,13 +874,15 @@ pub fn run_ode(
         crate::resolved_expr::stage_per_eval(model, params, cfg.t_start, cfg.dt);
 
     // The ODE skeleton is deterministic: it integrates the mean field, so it
-    // starts from the mean initial state. (The forward-sensitivity path takes
-    // the un-rounded `initial_state_continuous` instead — see its doc comment.)
-    let (int_s0, real_s0) = model.initial_state_mean(params)?;
+    // starts from the un-rounded initial state, as the forward-sensitivity
+    // path does (`integrate_obs_sensitivity`). A start rounded to whole counts
+    // would make the solution a step function of any parameter that sets an
+    // initial count — see `CompiledModel::initial_state_continuous`.
+    let (int_s0, real_s0) = model.initial_state_continuous(params)?;
     let n_transitions = model.model.transitions.len();
     let mut state = OdeState {
-        int:  int_s0.counts.iter().map(|&c| c as f64).collect(),
-        real: real_s0.values.clone(),
+        int:  int_s0,
+        real: real_s0,
         flow: vec![0.0; n_transitions],
     };
 
@@ -1700,6 +1702,58 @@ mod tests {
         // At a θ whose start is non-negative both paths run.
         params[mu_idx] = 0.5;
         assert!(run_ode(&cm, &params, &cfg, None, None).is_ok());
+    }
+
+    /// The value path starts from the un-rounded initial state, so the ODE
+    /// solution is a smooth function of a parameter that sets an initial count.
+    /// `dN/dt = -mu·N` from `N(0) = n0` has cumulative deaths
+    /// `n0·(1 − e^{−mu·t})`: the oracle is closed-form, and at `n0 = 2.4` it
+    /// differs from the rounded start's (`n0 = 2`) by 20%. The same start is
+    /// what the forward-sensitivity path integrates from, so the two paths'
+    /// incidence agrees bit for bit at a fractional initial count.
+    #[test]
+    fn run_ode_starts_from_the_unrounded_initial_state() {
+        let mut model = load_golden("pure_death");
+        model.parameters.push(ir::parameter::Parameter {
+            name: "n0".to_string(),
+            ..model.parameters[0].clone()
+        });
+        *model.initial_conditions.0.get_mut("N").unwrap() =
+            ir::model::InitSpec::Deterministic(Expr::param("n0"));
+        let cm = CompiledModel::new(model).expect("compiles");
+        let idx = |name: &str| cm.model.parameters.iter().position(|p| p.name == name).unwrap();
+        let (mu, n0) = (0.1, 2.4);
+        let mut params = vec![0.0; cm.model.parameters.len()];
+        params[idx("mu")] = mu;
+        params[idx("n0")] = n0;
+        let cfg = OdeConfig { t_start: 0.0, t_end: cm.model.simulation.t_end, dt: 0.01 };
+
+        let traj = run_ode(&cm, &params, &cfg, None, None).unwrap();
+        assert_eq!(traj.snapshots.len(), 21, "one row per unit time on [0, 20]");
+        let mut deaths = 0.0;
+        for snap in &traj.snapshots[1..] {
+            deaths += snap.flows.as_real()[0];
+            let oracle = n0 * (1.0 - (-mu * snap.t).exp());
+            assert!(
+                (deaths - oracle).abs() < 1e-9,
+                "t = {}: cumulative deaths {deaths} vs n0·(1 − e^(−mu·t)) = {oracle}; a start \
+                 rounded to 2 would give {}",
+                snap.t,
+                2.0 * (1.0 - (-mu * snap.t).exp()),
+            );
+        }
+
+        let obs_times = [1.0, 2.0, 3.0];
+        let recs = integrate_obs_sensitivity(&cm, &params, &[], &[], &cfg, &obs_times, cfg.dt).unwrap();
+        for (rec, snap) in recs.iter().zip(&traj.snapshots[1..]) {
+            assert_eq!(rec.t, snap.t);
+            assert_eq!(
+                rec.inc[0].to_bits(),
+                snap.flows.as_real()[0].to_bits(),
+                "t = {}: the value path's incidence is not the gradient path's",
+                snap.t,
+            );
+        }
     }
 
     fn load_golden(name: &str) -> ir::Model {
