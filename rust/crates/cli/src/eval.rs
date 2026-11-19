@@ -1,8 +1,14 @@
-//! `camdl eval` — evaluate time-dependent expressions without simulation.
+//! `camdl dev eval` — evaluate forcings and parameters on a time grid without
+//! simulation.
 //!
-//! Evaluates forcing functions, let bindings, and inline expressions at a
-//! time grid. No compartment state, no RNG, no trajectories. Useful for
-//! inspecting covariates, forcing curves, and parameter-derived quantities.
+//! Evaluates a forcing function or a parameter, by name, at each time of a
+//! grid. No compartment state, no RNG, no trajectories. Useful for inspecting
+//! covariates and forcing curves.
+//!
+//! A `let` binding is not evaluable by name: the compiler inlines a let into
+//! the expressions that use it, so the IR has no expression for it (only the
+//! declared section's display tree, which no evaluator reads). Asking for one
+//! is refused with its source line, naming what to evaluate instead.
 
 use sim::{
     compiled_model::CompiledModel,
@@ -15,7 +21,12 @@ use ir::expr::Expr;
 /// Checks: forcing functions, then let bindings (already inlined into
 /// transition rates — we look for them in the original Model's IR).
 /// Returns the Expr and whether it references compartment state.
-fn resolve_named_expr(model: &ir::Model, compiled: &CompiledModel, name: &str) -> Result<Expr, String> {
+fn resolve_named_expr(
+    model: &ir::Model,
+    compiled: &CompiledModel,
+    lets: &[DeclaredLet],
+    name: &str,
+) -> Result<Expr, String> {
     // 1. Forcing function?
     if compiled.time_func_index.contains_key(name) {
         return Ok(Expr::TimeFunc(ir::expr::TimeFuncWrap {
@@ -28,12 +39,17 @@ fn resolve_named_expr(model: &ir::Model, compiled: &CompiledModel, name: &str) -
         return Ok(Expr::Param(ir::expr::ParamExpr { param: name.into() }));
     }
 
-    // 3. Scan transitions and let bindings for named sub-expressions.
-    // The OCaml expander inlines let bindings, so they don't survive as
-    // named entities in the IR. But for simple parameter-only expressions,
-    // we can try evaluating the name as a parameter expression.
-    // For now: if not found, try parsing as an inline expression.
-    // (Inline expression parsing is a future extension.)
+    // 3. A `let` binding: inlined by the compiler, so there is no IR
+    // expression to evaluate. Say so, and name what it reads.
+    if let Some(l) = lets.iter().find(|l| l.name == name) {
+        return Err(format!(
+            "'{name}' is a `let` binding, which `dev eval` cannot evaluate: the compiler \
+             inlines a let into the expressions that use it, so the compiled model has no \
+             expression for it by name.\n  {}\n  Evaluate the forcings and parameters it \
+             uses instead.",
+            l.source_text
+        ));
+    }
 
     // 4. Check if it's a compartment (error with helpful message)
     if compiled.comp_index.contains_key(name) {
@@ -53,11 +69,34 @@ fn resolve_named_expr(model: &ir::Model, compiled: &CompiledModel, name: &str) -
     }
 
     Err(format!(
-        "unknown expression '{}'. Available forcing functions: {:?}, parameters: {:?}",
+        "unknown expression '{}'. `dev eval` evaluates a forcing function or a parameter \
+         by name (not a call such as `f(t)`). Available forcing functions: {:?}, parameters: {:?}",
         name,
         model.time_functions.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
         model.parameters.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
     ))
+}
+
+/// A `let` as the declared section records it: its name and its source line.
+struct DeclaredLet {
+    name: String,
+    source_text: String,
+}
+
+/// The `let` bindings of the declared section of the IR JSON, or none when
+/// the section is absent (an IR written without the compiler).
+fn declared_lets(ir_json: &str) -> Vec<DeclaredLet> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(ir_json) else { return vec![] };
+    let Some(defs) = v.pointer("/declared/definitions").and_then(|d| d.as_array()) else {
+        return vec![];
+    };
+    defs.iter()
+        .filter_map(|d| {
+            let name = d.get("name")?.as_str()?.to_string();
+            let source_text = d.get("source_text").and_then(|s| s.as_str()).unwrap_or(&name).to_string();
+            Some(DeclaredLet { name, source_text })
+        })
+        .collect()
 }
 
 /// Check if an Expr references compartment state (Pop or PopSum nodes).
@@ -90,7 +129,7 @@ pub fn cmd_eval(a: &crate::args::EvalArgs) {
     let ir_path = a.model.to_string_lossy();
     let at_points: Option<Vec<f64>> = if a.at.is_empty() { None } else { Some(a.at.clone()) };
 
-    let (model_in, _model_json) = crate::util::load_model(&ir_path)
+    let (model_in, model_json) = crate::util::load_model(&ir_path)
         .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
 
     // Unified parameter resolver (2026-05-25 CLI UX rev 2). Maps the
@@ -151,9 +190,10 @@ pub fn cmd_eval(a: &crate::args::EvalArgs) {
         .unwrap_or_else(|e| { out.fail(format!("compile error: {:?}", e)); });
     let params = compiled.default_params.clone();
 
+    let lets = declared_lets(&model_json);
     let mut resolved: Vec<(String, Expr)> = Vec::new();
     for name in &a.expr {
-        match resolve_named_expr(&model, &compiled, name) {
+        match resolve_named_expr(&model, &compiled, &lets, name) {
             Ok(expr) => {
                 if let Some(comp) = references_compartments(&expr) {
                     out.say(format_args!("error: expression '{}' references compartment '{}'.", name, comp));

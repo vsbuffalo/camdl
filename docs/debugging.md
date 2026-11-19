@@ -42,15 +42,21 @@ t       school
 
 ### What's Evaluable
 
-Anything that depends only on `t`, parameters, and forcing functions:
+A forcing function or a parameter, by name:
 
-- **Forcing functions**: `school`, `seasonal`, `pop_trend`
+- **Forcing functions**: `school`, `seasonal`, `pop_trend` — the bare name, not
+  a call (`seasonal`, not `seasonal(t)`)
 - **Parameters**: `R0`, `gamma`, `sigma_se`
-- **Math on time**: `exp(-mu * t)` (via inline expressions, future)
 
 ### What's NOT Evaluable
 
-Expressions referencing compartment populations:
+A `let` binding, even one that reads only `t`, parameters and forcings. The
+compiler inlines a let into the expressions that use it, so the compiled model
+has no expression for it by name; `dev eval` refuses one, prints its source
+line, and asks for the forcings and parameters it uses. An inline expression
+(`exp(-mu * t)`) is not accepted either.
+
+Nor an expression referencing compartment populations:
 
 ```bash
 camdl dev eval model.ir.json --params p.toml --expr "S"
