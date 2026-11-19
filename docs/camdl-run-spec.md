@@ -642,13 +642,17 @@ fit (`simulate --draws posterior --fit` on a bare directory of draws) refuses a
 fit folder whose stored config cannot be read, rather than running without it.
 Its `[method]` is the file's: a fit folder holds every method run on its
 problem, and each run's own method settings are in its `run.json` (`inputs`).
-Neither file enters any identity. A fit folder written before camdl stored
-`fit.resolved.toml` is at store layout 0 (§2.7), and every reader of a stored
-fit's config refuses it, naming `camdl dev migrate <folder>`, which writes the
-file from what the folder records. Re-running the fit does not repair such a
-folder: the engine build is in every fit's identity, so a newer camdl's run
-writes a new folder beside it. A folder at the current layout without the file
-is refused as incomplete.
+One command-line value a fit's identity keys is not written in: `--emit-every`,
+the cadence `[synthetic]` data are generated at. It has no fit-file spelling,
+and it reaches the fits only through the generated data, whose bytes key each
+synthetic fit, so two synthetic fits that differ only by it store the same
+`fit.resolved.toml`. Neither file enters any identity. A fit folder written
+before camdl stored `fit.resolved.toml` is at store layout 0 (§2.7), and every
+reader of a stored fit's config refuses it, naming `camdl dev migrate <folder>`,
+which writes the file from what the folder records. Re-running the fit does not
+repair such a folder: the engine build is in every fit's identity, so a newer
+camdl's run writes a new folder beside it. A folder at the current layout
+without the file is refused as incomplete.
 
 **A stored table is checked before it is bound.** A fit binds each
 `[data.tables]` file once, folds its SHA-256 into the fit's identity

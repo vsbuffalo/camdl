@@ -196,7 +196,10 @@ pub(crate) const RESOLVED_CONFIG_HEADER: &str = "\
 # fit.meta.json records. [estimate], [data.observations] and [data.holdout]
 # keep the file's order, which is meaningful; every other table's keys are
 # sorted. [method] is the file's; each run's own method settings are in its
-# run.json.
+# run.json. One command-line value the fit's identity keys is not written in:
+# --emit-every, the cadence [synthetic] data are generated at, which has no
+# fit-file spelling; it reaches the fits only through the generated data,
+# whose bytes key each synthetic fit.
 ";
 
 /// The tables whose key order means something (camdl reads them in order: the
