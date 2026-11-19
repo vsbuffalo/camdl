@@ -224,6 +224,18 @@ pub(crate) fn resolved_config_text(
     flags: ProblemFlags,
     fixed: &indexmap::IndexMap<String, f64>,
 ) -> Result<String, String> {
+    resolved_config_text_with(RESOLVED_CONFIG_HEADER, text, flags, fixed)
+}
+
+/// [`resolved_config_text`] under another opening comment, `header`: the one
+/// construction of the text, for a writer other than `fit run` that must say
+/// it wrote the file (`camdl dev migrate`, [`crate::store_migrate`]).
+pub(crate) fn resolved_config_text_with(
+    header: &str,
+    text: &str,
+    flags: ProblemFlags,
+    fixed: &indexmap::IndexMap<String, f64>,
+) -> Result<String, String> {
     let mut doc: toml::Table = text.parse().map_err(|e| format!("cannot parse the config to store it: {e}"))?;
     let written = FitConfig::from_toml_str(text).map_err(|e| format!("cannot parse the config to store it: {e}"))?;
     let orders = ordered_keys(&written);
@@ -247,7 +259,7 @@ pub(crate) fn resolved_config_text(
             body.push_str(&format!("{} = {}\n", bare_or_quoted(key), sorted_value(table[key].clone())));
         }
     }
-    let text = format!("{RESOLVED_CONFIG_HEADER}\n{body}");
+    let text = format!("{header}\n{body}");
     // Every reader parses it with the production parser; a text it refuses,
     // or reads in another order, is refused here, before a fit folder holds a
     // config no reader can open or one that reads differently.
