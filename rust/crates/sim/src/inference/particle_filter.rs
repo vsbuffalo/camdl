@@ -45,6 +45,38 @@ pub struct PredictionDiag {
     pub state_q95: f64,
 }
 
+/// The weighted mean and quantiles of one stream's conditional mean
+/// `E[y_t | x_t, θ]` over the swarm at one stop, under one set of weights.
+/// Every field is NaN when no particle carries weight there, or when a
+/// particle that does has a non-finite mean.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StreamMeanSummary {
+    pub mean: f64,
+    pub q05: f64,
+    pub q25: f64,
+    pub q50: f64,
+    pub q75: f64,
+    pub q95: f64,
+}
+
+/// One stream at one stop of the observation axis where it is scheduled: its
+/// conditional mean `E[y_t | x_t, θ]` summarised over the swarm before and
+/// after the stop's observations are scored.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StreamMeanStep {
+    /// The stop's index on the observation axis (`obs_model.obs_time`).
+    pub obs_idx: usize,
+    /// The stream's index in `obs_model.stream_names()`.
+    pub stream: usize,
+    /// Equal weight on every particle alive at the stop, before anything at
+    /// the stop is scored: the one-step predictive `p(μ_t | y_{1..t-1})`.
+    pub predictive: StreamMeanSummary,
+    /// The stop's weights `log p(y_t | x_t, θ)`, every stream observed there
+    /// scored jointly: the filtering distribution `p(μ_t | y_{1..t})`. At a
+    /// stop that does not assimilate (D72) it equals `predictive`.
+    pub filtered: StreamMeanSummary,
+}
+
 /// Result of a particle filter run.
 pub struct PFilterResult {
     /// Estimated log p(y_{1:T} | θ).
@@ -76,6 +108,9 @@ pub struct PFilterResult {
     /// `prequential::build_trace` with the observation series to build
     /// a `PrequentialTrace`.
     pub prequential: Option<PrequentialRecorded>,
+    /// One entry per stop and scheduled stream, in stop order and then stream
+    /// order, populated when `SMCConfig.record_stream_means = true`.
+    pub stream_means: Option<Vec<StreamMeanStep>>,
     /// Why the log-likelihood is `-inf`, when it is because every particle
     /// scored `-inf` at some observation: the first such observation that
     /// counts toward the log-likelihood. `None` for a filter that never lost
@@ -416,6 +451,9 @@ pub fn bootstrap_filter_recording_at<P: ProcessModel<State = ParticleState>>(
         Vec::with_capacity(n_obs)
     } else { Vec::new() };
 
+    // Stream-mean summaries (allocated only if requested).
+    let mut stream_means: Vec<StreamMeanStep> = Vec::new();
+
     // Prequential recording (allocated only if requested).
     let mut preq_times: Vec<f64> = if config.record_prequential {
         Vec::with_capacity(n_obs)
@@ -579,6 +617,39 @@ pub fn bootstrap_filter_recording_at<P: ProcessModel<State = ParticleState>>(
             } else {
                 0.0
             };
+        }
+
+        // The conditional mean of each scheduled stream, summarised under the
+        // weights before and after this stop is scored. `mean()` reads the
+        // state (with the just-folded `acc`) and draws nothing, so the
+        // filter's random streams and weights are untouched. A stream NOT
+        // scheduled at this stop has a NaN mean on every particle
+        // (multi-cadence, proposal 2026-06-10 §3.6) and gets no entry. The
+        // predictive weights are equal on the live particles: every stop
+        // starts from equal weights (the last stop resampled, or its weights
+        // were already equal, or it did not assimilate), and a dead particle's
+        // state is not a draw from anything.
+        if config.record_stream_means {
+            let per_particle: Vec<Vec<f64>> = swarm.states.iter()
+                .map(|s| obs_model.mean(s, obs_idx, params))
+                .collect();
+            let predictive_lw: Vec<f64> = (0..n_particles)
+                .map(|i| if deaths.is_dead(i) { f64::NEG_INFINITY } else { 0.0 })
+                .collect();
+            for stream in 0..obs_model.n_streams() {
+                let values: Vec<f64> = per_particle.iter()
+                    .map(|m| m.get(stream).copied().unwrap_or(f64::NAN))
+                    .collect();
+                if values.iter().all(|v| v.is_nan()) {
+                    continue;
+                }
+                stream_means.push(StreamMeanStep {
+                    obs_idx,
+                    stream,
+                    predictive: stream_mean_summary(&values, &predictive_lw),
+                    filtered: stream_mean_summary(&values, &swarm.log_weights),
+                });
+            }
         }
 
         // Explain a total loss of weight while the states still hold what was
@@ -866,6 +937,7 @@ pub fn bootstrap_filter_recording_at<P: ProcessModel<State = ParticleState>>(
         final_states: Some(swarm.states),
         ancestry,
         prequential,
+        stream_means: if config.record_stream_means { Some(stream_means) } else { None },
         collapse,
     })
 }
@@ -873,18 +945,54 @@ pub fn bootstrap_filter_recording_at<P: ProcessModel<State = ParticleState>>(
 /// Weighted mean and quantiles from log-weighted samples.
 /// Returns (mean, q05, q50, q95).
 fn weighted_quantiles(values: &[f64], log_weights: &[f64]) -> (f64, f64, f64, f64) {
-    let n = values.len();
-    if n == 0 {
+    if values.is_empty() {
         return (0.0, 0.0, 0.0, 0.0);
     }
+    let (mean, [q05, q50, q95]) =
+        weighted_mean_and_quantiles(values, &normalize_log_weights(log_weights), [0.05, 0.50, 0.95]);
+    (mean, q05, q50, q95)
+}
 
+/// [`StreamMeanSummary`] of `values` under `log_weights`: the same weighted
+/// mean and quantile rule as [`weighted_quantiles`] (the `--trace` columns),
+/// at the quartiles as well. NaN in every field when no weight is finite (the
+/// stop collapsed, or every particle is dead), since normalising would then
+/// fall back to uniform weights and summarise states the filter gave no
+/// weight; and NaN when a particle with weight has a non-finite mean, which
+/// has no place in a sort.
+fn stream_mean_summary(values: &[f64], log_weights: &[f64]) -> StreamMeanSummary {
+    let nan = StreamMeanSummary {
+        mean: f64::NAN, q05: f64::NAN, q25: f64::NAN, q50: f64::NAN, q75: f64::NAN, q95: f64::NAN,
+    };
+    if !log_weights.iter().any(|w| w.is_finite()) {
+        return nan;
+    }
     let weights = normalize_log_weights(log_weights);
+    if values.iter().zip(&weights).any(|(v, &w)| w > 0.0 && !v.is_finite()) {
+        return nan;
+    }
+    // Weightless particles (dead, or scored -inf) may carry a NaN mean; they
+    // take no part in the summary.
+    let (values, weights): (Vec<f64>, Vec<f64>) = values.iter().zip(&weights)
+        .filter(|(_, &w)| w > 0.0)
+        .map(|(&v, &w)| (v, w))
+        .unzip();
+    let (mean, [q05, q25, q50, q75, q95]) =
+        weighted_mean_and_quantiles(&values, &weights, [0.05, 0.25, 0.50, 0.75, 0.95]);
+    StreamMeanSummary { mean, q05, q25, q50, q75, q95 }
+}
 
+/// The weighted mean of `values` and their weighted quantiles at `probs`,
+/// for normalised `weights`: the smallest value whose cumulative weight, in
+/// ascending order of value, reaches `p`.
+fn weighted_mean_and_quantiles<const K: usize>(
+    values: &[f64], weights: &[f64], probs: [f64; K],
+) -> (f64, [f64; K]) {
     // Weighted mean
-    let mean: f64 = values.iter().zip(&weights).map(|(&v, &w)| v * w).sum();
+    let mean: f64 = values.iter().zip(weights).map(|(&v, &w)| v * w).sum();
 
     // Weighted quantiles: sort by value, walk cumulative weight
-    let mut sorted: Vec<(f64, f64)> = values.iter().zip(&weights).map(|(&v, &w)| (v, w)).collect();
+    let mut sorted: Vec<(f64, f64)> = values.iter().zip(weights).map(|(&v, &w)| (v, w)).collect();
     sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
     let quantile = |p: f64| -> f64 {
@@ -896,5 +1004,5 @@ fn weighted_quantiles(values: &[f64], log_weights: &[f64]) -> (f64, f64, f64, f6
         sorted.last().map_or(0.0, |&(v, _)| v)
     };
 
-    (mean, quantile(0.05), quantile(0.50), quantile(0.95))
+    (mean, probs.map(quantile))
 }

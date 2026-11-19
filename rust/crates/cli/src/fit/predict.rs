@@ -4286,6 +4286,7 @@ fn one_step_bands(
         record_ancestry: false,
         record_prequential: true,
         record_predictions: false, // gh#520: one-step-ahead draws come from `.prequential`, not `.predictions`
+        record_stream_means: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         // D78: the sampler the fit ran, as the forecast does. Both samplers
         // draw exactly Binomial(n, p), but from different random numbers, so a
@@ -4984,6 +4985,7 @@ mod tests {
             predictions: None,
             final_states: None,
             ancestry: None,
+            stream_means: None,
             prequential: Some(PrequentialRecorded {
                 obs_times: vec![7.0, 14.0],
                 log_liks: vec![vec![-5.0, -5.0], vec![-5.0, -5.0]],

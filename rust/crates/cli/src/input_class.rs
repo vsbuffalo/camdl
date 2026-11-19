@@ -247,6 +247,7 @@ pub const PFILTER: &[(&str, InputClass)] = &[
     ("save_paths", Presentation),
     ("n_paths", Presentation),
     ("save_filtering", Presentation),
+    ("save_filtered_streams", Presentation),
     ("save_prequential", Presentation),
     ("score_from", Presentation),
     ("no_save_samples", Presentation),

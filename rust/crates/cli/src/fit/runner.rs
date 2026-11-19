@@ -681,6 +681,7 @@ impl FitRunConfig {
             // `.log_likelihood`; every other caller of `..config.smc_config()`
             // is likewise a likelihood-only or prequential-only evaluation.
             record_predictions: false,
+            record_stream_means: false,
             // gh#241: deterministic compute budget (engine default); no
             // wall-clock watchdog. See the IF2Config above.
             max_substeps: sim::inference::degeneracy::ITER_BUDGET,

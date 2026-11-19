@@ -99,6 +99,7 @@ fn replicates_with_a_per_run_output_is_refused() {
         ("--save-final-state", "final.tsv"),
         ("--save-paths", "paths.tsv"),
         ("--save-filtering", "filtering.tsv"),
+        ("--save-filtered-streams", "streams.tsv"),
         ("--save-prequential", "preq"),
     ] {
         let out = pfilter(tmp.path(), &fx, &["--replicates", "2", flag, value]);

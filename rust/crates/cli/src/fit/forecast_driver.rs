@@ -325,6 +325,7 @@ pub(crate) fn fixed_origin_forecast(
         record_ancestry: config.record_expected,
         record_prequential: true,
         record_predictions: false,
+        record_stream_means: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: config.binomial,
     };

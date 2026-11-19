@@ -114,6 +114,9 @@ pub(crate) struct PfilterOutputs {
     /// `--save-paths` with `--n-paths`.
     pub save_paths: Option<(usize, String)>,
     pub save_filtering: Option<String>,
+    /// `--save-filtered-streams`: each stream's conditional mean, summarised
+    /// before and after each step is scored.
+    pub save_filtered_streams: Option<String>,
     pub save_prequential: Option<String>,
     /// `--score-from`: the window the prequential trace scores.
     pub score_from: Option<String>,
@@ -174,6 +177,7 @@ pub(crate) fn resolve(
         save_paths,
         n_paths,
         save_filtering,
+        save_filtered_streams,
         save_prequential,
         score_from,
         no_save_samples,
@@ -241,6 +245,7 @@ pub(crate) fn resolve(
         output: output.as_ref().map(path),
         save_paths: save_paths.as_ref().map(|p| (*n_paths, path(p))),
         save_filtering: save_filtering.as_ref().map(path),
+        save_filtered_streams: save_filtered_streams.as_ref().map(path),
         save_prequential: save_prequential.clone(),
         score_from: score_from.clone(),
         save_samples: !*no_save_samples,

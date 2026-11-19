@@ -276,6 +276,7 @@ fn ic_free_skips_the_first_observation_not_union_index_zero() {
         record_ancestry: false,
         record_prequential: false,
         record_predictions: false,
+        record_stream_means: false,
         max_substeps: u64::MAX,
         binomial: sim::rng::BinomialAlgorithm::Btpe,
     };

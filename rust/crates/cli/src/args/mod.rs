@@ -1838,6 +1838,15 @@ pub struct PfilterArgs {
     #[arg(long)]
     pub save_filtering: Option<PathBuf>,
 
+    /// Write, per observation step and stream, the weighted mean and
+    /// 5/25/50/75/95% quantiles over the particles of the stream's conditional
+    /// mean E[y_t | x_t, θ] (e.g. rho × the step's accumulated flow), twice:
+    /// `predictive` (before y_t is scored, given the data through the step
+    /// before) and `filtered` (after, given the data through t). Columns:
+    /// time, stream, phase, mean, q05, q25, q50, q75, q95.
+    #[arg(long)]
+    pub save_filtered_streams: Option<PathBuf>,
+
     /// Write {STEM}.tsv (the joint log score and ESS per step),
     /// {STEM}.streams.tsv (each stream's observed value, predictive band,
     /// log score, CRPS and PIT per step) + {STEM}.json (full typed

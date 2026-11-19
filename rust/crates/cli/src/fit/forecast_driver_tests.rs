@@ -485,7 +485,7 @@ fn a_targets_start_leaves_the_observed_likelihood_unchanged() {
         let process = ChainBinomialProcess::new(compiled);
         let smc = SMCConfig {
             n_particles: 200, dt: 1.0, t_start: 0.0, skip_first_obs_from_loglik: false,
-            record_ancestry: false, record_prequential: false, record_predictions: false,
+            record_ancestry: false, record_prequential: false, record_predictions: false, record_stream_means: false,
             max_substeps: sim::inference::degeneracy::ITER_BUDGET,
             binomial: sim::rng::BinomialAlgorithm::Btpe,
         };

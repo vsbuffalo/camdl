@@ -158,6 +158,7 @@ fn x0_per_particle(compiled: &Arc<CompiledModel>, params: &[f64]) -> Vec<Vec<f64
         record_ancestry: true,
         record_prequential: false,
         record_predictions: false, // FlatObs has n_streams() == 0; nothing to predict
+        record_stream_means: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
@@ -285,6 +286,7 @@ fn a_swarm_of_one_or_zero_particles_does_not_panic() {
             // keep exercising the `has_predictions` empty-swarm probe this
             // test exists to cover (see the comment above).
             record_predictions: true,
+            record_stream_means: false,
             max_substeps: sim::inference::degeneracy::ITER_BUDGET,
             binomial: sim::rng::BinomialAlgorithm::Btpe,
         };

@@ -3112,12 +3112,13 @@ their end, since a state filtered through held-out rows would be a forecast
 origin that has seen the data its forecast is scored against (gh#1138). Every
 per-run output of that run then covers the training rows only: the
 log-likelihood, `--trace`, `--save-prequential`, `--save-paths`,
-`--save-filtering` and `--pf-health`. `--score-from` is refused beside a cut
-that dropped rows, since every row it could score trained. When the cut drops a
-row, the training rows it kept enter the run's `config` level; a cut that drops
-nothing keeps the run_id of the same run without `--save-final-state`. An
-anchored cutoff resolves over the fit config's own files, so a run that binds
-only the training rows with `--data` cuts nothing and saves the same state.
+`--save-filtering`, `--save-filtered-streams` and `--pf-health`. `--score-from`
+is refused beside a cut that dropped rows, since every row it could score
+trained. When the cut drops a row, the training rows it kept enter the run's
+`config` level; a cut that drops nothing keeps the run_id of the same run
+without `--save-final-state`. An anchored cutoff resolves over the fit config's
+own files, so a run that binds only the training rows with `--data` cuts nothing
+and saves the same state.
 
 - `holdout_after` is a bare model time, a date (the instant that day begins), or
   an observation-anchored expression (`last_obs - 6 weeks`). Its anchors resolve
@@ -7703,6 +7704,10 @@ camdl fit predict [FIT]
 --save-paths FILE           smoothing-distribution trajectory samples
 --n-paths N                 how many, for --save-paths (default 1)
 --save-filtering FILE       per-step particle states and log-weights
+--save-filtered-streams FILE
+                            per step and stream, quantiles of E[y_t | x_t, θ]
+                            before (`predictive`) and after (`filtered`) y_t is
+                            scored
 --save-prequential STEM     {STEM}.tsv (joint score per step) + {STEM}.streams.tsv
                             (per-stream scores) + {STEM}.json
 --no-save-samples           with --save-prequential, drop per-particle samples

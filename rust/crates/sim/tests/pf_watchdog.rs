@@ -188,6 +188,7 @@ fn bootstrap_filter_bails_on_ess_collapse() {
         skip_first_obs_from_loglik: false,
         record_ancestry: false, record_prequential: false,
         record_predictions: false,
+        record_stream_means: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
@@ -597,6 +598,7 @@ fn bootstrap_filter_iteration_budget_aborts_pre_window() {
         skip_first_obs_from_loglik: false,
         record_ancestry: false, record_prequential: false,
         record_predictions: false,
+        record_stream_means: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
@@ -695,6 +697,7 @@ fn an_empty_swarm_does_not_panic_the_bootstrap_filter() {
         record_ancestry: false,
         record_prequential: false,
         record_predictions: false, // TimeGridObs has n_streams() == 0
+        record_stream_means: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
