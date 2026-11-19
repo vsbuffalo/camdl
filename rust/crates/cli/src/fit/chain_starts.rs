@@ -1017,10 +1017,18 @@ fn sample_gamma_shape_rate(rng: &mut StatefulRng, shape: f64, rate: f64) -> f64 
     }
 }
 
-/// `from_posterior`: one row per chain, drawn uniformly with replacement
-/// from a draws TSV. An explicit source that cannot bind every estimated
-/// parameter — a missing column or an unparseable cell — is a hard error,
-/// never a silent bounds-uniform fallback (gh#274).
+/// `from_posterior`: one row per chain from a draws TSV, drawn without
+/// replacement. The eligible rows (the whole file, or a chain subset's) are put
+/// in a seeded random order and chain `i` takes the `i`-th, so when there are
+/// at least as many rows as chains every chain starts from a distinct row.
+/// With fewer rows than chains each row is used before any is reused (chain
+/// `i` takes the `i mod n`-th), and a warning says how many chains share a
+/// start: chains that start together are not independent starts, which is
+/// what a between-chain diagnostic such as R̂ assumes.
+///
+/// An explicit source that cannot bind every estimated parameter — a missing
+/// column or an unparseable cell — is a hard error, never a silent
+/// bounds-uniform fallback (gh#274).
 fn draw_from_posterior(
     resolved: &ResolvedParameters,
     path: &Path,
@@ -1102,9 +1110,24 @@ fn draw_from_posterior(
     // The literal is grouped to spell its mnemonic, not in equal-width groups.
     #[allow(clippy::unusual_byte_groupings)]
     let mut rng = StatefulRng::new(seed ^ 0xb05_e_05u64);
+    // A seeded Fisher–Yates shuffle of the eligible rows; chain `i` takes the
+    // `i`-th (cycling when there are fewer rows than chains).
+    let mut order = eligible.clone();
+    for i in (1..order.len()).rev() {
+        let j = ((rng.uniform() * (i + 1) as f64).floor() as usize).min(i);
+        order.swap(i, j);
+    }
+    if order.len() < n_chains {
+        crate::out::detached().say(format_args!(
+            "{w} starts = {{ from_posterior = .. }}: {} chains but only {} eligible row(s) in `{}`, \
+             so {} chain(s) reuse a row another chain starts from. Chains that share a start \
+             are not independent starts; use a source with at least {} rows, or fewer chains.",
+            n_chains, order.len(), path.display(), n_chains - order.len(), n_chains,
+            w = crate::out::paint::warning_tag(),
+        ));
+    }
     let starts: Vec<ChainStart> = (0..n_chains).map(|chain_id| {
-        let pick = (rng.uniform() * eligible.len() as f64).floor() as usize;
-        let row_idx = eligible[pick.min(eligible.len() - 1)];
+        let row_idx = order[chain_id % order.len()];
         let mut values = HashMap::with_capacity(names.len());
         for (k, name) in names.iter().enumerate() {
             values.insert((*name).clone(), parsed[row_idx][k]);
@@ -1970,29 +1993,58 @@ mod tests {
         assert_eq!(rows[2].reason, "PF degenerate: EssCollapsed");
     }
 
+    fn posterior_rows(starts: &DrawnStarts) -> Vec<usize> {
+        starts.starts.iter().map(|cs| match &cs.source {
+            InitSource::PosteriorRow { row, .. } => *row,
+            other => panic!("unexpected source {other:?}"),
+        }).collect()
+    }
+
+    /// A file with exactly as many rows as chains: every row is used once.
+    /// Drawn with replacement, 8 chains over 8 rows reused rows and skipped
+    /// others (a real run started from rows 5,2,5,6,6,7,6,1).
     #[test]
-    fn from_posterior_samples_uniformly_with_replacement() {
-        // Tiny TSV with 4 rows; draw 50 chains and verify all rows
-        // get used (with replacement → expect ≥3 of 4 distinct).
+    fn from_posterior_assigns_distinct_rows_when_the_file_has_enough() {
+        let resolved = mk_resolved(
+            vec![mk_param("beta", 0.3, None, Some((0.0, 1.0)))],
+            &["beta"],
+        );
+        let path = write_tmp("from_post_exact",
+            "beta\n0.10\n0.20\n0.30\n0.40\n0.50\n0.60\n0.70\n0.80\n");
+        for seed in [1, 42, 7, 2026] {
+            let rows = posterior_rows(&draw(&resolved, &from_posterior(&path), 8, seed).unwrap());
+            let mut sorted = rows.clone();
+            sorted.sort_unstable();
+            assert_eq!(sorted, (0..8).collect::<Vec<_>>(),
+                "seed {seed}: 8 chains over 8 rows must use each row once, got {rows:?}");
+            // Deterministic by seed.
+            assert_eq!(rows, posterior_rows(&draw(&resolved, &from_posterior(&path), 8, seed).unwrap()));
+        }
+        // More rows than chains: still distinct, and a different seed gives a
+        // different assignment.
+        let rows_a = posterior_rows(&draw(&resolved, &from_posterior(&path), 4, 1).unwrap());
+        let rows_b = posterior_rows(&draw(&resolved, &from_posterior(&path), 4, 2).unwrap());
+        assert_eq!(rows_a.iter().collect::<HashSet<_>>().len(), 4, "{rows_a:?}");
+        assert_ne!(rows_a, rows_b, "the assignment must depend on the seed");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Fewer rows than chains: every row is used before any is reused, so the
+    /// reuse is spread evenly (each row by 50 / 4 = 12 or 13 chains).
+    #[test]
+    fn from_posterior_with_fewer_rows_than_chains_uses_every_row_evenly() {
         let resolved = mk_resolved(
             vec![mk_param("beta", 0.3, None, Some((0.0, 1.0)))],
             &["beta"],
         );
         let path = write_tmp("from_post_sampling",
             "beta\n0.10\n0.20\n0.30\n0.40\n");
-        let starts = draw(&resolved, &from_posterior(&path), 50, 42).unwrap();
-        // All values should be from {0.10, 0.20, 0.30, 0.40}.
-        let allowed: [f64; 4] = [0.10, 0.20, 0.30, 0.40];
-        let used: HashSet<i64> = starts.starts.iter()
-            .map(|cs| (cs.values["beta"] * 100.0).round() as i64)
-            .collect();
-        for u in &used {
-            assert!(allowed.iter().any(|a| ((*a * 100.0).round() as i64) == *u),
-                "value {} not in allowed {:?}", u, allowed);
-        }
-        assert!(used.len() >= 3,
-            "expected ≥ 3 distinct rows used in 50 draws, got {}: {:?}",
-            used.len(), used);
+        let rows = posterior_rows(&draw(&resolved, &from_posterior(&path), 50, 42).unwrap());
+        let mut counts = [0usize; 4];
+        for r in &rows { counts[*r] += 1; }
+        assert!(counts.iter().all(|&c| c == 12 || c == 13), "uneven reuse: {counts:?}");
+        let first_four: HashSet<usize> = rows[..4].iter().copied().collect();
+        assert_eq!(first_four.len(), 4, "the first four chains must take the four rows: {rows:?}");
         std::fs::remove_file(&path).ok();
     }
 
