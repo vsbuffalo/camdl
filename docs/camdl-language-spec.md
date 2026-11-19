@@ -4959,6 +4959,9 @@ init {
 ```
 
 Unlisted compartments default to 0. Expressions can reference parameters.
+They are evaluated at the start of the run, `t = t_start` (`simulate { from }`),
+so an entry that reads `t` or a forcing takes its value at that instant, not
+at `t = 0`.
 
 An entry for a compartment with an Erlang dwell (`via erlang`, §9.4.1) lands
 in its first stage. `stage(E, 2) = 10` places the value in another; there is no
