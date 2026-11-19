@@ -559,13 +559,13 @@ fn every_fit_handle_names_the_fits_problem() {
     assert!(ids.iter().all(|i| *i == ids[0]), "every handle names one problem: {ids:?}");
 }
 
-/// A point of `fit run --sweep` other than the file's own value is refused
-/// by every handle form, naming the parameter with both values: its fit
-/// folder archives the file's `[fixed]`, so surveying it would hold the
-/// un-swept value under the point's name. The point at the file's value
-/// agrees with its archive and is surveyed.
+/// A point of `fit run --sweep` named by its leaf directory, its problem
+/// folder or its run-id prefix is surveyed at the point's own value, which
+/// its fit folder's `fit.resolved.toml` holds: every form stores the bytes a
+/// survey of `fit_b.toml`, whose file writes the point's value, stores, and
+/// not those of the file's own value. The forms name one computation.
 #[test]
-fn a_sweep_point_handle_is_refused() {
+fn a_sweep_point_handle_surveys_at_the_points_value() {
     let fx = fx();
     let store = tempfile::tempdir().unwrap();
     let with_method = format!(
@@ -575,15 +575,18 @@ fn a_sweep_point_handle_is_refused() {
     let fit_path = store.path().join("fit_a.toml");
     std::fs::write(&fit_path, with_method).unwrap();
     let fitted = run_into(store.path(), &Invocation::new(&fx, &["fit", "run", &fit_path.to_string_lossy(), "--sweep", "gamma=0.2,0.25"]));
-    let (same, other) = sweep_points(&fitted, "gamma", 0.2);
+    let (_, other) = sweep_points(&fitted, "gamma", 0.2);
+    assert_eq!(segment_fixed(&other.dir, "gamma"), Some(0.25));
+    let written = run(&sv_fit(&fx, "fit_b.toml", &[])).bytes(KIND);
+    let unswept = run(&sv_fit(&fx, "fit_a.toml", &[])).bytes(KIND);
+    assert!(!written.is_empty());
+    assert_ne!(written, unswept, "the swept value changes what a survey stores");
     let segment = other.dir.parent().unwrap().parent().unwrap().to_string_lossy().into_owned();
+    let mut ids = Vec::new();
     for h in [other.dir.to_string_lossy().into_owned(), segment, other.run_id[..12].to_string()] {
-        let out = run_in(store.path(), &sv_fit(&fx, "fit_a.toml", &[]).set("--fit", &h));
-        let err = String::from_utf8_lossy(&out.stderr);
-        assert!(!out.status.success(), "--fit {h}: the sweep point is refused:\n{err}");
-        assert!(err.contains("gamma = 0.2 in the archive, 0.25 in the run"), "names the parameter and both values:\n{err}");
-        assert!(err.contains("sweep point cannot be named by a handle"), "{err}");
+        let s = run_into(store.path(), &sv_fit(&fx, "fit_a.toml", &[]).set("--fit", &h));
+        assert_eq!(s.bytes(KIND), written, "--fit {h}: the survey of the point's value");
+        ids.push(s.ids(KIND));
     }
-    let s = run_into(store.path(), &sv_fit(&fx, "fit_a.toml", &[]).set("--fit", &same.dir.to_string_lossy()));
-    assert!(!s.ids(KIND).is_empty(), "the point at the archived value is surveyed");
+    assert!(ids.iter().all(|i| *i == ids[0]), "every handle names one computation: {ids:?}");
 }

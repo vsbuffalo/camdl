@@ -672,8 +672,8 @@ pub fn resolve_fit_run(s: &str) -> Result<ResolvedFit, ResolveError> {
 
 /// The fit problem a `--fit` handle names, for a command that reads a fit's
 /// problem but none of its results (`pfilter`, `profile`, `survey`): the
-/// config text, where its relative paths are anchored, and the configuration
-/// parsed from it.
+/// config as the user wrote it, the configuration resolved from it, where its
+/// relative paths are anchored, and the configuration parsed.
 ///
 /// The handle forms are `fit predict`'s. A `fit.toml` names the problem the
 /// file states as it now reads (gh#896: a `fit.toml` names the run the file
@@ -681,73 +681,39 @@ pub fn resolve_fit_run(s: &str) -> Result<ResolvedFit, ResolveError> {
 /// before any fit runs keeps working; a problem a fit run's command line
 /// changed (`fit run --allow-forcing-extrapolation`) is not the file's, and is
 /// not read through it. A leaf directory, `@label`, run-id or fit-id prefix,
-/// or problem folder names a stored fit, whose archived config is read: the
-/// config the fit ran under, a flag's problem value written in (gh#1268).
+/// or problem folder names a stored fit, whose `fit.resolved.toml` is read: the
+/// config the fit ran under, a flag's problem value written in (gh#1268) and a
+/// sweep point's own `[fixed]`.
 ///
-/// Two things the archive does not hold. A sweep point's values: its folder
-/// archives the file's `[fixed]`, so a reader of `[fixed]` refuses such a
-/// handle ([`FitProblem::refuse_a_sweep_point`]). And the run's own method:
-/// the archive's `[method]` is the file's, while a folder holds every method
-/// run on its problem and a method flag (`--starts`, a sampler flag) is
-/// recorded in the leaf, not folded into the archive; `profile`, the one
-/// reader of the fit's `[method]` (its nl-* budget and `starts`), reads the
-/// file's. Both lift when a fit's resolved config is stored (D93).
+/// One thing the resolved config does not hold: the run's own method. Its
+/// `[method]` is the file's, while a folder holds every method run on its
+/// problem and a method flag (`--starts`, a sampler flag) is recorded in the
+/// leaf; `profile`, the one reader of the fit's `[method]` (its nl-* budget
+/// and `starts`), reads the file's.
 pub(crate) struct FitProblem {
     /// The handle as typed, for messages.
     pub handle: String,
-    /// The config text, read once: the fit file, or the stored fit's archived
-    /// config (`fit.toml.original`).
-    pub text: String,
+    /// The config as the user wrote it, read once: the fit file, or the stored
+    /// fit's `fit.toml.original`. What a reader that archives the config
+    /// (`profile`) stores as its own `fit.toml.original`, and hashes.
+    pub original: String,
+    /// The configuration resolved from `original`, as a fit folder stores it
+    /// ([`crate::fit::run_config::resolved_config_text`]): the stored fit's
+    /// `fit.resolved.toml`, or, for a fit file, its resolution with no
+    /// command-line value. What `profile` stores as its own
+    /// `fit.resolved.toml`.
+    pub resolved: String,
     /// The path the config's relative paths were written against: the file
     /// itself, or the stored fit's source config (`<segment>/<source_config>`).
     /// Where a reader that archives the config (`profile`'s sidecar) records
     /// it as written.
     pub anchor: PathBuf,
-    /// `text`, parsed and anchored at `anchor`.
+    /// The configuration, parsed and anchored at `anchor`.
     pub config: FitConfig,
-    /// For a stored fit, the fixed values its fit folder records it ran at
-    /// (`fit.meta.json` `fixed`), which [`Self::refuse_a_sweep_point`] checks
-    /// against the archived config; `None` for a `fit.toml`.
-    pub ran_fixed: Option<std::collections::BTreeMap<String, f64>>,
 }
 
 impl FitProblem {
-    /// Refuse a stored fit whose fit folder ran at fixed values its archived
-    /// config does not state: a point of `fit run --sweep`, whose folder
-    /// archives the file's `[fixed]`, not the point's. A reader that takes the
-    /// problem's `[fixed]` (`profile`, `survey`) would otherwise compute the
-    /// un-swept problem under the point's name. The refusal names each
-    /// parameter with the archived and the run value. A `fit.toml`, and a
-    /// stored fit whose record agrees with its archive, pass.
-    pub fn refuse_a_sweep_point(&self) -> Result<(), String> {
-        let Some(ran) = &self.ran_fixed else { return Ok(()) };
-        let problem = &self.config.problem;
-        let archived = problem.fixed.resolve().unwrap_or_else(|_| problem.fixed.values.clone());
-        let differs: Vec<String> = ran
-            .iter()
-            .filter_map(|(name, &v)| match archived.get(name) {
-                Some(&a) if a != v => Some(format!("{name} = {a} in the archive, {v} in the run")),
-                None if problem.estimate.contains_key(name) => {
-                    Some(format!("{name} estimated in the archive, fixed at {v} in the run"))
-                }
-                _ => None,
-            })
-            .collect();
-        if differs.is_empty() {
-            return Ok(());
-        }
-        Err(format!(
-            "--fit {} names a fit that ran at fixed values its stored config does not state \
-             ({}): a point of `fit run --sweep`, whose fit folder archives the file's [fixed], \
-             not the point's. A sweep point cannot be named by a handle yet. Name the \
-             problem by a fit.toml whose [fixed] holds the point's values.",
-            self.handle,
-            differs.join("; ")
-        ))
-    }
-
-    /// The config's file name, for messages (`fit.toml`, or
-    /// `fit.toml.original` of a stored fit).
+    /// The handle's file name, for messages.
     pub fn name(&self) -> String {
         Path::new(&self.handle)
             .file_name()
@@ -770,7 +736,12 @@ pub(crate) fn resolve_fit_problem(s: &str) -> Result<FitProblem, ResolveError> {
             .map_err(|e| ResolveError::NotFound(format!("cannot read fit config {}: {e}", path.display())))?;
         let config = FitConfig::parse_anchored_at(&text, &path, &path)
             .map_err(|e| ResolveError::NotFound(format!("cannot load fit config {}: {e}", path.display())))?;
-        return Ok(FitProblem { handle: s.to_string(), text, anchor: path, config, ran_fixed: None });
+        let no_flag = crate::fit::run_config::ProblemFlags { allow_forcing_extrapolation: false };
+        let resolved = crate::fit::run_config::resolved_config_text(&text, no_flag, &config.problem.fixed)
+            .map_err(|e| ResolveError::NotFound(format!("fit config {}: {e}", path.display())))?;
+        return Ok(FitProblem {
+            handle: s.to_string(), original: text, resolved, anchor: path, config,
+        });
     }
     let segment = match resolve_target(s)? {
         FitTarget::Segment(seg) => seg,
@@ -778,22 +749,24 @@ pub(crate) fn resolve_fit_problem(s: &str) -> Result<FitProblem, ResolveError> {
             .map_err(ResolveError::NotFound)?
             .ok_or_else(|| ResolveError::NotFound(format!("{} is not inside a fit's directory", l.dir.display())))?,
     };
-    let (text, anchor, config) = read_segment_config(&segment).map_err(ResolveError::NotFound)?;
-    let ran_fixed = crate::run_meta::read_fit_sidecar(&segment)
-        .map_err(ResolveError::NotFound)?
-        .map(|side| side.fixed);
-    Ok(FitProblem { handle: s.to_string(), text, anchor, config, ran_fixed })
+    let (resolved, anchor, config) = read_segment_config(&segment).map_err(ResolveError::NotFound)?;
+    let archived = segment.join(crate::run_meta::ARCHIVED_CONFIG);
+    let original = std::fs::read_to_string(&archived)
+        .map_err(|e| ResolveError::NotFound(format!("cannot read {}: {e}", archived.display())))?;
+    Ok(FitProblem { handle: s.to_string(), original, resolved, anchor, config })
 }
 
 /// Recover the config for a segment reached by run-dir / `@label` / hash.
 ///
-/// The archived `fit.toml.original` is the authoritative record of the config
-/// that produced this fit — the file the user still has on disk may have drifted
-/// since. So the archive is what we read, always; there is no "prefer the live
-/// original" branch, because a live original that still matched would parse to
-/// the same config anyway.
+/// The stored `fit.resolved.toml` is the authoritative record of the config
+/// this fit ran under — the file the user still has on disk may have drifted
+/// since, and holds neither a command-line override nor a sweep point's values.
+/// So the resolved config is what we read, always; there is no "prefer the
+/// live original" branch. A folder written before fit folders stored one is
+/// refused, naming the re-run that writes it; the verbatim `fit.toml.original`
+/// beside it is never read in its place.
 ///
-/// What the archive cannot carry is its own *location*. Data archival is not yet
+/// What the stored config cannot carry is its own *location*. Data archival is not yet
 /// part of the sealed packet (Phase 1 archives only the model IR), so the data
 /// still lives where the config says — at paths written relative to the
 /// **source config's directory**, not to the segment. Anchoring them at the
@@ -817,8 +790,8 @@ fn load_config_for_segment(segment: &Path) -> Result<FitConfig, String> {
     read_segment_config(segment).map(|(_, _, config)| config)
 }
 
-/// [`load_config_for_segment`], with the archived text it parsed and the path
-/// that text's relative paths are anchored at.
+/// [`load_config_for_segment`], with the resolved config's text it parsed and
+/// the path that text's relative paths are anchored at.
 fn read_segment_config(segment: &Path) -> Result<(String, PathBuf, FitConfig), String> {
     let side = crate::run_meta::read_fit_sidecar(segment)?.ok_or_else(|| {
         format!(
@@ -835,19 +808,19 @@ fn read_segment_config(segment: &Path) -> Result<(String, PathBuf, FitConfig), S
             segment.display()
         ));
     };
-    let archived = segment.join(crate::run_meta::ARCHIVED_CONFIG);
+    let resolved = crate::run_meta::require_resolved_config(segment)?;
     let anchor = segment.join(source_config);
     let unreadable = |e: String| {
         format!(
-            "{} is a fit directory but its archived config could not be read: {e}\n  \
+            "{} is a fit directory but its resolved config could not be read: {e}\n  \
              (expected {})",
             segment.display(),
-            archived.display()
+            resolved.display()
         )
     };
-    let text = std::fs::read_to_string(&archived)
-        .map_err(|e| unreadable(format!("cannot read {}: {e}", archived.display())))?;
-    let config = FitConfig::parse_anchored_at(&text, &archived, &anchor).map_err(unreadable)?;
+    let text = std::fs::read_to_string(&resolved)
+        .map_err(|e| unreadable(format!("cannot read {}: {e}", resolved.display())))?;
+    let config = FitConfig::parse_anchored_at(&text, &resolved, &anchor).map_err(unreadable)?;
     refuse_missing_data(&config, &side, &anchor)?;
     let mut config = config;
     bind_stored_inputs(&mut config, segment, &side)?;
@@ -1137,6 +1110,39 @@ cooling = 0.7
         (tmp, toml_path, seg)
     }
 
+    /// Write `seg` as `fit run` writes a fit folder made from the file at
+    /// `toml_path` with no option: the sidecar, the file as read and its
+    /// resolved config.
+    fn write_fit_folder(
+        seg: &Path,
+        toml_path: &Path,
+        side: &crate::run_meta::FitSidecar,
+    ) -> std::io::Result<()> {
+        let text = std::fs::read_to_string(toml_path)?;
+        let fixed = FitConfig::from_toml_str(&text).expect("a fit file").problem.fixed;
+        let no_flag = crate::fit::run_config::ProblemFlags { allow_forcing_extrapolation: false };
+        let resolved = crate::fit::run_config::resolved_config_text(&text, no_flag, &fixed)
+            .expect("a resolved config");
+        crate::run_meta::write_fit_sidecar_with_config(seg, toml_path, &text, &resolved, Path::new(""), side)
+    }
+
+    /// A fit folder an older camdl wrote, with `fit.toml.original` but no
+    /// `fit.resolved.toml`, is refused, naming the re-run that writes it; the
+    /// verbatim file is never read in its place.
+    #[test]
+    fn a_fit_folder_without_a_resolved_config_is_refused_naming_the_rerun() {
+        let (tmp, toml_path, seg) = portable_project("no_resolved");
+        write_fit_folder(&seg, &toml_path, &Default::default()).unwrap();
+        resolve_fit(&seg.to_string_lossy()).unwrap_or_else(|e| panic!("a current folder resolves: {e}"));
+        std::fs::remove_file(seg.join(crate::run_meta::RESOLVED_CONFIG)).unwrap();
+        assert!(seg.join(crate::run_meta::ARCHIVED_CONFIG).is_file());
+        let err = resolve_fit(&seg.to_string_lossy()).err().expect("no resolved config").to_string();
+        assert!(err.contains("has no fit.resolved.toml"), "{err}");
+        assert!(err.contains("written by an older camdl"), "{err}");
+        assert!(err.contains("Re-run the fit"), "{err}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn archived_config_anchors_at_the_recorded_toml_dir() {
         // gh#652: the archived config's `../data/streams/cases.tsv` must resolve
@@ -1148,7 +1154,7 @@ cooling = 0.7
         let side = crate::run_meta::FitSidecar {
             ..Default::default()
         };
-        crate::run_meta::write_fit_sidecar(&seg, &toml_path, Path::new(""), &side).unwrap();
+        write_fit_folder(&seg, &toml_path, &side).unwrap();
         // The live original is GONE — the archive is all that is left, which is
         // exactly the case the segment-anchored resolution got wrong.
         std::fs::remove_file(&toml_path).unwrap();
@@ -1180,7 +1186,7 @@ cooling = 0.7
     #[test]
     fn the_source_config_is_recorded_relative_to_the_fit_folder() {
         let (tmp, toml_path, seg) = portable_project("relative");
-        crate::run_meta::write_fit_sidecar(&seg, &toml_path, Path::new(""), &Default::default()).unwrap();
+        write_fit_folder(&seg, &toml_path, &Default::default()).unwrap();
         let side = crate::run_meta::read_fit_sidecar(&seg).unwrap().unwrap();
         assert_eq!(side.source_config.as_deref(), Some("../../../fits/a.toml"));
         assert_eq!(side.schema_version, crate::run_meta::FIT_META_SCHEMA_VERSION);
@@ -1198,7 +1204,7 @@ cooling = 0.7
             data_hashes: std::collections::BTreeMap::from([("cases".to_string(), "b39b0a43".to_string())]),
             ..Default::default()
         };
-        crate::run_meta::write_fit_sidecar(&seg, &toml_path, Path::new(""), &side).unwrap();
+        write_fit_folder(&seg, &toml_path, &side).unwrap();
         std::fs::remove_file(tmp.join("data/streams/cases.tsv")).unwrap();
         let err = resolve_fit(&seg.to_string_lossy()).err().expect("the data is gone").to_string();
         assert!(err.contains("stream `cases`"), "{err}");
@@ -1224,7 +1230,7 @@ cooling = 0.7
                     .map(|(k, v)| (k.to_string(), v.to_string())).collect(),
                 ..Default::default()
             };
-            crate::run_meta::write_fit_sidecar(&seg, &toml_path, Path::new(""), &side).unwrap();
+            write_fit_folder(&seg, &toml_path, &side).unwrap();
             let err = resolve_fit(&seg.to_string_lossy()).err().expect("the holdout is gone").to_string();
             assert!(err.contains("holdout stream `cases`") && err.contains("holdout.tsv")
                     && err.contains(expect), "{slug}: {err}");
@@ -1324,7 +1330,7 @@ cooling = 0.7
             fit_toml_hash: crate::hashing::sha256_hex(archived.as_bytes()),
             ..Default::default()
         };
-        crate::run_meta::write_fit_sidecar(&seg, &toml_path, Path::new(""), &side).unwrap();
+        write_fit_folder(&seg, &toml_path, &side).unwrap();
         let leaf = plant_run(&seg, Some(&[config_identity(archived).unwrap()]));
         std::fs::write(&toml_path, live).unwrap();
         (resolve_config(&toml_path).map(|r| r.0.dir), leaf, tmp)
@@ -1452,7 +1458,7 @@ cooling    = 0.70
         let side = crate::run_meta::FitSidecar {
             ..Default::default()
         };
-        crate::run_meta::write_fit_sidecar(&seg, &toml_path, Path::new(""), &side).unwrap();
+        write_fit_folder(&seg, &toml_path, &side).unwrap();
         let a = plant_run(&seg, Some(&[config_identity(ARCHIVED).unwrap()]));
         let b = seg.join("if2-11111111").join("seed_1-00000000");
         std::fs::create_dir_all(&b).unwrap();

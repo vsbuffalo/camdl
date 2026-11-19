@@ -220,6 +220,13 @@ impl Stored {
             .map(|l| l.levels.get(level).unwrap_or_else(|| panic!("{kind} leaf has no `{level}` level: {:?}", l.levels)).clone())
             .collect()
     }
+    /// The stored bytes of every leaf of `kind`, sorted, without their run
+    /// ids: what two runs computed, whatever each was keyed by.
+    pub fn bytes(&self, kind: &str) -> Vec<BTreeMap<String, String>> {
+        let mut out: Vec<BTreeMap<String, String>> = self.of(kind).values().map(|l| l.files.clone()).collect();
+        out.sort();
+        out
+    }
     /// The kind, run id and stored bytes of every leaf of `kind`.
     pub fn result(&self, kind: &str) -> Vec<(String, BTreeMap<String, String>)> {
         self.of(kind).values().map(|l| (l.run_id.clone(), l.files.clone())).collect()

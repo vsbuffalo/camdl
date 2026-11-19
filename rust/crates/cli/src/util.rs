@@ -3430,7 +3430,7 @@ pub fn combine_fit_scenario(
 /// no-op at best and a double scale at worst.
 ///
 /// The selection is read from the fit config — for a stored fit, the archived
-/// `fit.toml.original` — and the fit level's identity hashes that config's
+/// `fit.resolved.toml` — and the fit level's identity hashes that config's
 /// problem half whole (`fit::cas`), so it is already part of the fit's
 /// `run_id`; nothing new needs recording on the leaf.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

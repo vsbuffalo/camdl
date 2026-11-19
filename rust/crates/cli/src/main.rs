@@ -4243,7 +4243,7 @@ fn simulate_on_bound_design(
 /// for an anchored `--to`, from the fit's `[data.observations]` bindings.
 /// `--fit` accepts a fit toml, run directory, `@label`, or hash — the same
 /// resolution `fit predict` uses (`fit::handle::resolve_fit`; for a run dir
-/// the archived `fit.toml.original` is the fallback, whose relative data
+/// the stored `fit.resolved.toml` is the fallback, whose relative data
 /// paths resolve against the segment — co-located data only, the same limit
 /// `fit predict <run-dir>` has). Streams load through the same shared seam as
 /// pfilter/profile, so dated time columns, long-form families, and holes

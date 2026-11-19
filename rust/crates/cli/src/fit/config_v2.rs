@@ -2676,7 +2676,7 @@ fn validate_method_keys(contents: &str, method: &Method) -> Result<(), String> {
 
 /// Refuse the `[method]` keys this file's method leaves inert. Run by
 /// `fit run` only, on the file it is about to run — never by the shared
-/// parser, which also reads stored fits' archived `fit.toml.original` for
+/// parser, which also reads stored fits' `fit.resolved.toml` for
 /// `fit table` and handle resolution: a fit stored before a key became
 /// refused must stay listable.
 pub fn refuse_inert_method_keys_in(contents: &str, method: &Method) -> Result<(), String> {
@@ -2828,7 +2828,7 @@ impl FitConfig {
     ///
     /// The two coincide for a config loaded from where the user wrote it — that
     /// is [`load`](Self::load). They diverge for the copy archived inside a fit
-    /// segment (`fit.toml.original`): its relative `[model] camdl` /
+    /// segment (`fit.resolved.toml`): its relative `[model] camdl` /
     /// `[data.observations]` paths were written against the *original* fit.toml
     /// directory, so anchoring them at the archive's own location resolves
     /// `../data/x.tsv` to `results/fits/data/x.tsv` — a path that never existed

@@ -157,12 +157,6 @@ pub(crate) fn resolve(
         let f = crate::fit::handle::resolve_fit_problem(&handle.to_string_lossy()).unwrap_or_else(|e| {
             out.fail(format!("error: --fit {}: {e}", handle.display()));
         });
-        // The survey holds the fit's [fixed]: a sweep point's archive does not
-        // hold the point's values, so it is refused rather than surveyed as
-        // the un-swept problem.
-        if let Err(e) = f.refuse_a_sweep_point() {
-            out.fail(format!("error: {e}"));
-        }
         f
     });
     let problem = fit.as_ref().map(|f| &f.config.problem);
