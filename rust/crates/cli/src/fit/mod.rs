@@ -2686,6 +2686,8 @@ fn build_fit_sidecar(
         .collect();
     let calendar = ir::caltime::CalendarAxis::from_model(model).map_err(|e| e.to_string())?;
     Ok(crate::run_meta::FitSidecar {
+        // Stamped by `write_fit_sidecar_with_config`.
+        store_layout: runid::STORE_LAYOUT,
         table_hashes: data.tables_hex(),
         // A fit's label is its run's, on the leaf (gh#896); the sidecar
         // describes the problem.

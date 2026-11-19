@@ -416,6 +416,7 @@ mod tests {
             std::fs::write(leaf.join("run.json"), rec).unwrap();
         }
         let sidecar = FitSidecar {
+            store_layout: runid::STORE_LAYOUT,
             label: Some("a fit".into()),
             table_hashes: Default::default(),
             model_identity: "f00d".repeat(16),

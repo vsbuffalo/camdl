@@ -26,6 +26,19 @@ use crate::kind::ArtifactKind;
 /// stale and is recomputed.
 pub const FORMAT_VERSION: u16 = 2;
 
+/// The current store layout: what a folder of the store holds beside its
+/// record, as a whole number every command that writes a folder records
+/// (`run.json`'s [`RunRecord::store_layout`], and a fit folder's
+/// `fit.meta.json`). Unlike [`FORMAT_VERSION`], which is the record's own
+/// schema, it versions the files around the record, so an older folder is
+/// brought up to date in place by `camdl dev migrate`, one step per number,
+/// rather than recomputed. A record without the field is layout 0; only the
+/// migration reads that absence.
+///
+/// 1: a fit folder that keeps its fit file (`fit.toml.original`) keeps the
+/// configuration its fits ran under beside it (`fit.resolved.toml`).
+pub const STORE_LAYOUT: u32 = 1;
+
 /// `kind` strings an older camdl wrote, each with the name it now has. A record
 /// carrying one does not deserialize; this table only lets a reader say why.
 pub(crate) const RENAMED_KINDS: &[(&str, &str)] = &[("fit_stage", "fit_method")];
@@ -278,6 +291,11 @@ pub struct RunRecord {
     pub kind: ArtifactKind,
     pub run_id: ContentHash,
     pub hash_version: u16,
+    /// The store layout of the folder this record is in ([`STORE_LAYOUT`]
+    /// when this camdl wrote it). Absent, and so 0, in a record written
+    /// before layouts were numbered. Recorded, not hashed.
+    #[serde(default)]
+    pub store_layout: u32,
     /// The IR schema version (e.g. `"0.7"`) — a string, matching `ir/VERSION`.
     pub ir_version: String,
     /// The build fingerprint of the engine that computed the run (the CLI's
@@ -384,6 +402,7 @@ mod output_schema_tests {
             kind: ArtifactKind::Sim,
             run_id: ContentHash::digest_bytes(b"x"),
             hash_version: 1,
+            store_layout: STORE_LAYOUT,
             ir_version: "0.0".to_string(),
             engine_version: "test".to_string(),
             engine_switches: Vec::new(),
@@ -413,6 +432,7 @@ mod output_schema_tests {
             kind: ArtifactKind::FitMethod,
             run_id: ContentHash::digest_bytes(b"x"),
             hash_version: 1,
+            store_layout: STORE_LAYOUT,
             ir_version: "0.0".to_string(),
             engine_version: "test".to_string(),
             engine_switches: Vec::new(),
@@ -440,5 +460,37 @@ mod output_schema_tests {
         let unknown = json.replace(r#""kind":"fit_method""#, r#""kind":"no_such_kind""#);
         assert!(renamed_kind(unknown.as_bytes()).is_none(), "only a renamed kind is explained");
         assert!(renamed_kind(b"not json").is_none());
+    }
+
+    /// A record states its store layout; one written before layouts were
+    /// numbered has no field, and reads as layout 0.
+    #[test]
+    fn a_record_without_a_store_layout_reads_as_layout_zero() {
+        let current = RunRecord {
+            format_version: FORMAT_VERSION,
+            kind: ArtifactKind::Sim,
+            run_id: ContentHash::digest_bytes(b"x"),
+            hash_version: 1,
+            store_layout: STORE_LAYOUT,
+            ir_version: "0.0".to_string(),
+            engine_version: "test".to_string(),
+            engine_switches: Vec::new(),
+            levels: vec![],
+            deps: vec![],
+            status: RunStatus::Completed,
+            failure: None,
+            artifacts: BTreeMap::new(),
+            output_schema: BTreeMap::new(),
+            children: BTreeMap::new(),
+            calendar: ir::caltime::CalendarAxis::parse("days", None).unwrap(),
+            inputs: serde_json::Value::Null,
+            provenance: Provenance::default(),
+        };
+        let json = serde_json::to_string(&current).unwrap();
+        assert!(json.contains(&format!(r#""store_layout":{STORE_LAYOUT}"#)), "{json}");
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value.as_object_mut().unwrap().remove("store_layout");
+        let old: RunRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(old.store_layout, 0);
     }
 }

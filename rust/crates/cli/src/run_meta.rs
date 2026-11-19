@@ -708,6 +708,15 @@ pub struct FitSidecar {
     /// the caller set; [`read_fit_sidecar`] refuses any other.
     #[serde(default)]
     pub schema_version: u32,
+    /// The folder's store layout ([`runid::STORE_LAYOUT`]), set by
+    /// [`write_fit_sidecar`] and [`write_fit_sidecar_with_config`] whatever the
+    /// caller set, and kept as read by [`store_fit_sidecar`]. Absent, and so 0,
+    /// in a record written before layouts were numbered; a reader of the
+    /// folder's stored config refuses any layout but the current one
+    /// ([`require_resolved_config`]), and `camdl dev migrate` brings an older
+    /// folder up to it.
+    #[serde(default)]
+    pub store_layout: u32,
     /// A profile's label. A fit segment's sidecar carries none: a fit's label
     /// lives on its runs' `run.json` (`provenance.label`, gh#896).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -854,6 +863,7 @@ impl Default for FitSidecar {
     fn default() -> Self {
         FitSidecar {
             schema_version: 0,
+            store_layout: 0,
             table_hashes: BTreeMap::new(),
             label: None,
             source_model: None,
@@ -1004,6 +1014,7 @@ fn write_fit_sidecar_archiving(
 ) -> std::io::Result<()> {
     std::fs::create_dir_all(fit_segment)?;
     let mut sidecar = sidecar.clone();
+    sidecar.store_layout = runid::STORE_LAYOUT;
     sidecar.source_config = None;
     sidecar.source_model = if model_path.is_file() {
         Some(relative_path(fit_segment, model_path)?)
@@ -1212,6 +1223,34 @@ mod tests {
         let why = check_fit_summary_schema(&other, "mh_summary.json")
             .expect_err("a tag this camdl does not read is refused too");
         assert!(why.contains("v99") && why.contains(FIT_SUMMARY_SCHEMA), "{why}");
+    }
+
+    /// Writing a fit folder stamps the current store layout whatever the
+    /// caller set; rewriting a sidecar that was read back keeps the layout it
+    /// read, so an update to an older folder does not claim the files a newer
+    /// layout promises.
+    #[test]
+    fn the_store_layout_is_stamped_on_write_and_kept_on_a_rewrite() {
+        let dir = std::env::temp_dir().join(format!(
+            "camdl_layout_{}_{}", std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let bare = FitSidecar::default();
+        assert_eq!(bare.store_layout, 0);
+        write_fit_sidecar(&dir, std::path::Path::new("nonexistent.toml"), std::path::Path::new(""), &bare)
+            .unwrap();
+        assert_eq!(read_fit_sidecar(&dir).unwrap().unwrap().store_layout, runid::STORE_LAYOUT);
+
+        let mut old = read_fit_sidecar(&dir).unwrap().unwrap();
+        old.store_layout = 0;
+        store_fit_sidecar(&dir, &old).unwrap();
+        assert_eq!(read_fit_sidecar(&dir).unwrap().unwrap().store_layout, 0, "a rewrite keeps the layout");
+        let text = std::fs::read_to_string(dir.join("fit.meta.json")).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        value.as_object_mut().unwrap().remove("store_layout");
+        std::fs::write(dir.join("fit.meta.json"), value.to_string()).unwrap();
+        assert_eq!(read_fit_sidecar(&dir).unwrap().unwrap().store_layout, 0, "no field is layout 0");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The recorded training partition is the §3.7.3(b) proof, and a rerun
