@@ -637,15 +637,17 @@ order because camdl reads them in order; so the same configuration always gives
 the same bytes. Relative `[model]`, `[data]` and `output_dir` paths in it
 resolve against the fit file's directory, below. Reading a stored config checks
 its `[fixed]` against the values `fit.meta.json` records the fit running at and
-refuses a difference, naming each parameter. A command that can run without a
-fit (`simulate --draws posterior --fit` on a bare directory of draws) refuses a
-fit folder whose stored config cannot be read, rather than running without it.
-Its `[method]` is the file's: a fit folder holds every method run on its
-problem, and each run's own method settings are in its `run.json` (`inputs`).
-One command-line value a fit's identity keys is not written in: `--emit-every`,
-the cadence `[synthetic]` data are generated at. It has no fit-file spelling,
-and it reaches the fits only through the generated data, whose bytes key each
-synthetic fit, so two synthetic fits that differ only by it store the same
+refuses a difference, naming each parameter; `pfilter`, `profile` and `survey`
+`--fit`, which also read and key the stored `fit.toml.original`, refuse one
+whose SHA-256 is not `fit_toml_hash`. A command that can run without a fit
+(`simulate --draws posterior --fit` on a bare directory of draws) refuses a fit
+folder whose stored config cannot be read, rather than running without it. Its
+`[method]` is the file's: a fit folder holds every method run on its problem,
+and each run's own method settings are in its `run.json` (`inputs`). One
+command-line value a fit's identity keys is not written in: `--emit-every`, the
+cadence `[synthetic]` data are generated at. It has no fit-file spelling, and it
+reaches the fits only through the generated data, whose bytes key each synthetic
+fit, so two synthetic fits that differ only by it store the same
 `fit.resolved.toml`. Neither file enters any identity. A fit folder written
 before camdl stored `fit.resolved.toml` is at store layout 0 (§2.7), and every
 reader of a stored fit's config refuses it, naming `camdl dev migrate <folder>`,
@@ -1510,10 +1512,20 @@ fit wrote, or one a migration wrote before it stopped), that file's text below
 its header against the derived text; an agreeing file is kept as written. A
 CLI-only fit holds no configuration and a leaf holds nothing that changed, so
 both have their layout raised alone. So does a profile folder: no reader takes a
-configuration from one, and its resolved configuration cannot be derived from
-what it records (a profile of a stored fit stores that fit's, under the fit's
-flags rather than its own), so a profile folder migrated from layout 0 keeps
-only its `fit.toml.original`.
+configuration from one (a `--fit` handle naming a profile's folder, or a profile
+point, is refused as such, naming the fit config it profiles), and its resolved
+configuration cannot be derived from what it records (a profile of a stored fit
+stores that fit's, under the fit's flags rather than its own), so a profile
+folder migrated from layout 0 keeps only its `fit.toml.original`.
+
+**Folders this step refuses.** From c60d0401c until `fit.resolved.toml`, a fit
+run with `--allow-forcing-extrapolation` stored its fit file with the flag
+folded in (the file parsed, `[config] allow_forcing_extrapolation = true` set,
+the table written back), while `fit_toml_hash` hashes the file as read. The file
+the fit read is then in no record, so the stored file cannot be checked, and
+such a folder is refused, saying so: re-run the fit with this camdl. A fit
+folder whose `fit.toml.original` is not its `fit_toml_hash` for any other reason
+is refused as not the file the fit read.
 
 **Adding a step.** Raise `runid::STORE_LAYOUT`, append a step to
 `store_migrate::STEPS` whose `from` is the previous layout (precondition,
