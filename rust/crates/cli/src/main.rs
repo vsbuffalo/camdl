@@ -1069,6 +1069,7 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
         (Some(raw), _) => Some(crate::obs_anchor::StartOverride::parse("--from", raw, &model_raw)
             .unwrap_or_else(|e| { out.fail(format!("error: {e}")); })),
         (None, Some(fit_ref)) => simulate_fit_config_start(fit_ref)
+            .unwrap_or_else(|e| { out.fail(format!("error: --fit {}: {e}", fit_ref.display())); })
             .map(|raw| crate::obs_anchor::StartOverride::parse("[simulate] from", &raw, &model_raw))
             .transpose()
             .unwrap_or_else(|e| { out.fail(format!("error: {e}")); }),
@@ -4284,28 +4285,44 @@ fn resolve_simulate_obs_anchors(
 /// Read from the config text alone, without binding its data: `--fit` serves
 /// several purposes (`--draws posterior`, `--init-state fit`, anchors), each of
 /// which resolves and checks the fit its own way and reports its own errors. A
-/// handle that names no readable config yields no start here, and the purpose
-/// that needs the fit refuses it.
-fn simulate_fit_config_start(fit_ref: &std::path::Path) -> Option<String> {
+/// handle that names no readable config (no fit there, a bare directory of
+/// draws, a CLI-only fit) yields no start here, and the purpose that needs the
+/// fit refuses it. A fit folder that keeps a config it cannot be read under
+/// (another store layout, its resolved config gone) is `Err`: passed over, the
+/// run would start where the model says rather than where the fit did.
+fn simulate_fit_config_start(fit_ref: &std::path::Path) -> Result<Option<String>, String> {
     use crate::fit::handle::{FitRef, FitTarget};
     let raw = fit_ref.to_string_lossy();
     let text = match FitRef::classify(&raw) {
-        FitRef::Config(path) => std::fs::read_to_string(path).ok()?,
+        FitRef::Config(path) => match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(_) => return Ok(None),
+        },
         _ => {
-            let segment = match crate::fit::handle::resolve_target(&raw).ok()? {
-                FitTarget::Segment(seg) => seg,
-                FitTarget::Leaf(l) => crate::fit::fit_view::leaf_segment(&l.dir).ok()??,
+            let segment = match crate::fit::handle::resolve_target(&raw) {
+                Ok(FitTarget::Segment(seg)) => seg,
+                Ok(FitTarget::Leaf(l)) => match crate::fit::fit_view::leaf_segment(&l.dir) {
+                    Ok(Some(seg)) => seg,
+                    _ => return Ok(None),
+                },
+                Err(_) => return Ok(None),
             };
-            std::fs::read_to_string(crate::run_meta::require_resolved_config(&segment).ok()?).ok()?
+            let keeps_a_config = crate::run_meta::read_fit_sidecar(&segment)?
+                .is_some_and(|side| side.source_config.is_some());
+            if !keeps_a_config {
+                return Ok(None);
+            }
+            let path = crate::run_meta::require_resolved_config(&segment)?;
+            std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?
         }
     };
-    let doc: toml::Table = text.parse().ok()?;
-    match doc.get("simulate")?.get("from")? {
-        toml::Value::String(s) => Some(s.clone()),
-        toml::Value::Integer(i) => Some(i.to_string()),
-        toml::Value::Float(f) => Some(f.to_string()),
+    let Ok(doc) = text.parse::<toml::Table>() else { return Ok(None) };
+    Ok(match doc.get("simulate").and_then(|s| s.get("from")) {
+        Some(toml::Value::String(s)) => Some(s.clone()),
+        Some(toml::Value::Integer(i)) => Some(i.to_string()),
+        Some(toml::Value::Float(f)) => Some(f.to_string()),
         _ => None,
-    }
+    })
 }
 
 /// The problem `simulate --fit` names. A bare fit.toml needs NO completed run;

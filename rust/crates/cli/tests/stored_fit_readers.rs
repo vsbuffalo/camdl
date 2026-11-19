@@ -70,3 +70,29 @@ fn a_stored_fit_whose_original_is_not_the_files_is_refused() {
         assert!(said.contains("fit_toml_hash") && said.contains("fit.toml.original"), "{what}: {said}");
     }
 }
+
+/// `simulate --fit <run handle>` reads the config's `[simulate] from` from
+/// the stored fit. A fit folder whose config cannot be read (here, one an
+/// older camdl wrote, at layout 0) is refused naming the migration, not
+/// passed over to run from the model's own start.
+#[test]
+fn simulate_refuses_a_stored_fit_whose_config_it_cannot_read() {
+    let fx = Fixture::new("stored_fit_readers");
+    fx.write("fit.toml", &format!("{}[simulate]\nfrom = -7\n", fit_config("gamma = 0.2\nrho = 0.5")));
+    let leaf = fx.fit(&["fit.toml", "--seed", "1"]).remove(0);
+    let handle = fx.dir.join(&leaf).to_string_lossy().into_owned();
+    let sim = || fx.camdl(&["simulate", "m.camdl", "--fit", &handle, "--param", "beta=0.3", "--param", "gamma=0.2",
+                            "--param", "rho=0.5", "--seed", "1", "--stdout", "--progress", "none"]);
+    ok(&sim());
+
+    let folder = fx.folder(&leaf);
+    std::fs::remove_file(folder.join("fit.resolved.toml")).unwrap();
+    let meta = folder.join("fit.meta.json");
+    let mut v = json(&meta);
+    v.as_object_mut().unwrap().remove("store_layout");
+    set_json(&meta, &v);
+    let out = sim();
+    let said = text(&out);
+    assert!(!out.status.success(), "a layout-0 fit folder must not be passed over:\n{said}");
+    assert!(said.contains(&format!("camdl dev migrate {}", folder.display())), "{said}");
+}
