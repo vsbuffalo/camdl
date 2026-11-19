@@ -2388,7 +2388,7 @@ Examples:
 
   # Inspect a forcing function over time
   camdl dev eval sir.camdl --params p.toml \\
-      --expr \"seasonal(t)\" --from 0 --to 365
+      --expr \"seasonal\" --from 0 --to 365
 "))]
 pub struct EvalArgs {
     /// IR JSON or .camdl model file
