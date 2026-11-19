@@ -21,6 +21,7 @@ diagnostic emit-site that isn't in the catalog.
 - **`W2xx` — IR / compiler warnings** (suspicious but legal expressions)
 - **`W3xx` — covariate / forcing warnings** (alignment, interpolation)
 - **`I3xx` — dimensional-analysis info** (undetermined dimensions, etc.)
+- **`I4xx` — schedule / forcing info** (how a forcing is evaluated)
 - **`L4xx` — lints** (semantically valid but discouraged patterns)
 
 ## Errors
@@ -517,6 +518,7 @@ matter, of whether the step changes the answer. Fits with methods other than
 | ---- | -------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | I300 | Info     | dimensional | parameter dimension could not be determined (annotate with a more specific kind)                                                                                                                                                                                                                                                       |
 | I316 | Info     | dimensional | a log-normal `mu` or `sigma` is directly a parameter with a dimension (`mu = mu_r`, `mu_r : rate`): those arguments are log-coordinates in model units, so a rate's value there is probably meant as `log(mu_r)` or as a `real dim 1` log-coordinate. Advisory only; never constrains a dimension (2026-11-06 dimension checking §5.9) |
+| I401 | Info     | forcing     | a range-form `periodic` forcing's period is not a whole number of `step`s, so its `round(period / step)` bins are `period / n` wide rather than `step` (365.25 days in 1-day steps: 365 bins of 1.000685 days), and bin edges drift from the step grid. Advisory only                                                                  |
 
 ## Lints
 

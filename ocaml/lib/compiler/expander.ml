@@ -10360,6 +10360,36 @@ let expand_time_function_one ctx fname (env : (string * string) list)
             1.0 in
           let n_bins = (period_f /. step_f +. 0.5) |> int_of_float in
           let arr = Array.make n_bins 0.0 in
+          (* The runtime divides the period into n_bins equal bins
+             (period / n_bins wide), not bins of width step. When period /
+             step is not a whole number the two differ, and the bin edges
+             fall off the step grid: 365.25 days in 1-day steps is 365 bins
+             of 1.000685 days, so bin 182 starts 0.125 days after day 182.
+             Not an error; said so the drift is visible. *)
+          if n_bins > 0
+             && Float.abs (period_f /. step_f -. float_of_int n_bins) > 1e-9 then begin
+            let tu = unit_lit_to_string ctx.time_unit in
+            let width = period_f /. float_of_int n_bins in
+            let mid = n_bins / 2 in
+            Diagnostics.info ctx.diags ~code:"I401" ~loc:Diagnostics.no_loc
+              ~message:(Printf.sprintf
+                "periodic time function '%s': period %g %s is not a whole \
+                 number of steps of %g %s, so its %d bins are each %.7g %s \
+                 wide, not %g"
+                fname period_f tu step_f tu n_bins width tu step_f)
+              ~detail:(Printf.sprintf
+                "bin i covers i x %.7g to (i + 1) x %.7g %s, so bin edges \
+                 fall partway through a step and drift from the step grid: \
+                 bin %d starts at %.6g, not %g. Each period restarts at a \
+                 multiple of %g %s, so the drift also shifts the bins \
+                 against the step grid from one period to the next."
+                width width tu mid (float_of_int mid *. width)
+                (float_of_int mid *. step_f) period_f tu)
+              ~hint:"to keep bin edges on whole steps, make the period a \
+                     whole number of steps (e.g. period = 365 'days with \
+                     step = 1 'days)"
+              ()
+          end;
           (* Extract ranges from the on = [...] expression *)
           let ranges = match on_expr with
             | EList items -> items

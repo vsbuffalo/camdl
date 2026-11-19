@@ -11692,6 +11692,44 @@ let test_gh1148_past_period_bound_fractional_period () =
       simulate { from = 0 'days  to = 30 'days }
     |})
 
+(* I401: a range-form periodic forcing whose period is not a whole number of
+   steps. The runtime divides the period into round(period / step) equal bins,
+   so 365.25 days in 1-day steps is 365 bins of 1.000685 days and the bin
+   edges drift off the day grid. Said, never refused. *)
+let test_i401_periodic_fractional_bins_noted () =
+  let d = expect_diag ~severity:Diagnostics.Info ~code:"I401"
+      ({|
+        time_unit = 'days
+        compartments { S, I }
+        parameters { beta : rate  N0 : count }
+        forcing {
+          school : periodic 'ratio {
+            period = 365.25 'days
+            step   = 1 'days
+            on     = [7 'days : 100 'days]
+          }
+        }
+        transitions { inf : S --> I @ beta * school * S }
+        init { S = N0 }
+        simulate { from = 0 'days  to = 30 'days }
+      |}) in
+  if not (contains_substring ~needle:"365 bins are each 1.000685 days wide"
+            d.message) then
+    Alcotest.failf "I401 should state the bin width, got: %s" d.message
+
+let test_i401_periodic_whole_bins_silent () =
+  (* A period that is a whole number of steps (52 weekly bins in 364 days,
+     365 daily bins in 365 days) says nothing. *)
+  List.iter (fun src ->
+      match compile_with_diags src with
+      | Error e -> Alcotest.failf "expected compile success but got: %s" e
+      | Ok d ->
+        let i401 = List.filter (fun (x : Diagnostics.diagnostic) ->
+            x.code = "I401") (diags_of_detail d) in
+        Alcotest.(check int) "no I401" 0 (List.length i401))
+    [ gh1148_weekly_model "7 'days : 13 'days";
+      gh1135_periodic_on_model "7 'days : 100 'days" ]
+
 let test_typed_time_w324_bare_numeric_simulate_warning () =
   let src = {|
     time_unit = 'days
@@ -19416,6 +19454,10 @@ let () =
         `Quick test_gh1148_past_period_bound_is_last_bin_end;
       Alcotest.test_case "gh#1148 E406 past-period bound with a fractional period"
         `Quick test_gh1148_past_period_bound_fractional_period;
+      Alcotest.test_case "I401 periodic period not a whole number of steps"
+        `Quick test_i401_periodic_fractional_bins_noted;
+      Alcotest.test_case "I401 silent when the period is whole steps"
+        `Quick test_i401_periodic_whole_bins_silent;
       (* Rule 5 (W324, W325): bare-numeric in time positions. *)
       Alcotest.test_case "W324 bare-numeric simulate.from/to warns under origin"
         `Quick test_typed_time_w324_bare_numeric_simulate_warning;
