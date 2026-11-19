@@ -374,9 +374,7 @@ which is the natural input back into a multi-cadence fit.
 ### The `--trace` output
 
 ```
-time  ll_increment  ESS    pred_mean  pred_q05  pred_q50  pred_q95  observed
-7     -7.84         17.4   42.3       5         31        112       82
-14    -5.37         217.7  51.2       12        45        98        98
+time  ll_increment  ESS  obs_mean  obs_q05  obs_q50  obs_q95  state_mean  state_q05  state_q50  state_q95  observed
 ```
 
 **ll_increment:** How surprising this observation was. More negative = more
@@ -388,9 +386,14 @@ is extremely unlikely given the model."
 filter is collapsing — increase N or check the model. Above 90% means the
 observation is uninformative (the model already knew what to expect).
 
-**pred_q05/q50/q95:** The filter's prediction before seeing the data. If
-`observed` falls between q05 and q95 about 90% of the time, the model is
-well-calibrated.
+**obs_q05/q50/q95:** The filter's prediction of the observation before seeing
+it, observation noise included. If `observed` falls between q05 and q95 about
+90% of the time, the model is well-calibrated.
+
+**state_mean, state_q05/q50/q95:** The same one-step prediction without the
+observation noise: the distribution over the particles of the observation
+model's conditional mean `E[y_t | x_t, θ]`, summed over the streams scheduled at
+that step ("Prediction quantiles" below).
 
 ### The `--pf-health` output — "do I have enough particles?"
 
