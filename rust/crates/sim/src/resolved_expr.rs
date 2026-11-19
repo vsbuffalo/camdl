@@ -93,29 +93,37 @@ pub enum ResolvedExpr {
     PerEvalRef(usize),
 }
 
-/// Returns true if the expression references compartment state (Pop, PopSum).
-/// Used to check whether an expression can be evaluated at a fixed state
-/// or needs per-particle evaluation.
-pub fn references_state(expr: &ResolvedExpr) -> bool {
+/// Returns true if the expression references compartment state (Pop, PopSum),
+/// directly or through a hoisted binding body in `bindings`
+/// (`resolved.bindings`, slot order). Used to check whether an expression can
+/// be evaluated at a fixed state or needs per-particle evaluation.
+///
+/// A `BindingRef` is followed into its body rather than assumed state-derived:
+/// the compiler also hoists a parameter-free constant `let` (`let s2 = 0.08
+/// 'days`) into a binding, and treating every binding as state made such a
+/// constant read as compartment state at every call site of this check.
+/// Evaluating a `BindingRef` outside the propensity cache recomputes its body
+/// on demand (`eval_resolved`), so a state-free body is exact at any state.
+pub fn references_state(expr: &ResolvedExpr, bindings: &[ResolvedExpr]) -> bool {
+    let read = |e: &ResolvedExpr| references_state(e, bindings);
     match expr {
         ResolvedExpr::IntPop(_)
         | ResolvedExpr::RealPop(_)
         | ResolvedExpr::IntPopSum(_)
         | ResolvedExpr::MixedPopSum { .. } => true,
-        ResolvedExpr::BinOp { left, right, .. } =>
-            references_state(left) || references_state(right),
-        ResolvedExpr::UnOp { arg, .. } => references_state(arg),
-        ResolvedExpr::Cond { pred, then_, else_ } =>
-            references_state(pred) || references_state(then_) || references_state(else_),
-        ResolvedExpr::TableLookup { index, .. } => references_state(index),
-        ResolvedExpr::UncheckedDim { inner } => references_state(inner),
-        ResolvedExpr::Reduce(terms) => terms.iter().any(references_state),
-        // Hoisted bindings are state-derived (N/I_agg/F read compartments).
-        ResolvedExpr::BindingRef(_) => true,
+        ResolvedExpr::BinOp { left, right, .. } => read(left) || read(right),
+        ResolvedExpr::UnOp { arg, .. } => read(arg),
+        ResolvedExpr::Cond { pred, then_, else_ } => read(pred) || read(then_) || read(else_),
+        ResolvedExpr::TableLookup { index, .. } => read(index),
+        ResolvedExpr::UncheckedDim { inner } => read(inner),
+        ResolvedExpr::Reduce(terms) => terms.iter().any(read),
+        // Bindings are topologically ordered (a body references only earlier
+        // slots), so this recursion terminates. A slot outside `bindings` is
+        // treated as state, the conservative answer.
+        ResolvedExpr::BindingRef(slot) => bindings.get(*slot).is_none_or(read),
         // gh#272: per-eval bindings are param/table-only by construction —
         // `CompiledModel::new` rejects any state (or time-varying) reference via
         // `per_eval_staging_violation` (gh#284) — so they never reference state.
-        // The contrast with BindingRef above is the keystone invariant boundary.
         ResolvedExpr::PerEvalRef(_) => false,
         _ => false,
     }

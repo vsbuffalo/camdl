@@ -2455,7 +2455,7 @@ impl CompiledModel {
         // Incident: 2026-04-22-observation-sampler-scratch-state.md.
         for (tr, od) in model.transitions.iter().zip(&overdispersion) {
             if let Some(od_expr) = od {
-                if crate::resolved_expr::references_state(od_expr) {
+                if crate::resolved_expr::references_state(od_expr, &resolved_bindings) {
                     return Err(SimError::Validation(format!(
                         "transition '{}': overdispersion σ² expression \
                          references compartment state (Pop / PopSum), which \
@@ -2566,7 +2566,7 @@ impl CompiledModel {
                         .map(|e| resolve_expr(e, &resolve_ctx))
                         .collect::<Result<_, _>>()?;
                     for r in &resolved {
-                        if crate::resolved_expr::references_state(r) {
+                        if crate::resolved_expr::references_state(r, &resolved_bindings) {
                             return Err(SimError::Validation(format!(
                                 "intervention '{}': `at [...]` schedule \
                                  expression references compartment state \

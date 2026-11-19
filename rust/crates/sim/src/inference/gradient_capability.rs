@@ -619,6 +619,7 @@ fn preflight_scheduled_effects(
             // hoisted binding): ∂amount/∂state is not emitted.
             if crate::resolved_expr::references_state(
                 &model.resolved.intervention_exprs[iv_idx][action_idx],
+                &model.resolved.bindings,
             ) {
                 return Err(SimError::Validation(format!(
                     "ODE gradient (nl-lbfgs): the amount of {} `{}`'s `{}` reads compartment \
