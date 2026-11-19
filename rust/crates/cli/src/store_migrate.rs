@@ -595,6 +595,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A fit whose roles formed no partition recorded `partition` as
+    /// `unresolved` and its `[fixed]` resolved as `fixed`; step 0 to 1 takes
+    /// the folder's `[fixed]` from that field, and verifies it.
+    #[test]
+    fn an_unresolved_partition_takes_the_fixed_values_the_record_holds() {
+        let root = crate::test_support::unique_temp_dir("migrate_unresolved");
+        let seg = root.join("fits").join("fit-00000000");
+        std::fs::create_dir_all(&seg).unwrap();
+        // The file allows forcing extrapolation itself, so no run record is
+        // needed to say whether the command line did.
+        let original = "[model]\ncamdl = \"m.camdl\"\n[estimate]\nbeta = { bounds = [0.05, 2.0] }\n\
+                        [fixed]\ngamma = 0.2\nrho = 0.5\n[config]\nallow_forcing_extrapolation = true\n";
+        std::fs::write(root.join("fit.toml"), original).unwrap();
+        std::fs::write(seg.join(ARCHIVED_CONFIG), original).unwrap();
+        let meta = serde_json::json!({
+            "schema_version": crate::run_meta::FIT_META_SCHEMA_VERSION,
+            "source_config": "../../fit.toml",
+            "model_identity": "",
+            "fit_toml_hash": crate::hashing::sha256_hex(original.as_bytes()),
+            "estimated": ["beta"],
+            "fixed": { "gamma": 0.2, "rho": 0.5 },
+            "partition": { "status": "unresolved", "reason": "a role the rules refuse" },
+            "calendar": { "days_per_unit": 1.0, "origin": null, "time_unit": "days" },
+        });
+        std::fs::write(seg.join("fit.meta.json"), meta.to_string()).unwrap();
+        let side = crate::run_meta::read_fit_sidecar(&seg).unwrap().unwrap();
+        assert!(matches!(side.partition, Some(crate::roles::PartitionField::Unresolved { .. })));
+        let folder = Folder::Record { dir: seg.clone(), side };
+        step0::check(&folder).unwrap();
+        let writes = step0::derive(&folder).unwrap();
+        step0::verify(&folder, &writes).unwrap();
+        let derived = crate::fit::config_v2::FitConfig::from_toml_str(&writes[0].text).unwrap();
+        let fixed = derived.problem.fixed.resolve().unwrap();
+        assert_eq!((fixed.get("gamma"), fixed.get("rho"), fixed.len()), (Some(&0.2), Some(&0.5), 2), "{}", writes[0].text);
+
+        // A record whose `fixed` disagrees with the file's inline value is
+        // refused, not written.
+        let mut wrong = meta.clone();
+        wrong["fixed"]["rho"] = serde_json::json!(0.6);
+        std::fs::write(seg.join("fit.meta.json"), wrong.to_string()).unwrap();
+        let side = crate::run_meta::read_fit_sidecar(&seg).unwrap().unwrap();
+        let folder = Folder::Record { dir: seg.clone(), side };
+        let writes = step0::derive(&folder).unwrap();
+        let err = step0::verify(&folder, &writes).unwrap_err();
+        assert!(err.contains("rho"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn the_steps_run_from_the_oldest_kept_to_the_current_layout() {
         for pair in STEPS.windows(2) {
