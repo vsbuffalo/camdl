@@ -4259,10 +4259,10 @@ fn simulate_on_bound_design(
 /// gh#626: resolve the global observation anchors (`first_obs`, `last_obs`)
 /// for an anchored `--to`, from the fit's `[data.observations]` bindings.
 /// `--fit` accepts a fit toml, run directory, `@label`, or hash — the same
-/// resolution `fit predict` uses (`fit::handle::resolve_fit`; for a run dir
-/// the stored `fit.resolved.toml` is the fallback, whose relative data
-/// paths resolve against the segment — co-located data only, the same limit
-/// `fit predict <run-dir>` has). Streams load through the same shared seam as
+/// resolution `fit predict` uses (`fit::handle::resolve_fit`; for a run
+/// handle the stored `fit.resolved.toml`, whose relative data paths resolve
+/// against the fit file's directory, `source_config` in `fit.meta.json`).
+/// Streams load through the same shared seam as
 /// pfilter/profile, so dated time columns, long-form families, and holes
 /// resolve exactly as at fit time; anchors fold over the training rows the
 /// config's `holdout_after` leaves, and rows whose value is `NA` count

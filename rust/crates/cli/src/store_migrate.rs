@@ -1,41 +1,10 @@
 //! `camdl dev migrate`: bring the folders of a store an older camdl wrote up
-//! to the current store layout ([`runid::STORE_LAYOUT`]), in place.
-//!
-//! Every folder of a store records the layout it was written at: a leaf in
-//! its `run.json` (`store_layout`), a fit or profile folder in its
-//! `fit.meta.json`. A record without the field is layout 0. A reader of a
-//! stored fit's configuration refuses a folder at any layout but the current
-//! one ([`check_layout`]); this module is the only code that reads an older
-//! one.
-//!
-//! **Steps.** [`STEPS`] lists one [`Step`] per layout number, `n` to `n + 1`,
-//! in order. A step has a precondition ([`Step::check`]), a derivation that
-//! reads only what the folder already records ([`Step::derive`], which returns
-//! the files to write), and a verification of what it derived
-//! ([`Step::verify`]), run before anything is written. A folder is taken
-//! through every step from its layout to the current one.
-//!
-//! **Never a guess.** A folder whose records are missing or disagree is
-//! refused with the reason and left as it was; the others are migrated, and
-//! the command exits non-zero.
-//!
-//! **Atomic per step.** Each file a step writes goes to a temporary file in
-//! the same directory and is renamed over its name
-//! ([`runid::write_file_atomic`]); the folder's layout is raised last, in its
-//! record, the same way. A crash leaves the folder at its old layout, with at
-//! most a file the step writes again on the next run (it verifies a file
-//! already there against what it derives).
-//!
-//! **Marked.** A file a migration writes opens with a header naming the step
-//! and the records it was derived from, so it is told apart from one the
-//! command that made the folder wrote.
-//!
-//! **Adding a step.** Raise [`runid::STORE_LAYOUT`], append a [`Step`] whose
-//! `from` is the previous layout, and make every reader of what the new
-//! layout adds check it ([`check_layout`]). **Retiring steps.** Before 1.0 a
-//! step older than the previous release may be dropped from the front of
-//! [`STEPS`]; a folder older than the oldest step kept is refused with its
-//! layout number ([`oldest_migratable`]).
+//! to the current store layout ([`runid::STORE_LAYOUT`]), in place. The
+//! layout, the command's guarantees (derive only from what a folder records,
+//! refuse rather than guess, atomic per step, a marked header) and how to add
+//! or retire a step are specified in `docs/camdl-run-spec.md` §2.7; this
+//! module is their one implementation, and the only code that reads a folder
+//! at an older layout. Readers refuse one through [`check_layout`].
 
 use std::path::{Path, PathBuf};
 
@@ -126,30 +95,11 @@ pub static STEPS: &[Step] = &[Step {
     verify: step0::verify,
 }];
 
-/// Layout 0 to 1: a fit folder that keeps its fit file (`fit.toml.original`)
-/// gains `fit.resolved.toml`.
-///
-/// What each folder kind gets:
-///
-/// - A fit folder (its leaves are fit runs) with a fit file: the resolved
-///   configuration, built by the function `fit run` builds it with
-///   ([`crate::fit::run_config::resolved_config_text_with`]) from three
-///   records: `fit.toml.original` (checked against `fit_toml_hash`), the
-///   `[fixed]` values `fit.meta.json`'s partition records the folder running
-///   at, and whether its runs' `run.json` record forcing extrapolation as
-///   allowed (the one command-line value of the problem half,
-///   [`crate::fit::run_config::ProblemFlags`]). It is verified as a reader
-///   parses it, against the recorded `[fixed]` and estimated names, and, when
-///   the folder already holds the file, against that file.
-/// - A fit folder made without a fit file (a CLI-only fit) holds no
-///   configuration: the layout is raised alone.
-/// - A profile folder: the layout is raised alone. No reader takes a
-///   configuration from a profile folder, and its resolved configuration
-///   cannot be derived from what it records (a profile of a stored fit stores
-///   that fit's, with the fit's flags rather than its own), so none is
-///   written; a profile folder migrated from layout 0 keeps only its
-///   `fit.toml.original`.
-/// - A leaf: the layout is raised alone; nothing a leaf holds changed.
+/// Layout 0 to 1: a fit folder that keeps its fit file gains
+/// `fit.resolved.toml`, built by the function `fit run` builds it with
+/// ([`crate::fit::run_config::resolved_config_text_with`]); every other folder
+/// has its layout raised alone. What each kind gets, and from which records,
+/// is the run spec's §2.7, "Step 0 to 1".
 mod step0 {
     use super::*;
 
@@ -160,13 +110,8 @@ mod step0 {
 # from what this folder recorded: fit.toml.original (the fit file as read; its
 # SHA-256 is fit_toml_hash in fit.meta.json), the [fixed] values fit.meta.json
 # records the fit running at (its partition), and whether the runs' run.json
-# record forcing extrapolation as allowed (--allow-forcing-extrapolation, the
-# one command-line value of the problem half). Below this header it is the
-# text `camdl fit run` writes for the same records: relative [model], [data]
-# and output_dir paths resolve against the fit file's directory (source_config
-# in fit.meta.json), a reader binds each [data.tables] input to its copy in
-# inputs/, [estimate], [data.observations] and [data.holdout] keep the file's
-# order and every other table is sorted, and [method] is the file's.
+# record forcing extrapolation as allowed. Below this header it is the text
+# `camdl fit run` writes for the same records (docs/camdl-run-spec.md, 2.7).
 ";
 
     /// What a folder is, for this step.
@@ -464,11 +409,10 @@ pub fn migrate(folder: Folder, dry_run: bool) -> Outcome {
     let mut folder = folder;
     let mut wrote = Vec::new();
     for step in STEPS.iter().filter(|s| s.from >= from) {
-        if folder.layout() != step.from {
-            return Outcome::Refused {
-                reason: format!("it is at layout {}, and the next step starts at {}", folder.layout(), step.from),
-            };
-        }
+        // The steps are consecutive from the oldest kept (checked above and
+        // by `the_steps_run_from_the_oldest_kept_to_the_current_layout`), and
+        // each raises the layout by one.
+        debug_assert_eq!(folder.layout(), step.from);
         let writes = match (step.check)(&folder)
             .and_then(|()| (step.derive)(&folder))
             .and_then(|w| (step.verify)(&folder, &w).map(|()| w))

@@ -1816,7 +1816,7 @@ fn run_profile(
                 Err(e) => out.fail(format!("error: --fit {}: {e}", f.handle)),
             },
             None => crate::run_meta::write_fit_sidecar(
-                &base_seg, std::path::Path::new(""), std::path::Path::new(&ir_path), &sidecar),
+                &base_seg, std::path::Path::new(&ir_path), &sidecar),
         };
         if let Err(e) = written {
             out.say(format_args!("warning: cannot write profile sidecar {}: {}",

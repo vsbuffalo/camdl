@@ -766,8 +766,9 @@ pub(crate) fn resolve_fit_problem(s: &str) -> Result<FitProblem, ResolveError> {
 /// since, and holds neither a command-line override nor a sweep point's values.
 /// So the resolved config is what we read, always; there is no "prefer the
 /// live original" branch. A folder written before fit folders stored one is
-/// refused, naming the re-run that writes it; the verbatim `fit.toml.original`
-/// beside it is never read in its place.
+/// at an older store layout and refused, naming `camdl dev migrate`
+/// ([`crate::run_meta::require_resolved_config`]); the verbatim
+/// `fit.toml.original` beside it is never read in its place.
 ///
 /// What the stored config cannot carry is its own *location*. Data archival is not yet
 /// part of the sealed packet (Phase 1 archives only the model IR), so the data
@@ -1367,7 +1368,6 @@ cooling = 0.7
         crate::run_meta::write_fit_sidecar(
             &seg,
             Path::new(""),
-            Path::new(""),
             &crate::run_meta::FitSidecar::default(),
         )
         .unwrap();
@@ -1630,7 +1630,7 @@ cooling    = 0.70
         let leaf = seg.join("if2-11111111").join("seed_1-22222222");
         std::fs::create_dir_all(&leaf).unwrap();
         crate::run_meta::write_fit_sidecar(
-            &seg, Path::new("nonexistent.toml"), Path::new(""), &crate::run_meta::FitSidecar::default()).unwrap();
+            &seg, Path::new(""), &crate::run_meta::FitSidecar::default()).unwrap();
         let rec = serde_json::json!({
             "format_version": 1, "kind": "fit_method", "run_id": format!("abcd9{}", "0".repeat(59)),
             "hash_version": 1, "calendar": {"days_per_unit": 1.0, "origin": null, "time_unit": "days"}, "ir_version": "0.7", "engine_version": "0.1.0+test",

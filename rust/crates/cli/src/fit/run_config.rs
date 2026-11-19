@@ -330,16 +330,9 @@ fn table_mut<'a>(doc: &'a mut toml::Table, key: &str) -> Result<&'a mut toml::Ta
 /// text does not depend on the order the file wrote them in (whichever map
 /// `toml::Table` is built on).
 fn sorted(doc: toml::Table) -> toml::Table {
-    fn value(v: toml::Value) -> toml::Value {
-        match v {
-            toml::Value::Table(t) => toml::Value::Table(sorted(t)),
-            toml::Value::Array(a) => toml::Value::Array(a.into_iter().map(value).collect()),
-            other => other,
-        }
-    }
     let mut entries: Vec<(String, toml::Value)> = doc.into_iter().collect();
     entries.sort_by(|a, b| a.0.cmp(&b.0));
-    entries.into_iter().map(|(k, v)| (k, value(v))).collect()
+    entries.into_iter().map(|(k, v)| (k, sorted_value(v))).collect()
 }
 
 /// Resolve `fit run`'s configuration from its arguments, its file and the

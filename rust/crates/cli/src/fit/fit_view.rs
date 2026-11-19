@@ -447,7 +447,7 @@ mod tests {
         // step is skipped; the sidecar still writes.
         let model = seg.parent().unwrap().parent().unwrap().join("sir.camdl");
         std::fs::write(&model, "compartments { S }\n").unwrap();
-        write_fit_sidecar(seg, Path::new("nonexistent.toml"), &model, &sidecar).unwrap();
+        write_fit_sidecar(seg, &model, &sidecar).unwrap();
     }
 
     /// Pins the N→1 aggregation `FitView` performs over a realistic
