@@ -816,6 +816,72 @@ fn a_profile_stores_the_original_and_the_resolved_config() {
     assert!(resolved.starts_with("# fit.resolved.toml:"), "{resolved}");
 }
 
+/// A fit whose `[fixed]` is a `from_scenario` profiled by its leaf and by its
+/// file stores the same `fit.resolved.toml` in the profile's folder: the
+/// scenario's values, expanded, either way.
+#[test]
+fn a_from_scenario_fit_stores_one_resolved_config_whichever_form_names_it() {
+    let fx = fx();
+    let store = tempfile::tempdir().unwrap();
+    let model = store.path().join("sir_sc.camdl");
+    let src = SIR.replace("scenarios {\n  with_sia { enable = [sia] }\n}",
+        "scenarios {\n  with_sia { enable = [sia] }\n  sc { set = { beta_b = 0.2  rho = 0.5 } }\n}");
+    assert_ne!(src, SIR);
+    std::fs::write(&model, src).unwrap();
+    let plain = std::fs::read_to_string(fx.fx.path("fit_plain.toml")).unwrap();
+    let text = plain
+        .replace("[fixed]\nbeta_b = 0.2\nrho = 0.5\n", "[fixed]\nfrom_scenario = \"sc\"\n")
+        .replace(&fx.fx.path("sir.ir.json"), &model.to_string_lossy());
+    assert!(text.contains("from_scenario") && text.contains("sir_sc.camdl"), "{text}");
+    let fit_path = store.path().join("fit_sc.toml");
+    std::fs::write(&fit_path, text).unwrap();
+    let fitted = run_into(store.path(), &Invocation::new(&fx.fx, &["fit", "run", &fit_path.to_string_lossy()]));
+    let leaf = fitted.of("fit_method").into_values().next().expect("the fit's leaf").clone();
+    let resolved_of = |handle: &str| {
+        let out = tempfile::tempdir().unwrap();
+        let m = model.to_string_lossy();
+        run_into(out.path(), &Invocation::new(&fx.fx, &["profile", &m, "--fit", handle]).with(CELLS).with(IF2_CELL));
+        let folders = sidecar_folders(out.path(), "profiles");
+        assert_eq!(folders.len(), 1, "one profile folder: {folders:?}");
+        std::fs::read_to_string(folders[0].join("fit.resolved.toml")).unwrap()
+    };
+    let by_leaf = resolved_of(&leaf.dir.to_string_lossy());
+    let by_file = resolved_of(&fit_path.to_string_lossy());
+    let fixed_table: toml::Table = by_leaf.parse::<toml::Table>().unwrap()["fixed"].as_table().unwrap().clone();
+    assert!(!fixed_table.contains_key("from_scenario"), "the scenario is expanded:\n{by_leaf}");
+    assert_eq!(fixed_table["rho"].as_float(), Some(0.5), "{by_leaf}");
+    assert_eq!(by_leaf, by_file, "one resolved config whichever form names the fit");
+}
+
+/// A fit whose `[fixed]` is read `from_file` stores the values it read: its
+/// `fit.resolved.toml` names no file, and a profile of its leaf, from another
+/// working directory after the file is edited, is the profile of the values
+/// the fit ran at (`fit_plain.toml`'s), not the edited file's (`fit_rho.toml`'s).
+#[test]
+fn a_from_file_fit_is_profiled_at_the_values_it_read() {
+    let fx = fx();
+    let store = tempfile::tempdir().unwrap();
+    let plain = std::fs::read_to_string(fx.fx.path("fit_plain.toml")).unwrap();
+    assert!(plain.contains("[fixed]\nbeta_b = 0.2\nrho = 0.5\n"));
+    let fit_path = store.path().join("fit_from_file.toml");
+    std::fs::write(&fit_path, plain.replace("[fixed]\nbeta_b = 0.2\nrho = 0.5\n", "[fixed]\nfrom_file = \"fixed.toml\"\n")).unwrap();
+    std::fs::write(store.path().join("fixed.toml"), "beta_b = 0.2\nrho = 0.5\n").unwrap();
+    let fitted = run_into(store.path(), &Invocation::new(&fx.fx, &["fit", "run", &fit_path.to_string_lossy()]));
+    let leaf = fitted.of("fit_method").into_values().next().expect("the fit's leaf").clone();
+    let folder = leaf.dir.parent().unwrap().parent().unwrap();
+    let resolved = std::fs::read_to_string(folder.join("fit.resolved.toml")).unwrap();
+    let fixed_table: toml::Table = resolved.parse::<toml::Table>().unwrap()["fixed"].as_table().unwrap().clone();
+    assert!(!fixed_table.contains_key("from_file"), "the stored config names no fixed-values file:\n{resolved}");
+    assert_eq!(fixed_table["rho"].as_float(), Some(0.5), "it holds the values read:\n{resolved}");
+    std::fs::write(store.path().join("fixed.toml"), "beta_b = 0.2\nrho = 0.6\n").unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let by_leaf = run_into(elsewhere.path(), &prof(&fx, &[]).set("--fit", &leaf.dir.to_string_lossy())).bytes(KIND);
+    let ran = run(&prof(&fx, &[])).bytes(KIND);
+    let edited = run(&prof(&fx, &[]).set("--fit", &fx.fx.path("fit_rho.toml"))).bytes(KIND);
+    assert_ne!(ran, edited, "the edit changes what a profile stores");
+    assert_eq!(by_leaf, ran, "the leaf is profiled at the values the fit read");
+}
+
 /// A point of `fit run --sweep` named by its leaf directory, its problem
 /// folder or its run-id prefix is profiled at the point's own value, which
 /// its fit folder's `fit.resolved.toml` holds: every form stores the bytes a
