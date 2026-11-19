@@ -699,10 +699,9 @@ records each file under the key written. `holdout_hashes` records each
 written by an older camdl may hold the first eight hex digits only, key a
 shorthand fit by observation leaf (`cases_urban`, `cases_rural` for one indexed
 `cases[p in patch]` block), and record no holdout files; `compare` reads such a
-record as its entry in Appendix A (`camdl compare`) describes. And `fixed` is
-projected from the base configuration, so under `fit run --sweep` every swept
-segment records the _unswept_ value of the swept parameter; the segment's
-fit-level hash, not this field, distinguishes the sweep points. `estimated`,
+record as its entry in Appendix A (`camdl compare`) describes. And under
+`fit run --sweep` each segment's `fixed` holds its own point's value of the
+swept parameter, as its `partition` and `fit.resolved.toml` do. `estimated`,
 `fixed`, `partition` and `parameters_provenance` are written per segment from
 that segment's own resolution; the fit-level record before any segment has run
 leaves them empty.
