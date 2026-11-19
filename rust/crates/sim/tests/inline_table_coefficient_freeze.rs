@@ -90,7 +90,7 @@ fn decay_model() -> Model {
             time_semantics: "continuous".into(),
             dt: None, rng_seed: Some(42),
             integrator: Default::default(),
-            t_end_anchor: None,
+            t_end_anchor: None, t_start_anchor: None,
         },
         presets: vec![],
         model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],

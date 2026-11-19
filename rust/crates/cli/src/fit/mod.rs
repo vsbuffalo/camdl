@@ -24,12 +24,13 @@ fn resolve_anchors_into_temp_ir(
         .map_err(|e| format!("cannot read compiled IR {ir_path}: {e}"))?;
     let mut env = ir::envelope_from_str(&src)
         .map_err(|e| format!("IR load error from {ir_path}: {e}"))?;
-    if !crate::obs_anchor::model_is_anchored(&env.model) {
+    // The config's `[simulate] from` is resolved here too, with the anchors:
+    // the start it names is written into the model every later load reads.
+    if !crate::obs_anchor::fit_resolves(&env.model, config) {
         return Ok(ir_path.to_string());
     }
-    let window = crate::obs_anchor::fit_window(&env.model, config)
-        .map_err(|e| format!("resolving this model's observation anchors from [data]: {e}"))?;
-    let moved = crate::obs_anchor::substitute(&mut env.model, window)?;
+    let moved = crate::obs_anchor::resolve_for_fit(&mut env.model, config)
+        .map_err(|e| format!("resolving this model's start and observation anchors from [data]: {e}"))?;
     crate::obs_anchor::report(out, &moved, &env.model);
 
     // A fresh temp, never the input path: `resolve_ir_path` returns a

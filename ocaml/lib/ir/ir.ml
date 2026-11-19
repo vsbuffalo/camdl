@@ -1237,7 +1237,9 @@ type integrator =
 (** The [simulate] block: the window to simulate and how. A model without one
     simulates [[0, 100]]. *)
 type simulation_config = {
-  t_start:        float;    (** The start of the window, in model time units. *)
+  t_start:        float;
+      (** The start of the window, in model time units. While
+          [t_start_anchor] is present it is NaN, serialised as [null]. *)
   t_end:          float;
       (** The end of the window, in model time units. While [t_end_anchor]
           is present it is NaN, serialised as [null], so no comparison of
@@ -1254,6 +1256,12 @@ type simulation_config = {
           The runtime writes the resolved time into [t_end] and clears this
           field before it builds the model, and refuses a model that still
           carries it. *)
+  t_start_anchor: anchored_time option;
+      (** A start stated relative to the data, [from = first_obs]. Same
+          contract as [t_end_anchor]: [t_start] and every start the compiler
+          derives from it (the output and emit schedules, a recurring
+          schedule with no [from] of its own) are NaN until the runtime writes
+          the resolved time into them and clears this field. *)
 }
 
 (* ── Presets (named parameter sets for web UI / CLI) ─────────────────────────── *)

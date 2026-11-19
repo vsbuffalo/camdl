@@ -428,10 +428,10 @@ pub(crate) fn resolve(
     // because that path can be a user-supplied `.ir.json` (`resolve_ir_path`
     // returns it unchanged) and a command must never rewrite the user's file.
     //
-    // Fit identity is unaffected and already correct: it hashes the original
-    // `.camdl` source plus the data digests, so two data vintages against one
-    // anchored model key differently through the data, exactly as two vintages
-    // of any fit do.
+    // The config's `[simulate] from` is resolved here too. Fit identity keys
+    // on the model loaded from the re-emitted IR, so the resolved start and
+    // horizon are in it: two windows are two fits, and one start spelled two
+    // ways is one.
     let compiled_ir = super::resolve_anchors_into_temp_ir(out, &compiled_ir, &config.problem)
         .unwrap_or_else(|e| {
             out.fail(format!("error: {}", e));

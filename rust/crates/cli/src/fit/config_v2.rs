@@ -55,6 +55,8 @@ struct FitConfigWire {
     method: Option<Method>,
     #[serde(default)]
     config: FitBackendConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    simulate: Option<SimulateSpec>,
     #[serde(default)]
     scenario: Option<String>,
     #[serde(default)]
@@ -120,6 +122,15 @@ pub struct Problem {
 
     /// Time step and observation alignment. Default dt=1.0.
     pub config: FitBackendConfig,
+
+    /// `[simulate]`: run-time choices about the simulated window that the
+    /// config makes for the model. `from` overrides the model's
+    /// `simulate { from }` (and is itself overridden by `simulate --from`).
+    /// Not in the fit's hashed config blob: the resolved start enters the fit
+    /// through the model digest, so two spellings of one start are one fit
+    /// (`fit::cas::FIT_PROVENANCE_KEYS`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub simulate: Option<SimulateSpec>,
 
     /// Named scenario from the model. Applies scenario's enable/disable lists
     /// and param overrides before inference. Mutually exclusive with
@@ -189,12 +200,12 @@ impl FitConfigWire {
     fn split(self) -> FitConfig {
         let FitConfigWire {
             model, data, synthetic, fit_seeds, simplex_groups, output_dir, estimate, fixed,
-            method, config, scenario, enable, disable, ic_free, provenance,
+            method, config, simulate, scenario, enable, disable, ic_free, provenance,
         } = self;
         FitConfig {
             problem: Problem {
                 model, data, synthetic, simplex_groups, output_dir, estimate, fixed, config,
-                scenario, enable, disable, ic_free, provenance, compiled_ir: None,
+                simulate, scenario, enable, disable, ic_free, provenance, compiled_ir: None,
             },
             inference: Inference { method, fit_seeds },
         }
@@ -207,12 +218,12 @@ impl FitConfig {
     fn to_wire(&self) -> FitConfigWire {
         let Problem {
             model, data, synthetic, simplex_groups, output_dir, estimate, fixed, config,
-            scenario, enable, disable, ic_free, provenance, compiled_ir: _,
+            simulate, scenario, enable, disable, ic_free, provenance, compiled_ir: _,
         } = self.problem.clone();
         let Inference { method, fit_seeds } = self.inference.clone();
         FitConfigWire {
             model, data, synthetic, fit_seeds, simplex_groups, output_dir, estimate, fixed,
-            method, config, scenario, enable, disable, ic_free, provenance,
+            method, config, simulate, scenario, enable, disable, ic_free, provenance,
         }
     }
 
@@ -237,6 +248,17 @@ impl Serialize for FitConfig {
     fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
         self.to_wire().serialize(ser)
     }
+}
+
+/// `[simulate]`: the simulated window, as the config sets it for the model.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SimulateSpec {
+    /// Where the run starts: a model-time number, a date under a model
+    /// `origin`, or an observation anchor (`"first_obs - 1 week"`), in the
+    /// grammar of `simulate --to`. Overrides the model's `simulate { from }`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<TimeSpecToml>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

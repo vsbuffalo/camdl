@@ -912,7 +912,7 @@
               "type": "object",
               "required": ["start", "period", "end"],
               "properties": {
-                "start": { "type": "number" },
+                "start": { "type": ["number", "null"], "description": "null encodes NaN: a start baked from an unresolved anchored `simulate { from }`." },
                 "period": { "type": "number" },
                 "end": { "type": ["number", "null"], "description": "null encodes an open (NaN) end." },
                 "at_day": { "type": "number" }
@@ -1367,7 +1367,7 @@
               "type": "object",
               "required": ["start", "step", "end"],
               "properties": {
-                "start": { "type": "number" },
+                "start": { "type": ["number", "null"], "description": "null encodes NaN: a start baked from an unresolved anchored `simulate { from }`." },
                 "step": { "type": "number" },
                 "end": { "type": ["number", "null"], "description": "null encodes an open (NaN) end." }
               },
@@ -1852,7 +1852,7 @@
               "type": "object",
               "required": ["start", "step"],
               "properties": {
-                "start": { "type": "number" },
+                "start": { "type": ["number", "null"], "description": "null encodes NaN: a start baked from an unresolved anchored `simulate { from }`." },
                 "step": { "type": "number" }
               },
               "additionalProperties": false
@@ -1887,7 +1887,7 @@
       "type": "object",
       "required": ["t_start", "t_end", "time_semantics"],
       "properties": {
-        "t_start": { "type": "number" },
+        "t_start": { "type": ["number", "null"], "description": "null encodes NaN: an unresolved anchored start (see t_start_anchor)." },
         "t_end": { "type": ["number", "null"], "description": "null encodes NaN: an unresolved anchored horizon (see t_end_anchor)." },
         "time_semantics": { "type": "string", "enum": ["continuous", "discrete"] },
         "dt": { "type": ["number", "null"] },
@@ -1915,6 +1915,10 @@
         },
         "t_end_anchor": {
           "comment": "gh#616: an observation-anchored horizon (`simulate { to = last_obs + 4 'weeks }`). PRESENT means the horizon is UNRESOLVED: `t_end` then carries NaN so every equality-based horizon guard fails closed, and the runtime resolver substitutes the resolved time into `t_end` and removes this key. A model that still carries it is refused at CompiledModel::new. Omitted for a literal horizon.",
+          "$ref": "#/definitions/anchored_time"
+        },
+        "t_start_anchor": {
+          "comment": "An observation-anchored start (`simulate { from = first_obs - 7 'days }`). PRESENT means the start is UNRESOLVED: `t_start` carries NaN (null), and so does every start the compiler derived from it — a regular output schedule's `start`, a regular emit schedule's `start`, a recurring schedule's `start` when it declares no `from`. The runtime resolver writes the resolved start into each NaN start and removes this key; a model that still carries it is refused at CompiledModel::new. Omitted for a literal start.",
           "$ref": "#/definitions/anchored_time"
         }
       },

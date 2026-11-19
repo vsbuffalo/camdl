@@ -140,7 +140,7 @@ fn model() -> Arc<CompiledModel> {
             dt: Some(1.0),
             rng_seed: Some(1),
             integrator: Default::default(),
-            t_end_anchor: None,
+            t_end_anchor: None, t_start_anchor: None,
         },
         presets: vec![],
         model_structure: None,

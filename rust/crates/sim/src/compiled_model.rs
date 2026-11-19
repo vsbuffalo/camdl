@@ -582,6 +582,12 @@ fn refuse_unresolved_anchors(model: &Model) -> Result<(), SimError> {
                        `survey`, or run it through a command that binds data by construction \
                        (`fit run`, `fit predict`).";
 
+    if let Some(a) = &model.simulation.t_start_anchor {
+        return Err(SimError::Validation(format!(
+            "the model's simulation start is anchored (`simulate {{ from = {a} }}`) and has \
+             not been resolved. {HOW}"
+        )));
+    }
     if let Some(a) = &model.simulation.t_end_anchor {
         return Err(SimError::Validation(format!(
             "the model's simulation horizon is anchored (`simulate {{ to = {a} }}`) and has \
@@ -3351,6 +3357,15 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("last_obs + 28") && msg.contains("--fit"),
             "the refusal must name the anchor and where data comes from: {msg}");
+
+        // 1b. The model's own start (`simulate { from = first_obs - 7 }`).
+        let mut m = load_with_params("sir_basic");
+        m.simulation.t_start = f64::NAN;
+        m.simulation.t_start_anchor = Some(AnchoredTime { anchor: ObsAnchor::First, offset: -7.0 });
+        let err = match CompiledModel::new(m) { Err(e) => e, Ok(_) => panic!("an anchored start must be refused") };
+        let msg = err.to_string();
+        assert!(msg.contains("from = first_obs - 7") && msg.contains("--fit"),
+            "the refusal must name the anchored start and where data comes from: {msg}");
 
         // 2. A preset's horizon.
         let mut m = load_with_params("sir_basic");

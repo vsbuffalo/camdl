@@ -2457,6 +2457,58 @@ let test_anchored_horizon_bakes_nan () =
   Alcotest.(check bool) "the baked t_end is NaN, not a placeholder number"
     true (Float.is_nan m.Ir.simulation.Ir.t_end)
 
+(* `from = first_obs - 7 'days`: the start rides in `t_start_anchor`, and
+   `t_start` and every start derived from it (output and emit grids, a
+   recurring schedule with no `from`) are baked NaN; a recurring schedule's own
+   `from` stays a number. The runtime moves exactly the NaN ones. *)
+let anchored_start_src = {|
+    compartments { S, I }
+    parameters { beta : rate  gamma : rate }
+    transitions {
+      infection : S --> I @ beta * S * I / (S + I)
+      recovery  : I --> S @ gamma * I
+    }
+    interventions {
+      defaulted : transfer(fraction = 0.1, from = S, to = I) { every = 30 'days  to = 90 'days }
+      declared  : transfer(fraction = 0.1, from = S, to = I) {
+        every = 30 'days  from = 3 'days  to = 90 'days
+      }
+    }
+    observations {
+      cases {
+        columns       { time : time, cases : count }
+        covers        = closing_at(time, 7 'days)
+        projected     = incidence(infection)
+        emit_schedule = every 7 'days
+        cases         ~ poisson(rate = projected)
+      }
+    }
+    output { trajectories { every = 7 'days } }
+    init { S = 990  I = 10 }
+    simulate { from = first_obs - 7 'days  to = 100 'days }
+  |}
+
+let test_anchored_start_bakes_nan () =
+  let m = compile_expect_ok anchored_start_src in
+  (match m.Ir.simulation.Ir.t_start_anchor with
+   | Some { anchor = Ir.AnchorFirst; offset } ->
+     Alcotest.(check (float 1e-12)) "7 'days folds to -7" (-7.0) offset
+   | _ -> Alcotest.fail "expected simulation.t_start_anchor = first_obs - 7");
+  Alcotest.(check bool) "t_start is NaN" true (Float.is_nan m.Ir.simulation.Ir.t_start);
+  (match m.Ir.output.Ir.times with
+   | Ir.OutRegular r -> Alcotest.(check bool) "output start NaN" true (Float.is_nan r.start)
+   | _ -> Alcotest.fail "regular output");
+  List.iter (fun (o : Ir.observation_model) ->
+    match o.emit_schedule with
+    | Some (Ir.ObsRegular r) -> Alcotest.(check bool) "emit start NaN" true (Float.is_nan r.start)
+    | _ -> Alcotest.fail "regular emit schedule") m.Ir.observations;
+  let start_of name =
+    match (List.find (fun (iv : Ir.intervention) -> iv.name = name) m.Ir.interventions).fire with
+    | Ir.Scheduled (Ir.Recurring r) -> r.start
+    | _ -> Alcotest.fail "recurring" in
+  Alcotest.(check bool) "a defaulted recurring start is NaN" true (Float.is_nan (start_of "defaulted"));
+  Alcotest.(check (float 1e-12)) "a declared recurring start stays" 3.0 (start_of "declared")
+
 (* A literal horizon is untouched — the anchor field stays absent. *)
 let test_literal_horizon_carries_no_anchor () =
   let m = compile_expect_ok (anchored_horizon_src "80 'days") in
@@ -18864,6 +18916,8 @@ let () =
         `Quick test_anchored_horizon_bakes_nan;
       Alcotest.test_case "a literal horizon carries no anchor"
         `Quick test_literal_horizon_carries_no_anchor;
+      Alcotest.test_case "from = first_obs - 7 'days bakes NaN starts + the anchor"
+        `Quick test_anchored_start_bakes_nan;
       Alcotest.test_case "a scenario may anchor its own horizon"
         `Quick test_anchored_scenario_horizon;
       Alcotest.test_case "recurring without `to` under an anchor (E336)"

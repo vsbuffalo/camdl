@@ -76,7 +76,7 @@ let empty_model
       dt = None;
       rng_seed = None;
       integrator = Rk4;
-      t_end_anchor = None;
+      t_end_anchor = None; t_start_anchor = None;
     };
     presets = [];
     model_structure = None;

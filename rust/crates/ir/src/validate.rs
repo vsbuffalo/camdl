@@ -582,11 +582,13 @@ pub fn validate(model: &Model) -> Result<(), Vec<ValidationError>> {
     // model whose horizon is simply not a number yet. The anchored case has its
     // own guard at the one place it matters: `CompiledModel::new` refuses an
     // unresolved anchor by name. Once the resolver substitutes, the anchor field
-    // is cleared and this check applies again to the resolved value.
+    // is cleared and this check applies again to the resolved value. An
+    // anchored START (`t_start_anchor`) is skipped for the same reason.
     {
         let t_start = model.simulation.t_start;
         let t_end   = model.simulation.t_end;
         if model.simulation.t_end_anchor.is_none()
+            && model.simulation.t_start_anchor.is_none()
             && !(t_start.is_finite() && t_end.is_finite() && t_end > t_start)
         {
             errors.push(ValidationError::InvalidHorizon { t_start, t_end });

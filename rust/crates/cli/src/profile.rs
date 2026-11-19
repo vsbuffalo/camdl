@@ -753,17 +753,30 @@ fn run_profile(
     // With nothing bound, an ANCHORED model is refused here rather than
     // deferred: it has no horizon at all, so nothing later can be computed from
     // it. An unanchored model falls through untouched.
+    // A fit config's `[simulate] from` moves the start as `fit run` does.
+    let start = fit.as_ref()
+        .map(|f| crate::obs_anchor::config_start(&f.config.problem, &model_pre))
+        .transpose()
+        .unwrap_or_else(|e| { out.fail(format!("error: {e}")); })
+        .flatten();
     let moved_any_anchor = match &bound_streams {
         Some(bound) => crate::obs_anchor::resolve_from_bindings(out, &mut model_pre, bound, dt,
-            fit_holdout_after.as_ref())
+            fit_holdout_after.as_ref(), start.as_ref())
             .unwrap_or_else(|e| { out.fail(format!("error: {e}")); }),
         None => {
+            let moved = match start.as_ref() {
+                Some(start) => match crate::obs_anchor::apply_start(&mut model_pre, start, None) {
+                    Ok(r) => { crate::obs_anchor::report(out, &[r], &model_pre); true }
+                    Err(e) => out.fail(format!("error: {e}")),
+                },
+                None => false,
+            };
             if let Some(msg) =
                 crate::obs_anchor::refuse_without_data(&model_pre, PROFILE_SUPPLY)
             {
                 out.fail(format!("error: {msg}"));
             }
-            false
+            moved
         }
     };
     // The run is content-addressed by the IR TEXT (`model_identity_from_ir`),

@@ -265,6 +265,10 @@ impl<'a> IntoIterator for &'a InitialConditions {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RegularOutputSchedule {
+    /// The output grid's start, baked from the model's `simulate { from }` —
+    /// NaN while that start is an unresolved anchor (see
+    /// [`crate::anchor::null_as_nan`]).
+    #[serde(with = "crate::anchor::null_as_nan")]
     pub start: f64,
     pub step:  f64,
 }
@@ -288,6 +292,10 @@ pub struct OutputConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SimulationConfig {
+    /// The simulation start. `null_as_nan` for the same reason as `t_end`: an
+    /// unresolved anchored start (`simulate { from = first_obs }`) travels as
+    /// JSON `null`.
+    #[serde(with = "crate::anchor::null_as_nan")]
     pub t_start:        f64,
     /// The simulation horizon. Encoded through `null_as_nan` because an
     /// unresolved anchored horizon travels as JSON `null` (gh#616) — JSON has
@@ -317,6 +325,15 @@ pub struct SimulationConfig {
     /// unanchored model's IR is byte-identical to its pre-gh#616 form.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub t_end_anchor:   Option<crate::anchor::AnchoredTime>,
+    /// `simulate { from = first_obs - 7 'days }` — an observation-anchored
+    /// start. Same contract as [`Self::t_end_anchor`]: while it is `Some`,
+    /// `t_start` is NaN, and so is every start the compiler derived from it
+    /// (the regular output and emit schedules, a recurring schedule that
+    /// declares no `from`). The runtime resolver writes the resolved start
+    /// into all of them and clears this field (`cli` `obs_anchor`), and
+    /// `CompiledModel::new` refuses a model that still carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub t_start_anchor: Option<crate::anchor::AnchoredTime>,
 }
 
 impl SimulationConfig {
@@ -329,6 +346,9 @@ impl SimulationConfig {
     fn restore_unresolved_horizon(&mut self) {
         if self.t_end_anchor.is_some() {
             self.t_end = f64::NAN;
+        }
+        if self.t_start_anchor.is_some() {
+            self.t_start = f64::NAN;
         }
     }
 }

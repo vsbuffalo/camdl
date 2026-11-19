@@ -1,4 +1,4 @@
-{"ir_version":"0.47","validated_by":"ocaml-compiler-v0.47","model":{"name":"bspline_smooth_grad","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.48","validated_by":"ocaml-compiler-v0.48","model":{"name":"bspline_smooth_grad","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"X","kind":"integer"},
 {"name":"D1","kind":"integer"},
 {"name":"D2","kind":"integer"}

@@ -324,13 +324,28 @@ fn run_pfilter(
     // With nothing bound, an ANCHORED model is refused here rather than
     // deferred: it has no horizon at all, so no later diagnostic can be
     // computed from it. An unanchored model falls through untouched.
+    // A fit config's `[simulate] from` moves the run's start the same way
+    // `fit run` does, so `pfilter --fit` scores the model the fit fits.
+    let start = fit.as_ref()
+        .map(|f| crate::obs_anchor::config_start(&f.config.problem, &model_in))
+        .transpose()
+        .unwrap_or_else(|e| { out.fail(format!("error: {e}")); })
+        .flatten();
     match &bound_streams {
         Some(bound) => {
-            if let Err(e) = crate::obs_anchor::resolve_from_bindings(out, &mut model_in, bound, dt, None) {
+            if let Err(e) = crate::obs_anchor::resolve_from_bindings(
+                out, &mut model_in, bound, dt, None, start.as_ref())
+            {
                 out.fail(format!("error: {e}"));
             }
         }
         None => {
+            if let Some(start) = start.as_ref() {
+                match crate::obs_anchor::apply_start(&mut model_in, start, None) {
+                    Ok(r) => crate::obs_anchor::report(out, &[r], &model_in),
+                    Err(e) => out.fail(format!("error: {e}")),
+                }
+            }
             if let Some(msg) = crate::obs_anchor::refuse_without_data(&model_in, PFILTER_SUPPLY) {
                 out.fail(format!("error: {msg}"));
             }

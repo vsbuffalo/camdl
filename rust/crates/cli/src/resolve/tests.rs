@@ -52,7 +52,7 @@ pub(crate) fn tiny_model() -> Model {
             dt: Some(1.0),
             rng_seed: None,
             integrator: Default::default(),
-            t_end_anchor: None,
+            t_end_anchor: None, t_start_anchor: None,
         },
         presets: vec![],
         model_structure: None,
@@ -828,12 +828,18 @@ fn cas_identity_pins() {
         // once more, for the version alone: this fixture's fit is IF2, which
         // reads no gradient, and its pfilter and profile hold
         // `allow_degenerate_rates` at its default.
-        ("sim", "19d799378e6bcf65a3fd4c9db8ed924f9390a172fead9b9edbd256c96d0451d0"),
-        ("fit", "8880ba88775f07e1fddf25a2d1edf5c25b752837ac15aff5101982ba48fb7628"),
-        ("pfilter", "d8e8bc0581a729abd89658d893194d57d26df1010c993c70b6d4420a0d4d535d"),
-        ("survey", "9981ba175436b50b9795e6efa5b0877145983b9cbef5498527e8cd3336e3577a"),
-        ("sim_ensemble", "5ae698ae436b20c3ca386ece61c65d6e6d053e6cf3651fa9c341e26f4bdfb22a"),
-        ("profile", "b1c05d0b02e800bdce2ad31d1cabf5422d2dc9499b598ac4585325e5d1471fa8"),
+        //
+        // ir/VERSION 0.48 (`simulation.t_start_anchor`) moved every kind once:
+        // the model hash now folds the start anchor (absent here, one byte), so
+        // every model level's bytes changed. Real runs re-key with the IR
+        // version folded into their model digest anyway; this fixture pins a
+        // fixed IR version, so the encoding is what moved it.
+        ("sim", "6953bbe5b76eb2416d2691eb6b0f58d816e2c7390846c46a45ca6f0731c47be7"),
+        ("fit", "dbba2ae4a701d1f75fea5be82dd2379815ceb9db4d9cf7c14b757fba4fa8ac33"),
+        ("pfilter", "856c94f609a1655aa8d9cb61d8692031379b905c10d603d1a93431b39683fb2b"),
+        ("survey", "e5397cc9b86b22368671b27e0998f3dc18884f47a26ddafc7690eb89d762f329"),
+        ("sim_ensemble", "f1cd909ce021ee87b67f97d69e3cf3d5708e0e27b40dfb87294d9cea48cb6de1"),
+        ("profile", "056e7f25cca4b714e2965b661196272c3447265456321ab12d62e83ee6b99bb9"),
     ];
     // Compared as whole lists so a failure reports EVERY kind that moved, not
     // just the first — the re-key scope is the thing under review.

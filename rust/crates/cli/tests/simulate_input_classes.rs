@@ -651,6 +651,12 @@ fn keyed_to() {
 }
 
 #[test]
+fn keyed_from() {
+    let fx = fx();
+    assert_rekeys("from", &sir(&fx, &[]), &sir(&fx, &["--from", "2"]));
+}
+
+#[test]
 fn keyed_init_state() {
     let fx = fx();
     let state = fx.path("state.tsv");

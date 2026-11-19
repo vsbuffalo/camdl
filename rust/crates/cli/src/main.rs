@@ -1051,16 +1051,44 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
     let (model_raw, _) = util::load_model(&ir_path_compiled).unwrap_or_else(|e| {
         out.fail(format!("error: {}", e));
     });
-    let model_is_anchored = crate::obs_anchor::model_is_anchored(&model_raw);
     let to_is_anchored = matches!(
         a.to.as_deref().map(|raw| crate::fit::runner::parse_time_spec(
             "--to", raw, model_raw.origin.as_deref(), &model_raw.time_unit)),
         Some(Ok(crate::fit::runner::TimeSpec::Anchored(_)))
     );
+    // The run's start: `--from` over the `--fit` config's `[simulate] from`
+    // over the model's own `simulate { from }`. Resolved here, once, to a
+    // number every cell's model is moved to (`util::load_run_model`), so the
+    // start enters each cell's identity through the model it hashes.
+    let start_override: Option<crate::obs_anchor::StartOverride> = match (a.from.as_deref(), a.fit.as_ref()) {
+        (Some(raw), _) => Some(crate::obs_anchor::StartOverride::parse("--from", raw, &model_raw)
+            .unwrap_or_else(|e| { out.fail(format!("error: {e}")); })),
+        (None, Some(fit_ref)) => simulate_fit_config_start(fit_ref)
+            .map(|raw| crate::obs_anchor::StartOverride::parse("[simulate] from", &raw, &model_raw))
+            .transpose()
+            .unwrap_or_else(|e| { out.fail(format!("error: {e}")); }),
+        (None, None) => None,
+    };
+    if start_override.is_some() && a.init_state.is_some() {
+        out.fail(format!(
+            "error: {} and --init-state both set the run's start: --init-state starts \
+             the run at the forecast origin its state was filtered to.\n  Fix: drop {}.",
+            start_override.as_ref().map(|s| s.source).unwrap_or("--from"),
+            start_override.as_ref().map(|s| s.source).unwrap_or("--from"),
+        ));
+    }
+    let from_is_anchored = start_override.as_ref().is_some_and(|s| s.is_anchored());
+    // Whether the model (as the start override leaves it) needs bound data: a
+    // literal `--from` over a model whose only anchor is its `from` does not.
+    let model_is_anchored = crate::obs_anchor::needs_window(&model_raw, start_override.as_ref());
     let obs_anchors: Option<ir::anchor::ObsAnchorTimes> =
         if model_is_anchored || to_is_anchored {
             let Some(fit_ref) = a.fit.as_ref() else {
-                let what = if model_is_anchored {
+                let what = if from_is_anchored {
+                    format!("{} \"{}\" is anchored to observed data",
+                            start_override.as_ref().map(|s| s.source).unwrap_or("--from"),
+                            start_override.as_ref().map(|s| s.raw.as_str()).unwrap_or(""))
+                } else if model_is_anchored {
                     format!("this model is anchored to observed data ({})",
                             crate::obs_anchor::anchored_sites(&model_raw).join(", "))
                 } else {
@@ -1073,7 +1101,8 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
                      resolves against."
                 ));
             };
-            let (first, last) = resolve_simulate_obs_anchors(&model_raw, fit_ref, dt)
+            let (first, last) = resolve_simulate_obs_anchors(
+                &crate::obs_anchor::window_model(&model_raw, start_override.as_ref()), fit_ref, dt)
                 .unwrap_or_else(|e| {
                     out.fail(format!("error: resolving observation anchors: {e}"));
                 });
@@ -1084,8 +1113,15 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
     // The locally-substituted model the up-front checks read. The RUN and the
     // CAS `base_model` are substituted separately, at their own loads, with this
     // same window — see `obs_anchor`'s module doc for why that is the seam.
+    let mut t_start_override: Option<f64> = None;
     let model_to = {
         let mut m = model_raw;
+        if let Some(start) = &start_override {
+            let r = crate::obs_anchor::apply_start(&mut m, start, obs_anchors)
+                .unwrap_or_else(|e| { out.fail(format!("error: {e}")); });
+            crate::obs_anchor::report(&out, std::slice::from_ref(&r), &m);
+            t_start_override = Some(r.resolved);
+        }
         if let Some(w) = obs_anchors {
             let moved = crate::obs_anchor::substitute(&mut m, w).unwrap_or_else(|e| {
                 out.fail(format!("error: {e}"));
@@ -1238,8 +1274,14 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
     // `--fit` without `--draws` is only meaningful when something needs the
     // fit's DATA rather than its posterior: an anchored `--to` (gh#626) or an
     // anchored model (gh#616). Otherwise keep the old ergonomics.
-    if a.fit.is_some() && a.draws.is_none() && !to_was_anchored && !model_is_anchored {
-        out.fail("error: --fit requires --draws (or an anchored --to, or an anchored model).");
+    // A config's `[simulate] from` is also a use of the fit's config without
+    // its posterior.
+    let start_from_config = start_override.as_ref().is_some_and(|s| s.source != "--from");
+    if a.fit.is_some() && a.draws.is_none() && !to_was_anchored && !model_is_anchored
+        && !start_from_config
+    {
+        out.fail("error: --fit requires --draws (or an anchored --to, an anchored model, \
+                  or a config with [simulate] from).");
     }
 
     let cas_root = execution.store_root.clone();
@@ -1468,6 +1510,7 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
         table_files,
         scenario_name: None, // set per-scenario in the loop
         t_end_override, // gh#626: keys the CAS identity below; cells get it via the job
+        t_start_override, // `--from` / `[simulate] from`, moved into each cell's model
         // `simulate` records the model's own output schedule; only `fit predict`
         // has forecast-row boundaries to add.
         required_output_times: Vec::new(),
@@ -2121,6 +2164,7 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
         source,
         scenarios,
         t_end_override,
+        t_start_override,
         required_output_times: Vec::new(),
         init_state: init_state_source,
         obs_anchors,
@@ -4213,9 +4257,46 @@ fn resolve_simulate_obs_anchors(
     fit_ref: &std::path::Path,
     dt: f64,
 ) -> Result<(f64, f64), String> {
-    // A bare fit.toml needs NO completed run — only its [data.observations]
-    // is consulted. Run dirs / @labels / hashes resolve through the store.
-    let config = match crate::fit::handle::FitRef::classify(&fit_ref.to_string_lossy()) {
+    obs_anchors_from_config(model, &simulate_fit_problem(fit_ref)?, dt)
+}
+
+/// The `[simulate] from` of the config `simulate --fit` names, as written:
+/// the fit.toml itself, or a stored fit's archived `fit.toml.original`.
+///
+/// Read from the config text alone, without binding its data: `--fit` serves
+/// several purposes (`--draws posterior`, `--init-state fit`, anchors), each of
+/// which resolves and checks the fit its own way and reports its own errors. A
+/// handle that names no readable config yields no start here, and the purpose
+/// that needs the fit refuses it.
+fn simulate_fit_config_start(fit_ref: &std::path::Path) -> Option<String> {
+    use crate::fit::handle::{FitRef, FitTarget};
+    let raw = fit_ref.to_string_lossy();
+    let text = match FitRef::classify(&raw) {
+        FitRef::Config(path) => std::fs::read_to_string(path).ok()?,
+        _ => {
+            let segment = match crate::fit::handle::resolve_target(&raw).ok()? {
+                FitTarget::Segment(seg) => seg,
+                FitTarget::Leaf(l) => crate::fit::fit_view::leaf_segment(&l.dir).ok()??,
+            };
+            std::fs::read_to_string(segment.join("fit.toml.original")).ok()?
+        }
+    };
+    let doc: toml::Table = text.parse().ok()?;
+    match doc.get("simulate")?.get("from")? {
+        toml::Value::String(s) => Some(s.clone()),
+        toml::Value::Integer(i) => Some(i.to_string()),
+        toml::Value::Float(f) => Some(f.to_string()),
+        _ => None,
+    }
+}
+
+/// The problem `simulate --fit` names. A bare fit.toml needs NO completed run;
+/// run dirs / @labels / hashes resolve through the store (a stored fit's
+/// config, whose `[simulate] from` is the start that fit was fitted from).
+fn simulate_fit_problem(
+    fit_ref: &std::path::Path,
+) -> Result<crate::fit::config_v2::Problem, String> {
+    Ok(match crate::fit::handle::FitRef::classify(&fit_ref.to_string_lossy()) {
         crate::fit::handle::FitRef::Config(path) => {
             crate::fit::config_v2::Problem::load(&path.to_string_lossy())
                 .map_err(|e| format!("failed to load fit toml '{}': {e}", path.display()))?
@@ -4224,8 +4305,7 @@ fn resolve_simulate_obs_anchors(
             .map_err(|e| e.to_string())?
             .config
             .problem,
-    };
-    obs_anchors_from_config(model, &config, dt)
+    })
 }
 
 /// The fold over a config already in hand. Split out so `fit predict` — which

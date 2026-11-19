@@ -55,6 +55,11 @@ pub struct SimulateJob {
     /// every cell after the scenario horizon in `util::resolve_loaded_run`, and
     /// keyed into run identity from the model each cell runs. `None` = no override.
     pub t_end_override: Option<f64>,
+    /// The run's resolved start, when `--from` or the fit config's
+    /// `[simulate] from` overrides the model's `simulate { from }`: moved into
+    /// every cell's model by `util::load_run_model`, so it is keyed through the
+    /// model level. `None` = the model's own start.
+    pub t_start_override: Option<f64>,
     /// Times every cell must record a trajectory snapshot at, beyond the
     /// model's own `output { trajectories { … } }` schedule — copied verbatim
     /// onto each cell's [`crate::util::SimRun`], where

@@ -5,6 +5,10 @@ use crate::expr::Expr;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecurringSchedule {
+    /// The window start: the schedule's own `from`, or the model's
+    /// `simulate { from }` when it declares none — NaN while that start is an
+    /// unresolved anchor (see [`crate::anchor::null_as_nan`]).
+    #[serde(with = "crate::anchor::null_as_nan")]
     pub start:  f64,
     pub period: f64,
     /// The window end. Compiler-baked from the model horizon when the schedule

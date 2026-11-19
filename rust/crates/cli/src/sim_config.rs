@@ -321,6 +321,7 @@ impl ResolvedCell {
             adhoc_disable: _,
             fit_base: _,
             t_end_override: _,
+            t_start_override: _,
             // Display only: the scenario label and the source a notice names.
             scenario_inline_name: _,
             overrides_label: _,

@@ -134,6 +134,35 @@ editing the source file after the fit cannot change a past fit's predictions;
 with `[synthetic]` and no `[data]` has nowhere to write `[data.tables]`, so its
 model cannot declare an external input.
 
+**`[simulate]`** — the simulated window, as this config sets it for the model.
+Its one key, `from`, is where the run starts, and overrides the model's
+`simulate { from }`:
+
+```toml
+[simulate]
+from = "first_obs"            # or -2, or "1950-01-01" under a model origin
+```
+
+The value is a model-time number, a date under a model `origin`, or an
+observation anchor with a bare-word offset (`"first_obs - 1 week"`), the grammar
+of `simulate --to`. `first_obs` is the start of the earliest observed period of
+the training rows this config binds, so for weekly counts with
+`covers = closing_at(time, 7 'days)` whose first row is labelled day 5 it is day
+−2, the day that week opened. Every command that reads the config applies it:
+`fit run`, `pfilter --fit`, `profile --fit`, `survey --fit` and
+`simulate --fit`, where `simulate --from` takes precedence over it. The start
+moves with every start the model derives from its own (the output and emit
+schedules, a recurring intervention with no `from`), and a model whose literal
+`from` is also a recurring schedule's start is refused rather than guessed (the
+language spec, §18).
+
+The start enters the fit's identity through the model, not through this key:
+camdl writes the resolved start into the model before keying the fit, so
+`from = "first_obs"`, `from = -2` and a model written with `from = -2 'days` are
+one fit when they resolve to the same day, and two windows are two fits. The
+stored fit records the model with its start, so `fit predict` and
+`simulate --fit <run dir>` replay it.
+
 **`[estimate]`** — the parameters to infer. Each value is an inline table:
 
 | key                         | meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
@@ -242,6 +271,42 @@ third config or, for a quick likelihood at fixed parameters, a flag:
 ```bash
 camdl pfilter measles.camdl --fit fit_c1.toml --params theta.toml \
   --table school=../data/build/calendar/school_c3.tsv
+```
+
+## One model over several data windows
+
+A model whose run starts one week before its data begin can say so once, and
+leave the window to the data:
+
+```camdl
+simulate { from = first_obs  to = 5479 'days  dt = 1 'days }
+```
+
+Each data window is then a config. Two configs that bind the 1950–1963 and the
+1950–1960 notifications fit the same model from two starts, each at the opening
+of its own first observed week:
+
+```toml
+# fit_full.toml
+[model]
+camdl = "he2010.camdl"
+
+[data.observations]
+cases = "../data/build/cases_1950_1963.tsv"
+```
+
+```toml
+# fit_refit.toml: the same file, except
+[data.observations]
+cases = "../data/build/cases_1950_1960.tsv"
+```
+
+When the data do not fix the start (scoring a held-out window from a model
+fitted on another), the config states it:
+
+```toml
+[simulate]
+from = "1961-01-01"   # a date needs `origin = date(...)` in the model
 ```
 
 ## How paths resolve
