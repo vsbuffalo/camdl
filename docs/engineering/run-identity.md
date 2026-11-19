@@ -427,15 +427,20 @@ and the run's config identity are taken from it), and `fit.resolved.toml`, the
 configuration the folder's fits ran under
 ([`resolved_config_text`](rust:cli::fit::run_config::resolved_config_text)): the
 text with every problem-half value the command line set
-(`--allow-forcing-extrapolation`) and the folder's own `[fixed]` (a sweep
-point's values) written in, keys sorted, marked as generated. Neither enters an
-identity. Every reader of a stored fit's config reads the resolved file: a
-run-directory, label or run-id handle (`fit predict <leaf>`, `compare <leaf>`)
-so runs under the override and at the sweep point's values, and `fit table`
-diffs it. A folder an older build wrote has none and is refused, naming the
-re-run that writes it; no reader falls back to `fit.toml.original`. A `fit.toml`
-handle names only the run the file alone makes, so it refuses a flag-made fit
-and names its leaf. Every `fit run` input is classified in
+(`--allow-forcing-extrapolation`) and the folder's own `[fixed]` values (a sweep
+point's, a `from_scenario`'s and a `from_file`'s) written in, keys sorted except
+those of the tables camdl reads in order (`[estimate]`, `[data.observations]`,
+`[data.holdout]`), marked as generated. Neither enters an identity. A reader
+checks the resolved `[fixed]` against the values `fit.meta.json` records the fit
+running at, and a fit folder whose stored config cannot be read is
+[`ResolveError::StoredConfig`](rust:cli::fit::handle::ResolveError), which no
+reader passes over as "no fit". Every reader of a stored fit's config reads the
+resolved file: a run-directory, label or run-id handle (`fit predict <leaf>`,
+`compare <leaf>`) so runs under the override and at the sweep point's values,
+and `fit table` diffs it. A folder an older build wrote has none and is refused,
+naming the re-run that writes it; no reader falls back to `fit.toml.original`. A
+`fit.toml` handle names only the run the file alone makes, so it refuses a
+flag-made fit and names its leaf. Every `fit run` input is classified in
 `input_class::FIT_RUN` and has a case in
 `rust/crates/cli/tests/fit_run_input_classes.rs`.
 
