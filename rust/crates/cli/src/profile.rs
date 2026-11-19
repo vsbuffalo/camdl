@@ -546,10 +546,12 @@ fn run_profile(
             });
         // Hash the config as the user wrote it (the fit file, or a stored
         // fit's `fit.toml.original`), as `fit run`'s `fit_toml_hash` does; it
-        // is keyed in the base. What the resolved config adds to it — a
-        // flag's `[config]` value and the folder's `[fixed]` — is keyed there
-        // as values (`allow_forcing_extrapolation`, `fixed`). Path-independent:
-        // only the contents participate, matching the `data_hash` convention.
+        // is keyed in the base. What the resolved config adds to it reaches
+        // the base too: a flag's `[config]` value as
+        // `allow_forcing_extrapolation`, the folder's `[fixed]` values through
+        // `base_params` (the hash of every parameter's resolved value).
+        // Path-independent: only the contents participate, matching the
+        // `data_hash` convention.
         let hash = crate::hashing::sha256_hex(f.original.as_bytes());
         // The likelihood every cell scores is the fit's own (`ic_free`), read
         // through the same function `fit run` uses, so a profile curve is on
@@ -1796,9 +1798,22 @@ fn run_profile(
         // Store the fit's config as a fit folder does: the user's text as
         // `fit.toml.original`, the configuration resolved from it as
         // `fit.resolved.toml` (none for a CLI-only profile).
+        // A fit file's resolution is built here, from the `[fixed]` values
+        // resolved above (a `from_scenario` expanded with the model), so it is
+        // the text a fit folder of the file stores, whichever form named it.
         let written = match fit.as_ref() {
-            Some(f) => crate::run_meta::write_fit_sidecar_with_config(
-                &base_seg, &f.anchor, &f.original, &f.resolved, std::path::Path::new(&ir_path), &sidecar),
+            Some(f) => match f.resolved.clone().map_or_else(
+                || crate::fit::run_config::resolved_config_text(
+                    &f.original,
+                    crate::fit::run_config::ProblemFlags { allow_forcing_extrapolation: false },
+                    &fit_toml_fixed_indexmap,
+                ),
+                Ok,
+            ) {
+                Ok(resolved) => crate::run_meta::write_fit_sidecar_with_config(
+                    &base_seg, &f.anchor, &f.original, &resolved, std::path::Path::new(&ir_path), &sidecar),
+                Err(e) => out.fail(format!("error: --fit {}: {e}", f.handle)),
+            },
             None => crate::run_meta::write_fit_sidecar(
                 &base_seg, std::path::Path::new(""), std::path::Path::new(&ir_path), &sidecar),
         };

@@ -1208,9 +1208,12 @@ fn run_fit(
                 // The folder keeps the text read once, as written, and the
                 // configuration its fits ran under: that text with what the
                 // command line set in the problem half (gh#1268) and the
-                // folder's own `[fixed]`, a sweep point's values applied.
+                // folder's own `[fixed]` values: a sweep point's applied, a
+                // `from_file` read as the fit reads it.
+                let folder_fixed = sweep_config.fixed.resolve()
+                    .unwrap_or_else(|e| out.fail(format!("error: {e}")));
                 let resolved_config = run_config::resolved_config_text(
-                    &config_text, problem_flags, &sweep_config.fixed,
+                    &config_text, problem_flags, &folder_fixed,
                 )
                 .unwrap_or_else(|e| out.fail(format!("error: {e}")));
                 if let Err(e) = crate::run_meta::write_fit_sidecar_with_config(

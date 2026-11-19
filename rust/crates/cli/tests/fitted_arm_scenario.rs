@@ -296,6 +296,31 @@ fn simulate_posterior_replays_the_fits_selection() {
         "`--disable vax` switches off the fitted vax and must differ");
 }
 
+/// A fit leaf whose folder's stored config cannot be read (`fit.resolved.toml`
+/// gone) is refused by `simulate --draws posterior --fit`, naming the file,
+/// never replayed without the fit's selection and simulator as a bare
+/// directory of draws is. With the file back, the same command runs.
+#[test]
+fn simulate_posterior_refuses_a_fit_whose_stored_config_is_unreadable() {
+    let tmp = tempdir("simulate_unreadable");
+    let ir = compile(tmp.path(), "m", &format!("{HEAD}{TAIL_BOTH}"));
+    let fit = fit_config(tmp.path(), "f", &ir, r#"enable = ["vax"]"#, PMMH);
+    ok(run(tmp.path(), &["fit", "run", &fit.to_string_lossy()]), "fit run");
+    let leaf = draws_leaf(&tmp.path().join("res_f"));
+    let resolved = leaf.parent().unwrap().parent().unwrap().join("fit.resolved.toml");
+    let kept = std::fs::read(&resolved).unwrap();
+    std::fs::remove_file(&resolved).unwrap();
+    let args = ["simulate", ir.to_str().unwrap(), "--draws", "posterior", "--fit", leaf.to_str().unwrap(),
+        "--n-draws", "5", "--seed", "3", "-o", "out.tsv"];
+    let out = run(tmp.path(), &args);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "a fit folder without its stored config is refused:\n{err}");
+    assert!(err.contains("has no fit.resolved.toml"), "{err}");
+    assert!(!err.contains("is not a stored fit run"), "not passed over as a bare directory:\n{err}");
+    std::fs::write(&resolved, kept).unwrap();
+    ok(run(tmp.path(), &args), "simulate with the stored config back");
+}
+
 #[test]
 fn simulate_prior_and_file_draws_replay_the_fits_selection() {
     // `--draws prior --fit` and `--draws <file> --fit` read the fit config for
