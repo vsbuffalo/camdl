@@ -715,7 +715,9 @@ fn a_fit_with_no_saved_trajectories_refuses_by_name() {
     let bin = skip_if_missing();
     let f = fixture();
 
-    let bare = f.dir.join("fit_no_paths");
+    // At the fit folder's depth below the fixture, so the copy's recorded
+    // `source_config` still names the fit file and its data resolve.
+    let bare = f.dir.join("copies").join("fits").join("fit_no_paths");
     let _ = std::fs::remove_dir_all(&bare);
     copy_tree(&f.fit, &bare);
     let saved = find_all(&bare, "trajectories.tsv");
@@ -821,7 +823,8 @@ fn a_changed_paired_ensemble_re_keys_every_cell() {
 
     // Perturb ONE restored state in the fit's saved paths and re-run into a
     // fresh store: the ensemble digest changes, so no cell may reuse an id.
-    let bumped = f.dir.join("fit_bumped");
+    // At the fit folder's depth, so its data resolve (as above).
+    let bumped = f.dir.join("copies").join("fits").join("fit_bumped");
     let _ = std::fs::remove_dir_all(&bumped);
     copy_tree(&f.fit, &bumped);
     let traj = find_all(&bumped, "trajectories.tsv")
