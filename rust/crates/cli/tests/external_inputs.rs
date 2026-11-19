@@ -533,3 +533,42 @@ fn pfilter_and_profile_bind_the_config_table_under_table_flag() {
     ok(&fx.camdl(&["survey", "fit.camdl", "--fit", "a.toml", "--n-points", "4", "--eval", "pfilter",
                    "--eval-particles", "30", "--eval-replicates", "1", "--seed", "1"]));
 }
+
+/// A stored fit read back by a reader of its config binds the table bytes
+/// the fit ran under. `fit.resolved.toml` keeps `[data.tables]`, and a reader
+/// of a run handle (`pfilter --fit <leaf>`) binds the copy stored in the fit
+/// folder, so editing the source file after the fit does not move the
+/// result; a stored copy whose bytes are not the ones the fit recorded is
+/// refused rather than read.
+#[test]
+fn a_stored_fits_reader_binds_the_tables_it_ran_under() {
+    let fx = Fixture::with_fit_files();
+    fx.write("school.tsv", CALENDAR_A);
+    fx.write("a.toml", &fit_config("school = \"school.tsv\"", PFILTER_METHOD));
+    let leaf = stored_leaf(&ok(&fx.camdl(&["fit", "run", "a.toml"])));
+    let folder = fx.dir.join(&leaf).ancestors().nth(2).unwrap().to_path_buf();
+    let resolved = std::fs::read_to_string(folder.join("fit.resolved.toml")).unwrap();
+    assert!(resolved.contains("[data.tables]\nschool = \"school.tsv\"\n"), "{resolved}");
+
+    let pf = |fit: &str| -> Result<f64, String> {
+        let out = fx.camdl(&["pfilter", "fit.camdl", "--fit", fit, "--param", "beta=0.4", "--param", "gamma=0.2",
+                             "--param", "rho=0.5", "--particles", "50", "--seed", "1"]);
+        if out.status.success() { Ok(printed_loglik(&out)) } else { Err(String::from_utf8_lossy(&out.stderr).into_owned()) }
+    };
+    let leaf_dir = fx.path(&leaf);
+    let as_ran = pf(&leaf_dir).unwrap();
+    assert_eq!(as_ran, pf("a.toml").unwrap(), "the leaf reads the table the file binds");
+
+    // The source file changes: the file now names another problem, the
+    // stored fit does not.
+    fx.write("school.tsv", CALENDAR_B);
+    assert_ne!(pf("a.toml").unwrap(), as_ran, "the table matters to the log-likelihood");
+    assert_eq!(pf(&leaf_dir).unwrap(), as_ran, "a stored fit binds the bytes it ran under");
+
+    // The stored copy itself changes: refused, naming the input and the
+    // digest the fit recorded.
+    std::fs::write(folder.join("inputs/school.tsv"), CALENDAR_B).unwrap();
+    let err = pf(&leaf_dir).expect_err("a stored copy whose bytes are not the fit's");
+    let recorded = sha256_hex(&fx.dir.join("cal/a.tsv"));
+    assert!(err.contains("external input 'school'") && err.contains(&recorded), "{err}");
+}

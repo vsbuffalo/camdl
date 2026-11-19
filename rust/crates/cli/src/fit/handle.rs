@@ -840,8 +840,10 @@ fn read_segment_config(segment: &Path) -> Result<(String, PathBuf, FitConfig), R
 /// Point `config`'s `[data.tables]` at the copies the fit stored in
 /// `segment` (`run_meta::STORED_INPUTS_DIR`), so whatever replays the fit
 /// binds the bytes it was fitted under, not the file at the recorded path as
-/// it is now. A copy that is missing is refused, naming the input and the
-/// digest the fit recorded for it.
+/// it is now. A copy that is missing, or whose bytes are not the ones the fit
+/// recorded binding (`table_hashes` in `fit.meta.json`, the digest its
+/// identity folds), is refused, naming the input and that digest: read, it
+/// would replay the fit under a table it was not fitted under.
 fn bind_stored_inputs(
     config: &mut FitConfig,
     segment: &Path,
@@ -860,6 +862,24 @@ fn bind_stored_inputs(
                 segment.display(),
                 stored.display()
             ));
+        }
+        let bytes = std::fs::read(&stored)
+            .map_err(|e| format!("cannot read {}: {e}", stored.display()))?;
+        let found = crate::hashing::sha256_hex(&bytes);
+        match side.table_hashes.get(name) {
+            Some(recorded) if *recorded == found => {}
+            recorded => {
+                let recorded = recorded
+                    .map(|h| format!("the fit recorded binding {h}"))
+                    .unwrap_or_else(|| "the fit recorded no digest for it".to_string());
+                return Err(format!(
+                    "{} is a fit directory but its stored copy of external input '{name}' \
+                     ([data.tables] {name} = \"{path}\"), {}, is not the file the fit was bound \
+                     to: its SHA-256 is {found}, and {recorded}.",
+                    segment.display(),
+                    stored.display()
+                ));
+            }
         }
         *path = stored.to_string_lossy().into_owned();
     }
