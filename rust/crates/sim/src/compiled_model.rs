@@ -2800,11 +2800,15 @@ impl CompiledModel {
             let global = self.comp_index.get(name.as_str())
                 .copied()
                 .ok_or_else(|| SimError::UnknownCompartment(name.clone()))?;
+            // t is the run's start, `simulate { from }` (language spec §17:
+            // `init {}` is evaluated at `t_start`), so an entry reading `t` or
+            // a forcing sees its value at the first instant of the run. Every
+            // initial-state evaluation in this impl uses the same `t`.
             // dt: 0.0 — initial-condition expressions don't have
             // access to a meaningful integrator step (init runs once,
             // before stepping). Users referencing `dt` here get 0.0.
             let v = {
-                let ctx = EvalCtx { model: self, int_s: &int_s, real_s: &real_s, params, t: 0.0, dt: 0.0, projected: None, aux: None, int_float_override: None, per_eval: None };
+                let ctx = EvalCtx { model: self, int_s: &int_s, real_s: &real_s, params, t: self.model.simulation.t_start, dt: 0.0, projected: None, aux: None, int_float_override: None, per_eval: None };
                 eval_expr(expr, &ctx)?
             };
             if let Some(local) = self.global_to_int[global] {
@@ -2865,7 +2869,7 @@ impl CompiledModel {
             // Every argument is evaluated against the state built so far —
             // the same partial state a deterministic RHS sees.
             let arg = |e: &ir::expr::Expr| -> Result<f64, SimError> {
-                let ctx = EvalCtx { model: self, int_s: &int_s, real_s: &real_s, params, t: 0.0, dt: 0.0, projected: None, aux: None, int_float_override: None, per_eval: None };
+                let ctx = EvalCtx { model: self, int_s: &int_s, real_s: &real_s, params, t: self.model.simulation.t_start, dt: 0.0, projected: None, aux: None, int_float_override: None, per_eval: None };
                 eval_expr(e, &ctx)
             };
             let v: f64 = match spec {
@@ -2968,7 +2972,7 @@ impl CompiledModel {
         for (name, spec) in &self.model.initial_conditions {
             let Some(x) = self.init_law_value(name, &int_s, &real_s, spec)? else { continue };
             let arg = |e: &ir::expr::Expr| -> Result<f64, SimError> {
-                let ctx = crate::propensity::EvalCtx { model: self, int_s: &int_s, real_s: &real_s, params, t: 0.0, dt: 0.0, projected: None, aux: None, int_float_override: None, per_eval: None };
+                let ctx = crate::propensity::EvalCtx { model: self, int_s: &int_s, real_s: &real_s, params, t: self.model.simulation.t_start, dt: 0.0, projected: None, aux: None, int_float_override: None, per_eval: None };
                 crate::propensity::eval_expr(e, &ctx)
             };
             ll += match spec {
@@ -3060,7 +3064,7 @@ impl CompiledModel {
         let (int_s, real_s) = self.state_view(x0_int, x0_real);
         for (name, spec) in &self.model.initial_conditions {
             let Some(x) = self.init_law_value(name, &int_s, &real_s, spec)? else { continue };
-            let ctx = crate::propensity::EvalCtx { model: self, int_s: &int_s, real_s: &real_s, params, t: 0.0, dt: 0.0, projected: None, aux: None, int_float_override: None, per_eval: None };
+            let ctx = crate::propensity::EvalCtx { model: self, int_s: &int_s, real_s: &real_s, params, t: self.model.simulation.t_start, dt: 0.0, projected: None, aux: None, int_float_override: None, per_eval: None };
             let arg = |e: &ir::expr::Expr| crate::propensity::eval_expr(e, &ctx);
             // `∂arg/∂θ_j` for every model parameter, from the emitted map.
             let chain = |d: &ir::deriv::Diffable, dlogp_darg: f64,
@@ -3176,7 +3180,7 @@ impl CompiledModel {
                 .expect("init_order indexes initial_conditions");
             let expr = &spec.mean_expr();
             let v = {
-                let ctx = EvalCtx { model: self, int_s: &unused_int, real_s: &real_s, params, t: 0.0, dt: 0.0, projected: None, aux: None, int_float_override: Some(&int_values), per_eval: None };
+                let ctx = EvalCtx { model: self, int_s: &unused_int, real_s: &real_s, params, t: self.model.simulation.t_start, dt: 0.0, projected: None, aux: None, int_float_override: Some(&int_values), per_eval: None };
                 eval_expr(expr, &ctx)?
             };
             let global = self.comp_index.get(name.as_str())
@@ -3229,7 +3233,7 @@ impl CompiledModel {
 
         let zero_int = IntState::new(n_int);
         let zero_real = RealState::new(self.real_local_to_global.len());
-        let ctx = EvalCtx { model: self, int_s: &zero_int, real_s: &zero_real, params, t: 0.0, dt: 0.0, projected: None, aux: None, int_float_override: None, per_eval: None };
+        let ctx = EvalCtx { model: self, int_s: &zero_int, real_s: &zero_real, params, t: self.model.simulation.t_start, dt: 0.0, projected: None, aux: None, int_float_override: None, per_eval: None };
 
         for (comp_name, param_map) in &self.model.ic_grad {
             let global = self.comp_index.get(comp_name.as_str())
