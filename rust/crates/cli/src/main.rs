@@ -4273,7 +4273,8 @@ fn resolve_simulate_obs_anchors(
 }
 
 /// The `[simulate] from` of the config `simulate --fit` names, as written:
-/// the fit.toml itself, or a stored fit's archived `fit.toml.original`.
+/// the fit.toml itself, or the configuration a stored fit ran under
+/// (`fit.resolved.toml`), never the verbatim `fit.toml.original` beside it.
 ///
 /// Read from the config text alone, without binding its data: `--fit` serves
 /// several purposes (`--draws posterior`, `--init-state fit`, anchors), each of
@@ -4290,7 +4291,7 @@ fn simulate_fit_config_start(fit_ref: &std::path::Path) -> Option<String> {
                 FitTarget::Segment(seg) => seg,
                 FitTarget::Leaf(l) => crate::fit::fit_view::leaf_segment(&l.dir).ok()??,
             };
-            std::fs::read_to_string(segment.join("fit.toml.original")).ok()?
+            std::fs::read_to_string(crate::run_meta::require_resolved_config(&segment).ok()?).ok()?
         }
     };
     let doc: toml::Table = text.parse().ok()?;
