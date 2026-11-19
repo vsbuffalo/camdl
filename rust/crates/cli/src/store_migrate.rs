@@ -502,7 +502,17 @@ fn apply(folder: Folder, to: u32, writes: &[Write]) -> Result<Folder, String> {
                 .ok_or_else(|| format!("{} has no run.json after migrating", dir.display()))?;
             Ok(Folder::Leaf { dir, record: leaf.record })
         }
-        Folder::Record { dir, mut side } => {
+        Folder::Record { dir, side: walked } => {
+            // The record as it is now, not as the walk read it: another writer
+            // may have rewritten it since.
+            let mut side = crate::run_meta::read_fit_sidecar(&dir)?
+                .ok_or_else(|| format!("{} has no fit.meta.json", dir.display()))?;
+            if side.store_layout != walked.store_layout {
+                return Err(format!(
+                    "its fit.meta.json changed to layout {} while migrating",
+                    side.store_layout
+                ));
+            }
             side.store_layout = to;
             crate::run_meta::store_fit_sidecar(&dir, &side).map_err(|e| e.to_string())?;
             let side = crate::run_meta::read_fit_sidecar(&dir)?
@@ -561,6 +571,29 @@ pub fn cmd_migrate(a: &crate::args::MigrateArgs) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Raising a fit folder's layout rewrites its `fit.meta.json` as it is
+    /// then, not as the walk read it: a field another writer changed in
+    /// between (here `estimated`) survives.
+    #[test]
+    fn raising_the_layout_rewrites_the_sidecar_as_it_is_on_disk() {
+        let dir = crate::test_support::unique_temp_dir("migrate_reread");
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::run_meta::store_fit_sidecar(&dir, &FitSidecar::default()).unwrap();
+        let side = crate::run_meta::read_fit_sidecar(&dir).unwrap().unwrap();
+        assert_eq!(side.store_layout, 0);
+        let walked = Folder::Record { dir: dir.clone(), side };
+        let mut changed = crate::run_meta::read_fit_sidecar(&dir).unwrap().unwrap();
+        changed.estimated = vec!["written meanwhile".to_string()];
+        crate::run_meta::store_fit_sidecar(&dir, &changed).unwrap();
+        let after = match apply(walked, 1, &[]).unwrap() {
+            Folder::Record { side, .. } => side,
+            Folder::Leaf { .. } => unreachable!(),
+        };
+        assert_eq!(after.store_layout, 1);
+        assert_eq!(after.estimated, vec!["written meanwhile".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn the_steps_run_from_the_oldest_kept_to_the_current_layout() {

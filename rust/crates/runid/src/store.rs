@@ -1873,6 +1873,30 @@ pub fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), CasError> {
     }
 }
 
+/// [`write_file_atomic`] through a temporary file of this writer's own,
+/// `.<name>.<pid>.<nanos>.tmp` in the same directory, for a file that several
+/// processes may rewrite at once (a fit folder's `fit.meta.json`): a shared
+/// fixed name would let one writer's rename publish another's half-written
+/// bytes, or fail on another's temporary.
+pub fn write_file_atomic_own_tmp(path: &Path, bytes: &[u8]) -> Result<(), CasError> {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = path.with_file_name(format!(".{name}.{}.{nanos}.tmp", std::process::id()));
+    let committed = write_file_synced(&tmp, bytes)
+        .and_then(|()| fs::rename(&tmp, path).at("commit", path));
+    if let Err(e) = committed {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    match path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        Some(dir) => fsync_dir(dir),
+        None => fsync_dir(Path::new(".")),
+    }
+}
+
 /// Write `run.json` directly (Mode A staging: the whole dir is renamed
 /// atomically, so no tmp is needed).
 fn write_record_direct(dir: &Path, record: &RunRecord) -> Result<(), CasError> {

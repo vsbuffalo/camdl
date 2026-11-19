@@ -1024,8 +1024,12 @@ fn write_fit_sidecar_archiving(
         None
     };
     if let Some(StoredConfig { path, text, resolved }) = config {
-        std::fs::write(fit_segment.join(ARCHIVED_CONFIG), text)?;
-        std::fs::write(fit_segment.join(RESOLVED_CONFIG), resolved)?;
+        // Each whole or not at all, so a crash cannot leave a torn config
+        // beside a record that names it.
+        runid::write_file_atomic(&fit_segment.join(ARCHIVED_CONFIG), text.as_bytes())
+            .map_err(std::io::Error::other)?;
+        runid::write_file_atomic(&fit_segment.join(RESOLVED_CONFIG), resolved.as_bytes())
+            .map_err(std::io::Error::other)?;
         sidecar.source_config = Some(relative_path(fit_segment, path)?);
         // gh#353: archive the model `.camdl` source too, symmetric with
         // fit.toml.original, so the leaf is self-contained (source + config +
@@ -1069,9 +1073,11 @@ pub fn store_fit_sidecar(fit_segment: &std::path::Path, sidecar: &FitSidecar) ->
     merged.training_partition = sidecar.training_partition.clone()
         .or_else(|| on_disk.and_then(|s| s.training_partition));
     let bytes = serde_json::to_vec_pretty(&merged).map_err(std::io::Error::other)?;
-    // Whole or not at all: a reader (or `camdl dev migrate`, which bumps the
-    // layout here last) never sees a torn record.
-    runid::write_file_atomic(&fit_segment.join("fit.meta.json"), &bytes).map_err(std::io::Error::other)
+    // Whole or not at all, through a temporary of this writer's own: a
+    // reader never sees a torn record, and two writers of one folder (a fit
+    // recording its training partition, `camdl dev migrate` raising the
+    // layout) never share a temporary.
+    runid::write_file_atomic_own_tmp(&fit_segment.join("fit.meta.json"), &bytes).map_err(std::io::Error::other)
 }
 
 /// `to` as a path relative to the directory `from`, computed between the two
@@ -1245,6 +1251,22 @@ mod tests {
         value.as_object_mut().unwrap().remove("store_layout");
         std::fs::write(dir.join("fit.meta.json"), value.to_string()).unwrap();
         assert_eq!(read_fit_sidecar(&dir).unwrap().unwrap().store_layout, 0, "no field is layout 0");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two processes rewriting one folder's sidecar at once (a `fit run`
+    /// recording its training partition while `camdl dev migrate` raises the
+    /// layout) must not share a temporary file. A writer's temporary is its
+    /// own: one another writer holds at the old fixed name
+    /// (`fit.meta.json.tmp`, here a directory, so it cannot be overwritten)
+    /// does not stop the write, and is left alone.
+    #[test]
+    fn a_sidecar_write_does_not_use_another_writers_temporary() {
+        let dir = crate::test_support::unique_temp_dir("sidecar_tmp");
+        std::fs::create_dir_all(dir.join("fit.meta.json.tmp")).unwrap();
+        store_fit_sidecar(&dir, &FitSidecar::default()).unwrap();
+        assert!(read_fit_sidecar(&dir).unwrap().is_some());
+        assert!(dir.join("fit.meta.json.tmp").is_dir(), "another writer's temporary is left alone");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
