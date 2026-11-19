@@ -219,6 +219,7 @@ fn smc(record: bool) -> SMCConfig {
         record_ancestry: record,
         record_prequential: record,
         record_predictions: record,
+        record_stream_means: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,
     }

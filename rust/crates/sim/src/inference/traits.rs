@@ -396,6 +396,16 @@ pub struct SMCConfig {
     /// before.
     pub record_predictions: bool,
 
+    /// Summarise, at every stop of the observation axis and for every stream
+    /// scheduled there, the weighted distribution over the swarm of that
+    /// stream's conditional mean `E[y_t | x_t, θ]` (`obs_model.mean()`), twice:
+    /// under the weights before `y_t` is scored and under the weights after
+    /// (`PFilterResult.stream_means`). Only `camdl pfilter
+    /// --save-filtered-streams` reads it. It draws nothing and changes no
+    /// weight, so the filter's likelihood, resampling and random streams are
+    /// the same with it on or off.
+    pub record_stream_means: bool,
+
     /// gh#241. The deterministic per-call compute budget: the maximum
     /// cumulative particle-substep count one filter evaluation may execute
     /// before bailing with `PFIterationBudget`. Default

@@ -203,7 +203,7 @@ fn smc_config() -> SMCConfig {
     SMCConfig {
         n_particles: 64, dt: 1.0, t_start: 0.0,
         skip_first_obs_from_loglik: false, record_ancestry: false,
-        record_prequential: false, record_predictions: false,
+        record_prequential: false, record_predictions: false, record_stream_means: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,
     }

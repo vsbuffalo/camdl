@@ -39,6 +39,7 @@ pub(crate) fn check_per_run_outputs(a: &crate::args::PfilterArgs) -> Result<(), 
         ("--save-final-state", a.save_final_state.is_some()),
         ("--save-paths", a.save_paths.is_some()),
         ("--save-filtering", a.save_filtering.is_some()),
+        ("--save-filtered-streams", a.save_filtered_streams.is_some()),
         ("--save-prequential", a.save_prequential.is_some()),
     ]
     .into_iter()
@@ -192,6 +193,7 @@ fn run_pfilter(
         output: output_path,
         save_paths,
         save_filtering,
+        save_filtered_streams,
         save_prequential,
         score_from,
         save_samples,
@@ -569,7 +571,7 @@ fn run_pfilter(
                  state saved at t = {}, the end of the training rows (holdout_after); \
                  the log-likelihood shown covers training rows only, as does every \
                  other output of this run (--trace, --save-prequential, --save-paths, \
-                 --save-filtering, --pf-health)",
+                 --save-filtering, --save-filtered-streams, --pf-health)",
                 cut.at, cut.extent));
             training_cut = Some(cut);
         }
@@ -696,6 +698,8 @@ fn run_pfilter(
         record_ancestry: need_ancestry,
         record_prequential: save_prequential.is_some(),
         record_predictions: want_predictions,
+        // Single-run only: `--replicates` refuses `--save-filtered-streams`.
+        record_stream_means: save_filtered_streams.is_some() && n_replicates <= 1,
         // gh#241: deterministic compute budget (the engine default unless the
         // user passes `--pf-max-substeps`). Reproducible across machines — there
         // is no wall-clock watchdog, so a content-addressed `pfilters/` leaf is
@@ -1212,6 +1216,16 @@ fn run_pfilter(
             out.fail(format!("error writing filtering: {}", e));
         });
         out.say(format_args!("filtering marginals written to {}", path));
+    }
+
+    // Each stream's conditional mean before and after each step is scored
+    // (--save-filtered-streams PATH).
+    if let Some(ref path) = save_filtered_streams {
+        let steps = result.stream_means.as_deref().expect(
+            "record_stream_means must be true when save_filtered_streams is set");
+        write_filtered_streams_tsv(path, steps, &observations, &obs_model.stream_names())
+            .unwrap_or_else(|e| out.fail(format!("error writing filtered streams: {}", e)));
+        out.say(format_args!("filtered stream means written to {}", path));
     }
 
     // A filter that lost all its weight has no likelihood to report or store:
@@ -2315,6 +2329,33 @@ fn write_filtering_tsv(
         }
     }
     Ok(())
+}
+
+/// `--save-filtered-streams`: one row per stop of the observation axis,
+/// stream scheduled there, and phase (`predictive`, then `filtered`), holding
+/// the weighted mean and quantiles over the swarm of the stream's conditional
+/// mean `E[y_t | x_t, θ]`. `time` is the stop's model time, the `--trace`
+/// column of the same name. A summary with no weight behind it prints `NA`.
+fn write_filtered_streams_tsv(
+    path: &str,
+    steps: &[sim::inference::particle_filter::StreamMeanStep],
+    observations: &[Observation],
+    stream_names: &[String],
+) -> Result<(), String> {
+    let cell = |v: f64| if v.is_finite() { format!("{v}") } else { "NA".to_string() };
+    let mut w = std::io::BufWriter::new(std::fs::File::create(path)
+        .map_err(|e| format!("cannot create {}: {}", path, e))?);
+    let io = |e: std::io::Error| format!("writing {}: {}", path, e);
+    writeln!(w, "time\tstream\tphase\tmean\tq05\tq25\tq50\tq75\tq95").map_err(io)?;
+    for step in steps {
+        for (phase, s) in [("predictive", &step.predictive), ("filtered", &step.filtered)] {
+            writeln!(w, "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                observations[step.obs_idx].time, stream_names[step.stream], phase,
+                cell(s.mean), cell(s.q05), cell(s.q25), cell(s.q50), cell(s.q75), cell(s.q95))
+                .map_err(io)?;
+        }
+    }
+    w.flush().map_err(io)
 }
 
 /// Format a Snyder implied-particle-count estimate `exp(τ²/2)` for reading.

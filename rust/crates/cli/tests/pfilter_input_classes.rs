@@ -574,6 +574,16 @@ fn presentation_save_filtering() {
 }
 
 #[test]
+fn presentation_save_filtered_streams() {
+    let fx = fx();
+    assert_unaffected(
+        "--save-filtered-streams",
+        &pf(&fx, &[]),
+        &pf(&fx, &["--save-filtered-streams", "streams.tsv"]),
+    );
+}
+
+#[test]
 fn presentation_save_prequential() {
     let fx = fx();
     assert_unaffected("--save-prequential", &pf(&fx, &[]), &pf(&fx, &["--save-prequential", "preq"]));

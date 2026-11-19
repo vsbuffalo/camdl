@@ -738,6 +738,7 @@ fn run_pf(
         record_ancestry: false,
         record_prequential: false,
         record_predictions: false,
+        record_stream_means: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
@@ -1308,6 +1309,7 @@ fn recording_flags_do_not_move_the_likelihood() {
             record_ancestry: rec,
             record_prequential: rec,
             record_predictions: rec,
+            record_stream_means: false,
             max_substeps: sim::inference::degeneracy::ITER_BUDGET,
             binomial: sim::rng::BinomialAlgorithm::Btpe,
         };

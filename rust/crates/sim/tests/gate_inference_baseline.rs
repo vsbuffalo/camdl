@@ -229,6 +229,7 @@ fn run(builder: RefBuilder) -> f64 {
         record_ancestry: false,
         record_prequential: false,
         record_predictions: false,
+        record_stream_means: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,
     };

@@ -2021,6 +2021,7 @@ fn run_profile(
                             record_ancestry: false,
                             record_prequential: false,
                             record_predictions: false, // gh#520: only `.log_likelihood` is read below
+                            record_stream_means: false,
                             max_substeps: pf_max_substeps.unwrap_or(sim::inference::degeneracy::ITER_BUDGET), // gh#241
                             // gh#747: the cell's own sampler, so the re-scored
                             // loglik is the one its IF2 run would reproduce.

@@ -393,7 +393,9 @@ it, observation noise included. If `observed` falls between q05 and q95 about
 **state_mean, state_q05/q50/q95:** The same one-step prediction without the
 observation noise: the distribution over the particles of the observation
 model's conditional mean `E[y_t | x_t, θ]`, summed over the streams scheduled at
-that step ("Prediction quantiles" below).
+that step ("Prediction quantiles" below). For one stream these are the
+`predictive` rows of `--save-filtered-streams`, which also reports the
+distribution after `y_t` is scored.
 
 ### The `--pf-health` output — "do I have enough particles?"
 
@@ -486,6 +488,70 @@ For **PF diagnostics** (particle degeneracy, ESS decay, obs-model sanity checks,
 filter-implementation debugging), use `--save-filtering`. The per-step
 log-weights are what you need to detect those pathologies; they're not what you
 need to compare trajectories to data.
+
+### Filtered and one-step predictive stream means
+
+The quantity a figure of a filter against its data usually wants is a stream's
+expected observation at each step: for weekly notifications observed as
+`cases ~ normal(mean = rho * projected, ...)` with
+`projected =
+incidence(recovery)`, the expected count `μ_t = ρ · C_t`, where
+`C_t` is the week's accumulated recoveries. `--save-filtering` cannot give it,
+because a flow accumulated over the week is not a compartment and the file holds
+only compartments. `camdl pfilter --save-filtered-streams PATH` writes it
+directly, as two distributions at each step `t`:
+
+- **`predictive`**, `p(μ_t | y_{1..t-1}, θ)`: the one-step forecast, given the
+  data through the step before. Every live particle carries equal weight, as the
+  swarm stands after the previous step's resampling.
+- **`filtered`**, `p(μ_t | y_{1..t}, θ)`: the same particles weighted by
+  `p(y_t | x_t, θ)`, every stream observed at `t` scored jointly. These are the
+  weights `--save-filtering` writes.
+
+What is summarised is, for each particle, the observation model's conditional
+mean `E[y_t | x_t, θ]` (what `obs_model.mean()` evaluates): the `mean =`
+argument of a `normal`, `neg_binomial` or `beta`, the `rate` of a `poisson`, `p`
+of a `bernoulli`, `n · p` of a `binomial`, `n · α / (α + β)` of a
+`beta_binomial`, and `(1 − π) · mean` of a `zero_inflated` negative binomial. It
+carries the process uncertainty and none of the observation noise.
+
+The file is a long TSV, one row per step, stream scheduled at that step, and
+phase, `predictive` before `filtered`:
+
+```text
+time  stream  phase       mean    q05   q25   q50   q75   q95
+1     cases   predictive  9.989   6.5   8.5   10    11.5  14
+1     cases   filtered    9.008   6     8     9     10    12
+```
+
+- `time`: the step's model time, the `--trace` column of the same name.
+- `stream`: the observation stream's name.
+- `phase`: `predictive` or `filtered`, as above.
+- `mean`: the weighted mean of `E[y_t | x_t, θ]` over the particles.
+- `q05` … `q95`: its weighted 5%, 25%, 50%, 75% and 95% quantiles, each the
+  smallest particle value at which the cumulative weight reaches the level (the
+  rule `--trace` uses).
+
+A step where no particle has weight (the filter's weights collapsed there, or
+every particle died) prints `NA` in every summary column. A stream gets rows
+only at the steps it is scheduled at, so a multi-stream model with streams on
+different cadences has a different number of rows per stream. At a step where
+nothing is observed (every row there `NA`), nothing is scored, and `filtered`
+equals `predictive`.
+
+For a single stream, the `predictive` median and mean are `--trace`'s
+`state_q50` and `state_mean` at the same `time`, which `--trace` rounds; they
+differ only at a step where particles have died, which `--trace` counts at equal
+weight and this file leaves out. Neither phase is a smoothing distribution
+`p(μ_t | y_{1..T})`: for that, use `--save-paths`, which writes each stream's
+mean along each sampled path.
+
+The flag is output only: the log-likelihood, every other output and the run's
+stored identity are the same with it as without it, since computing the means
+draws no random number and changes no weight. Like the other per-run outputs, it
+is refused beside `--replicates N`. It holds two rows of six numbers per step
+and stream, so unlike `--save-filtering` it stays small whatever the particle
+count.
 
 ### The diagnostic plot: unconditional vs smoothing
 
@@ -1863,15 +1929,16 @@ at their end: a state filtered through the held-out rows would already have seen
 the data its forecast is scored against. The run says so:
 
 ```text
-pfilter: --save-final-state under holdout_after = "6" (t = 6): state saved at t = 6, the end of the training rows (holdout_after); the log-likelihood shown covers training rows only, as does every other output of this run (--trace, --save-prequential, --save-paths, --save-filtering, --pf-health)
+pfilter: --save-final-state under holdout_after = "6" (t = 6): state saved at t = 6, the end of the training rows (holdout_after); the log-likelihood shown covers training rows only, as does every other output of this run (--trace, --save-prequential, --save-paths, --save-filtering, --save-filtered-streams, --pf-health)
 ```
 
 Every per-run output of that run therefore covers the training rows only: the
 log-likelihood, `--trace`, `--save-prequential`, `--save-paths`,
-`--save-filtering` and `--pf-health`. `--score-from` is refused beside it when
-the cut dropped rows, because every row it could score trained; score the
-held-out window in a separate run without `--save-final-state`. Without
-`--save-final-state`, the filter and every output cover the full series.
+`--save-filtering`, `--save-filtered-streams` and `--pf-health`. `--score-from`
+is refused beside it when the cut dropped rows, because every row it could score
+trained; score the held-out window in a separate run without
+`--save-final-state`. Without `--save-final-state`, the filter and every output
+cover the full series.
 
 The file is a TSV with a `# camdl-final-state v1  t=<time>` header, then one row
 per particle and one column per integer compartment — nothing else. The header's

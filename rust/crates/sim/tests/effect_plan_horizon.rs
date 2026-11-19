@@ -59,7 +59,7 @@ fn increments(m: &Arc<CompiledModel>, times: &[f64]) -> Vec<f64> {
     let config = SMCConfig {
         n_particles: 8, dt: 1.0, t_start: 0.0,
         skip_first_obs_from_loglik: false, record_ancestry: false,
-        record_prequential: false, record_predictions: false,
+        record_prequential: false, record_predictions: false, record_stream_means: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
@@ -122,7 +122,7 @@ fn filter(m: &Arc<CompiledModel>, times: &[f64]) -> Result<f64, String> {
     let config = SMCConfig {
         n_particles: 8, dt: 1.0, t_start: 0.0,
         skip_first_obs_from_loglik: false, record_ancestry: false,
-        record_prequential: false, record_predictions: false,
+        record_prequential: false, record_predictions: false, record_stream_means: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,
     };

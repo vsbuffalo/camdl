@@ -162,6 +162,7 @@ fn hole_does_not_suppress_incidence_reset() {
         record_ancestry: false,
         record_prequential: false,
         record_predictions: true, // this test reads `res.predictions`
+        record_stream_means: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
@@ -233,6 +234,7 @@ fn conditioning_boundary_resets_leading_incidence() {
         skip_first_obs_from_loglik: false,
         record_ancestry: false, record_prequential: false,
         record_predictions: true, // this test reads `res.predictions`
+        record_stream_means: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
@@ -285,6 +287,7 @@ fn dense_baseline_matches_predictions_at_non_hole_indices() {
         skip_first_obs_from_loglik: false,
         record_ancestry: false, record_prequential: false,
         record_predictions: true, // this test reads `res.predictions`
+        record_stream_means: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
