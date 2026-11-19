@@ -308,6 +308,36 @@ fn leaf_at(dir: &Path) -> Result<Option<crate::cas_read::Leaf>, ResolveError> {
         .map(|l| crate::cas_read::Leaf { dir: l.dir, record: l.record }))
 }
 
+/// `Err` ([`ResolveError::NotFound`]: no fit there) when `dir` is a profile's
+/// folder, or a directory inside one: its runs are profile points and none is
+/// a fit run. A profile's folder records the config of the fit it profiles,
+/// which the refusal names; it is never read as a fit folder.
+fn refuse_a_profile_folder(dir: &Path) -> Result<(), ResolveError> {
+    let kinds: std::collections::HashSet<runid::ArtifactKind> =
+        runid::discover_in_walk_order(dir, runid::Scope::default())
+            .into_iter()
+            .filter_map(|l| l.ok().map(|l| l.record.kind))
+            .collect();
+    if !kinds.contains(&runid::ArtifactKind::ProfilePoint) || kinds.contains(&runid::ArtifactKind::FitMethod) {
+        return Ok(());
+    }
+    let profiles = dir
+        .ancestors()
+        .find_map(|d| {
+            let side = crate::run_meta::read_fit_sidecar(d).ok().flatten()?;
+            Some(match side.source_config {
+                Some(c) => format!("it profiles the fit config {}", d.join(c).display()),
+                None => "it was made without a fit config".to_string(),
+            })
+        })
+        .unwrap_or_else(|| "it records no fit config".to_string());
+    Err(ResolveError::NotFound(format!(
+        "{} is a profile's folder, not a fit: its runs are profile points, and `--fit` names a \
+         fit ({profiles}).",
+        dir.display()
+    )))
+}
+
 /// Resolve a handle to what it names: a leaf directory, a run-id prefix,
 /// `@label` or a `fit.toml` names one run; a problem folder or a fit-id prefix
 /// names that folder.
@@ -315,7 +345,10 @@ pub fn resolve_target(s: &str) -> Result<FitTarget, ResolveError> {
     match FitRef::classify(s) {
         FitRef::RunDir(dir) => match leaf_at(&dir)? {
             Some(leaf) => Ok(FitTarget::Leaf(LeafRef::of(leaf))),
-            None if dir.is_dir() => Ok(FitTarget::Segment(dir)),
+            None if dir.is_dir() => {
+                refuse_a_profile_folder(&dir)?;
+                Ok(FitTarget::Segment(dir))
+            }
             None => Err(ResolveError::NotFound(format!("no such fit directory: {}", dir.display()))),
         },
         FitRef::HashPrefix(prefix) => {
@@ -1399,6 +1432,46 @@ cooling = 0.7
         });
         std::fs::write(leaf.join("run.json"), rec.to_string()).unwrap();
         leaf
+    }
+
+    /// A profile's folder is not a fit: `--fit` naming it, or one of its
+    /// profile points, is refused as such, naming the fit config it profiles,
+    /// rather than read as a fit folder (whose missing `fit.resolved.toml`
+    /// would send the user to re-run a fit that is not there).
+    #[test]
+    fn a_profile_folder_is_not_a_fit_handle() {
+        let tmp = crate::test_support::unique_temp_dir("handle_profile_folder");
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("fit.toml"), "[model]\ncamdl = \"m.camdl\"\n").unwrap();
+        let base = tmp.join("profiles").join("m-00000000");
+        std::fs::create_dir_all(&base).unwrap();
+        let side = crate::run_meta::FitSidecar {
+            store_layout: runid::STORE_LAYOUT,
+            source_config: Some("../../fit.toml".to_string()),
+            ..Default::default()
+        };
+        crate::run_meta::store_fit_sidecar(&base, &side).unwrap();
+        let point = base.join("gamma_0.25-00000000").join("if2-00000000").join("seed_1-00000000").join("start_0-00000000");
+        std::fs::create_dir_all(&point).unwrap();
+        let rec = serde_json::json!({
+            "format_version": 1, "kind": "profile_point", "run_id": "cd".repeat(32),
+            "hash_version": 1, "calendar": {"days_per_unit": 1.0, "origin": null, "time_unit": "days"},
+            "ir_version": "0.7", "engine_version": crate::version::ENGINE_ID,
+            "levels": [], "status": "completed", "artifacts": {}, "inputs": {},
+        });
+        std::fs::write(point.join("run.json"), rec.to_string()).unwrap();
+        for handle in [&base, &point, &base.join("gamma_0.25-00000000")] {
+            let err = match resolve_fit_problem(&handle.to_string_lossy()) {
+                Ok(_) => panic!("{} is not a fit", handle.display()),
+                Err(e) => e,
+            };
+            assert!(matches!(err, ResolveError::NotFound(_)), "no fit there: {err}");
+            let err = err.to_string();
+            assert!(err.contains("is a profile's folder, not a fit"), "{err}");
+            assert!(err.contains(&format!("{}", base.join("../../fit.toml").display())), "names the fit config: {err}");
+            assert!(!err.contains("Re-run the fit"), "{err}");
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// A run directory whose `run.json` is not a run record is an error
