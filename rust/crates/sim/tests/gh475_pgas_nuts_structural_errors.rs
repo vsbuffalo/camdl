@@ -157,7 +157,7 @@ fn death_model(d_rate_d_n0: Expr) -> Arc<CompiledModel> {
             dt: Some(DT),
             rng_seed: Some(42),
             integrator: Default::default(),
-            t_end_anchor: None,
+            t_end_anchor: None, t_start_anchor: None,
         },
         presets: vec![],
         model_structure: None,

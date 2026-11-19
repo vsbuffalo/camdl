@@ -92,6 +92,9 @@ pub const SIMULATE: &[(&str, InputClass)] = &[
     // SimulateArgs
     ("model", Keyed(Model)),
     ("to", Keyed(Config)),
+    // `--from` moves the model's start (and the starts derived from it) in the
+    // one load the run and its identity share, so it keys the model level.
+    ("from", Keyed(Model)),
     ("init_state", Keyed(Config)),
     ("allow_degenerate_rates", Keyed(Config)),
     ("param_vec", Keyed(Params)),

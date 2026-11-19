@@ -187,6 +187,10 @@ impl Likelihood {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RegularSchedule {
+    /// The emit grid's start, baked from the model's `simulate { from }` — NaN
+    /// while that start is an unresolved anchor (see
+    /// [`crate::anchor::null_as_nan`]).
+    #[serde(with = "crate::anchor::null_as_nan")]
     pub start: f64,
     pub step:  f64,
     /// The emit window's end, baked from the model horizon — NaN while that

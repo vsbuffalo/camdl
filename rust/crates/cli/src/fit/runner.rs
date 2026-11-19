@@ -279,11 +279,10 @@ pub(crate) fn resolve_fit_parameters(
     // `FitRunConfig` can also be built by entry points that do not go
     // through `run_fit` — same window, same function, so resolving again is
     // idempotent rather than a second opinion.
-    if crate::obs_anchor::model_is_anchored(&model_pre) {
-        let window = crate::obs_anchor::fit_window(&model_pre, fit).map_err(|e| {
-            format!("resolving this model's observation anchors from [data]: {e}")
+    if crate::obs_anchor::fit_resolves(&model_pre, fit) {
+        let moved = crate::obs_anchor::resolve_for_fit(&mut model_pre, fit).map_err(|e| {
+            format!("resolving this model's start and observation anchors from [data]: {e}")
         })?;
-        let moved = crate::obs_anchor::substitute(&mut model_pre, window)?;
         crate::obs_anchor::report(&crate::out::detached(), &moved, &model_pre);
     }
     // Keep a copy of the unfiltered model so the startup diagnostic
@@ -4036,7 +4035,7 @@ mod tests {
                 m
             }),
             output: OutputConfig { times: OutputSchedule::AtTimes(vec![0.0, 80.0]), format: "tsv".into(), trajectory: true, observations: false },
-            simulation: SimulationConfig { t_start: 0.0, t_end: 80.0, time_semantics: "continuous".into(), dt: Some(1.0), rng_seed: Some(42), integrator: Default::default() , t_end_anchor: None },
+            simulation: SimulationConfig { t_start: 0.0, t_end: 80.0, time_semantics: "continuous".into(), dt: Some(1.0), rng_seed: Some(42), integrator: Default::default() , t_end_anchor: None, t_start_anchor: None },
             presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
         };
 
@@ -4209,7 +4208,7 @@ mod tests {
                 t_start: 0.0, t_end: 1.0, time_semantics: "continuous".into(),
                 dt: Some(1.0), rng_seed: Some(42),
                 integrator: Default::default(),
-                t_end_anchor: None,
+                t_end_anchor: None, t_start_anchor: None,
             },
             presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
         };
@@ -4315,7 +4314,7 @@ mod tests {
                 t_start: 0.0, t_end: 1.0, time_semantics: "continuous".into(),
                 dt: Some(1.0), rng_seed: Some(42),
                 integrator: Default::default(),
-                t_end_anchor: None,
+                t_end_anchor: None, t_start_anchor: None,
             },
             presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
         };
@@ -4488,7 +4487,7 @@ mod tests {
                 t_start: 0.0, t_end: 1.0, time_semantics: "continuous".into(),
                 dt: None, rng_seed: None,
                 integrator: Default::default(),
-                t_end_anchor: None,
+                t_end_anchor: None, t_start_anchor: None,
             },
             presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
         };
@@ -4554,7 +4553,7 @@ mod tests {
             simulation: ir::model::SimulationConfig {
                 t_start: 0.0, t_end: 1.0, time_semantics: "continuous".into(),
                 dt: None, rng_seed: None, integrator: Default::default(),
-                t_end_anchor: None,
+                t_end_anchor: None, t_start_anchor: None,
             },
             presets: vec![], model_structure: None, balance: None,
             identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
@@ -5245,7 +5244,7 @@ dt = 1.0
                 t_start: 0.0, t_end: 1.0, time_semantics: "continuous".into(),
                 dt: Some(1.0), rng_seed: Some(42),
                 integrator: Default::default(),
-                t_end_anchor: None,
+                t_end_anchor: None, t_start_anchor: None,
             },
             presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
         };
@@ -6705,7 +6704,7 @@ dt = 1.0
                 t_start: 0.0, t_end: 28.0, time_semantics: "continuous".into(),
                 dt: Some(1.0), rng_seed: Some(1),
                 integrator: Default::default(),
-                t_end_anchor: None,
+                t_end_anchor: None, t_start_anchor: None,
             },
             presets: vec![],
             model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],

@@ -406,7 +406,8 @@ let anchor_serde_test () =
   (* An anchored simulation config round-trips through the whole block. *)
   let cfg = { t_start = 0.0; t_end = Float.nan; time_semantics = "continuous";
               dt = None; rng_seed = None; integrator = Rk4;
-              t_end_anchor = Some { anchor = AnchorLast; offset = 28.0 } } in
+              t_end_anchor = Some { anchor = AnchorLast; offset = 28.0 };
+              t_start_anchor = None } in
   let cfg' = Serde.simulation_config_of_json (Serde.simulation_config_to_json cfg) in
   Alcotest.(check bool) "anchored simulation config round-trips" true
     (cfg'.t_end_anchor = cfg.t_end_anchor);
@@ -476,7 +477,20 @@ let no_anchor_wire_is_byte_identical_test () =
   (* And it round-trips back to NaN, so the in-memory invariant survives. *)
   let back = Serde.simulation_config_of_json (Yojson.Safe.from_string anchored_json) in
   Alcotest.(check bool) "the anchored horizon reads back as NaN" true (Float.is_nan back.t_end);
-  Alcotest.(check bool) "and keeps its anchor" true (back.t_end_anchor = anchored.t_end_anchor)
+  Alcotest.(check bool) "and keeps its anchor" true (back.t_end_anchor = anchored.t_end_anchor);
+  (* An anchored START (`from = first_obs - 7 'days`) travels the same way:
+     `t_start` as null, the anchor appended after any `t_end_anchor`. *)
+  let start_anchored = { m.simulation with
+                         t_start = Float.nan;
+                         t_start_anchor = Some { Ir.anchor = Ir.AnchorFirst; offset = -7.0 } } in
+  let start_json = Yojson.Safe.to_string (Serde.simulation_config_to_json start_anchored) in
+  Alcotest.(check string) "an anchored start appends one key and nulls t_start"
+    {|{"t_start":null,"t_end":80.0,"time_semantics":"continuous","dt":null,"rng_seed":null,"t_start_anchor":{"anchor":"first_obs","offset":-7.0}}|}
+    start_json;
+  let back = Serde.simulation_config_of_json (Yojson.Safe.from_string start_json) in
+  Alcotest.(check bool) "the anchored start reads back as NaN" true (Float.is_nan back.t_start);
+  Alcotest.(check bool) "and keeps its anchor" true
+    (back.t_start_anchor = start_anchored.t_start_anchor)
 
 (* ir/VERSION 0.33: forcing data provenance. Same two things to pin as the
    0.32 anchor, and again the second is the one that matters for the bump.

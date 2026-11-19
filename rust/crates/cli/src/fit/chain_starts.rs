@@ -1626,7 +1626,7 @@ mod tests {
                 time_semantics: "continuous".into(),
                 dt: None, rng_seed: None,
                 integrator: Default::default(),
-                t_end_anchor: None,
+                t_end_anchor: None, t_start_anchor: None,
             },
             presets: vec![],
             model_structure: None,

@@ -1673,15 +1673,25 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     let resolved_obs_anchors: Option<ir::anchor::ObsAnchorTimes> =
         if crate::obs_anchor::model_is_anchored(&model) {
             // The window the fit itself resolved, read the same way.
-            let w = crate::obs_anchor::fit_window(&model, &config).map_err(|e| {
+            Some(crate::obs_anchor::fit_window(&model, &config).map_err(|e| {
                 format!("resolving this model's observation anchors from the fit's data: {e}")
-            })?;
-            let moved = crate::obs_anchor::substitute(&mut model, w)?;
-            crate::obs_anchor::report(out, &moved, &model);
-            Some(w)
+            })?)
         } else {
             None
         };
+    // The fit's `[simulate] from` and the anchors, through the one resolution
+    // `fit run` used. A stored fit's archived model is already resolved (its
+    // start a number), so this is a no-op there and the fit's start replays.
+    if crate::obs_anchor::fit_resolves(&model, &config) {
+        let moved = crate::obs_anchor::resolve_for_fit(&mut model, &config).map_err(|e| {
+            format!("resolving this model's start and observation anchors from the fit's data: {e}")
+        })?;
+        crate::obs_anchor::report(out, &moved, &model);
+    }
+    // The start the fit ran from, which every cell's re-load of the IR is
+    // moved to (`util::load_run_model`): a no-op on an archived model, whose
+    // start is already this number.
+    let fitted_t_start = model.simulation.t_start;
     let model = model;
     // A fit made under `allow_forcing_extrapolation` is predicted under it:
     // the predictive replays the fit's own model over its own horizon.
@@ -2573,6 +2583,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
                         scenarios: vec![sref.clone()],
                         // gh#626: the predictive window comes from the data.
                         t_end_override: None,
+                        t_start_override: Some(fitted_t_start),
                         // The forecast rows' closing boundaries, so the
                         // projection finds a recorded snapshot at each. Empty
                         // unless a declared period closes off the recorded grid,

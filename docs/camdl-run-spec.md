@@ -2125,10 +2125,10 @@ camdl simulate seir_vaccine.camdl --params params.toml --scenario with_sia --par
 The `--obs*` combinations are clap conflicts like the rest (§3.1.1), rejected at
 parse time. Two checks need the compiled model and run after it, exiting 1 with
 a one-line message: `--fit` is legal without `--draws` only when something needs
-the fit's data rather than its posterior — an anchored `--to` or an anchored
-model — and is refused otherwise
-(`--fit requires --draws (or an anchored --to,
-or an anchored model)`).
+the fit's data or config rather than its posterior — an anchored `--to`, an
+anchored model, or a config with `[simulate] from` — and is refused otherwise
+(`--fit requires --draws (or an anchored --to, an anchored model, or a config
+with [simulate] from)`).
 `--init-state fit` is a separate check: it needs
 `--draws posterior --fit <fit results dir>`.
 
@@ -7465,6 +7465,12 @@ Run window
                               offset ("last_obs + 8 weeks"). Anchored forms need
                               --fit for the observed times. A scenario declaring a
                               different horizon is an error
+  --from SPEC                 override the start (simulation.t_start), the grammar
+                              of --to ("first_obs - 1 week"; first_obs = the start
+                              of the earliest observed period). Over the --fit
+                              config's [simulate] from, over the model's own
+                              `simulate { from }`. Keyed through the model.
+                              Conflicts with --init-state
   --init-state FILE|fit       start from an inferred state at the last observation
                               time instead of init { }. The origin becomes t_start,
                               and must coincide with an output-emit time.

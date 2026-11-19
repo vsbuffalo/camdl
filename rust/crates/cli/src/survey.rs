@@ -1083,7 +1083,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, cfg: &crate::survey_config::Reso
             .map(|o| (o.name.clone(), std::path::PathBuf::from(&data_path)))
             .collect();
         let moved_any_anchor = crate::obs_anchor::resolve_from_bindings(out,
-            &mut model_pre, &inline_bindings, SURVEY_DT, None,
+            &mut model_pre, &inline_bindings, SURVEY_DT, None, None,
         )?;
         let model_ir_json = if moved_any_anchor {
             ir::reemit_with_model(&model_ir_json, &model_pre)

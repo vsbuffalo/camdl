@@ -179,7 +179,7 @@ fn representative_model() -> Model {
             dt: Some(1.0),
             rng_seed: Some(42),
             integrator: Default::default(),
-            t_end_anchor: None,
+            t_end_anchor: None, t_start_anchor: None,
         },
         presets: vec![Preset {
             name: "high_beta".into(),
@@ -313,7 +313,11 @@ fn model_golden_hash() {
     // HASH_VERSION 5 -> 6 (D72): the version alone.
     // HASH_VERSION 6 -> 7 (D77): the version alone.
     // HASH_VERSION 7 -> 8 (proposal 2026-11-17): the version alone.
-    const GOLDEN: &str = "4e8a459e18ba6744e0d26f06b6db922b23a2647134b1ca9b55f74074defca20e";
+    // IR 0.48: `SimulationConfig::hash_into` folds `t_start_anchor` (an
+    // observation-anchored `simulate { from }`), unconditionally, so the
+    // representative model's absent anchor adds a presence byte and the hash
+    // moves once — a deliberate, version-bumped re-key.
+    const GOLDEN: &str = "69ebe79def418b1eb7e3ec36db650cdefb657ef750efd035b681c62aa5fe36b1";
     let got = representative_model().content_hash().to_hex();
     assert_eq!(got, GOLDEN, "ir Model golden hash changed (got {got})");
 }

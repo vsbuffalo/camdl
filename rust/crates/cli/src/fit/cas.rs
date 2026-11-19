@@ -250,6 +250,22 @@ pub(crate) fn serialize_minus<T: serde::Serialize>(
                     if let Some(o) = obj {
                         o.remove(last);
                     }
+                    // A table left empty by the subtraction goes too: a config
+                    // whose `[simulate]` held only `from` must key like one
+                    // with no `[simulate]` at all.
+                    if let Some((parent, _)) = key.rsplit_once('.') {
+                        let mut parts: Vec<&str> = parent.split('.').collect();
+                        let leaf = parts.pop().expect("rsplit_once left a parent");
+                        let mut obj = Some(&mut *m);
+                        for p in parts {
+                            obj = obj.and_then(|o| o.get_mut(p)).and_then(|v| v.as_object_mut());
+                        }
+                        if let Some(o) = obj {
+                            if o.get(leaf).and_then(|v| v.as_object()).is_some_and(|t| t.is_empty()) {
+                                o.remove(leaf);
+                            }
+                        }
+                    }
                 }
             }
             // `exclude` on a non-object is a programming error, not a data
@@ -425,7 +441,13 @@ fn fit_config_blob_hash(problem: &Problem) -> Result<ContentHash, String> {
 /// level ([`fit_config_blob_hash`]) subtracts all of them; the config lookup
 /// ([`config_identity_hash`]) subtracts the `[provenance]` note, so a config
 /// whose note was reworded finds the fit the store already holds for it.
-const FIT_PROVENANCE_KEYS: &[&str] = &["output_dir", "provenance", "data.tables"];
+///
+/// `simulate.from` is not provenance but is left out on the same terms as
+/// `data.tables`: what it chooses enters elsewhere. The start it resolves to
+/// is substituted into the model before the fit is keyed, so it reaches the
+/// fit through `FitDigest.model`, and `"first_obs"`, `-2` and a model written
+/// with `from = -2 'days` key one fit when they resolve to one start.
+const FIT_PROVENANCE_KEYS: &[&str] = &["output_dir", "provenance", "data.tables", "simulate.from"];
 
 /// The config-MEANING hash: what a `fit.toml` handle is looked up by (gh#653).
 ///

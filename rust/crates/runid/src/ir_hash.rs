@@ -1510,6 +1510,7 @@ impl ContentAddressed for SimulationConfig {
         // model hash — add it below, or bind it `_` with the reason.
         let SimulationConfig {
             t_start, t_end, time_semantics, dt, rng_seed, integrator, t_end_anchor,
+            t_start_anchor,
         } = self;
         header(h, "ir::model::SimulationConfig");
         h.write_f64_bits(*t_start);
@@ -1525,6 +1526,10 @@ impl ContentAddressed for SimulationConfig {
         // paths that hash an as-compiled model (fit sidecar, model-level
         // provenance).
         hash_anchor_opt(h, t_end_anchor);
+        // An anchored start is identity on the same terms as the horizon: two
+        // anchors bake the same NaN start, so only this field tells them
+        // apart on the paths that hash an as-compiled model.
+        hash_anchor_opt(h, t_start_anchor);
     }
 }
 

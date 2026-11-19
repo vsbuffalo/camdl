@@ -89,7 +89,7 @@ fn model(a0: f64, init: Vec<(&str, InitSpec)>, bindings: Vec<Binding>) -> Model 
             dt: None,
             rng_seed: Some(1),
             integrator: Default::default(),
-            t_end_anchor: None,
+            t_end_anchor: None, t_start_anchor: None,
         },
         presets: vec![],
         model_structure: None,

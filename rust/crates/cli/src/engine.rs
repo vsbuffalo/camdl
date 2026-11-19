@@ -551,6 +551,7 @@ pub fn build_cell_sim_run(
         table_files: table_files.clone(),
         scenario_name,
         t_end_override: job.t_end_override,
+        t_start_override: job.t_start_override,
         // Copied verbatim onto every cell: the emission grid is one grid for
         // the whole job, like the observed window below.
         required_output_times: job.required_output_times.clone(),

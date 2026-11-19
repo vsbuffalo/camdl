@@ -340,6 +340,19 @@ pub struct SimulateArgs {
     #[arg(long, value_name = "SPEC")]
     pub to: Option<String>,
 
+    /// Override the run's start (the model's `simulate { from }`), so one
+    /// model serves several data windows. SPEC is the grammar of --to: a
+    /// model-time number ("-2"), a date (needs a model origin), or an
+    /// observation anchor with optional offset ("first_obs",
+    /// "first_obs - 1 week"); first_obs is the start of the earliest observed
+    /// period over the bound streams, so anchored forms require --fit. Takes
+    /// precedence over the --fit config's `[simulate] from`. Moves every start
+    /// derived from the model's (the output and emit schedules, a recurring
+    /// schedule with no `from`), and enters the run's identity through the
+    /// model. Refused with --init-state, which sets the start itself.
+    #[arg(long, value_name = "SPEC", allow_hyphen_values = true)]
+    pub from: Option<String>,
+
     /// Start the run from an inferred state at the last observation time
     /// instead of the model's `init {}` block — the forecast workflow. The
     /// origin time becomes the run's `t_start`; pair it with

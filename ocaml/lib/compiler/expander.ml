@@ -8319,13 +8319,22 @@ let sim_to_is_anchored ctx =
 (* The bare-number warning of `simulate { from }` and `{ to }` (W324). *)
 let sim_bare field = Some (bare_field ~code:"W324" ~field ~hint:Time_typing.hint_bare_numeric_simulate)
 
-(* The model's `simulate { from }` as a number: [t_start]. *)
+(* The model's `simulate { from }` as a number: [t_start], for the sites that
+   BAKE it into something else (the output schedule's start, an emit
+   schedule's start, a recurring schedule's default `from`). NaN when the start
+   is an observation anchor (`from = first_obs`): the runtime resolver writes
+   the resolved start into every NaN start it finds, so a resolved model is the
+   model that would have compiled with that start as a literal. As with
+   [sim_t_end_baked], classifying the raw AST here (not folding it) keeps an
+   anchor from being reported as an undeclared name once per site. *)
 let sim_t_start ctx =
   match ctx.simulate with
   | None -> 0.0
   | Some sd ->
-    Lower.instant_const ctx ~what:"`simulate.from`" ~context:"simulate.from"
-      ?bare:(sim_bare "from") sd.sim_from
+    if mentions_obs_anchor (Time_pos.expr sd.sim_from) then Float.nan
+    else
+      Lower.instant_const ctx ~what:"`simulate.from`" ~context:"simulate.from"
+        ?bare:(sim_bare "from") sd.sim_from
 
 (* The model horizon as a compile-time number, for the sites that BAKE it into
    something else (a recurring schedule's default end, an emit schedule's end, a
@@ -9419,9 +9428,22 @@ let expand_simulate ctx =
   | None ->
     { Ir.t_start = 0.0; Ir.t_end = 100.0;
       Ir.time_semantics = "continuous"; Ir.dt = None; Ir.rng_seed = None;
-      Ir.integrator = Ir.Rk4; Ir.t_end_anchor = None }
+      Ir.integrator = Ir.Rk4; Ir.t_end_anchor = None; Ir.t_start_anchor = None }
   | Some sd ->
-    let t_start = sim_t_start ctx in
+    (* `from = first_obs`: the start is resolved per run from the bound data,
+       exactly as an anchored `to` is. `t_start` is baked NaN, and so is every
+       start derived from it ([sim_t_start]). *)
+    let (t_start, t_start_anchor) =
+      match Lower.instant_horizon ctx ~what:"`simulate.from`" ~context:"simulate.from"
+              ?bare:(sim_bare "from")
+              ~anchor_what:"`simulate { from }`"
+              ~example:"`from = first_obs - 7 'days`" sd.sim_from with
+      | Lower.At_anchor a -> (Float.nan, Some a)
+      | Lower.At f -> (f, None)
+      | Lower.At_expr _ | Lower.At_bad -> (Float.nan, None)
+    in
+    let start_refused =
+      t_start_anchor = None && mentions_obs_anchor (Time_pos.expr sd.sim_from) in
     (* gh#616: `to = last_obs + 4 'weeks`. The anchor field carries the horizon
        and `t_end` is baked NaN — NOT a placeholder number. Two placeholders
        would compare EQUAL, which silently defeats every equality-based horizon
@@ -9449,7 +9471,8 @@ let expand_simulate ctx =
        refuse it here, naming both resolved values. An anchored `to` bakes NaN
        on purpose and is resolved later (gh#616), so it is skipped exactly as
        the loader skips it. Located at the `to = ...` entry. *)
-    if t_end_anchor = None && not horizon_refused
+    if t_end_anchor = None && t_start_anchor = None
+       && not horizon_refused && not start_refused
        && not (Float.is_finite t_start && Float.is_finite t_end
                && t_end > t_start) then begin
       let unit = match ctx.time_unit with
@@ -9517,7 +9540,7 @@ let expand_simulate ctx =
     in
     { Ir.t_start; Ir.t_end;
       Ir.time_semantics = "continuous"; Ir.dt; Ir.rng_seed = None;
-      Ir.integrator; Ir.t_end_anchor }
+      Ir.integrator; Ir.t_end_anchor; Ir.t_start_anchor }
 
 let expand_output ctx =
   (* The output window's upper bound is no longer stored on the schedule

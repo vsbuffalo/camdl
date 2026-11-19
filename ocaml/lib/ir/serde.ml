@@ -4,7 +4,7 @@
     The file [camdlc] writes is an envelope around the model:
 
     {@json[
-      {"ir_version":"0.47","validated_by":"ocaml-compiler-v0.47","model":{"name":"licm","version":"0.3","time_unit":"days","description":null,"compartments":[
+      {"ir_version":"0.48","validated_by":"ocaml-compiler-v0.48","model":{"name":"licm","version":"0.3","time_unit":"days","description":null,"compartments":[
       {"name":"S","kind":"integer"},
       {"name":"I","kind":"integer"},
       {"name":"R","kind":"integer"}
@@ -828,7 +828,8 @@ let intervention_schedule_to_json (s : intervention_schedule) : Yojson.Safe.t =
     obj [("at_times_expr", arr (List.map expr_to_json exprs))]
   | Recurring r ->
     obj [("recurring", obj (
-      [("start",  flt r.start);
+      [(* A start baked from an anchored `simulate { from }` is NaN: null. *)
+       ("start",  if Float.is_nan r.start then null else flt r.start);
        ("period", flt r.period);
        (* A baked end taken from an anchored horizon is NaN, and JSON
           has no NaN literal — emit null (see simulation_config_to_json). *)
@@ -844,7 +845,7 @@ let intervention_schedule_of_json j =
     | "at_times_expr" -> AtTimesExpr (List.map expr_of_json (as_list v))
     | "recurring" ->
       Recurring {
-        start  = as_float (member "start"  v);
+        start  = (match member "start" v with `Null -> Float.nan | x -> as_float x);
         period = as_float (member "period" v);
         end_   = (match member "end" v with `Null -> Float.nan | x -> as_float x);
         at_day = (match member_opt "at_day" v with
@@ -1179,7 +1180,8 @@ let obs_schedule_to_json (s : observation_schedule) : Yojson.Safe.t =
     obj [("at_times", arr (List.map flt ts))]
   | ObsRegular r ->
     obj [("regular", obj [
-      ("start", flt r.start);
+      (* Baked from an anchored `simulate { from }`: NaN, emitted null. *)
+      ("start", if Float.is_nan r.start then null else flt r.start);
       ("step",  flt r.step);
       ("end",   if Float.is_nan r.end_ then null else flt r.end_);
     ])]
@@ -1191,7 +1193,7 @@ let obs_schedule_of_json j =
     | "at_times" -> ObsAtTimes (List.map as_float (as_list v))
     | "regular"  ->
       ObsRegular {
-        start = as_float (member "start" v);
+        start = (match member "start" v with `Null -> Float.nan | x -> as_float x);
         step  = as_float (member "step"  v);
         end_  = (match member "end" v with `Null -> Float.nan | x -> as_float x);
       }
@@ -1828,7 +1830,8 @@ let output_schedule_to_json (s : output_schedule) : Yojson.Safe.t =
   match s with
   | OutRegular r ->
     obj [("regular", obj [
-      ("start", flt r.start);
+      (* Baked from an anchored `simulate { from }`: NaN, emitted null. *)
+      ("start", if Float.is_nan r.start then null else flt r.start);
       ("step",  flt r.step);
     ])]
   | OutAtTimes ts ->
@@ -1840,7 +1843,7 @@ let output_schedule_of_json j =
     match key with
     | "regular" ->
       OutRegular {
-        start = as_float (member "start" v);
+        start = (match member "start" v with `Null -> Float.nan | x -> as_float x);
         step  = as_float (member "step"  v);
       }
     | "at_times" -> OutAtTimes (List.map as_float (as_list v))
@@ -1895,7 +1898,9 @@ let simulation_config_to_json (s : simulation_config) : Yojson.Safe.t =
   (* integrator omitted at the Rk4 default, mirroring the Rust side's
      `skip_serializing_if`. *)
   obj (
-    [ ("t_start",        flt s.t_start);
+    [ (* An unresolved anchored start is NaN too, emitted as null for the same
+         reason as the horizon below. *)
+      ("t_start",        if Float.is_nan s.t_start then null else flt s.t_start);
       (* An unresolved anchored horizon bakes NaN, and JSON has no NaN
          literal — Yojson emits a bare `NaN` token that no conforming reader
          accepts, so the IR could not be loaded at all. Emit `null` instead: the
@@ -1913,6 +1918,9 @@ let simulation_config_to_json (s : simulation_config) : Yojson.Safe.t =
     @ (match s.t_end_anchor with
        | None -> []
        | Some a -> [ ("t_end_anchor", anchored_time_to_json a) ])
+    @ (match s.t_start_anchor with
+       | None -> []
+       | Some a -> [ ("t_start_anchor", anchored_time_to_json a) ])
   )
 
 let simulation_config_of_json j =
@@ -1920,7 +1928,13 @@ let simulation_config_of_json j =
     | Some `Null | None -> None
     | Some v -> Some (anchored_time_of_json v)
   in
-  { t_start        = as_float  (member "t_start"        j);
+  let t_start_anchor = match member_opt "t_start_anchor" j with
+    | Some `Null | None -> None
+    | Some v -> Some (anchored_time_of_json v)
+  in
+  { t_start        = (match member "t_start" j with
+                      | `Null -> Float.nan
+                      | v     -> as_float v);
     (* A null horizon is the anchored case (see the emitter) and reads back
        as NaN. The reader does not check that [t_end_anchor] is present. *)
     t_end          = (match member "t_end" j with
@@ -1931,6 +1945,7 @@ let simulation_config_of_json j =
     rng_seed       = (match member_opt "rng_seed" j with Some `Null | None -> None | Some v -> Some (as_int   v));
     integrator     = (match member_opt "integrator" j with Some `Null | None -> Rk4 | Some v -> integrator_of_json v);
     t_end_anchor;
+    t_start_anchor;
   }
 
 (* ── Presets ─────────────────────────────────────────────────────────────── *)

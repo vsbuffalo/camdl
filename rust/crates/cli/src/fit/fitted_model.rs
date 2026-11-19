@@ -109,11 +109,7 @@ pub fn as_fitted(
         crate::external_inputs::bind(&mut m, &problem.external_bindings())
             .map_err(|e| e.to_string())?;
     }
-    if !crate::obs_anchor::model_is_anchored(&m) {
-        return Ok((m, Vec::new()));
-    }
-    let window = crate::obs_anchor::fit_window(&m, problem)?;
-    let resolved = crate::obs_anchor::substitute(&mut m, window)?;
+    let resolved = crate::obs_anchor::resolve_for_fit(&mut m, problem)?;
     Ok((m, resolved))
 }
 
@@ -122,6 +118,12 @@ pub fn as_fitted(
 /// `None` when every horizon agrees.
 fn horizons_moved(fitted: &ir::Model, given: &ir::Model) -> Option<String> {
     let mut out = Vec::new();
+    if fitted.simulation.t_start.to_bits() != given.simulation.t_start.to_bits() {
+        out.push(format!(
+            "the model starts at t = {} where the fitted model started at t = {}",
+            given.simulation.t_start, fitted.simulation.t_start
+        ));
+    }
     if fitted.simulation.t_end != given.simulation.t_end {
         out.push(format!(
             "the model runs to t = {} where the fitted model ran to t = {}",

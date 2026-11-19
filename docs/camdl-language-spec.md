@@ -5926,7 +5926,8 @@ of the model's content identity and is declared in `simulate {}`.
 A typo'd or unsupported key in `simulate {}` is a hard error (`E106`), never
 silently dropped; the accepted keys are `from`, `to`, `dt`, `integrator`. `to`
 is required: a `simulate {}` block without it is `E106`, because the end of the
-run has no default. `from` defaults to `0`.
+run has no default. `from` defaults to `0`. Both may be observation anchors, and
+a run may override `from` (below).
 
 Seed is always external (CLI `--seed`), never in the model file.
 
@@ -5979,6 +5980,57 @@ Because the horizon is now unknown at compile time, three constructs that
 For the third case, and for any model that must keep a literal horizon, the
 per-run alternative is the CLI: leave `simulate { to }` literal and pass
 `camdl simulate --to "last_obs + 8 weeks"` (note the CLI's bare-word units).
+
+### An observation-anchored start, and a start chosen per run
+
+`from` may be an observation anchor too, under the same rules as `to`: a model
+whose run should begin one week before its data begin says so, rather than
+carrying a day that has to change with the data window:
+
+```camdl
+simulate { from = first_obs - 7 'days  to = last_obs }
+```
+
+`first_obs` is the start of the earliest observed period over the run's bound
+streams, so for a stream with `covers = closing_at(time, 7 'days)` whose first
+row is labelled day 5, `first_obs` is day −2, the day that week opened. A model
+that should start where its first observed period opens writes
+`from = first_obs`.
+
+The start is resolved once per run, from the observation times the run binds,
+by every command that resolves an anchored `to`, and a command with no data
+refuses an anchored start by name. The resolved start is substituted into the
+model the run is content-addressed by, together with every start the compiler
+derived from it: the regular output schedule, a regular `emit_schedule`, and a
+recurring intervention or event that declares no `from` of its own. A resolved
+model is therefore the model that would have compiled with that start written
+as a literal: two data windows are two runs, and one window reached by two
+spellings is one run. `init {}` is evaluated at the resolved start (§15.1).
+
+A run may also be given its start from outside the model file, so that one
+model serves several data windows. Highest precedence first:
+
+1. `camdl simulate --from SPEC` on the command line;
+2. `[simulate] from = SPEC` in the fit config (`camdl docs fit-toml`), read by
+   every command that reads the config (`fit run`, `pfilter --fit`,
+   `profile --fit`, `survey --fit`, `simulate --fit`);
+3. the model's own `simulate { from }`.
+
+SPEC is the CLI time grammar of `--to`: a model-time number, a date under a
+model `origin`, or an anchor with a bare-word offset (`"first_obs - 1 week"`).
+The override is applied exactly as an anchored start is, so it enters the run's
+identity through the model and moves the same derived starts. A stored fit
+records the start it was fitted from, and `fit predict` and
+`simulate --fit <run dir>` replay that start.
+
+One case is refused rather than guessed. When the model's `from` is a literal
+and a recurring intervention or event starts at that same time, camdl cannot
+tell whether the schedule declared no `from` (and should move with the run's
+start) or declared one equal to it (and should stay), so a different start from
+the command line or the config is refused, naming the schedules. Writing the
+model's `from` as an observation anchor removes the ambiguity, because a
+schedule that declares no `from` then carries no number at all until the run
+resolves it.
 
 ---
 

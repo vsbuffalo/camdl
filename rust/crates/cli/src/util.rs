@@ -2850,6 +2850,9 @@ pub struct SimRun {
     /// differing from both the model's and this value is refused up front in
     /// `run_simulate`) keeps the baked-end guard's `old_end` meaningful.
     pub t_end_override: Option<f64>,
+    /// The resolved `--from` / `[simulate] from` start (model time), applied
+    /// by [`load_run_model`] to the one load both the run and its identity take.
+    pub t_start_override: Option<f64>,
     /// Times that must be recorded trajectory snapshots for this run, on top of
     /// whatever `output { trajectories { … } }` enumerates
     /// (2026-09-08-workflow-first-fit-config §1.5, §3.5).
@@ -3603,6 +3606,7 @@ impl Default for SimRun {
             table_files: HashMap::new(),
             scenario_name: None,
             t_end_override: None,
+            t_start_override: None,
             required_output_times: Vec::new(),
             init_state: None,
             obs_anchors: None,
@@ -3646,6 +3650,11 @@ pub fn load_run_model(run: &SimRun) -> Result<ir::Model, String> {
     // gh#616: substitute the run's observation anchors FIRST — before the
     // scenario horizon (which reads a preset's `t_end`, NaN until substituted),
     // before the `--to` override, and before validate/compile.
+    // The run's start override goes first: it clears a start anchor the model
+    // carries, so the substitution below leaves the start alone.
+    if let Some(s) = run.t_start_override {
+        crate::obs_anchor::set_start(&mut model, s, "simulate { from }")?;
+    }
     if let Some(w) = run.obs_anchors {
         crate::obs_anchor::substitute(&mut model, w)?;
     }
@@ -5280,7 +5289,7 @@ mod tests {
                 t_start: 0.0, t_end: 1.0, time_semantics: "continuous".into(),
                 dt: None, rng_seed: None,
                 integrator: Default::default(),
-                t_end_anchor: None,
+                t_end_anchor: None, t_start_anchor: None,
             },
             interventions: ivs,
             presets: vec![], model_structure: None, balance: None, identity_tracked_compartments: vec![], quantities: vec![], contrasts: vec![],
@@ -5499,7 +5508,7 @@ mod tests {
                 t_start: 0.0, t_end: 1.0,
                 time_semantics: "days".into(), dt: None, rng_seed: None,
                 integrator: Default::default(),
-                t_end_anchor: None,
+                t_end_anchor: None, t_start_anchor: None,
             },
             presets: Vec::new(),
             model_structure: None,
