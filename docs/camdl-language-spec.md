@@ -1727,6 +1727,21 @@ The `periodic` type supports two forms:
   [`docs/dates.md`](dates.md) and the typed-time proposal §3 (Rule 2 /
   bare-numeric subsection).
 
+**Bin width at run time.** In both forms the runtime divides the period into
+equal bins, each `period / n` wide, where `n` is the number of values: `t` falls
+in bin `floor((t mod period) / (period / n))`. In the range form `n` is
+`period / step` rounded to the nearest whole number, so when the period is not a
+whole number of steps the bins are not `step` wide. `period = 365.25 'days` with
+`step = 1 'days` makes 365 bins of 1.000685 days, not 1 day: bin `i` starts at
+`i × 1.000685`, so its switch points fall partway through a day and drift from
+midnight across the year (bin 182 starts at 182.125, three hours into day 182),
+and each year restarts 0.25 days later on the day grid. A range is still
+converted to bins as described above, by whole steps; only where those bins
+start and end at run time moves. `camdl check` notes this as **I401**, with the
+actual bin width. To keep the switch points on whole days, use a period that is
+a whole number of steps (`period = 365 'days`); to keep the year at 365.25 days,
+accept the drift, which is at most `step / 2` within a period.
+
 Forcing functions are used in rate expressions by name or with explicit `(t)`:
 
 <!-- camdl-doctest-preamble: forcing-school
