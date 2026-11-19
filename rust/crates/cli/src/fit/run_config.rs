@@ -191,9 +191,12 @@ pub(crate) const RESOLVED_CONFIG_HEADER: &str = "\
 # values: a sweep point's applied, a `from_scenario` and a `from_file` read in,
 # so it names no fixed-values file. Relative [model], [data] and output_dir
 # paths resolve against the fit file's directory (`source_config` in
-# fit.meta.json). [estimate], [data.observations] and [data.holdout] keep the
-# file's order, which is meaningful; every other table's keys are sorted.
-# [method] is the file's; each run's own method settings are in its run.json.
+# fit.meta.json), except that a reader binds each [data.tables] input to the
+# copy of its bytes this folder stores in inputs/, checked against the digest
+# fit.meta.json records. [estimate], [data.observations] and [data.holdout]
+# keep the file's order, which is meaningful; every other table's keys are
+# sorted. [method] is the file's; each run's own method settings are in its
+# run.json.
 ";
 
 /// The tables whose key order means something (camdl reads them in order: the
