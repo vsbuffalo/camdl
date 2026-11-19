@@ -156,6 +156,9 @@ mod step0 {
         }
         let found = crate::hashing::sha256_hex(&bytes);
         if found != side.fit_toml_hash {
+            if stored_with_the_flag_folded_in(dir, &bytes)? {
+                return refuse_a_folded_original(dir);
+            }
             return Err(format!(
                 "fit.toml.original is not the file the fit read: its SHA-256 is {found}, and \
                  fit.meta.json records {} (fit_toml_hash)",
@@ -163,6 +166,43 @@ mod step0 {
             ));
         }
         Ok(())
+    }
+
+    /// Whether `original` (a `fit.toml.original` whose hash is not the
+    /// recorded `fit_toml_hash`) is the file as main stored it for a fit run
+    /// with `--allow-forcing-extrapolation`, from c60d0401c until the
+    /// resolved config: the file parsed, `[config] allow_forcing_extrapolation
+    /// = true` set, and the table written back, so the text is its own
+    /// re-serialisation, it allows extrapolation, and the folder's runs record
+    /// it as allowed. `fit_toml_hash` hashes the file as read, which no record
+    /// in the folder holds.
+    fn stored_with_the_flag_folded_in(dir: &Path, original: &[u8]) -> Result<bool, String> {
+        let Ok(text) = std::str::from_utf8(original) else { return Ok(false) };
+        let Ok(doc) = text.parse::<toml::Table>() else { return Ok(false) };
+        let rewritten = toml::to_string(&doc).is_ok_and(|t| t == text);
+        let allows = doc.get("config")
+            .and_then(|c| c.get("allow_forcing_extrapolation"))
+            .and_then(toml::Value::as_bool)
+            == Some(true);
+        Ok(rewritten && allows && runs_allow_forcing_extrapolation(dir)? == Some(true))
+    }
+
+    /// What step 0 to 1 does with a folder whose `fit.toml.original` main
+    /// stored with `--allow-forcing-extrapolation` folded in
+    /// ([`stored_with_the_flag_folded_in`]). The file the fit read is not in
+    /// the folder, so it cannot be checked against `fit_toml_hash`, and the
+    /// folder is refused. A rescue of such folders (deriving the resolved
+    /// configuration from the folded file, if the maintainer accepts that
+    /// the file is not checked) belongs here and nowhere else.
+    fn refuse_a_folded_original(dir: &Path) -> Result<(), String> {
+        Err(format!(
+            "{} was written by a camdl that folded --allow-forcing-extrapolation into the fit \
+             file it stored: its fit.toml.original is that file re-written with the flag set, \
+             while fit_toml_hash records the file as the fit read it, which the folder does not \
+             keep, so the stored file cannot be checked to be the fit's. Re-run the fit with this \
+             camdl.",
+            dir.display()
+        ))
     }
 
     /// The `[fixed]` values the folder's fits ran at, from its partition: the
