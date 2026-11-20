@@ -34,8 +34,6 @@ struct DepFile {
 }
 #[derive(Deserialize)]
 struct DepEntry {
-    #[allow(dead_code)]
-    as_written: String,
     resolved: String,
 }
 
