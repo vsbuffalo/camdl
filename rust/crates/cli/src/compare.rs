@@ -2571,18 +2571,31 @@ fn try_load_explicit_prequential(path: &str) -> Result<Option<PrequentialTrace>,
     let mut trace = serde_json::from_str::<PrequentialTrace>(&text)
         .map_err(|e| format!("parsing {}: {}", json_path.display(), e))?;
     if trace.schema_version < score::trace::SCHEMA_RECORDING_HELD_FORCINGS {
-        let run_json = json_path.parent().map(|d| d.join("run.json"));
+        // A method leaf's own trace is `prequential.json`, beside its
+        // `run.json`; a trace by any other name has no record known to be its
+        // run's, so none is read.
+        let run_json = (json_path.file_name().is_some_and(|n| n == "prequential.json"))
+            .then(|| json_path.parent().map(|d| d.join("run.json")))
+            .flatten();
         trace.warnings.extend(held_forcings_of_older_trace(run_json.as_deref())?);
     }
     Ok(Some(trace))
 }
 
+/// The first record `hash_version` whose build refuses a forcing evaluated
+/// outside its range unless overridden, and records what it held under the
+/// override: `HASH_VERSION` 5 (79ba6e803) descends from the refusal
+/// (4ab9d4455, gh#1082). A record below it may have held a forcing silently.
+const HELD_FORCINGS_RECORDED_FROM: u64 = 5;
+
 /// What a trace written before held forcings were recorded
 /// ([`score::trace::SCHEMA_RECORDING_HELD_FORCINGS`]) can say about them,
 /// from the `run.json` beside it (a method leaf's record), if there is one:
-/// the forcings it records as held under the override, none when it records
-/// no override (the run would have been refused at a held forcing), and,
-/// without a record, that it is unknown.
+/// the forcings it records as held under the override; none when it records
+/// no override and was made by a build that refuses a forcing outside its
+/// range ([`HELD_FORCINGS_RECORDED_FROM`]), since such a run would have been
+/// refused at a held forcing; and otherwise, a record from before the
+/// refusal or none at all, that it is unknown.
 fn held_forcings_of_older_trace(run_json: Option<&Path>) -> Result<Vec<PrequentialWarning>, String> {
     let Some(path) = run_json.filter(|p| p.is_file()) else {
         return Ok(vec![PrequentialWarning::HeldForcingsUnrecorded]);
@@ -2591,7 +2604,10 @@ fn held_forcings_of_older_trace(run_json: Option<&Path>) -> Result<Vec<Prequenti
     let record: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("parsing {}: {e}", path.display()))?;
     let Some(held) = record.pointer("/inputs/forcing_extrapolation/held").and_then(|h| h.as_array()) else {
-        return Ok(Vec::new());
+        // No override recorded. A build from before the refusal held a
+        // forcing outside its range silently and recorded nothing.
+        let refusing_build = record["hash_version"].as_u64().is_some_and(|v| v >= HELD_FORCINGS_RECORDED_FROM);
+        return Ok(if refusing_build { Vec::new() } else { vec![PrequentialWarning::HeldForcingsUnrecorded] });
     };
     held.iter()
         .map(|h| {
@@ -4341,8 +4357,25 @@ mod tests {
             bound: None,
             lagged: None,
         }]);
-        std::fs::write(&record, r#"{"inputs": {}}"#).unwrap();
+        // No override, from a build that refuses a held forcing: none held.
+        std::fs::write(&record, r#"{"hash_version": 5, "inputs": {}}"#).unwrap();
         assert_eq!(held_forcings_of_older_trace(Some(&record)).unwrap(), vec![]);
+        // No override, from a build before the refusal: unknown.
+        std::fs::write(&record, r#"{"hash_version": 4, "inputs": {}}"#).unwrap();
+        assert_eq!(held_forcings_of_older_trace(Some(&record)).unwrap(),
+            vec![PrequentialWarning::HeldForcingsUnrecorded]);
+        // A trace not named `prequential.json` does not read the record beside
+        // it, which need not be its run's.
+        let trace = r#"{"schema_version": 6, "t0": 0, "provenance": "plug_in", "conditioning": "in_sample",
+            "steps": [{"t": 7.0, "y_obs": 1.0, "y_pred_samples": [], "log_score": -1.0, "crps": 0.5,
+                       "pit": 0.5, "ess": 100.0}], "warnings": []}"#;
+        std::fs::write(&record, r#"{"hash_version": 5, "inputs": {}}"#).unwrap();
+        for (name, want) in [("prequential.json", vec![]), ("foo.json", vec![PrequentialWarning::HeldForcingsUnrecorded])] {
+            let path = tmp.path().join(name);
+            std::fs::write(&path, trace).unwrap();
+            let read = try_load_explicit_prequential(&path.to_string_lossy()).unwrap().unwrap();
+            assert_eq!(read.warnings, want, "{name}");
+        }
         assert_eq!(held_forcings_of_older_trace(Some(&tmp.path().join("absent.json"))).unwrap(),
             vec![PrequentialWarning::HeldForcingsUnrecorded]);
         assert!(held_forcing_line("a", &PrequentialWarning::HeldForcingsUnrecorded).unwrap()
