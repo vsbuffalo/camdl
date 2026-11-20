@@ -3630,10 +3630,10 @@ pub fn load_run_model(run: &SimRun) -> Result<ir::Model, String> {
     // compiles its model once, under its own compile settings, before any run.
     // A source path is refused rather than compiled here without them.
     let ir_path_resolved = &run.ir_path;
-    let src = ir_text(ir_path_resolved, None)?;
-    // gh#audit-C8. Envelope-aware load (see load_model above).
-    let mut model: ir::Model = ir::from_str(&src)
-        .map_err(|e| format!("IR load error from {}: {}", ir_path_resolved, e))?;
+    // Parsed and checked as every loader parses and checks it
+    // ([`parse_model`]): the IR's integrity battery, and the refusal of the
+    // unreleased `smooth(...)` bspline form.
+    let (mut model, _) = parse_model(ir_path_resolved, ir_text(ir_path_resolved, None)?)?;
     // gh#616: substitute the run's observation anchors FIRST — before the
     // scenario horizon (which reads a preset's `t_end`, NaN until substituted),
     // before the `--to` override, and before validate/compile.
@@ -5005,6 +5005,18 @@ mod tests {
         let path = dir.join(name);
         std::fs::write(&path, content).unwrap();
         path.to_str().unwrap().to_string()
+    }
+
+    /// A forward run reads its model through `load_run_model`, and the
+    /// unreleased `coefs = smooth(...)` bspline form is refused there as it
+    /// is by every other loader, not only by the load a command made first.
+    #[test]
+    fn a_run_model_with_a_smooth_bspline_is_refused() {
+        let ir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../ocaml/golden/bspline_smooth.ir.json");
+        let run = base_sim_run(ir.to_str().unwrap());
+        let err = load_run_model(&run).expect_err("a smooth bspline is refused");
+        assert!(err.contains("`coefs = smooth(...)` is not yet available"), "{err}");
     }
 
     fn base_sim_run(ir_path: &str) -> SimRun {
