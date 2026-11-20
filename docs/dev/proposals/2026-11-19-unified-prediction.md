@@ -97,11 +97,15 @@ What this costs a user, each item checked as marked:
   bands of the observation; `--save-filtered-streams` bands are bands of the
   expectation; neither file says so in a column, and the expectation band is not
   available for a posterior at all.
-- **Held-out rows are marked nowhere in a prediction.** `fit predict` one-step
-  filters through rows after `holdout_after` and marks none of them (gh#1079,
-  being fixed separately). `pfilter --score-from 21` drops the rows before day
-  21 from the trace rather than marking them, so one table over training and
-  held-out rows cannot be had (_run_).
+- **Held-out rows were marked nowhere in a prediction.** `fit predict` one-step
+  filters through rows after `holdout_after`; since the fix for gh#1079
+  (`7918f460a..ec75f4c66`) each row of `predictive/<stream>.tsv` carries a
+  `role` (`trained`, `held_out`, `future`) and the manifest names both
+  information sets, which is the marking this proposal carries into every mode.
+  A fit with separate holdout files still gets no one-step row for them
+  (gh#1309). `pfilter --score-from 21` drops the rows before day 21 from the
+  trace rather than marking them, so one table over training and held-out rows
+  cannot be had (_run_).
 - **There are two forecasts in one command.** `fit predict` with no flags writes
   a free-forward tail past the last row, on a grid built from the most common
   gap between labels, starting at the largest label of the whole file including
@@ -121,10 +125,10 @@ What this costs a user, each item checked as marked:
 `pfilter --save-final-state` writes the particles' compartment counts at the
 last row; `simulate --init-state` continues from them. It restores counts and
 nothing else, so it cannot produce the row of a reporting period under way at
-the restart. As of the fix that accompanies this proposal it refuses to write
-observations in that case, naming the stream and the period. Making it exact is
-PR #1158's subject and is not needed by anything below: no prediction in this
-proposal goes through a saved state.
+the restart. Since the fix for gh#1081 (`8e404048c..0a377eb28`) it refuses to
+write observations in that case, naming the stream and the period. Making it
+exact is PR #1158's subject and is not needed by anything below: no prediction
+in this proposal goes through a saved state.
 
 ## How others divide the same work
 
@@ -324,7 +328,7 @@ for the other.
 **The row.**
 
 ```rust
-pub enum Phase { Trained, HeldOut, Future, Unknown }
+pub enum RowRole { Trained, HeldOut, Future, Unknown }
 
 pub struct PredictionRow {
     pub scenario: String,
@@ -335,7 +339,7 @@ pub struct PredictionRow {
     pub origin: f64,                 // see below
     pub horizon: Option<i64>,        // forecast only
     pub lead: f64,                   // measures.end() − origin
-    pub phase: Phase,
+    pub role: RowRole,
     pub quantity: Quantity,
     pub parameters: ParameterKind,   // posterior | fixed_point
     pub mean: f64,
@@ -349,7 +353,11 @@ free-forward; under one-step, the end of the latest row of any stream
 assimilated before this row, which varies by row (spec §2.6); the forecast
 origin under forecast.
 
-`phase` describes the row against the parameter set, using only rows the
+The column is named `role`, the spec's word (§5.3) and the name the predictive
+table already has on `main`. `phase` is not used for it: `pfilter`'s
+filtered-streams file uses that word for before or after assimilation.
+
+`role` describes the row against the parameter set, using only rows the
 prediction itself read:
 
 - `trained`: the row is in the parameter set.
@@ -367,7 +375,7 @@ Every mode writes the same file, `predictions.tsv`, one row per `PredictionRow`:
 
 ```
 scenario stream <dims> t_start t_stop [date_start date_stop] mode origin
-horizon lead phase quantity parameters mean q05 q25 q50 q75 q95 n
+horizon lead role quantity parameters mean q05 q25 q50 q75 q95 n
 ```
 
 It replaces `predictive/<stream>.tsv` and `forecast/<stream>.tsv`.
@@ -404,25 +412,25 @@ The score artifact writes two tables beside `score.json`.
 `scored.tsv`, one row per scored target, which is the plot-ready table:
 
 ```
-scenario stream <dims> t_start t_stop [dates] mode origin horizon lead phase
+scenario stream <dims> t_start t_stop [dates] mode origin horizon lead role
 parameters mean q05 q25 q50 q75 q95 observed log_score crps pit_lo pit_hi
 in_50 in_90
 ```
 
 The quantiles are the observation quantity's (an outcome is compared with the
-predictive distribution of `y`, not of its mean). `phase` here is `trained` or
+predictive distribution of `y`, not of its mean). `role` here is `trained` or
 `held_out`. `in_50` and `in_90` say whether the outcome fell inside the central
 50% and 90% intervals.
 
-`summary.tsv`, one row per (stream, mode, phase, lead):
+`summary.tsv`, one row per (stream, mode, role, lead):
 
 ```
-stream <dims> mode phase lead horizon n log_score_sum log_score_mean
+stream <dims> mode role lead horizon n log_score_sum log_score_mean
 crps_mean coverage_50 coverage_90
 ```
 
 Rows are grouped by lead time, and a stream with a declared cadence carries the
-matching horizon. Scores at different leads, different phases or different modes
+matching horizon. Scores at different leads, different roles or different modes
 are never summed (D35). Both tables open with the fit's label, so tables from
 several models stack by concatenation; `compare` reads the artifacts and refuses
 to difference scores whose mode, origins, leads or scored rows differ.
@@ -524,7 +532,7 @@ camdl score measles.camdl --params he2010.toml --data cases=london.tsv \
 `scored.tsv` from the second, abridged:
 
 ```
-stream t_start    t_stop     mode     origin     lead phase    parameters  q05 q50 q95 observed log_score
+stream t_start    t_stop     mode     origin     lead role    parameters  q05 q50 q95 observed log_score
 cases  1960-12-18 1960-12-25 one_step 1960-12-18 7    trained  fixed_point 212 301 420 288      -5.91
 cases  1960-12-25 1961-01-01 one_step 1960-12-25 7    trained  fixed_point 230 322 451 340      -6.02
 cases  1961-01-01 1961-01-08 one_step 1961-01-01 7    held_out fixed_point 247 349 488 402      -6.37
@@ -565,7 +573,7 @@ leaves `main` consistent.
    and nothing past them. Rename the `horizon` column that holds a mode to
    `mode`. Update the spec's "Not yet built (Phase B)" markers for what Stage 5
    built.
-2. **The row and the table.** `PredictionRow`, `Quantity`, `Phase`;
+2. **The row and the table.** `PredictionRow`, `Quantity`, `RowRole`;
    `predictions.tsv` and `prediction.json` written by all three modes;
    `convergence.tsv`; the shared reader (gh#1259, gh#1260). No new capability.
 3. **Parameter sources.** `ParameterSource`, `ParameterSet`; `--params`,
@@ -601,7 +609,7 @@ Each is written to fail before its stage.
   posterior whose every draw is `P` give identical `predictions.tsv` apart from
   the `parameters` column.
 - **Fixed point is labelled.** The manifest and the table say `fixed_point`;
-  with no `--trained-through`, every phase is `unknown` and `score` stamps
+  with no `--trained-through`, every role is `unknown` and `score` stamps
   nothing held-out; with it, the stamp is "held-out as declared".
 - **One-step score equals the filter's likelihood.** At a fixed point and
   matched seed, the sum of `scored.tsv`'s one-step `log_score` over all rows
@@ -621,7 +629,7 @@ Each is written to fail before its stage.
   `scored.tsv` and leaves `predictions.tsv`, `forecast-samples.tsv` and the
   prediction's address unchanged (D79, D81).
 - **Scores are never pooled.** `summary.tsv` has one row per (stream, mode,
-  phase, lead); `compare` refuses two artifacts whose origins or leads differ.
+  role, lead); `compare` refuses two artifacts whose origins or leads differ.
 - **Coverage.** On data simulated from the model at the scoring parameters,
   `coverage_50` and `coverage_90` over many origins fall within binomial error
   of 0.5 and 0.9 at each lead.
