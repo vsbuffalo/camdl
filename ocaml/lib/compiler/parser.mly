@@ -85,6 +85,17 @@
      as written, so a mistake inside the base is still reported. *)
   let lik_of_funcall kind args ~sp ~ep =
     let plain l = (l, None) in
+    (* A wrapper's argument that is none of [known] is reported (E251) rather
+       than dropped, since the desugaring reads only the arguments it knows. *)
+    let reject_unknown ~known ~expected =
+      List.iter (fun (k, _) ->
+        if k <> "" && not (List.mem k known) then
+          Parser_errors.push_error ~sp ~ep
+            ~code:"E251"
+            ~msg:(Printf.sprintf "%s has no argument '%s'; expected %s"
+              kind k expected))
+        args
+    in
     match kind with
     | "neg_binomial"  -> plain (LikNegBinomial  args)
     | "poisson"       -> plain (LikPoisson      args)
@@ -94,6 +105,8 @@
     | "beta"          -> plain (LikBeta         args)
     | "bernoulli"     -> plain (LikBernoulli    args)
     | "diagnostic_test" ->
+      reject_unknown ~known:["base"; "sens"; "spec"]
+        ~expected:"base = <binomial|bernoulli>(...), sens = <expr>, spec = <expr>";
       let find k = List.assoc_opt k args in
       (match find "base", find "sens", find "spec" with
        | Some (EFuncCall (base_kind, base_args)), Some sens_e, Some spec_e ->
@@ -133,16 +146,8 @@
          pi = )`. Desugar to the flat [LikZeroInflatedNegBinomial] by flattening
          the base's kwargs with `pi`. Base is restricted to neg_binomial for
          now. *)
-      (* Reject any kwarg other than base/pi so a stray or typo'd argument is not
-         silently dropped (No loose semantics). *)
-      List.iter (fun (k, _) ->
-        if k <> "" && k <> "base" && k <> "pi" then
-          Parser_errors.push_error ~sp ~ep
-            ~code:"E251"
-            ~msg:(Printf.sprintf
-              "zero_inflated has no argument '%s'; expected base = neg_binomial(...), \
-               pi = <expr>" k))
-        args;
+      reject_unknown ~known:["base"; "pi"]
+        ~expected:"base = neg_binomial(...), pi = <expr>";
       let find k = List.assoc_opt k args in
       (match find "base", find "pi" with
        | Some (EFuncCall (base_kind, base_args)), Some pi_e ->

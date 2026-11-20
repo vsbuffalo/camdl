@@ -13,6 +13,22 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-11-20 — an unknown argument to `diagnostic_test` is refused
+
+**What.** `diagnostic_test(...)` reads only `base`, `sens` and `spec`. Any other
+keyword used to be dropped without a diagnostic, so a call that misspelt `sens`
+as `sensitivity` beside the correct one compiled, and the misspelt argument did
+nothing. It is now refused, as `zero_inflated` already refused a keyword other
+than `base` and `pi`.
+
+**Migration.** Remove the argument, or correct its name to `base`, `sens` or
+`spec`.
+
+**Diagnostic.** E251, "diagnostic_test has no argument 'sensitivity'; expected
+base = <binomial|bernoulli>(...), sens = <expr>, spec = <expr>".
+
+---
+
 ## 2026-11-20 — a constant `diagnostic_test` sensitivity or specificity outside [0, 1] is refused
 
 **What.** `diagnostic_test(base = ..., sens = S, spec = P)` rewrites the base's

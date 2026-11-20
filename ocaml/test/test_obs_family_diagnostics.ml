@@ -116,6 +116,25 @@ let test_base_args_still_checked () =
                  r = r, rr = r))"
     ["E251"; "E325"]
 
+(* gh#1325: a wrapper argument the wrapper does not have is reported, not
+   dropped, as `zero_inflated` already does. *)
+let test_diagnostic_test_stray_argument () =
+  let src = model ~projected:"prevalence(of = I, among = S + I + R)"
+      ~likelihood:"cases ~ diagnostic_test(base = binomial(n = N_tested, \
+                   p = projected), sens = sens, spec = spec, sensitivity = sens)"
+      () in
+  Alcotest.(check (list string))
+    "diagnostic_test with a misspelt argument beside the right one" ["E251"]
+    (List.sort_uniq compare (codes_of src));
+  match diags_with_code src "E251" with
+  | [d] ->
+    if not (contains ~needle:"'sensitivity'" d.Diagnostics.message) then
+      Alcotest.failf "the report does not name the argument: %s"
+        d.Diagnostics.message;
+    if d.Diagnostics.loc = Diagnostics.no_loc then
+      Alcotest.fail "the report has no source location"
+  | ds -> Alcotest.failf "expected one E251, got %d" (List.length ds)
+
 (* A reported call keeps the arguments the author wrote, so a data column
    named only inside it is still a column the likelihood reads, not a dead one
    (E277). *)
@@ -187,6 +206,8 @@ let () =
       Alcotest.test_case "E118 alone" `Quick test_e118_alone;
       Alcotest.test_case "base arguments still checked" `Quick
         test_base_args_still_checked;
+      Alcotest.test_case "gh#1325: diagnostic_test stray argument" `Quick
+        test_diagnostic_test_stray_argument;
       Alcotest.test_case "a reported call keeps its names" `Quick
         test_reported_call_keeps_its_names;
     ];

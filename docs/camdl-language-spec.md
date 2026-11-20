@@ -3985,7 +3985,7 @@ slide_positivity ~ binomial(
 
 Sensitivity and specificity correct a probability, so any other base
 (`poisson`, `neg_binomial`, `normal`, `beta_binomial`) is **E253**. A call
-missing `base`, `sens` or `spec` is **E254**.
+missing `base`, `sens` or `spec` is **E254**, and any other keyword is **E251**.
 
 **Arguments.** `sens` and `spec` may be constants, parameters with priors
 (estimating the test characteristics jointly with the transmission model), or
