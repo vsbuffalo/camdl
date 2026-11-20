@@ -6115,7 +6115,15 @@ Same inputs → same hashes → run directory already exists → skip simulation
 
 ## 20. Parameter Files
 
-### 20.1 Values (v0.1)
+A model declares its parameters, their bounds and their priors (§4); their
+values are supplied from outside the model file. This section specifies the
+params file that carries a point of values, the prior syntax on a declaration,
+and how both relate to the parameter grammar. Which source wins when several
+set one parameter is the precedence chain of the run spec (§1.3).
+
+### 20.1 Values
+
+A params file is a flat TOML file with one numeric value per parameter:
 
 ```toml
 # params.toml
@@ -6129,10 +6137,18 @@ N0 = 1000000
 I0 = 10
 ```
 
+`camdl simulate --params FILE` and `camdl pfilter --params FILE` read it, and
+`--params` may be repeated: a later file overrides an earlier one, with a note
+naming the value it replaced. A value must be a number; a string such as
+`beta = "0.3 /day"` is refused with an error naming the file and key. A
+parameter that no source supplies is an error naming it. The table-section
+form for indexed parameters, the `[provenance]` table, and the other commands
+that read the same format are specified in the run spec (Appendix B).
+
 ### 20.2 Priors
 
-Priors are declared with `~` syntax directly on parameters in the `.camdl` file
-— they are beliefs about parameters and belong with the declaration:
+A prior is written with `~` on the parameter's declaration, after its kind and
+bounds. It is optional.
 
 ```camdl
 parameters {
@@ -6144,85 +6160,113 @@ parameters {
 }
 ```
 
-The `~` reads "distributed as" and is always optional. Parameters without a
-prior can still be fixed at a known value via `--params` files.
+A parameter without a prior can still be given a value (a params file, a
+scenario, a fit's `[fixed]` table) or be estimated; which methods require a
+prior is stated in the run spec (§12.2). A prior in `fit.toml`'s `[estimate]`
+overrides the model's (run spec §12.1); the `fit.toml` spellings are in run
+spec §12.3.
 
-**Supported distributions**:
+**Families.** Nine families are accepted, each with keyword arguments only:
 
-| Distribution       | Syntax                                       | Parameters              |
-| ------------------ | -------------------------------------------- | ----------------------- |
-| `uniform`          | `~ uniform(lower = L, upper = U)`            | bounds                  |
-| `normal`           | `~ normal(mu = M, sigma = S)`                | mean, sd (natural)      |
-| `log_normal`       | `~ log_normal(mu = M, sigma = S)`            | log-scale mu, sigma     |
-| `half_normal`      | `~ half_normal(sigma = S)`                   | sd of underlying normal |
-| `beta`             | `~ beta(alpha = A, beta = B)`                | shape parameters        |
-| `gamma`            | `~ gamma(shape = K, rate = R)`               | shape, rate (NOT scale) |
-| `exponential`      | `~ exponential(rate = R)`                    | rate = 1/mean           |
-| `log_uniform`      | `~ log_uniform(lower = L, upper = U)`        | bounds, `L, U > 0`      |
-| `truncated_normal` | `~ truncated_normal(mean = M, sd = S)`       | mean, sd; bounds from `in [..]` |
+| Distribution       | Syntax                                 | Arguments                                         |
+| ------------------ | -------------------------------------- | ------------------------------------------------- |
+| `uniform`          | `~ uniform(lower = L, upper = U)`      | bounds, `L < U`                                   |
+| `normal`           | `~ normal(mu = M, sigma = S)`          | mean and standard deviation, on the natural scale |
+| `log_normal`       | `~ log_normal(mu = M, sigma = S)`      | mean and standard deviation of `log X`            |
+| `half_normal`      | `~ half_normal(sigma = S)`             | standard deviation of the unfolded normal         |
+| `beta`             | `~ beta(alpha = A, beta = B)`          | shape parameters                                  |
+| `gamma`            | `~ gamma(shape = K, rate = R)`         | shape and rate, `E[X] = K/R`                      |
+| `exponential`      | `~ exponential(rate = R)`              | rate, `E[X] = 1/R`                                |
+| `log_uniform`      | `~ log_uniform(lower = L, upper = U)`  | bounds, `0 < L < U`                               |
+| `truncated_normal` | `~ truncated_normal(mean = M, sd = S)` | mean and standard deviation; bounds from `in [..]` |
 
-All arguments are keyword (named), never positional. All arguments must be
-compile-time constants.
+**Meaning.** The conventions that differ between texts are fixed as follows.
 
-**Parameterization conventions** (these are load-bearing):
+- `log_normal(mu, sigma)` takes its arguments on the log scale:
+  `log(X) ~ Normal(mu, sigma)`, so the median of `X` is `exp(mu)`.
+- `gamma(shape, rate)` is the rate parameterization, with density
+  `rᵏ xᵏ⁻¹ e^(−r x) / Γ(k)`; a `scale` argument is refused.
+- `log_uniform(lower, upper)` is uniform on the log scale,
+  `log(X) ~ Uniform(log lower, log upper)`, with density
+  `1 / (x (ln U − ln L))` on `[L, U]`: each order of magnitude in the range
+  has equal mass. It suits a scale parameter known only to within orders of
+  magnitude, such as a coupling rate.
+- `truncated_normal(mean, sd)` is `Normal(mean, sd)` truncated to the
+  parameter's declared `in [lo, hi]` and renormalized over it, so the bounds
+  are the truncation and are stated in one place.
 
-- `log_normal(mu, sigma)`: parameters are on the **log scale**.
-  `log(X) ~ Normal(mu, sigma)`. Median of X is `exp(mu)`.
-- `half_normal(sigma)`: sigma is the SD of the underlying (unfolded) normal.
-- `gamma(shape, rate)`: rate parameterization (`E[X] = shape/rate`).
-- `log_uniform(lower, upper)`: **uniform on the log scale** —
-  `log(X) ~ Uniform(log lower, log upper)`, so every order of magnitude in
-  `[lower, upper]` is equally likely. The honest weakly-informative choice for a
-  scale parameter known only to within orders of magnitude (e.g. a coupling
-  rate). Requires `lower, upper > 0`, and the parameter's bounds must lie within
-  `[lower, upper]`.
-- `truncated_normal(mean, sd)`: a `normal(mean, sd)` truncated to the
-  parameter's declared `in [lo, hi]` range — the bounds are the truncation,
-  with no second place to disagree. A parameter with a `truncated_normal` prior
-  **must** declare `in [lo, hi]`. Exact and warning-free, unlike a plain
-  `normal(...)` whose out-of-bounds mass is rejected at draw time.
+**Hyperparameters.** A prior argument may be an expression over other declared
+parameters, which makes the prior hierarchical: each cell of an indexed
+parameter is drawn from the same family with shared hyperparameters, which
+pools the cells partially. An optional `| dim` suffix names the dimension
+pooled over:
 
-Priors in the model are the primary source; `fit.toml [estimate]` priors
-override them for sensitivity analysis. See the run spec §12 for the full
-precedence chain.
-
-### 20.3 Views (v0.2+)
-
-```toml
-# view.toml — implements V from the parameter grammar
-[view]
-free = ["beta", "gamma", "rho", "I0"]
+```
+parameters {
+  mu_h      : real ~ normal(mu = -1, sigma = 1)
+  sigma_h   : positive ~ half_normal(sigma = 0.5)
+  beta[age] : rate ~ log_normal(mu = mu_h, sigma = sigma_h) | age
+}
 ```
 
-Free parameters are varied by the inference engine; all other parameters are
-held fixed at their values from `params.toml`. Views are only relevant for
-`camdl fit` (v0.2+) — they have no effect on forward simulation.
+A hierarchical prior's arguments are evaluated at each parameter draw, before
+any simulation, so they may use parameters, literals and arithmetic on them.
+
+**What is refused.**
+
+- A positional argument is a syntax error (**E001**); an unknown family is
+  **E232**; a missing argument is **E231**; an argument the family does not take
+  (`normal(mean = …)`, `gamma(scale = …)`) is **E233**.
+- A constant argument outside the family's domain (`uniform` with
+  `lower ≥ upper`, `log_uniform` with `lower ≤ 0`, a non-positive `sigma`) is
+  **E235**.
+- A `truncated_normal` prior on a parameter with no `in [lo, hi]` is **E285**.
+- An argument that reads time, compartment state, a `let` binding, a forcing, a
+  table or an observation, or names an undeclared parameter, is **E230**.
+- `log_uniform` and `truncated_normal` take constant arguments only; a
+  hyperparameter in their arguments, or a `| dim` suffix, is **E286**.
+
+Whether a prior puts mass on the whole of a parameter's search box (for
+example, `log_uniform(lower = L, upper = U)` on bounds outside `[L, U]`, or a
+`beta` prior on a `rate`) is not checked when the model is compiled. It is
+checked when a fit starts (run spec §12.4).
+
+Related sections: §4 (parameter declarations and bounds), §4.4 (bounds),
+run spec §12 (prior precedence and the `fit.toml` forms).
+
+### 20.3 Estimated and fixed parameters
+
+A fit partitions the model's parameters into those it estimates and those it
+holds fixed. The partition is the `fit.toml`'s `[estimate]` and `[fixed]`
+tables (run spec §6.3, §6.4); `camdl profile` and `camdl survey` also take
+`--fixed NAME=VALUE`. Forward simulation has no partition: every parameter
+takes a value (§20.1).
 
 ### 20.4 Relationship to the Parameter Grammar
 
-The parameter grammar (Buffalo 2026) defines the formal framework for
-partitioning and manipulating model inputs. camdl implements each concept:
+The parameter grammar (Buffalo 2026) is a formal framework for partitioning and
+manipulating a simulator's inputs. Each of its objects has a camdl counterpart:
 
-| Grammar concept          | camdl implementation                        |
-| ------------------------ | ------------------------------------------- |
-| **M** (parameter space)  | `parameters { }` block — all tuneable knobs |
-| **C** (configuration)    | Model structure + `simulate` + `output`     |
-| **S** (seed)             | CLI `--seed`, never in model file           |
-| **Point m ∈ M**          | `params.toml`                               |
-| **Scenario σ**           | `scenarios { }` — patch operations          |
-| **Baseline σ₀**          | Identity patch — model as defined           |
-| **View V**               | `view.toml` — free vs fixed                 |
-| **Prior π(m)**           | `~` syntax on parameter declaration         |
-| **Transform T_V**        | Per-parameter `transform` (v0.2+)           |
-| **Reparameterization R** | Future: `reparam.toml`                      |
-| **Sim(m, c, s) → y**     | `camdl simulate`                            |
-| **Sim_σ,V,T(z, s) → y**  | `camdl fit` (v0.2+)                         |
+| Grammar concept          | camdl counterpart                                                                 |
+| ------------------------ | --------------------------------------------------------------------------------- |
+| **M** (parameter space)  | the `parameters { }` block                                                        |
+| **C** (configuration)    | the model structure, `simulate { }` and `output { }`, and the backend and step chosen at run time |
+| **S** (seed)             | `--seed` on the command line; never in the model file                             |
+| **Point m ∈ M**          | a params file (§20.1)                                                             |
+| **Scenario σ**           | a scenario in `scenarios { }`, a patch (§17)                                      |
+| **Baseline σ₀**          | no scenario selected: the model as declared                                       |
+| **View V**               | the `[estimate]` and `[fixed]` tables of a `fit.toml` (§20.3)                      |
+| **Prior π(m)**           | `~` on a parameter declaration (§20.2)                                            |
+| **Transform T_V**        | derived per estimated parameter from its resolved bounds and declared kind (run spec §6.3) |
+| **Reparameterization R** | not supported as a separate input; a different parameterization is written in the model |
+| **Sim(m, c, s) → y**     | `camdl simulate`                                                                  |
+| **Sim_σ,V,T(z, s) → y**  | `camdl fit run`                                                                   |
 
-The downward chain from inference coordinates to simulation output:
+The chain from inference coordinates to simulation output:
 
 ```
 z ∈ Z_V     inference engine proposes a vector
-  │ T_V⁻¹   back-transform (exp, expit)
+  │ T_V⁻¹   inverse transform (run spec §6.3)
   ▼
 p ∈ P_V     free parameter values
   │ κ_V     fill in fixed values
@@ -6236,25 +6280,31 @@ m ∈ M       complete parameter set
 y ∈ Y       trajectory, observations
 ```
 
-Every arrow is defined by external configuration. The `.camdl` file defines the
-structural skeleton; the parameter grammar fills in the rest.
+The model file declares the parameter space, the priors and the scenarios. The
+point, the view, the scenario selected and the seed are chosen outside it.
 
 ---
 
 ## 21. CLI
 
-The unified `camdl` command routes to two backends: **`camdlc`** (OCaml
-compiler) for compilation/inspection and **`camdl`** (Rust) for simulation,
-experiments, and inference. All commands accept `.camdl` files directly
-(auto-compiled via `camdlc`).
+The `camdl` command compiles, simulates and fits models. Every command that
+takes a model accepts a `.camdl` file, which it compiles with `camdlc`. This
+section lists the commands that act on the language's constructs; the complete
+reference for every flag is the run spec (Appendix A), and fitting is described
+in `camdl docs inference`.
 
 ### 21.1 Compilation and Inspection
 
 ```bash
 camdl dev compile MODEL.camdl          # compile to IR JSON (stdout)
-camdl check   MODEL.camdl              # validate structure (no output)
+camdl check   MODEL.camdl              # parse and type-check; print diagnostics
 camdl inspect MODEL.camdl [OPTIONS]    # inspect compartments, transitions, etc.
 ```
+
+`check`, `inspect`, `render` and `dev compile` pass their arguments to
+`camdlc`. `inspect` takes `--summary`, `--dims`, `--compartments`,
+`--transitions`, `--tables` and `--forcings`; `camdlc --help` lists the
+compiler's own flags.
 
 ### 21.2 Simulation
 
@@ -6263,20 +6313,23 @@ camdl simulate MODEL --params P.toml --seed 42 [OPTIONS]
 
 Options:
   --backend    gillespie|chain_binomial|ode  (default: chain_binomial)
-  --dt         DT         step size for chain_binomial / ode
+  --dt         DT         step size for chain_binomial / ode (default: 1.0)
   --seed       N          RNG seed (default: 1)
-  --scenario   NAME       select a named scenario
-  --enable     NAME       enable an intervention (ad-hoc; mutually exclusive with --scenario)
-  --disable    NAME       disable an intervention
+  --scenario   NAME       select a named scenario (repeatable; conflicts with --enable/--disable)
+  --enable     NAME       enable an intervention (repeatable)
+  --disable    NAME       disable an intervention (repeatable)
   --param      NAME=VALUE override a parameter value
   --param-vec  PREFIX=FILE override indexed params from a keyed TSV
   --params     FILE.toml  load parameter values (repeatable, later overrides earlier)
 ```
 
-By default `simulate` writes the trajectory to a content-addressed store leaf
-under `./results` (read it back with `camdl cat <id>`); pass `--stdout` to stream
-the TSV to stdout instead, or `-o FILE` to also write a loose TSV mirror. The TSV
-columns are `t`, one column per compartment, and `flow_<name>` per transition.
+`simulate` writes the trajectory to a content-addressed store leaf under
+`./results` (`--output-dir` sets the root), and prints the `camdl cat` command
+that reads it back. `--stdout` streams the TSV to stdout and writes no leaf;
+`-o FILE` writes a TSV copy in addition to the leaf. The trajectory's columns
+are `t`, `t_start` and `t_stop` (the period each row's flows cover), one column
+per compartment, and `flow_<name>` per transition (run spec §10.1).
+Observation draws are written with `--obs`, `--obs-dir` or `--obs-only` (§12.4).
 
 ### 21.3 Expression Evaluation
 
@@ -6285,9 +6338,11 @@ camdl dev eval MODEL --params P.toml --expr "school,seas,R0" --from 0 --to 365 -
 camdl dev eval MODEL --params P.toml --expr "school" --at 0,100,200,300
 ```
 
-Evaluates time-dependent expressions (forcing functions, parameters, math
-expressions) at a time grid without simulation. Expressions that reference
-compartment state produce an error.
+`dev eval` evaluates forcings and parameters, by name, on a time grid without
+simulating, and writes one column per name. A name that is not a forcing or a
+parameter is refused with a message listing the names available. A `let`
+binding is refused, since it is inlined into the expressions that use it, and so
+is a compartment, whose value needs a simulation.
 
 ### 21.4 Sweeps and scenario grids
 
@@ -6300,134 +6355,75 @@ camdl show  <short-hash>
 camdl cat   <short-hash> [--stream NAME]
 ```
 
-Parameter sweeps (a deterministic grid, the design axis), scenario comparisons,
-and posterior-predictive checks (`--draws`). Every design point at a replicate
-shares one random stream, so the grid runs with common random numbers; a second
-run of the same grid reads the cells the store holds back. Sensitivity analysis
-(Sobol indices) is out of scope for the CLI: generate the design in R or Python,
-run it with `--sweep-file`, and compute the indices with R's `sensitivity`
-package or Python's `SALib` on `ensemble.tsv`. See the Run Specification
-(`camdl-run-spec.md` §5) for details.
+`--sweep` runs a deterministic grid over parameters (the design axis),
+`--scenario` a list of scenarios, and `--draws` parameter draws for a
+predictive check. Every design point at a given replicate shares one random
+stream, so the grid runs with common random numbers, and a second run of the
+same grid reads back the cells the store already holds. The semantics are in
+the run spec (§5).
+
+camdl computes no sensitivity indices and generates no space-filling designs.
+For a Sobol analysis, generate the design in R or Python, run it with
+`--sweep-file`, and compute the indices from `ensemble.tsv` with R's
+`sensitivity` package (Iooss et al., [CRAN](https://CRAN.R-project.org/package=sensitivity))
+or Python's SALib (Herman and Usher 2017,
+[_Journal of Open Source Software_ 2(9):97](https://doi.org/10.21105/joss.00097)).
 
 ### 21.5 Inference
 
 ```bash
-# Particle filter — log-likelihood estimation
+# Particle filter: a log-likelihood estimate at fixed parameters
 camdl pfilter MODEL --params P.toml --data cases.tsv \
     --particles 5000 --dt 1 --seed 42 --trace diag.tsv
 
-# Iterated filtering (MLE) is run as a fit. Write a fit.toml whose `[method]`
-# has `algorithm = "if2"` and run it through `camdl fit run`:
-#
-#   [model]
-#   camdl = "MODEL"
-#
-#   [data.observations]
-#   cases = "cases.tsv"
-#
-#   [estimate]
-#   R0    = { bounds = [0.1, 10.0], start = 5.0 }
-#   sigma = { bounds = [0.0, 1.0],  start = 0.01 }
-#   gamma = { bounds = [0.0, 1.0],  start = 0.01 }
-#
-#   [fixed]
-#   N0 = 1000
-#   mu = 0.0
-#   k  = 10
-#
-#   [method]
-#   algorithm  = "if2"
-#   backend    = "chain_binomial"
-#   chains     = 4
-#   particles  = 2000
-#   iterations = 100
-#   cooling    = 0.95
-#
+# A fit: the [method] of a fit.toml (`camdl fit methods` lists them)
 camdl fit run fit.toml --seed 42
 
-# Profile likelihood — parameter identifiability. The swept parameter and its
-# grid are given by `--sweep "PARAM=lin(min,max,n)"` (repeat for 2D+).
+# Profile likelihood over a grid of one parameter (repeat --sweep for 2D+)
 camdl profile MODEL --starts from_params=P.toml --data cases.tsv \
     --sweep "R0=lin(0.5,5,20)" \
     --rw-sd "sigma=0.01,gamma=0.01" \
     --particles 500 --iterations 30 --n-starts 3 --parallel 8
-
-# 2D profile — repeat --sweep
-camdl profile MODEL \
-    --sweep "alpha=lin(0.85,0.95,3)" --sweep "gamma=lin(0.06,0.10,3)" ...
 ```
 
-The projection and likelihood for each data stream come from the model's
-`observations { ... }` block (§12); inference commands do not take a `--flow` /
-`--obs-model` projection override. When a single positional `--data FILE` is
-bound and the model declares more than one observation stream, pass `--obs NAME`
-to say which stream (or indexed family) the file is. The legacy `--flow` /
-`--obs-model` projection-override flags were removed in the 2026-05-25 CLI UX
-revision.
+The projection and the distribution of each data stream come from the model's
+`observations { }` block (§12); no inference command overrides them. A bare
+`--data FILE` binds to the model's only observation stream; when the model
+declares more than one, `--obs NAME` names the stream or indexed family the
+file is. `--data NAME=PATH`, repeated, binds several streams at once.
 
-**`--rw-sd`** (`camdl profile`): Perturbation scale per parameter. Optional
-with `--fit`, whose `[estimate]` (less swept and pinned parameters) is then the
-estimated set, each IF2 step its `rw_sd` or the automatic default; given with
-`--fit`, a list must name every such `[estimate]` parameter. Three modes:
+A fit's configuration (`[estimate]`, `[fixed]`, `[data]`, `[method]` and the
+chain `starts`) is specified in the run spec (§6), with an IF2 example in §8.1.
+Initial-condition parameters such as `S0` and `I0` are estimated like any other
+parameter, by listing them under `[estimate]`.
 
-- Explicit: `--rw-sd "R0=5,sigma=0.01"` — the list IS the partition. Parameters
-  not listed are held fixed. No `--fixed` needed.
-- Auto: `--rw-sd auto` — heuristic from parameter bounds (`(hi-lo)/6` on
-  transformed scale). Use `--fixed NAME=VALUE` (repeatable) or
-  `--fixed-file <toml>` to exclude and value-pin specific params.
-- Mixed: `--rw-sd "R0=5,sigma=auto"` — explicit where you know, auto where you
-  don't.
+**`--rw-sd`** (`camdl profile`) sets the IF2 perturbation scale of each
+estimated parameter, and with it the estimated set:
 
-In a fit, an `algorithm = "if2"` method takes each parameter's perturbation scale
-from that parameter's `[estimate]` `rw_sd`, and derives one from its bounds when
-`rw_sd` is absent. Cooling follows pomp's `cooling.fraction.50`: the SD reaches `cooling` of its
-initial value after `cooling_target_iters` iterations (default 50); see
-`docs/methods/cooling.md`.
+- `--rw-sd "R0=5,sigma=0.01"`: the listed parameters are estimated, with these
+  scales on the natural scale; the others are held fixed.
+- `--rw-sd auto`: every parameter that is not swept, pinned (`--fixed`,
+  `--fixed-file`, the `--fit` config's `[fixed]`) or a model constant is
+  estimated, each with the default step that its bounds' transform takes.
+- `--rw-sd "R0=5,sigma=auto"`: an explicit scale where one is given and the
+  default step where `auto` is written.
 
-**Regimes (scout / refine / validate)**: the scout → refine → validate ladder is
-a sequence of `fit.toml` files, each with `[method] algorithm = "if2"` and the
-same problem half, not a CLI preset. A scout is a fast, mildly-cooled fit for
-basin exploration (e.g. `chains = 8`, `particles = 500`, `iterations = 30`,
-`cooling = 0.70`); a refine sharpens onto the scout's mode with more particles
-and aggressive cooling (e.g. `chains = 4`, `particles = 1000`,
-`iterations = 50`, `cooling = 0.05`, `starts = { from_mle = "@scout" }`); a
-validate file is a final high-particle polish. Each file sets these knobs
-explicitly; a later file warm-starts from an earlier one's MLE by handle. A
-source whose convergence verdict failed is refused unless
-`--allow-nonconverged-source` records the choice (`docs/methods/cooling.md`).
+`--rw-sd` is required without `--fit`. With `--fit`, it is optional: the
+estimated set is the config's `[estimate]` less the swept and pinned
+parameters, each with its `rw_sd` or the default step, and a list given with
+`--fit` must name every such parameter. In a fit, IF2 takes each parameter's
+scale from its `[estimate]` `rw_sd`, or the default step when `rw_sd` is
+absent. Cooling follows pomp's `cooling.fraction.50`: the perturbation SD
+reaches `cooling` times its initial value after `cooling_target_iters`
+iterations (default 50; `docs/methods/cooling.md`).
 
-**Initial value parameters (IVP)**: parameters that set the initial compartment
-state (e.g. `S0`, `I0`) are declared on the model and estimated like any other
-parameter — list them under `[estimate]` in the `fit.toml`. The fit perturbs /
-draws their initial values as part of the inference; there is no separate CLI
-flag to nominate them.
-
-**`--fixed NAME=VALUE`**: Pin `NAME` at `VALUE` (repeatable) and remove it from
-the inference `[estimate]` set if present. The universal value-setter, available
-on `camdl profile` and `camdl survey`; in a `fit.toml` the equivalent is the
-`[fixed] NAME = VALUE` block read by `camdl fit run`.
-
-**Pinning many params (the replacement for the removed name-only `--fixed`).**
-
-The pre-2026-05-25 surface accepted a name-only comma list: `--fixed "N0,mu,k"`
-meaning "freeze these three at their model defaults." That form is **removed**
-(a model carries no parameter values, so there was no default to freeze at).
-The two replacements are:
-
-- `--fixed NAME=VALUE` (repeated): explicit values, one per flag. Preferred for
-  the small case (≤ 3 names).
-- `--fixed-file <toml>`: a flat params TOML — top-level keys are parameter
-  names, values are the pin values; repeatable, later files override earlier
-  ones. Preferred for many-params vignettes (extract the values once, commit the
-  TOML, point the invocation at it).
-- For the original "pin without typing a value" intent, the equivalent under the
-  new surface is to **not list the parameter in `--fixed`/`--fixed-file`**: the
-  value then comes from the next tier down (a `[fixed]` or `--params` value, or
-  the compiled-in value a `camdlc --set` pinned, if any). A parameter with no
-  value from any tier is an error, not a default. See `docs/camdl-run-spec.md §1.3` for the
-  full precedence chain and
-  `docs/dev/proposals/archive/post-alpha/2026-05-25-cli-init-and-params-ux.md` §"`--fixed`
-  semantics, defined once" for the rationale.
+**`--fixed NAME=VALUE`** (`camdl profile`, `camdl survey`) pins `NAME` at
+`VALUE` and removes it from the estimated set; it may be repeated.
+`--fixed-file FILE` (`camdl profile`) pins every key of a params file (§20.1),
+and may be repeated, a later file overriding an earlier one. A parameter named
+by neither takes its value from the next tier of the precedence chain (run spec
+§1.3); a parameter with no value from any tier is an error. In a `fit.toml` the
+equivalent is the `[fixed]` table.
 
 ### 21.6 Fit Workflow
 
@@ -6437,38 +6433,45 @@ camdl fit summary results/fits/<dir>/
 camdl fit table   results/fits/
 ```
 
-Driven by `fit.toml` with `[estimate]`, `[fixed]`, `[data]`, and one `[method]`.
-A chain of fits (by convention `scout`, `refine`, `validate`) is a chain of
-files, each naming the previous by handle in its `starts` rule
+`fit run` runs the one `[method]` of a `fit.toml`. A sequence of fits, by
+convention a scout, a refine and a validate file, is a sequence of files, each
+starting from an earlier fit by handle in its `starts` rule
 (`starts = { from_mle = "@scout" }`); `--starts SPEC` overrides the rule for one
-run. `--sweep` takes a Cartesian product over parameter grids. See
-`docs/camdl-inference-spec.md`.
+run. A source fit whose convergence verdict failed is refused unless
+`--allow-nonconverged-source` is passed. `--sweep` repeats the fit over a
+Cartesian grid of fixed parameters (run spec §7.3). `fit summary` reports one
+fit's convergence verdict, estimates and diagnostics; `fit table` writes one row
+per fit under a results root. The method ladder is described in the inference
+spec (§6).
 
-**Pfilter replicates:**
+**Particle-filter replicates:**
 
 ```bash
 camdl pfilter MODEL --params P.toml --data d.tsv \
     --replicates 100 --output logliks.tsv
 ```
 
-Runs N independent particle filters, outputs `seed\tloglik` TSV.
+runs independent particle filters and writes a `seed`, `loglik` TSV, one row per
+replicate.
 
-**Pfilter trace** (observation-space predictions):
+**Particle-filter trace:**
 
 ```bash
 camdl pfilter MODEL --params P.toml --data d.tsv --trace diag.tsv
 ```
 
-Columns:
-`time ll_increment ESS obs_mean obs_q05 obs_q50 obs_q95
-state_mean state_q05 state_q50 state_q95 observed`.
-`obs_*` includes observation noise; `state_*` is process uncertainty only.
+writes one row per observation time, with columns
+`time ll_increment ESS obs_mean obs_q05 obs_q50 obs_q95 state_mean state_q05
+state_q50 state_q95 observed`. `ll_increment` is that time's contribution to
+the log-likelihood and `ESS` the effective sample size of the particles. The
+`obs_*` columns include observation noise; the `state_*` columns show process
+uncertainty only.
 
 ### 21.7 Train/Holdout Validation
 
 A train/holdout split is declared in the fit config, and the data file stays
-whole. A row trains when the end of what it measures is at or before the
-cutoff:
+whole. Under `holdout_after`, a row trains when the end of the period it
+measures is at or before the cutoff:
 
 ```toml
 [data]
@@ -6481,7 +6484,8 @@ cases = "data/cases.tsv"
 Held-out rows supplied as their own file are bound with `[data.holdout]`
 instead. `camdl compare` scores the withheld rows out of sample, and
 `camdl pfilter --fit fit.toml --save-final-state FILE` binds only the training
-rows and saves the state at their end.
+rows and saves the particle state at their end. The rules for the cutoff are in
+`docs/fit-toml.md`.
 
 ### 21.8 Particle State Export
 
@@ -6490,12 +6494,14 @@ camdl pfilter MODEL --params P.toml --data train.tsv \
     --particles 5000 --save-final-state final_particles.tsv
 ```
 
+writes the final particle states to a TSV.
+
 ---
 
 ## 22. Worked Examples
 
-These examples progress from trivial to complex, showing how primitives compose.
-Each shows the DSL source and key points about what the compiler generates.
+These examples build from a bare SIR model to stratified and staged models,
+each showing how the primitives compose and what the compiler expands them to.
 
 ### 22.1 Bare SIR (Simplest Possible Model)
 
@@ -6528,9 +6534,8 @@ simulate {
 }
 ```
 
-10 lines of model structure. No stratification, no demography, no observations.
-The compiler generates 2 IR transitions with flat rate expressions. This is the
-minimal golden test model.
+Two transitions with unindexed rate expressions; no stratification, demography
+or observations.
 
 ### 22.2 SIR with Demography (Explicit Transitions)
 
@@ -6570,15 +6575,15 @@ simulate {
 }
 ```
 
-6 transitions total. Every rate is a total propensity — `death_S` rate is
-`mu * S` (per-capita rate times population count, explicit). Birth is an inflow
-at rate `mu * N` (population-dependent, balances deaths in expectation).
+Six transitions. Every rate is a total propensity: the `death_S` rate is
+`mu * S`, a per-capita rate times a count. `birth` is an inflow at `mu * N`,
+which balances the deaths in expectation.
 
 ### 22.3 SEIR with Age Mixing (Introducing Stratification)
 
-Age-structured transmission is written with the explicit indexed form (§10): one
-`infection` transition per age class, with a contact-matrix-weighted sum over the
-infectious classes.
+Age-structured transmission is written in the explicit indexed form (§10): one
+`infection` transition per age class, with a contact-matrix-weighted sum over
+the infectious classes.
 
 ```camdl
 time_unit = 'days
@@ -6609,11 +6614,10 @@ transitions {
 }
 ```
 
-The `sum(b in age, C_age[a,b] * I[b] / N_local[b])` term is the
-contact-matrix-weighted force of infection on age class `a`; progression and
-recovery are replicated within each stratum by the `[a in age]` binder. (An
-earlier `coupling[age = C_age]` shorthand that auto-generated this sum was
-removed — see §10.)
+`sum(b in age, C_age[a,b] * I[b] / N_local[b])` is the
+contact-matrix-weighted force of infection on age class `a`. The `[a in age]`
+binder replicates progression and recovery within each stratum, so the model
+expands to six transitions.
 
 ### 22.4 STI with Directed Transmission (Off-Diagonal Matrix)
 
@@ -6647,11 +6651,11 @@ transitions {
 }
 ```
 
-The zero diagonal in `B_sex` means no within-sex transmission. The
-`sum(t in sex, ...)` sums over both sexes, but the zero entries eliminate
-same-sex terms. `infection_female` rate becomes
-`S[female] * beta_mf * I[male] / N_local[male]`. No special `directed` keyword
-needed — the matrix structure does all the work.
+The zero diagonal of `B_sex` removes within-sex transmission. The sum over
+`t in sex` keeps both terms, and the zero entry weights the same-sex term to
+zero, so the rate of `infection_female` equals
+`S[female] * beta_mf * I[male] / N_local[male]`. Directed transmission needs no
+keyword of its own; the matrix states it.
 
 ### 22.5 Cholera with Environmental Reservoir (Real Compartment + ODE)
 
@@ -6686,14 +6690,11 @@ ode {
 }
 ```
 
-`W : real` is continuous-valued — not a population count. The `ode` block gives
-`dW/dt`. Between stochastic events (infections, recoveries), W evolves
-deterministically. This is a piecewise-deterministic Markov process (PDMP). `W`
-appears in the infection rate via the dose-response term `beta_W * W / (K + W)`
-— coupling the continuous and discrete dynamics.
-
-Note: `c in compartments` would NOT iterate over `W` (integer compartments only
-by default).
+`W : real` is a continuous quantity, not a population count, and the `ode`
+block gives its derivative `dW/dt`. W evolves deterministically between the
+stochastic infection and recovery events (§11), and enters the infection rate
+through the dose-response term `beta_W * W / (K + W)`. `c in compartments`
+iterates over integer compartments only, so it does not include `W` (§9.5).
 
 ### 22.6 Five-Age-Group Model with Consecutive Aging
 
@@ -6770,13 +6771,12 @@ transitions {
 }
 ```
 
-`consecutive(age)` generates pairs: `(age_0_5, age_5_15)`,
-`(age_5_15, age_15_50)`, `(age_15_50, age_50_65)`, `(age_50_65, age_65p)`. With
-3 compartments, this produces 3 × 4 = 12 aging transitions. The last age group
-(`age_65p`) has no outgoing aging — individuals stay until death.
-
-Total transitions: 5 infections + 5 recoveries + 12 aging + 15 deaths + 1 birth
-= 38.
+`consecutive(age)` generates the pairs `(age_0_5, age_5_15)`,
+`(age_5_15, age_15_50)`, `(age_15_50, age_50_65)` and `(age_50_65, age_65p)`.
+With 3 compartments, `aging` expands to 3 × 4 = 12 transitions. The last age
+group, `age_65p`, has no outgoing aging; individuals leave it only by death.
+The model has 5 infections + 5 recoveries + 12 aging + 15 deaths + 1 birth = 38
+transitions.
 
 ### 22.7 Erlang Sub-Staging (Non-Exponential Waiting Times)
 
@@ -6810,11 +6810,13 @@ transitions {
 }
 ```
 
-The Erlang-3 latent period has the same mean (1/sigma) as exponential but
-reduced variance (variance = 1/(k·sigma²)). The distribution is more peaked,
-closer to real disease progression. Note: `infection` destination is `E[e1]` —
-entering the first sub-stage. Partial stratification (`only = [E]`) means S, I,
-R don't have the `latent_stage` dimension.
+An Erlang-3 latent period has the same mean as the exponential, `1/sigma`, and
+a smaller variance, `1/(k·sigma²)` with `k = 3`, so the distribution is more
+concentrated about its mean. `infection` enters the first sub-stage, `E[e1]`.
+Under partial stratification (`only = [E]`), S, I and R do not carry the
+`latent_stage` dimension. The same residence is written in one line as
+`onset : E --> I via erlang(stages = 3, rate = sigma)` (§9.4.1), under which
+the stages are residence structure and not a population stratum (§5.0).
 
 ---
 
