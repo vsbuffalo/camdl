@@ -132,12 +132,13 @@ the language spec excluded. Name the files: a bare `dprint fmt` reformats every
 Markdown file in the tree, and with `--config-discovery=global` it uses the
 caller's own configuration instead, which can include JSON and so the goldens.
 
-**Exception: `docs/camdl-language-spec.md` is never formatted.** It embeds ~30
-`<!-- camdl-doctest-preamble -->` markers and fenced `camdl` snippets that the
-doc-test harness parses; `dprint`'s reflow disturbs that structure and turns
-passing doc-tests into failures/ICEs. `dprint.json` excludes it. Edit it by
-hand. Any other `.md` with embedded doctest preambles is the same hazard — check
-before formatting.
+**Exception: `docs/camdl-language-spec.md` is never formatted.** The doc-test
+harness parses its `` ```camdl-doctest-preamble NAME `` fences, its
+`<!-- camdl-doctest-data -->` comments and its fenced `camdl` snippets;
+`dprint`'s reflow disturbs that structure and turns passing doc-tests into
+failures/ICEs. `dprint.json` excludes it. Edit it by hand. Any other `.md` with
+embedded doctest preambles or data comments is the same hazard — check before
+formatting.
 
 `docs/camdl-data-spec.md` is executed too (`make test-data-spec`) but is **safe
 to format**: its examples are marked in the fence info string
