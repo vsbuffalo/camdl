@@ -763,7 +763,8 @@ fn check_schedule_agrees(
 /// ending at or before `reach`, or `None` when the stream declares no
 /// schedule. They are the periods `simulate --obs` writes (`plan_emission`):
 /// for a uniform `covers` form, the period `covers.period_of(label)` of each
-/// emit label, continued while a period starts before `reach`; for window
+/// emit label, continued while a period starts before `reach`, leaving out a
+/// period that starts before the schedule's first time; for window
 /// columns, the gaps between consecutive emit times, with the one crossing
 /// the reach included. Gaps between emit times are a uniform form's periods
 /// only at offset 0 with a step equal to the span, so they are not used for
@@ -792,7 +793,15 @@ fn schedule_periods(obs: &ObservationModel, reach: f64) -> Option<Vec<Measures>>
                 ObservationSchedule::Regular(_) => return None,
                 ObservationSchedule::AtTimes(ts) => ts.clone(),
             };
-            Some(labels.into_iter().filter_map(|l| positive(of(l))).collect())
+            // A period that starts before the schedule's first time (label 3
+            // under `closing_at` covers [-4, 3)) is one no run from the
+            // schedule's start writes, so it is not one to disagree with.
+            let first = labels.iter().copied().fold(f64::INFINITY, f64::min);
+            Some(labels.into_iter()
+                .map(of)
+                .filter(|&(start, _)| start >= first - TIME_TIE_EPS)
+                .filter_map(positive)
+                .collect())
         }
         _ => {
             let mut times = emit_times(obs, reach)?;
@@ -1231,8 +1240,9 @@ mod tests {
 
     /// D82: a uniform weekly `covers` form whose rows close on days 7, 14,
     /// 21 and an `emit_schedule` of every 7 days from day 3 disagree over the
-    /// same reporting interval: the emitter writes label 3 over [-4, 3)
-    /// (`period_of`, gh#1301). The forecast is refused, naming the stream,
+    /// same reporting interval: the emitter writes label 10 over [3, 10)
+    /// (`period_of`, gh#1301; label 3's [-4, 3) starts before the schedule
+    /// and is not judged). The forecast is refused, naming the stream,
     /// both periods and the source of each, rather than following the data.
     #[test]
     fn a_tiling_and_an_emit_schedule_that_disagree_are_refused() {
@@ -1247,7 +1257,7 @@ mod tests {
         assert!(matches!(&refusals[..], [StreamRefusal::ScheduleConflict { .. }]), "{refusals:?}");
         let msg = err.to_string();
         assert!(msg.contains("'weekly'") && msg.contains("[0, 7)") && msg.contains("training row 0")
-            && msg.contains("[-4, 3)") && msg.contains("emit_schedule"), "{msg}");
+            && msg.contains("[3, 10)") && msg.contains("emit_schedule"), "{msg}");
         // Agreeing declarations forecast as before.
         wobs.emit_schedule = Some(ObservationSchedule::Regular(RegularSchedule { start: 0.0, step: 7.0, end: 63.0 }));
         let plan = ForecastPlan::new(partition(&rows), 14.0, &[
@@ -1330,7 +1340,7 @@ mod tests {
         let PlanError::NoTargets { refusals } = &err else { panic!("{err:?}") };
         assert_eq!(refusals, &[StreamRefusal::ScheduleConflict {
             stream: "weekly".into(), data: (0.0, 7.0), data_source: "training row 0".into(),
-            schedule: (-6.0, 1.0),
+            schedule: (1.0, 8.0),
         }]);
     }
 
