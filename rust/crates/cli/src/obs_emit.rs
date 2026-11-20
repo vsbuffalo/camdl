@@ -182,11 +182,7 @@ pub(crate) fn plan_emission(
     // an end of it, is quietly not written.
     let label_in_run = |t: f64| t >= t_start - eps && t <= t_end + eps;
 
-    let covers: Option<Covers> = match (&obs.covers, override_step) {
-        (Some(Covers::From { offset, .. }), Some(step)) => Some(Covers::From { offset: *offset, span: step }),
-        (Some(Covers::Until { offset, .. }), Some(step)) => Some(Covers::Until { offset: *offset, span: step }),
-        (c, _) => c.clone(),
-    };
+    let covers = emitted_covers(obs, override_step);
 
     let rows: Vec<EmitRow> = match (obs.projection.temporal_kind(), &covers) {
         // A state read at each instant; a declaration on it does not compile.
@@ -245,6 +241,18 @@ pub(crate) fn plan_emission(
     Ok(EmitPlan { columns, format: TemporalFormat::Numeric, scored, rows })
 }
 
+/// The uniform `covers` form a stream's rows are emitted under: the declared
+/// one, re-widened to `override_step` when `--emit-every` names the stream
+/// (gh#656). `None` for a stream with no declaration; `WindowColumns` is
+/// returned unchanged.
+fn emitted_covers(obs: &ObservationModel, override_step: Option<f64>) -> Option<Covers> {
+    match (&obs.covers, override_step) {
+        (Some(Covers::From { offset, .. }), Some(step)) => Some(Covers::From { offset: *offset, span: step }),
+        (Some(Covers::Until { offset, .. }), Some(step)) => Some(Covers::Until { offset: *offset, span: step }),
+        (c, _) => c.clone(),
+    }
+}
+
 /// Refuse a restart (`simulate --init-state`) that begins inside one of
 /// `obs`'s reporting periods (gh#1081, gh#1085;
 /// `docs/dev/temporal-architecture.md` §4.4, "Restarts").
@@ -257,49 +265,55 @@ pub(crate) fn plan_emission(
 /// `window_start`/`window_stop` stream wrote a short first window from the
 /// restart to the next emit time.
 ///
-/// `schedule` is the stream's effective emit schedule, after `--emit-every`,
-/// and `override_step` that flag's cadence for this stream, exactly as
-/// [`plan_emission`] takes it; `t_end` is the run's end. The periods examined
-/// are the ones the schedule declares over the whole run, including those
-/// labelled before `origin`: a `starting_on` week is labelled with its first
-/// day, so the week under way carries a label earlier than the restart.
+/// The periods examined are the ones a run from `model_start` (the model's
+/// `simulate.from`) to `t_end` writes: for a uniform form, each schedule
+/// label's period that lies within that run; for window columns, the
+/// contiguous windows from `model_start` through the emit times. They include
+/// periods labelled before `origin` (a `starting_on` week is labelled with its
+/// first day). A period the unrestarted run does not write is not examined:
+/// an `ending_on` week labelled at `model_start` begins before the model does,
+/// no run writes it, and a restart at `model_start` loses nothing.
 ///
-/// A window-column stream's periods run between consecutive emit times. One
-/// with no emit time at or before `origin` is not refused: its first window
-/// opens where the run starts, in a restarted run as in any other.
+/// `schedule` is the stream's effective emit schedule, after `--emit-every`,
+/// and `override_step` that flag's cadence for this stream, as
+/// [`plan_emission`] takes it.
 pub(crate) fn refuse_period_under_way(
     obs: &ObservationModel,
     schedule: &ir::observation::ObservationSchedule,
     override_step: Option<f64>,
+    model_start: f64,
     origin: f64,
     t_end: f64,
 ) -> Result<(), String> {
     let eps = crate::OBS_SNAP_EPS;
     let all = crate::obs_schedule_times(schedule, None, t_end);
+    let written = |start: f64, stop: f64| start >= model_start - eps && stop <= t_end + eps;
     let straddles = |start: f64, stop: f64| start < origin - eps && stop > origin + eps;
-    let covers: Option<Covers> = match (&obs.covers, override_step) {
-        (Some(Covers::From { offset, .. }), Some(step)) => Some(Covers::From { offset: *offset, span: step }),
-        (Some(Covers::Until { offset, .. }), Some(step)) => Some(Covers::Until { offset: *offset, span: step }),
-        (c, _) => c.clone(),
-    };
-    let under_way: Option<(f64, f64)> = match (obs.projection.temporal_kind(), &covers) {
-        // A state read at an instant has no period to be inside.
-        (TemporalKind::Instant, _) => None,
-        // Refused where the rows are planned (`missing_covers_error`).
-        (TemporalKind::Interval, None) => None,
-        (TemporalKind::Interval, Some(covers @ (Covers::From { .. } | Covers::Until { .. }))) => all
-            .iter()
-            .filter_map(|&t| covers.period_of(t))
-            .find(|&(start, stop)| straddles(start, stop)),
-        (TemporalKind::Interval, Some(Covers::WindowColumns)) => {
-            let before = all.iter().copied().rfind(|&t| t <= origin + eps);
-            let after = all.iter().copied().find(|&t| t > origin + eps);
-            match (before, after) {
-                (Some(start), Some(stop)) if straddles(start, stop) => Some((start, stop)),
-                _ => None,
+    let under_way: Option<(f64, f64)> =
+        match (obs.projection.temporal_kind(), &emitted_covers(obs, override_step)) {
+            // A state read at an instant has no period to be inside.
+            (TemporalKind::Instant, _) => None,
+            // Refused where the rows are planned (`missing_covers_error`).
+            (TemporalKind::Interval, None) => None,
+            (TemporalKind::Interval, Some(covers @ (Covers::From { .. } | Covers::Until { .. }))) => all
+                .iter()
+                .filter_map(|&t| covers.period_of(t))
+                .find(|&(start, stop)| written(start, stop) && straddles(start, stop)),
+            // Contiguous windows closing at each emit time, the first opening
+            // at the model's start (as `plan_emission` opens it).
+            (TemporalKind::Interval, Some(Covers::WindowColumns)) => {
+                let mut prev = model_start;
+                let mut found = None;
+                for &t in all.iter().filter(|&&t| t > model_start + eps) {
+                    if straddles(prev, t) {
+                        found = Some((prev, t));
+                        break;
+                    }
+                    prev = t;
+                }
+                found
             }
-        }
-    };
+        };
     let Some((start, stop)) = under_way else { return Ok(()) };
     Err(format!(
         "--init-state restarts at t = {origin}, inside a reporting period of observation \
@@ -309,9 +323,9 @@ pub(crate) fn refuse_period_under_way(
          or a partial count.\n  \
          Fix: forecast from the fit with `camdl fit predict <fit> --mode forecast \
          --horizon <duration>`, which predicts the period under way from the filter's own \
-         running count; or restart where no emitted stream is inside a period (for \
-         '{name}', t = {start} or t = {stop}); or run without observation output \
-         (`-o` writes the trajectories alone).",
+         running count; or restart from a state saved where no emitted stream is \
+         inside a period (for '{name}', t = {start} or t = {stop}); or run without \
+         observation output (`-o` writes the trajectories alone).",
         name = obs.name,
     ))
 }
@@ -648,7 +662,7 @@ pub(crate) fn simulate_dataset(
             model.observations.iter()
                 .map(|obs| {
                     let times = crate::obs_emit_schedule_times(
-                        obs, None, model.simulation.t_end, emit)?;
+                        obs, None, model.simulation.t_start, model.simulation.t_end, emit)?;
                     let plan = plan_emission(
                         obs, &times, run_start, model.simulation.t_end,
                         emit.and_then(|e| e.resolve_for(&obs.source)),
