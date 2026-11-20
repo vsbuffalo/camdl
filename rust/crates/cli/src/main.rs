@@ -543,7 +543,6 @@ fn main() {
     // `--no-licm` / `CAMDL_NO_LICM` and `--no-ir-cache` / `CAMDL_NO_IR_CACHE`:
     // the settings every compile of this invocation runs under, resolved once
     // and passed to each command that compiles (`util::CompileSettings`).
-    // Nothing reads them process-wide.
     let compile = util::CompileSettings::resolve(cli.global.no_licm, cli.global.no_ir_cache);
 
     match cli.command {

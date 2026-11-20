@@ -130,10 +130,10 @@ impl ForcingPolicy {
     }
 
     /// Route the engine's forcing notes into this policy until the returned
-    /// guard drops. Install it before compiling the models that run under it:
-    /// a model reports a forcing once, so one compiled earlier and already
-    /// past a forcing's range does not tell this policy (see the module doc). Installed before the command evaluates its model, and
-    /// held for the rest of the command. An install nests: `fit predict`
+    /// guard drops. Install it before compiling the models that run under it,
+    /// and hold it for the rest of the command: a model reports a forcing
+    /// once, so one compiled earlier and already past a forcing's range does
+    /// not tell this policy (see the module doc). An install nests: `fit predict`
     /// installs the stored fit's policy inside its own, and the inner guard's
     /// drop puts back the policy it replaced.
     pub fn install(&self) -> Installed {

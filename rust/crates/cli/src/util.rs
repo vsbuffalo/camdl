@@ -590,8 +590,7 @@ pub fn resolve_relative_to_toml(toml_path: &std::path::Path, path: &str) -> Stri
 /// flags and the environment ([`CompileSettings::resolve`]) and passed by each
 /// command to every compile it makes ([`load_model`], [`resolve_ir_path`],
 /// [`run_camdlc_compile`], [`load_model_envelope`], [`delegate_to_camdlc`],
-/// [`camdlc_emit_deps`]). Nothing reads them process-wide (proposal
-/// 2026-11-17, phase 3).
+/// [`camdlc_emit_deps`]).
 /// The default (LICM on, cache on) is for tests; a command resolves its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct CompileSettings {

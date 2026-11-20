@@ -33,10 +33,13 @@
 //! `run.json` names the switches in `engine_switches` while its
 //! `engine_version` stays the build. `CAMDL_NO_CONSTANT_FOLD` and
 //! `CAMDL_NO_LICM` change the IR the compiler emits and are keyed through the
-//! model level. `simulate`, `fit run`, `pfilter`, `profile` and `survey` put
-//! the switches into their identities (a fit at its `fit` level, a profile
-//! point in its base); the other commands adopt them as they are converted
-//! (proposal phase 3 step 4).
+//! model level. The commands that store a result under an address key the
+//! switches into it: `simulate` (its trajectories, their observation subtrees
+//! and its ensembles), `fit run` (at the `fit` level), `fit predict` (its
+//! output directory), `pfilter`, `profile` (a point's base) and `survey`.
+//! `compare` scores a chain-binomial fit through a `camdl pfilter` child,
+//! which keys them; its in-process ODE scoring and `dev eval` store nothing
+//! under an address, so they key no switch.
 //!
 //! Not here:
 //!
