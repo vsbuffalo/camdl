@@ -1401,24 +1401,34 @@ fn run_simulate(a: &args::SimulateArgs, compile: util::CompileSettings) {
         }
         _ => None,
     };
+    // The stored fit that run belongs to, resolved once: its simulator below
+    // and its intervention selection further down both read it. A fit folder
+    // whose stored config cannot be read is refused: the fit is there, and
+    // neither its simulator nor its selection is what runs without it. Any
+    // other failure is a bare directory holding a `draws.tsv` outside any fit,
+    // which each reader says.
+    let posterior_fit: Option<Result<crate::fit::handle::ResolvedFit, crate::fit::handle::ResolveError>> =
+        posterior_fit_ref.as_deref().map(|run| match crate::fit::handle::resolve_fit(run) {
+            Err(e @ crate::fit::handle::ResolveError::StoredConfig(_)) => {
+                let fit_handle = fit_path_for_draws.as_deref().unwrap_or_default();
+                out.fail(format!("error: --fit {fit_handle}: {e}"));
+            }
+            resolved => resolved,
+        });
+    // The simulator a stored fit ran on, read from the model it ran on.
+    let stored_simulator = |r: &crate::fit::handle::ResolvedFit| {
+        crate::fit::fitted_model::stored_fit_model(r, compile)
+            .and_then(|m| crate::fit::fitted_model::stored_fit_simulator(r, &m))
+    };
     let fitted_simulator: Option<(String, crate::fit::fitted_model::FittedSimulator)> =
         match (draws_path.as_deref(), fit_path_for_draws.as_ref()) {
             (Some("posterior"), Some(fit_handle)) => {
                 // A bare directory holding a `draws.tsv` outside any fit has no
-                // fit record, so no simulator to replay on (said in the arm). A
-                // fit folder whose stored config cannot be read is refused: the
-                // fit is there, and its simulator is not what runs without it.
-                match crate::fit::handle::resolve_fit(posterior_fit_ref.as_deref().unwrap_or_default()) {
-                    Ok(r) => Some(r),
-                    Err(e @ crate::fit::handle::ResolveError::StoredConfig(_)) => {
-                        out.fail(format!("error: --fit {fit_handle}: {e}"));
-                    }
-                    Err(_) => None,
-                }
-                    .map(|r| {
-                        crate::fit::fitted_model::stored_fit_model(&r, compile)
-                            .and_then(|m| crate::fit::fitted_model::stored_fit_simulator(&r, &m))
-                    })
+                // fit record, so no simulator to replay on (said in the arm).
+                posterior_fit
+                    .as_ref()
+                    .and_then(|r| r.as_ref().ok())
+                    .map(stored_simulator)
                     .transpose()
                     .unwrap_or_else(|e| {
                         out.fail(format!("error: --fit {fit_handle}: {e}"));
@@ -1433,10 +1443,7 @@ fn run_simulate(a: &args::SimulateArgs, compile: util::CompileSettings) {
                 } else {
                     crate::fit::handle::resolve_fit(fit_ref)
                         .map_err(|e| e.to_string())
-                        .and_then(|r| {
-                            crate::fit::fitted_model::stored_fit_model(&r, compile)
-                                .and_then(|m| crate::fit::fitted_model::stored_fit_simulator(&r, &m))
-                        })
+                        .and_then(|r| stored_simulator(&r))
                 };
                 Some((
                     fit_ref.clone(),
@@ -1476,8 +1483,7 @@ fn run_simulate(a: &args::SimulateArgs, compile: util::CompileSettings) {
             backend: a.backend.backend,
             dt: a.backend.dt,
             integrator: a.backend.integrator,
-            allow_degenerate_rates: a.allow_degenerate_rates,
-            allow_forcing_extrapolation: a.forcing_extrapolation.allow_forcing_extrapolation,
+            settings: eval_settings,
         };
         let replay = crate::fit::fitted_model::replay_simulator(fit_name, fitted, flags, backend)
             .unwrap_or_else(|e| {
@@ -1901,7 +1907,7 @@ fn run_simulate(a: &args::SimulateArgs, compile: util::CompileSettings) {
             // fit's own intervention selection (its `scenario` / `enable` /
             // `disable`): the implicit arm is the model that was fitted, and a
             // `--scenario` / `--enable` / `--disable` applies on top of it.
-            match crate::fit::handle::resolve_fit(fit_ref) {
+            match posterior_fit.as_ref().expect("resolved with --fit") {
                 Ok(resolved) => {
                     // The draws are this fit's model's: refuse a different
                     // model before anything runs.
@@ -1925,11 +1931,6 @@ fn run_simulate(a: &args::SimulateArgs, compile: util::CompileSettings) {
                             base_sim_run.fit_base.describe()
                         ));
                     }
-                }
-                // A fit folder whose stored config cannot be read is refused,
-                // never run without the fit's selection.
-                Err(e @ crate::fit::handle::ResolveError::StoredConfig(_)) => {
-                    out.fail(format!("error: --fit {fit_handle}: {e}"));
                 }
                 // A bare directory holding a `draws.tsv` outside any fit
                 // carries no fit config, so there is no selection to apply.

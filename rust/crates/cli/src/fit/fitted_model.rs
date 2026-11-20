@@ -481,10 +481,8 @@ pub struct SimulatorFlags {
     pub backend: Option<ForwardBackend>,
     pub dt: Option<f64>,
     pub integrator: Option<IntegratorArg>,
-    /// `--allow-degenerate-rates`.
-    pub allow_degenerate_rates: bool,
-    /// `--allow-forcing-extrapolation`.
-    pub allow_forcing_extrapolation: bool,
+    /// `--allow-degenerate-rates` and `--allow-forcing-extrapolation`.
+    pub settings: FittedSettings,
 }
 
 /// What a replay runs on: the fit's simulator, with each explicit flag applied.
@@ -549,7 +547,8 @@ pub fn replay_simulator(
             moved.join(", ")
         )
     });
-    let settings = fit.settings.with_flags(flags.allow_degenerate_rates, flags.allow_forcing_extrapolation);
+    let settings =
+        fit.settings.with_flags(flags.settings.allow_degenerate_rates, flags.settings.allow_forcing_extrapolation);
     let settings_notice = fit.settings.turned_on_note(settings, fit_name, "this replay runs");
     let notice = match (simulator_notice, settings_notice) {
         (Some(a), Some(b)) => Some(format!("{a}\n{b}")),
@@ -656,7 +655,10 @@ mod simulator_tests {
         let r = replay_simulator("F", &fit, SimulatorFlags::default(), ForwardBackend::ChainBinomial).unwrap();
         assert_eq!((r.settings, r.notice), (both, None));
 
-        let flags = SimulatorFlags { allow_degenerate_rates: true, ..Default::default() };
+        let flags = SimulatorFlags {
+            settings: FittedSettings { allow_degenerate_rates: true, ..Default::default() },
+            ..Default::default()
+        };
         let r = replay_simulator("F", &cb(1.0), flags, ForwardBackend::ChainBinomial).unwrap();
         assert_eq!(r.settings, FittedSettings { allow_degenerate_rates: true, allow_forcing_extrapolation: false });
         let n = r.notice.unwrap();
