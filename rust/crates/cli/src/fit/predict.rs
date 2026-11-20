@@ -60,17 +60,20 @@ impl Horizon {
 /// (`docs/dev/temporal-architecture.md` §5.3). A one-step band covers every
 /// data row, and the parameters behind it were fitted to the `Trained` ones
 /// alone, so a `HeldOut` row's band is out of sample in its parameters while
-/// its state has been filtered through every earlier row (gh#1079).
+/// its state has been filtered through every earlier row (gh#1079). The
+/// spec's third role, `target`, belongs to a forecast's targets (each with a
+/// horizon and a lead) and is not written here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowRole {
-    /// A data row in the fit's training prefix of its stream: the parameters
-    /// were fitted to it.
+    /// A row of the fit's training prefix of its stream (an `NA` row
+    /// included: it holds its position in the prefix).
     Trained,
-    /// A data row after that prefix: the fit held it out.
+    /// A row of the bound file after that prefix: the fit held it out.
     HeldOut,
-    /// A free-forward row past the stream's last data row: nothing was
-    /// observed there.
-    Target,
+    /// This prediction read no data row for this period: a free-forward row
+    /// past the last row of the stream's bound file. Under `[data.holdout]`
+    /// that includes the periods the holdout file covers, which is not read.
+    Future,
 }
 
 impl RowRole {
@@ -79,7 +82,7 @@ impl RowRole {
         match self {
             RowRole::Trained => "trained",
             RowRole::HeldOut => "held_out",
-            RowRole::Target => "target",
+            RowRole::Future => "future",
         }
     }
 
@@ -3073,22 +3076,15 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
         }
         if let Some(o) = &one_step {
             // A one-step band at a row is drawn from a state filtered through
-            // every earlier row of every stream in `streams`, held-out rows
-            // included: per stream, `rows` walked, of which `held_out_rows`
-            // lie after the fit's training prefix.
-            let mut set = serde_json::json!({
-                "conditioning": "filtered",
-                "through": "every earlier row of every stream, held-out rows included",
-                "streams": &o.filtered,
-            });
-            // `[data.holdout]` files are not read: their rows are neither
-            // filtered through nor predicted.
-            if !parameter_set.holdout_sources.is_empty() {
-                set["holdout_files"] = serde_json::json!({
-                    "read": false, "sources": &parameter_set.holdout_sources,
-                });
-            }
-            state_sets.insert(Horizon::OneStepAhead.as_str().to_string(), set);
+            // every earlier row of every stream in `streams` (the streams
+            // this predict covers): per stream, `rows` walked, of which
+            // `held_out_rows` lie after the fit's training prefix. The counts
+            // say whether held-out rows were filtered through; no prose
+            // restates them.
+            state_sets.insert(
+                Horizon::OneStepAhead.as_str().to_string(),
+                serde_json::json!({ "conditioning": "filtered", "streams": &o.filtered }),
+            );
         }
         let mut manifest = serde_json::json!({
             // The tag is the only thing telling a consumer which column
@@ -3133,6 +3129,15 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
             // value: the rows the latent state behind a band was conditioned
             // on.
             "state_sets": state_sets,
+            // `[data.holdout]` files are not read by the free-forward or the
+            // one-step mode: their rows are neither filtered through nor
+            // predicted as data rows, so a free-forward row in a period they
+            // cover is `future`. `holdout_after` and `[data.holdout]`
+            // describing one split therefore do not yet give one record
+            // (gh#1309). Absent without `[data.holdout]`.
+            "holdout_files": (!parameter_set.holdout_sources.is_empty()).then(|| serde_json::json!({
+                "read": false, "sources": &parameter_set.holdout_sources,
+            })),
             "streams": predictive_manifest_entries,
             // D76: which declared streams (leaves) this artifact holds, which it
             // left out and why, and which failed, so a reader need not infer
@@ -3265,14 +3270,17 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     if let Some(o) = &one_step {
         let held: Vec<String> = o.filtered.iter()
             .filter(|f| f.held_out_rows > 0)
-            .map(|f| format!("{} of {} in '{}'", f.held_out_rows, f.rows, f.stream))
+            .map(|f| format!("{} of {} rows in '{}'", f.held_out_rows, f.rows, f.stream))
             .collect();
         if !held.is_empty() {
+            // The streams the filter walked: under `--stream`, not every
+            // stream the fit bound.
+            let walked: Vec<String> = o.filtered.iter().map(|f| format!("'{}'", f.stream)).collect();
             out.say(format_args!(
                 "fit predict: the one_step rows include held-out rows ({}): their bands use \
                  parameters fitted without them and a state filtered through every earlier \
-                 row, held-out rows included (the `role` column marks them).",
-                held.join(", ")));
+                 row of {}, held-out rows included (the `role` column marks them).",
+                held.join(", "), walked.join(", ")));
         }
     }
 
@@ -3637,7 +3645,7 @@ fn assemble_predictive(
                 let role = if ti < n_data_rows {
                     parameter_set.role(leaf_name, ti)
                 } else {
-                    RowRole::Target
+                    RowRole::Future
                 };
                 rows.push(
                     band_row(
@@ -4593,8 +4601,9 @@ fn one_step_bands(
                     .position(|end| (end - t).abs() <= crate::OBS_SNAP_EPS)
                     .ok_or_else(|| format!(
                         "internal error: the one-step filter predicted stream '{}' at t = {t}, \
-                         where none of its rows ends, so the row's role cannot be read",
-                        stream_names[si]))?;
+                         where none of its {} rows ends, so the row's role cannot be read; \
+                         please report this with the stream name and the time",
+                        stream_names[si], row_ends[stream_names[si].as_str()].len()))?;
                 let role = parameter_set.role(&stream_names[si], position);
                 // No per-row R̂ on the one-step horizon (gh#794). Its cell is a
                 // pool over (posterior draws × filter particles), so the
@@ -5410,8 +5419,8 @@ mod tests {
         assert_eq!(RowRole::of_data_row(3, 3), RowRole::HeldOut);
         assert_eq!(RowRole::of_data_row(0, 0), RowRole::HeldOut);
         assert_eq!(
-            [RowRole::Trained, RowRole::HeldOut, RowRole::Target].map(|r| r.as_str()),
-            ["trained", "held_out", "target"],
+            [RowRole::Trained, RowRole::HeldOut, RowRole::Future].map(|r| r.as_str()),
+            ["trained", "held_out", "future"],
         );
     }
 
