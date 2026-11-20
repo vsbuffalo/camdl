@@ -244,8 +244,11 @@ particles at each observation time, and pools over (particles × draws) into the
 `q05…q95` columns of `predictive/<stream>.tsv` —
 `horizon=one_step,
 treatment=posterior`. This is chain-binomial only (an ODE
-fit's one-step reduces to its free-forward band). See
-[`camdl docs workflow`](workflow.md) §7.
+fit's one-step reduces to its free-forward band). Under `[data] holdout_after`
+the band at a held-out row uses parameters fitted without that row and a state
+filtered through the earlier held-out rows; the `role` column marks which rows
+those are (`trained` or `held_out`). See [`camdl docs workflow`](workflow.md)
+§7.
 
 ### Forecasts from the end of the training rows
 

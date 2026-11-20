@@ -193,12 +193,18 @@ camdl fit predict --fit fit.toml --stream onset     # predicted-vs-observed arti
 `fit_rhat_max`/`fit_ess_min` stamp, and the per-row `rhat_mean`/`rhat_pred`
 convergence channels) and `observed/<stream>.tsv` under the run directory. Join
 the two on `(time, <dims>)` and plot, one facet per stratum. `role` is `trained`
-for a data row the parameters were fitted to, `held_out` for a data row the fit
-held out (`[data] holdout_after`), and `target` for a free-forward row past the
-last data row. A `one_step` band at a `held_out` row uses parameters fitted
-without that row and a state filtered through every earlier row, held-out rows
-included, so it is not a forecast from the end of the training rows; `--horizon`
-is. Omit `--mode` for all applicable horizons (chain-binomial → `free_forward` +
+for a row of the fit's training prefix (an `NA` row included), `held_out` for a
+row of the bound file after that prefix (`[data] holdout_after`), and `future`
+for a free-forward row past the last row of the bound file: this prediction read
+no data row for this period (a `[data.holdout]` file is not read, so the periods
+it covers are `future` too, gh#1309). For a stream labelled by each period's
+start, `one_step` rows carry the period's end in `time` while `free_forward`
+rows and `observed/` carry the label (gh#1152), and the `free_forward` rows past
+the data are mis-timed (gh#1151); `role` is read by row position and is right on
+both. A `one_step` band at a `held_out` row uses parameters fitted without that
+row and a state filtered through every earlier row, held-out rows included, so
+it is not a forecast from the end of the training rows; `--horizon` is. Omit
+`--mode` for all applicable horizons (chain-binomial → `free_forward` +
 `one_step`; ODE → `free_forward` only); an optimizer fit (IF2 / NLopt) is
 refused since it has no posterior cloud.
 

@@ -1152,16 +1152,23 @@ Outputs, under the run directory:
 Read both, join on (time, <dims>), plot observed over the predictive ribbon.
 
 The role column says what part each row played in the fit:
-  trained    a data row the parameters were fitted to.
-  held_out   a data row the fit held out ([data] holdout_after). A one_step
-             band there uses parameters fitted without the row, and a state
-             filtered through every earlier row, held-out rows included: it
-             is not a forecast from the end of the training rows (that is
-             --horizon).
-  target     a free_forward row past the last data row.
+  trained    a row of the fit's training prefix (an NA row included).
+  held_out   a row of the bound file after that prefix ([data]
+             holdout_after). A one_step band there uses parameters fitted
+             without the row, and a state filtered through every earlier
+             row, held-out rows included: it is not a forecast from the end
+             of the training rows (that is --horizon).
+  future     this prediction read no data row for this period: a
+             free_forward row past the last row of the bound file. A
+             [data.holdout] file is not read, so the periods it covers are
+             future too (gh#1309).
 predictive.json records both sets: parameter_set (the rows the parameters
 were fitted to) and state_sets (the rows each band's state was filtered
 through).
+For a stream labelled by each period's start, one_step rows carry the
+period's end in `time` while free_forward rows and observed/ carry the label
+(gh#1152), and the free_forward rows past the data are mis-timed (gh#1151);
+the role is read by row position and is right on both.
 Under --exclude-chains the bands land in predictive-excl<ids>/ instead, so a
 chain subset never overwrites the pooled artifact; `camdl show <fit>` lists
 every address the fit holds.

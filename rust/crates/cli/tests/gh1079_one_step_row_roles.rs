@@ -5,10 +5,11 @@
 //! The one-step band filters through every row of the bound files, held-out
 //! rows included, while the parameters came from the training rows alone.
 //! Each row of `predictive/<stream>.tsv` therefore carries a `role`:
-//! `trained` (in the fit's training prefix of its stream), `held_out` (a data
-//! row after that prefix) or `target` (a free-forward row past the last data
-//! row). Membership is the row's position in its stream, read from the fit's
-//! recorded training partition.
+//! `trained` (in the fit's training prefix of its stream), `held_out` (a row
+//! of the bound file after that prefix) or `future` (a free-forward row past
+//! the last row of the bound file: the prediction read no data row for that
+//! period). Membership is the row's position in its stream, read from the
+//! fit's recorded training partition.
 //!
 //! The fixture is `tests/fixtures/forecast/two_cadence_sir.camdl`: a
 //! chain-binomial SIR reported daily (63 rows) and weekly (9 rows), fitted by
@@ -58,7 +59,12 @@ fn copy_rows(dir: &Path, file: &str, to: &str, keep: &dyn Fn(f64) -> bool) {
 /// Write `fit.toml` (`[data]` body `data`, then `tail`, e.g. a
 /// `[data.holdout]` block) and run a small PMMH fit of both streams.
 fn fit(dir: &Path, data: &str, tail: &str) {
-    std::fs::copy(fixture("two_cadence_sir.camdl"), dir.join("model.camdl")).unwrap();
+    fit_model(dir, &std::fs::read_to_string(fixture("two_cadence_sir.camdl")).unwrap(), data, tail);
+}
+
+/// [`fit`], of the model source `model`.
+fn fit_model(dir: &Path, model: &str, data: &str, tail: &str) {
+    std::fs::write(dir.join("model.camdl"), model).unwrap();
     std::fs::write(dir.join("fit.toml"), format!(r#"output_dir = "results"
 
 [model]
@@ -107,7 +113,15 @@ fn walk(root: &Path) -> Vec<PathBuf> {
 /// Run `fit predict` (both modes unless `extra` says otherwise) and return
 /// what it said and the directory it wrote `predictive.json` to.
 fn predict(dir: &Path, extra: &[&str]) -> (String, PathBuf) {
-    let mut args = vec!["fit", "predict", "--fit", "fit.toml", "--n-draws", "3", "--particles", "40"];
+    // Each call's options key their own directory; keep only this call's.
+    for p in walk(&dir.join("results")).into_iter().filter(|p| p.file_name().is_some_and(|n| n == "predictive.json")) {
+        std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
+    }
+    let mut args = vec!["fit", "predict", "--fit", "fit.toml", "--n-draws", "3"];
+    // `--particles` is refused when no filter runs.
+    if !extra.contains(&"free_forward") {
+        args.extend_from_slice(&["--particles", "40"]);
+    }
     args.extend_from_slice(extra);
     let out = run(dir, &args);
     assert!(out.status.success(), "fit predict: {}", said(&out));
@@ -193,21 +207,35 @@ fn rows_past_the_training_prefix_are_held_out_and_the_manifest_names_both_sets()
         .map(|s| (s["stream"].as_str().unwrap(), s["rows"].as_u64().unwrap(), s["held_out_rows"].as_u64().unwrap()))
         .collect();
     assert_eq!(filtered, [("daily_cases", 63, 39), ("weekly_cases", 9, 6)]);
+    assert!(os.get("through").is_none(), "the counts say what was filtered through: {os}");
     assert_eq!(m["state_sets"]["free_forward"], json!({"conditioning": "none", "streams": []}));
+    assert!(m["holdout_files"].is_null(), "no [data.holdout]: {}", m["holdout_files"]);
 
     // Said once, in one sentence.
-    let line = "fit predict: the one_step rows include held-out rows (39 of 63 in 'daily_cases', \
-                6 of 9 in 'weekly_cases')";
+    let line = "fit predict: the one_step rows include held-out rows (39 of 63 rows in 'daily_cases', \
+                6 of 9 rows in 'weekly_cases')";
     assert_eq!(text.matches(line).count(), 1, "{text}");
-    assert!(text.contains("parameters fitted without them"), "{text}");
+    assert!(text.contains("parameters fitted without them and a state filtered through every earlier \
+                           row of 'daily_cases', 'weekly_cases', held-out rows included"), "{text}");
+
+    // Under `--stream`, the sentence and the state set name what was filtered.
+    let (text, out) = predict(dir, &["--mode", "one_step", "--stream", "weekly_cases"]);
+    assert!(text.contains("(6 of 9 rows in 'weekly_cases'): their bands use parameters fitted without \
+                           them and a state filtered through every earlier row of 'weekly_cases', held-out"),
+        "{text}");
+    let m = read_json(&out.join("predictive.json"));
+    let filtered: Vec<&str> = m["state_sets"]["one_step"]["streams"].as_array().unwrap().iter()
+        .map(|s| s["stream"].as_str().unwrap()).collect();
+    assert_eq!(filtered, ["weekly_cases"]);
+    assert_eq!(roles(&out, "weekly_cases", "one_step"), split_at((1..=9).map(|w| 7 * w), 24));
 }
 
-/// The control, and the forecast tail. No holdout, data through day 42 of a
-/// model that runs to day 63: every data row trained, and the free-forward
-/// rows past the last data row are targets. Nothing is said about held-out
-/// rows.
+/// The control, and the rows past the data. No holdout, data through day 42
+/// of a model that runs to day 63: every data row trained, and the
+/// free-forward rows past the last data row are `future` (the prediction read
+/// no data row there). Nothing is said about held-out rows.
 #[test]
-fn without_a_holdout_every_data_row_trained_and_the_tail_rows_are_targets() {
+fn without_a_holdout_every_data_row_trained_and_the_rows_past_the_data_are_future() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     copy_rows(dir, "daily_cases.tsv", "daily_cases.tsv", &|t| t <= 42.0);
@@ -218,7 +246,7 @@ fn without_a_holdout_every_data_row_trained_and_the_tail_rows_are_targets() {
     assert_eq!(roles(&out, "weekly_cases", "one_step"), split_at((1..=6).map(|w| 7 * w), 42));
     assert_eq!(roles(&out, "daily_cases", "one_step"), split_at(1..=42, 42));
     let tail = |times: Vec<u32>| -> Vec<(f64, String)> {
-        times.into_iter().map(|t| (t as f64, if t <= 42 { "trained" } else { "target" }.to_string())).collect()
+        times.into_iter().map(|t| (t as f64, if t <= 42 { "trained" } else { "future" }.to_string())).collect()
     };
     assert_eq!(roles(&out, "weekly_cases", "free_forward"), tail((1..=9).map(|w| 7 * w).collect()));
     assert_eq!(roles(&out, "daily_cases", "free_forward"), tail((1..=63).collect()));
@@ -233,8 +261,10 @@ fn without_a_holdout_every_data_row_trained_and_the_tail_rows_are_targets() {
 }
 
 /// `[data.holdout]` puts the held-out rows in their own file, which the
-/// predictive does not read: its rows are the training files' rows, all
-/// `trained`, and the manifest says the holdout files were not read.
+/// predictive does not read (gh#1309): the one-step rows are the training
+/// files' rows, all `trained`; the free-forward rows in the periods the
+/// holdout file covers are `future`, not `held_out`; and the manifest says,
+/// in either mode, that the holdout files were not read.
 #[test]
 fn a_holdout_file_is_not_read_and_the_manifest_says_so() {
     let tmp = tempfile::tempdir().unwrap();
@@ -249,19 +279,78 @@ fn a_holdout_file_is_not_read_and_the_manifest_says_so() {
     assert_eq!(roles(&out, "daily_cases", "one_step"), split_at(1..=24, 24));
     let m = read_json(&out.join("predictive.json"));
     assert_eq!(m["parameter_set"]["rule"], json!({"kind": "separate_files"}));
+    let not_read = json!({"read": false, "sources": ["weekly_cases"]});
+    assert_eq!(m["holdout_files"], not_read);
     let os = &m["state_sets"]["one_step"];
-    assert_eq!(os["holdout_files"], json!({"read": false, "sources": ["weekly_cases"]}));
     let filtered: Vec<(u64, u64)> = os["streams"].as_array().unwrap().iter()
         .map(|s| (s["rows"].as_u64().unwrap(), s["held_out_rows"].as_u64().unwrap())).collect();
     assert_eq!(filtered, [(24, 0), (3, 0)]);
     assert!(m["state_sets"].get("free_forward").is_none(), "no free-forward section was written");
     assert!(!text.contains("include held-out rows"), "{text}");
+
+    // Free-forward alone: the training rows, then the periods no data row was
+    // read for, the weeks the holdout file covers among them.
+    let (_, out) = predict(dir, &["--mode", "free_forward"]);
+    let past = |times: Vec<u32>| -> Vec<(f64, String)> {
+        times.into_iter().map(|t| (t as f64, if t <= 24 { "trained" } else { "future" }.to_string())).collect()
+    };
+    assert_eq!(roles(&out, "weekly_cases", "free_forward"), past((1..=9).map(|w| 7 * w).collect()));
+    assert_eq!(roles(&out, "daily_cases", "free_forward"), past((1..=63).collect()));
+    let m = read_json(&out.join("predictive.json"));
+    assert_eq!(m["holdout_files"], not_read, "a free-forward manifest says so too");
+    assert!(m["state_sets"].get("one_step").is_none());
 }
 
-/// A fit that records no training partition is refused, with the sentence the
-/// forecast mode uses: the roles are not guessed.
+/// Position, not label against the cutoff. The weekly stream is labelled by
+/// each week's start (`starting_on`), and `holdout_after = 24` falls inside
+/// the week labelled 21, which runs to day 28: its label is before the cutoff
+/// and its end after it. The fit holds that row out (a row trains if what it
+/// measures ends by the cutoff), so it is `held_out` in both sections. The
+/// expected roles are written out per row, by position in the file (labels 0,
+/// 7, 14 trained; 21 to 56 held out), not derived from any time.
 #[test]
-fn a_fit_with_no_recorded_partition_is_refused() {
+fn a_row_whose_label_precedes_the_cutoff_and_whose_period_ends_after_it_is_held_out() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    copy_rows(dir, "daily_cases.tsv", "daily_cases.tsv", &|_| true);
+    // The same nine weekly counts, labelled by the week's start: 0, 7, …, 56.
+    let weekly = std::fs::read_to_string(fixture("weekly_cases.tsv")).unwrap();
+    let mut lines = weekly.lines();
+    let mut relabelled = lines.next().unwrap().to_string() + "\n";
+    for l in lines {
+        let (t, v) = l.split_once('\t').unwrap();
+        relabelled += &format!("{}\t{v}\n", t.parse::<u32>().unwrap() - 7);
+    }
+    std::fs::write(dir.join("weekly_cases.tsv"), relabelled).unwrap();
+    let closing = "covers        = closing_at(time, 7 'days)";
+    let model = std::fs::read_to_string(fixture("two_cadence_sir.camdl")).unwrap();
+    assert_eq!(model.matches(closing).count(), 1);
+    fit_model(dir, &model.replace(closing, "covers        = starting_on(time, 7 'days)"),
+        "holdout_after = 24.0\n", "");
+    let (_, out) = predict(dir, &[]);
+
+    let m = read_json(&out.join("predictive.json"));
+    let weekly_prefix = m["parameter_set"]["streams"].as_array().unwrap().iter()
+        .find(|s| s["stream"] == "weekly_cases").unwrap()["rows"].as_u64().unwrap();
+    assert_eq!(weekly_prefix, 3, "the fit trained on the weeks labelled 0, 7, 14");
+
+    let (t, h) = ("trained", "held_out");
+    // Free-forward rows carry the label. The data rows are the first nine.
+    let ff = roles(&out, "weekly_cases", "free_forward");
+    let expect_ff = [(0.0, t), (7.0, t), (14.0, t), (21.0, h), (28.0, h), (35.0, h), (42.0, h), (49.0, h), (56.0, h)]
+        .map(|(time, role)| (time, role.to_string()));
+    assert_eq!(&ff[..9], &expect_ff[..], "the week labelled 21 ends on day 28, after the cutoff");
+    // One-step rows carry the period's end (gh#1152), so the same nine rows
+    // are timed 7, …, 63; the week labelled 21 is the row timed 28.
+    let expect_os = [(7.0, t), (14.0, t), (21.0, t), (28.0, h), (35.0, h), (42.0, h), (49.0, h), (56.0, h), (63.0, h)]
+        .map(|(time, role)| (time, role.to_string()));
+    assert_eq!(roles(&out, "weekly_cases", "one_step"), expect_os);
+}
+
+/// A fit that records no training partition is refused in both modes, with
+/// the sentence the forecast mode uses: the roles are not guessed.
+#[test]
+fn a_fit_with_no_recorded_partition_is_refused_in_both_modes() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     copy_rows(dir, "daily_cases.tsv", "daily_cases.tsv", &|_| true);
@@ -274,10 +363,12 @@ fn a_fit_with_no_recorded_partition_is_refused() {
     assert!(sidecar.as_object_mut().unwrap().remove("training_partition").is_some(), "{sidecar}");
     std::fs::write(&meta, serde_json::to_string_pretty(&sidecar).unwrap()).unwrap();
 
-    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--mode", "one_step", "--n-draws", "3"]);
-    assert!(!out.status.success(), "{}", said(&out));
-    assert!(said(&out).contains("records no training partition, so which rows its parameters were fitted to cannot be read"),
-        "{}", said(&out));
-    assert!(!walk(&dir.join("results")).iter().any(|p| p.file_name().is_some_and(|n| n == "predictive.json")),
-        "nothing is written");
+    for mode in ["free_forward", "one_step"] {
+        let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--mode", mode, "--n-draws", "3"]);
+        assert_eq!(out.status.code(), Some(1), "--mode {mode}: {}", said(&out));
+        assert!(said(&out).contains("records no training partition, so which rows its parameters were fitted to cannot be read"),
+            "--mode {mode}: {}", said(&out));
+        assert!(!walk(&dir.join("results")).iter().any(|p| p.file_name().is_some_and(|n| n == "predictive.json")),
+            "--mode {mode}: nothing is written");
+    }
 }
