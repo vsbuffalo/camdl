@@ -57,18 +57,40 @@ paragraphs develop an idea, rather than turning every point into a list.
 
 **Instead of:**
 
-> The `observations` block provides the functionality required to map the
-> underlying latent state to the observed data, enabling likelihood computation.
+> The `observations` block is a critical component of every camdl model. It
+> provides the functionality required to map the underlying latent state to the
+> observed data, enabling likelihood computation during inference. Importantly,
+> this is not just a convenience — it is a fundamental part of how camdl bridges
+> the gap between models and data. By centralizing this logic, camdl ensures a
+> clean, robust, and consistent interface across workflows.
 
 **Write:**
 
-> The model describes infections, but our data contain reported cases. The
-> `observations` block connects the two: it says what the model predicts we
-> would measure, and how much the measurements can vary around that prediction.
+> A model's transitions determine its compartment counts and the flows between
+> compartments: how many people are infected, recovered or in hospital on each
+> day, and how many become newly infected. These counts and flows are latent,
+> meaning the data never observe them directly. A surveillance system, for
+> example, records reported cases, which are an incomplete, noisy and often
+> delayed count of new infections. The `observations` block states how each
+> observed quantity is distributed given the model's counts and flows.
+>
+> Whether we are fitting a model's parameters or simulating synthetic
+> observations, we need that statement, and camdl reads it from this one block
+> for both. This follows from one of camdl's [design commitments](intro.md): the
+> model file holds the model's structure, and every command reads that same
+> file. The compiler writes the `observations` block into the model's
+> intermediate representation once, and the runtime builds two functions from
+> that one entry: a sampler that draws observations given the latent state, used
+> by `camdl simulate --obs`, and a density that scores observed data given the
+> latent state, used by `camdl fit`. If each command had its own description, a
+> model could be fitted under one reporting process and checked by simulating
+> under another, and nothing would point to the difference as the cause.
 
-The second version gives a reason for the feature before naming its
-responsibility. It also introduces the statistical distinction readers will need
-later.
+The first version never says what the block contains, and every sentence after
+the second only asserts that the block matters. The second version starts from
+the problem the block solves, says what it holds (a distribution for each
+observed quantity given the latent state), and explains the design by the
+mechanism behind it and the failure that mechanism prevents.
 
 **Instead of:**
 
@@ -80,11 +102,11 @@ later.
 > We'll fit the model to the daily counts, then check whether the resulting
 > posterior makes reasonable predictions.
 
-Avoid puffery, stock transitions, long strings of parenthetical definitions, and
-claims that something is “important” without saying why. But do not edit all
-personality out of the writing. An occasional concrete comparison, well-chosen
-observation, or candid sentence about a method's limitations can make technical
-prose memorable.
+Do not edit all personality out of the writing. An occasional concrete
+comparison, well-chosen observation, or candid sentence about a method's
+limitations can make technical prose memorable.
+
+{{< include _prose-style.md >}}
 
 A section heading names its topic in a few words: “Identity and provenance,”
 “The hash function,” “Forcing a run to be computed again.” Do not write a
@@ -601,187 +623,7 @@ functions that use it, and a reviewer looking for a type that represents its
 data badly. The comments in the source are therefore published prose, and
 everything earlier in this guide applies to them.
 
-### Two kinds of comment, and only one is published
-
-A **doc comment** says what a type, field, constructor, module or function _is_:
-what a value of it means, what it guarantees, and what it is for. In OCaml it is
-written `(** ... *)`; in Rust it is `///` on an item and `//!` at the top of a
-module. The generator publishes doc comments and nothing else.
-
-An **implementation comment** says why a line of code is written as it is, when
-the code cannot say so itself. In OCaml it is written `(* ... *)`; in Rust it is
-`//`. The generator drops it, so it appears nowhere on the site, and the
-declarations on the internals pages show no implementation comments at all.
-
-The distinction matters because the two comments answer different questions for
-different readers. Someone deciding whether `destination_form` is the right type
-needs to know what its constructors represent, not how the expander lowers them.
-A comment of the wrong kind is either missing from the page or puts lowering
-details in front of a reader who asked what the type means.
-
-### What a doc comment says
-
-The first sentence is a summary that stands alone, because it is what the index
-of a module shows. It names what the thing represents in the model or the
-program, not its shape: "A transition's destination: one or more compartments,
-or a probabilistic choice between them", not "A list of stoichiometry
-references". The declaration printed beside it already gives the shape.
-
-After the summary, a doc comment adds only what the declaration cannot show:
-
-- **What the value means**, in camdl's terms: which part of a model it comes
-  from, and what each constructor or field stands for.
-- **An invariant the type does not enforce**: a list that is never empty,
-  indices that are in range, names that are already resolved. Every invariant
-  stated in prose is one a reader must take on trust, so it is also a question
-  worth asking about the design: could the type hold it instead?
-- **Units, scales and time conventions**, where a number carries them: per day
-  or per year, a probability or a rate, an instant or a duration.
-- **An example**, preferably the camdl source that produces the value. A short
-  model fragment says more about an AST constructor than a paragraph does.
-
-A type's doc comment that needs more than a short paragraph is describing a
-design, and the design belongs in the module's doc comment or the library's
-overview page, described next. Link to a published page, such as a section of
-the language specification, when the type implements what that page specifies.
-
-### Module docs and overview pages explain the design
-
-A type's doc says what one value means. A module's doc comment, the `(** ... *)`
-at the top of the file or the `//!` at the top of a Rust module, says how the
-module is put together: what it receives and what it hands on, which types carry
-its work and how they relate, what it guarantees to the code that uses its
-output, and why it is shaped the way it is. A library's overview page (an odoc
-`index.mld`, or a crate's top-level `//!`) does the same for the whole library,
-stage by stage. These are the pages a new developer reads first, and the place
-where a reviewer learns what each part promises, so that a broken promise is
-visible.
-
-Write the reasons for the design as they stand today. "Names are resolved before
-this pass, so no expression here can refer to an unknown compartment" is a
-reason: it holds now, and it tells a reader what they may rely on. "This pass
-was moved after name resolution to fix a crash" is history, and it is left to
-the commit log. A reason names the property the design protects; history names
-the event that produced it. When the honest reason is that no one has needed
-anything better, say what the design does and leave the reason out.
-
-A module doc follows the same rules as any other page on the site: open with a
-summary sentence that stands alone, define terms on first use, show a short
-example where one helps, and prefer prose to lists. The overview page of the
-compiler, `ocaml/lib/compiler/index.mld`, and the module docs of `ast.ml` and
-`ir.ml` are the worked examples.
-
-### What a doc comment never says
-
-A doc comment describes the code as it is. It never narrates how the code came
-to be: no issue numbers, no proposal section numbers, no "previously", "now",
-"no longer", "the new …" or "superseded by", no names of the work stream or
-milestone in which a feature arrived. Git history and the documents under
-`docs/dev/` hold that record, and a doc comment that repeats it grows stale the
-day the code changes again.
-
-It also does not restate the declaration ("a list of pairs of strings"), list
-which functions call it, or describe the comment's author's reasoning. Write
-emphasis as you would in prose, never in capitals.
-
-**Instead of:**
-
-```ocaml
-(** Transition destination form.
-    - [DstSum] is the ordinary case: a `+`-separated list of destination
-      compartments, each contributing +1 to stoichiometry. Singleton =
-      classic, ≥ 2 = multi-dest (wave 1 / malaria #1).
-    - [DstBranch] (wave 2 / malaria #2) is a probabilistic branch:
-      `X --> { A : w_A, B : w_B } @ rate`. The expander desugars each
-      branch into its own IR transition with rate `w_i * rate`. The
-      existing chain-binomial source-grouping machinery
-      then performs the correct multinomial split at firing time. *)
-type destination_form =
-  | DstSum    of stoich_ref list
-  | DstBranch of (stoich_ref * expr) list
-```
-
-**Write:**
-
-```ocaml
-(** Where a transition sends the individuals it moves.
-
-    {@camdl[
-      infection : S --> I @ beta * S * I / N              # DstSum [I]
-      split     : I --> R + Q @ gamma * I                 # DstSum [R; Q]
-      recovery  : I --> { R : 0.9, D : 0.1 } @ gamma * I  # DstBranch
-      death     : Q --> @ mu * Q                          # DstSum []
-    ]} *)
-type destination_form =
-  | DstSum    of stoich_ref list
-      (** Every listed compartment gains one individual per firing. The empty
-          list stands for two things the tree does not tell apart: a
-          transition whose individuals leave the model ([Q --> @ mu * Q], a
-          death or emigration), and a [via] transition with no arrow target,
-          [I via hyper_erlang(...)], each of whose branches names its own
-          destination. *)
-  | DstBranch of (stoich_ref * expr) list
-      (** One flow per branch, at the branch's weight times the transition's
-          rate, so the source leaves at the rate times the sum of the
-          weights. Weights that are all constants must sum to one (E423). *)
-```
-
-The first version mixes three things: what the type means, how the expander
-lowers it, and when each constructor was added. The second keeps only the first,
-and lets four lines of camdl show what the constructors are. The lowering is
-still worth explaining, and an implementation comment at the expander's lowering
-code is the place for it.
-
-Writing the second version also surfaces two facts the first one hid. The empty
-`DstSum` carries two unrelated meanings, which no reader of the type would
-guess, and the weights of a `DstBranch` are not checked. Both are honest
-documentation of the code as it stands, and both are design questions: the two
-meanings could be two constructors, and a missing check is a hole in the
-language. Saying plainly what a type does is how a reader finds out whether it
-should.
-
-**Instead of:**
-
-```rust
-/// Deserialise a `Model` from a JSON string. gh#audit-C8: enforces
-/// the `IrEnvelope` wrapper with version handshake. Returns
-/// `IrError::VersionMismatch` if the envelope's `ir_version` doesn't
-/// match the `IR_VERSION` baked from `ir/VERSION` at compile time.
-pub fn from_str(s: &str) -> Result<Model, IrError> {
-```
-
-**Write:**
-
-```rust
-/// Reads a compiled model from the JSON `camdlc` writes.
-///
-/// The input must be a whole `IrEnvelope`, not a bare model. An envelope
-/// whose `ir_version` differs from [`IR_VERSION`], the version this runtime
-/// reads, is refused with [`IrError::VersionMismatch`].
-pub fn from_str(s: &str) -> Result<Model, IrError> {
-```
-
-### Implementation comments are short and local
-
-An implementation comment earns its place by stopping a careful reader from
-"fixing" something that is correct, or by naming a fact the code depends on that
-the code cannot show: an ordering that matters, a numerical hazard, a property
-of the input that a check upstream established. One or two sentences, next to
-the line in question. Delete a comment that restates the code below it, narrates
-the change that introduced it, or reasons aloud. Issue numbers belong in tests
-(a regression test names the issue it reproduces) and in commit messages; code
-names one only when it is a workaround for an outside defect that the issue
-documents.
-
-### Examples in doc comments are compiled
-
-An example in a doc comment is code, and it is checked like the examples on
-every other page. A camdl example is marked `{@camdl[ ... ]}` in OCaml and
-fenced as `camdl` in Rust; the documentation build compiles each one and fails
-if it does not compile. A Rust example fenced as `rust` is a doctest, run by
-`cargo test`. Write examples that are complete enough to check, and mark a
-fragment that cannot stand alone as such, rather than letting an uncompiled
-example drift from the language.
+{{< include _code-comments.md >}}
 
 ### What the internals pages show a reviewer
 
@@ -810,30 +652,11 @@ two modules both define `expr`, and a module that opens `Ast` means `Ast.expr`
 when it writes `expr`. A name the generator cannot attribute exactly is left
 unlinked, because a wrong link is worse than none.
 
-### Checklist for documenting a module
+## 11. Writing a specification
 
-Before handing in doc comments for a module, its author, human or agent, should
-be able to answer _yes_ to each of these:
+{{< include _spec-style.md >}}
 
-- Does the module doc open with a sentence that says what the module is for, and
-  go on to explain its design: what goes in, what comes out, which types carry
-  the work, and what the module guarantees?
-- Does every type have a doc whose first sentence says what a value represents,
-  not its shape?
-- Is every non-obvious constructor and field documented, and every invariant the
-  type does not enforce stated?
-- Has every claim been checked against the code that produces and consumes the
-  value, not taken from an older comment?
-- Does every camdl example compile, and is every output excerpt copied from real
-  output?
-- Is the comment free of history: no issue or proposal numbers, dates, work
-  stream names, "previously", "now", "no longer" or "replaces"?
-- Is the change to the source comments only, with every code line as it was?
-- Has every design problem found while writing been reported, not left
-  undocumented, hidden behind a vague phrase, or quietly fixed in the same
-  change?
-
-## 11. Final editorial checklist
+## 12. Final editorial checklist
 
 Before submitting documentation, an agent should be able to answer _yes_ to
 these questions:
