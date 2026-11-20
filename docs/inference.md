@@ -1960,13 +1960,23 @@ origin, or drop the origin row before plotting.
 Everything that cannot be restored faithfully is refused rather than quietly
 defaulted:
 
-| Situation                      | Why it is refused                                                                                                                         |
-| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| a real-valued compartment      | the filter's state is integer counts only, so the reservoir's value at the origin is recorded nowhere                                     |
-| a reactive intervention        | the policy's observation history, once/cooldown gating, pending-effect queue and surveillance RNG stream are not in the file              |
-| `--backend gillespie` / `ode`  | neither has a start-from-state seam, and the states came from the chain-binomial filter                                                   |
-| `--draws`                      | the states belong to one θ; pairing them with unrelated posterior draws forecasts a state and a parameter vector that never went together |
-| `--replicates` ≠ the row count | replicate _i_ restores row _i_, and a prefix of a post-resampling swarm is not an exchangeable subsample                                  |
+| Situation                                                                      | Why it is refused                                                                                                                         |
+| ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| a real-valued compartment                                                      | the filter's state is integer counts only, so the reservoir's value at the origin is recorded nowhere                                     |
+| a reactive intervention                                                        | the policy's observation history, once/cooldown gating, pending-effect queue and surveillance RNG stream are not in the file              |
+| `--backend gillespie` / `ode`                                                  | neither has a start-from-state seam, and the states came from the chain-binomial filter                                                   |
+| `--draws`                                                                      | the states belong to one θ; pairing them with unrelated posterior draws forecasts a state and a parameter vector that never went together |
+| `--replicates` ≠ the row count                                                 | replicate _i_ restores row _i_, and a prefix of a post-resampling swarm is not an exchangeable subsample                                  |
+| observation output when a stream's reporting period is under way at the origin | the file does not hold what the stream had counted since that period began, so the period's row would be missing or a partial count       |
+
+The last row is about where the origin falls. A weekly stream declared
+`covers = closing_at(time, 7 'days)` counts days 21 to 27 in the row labelled
+28; a restart at day 25 is inside that week, and `--obs`, `--obs-dir` and the
+other observation outputs are refused, naming the stream and the period
+`[21, 28)`. A restart at day 21 or day 28 is not. Trajectory output (`-o`) is
+unaffected. To predict a week that is under way, use
+`camdl fit predict --mode forecast`, which reads it from the filter's own
+running count.
 
 The origin must coincide with an output-emit time — a time between snapshots is
 an error, never snapped to a neighbour.
