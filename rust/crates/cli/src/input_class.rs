@@ -25,14 +25,14 @@
 //! that every input has a case in `rust/crates/cli/tests/<command>_input_classes.rs`.
 
 /// The identity level a keyed input enters at. The first five are the levels of
-/// a simulation leaf ([`runid::inputs::TrajectoryInput`]); `Obs` is the address
-/// of the synthetic-observation subtree under a leaf
+/// a simulation leaf ([`crate::resolve::resolve_trajectory`]); `Obs` is the
+/// address of the synthetic-observation subtree under a leaf
 /// ([`crate::cas_sink::obs_subtree_hash`]), which a trajectory's own run id does
 /// not cover. `Fit` and `Method` are the levels of a fit method leaf
-/// ([`runid::inputs::FitMethodInput`]), whose third is `Seed`: the fit level
-/// holds the model, the data, the problem half of the configuration and the
-/// engine, so an environment variable keyed at a simulation's `Model` level
-/// enters a fit at its `Fit` level. A `pfilter` leaf's levels are `Model`,
+/// ([`runid::inputs::FitDigest`], [`runid::inputs::MethodLevel`]), whose third
+/// is `Seed`: the fit level holds the model, the data, the problem half of the
+/// configuration and the engine, so an environment variable keyed at a
+/// simulation's `Model` level enters a fit at its `Fit` level. A `pfilter` leaf's levels are `Model`,
 /// `Config`, `Params` and `Seed`. A profile point's are `profile`, `point`,
 /// `method`, `seed` and `start` ([`crate::profile_cas::resolve_profile_point`]);
 /// its inputs key `Profile`, `Method` or `Seed`. The profile level (the base)

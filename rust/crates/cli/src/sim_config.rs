@@ -15,12 +15,13 @@
 //!                         CasSink::cell_identity ◄──┴────────────────────────────────────── ResolvedCell
 //!                                   │                                                              │
 //!                                   ▼                                                              ▼
-//!                       TrajectoryInput levels (run_id)                       util::simulate_compiled (engine)
+//!                       resolve_trajectory levels (run_id)                    util::simulate_compiled (engine)
 //! ```
 //!
 //! **How a field reaches the identity.** A simulate invocation runs many cells,
 //! and identity is per cell, so the configuration is not hashed as one value.
-//! Each part reaches a level of the cell's [`runid::inputs::TrajectoryInput`]:
+//! Each part reaches a level of the cell's identity
+//! ([`crate::resolve::resolve_trajectory`]):
 //!
 //! - [`ResolvedModel::digest`] *is* the `model` level ([`ModelDigest`], derived
 //!   `RunInput`), computed once from the model the engine loads.

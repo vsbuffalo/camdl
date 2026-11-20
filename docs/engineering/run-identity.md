@@ -91,8 +91,9 @@ path) collides.
 
 The inputs are not hashed as one blob. For a simulation they are split into five
 levels, each a disjoint slice: the model, the configuration, the parameters, the
-scenario and the seed ([`TrajectoryInput`](rust:runid::inputs::TrajectoryInput)
-composes them). Each level is hashed on its own, and the leaf's address is
+scenario and the seed
+([`resolve_trajectory`](rust:cli::resolve::resolve_trajectory) hashes them).
+Each level is hashed on its own, and the leaf's address is
 [`run_id`](rust:runid::kind::run_id) over the artifact kind and the level hashes
 in order:
 

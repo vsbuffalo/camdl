@@ -25,7 +25,7 @@
 //! — know which one your change touches:
 //!
 //! 1. **Structural `#[derive(RunInput)]`** (this crate). [`inputs::SimConfig`],
-//!    [`inputs::TrajectoryInput`], [`inputs::FitDigest`], … hash field by field
+//!    [`inputs::ResolvedParams`], [`inputs::FitDigest`], … hash field by field
 //!    in declaration order. The derive folds **every** non-provenance field,
 //!    *include by default* — there is no skip-if-default. Mark a field
 //!    `#[run_input(provenance)]` to exclude it entirely (display only). The

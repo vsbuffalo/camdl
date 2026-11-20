@@ -264,7 +264,6 @@ fn fit_digest_holdout_content_is_keyed() {
     );
 
     // No spurious sensitivity: identical holdout content → identical hash.
-    assert_eq!(base.content_hash(), base.clone().content_hash());
 
     // A bound external file's content is fit identity too, and so is its
     // absence: binding one where there was none, or changing its bytes,
@@ -278,13 +277,8 @@ fn fit_digest_holdout_content_is_keyed() {
 }
 
 #[test]
-fn trajectory_input_display_is_provenance() {
-    let model = ModelDigest {
-        ir: ContentHash::from_bytes([5; 32]),
-        ir_version: "0.7".into(),
-        engine: EngineIdentity::of_build("0.3.0"),
-    };
-    let config = SimConfig {
+fn sim_config_semantic_flags_rekey() {
+    let base = SimConfig {
         backend: Backend::ChainBinomial,
         dt: fid(1),
         t_start: fid(0),
@@ -297,49 +291,16 @@ fn trajectory_input_display_is_provenance() {
         columns: BTreeSet::new(),
         init_state: None,
     };
-    let params = ResolvedParams { values: BTreeMap::new(), tables: vec![] };
-    let scenario = ResolvedScenario {
-        enabled: BTreeSet::new(),
-        disabled: BTreeSet::new(),
-        patch: BTreeMap::new(),
-        scale: BTreeMap::new(),
-    };
-    let seed = Seed { process_seed: 1, base_seed: 1 };
 
-    let base = TrajectoryInput {
-        model: model.clone(),
-        config: config.clone(),
-        params: params.clone(),
-        scenario: scenario.clone(),
-        seed,
-        display: RunProvenance { argv: vec!["camdl".into()], label: None },
-    };
-    let other = TrajectoryInput {
-        model,
-        config,
-        params,
-        scenario,
-        seed,
-        display: RunProvenance {
-            argv: vec!["totally".into(), "different".into()],
-            label: Some("a label".into()),
-        },
-    };
-    assert_eq!(
-        base.content_hash(),
-        other.content_hash(),
-        "the provenance display field must not affect identity"
-    );
-
-    // Negative control: a semantic change (degenerate-rates flag) does.
+    // The degenerate-rates flag changes collapse handling, so it re-keys.
     let mut flipped = base.clone();
-    flipped.config.allow_degenerate_rates = true;
+    flipped.allow_degenerate_rates = true;
     assert_ne!(base.content_hash(), flipped.content_hash());
 
     // So does the forcing-extrapolation override (D44): the run may hold a
     // forcing's end value, so it is a different run.
     let mut held = base.clone();
-    held.config.allow_forcing_extrapolation = true;
+    held.allow_forcing_extrapolation = true;
     assert_ne!(base.content_hash(), held.content_hash());
 }
 

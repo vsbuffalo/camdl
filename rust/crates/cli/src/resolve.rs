@@ -1,6 +1,6 @@
 //! The `Resolve` bridge for `simulate`: map already-resolved CLI
-//! inputs into the `runid` identity types — `TrajectoryInput`, the factored
-//! `LevelId`s, and the leaf `run_id`.
+//! inputs into the `runid` identity types — the factored `LevelId`s and the
+//! leaf `run_id`.
 //!
 //! Every field that enters a hash is a *resolved value*: param/scenario maps
 //! are concrete name→value, the seed is the resolved `process_seed` (never
@@ -148,9 +148,9 @@ fn resolve_scenario(
 
 use crate::fit::cas::{level, structural_level_hash};
 
-/// Resolve a trajectory leaf's identity: its `TrajectoryInput`, the five
-/// factored levels (model/config/params/scenario/seed, in path order), and
-/// the `run_id` derived from them.
+/// Resolve a trajectory leaf's identity: the five factored levels
+/// (model/config/params/scenario/seed, in path order), and the `run_id` derived
+/// from them.
 pub fn resolve_trajectory(ctx: &TrajectoryCtx) -> Result<ResolvedTrajectory, ResolveError> {
     let config = &ctx.config;
     let config_label = format!(

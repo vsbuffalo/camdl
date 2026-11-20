@@ -1,27 +1,20 @@
-//! Resolved per-level digest types and leaf input shapes — the identity
-//! contract, expressed as types.
+//! Resolved per-level digest types — the identity contract, expressed as
+//! types.
 //!
 //! Every field here is a *resolved value* or *content digest*, never a raw
 //! path, unresolved preset, or generating recipe. Provenance fields carry
 //! `#[run_input(provenance)]` and are recorded in `run.json` but never
-//! hashed. The leaf inputs compose the shared per-level digests
-//! ([`ModelDigest`], [`SimConfig`], [`ResolvedParams`], [`ResolvedScenario`])
-//! so grouping (seed ensembles, profile grids) falls out of the path tree.
+//! hashed. The CLI's resolvers hash each level separately ([`ModelDigest`],
+//! [`SimConfig`], [`ResolvedParams`], [`ResolvedScenario`], [`Seed`], …) and
+//! compose the level hashes into a leaf's `run_id`, so grouping (seed
+//! ensembles, profile grids) falls out of the path tree.
 //!
-//! **M1 status.** These types *specify the shapes*; the resolver that
-//! produces their values (compile-or-cache IR, param/scenario/config
-//! resolution, sweep/draw/seed expansion) is M2/M3 work. Two consequences:
-//!
-//! - [`ModelDigest`] is the **M2 interim** whole-IR digest (over-invalidates
-//!   an obs-only edit, never under-invalidates). M2.5 splits it into
-//!   dynamics/observation/output to recover latent-trajectory reuse; until
-//!   then the obs sub-artifact's model identity rides in the trajectory's
-//!   whole-IR digest. Its `ir` component is [`model_ir_hash`] — the
-//!   presentation-normalized model hash every identity path shares (gh#442).
-//! - [`CalendarMode`] is a minimal placeholder: the calendar-time work is
-//!   in-flight (per CLAUDE.md), so its variant set is provisional and M2
-//!   finalizes it against the resolver. It is kept here only so the
-//!   [`SimConfig`] shape is concrete.
+//! - [`ModelDigest`] is a whole-IR digest: an observation-only edit re-keys
+//!   the trajectory too (it over-invalidates, never under-invalidates). Its
+//!   `ir` component is [`model_ir_hash`] — the presentation-normalized model
+//!   hash every identity path shares (gh#442).
+//! - [`CalendarMode`]: every run resolves to `Numeric`; the variant set is
+//!   provisional.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -42,8 +35,8 @@ pub enum Backend {
     Ode,
 }
 
-/// Resolved calendar mode. **Placeholder** (see the module note): the
-/// calendar-time work is in-flight, so the variant set is provisional.
+/// Resolved calendar mode. Every run resolves to `Numeric`; the variant set is
+/// provisional.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, RunInput)]
 pub enum CalendarMode {
     Numeric,
@@ -332,10 +325,8 @@ pub struct SimConfig {
     pub init_state: Option<InitStateDigest>,
 }
 
-/// The model-level digest. **M2 interim:** the whole canonical IR. M2.5
-/// splits this into `ModelDynamicsDigest` / `ObservationDigest` /
-/// `OutputDigest` to recover latent-trajectory reuse; either way the model
-/// level also folds in `ir_version` + `engine`.
+/// The model-level digest: the whole canonical IR, the IR schema version and
+/// the engine.
 #[derive(Debug, Clone, PartialEq, Eq, RunInput)]
 pub struct ModelDigest {
     /// `content_hash` of the whole canonical IR.
@@ -346,7 +337,7 @@ pub struct ModelDigest {
 }
 
 impl ModelDigest {
-    /// Build the M2-interim whole-IR digest from a compiled model.
+    /// Build the whole-IR digest from a compiled model.
     ///
     /// Presentation normalization happens **here** (gh#442), not in the caller.
     /// This is the one constructor every identity path routes through — `sim`,
@@ -450,51 +441,6 @@ impl ContentAddressed for Deps {
     }
 }
 
-/// Input-side provenance carried on a leaf input and **always skipped** from
-/// the hash (`#[run_input(provenance)]` at every embed site). The recorded
-/// counterpart that lands in `run.json` is `record::Provenance`. Minimal in
-/// M1; the resolver fills it in M2. Deliberately not `ContentAddressed` — it
-/// must never be hashed.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct RunProvenance {
-    pub argv: Vec<String>,
-    pub label: Option<String>,
-}
-
-// ── Leaf input shapes ────────────────────────────────────────────────────────
-//
-// Each leaf composes the shared per-level digests plus its command-specific
-// fields; the provenance field is excluded from the hash. The forward-sim
-// leaves (Trajectory, SyntheticObs) are wired in M2; the inference leaves
-// (FitMethod, PfilterEval, Survey, Projection) in M3.
-
-/// `simulate` leaf: the latent dynamics — NOT the obs model. (M2
-/// interim: `model` is the whole-IR [`ModelDigest`]; M2.5 swaps in the
-/// dynamics/output split so an obs-only edit does not re-key the trajectory.)
-#[derive(Debug, Clone, PartialEq, RunInput)]
-pub struct TrajectoryInput {
-    pub model: ModelDigest,
-    pub config: SimConfig,
-    pub params: ResolvedParams,
-    pub scenario: ResolvedScenario,
-    pub seed: Seed,
-    #[run_input(provenance)]
-    pub display: RunProvenance,
-}
-
-/// Synthetic-observation sub-artifact under a trajectory. M2 interim: the obs
-/// *model* identity rides in the trajectory's whole-IR [`ModelDigest`]
-/// (referenced via `trajectory`), so this leaf adds the requested streams +
-/// the resolved obs seed. M2.5 adds the full `ObservationDigest` here.
-#[derive(Debug, Clone, PartialEq, RunInput)]
-pub struct SyntheticObsInput {
-    pub trajectory: ArtifactRef,
-    pub streams: Vec<String>,
-    pub obs_seed: Seed,
-    #[run_input(provenance)]
-    pub display: RunProvenance,
-}
-
 /// Fit-wide digest (the `fit` level): model + data + the whole canonicalized
 /// fit.toml + engine. Hashing the *whole* canonicalized document (not an
 /// enumerated subset) is the include-by-default posture — dropping a field
@@ -552,20 +498,6 @@ pub struct MethodConfig {
     pub target_length: u64,
 }
 
-/// `fit` method leaf (M3). A sourced start's lineage lives in `deps`: a
-/// `from_mle` / `from_posterior` / `from_params` start folds in its source's
-/// identity, so the run invalidates whenever that source changes. Sound only
-/// once the engine is pure (the M3 fixes).
-#[derive(Debug, Clone, PartialEq, RunInput)]
-pub struct FitMethodInput {
-    pub fit: FitDigest,
-    pub method: MethodConfig,
-    pub deps: Deps,
-    pub seed: Seed,
-    #[run_input(provenance)]
-    pub display: RunProvenance,
-}
-
 /// The `method` *level* hash input: a method's own config **plus its `deps`**.
 /// This is what the factored path's method segment (`{algorithm}-{method_h8}`)
 /// and the leaf `run_id` hash for the method level — so a run started
@@ -573,46 +505,11 @@ pub struct FitMethodInput {
 /// whenever the source changes, while editing its own `[method]` leaves the
 /// source leaf untouched.
 /// Kept distinct from [`MethodConfig`] so the bare config (without lineage)
-/// stays addressable, and from [`FitMethodInput`] which composes all levels.
+/// stays addressable.
 #[derive(Debug, Clone, PartialEq, Eq, RunInput)]
 pub struct MethodLevel {
     pub config: MethodConfig,
     pub deps: Deps,
-}
-
-/// `pfilter` leaf (M3): scores a model at fixed params (does not estimate) —
-/// its own kind, keeping "estimate params" and "score at fixed params"
-/// unconflated.
-#[derive(Debug, Clone, PartialEq, RunInput)]
-pub struct PfilterEvalInput {
-    pub model: ModelDigest,
-    /// Resolved observation streams consumed.
-    pub data: Vec<DataDigest>,
-    pub params: ResolvedParams,
-    pub particles: u32,
-    pub config: SimConfig,
-    /// Resolved obs-block + flow-index selection (selects which series drives
-    /// the likelihood).
-    pub obs_block: String,
-    pub flow_indices: Vec<u32>,
-    pub seed: Seed,
-    #[run_input(provenance)]
-    pub display: RunProvenance,
-}
-
-/// `survey` leaf (M3): a likelihood-landscape diagnostic over an LHS box.
-#[derive(Debug, Clone, PartialEq, RunInput)]
-pub struct SurveyInput {
-    pub model: ModelDigest,
-    pub data: Vec<DataDigest>,
-    /// LHS box: estimated param → (lo, hi), canonical.
-    pub bounds: BTreeMap<ParamId, (FiniteF64, FiniteF64)>,
-    pub fixed: ResolvedParams,
-    pub scenario: ResolvedScenario,
-    pub n_points: u32,
-    pub seed: Seed,
-    #[run_input(provenance)]
-    pub display: RunProvenance,
 }
 
 // ── profile leaves (M3.3) ──────────────────────────────────────────────────
@@ -682,35 +579,6 @@ pub struct ProfileMethod {
 #[derive(Debug, Clone, PartialEq, Eq, RunInput)]
 pub struct StartLevel {
     pub index: u32,
-}
-
-/// `profile` point leaf (M3.3). Flat independent leaves — no inter-point deps:
-/// each point pins the focal param and sub-fits the rest, with no neighbour
-/// warm-start. Composes the five levels; the per-level hashes drive the path
-/// `profiles/<base>/<point>/<method>/<seed>/<start>/`.
-#[derive(Debug, Clone, PartialEq, RunInput)]
-pub struct ProfilePointInput {
-    pub base: ProfileBase,
-    pub point: ProfilePointConfig,
-    pub method: ProfileMethod,
-    pub seed: Seed,
-    pub start: StartLevel,
-    #[run_input(provenance)]
-    pub display: RunProvenance,
-}
-
-/// `lineage realize/tree/cohort/sojourn` projection leaf (M3): a 1–2-hop
-/// chain off an upstream artifact. Each hop's upstream is one `ArtifactRef`;
-/// every output-determining flag is folded into `spec`.
-#[derive(Debug, Clone, PartialEq, RunInput)]
-pub struct ProjectionInput {
-    /// The consumed upstream (event-log → line-list → projection).
-    pub upstream: ArtifactRef,
-    /// Content digest of the resolved, output-determining flag set
-    /// (`--event`/`--align-zero`/window/scheme/seed, per subcommand).
-    pub spec: ContentHash,
-    #[run_input(provenance)]
-    pub display: RunProvenance,
 }
 
 #[cfg(test)]
