@@ -245,6 +245,77 @@ pub(crate) fn plan_emission(
     Ok(EmitPlan { columns, format: TemporalFormat::Numeric, scored, rows })
 }
 
+/// Refuse a restart (`simulate --init-state`) that begins inside one of
+/// `obs`'s reporting periods (gh#1081, gh#1085;
+/// `docs/dev/temporal-architecture.md` §4.4, "Restarts").
+///
+/// A saved state holds compartment counts and nothing else: not what a stream
+/// has counted since its current period began. The row for a period under way
+/// at `origin` therefore cannot be written from it. Before this check a
+/// uniform `covers` stream dropped that row without a word ([`plan_emission`]
+/// keeps a row only when the run covers its whole period), and a
+/// `window_start`/`window_stop` stream wrote a short first window from the
+/// restart to the next emit time.
+///
+/// `schedule` is the stream's effective emit schedule, after `--emit-every`,
+/// and `override_step` that flag's cadence for this stream, exactly as
+/// [`plan_emission`] takes it; `t_end` is the run's end. The periods examined
+/// are the ones the schedule declares over the whole run, including those
+/// labelled before `origin`: a `starting_on` week is labelled with its first
+/// day, so the week under way carries a label earlier than the restart.
+///
+/// A window-column stream's periods run between consecutive emit times. One
+/// with no emit time at or before `origin` is not refused: its first window
+/// opens where the run starts, in a restarted run as in any other.
+pub(crate) fn refuse_period_under_way(
+    obs: &ObservationModel,
+    schedule: &ir::observation::ObservationSchedule,
+    override_step: Option<f64>,
+    origin: f64,
+    t_end: f64,
+) -> Result<(), String> {
+    let eps = crate::OBS_SNAP_EPS;
+    let all = crate::obs_schedule_times(schedule, None, t_end);
+    let straddles = |start: f64, stop: f64| start < origin - eps && stop > origin + eps;
+    let covers: Option<Covers> = match (&obs.covers, override_step) {
+        (Some(Covers::From { offset, .. }), Some(step)) => Some(Covers::From { offset: *offset, span: step }),
+        (Some(Covers::Until { offset, .. }), Some(step)) => Some(Covers::Until { offset: *offset, span: step }),
+        (c, _) => c.clone(),
+    };
+    let under_way: Option<(f64, f64)> = match (obs.projection.temporal_kind(), &covers) {
+        // A state read at an instant has no period to be inside.
+        (TemporalKind::Instant, _) => None,
+        // Refused where the rows are planned (`missing_covers_error`).
+        (TemporalKind::Interval, None) => None,
+        (TemporalKind::Interval, Some(covers @ (Covers::From { .. } | Covers::Until { .. }))) => all
+            .iter()
+            .filter_map(|&t| covers.period_of(t))
+            .find(|&(start, stop)| straddles(start, stop)),
+        (TemporalKind::Interval, Some(Covers::WindowColumns)) => {
+            let before = all.iter().copied().rfind(|&t| t <= origin + eps);
+            let after = all.iter().copied().find(|&t| t > origin + eps);
+            match (before, after) {
+                (Some(start), Some(stop)) if straddles(start, stop) => Some((start, stop)),
+                _ => None,
+            }
+        }
+    };
+    let Some((start, stop)) = under_way else { return Ok(()) };
+    Err(format!(
+        "--init-state restarts at t = {origin}, inside a reporting period of observation \
+         stream '{name}': the period [{start}, {stop}) began before the restart. The saved \
+         state holds compartment counts only, not what '{name}' had counted since \
+         t = {start}, so this period's row cannot be written from it; it would be missing, \
+         or a partial count.\n  \
+         Fix: forecast from the fit with `camdl fit predict <fit> --mode forecast \
+         --horizon <duration>`, which predicts the period under way from the filter's own \
+         running count; or restart where no emitted stream is inside a period (for \
+         '{name}', t = {start} or t = {stop}); or run without observation output \
+         (`-o` writes the trajectories alone).",
+        name = obs.name,
+    ))
+}
+
 /// Plan the rows a stream's **bound data** occupies — the design-preserving
 /// plan gh#831 asks for.
 ///

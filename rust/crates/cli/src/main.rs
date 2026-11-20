@@ -2830,6 +2830,12 @@ fn materialize_obs_for_quantities(
             // over fabricated tail values (gh#561).
             Some(s) => {
                 let s = crate::emit_every::apply_override(emit, obs_ir, s)?;
+                if let Some(origin) = restart_origin {
+                    crate::obs_emit::refuse_period_under_way(
+                        obs_ir, &s, emit.and_then(|e| e.resolve_for(&obs_ir.source)),
+                        origin, model.simulation.t_end,
+                    )?;
+                }
                 obs_schedule_times(&s, restart_origin, model.simulation.t_end)
             }
             None => continue, // fit-only — consumes no RNG, mirroring `--obs`
@@ -4478,6 +4484,11 @@ pub(crate) fn obs_emit_schedule_times(
     match &obs.emit_schedule {
         Some(s) => {
             let s = crate::emit_every::apply_override(emit, obs, s)?;
+            if let Some(origin) = restart_origin {
+                crate::obs_emit::refuse_period_under_way(
+                    obs, &s, emit.and_then(|e| e.resolve_for(&obs.source)), origin, t_end,
+                )?;
+            }
             Ok(obs_schedule_times(&s, restart_origin, t_end))
         }
         None => Err(format!(
