@@ -163,10 +163,10 @@ pub struct Problem {
     /// (`.ir.json`). `cmd_fit_run_v2` compiles `model.camdl` → IR exactly
     /// once up front and records the temp path here; every per-cell
     /// `FitRunConfig::build` then loads this pre-compiled IR instead of
-    /// re-invoking camdlc per (cell × sweep point). `None` means "compile from
-    /// `model.camdl`" (the fallback for unit tests that build a config
-    /// directly). Never serialized — `model.camdl` remains the sole
-    /// identity-bearing source path (the fit content hash hashes its bytes).
+    /// re-invoking camdlc per (cell × sweep point). Read through
+    /// [`Problem::compiled_model`]. Never serialized — `model.camdl` remains
+    /// the sole identity-bearing source path (the fit content hash hashes its
+    /// bytes).
     #[serde(skip)]
     pub compiled_ir: Option<String>,
 }
@@ -3621,6 +3621,22 @@ impl LikelihoodObjective {
 }
 
 impl Problem {
+    /// The compiled model this problem's runs read: `compiled_ir`, or a
+    /// `model.camdl` that is itself compiled IR (a config that names an
+    /// `.ir.json`, as unit tests do). A model source with nothing compiled is
+    /// an error, never compiled here: the command compiles it, under its
+    /// compile settings, before anything reads it.
+    pub fn compiled_model(&self) -> Result<&str, String> {
+        match &self.compiled_ir {
+            Some(ir) => Ok(ir),
+            None if !self.model.camdl.ends_with(".camdl") => Ok(&self.model.camdl),
+            None => Err(format!(
+                "internal: the model {} was not compiled before it was read",
+                self.model.camdl
+            )),
+        }
+    }
+
     /// The likelihood this problem defines: [`LikelihoodObjective`] from
     /// `ic_free`. The one place the key is read.
     pub fn likelihood_objective(&self) -> LikelihoodObjective {

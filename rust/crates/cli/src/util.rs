@@ -4840,6 +4840,17 @@ mod tests {
             "unknown sidecar schema must read as not-fresh");
     }
 
+    /// A load of an already-compiled model refuses model source rather than
+    /// compile it without the command's compile settings, before reading the
+    /// file (this one does not exist).
+    #[test]
+    fn load_ir_refuses_model_source() {
+        for load in [load_ir, |p: &str| load_ir_envelope(p).map(|e| (e.model, String::new()))] {
+            let err = load("no-such-model.camdl").unwrap_err();
+            assert!(err.contains("is model source where a compiled model was expected"), "{err}");
+        }
+    }
+
     // ── apply_integrator_override (gh#166 C4) ────────────────────────────────
 
     #[test]

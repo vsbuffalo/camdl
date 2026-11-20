@@ -801,7 +801,7 @@ fn run_fit(
                 spec,
                 // Pre-compiled IR (compiled once above) so per-dataset generation
                 // doesn't re-invoke camdlc.
-                config.problem.compiled_ir.as_deref().unwrap_or(&config.problem.model.camdl),
+                config.problem.compiled_model().unwrap_or_else(|e| out.fail(format!("error: {e}"))),
                 &fit_dir,
                 config.problem.config.dt,
                 config.problem.config.eval_settings(),
@@ -1940,12 +1940,10 @@ fn run_fit(
                     // provenance block (same shape as the IF2 path uses).
                     // Load the canonical IR JSON from the pre-compiled IR so this
                     // provenance read doesn't re-invoke camdlc.
-                    let model_src = sweep_config.compiled_ir.as_deref()
-                        .unwrap_or(&sweep_config.model.camdl);
-                    let model_ir_json = crate::util::load_ir(model_src)
-                        .ok()
+                    let model_ir_json = sweep_config.compiled_model()
+                        .and_then(crate::util::load_ir)
                         .map(|(_, ir_json)| ir_json)
-                        .unwrap_or_default();
+                        .unwrap_or_else(|e| abandon_method(&out, format!("error: {e}")));
                     let model_identity_for_prov =
                         crate::resolve::model_identity_from_ir(&model_ir_json);
                     let data_hashes_for_prov = provenance_data_hashes(&data_digests);
@@ -2635,12 +2633,9 @@ fn build_fit_sidecar(
 ) -> Result<crate::run_meta::FitSidecar, String> {
     let problem = &config.problem;
     // The pre-compiled IR (set by `cmd_fit_run_v2`, under its compile
-    // settings); empty string if the IR can't be loaded.
-    let model_src = problem.compiled_ir.as_deref().unwrap_or(&problem.model.camdl);
-    let model_identity = crate::util::load_ir(model_src)
-        .ok()
-        .map(|(_, ir_json)| crate::resolve::model_identity_from_ir(&ir_json))
-        .unwrap_or_default();
+    // settings).
+    let model_src = problem.compiled_model()?;
+    let model_identity = crate::resolve::model_identity_from_ir(&crate::util::load_ir(model_src)?.1);
     let fit_toml_hash = crate::hashing::sha256_hex(fit_toml);
     // gh#771: the digests of the files the RESOLVED bindings name, by source
     // (`StreamBindings`), the same ones the run identity folds. The one-file
@@ -2726,7 +2721,7 @@ fn build_fit_sidecar(
         calendar,
         // The `#'` doc dictionary (presentation metadata), loaded from the same
         // compiled IR. Empty when the model documents nothing.
-        docs: crate::util::load_ir_envelope(model_src).map(|e| e.docs).unwrap_or_default(),
+        docs: crate::util::load_ir_envelope(model_src)?.docs,
     })
 }
 
@@ -3566,6 +3561,11 @@ mod tests {
 
     /// Deserialize a golden IR envelope into an `ir::Model` (no compile —
     /// only the declared observation names are read here).
+    /// The absolute path of a committed golden IR, as a fit's `compiled_ir`.
+    fn golden_path(rel: &str) -> String {
+        format!("{}/../../../{}", env!("CARGO_MANIFEST_DIR"), rel)
+    }
+
     fn golden_model(rel: &str) -> ir::Model {
         let path = format!("{}/../../../{}", env!("CARGO_MANIFEST_DIR"), rel);
         let json = std::fs::read_to_string(&path)
@@ -3668,7 +3668,8 @@ mod tests {
              chains = 1\nparticles = 10\niterations = 1\ncooling = 0.7\n",
             data_path.display());
         std::fs::write(&fit_path, &toml_src).unwrap();
-        let config = config_v2::FitConfig::from_toml_str(&toml_src).unwrap();
+        let mut config = config_v2::FitConfig::from_toml_str(&toml_src).unwrap();
+        config.problem.compiled_ir = Some(golden_path("ocaml/golden/sir_two_patch_long_obs.ir.json"));
         let model = golden_model("ocaml/golden/sir_two_patch_long_obs.ir.json");
         let data = read_data_digests(config.problem.data_spec().unwrap(), &model).unwrap();
         let sidecar = build_fit_sidecar(&config, &std::fs::read(&fit_path).unwrap(), &model, &data).unwrap();
@@ -3693,7 +3694,8 @@ mod tests {
              chains = 1\nparticles = 10\niterations = 1\ncooling = 0.7\n",
             data_path.display());
         std::fs::write(&fit_path, &toml_src).unwrap();
-        let config = config_v2::FitConfig::from_toml_str(&toml_src).unwrap();
+        let mut config = config_v2::FitConfig::from_toml_str(&toml_src).unwrap();
+        config.problem.compiled_ir = Some(golden_path("ocaml/golden/sir_two_patch_long_obs.ir.json"));
         let mut model = golden_model("ocaml/golden/sir_two_patch_long_obs.ir.json");
         model.origin = Some("2020-03-01".into());
         let data = read_data_digests(config.problem.data_spec().unwrap(), &model).unwrap();
@@ -3728,7 +3730,8 @@ mod tests {
              chains = 1\nparticles = 10\niterations = 1\ncooling = 0.7\n",
             train.display(), holdout.display());
         std::fs::write(&fit_path, &toml_src).unwrap();
-        let config = config_v2::FitConfig::from_toml_str(&toml_src).unwrap();
+        let mut config = config_v2::FitConfig::from_toml_str(&toml_src).unwrap();
+        config.problem.compiled_ir = Some(golden_path("ocaml/golden/sir_two_patch_long_obs.ir.json"));
         let model = golden_model("ocaml/golden/sir_two_patch_long_obs.ir.json");
         let data = read_data_digests(config.problem.data_spec().unwrap(), &model).unwrap();
         let sidecar = build_fit_sidecar(&config, &std::fs::read(&fit_path).unwrap(), &model, &data).unwrap();
@@ -3751,8 +3754,8 @@ mod tests {
             .expect("write data");
         let fit_path = tmp.path().join("fit.toml");
         // `.ir.json` (not `.camdl`) and non-existent: `build_fit_sidecar`
-        // falls back to an empty model identity rather than shelling out to
-        // camdlc. The model under test is passed in directly.
+        // reads the compiled model (`compiled_ir`, the golden the model under
+        // test is loaded from), as `fit run` sets it.
         let toml_src = format!(
             r#"
 [model]
@@ -3778,8 +3781,9 @@ cooling = 0.7
             data_path.display()
         );
         std::fs::write(&fit_path, &toml_src).expect("write fit.toml");
-        let config = config_v2::FitConfig::from_toml_str(&toml_src)
+        let mut config = config_v2::FitConfig::from_toml_str(&toml_src)
             .expect("fixture fit.toml should parse");
+        config.problem.compiled_ir = Some(golden_path("ocaml/golden/seir_observations.ir.json"));
 
         let model = golden_model("ocaml/golden/seir_observations.ir.json");
         let stream_names: Vec<String> =
@@ -3833,8 +3837,9 @@ N0 = 1000
 "#);
             let fit_path = tmp.path().join("fit.toml");
             std::fs::write(&fit_path, &toml_src).expect("write fit.toml");
-            let config = config_v2::FitConfig::from_toml_str(&toml_src)
+            let mut config = config_v2::FitConfig::from_toml_str(&toml_src)
                 .expect("fixture fit.toml should parse");
+            config.problem.compiled_ir = Some(golden_path("ocaml/golden/seir_observations.ir.json"));
             // The data digests are not under test here.
             build_fit_sidecar(&config, &std::fs::read(&fit_path).unwrap(), &model,
                 &Default::default()).unwrap()

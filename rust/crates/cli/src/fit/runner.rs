@@ -263,12 +263,10 @@ pub(crate) fn resolve_fit_parameters(
     seed: u64,
 ) -> Result<FitParameters, String> {
     // Load the model: the IR `cmd_fit_run_v2` compiled once up front, under
-    // its compile settings (`compiled_ir`), so a swept or replicated fit
-    // doesn't re-invoke camdlc per (cell × sweep point). Without it,
-    // `model.camdl` must itself be compiled IR: a source is refused rather
-    // than compiled here without the command's compile settings. The
+    // its compile settings (`Problem::compiled_model`), so a swept or
+    // replicated fit doesn't re-invoke camdlc per (cell × sweep point). The
     // identity path is always `model.camdl`, not this.
-    let model_path = fit.compiled_ir.as_deref().unwrap_or(&fit.model.camdl);
+    let model_path = fit.compiled_model()?;
     let (mut model_pre, model_ir_json) = crate::util::load_ir(model_path)?;
     // gh#616: resolve the model's observation anchors from THIS fit's bound
     // data, before anything compiles. Not optional: `ode_grad.rs` takes the
