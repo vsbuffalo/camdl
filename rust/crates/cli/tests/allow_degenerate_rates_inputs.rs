@@ -428,3 +428,51 @@ fn compare_replays_the_fits_allow_degenerate_rates() {
     assert!(!all.contains("AllParticlesDead"), "the scoring filter must not collapse:\n{all}");
     assert!(o.status.success(), "{all}");
 }
+
+/// The distinct run ids of the committed `run.json`s under `root`.
+fn run_ids(root: &Path) -> std::collections::BTreeSet<String> {
+    fn walk(d: &Path, out: &mut std::collections::BTreeSet<String>) {
+        if let Ok(b) = std::fs::read_to_string(d.join("run.json")) {
+            let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+            if let Some(id) = v["run_id"].as_str() {
+                out.insert(id.to_string());
+            }
+        }
+        for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
+            if e.path().is_dir() { walk(&e.path(), out) }
+        }
+    }
+    let mut out = std::collections::BTreeSet::new();
+    walk(root, &mut out);
+    out
+}
+
+/// `simulate --draws posterior --fit` replays the fit's model from each
+/// posterior draw. The fit was made under `allow_degenerate_rates`, and every
+/// trajectory at its draws reaches `S + I = 0`, so the replay must run under
+/// the fit's setting: it is the same computation as the replay given
+/// `--allow-degenerate-rates`, so the flagged run adds no run id. Before the
+/// fix the replay read only simulate's own flag and failed with
+/// `NumericalCollapse` (gh#1235).
+#[test]
+fn simulate_posterior_replays_the_fits_allow_degenerate_rates() {
+    let (tmp, leaf) = degenerate_fit("simulate_posterior");
+    let replay = |extra: &[&str]| {
+        let mut args = vec![
+            "simulate", "model.camdl", "--draws", "posterior", "--fit", &leaf, "--n-draws", "4",
+            "--seed", "1",
+        ];
+        args.extend_from_slice(extra);
+        camdl(&tmp.0, &args)
+    };
+    let o = replay(&[]);
+    let all = text(&o);
+    assert!(!all.contains("NumericalCollapse"), "the replay must not collapse:\n{all}");
+    assert!(o.status.success(), "{all}");
+    let after = run_ids(&tmp.0.join("out"));
+    assert!(!after.is_empty(), "the replay stored its cells:\n{all}");
+    let o = replay(&["--allow-degenerate-rates"]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(run_ids(&tmp.0.join("out")), after,
+        "the fit's setting and the flag are one computation, so the flagged replay is served from the store");
+}

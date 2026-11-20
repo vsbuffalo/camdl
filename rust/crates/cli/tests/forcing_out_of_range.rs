@@ -494,6 +494,45 @@ fn compare_scores_a_fit_under_its_configs_override() {
     assert!(o.status.success(), "{err}");
 }
 
+/// The method leaf of the one fit under `results` in `dir` whose method
+/// directory starts with `method`.
+fn method_leaf(dir: &Path, method: &str) -> String {
+    statuses(&dir.join("results"))
+        .into_iter()
+        .find(|(p, v)| v["kind"] != "fit" && p.to_string_lossy().contains(&format!("{method}-")))
+        .map(|(p, _)| p.parent().unwrap().to_string_lossy().into_owned())
+        .expect("the fit's method leaf")
+}
+
+/// `simulate --draws posterior --fit` replays a fit made under `[config]
+/// allow_forcing_extrapolation` under it: the replay holds the forcing rather
+/// than refusing it, says so once, and is the same computation as the replay
+/// given the flag, so the flagged run adds no run id (gh#1235).
+#[test]
+fn simulate_replays_a_fit_under_its_configs_override() {
+    let tmp = tempfile::tempdir().unwrap();
+    let m = model(tmp.path(), "linear", &ROWS_TO_50);
+    let o = fit_run(tmp.path(), &m, "allow_forcing_extrapolation = true\n");
+    assert!(o.status.success(), "{}", stderr(&o));
+    let leaf = method_leaf(tmp.path(), "pgas");
+    let replay = |extra: &[&str]| {
+        let mut args = vec![
+            "simulate", m.to_str().unwrap(), "--draws", "posterior", "--fit", &leaf, "--n-draws", "2",
+            "--seed", "1",
+        ];
+        args.extend_from_slice(extra);
+        camdl(tmp.path(), &args)
+    };
+    let o = replay(&[]);
+    let err = stderr(&o);
+    assert!(o.status.success(), "the fit's override lets the replay run:\n{err}");
+    assert_eq!(warnings(&err), 1, "one warning for the one forcing:\n{err}");
+    let after = run_ids(&tmp.path().join("cas"));
+    let o = replay(&["--allow-forcing-extrapolation"]);
+    assert!(o.status.success(), "under the flag too:\n{}", stderr(&o));
+    assert_eq!(run_ids(&tmp.path().join("cas")), after, "the fit's override and the flag are one computation");
+}
+
 /// A refused fit does not leave its claim open: the method's `run.json` is
 /// marked `failed`, with the refusal as its failure, and no lock is left
 /// behind, for each method that holds a claim while it runs.

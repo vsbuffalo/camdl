@@ -1489,11 +1489,20 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
         }
     }
     let mut integrator = a.backend.integrator;
+    // The evaluator settings: the flags, or, on a replay of a fit, the fit's
+    // `[config]` settings with the flags folded in (gh#1235). Read into the
+    // resolved configuration below, which keys them and derives what runs.
+    let mut eval_settings = crate::fit::fitted_model::FittedSettings {
+        allow_degenerate_rates: a.allow_degenerate_rates,
+        allow_forcing_extrapolation: a.forcing_extrapolation.allow_forcing_extrapolation,
+    };
     if let Some((fit_name, fitted)) = &fitted_simulator {
         let flags = crate::fit::fitted_model::SimulatorFlags {
             backend: a.backend.backend,
             dt: a.backend.dt,
             integrator: a.backend.integrator,
+            allow_degenerate_rates: a.allow_degenerate_rates,
+            allow_forcing_extrapolation: a.forcing_extrapolation.allow_forcing_extrapolation,
         };
         let replay = crate::fit::fitted_model::replay_simulator(fit_name, fitted, flags, backend)
             .unwrap_or_else(|e| {
@@ -1505,6 +1514,7 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
         backend = replay.backend;
         dt = replay.dt;
         integrator = replay.integrator;
+        eval_settings = replay.settings;
     }
 
     let mut base_sim_run = util::SimRun {
@@ -2178,8 +2188,8 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
             SimConfigFlags {
                 backend,
                 dt,
-                allow_degenerate_rates: a.allow_degenerate_rates,
-                allow_forcing_extrapolation: a.forcing_extrapolation.allow_forcing_extrapolation,
+                allow_degenerate_rates: eval_settings.allow_degenerate_rates,
+                allow_forcing_extrapolation: eval_settings.allow_forcing_extrapolation,
                 view: output_cols,
             },
         )
