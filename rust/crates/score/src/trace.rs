@@ -441,6 +441,10 @@ pub enum TraceOverride {
     /// Derived under `compare --allow-changed-data`: these streams' training
     /// files no longer matched the hashes the fit recorded.
     ChangedData { streams: Vec<String> },
+    /// Derived under `compare --allow-forcing-extrapolation` from a fit made
+    /// without it: a forcing evaluated outside its range was held rather than
+    /// refused, as the fit itself would not have done.
+    ForcingExtrapolationAllowed,
 }
 
 /// Where a trace's parameters came from. Externally tagged like

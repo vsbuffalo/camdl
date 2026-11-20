@@ -2717,6 +2717,9 @@ fn derive_prequential(
     // passed it as flags, and the in-process ODE scorer runs under it
     // (gh#1235).
     let settings = fitted.settings.with_flags(false, derive.allow_forcing_extrapolation);
+    // When compare's flag turned the setting on, it is said here and recorded
+    // in the trace's derivation (`TraceOverride::ForcingExtrapolationAllowed`).
+    let flag_turned_on_forcing = settings.allow_forcing_extrapolation && !fitted.settings.allow_forcing_extrapolation;
     if let Some(note) = fitted.settings.turned_on_note(settings, &segment.display().to_string(), "compare scores it") {
         out.say(format_args!("{note}"));
     }
@@ -3006,6 +3009,11 @@ fn derive_prequential(
         .is_some_and(|d| d.holdout_after.is_some() || d.holdout.is_some());
     if derive.force_in_sample && declares_holdout {
         derivation.overrides.push(TraceOverride::InSampleForced);
+    }
+    // compare's `--allow-forcing-extrapolation` turned the setting on for a fit
+    // made without it: the trace says so.
+    if flag_turned_on_forcing {
+        derivation.overrides.push(TraceOverride::ForcingExtrapolationAllowed);
     }
 
     // gh#585 (Stage 3.5): §3.7.3(c) — the `HoldOutTail` stamp is granted

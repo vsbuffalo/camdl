@@ -614,6 +614,12 @@ fn compare_says_when_its_flag_scores_a_fit_under_the_override() {
     assert!(err.contains("was fitted without --allow-forcing-extrapolation; compare scores it under it, as given"),
         "{err}");
     assert_eq!(held_lines(&o).len(), 2, "{}\n{err}", String::from_utf8_lossy(&o.stdout));
+    // `--format json` records it in each row's trace derivation.
+    let o = camdl(tmp.path(), &["compare", &leaf, &leaf, "--allow-forcing-extrapolation", "--format", "json"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    let text = v.to_string();
+    assert_eq!(text.matches("\"forcing_extrapolation_allowed\"").count(), 2, "one per row: {v:#}");
 }
 
 /// Two ODE fits, each made under the override and each holding the forcing
