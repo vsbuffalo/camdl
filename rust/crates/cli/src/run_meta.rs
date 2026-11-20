@@ -1323,19 +1323,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Two processes rewriting one folder's sidecar at once (a `fit run`
-    /// recording its training partition while `camdl dev migrate` raises the
-    /// layout) must not share a temporary file. A writer's temporary is its
-    /// own: one another writer holds at the old fixed name
-    /// (`fit.meta.json.tmp`, here a directory, so it cannot be overwritten)
-    /// does not stop the write, and is left alone.
+    /// A sidecar write stages its bytes through a temporary file of its own
+    /// and renames it into place, so a successful write, first or repeated,
+    /// leaves the sidecar and no temporary beside it. A temporary a writer
+    /// that died mid-write left behind is not this test's subject.
     #[test]
-    fn a_sidecar_write_does_not_use_another_writers_temporary() {
+    fn a_sidecar_write_leaves_no_temporary() {
         let dir = crate::test_support::unique_temp_dir("sidecar_tmp");
-        std::fs::create_dir_all(dir.join("fit.meta.json.tmp")).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        store_fit_sidecar(&dir, &FitSidecar::default()).unwrap();
         store_fit_sidecar(&dir, &FitSidecar::default()).unwrap();
         assert!(read_fit_sidecar(&dir).unwrap().is_some());
-        assert!(dir.join("fit.meta.json.tmp").is_dir(), "another writer's temporary is left alone");
+        let names: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["fit.meta.json".to_string()], "the sidecar and nothing else");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
