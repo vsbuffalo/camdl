@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
 /// The `schema` tag every `<algorithm>_summary.json` carries as its first key,
-/// in the form the predictive manifests use (`camdl.predictive/v3`,
+/// in the form the predictive manifests use (`camdl.predictive/v4`,
 /// `camdl.predict-report/v2`).
 ///
 /// It exists because two keys of this file changed *meaning* under unchanged
