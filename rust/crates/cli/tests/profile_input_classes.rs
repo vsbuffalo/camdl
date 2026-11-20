@@ -1,5 +1,5 @@
 //! A case for every input of `camdl profile`, checked as its class predicts
-//! (`rust/crates/cli/src/input_class.rs`, `PROFILE`; proposal
+//! (`rust/crates/cli/src/input_class.rs`; proposal
 //! `docs/dev/proposals/2026-11-17-honest-input-addressed-store.md` phase 3
 //! "Tests"). The runner is `input_class_runner`.
 //!
@@ -9,8 +9,8 @@
 //! leaves:
 //!
 //! - `keyed(level)`: changed alone, every point's run id changes, and so does
-//!   its hash at the level the class table names (`profile`, `method` or
-//!   `seed`). An environment variable the table keys at a simulation's `model`
+//!   its hash at the level its class names (`profile`, `method` or
+//!   `seed`). An environment variable keyed at a simulation's `model`
 //!   level enters a profile at its `profile` level, which holds the model and
 //!   the engine.
 //! - `execution`: the run ids and the stored bytes stay the same.

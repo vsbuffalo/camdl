@@ -125,7 +125,8 @@ pub(crate) struct Cli {
 }
 
 /// The options every subcommand accepts. Each converted command classifies
-/// them in its own table ([`input_class::SIMULATE`]).
+/// them where it declares its inputs (`#[input(command(.., global(..)))]`,
+/// [`input_class`]).
 #[derive(clap::Args, input_class_derive::Inputs)]
 pub(crate) struct GlobalArgs {
     /// Log verbosity (error/warn/info/debug/trace). Overrides RUST_LOG.

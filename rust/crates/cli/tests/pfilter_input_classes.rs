@@ -1,5 +1,5 @@
 //! A case for every input of `camdl pfilter`, checked as its class predicts
-//! (`rust/crates/cli/src/input_class.rs`, `PFILTER`; proposal
+//! (`rust/crates/cli/src/input_class.rs`; proposal
 //! `docs/dev/proposals/2026-11-17-honest-input-addressed-store.md` phase 3
 //! "Tests"). The runner is `input_class_runner`.
 //!
@@ -9,8 +9,8 @@
 //! fails if an input has none. What each class asserts:
 //!
 //! - `keyed(level)`: changed alone, the pfilter leaf's run id changes, and so
-//!   does its hash at the level the class table names. An environment
-//!   variable the table keys at a simulation's `model` level enters a pfilter
+//!   does its hash at the level its class names. An environment
+//!   variable keyed at a simulation's `model` level enters a pfilter
 //!   at its `model` level too, which holds the model and the engine.
 //! - `execution`: the run id and the stored bytes stay the same.
 //! - `presentation`: the leaf is unaffected (or, for `--no-store`, none is

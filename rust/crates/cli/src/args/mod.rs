@@ -380,6 +380,8 @@ pub struct SimulateArgs {
     /// schedule with no `from`), and enters the run's identity through the
     /// model. Refused with --init-state, which sets the start itself.
     #[arg(long, value_name = "SPEC", allow_hyphen_values = true)]
+    // `--from` moves the model's start (and the starts derived from it) in the
+    // one load the run and its identity share, so it keys the model level.
     #[input(keyed(model))]
     pub from: Option<String>,
 
@@ -757,6 +759,16 @@ pub struct SimulateArgs {
 // ─── fit ──────────────────────────────────────────────────────────────────────
 
 #[derive(Args, Inputs)]
+// Input classes (`input_class`). The fit configuration file is `keyed(fit)`:
+// its problem half is the fit level, though its `[method]` table keys the
+// method level. Every flag that writes into `[method]` (`--starts`, the sampler
+// and dt-check flags, `--binomial`, the pfilter record flags) is
+// `keyed(method)`; `--allow-forcing-extrapolation`, which writes into
+// `[config]`, and the global `--no-licm`, which changes the IR, are
+// `keyed(fit)`. `--resume` keys the method level through its target length and
+// its dep on the base. `--emit-every` keys a synthetic fit through the data it
+// generates, in the fit level. `--allow-nonconverged-source` lifts a refusal
+// and changes nothing a run that starts computes, so it is `execution`.
 #[input(command(levels(fit, method, seed), global(crate::GlobalArgs, override(no_licm = keyed(fit)))))]
 #[command(after_help = colored_help!("\
 Examples:
@@ -1853,6 +1865,15 @@ pub struct LabelArgs {
 // ─── pfilter ──────────────────────────────────────────────────────────────────
 
 #[derive(Args, Inputs)]
+// Input classes (`input_class`). A pfilter leaf's levels are `model` (the
+// resolved model, with the engine), `config` (the scoring setup and the data),
+// `params` (the scored point) and `seed`. `--fit` keys the config level through
+// what its problem supplies: the objective, the data, the two policies.
+// `--table` and a scenario change the resolved model. `--save-final-state`
+// writes a file, and under the fit's `holdout_after` cuts the bound rows to the
+// training rows, which the config level keys. `--pf-max-substeps` and
+// `--time-format` decide whether a run is refused, never what a run that
+// completes stores, so they are `execution`.
 #[input(command(levels(model, config, params, seed), global(crate::GlobalArgs)))]
 #[command(after_help = colored_help!("\
 Examples:
@@ -2048,6 +2069,15 @@ pub struct If2Args {
 // ─── profile ──────────────────────────────────────────────────────────────────
 
 #[derive(Args, Inputs)]
+// Input classes (`input_class`). A profile point's levels are `profile` (the
+// base: the resolved model, the data, the problem, the sweep grid, the engine),
+// `point` (the cell's focal values), `method` (how a cell is fitted), `seed` and
+// `start`. `--sweep` is keyed, not `expands`: the grid is folded into every
+// point's base, so a different grid is a different profile and no cell is
+// shared with it. `--seeds` expands: each seed is its own level. Each algorithm
+// runs on one backend, so `--backend` decides only whether the run is refused,
+// as `--time-format` does; `--allow-nonconverged-source` lifts a refusal. All
+// three are `execution`.
 #[input(command(levels(profile, method, seed), global(crate::GlobalArgs, override(no_licm = keyed(profile)))))]
 #[command(after_help = colored_help!("\
 Examples:
@@ -2348,6 +2378,13 @@ pub struct ProfileArgs {
 // ─── survey ───────────────────────────────────────────────────────────────────
 
 #[derive(Args, Inputs)]
+// Input classes (`input_class`). A survey leaf's levels are `model` (the
+// resolved model and the engine), `config` (the evaluation, the data, the fixed
+// values, the scenario, the objective, the two policies), `box` (the sampled
+// bounds and the number of points) and `seed`. `--fit` keys the config level
+// through what its problem supplies. `--output` is the store root, so it is
+// `execution`, with `--force` and `--parallel`. `--render` asks for the leaf's
+// child `landscape_html/`.
 #[input(command(levels(model, config, box, seed), global(crate::GlobalArgs)))]
 #[command(after_help = colored_help!("\
 EXAMPLES
@@ -3340,6 +3377,9 @@ pub struct MreFitArgs {
 /// its trajectory-output meaning). No `--no-data`: a forward sim has no observed
 /// data, and its tables/params can't be dropped without breaking the run.
 #[derive(Args, Inputs)]
+// Input classes (`input_class`). `mre simulate` writes a bundle that
+// reproduces a simulate run, so every input it shares with `simulate` keeps its
+// class there; `--bundle` is its own.
 #[input(command(levels(model, config, params, scenario, seed, obs), global(crate::GlobalArgs)))]
 #[command(after_help = colored_help!("\
 Bundles a model + its read() tables + params into a shareable `.tar.gz` that

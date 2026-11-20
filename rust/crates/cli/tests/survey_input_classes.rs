@@ -1,5 +1,5 @@
 //! A case for every input of `camdl survey`, checked as its class predicts
-//! (`rust/crates/cli/src/input_class.rs`, `SURVEY`; proposal
+//! (`rust/crates/cli/src/input_class.rs`; proposal
 //! `docs/dev/proposals/2026-11-17-honest-input-addressed-store.md` phase 3
 //! "Tests"). The runner is `input_class_runner`.
 //!
@@ -8,7 +8,7 @@
 //! fails if an input has none. What each class asserts, over the survey leaf:
 //!
 //! - `keyed(level)`: changed alone, the leaf's run id changes, and so does
-//!   its hash at the level the class table names (`model`, `config`, `box` or
+//!   its hash at the level its class names (`model`, `config`, `box` or
 //!   `seed`). An environment variable keyed at a simulation's `model` level
 //!   enters a survey at its `model` level too, which holds the engine.
 //! - `execution`: the run id and the stored bytes stay the same.

@@ -1,5 +1,5 @@
 //! A case for every input of `camdl fit run`, checked as its class predicts
-//! (`rust/crates/cli/src/input_class.rs`, `FIT_RUN`; proposal
+//! (`rust/crates/cli/src/input_class.rs`; proposal
 //! `docs/dev/proposals/2026-11-17-honest-input-addressed-store.md` phase 3
 //! "Tests").
 //!
@@ -17,8 +17,8 @@
 //! What each class asserts:
 //!
 //! - `keyed(level)`: changed alone, every fit leaf's run id changes, and so
-//!   does its hash at the level the class table names ([`assert_rekeys`]). An
-//!   environment variable the table keys at a simulation's `model` level enters
+//!   does its hash at the level its class names ([`assert_rekeys`]). An
+//!   environment variable keyed at a simulation's `model` level enters
 //!   a fit at its `fit` level, which holds the fit's model and engine.
 //! - `execution`: the run ids and the stored bytes stay the same
 //!   ([`assert_same_result`]).

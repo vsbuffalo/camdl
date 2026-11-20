@@ -1,5 +1,5 @@
-//! The class of every input of a converted command, as a table per command,
-//! checked against the arguments clap accepts.
+//! The class of every input of a converted command, declared on its clap field
+//! with `#[derive(Inputs)]` and checked against the arguments clap accepts.
 //!
 //! An input is a command-line field (or, in [`crate::env`], an environment
 //! variable). Its class says what it may do to a stored result, and how that is
@@ -16,13 +16,24 @@
 //! | `expands`      | defines the set of runs (`--seeds`, `--sweep`)               | differential: cells common to both keep their run ids    |
 //! | `removed`      | refuses an old spelling with a migration message             | the flag fails with the message                          |
 //!
-//! A class belongs to a (command, input) pair, not to a flag: a group that
-//! several commands flatten (`ForcingExtrapolationArg`, the global options) is
-//! classified in each command's table: [`SIMULATE`], [`FIT_RUN`], [`PFILTER`],
-//! [`PROFILE`], [`SURVEY`].
-//! `every_<command>_flag_is_classified` (below) checks each against every
-//! argument clap accepts, both ways, and `every_<command>_input_has_a_case`
-//! that every input has a case in `rust/crates/cli/tests/<command>_input_classes.rs`.
+//! Each field of a command's clap struct, of every group it flattens and of
+//! the global options carries its class, `#[input(keyed(config))]` or
+//! `#[input(execution)]`; a field without one does not compile
+//! (`rust/crates/input-class-derive`). A class belongs to a (command, input)
+//! pair, not to a flag: a group that several commands flatten
+//! (`ForcingExtrapolationArg`, the global options) declares a class for each
+//! field, and a command that needs another says so where it flattens the group,
+//! `#[input(override(allow_forcing_extrapolation = keyed(fit)))]`. A command
+//! declares the levels of its leaf, `#[input(command(levels(..), global(..)))]`,
+//! and a `keyed` class naming a level it does not have does not compile.
+//!
+//! The derive generates each command's inventory, `SimulateArgs::INPUTS`, and
+//! [`COMMANDS`] lists them. `every_classified_command_matches_its_clap_arguments`
+//! (below) checks each against the arguments clap accepts, both ways;
+//! `every_<command>_input_has_a_case`, that every input has a case in
+//! `rust/crates/cli/tests/<command>_input_classes.rs`. Those suites read a keyed
+//! input's level from the inventory through `camdl __input-classes`
+//! ([`print_classes`]).
 
 /// The identity level a keyed input enters at. The first five are the levels of
 /// a simulation leaf ([`crate::resolve::resolve_trajectory`]); `Obs` is the
@@ -41,7 +52,6 @@
 /// its `Profile` level. A survey leaf's are `Model`, `Config`, `Box` (the
 /// sampled bounds and the number of points) and `Seed`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[cfg_attr(not(test), allow(dead_code))] // the levels other than `Model` occur only in the command tables
 pub enum Level {
     Model,
     Config,
@@ -57,11 +67,9 @@ pub enum Level {
 
 /// What an input may do to a stored result. See the module table.
 ///
-/// `Provenance` and `Expands` occur only in the command tables, which tests
-/// read; the environment table ([`crate::env::VARS`]), read at run time, has
-/// neither.
+/// `Provenance` and `Expands` occur only in the command inventories; the
+/// environment table ([`crate::env::VARS`]) has neither.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub enum InputClass {
     Keyed(Level),
     Execution,
@@ -308,322 +316,6 @@ pub fn print_classes(path: &[String]) -> i32 {
 }
 
 #[cfg(test)]
-use InputClass::{Child, Execution, Expands, Keyed, Presentation, Provenance, Removed};
-#[cfg(test)]
-use Level::{Config, Fit, Method, Model, Obs, Params, Profile, Scenario, Seed};
-
-/// `camdl simulate`'s inputs, by clap argument id (the field name), with their
-/// classes: `SimulateArgs`, the groups it flattens and the global options.
-#[cfg(test)]
-pub const SIMULATE: &[(&str, InputClass)] = &[
-    // SimulateArgs
-    ("model", Keyed(Model)),
-    ("to", Keyed(Config)),
-    // `--from` moves the model's start (and the starts derived from it) in the
-    // one load the run and its identity share, so it keys the model level.
-    ("from", Keyed(Model)),
-    ("init_state", Keyed(Config)),
-    ("allow_degenerate_rates", Keyed(Config)),
-    ("param_vec", Keyed(Params)),
-    ("scenarios", Expands),
-    ("enable", Keyed(Scenario)),
-    ("disable", Keyed(Scenario)),
-    ("seed", Keyed(Seed)),
-    ("seeds", Expands),
-    ("replicates", Expands),
-    ("draws", Expands),
-    ("sweep", Expands),
-    ("sweep_file", Expands),
-    ("fit", Keyed(Params)),
-    ("n_draws", Expands),
-    ("chains", Expands),
-    ("exclude_chains", Expands),
-    ("draws_out", Presentation),
-    ("output", Presentation),
-    ("stdout", Presentation),
-    ("emit_every", Keyed(Obs)),
-    ("obs", Child),
-    ("obs_dir", Child),
-    ("obs_only", Child),
-    ("obs_only_dir", Child),
-    ("design_from", Presentation),
-    ("projected_out", Presentation),
-    ("dates", Presentation),
-    ("quantities_out", Presentation),
-    ("quantities", Presentation),
-    ("dry_run", Presentation),
-    ("output_dir", Execution),
-    ("parallel", Execution),
-    ("force", Execution),
-    ("label", Provenance),
-    ("event_log", Child),
-    ("format", Presentation),
-    ("tsv", Presentation),
-    ("reactive_log", Presentation),
-    // ForcingExtrapolationArg
-    ("allow_forcing_extrapolation", Keyed(Config)),
-    // ModelOverrides
-    ("params", Keyed(Params)),
-    ("param", Keyed(Params)),
-    ("table", Keyed(Params)),
-    // SimBackend
-    ("backend", Keyed(Config)),
-    ("dt", Keyed(Config)),
-    ("integrator", Keyed(Model)),
-    // OutputView
-    ("every", Keyed(Model)),
-    ("no_flows", Keyed(Config)),
-    ("columns", Keyed(Config)),
-    // GlobalArgs
-    ("verbosity", Presentation),
-    ("progress", Presentation),
-    ("no_progress", Presentation),
-    ("no_ir_cache", Execution),
-    ("no_licm", Keyed(Model)),
-];
-
-/// `camdl fit run`'s inputs, by clap argument id (the field name), with their
-/// classes: `FitRunArgs`, the group it flattens and the global options.
-///
-/// The fit configuration file is `keyed(fit)`: its problem half is the fit
-/// level, though its `[method]` table keys the method level. Every flag that
-/// writes into `[method]` (`--starts`, the sampler and dt-check flags,
-/// `--binomial`, the pfilter record flags) is `keyed(method)`;
-/// `--allow-forcing-extrapolation`, which writes into `[config]`, and the
-/// global `--no-licm`, which changes the IR, are `keyed(fit)`. `--resume` keys
-/// the method level through its target length and its dep on the base.
-/// `--emit-every` keys a synthetic fit through the data it generates, in the
-/// fit level. `--allow-nonconverged-source` lifts a refusal and changes
-/// nothing a run that starts computes, so it is `execution`.
-#[cfg(test)]
-pub const FIT_RUN: &[(&str, InputClass)] = &[
-    // FitRunArgs
-    ("config", Keyed(Fit)),
-    ("starts", Keyed(Method)),
-    ("starts_chains", Keyed(Method)),
-    ("allow_nonconverged_source", Execution),
-    ("parallel", Execution),
-    ("seed", Keyed(Seed)),
-    ("force", Execution),
-    ("resume", Keyed(Method)),
-    ("sweep", Expands),
-    ("emit_every", Keyed(Fit)),
-    ("decibans_thresh", Keyed(Method)),
-    ("_removed_stage", Removed),
-    ("_removed_init", Removed),
-    ("_removed_posterior", Removed),
-    ("_removed_mle", Removed),
-    ("_removed_params", Removed),
-    ("_removed_survey_path", Removed),
-    ("_removed_survey_top_k", Removed),
-    ("_removed_allow_nonconverged_scout", Removed),
-    ("_removed_init_method", Removed),
-    ("_removed_starts_from", Removed),
-    ("_removed_tempering", Removed),
-    ("_removed_rho", Removed),
-    ("label", Provenance),
-    ("no_dt_check", Keyed(Method)),
-    ("dt_check_strict", Keyed(Method)),
-    ("binomial", Keyed(Method)),
-    ("dt_check_halvings", Keyed(Method)),
-    ("cooling_target_iters", Keyed(Method)),
-    ("max_tree_depth", Keyed(Method)),
-    ("trajectory_warmup", Keyed(Method)),
-    ("csmc_sweeps_per_nuts", Keyed(Method)),
-    ("n_trajectories", Keyed(Method)),
-    ("diagonal_mass", Keyed(Method)),
-    ("no_nuts", Keyed(Method)),
-    ("no_ancestor_sampling", Keyed(Method)),
-    ("no_adapt", Keyed(Method)),
-    ("adapt_start", Keyed(Method)),
-    ("record_ancestry", Keyed(Method)),
-    ("record_prequential", Keyed(Method)),
-    // ForcingExtrapolationArg
-    ("allow_forcing_extrapolation", Keyed(Fit)),
-    // GlobalArgs
-    ("verbosity", Presentation),
-    ("progress", Presentation),
-    ("no_progress", Presentation),
-    ("no_ir_cache", Execution),
-    ("no_licm", Keyed(Fit)),
-];
-
-/// `camdl pfilter`'s inputs, by clap argument id (the field name), with their
-/// classes: `PfilterArgs`, the groups it flattens and the global options.
-///
-/// A pfilter leaf's levels are `model` (the resolved model, with the engine),
-/// `config` (the scoring setup and the data), `params` (the scored point) and
-/// `seed`. `--fit` keys the config level through what its problem supplies:
-/// the objective, the data, the two policies. `--table` and a scenario change
-/// the resolved model. `--save-final-state` writes a file, and under the fit's
-/// `holdout_after` cuts the bound rows to the training rows, which the config
-/// level keys. `--pf-max-substeps` and `--time-format` decide whether a run is
-/// refused, never what a run that completes stores, so they are `execution`.
-#[cfg(test)]
-pub const PFILTER: &[(&str, InputClass)] = &[
-    // PfilterArgs
-    ("model", Keyed(Model)),
-    ("particles", Keyed(Config)),
-    ("data", Keyed(Config)),
-    ("fit", Keyed(Config)),
-    ("replicates", Keyed(Config)),
-    ("trace", Presentation),
-    ("pf_health", Presentation),
-    ("output", Presentation),
-    ("save_final_state", Keyed(Config)),
-    ("save_paths", Presentation),
-    ("n_paths", Presentation),
-    ("save_filtering", Presentation),
-    ("save_filtered_streams", Presentation),
-    ("save_prequential", Presentation),
-    ("score_from", Presentation),
-    ("no_save_samples", Presentation),
-    ("no_store", Presentation),
-    // ModelOverrides
-    ("params", Keyed(Params)),
-    ("param", Keyed(Params)),
-    ("table", Keyed(Model)),
-    // ScenarioArgs
-    ("scenario", Keyed(Model)),
-    ("enable", Keyed(Model)),
-    ("disable", Keyed(Model)),
-    // InferenceCore
-    ("dt", Keyed(Config)),
-    ("seed", Keyed(Seed)),
-    ("parallel", Execution),
-    ("allow_degenerate_rates", Keyed(Config)),
-    ("time_format", Execution),
-    ("pf_max_substeps", Execution),
-    ("binomial", Keyed(Config)),
-    // ForcingExtrapolationArg
-    ("allow_forcing_extrapolation", Keyed(Config)),
-    // StreamSelection
-    ("obs", Keyed(Config)),
-    // GlobalArgs
-    ("verbosity", Presentation),
-    ("progress", Presentation),
-    ("no_progress", Presentation),
-    ("no_ir_cache", Execution),
-    ("no_licm", Keyed(Model)),
-];
-
-/// `camdl profile`'s inputs, by clap argument id (the field name), with their
-/// classes: `ProfileArgs`, the groups it flattens and the global options.
-///
-/// A profile point's levels are `profile` (the base: the resolved model, the
-/// data, the problem, the sweep grid, the engine), `point` (the cell's focal
-/// values), `method` (how a cell is fitted), `seed` and `start`. `--sweep` is
-/// keyed, not `expands`: the grid is folded into every point's base, so a
-/// different grid is a different profile and no cell is shared with it.
-/// `--seeds` expands: each seed is its own level. Each algorithm runs on one
-/// backend, so `--backend` decides only whether the run is refused, as
-/// `--time-format` does; `--allow-nonconverged-source` lifts a refusal. All
-/// three are `execution`.
-#[cfg(test)]
-pub const PROFILE: &[(&str, InputClass)] = &[
-    // ProfileArgs
-    ("model", Keyed(Profile)),
-    ("data", Keyed(Profile)),
-    ("fit", Keyed(Profile)),
-    ("sweep", Keyed(Profile)),
-    ("particles", Keyed(Method)),
-    ("iterations", Keyed(Method)),
-    ("n_starts", Keyed(Method)),
-    ("starts", Keyed(Method)),
-    ("starts_chains", Keyed(Method)),
-    ("allow_nonconverged_source", Execution),
-    ("_removed_init", Removed),
-    ("_removed_posterior", Removed),
-    ("_removed_mle", Removed),
-    ("_removed_params", Removed),
-    ("_removed_pmmh_steps", Removed),
-    ("_removed_pmmh_particles", Removed),
-    ("_removed_pmmh_rho", Removed),
-    ("cooling", Keyed(Method)),
-    ("cooling_target_iters", Keyed(Method)),
-    ("rw_sd", Keyed(Method)),
-    ("output", Presentation),
-    ("format", Presentation),
-    ("seeds", Expands),
-    ("label", Provenance),
-    ("algorithm", Keyed(Method)),
-    ("backend", Execution),
-    // InferenceModelOverrides
-    ("fixed_cli", Keyed(Profile)),
-    ("fixed_files", Keyed(Profile)),
-    ("table", Keyed(Profile)),
-    ("_removed_param", Removed),
-    // ScenarioArgs
-    ("scenario", Keyed(Profile)),
-    ("enable", Keyed(Profile)),
-    ("disable", Keyed(Profile)),
-    // InferenceCore
-    ("dt", Keyed(Method)),
-    ("seed", Keyed(Seed)),
-    ("parallel", Execution),
-    ("allow_degenerate_rates", Keyed(Profile)),
-    ("time_format", Execution),
-    ("pf_max_substeps", Keyed(Method)),
-    ("binomial", Keyed(Method)),
-    // ForcingExtrapolationArg
-    ("allow_forcing_extrapolation", Keyed(Profile)),
-    // StreamSelection
-    ("obs", Keyed(Profile)),
-    // GlobalArgs
-    ("verbosity", Presentation),
-    ("progress", Presentation),
-    ("no_progress", Presentation),
-    ("no_ir_cache", Execution),
-    ("no_licm", Keyed(Profile)),
-];
-
-/// `camdl survey`'s inputs, by clap argument id (the field name), with their
-/// classes: `SurveyArgs`, the group it flattens and the global options.
-///
-/// A survey leaf's levels are `model` (the resolved model and the engine),
-/// `config` (the evaluation, the data, the fixed values, the scenario, the
-/// objective, the two policies), `box` (the sampled bounds and the number of
-/// points) and `seed`. `--fit` keys the config level through what its
-/// problem supplies. `--output` is the store root, so it is `execution`, with
-/// `--force` and `--parallel`. `--render` asks for the leaf's child
-/// `landscape_html/`.
-#[cfg(test)]
-pub const SURVEY: &[(&str, InputClass)] = &[
-    // SurveyArgs
-    ("model", Keyed(Model)),
-    ("allow_degenerate_rates", Keyed(Config)),
-    ("fit", Keyed(Config)),
-    ("estimate", Keyed(Level::Box)),
-    ("data", Keyed(Config)),
-    ("fixed", Keyed(Config)),
-    ("scenario", Keyed(Config)),
-    ("n_points", Keyed(Level::Box)),
-    ("eval", Keyed(Config)),
-    ("eval_particles", Keyed(Config)),
-    ("eval_replicates", Keyed(Config)),
-    ("seed", Keyed(Seed)),
-    ("render", Child),
-    ("output", Execution),
-    ("label", Provenance),
-    ("force", Execution),
-    ("parallel", Execution),
-    // ForcingExtrapolationArg
-    ("allow_forcing_extrapolation", Keyed(Config)),
-    // GlobalArgs
-    ("verbosity", Presentation),
-    ("progress", Presentation),
-    ("no_progress", Presentation),
-    ("no_ir_cache", Execution),
-    ("no_licm", Keyed(Model)),
-];
-
-/// `camdl mre simulate`'s own input. It flattens `SimulateArgs` and writes a
-/// bundle that reproduces that simulate run, so every other input keeps the
-/// class it has in [`SIMULATE`].
-#[cfg(test)]
-pub const MRE_SIMULATE_OWN: &[(&str, InputClass)] = &[("bundle", Presentation)];
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use clap::CommandFactory;
@@ -646,78 +338,28 @@ mod tests {
             .collect()
     }
 
-    fn assert_covers<'a>(what: &str, clap: BTreeSet<String>, table: impl IntoIterator<Item = &'a (&'a str, InputClass)>) {
-        let mut seen = BTreeSet::new();
-        for (field, _) in table {
-            assert!(seen.insert(field.to_string()), "{what}: `{field}` is classified twice");
-        }
-        let missing: Vec<&String> = clap.difference(&seen).collect();
-        let stale: Vec<&String> = seen.difference(&clap).collect();
-        assert!(
-            missing.is_empty() && stale.is_empty(),
-            "{what}: the class table and the arguments clap accepts disagree.\n  \
-             accepted by clap, not classified: {missing:?}\n  \
-             classified, not accepted by clap: {stale:?}"
-        );
-    }
-
-    /// The inventory `#[derive(Inputs)]` generates for each command is its
-    /// hand-written table, row for row, as a set.
+    /// Every classified command's inventory names exactly the arguments clap
+    /// accepts for it. The derive sees one struct and the groups it flattens;
+    /// this sees the parser `main.rs` builds. So it catches what the derive
+    /// cannot: a subcommand wired to a struct other than the one classified,
+    /// global options that reach a command from anywhere but the group its
+    /// `global(..)` names, and a field whose clap id is not its name
+    /// (`#[arg(id = ..)]`) or that is not an argument at all (`#[arg(skip)]`).
     #[test]
-    fn the_derived_inventory_is_each_commands_table() {
-        use crate::args::{FitRunArgs, MreSimulateArgs, PfilterArgs, ProfileArgs, SimulateArgs, SurveyArgs};
-        fn set<'a>(rows: impl IntoIterator<Item = &'a (&'a str, InputClass)>) -> BTreeSet<(String, InputClass)> {
-            rows.into_iter().map(|(f, c)| (f.to_string(), *c)).collect()
-        }
-        let mre_table: Vec<(&str, InputClass)> = SIMULATE.iter().chain(MRE_SIMULATE_OWN).copied().collect();
-        for (what, derived, table) in [
-            ("simulate", SimulateArgs::INPUTS, SIMULATE),
-            ("fit run", FitRunArgs::INPUTS, FIT_RUN),
-            ("pfilter", PfilterArgs::INPUTS, PFILTER),
-            ("profile", ProfileArgs::INPUTS, PROFILE),
-            ("survey", SurveyArgs::INPUTS, SURVEY),
-            ("mre simulate", MreSimulateArgs::INPUTS, &mre_table[..]),
-        ] {
-            assert_eq!(derived.len(), table.len(), "{what}: as many derived inputs as table rows");
-            let (d, t) = (set(derived), set(table));
-            let only_derived: Vec<_> = d.difference(&t).collect();
-            let only_table: Vec<_> = t.difference(&d).collect();
+    fn every_classified_command_matches_its_clap_arguments() {
+        for (path, inputs) in COMMANDS {
+            let what = format!("camdl {}", path.join(" "));
+            let clap = clap_args(path);
+            let classified: BTreeSet<String> = inputs.iter().map(|(f, _)| f.to_string()).collect();
+            let missing: Vec<&String> = clap.difference(&classified).collect();
+            let stale: Vec<&String> = classified.difference(&clap).collect();
             assert!(
-                only_derived.is_empty() && only_table.is_empty(),
-                "{what}: the derived inventory and the table disagree.\n  \
-                 derived only: {only_derived:?}\n  table only: {only_table:?}"
+                missing.is_empty() && stale.is_empty(),
+                "{what}: the derived inventory and the arguments clap accepts disagree.\n  \
+                 accepted by clap, not classified: {missing:?}\n  \
+                 classified, not accepted by clap: {stale:?}"
             );
         }
-    }
-
-    #[test]
-    fn every_simulate_flag_is_classified() {
-        assert_covers("camdl simulate", clap_args(&["simulate"]), SIMULATE);
-    }
-
-    #[test]
-    fn every_fit_run_flag_is_classified() {
-        assert_covers("camdl fit run", clap_args(&["fit", "run"]), FIT_RUN);
-    }
-
-    #[test]
-    fn every_pfilter_flag_is_classified() {
-        assert_covers("camdl pfilter", clap_args(&["pfilter"]), PFILTER);
-    }
-
-    #[test]
-    fn every_profile_flag_is_classified() {
-        assert_covers("camdl profile", clap_args(&["profile"]), PROFILE);
-    }
-
-    #[test]
-    fn every_survey_flag_is_classified() {
-        assert_covers("camdl survey", clap_args(&["survey"]), SURVEY);
-    }
-
-    #[test]
-    fn every_mre_simulate_flag_is_classified() {
-        assert_covers("camdl mre simulate", clap_args(&["mre", "simulate"]), SIMULATE.iter().chain(MRE_SIMULATE_OWN));
     }
 
     /// Environment inputs with no `simulate` case, each with the reason.
@@ -793,11 +435,11 @@ mod tests {
             .collect()
     }
 
-    /// The cases `table` and the environment table (less `no_case`) call for,
+    /// The cases `inputs` and the environment table (less `no_case`) call for,
     /// against those `file` holds.
-    fn assert_every_input_has_a_case(what: &str, file: &str, table: &[(&str, InputClass)], no_case: &[(&str, &str)]) {
+    fn assert_every_input_has_a_case(what: &str, file: &str, inputs: Inventory, no_case: &[(&str, &str)]) {
         let mut wanted = BTreeSet::new();
-        for (field, class) in table {
+        for (field, class) in inputs {
             wanted.insert(case_name(*class, field, false));
         }
         for v in crate::env::VARS {
@@ -810,7 +452,7 @@ mod tests {
         let stray: Vec<&String> = cases.difference(&wanted).collect();
         assert!(
             missing.is_empty() && stray.is_empty(),
-            "the cases and {what}'s class table disagree.\n  \
+            "the cases and {what}'s inventory disagree.\n  \
              inputs without a case: {missing:?}\n  \
              cases naming no such input (or the wrong class): {stray:?}"
         );
@@ -826,7 +468,7 @@ mod tests {
     /// run id and manifest are unchanged and the child is at its address.
     #[test]
     fn every_simulate_input_has_a_case() {
-        assert_every_input_has_a_case("simulate", "simulate_input_classes.rs", SIMULATE, NO_CASE);
+        assert_every_input_has_a_case("simulate", "simulate_input_classes.rs", crate::args::SimulateArgs::INPUTS, NO_CASE);
     }
 
     /// The same for `fit run`, in `tests/fit_run_input_classes.rs`, where a
@@ -834,24 +476,24 @@ mod tests {
     /// message.
     #[test]
     fn every_fit_run_input_has_a_case() {
-        assert_every_input_has_a_case("fit run", "fit_run_input_classes.rs", FIT_RUN, FIT_RUN_NO_CASE);
+        assert_every_input_has_a_case("fit run", "fit_run_input_classes.rs", crate::args::FitRunArgs::INPUTS, FIT_RUN_NO_CASE);
     }
 
     /// The same for `survey`, in `tests/survey_input_classes.rs`.
     #[test]
     fn every_survey_input_has_a_case() {
-        assert_every_input_has_a_case("survey", "survey_input_classes.rs", SURVEY, SURVEY_NO_CASE);
+        assert_every_input_has_a_case("survey", "survey_input_classes.rs", crate::args::SurveyArgs::INPUTS, SURVEY_NO_CASE);
     }
 
     /// The same for `profile`, in `tests/profile_input_classes.rs`.
     #[test]
     fn every_profile_input_has_a_case() {
-        assert_every_input_has_a_case("profile", "profile_input_classes.rs", PROFILE, PROFILE_NO_CASE);
+        assert_every_input_has_a_case("profile", "profile_input_classes.rs", crate::args::ProfileArgs::INPUTS, PROFILE_NO_CASE);
     }
 
     /// The same for `pfilter`, in `tests/pfilter_input_classes.rs`.
     #[test]
     fn every_pfilter_input_has_a_case() {
-        assert_every_input_has_a_case("pfilter", "pfilter_input_classes.rs", PFILTER, PFILTER_NO_CASE);
+        assert_every_input_has_a_case("pfilter", "pfilter_input_classes.rs", crate::args::PfilterArgs::INPUTS, PFILTER_NO_CASE);
     }
 }

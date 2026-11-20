@@ -17,8 +17,8 @@
 //! What each class asserts:
 //!
 //! - `keyed(level)`: changed alone, every cell's run id changes, and so does
-//!   its hash at the level the class table names ([`assert_rekeys`], which
-//!   reads the level from the table). `keyed(obs)`: the trajectory keeps its
+//!   its hash at the level its class names ([`assert_rekeys`], which
+//!   reads the level from the inventory). `keyed(obs)`: the trajectory keeps its
 //!   run id and the observation subtree under it re-keys.
 //! - `execution`: the run ids and the stored bytes stay the same
 //!   ([`assert_same_result`]).
