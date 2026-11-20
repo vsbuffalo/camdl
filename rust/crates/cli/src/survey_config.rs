@@ -31,6 +31,7 @@
 //! the seed level the seed.
 
 use crate::args::types::EstimateBoundsSpec;
+use crate::fit::fitted_model::FittedSettings;
 use crate::fit::handle::FitProblem;
 use crate::run_meta::SurveyEvalMethod;
 
@@ -165,14 +166,16 @@ pub(crate) fn resolve(
     // which `fit run` applied to the fit, and fails the trajectory otherwise;
     // under the particle filter a point where only some particles collapse
     // still scores, to a different value (gh#1235).
+    let settings = problem
+        .map(|p| FittedSettings::of(&p.config))
+        .unwrap_or_default()
+        .with_flags(*allow_degenerate_rates, *allow_forcing_extrapolation);
     let eval_settings = sim::EvalSettings {
-        allow_degenerate_rates: *allow_degenerate_rates || problem.is_some_and(|p| p.config.allow_degenerate_rates),
+        allow_degenerate_rates: settings.allow_degenerate_rates,
     };
     // The forcing-extrapolation policy every point is evaluated under and the
     // leaf's record names, installed for the rest of the command.
-    let forcing = crate::forcing_extrapolation::ForcingPolicy::new(
-        *allow_forcing_extrapolation || problem.is_some_and(|p| p.config.allow_forcing_extrapolation),
-    );
+    let forcing = crate::forcing_extrapolation::ForcingPolicy::new(settings.allow_forcing_extrapolation);
     let installed = forcing.install();
 
     let resolved = ResolvedSurveyConfig {

@@ -33,6 +33,7 @@
 //! algorithm and settings; its `seed` and `start` levels the seed and start.
 
 use crate::args::types::{DataSpec, RwSd, SweepSpec};
+use crate::fit::fitted_model::FittedSettings;
 use crate::fit::handle::FitProblem;
 use crate::pfilter_config::ScenarioFlags;
 use crate::profile::ProfileAlgo;
@@ -312,17 +313,19 @@ pub(crate) fn resolve(
     // allow_degenerate_rates`, and an error otherwise. It changes every cell's
     // log-likelihood, so it is applied before any cell runs and keyed in the
     // base identity.
+    let settings = problem
+        .map(|p| FittedSettings::of(&p.config))
+        .unwrap_or_default()
+        .with_flags(*allow_degenerate_rates, *allow_forcing_extrapolation);
     let eval = sim::EvalSettings {
-        allow_degenerate_rates: *allow_degenerate_rates || problem.is_some_and(|p| p.config.allow_degenerate_rates),
+        allow_degenerate_rates: settings.allow_degenerate_rates,
     };
     // A forcing evaluated outside its range holds its end value under
     // `--allow-forcing-extrapolation` or the fit's `[config]
     // allow_forcing_extrapolation` (gh#1235), and is refused otherwise: the
     // policy every cell runs under and every record names, installed for the
     // rest of the command and keyed in the base identity from this value.
-    let forcing = crate::forcing_extrapolation::ForcingPolicy::new(
-        *allow_forcing_extrapolation || problem.is_some_and(|p| p.config.allow_forcing_extrapolation),
-    );
+    let forcing = crate::forcing_extrapolation::ForcingPolicy::new(settings.allow_forcing_extrapolation);
     let installed = forcing.install();
 
     // An nl-* cell's optimizer budget: the fit's own, when its [method] is an

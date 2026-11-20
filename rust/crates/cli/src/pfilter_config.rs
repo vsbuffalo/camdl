@@ -34,6 +34,7 @@
 
 use crate::args::types::DataSpec;
 use crate::fit::config_v2::LikelihoodObjective;
+use crate::fit::fitted_model::FittedSettings;
 use crate::fit::handle::FitProblem;
 
 /// The resolved configuration of one `camdl pfilter`.
@@ -197,17 +198,19 @@ pub(crate) fn resolve(
     // which `fit run` applied to the fit, and kills the particle otherwise
     // (gh#1235). Carried on the compiled model every particle runs, and keyed
     // in the store leaf from the same value.
+    let settings = problem
+        .map(|p| FittedSettings::of(&p.config))
+        .unwrap_or_default()
+        .with_flags(*allow_degenerate_rates, *allow_forcing_extrapolation);
     let eval = sim::EvalSettings {
-        allow_degenerate_rates: *allow_degenerate_rates || problem.is_some_and(|p| p.config.allow_degenerate_rates),
+        allow_degenerate_rates: settings.allow_degenerate_rates,
     };
     // A forcing evaluated outside its range holds its end value under
     // `--allow-forcing-extrapolation` or the fit's `[config]
     // allow_forcing_extrapolation`, and is refused otherwise: the policy the
     // filter runs under and the leaf's record names, installed for the rest of
     // the command and keyed in the leaf from this value.
-    let forcing = crate::forcing_extrapolation::ForcingPolicy::new(
-        *allow_forcing_extrapolation || problem.is_some_and(|p| p.config.allow_forcing_extrapolation),
-    );
+    let forcing = crate::forcing_extrapolation::ForcingPolicy::new(settings.allow_forcing_extrapolation);
     let installed = forcing.install();
     // The likelihood scored: the fit's own (`ic_free`), read through the
     // function `fit run` uses, so a pfilter at the fit's MLE reports the number
