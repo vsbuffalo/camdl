@@ -2080,6 +2080,13 @@ fn run_fit(
                                 pf_seed,
                                 obs_model.first_observation_opens_after_run_start(smc_config.t_start),
                                 None);
+                            // The forcings the fit's policy held outside their
+                            // ranges, as `camdl pfilter --save-prequential`
+                            // records them, so `compare` reading this trace
+                            // reports them on its row. The policy is the
+                            // command's, so a forcing an earlier method of this
+                            // fit held on the same model is listed too.
+                            trace.warnings.extend(forcing.trace_warnings());
                             // Schema 5: how this trace was computed, recorded
                             // as `camdl pfilter --save-prequential` records
                             // it — one pass (replicate 0) at the point this

@@ -577,6 +577,30 @@ fn compare_reports_a_hold_made_while_scoring_each_row() {
     assert_eq!(held_lines(&o).len(), 2, "one line per row:\n{}\n{}", String::from_utf8_lossy(&o.stdout), stderr(&o));
 }
 
+/// A fit whose method is `pfilter` writes its prequential trace in its
+/// leaf, and `compare` reads that trace as it is. Made under the override on
+/// data past the forcing's range, the filter held the forcing, and the trace
+/// records it, so `compare` reports it on each row (gh#1235).
+#[test]
+fn compare_reports_a_hold_recorded_by_a_pfilter_method_fit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let m = model(tmp.path(), "linear", &ROWS_TO_50);
+    let toml = fit_toml(tmp.path(), &m, "allow_forcing_extrapolation = true\n");
+    let text = std::fs::read_to_string(&toml).unwrap().replace(
+        "[method]\nalgorithm = \"pgas\"\nbackend = \"chain_binomial\"\nchains = 1\nparticles = 8\n\
+         sweeps = 4\nburn_in = 2\n",
+        "[method]\nalgorithm = \"pfilter\"\nbackend = \"chain_binomial\"\nparticles = 50\nreplicates = 1\n",
+    );
+    assert!(text.contains("algorithm = \"pfilter\""), "{text}");
+    std::fs::write(&toml, text).unwrap();
+    let o = camdl(tmp.path(), &["fit", "run", toml.to_str().unwrap()]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let leaf = method_leaf(tmp.path(), "pfilter");
+    let o = camdl(tmp.path(), &["compare", &leaf, &leaf]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(held_lines(&o).len(), 2, "one line per row:\n{}\n{}", String::from_utf8_lossy(&o.stdout), stderr(&o));
+}
+
 /// A fit made without the override, scored under compare's
 /// `--allow-forcing-extrapolation`: compare says the flag turned the setting
 /// on for it, and reports the hold on its rows.
