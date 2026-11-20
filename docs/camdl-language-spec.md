@@ -3845,8 +3845,10 @@ the plain division, which remains legal, does not have:
 
 `prevalence` has no pooling argument of its own; pooling is written with `sum`
 on each side. It is valid only as the whole right-hand side of
-`projected = …`. Inside arithmetic it is refused with **E100**, as an undeclared
-function, and a proportion inside arithmetic is written as the division,
+`projected = …`. Inside arithmetic it is refused with **E100**, whose message
+says where `prevalence` is accepted and, in a projection, whose hint writes the
+expression out with each call replaced by its division. A proportion inside
+arithmetic is written as the division,
 `sum(a in age, w[a] * (I[a] / N_local[a]))`. A missing `of` or `among` is
 **E250**. `prevalence(X)` and `prevalence(X1, X2)` are **E356**: write `X` for
 the count, or `prevalence(of = X, among = N)` for the proportion. A proportion

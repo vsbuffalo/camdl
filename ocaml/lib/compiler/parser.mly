@@ -65,6 +65,14 @@
         ~fix:None;
       []
 
+  (* Arguments standing in for ones the author did not write, after the parser
+     has reported why a likelihood call is malformed. The expander checks every
+     family's arguments (E250, E251); without these it would report the same
+     mistake a second time, as arguments missing from a call the author never
+     wrote. The compile already fails on the parser's error, so the values are
+     never used. *)
+  let placeholders keys = List.map (fun k -> (k, EConst 1.0)) keys
+
   (* Assemble an [obs_decl] from the header (name, indices, source) and the
      block's key/value entries. The entries are the polymorphic variants
      produced by [obs_kv]; we fold them into the record fields. A bare
@@ -108,12 +116,17 @@
               ~msg:(Printf.sprintf
                 "diagnostic_test base must be binomial(...) or bernoulli(...); got %s(...)"
                 other);
-            LikBinomial [])
-       | _ ->
+            LikBinomial (rewrite_p (placeholders ["n"; "p"])))
+       | base, _, _ ->
          Parser_errors.push_error ~sp ~ep
            ~code:"E254"
            ~msg:"diagnostic_test requires keyword args base = <binomial|bernoulli>(...), sens = <expr>, spec = <expr>";
-         LikBinomial [])
+         (* A base the wrapper accepts keeps its own arguments, so a mistake
+            inside it is still reported. *)
+         (match base with
+          | Some (EFuncCall ("binomial", base_args))  -> LikBinomial base_args
+          | Some (EFuncCall ("bernoulli", base_args)) -> LikBernoulli base_args
+          | _ -> LikBinomial (placeholders ["n"; "p"])))
     | "zero_inflated" ->
       (* Zero-inflation wrapper: `zero_inflated(base = neg_binomial(mean=, r=),
          pi = )`. Desugar to the flat [LikZeroInflatedNegBinomial] by flattening
@@ -140,17 +153,27 @@
               ~code:"E324"
               ~msg:(Printf.sprintf
                 "zero_inflated base must be neg_binomial(...); got %s(...)" other);
-            LikZeroInflatedNegBinomial [])
-       | _ ->
+            LikZeroInflatedNegBinomial (placeholders ["mean"; "r"] @ [("pi", pi_e)]))
+       | base, pi ->
          Parser_errors.push_error ~sp ~ep
            ~code:"E325"
            ~msg:"zero_inflated requires keyword args base = neg_binomial(...), pi = <expr>";
-         LikZeroInflatedNegBinomial [])
+         (* What the author did write is kept, so a mistake inside it is
+            still reported. *)
+         let base_args = match base with
+           | Some (EFuncCall ("neg_binomial", base_args)) -> base_args
+           | _ -> placeholders ["mean"; "r"] in
+         let pi_arg = match pi with
+           | Some pi_e -> [("pi", pi_e)]
+           | None -> placeholders ["pi"] in
+         LikZeroInflatedNegBinomial (base_args @ pi_arg))
     | s ->
       Parser_errors.push_error ~sp ~ep
         ~code:"E104"
         ~msg:(Printf.sprintf "unknown likelihood '%s': expected one of neg_binomial, poisson, normal, binomial, beta_binomial, beta, bernoulli, diagnostic_test, zero_inflated" s);
-      LikPoisson args
+      (* The arguments belong to a family that does not exist; checking them
+         against Poisson's would report them as mistakes they are not. *)
+      LikPoisson (placeholders ["rate"])
 
   (* Destructure `covers = <form>(<time column>[, <span>])` (gh#833) out of a
      parsed expression. Shape only — whether the form NAME is one of the three,
@@ -1152,7 +1175,7 @@ obs_kv:
           Parser_errors.push_error ~sp:$startpos ~ep:$endpos
             ~code:"E118"
             ~msg:"likelihood value must be a function call, e.g. cases ~ neg_binomial(mean = projected, r = k)";
-          LikPoisson []) }
+          LikPoisson (placeholders ["rate"])) }
 
 (* The `emit_schedule` literal (§2.5): `every N 'unit` (regular) or
    `at [t1, t2, ...] 'unit` (explicit times). Lowers to the same

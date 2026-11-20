@@ -5960,6 +5960,20 @@ let rec resolve_expr ctx (env : (string * string) list) (e : expr) : Ir.expr =
           ~hint:(Printf.sprintf "write '%s' or '%s(t)'" fname fname) ();
       Ir.TimeFunc fname
     end
+    else if fname = "prevalence" then begin
+      (* The one call a projection accepts whole, reaching an expression
+         position: a likelihood argument, a `let`, a rate. A projection that
+         merely contains it is reported, located and with its rewrite, by
+         [check_observation_surface] and never resolved. *)
+      Diagnostics.error ctx.diags ~code:"E100" ~loc:Diagnostics.no_loc
+        ~message:"`prevalence(...)` is accepted only as a whole projection, \
+                  `projected = prevalence(of = ..., among = ...)`, not inside \
+                  an expression"
+        ~hint:"write the proportion as a division — `rho * I / N` for \
+               `rho * prevalence(of = I, among = N)` — or keep `projected = \
+               prevalence(of = I, among = N)` and use `projected` here" ();
+      Ir.Const 0.0
+    end
     else begin
       Diagnostics.error ctx.diags ~code:"E100" ~loc:Diagnostics.no_loc
         ~message:(Printf.sprintf "undeclared function '%s'" fname)
@@ -11957,6 +11971,39 @@ let classify_prevalence_call (args : (string * expr) list) : prevalence_call =
              "the form is %s, e.g. `prevalence(of = I[a], among = N_local[a])`"
              form })
 
+(* The first `prevalence(...)` call in [e], anywhere in it. *)
+let rec first_prevalence_call (e : expr) : expr option =
+  let first es = List.find_map first_prevalence_call es in
+  match e with
+  | EFuncCall ("prevalence", _) -> Some e
+  | EFuncCall (_, args) -> first (List.map snd args)
+  | EBinOp (_, l, r) | ERange (l, r) -> first [l; r]
+  | EUnOp (_, a) | ESum (_, _, _, a, _) | ESumStages (_, _, a, _) -> first [a]
+  | ECond (p, a, b) -> first [p; a; b]
+  | EList es -> first es
+  | EConst _ | EUnit _ | EIdent _ | EIndex _ | EObsAccess _ | ERunMember _ -> None
+
+(* [e] with each well-formed `prevalence(of = X, among = Y)` replaced by the
+   division it stands for, `X / Y`: the expression the author can write in its
+   place. A malformed call is left as written; its own form is the mistake to
+   fix first. *)
+let rec prevalence_as_division (e : expr) : expr =
+  let go = prevalence_as_division in
+  match e with
+  | EFuncCall ("prevalence", args) ->
+    (match classify_prevalence_call args with
+     | Prev_proportion { of_; among } -> EBinOp (Div, of_, among)
+     | Prev_removed _ | Prev_malformed _ -> e)
+  | EFuncCall (f, args) -> EFuncCall (f, List.map (fun (k, a) -> (k, go a)) args)
+  | EBinOp (op, l, r) -> EBinOp (op, go l, go r)
+  | ERange (l, r) -> ERange (go l, go r)
+  | EUnOp (op, a) -> EUnOp (op, go a)
+  | ESum (v, d, g, a, loc) -> ESum (v, d, g, go a, loc)
+  | ESumStages (v, c, a, loc) -> ESumStages (v, c, go a, loc)
+  | ECond (p, a, b) -> ECond (go p, go a, go b)
+  | EList es -> EList (List.map go es)
+  | EConst _ | EUnit _ | EIdent _ | EIndex _ | EObsAccess _ | ERunMember _ -> e
+
 (* A `let` by name, read from the declaration list rather than [ctx.let_tbl]
    so it serves both the surface pass (which runs before the lookup tables
    exist) and the projection dispatch. *)
@@ -12340,7 +12387,28 @@ let check_observation_surface ctx =
       (match classify_prevalence_call args with
        | Prev_removed _ -> ()   (* E356's hint already states the pooling *)
        | _ -> check_bare_pooling ctx od (pools call))
-    | Some (ProjDerived e) -> check_bare_pooling ctx od (pools e)
+    | Some (ProjDerived e) ->
+      (* `prevalence(...)` is a projection form, not a function: it is
+         accepted as the whole of `projected` and nowhere inside it. Reported
+         here, located, with the expression rewritten without it; the
+         projection lowering leaves the stream unresolved. *)
+      (match first_prevalence_call e with
+       | Some call ->
+         Diagnostics.error ctx.diags ~code:"E100" ~loc:(at call)
+           ~message:(Printf.sprintf
+             "observation '%s': `prevalence(...)` is accepted only as the \
+              whole projection, `projected = prevalence(of = ..., among = \
+              ...)`, not inside an expression"
+             od.oname)
+           ~hint:(Printf.sprintf
+             "write the proportion as a division:\n\
+             \      projected = %s\n\
+             \  or keep the proportion whole and move the rest into the \
+                likelihood, e.g. `binomial(n = tested, p = rho * projected)`"
+             (surface_src (prevalence_as_division e)))
+           ()
+       | None -> ());
+      check_bare_pooling ctx od (pools e)
     | _ -> ()
   ) ctx.obs_decls
 
@@ -13413,6 +13481,11 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
          | Some [single] -> Ir.CumulativeFlow single
          | Some many     -> check_flows_disjoint many; Ir.CumulativeFlowSum many
          | None when mentions_incidence e -> incidence_misuse e
+         (* Reported by [check_observation_surface]; resolving it would add
+            the generic E100 for the same call. *)
+         | None when Option.is_some (first_prevalence_call e) ->
+           projection_refused := true;
+           Ir.DerivedExpr (Ir.Const 0.0)
          | None          -> derived e)
     in
     (* Likelihood kwarg resolution with strict diagnostics. Unlike the
