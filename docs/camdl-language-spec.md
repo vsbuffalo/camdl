@@ -5090,15 +5090,11 @@ through other entries or `let` bindings, a compartment that is.
 
 ## 16. Output and Quantities
 
-A simulation writes a **trajectory** — the time series of compartment states,
-sampled on a schedule. With no `output {}` block the default schedule applies;
-declare one to set the cadence or give explicit output times.
-
-> **Default schedule.** Snapshots every `1` in the model's `time_unit`, covering
-> `[t_start, t_end]` — where the window is taken from the `simulate {}`
-> block (or `(0, 100)` if `simulate {}` is omitted). The simulate command writes
-> the trajectory to `--output` (or stdout) and writes observation files only when
-> `--obs` / `--obs-dir` / `--obs-only` is passed.
+A simulation writes a **trajectory**: the compartment states, and the flow of
+each transition, at a list of output times. The `output {}` block sets those
+times. Two further blocks declare reports computed from runs and never scored
+as data: `quantities {}` reduces one run (§16.4) and `contrasts {}` compares
+two (§16.5).
 
 ```camdl
 output {
@@ -5108,66 +5104,88 @@ output {
 }
 ```
 
-The schedule mirrors the observation surface: use **either** `every = E` for a
-regular cadence **or** `at = [t1, t2, ...]` for an explicit list of output times
-— the two are mutually exclusive (specifying both is an error). A `format = …`
-field parses but is currently inert: the writer always emits wide TSV. (`format`
-is stripped before run hashing, so it never affects cached results.)
-
-**In anchored mode**, `every` must be classified `Exact`, as for an
-intervention's `every` (§13.2): a regular schedule has one fixed step, so
-`every = 1 'months` would place snapshots 30.436875 days apart and drift off the
-month boundaries. It is **E322**; list calendar-aligned times as
-`at = [date_range(origin, add_calendar_years(origin, 1), calendar_months = 1)]`,
-or write `every = 30 'days`. The `at` entries are instant positions (§2.1): a
-single calendar step in one is its calendar date (the one-step calendar rule),
-and any other calendar duration is **E321**.
-
 ```camdl
 output { trajectories { at = [0, 30, 60, 90] } }   # snapshot only at these times
 ```
 
+The block holds one section, `trajectories`, with one of two keys:
+
+- `every = E`, a regular cadence: one row every `E`, starting at `t_start`;
+- `at = [t1, t2, …]`, an explicit list of output times.
+
+Giving both is **E106**, and so is any section other than `trajectories`. A
+cadence that is not positive (`every = 0`) is refused when a run loads the
+model. A `format = …` key is accepted and has no effect: the trajectory is
+always written as TSV, and the key is excluded from run identity (§19.1).
+
+Without an `output {}` block the trajectory has one row every 1 `time_unit`
+from `t_start` to `t_end`. The window is the `simulate {}` block's (§18); a
+model with no `simulate {}` block runs over `[0, 100]`.
+
+**Calendar time.** Under a declared `origin` (anchored mode, §2.1), the cadence
+`every` must be an exact duration, as an intervention's `every` must (§13.2): a
+calendar step has no single length, so `every = 1 'months` would place rows
+30.436875 days apart and drift off the month boundaries. It is **E322**, whose
+hint names the two alternatives, a list of calendar dates
+(`at = [date_range(origin, add_calendar_years(origin, 1), calendar_months = 1)]`)
+or a fixed cadence (`every = 30 'days`). The `at` entries are instant
+positions (§2.1): one calendar step is its calendar date by the one-step
+calendar rule, and any other calendar duration is **E321**.
+
+**Where the trajectory goes.** `camdl simulate` stores the trajectory in the
+run store (§19). `-o FILE` also writes a copy to `FILE`, and `--stdout` streams
+it to standard output and stores nothing. Synthetic observations are written
+only when `--obs`, `--obs-dir`, `--obs-only` or `--obs-only-dir` is passed
+(§12.4, §21).
+
+Related sections: §18 (the simulated window), §19 (the run store), §21 (the
+CLI), §25 (the IR).
+
 ### 16.1 Output Files
 
+A `simulate` run stores two files in its leaf directory (§19):
+
 ```
-trajectories.tsv      # time × compartment states (one row per output time)
-metadata.json         # run provenance (see §19)
+traj.tsv      # one row per output time
+run.json      # the run record: identity levels, resolved inputs, file digests (§19)
 ```
+
+`traj.tsv` has a `t` column, a `t_start`/`t_stop` pair, one column per
+compartment and one `flow_<transition>` column per transition. A row's
+`flow_<transition>` is the number of that transition's events in
+`[t_start, t_stop)`, which runs from the previous output time, or for the first
+row from the start of the run, to the row's own time. A regular schedule's
+first row is at the start of the run, so its interval is empty and its flows
+are 0; under `at = [10, 20]` from `t = 0` the first row covers `[0, 10)`.
 
 ### 16.2 IR Mapping
 
-The trajectories block compiles to the IR `output` schedule: `every = E` →
-`OutRegular { start, step }` (start defaults to `t_start` so the schedule covers
-exactly the requested window `[from, to]`, including anchored models with a
-negative `t_start`); `at = [...]` → `OutAtTimes`. The runtime writes the
-trajectory directly during simulation.
+`every = E` compiles to the IR output schedule `{"regular": {"start", "step"}}`
+with `start = t_start`, so the schedule covers the window `[from, to]`,
+including a negative `t_start` in an anchored model. `at = [...]` compiles to
+`{"at_times": [...]}`.
 
-Output emission is confined to `[start, simulation.t_end]`: `simulation.t_end`
-is the sole horizon authority, and output times are derived from it at emission
-— a regular schedule enumerates up to `t_end`, and an explicit `at = [...]` time
-beyond the horizon is not emitted (never against a frozen post-horizon state).
-The final trajectory row is therefore the last output time at or before `t_end`;
-a firing after that time (for example between a final weekly output at 14 and a
-`t_end` of 20) appears in no row.
+A row is written only at an output time in `[start, t_end]`, where `t_end` is
+the simulated horizon (§18). A regular schedule stops at the last step at or
+before `t_end`, and an `at` entry after `t_end` is not written. The last row is
+therefore the last output time at or before `t_end`: with weekly rows and
+`t_end = 20`, the last row is at 14, and an effect that fires between 14 and 20
+appears in no row.
 
-Synthetic observations (forward simulation) are not part of the trajectory
-output; they are produced by the simulate command's `--obs` family of flags
-(§21), generated by the runtime's `sample_observations` method from the
-observation model definitions.
+Synthetic observations are not part of the trajectory; §12.4 describes how
+simulation draws them.
 
 ### 16.3 Per-run overrides (CLI and config)
 
-The cadence and the columns can also be set per run, without editing the model
-— useful for exploratory runs and for large stratified/spatial models whose
-`flow_*` columns dominate the output. These are `simulate` flags. (Only
-`simulate` writes trajectories, so the view applies there; `fit.toml` has no
-trajectory output.)
+Three `simulate` flags set the cadence and the columns of one run without
+editing the model. Only `simulate` writes trajectories, so a fit config has no
+equivalent.
 
-| Flag                | Effect                                                                                                                            |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `--output-every N`  | One row every `N` time-units, overriding the model's `output { every }`. A plain number in the model's `time_unit` (like `--dt`). |
-| `--no-flows`        | Drop every `flow_*` column.                                                                                                       |
-| `--columns A,B,…`   | Restrict to this allow-list of output column names (compartments and/or `flow_<name>`); emitted order follows the model.          |
+| Flag               | Effect                                                                                                                                                    |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--output-every N` | One row every `N`, replacing the model's `output { }` schedule. `N` is a plain number in the model's `time_unit`, like `--dt`.                            |
+| `--no-flows`       | Drops every `flow_*` column.                                                                                                                              |
+| `--columns A,B,…`  | Keeps only the named columns (compartments and `flow_<name>` columns). The written order follows the model, not the list. An unknown name is an error listing the valid columns. |
 
 ```bash
 # weekly latent state, no flow columns — on a 23-patch spatial run the
@@ -5175,25 +5193,17 @@ trajectory output.)
 camdl simulate polio.camdl --draws prior -n 100 --output-every 7 --no-flows
 ```
 
-These overrides participate in run identity. `--output-every` rewrites the
-model schedule (it rides the model digest, re-keying only runs that use it);
-`--no-flows` / `--columns` ride the `config` level, because a column subset is a
-distinct, reproducible artifact — a content-addressed leaf cannot share a
-`run_id` with the full one. (Introducing this view bumps the `config` schema
-version, so all sim `run_id`s shift once — a deliberate, versioned turnover;
-existing cached sims re-run on next use.) An unknown `--columns` name is a hard
-error that lists the valid columns.
+All three are part of run identity, because each changes the stored file.
+`--output-every` rewrites the model's output schedule and so enters the
+`model` and `config` levels; `--no-flows` and `--columns` enter the `config`
+level (§19.1).
 
 ### 16.4 Derived quantities (`quantities {}`)
 
-`quantities {}` is a top-level block — a sibling of `observations {}` and
-`output {}`, not nested in either — that declares **derived quantities**:
-summaries computed from a run and reported alongside the trajectory, but never
-scored as data. It is the non-scored twin of an observation. Where
-`observations {}` defines what the likelihood _sees_, `quantities {}` defines
-what you want _read back_ — a peak size, an attack rate, the time an outbreak
-takes off — so a summary no longer has to be smuggled through a fake scored
-stream.
+`quantities {}` is a top-level block that declares **derived quantities**:
+values computed from a run and reported beside the trajectory, but never scored
+as data. A peak, an attack rate or the time an outbreak takes off is declared
+here; `observations {}` (§12) declares only what the likelihood scores.
 
 ```camdl-doctest-preamble quantities-demo
 compartments { S, I, R }
@@ -5236,44 +5246,65 @@ quantities {
 }
 ```
 
-Each binding is `name = <expr>`. Whether a quantity is a **series** or a
-**scalar** is determined by the expression, never declared:
+Each binding is `name = <expr>`. The expression determines whether the quantity
+is a series or a scalar:
 
-- **Series** — an expression over compartment state (with parameters, `time`,
-  tables, forcings) and **no reduction** yields one value per output time
-  (`prevalence` above), on the trajectory's output schedule (§16).
-- **Scalar** — a **reduction** collapses a series to a single number or a single
-  time. The temporal reductions are `final`, `mean`, `integral`,
-  `count_above` / `count_below`, `value_at`, `time_of_max` / `time_of_min`, and
-  `first_above` / `first_below` / `last_above` / `last_below`. In addition, a
-  **unary** `max` / `min` reduces a series to its peak / trough — binary
-  `max(a, b)` / `min(a, b)` stay pointwise operators everywhere else.
+- a **series** is an expression over compartment state, parameters, `time`,
+  tables and forcings with no reduction, and has one value per output time
+  (`prevalence` above);
+- a **scalar** applies a reduction to a series, or combines scalars that were
+  reduced earlier.
 
-**Reducing a simulated observation.** A reduction may fold a simulated
-observation instead of raw state: `max(observations.<stream>)` reduces the same
-`y_sim` the run drew for `<stream>`, never triggering a fresh draw — so the
-quantity and the emitted observation file always agree. An observation source
-**must** be reduced; a bare `observations.<stream>` series is rejected
-(**E289**), because a quantity that re-sampled observations on every read would
-not be reproducible.
+**Reductions.** With `x` evaluated at the output times `t_1 < … < t_n`
+(§16.2):
 
-**Reduction arithmetic.** Already-reduced scalars combine with `+ - * /` and
-comparisons, as in `outbreak_dur = fadeout - takeoff`. A reduction call may not
-be **nested** inside that arithmetic — `last_above(I, 0) - takeoff` is rejected
-(**E289**); bind the reduction to its own quantity first, then combine the
-names. A reduction name used in a _rate_ or a `let` binding (outside
-`quantities {}`) is rejected (**E290**): a reduction summarizes a whole run and
-is meaningless inside a per-step propensity.
+| Reduction                                  | Value                                                                                    |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------- |
+| `final(x)`                                 | `x` at `t_n`                                                                             |
+| `max(x)`, `min(x)`                         | the largest or smallest value; with two arguments `max` and `min` are pointwise instead  |
+| `mean(x)`                                  | the arithmetic mean over the `n` output times                                            |
+| `integral(x)`                              | the trapezoidal integral of `x` over `[t_1, t_n]`                                        |
+| `count_above(x, c)`, `count_below(x, c)`   | the number of output times with `x > c` (or `x < c`)                                     |
+| `time_of_max(x)`, `time_of_min(x)`         | the first output time at which the extreme value occurs                                  |
+| `first_above(x, c)`, `first_below(x, c)`   | the first output time with `x > c` (or `x < c`)                                          |
+| `last_above(x, c)`, `last_below(x, c)`     | the last output time with `x > c` (or `x < c`)                                           |
+| `value_at(x, TIME)`                        | `x` at the last output time at or before `TIME`                                          |
 
-**Reading a series at a time.** `value_at(series, TIME)` is the series value
-at the last output time at or before `TIME` (the state *as of* `TIME`; values
-are never interpolated). `TIME` is an instant position (§2.1): a constant time
-expression — `date("2026-08-10")` under a declared `origin` (where a bare number
-draws **W325**, as an `at [...]` entry does, and a `'months`/`'years` literal
-follows the one-step calendar rule: `value_at(I, 6 'months)` reads `I` six
-calendar months after the origin), or a number in model time —
-**or an observation anchor**: `last_obs` (the end of observed data),
-`first_obs` (its start), each optionally plus or minus a constant duration.
+A time-valued result is a date in an anchored model.
+
+**Rules.** A reduction's argument is a series expression. A reference to
+another quantity inside a reduction is **E289**, whether that quantity is a
+scalar or a series. Reduced scalars combine with `+ - * /` and comparisons
+(`outbreak_dur = fadeout - takeoff`); a series quantity in that arithmetic is
+**E289**, and so is a reduction call nested inside it (`last_above(I, 0) -
+takeoff`): bind the reduction to its own name first. The two sides of an
+operator must have the same dimension (**E302**). A reduction outside
+`quantities {}`, in a rate or a `let`, is **E290**, because a reduction is a
+property of a whole run and a rate is evaluated at each step. `dt` in a
+quantity is **E288**: a quantity is read at output times, where the integrator
+step has no value. A quantity whose name is already a compartment, parameter,
+`let`, forcing, observation stream or earlier quantity is **E289**.
+
+**Reducing a simulated observation.** `max(observations.<stream>)` reduces the
+values the run drew for `<stream>`, at the stream's emission times, without
+drawing again, so the quantity and the emitted observation file agree. An
+observation source is valid only as the sole argument of a reduction: a bare
+`observations.<stream>` is **E289**, because a quantity that drew new
+observations on each read would not be reproducible, and so is an observation
+source inside arithmetic. The stream must be declared and unstratified
+(**E289** otherwise).
+
+**Reading a series at a time.** `value_at(series, TIME)` is the value at the
+last output time at or before `TIME`; values are never interpolated. `TIME` is
+an instant position (§2.1), and is one of:
+
+- a constant time expression: a number in model time, or under a declared
+  `origin` a date such as `date("2026-08-10")`. A bare number there draws
+  **W325**, as an `at [...]` entry does, and a `'months` or `'years` literal
+  follows the one-step calendar rule (`value_at(I, 6 'months)` reads `I` six
+  calendar months after the origin);
+- an observation anchor: `last_obs`, the end of the observed data, or
+  `first_obs`, its start, optionally plus or minus a constant duration.
 
 ```camdl
 outbreak_size  = value_at(N0 - S, last_obs)
@@ -5281,99 +5312,93 @@ a_week_earlier = value_at(N0 - S, last_obs - 1 'weeks)
 at_the_start   = value_at(N0 - S, first_obs)
 ```
 
-An anchor's *value* is data-dependent and resolved where data is in hand
-(`fit predict`); the offset is **not** — it is folded to model time units at
-compile time, so the compiled model itself stays data-independent. A forward
-`simulate` of an anchored model is rejected with an error naming the quantity,
-because a simulation has no observed data to anchor to.
+An anchor's value depends on the data and is resolved by the command that
+binds it (`fit predict`). The offset is folded to model time when the model is
+compiled, so the compiled model does not depend on the data. A forward
+`camdl simulate` of a model with an anchored `value_at` is refused with an
+error naming the quantity, because a simulation binds no observed data.
 
-The offset must carry a duration unit: a bare `last_obs - 7` is rejected
-(**E335**), because there is no unit to interpret. Under a declared `origin` a
-`'months`/`'years` offset is rejected too (**E321**): the date `last_obs` stands
-for is known only when the model runs, and a calendar month from a date depends
-on which date it is, so the resolved time would move with the data. Note that camdl writes durations with a leading tick
-(`1 'weeks`); a bare word (`1 weeks`) is **E115**, which names the tick form.
-The command line takes the opposite convention (`--to "last_obs + 8 weeks"`,
-bare words), because a tick is a shell-quoting hazard; under a declared
-`origin` it refuses a month or year offset the same way
-(`--to "last_obs + 6 months"` asks for `"last_obs + 183 days"`).
+The offset carries a duration unit: a bare `last_obs - 7` is **E335**. Under a
+declared `origin` a `'months` or `'years` offset is **E321**, because the date
+`last_obs` stands for is known only when the model runs and a calendar month
+from a date depends on the date. A duration is written with a leading tick
+(`1 'weeks`); a bare word (`1 weeks`) is **E115**, whose message names the tick
+form. The command line uses bare words instead (`--to "last_obs + 8 weeks"`),
+because a tick is a shell-quoting hazard, and under a declared `origin` it
+refuses a month or year offset the same way (`--to "last_obs + 6 months"` asks
+for `"last_obs + 183 days"`). An anchor is legal only as the whole time
+argument, optionally plus or minus a constant duration: `2 * last_obs` is
+**E335**, and outside the positions that accept it an anchor is an undeclared
+name (**E100**).
 
-An anchor is legal **only** as the whole time argument, optionally `±` a
-constant duration; folding it into a larger expression (`2 * last_obs`) is
-rejected (**E335**), and outside its granted positions it is an ordinary
-unknown name.
+**Censoring.** A timing reduction that never resolves (`first_above` on a draw
+that never crosses the threshold, `time_of_max` on an all-zero series) is
+reported as **right-censored**; no time is invented for it. A `value_at` whose
+`TIME` lies before the first or after the last output time of the draw is
+censored the same way and is never clamped to the window edge, since clamping
+would report the value at the horizon in place of the value asked for. A single
+run writes a censored value as `NA`; a banded table excludes censored draws
+from its quantiles.
 
-**Censoring.** A timing reduction that never resolves — `first_above` on a draw
-that never crosses the threshold, `time_of_max` on an all-zero series — is
-reported as **right-censored**, not as a fabricated time. A `value_at` whose
-`TIME` falls outside the draw's trajectory window is censored the same way,
-never clamped to the window edge: clamping would silently report the value at
-the horizon instead of the value asked for.
+**Where quantities are computed.** Quantities are computed by
+`camdl simulate --quantities-out DIR`, for a single run, replicates, or
+prior-predictive draws (`--draws`), and by `fit predict` over a fitted
+posterior. Without `--quantities-out`, `simulate` prints a note and computes
+none. The tables are `quantities/<name>.tsv`, a bare `value` for a single run
+and quantiles for an ensemble, with a `quantities.json` manifest giving each
+quantity's shape, reduction and censoring. The files a `fit predict` writes are
+specified in the run spec (§2.2.2, §2.2.3).
 
-**Where they run, and run identity.** Quantities run wherever a simulation does:
-over prior-predictive draws (`simulate --draws`), over a fitted posterior
-(`fit predict`), and in a plain `simulate`. Banded results land in
-`quantities/<name>.tsv` with a `quantities.json` manifest describing each
-quantity's kind. Because they are _derived reports_ computed from a run rather
-than inputs to it, adding or changing a `quantities {}` block never re-keys a
-model's `run_id`.
+**Run identity.** Quantities are reports computed from a run, so adding or
+changing a `quantities {}` block leaves the model's `run_id` unchanged. The same
+holds for `#'` documentation: the compiler writes a doc comment into the IR
+envelope's `docs` dictionary, outside the `model` object that run identity is
+computed from, so rewording a docstring (correcting a citation, sharpening a
+caveat) leaves `model_identity` unchanged and orphans no completed fit. This
+covers the file-header block that documents the whole model (§1) as it does a
+parameter's, which is why that block, and not `description = "…"`, holds a
+model's description. Both rules leave the reporting vocabulary and the record
+of why a prior is what it is free to edit after a long run. Anything the model
+computes with re-keys: a rate, a prior, a bound, a compartment, a transition, an
+observation.
 
-**`#'` documentation carries the same guarantee.** A doc comment is presentation
-metadata: the compiler emits it into the IR envelope's `docs` dictionary, which
-sits *outside* the `model` object that run identity is computed from. Rewording
-a docstring — correcting a citation, sharpening a caveat — therefore leaves
-`model_identity` unchanged and orphans no completed fit. This holds for the
-file-header block that documents the whole model (§1) exactly as it does for a
-parameter's, which is why that block, and not `description = "…"`, is where a
-model's real description belongs: a description nobody dares correct is worse
-than none. Both rules exist so
-that the two edits a modeller most often wants to make *after* a long run, the
-reporting vocabulary and the scholarly record of why a prior is what it is, are
-free to make. What *does* re-key is anything the model computes with: a rate, a
-prior, a bound, a compartment, a transition, an observation.
-
-**A vocabulary can live in its own file.** A `quantities {}` block is a
-_reporting vocabulary_, and several models often want the same one. Rather than
-copy it into each model — where the copies drift — put it in an ordinary
-`.camdl` file containing **only** a `quantities {}` block, and supply it at the
-point of use:
+**Vocabulary files.** A `quantities {}` block can be kept in its own `.camdl`
+file, containing only that block, and supplied at the point of use, so several
+models share one reporting vocabulary:
 
 ```
 camdl simulate model.camdl --quantities reporting/national.camdl --quantities-out out/
 camdl fit predict @jigawa-baseline --quantities reporting/national.camdl
 ```
 
-The file is compiled as a second compilation unit of that model's compile, so
-its body is resolved against the model's own compartments, parameters and `let`
-bindings, and a name the model does not declare is an error naming both the
-name and the file. It **replaces** the model's own block; it never merges,
-because a merge rule would make the reported table depend on which of two files
-declared a name first. A file that declares anything besides quantities is
-**E339**; one that declares no quantities is **E340** (replacement means an
-empty vocabulary would report nothing).
+The file is compiled with the model, so its body is resolved against the
+model's compartments, parameters and `let` bindings, and a name the model does
+not declare is an error located in the file. It **replaces** the model's own
+block and is never merged with it, so the reported table does not depend on an
+order between two files. A file that declares anything besides quantities is
+**E339**; a file that declares no quantities is **E340**, since the
+replacement would report nothing.
 
-The emitted tables are keyed by the file's contents:
-`quantities-<key>/<name>.tsv` with a matching `quantities-<key>.json` whose
-`vocabulary` object records the file's path and digest. Two vocabularies applied
-to one run therefore produce two tables rather than overwriting one, and
-correcting a formula in place produces a new table rather than a stale cache
-hit. Run identity is untouched, as above.
+The tables are keyed by the file's contents: `quantities-<key>/<name>.tsv`,
+with a `quantities-<key>.json` manifest whose `vocabulary` object records the
+file's path and SHA-256 digest. Two vocabularies applied to one run therefore
+write two tables, and a formula corrected in place writes a new table. Run
+identity is unchanged.
 
-`fit predict --quantities` is the only way to change what an EXISTING fit
-reports: `fit predict` reads the model IR archived inside the fit, so editing a
-formula in the model source has no effect on a fit that has already run. The
-vocabulary is compiled against the fit's model source and refused unless that
-source is still the same model the fit ran on — quantities are excluded from
-that comparison, so a reporting-only edit to the source is not a mismatch.
+A fit stores the model IR it ran on, and `fit predict` reads that stored IR, so
+editing a formula in the model source does not change what an existing fit
+reports; `fit predict --quantities` does. The vocabulary is compiled against the
+fit's model source and refused unless that source is still the model the fit
+ran on. The comparison excludes quantities and contrasts, so a source edited
+only in its reporting blocks is accepted.
 
 ### 16.5 Counterfactual contrasts (`contrasts {}`)
 
-A `quantities {}` recipe reduces **one** run. A `contrasts {}` entry compares
-**two**: it is the block that answers "how many deaths did the campaign avert?"
-Each entry is arithmetic over *run-rooted* operands of the form
-`<run>.<namespace>.<member>`, where `<run>` is a preset declared in
-`scenarios {}` (§17) or the reserved name `fitted` (the fitted model with no
-scenario overlay), and `<namespace>` is `quantities` or `observations`.
+A `contrasts {}` entry compares two runs of the fitted model, for questions such
+as "how many infections did the campaign avert?". Each entry is arithmetic over
+**run-rooted** operands, `<run>.<namespace>.<member>`, where `<run>` is a preset
+declared in `scenarios {}` (§17) or the reserved name `fitted` (the fitted model
+with no scenario applied), and `<namespace>` is `quantities` or `observations`.
 
 ```camdl-doctest-preamble contrast-sir
 compartments { S, I, R }
@@ -5414,68 +5439,79 @@ contrasts {
 }
 ```
 
-**Why this is a language construct rather than two runs and a subtraction.**
-Differencing two independently-simulated arms by hand mixes the intervention
-effect with the Monte Carlo noise of two unrelated random draws. The reducer
-behind `contrasts {}` instead *forks* both arms from a shared trajectory: it
-diffs the two runs' live intervention sets, finds the toggled intervention, and
-branches at the last saved snapshot strictly before the instant that
-intervention fires on the arms' chain-binomial grid (§13.2: declared at 2.4 with
-`dt = 1`, it fires at 2, so with snapshots on the integer grid the fork is at
-1), so both arms share one history up to the intervention and one per-draw seed. The
-difference is then attributable to the intervention rather than to sampling.
-Results are banded over the forkable draws into `contrasts/<name>.tsv`. A
-contrast whose two arms differ only in a parameter — no intervention is toggled
-— has no fork point, and is skipped with a note rather than silently reported.
+**Meaning.** Differencing two independently simulated arms by hand mixes the
+intervention's effect with the Monte Carlo noise of two unrelated random draws.
+`fit predict` instead runs both arms from one shared state. It compares the
+intervention sets of the two runs to find the toggled intervention, and forks
+at the last saved trajectory snapshot strictly before the time that
+intervention fires on the run's grid (§13.2: an intervention declared at 2.4
+fires at 2 under `dt = 1`, so with snapshots on the integer grid the fork is at
+1). Both arms start from that posterior draw's state at the fork and share its
+seed, so their difference is attributable to the intervention. When several
+interventions are toggled, the fork precedes the earliest. The results are
+banded over the draws that can be forked into `contrasts/<name>.tsv`. An
+operand of series shape gives a series contrast; a scalar gives a scalar one.
 
-**Division by zero is censoring, not an error.** A stochastic arm can
-legitimately end a draw with a zero count, so a ratio such as
-`(baseline.x - vaccinate.x) / baseline.x` has a zero denominator in some
-posterior draws. A finite numerator over a zero denominator (`/`, and likewise
-`%`) is *undefined for that draw*: the draw is censored, by the same mechanism
-as a `time_of_max` that never fired. For a scalar contrast the draw drops out of
-the band; for a series contrast only the affected time cells drop out, so the
-other snapshots of that draw still count. The band's `n_used` column reports,
-per cell, how many draws it was computed over. Censoring propagates through
-further arithmetic (a result touching a censored operand is censored). For each
-contrast with at least one such draw, `fit predict` prints one line on stderr:
+Contrasts are computed only by `fit predict`, only on a chain-binomial fit
+whose posterior draws carry a saved latent path, and only over those draws;
+`fit predict` says how many draws that is when it is fewer than all. On any
+other fit, `fit predict` skips the contrasts with a note. It also skips, with a
+note naming the contrast:
+
+- a contrast whose arms toggle no intervention, so that they differ only in
+  parameters and have no fork point;
+- a toggled intervention whose fire time depends on a parameter, or that is
+  reactive (§13.9), since neither has a static fire time;
+- an operand in the `observations` namespace, or a quantity that reduces an
+  observation stream (§16.4). Both compile, and neither is computed.
+
+**Division by zero is censoring.** A stochastic arm can end a draw with a zero
+count, so a ratio such as `(baseline.x - vaccinate.x) / baseline.x` can have a
+zero denominator in some posterior draws. A finite numerator over a zero
+denominator is undefined for that draw, which is censored by the same mechanism
+as a `first_above` that never crosses. A scalar contrast drops the draw from its
+band; a series contrast drops only the affected time cells, so the draw's other
+snapshots still count. The band's `n_used` column gives, per cell, the number of
+draws it was computed over, and a result computed from a censored operand is
+censored. For each contrast with at least one such draw, `fit predict` prints
+one line on stderr:
 
 ```text
 fit predict: contrast 'rel': 3 of 200 draws undefined (denominator 0); excluded from the band, see n_used
 ```
 
 The count is of draws with at least one undefined cell. If every draw is
-undefined the band cells are empty and `n_used` is 0. This applies only to a
-zero denominator: any other non-finite per-draw value (an overflow, or a
-non-finite operand) is still a hard error, because it indicates a defect rather
-than a property of the draw.
+undefined the band's cells are empty and `n_used` is 0. Any other non-finite
+per-draw value, such as an overflow or a non-finite operand, is an error,
+because it indicates a defect and is not a property of the draw.
 
-**Diagnostics.**
+**What is refused.**
 
-- **E292** — a run-rooted reference used outside `contrasts {}`. It is a
-  contrast operand and has no value in a rate, `let` binding, or other
-  per-instant expression.
-- **E293** — a run-rooted reference inside a `quantities {}` recipe. The run is
-  implicit there; drop the `<run>.` prefix.
-- **E294** — an operand names a run that is not a declared scenario nor
-  `fitted`, or a quantity/stream the model does not declare.
-- **E295** — the body is not run-rooted arithmetic (a bare constant, a
-  comparison, or an inline reducer appeared where `<run>.<ns>.<member>` operands
-  combined with `+ - * /` are required).
-- **E297** — the two arms have incompatible dimensions (`deaths - rate`).
-- **E298** — two entries share a name; each lowers to one
-  `contrasts/<name>.tsv`, so a duplicate would clobber its sibling.
+- **E292**: a run-rooted reference outside `contrasts {}`, as in a rate or a
+  `let`. It is a contrast operand and has no value at an instant.
+- **E293**: a run-rooted reference inside a `quantities {}` recipe, where the
+  run is implicit; drop the `<run>.` prefix.
+- **E294**: an operand naming a run that is neither a declared scenario nor
+  `fitted`, or a quantity the model does not declare.
+- **E295**: a body that is not run-rooted operands combined with `+ - * /`,
+  such as a bare constant, a constant factor (`2 * (…)`), a comparison, or an
+  inline reduction.
+- **E297**: two operands of different dimensions (`deaths - rate`).
+- **E298**: two entries with one name; each writes `contrasts/<name>.tsv`, so a
+  duplicate would overwrite the other.
 
-Like `quantities {}`, a `contrasts {}` block is a derived report rather than an
-input to the dynamics, so adding or changing one never re-keys a model's
-`run_id`.
+Like `quantities {}`, a `contrasts {}` block is a report, so adding or changing
+one leaves the model's `run_id` unchanged.
 
 ---
 
 ## 17. Scenarios
 
-Patch-based modifications to the baseline. Baseline is the identity patch — the
-model as defined, no modifications.
+A scenario is a named set of changes to the model, chosen per run with
+`--scenario` (run spec §4.1): interventions turned on or off, parameter values
+set or scaled, and the end time. The **baseline** is a run with no scenario,
+the model exactly as written; interventions are off in it unless enabled
+(§13.4).
 
 ```camdl-doctest-preamble scenario-sia
 compartments { S, V, I, R }
@@ -5520,81 +5556,86 @@ scenarios {
 }
 ```
 
+Related sections: §13 (interventions), §16.5 (contrasts between scenarios),
+§18 (the end time), §20 (parameter values).
+
 ### 17.1 Patch Operations
 
 ```
 label   = STRING                   human-readable name for the scenario
 enable  = [INTERVENTION, ...]      turn on interventions
 disable = [INTERVENTION, ...]      turn off interventions
-set     = { PARAM = EXPR, ... }    override parameter values
-scale   = { PARAM = FACTOR, ... }  multiply (compiler checks domain validity)
-compose = [SCENARIO, ...]          apply patches in sequence
-simulate { to = EXPR }             override only the end time (§17.2); `to` is required, and from/dt/integrator are model-wide, not per-scenario (E106)
+set     = { PARAM = EXPR, ... }    set parameter values
+scale   = { PARAM = FACTOR, ... }  multiply parameter values
+compose = [SCENARIO, ...]          apply other scenarios' patches, in order
+extends = SCENARIO                 inherit another scenario's fields (§17.2)
+simulate { to = EXPR }             override the end time
 ```
 
-`enable`, `disable` and `compose` take a bracketed list of names even for one
-name: `enable = sia` is an error (**E123**, with a fix-it to `enable = [sia]`),
-as is a list member that is not a name. `set` and `scale` are the only fields
-that take a `{ ... }` block; `beta = { ... }` is an error (**E124**) whose hint
-shows `set = { beta = ... }`.
+**Lists and blocks.** `enable`, `disable` and `compose` take a bracketed list
+even for one name: `enable = sia` is **E123**, with a fix-it to
+`enable = [sia]`, and so is a list member that is not a name. `set` and `scale`
+are the only fields that take a `{ ... }` block; `beta = { ... }` is **E124**,
+whose hint shows `set = { beta = ... }`. An `enable` or `disable` entry naming
+no intervention is **E267**, and a `set` or `scale` key naming no parameter is
+**E268**.
 
-A scenario may override the end time and nothing else. The rule is that a
-scenario overlays what leaves the **trajectory prefix** intact: extending or
-truncating `to` never re-tiles `[from, old_to]`, so two scenarios differing only
-in horizon stay byte-identical over their shared span and the paired-seed
-coupling (§3.1 of the run spec) survives. `dt` and `integrator` re-tile the
-substep grid, so arms would diverge from `from` for purely numerical reasons and
-any between-arm difference would mix in discretization error; `from` is the same
-class, with the extra wrinkle that `init {}` is evaluated at `t_start`. All
-three are `E106`, as is a `simulate {}` block that omits `to` — including an
-empty one, which cannot mean anything.
-
-Under an explicit `at = [...]` output list (§16), emission is exactly the listed
-times within the horizon, so a scenario `to` is **inert** when it selects the
-same entries the model horizon already would — no listed time falls between the
-two. The compiler warns (`W106`) in that case only: a `to` that pulls in (or
-drops) a listed time changes both the trajectory and every `quantities {}`
-reduction, and is not warned about.
-
-**Indexed parameter syntax in set/scale.** For indexed parameters declared as
-`N0[patch]`, the `set` and `scale` blocks accept either the mangled name or the
-indexed form:
+**Indexed parameters.** A `set` or `scale` key for a parameter declared as
+`N0[patch]` may be written in the indexed form or as the expanded name:
 
 ```
 set = {
-  N0[urban] = 100000    # indexed — preferred, mirrors declaration syntax
-  N0_rural  = 50000     # mangled — still accepted
+  N0[urban] = 100000    # indexed, as in the declaration
+  N0_rural  = 50000     # expanded name
 }
 ```
 
-The compiler mangles `N0[urban]` to `N0_urban` in the IR. Multi-dimensional
-indices are supported: `amp[urban, child]` mangles to `amp_urban_child`.
+The compiler expands `N0[urban]` to `N0_urban` in the IR, and a
+multi-dimensional index the same way: `amp[urban, child]` is
+`amp_urban_child`.
 
-**Family-based enable resolution.** `enable` entries are matched against
-intervention `base_name` as well as exact names. If `"sia"` is the `base_name`
-of an indexed family `sia[p in patch]`, writing `enable = [sia]` activates all
-238 members at once. Individual members can still be addressed by their expanded
-name (e.g., `"sia_borno_damboa"`) when fine-grained control is needed.
+**Intervention families.** An `enable` or `disable` entry may name an indexed
+intervention family as well as one member: for a family declared
+`sia[p in patch]`, `enable = [sia]` turns on every member, and
+`enable = [sia_borno_damboa]` turns on one.
 
-The compiler warns on non-commutative compositions (overlapping write sets).
-`scale` on a `probability` parameter that would exceed [0,1] is a **compile
-error** — the user must handle clamping explicitly via `set` with an
-`if/then/else` expression. No implicit clamping.
+**End time.** A scenario's `simulate {}` block sets `to` and nothing else. A
+scenario may change the end time because a different horizon leaves the
+trajectory over the shared span unchanged: the substep grid over
+`[from, old_to]` is the same, so two scenarios differing only in horizon are
+identical over their shared span and the paired-seed coupling of the run spec
+(§3.1) holds. `dt` and `integrator` change the substep grid, so arms would
+diverge from `from` through discretization alone; `from` moves the grid and the
+time at which `init {}` is evaluated. Each of the three is **E106** in a
+scenario, and so is a `simulate {}` block without `to`, including an empty
+one. A scenario's `to` may be an observation anchor (§18).
+
+When the model lists its output times explicitly (`at = [...]`, §16), a run
+writes exactly the listed times within its horizon. A scenario `to` that keeps
+the same listed times as the model's horizon has no effect on the output, and
+draws **W106**. A `to` that adds or drops a listed time changes the trajectory
+and every `quantities {}` reduction, and draws no warning.
 
 **Patch algebra.** Within one scenario, `set` applies before `scale`, so `scale`
-multiplies the value `set` produced (or the inherited value, when the parameter
-isn't `set`). Across a `compose` list, the composed sub-scenarios apply in listed
-order and the scenario's **own** patch applies last, so it wins any collision
-with a composed one. In `enable`/`disable`, an explicit `disable` beats an
-`enable` of the same intervention — a name appearing in both lists ends up
-disabled.
+multiplies the value `set` produced, or the value the parameter has without the
+scenario. The scenarios in a `compose` list apply in listed order, and the
+scenario's own patch applies last, so it wins any collision with a composed
+one; a factor given by both a composed scenario and the scenario itself
+multiplies twice. A scenario named in `compose` that itself composes is refused
+when the run resolves the scenario. In `enable` and `disable`, a `disable` wins:
+an intervention named in both is off.
 
-### 17.2 Scenario Inheritance — `extends`
+The compiler warns on non-commutative compositions (overlapping write sets).
+A value that `set` or `scale` moves outside the parameter's declared domain,
+such as a `probability` scaled above 1, is refused when the run resolves its
+parameters, with an error naming the parameter, its value and its bounds. No
+value is clamped; a clamp is written explicitly as an `if/then/else` in `set`.
 
-A scenario can inherit from another via `extends = <parent_name>`, which is
-**compile-time sugar**: the child is resolved as the parent with the child's
-fields layered on top. The IR keeps its flat preset shape — downstream consumers
-see no trace of inheritance.
+### 17.2 Scenario Inheritance (`extends`)
+
+`extends = <parent>` makes a scenario the parent scenario with the child's own
+fields applied on top. The compiler resolves the inheritance, and each scenario
+is a flat preset in the IR.
 
 ```camdl-doctest-preamble scenario-vacc
 compartments { S, V, I, R }
@@ -5637,53 +5678,60 @@ scenarios {
 }
 ```
 
-**Merge rules (per field):**
+The fields merge as follows:
 
-| Field                          | Behavior                                                       |
-| ------------------------------ | -------------------------------------------------------------- |
-| `set`, `scale`                 | Child keys override parent keys on collision; union otherwise. |
-| `enable`, `disable`, `compose` | Parent + child, deduped preserving first-seen order.           |
-| `label`, `simulate.to`         | Child overrides parent when present.                           |
+| Field                          | Merge                                                         |
+| ------------------------------ | ------------------------------------------------------------- |
+| `set`, `scale`                 | the union; on a shared key the child's entry wins             |
+| `enable`, `disable`, `compose` | the parent's list, then the child's, without repeats          |
+| `label`, `simulate.to`         | the child's when given, otherwise the parent's                |
 
-**Expression scope.** Child `set` expressions are evaluated _after_ parent's
-`set` is resolved — so `set = { beta = beta * 1.5 }` in a child reads the
-parent's resolved `beta`. There's no default-at-declaration path in camdl; the
-name must resolve to a concrete upstream value or the compiler errors.
+The child's `set` entries are evaluated after the parent's, so
+`set = { beta = beta * 1.5 }` in the child reads the parent's resolved `beta`
+(§17.3).
 
 ::: {.callout-warning}
-**`enable`/`disable`/`compose` append parent's list to
-the child's.** A child writing `enable = [masking]` under a parent with
-`enable = [vaccination]` gets `[vaccination, masking]`, **not** just
-`[masking]`. To remove a parent's intervention in a child, use `disable`. The
-compiler emits **W310** whenever this merge actually changes the child's
-declared list, so the surprise is observable rather than silent.
+`enable`, `disable` and `compose` are appended to the parent's lists. A child
+writing `enable = [masking]` under a parent with `enable = [vaccination]` has
+`[vaccination, masking]`. To turn off a parent's intervention in a child, list
+it in `disable`. The compiler emits **W310** whenever the merge changes the
+child's declared list.
 :::
 
-**Diagnostics:**
+**What is refused.**
 
-- **E353** — cycle in `extends` chain (includes the full chain in the message).
-- **E354** — unknown parent scenario (suggests the closest name by edit
-  distance).
-- **E355** — chain depth > 5; treat as a code smell and factor common ancestors,
-  or request multi-parent composition as a future feature.
-- **W310** — append-dedup of parent's enable/disable/compose changed the
-  resolved list (see callout above).
+- **E353**: a cycle in an `extends` chain; the message prints the chain.
+- **E354**: an unknown parent scenario; the hint suggests the closest declared
+  name.
+- **E355**: an `extends` chain more than five links deep; factor the common
+  fields into a shared ancestor.
+- **W310**: the merge of the parent's `enable`, `disable` or `compose` changed
+  the child's list.
 
 ### 17.3 Scenario Expression Scope
 
-Inside `set = { PARAM = EXPR }`, the RHS expression can reference:
+The right-hand side of a `set` or `scale` entry is evaluated when the model is
+compiled, from left to right. It may use:
 
-- The parameter's **current value** (its name refers to the pre-patch value)
-- Other parameters (their pre-patch values)
-- Literal constants
+- numeric literals and arithmetic on them;
+- a parameter given a value earlier in the same resolved list: an earlier entry
+  of the same block, or for a child scenario, the parent's entries (§17.2). In
+  `set = { beta = 0.2  gamma = beta * 2 }`, `gamma` is 0.4.
 
-Compartment state, time, and other scenario settings are NOT in scope — scenario
-patches are static transformations of parameter values, not runtime-dependent
-operations.
+Any other name is **E401**, a non-constant expression. A parameter's value from
+a parameter file or the command line is not in scope, so
+`set = { beta = beta * 1.5 }` in a scenario with no parent that sets `beta` is
+**E401**; write the multiplication as `scale = { beta = 1.5 }`. Compartment
+state and time are not in scope either (**E401**): a scenario changes parameter
+values before the run and does not depend on its state.
 
 ---
 
 ## 18. Simulation Configuration
+
+The `simulate {}` block sets the simulated window, `from` and `to`, and
+optionally the discretization step `dt` and the ODE integrator. How each
+backend uses the step is described in `camdl docs backends`.
 
 ```camdl-doctest-preamble sir-basic
 compartments { S, I, R }
@@ -5706,127 +5754,120 @@ simulate {
 }
 ```
 
-The `simulate {}` block sets the time window (`from`, `to`) and, optionally, the
-discretization step `dt`. All three are unit-aware like any time literal:
-`dt = 0.05 'months` is one month-scaled step (affine 30.44-day months), the same
-convention `from`/`to` use.
+**Keys.** The block takes `from`, `to`, `dt` and `integrator`; any other key,
+including a tolerance written outside `integrator` and a `seed`, is **E106**.
+`to` is required (**E106** without it), because the end of the run has no
+default; `from` defaults to `0`. A `to` not later than `from` is **E602**. The
+RNG seed is never part of the model: it is set per run with `--seed` or
+`--seeds`.
 
-`dt` is a **model knob**. A stochastic compartmental model's behaviour is
-genuinely sensitive to the step — discretization error shrinks as `dt → 0`, and
-Richardson-extrapolation diagnostics deliberately vary it — so the chosen step
-is part of the model, declared next to the dynamics it discretizes. (`dt` is the
-per-substep length the chain-binomial and ODE backends integrate
-with; the exact-event Gillespie backend ignores it.)
+**Time values.** `from`, `to` and `dt` take unit literals like any time value.
+`from` and `to` are instant positions (§2.1). `dt` is a length, so a calendar
+unit there keeps its average: `dt = 0.05 'months` is 0.05 × 30.436875 days.
+A `dt` that is not positive is refused when a run starts.
 
-The CLI `--dt` flag is the **override**: it wins over the model's `dt` for a
-single run, which is exactly what a sensitivity sweep or a convergence check
-wants. When neither the model nor `--dt` sets a step, it defaults to `1` in the
-model's `time_unit`. Omit `dt` from the model only when you intend the run — not
-the model — to choose it.
+**The step.** `dt` is part of the model: a stochastic compartmental model's
+behaviour depends on the step, and its discretization error shrinks as
+`dt → 0`. It is the substep length of the chain-binomial backend and of the
+fixed-step ODE integrator; the Gillespie backend, which simulates exact event
+times, does not use it. The CLI `--dt` overrides the model's `dt` for one run,
+as a convergence check or a sensitivity sweep needs. With neither set, the step
+is 1 in the model's `time_unit`.
 
-The optional `integrator` key selects the ODE method (it has no effect on the
-chain-binomial or Gillespie backends). It is **tagged**: `integrator = rk4` is
-fixed-step classic RK4 (the default — omit the key for it), and
-`integrator = rk45 { atol = 1e-8  rtol = 1e-6 }` is adaptive Dormand–Prince
-RK4(5), which takes large steps through smooth stretches and small steps only
-where the trajectory moves fast. The tolerances `atol`/`rtol` are
-**dimensionless** (error tolerances, not times), optional (omitted → the
-runtime's calibrated default of `1e-8`/`1e-6`), and are **keys of the `rk45`
-block** — they cannot be written without it, so an orphan tolerance (a tolerance
-without `rk45`, or a tolerance on `rk4`) is a compile error. A model that
-references `dt` in a rate (`Expr::Dt`) is incompatible with `rk45` — adaptive
-stepping has no single fixed `dt` — and is rejected with a hard error pointing
-back to `rk4`. The CLI `--integrator rk4|rk45` flag overrides the method for a
-single forward `simulate` run (it preserves any model-declared tolerances);
-there is no fit-side flag, because on the inference path the integrator is part
-of the model's content identity and is declared in `simulate {}`.
+**The integrator.** `integrator` selects the ODE method and has no effect on
+the chain-binomial or Gillespie backends:
 
-A typo'd or unsupported key in `simulate {}` is a hard error (`E106`), never
-silently dropped; the accepted keys are `from`, `to`, `dt`, `integrator`. `to`
-is required: a `simulate {}` block without it is `E106`, because the end of the
-run has no default. `from` defaults to `0`. Both may be observation anchors, and
-a run may override `from` (below).
+- `integrator = rk4`, the default, is fixed-step classical Runge–Kutta of
+  order 4;
+- `integrator = rk45 { atol = 1e-8  rtol = 1e-6 }` is the adaptive
+  Dormand–Prince RK4(5) method (Dormand & Prince 1980, _J. Comput. Appl. Math._
+  6(1):19–26), which takes large steps where the trajectory is smooth and small
+  steps where it changes fast.
 
-Seed is always external (CLI `--seed`), never in the model file.
+The tolerances `atol` and `rtol` are dimensionless and optional; omitted, they
+are `1e-8` and `1e-6`. They are keys of the `rk45` block: a tolerance on `rk4`,
+one with a unit, and an integrator other than `rk4` or `rk45` are **E106**. A
+model whose rate reads `dt` cannot run under `rk45`, which has no fixed step,
+and such a run is refused with an error naming `rk4`. The CLI
+`--integrator rk4|rk45` overrides the method for one `simulate` run and keeps
+the model's tolerances. No fit command takes the flag: on the inference path
+the integrator is part of the model's identity and is set in `simulate {}`.
 
-### An observation-anchored horizon
+Related sections: §16 (output times), §17.1 (a scenario's end time), §19 (run
+identity), §2.1 (instant positions and calendar time).
 
-`to` may be an **observation anchor** — `last_obs` or `first_obs`, optionally
-`±` a constant duration — instead of a literal time. A forecasting model whose
-horizon is "eight weeks past the end of the data" then states that, rather than
-carrying a date that has to be re-typed on every data release:
+### Observation-anchored end time
+
+`to` may be an **observation anchor**, `last_obs` or `first_obs`, optionally
+plus or minus a constant duration, instead of a literal time. A forecasting
+model whose horizon is eight weeks past the end of the data states it once and
+needs no edit on each data release:
 
 ```camdl
 simulate { from = 0 'days  to = last_obs + 8 'weeks }
 ```
 
-A scenario may anchor its own horizon the same way
-(`scenarios { forecast { simulate { to = last_obs + 8 'weeks } } }`).
+A scenario's own `to` may be anchored the same way
+(`scenarios { forecast { simulate { to = last_obs + 8 'weeks } } }`). The rules
+of every anchor position apply (§16.4): the anchor is the whole term, its
+offset carries a duration unit (**E335** otherwise), and under an `origin` a
+`'months` or `'years` offset is **E321**.
 
-The horizon is resolved once per run, from the observation times the run binds,
-and the resolved value is printed on stderr and substituted into the model the
-run is content-addressed by — so a run under one data vintage is never served
-from the store for another. The same rules as every other anchor position apply
-(whole term, offset carries a duration unit, no `'months`/`'years` under an
-`origin`).
+A run resolves the horizon once, from the observation times it binds, prints
+the resolved value on stderr, and substitutes it into the model its identity is
+computed from, so a run under one data release is never served from the store
+for another. Every command that binds observation data resolves anchors this
+way: `camdl simulate --fit <fit.toml | fit run dir>`, `fit run`, `fit predict`,
+and `pfilter`, `profile` and `survey`, which take the observation window from
+what they bind through `--data` or `--fit`. A command that binds no data
+refuses an anchored model, naming the anchored construct.
 
-Every command that binds observation data resolves anchors this way:
-`camdl simulate --fit <fit.toml | fit run dir>`, `fit run`, `fit predict`, and
-the three fixed-parameter commands `pfilter`, `profile` and `survey`, which fold
-the window from whatever they bind through `--data` or `--fit`. A command with no
-data cannot resolve one and refuses, naming the anchored construct.
+`pfilter`, `profile` and `survey` score at the observation times and do not
+simulate to a horizon, so a scenario's own `simulate { to }` is refused there.
+The comparison is made after resolution: a scenario anchor that resolves to the
+model's own horizon has no effect and runs.
 
-`pfilter`, `profile` and `survey` score at the observation times rather than over
-the model horizon, so a *scenario's* own `simulate { to }` still cannot be
-honoured there and is refused rather than silently dropped. The comparison is
-made after resolution, so a scenario anchor that resolves to the same time as the
-model's is a no-op and runs.
+Three constructs fix their timing from the horizon when the model is compiled,
+and are refused under an anchored `to`:
 
-Because the horizon is now unknown at compile time, three constructs that
-**bake** it are refused rather than left to silently mis-fire:
+- a recurring intervention or event without its own `to`, whose window would end
+  at the horizon (**E336**); give the schedule its own `to`;
+- the `every … at_day …` schedule (§13.7), which has no `to` key (**E337**);
+- a reactive policy (§13.9), whose monitoring window is set from the horizon
+  (**E338**). Under an anchored `to` the dynamics would run to the resolved end
+  while the policy stopped at the compiled one, with no error.
 
-- A recurring intervention or event with no `to` of its own (**E336**) — its
-  window would default to the model horizon. Give the schedule its own `to`.
-- The `every … at_day …` schedule form (**E337**), which has no `to` key at all
-  to override with.
-- A reactive policy (**E338**). Its monitoring window is fixed at compile time
-  from the horizon, so under an anchored `to` the dynamics would run to the
-  resolved end while the policy stopped reacting at the baked one — with no
-  error. Until that is re-derived from the run horizon, an anchored model
-  horizon and a reactive policy cannot be combined.
+For these, and for any model that keeps a literal horizon, the horizon can be
+set per run instead: leave `simulate { to }` literal and pass
+`camdl simulate --to "last_obs + 8 weeks"`, in the CLI's bare-word units.
 
-For the third case, and for any model that must keep a literal horizon, the
-per-run alternative is the CLI: leave `simulate { to }` literal and pass
-`camdl simulate --to "last_obs + 8 weeks"` (note the CLI's bare-word units).
+### Observation-anchored and per-run start
 
-### An observation-anchored start, and a start chosen per run
-
-`from` may be an observation anchor too, under the same rules as `to`: a model
-whose run should begin one week before its data begin says so, rather than
-carrying a day that has to change with the data window:
+`from` may be an observation anchor too, under the same rules as `to`. A model
+whose run begins one week before its data writes:
 
 ```camdl
 simulate { from = first_obs - 7 'days  to = last_obs }
 ```
 
 `first_obs` is the start of the earliest observed period over the run's bound
-streams, so for a stream with `covers = closing_at(time, 7 'days)` whose first
-row is labelled day 5, `first_obs` is day −2, the day that week opened. A model
-that should start where its first observed period opens writes
+streams. For a stream with `covers = closing_at(time, 7 'days)` whose first row
+is labelled day 5, `first_obs` is day −2, the day that week opened (§12.1.1). A
+model that starts where its first observed period opens writes
 `from = first_obs`.
 
-The start is resolved once per run, from the observation times the run binds,
-by every command that resolves an anchored `to`, and a command with no data
-refuses an anchored start by name. The resolved start is substituted into the
-model the run is content-addressed by, together with every start the compiler
-derived from it: the regular output schedule, a regular `emit_schedule`, and a
-recurring intervention or event that declares no `from` of its own. A resolved
-model is therefore the model that would have compiled with that start written
-as a literal: two data windows are two runs, and one window reached by two
-spellings is one run. `init {}` is evaluated at the resolved start (§15.1).
+The start is resolved once per run, by every command that resolves an anchored
+`to`, and a command with no data refuses an anchored start by name. The
+resolved start is substituted into the model the run's identity is computed
+from, together with every start the compiler derived from it: the regular
+output schedule, a regular `emit_schedule`, and a recurring intervention or
+event that declares no `from` of its own. A resolved model is therefore the
+model that would have compiled with the start written as a literal: two data
+windows are two runs, and one window reached by two spellings is one run.
+`init {}` is evaluated at the resolved start (§15.1).
 
-A run may also be given its start from outside the model file, so that one
-model serves several data windows. Highest precedence first:
+A run may also take its start from outside the model file, so that one model
+serves several data windows. In order of precedence:
 
 1. `camdl simulate --from SPEC` on the command line;
 2. `[simulate] from = SPEC` in the fit config (`camdl docs fit-toml`), read by
@@ -5834,29 +5875,34 @@ model serves several data windows. Highest precedence first:
    `profile --fit`, `survey --fit`, `simulate --fit`);
 3. the model's own `simulate { from }`.
 
-SPEC is the CLI time grammar of `--to`: a model-time number, a date under a
-model `origin`, or an anchor with a bare-word offset (`"first_obs - 1 week"`).
-The override is applied exactly as an anchored start is, so it enters the run's
-identity through the model and moves the same derived starts. A stored fit
-records the start it was fitted from, and `fit predict` and
-`simulate --fit <run dir>` replay that start.
+`SPEC` has the grammar of `--to`: a model-time number, a date under a model
+`origin`, or an anchor with a bare-word offset (`"first_obs - 1 week"`). The
+override is applied as an anchored start is, so it enters the run's identity
+through the model and moves the same derived starts. A stored fit records the
+start it was fitted from, and `fit predict` and `simulate --fit <run dir>`
+replay that start. `--from` is refused together with `--init-state`, which sets
+the start itself.
 
-One case is refused rather than guessed. When the model's `from` is a literal
-and a recurring intervention or event starts at that same time, camdl cannot
-tell whether the schedule declared no `from` (and should move with the run's
-start) or declared one equal to it (and should stay), so a different start from
-the command line or the config is refused, naming the schedules. Writing the
-model's `from` as an observation anchor removes the ambiguity, because a
-schedule that declares no `from` then carries no number at all until the run
-resolves it.
+One case is refused. When the model's `from` is a literal and a recurring
+intervention or event starts at that same time, the compiled model does not
+record whether the schedule declared no `from` (and should move with the run's
+start) or declared one equal to it (and should stay). A different start from
+the command line or the config is then refused, with an error naming the
+schedules. Writing the model's `from` as an observation anchor removes the
+ambiguity, because a schedule that declares no `from` then carries no number
+until the run resolves it.
 
 ---
 
 ## 19. Content-Addressable Output
 
-Outputs are stored in a **content-addressed store** under an `output_dir` you
-choose, partitioned by artifact kind (`sims/` for `simulate` trajectories,
-`fits/` for inference runs, and so on):
+Every run is stored in a **content-addressed store** under the output root
+(`--output-dir`, default `./results`), partitioned by artifact kind: `sims/`
+for `simulate` trajectories, `fits/` for fits, and so on. A run's directory is
+derived from its inputs, so the same inputs always reach the same directory and
+different inputs never share one. The store's layout and every artifact kind
+are specified in the run spec (§2.1, §3.7); this section states what a
+`simulate` run's address depends on.
 
 ```
 {output_dir}/
@@ -5866,77 +5912,76 @@ choose, partitioned by artifact kind (`sims/` for `simulate` trajectories,
       run.json
 ```
 
-A `simulate` trajectory's address is a **factored tuple of five levels** —
-model, config, params, scenario, seed — nested in that order. Each path segment
-is `{label}-{hash8}`, e.g. `sir_basic-3a7f2c1d/chain_binomial-dt1-1fb03eee/…`:
-the `label` is a human-readable provenance tag (the model stem,
-`chain_binomial-dt1`, `seed_1`) and the `hash8` is the first eight hex chars of
-that level's structural content hash.
+A `simulate` trajectory's address has five levels, nested in the order model,
+config, params, scenario, seed. Each path segment is `{label}-{hash8}`, as in
+`sir_basic-3a7f2c1d/chain_binomial-dt1-1fb03eee/…`: the label is a readable
+tag (the model's file stem, `chain_binomial-dt1`, `seed_1`) and `hash8` is the
+first eight hex characters of that level's content hash.
 
-Navigation and display read `run.json`, never the segment text, so the label is
-cosmetic. Renaming a scenario changes the directory name but not the identity,
-which produces a harmless cache miss (a fresh directory, one redundant re-run),
-never a wrong answer. There is **no** `00000000` special-case marker for an
-empty (baseline) scenario: an empty `enable`/`disable`/`set` hashes to a
-concrete level hash like any other input.
+Commands that list and display runs read `run.json`, never the segment text, so
+a label carries no identity. Renaming a scenario changes its directory name but
+not its identity: the result is a fresh directory and one redundant run, never
+a wrong answer. A baseline run's empty scenario hashes to a level hash like any
+other input.
 
 ### 19.1 Run identity
 
-A leaf's identity is its `run_id`: a single structural hash over the ordered
-list of the five per-level content hashes,
+A leaf's identity is its `run_id`, one hash over the artifact kind and the
+ordered list of the five level hashes,
 
 ```
 run_id = hash(HASH_VERSION, kind, [model, config, params, scenario, seed])
 ```
 
-recorded in full (64 hex chars) in `run.json`; the 8-hex path segments are a
-readable factoring of it. Each level hashes a **disjoint slice** of the resolved
-input set, and their union is the whole input:
+recorded in full (64 hex characters) in `run.json`; the eight-character path
+segments are a readable factoring of it. Each level hashes a disjoint part of
+the resolved inputs, and together they cover all of them:
 
-| Level      | Covers                                                                                                                                                                       |
-| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`    | the structural IR — compartments, transitions, observations, ODE equations, tables, `init`, `time_unit` — presentation-normalized (output format and time rendering are stripped, since they don't change results) |
-| `config`   | backend, `dt`, `from` / `to`, the output schedule, the written-column selection (`--columns` / `--no-flows`), and degenerate-rate handling                                 |
-| `params`   | the resolved base parameter values and any loaded table data                                                                                                              |
-| `scenario` | the scenario **delta** only: the `enable` / `disable` lists and the `set` / `scale` parameter patch                                                                        |
-| `seed`     | the process and base RNG seeds                                                                                                                                             |
+| Level      | Covers                                                                                                                                                                                                   |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`    | the whole compiled model (compartments, transitions, observations, ODE equations, tables, `init`, `time_unit`, scenario presets), the IR schema version and the engine build; the output `format` and the time rendering are removed first, since they do not change results, and `quantities {}`, `contrasts {}` and `#'` documentation are not part of the model (§16.4) |
+| `config`   | the backend, `dt`, `from` and `to`, the output schedule, the calendar mode, the written-column selection (`--columns`, `--no-flows`), the handling of degenerate rates and of forcing extrapolation, and the saved state a run starts from under `--init-state` |
+| `params`   | the resolved base parameter values and the content digests of any loaded table files                                                                                                                     |
+| `scenario` | the scenario's effective change only: the `enable` and `disable` lists and the `set` and `scale` parameter patch                                                                                         |
+| `seed`     | the run's process seed, derived from `--seed` or `--seeds` (run spec §3.5)                                                                                                                               |
 
-Two runs that share a structural model share the `model` level even if one bakes
-in calibrated values and the other supplies them externally; changing a
-parameter value re-keys the `params` level while the `model` level is untouched.
-The written-column selection is part of `config`, so two runs that request
-different columns are distinct leaves — a leaf's bytes and its `run_id` never
-disagree.
+Two runs of one structural model share the `model` level when one writes
+calibrated values into the model and the other supplies them from a parameter
+file; changing a parameter value re-keys the `params` level and leaves the
+`model` level unchanged. The written-column selection is part of `config`, so
+two runs that write different columns are different leaves, and a leaf's file
+and its `run_id` always agree.
 
-**Collision handling.** Eight hex chars per segment suffices because a collision
-requires *every* level on the path to collide at once; the full 64-char hashes
-in `run.json` are the authoritative check, and the store escalates a genuine
-path-prefix collision by suffixing the final segment.
+**Collisions.** Eight hex characters per segment suffice because two leaves
+share a path only when every level on the path collides at once. The full
+hashes in `run.json` are the authoritative check, and when two different
+identities do share a path the store adds a suffix to the final segment.
 
 ### 19.2 Cache reuse
 
-A run is a **cache hit** when its factored path already exists. Because the
-levels nest independently, an unchanged level's subtree is reused verbatim:
+A run whose address already holds a completed leaf is a **cache hit** and is
+read back without simulating. The levels nest, so a change re-keys its own level
+and every level below it, and the subtrees of unchanged levels are reused:
 
-| What changed                        | Re-keys              | Reuse                                                       |
-| ----------------------------------- | -------------------- | ---------------------------------------------------------- |
-| model / IR                          | `model` + all below  | none                                                       |
-| base params or table data           | `params` + below     | none                                                       |
-| backend, `dt`, or column selection  | `config` + below     | none                                                       |
-| one scenario's enable/disable/patch | that `scenario` leaf | sibling scenarios reused                                   |
-| add more seeds                      | new `seed` leaves    | existing seeds reused                                      |
-| rename a scenario (same delta)      | nothing (label only) | identity unchanged, but the renamed path is a fresh directory → one harmless re-run |
+| What changed                        | Re-keys              | Reuse                                                                       |
+| ----------------------------------- | -------------------- | --------------------------------------------------------------------------- |
+| model / IR                          | `model` + all below  | none                                                                        |
+| base params or table data           | `params` + below     | none                                                                        |
+| backend, `dt`, or column selection  | `config` + below     | none                                                                        |
+| one scenario's enable/disable/patch | that `scenario` leaf | sibling scenarios reused                                                    |
+| add more seeds                      | new `seed` leaves    | existing seeds reused                                                       |
+| rename a scenario (same delta)      | nothing (label only) | identity unchanged; the renamed path is a fresh directory, so one re-run    |
 
 ### 19.3 Enumerating runs
 
-There is no manifest file. Every completed run is its own content-addressed
-`run.json` leaf; to enumerate them, walk those leaves or read the derived
-`index.json`. `camdl list` does this live.
+There is no manifest file. Each completed run is its own `run.json` leaf, and
+`camdl list` enumerates them by walking the leaves or reading the store's
+`index.json`, a lookup cache rebuilt from the leaves (run spec §2.6).
 
 ### 19.4 Caching
 
-Same inputs → same hashes → run directory already exists → skip simulation. Pass
-`--force` to re-run and overwrite existing results.
+The same inputs give the same hashes, so a run whose leaf already exists is not
+simulated again. `--force` re-runs it and overwrites the stored result.
 
 ---
 
