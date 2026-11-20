@@ -261,10 +261,14 @@ run to mid-week, is predicted whole: the particle carries the flow it inferred
 before the origin and adds what it simulates after it. Because a stream's
 running total starts only where a declared period starts, the periods come from
 the stream's declaration (its `covers` width, or its `emit_schedule`), never
-from the spacing of past rows. The draws are pooled with equal weights, and a
-draw whose filter fails, or any particle that dies after the origin, fails the
-whole forecast rather than being dropped. Chain-binomial posteriors only for
-now.
+from the spacing of past rows. A stream with `window_start`/`window_stop`
+columns states observation supports rather than a cadence: its held-out windows
+are predicted exactly as observed, gaps and widths included, and past its last
+known window the targets are its `emit_schedule`'s periods from that window's
+stop, a schedule period across that stop being refused. The draws are pooled
+with equal weights, and a draw whose filter fails, or any particle that dies
+after the origin, fails the whole forecast rather than being dropped.
+Chain-binomial posteriors only for now.
 
 ### What happens at each observation time
 
@@ -2003,8 +2007,9 @@ use `fit predict`, which carries each stream's running total through the origin
 [Forecasts from the end of the training rows](#forecasts-from-the-end-of-the-training-rows)).
 
 `pfilter --save-final-state` checks the same thing from its side. Before
-filtering, it refuses to save a state when a bound stream's data imply different
-periods from those its `emit_schedule` gives, with the diagnostic `fit predict`
+filtering, it refuses to save a state when a bound uniform stream's data imply
+different periods from those its `emit_schedule` gives (a window-column stream's
+windows are supports and are not compared), with the diagnostic `fit predict`
 gives for the same disagreement, naming `--save-final-state`: the filter took
 the stream's periods from the data, and a restart would write them from the
 schedule. That includes a run that will only ever restart the trajectory,

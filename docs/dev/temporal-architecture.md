@@ -558,33 +558,40 @@ For each stream, one function builds the targets after the forecast origin
 1. **The declared tiling**, for a stream with a uniform `covers` form: the
    periods continue the stream's tiling at its declared width. Because a uniform
    stream's periods tile without gaps (§2.2), its phase is fixed by any of its
-   rows; the first target is the period under way at the origin.
-2. **The emit schedule**, for a stream with window columns and an
-   `emit_schedule`: the periods between consecutive schedule times. The emit
-   schedule already means "the times at which this stream reports" for
-   `simulate --obs`; forecasting reads the same declaration. Where the periods
-   the stream's rows imply and its schedule disagree over the same reporting
-   interval, the forecast and a restart are refused, naming the stream, both
-   periods and the source of each (D82).
-3. **Held-out rows**, when scoring a window-column stream with no
-   `emit_schedule`: the periods of the rows that did not train, validated for
-   order, uniqueness, overlap and endpoints. Nothing is extrapolated.
-4. **Refusal** otherwise (D42): a window-column stream with no `emit_schedule`
-   declares no rhythm, and the forecast tail is refused with a message naming
-   the two ways to declare one. A stream with no bound rows is refused too: it
-   has no phase.
+   rows; the first target is the period under way at the origin. Where the
+   periods the rows imply and the periods the stream's `emit_schedule` gives for
+   its labels (`covers.period_of(label)`) disagree over the same reporting
+   interval, the forecast and a restart state are refused, naming the stream,
+   both periods and the source of each (D82).
+2. **Observed windows, then the emit schedule**, for a stream with window
+   columns (D106). Its rows state observation supports, exact `[start, stop)`
+   windows that may leave gaps and vary in width, not a cadence, so they are not
+   compared with the schedule. The held-out rows' windows within the reach are
+   targets exactly as observed, validated for order, uniqueness, overlap and
+   endpoints, whether or not the stream has an `emit_schedule`. Past the last
+   known window (the latest end among the training and held-out rows) the
+   targets are the `emit_schedule`'s periods, the gaps between consecutive
+   schedule times, that start at or after that window's stop; the emit schedule
+   already means "the times at which this stream reports" for `simulate --obs`.
+   A schedule period that starts before that stop and ends after it is refused,
+   naming both; it is never trimmed or merged. With no `emit_schedule` nothing
+   follows the known windows.
+3. **Refusal** otherwise (D42): a window-column stream with neither held-out
+   rows nor an `emit_schedule` declares no targets, and the forecast tail is
+   refused with a message naming the two ways to declare them. A uniform stream
+   with no bound rows is refused too: it has no phase.
 
-When scoring a stream with a declared cadence (1 or 2), the held-out rows only
-select which targets are scored; they do not renumber them, so a missing week
-does not shift the horizon of later weeks. A held-out row whose period is not
-one of the stream's targets is refused, never skipped. Every target carries its
-lead time (its end minus the origin) apart from its ordinal: for targets taken
-from irregular held-out rows (3), the ordinal is not a horizon comparable with a
+When scoring a uniform stream (1), the held-out rows only select which targets
+are scored; they do not renumber them, so a missing week does not shift the
+horizon of later weeks. A held-out row whose period is not one of the stream's
+targets is refused, never skipped. Every target carries its lead time (its end
+minus the origin) apart from its ordinal: for a window-column stream's targets
+(2), the ordinal is a position in its list, not a horizon comparable with a
 tiled stream's, and comparisons across data sets with missing periods use lead
 time.
 
-The most common gap between observations is never a target source. The horizon
-only truncates the list.
+The most common gap between observations, the widths of past windows and their
+spacing are never a target source. The horizon only truncates the list.
 
 Calendar-month and standard-week periods cannot be declared until the calendar
 `covers` forms of the follow-up proposal land (D45). Until then a monthly stream

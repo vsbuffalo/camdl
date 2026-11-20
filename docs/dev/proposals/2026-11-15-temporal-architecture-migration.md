@@ -1064,7 +1064,8 @@ Recorded in the maintainer's docket; each is reflected in the spec and above.
   endpoints. Every target carries its lead time (its end minus the origin)
   independently of its ordinal, so the second of two irregular targets is not a
   horizon-2 forecast in the sense of a tiled stream; outputs across data sets
-  with missing periods are compared by lead time.
+  with missing periods are compared by lead time. Amended by D106 for
+  window-column streams.
 - **D81** (2026-11-17). A stream whose likelihood reads a design column (such as
   `binomial(n = tested, …)`) is forecast and scored, superseding the refusal of
   D52. Two modes are distinguished and labelled: a prospective forecast, whose
@@ -1084,7 +1085,8 @@ Recorded in the maintainer's docket; each is reflected in the spec and above.
   restart are refused, with a diagnostic naming the stream, the conflicting
   periods and the source of each. There is no precedence rule; deliberately
   different historical and prospective schedules would need an explicit
-  prospective schedule declaration, a separate feature.
+  prospective schedule declaration, a separate feature. Amended by D106: the
+  comparison applies to uniform `covers` streams only.
 - **D83** (2026-11-17). A scenario forecast publishes each arm's full predictive
   distribution and the difference of predictive means,
   `Δ = E[Y_A | D] − E[Y_B | D]`, with its paired Monte Carlo standard error. No
@@ -1151,6 +1153,23 @@ Recorded in the maintainer's docket; each is reflected in the spec and above.
   state the restart rule. #1158 needs its §4 and test 7 revised to the
   refuse-at-save rule; gh#1081 and gh#1085 stay open, retitled to the completion
   feature.
+- **D106** (2026-11-19). Window-column data specify observation supports, exact
+  `[start, stop)` windows with gaps and varying widths allowed, not a future
+  cadence. Amends D80 and D82. The D82 comparison of a stream's data with its
+  `emit_schedule` applies to uniform `covers` streams only, at the forecast and
+  at `pfilter --save-final-state` alike. A window-column stream's targets are
+  chosen in `ForecastPlan`, and no writer carries a scheduling rule: its
+  held-out windows within the reach are targets exactly as observed, whether or
+  not it has an `emit_schedule`; past the last known window (the latest end
+  among training and held-out rows) the targets come only from the declared
+  `emit_schedule`, its periods that start at or after that window's stop; a
+  schedule period that straddles that stop is refused, naming both, never
+  trimmed or merged; with no `emit_schedule` nothing follows the known windows,
+  and a stream with neither held-out rows nor a schedule is refused as before
+  (D42). No cadence is inferred from gaps, widths or a modal interval. The
+  restart rule (D100) is unchanged: a restart time inside a window is refused,
+  naming it. Saved states should eventually continue exactly from inside a
+  window; that is the exact restart (#1158).
 
 ## Part 9. Documents this plan changes
 

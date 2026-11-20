@@ -215,22 +215,28 @@ _forecast origin_), the state is filtered through the training rows only and
 each stream's periods ending within the reach are predicted, the period under
 way at the origin included. A target's `horizon` counts its stream's own periods
 from that one (0, 1, …); `lead` is the time from the origin to the target's end.
-The targets are the periods the stream declares — a uniform `covers` form
-continues its tiling, window columns use `emit_schedule` — and the rows after
+For a uniform `covers` form the targets continue its tiling, and the rows after
 the training rows (the _held-out_ rows) only select which of those targets have
 an observed value; they never renumber them. A held-out row within the reach
 whose period is not one of the stream's targets is refused, not skipped, and so
-are two held-out rows naming one target. A stream with window columns and no
-`emit_schedule` takes its held-out rows' windows within the reach as its
-targets, which must be in order, distinct and disjoint, and must not overlap its
-training rows; their `horizon` counts the held-out rows, not declared periods,
-so compare such targets by `lead`. A stream whose rows and `emit_schedule` give
-different periods over the same reporting interval is refused, with both periods
-and where each comes from. A stream with no declared rhythm and no held-out rows
-is refused. A refused stream is listed under `failed`, named in `report.json`,
-and the exit status is 1. A stream none of whose periods ends within the reach
-is skipped with the reason `no_target_within_horizon` (a failure if `--stream`
-named it).
+are two held-out rows naming one target. A uniform stream whose rows and
+`emit_schedule` give different periods over the same reporting interval is
+refused, with both periods and where each comes from.
+
+A stream with window columns states observation supports, exact windows that may
+leave gaps and vary in width, never a cadence. Its held-out windows within the
+reach are its targets exactly as observed, whether or not it has an
+`emit_schedule`; they must be in order, distinct and disjoint, and must not
+overlap its training rows. Past its last known window the targets are its
+`emit_schedule`'s periods (the gaps between emit times) that start at or after
+that window's stop; a schedule period that starts before the stop and ends after
+it is refused, naming both. With no `emit_schedule` nothing follows the known
+windows. Such targets' `horizon` is their position in that list, not a count of
+declared periods, so compare them by `lead`. A stream with no declared rhythm
+and no held-out rows is refused. A refused stream is listed under `failed`,
+named in `report.json`, and the exit status is 1. A stream none of whose periods
+ends within the reach is skipped with the reason `no_target_within_horizon` (a
+failure if `--stream` named it).
 
 A stream whose likelihood reads a design column, such as a binomial's
 `n = tested`, needs that column's value at every target. `--design SOURCE=FILE`
@@ -385,10 +391,10 @@ stream and the period, when the stream is one it would write (`--obs`,
 `--obs-dir`, `--obs-only`, `--obs-only-dir`) or one an `observations.<stream>`
 quantity reads, whether or not the run reaches the period's end; a
 trajectory-only run is not refused. The filter, under `--save-final-state`,
-refuses to save when a stream's data and its `emit_schedule` imply different
-periods, and notes any period under way at T. To restart cleanly, end the data
-on a boundary of every emitted stream's periods; to predict the period under
-way, use `fit predict --horizon`, which needs a fit. Details:
+refuses to save when a uniform stream's data and its `emit_schedule` imply
+different periods, and notes any period under way at T. To restart cleanly, end
+the data on a boundary of every emitted stream's periods; to predict the period
+under way, use `fit predict --horizon`, which needs a fit. Details:
 [inference.md](inference.md#forecasting-from-the-filtered-state).
 
 ### Model comparison
