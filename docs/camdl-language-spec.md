@@ -6890,371 +6890,412 @@ scenarios {
 
 ## 24. Compilation Pipeline
 
+`camdlc` compiles a `.camdl` file into the intermediate representation (IR), a
+JSON document that the `camdl` runtime reads. The runtime does not read the
+model source: it sees only the IR's concrete compartments, transitions and
+expression trees, with no index variables left in them. The IR format is
+specified in `docs/compartmental-ir-spec.md`.
+
 ```
-.camdl file  →  [Parser]     →  AST
-params.toml  →  [Loader]     ─┐
-data files   →  [Loader]     ─┤
-                               ▼
-                          [Expander]   →  Expanded IR
-                               │
-                          [Validator]  →  type/dimension checks
-                               │
-                          [Serializer] →  model.ir.json
-                               │
-                          [Rust Runtime] → output files
+model.camdl ─▶ parse ─▶ expand ─▶ check ─▶ model.ir.json
+                          ▲
+             files named by read(…)
+
+model.ir.json + parameter values + data ─▶ camdl ─▶ simulations, fits, output
 ```
 
-**Parser** (Menhir): `.camdl` text → AST. ~60 grammar productions.
+- **Parse.** The text becomes a syntax tree. A syntax error is **E001**.
+- **Expand.** Every indexed declaration becomes the concrete compartments,
+  transitions, observations and actions it stands for (§25): binders are
+  enumerated, `where` guards are evaluated and the members they reject are
+  dropped, `let` bindings are lowered, unit literals are converted to the
+  model's `time_unit`, and the files named by `read(…)` are read (§6.2).
+- **Check.** Names, index arity, table shapes and dimensions (§2.2) are checked,
+  during expansion and on the expanded model.
+
+`camdlc check FILE.camdl` runs all three stages and writes nothing.
+`camdlc FILE.camdl` writes the IR to standard output, one element per line;
+`--pretty` indents it, and `--set NAME=VALUE` overrides a parameter's value in
+it. Parameter values (§20), observation data and run settings are otherwise read
+by the runtime when a model is run (§21).
 
 ### 24.1 File-Level Grammar
 
-A `.camdl` file is a sequence of declarations. Order does not matter — all
-declarations are collected first, then resolved (forward references are valid).
-A block that lists entries (`compartments`, `parameters`, `transitions`, ...)
-may be written more than once, and its entries are joined. `time_unit`,
-`origin`, `description`, `simulate`, `output` and `balance` may each be written
-once; a second one is an error (**E140**), located at the second, with a note at
-the first.
+A `.camdl` file is a sequence of declarations, optionally headed by a `#'`
+block that documents the model (§1.1).
 
 ```camdl
-file := declaration*
+file := model_doc? declaration*
 
 declaration :=
   | time_unit_decl                    # time_unit = 'days
+  | description_decl                  # description = "..."
   | origin_decl                       # origin = date("YYYY-MM-DD")
   | compartments_block                # compartments { ... }
   | parameters_block                  # parameters { ... }
   | dimensions_block                  # dimensions { dim = [...] | read(...) }
+  | stratify_decl                     # stratify(by = ..., ...)
   | tables_block                      # tables { ... }
-  | forcing_block                   # forcing { ... }
+  | forcing_block                     # forcing { ... }
+  | let_binding                       # let NAME = EXPR  |  let NAME : TYPE = EXPR
   | transitions_block                 # transitions { ... }
+  | ode_block                         # ode { ... }
+  | balance_block                     # balance { NAME = EXPR }
+  | init_block                        # init { ... }
   | observations_block                # observations { ... }
   | interventions_block               # interventions { ... }
   | events_block                      # events { ... }
-  | ode_block                         # ode { ... }
-  | output_block                      # output { ... }
-  | quantities_block                  # quantities { ... }
+  | reactive_interventions_block      # reactive_interventions { ... }
   | timepoints_block                  # timepoints { ... }
-  | init_block                        # init { ... }
+  | quantities_block                  # quantities { ... }
+  | contrasts_block                   # contrasts { ... }
+  | output_block                      # output { ... }
   | simulate_block                    # simulate { ... }
   | scenarios_block                   # scenarios { ... }
-  | balance_block                     # balance { ... }
-  | stratify_decl                     # stratify(by = ..., ...)
-  | let_binding                       # let NAME = EXPR
 ```
 
-**Mandatory** for a runnable model: `compartments`, at least one of
-`transitions` or `ode` (integer compartments evolve via `transitions`, `real`
-compartments via `ode`; a model may use either or both), `init`, `simulate`, and
-`time_unit`. Everything else is optional.
+Declarations may appear in any order. All of them are collected before any name
+is resolved, so a name may be used above its declaration. A block that lists
+entries (`compartments`, `parameters`, `transitions`, …) may be written more than
+once, and its entries are joined. `time_unit`, `origin`, `description`,
+`simulate`, `output` and `balance` may each be written once; a second one is
+**E140**, located at the second, with a note at the first.
 
-**Mandatory** for `camdl check` (validation only): `compartments`. A param-free
-model checks cleanly and a pure-`ode` model (no `transitions` block) checks and
-compiles; no `parameters`, `simulate`, or `init` is required for validation.
+The only declaration a model requires is `compartments`. A model with no other
+declaration compiles, with an L402 warning for each compartment that nothing
+reads, and runs. Each omitted declaration has a default: `time_unit` is
+`'days` (§2), the run covers model times 0 to 100 when there is no `simulate`
+block (§14.1), a compartment that `init` does not name starts at 0 (§15), and a
+model with neither `transitions` nor `ode` holds its initial state.
 
-**Expander** (OCaml): indexed transitions → flat IR transitions,
-`c in compartments` → per-compartment transitions, `consecutive` → adjacent pair
-transitions, `sum(... where P, ...)` and transition `where` → compile-time
-filtering, let bindings → inlined expressions, `ode {}` → IR ODE equations, unit
-normalization.
-
-**Validator**: compartment arity checking, table dimension checking, index
-variable scoping, parameter reference resolution, dimensional analysis.
-
-**Serializer**: expanded IR → compact one-element-per-line JSON (a `--pretty`
-variant exists for inspection).
-
-**Runtime** (Rust): deserializes IR, evaluates propensities, simulates, writes
-output. Knows nothing about the DSL — sees only flat compartments, transitions,
-and expression ASTs.
+Related sections: §25 (what expansion produces), §26 (diagnostics), §21 (the
+commands that compile and run a model).
 
 ---
 
 ## 25. Expansion Rules (DSL → IR Mapping)
 
-Every DSL construct compiles to specific IR structures. This section documents
-the mapping for each construct — the contract between the OCaml frontend and the
-Rust backend.
+This section gives the IR that each construct compiles to, as `camdlc` writes
+it. The IR fragments are abridged: a transition's `metadata`, `rate_grad` and
+`rate_state_grad` fields are left out, and `...` stands for elements of the
+same pattern.
+
+Expanded names join a base name and levels with `_`. A compartment cell takes
+its levels in the order the dimensions were stratified (`S[child, p1]` is
+`S_child_p1`); a member of a transition family takes the level of each binder,
+in binder order (`migrate[a in age, src in patch, dst in patch]` has a member
+`migrate_child_p1_p2`). The examples use `age = [child, adult]` unless they say
+otherwise.
 
 ### 25.1 Let Bindings
 
+A `let` lowers to one of three forms:
+
+- a typed `let` whose body is a constant is a model constant, listed under
+  `constants` and read through `const_ref`;
+- a `let` whose body reads no parameter, directly or through another `let`, is a
+  shared binding, listed once per cell under `bindings` and read through
+  `binding_ref`;
+- any other `let` is inlined: its expression tree replaces each use.
+
 ```camdl
 # DSL:
-let N = S + E + I + R
+let N = S + E + I + R             # reads no parameter
+let k : positive = 2.0            # typed, with a constant body
+let force = beta * I / N          # reads a parameter
 
-# IR: everywhere N appears, inline the expression tree:
-BinOp(Add, BinOp(Add, BinOp(Add, Pop("S"), Pop("E")), Pop("I")), Pop("R"))
+# IR:
+"constants": [{"name": "k", "value": 2.0, "kind": "positive"}]
+"bindings":  [{"name": "N", "expr": {"pop_sum": ["S_child", "S_adult", "E_child", "E_adult",
+                                                  "I_child", "I_adult", "R_child", "R_adult"]}}]
+# a use of k:     {"const_ref": "k"}
+# a use of N:     {"binding_ref": "N"}
+# a use of force: {"bin_op": {"op": "div",
+#                   "left": {"bin_op": {"op": "mul", "left": {"param": "beta"},
+#                                       "right": {"pop_sum": ["I_child", "I_adult"]}}},
+#                   "right": {"binding_ref": "N"}}}
 ```
 
-After stratification, bare `S` in the let body becomes
-`PopSum(["S_child", "S_adult"])`. N is always the global total.
+In model dynamics a bare stratified compartment name is the sum over all its
+cells (`pop_sum`), so `N` is the total population. An observation reads the bare
+name differently (§12.1, "Pooling strata"). An indexed `let` that reads no
+parameter, such as `let N_local[a in age] = S[a] + E[a] + I[a] + R[a]`, gives
+one binding per cell: `N_local_child` and `N_local_adult`.
 
 ### 25.2 Indexed Transitions
+
+An indexed transition becomes one IR transition per combination of its binders'
+levels.
 
 ```camdl
 # DSL:
 recovery[a in age] : I[a] --> R[a]  @ gamma * I[a]
-# with age = [child, adult]
 
-# IR: two concrete transitions:
-{ name: "recovery_child",
-  stoichiometry: [("I_child", -1), ("R_child", 1)],
-  rate: BinOp(Mul, Param("gamma"), Pop("I_child")),
-  event_key: "recovery_child:{firing_index}" }
+# IR: two transitions
+{"name": "recovery_child",
+ "stoichiometry": [["I_child", -1], ["R_child", 1]],
+ "rate": {"bin_op": {"op": "mul", "left": {"param": "gamma"}, "right": {"pop": "I_child"}}}}
 
-{ name: "recovery_adult",
-  stoichiometry: [("I_adult", -1), ("R_adult", 1)],
-  rate: BinOp(Mul, Param("gamma"), Pop("I_adult")),
-  event_key: "recovery_adult:{firing_index}" }
+{"name": "recovery_adult",
+ "stoichiometry": [["I_adult", -1], ["R_adult", 1]],
+ "rate": {"bin_op": {"op": "mul", "left": {"param": "gamma"}, "right": {"pop": "I_adult"}}}}
 ```
 
 ### 25.3 Inflows
 
+An inflow has a stoichiometry with only a destination.
+
 ```camdl
-# DSL:
+# DSL, with patch = [p1, p2, p3]:
 birth[p in patch] : --> S[child, p]
   @ mu * sum(a in age, N_local[a, p])
 
-# IR (for each patch value, e.g., p1):
-{ name: "birth_p1",
-  stoichiometry: [("S_child_p1", 1)],
-  rate: BinOp(Mul, Param("mu"),
-    PopSum(["S_child_p1","E_child_p1",...,"R_adult_p1"])),
-  event_key: "birth_p1:{firing_index}" }
+# IR, for p = p1:
+{"name": "birth_p1",
+ "stoichiometry": [["S_child_p1", 1]],
+ "rate": {"bin_op": {"op": "mul", "left": {"param": "mu"},
+   "right": {"reduce": [{"binding_ref": "N_local_child_p1"},
+                        {"binding_ref": "N_local_adult_p1"}]}}}}
 ```
 
-`sum(a in age, N_local[a, p])` expands to the sum of all compartments in patch p
-across all age groups — the compiler generates the `PopSum` from the known
-compartment list and index bindings.
+A `sum` over a dimension lowers to `reduce`, the sum of one term per level. Here
+each term is a cell of the shared binding `N_local` (§25.1); written out as
+`sum(a in age, S[a, p] + E[a, p] + I[a, p] + R[a, p])`, the same sum lowers to
+one `pop_sum` over the cells of patch `p1`.
 
 ### 25.4 Projections
 
+An observation's projection (§12.1) lowers to one of four IR forms: a single
+flow, a list of flows accumulated together, a ratio of two such lists, or a sum
+of compartment cells read at an instant.
+
 ```camdl
-# DSL (UNSTRATIFIED `infection` only — see §12.1: a bare, un-indexed
-# incidence() over a STRATIFIED family is E280, on any stream):
+# DSL, on an unstratified `infection`:
 incidence(infection)
 
 # IR:
-CumulativeFlow("infection")
+{"cumulative_flow": "infection"}
 
-# DSL: pooling a stratified family, stated explicitly
-sum(a in age, incidence(infection[a]))
+# DSL: one stratum of a stratified family
+incidence(infection[child])
 
 # IR:
-CumulativeFlowSum(["infection_child", "infection_adult"])
+{"cumulative_flow": "infection_child"}
 
-# DSL: adding distinct flows into one reported column (two routes into the
-# same notification series). Addition and the family sum are the same object —
-# a set of flows accumulated over the stream's interval — so they compose and
-# flatten into one list:
+# DSL: a stratified family pooled with `sum`, and flows added into one column
+sum(a in age, incidence(infection[a]))
 incidence(infection[child]) + incidence(infection[adult])
 sum(a in age, incidence(infection[a])) + incidence(importation)
 
 # IR:
-CumulativeFlowSum(["infection_child", "infection_adult"])
-CumulativeFlowSum(["infection_child", "infection_adult", "importation"])
+{"cumulative_flow_sum": ["infection_child", "infection_adult"]}
+{"cumulative_flow_sum": ["infection_child", "infection_adult"]}
+{"cumulative_flow_sum": ["infection_child", "infection_adult", "importation"]}
 
-# A projection may ADD incidence terms; it may not weight, subtract, or mix
-# them with an instant state read (E341). A per-stream reporting rate goes in
-# the LIKELIHOOD (`cases ~ poisson(rate = rho * projected)`); a PER-STRATUM
-# weight inside the projection is not yet supported.
-
-# DSL:
-incidence(infection[child])    # indexed: specific stratum
-
-# IR:
-CumulativeFlow("infection_child")
-
-# DSL: the fraction of the row's events that were of one kind — one flow sum
-# divided by another, both accumulated over the same window (§12.1). The two
-# sides are the object CumulativeFlowSum carries; the same flow on both sides
-# is the expected shape, not a collision.
+# DSL: one sum of flows divided by another, both accumulated over the row's period
 incidence(die_comm) / (incidence(die_comm) + incidence(die_fac))
 incidence(infection[child]) / sum(a in age, incidence(infection[a]))
 
 # IR:
-FlowRatio { numerator: ["die_comm"], denominator: ["die_comm", "die_fac"] }
-FlowRatio { numerator: ["infection_child"], denominator: ["infection_child", "infection_adult"] }
+{"flow_ratio": {"numerator": ["die_comm"], "denominator": ["die_comm", "die_fac"]}}
+{"flow_ratio": {"numerator": ["infection_child"], "denominator": ["infection_child", "infection_adult"]}}
 
-# DSL:
-R                              # bare: global total
+# DSL: a stock, pooled over its strata
+sum(R)
 
 # IR:
-CurrentPopSum(["R_child", "R_adult"])
+{"current_pop_sum": ["R_child", "R_adult"]}
 ```
 
+Adding flows and summing a family produce the same object, a list of flows
+accumulated over the row's period, so the two forms combine into one list. The
+same flow on both sides of a ratio is the expected shape. Weighting, subtracting
+or mixing flows with a state read is **E341**, and an unindexed `incidence(…)`
+or compartment over a stratified family is **E280** (§12.1).
+
 ### 25.5 Interventions
+
+A scheduled intervention lowers to its firing times and a list of actions. An
+action on a stratified compartment becomes one action per cell.
 
 ```camdl
 # DSL:
 sia_round_1 : transfer(fraction = 0.80, from = S, to = V) at [180]
 
-# IR (with age = [child, adult]):
-# Intervention at t=180, two actions (one per stratum):
-{ time: 180.0,
-  actions: [
-    FractionTransfer("S_child", "V_child", 0.80),
-    FractionTransfer("S_adult", "V_adult", 0.80)
-  ] }
-
-# Each FractionTransfer is atomic:
-#   delta = floor(Pop("S_child") * 0.80)
-#   S_child -= delta
-#   V_child += delta
-# Delta computed from pre-intervention state.
+# IR:
+{"name": "sia_round_1",
+ "fire": {"scheduled": {"at_times": [180.0]}},
+ "actions": [
+   {"fraction_transfer": {"src": "S_child", "dst": "V_child", "fraction": {"const": 0.8}}},
+   {"fraction_transfer": {"src": "S_adult", "dst": "V_adult", "fraction": {"const": 0.8}}}
+ ]}
 ```
+
+A `fraction_transfer` moves `⌊f · x⌋` individuals from the source cell to the
+destination cell, where `x` is the source's current count and `f` is the
+fraction clamped to `[0, 1]`. For `real` compartments, and under the ODE
+backend, the amount `f · x` is not rounded. Interventions are off unless
+enabled (§13.4), and the order in which actions and other effects apply within a
+step is §13.10.
 
 ### 25.6 Stratified Transmission (Indexed Sum → IR)
 
-```camdl
-# DSL: explicit indexed transmission (§10)
-infection[a in age] : S[a] --> E[a]
-  @ beta * S[a] * sum(b in age,
-      C_age[a,b] * I[b] / sum(c in compartments, c[b]))
-# with age = [child, adult]
+The explicit transmission form of §10 lowers like any other indexed rate: the
+inner `sum` becomes a `reduce`, and a table cell whose value is a literal number
+is written as that number.
 
-# Expands to IR:
-{ name: "infection_child",
-  stoichiometry: [("S_child", -1), ("E_child", 1)],
-  rate: BinOp(Mul, Param("beta"),
-    BinOp(Mul, Pop("S_child"),
-      BinOp(Add,
-        BinOp(Mul, TableLookup("C_age", 0),
-          BinOp(Div, Pop("I_child"),
-            PopSum(["S_child","E_child","I_child","R_child"]))),
-        BinOp(Mul, TableLookup("C_age", 1),
-          BinOp(Div, Pop("I_adult"),
-            PopSum(["S_adult","E_adult","I_adult","R_adult"])))))) }
+```camdl
+# DSL, with C_age = [[2.0, 0.5], [0.5, 1.5]] and
+# let N_local[a in age] = S[a] + E[a] + I[a] + R[a]:
+infection[a in age] : S[a] --> E[a]
+  @ beta * S[a] * sum(b in age, C_age[a, b] * I[b] / N_local[b])
+
+# IR, for a = child:
+{"name": "infection_child",
+ "stoichiometry": [["S_child", -1], ["E_child", 1]],
+ "rate": {"bin_op": {"op": "mul",
+   "left": {"bin_op": {"op": "mul", "left": {"param": "beta"}, "right": {"pop": "S_child"}}},
+   "right": {"reduce": [
+     {"bin_op": {"op": "div",
+       "left": {"bin_op": {"op": "mul", "left": {"const": 2.0}, "right": {"pop": "I_child"}}},
+       "right": {"binding_ref": "N_local_child"}}},
+     {"bin_op": {"op": "div",
+       "left": {"bin_op": {"op": "mul", "left": {"const": 0.5}, "right": {"pop": "I_adult"}}},
+       "right": {"binding_ref": "N_local_adult"}}}]}}}}
 ```
 
-The per-stratum denominator `sum(c in compartments, c[b])` becomes `PopSum` of
-all compartments in stratum `b`.
+A cell whose value is an expression, such as a parameter, is read through
+`table_lookup` at a constant row-major index instead.
 
 ### 25.7 Consecutive Pairs
 
+A `consecutive(dim)` binder enumerates each level with the next one; the last
+level has no successor and generates no transition.
+
 ```camdl
-# DSL:
+# DSL, with age = [age_0_5, age_5_15, age_15_50], compartments = [S, I, R]
+# and age_dur : age 'days = [5 'years, 10 'years, 35 'years]:
 aging[c in compartments, (a, a_next) in consecutive(age)]
   : c[a] --> c[a_next]
   @ (1 / age_dur[a]) * c[a]
-# with age = [age_0_5, age_5_15, age_15_50], compartments = [S, I, R]
 
-# Compiler generates pairs: (age_0_5, age_5_15), (age_5_15, age_15_50)
-# × compartments: S, I, R
-# = 2 pairs × 3 compartments = 6 IR transitions:
+# 2 pairs × 3 compartments = 6 IR transitions:
+{"name": "aging_S_age_0_5",
+ "stoichiometry": [["S_age_0_5", -1], ["S_age_5_15", 1]],
+ "rate": {"bin_op": {"op": "mul",
+   "left": {"bin_op": {"op": "div", "left": {"const": 1.0}, "right": {"const": 1826.2125}}},
+   "right": {"pop": "S_age_0_5"}}}}
 
-{ name: "aging_S_age_0_5",
-  stoichiometry: [("S_age_0_5", -1), ("S_age_5_15", 1)],
-  rate: BinOp(Mul,
-    BinOp(Div, Const(1.0), TableLookup("age_dur", 0)),
-    Pop("S_age_0_5")),
-  event_key: "aging_S_age_0_5:{firing_index}" }
+{"name": "aging_S_age_5_15",
+ "stoichiometry": [["S_age_5_15", -1], ["S_age_15_50", 1]],
+ "rate": {"bin_op": {"op": "mul",
+   "left": {"bin_op": {"op": "div", "left": {"const": 1.0}, "right": {"const": 3652.425}}},
+   "right": {"pop": "S_age_5_15"}}}}
 
-{ name: "aging_S_age_5_15",
-  stoichiometry: [("S_age_5_15", -1), ("S_age_15_50", 1)],
-  rate: BinOp(Mul,
-    BinOp(Div, Const(1.0), TableLookup("age_dur", 1)),
-    Pop("S_age_5_15")),
-  event_key: "aging_S_age_5_15:{firing_index}" }
-
-# ... (same pattern for I and R)
+# ... the same pattern for I and R
 ```
 
-Both `a` and `a_next` are available in the rate expression. The last stratum
-(`age_15_50` in this example) has no pair — no transition is generated.
+Both `a` and `a_next` may appear in the rate. The member's name carries `a` and
+not `a_next`. The table's durations appear converted to the model's
+`time_unit` (5 years is 1826.2125 days).
 
 ### 25.8 Guard Clauses (`where`)
 
-Guards are evaluated at compile time. The compiler instantiates all index
-combinations, evaluates the guard, and **omits** transitions where the guard is
-false. The IR has no concept of guards.
+A `where` guard is evaluated when the model is compiled. Each combination of
+binder levels is instantiated, and a combination for which the guard is false
+generates no transition. The IR has no guards.
 
 ```camdl
-# DSL:
+# DSL, with patch = [p1, p2, p3]:
 migrate[src in patch, dst in patch] : S[src] --> S[dst]
   @ mig[dst,src] * S[src]
   where src != dst
-# with patch = [p1, p2, p3]
 
-# Compiler evaluates:
-#   (p1, p1): src == dst → SKIP
-#   (p1, p2): src != dst → EMIT
-#   (p1, p3): src != dst → EMIT
-#   (p2, p1): src != dst → EMIT
-#   (p2, p2): src == dst → SKIP
+# Combinations:
+#   (p1, p1): src == dst → dropped
+#   (p1, p2): src != dst → migrate_p1_p2
+#   (p1, p3): src != dst → migrate_p1_p3
+#   (p2, p1): src != dst → migrate_p2_p1
+#   (p2, p2): src == dst → dropped
 #   ...
-# Result: 6 transitions (not 9)
+# Result: 6 transitions of the 9 combinations
 ```
+
+`camdlc inspect` reports the number of members a guard dropped (§26.11).
 
 ### 25.9 Compartment Iteration (`c in compartments`)
 
-The compiler expands `c in compartments` by substituting each integer
-compartment name. When a compartment has more dimensions than the index
-signature provides, the compiler **iterates over the omitted dimensions** to
-satisfy the stoichiometry rule (§5.1).
+`c in compartments` substitutes each integer compartment name for `c`. When a
+compartment has more dimensions than the index signature gives, the compiler
+iterates over the omitted dimensions, so that every source and destination names
+a full cell (§5.1).
 
 ```camdl
 # DSL:
 death[c in compartments, a in age] : c[a] -->  @ mu * c[a]
-# with compartments = [S, I, R] (R has extra immunity dimension)
+# with compartments = [S, I, R], R stratified by an extra dimension
+# immunity = [natural, vaccine]
 # S dims: [age], R dims: [age, immunity]
 
-# For S: straightforward
-{ name: "death_S_child", stoichiometry: [("S_child", -1)],
-  rate: BinOp(Mul, Param("mu"), Pop("S_child")) }
-{ name: "death_S_adult", stoichiometry: [("S_adult", -1)],
-  rate: BinOp(Mul, Param("mu"), Pop("S_adult")) }
+# For S:
+{"name": "death_S_child", "stoichiometry": [["S_child", -1]],
+ "rate": {"bin_op": {"op": "mul", "left": {"param": "mu"}, "right": {"pop": "S_child"}}}}
+{"name": "death_S_adult", "stoichiometry": [["S_adult", -1]],
+ "rate": {"bin_op": {"op": "mul", "left": {"param": "mu"}, "right": {"pop": "S_adult"}}}}
 
-# For R: compiler fills omitted immunity dimension, generating per-immunity:
-{ name: "death_R_child_natural", stoichiometry: [("R_child_natural", -1)],
-  rate: BinOp(Mul, Param("mu"), Pop("R_child_natural")) }
-{ name: "death_R_child_vaccine", stoichiometry: [("R_child_vaccine", -1)],
-  rate: BinOp(Mul, Param("mu"), Pop("R_child_vaccine")) }
+# For R, one transition per immunity level:
+{"name": "death_R_child_natural", "stoichiometry": [["R_child_natural", -1]],
+ "rate": {"bin_op": {"op": "mul", "left": {"param": "mu"}, "right": {"pop": "R_child_natural"}}}}
+{"name": "death_R_child_vaccine", "stoichiometry": [["R_child_vaccine", -1]],
+ "rate": {"bin_op": {"op": "mul", "left": {"param": "mu"}, "right": {"pop": "R_child_vaccine"}}}}
 # ... (adult × natural, adult × vaccine)
 ```
 
 ### 25.10 Interventions (All Dimensions)
 
-Interventions on stratified compartments expand over **all** dimensions:
+An action on a bare stratified compartment expands over all of its dimensions.
 
 ```camdl
 # DSL:
 sia_round_1 : transfer(fraction = 0.80, from = S, to = V) at [180]
-# S and V have dimensions [age, patch] (2 × 774)
+# S and V stratified by [age, patch], 2 × 774 cells
 
-# IR: one FractionTransfer per (age × patch) = 1548 atomic transfers
-{ time: 180.0,
-  actions: [
-    FractionTransfer("S_child_p1", "V_child_p1", 0.80),
-    FractionTransfer("S_child_p2", "V_child_p2", 0.80),
-    ...
-    FractionTransfer("S_adult_p774", "V_adult_p774", 0.80)
-  ] }
+# IR: one fraction_transfer per (age, patch) cell, 1548 in all
+{"name": "sia_round_1",
+ "fire": {"scheduled": {"at_times": [180.0]}},
+ "actions": [
+   {"fraction_transfer": {"src": "S_child_p1", "dst": "V_child_p1", "fraction": {"const": 0.8}}},
+   {"fraction_transfer": {"src": "S_child_p2", "dst": "V_child_p2", "fraction": {"const": 0.8}}},
+   ...
+   {"fraction_transfer": {"src": "S_adult_p774", "dst": "V_adult_p774", "fraction": {"const": 0.8}}}
+ ]}
 ```
 
-Each `FractionTransfer` is atomic: `delta = floor(source * fraction)` from
-pre-intervention state, then `source -= delta, dest += delta`.
-
-Endpoints pair only when both are declared with the same dimensions in the same
-order; anything else is **E237**. `count =` on this bare form is **E238**, and a
-bare endpoint inside an indexed family is **E239** (all three: §13.1).
+The two endpoints pair cell by cell only when both are declared with the same
+dimensions in the same order; anything else is **E237**. `count =` on this bare
+form is **E238**, since it would move the count out of every cell, and a bare
+endpoint inside an indexed intervention family is **E239** (all three: §13.1).
 
 ---
 
 ## 26. Errors and Validation
 
-The compiler produces clear, domain-specific error messages. Errors are caught
-at compile time, not simulation time.
+`camdlc` reports the problems in a model when it is compiled. Each diagnostic
+has a code, a severity, a location and, for most, a hint. Parameter values are
+checked when they are supplied for a run (§26.7).
 
 ### 26.0 Diagnostic Codes
 
-Diagnostics carry a numeric code for programmatic consumption (e.g.,
-`--json-errors` mode). The codes below are a representative selection — the
-families (not every individual code) are: `E001` (parse/lexer), `E1xx`
-(names/indices/reserved-ids), `E2xx` (declaration, expansion, schedule, and
-observation-surface checks), `E3xx` (dimensional analysis), `E4xx`
-(forcing/table), `E6xx` (validator), and `W1xx`/`W2xx`/`W3xx` (warnings). The
-authoritative list is whatever `ocaml/lib/compiler/` and `ocaml/lib/ir/` emit.
+Every diagnostic carries a code. The table below lists a selection. The leading
+digit of an error code gives its family: `E001` (syntax), `E1xx` (names,
+indices, reserved identifiers and singleton declarations), `E2xx` (declarations,
+expansion, schedules and observation streams), `E3xx` (dimensions and times),
+`E4xx` (forcing, constant expressions and declaration families), `E5xx` (names
+in the expanded model, such as an expanded compartment that does not exist) and
+`E6xx` (checks on the expanded model as a whole, such as the `simulate`
+horizon). `W` codes are warnings, `L` codes are warnings about the model's
+structure (L402, a compartment declared but never used), and `I` codes are
+information.
 
 | Code | Kind    | Description                                                                                |
 | ---- | ------- | ----------------------------------------------------------------------------------------- |
@@ -7305,130 +7346,156 @@ authoritative list is whatever `ocaml/lib/compiler/` and `ocaml/lib/ir/` emit.
 | E423 | Error   | A destination split's constant weights are not a probability distribution: a weight is not finite or lies outside [0, 1], or all are constant and do not sum to 1 (within `1e-9`) (§9.1.2) |
 | W103 | Warning | Let binding name shadows a stratum value in some dimension                                |
 
-Diagnostics can be emitted as structured JSON by passing `--json-errors` to
-`camdlc`:
+`camdlc FILE.camdl --json-errors` writes the diagnostics to standard error as a
+JSON array instead of as text. Each element has `severity`, `code`, `message`,
+`loc` (file, line, column, end line and end column) and, where there is one,
+`hint`. `camdlc check` does not take the flag.
 
 ```bash
-camdlc check model.camdl --json-errors 2>errors.json
+camdlc model.camdl --json-errors 2>errors.json
 ```
 
 ### 26.1 Dimension Errors
 
-```camdl
-# Wrong number of indices
-recovery[a in age] : I[a, s] --> R[a]  @ gamma * I[a, s]
-# ERROR at line 42: I has dimensions [age] but was indexed with
-#   [age, ???]. 's' is not bound — did you mean to add 's in sex'
-#   to the transition index?
+An index on a compartment, table or `let` family names a level or a binder, one
+per dimension. An index variable that no binder binds is read as a level name,
+so `I[a, s]` with `s` unbound names the cell `I_child_s`, which does not exist,
+and is **E100**. A binder of the wrong dimension in a table slot is **E263**,
+naming each level that is not a level of the slot's dimension.
 
-# Wrong dimension type for table
+```camdl
+# An index variable that is not bound (I : [age])
+recovery[a in age] : I[a, s] --> R[a]  @ gamma * I[a, s]
+# error[E100]: undeclared name 'I_child_s'
+
+# A binder of the wrong dimension (C_age : age × age, j bound to sex)
 infection[a in age] : S[a] --> E[a]
   @ beta * S[a] * sum(j in sex, C_age[a, j] * I[j] / N[j])
-# ERROR at line 45: C_age is declared as age × age, but index 2
-#   ('j') is bound to 'sex' (via 'j in sex'). Did you mean
-#   'j in age'?
+# error[E263]: 'f' is not a level of dimension 'age'
+#   = hint: valid levels: child, adult
 ```
 
 ### 26.2 Unbound Variables
 
+Every index variable in a rate is bound by the transition's index or by a
+`sum`. An unbound one is **E100**, as in §26.1.
+
 ```camdl
 infection[a in age] : S[a] --> E[a]
   @ beta * S[a] * I[a, s] / N
-# ERROR at line 45: 's' is used in I[a, s] but is not bound.
-#   I has dimensions [age, sex]. Bind 's' with 'sum(s in sex, ...)'
-#   or add 's in sex' to the transition index.
+# with I : [age, sex] and s unbound:
+# error[E100]: undeclared name 'I_child_s'
 ```
 
 ### 26.3 Partial Stratification Stoichiometry
+
+Every source and destination of a transition names a full cell of its
+compartment (§5.1). A destination that leaves out one of its compartment's
+dimensions names no cell and is **E503**.
 
 ```camdl
 dimensions { immunity = [natural, vaccine] }
 stratify(by = immunity, only = [R])
 
 recovery[a in age] : I[a] --> R[a]  @ gamma * I[a]
-# ERROR at line 55: R has dimensions [age, immunity] but destination
-#   R[a] only specifies [age]. All dimensions of a destination
-#   compartment must be specified in stoichiometry.
-#   Did you mean: R[a, natural] or R[a, vaccine]?
+# R : [age, immunity], so R[a] names no cell:
+# error[E503]: unknown compartment referenced: 'R_child'
+# Write R[a, natural] or R[a, vaccine].
 ```
 
 ### 26.4 Dimension Does Not Exist
 
+A binder over a name that is not a declared dimension is **E263**; the hint lists
+the declared dimensions.
+
 ```camdl
 recovery[a in age, r in habitat] : I[a, r] --> R[a, r]  @ gamma * I[a, r]
-# ERROR at line 50: 'habitat' is not a declared dimension.
-#   Declared dimensions: age, sex, patch.
+# error[E263]: 'habitat' is not a declared dimension
+#   = hint: ... declared dimensions: age, sex, patch
 ```
 
 ### 26.5 Compartment Doesn't Have Dimension
+
+An index of a dimension that the compartment is not stratified by names no cell
+and is **E100**.
 
 ```camdl
 dimensions { immunity = [natural, vaccine] }
 stratify(by = immunity, only = [R])
 
 waning[a in age] : I[a, natural] --> S[a]  @ wane * I[a, natural]
-# ERROR at line 55: I does not have dimension 'immunity'.
-#   I has dimensions: [age]. Only R has dimension 'immunity'.
-#   Did you mean R[a, natural]?
+# I : [age], so I[a, natural] names no cell:
+# error[E100]: undeclared name 'I_child_natural'
 ```
 
 ### 26.6 Unit Errors
+
+The two sides of `+` or `-` have the same dimension (§2.2); a mismatch is
+**E302**. A rate whose dimension is not a population per unit time is **E300**.
 
 ```camdl
 transitions {
   recovery : I --> R  @ gamma + I
   # where gamma : rate ('per_day) and I : count
 }
-# ERROR at line 33: cannot add rate (1/time) and count (dimension P).
-#   Did you mean 'gamma * I'?
+# error[E302]: dimension mismatch: + in transition 'recovery' rate
+#   = note: left has dimension T^-1 (per-capita rate), right has dimension
+#     P (population count) — cannot combine
 ```
 
 ### 26.7 Parameter Domain Errors
 
-Checked when parameter values are supplied (not at model compile time):
+A parameter value is checked against the parameter's declared type and bounds
+(§4.4) when parameter values are resolved for a run, not when the model is
+compiled. A value outside them stops the run before it starts:
 
 ```
-# params.toml: rho = 1.5
-# ERROR: parameter 'rho' is declared as probability (∈ [0, 1])
-#   but supplied value is 1.5.
+# params.toml: rho = 1.5, with rho : probability
+error: parameter 'rho' = 1.5 is outside declared bounds [0, 1].
 ```
 
 ### 26.8 Scenario Validation
 
+A parameter named twice in one scenario's `set` or `scale` block is an error.
+Two scenarios composed with `compose` that both modify one parameter draw a
+warning, because composition applies the scenarios in order and its result
+depends on that order (§17).
+
 ```camdl
 scenarios {
   high_coverage {
-    scale = { beta = 1.5, beta = 2.0 }
+    scale = {
+      beta = 1.5
+      beta = 2.0
+    }
   }
 }
-# ERROR: parameter 'beta' appears twice in scale operation.
+# error: parameter 'beta' appears twice in scale operation.
 
 scenarios {
   combined {
     compose = [variant, closure]
   }
 }
-# WARNING: scenarios 'variant' and 'closure' both modify parameter
-#   'beta'. Composition is non-commutative; the result depends on
-#   order. 'variant' is applied first, then 'closure'.
+# warning: scenarios 'variant' and 'closure' both modify parameter 'beta';
+#   'variant' is applied first, then 'closure'.
 ```
 
 ### 26.9 Self-Loop Detection
 
-A generated self-loop is a **hard error** (`E310`), not a warning. When an
-expanded transition's source and destination are the same compartment, its net
-stoichiometry cancels to empty, and the compiler rejects it rather than emitting
-a no-op transition:
+A transition whose sources and destinations cancel has no net effect and is
+**E310**. A family whose binders include a member with the same source and
+destination, such as the diagonal `src == dst` of a migration family, is refused
+for that member.
 
 ```camdl
 migrate[c in compartments, src in patch, dst in patch]
   : c[src] --> c[dst]  @ mig[dst, src] * c[src]
-# ERROR E310: transition 'migrate' has no net effect: sources and
-#   destinations cancel (the diagonal src == dst members are self-loops).
-#   Add 'where src != dst' to drop the diagonal, or ensure mig[i,i] = 0.
+# error[E310]: transition 'migrate' has no net effect: sources and
+#   destinations cancel
 ```
 
-Add the guard to filter the diagonal:
+A `where` guard drops the diagonal (§9.3):
 
 ```camdl
 migrate[c in compartments, src in patch, dst in patch]
@@ -7437,43 +7504,45 @@ migrate[c in compartments, src in patch, dst in patch]
 
 ### 26.10 Name Resolution
 
-A user-defined name lives in exactly one namespace. The same name declared in
-two of {compartments, parameters, let bindings, forcing, tables} is a
-**duplicate-declaration** error (`E278`), so there is never a legal
-cross-namespace collision for a resolution order to arbitrate — the compiler
-rejects the ambiguity rather than silently preferring one namespace. What is
-reported:
+A user-defined name lives in exactly one namespace. A name declared twice, in
+one namespace or in two of compartments, parameters, `let` bindings, forcing and
+tables, is **E278**, so no reference is ambiguous and there is no resolution
+order between namespaces. Two parameters named `beta`, two compartments named
+`S`, and a parameter and a `let` both named `beta` are all **E278**.
 
-- **Shadowing reserved identifiers**: `t_start`, `t_end`, `compartments`, etc.
-  (`E100`).
-- **Duplicate declarations** (`E278`): two parameters named `beta`, two
-  compartments named `S`, or the same name in two of the namespaces above (e.g.
-  a parameter and a compartment both named `N`).
+A reserved identifier (`t`, `t_start`, `t_end`, `dt`, `pi`, `e`; §14.2) used as
+the name of a parameter or `let` is **E100**. A keyword (`compartments`, `sum`,
+`consecutive`, `origin`, …) used as a name is a syntax error, **E001**. A `let`
+named like a level of a dimension is allowed, with warning **W103**.
 
 ### 26.11 Compiler Reporting
 
-For every model, `camdl check` reports a size summary. The real output uses the
-model name as a bold header, lowercase field labels, a `→` between base and
-expanded counts, and a "(+ N filtered by where)" suffix on the transitions line.
-The exact glyphs and colouring are terminal-dependent; illustratively:
+`camdlc inspect FILE.camdl` prints a summary of the model's size: each count as
+declared and as expanded, and the number of transitions a `where` guard dropped.
+The header is the model's name. For an SEIR model with a vaccinated class,
+stratified by two age groups and three patches:
 
 ```
-seir_age_seasonal
+strat
 
-  compartments   5 base × 2 age × 774 patch = 7740 expanded
-  transitions    8 base → 47,892 expanded (+ 0 filtered by where)
-  parameters     13 declared
-  ...
+  compartments   5 base × 2 age × 3 patch = 30 expanded
+  transitions     5 base → 33 expanded (+ 6 filtered by where)
+  parameters      5 declared (5 rate)
+  tables          0
+  let bindings    1 (N_local[a in age, p in patch])
+  dimensions      age = [child, adult], patch = [p1, p2, p3]
+  observations    0 streams
+  interventions   1 (0 active by default)
 ```
 
-This gives the user a quick sanity check on model size before simulation. (For
-the full per-parameter listing use `camdlc inspect --parameters`.)
+`camdlc inspect` takes one report option in place of the summary, such as
+`--parameters` for the parameters grouped by kind, `--compartments` for the
+expanded names, or `--count` for the members each declaration generates;
+`camdlc inspect --help` lists them all.
 
 ---
 
 ## 27. Primitive Summary
-
-The language is built on these composable primitives:
 
 ```camdl ignore
 # State
@@ -7489,9 +7558,10 @@ stratify(by = DIM, only = [COMP, ...])  partial stratification
 # Indexing
 NAME[val]                            concrete stratum access
 NAME[var]                            index variable access
-NAME                                 bare = sum over all strata
+NAME                                 bare: in dynamics, the sum over all strata (§12.1 for observations)
 [var in dim]                         bind index variable to dimension
 sum(var in dim, expr)                sum over dimension
+sum(var in dim where PRED, expr)     sum over the levels the guard keeps
 
 # Iteration
 [c in compartments]                  iterate over integer compartment names
@@ -7508,26 +7578,30 @@ NAME[indices] : SRC --> @ RATE       outflow (death)
 @ deterministic(RATE)                nearbyint(rate × dt), no stochasticity
 
 # Data
-table : dim × dim unit = [...]       typed, shape-checked, unit-annotated
-let name[indices] = expr              computed quantity (family of values)
+table : dim × dim 'UNIT = [...]      typed, shape-checked, unit-annotated
+let name[indices] = expr             computed quantity (family of values)
+let name : TYPE = expr               typed let (§8.4)
 
 # Math functions
-exp(x), log(x), sqrt(x)             standard math (unary)
-abs(x), floor(x), ceil(x)           rounding and absolute value
-sin(x), cos(x), tanh(x)             trigonometric / hyperbolic (unary)
+exp(x), log(x), sqrt(x)              standard math (unary)
+abs(x), floor(x), ceil(x)            rounding and absolute value
+sin(x), cos(x), tanh(x)              trigonometric / hyperbolic (unary)
 mod(a, b)                            Euclidean remainder (binary)
-min(a, b), max(a, b)                element-wise min / max (binary)
+min(a, b), max(a, b)                 smaller / larger of two values
 
 # Time
 t                                    current simulation time
 
-# Forcing (time-dependent functions) — the tier-3 unit literal 'UNIT is required (§7; E001 if omitted)
-forcing { NAME : sinusoidal 'UNIT { ... } }     smooth seasonal
-forcing { NAME : periodic 'UNIT { ... } }       repeating step (values or on = [lo:hi, ...])
-forcing { NAME : piecewise 'UNIT { ... } }      non-repeating step
-forcing { NAME : interpolated 'UNIT { ... } }   data-driven (linear or spline)
+# Forcing (time-dependent functions); the unit literal 'UNIT is required (§7; E001 if omitted)
+forcing { NAME : sinusoidal 'UNIT { ... } }       smooth seasonal
+forcing { NAME : fourier 'UNIT { ... } }          finite Fourier series
+forcing { NAME : periodic 'UNIT { ... } }         repeating step (values or on = [lo:hi, ...])
+forcing { NAME : periodic_spline 'UNIT { ... } }  periodic B-spline
+forcing { NAME : bspline 'UNIT { ... } }          non-periodic B-spline
+forcing { NAME : piecewise 'UNIT { ... } }        non-repeating step
+forcing { NAME : interpolated 'UNIT { ... } }     data-driven (linear or spline)
 
 # Reserved identifiers
-t, t_start, t_end, dt, pi, e                # genuinely reserved (E100)
-compartments, sum, consecutive             # keywords (E001 if used as a name)
+t, t_start, t_end, dt, pi, e                # reserved (E100 if used as a name)
+compartments, sum, consecutive, origin      # keywords (E001 if used as a name)
 ```
