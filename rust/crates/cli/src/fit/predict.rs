@@ -3134,7 +3134,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
             // predicted as data rows, so a free-forward row in a period they
             // cover is `future`. `holdout_after` and `[data.holdout]`
             // describing one split therefore do not yet give one record
-            // (gh#1309). Absent without `[data.holdout]`.
+            // (gh#1309). `null` without `[data.holdout]`.
             "holdout_files": (!parameter_set.holdout_sources.is_empty()).then(|| serde_json::json!({
                 "read": false, "sources": &parameter_set.holdout_sources,
             })),

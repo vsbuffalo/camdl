@@ -874,8 +874,8 @@ are mis-timed (gh#1151); `role` is read by row position and is right on both.
   stream, the `rows` the filter walked, how many of them are `held_out_rows`,
   and the rows' digest. Whether held-out rows were filtered through is read from
   `held_out_rows`; under `--stream` only the selected streams are listed.
-- `holdout_files`, at the top level, present under `[data.holdout]`:
-  `{"read": false, "sources": […]}`. These two modes do not read the holdout
+- `holdout_files`, at the top level: `null` without `[data.holdout]`, and under
+  it `{"read": false, "sources": […]}`. These two modes do not read the holdout
   files, so their rows are neither filtered through nor predicted as data rows.
   Every `one_step` row is then `trained`, and a `free_forward` row in a period a
   holdout file covers is `future`, not `held_out`. `holdout_after` and
