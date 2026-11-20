@@ -1874,17 +1874,21 @@ pub fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), CasError> {
 }
 
 /// [`write_file_atomic`] through a temporary file of this writer's own,
-/// `.<name>.<pid>.<nanos>.tmp` in the same directory, for a file that several
-/// processes may rewrite at once (a fit folder's `fit.meta.json`): a shared
-/// fixed name would let one writer's rename publish another's half-written
-/// bytes, or fail on another's temporary.
+/// `.<name>.<pid>.<n>.<nanos>.tmp` in the same directory (`n` counts this
+/// process's writes, so two threads never share one either), for a file that
+/// several processes may rewrite at once (a fit folder's `fit.meta.json` and
+/// configs): a shared fixed name would let one writer's rename publish
+/// another's half-written bytes, or take away the temporary another is about
+/// to rename.
 pub fn write_file_atomic_own_tmp(path: &Path, bytes: &[u8]) -> Result<(), CasError> {
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let tmp = path.with_file_name(format!(".{name}.{}.{nanos}.tmp", std::process::id()));
+    let tmp = path.with_file_name(format!(".{name}.{}.{n}.{nanos}.tmp", std::process::id()));
     let committed = write_file_synced(&tmp, bytes)
         .and_then(|()| fs::rename(&tmp, path).at("commit", path));
     if let Err(e) = committed {

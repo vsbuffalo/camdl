@@ -1025,10 +1025,12 @@ fn write_fit_sidecar_archiving(
     };
     if let Some(StoredConfig { path, text, resolved }) = config {
         // Each whole or not at all, so a crash cannot leave a torn config
-        // beside a record that names it.
-        runid::write_file_atomic(&fit_segment.join(ARCHIVED_CONFIG), text.as_bytes())
+        // beside a record that names it, and through a temporary of this
+        // writer's own: several `fit run`s of one file (one per seed) write
+        // one folder's configs at once.
+        runid::write_file_atomic_own_tmp(&fit_segment.join(ARCHIVED_CONFIG), text.as_bytes())
             .map_err(std::io::Error::other)?;
-        runid::write_file_atomic(&fit_segment.join(RESOLVED_CONFIG), resolved.as_bytes())
+        runid::write_file_atomic_own_tmp(&fit_segment.join(RESOLVED_CONFIG), resolved.as_bytes())
             .map_err(std::io::Error::other)?;
         sidecar.source_config = Some(relative_path(fit_segment, path)?);
         // gh#353: archive the model `.camdl` source too, symmetric with
@@ -1251,6 +1253,43 @@ mod tests {
         value.as_object_mut().unwrap().remove("store_layout");
         std::fs::write(dir.join("fit.meta.json"), value.to_string()).unwrap();
         assert_eq!(read_fit_sidecar(&dir).unwrap().unwrap().store_layout, 0, "no field is layout 0");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Several `fit run`s of one fit file (one per seed, in parallel shells)
+    /// write one fit folder's configs and record at once. Every write
+    /// succeeds: no writer's commit renames away a temporary another writer
+    /// is about to commit, and the folder ends holding the configs whole.
+    #[test]
+    fn concurrent_writers_of_one_fit_folders_configs_all_succeed() {
+        let dir = crate::test_support::unique_temp_dir("sidecar_concurrent");
+        let seg = dir.join("fits").join("fit-00000000");
+        std::fs::create_dir_all(&seg).unwrap();
+        let toml = dir.join("fit.toml");
+        std::fs::write(&toml, "[model]\ncamdl = \"m.camdl\"\n").unwrap();
+        let failures: Vec<String> = std::thread::scope(|scope| {
+            let writers: Vec<_> = (0..6)
+                .map(|_| {
+                    scope.spawn(|| {
+                        (0..40)
+                            .filter_map(|_| {
+                                write_fit_sidecar_with_config(
+                                    &seg, &toml, "the file\n", "the resolved config\n",
+                                    std::path::Path::new(""), &FitSidecar::default(),
+                                )
+                                .err()
+                                .map(|e| e.to_string())
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            writers.into_iter().flat_map(|w| w.join().unwrap()).collect()
+        });
+        assert!(failures.is_empty(), "{} failed writes, e.g. {:?}", failures.len(), failures.first());
+        assert_eq!(std::fs::read_to_string(seg.join(ARCHIVED_CONFIG)).unwrap(), "the file\n");
+        assert_eq!(std::fs::read_to_string(seg.join(RESOLVED_CONFIG)).unwrap(), "the resolved config\n");
+        assert!(read_fit_sidecar(&seg).unwrap().is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

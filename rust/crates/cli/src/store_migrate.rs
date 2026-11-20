@@ -157,7 +157,7 @@ mod step0 {
         let found = crate::hashing::sha256_hex(&bytes);
         if found != side.fit_toml_hash {
             if stored_with_the_flag_folded_in(dir, &bytes)? {
-                return refuse_a_folded_original(dir);
+                return refuse_a_folded_original();
             }
             return Err(format!(
                 "fit.toml.original is not the file the fit read: its SHA-256 is {found}, and \
@@ -194,15 +194,13 @@ mod step0 {
     /// folder is refused. A rescue of such folders (deriving the resolved
     /// configuration from the folded file, if the maintainer accepts that
     /// the file is not checked) belongs here and nowhere else.
-    fn refuse_a_folded_original(dir: &Path) -> Result<(), String> {
-        Err(format!(
-            "{} was written by a camdl that folded --allow-forcing-extrapolation into the fit \
+    fn refuse_a_folded_original() -> Result<(), String> {
+        Err("it was written by a camdl that folded --allow-forcing-extrapolation into the fit \
              file it stored: its fit.toml.original is that file re-written with the flag set, \
              while fit_toml_hash records the file as the fit read it, which the folder does not \
              keep, so the stored file cannot be checked to be the fit's. Re-run the fit with this \
-             camdl.",
-            dir.display()
-        ))
+             camdl."
+            .to_string())
     }
 
     /// The `[fixed]` values the folder's fits ran at, from its partition: the

@@ -243,6 +243,9 @@ fn a_folder_main_wrote_with_the_flag_folded_in_is_refused_as_such() {
     let said = text(&run);
     assert_eq!(run.status.code(), Some(1), "{said}");
     assert!(said.contains("folded --allow-forcing-extrapolation into the fit file it stored"), "{said}");
+    let rel = folder.strip_prefix(&fx.dir).unwrap().display().to_string();
+    let line = said.lines().find(|l| l.starts_with("refused ")).expect("a refused line");
+    assert_eq!(line.matches(rel.as_str()).count(), 1, "the folder is named once: {line}");
     assert!(said.contains("Re-run the fit"), "{said}");
     assert!(!said.contains("is not the file the fit read"), "not a tampering refusal: {said}");
     assert!(!folder.join("fit.resolved.toml").exists());
