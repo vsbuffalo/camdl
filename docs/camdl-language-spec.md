@@ -2263,9 +2263,21 @@ body's dimension.
 
 ## 9. Transitions
 
-The core dynamics. Every transition has a name, stoichiometry, and rate.
+A transition is one kind of event: its stoichiometry says which compartments
+lose and gain one member each time it fires, and its rate says how often it
+fires. The simulation backends that draw events from these rates are described
+in [`docs/runtimes.md`](runtimes.md).
+
+Related sections: §5 (stratification and the indexing rules), §8 (`let`
+bindings), §12.1 (flows observed with `incidence`), §13 (interventions and
+events, which move people outside transitions), §25.2 and §25.7 (how indexed
+transitions lower to the IR).
 
 ### 9.1 Syntax
+
+A transition is written `name : <sources> --> <destinations> @ <rate>`, with an
+optional index binder after the name (§9.2) and an optional `where` guard after
+the rate (§9.3).
 
 ```camdl
 # Transfer: source --> destination
@@ -2284,21 +2296,27 @@ infection_water : S --> I {
 }
 ```
 
-**Block form properties:**
+- **Transfer.** Each firing removes one member from the source and adds one to
+  the destination.
+- **Inflow.** With nothing left of `-->`, each firing adds one member to the
+  destination, with stoichiometry `[(destination, +1)]`. Births, importation
+  and immigration are inflows.
+- **Outflow.** With nothing right of `-->`, each firing removes one member from
+  the source.
 
-- `rate` (required): the total propensity expression
-- `where <guard>` (optional): an index-variable guard, identical to the inline
-  `... @ <rate> where <guard>` form
+The block form `name : A --> B { … }` takes `rate = <expr>` or
+`via = <law>` (§9.4.1), exactly one of the two, and an optional
+`where <guard>` with the same meaning as the inline guard. Both `rate` and
+`via` in one block is **E112**. A transition with neither `@ <rate>` nor `via`
+is a syntax error (E001).
 
-**Inflows** (`-->` with nothing on the left) model individuals entering the
-system from outside: births, importation, immigration. There is no source
-compartment — the rate expression says how fast new individuals appear.
-Stoichiometry: `[(destination, +1)]`.
+The rate after `@` is the total propensity of the event (§9.6) and is checked
+against the dimension count per unit time (§2.2.1). A compartment that is not an
+integer compartment cannot appear in a transition's stoichiometry (**E508**,
+§11).
 
-**Importation** is an inflow of infected individuals from an external source,
-typically at a constant or data-driven rate unrelated to the model's own state.
-Unlike births (which depend on the existing population), importation represents
-exogenous exposure — cases entering the modeled region from elsewhere:
+Importation is an inflow of infected individuals whose rate does not depend on
+the model's own state:
 
 ```camdl-doctest-preamble importation
 compartments { S, I, R }
@@ -2333,9 +2351,9 @@ transitions {
 }
 ```
 
-**Transition attributes: `#[lineage]`.** An attribute may precede a
-transition's name, conventionally on its own line. `#[lineage]` is the only
-attribute the language defines; anything else is **E110**.
+**Attributes: `#[lineage]`.** An attribute is written before a transition's
+name, conventionally on its own line. `#[lineage]` is the only attribute; any
+other is **E110**.
 
 ```camdl-doctest-preamble lineage-sir
 compartments { S, I, R }
@@ -2354,40 +2372,39 @@ transitions {
 }
 ```
 
-The attribute marks the transition as a parent→child event, so the simulator can
-record *which* individual infected *which* — an identity layer on top of the
-compartment counts. It is for generating synthetic line lists and transmission
-trees (for example, to validate phylodynamic inference against a known true
-tree); it never changes the count dynamics, and the genealogy is a conditional
-sample given the counts rather than a function of them. The three-stage
-pipeline (`simulate --event-log`, `lineage realize`, `lineage tree`) is
-described in [`docs/lineages.md`](lineages.md).
+`#[lineage]` marks each firing as caused by one existing individual, as an
+infector causes an infection, so that a simulation can record which individual
+caused which event. It is used to generate synthetic line lists and
+transmission trees; it does not change the count dynamics, and the genealogy is
+drawn conditionally on the simulated counts. The commands that record and
+realize the genealogy (`simulate --event-log`, `lineage realize`,
+`lineage tree`) are described in [`docs/lineages.md`](lineages.md).
 
-The rate must be **linear in the infector compartments**, because the per-parent
-sampling weights are read off the rate as linear coefficients. `beta * S * I / N`
-qualifies: `I` is a linear factor in the numerator, and its appearance in the
-denominator `N` is treated as a frozen normalizer. A genuinely nonlinear use of
-a parent compartment — `beta * S * (I + iota)^alpha / N` — is **E601**, which
-names the offending compartment and the subexpression it appears in. So is a
-product of two parent counts in the numerator, `beta * S * I * I / (N * N)` or
-`beta * S * I * A / N`: its weights could not sum to the rate. A conditional
-is linear when its condition reads no parent compartment and each branch is
-linear: `if t > 10 then beta * S * I / N else 0` has the parent `I` with weight
-`if t > 10 then beta * S / N else 0`. A condition that reads a parent anywhere,
-`if I > 10 then …` or `if S / (K + I) > 0.5 then …`, is E601. Wrapping
-the rate in `overdispersed(...)` (§9.8) is transparent to this analysis: the
-environmental noise changes the counts, not the attribution.
+The cause of a firing is chosen in two steps: a parent compartment `c` with
+probability proportional to `w_c · count_c`, then an individual uniformly within
+it. The rate must therefore be a sum of `w_c · count_c` over its parent
+compartments. A parent is a compartment the rate reads, other than the
+transition's sources, in the numerator of the rate. A compartment read anywhere
+in the divisor of a division is a normalizer, held at its value at the event,
+and is never a parent: in `beta * S * I / N`, `I` is the one parent, with weight
+`beta * S / N`, and its appearance inside `N` is a normalizer.
+
+A rate that is not linear in its parents is **E601**, whose message names the
+compartment and the subexpression. A parent is used nonlinearly when it appears
+inside a power other than `^ 1`, a built-in function (§9.7), a comparison or a
+table index, as in `beta * S * (I + iota)^alpha / N`, and when a product has a
+parent in both operands, as in `beta * S * I * I / (N * N)` or
+`beta * S * I * A / N`. A conditional is linear when its condition reads no
+parent and each branch is linear: `if t > 10 'days then beta * S * I / N else 0`
+has the parent `I` with weight `if t > 10 'days then beta * S / N else 0`, and
+`if I > 10 then …` is E601. A rate wrapped in `overdispersed(…)` (§9.8) is
+analysed as its inner rate.
 
 ### 9.1.1 Multi-source transitions (`A + B --> …`)
 
 Either side of `-->` accepts a `+`-separated list of compartments. Each source
-contributes `-1` and each destination contributes `+1` to the transition's net
-stoichiometry. This exposes the IR's already-general
-`stoichiometry: Vec<(name, int)>` shape to the DSL — the same construct the Rust
-runtime has always consumed.
-
-**Bimolecular mass-action** (vector-host transmission, pair formation, cell-cell
-interactions):
+contributes `−1` and each destination `+1` to the transition's net
+stoichiometry, and one firing applies all of them at once.
 
 ```camdl
 # Host infection from an infectious mosquito bite.
@@ -2400,54 +2417,28 @@ infect_v : S_v + I_h --> E_v + I_h   @ a * b_v * S_v * I_h / H
 react    : A + B --> C               @ k * A * B
 ```
 
-Atomic firing: a single Gillespie step applies the _vector_ of deltas at once.
-For `bite`, `S_h` decrements and `I_h` increments together — no intermediate
-state.
+**Catalysts.** A compartment on both sides of the arrow contributes `−1` and
+`+1`, which sum to `0`, and is dropped from the stoichiometry. The rate still
+reads it.
 
-**Backend requirement.** A multi-source transition requires **Gillespie or
-ODE**. Chain-binomial rejects it with a hard error (gh#121): its competing-risk
-draw bounds the drawn flow by a *single* source count, which is wrong when two
-sources jointly gate the event (the correct joint draw, bounded by the minimum
-over all sources, is not implemented). On chain-binomial, fall back to the
-single-source encoding with the second population referenced only in the rate
-(shown under "When to use it" below).
+- `bite : S_h + I_v --> I_h + I_v @ …` has stoichiometry `{S_h: -1, I_h: +1}`.
+- `react : A + B --> C @ …` has stoichiometry `{A: -1, B: -1, C: +1}`.
 
-**Catalyst collapse.** A compartment appearing on both sides of the arrow
-contributes `−1` and `+1`, which sum to `0`. Zero-delta entries are dropped from
-the stoichiometry because (a) they produce no net state change, and (b) the IR
-validator rejects `delta == 0`. The rate expression's reference to the catalyst
-is preserved, so the propensity dependency graph still wires it in.
-
-- `bite : S_h + I_v --> I_h + I_v @ …` → stoichiometry `{S_h: -1, I_h: +1}`.
-- `react : A + B --> C @ …` → stoichiometry `{A: -1, B: -1, C: +1}`.
-
-**No-net-effect error (E310).** A transition where every delta collapses to zero
-(all compartments are pure catalysts) emits `E310`: "transition 'X' has no net
-effect: sources and destinations cancel". Almost always a model error; the hint
-suggests removing catalysts or adding a non-trivial destination.
-
-**When to use it.** Multi-source is the canonical encoding for any
-two-population mass-action event — transmission that depends on two pop classes
-(S × I), predator-prey-style interactions, chemistry. Single-source with the
-catalyst referenced only in the rate is equivalent in the IR but hides the
-biological structure:
+A transition whose every entry cancels is **E310** ("transition 'X' has no net
+effect: sources and destinations cancel"). A catalyst written only in the rate
+gives the same stoichiometry and rate as the multi-source form:
 
 ```camdl
-# Clear (reads like the biology).
+# Multi-source form: the infectious mosquito is a catalyst.
 bite : S_h + I_v --> I_h + I_v  @ a * b_h * S_h * I_v / H
 
-# Equivalent IR, less clear.
+# Same stoichiometry and rate, single source.
 bite : S_h --> I_h              @ a * b_h * S_h * I_v / H
 ```
 
-Both produce the same stoichiometry `{S_h:-1, I_h:+1}` and the same rate
-expression. Prefer the multi-source form when two compartments jointly determine
-the event — the `+` makes the dependency explicit.
-
-**Repeated sources: several units per firing (`S + S --> D`).** A compartment
-may appear more than once on the left. Its entries add, so `S + S --> D`
-consumes two members of `S` each time it fires (stoichiometry `{S: -2, D: +1}`):
-pair formation, or a reaction that needs two molecules of one species.
+**Repeated sources.** A compartment may appear more than once on the left, and
+its entries add: `S + S --> D` consumes two members of `S` per firing
+(stoichiometry `{S: -2, D: +1}`).
 
 ```camdl
 time_unit = 'days
@@ -2461,44 +2452,40 @@ init { S = 5 }
 simulate { from = 0 'days  to = 3 'days }
 ```
 
-**Feasibility.** A transition is _feasible_ in a state when every compartment it
+**Feasibility.** A transition is feasible in a state when every compartment it
 consumes holds at least the number of members one firing removes: `x_i ≥ ν_i`
-for each compartment `i` whose net stoichiometry is `−ν_i < 0`. `pair` above is
-feasible only while `S ≥ 2`; `rec` while `S ≥ 1`; `A + B --> C` while `A ≥ 1`
-and `B ≥ 1`. The rule is about the net stoichiometry, so a catalyst (on both
-sides, collapsed away as described above) is not consumed. How each backend
-treats it:
+for each compartment `i` with net stoichiometry `−ν_i < 0`. `pair` above is
+feasible only while `S ≥ 2`, `rec` while `S ≥ 1`, and `A + B --> C` while
+`A ≥ 1` and `B ≥ 1`. A catalyst is not consumed.
 
-- **Gillespie** fires a transition at its declared rate where it is feasible and
-  not at all where it is not: the effective propensity is the rate expression
-  when feasible and `0` otherwise. The rule applies to every transition, so no
-  firing ever takes a compartment below zero. The rate expression is not
-  rewritten — `k * S * S` stays `k * S * S` wherever `pair` can fire; it is not
-  turned into the combinatorial `k * S * (S - 1)`. Write the number of distinct
-  pairs into the rate if that is the intended propensity. For a single-unit
-  transition whose rate is proportional to its source the rule changes nothing
-  (the rate is already `0` when the source is empty); a constant-rate exit
-  (`S --> R @ k`) stops when `S` reaches `0`.
-- **Chain-binomial** refuses a transition that consumes more than one unit of a
-  source, when the model is loaded and before any step, on `simulate` and on
-  every inference method that runs on it (`pfilter`, `fit` with IF2, PMMH or
-  PGAS). Its Euler-multinomial step draws how many _individuals_ leave a
-  compartment, one at a time, and has no meaning for a firing that removes two
-  at once:
+The backends treat these transitions differently:
+
+- **Gillespie** fires each transition at its declared rate where it is feasible
+  and not at all where it is not, so no firing takes a compartment below zero.
+  The rate is not rewritten: `k * S * S` is not turned into the combinatorial
+  `k * S * (S - 1)`, so a propensity over distinct pairs is written into the
+  rate. A constant-rate exit (`S --> R @ k`) stops when `S` reaches 0.
+- **Chain-binomial** refuses a transition with two or more distinct source
+  compartments, and a transition that consumes more than one member of a
+  source per firing, when the model is loaded, in `simulate`, `pfilter` and
+  every `fit` method that runs on it. Its step draws how many individuals leave
+  each compartment (§9.1.2), which bounds a flow by one source's count and has
+  no meaning for a firing that removes two members at once. The second refusal
+  reads:
   ```
   error: transition 'pair' consumes 2 units of S per firing; the chain-binomial backend models individuals leaving a compartment one at a time and supports at most 1 unit per firing from a source
     help: use --backend gillespie for this model (`fit` and `pfilter` have no Gillespie backend: fit it with backend = "ode", or restructure the transition)
   ```
-- **ODE** treats every transition as a continuous flow: `pair` removes
-  `S` at `2 × rate` and adds `D` at `rate`. There are no discrete firings, so
-  there is no feasibility rule.
+  On chain-binomial a two-population event is written with a single source and
+  the second population read only in the rate, as in the second `bite` above.
+- **ODE** treats every transition as a continuous flow: `pair` removes `S` at
+  twice its rate and adds `D` at its rate. There are no discrete firings and no
+  feasibility rule.
 
 ### 9.1.2 Probabilistic branching (`X --> { A : p, B : 1-p }`)
 
-When a single event has multiple possible destination compartments chosen
-probabilistically — symptomatic vs asymptomatic infection, mild vs severe vs
-fatal progression, detected vs missed case — write the destinations as a
-weighted set:
+A transition whose single event has several possible destinations, chosen at
+random when it fires, lists the destinations with a weight each:
 
 ```camdl
 # An infection event produces a symptomatic case with probability
@@ -2506,71 +2493,60 @@ weighted set:
 infection : S --> { I_symp : p_symp, I_asym : 1 - p_symp }
   @ beta * S * (I_symp + I_asym) / N
 
-# Age-indexed branching (malaria use case).
+# Age-indexed branching.
 bite[a in age] : X[a] --> { Y_symp[a] : p_symp[a], Y_asym[a] : 1 - p_symp[a] }
   @ h_eff * X[a]
 ```
 
-**Semantics.** Pure compile-time sugar. Each branch expands to its own IR
-transition with rate `weight_i × original_rate` and stoichiometry
-`{source: -1, dest_i: +1}`. The existing source- grouping machinery in every
-stochastic backend (Gillespie, chain-binomial) correctly groups
-transitions sharing a source and performs a **single multinomial split** at
-firing time — _not_ two independent draws, which would double-consume the source
-at high incidence. See `sim/src/chain_binomial.rs` §Euler-multinomial for the
-algorithm (matches pomp's `reulermultinom`).
+**Meaning.** Each branch expands to its own transition with rate
+`weight_i × rate` and stoichiometry `{source: -1, dest_i: +1}`. For
+`S --> { I_symp : p_symp, I_asym : 1 - p_symp } @ r`:
 
-For the example above, `S --> { I_symp : p_symp, I_asym : 1 - p_symp }
-@ r`
-produces two IR transitions:
-
-| Name               | Stoich              | Rate               |
+| Name               | Stoichiometry       | Rate               |
 | ------------------ | ------------------- | ------------------ |
 | `infection_I_symp` | `{S:-1, I_symp:+1}` | `p_symp * r`       |
 | `infection_I_asym` | `{S:-1, I_asym:+1}` | `(1 - p_symp) * r` |
 
-The total exit rate from `S` is `p_symp * r + (1 - p_symp) * r = r`, so the
-overall depletion rate is unchanged; only the destination distribution is
-refined.
+The total exit rate from `S` is `p_symp * r + (1 - p_symp) * r = r`.
+Branching is the same model as writing the branch transitions by hand.
+Chain-binomial draws all the exits of one source compartment jointly, so the
+branches cannot together remove more members than the source holds: the
+number leaving is `Binomial(n, 1 − exp(−Σ r_i · dt / n))`, for `n` members
+and exit rates `r_i`, and the leavers are split across the exits in proportion
+to their rates. This is the Euler-multinomial step of Bretó et al. (2009,
+[Ann. Appl. Stat. 3(1)](https://doi.org/10.1214/08-AOAS201)) and of pomp's `reulermultinom` (King, Nguyen & Ionides 2016,
+[J. Stat. Softw. 69(12)](https://doi.org/10.18637/jss.v069.i12)). Two
+independent processes out of one compartment, such as recovery and death from
+`I`, are written as two plain transitions and are drawn the same way.
 
-**Branch naming.** The compiler appends the destination compartment name to the
-transition's base name to disambiguate. Indexed transitions combine the index
-suffix and branch suffix:
-`bite[a in age] : X[a] --> { Y_symp[a] : …, Y_asym[a] : … } @ …` produces
-`bite_child_Y_symp`, `bite_child_Y_asym`, `bite_adult_Y_symp`,
-`bite_adult_Y_asym`.
+**Names.** A branch's name is the transition's name followed by the
+destination compartment's name, after any index levels:
+`bite[a in age] : X[a] --> { Y_symp[a] : …, Y_asym[a] : … } @ …` gives
+`bite_child_Y_symp`, `bite_child_Y_asym`, `bite_adult_Y_symp` and
+`bite_adult_Y_asym`. The suffix is the compartment's name without its index, so
+two branches into cells of one compartment (`{ Y[child] : p, Y[adult] : 1 - p }`)
+give the same name twice and are **E501**.
 
-**When to use it.** When the biology is "one event, multiple outcomes chosen
-stochastically at the moment of the event." When the biology is "two separate
-ongoing processes from the same compartment with different rates" (e.g., death
-and recovery from I), use two plain transitions — the runtime treats them
-identically under source-grouping, but the DSL intent differs and two
-transitions reads more naturally.
+**Weights.** A weight is any scalar expression of dimension `probability`.
+Each branch fires at `weight_i × rate`, so the total outflow is
+`rate × Σ weight_i`, and the rate after `@` is the outflow only when the weights
+sum to 1.
 
-**Weights.** The weight of each branch is any scalar expression with dimension
-`probability` (dimensionless, domain `[0, 1]`). Because each branch fires at
-`weight_i × rate`, the total outflow from the source is `rate × Σ weight_i`:
-the rate after `@` is the outflow only when the weights sum to 1. A sum below 1
-does not send the remainder anywhere; it lowers the outflow, and a sum above 1
-raises it.
-
-- **Constant weights must be a probability distribution.** A weight is a
-  compile-time constant when it is a number (with or without a unit literal
-  such as `'ratio`), arithmetic on such, a built-in math function (`exp`, `log`,
-  `sqrt`, …) or `min`/`max`/`mod` applied to such, or an unindexed `let` binding
-  of such. Each constant weight must be a finite number in `[0, 1]`, even
-  beside parameter weights — `{ R : 1.5, Q : -0.5 }` sums to 1 but gives `Q` a
-  negative rate — and when every weight is constant their sum must be within
-  `1e-9` of 1. Otherwise the transition is rejected (**E423**). The tolerance
-  absorbs floating-point rounding (`0.7 + 0.2 + 0.1` is `0.9999999999999999`;
-  `1/3` three times) and nothing a model would write on purpose, so
-  `{ A : 0.33, B : 0.33, C : 0.33 }` is an error. To lower the total outflow,
-  change the rate after `@`.
-- **Weights that depend on anything known only at run time are not checked.**
-  A parameter, a table, a forcing or the state can make the sum differ from 1,
-  and then the outflow is `rate × Σ weight_i`, exactly as written. Write the
-  last weight as one minus the others (`{A : p, B : 1 - p}`, or
-  `1 - sum-of-others` for n-way branching) and the sum is 1 for every value.
+- **Constant weights** are checked. A weight is a compile-time constant when it
+  is a number (with or without a unit literal such as `'ratio`), arithmetic on
+  numbers, a built-in function (`exp`, `log`, `sqrt`, …, `min`, `max`, `mod`)
+  of numbers, or an unindexed `let` of one. Each constant weight must be a
+  finite number in `[0, 1]`, even beside non-constant weights, since
+  `{ R : 1.5, Q : -0.5 }` sums to 1 but gives `Q` a negative rate; and when
+  every weight is constant, their sum must be within `1e-9` of 1. Otherwise the
+  transition is **E423**. The tolerance absorbs floating-point rounding
+  (`0.7 + 0.2 + 0.1`, three weights of `1/3`), so
+  `{ A : 0.33, B : 0.33, C : 0.33 }` is an error. The total outflow is changed
+  through the rate after `@`.
+- **Weights read at run time** (a parameter, a table, a forcing or the state)
+  are not checked, and the outflow is `rate × Σ weight_i` as written. Writing
+  the last weight as one minus the others (`{A : p, B : 1 - p}`) makes the sum
+  1 for every value.
 
 ### 9.2 Indexed Transitions
 
@@ -2578,25 +2554,27 @@ raises it.
 transition_name[i in dim1, j in dim2, ...] : from --> to  @ rate
 ```
 
-The `[i in dim]` clause binds index variables. The compiler generates one
-concrete IR transition per combination of index values. Dimensionality is known
-at compile time: `|dim1| × |dim2| × ...` transitions.
+The binder `[i in dim]` binds an index variable to each level of `dim` in turn,
+and the compiler emits one transition per combination of levels,
+`|dim1| × |dim2| × …` in all, named by the transition's name followed by the
+levels (`infection_child_north`). A binder may also range over pairs of
+consecutive levels (§9.4), over the compartments (§9.5), or over the stages of
+a staged compartment (§9.4.1).
 
-**Every member must differ from the others.** Each generated transition is its
-own flow, so two members with the same stoichiometry and the same rate run the
-same flow twice. `inf[r in round] : S --> I @ beta * S` on unstratified `S` and
-`I` never mentions `r`, so it would emit `inf_r1` and `inf_r2` and run at
-`2 beta S` from a declaration that reads as `beta S`. A family whose expansion
-yields two such members is **E422**, which names the binder that fails to
-distinguish them. Index a compartment by it (`S[r] --> I[r]`) or a parameter
-(`beta[r]`), or drop it. The rule compares the expanded members: a `where` guard
-that leaves a single member is legal. A table lookup counts as using the binder
-even when two entries are equal, because the members are compared before table
-entries are folded to constants.
+**Members must differ.** Each emitted transition is a flow of its own, so two
+members with the same stoichiometry and the same rate run the same flow twice.
+`inf[r in round] : S --> I @ beta * S` on unstratified `S` and `I` never reads
+`r`; it would emit `inf_r1` and `inf_r2` and fire at `2 · beta · S` from a
+declaration that reads as `beta · S`. A family that expands to two such members
+is **E422**, which names the binder that does not distinguish them. The fix is
+to index a compartment (`S[r] --> I[r]`) or a parameter (`beta[r]`) by the
+binder, or to drop it. The comparison is of the expanded members: a `where`
+guard that leaves one member is legal, and a table lookup counts as reading the
+binder even when two of its entries are equal.
 
 ### 9.3 Guard Clauses (`where`)
 
-The `where` clause filters which index combinations generate transitions:
+A `where` clause keeps only the index combinations for which its guard is true:
 
 ```camdl
 # Migration: exclude self-loops
@@ -2616,27 +2594,34 @@ transfer[a in age, src in patch, dst in patch] : S[a,src] --> S[a,dst]
   where src != dst and a == adult
 ```
 
-**Guard grammar:**
-
 ```
-guard := index_var '!=' index_val_or_var
-       | index_var '==' index_val_or_var
+guard := IDENT '==' IDENT                    # index variable against a variable or level
+       | IDENT '!=' IDENT
+       | IDENT '[' IDENT (',' IDENT)* ']' relop NUMBER
+                                             # a constant table cell against a literal
        | guard 'and' guard
        | guard 'or' guard
        | '(' guard ')'
+relop := '<' | '<=' | '>' | '>=' | '==' | '!='
 ```
 
-Guards reference **index variables only** (not parameters or compartments). They
-are evaluated at **compile time** — the compiler instantiates all index
-combinations, evaluates the guard for each, and emits IR transitions only for
-combinations where the guard is true. The IR has no concept of guards.
+`and` binds more tightly than `or`. A guard is evaluated when the model is
+compiled, once per index combination, and only the combinations for which it
+holds are emitted; the IR has no guards. It reads index variables, level names,
+and cells of constant tables indexed by index variables, as in
+`where p != q and dist[p,q] < 50`; the rules for table cells are in §8.2.1.
 
-Guards compose with all iteration forms: regular `[i in dim]`, `consecutive`,
-and `c in compartments`.
+**Refused.** A guard that compares a table cell with a parameter is **E284**,
+since the set of emitted transitions cannot depend on a fitted value. A guard
+that names a compartment, such as `where c != S` on a `c in compartments`
+binder, is **E217**. A parameter compared directly, `not`, and an
+ordering of index variables (`p < q`) are syntax errors (E001). A guard that
+removes every combination is warning **W200**.
 
 ### 9.4 Consecutive Pair Iterator
 
-The `consecutive(dim)` binding yields adjacent pairs from an ordered dimension:
+The binder `(a, a_next) in consecutive(dim)` binds each pair of adjacent levels
+of `dim`, in declaration order:
 
 ```camdl-doctest-preamble consecutive-aging
 compartments { S, I, R }
@@ -2657,14 +2642,13 @@ transitions {
 }
 ```
 
-For `age = [age_0_5, age_5_15, age_15_50, age_50_65, age_65p]`, this generates
-four transitions per compartment per patch: `age_0_5→age_5_15`,
-`age_5_15→age_15_50`, `age_15_50→age_50_65`, `age_50_65→age_65p`. The last
-stratum has no outgoing aging transition.
+For the five levels of `age` this gives four pairs, `(a0_5, a5_15)`,
+`(a5_15, a15_50)`, `(a15_50, a50_65)` and `(a50_65, a65p)`, and so four aging
+transitions per compartment and patch. The last level has no outgoing
+transition.
 
-This is a general-purpose primitive for any sequential transfer along an ordered
-dimension. It also handles **Erlang sub-staging** for non-exponential waiting
-times:
+A chain of consecutive transitions through sub-stages of one compartment gives
+it an Erlang-distributed residence time:
 
 ```camdl-doctest-preamble erlang-E
 compartments { E, I }
@@ -2687,31 +2671,27 @@ transitions {
 }
 ```
 
-This gives an Erlang(k=3, rate=sigma) distributed latent period. The mean is the
-same as exponential (1/sigma), but the variance is reduced by factor k,
-producing a more peaked distribution — closer to real disease progression.
-
-Writing the chain by hand works, but it buries the modelling intent and invites
-a silent error: the per-stage rate must be `k * sigma`, and writing plain
-`sigma` gives a mean wrong by a factor of `k` with no diagnostic. The `via`
-clause below states the residence directly and lowers to exactly this chain.
+The latent period is Erlang(`k = 3`, rate `3σ`): its mean is `1/σ`, the mean of
+the exponential period of an unstaged `E`, and its variance is `1/(3σ²)`, the
+exponential variance divided by `k`. The per-stage rate must be `k · σ`; a
+chain written with `sigma` per stage has a mean `k` times too long, and no
+diagnostic detects it. The `via` clause (§9.4.1) states the residence and
+supplies the per-stage rate.
 
 #### 9.4.1 Staged residences: the `via` clause
 
-A compartment's residence time is exponential by default: while an individual is
-in `E`, it leaves at the total exit hazard — memoryless, with coefficient of
-variation (CV, the standard deviation over the mean) equal to one. Real latent
-and infectious periods are more regular than that, and the number of stages in a
-period materially changes epidemic speed and the reproduction number inferred
-from the same data. The **method of stages** recovers a non-exponential dwell by
-splitting a compartment into `k` internal sub-stages, each exponential of rate
-`k/τ`, so the total residence is Erlang(`k`, `k/τ`): mean `τ`, variance `τ²/k`,
-CV `1/√k`. The manual `consecutive` staging above is exactly this construction,
-written out.
+A compartment's residence time is exponential by default, with coefficient of
+variation (CV, the standard deviation over the mean) 1. Splitting a compartment
+into `k` sub-stages, each left at rate `k/τ`, makes the residence
+Erlang(`k`, `k/τ`), with mean `τ`, variance `τ²/k` and CV `1/√k`; this is the
+method of stages, also called the linear chain trick (Hurtado & Kirosingh 2019,
+[J. Math. Biol. 79](https://doi.org/10.1007/s00285-019-01412-w)). The number of
+stages changes the epidemic's speed and the reproduction number inferred from
+the same data.
 
-A transition that **drains** a compartment can carry that residence law
-directly. In place of a rate it takes a `via` clause naming the law, which
-stages the **source** compartment and supplies the per-stage rate for you:
+A transition that drains a compartment may carry the residence law in place of
+a rate. `via <law>` stages the transition's source and supplies the per-stage
+rate:
 
 ```camdl-doctest-preamble via-erlang
 compartments { S, E, I, R }
@@ -2730,37 +2710,30 @@ transitions {
 }
 ```
 
-A transition is **either** `@ rate` **or** `via law`, never both and never
-neither. `@ rate` is an ordinary exponential transition — the rate is the
-propensity; `via law` is a staged residence — the law supplies `k/τ` per stage.
-The force that *fills* the compartment (here `infection`) stays an ordinary
-`@`-transition; only the draining transition carries the dwell law, so there is
-no "entry force versus residence rate" ambiguity.
+A transition takes either `@ rate`, an exponential event whose rate is the
+propensity, or `via law`, a staged residence. The transition that fills the
+compartment (`infection`) is an ordinary `@` transition.
 
-`via erlang(...)` lowers to ordinary sub-staged compartments and `consecutive`
-transitions — `E` becomes `E_s1, E_s2, E_s3`, chained at rate `3 * sigma` and
-exiting into `I_s1` — isomorphic (modulo stage names) to the hand-written form
-in §9.4. Because the sub-stages are ordinary compartments, a **bare** reference
-to the staged source sums over its stages automatically (the bare-name rule,
-§5.1): the `I` in the force of infection above already means
-`I_s1 + I_s2 + I_s3`, so the mean infectious period and R₀ are preserved and only
-the dwell-time *shape* changes. `via` introduces no new IR — it is a macro over
-existing compartments and transitions, so all three backends and the gradient
-machinery see the lowered model unchanged.
+**Meaning.** `via erlang(...)` expands to ordinary compartments and transitions:
+`E` becomes `E_s1`, `E_s2`, `E_s3`, chained at rate `3 * sigma`, and the last
+stage exits into the destination's first stage (`I_s1` above), as the
+hand-written chain of §9.4 does. A bare reference to a staged compartment is the
+sum over its stages (§5.1), so the `I` in the force of infection is
+`I_s1 + I_s2 + I_s3`: the mean infectious period is unchanged and only the
+shape of its distribution changes. `via` adds no construct to the IR; every
+backend and every inference method runs the expanded model.
 
-In `erlang(stages = k, mean = τ | rate = r)`, give exactly one of `mean` or
-`rate` (they are reciprocals); `stages` is a positive-integer literal, because it
-sets how many compartments exist — model structure, not a fittable parameter.
-`mean`, `rate`, and mixture weights *are* fittable and gradient-estimable.
-`stages = 1` is the ordinary exponential dwell — not a no-op, but the `k`-knob at
-its lowest setting.
+`erlang(stages = k, mean = τ)` and `erlang(stages = k, rate = r)` take exactly
+one of `mean` and `rate`, which are reciprocals. `stages` is a positive-integer
+literal, because it sets how many compartments exist; `mean`, `rate` and the
+branch weights below may be parameters and are estimable, gradients included.
+`stages = 1` is the exponential residence.
 
-**Mixtures of durations.** Some periods are not a single Erlang but a mixture:
-an individual takes one of several routes, chosen on entry. `hyper_erlang` is a
-finite mixture of Erlang chains, each written as a self-contained `branch(...)`.
-When the branches share an endpoint, write it once on the arrow and give each
-branch a `weight`; the last branch's weight is implicit (`1 −` the sum of the
-others), so the mixture is normalized by construction:
+**Mixtures.** `hyper_erlang` is a finite mixture of Erlang chains: an individual
+takes one route, chosen on entry, and each route is written as a
+`branch(...)`. When the branches share an endpoint, it is written once on the
+arrow and each branch but the last carries a `weight`; the last branch's weight
+is one minus the sum of the others.
 
 ```camdl-doctest-preamble via-hyper-shared
 time_unit = 'weeks
@@ -2783,10 +2756,9 @@ transitions {
 }
 ```
 
-When the branches end in *different* compartments — a case-fatality split, where
-the fatal and recovering arms have different durations *and* destinations — each
-branch carries its own `to` and the transition needs no arrow target (a branch
-with neither a `to` nor a transition target is an error):
+When the branches end in different compartments, as in a case-fatality split
+whose fatal and recovering arms differ in duration and destination, each branch
+carries its own `to` and the transition has no arrow target:
 
 ```camdl-doctest-preamble via-hyper-dest
 time_unit = 'days
@@ -2809,25 +2781,21 @@ transitions {
 }
 ```
 
-Each branch is `branch(label, stages, mean | rate, weight?, to?)`: `label` is a
-required bare name (it names the branch's stage compartments, `I__fatal__1 …`),
-and `weight` and `to` are optional. This is *not* two competing exponential
-exits — those would give coupled, exponential outcome times; here the outcome is
-decided on entry and each arm runs its own gamma chain to its own destination.
-The bare `I` in the force of infection still sums *all* the branch stages
-(everyone infectious), so transmission is unaffected.
+A branch is `branch(label = <name>, stages = k, mean = τ | rate = r,
+weight = w, to = <compartment>)`, with `weight` and `to` optional. The label is
+a bare name and names the branch's stage compartments (`I__fatal__1`,
+`I__fatal__2`, …). The outcome is decided on entry, and each arm runs its own
+Erlang chain to its own destination; this differs from two competing
+exponential exits, whose outcome times are coupled and exponential. A bare `I`
+is the sum of every branch's stages.
 
-The clause also has a **block form**, mirroring the brace body used elsewhere,
-with `rate` and `via` mutually exclusive:
-`onset : E --> I { via = erlang(stages = 3, rate = sigma) }`.
+The block form writes the law as a key: `onset : E --> I { via = erlang(stages =
+3, rate = sigma) }`.
 
-**Other exits from a staged compartment.** People can leave a compartment with
-an Erlang dwell before the dwell completes: they die, are treated, or age into
-another stratum. Write that as an ordinary `@` transition whose single source is
-the staged compartment, indexed exactly as it was declared and with no stage
-(`E[a]`, or bare `E` when `E` is not stratified). Such a transition is a
-*competing exit*: a hazard that acts throughout the dwell and does not depend on
-the stage.
+**Other exits from a staged compartment.** An ordinary `@` transition whose
+single source is a staged compartment, written as declared and with no stage
+(`E[a]`, or bare `E` when `E` is not stratified), is a competing exit: a hazard
+that acts throughout the residence, whatever the stage.
 
 ```camdl-doctest-preamble via-competing
 dimensions { age = [pre, sch] }
@@ -2853,29 +2821,27 @@ transitions {
 }
 ```
 
-The rate `R` you write is the total propensity out of the whole cell, as
-everywhere in camdl, and `E[a]` in it is the sum over the stages. The compiler
-expands the transition to one copy per stage and gives stage `s` the share of
-`R` in proportion to its occupancy:
+The written rate `R` is the total propensity out of the whole cell, and `E[a]`
+in it is the sum over the stages. The compiler emits one copy of the transition
+per stage and gives stage `s` the share of `R` in proportion to its occupancy:
 
 ```
 R_s = R * E_s / E     if E > 0
 R_s = 0               if E = 0
 ```
 
-Every stage then faces the same hazard per person, `R / E`, the stage rates sum
-to `R`, and the `via` progression runs unchanged alongside. When the rate is a
-product in which the source reference appears exactly once as a factor and the
-compartment appears nowhere else — `mu * E[a]` — the share is that product with
-the factor replaced by the stage cell, `mu * E[a, s]`, which is exactly what a
-hand-written per-stage model holds. A quotient whose divisor does not mention
-the compartment counts as such a product: `mu * E[a] / N_ref` gives
-`mu * E[a, s] / N_ref`. A sum or difference of such products is replaced term
-by term: `cmax * E[a] + mu * E[a]` gives `cmax * E[a, s] + mu * E[a, s]`, but
-`cmax * E[a] + mu * K`, whose second term does not read the source, does not.
-Any other rate (`treat` above) lowers to the guarded quotient.
+Every stage then faces the same per-person hazard `R / E`, the stage rates sum
+to `R`, and the `via` progression runs alongside. When the rate is a product in
+which the source reference appears once as a factor and the compartment appears
+nowhere else, such as `mu * E[a]`, the share is that product with the factor
+replaced by the stage cell, `mu * E[a, s]`. A quotient whose divisor does not
+read the compartment counts as such a product (`mu * E[a] / N_ref` gives
+`mu * E[a, s] / N_ref`), and a sum or difference of such products is replaced
+term by term (`cmax * E[a] + mu * E[a]` gives `cmax * E[a, s] + mu * E[a, s]`).
+Any other rate, such as `treat` above or `cmax * E[a] + mu * K`, lowers to the
+guarded quotient.
 
-Where the people go follows from the destination:
+The destination determines where the people go:
 
 | Movement                                         | Stage                                 |
 | ------------------------------------------------ | ------------------------------------- |
@@ -2883,22 +2849,19 @@ Where the people go follows from the destination:
 | To an unstaged compartment (`death_E`, `treat`)  | Drawn from every stage                |
 | To a *different* staged compartment              | Drawn from every stage, enter stage 1 |
 
-A move into a different staged compartment restarts that compartment's dwell at
-its first stage, as every inflow does. Because the modeller may have meant the
-progression to continue (an isolation compartment that mirrors the infectious
-period), the compiler says so with warning `W107`. The `via` transition's own
-exit into a staged compartment does not warn. A `hyper_erlang` destination
-warns too: its arrivals are split by the branch weights into each branch's
-first stage. It has no stage dimension, so the way to continue into a branch is
-to name that branch's stage compartment as the destination (`H__fast__2`),
-which bypasses the branch weights.
+A move into a different staged compartment starts that compartment's residence
+at its first stage, as every inflow does, and raises warning **W107**. The `via`
+transition's own exit into a staged compartment does not warn. A move into a
+`hyper_erlang` compartment also warns: the arrivals are split by the branch
+weights into each branch's first stage, and naming one branch's stage
+compartment as the destination (`H__fast__2`) bypasses the weights.
 
-*What `mean` and `rate` mean with a competing exit.* The `via` law's `mean` is
-the dwell time absent the competing exit, not the mean time spent in the
-compartment, which is shorter. With a constant hazard `mu` per person beside an
-Erlang-`k` dwell of stage rate `k * sigma`, a person advances from each stage
-with probability `k*sigma / (k*sigma + mu)`, so the fraction that completes the
-dwell is
+*`mean` and `rate` beside a competing exit.* The law's `mean` is the residence
+time in the absence of the competing exit; the mean time spent in the
+compartment is shorter. With a constant per-person hazard `mu` beside an
+Erlang-`k` residence of stage rate `k * sigma`, a person advances from each
+stage with probability `k*sigma / (k*sigma + mu)`, and the fraction that
+completes the residence is
 
 ```
 (k*sigma / (k*sigma + mu))^k
@@ -2906,27 +2869,24 @@ dwell is
 
 *Flows.* A flow reference to the transition as written reads all its stage
 copies: `incidence(death_E[a])` is the deaths from `E[a]` at any stage. The
-stage is not a population stratum, so this pools nothing you declared and `E280`
-(§12.1) does not apply to it; a bare `incidence(death_E)` on the age-stratified
-family is still `E280`, for pooling `age`. In trajectory and flow columns the
-copies are named like any indexed family, with the stage level last
-(`death_E_pre_s1`).
+stage is not a population stratum, so E280 (§12.1) does not apply to it; a bare
+`incidence(death_E)` on the age-stratified family is still E280, for pooling
+`age`. In trajectory and flow columns the copies are named with the stage level
+last (`death_E_pre_s1`). With `stages = 1` the source is not staged and the
+transition is an ordinary second exit, so one model text compiles at every
+stage count.
 
-With `stages = 1` the source is not staged and the transition is an ordinary
-second exit: the same model text compiles at every stage count.
+*Lineage.* A `#[lineage]` competing exit takes every stage of `E[a]` as its
+source, as the unstaged transition takes `E[a]`, so the stages are never
+parents of one another and a rate is accepted or refused (E601) at every stage
+count alike. Each stage copy's parent weight is its share of the written rate's:
+for `mu * E[a] * I[a] / (K + E[a])` the parent of every copy is `I[a]`, with
+weight `if E > 0 then mu * E / (K + E) * E_s / E else 0`, and the copies'
+weights sum to the unstaged transition's `mu * E[a] / (K + E[a])`.
 
-*Lineage.* A `#[lineage]` competing exit takes the whole compartment cell as
-its source, every stage of `E[a]`, as the unstaged transition takes `E[a]`. So
-the stages are never parents of one another, and a rate is accepted or refused
-(E601) at every stage count alike. Each stage copy's parent weight is its share
-of the written rate's: for `mu * E[a] * I[a] / (K + E[a])` the parent of every
-copy is `I[a]`, with weight `if E > 0 then mu * E / (K + E) * E_s / E else 0`,
-and the weights of the copies sum to the unstaged transition's
-`mu * E[a] / (K + E[a])`.
-
-*Families over compartments.* A transition family bound over the compartment
-set is a competing exit for each staged member and an ordinary exit for the
-rest, so background mortality or ageing is written once for every compartment:
+*Families over compartments.* A family bound over the compartments (§9.5) is a
+competing exit for each staged member and an ordinary exit for the others, so
+background mortality or ageing is written once:
 
 ```camdl preamble=via-competing
 transitions {
@@ -2939,36 +2899,15 @@ transitions {
 ```
 
 The members for `c = E` expand per stage (`bg_pre_E_s1`, …; `ageing` keeps the
-stage), and `incidence(bg[a, E])` reads all of them. The refusals below apply
-to the staged member. A `where` guard cannot name a compartment (`E217`), so a
-family that must treat the staged member differently is written as separate
-transitions instead.
-
-Refused, each with its own diagnostic: a competing exit with
-`overdispersed(...)` noise (`E361` — the noise multiplier is drawn per
-transition, so the variance of the total would depend on the stage count); one
-that consumes more than one individual of the staged compartment per event
-(`E362`); a transition with two or more staged sources (`E363`); a staged
-source together with an unstaged one (`E365`); and any `@` transition out of a
-`hyper_erlang` compartment (`E364`), whose branches are separate chains rather
-than one stage dimension.
-
-**Scope and diagnostics.** A compartment takes one `via` law: a second `via`
-transition on the same source is `E246`. The laws that ship are `erlang` and
-`hyper_erlang`; any other law (`coxian`, `fixed`, …) is `E243`. `hyper_erlang`
-on an already-stratified source is a later sub-phase, rejected today with `E248`.
-Argument mistakes each get a named code: a `stages` that is not a positive
-integer is `E244`; giving both or neither of `mean`/`rate` is `E245`; an unknown
-`erlang` keyword is `E247`; fewer than two branches is `E255`; a `weight` on the
-last branch (or a missing one on any earlier branch) is `E256`; and duplicate
-branch labels are `E258`.
+stage), and `incidence(bg[a, E])` reads all of them. A `where` guard cannot name
+a compartment (E217), so a staged member that needs different treatment is
+written as a separate transition.
 
 **Moving people into and out of a staged compartment.** `init`, inflow
-transitions (`--> E`), `transfer` and `add` treat a compartment with an Erlang
-dwell like any other: write the compartment, indexed exactly as it was declared
-and with no stage (`E[a]`, or bare `E` when `E` is not stratified), and the
-compiler decides which stages the people come from and go to. This holds in
-`interventions {}`, `events {}` and `reactive_interventions {}` alike (§13).
+transitions (`--> E`), `transfer` and `add` write a staged compartment as
+declared, with no stage (`E[a]`, or bare `E`), and the compiler assigns the
+stages, in `interventions {}`, `events {}` and `reactive_interventions {}`
+alike (§13).
 
 ```camdl preamble=via-competing
 transitions {
@@ -2993,46 +2932,42 @@ interventions {
 | `transfer` to a *different* staged compartment   | Drawn from every stage, enter stage 1 |
 
 *One amount for the whole compartment.* A `transfer` out of a staged compartment
-is one action over all its stages (a *grouped transfer*). Its `fraction` or
-`count` is evaluated once and applies to the compartment's total `N`, the sum
-of the stages. On integer compartments the number moved is `floor(N * fraction)`
-or `min(round(count), N)`, and it is then taken from the stages in proportion
-to their occupancy: stage `i` gives `floor(M * n_i / N)`, and the individuals
-left over go one each to the stages with the largest remainders, the earlier
-stage first on a tie. So 5 people in stages (3, 1, 1) at `fraction = 0.4` give
-up `floor(5 * 0.4) = 2`, as (1, 1, 0). No stage gives more than it holds. The
-number moved therefore does not depend on `stages`, and the same text compiles
-at `stages = 1`, where it is an ordinary transfer.
+is one action over all its stages. Its `fraction` or `count` is evaluated once
+and applies to the compartment's total `N`, the sum of the stages. On integer
+compartments the number moved, `M`, is `floor(N * fraction)` or
+`min(round(count), N)`, and it is taken from the stages in proportion to their
+occupancy: stage `i` gives `floor(M * n_i / N)`, and the remaining individuals
+go one each to the stages with the largest remainders, the earlier stage first
+on a tie. Five people in stages (3, 1, 1) at `fraction = 0.4` give up
+`floor(5 * 0.4) = 2`, as (1, 1, 0). No stage gives more than it holds, the
+number moved does not depend on `stages`, and at `stages = 1` the action is an
+ordinary transfer.
 
-The floor is applied once, to the compartment total. This is a deliberate
-restriction of what a staged `transfer` can express: it cannot floor each
-stage separately. A transfer that names its cells one at a time does that, and
-is unchanged: a transfer between unstaged compartments, or one written with an
-explicit stage on its source (`from = stage(E[pre], 2)`), still moves
-`floor(source * fraction)` of that one cell. On real compartments, and on the
-ODE backend, nothing is rounded: each stage gives `n_i * fraction`, or
+The floor is applied once, to the total, so a staged `transfer` cannot floor
+each stage separately. A transfer that names one cell, whether between unstaged
+compartments or from an explicit stage (`from = stage(E[pre], 2)`), moves
+`floor(source * fraction)` of that cell. On real compartments and on the ODE
+backend nothing is rounded: each stage gives `n_i * fraction`, or
 `min(count, N) * n_i / N`.
 
-*Population dimensions are never pooled.* `transfer(from = E, to = T)` with
-both stratified by `age` pairs cell for cell over `age`, as for any bare
-stratified transfer (§13.1), and groups only the stages within each age cell.
-`count` on such a bare transfer is still `E238`, and a bare staged endpoint
-inside an indexed family is still `E239`.
+*Population dimensions are not pooled.* `transfer(from = E, to = T)` with both
+stratified by `age` pairs the cells over `age`, as for any bare stratified
+transfer (§13.1), and groups only the stages within each age cell. `count` on
+such a bare transfer is **E238**, and a bare staged endpoint inside an indexed
+family is **E239**.
 
-*What is refused.* A `set` on the compartment (`{ E[pre] = 5 ... }`) is `E366`:
-a total has no single meaning across the stages; set one stage
-(`stage(E[pre], 1) = ...`). A source that names its stage with a destination in
-the same compartment that does not (`from = stage(E[pre], 2), to = E[sch]`) is
-`E367`: name the destination stage as well. A `transfer`, `add` or `set` on a
-`hyper_erlang` compartment is `E368`. A transfer from one staged compartment
-into a different one restarts the destination's dwell and warns (`W107`), as the
-corresponding transition does; a movement with either endpoint written as
-`stage(...)` does not warn.
+*Refused.* A `set` on the compartment (`{ E[pre] = 5 ... }`) is **E366**,
+because a total has no single meaning across the stages; one stage is set with
+`stage(E[pre], 1) = ...`. A source that names its stage with a destination in
+the same compartment that does not
+(`from = stage(E[pre], 2), to = E[sch]`) is **E367**. A `transfer`, `add` or
+`set` on a `hyper_erlang` compartment is **E368**. A transfer from one staged
+compartment into a different one raises W107, as the corresponding transition
+does; a movement with either endpoint written as `stage(...)` does not.
 
-Reads are unaffected: a bare `E`, or `E[a]`, sums every stage (§5.1).
+Reads are unaffected: a bare `E`, or `E[a]`, is the sum of every stage (§5.1).
 
-**Naming one stage.** Everything above writes the compartment and leaves the
-stages to the compiler. Two forms name a stage when the model means one:
+**Naming one stage.** Two forms name a stage:
 
 ```camdl preamble=via-competing
 transitions {
@@ -3049,75 +2984,85 @@ interventions {
 init { S[pre] = 990  stage(E[pre], 2) = 10 }
 ```
 
-- `stage(E[pre], 2)` is one residence location: stage 2 of `E[pre]`. Its first
+- `stage(E[pre], 2)` is one residence location, stage 2 of `E[pre]`. Its first
   argument is the compartment with every population dimension indexed and no
-  stage (bare `E` when `E` is not stratified); its second is the location, a
-  whole number from 1 to the compartment's `stages`, or a variable bound by
-  `in stages(E)`. It is a state expression (in a rate, a `let`, an observation,
-  `balance`: `beta * S * stage(I, 2) / N` is infectiousness in stage 2 only) and
-  an endpoint (a transition source or destination, `from` and `to` of a
-  `transfer`, the target of `add` and `set`, an `init` entry).
-- `stages(E)` is the set of residence locations of `E`, and is written only as
-  the domain of a binder: `[st in stages(E)]` on a transition, an intervention,
-  an event, a reactive intervention, a quantity or a `let`, and
-  `sum(st in stages(E), ...)`. The
-  members of such a family are named with the stage level last (`move_s1`,
-  `move_s2`, `move_s3`), and a flow reference to a transition family over
-  stages reads all of them, as it does for a competing exit.
+  stage (bare `E` when `E` is not stratified); its second is a whole number from
+  1 to the compartment's `stages`, or a variable bound by `in stages(E)`. It is
+  a state expression, in a rate, a `let`, an observation or `balance`
+  (`beta * S * stage(I, 2) / N` is infectiousness in stage 2 only), and an
+  endpoint: a transition's source or destination, `from` and `to` of a
+  `transfer`, the target of `add` and `set`, and an `init` entry.
+- `stages(E)` is the set of residence locations of `E`, written only as the
+  domain of a binder: `[st in stages(E)]` on a transition, an intervention, an
+  event, a reactive intervention, a quantity or a `let`, and
+  `sum(st in stages(E), ...)`. Members of such a family are named with the
+  stage level last (`move_s1`, `move_s2`, `move_s3`), and a flow reference to a
+  transition family over stages reads all of them.
 
 A `stage(...)` endpoint is that location only. A transition whose source is
-`stage(E[pre], 3)` is an ordinary transition out of that one cell, not a
-competing exit: its rate is not divided over the stages. An `init` entry or an
-`add` without a stage lands in stage 1; with `stage(...)` it lands where it
-says. A movement with either endpoint written as `stage(...)` states its
-location and does not raise `W107`.
+`stage(E[pre], 3)` is an ordinary transition out of that cell, and its rate is
+not divided over the stages. An `init` entry or an `add` without a stage lands
+in stage 1, and with `stage(...)` in the stage it names. A movement with either
+endpoint written as `stage(...)` does not raise W107. A stage is a state of the
+progression, not an interval of elapsed time: `stage(E, 3)` holds the people
+who have made two stage transitions.
 
-A stage is a stochastic progression state, not an elapsed-time interval:
-`stage(E, 3)` selects people who have completed two stage transitions, not
-people infected between two dates.
+*Every stage count.* With `stages = 1`, and for a compartment with no `via`
+law, there is one location: `stage(E[pre], 1)` is `E[pre]`, and a binder over
+`stages(E)` has one element, so its declaration has the single member it would
+have without the binder (`move`, not `move_s1`). A model written with location
+1 and stage variables compiles at every stage count; a literal location above
+the stage count does not. There is no accessor for the stage count: an amount
+written for the whole compartment is divided over its stages by the compiler.
 
-*The same text at every stage count.* With `stages = 1`, and for a compartment
-with no `via` law, there is one location: `stage(E[pre], 1)` is `E[pre]`, and a
-binder over `stages(E)` has one element, so its declaration has the single
-member it would have without the binder (`move`, not `move_s1`). A model
-written with location 1 and stage variables compiles unchanged when `stages`
-changes; a literal location above the stage count does not. There is no
-stage-count accessor: an amount written for the whole compartment is divided
-over its stages by the compiler, so a fraction or a rate never needs the number
-of stages.
-
-*What is refused.* `stage(...)` with anything but a compartment reference and a
+*Refused.* `stage(...)` with anything but a compartment reference and a
 location, or with a population dimension left unindexed (`stage(E, 2)` when `E`
-is stratified by `age`), is `E369`. A location the compartment does not have
-is `E370`, and the message gives its stage count: a literal out of range, any
+is stratified by `age`), is **E369**. A location the compartment does not have
+is **E370**, whose message gives the stage count: a literal out of range, any
 location but 1 on a compartment with one stage, or a location that is neither a
-literal nor a stage variable. A variable bound over `stages(E)` is a location
-of `E` only: as the location of another compartment (`stage(I[a], st)`) it is
-`E371`, and anywhere else (as a population index, `S[st]`; as a value; in a
-`where` predicate) it is `E372`. The one other thing it indexes is a `let`
-family declared over `stages(E)`. `stages(...)` of something that is not a
-compartment, or written as a value, is `E374`, as is a binder over it on an
-observation stream (data has no column for a stage) or in the brackets of an
-`init` entry. On a `hyper_erlang` compartment
-a location would be a branch and a phase; both forms are reserved there and
-are `E373`.
+literal nor a stage variable. A variable bound over `stages(E)` is a location of
+`E` only: as the location of another compartment (`stage(I[a], st)`) it is
+**E371**, and anywhere else (as a population index, `S[st]`; as a value; in a
+`where` predicate) it is **E372**. It may also index a `let` family declared
+over `stages(E)`. `stages(...)` of something that is not a compartment, or used
+as a value, is **E374**, and so is a binder over it on an observation stream
+(data has no column for a stage) or in the brackets of an `init` entry. On a
+`hyper_erlang` compartment a location would be a branch and a phase; both forms
+are reserved there and are **E373**.
 
 The stage dimension the compiler generates (`__latency_stage`, with levels
 `s1`, `s2`, …) is not part of the language. Naming it (`[st in
-__latency_stage]`, `sum(s in __latency_stage, ...)`) is `E375`, and indexing a
-stage by its level (`E[pre, s2]`) is `E376`; each diagnostic gives the
-`stages(E)` or `stage(E[pre], 2)` to write instead. An expanded cell name
-(`E_pre_s2`) is how every stratified cell is named in trajectory columns, and
-may still be written wherever a cell name is accepted; it does not exist at
-`stages = 1`.
+__latency_stage]`, `sum(s in __latency_stage, ...)`) is **E375**, and indexing a
+stage by its level (`E[pre, s2]`) is **E376**; each diagnostic gives the
+`stages(E)` or `stage(E[pre], 2)` form instead. An expanded cell name
+(`E_pre_s2`) is the name of the stage in trajectory columns and may be written
+wherever a cell name is accepted; it does not exist at `stages = 1`.
 
-#### 9.4.2 Aging across a stratified model (canonical use case)
+**What is refused.**
 
-`consecutive(dim)` is also the right primitive for **demographic aging across
-age bins** in any stratified model. Combined with `c in
-compartments` and an
-outer `[s in setting]` binding, one declaration covers all compartment families
-and all outer strata:
+- `via` laws: a law other than `erlang` and `hyper_erlang` (`coxian`, `fixed`,
+  …) is **E243**; a second `via` transition on the same source is **E246**; and
+  `hyper_erlang` on a stratified source is **E248**.
+- `erlang` arguments: a `stages` that is not a positive-integer literal is
+  **E244**; both or neither of `mean` and `rate` is **E245**; an unknown keyword
+  is **E247**.
+- `hyper_erlang` branches: fewer than two is **E255**; a `weight` on the last
+  branch, or a missing `weight` on an earlier one, is **E256**; a branch with
+  neither its own `to` nor an arrow target is **E257**; duplicate labels are
+  **E258**.
+- Competing exits: one with `overdispersed(...)` noise is **E361**, since the
+  noise is drawn per transition and the variance of the total would depend on
+  the stage count; one that consumes more than one member of the staged
+  compartment per event is **E362**; a transition with two or more staged
+  sources is **E363**; a staged source together with an unstaged one is
+  **E365**; and any `@` transition out of a `hyper_erlang` compartment, whose
+  branches are separate chains with no shared stage dimension, is **E364**.
+
+#### 9.4.2 Aging across a stratified model
+
+`consecutive(dim)` with a `c in compartments` binder and an outer binder covers
+demographic aging for every compartment family and every outer stratum in one
+declaration:
 
 ```camdl
 dimensions {
@@ -3140,18 +3085,14 @@ transitions {
 }
 ```
 
-For 3 settings × 3 compartments × 4 age boundaries this expands to 36 IR
-transitions — from one DSL declaration. Without `consecutive(dim)` the same
-pattern needs 36 hand-written lines (one per compartment/setting/boundary), all
-structurally identical, and a new boundary requires editing every compartment
-family.
-
-If you find yourself writing `age_S_02`, `age_S_25`, `age_S_5`, ...
-hand-enumerated transitions, you want this primitive.
+The declaration expands to 3 settings × 3 compartments × 4 age boundaries = 36
+transitions (`aging_S_low_burden_a02`, …). The last entry of `age_dur` is never
+read, because the last level is never the first of a pair.
 
 ### 9.5 Compartment Iteration
 
-The `c in compartments` binding iterates over compartment names:
+The binder `c in compartments` ranges over the integer compartments, and `c`
+stands for each compartment's name in the stoichiometry and the rate:
 
 ```camdl-doctest-preamble compartment-iter
 compartments { S, I, R }
@@ -3182,200 +3123,186 @@ transitions {
 }
 ```
 
-**`compartments` means integer compartments only** (the safe default). Real-
-valued compartments (like environmental reservoirs `W : real`) are excluded
-because population-level operations (death, migration) don't apply to continuous
-state.
+The members are named in binder order: `death_S_child_north`, … . A real
+compartment (`W : real`, §11) is not a member, since it holds a continuous
+quantity and is not moved by transitions.
 
-**Partial stratification and `c in compartments`.** When compartments have
-different arities (e.g., R has `[age, patch, immunity]` but S has
-`[age, patch]`), the compiler **expands over all omitted dimensions**. For
-`death[c in compartments, a in age, p in patch] : c[a,p] --> @ mu * c[a,p]`:
-
-- For S (dims: [age, patch]): generates
-  `death_S[a, p] : S[a,p] --> @ mu * S[a,p]`
-- For R (dims: [age, patch, immunity]): generates **separate transitions per
-  immunity value**:
-  `death_R[a, p, natural] : R[a,p,natural] --> @ mu * R[a,p,natural]` and
-  `death_R[a, p, vaccine] : R[a,p,vaccine] --> @ mu * R[a,p,vaccine]`
-
-This is correct: the stoichiometry rule (§5.1) requires all dimensions to be
-specified for source/destination. The `c in compartments` iterator automatically
-fills in omitted dimensions by iterating over them. The user writes `c[a,p]` and
-the compiler expands to the correct full-arity transitions for each compartment.
+Each member is indexed exactly as written, so `c[a, p]` names a cell only of a
+compartment stratified by exactly those dimensions. A compartment with a
+further dimension (`R` stratified by `[age, patch, immunity]` beside `S` by
+`[age, patch]`) is not expanded over it: `c[a,p]` for `R` is a partial index,
+refused in the rate as **E287** and at an endpoint as **E503**, an unknown
+compartment (there is no `R_child_north`). A family over compartments of
+different strata is written as one family per shape of stratification. A
+staged compartment is a member like any other, and its member is a competing
+exit (§9.4.1).
 
 ### 9.6 Rate Expressions
 
-The `@` rate is always the **total propensity** — the absolute event rate. No
-hidden per-capita multiplication. If you want per-capita semantics, write the
-population factor explicitly:
+The rate after `@` is the total propensity of the event, the expected number of
+firings per unit time in the current state. No per-capita factor is implied; a
+per-capita rate is multiplied by its population explicitly:
 
 ```
 death_S[a in age] : S[a] -->  @ mu * S[a]     # mu per capita, explicit * S[a]
 recovery[a in age] : I[a] --> R[a]  @ gamma * I[a]  # gamma per capita, explicit * I[a]
 ```
 
+A rate that evaluates to a negative number when the model is run is refused
+with an error naming the transition and the time. A rate that evaluates to
+`NaN` or an infinity, from a division by zero, `log` or `sqrt` outside its
+domain (§9.7) or an overflow, is refused as a numerical collapse; with
+`--allow-degenerate-rates` such a sub-expression evaluates to 0 instead.
+
 ### 9.7 Expression Grammar
 
-**Operator precedence** (highest to lowest):
+**Operator precedence**, highest to lowest:
 
 ```
 Precedence  Operators        Associativity
 ─────────────────────────────────────────
 1 (highest) ()  f()  x[]     —
-2           - (unary)        right
+2           - (unary)        —
 3           ^                right
 4           * /              left
 5           + -              left
 6           == != < > <= >=  non-associative
-7 (lowest)  if/then/else     right
+7 (lowest)  if/then/else     —
 ```
 
-Standard mathematical convention: `a + b * c` parses as `a + (b * c)`.
-Exponentiation is right-associative: `a ^ b ^ c` = `a ^ (b ^ c)`. Comparisons
-cannot be chained: `a < b < c` is a parse error. In a `where` predicate,
-relational operators (`< <= > >= == !=`) compare a constant table cell to a
-literal (`dist[p,q] < 50`); index variables support only `==` / `!=` (see
-§8.2.1).
-
-**Full grammar:**
+`a + b * c` is `a + (b * c)`, and `a ^ b ^ c` is `a ^ (b ^ c)`. Unary minus binds
+more tightly than `^`, so `-x^2` is `(-x)^2`, which equals `x^2`; the negated
+square is written `-(x^2)`. A chained comparison, `a < b < c`, is a syntax
+error. A comparison has the value 1 when it holds and 0 otherwise. Expressions
+have no logical operators: `and`, `or` and `not` are written only in `where`
+guards (§9.3), and a conjunction in an expression is a product of comparisons.
 
 ```
 expr := expr '+' expr | expr '-' expr
       | expr '*' expr | expr '/' expr
       | expr '^' expr
       | '-' expr
-      | IDENT                             # parameter, compartment, let binding, function
-      | FLOAT | FLOAT UNIT                # literal, optionally with unit
-      | IDENT '[' index (',' index)* ']'  # index access (positional or named)
-      | sum '(' IDENT 'in' IDENT ',' expr ')'  # summation
-      | IDENT '(' kwargs ')'              # function call
+      | IDENT                                 # parameter, compartment, let binding, forcing, table, t
+      | NUMBER | NUMBER UNIT                  # literal, optionally with a unit (§2.1)
+      | IDENT '[' index (',' index)* ']'      # index access (positional or named)
+      | 'sum' '(' binder (',' binder)* ',' expr ')'
+      | 'sum' '(' expr ')'                    # total over every stratum of a family
+      | IDENT '(' arg (',' arg)* ')'          # built-in function, forcing, stage(...)
       | 'if' expr 'then' expr 'else' expr
-      | expr '==' expr | expr '!=' expr | expr '<' expr | expr '>' expr
-      | expr '<=' expr | expr '>=' expr
+      | expr relop expr
       | '(' expr ')'
 
-index := expr                             # positional: S[child]
-       | IDENT '=' expr                   # named: S[age = child]
+binder := IDENT 'in' IDENT ('where' guard)?   # §8.2, §8.2.1
+        | IDENT 'in' 'stages' '(' IDENT ')'   # §9.4.1
+index  := expr                                # positional: S[child]
+        | IDENT '=' expr                      # named: S[age = child]
+arg    := expr | IDENT '=' expr
+relop  := '==' | '!=' | '<' | '>' | '<=' | '>='
 ```
 
-In a `where` guard (transition or `sum` predicate) the comparison operators are
-restricted — see §8.2.1: index variables compare only with `==` / `!=`, and the
-relational operators (`< <= > >= == !=`) apply only to a constant table cell
-against a numeric literal (`dist[p,q] < 50`). `sum` is a keyword, not a
-user-definable function.
+`sum` is a keyword, not a function a model can define. A `sum` with several
+binders nests them, first outermost: `sum(a in age, p in patch, N[a, p])`. A
+`sum` whose binders are not all before its body is **E114**. The comparison
+operators inside a `where` guard follow §9.3 and §8.2.1.
 
-**Built-in math functions.** These are recognized by the compiler as
-function-call syntax and produce IR expression nodes (not forcing functions):
+**Built-in functions.** These names are function calls that compile to IR
+expression nodes:
 
-| Function    | Arity | Result                                                          |
-| ----------- | ----- | --------------------------------------------------------------- |
-| `exp(x)`    | 1     | e^x                                                             |
-| `log(x)`    | 1     | Natural logarithm (ln). Returns -∞ for x ≤ 0.                   |
-| `sqrt(x)`   | 1     | Square root. Returns 0 for x < 0.                               |
-| `abs(x)`    | 1     | Absolute value                                                  |
-| `floor(x)`  | 1     | Floor (round toward -∞)                                         |
-| `ceil(x)`   | 1     | Ceiling (round toward +∞)                                       |
-| `sin(x)`    | 1     | Sine (radians)                                                  |
-| `cos(x)`    | 1     | Cosine (radians)                                                |
-| `tanh(x)`   | 1     | Hyperbolic tangent                                             |
-| `mod(a, b)` | 2     | Euclidean remainder (always non-negative). Returns 0 for b = 0. |
-| `min(a, b)` | 2     | Smaller of two values                                          |
-| `max(a, b)` | 2     | Larger of two values                                           |
+| Function    | Arity | Result                                         |
+| ----------- | ----- | ---------------------------------------------- |
+| `exp(x)`    | 1     | e^x                                            |
+| `log(x)`    | 1     | natural logarithm; undefined for x ≤ 0         |
+| `sqrt(x)`   | 1     | square root; undefined for x < 0               |
+| `abs(x)`    | 1     | absolute value                                 |
+| `floor(x)`  | 1     | round toward −∞                                |
+| `ceil(x)`   | 1     | round toward +∞                                |
+| `sin(x)`    | 1     | sine (radians)                                 |
+| `cos(x)`    | 1     | cosine (radians)                               |
+| `tanh(x)`   | 1     | hyperbolic tangent                             |
+| `mod(a, b)` | 2     | Euclidean remainder, in `[0, abs(b))`; undefined for b = 0 |
+| `min(a, b)` | 2     | smaller of two values                          |
+| `max(a, b)` | 2     | larger of two values                           |
 
-Example:
+An undefined value is `NaN` when the model is run, and a rate that reads one is
+refused (§9.6); under `--allow-degenerate-rates` it is 0. A call with the wrong
+number of arguments is **E120**, and an unknown function name (`tan`, `pow`) is
+**E100**. `mod` of an expression that reads a parameter is **E600**: `mod` is
+discontinuous where it wraps, so its derivative in the parameter is undefined.
 
 ```camdl
-let day_of_year = mod(t, 365.25)
+let day_of_year = mod(t, 365.25 'days)
 let pop_decay = N0 * exp(-mu * t)
-let is_pulse = (day_of_year > 250.0) * (day_of_year < 252.0)
+let is_pulse = (day_of_year > 250.0 'days) * (day_of_year < 252.0 'days)
 ```
 
-**Rate wrappers.** Two compiler-recognized forms modify how event counts are
-drawn for a transition. They are NOT general-purpose functions — they wrap the
-entire rate expression and are extracted by the compiler during expansion.
+**Conditionals.** `if c then a else b` is evaluated when the model is run, as
+an IR conditional node: `@ if I > 0 then beta * S * I / N else 0.0` compiles to
+`Cond(Pop("I"), <rate>, Const(0.0))`. Index variables are not values in an
+expression, so a choice between index levels is written with a `where` guard
+(§9.3) or a restricted sum (§8.2.1). `if i == j then … else …` inside a binder
+over `i` and `j` substitutes each level for its variable and is refused with
+**E100**, naming the level as an undeclared name.
 
-| Wrapper                   | Syntax                                        | Effect                                                       |
-| ------------------------- | --------------------------------------------- | ------------------------------------------------------------ |
-| `overdispersed(rate, σ²)` | `@ overdispersed(beta * S * I / N, sigma_se)` | Gamma-Poisson (NegBinomial) draws. Var = mean + mean²·σ²/dt. |
-| `deterministic(rate)`     | `@ deterministic(mu * N)`                     | Rounded integer: nearbyint(rate × dt). No stochastic noise.  |
+**Rate wrappers.** Two wrappers change how a transition's events are drawn.
+Each wraps the whole rate after `@` and is not a function elsewhere; inside
+arithmetic (`2 * overdispersed(…)`) it is **E100**, an undeclared function.
 
-These are documented in §9.8 (overdispersion) and are compatible with the
-chain-binomial backend. Gillespie and ODE reject models with
-`overdispersed()` transitions.
+| Wrapper                   | Syntax                                        | Effect                                                    |
+| ------------------------- | --------------------------------------------- | --------------------------------------------------------- |
+| `overdispersed(rate, σ²)` | `@ overdispersed(beta * S * I / N, sigma_se)` | gamma-noised rate, negative-binomial counts (§9.8)        |
+| `deterministic(rate)`     | `@ deterministic(mu * N)`                     | the count `rate × dt`, rounded to the nearest integer     |
 
-`deterministic(rate)` fires an exact count of `nearbyint(rate · dt)`, clamped to
-`[0, n_src]` — it never removes more than the source population. It is supported
-**only as the sole exit** from its source: a source that has a
-`deterministic(...)` exit *and* any other competing exit (a stochastic exit, or
-even a second `deterministic(...)`) is rejected (gh#122), because the flows would
-be drawn independently and could together over-draw the source. (The ODE backend
-runs *every* transition deterministically, so the restriction does not apply
-there.)
+`deterministic(rate)` is a chain-binomial construct. Each step fires the count
+`rate · dt` rounded to the nearest integer, halves away from zero, and for a
+transition with a source, clamped to `[0, n_src]` so that it never removes more
+than the source holds. A source whose `deterministic(...)` exit has any other
+exit beside it, stochastic or a second `deterministic(...)`, is refused on
+chain-binomial, in `simulate`, `pfilter` and every chain-binomial `fit`: the
+exits would be drawn independently and could together remove more than the
+source holds. The ODE backend runs every transition as a deterministic flow and
+does not apply the restriction. Gillespie fires a `deterministic(...)`
+transition as an ordinary stochastic event at its rate.
 
-**Compile-time vs runtime `if/else`.** The `if/then/else` expression has two
-evaluation modes depending on context:
-
-- **In `let` bindings with index variables**: if the condition involves only
-  index variables and constants, it is evaluated at **compile time**. The
-  compiler instantiates one value per index combination and evaluates the
-  condition for each. Example:
-  ```
-  let mig[i in patch, j in patch] =
-    if i == j then 0.0 else theta * pop[j] / (distance[i,j] ^ 2)
-  ```
-  For each `(i, j)` pair, the compiler evaluates `i == j` and produces either
-  `Const(0.0)` or the gravity expression in the IR. No runtime `Cond` node.
-
-- **In rate expressions referencing compartment state**: the condition is
-  evaluated at **runtime** and compiles to an IR `Cond` node. Example:
-  ```
-  @ if I > 0 then beta * S * I / N else 0.0
-  ```
-  This becomes `Cond(Pop("I"), <rate_expr>, Const(0.0))` in the IR.
-
-Names are resolved in order: **compartments → parameters → let bindings →
-forcing → tables**. The compiler reports an error if a name exists in multiple
-namespaces. User names cannot shadow reserved identifiers (see §14).
+**Names.** A name is declared in one namespace only: a name declared as two of
+compartment, parameter, `let`, forcing and table is **E278**. A user name cannot
+be a reserved identifier (§14); a parameter named `t` is E100.
 
 ### 9.8 Extra-Demographic Stochasticity (`overdispersed`)
 
-Demographic stochasticity (Poisson event draws) scales as 1/√N and is negligible
-for large populations. Extra-demographic stochasticity models rate-level noise —
-correlated fluctuations in contact rates, weather effects, superspreading — that
-doesn't scale away with population size (He et al. 2010).
-
-The `overdispersed(rate_expr, σ²_SE)` function wraps a rate expression with
-Gamma-distributed multiplicative noise:
+Demographic stochasticity, the randomness of individual events at fixed rates,
+has a relative size that falls as 1/√N in a population of N. Extra-demographic
+stochasticity is noise in the rates themselves, from fluctuating contact rates,
+weather or superspreading, and does not fall with population size
+(He et al. 2010,
+[J. R. Soc. Interface 7](https://doi.org/10.1098/rsif.2009.0151)).
+`overdispersed(rate, σ²)` puts multiplicative gamma noise on a transition's
+rate:
 
 ```
 infection : S --> I  @ overdispersed(beta * S * I / N, sigma_se)
 recovery  : I --> R  @ gamma * I
 ```
 
-The first argument is the base rate (a standard propensity expression). The
-second is σ²_SE, the **intensity** of the Gamma white noise — the variance the
-underlying Gamma process accumulates per unit time (He et al. 2010). It is *not*
-the realized multiplier variance: over a substep of length `dt` the runtime
-draws a mean-one multiplicative factor `G ~ Gamma(shape = dt/σ², scale = σ²/dt)`,
-so `E[G] = 1` and `Var(G) = σ²/dt` — the realized variance scales inversely with
-the step. The resulting event count distribution is NegBinomial — the
-Poisson-Gamma compound.
+The first argument is the rate; the second, σ², is the intensity of the gamma
+white noise, the variance the noise process accumulates per unit time
+(He et al. 2010). Over a step of length `dt`, the backend draws a mean-one
+multiplier `G ~ Gamma(shape = dt/σ², scale = σ²/dt)`, so `E[G] = 1` and
+`Var(G) = σ²/dt`, and multiplies the rate by it. The variance of the multiplier
+therefore depends on the step. For an inflow, the count is Poisson given the
+noised rate, so its distribution is negative binomial; for an exit, the noised
+rate enters the Euler-multinomial draw of §9.1.2. A step at which `dt/σ²` is
+below `1e-6` draws no noise. A transition without the wrapper has no
+`overdispersion` in the IR.
 
-`overdispersed` is syntactically a function call in expression position. The
-compiler extracts it during expansion: the inner rate goes to `transition.rate`,
-the variance goes to `transition.overdispersion` in the IR. Transitions without
-`overdispersed` have `overdispersion: null` — standard Poisson draws.
+σ² may read parameters, time and constants. A σ² that reads compartment state
+compiles, and is refused when the model is loaded for a run.
 
-**Backend compatibility.** Overdispersion is incompatible with Gillespie SSA
-(which assumes deterministic rates between events) and meaningless for ODE
-(deterministic). It is supported by chain-binomial (NegBinomial replaces Poisson
-draws). The runtime enforces this: requesting `--backend gillespie` for a model
-with `overdispersed` transitions produces a hard error with a hint to use
-`--backend chain_binomial`.
+**Backends.** Only chain-binomial runs an overdispersed transition, in
+simulation and in inference. Gillespie and the ODE backend refuse the model at
+dispatch with an error naming the capability, since Gillespie's waiting times
+assume rates that are constant between events and the ODE backend has no noise.
 
-**Composability.** Each transition independently chooses whether to be
-overdispersed, and with what variance:
+Each transition chooses its own noise intensity, or none:
 
 ```
 infection : S --> I  @ overdispersed(beta * S * I / N, sigma_inf)
@@ -3387,45 +3314,45 @@ waning    : R --> S  @ omega * R   # no extra noise
 
 ## 10. Stratified Transmission (Explicit Indexed Form)
 
-> **The `coupling[dim = M]` sugar was removed.** An earlier design had a
-> `coupling[dim = M]` block that auto-expanded a base transmission rate into a
-> contact-matrix-weighted sum; it was tried and removed, and there is no
-> `coupling` keyword in the grammar. Write stratified transmission with the
-> explicit indexed transition form below. For **sparse spatial coupling** the
-> recommended construct is a restricted sum, `sum(q in dim where P, body)`
-> (§8.2.1), which carves the neighbour support at compile time so the
-> force-of-infection sum costs O(P·k) rather than O(P²).
+Transmission between strata is written as an indexed transition whose rate sums
+over the infectious strata, weighted by a mixing matrix. There is no `coupling`
+keyword. Sparse spatial coupling, in which each patch mixes with a few
+neighbours, is written with a restricted sum, `sum(q in dim where P, body)`
+(§8.2.1), whose terms are fixed when the model is compiled.
+
+Related sections: §6 (tables), §8 (`let` bindings), §9.2 (indexed
+transitions), §25.6 (how the sum lowers to the IR).
 
 ### 10.1 The Explicit Primitive
 
-Write the full indexed transmission formula directly — it is always correct and
-always available. For models with multiple stratification dimensions the formula
-is longer but fully transparent:
+The force of infection on stratum `(a, s)` is written out over every
+infectious stratum `(b, t)`:
 
 ```camdl
 # Fully explicit age × sex structured transmission
+let N_local[b in age, t in sex] = S[b,t] + E[b,t] + I[b,t] + R[b,t]
+
 infection[a in age, s in sex] : S[a,s] --> E[a,s]
   @ beta * S[a,s] * sum(b in age, sum(t in sex,
-      C_age[a,b] * B_sex[s,t] * I[b,t]
-        / sum(c in compartments, c[b,t])
+      C_age[a,b] * B_sex[s,t] * I[b,t] / N_local[b,t]
     ))
 ```
 
-The per-stratum denominator `sum(c in compartments, c[b,t])` is the total
-population of stratum `(age=b, sex=t)` across all compartments; you can also
-declare it once as a `let N_local[...] = ...` binding (§8.4) and reference it.
+`N_local[b, t]` is the total population of stratum `(age = b, sex = t)` across
+all compartments. Compartment iteration (§9.5) is a transition binder and is
+not a `sum` domain, so the total is written as a `let` (§8).
 
 ### 10.2 What the Matrices Mean
 
-All coupling structures are expressed through the same mechanism — a rate matrix
-`M[i,j]` weighting contact between strata i and j:
+Every coupling structure is a matrix `M[i, j]` weighting contact between strata
+`i` and `j`:
 
-| Matrix structure  | Effect                                  | Example             |
-| ----------------- | --------------------------------------- | ------------------- |
-| Dense             | General mixing                          | Age contact matrix  |
-| Off-diagonal only | Directed (no within-group transmission) | STI sex-structured  |
-| Identity          | Within-stratum only                     | Same as no coupling |
-| All ones          | Homogeneous mixing                      | No structure        |
+| Matrix structure  | Effect                                  | Example                       |
+| ----------------- | --------------------------------------- | ----------------------------- |
+| Dense             | general mixing                          | age contact matrix            |
+| Off-diagonal only | directed, no within-group transmission  | sex-structured STI            |
+| Identity          | within-stratum only                     | the same as no coupling       |
+| All ones          | homogeneous mixing                      | no structure                  |
 
 ```camdl-doctest-preamble table-matrices
 compartments { S, I, R }
@@ -3458,18 +3385,16 @@ tables {
 }
 ```
 
-There is no separate `directed` or `mixing` keyword — they are all matrices. The
-matrix structure determines the coupling semantics. This is the right primitive:
-one concept (rate matrix), many structures.
+The language has no `directed` or `mixing` keyword: the structure of the matrix
+determines the coupling. A table entry may be a parameter (§6.6), so a mixing
+rate in the matrix can be estimated.
 
 ### 10.3 Multi-Strain Models
 
-Multi-strain models use the explicit indexed transition form throughout.
-
-The key structural insight: in a multi-strain compartmental model, **S is a
-shared pool** — a susceptible person isn't "susceptible to wild-type," they're
-just susceptible. The strain dimension belongs on E, I, R (tracking which strain
-you're infected with / recovered from), not on S.
+In a multi-strain model the susceptible pool is shared: a susceptible person is
+susceptible to every strain. The strain dimension is on the compartments that
+record which strain a person was infected with or recovered from, here `E`, `I`
+and `R`, and not on `S`.
 
 ```camdl
 compartments { S, E, I, R }
@@ -3514,33 +3439,27 @@ transitions {
 ```
 
 The cross-immunity factor `(1 - sum(w in strain, X[w,v] * R[a,w]) / N_local[a])`
-is a population-level mean-field approximation: it reduces the infection rate
-for strain `v` based on the fraction of the population recovered from each
-strain `w`, weighted by cross-protection `X[w,v]`. When no one has recovered
-(all in S), the factor is 1.0 (no reduction). As more people recover from strain
-`w`, susceptibility to strain `v` decreases proportionally.
+lowers the rate of infection with strain `v` by the fraction of the age group
+recovered from each strain `w`, weighted by the cross-protection `X[w,v]`. It is
+1 when no one has recovered. It is a mean-field approximation: the compartments
+record the strain of a person's last infection, not their history, so immunity
+from several past infections is not represented.
 
-This is the standard approximation for compartmental multi-strain models. Exact
-individual-level immunity tracking requires an ABM.
-
-**Negativity guard.** The cross-immunity factor can go negative if
-`sum(w, X[w,v] * R[a,w]) > N_local[a]` — possible with large cross-protection
-values and high recovery fractions. For well-specified matrices with
-`X[w,v] ∈ [0,1]` and proper population fractions this does not occur, but for
-safety the rate expression should clamp:
+The factor is negative when `sum(w, X[w,v] * R[a,w]) > N_local[a]`, and a
+negative rate is refused when the model is run (§9.6). A cross-protection
+matrix with entries in `[0, 1]` keeps the factor non-negative when each age
+group's recovered count is at most its population; otherwise the factor is
+clamped in the rate,
 `max(0.0, 1 - sum(w in strain, X_strain[w,v] * R[a,w]) / N_local[a])`.
 
 ---
 
 ## 11. ODE Block
 
-The `ode { }` block declares derivatives for real-valued compartments
-(`W : real`). The expander emits each `W = dW/dt` line as an IR ODE equation, and
-the runtime integrates them (RK4) between stochastic events — a
-piecewise-deterministic Markov process. A `Real` compartment must have an ODE
-equation; one without is a compile error.
-
-For real-valued compartments:
+The `ode { }` block gives the time derivative of each real-valued compartment
+(`W : real`), such as an environmental reservoir of a pathogen. Integer
+compartments change through transitions (§9); real compartments change only
+through their equations.
 
 ```camdl-doctest-preamble ode-demo
 compartments { S, I, R, W : real }
@@ -3563,21 +3482,43 @@ ode {
 }
 ```
 
-Left side = compartment name, right side = time derivative. Creates a
-piecewise-deterministic Markov process (PDMP): stochastic events for integer
-compartments, ODE evolution for real compartments between events.
+Each line is `<real compartment> = <expression>`: the left side names the
+compartment and the right side is its derivative, `dW/dt`. The right side may
+read compartments, parameters, `let` bindings, forcings and `t`.
 
-**Interaction with transitions, effects, and balance (ODE backend).** When the
-whole model is run on the fully-deterministic ODE backend, *every* transition
-also feeds the derivatives: each adds `stoichiometry · rate` to its
-compartments' `dc/dt` (integer compartments evolve as deterministic flow, not by
-stochastic draws), and each `real` compartment's `dW/dt` comes from its `ode {}`
-equation. Scheduled effects (interventions and events) are applied as **exact
-discontinuities** — the integrator lands exactly on the effect time, applies the
-effect, records output post-effect (§13.10), and restarts from the modified
-state. A `balance {}` constraint is **not** available on ODE: balance is a
-chain-binomial-only capability, so a model carrying a `balance {}` block run on
-ODE fails at dispatch with a capability error naming the limitation.
+**Meaning.** With a stochastic backend the model is a piecewise-deterministic
+Markov process: integer compartments change by discrete events and real
+compartments evolve continuously between them.
+
+- **Chain-binomial.** Each step of length `dt` first advances the real
+  compartments by one fourth-order Runge–Kutta (RK4) step, with the integer
+  compartments held at their values at the start of the step, and then draws
+  the step's transitions.
+- **Gillespie.** The real compartments are advanced by one RK4 step over each
+  interval between events, and to each scheduled boundary, and are clamped at 0.
+  The waiting time to the next event is drawn from the propensities at the
+  start of the interval, so a rate that reads a real compartment uses the
+  compartment's value at the previous event.
+- **ODE.** Every transition also contributes `stoichiometry × rate` to the
+  derivatives of its compartments, so integer compartments evolve as
+  deterministic flows, and the real compartments follow their equations. The
+  integrator is RK4 or the adaptive `rk45` (`--integrator`, §18). Scheduled
+  interventions and events are applied as discontinuities: the integrator stops
+  at the effect's time, applies it, records output after it (§13.10), and
+  restarts from the modified state.
+
+Inference on a model with real compartments runs on the ODE backend; a
+chain-binomial fit refuses the model, because its filters do not advance real
+compartments. A `balance {}` constraint (§13.8) is a chain-binomial construct,
+and a model carrying one is refused on the ODE and Gillespie backends at
+dispatch, with an error naming the capability.
+
+**What is refused.** A real compartment with no equation is **E509**. An
+equation for a compartment that is not real is **E510**. A real compartment in a
+transition's stoichiometry is **E508**. A real compartment takes one equation.
+
+Related sections: §3 (compartment kinds), §13.10 (effects within a step), §18
+(simulation configuration and integrators).
 
 ---
 
