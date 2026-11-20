@@ -397,33 +397,6 @@ fn check_emitted_ir_version(
     }
 }
 
-/// Run camdlc on a .camdl file and return the IR JSON as a string.
-///
-/// camdlc can take ~20s on large stratified models and `.output()` blocks
-/// the whole time. While it runs we show a progress indicator on **stderr**
-/// so the user knows the tool is working, respecting the `--progress` mode:
-///   - Pretty (TTY): an indicatif steady-tick spinner `compiling <model> …`,
-///     cleared on completion.
-///   - Plain (off-TTY): a single `compiling <model> …` log line (no carriage
-///     returns), safe under `tee`/CI.
-///   - None: nothing.
-///
-/// The indicator draws to stderr only (via `progress::draw_target()`, which
-/// is `hidden()` in plain/none modes); stdout — the IR JSON returned here —
-/// is untouched, so the return value is byte-identical to an un-instrumented
-/// call. The camdlc error path is unchanged: a non-zero exit still surfaces
-/// camdlc's stderr as `Err`.
-pub(crate) fn run_camdlc(camdl_path: &str, compile: CompileSettings) -> Result<String, String> {
-    // Full IR (state-Jacobian emitted). The metadata / identity / docs loaders
-    // that route through here (`load_model_envelope`) must never
-    // withhold the WrtPop Jacobian: a full IR is a safe superset for every
-    // consumer, and run identity is gradient-independent (runid SV=2), so a full
-    // vs lean compile of the same model share the same digest. The lean opt-out
-    // (`--no-state-grad`) lives on the run-producing path (`resolve_ir_path`),
-    // which knows the method and so can safely drop the Jacobian.
-    run_camdlc_compile(camdl_path, None, true, None, compile)
-}
-
 /// Compile `camdl_path` to IR JSON. When `emit_deps` is `Some(path)`, camdlc
 /// additionally writes its read-closure depfile there in the SAME compile (one
 /// invocation, IR on stdout + depfile to the path), so the IR cache can key on
@@ -443,6 +416,21 @@ pub(crate) fn run_camdlc(camdl_path: &str, compile: CompileSettings) -> Result<S
 /// path — the compiler reads it as a second compilation unit and resolves it
 /// against this model's symbols — and its bytes are folded into the IR-cache
 /// key, so two vocabularies over one model never share a cached IR.
+///
+/// camdlc can take ~20s on large stratified models and `.output()` blocks
+/// the whole time. While it runs we show a progress indicator on **stderr**
+/// so the user knows the tool is working, respecting the `--progress` mode:
+///   - Pretty (TTY): an indicatif steady-tick spinner `compiling <model> …`,
+///     cleared on completion.
+///   - Plain (off-TTY): a single `compiling <model> …` log line (no carriage
+///     returns), safe under `tee`/CI.
+///   - None: nothing.
+///
+/// The indicator draws to stderr only (via `progress::draw_target()`, which
+/// is `hidden()` in plain/none modes); stdout — the IR JSON returned here —
+/// is untouched, so the return value is byte-identical to an un-instrumented
+/// call. The camdlc error path is unchanged: a non-zero exit still surfaces
+/// camdlc's stderr as `Err`.
 pub(crate) fn run_camdlc_compile(
     camdl_path: &str,
     emit_deps: Option<&std::path::Path>,
@@ -601,7 +589,7 @@ pub fn resolve_relative_to_toml(toml_path: &std::path::Path, path: &str) -> Stri
 /// The settings a compile runs under, resolved once by `main` from the global
 /// flags and the environment ([`CompileSettings::resolve`]) and passed by each
 /// command to every compile it makes ([`load_model`], [`resolve_ir_path`],
-/// [`run_camdlc`], [`load_model_envelope`], [`delegate_to_camdlc`],
+/// [`run_camdlc_compile`], [`load_model_envelope`], [`delegate_to_camdlc`],
 /// [`camdlc_emit_deps`]). Nothing reads them process-wide (proposal
 /// 2026-11-17, phase 3).
 /// The default (LICM on, cache on) is for tests; a command resolves its own.
@@ -1337,8 +1325,8 @@ pub fn peek_simulation_dt(path: &str) -> Option<f64> {
 
 /// Load a .camdl or .ir.json model, returning the parsed model and raw IR JSON.
 /// The JSON is needed for provenance hashing. A `.camdl` is compiled under
-/// `compile`, the command's settings, to the full IR, as [`run_camdlc`]
-/// compiles it.
+/// `compile`, the command's settings, to the full IR, as
+/// [`load_model_envelope`] compiles it.
 pub(crate) fn load_model(path: &str, compile: CompileSettings) -> Result<(ir::Model, String), String> {
     let json = if path.ends_with(".camdl") {
         run_camdlc_compile(path, None, true, None, compile)?
@@ -1420,7 +1408,15 @@ fn refuse_unreleased_smooth(model: &ir::Model) -> Result<(), String> {
 /// dictionary — compiling a `.camdl` under `compile` or reading a `.ir.json`.
 pub(crate) fn load_model_envelope(path: &str, compile: CompileSettings) -> Result<ir::IrEnvelope, String> {
     let json = if path.ends_with(".camdl") {
-        run_camdlc(path, compile)?
+        // Full IR (state-Jacobian emitted). The metadata / identity / docs
+        // loaders that read through here must never withhold the WrtPop
+        // Jacobian: a full IR is a safe superset for every consumer, and run
+        // identity is gradient-independent (runid SV=2), so a full vs lean
+        // compile of the same model share the same digest. The lean opt-out
+        // (`--no-state-grad`) lives on the run-producing path
+        // (`resolve_ir_path`), which knows the method and so can safely drop
+        // the Jacobian.
+        run_camdlc_compile(path, None, true, None, compile)?
     } else {
         std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {}", path, e))?
     };
