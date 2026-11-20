@@ -24,7 +24,8 @@
 //! The byte-comparison tests compare against output recorded from main at
 //! c92e7c9e3, before the rule, under `fixtures/restart_guard/`. To re-record
 //! (only ever from a build of main), run this file's `baseline_` tests with
-//! `CAMDL_RECORD_RESTART_BASELINE=1`.
+//! `CAMDL_RECORD_RESTART_BASELINE=1` (only that value records; see
+//! docs/dev/testing.md, "Restart baselines recorded from main").
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -626,7 +627,7 @@ fn content(path: &Path) -> Vec<u8> {
 /// `files`, relative to the run directory, against `case`'s recorded copy.
 fn compare_with_main(case: &str, dir: &Path, files: &[&str]) {
     let base = baseline_dir(case);
-    let record = std::env::var_os("CAMDL_RECORD_RESTART_BASELINE").is_some();
+    let record = std::env::var("CAMDL_RECORD_RESTART_BASELINE").is_ok_and(|v| v == "1");
     for f in files {
         let got = content(&dir.join(f));
         let want = base.join(f.replace('/', "__"));
