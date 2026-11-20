@@ -10465,6 +10465,106 @@ let test_diagnostic_test_accuracy_in_range_ok () =
       ignore (compile_expect_ok (diagnostic_test_accuracy_src ~sens ~spec)))
     [ ("1", "0"); ("0.95", "0.99"); ("rho_sens", "rho_spec"); ("lab", "1 - 0.01") ]
 
+(* gh#1328: one model whose stream's columns, measurement and init block are
+   spliced in. `N_tested` is a count, `zpi` a probability, `r` positive, and
+   `lab = 0.9` an unindexed let. *)
+let probability_arg_src ?(columns = "time : time, y : count")
+    ?(init = "S = 999  I = 1") ~measurement () = Printf.sprintf {|
+    time_unit = 'days
+    compartments { S, I, R }
+    parameters {
+      beta     : rate        in [0.001, 5.0]
+      gamma    : rate        in [0.01, 1.0]
+      zpi      : probability in [0.0, 1.0]
+      r        : positive    in [0.1, 100.0]
+      N_tested : count       in [10, 10000]
+    }
+    let lab = 0.9
+    transitions {
+      infection : S --> I @ beta * S * I / (S + I + R)
+      recovery  : I --> R @ gamma * I
+    }
+    observations {
+      y {
+        columns       { %s }
+        projected = I / (S + I + R)
+        emit_schedule = every 1 'weeks
+        %s
+      }
+    }
+    init { %s }
+    simulate { from = 0 'days  to = 14 'days }
+  |} columns measurement init
+
+let e379_count src =
+  Compiler.collect_diagnostics ~name:"e379" src
+  |> List.filter (fun (d : Diagnostics.diagnostic) -> d.Diagnostics.code = "E379")
+  |> List.length
+
+(** A constant probability-valued argument outside [0, 1] is E379 in every
+    family that has one, and the message names the family and the argument. *)
+let test_probability_args_out_of_range_rejected () =
+  List.iter (fun (columns, measurement, contains) ->
+      compile_expect_error_code ~code:"E379" ~contains
+        (probability_arg_src ~columns ~measurement ()))
+    [ ("time : time, y : count",
+       "y ~ binomial(n = N_tested, p = 1.5)", "binomial `p`");
+      ("time : time, y : count",
+       "y ~ bernoulli(p = 0 - 0.2)", "`p` is -0.2");
+      ("time : time, y : count",
+       "y ~ zero_inflated(base = neg_binomial(mean = 10 * projected, r = r), pi = 1.5)",
+       "zero_inflated `pi`");
+      ("time : time, y : probability",
+       "y ~ beta(mean = lab * 2, concentration = 10)", "beta `mean`");
+      ("time : time, y : count",
+       "y ~ beta_binomial(n = N_tested, mean = 1.2, concentration = 10)",
+       "beta_binomial `mean`") ]
+
+(** A `diagnostic_test`'s base `p` is checked as written, not as rewritten:
+    with `sens = spec = 0.5` the rewritten `p` is 0.5 whatever the base's. *)
+let test_diagnostic_test_base_p_checked_as_written () =
+  compile_expect_error_code ~code:"E379" ~contains:"binomial `p` is not a probability"
+    (probability_arg_src
+       ~measurement:"y ~ diagnostic_test(base = binomial(n = N_tested, p = 0 - 0.1), \
+                     sens = 0.5, spec = 0.5)" ())
+
+(** One mistake, one report: `sens = 1.5` is not reported a second time
+    through the rewritten `p`. *)
+let test_diagnostic_test_sens_reported_once () =
+  Alcotest.(check int) "one E379" 1
+    (e379_count (probability_arg_src
+       ~measurement:"y ~ diagnostic_test(base = binomial(n = N_tested, p = 0.2), \
+                     sens = 1.5, spec = 0.9)" ()))
+
+let init_measurement = "y ~ binomial(n = N_tested, p = projected)"
+
+(** An init law's constant probability is checked like a measurement's, for a
+    binomial and for a `diagnostic_test` written as an init law. *)
+let test_init_law_probability_rejected () =
+  compile_expect_error_code ~code:"E379"
+    ~contains:"initial condition 'I ~ binomial(...)': the binomial `p`"
+    (probability_arg_src ~measurement:init_measurement
+       ~init:"S = 999  I ~ binomial(n = 10, p = 1.5)" ());
+  compile_expect_error_code ~code:"E379"
+    ~contains:"the `diagnostic_test` sensitivity is not a probability"
+    (probability_arg_src ~measurement:init_measurement
+       ~init:"S = 999  I ~ diagnostic_test(base = binomial(n = 10, p = 0.1), \
+              sens = 1.5, spec = 0.9)" ())
+
+(** Constants in [0, 1], both endpoints included, and parameters compile. *)
+let test_probability_args_in_range_ok () =
+  List.iter (fun (columns, measurement, init) ->
+      ignore (compile_expect_ok (probability_arg_src ~columns ~measurement ~init ())))
+    [ ("time : time, y : count", "y ~ binomial(n = N_tested, p = 0)", "S = 999  I = 1");
+      ("time : time, y : count", "y ~ bernoulli(p = 1)", "S = 999  I = 1");
+      ("time : time, y : count",
+       "y ~ zero_inflated(base = neg_binomial(mean = 10 * projected, r = r), pi = zpi)",
+       "S = 999  I = 1");
+      ("time : time, y : probability", "y ~ beta(mean = lab, concentration = 10)",
+       "S = 999  I = 1");
+      ("time : time, y : count", init_measurement,
+       "S = 999  I ~ binomial(n = 10, p = 1 - lab)") ]
+
 (* ── #[lineage] individual-sampling layer (2026-05-19 proposal) ──────────────
    Foundation slice: lexer attribute opener, `#[lineage]` parse (both
    forms), linear-in-parents classifier (accept/reject with E601),
@@ -19506,6 +19606,11 @@ let () =
       Alcotest.test_case "gh#1323: E379 constant sens/spec outside [0,1]" `Quick test_diagnostic_test_accuracy_out_of_range_rejected;
       Alcotest.test_case "gh#1323: E379 non-finite constant sens/spec"    `Quick test_diagnostic_test_accuracy_non_finite_rejected;
       Alcotest.test_case "gh#1323: sens/spec in [0,1] accepted"           `Quick test_diagnostic_test_accuracy_in_range_ok;
+      Alcotest.test_case "gh#1328: E379 constant probability arguments"   `Quick test_probability_args_out_of_range_rejected;
+      Alcotest.test_case "gh#1328: E379 diagnostic_test base p as written" `Quick test_diagnostic_test_base_p_checked_as_written;
+      Alcotest.test_case "gh#1328: E379 diagnostic_test sens reported once" `Quick test_diagnostic_test_sens_reported_once;
+      Alcotest.test_case "gh#1328: E379 init-law probabilities"           `Quick test_init_law_probability_rejected;
+      Alcotest.test_case "gh#1328: probability arguments in [0,1] accepted" `Quick test_probability_args_in_range_ok;
     ];
     "lineage_individual_sampling", [
       Alcotest.test_case "#[lineage] parses (both forms) → identical IR"   `Quick test_lineage_parses_both_forms;

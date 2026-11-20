@@ -817,15 +817,28 @@ type likelihood_kind =
           pass reading the names a model uses still sees the ones written
           here. *)
 
+(** A [diagnostic_test(...)] as written. The parser has already folded
+    [sens] and [spec] into the base's [p], where no rule can tell the three
+    apart; they are kept so the expander can check each argument whose value
+    is a probability (E379), and nothing else reads them. *)
+type test_accuracy = {
+  ta_base : likelihood_kind;
+      (** The base, [binomial(...)] or [bernoulli(...)], with its [p] as
+          written. *)
+  ta_sens : expr;
+  ta_spec : expr;
+}
+
 (** What one entry of the [init] block says its compartment starts at:
     computed, or drawn. An entry is one or the other, never both. *)
 type init_value =
   | IVExpr of expr
       (** [S = N0 - I]: computed from parameters, constants and other
           compartments' initial values. *)
-  | IVLaw  of likelihood_kind * loc
+  | IVLaw  of likelihood_kind * test_accuracy option * loc
       (** [I ~ poisson(rate = I0)]: drawn from the law once at the start of
-          each run, with the span of the law itself, where a diagnostic about
+          each run, with the [diagnostic_test(...)] the law was written as,
+          if it was, and the span of the law itself, where a diagnostic about
           the distribution points. *)
 
 (** The keyword arguments of a distribution, whatever its family. *)
@@ -872,13 +885,13 @@ let map_likelihood_kwargs (f : expr -> expr) (l : likelihood_kind) : likelihood_
 let init_value_exprs (v : init_value) : expr list =
   match v with
   | IVExpr e -> [e]
-  | IVLaw (l, _) -> List.map snd (likelihood_kwargs l)
+  | IVLaw (l, _, _) -> List.map snd (likelihood_kwargs l)
 
 (** Rewrites every expression of an initial value, keeping its form. *)
 let map_init_value (f : expr -> expr) (v : init_value) : init_value =
   match v with
   | IVExpr e -> IVExpr (f e)
-  | IVLaw (l, loc) -> IVLaw (map_likelihood_kwargs f l, loc)
+  | IVLaw (l, acc, loc) -> IVLaw (map_likelihood_kwargs f l, acc, loc)
 
 (** One entry of the [init] block: a compartment, one of its strata or a
     family of strata, and the value it starts at. The parser fills at most one
@@ -927,17 +940,6 @@ type obs_projection =
             projected = I / N
           ]} *)
 
-(** The [sens] and [spec] of a [diagnostic_test(...)], as written. The parser
-    has already folded them into the base's [p]; they are kept so the
-    expander can refuse a constant outside [0, 1] (E379), and nothing else
-    reads them. *)
-type test_accuracy = {
-  ta_sens : expr;
-  ta_spec : expr;
-  ta_loc  : loc;
-      (** The span of the [diagnostic_test(...)] call. *)
-}
-
 (** An observation stream's measurement model, [npos ~ binomial(...)]: the
     data column scored, and the distribution it is scored under.
 
@@ -952,6 +954,8 @@ type obs_measurement = {
   om_accuracy : test_accuracy option;
       (** [Some] when the measurement was written as [diagnostic_test(...)];
           [None] for any other family. *)
+  om_loc : loc;
+      (** The span of the distribution call. *)
 }
 
 (** What one column of an observation's data file holds, from its entry in

@@ -464,7 +464,7 @@ let initial env (i : init_entry) : D.initial_decl =
     in_bindings = bindings i.ibindings;
     in_value = (match i.ivalue with
       | IVExpr e -> IvExpr (dexpr env pos e)
-      | IVLaw (l, _) -> IvLaw (distribution env pos l));
+      | IVLaw (l, _, _) -> IvLaw (distribution env pos l));
     in_text = text env i.ispan }
 
 (* A compile that succeeded has every stream's columns, measurement and

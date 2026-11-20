@@ -477,7 +477,7 @@ let obs_found (od : obs_decl) : found =
   in
   let measurement = match omeasurement with
     | None -> none
-    | Some { om_scored = _; om_lik; om_accuracy = _ } -> in_exprs (List.map snd (likelihood_kwargs om_lik))
+    | Some { om_scored = _; om_lik; om_accuracy = _; om_loc = _ } -> in_exprs (List.map snd (likelihood_kwargs om_lik))
   in
   let projection = match oprojection with
     | None | Some (ProjIncidence _) -> none

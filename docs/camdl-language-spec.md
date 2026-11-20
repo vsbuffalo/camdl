@@ -3923,7 +3923,12 @@ and `beta_binomial`'s `mean` are dimensionless fractions, fed by a proportion
 (`I / N`, `prevalence(of = …, among = …)`) or a ratio of two accumulated flows
 (`incidence(a) / (incidence(a) + incidence(b))`, §12.1). A count there
 (`p = projected` over a bare `incidence(a)`, a missing division by `N`) is
-**E304**, and so is a fraction given to a count argument.
+**E304**, and so is a fraction given to a count argument. One of these
+arguments, or `zero_inflated`'s `pi` (§12.2.2), that is a compile-time constant
+(a number, arithmetic on numbers, or an unindexed `let` of one, as for the
+weights of a destination split, §9.1.2) must be a finite number in `[0, 1]`:
+`p = 1.5` is **E379**. A parameter is not checked when the model is compiled;
+declaring it `probability` keeps its values in `[0, 1]` (§4.4).
 
 The two `beta_binomial` forms are equivalent: `mean`/`concentration` lowers to
 `alpha = mean · concentration`, `beta = (1 − mean) · concentration`. Mixing the
@@ -3993,7 +3998,8 @@ expressions. The compiler checks that each is dimensionless (**E304**
 otherwise). A `sens` or `spec` that is a compile-time constant (a number,
 arithmetic on numbers, or an unindexed `let` of one, as for the weights of a
 destination split, §9.1.2) must be a finite number in `[0, 1]`: `sens = 1.5`
-or `spec = 1 - 1.2` is **E379**. A parameter is not checked when the model is
+or `spec = 1 - 1.2` is **E379**. The base's `p` is checked the same way as
+written, before the rewrite. A parameter is not checked when the model is
 compiled; declaring it `probability` keeps its values in `[0, 1]` (§4.4).
 
 ### 12.2.2 Counts with excess zeros: `zero_inflated`
@@ -4038,8 +4044,9 @@ Both `base` and `pi` are required (**E325**), and any other keyword is
 
 **Dimensions.** `mean` carries the count dimension `[P]`, an expected count over
 the reporting interval as in the plain `neg_binomial`, so a per-time transition
-rate there is **E304**. `r` and `pi` are dimensionless. A `pi` outside
-`[0, 1]` scores the row as impossible (log-likelihood −∞). Declaring `pi`'s
+rate there is **E304**. `r` and `pi` are dimensionless. A constant `pi` outside
+`[0, 1]` is **E379** (§12.2); a `pi` that leaves `[0, 1]` at run time scores
+the row as impossible (log-likelihood −∞). Declaring `pi`'s
 parameter as `probability` checks its `[0, 1]` domain when parameter values are
 resolved and restricts inference to `[0, 1]` (§4.4).
 
@@ -5033,10 +5040,11 @@ A law of the wrong kind for its compartment is **E344**. A family that is not
 an initial-state law is **E343**: `bernoulli`, `beta` and `beta_binomial`
 describe a measurement of a compartment, and belong in `observations {}`.
 `binomial`'s `p` given as a parameter declared with a kind other than
-`probability` (a `count`, say) is **E344**, naming the parameter. A law on the
-`balance {}` target is **E345**, because the balance stage overwrites the
-target after every substep, so the draw would be discarded before the first
-step.
+`probability` (a `count`, say) is **E344**, naming the parameter. A constant
+`p` must be a finite number in `[0, 1]` (**E379**), as in a measurement
+(§12.2). A law on the `balance {}` target is **E345**, because the balance stage
+overwrites the target after every substep, so the draw would be discarded before
+the first step.
 
 `neg_binomial` describes introductions that are clustered: its dispersion `r`
 sets how much more variable the count is than a Poisson count of the same mean,
@@ -7314,7 +7322,7 @@ information.
 | E360 | Error   | Arithmetic with no meaning on a definite instant: `Instant + Instant`, a `sum` of instants, `k * Instant`, `Duration − Instant`, `Instant +` a unitless constant, a conditional choosing between an Instant and a duration (§2.1) |
 | E377 | Error   | A stratified compartment is named without indices in a transition's stoichiometry (§8.3) |
 | E378 | Error   | A reactive trigger's threshold is neither a constant nor a parameter (§13.9) |
-| E379 | Error   | A `diagnostic_test` `sens` or `spec` that is a constant outside `[0, 1]` or not a finite number (§12.2.1) |
+| E379 | Error   | A probability-valued distribution argument (`p`, `pi`, a `beta`/`beta_binomial` `mean`, a `diagnostic_test` `sens` or `spec`) that is a constant outside `[0, 1]` or not a finite number, in a measurement or an initial-value law (§12.2) |
 | E423 | Error   | A destination split's constant weights are not a probability distribution: a weight is not finite or lies outside [0, 1], or all are constant and do not sum to 1 (within `1e-9`) (§9.1.2) |
 | W103 | Warning | Let binding name shadows a stratum value in some dimension                                |
 

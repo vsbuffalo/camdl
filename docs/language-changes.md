@@ -13,6 +13,27 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-11-20 — a constant probability argument outside [0, 1] is refused in every family
+
+**What.** A distribution argument whose value is a probability or a proportion —
+`binomial` and `bernoulli` `p`, `zero_inflated` `pi`, the `mean` of `beta` and
+of `beta_binomial` — that is a compile-time constant must now be a finite number
+in `[0, 1]`, as a `diagnostic_test` `sens` and `spec` already had to be. This
+holds in an observation's measurement and in an `init` law
+(`I ~ binomial(n = 10, p = 1.5)`), and for a `diagnostic_test`'s base `p` as
+written. These used to compile, and the likelihood or the initial draw then used
+a value that is not a probability. A parameter is not checked when the model is
+compiled.
+
+**Migration.** Write the argument as a value in `[0, 1]` (`p = 0.15` rather than
+`p = 15` or `p = 1.5`), or estimate it as a parameter of kind `probability`.
+
+**Diagnostic.** E379, "observation 'pos': the binomial `p` is not a probability:
+`p` is 1.5, outside [0, 1]"; in an `init` block, "initial condition 'I ~
+binomial(...)': the binomial `p` is not a probability: …".
+
+---
+
 ## 2026-11-20 — an unknown argument to `diagnostic_test` is refused
 
 **What.** `diagnostic_test(...)` reads only `base`, `sens` and `spec`. Any other

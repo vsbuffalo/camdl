@@ -72,10 +72,10 @@
      `Lik`; we wrap it into a measurement with an empty scored column so the
      parse completes — the E273 diagnostic already fired. *)
   (* Desugar a distribution call `D(kw = ..., ...)` into a [likelihood_kind],
-     paired with the `sens` and `spec` of a `diagnostic_test(...)` as written
-     ([None] for any other family). Shared by the `~` measurement form, the
+     paired with a `diagnostic_test(...)` as written, its base and its `sens`
+     and `spec` ([None] for any other family). Shared by the `~` measurement form, the
      `~` init law and the (rejected) migration `likelihood = D(...)` path;
-     only the measurement form keeps the pair's second half, for E379.
+     the first two keep the pair's second half, for E379.
      `diagnostic_test(...)` is compile-time sugar that reparameterizes a
      binomial/bernoulli `p` by sensitivity/specificity.
 
@@ -121,11 +121,13 @@
                in (k, p_adj)
              else (k, v))
          in
-         let accuracy = Some { ta_sens = sens_e; ta_spec = spec_e;
-                               ta_loc = Parser_errors.ast_loc_of ~sp ~ep } in
+         let accuracy base =
+           Some { ta_base = base; ta_sens = sens_e; ta_spec = spec_e } in
          (match base_kind with
-          | "binomial"  -> (LikBinomial  (rewrite_p base_args), accuracy)
-          | "bernoulli" -> (LikBernoulli (rewrite_p base_args), accuracy)
+          | "binomial"  ->
+            (LikBinomial  (rewrite_p base_args), accuracy (LikBinomial base_args))
+          | "bernoulli" ->
+            (LikBernoulli (rewrite_p base_args), accuracy (LikBernoulli base_args))
           | other ->
             Parser_errors.push_error ~sp ~ep
               ~code:"E253"
@@ -261,7 +263,8 @@
         proj := Some p
       | `Covers c      -> once "`covers`" ~sp ~ep; covers := Some c
       | `Measurement m -> once "a `~` measurement line" ~sp ~ep; meas := Some m
-      | `Lik l         -> meas := Some { om_scored = ""; om_lik = l; om_accuracy = None }
+      | `Lik (l, loc)  ->
+        meas := Some { om_scored = ""; om_lik = l; om_accuracy = None; om_loc = loc }
     ) kvs;
     { oname = name; oindices = ibs;
       osource = src; ocolumns = !cols;
@@ -1135,7 +1138,8 @@ obs_kv:
      is rejected by [obs_measurement_pooled] below. *)
   | scored = IDENT TILDE m = obs_likelihood
       { let (lik, accuracy) = m in
-        `Measurement { om_scored = scored; om_lik = lik; om_accuracy = accuracy } }
+        `Measurement { om_scored = scored; om_lik = lik; om_accuracy = accuracy;
+                       om_loc = Parser_errors.ast_loc_of ~sp:$startpos(m) ~ep:$endpos(m) } }
   (* Migration: a likelihood `~` does NOT carry the prior's `| dim` pooling
      suffix (§2.1). Point the author at the bracket-index form. *)
   | scored = IDENT TILDE m = obs_likelihood PIPE dim = IDENT
@@ -1147,7 +1151,8 @@ obs_kv:
           ~hint:(Printf.sprintf
             "to stratify the observation, index the stream header: \
              `%s[a in %s] from <source> { ... }`" scored dim);
-        `Measurement { om_scored = scored; om_lik = fst m; om_accuracy = None } }
+        `Measurement { om_scored = scored; om_lik = fst m; om_accuracy = None;
+                       om_loc = Parser_errors.ast_loc_of ~sp:$startpos(m) ~ep:$endpos(m) } }
   (* Migration: `every`/`at` at the top of an observation block was the old
      emission cadence; it is now `emit_schedule = ...` (§2.5). Reject the bare
      form with the rewrite. *)
@@ -1169,13 +1174,14 @@ obs_kv:
           ~msg:"`likelihood = D(...)` was replaced by the `~` form"
           ~hint:"write `<value_col> ~ D(...)` where <value_col> is a declared \
                  column — see `camdl docs language-changes`";
-        `Lik (match e with
+        `Lik ((match e with
         | EFuncCall (kind, args) -> fst (lik_of_funcall kind args ~sp:$startpos ~ep:$endpos)
         | _ ->
           Parser_errors.push_error ~sp:$startpos ~ep:$endpos
             ~code:"E118"
             ~msg:"likelihood value must be a function call, e.g. cases ~ neg_binomial(mean = projected, r = k)";
-          LikReported ("", [])) }
+          LikReported ("", [])),
+          Parser_errors.ast_loc_of ~sp:$startpos(e) ~ep:$endpos(e)) }
 
 (* The `emit_schedule` literal (§2.5): `every N 'unit` (regular) or
    `at [t1, t2, ...] 'unit` (explicit times). Lowers to the same
@@ -1192,8 +1198,8 @@ instant_entry:
   | e = expr { tpos Time_pos.Instant e ~sp:$startpos ~ep:$endpos }
 
 (* The `~` RHS distribution: `D(kw = ..., ...)` — keyword-only (the positional
-   case is rejected downstream in the expander as E250), with the `sens` and
-   `spec` of a `diagnostic_test(...)` ([lik_of_funcall]). *)
+   case is rejected downstream in the expander as E250), with a
+   `diagnostic_test(...)` as written ([lik_of_funcall]). *)
 obs_likelihood:
   | name = IDENT LPAREN args = separated_list(COMMA, kw_expr) RPAREN
       { lik_of_funcall name args ~sp:$startpos ~ep:$endpos }
@@ -1649,17 +1655,17 @@ init_entry:
   | f = IDENT LPAREN r = stoich_ref_item COMMA location = expr RPAREN TILDE l = obs_likelihood
       { let (comp, idxs) = stage_endpoint ~sp:$startpos ~ep:$endpos(location) f r location in
         { icomp = comp; iindices = idxs; ibindings = [];
-          ivalue = IVLaw (fst l, Parser_errors.ast_loc_of ~sp:$startpos(l) ~ep:$endpos(l));
+          ivalue = IVLaw (fst l, snd l, Parser_errors.ast_loc_of ~sp:$startpos(l) ~ep:$endpos(l));
           iloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos;
           ispan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   | comp = IDENT LBRACKET ibs = separated_nonempty_list(COMMA, index_binding) RBRACKET TILDE l = obs_likelihood
       { { icomp = comp; iindices = []; ibindings = ibs;
-          ivalue = IVLaw (fst l, Parser_errors.ast_loc_of ~sp:$startpos(l) ~ep:$endpos(l));
+          ivalue = IVLaw (fst l, snd l, Parser_errors.ast_loc_of ~sp:$startpos(l) ~ep:$endpos(l));
           iloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos;
           ispan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   | comp = IDENT idxs = index_items_opt TILDE l = obs_likelihood
       { { icomp = comp; iindices = idxs; ibindings = [];
-          ivalue = IVLaw (fst l, Parser_errors.ast_loc_of ~sp:$startpos(l) ~ep:$endpos(l));
+          ivalue = IVLaw (fst l, snd l, Parser_errors.ast_loc_of ~sp:$startpos(l) ~ep:$endpos(l));
           iloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos;
           ispan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
 

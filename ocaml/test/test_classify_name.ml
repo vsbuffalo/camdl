@@ -315,7 +315,7 @@ let covered_exprs (decls : declaration list)
             let binders = binder_vars ie.ibindings in
             let exprs = match ie.ivalue with
               | IVExpr e      -> [e]
-              | IVLaw (l, _)  -> List.map snd (likelihood_kwargs l) in
+              | IVLaw (l, _, _) -> List.map snd (likelihood_kwargs l) in
             List.map (fun e -> ("init " ^ ie.icomp, binders, [], e)) exprs)
           entries
       | DObservations obs ->
