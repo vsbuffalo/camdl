@@ -357,15 +357,18 @@ its duration. Installing is needed because the engine's run notes reach the
 command through `sim::run_notes`, whose reporter is one function installed at
 start-up: the reporter routes each forcing note into the installed policy
 through one routing slot, which is the policy's only process-wide state. With
-none installed, a note is refused. `sim::run_notes` also says each distinct note
-once per process, so a second policy installed in the same process would not be
-told of a forcing the first was told of. Every command installs one policy.
-`fit predict` alone nests a second, an allowing one, once it has read the stored
-fit's config; a refusal under the first has already ended the command, and the
-inner guard's drop puts the first back. A claim-holding `fit run` keeps a
-refusal for its claim, and each chain polls the command's policy (held by `Out`
-from `hold_claim` to `take_claim`, apart from the claim itself), so the first
-chain to fail the claim does not hide the refusal from the others.
+none installed, a note is refused. `sim::run_notes` says each other distinct
+note once per process, but reports a forcing note every time it is recorded (the
+engine records one at most once per forcing, side and compiled model), and the
+policy says it once per policy, skipping a forcing already in its `held` list.
+So every policy installed in one process is told of the forcings its own runs
+held. Most commands install one policy. `fit predict` alone nests a second, an
+allowing one, once it has read the stored fit's config; a refusal under the
+first has already ended the command, and the inner guard's drop puts the first
+back. A claim-holding `fit run` keeps a refusal for its claim, and each chain
+polls the command's policy (held by `Out` from `hold_claim` to `take_claim`,
+apart from the claim itself), so the first chain to fail the claim does not hide
+the refusal from the others.
 
 A command that replays a stored fit runs under the fit's own settings. The
 simulator a fit ran on,
@@ -376,10 +379,15 @@ them
 ([`FittedSettings::with_flags`](rust:cli::fit::fitted_model::FittedSettings::with_flags):
 a flag can only turn a setting on) and puts the result in its resolved
 configuration, and `compare` scores each fit under them, passing them to its
-`camdl pfilter` child as flags and installing them for its in-process ODE
-scorer. Because of the once-per-process note above, `compare` scores every fit
-without the override before every fit with it, so no fit is scored after a
-policy that held a forcing.
+`camdl pfilter` child as flags and installing them, one policy per fit, for its
+in-process ODE scorer. A forcing held while a fit was scored is part of the
+trace it affected
+([`PrequentialWarning::ForcingHeld`](rust:score::trace::PrequentialWarning::ForcingHeld)):
+`pfilter --save-prequential` writes it from its policy, and the ODE scorer adds
+it from the fit's, so `compare` reports it on that fit's rows. When `compare`'s
+flag turns the setting on for a fit made without it, it says so, as a `simulate`
+replay does
+([`FittedSettings::turned_on_note`](rust:cli::fit::fitted_model::FittedSettings::turned_on_note)).
 
 `--no-licm` is a compile setting,
 [`CompileSettings`](rust:cli::util::CompileSettings), with `--no-ir-cache`.
