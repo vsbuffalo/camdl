@@ -383,6 +383,8 @@ fn a_stream_with_no_bound_data_is_refused_when_its_schedule_puts_a_period_across
         "--save-final-state".into(), "state.tsv".into(),
     ]);
     assert!(pf.status.success(), "pfilter: {}", stderr(&pf));
+    assert!(stderr(&pf).contains("'weekly_cases'") && stderr(&pf).contains("[21, 28)"),
+        "the save notes the week under way: {}", stderr(&pf));
     let out = run(dir, &[
         "simulate".into(), "model.camdl".into(), "--params".into(), s(&params()),
         "--init-state".into(), "state.tsv".into(), "--replicates".into(), "20".into(),
@@ -441,7 +443,7 @@ n_trajectories = 4
     assert_eq!(leaves(&dir.join("cas")), 0, "a refusal commits no leaf");
 }
 
-// ── Data rows from the forecast fixture ──────────────────────────────────────
+// ── Rule 2: pfilter --save-final-state ───────────────────────────────────────
 
 fn fixture_rows(file: &str, through: f64) -> String {
     let text = std::fs::read_to_string(manifest().join("tests/fixtures/forecast").join(file)).unwrap();
@@ -459,6 +461,73 @@ fn fixture_rows(file: &str, through: f64) -> String {
 
 fn daily_through(t: u32) -> String {
     fixture_rows("daily_cases.tsv", t as f64)
+}
+
+fn pfilter_save(dir: &Path, model: &str, data: &[(&str, &str)]) -> Output {
+    std::fs::write(dir.join("model.camdl"), model).unwrap();
+    let mut args = vec![
+        "pfilter".into(), "model.camdl".into(), "--params".into(), s(&params()),
+        "--particles".into(), "20".into(), "--seed".into(), "1".into(),
+        "--save-final-state".into(), "state.tsv".into(),
+    ];
+    for (stream, text) in data {
+        let file = format!("{stream}.tsv");
+        std::fs::write(dir.join(&file), text).unwrap();
+        args.push("--data".into());
+        args.push(format!("{stream}={file}"));
+    }
+    run(dir, &args)
+}
+
+/// F6: weekly data closing on 11, 18, 25 against a schedule giving
+/// [0, 7), [7, 14), [14, 21). The save is refused before filtering, with the
+/// forecast's D82 text, and no state file is written.
+#[test]
+fn a_save_whose_data_and_schedule_disagree_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = pfilter_save(tmp.path(), BASE, &[
+        ("daily_cases", &daily_through(25)),
+        ("weekly_cases", "time\tweekly_cases\n11\t40\n18\t90\n25\t120\n"),
+    ]);
+    let err = stderr(&out);
+    assert!(!out.status.success(), "the save must be refused: {err}");
+    assert!(err.contains("stream 'weekly_cases' is refused --save-final-state: its data imply \
+        the period [4, 11) (training row 0), but its emit_schedule gives [0, 7) over the same \
+        reporting interval"), "{err}");
+    assert!(!tmp.path().join("state.tsv").exists(), "a refused save writes no state");
+}
+
+/// gh#1301 carried into Rule 2: an `ending_on` weekly stream whose data
+/// (labelled 7, 14, 21: [1, 8), [8, 15), [15, 22)) agree with the periods its
+/// schedule's labels give saves, and notes the week [22, 29) under way at 25.
+#[test]
+fn an_ending_on_stream_whose_declarations_agree_saves() {
+    let tmp = tempfile::tempdir().unwrap();
+    let model = variant(&[(WEEKLY_BLOCK_COVERS, "    covers        = ending_on(time, 7 'days)")]);
+    let out = pfilter_save(tmp.path(), &model, &[
+        ("daily_cases", &daily_through(25)),
+        ("weekly_cases", &fixture_rows("weekly_cases.tsv", 21.0)),
+    ]);
+    assert!(out.status.success(), "agreeing declarations save: {}", stderr(&out));
+    assert!(tmp.path().join("state.tsv").exists());
+    assert!(stderr(&out).contains("[22, 29)"), "{}", stderr(&out));
+}
+
+/// The two-cadence save agrees and succeeds, and says which period of which
+/// stream is under way at the saved time.
+#[test]
+fn a_save_inside_a_period_succeeds_with_a_note_naming_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = pfilter_save(tmp.path(), BASE, &[
+        ("daily_cases", &daily_through(25)),
+        ("weekly_cases", &fixture_rows("weekly_cases.tsv", 21.0)),
+    ]);
+    let err = stderr(&out);
+    assert!(out.status.success(), "the save succeeds: {err}");
+    assert!(err.contains("note: stream 'weekly_cases': its period [21, 28) is under way at the \
+        saved time t = 25"), "{err}");
+    assert!(err.contains("simulate --init-state"), "{err}");
+    assert!(!err.contains("'daily_cases': its period"), "the daily stream is on a boundary: {err}");
 }
 
 // ── Byte comparisons against output recorded from main ───────────────────────

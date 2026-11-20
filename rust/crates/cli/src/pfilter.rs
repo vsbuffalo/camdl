@@ -679,6 +679,37 @@ fn run_pfilter(
     out.say(format_args!("pfilter: {} observation boundaries × {} streams, {} particles, dt={}, seed={}",
         observations.len(), n_streams, n_particles, dt, seed));
 
+    // D100: a saved final state is a restart origin, and a restart writes a
+    // stream's periods from its `emit_schedule` while the filter took them
+    // from the data. Where the two disagree (D82, the forecast's check), the
+    // save is refused before filtering; where they agree but a period of a
+    // stream `simulate` would write is under way at the saved time, the run
+    // says so, since `simulate --init-state` will refuse to write it.
+    if save_final_state.is_some() {
+        let saved_at = observations.last().map(|o| o.time).unwrap_or(model.simulation.t_start);
+        for s in &streams {
+            if let Err(e) = crate::fit::forecast_plan::check_restart_schedule_agrees(
+                &s.obs_model_ir, &s.rows, saved_at + crate::fit::runner::TIME_TIE_EPS,
+            ) {
+                out.fail(format!("error: {e}"));
+            }
+        }
+        for obs in &model.observations {
+            let schedule = crate::obs_emit::EffectiveSchedule::of(obs, None)
+                .unwrap_or_else(|e| out.fail(format!("error: {e}")));
+            let Some(schedule) = schedule else { continue };
+            if let Some((start, stop)) = crate::obs_emit::period_under_way(
+                obs, &schedule, model.simulation.t_start, saved_at,
+            ) {
+                out.say(format_args!(
+                    "note: stream '{}': its period [{start}, {stop}) is under way at the saved \
+                     time t = {saved_at}; `simulate --init-state` will refuse to write that \
+                     stream, or quantities over it, from this file",
+                    obs.name));
+            }
+        }
+    }
+
     // Record ancestry when either --save-paths or --save-filtering is
     // active. Both flags consume the same per-step snapshot data; the
     // difference is only in what we write to disk at the end.

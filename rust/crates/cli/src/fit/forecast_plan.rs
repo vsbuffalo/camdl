@@ -272,15 +272,64 @@ impl std::fmt::Display for StreamRefusal {
                 row.describe(), source.describe()),
             StreamRefusal::InvalidHeldOut { stream, row, why } => write!(f,
                 "stream '{stream}' is refused a forecast: its {} {why}.", row.describe()),
-            StreamRefusal::ScheduleConflict { stream, data, data_source, schedule } => write!(f,
-                "stream '{stream}' is refused a forecast: its data imply the period [{}, {}) \
-                 ({data_source}), but its emit_schedule gives [{}, {}) over the same \
-                 reporting interval. Neither takes precedence; make the declarations agree \
-                 (or remove the emit_schedule). A deliberately different prospective \
-                 schedule would need its own declaration, which camdl does not have.",
-                data.0, data.1, schedule.0, schedule.1),
+            StreamRefusal::ScheduleConflict { stream, data, data_source, schedule } => f.write_str(
+                &schedule_conflict_text("a forecast", stream, *data, data_source, *schedule)),
         }
     }
+}
+
+/// The D82 diagnostic for `stream`, refused `what` (`a forecast`, or
+/// `--save-final-state` for a restart state): one text for both, so they
+/// differ only in the command refused.
+fn schedule_conflict_text(
+    what: &str,
+    stream: &str,
+    data: (f64, f64),
+    data_source: &str,
+    schedule: (f64, f64),
+) -> String {
+    format!(
+        "stream '{stream}' is refused {what}: its data imply the period [{}, {}) \
+         ({data_source}), but its emit_schedule gives [{}, {}) over the same \
+         reporting interval. Neither takes precedence; make the declarations agree \
+         (or remove the emit_schedule). A deliberately different prospective \
+         schedule would need its own declaration, which camdl does not have.",
+        data.0, data.1, schedule.0, schedule.1)
+}
+
+/// A D82 disagreement found when saving a restart state: the forecast's
+/// diagnostic, naming `--save-final-state` as the command refused.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SaveScheduleConflict(StreamRefusal);
+
+impl std::fmt::Display for SaveScheduleConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            StreamRefusal::ScheduleConflict { stream, data, data_source, schedule } => f.write_str(
+                &schedule_conflict_text("--save-final-state", stream, *data, data_source, *schedule)),
+            other => unreachable!("check_schedule_agrees refuses only a schedule conflict: {other:?}"),
+        }
+    }
+}
+
+/// D82 at `pfilter --save-final-state` (D100): `obs`'s bound `rows` (its
+/// training rows under `holdout_after`) against the periods its
+/// `emit_schedule` gives, over the reporting intervals up to `reach` (the
+/// saved time plus `TIME_TIE_EPS`), with no held-out rows and no targets. The
+/// filter's periods come from the data and a restart's from the schedule, so
+/// a disagreement is refused rather than saved. A stream with no
+/// `emit_schedule`, or an instant stream, has nothing to disagree with.
+pub(crate) fn check_restart_schedule_agrees(
+    obs: &ObservationModel,
+    rows: &[ObservedRow],
+    reach: f64,
+) -> Result<(), SaveScheduleConflict> {
+    if obs.projection.temporal_kind() != TemporalKind::Interval {
+        return Ok(());
+    }
+    let s = PlanStream { obs, training: rows, held_out: &[], design: DesignInput::NotSupplied };
+    check_schedule_agrees(&s, &obs.name, TargetSource::EmitSchedule, &[], reach)
+        .map_err(SaveScheduleConflict)
 }
 
 /// Why no plan can be built at all.
@@ -1279,6 +1328,38 @@ mod tests {
             stream: "weekly".into(), data: (0.0, 7.0), data_source: "training row 0".into(),
             schedule: (-6.0, 1.0),
         }]);
+    }
+
+    /// D100 (Rule 2): the save-state check is D82 over the bound rows, and
+    /// its diagnostic is the forecast's with only the command refused
+    /// changed. F6: weekly data closing on 11, 18, 25 against a schedule
+    /// giving [0, 7), [7, 14), [14, 21).
+    #[test]
+    fn the_save_state_check_is_d82_and_its_text_differs_only_in_the_command() {
+        let train: Vec<ObservedRow> = (0..3).map(|i| row(i, 4.0 + 7.0 * i as f64, 11.0 + 7.0 * i as f64)).collect();
+        let rows = BTreeMap::from([("weekly".to_string(), train.clone())]);
+        let mut wobs = weekly();
+        wobs.emit_schedule = Some(ObservationSchedule::Regular(RegularSchedule { start: 0.0, step: 7.0, end: 63.0 }));
+        let save = check_restart_schedule_agrees(&wobs, &train, 25.0 + TIME_TIE_EPS).unwrap_err();
+        assert_eq!(save, SaveScheduleConflict(StreamRefusal::ScheduleConflict {
+            stream: "weekly".into(), data: (4.0, 11.0), data_source: "training row 0".into(),
+            schedule: (0.0, 7.0),
+        }));
+        let forecast = ForecastPlan::new(partition(&rows), 14.0, &[
+            PlanStream { obs: &wobs, training: &train, held_out: &[], design: DesignInput::NotSupplied },
+        ]).unwrap_err();
+        let PlanError::NoTargets { refusals } = &forecast else { panic!("{forecast:?}") };
+        let forecast_text = refusals[0].to_string();
+        let save_text = save.to_string();
+        assert!(save_text.starts_with("stream 'weekly' is refused --save-final-state: "), "{save_text}");
+        assert_eq!(forecast_text.replacen("refused a forecast", "refused --save-final-state", 1), save_text);
+        // Agreeing declarations save; an instant stream is not judged.
+        let agree: Vec<ObservedRow> = (0..3).map(|i| row(i, 7.0 * i as f64, 7.0 * (i + 1) as f64)).collect();
+        assert_eq!(check_restart_schedule_agrees(&wobs, &agree, 21.0 + TIME_TIE_EPS), Ok(()));
+        let mut prev = obs("prev", None, Projection::CurrentPop("I".into()), wobs.emit_schedule.clone());
+        prev.covers = None;
+        let p: Vec<ObservedRow> = (0..3).map(|i| instant_row(i, 3.0 + 7.0 * i as f64)).collect();
+        assert_eq!(check_restart_schedule_agrees(&prev, &p, 17.0 + TIME_TIE_EPS), Ok(()));
     }
 
     /// D80: a held-out row of a stream with a declared cadence that is not
