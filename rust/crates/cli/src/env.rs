@@ -8,8 +8,9 @@
 //! [`get`] reads them all on first use and holds the values for the life of the
 //! process; nothing else in `cli` or `sim` reads the environment
 //! (`rust/crates/cli/tests/environment_is_read_in_one_module.rs`). The engine
-//! is told through values: [`install_engine_switches`] passes the evaluator
-//! switches to `sim` once, at start-up.
+//! is told through values: [`install_engine_switches`] passes the substep
+//! trace switch to `sim` once, at start-up, and [`eval_settings`] puts the
+//! evaluation-path switches on each model a command compiles.
 //!
 //! **Stability.** `stable` is a supported setting; `debug` is a diagnostic or an
 //! alternative evaluation path meant to agree with the default one;
@@ -268,14 +269,27 @@ pub(crate) fn get() -> &'static Environment {
     ENV.get_or_init(|| Environment::read(|name| std::env::var_os(name), std::env::vars_os()))
 }
 
-/// Pass the evaluator switches to the engine. Called once, at start-up, before
-/// any command runs a model.
+/// Pass the substep trace switch to the engine. Called once, at start-up,
+/// before any command runs a model.
 pub(crate) fn install_engine_switches(env: &Env) {
-    sim::trace::configure(sim::trace::Switches {
-        steps: env.trace_steps,
-        eval_unresolved: env.eval_unresolved,
-    });
-    sim::resolved_expr::set_binding_cache_off_by_default(env.no_binding_cache);
+    sim::trace::configure(sim::trace::Switches { steps: env.trace_steps });
+}
+
+/// The evaluator settings a command compiles its models under: its
+/// `allow_degenerate_rates` (a flag, or a fit's `[config]`), and the
+/// evaluation-path switches of this process's environment
+/// (`CAMDL_EVAL_UNRESOLVED`, `CAMDL_NO_BINDING_CACHE`). The switches ride on
+/// each compiled model rather than on the process, so a model compiled
+/// without them, in this process or any other, evaluates on the default path.
+/// They are keyed through [`Environment::engine_identity`], which reads the
+/// same environment.
+pub(crate) fn eval_settings(allow_degenerate_rates: bool) -> sim::EvalSettings {
+    let vars = &get().vars;
+    sim::EvalSettings {
+        allow_degenerate_rates,
+        eval_unresolved: vars.eval_unresolved,
+        no_binding_cache: vars.no_binding_cache,
+    }
 }
 
 #[cfg(test)]

@@ -878,7 +878,7 @@ fn run_profile(
 
     let compiled = Arc::new(CompiledModel::new(model.clone())
         .unwrap_or_else(|e| { out.fail(format!("{:?}", e)); })
-        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates }));
+        .with_eval_settings(crate::env::eval_settings(allow_degenerate_rates)));
     let base_params = compiled.default_params.clone();
 
     // Reject overdispersed models on the ODE backend (and any other

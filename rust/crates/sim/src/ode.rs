@@ -149,7 +149,7 @@ fn ode_derivs(
     // because B1 dropped the standalone `eval_propensities` call that used to be
     // the only cache-entering ODE eval; the RK4 stages now own it. Dropped at the
     // end of this stage so the next stage (different state) recomputes.
-    let _cache = crate::resolved_expr::CacheScope::enter(model.resolved.bindings.len());
+    let _cache = crate::resolved_expr::CacheScope::enter(model);
 
     // Integer compartment derivatives from transition stoichiometry × rate.
     //
@@ -258,7 +258,7 @@ fn sensitivity_derivs(
         int_float_override: Some(int_vals),
         per_eval,
     };
-    let _cache = crate::resolved_expr::CacheScope::enter(model.resolved.bindings.len());
+    let _cache = crate::resolved_expr::CacheScope::enter(model);
 
     for v in d_state.iter_mut() { *v = 0.0; }
     // Scratch for a transition's state-Jacobian entries ∂rate_r/∂x_j (gh#400). Each

@@ -16,9 +16,9 @@
 //! - `CAMDL_TRACE_STEPS=1` ([`Switches::steps`]): one TSV row per
 //!   chain-binomial substep ([`step`], with a header row before the first) and
 //!   one line per intervention or event action ([`effect_action`]).
-//! - `CAMDL_EVAL_UNRESOLVED` ([`Switches::eval_unresolved`]): the propensity
-//!   evaluator takes the slow string-keyed path ([`eval_unresolved`]), and says
-//!   so once.
+//! - The notice the propensity evaluator gives once when a model it evaluates
+//!   takes the string-keyed path ([`eval_unresolved_notice`]). That switch is
+//!   the model's own (`EvalSettings::eval_unresolved`), not this module's.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
@@ -33,18 +33,14 @@ use crate::effects::EffectKind;
 pub struct Switches {
     /// Trace every chain-binomial substep and effect action to stderr.
     pub steps: bool,
-    /// Route the propensity hot path through the string-keyed evaluator.
-    pub eval_unresolved: bool,
 }
 
 static STEPS: AtomicBool = AtomicBool::new(false);
-static EVAL_UNRESOLVED: AtomicBool = AtomicBool::new(false);
 
 /// Set the switches for this process. Called once, by the command-line crate,
 /// before any model runs.
 pub fn configure(switches: Switches) {
     STEPS.store(switches.steps, Ordering::Relaxed);
-    EVAL_UNRESOLVED.store(switches.eval_unresolved, Ordering::Relaxed);
 }
 
 /// Whether the substep trace is on ([`Switches::steps`]).
@@ -120,34 +116,15 @@ pub fn effect_action(kind: EffectKind, iv_name: &str, action: &Action, v: f64, t
     }
 }
 
-/// Bench / differential-validation switch: route the propensity hot path
-/// through the slow string-keyed `eval_expr` instead of the pre-resolved
-/// `eval_resolved` ([`Switches::eval_unresolved`], which `CAMDL_EVAL_UNRESOLVED`
-/// sets). It costs an atomic load — hoisted out of the per-transition loop in
-/// `eval_propensities`, so the default (off) path is unchanged. The first read
-/// that finds it on says so on stderr.
-///
-/// Two uses:
-///  - **benching**: time a `pfilter`/`fit` run with the var off vs on to
-///    measure end-to-end what pre-resolution buys (`T_on / T_off`);
-///  - **validation**: run any sim/inference under both evaluators and assert
-///    byte-identical output — a differential-testing oracle for the resolver,
-///    which is inference-critical.
-///
-/// `eval_resolved` and `eval_expr` are required to agree (see
-/// `tests/resolved_expr.rs`); this switch makes that agreement observable on
-/// real models at full scale, not just hand-built expressions.
-#[inline]
-pub fn eval_unresolved() -> bool {
-    let on = EVAL_UNRESOLVED.load(Ordering::Relaxed);
-    if on {
-        static SAID: OnceLock<()> = OnceLock::new();
-        SAID.get_or_init(|| {
-            eprintln!(
-                "[camdl] CAMDL_EVAL_UNRESOLVED set — propensity eval routed through \
-                 the slow string-keyed eval_expr (bench/validation mode)"
-            );
-        });
-    }
-    on
+/// Say once, on stderr, that a model is evaluating its propensities through
+/// the string-keyed `eval_expr` (`EvalSettings::eval_unresolved`, which
+/// `CAMDL_EVAL_UNRESOLVED` sets), the slow bench and validation path.
+pub(crate) fn eval_unresolved_notice() {
+    static SAID: OnceLock<()> = OnceLock::new();
+    SAID.get_or_init(|| {
+        eprintln!(
+            "[camdl] CAMDL_EVAL_UNRESOLVED set — propensity eval routed through \
+             the slow string-keyed eval_expr (bench/validation mode)"
+        );
+    });
 }

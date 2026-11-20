@@ -170,9 +170,7 @@ pub(crate) fn resolve(
         .map(|p| FittedSettings::of(&p.config))
         .unwrap_or_default()
         .with_flags(*allow_degenerate_rates, *allow_forcing_extrapolation);
-    let eval_settings = sim::EvalSettings {
-        allow_degenerate_rates: settings.allow_degenerate_rates,
-    };
+    let eval_settings = crate::env::eval_settings(settings.allow_degenerate_rates);
     // The forcing-extrapolation policy every point is evaluated under and the
     // leaf's record names, installed for the rest of the command.
     let forcing = crate::forcing_extrapolation::ForcingPolicy::new(settings.allow_forcing_extrapolation);

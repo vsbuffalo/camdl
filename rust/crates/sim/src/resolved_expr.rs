@@ -500,30 +500,20 @@ fn record_table_oob(table_idx: usize, index: i64, len: usize) {
 
 thread_local! {
     /// Per-thread test/bench override of the cache state. `None` → fall through
-    /// to the process default ([`set_binding_cache_off_by_default`]).
+    /// to the model's own setting (`EvalSettings::no_binding_cache`).
     static CACHE_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
-/// The process default: the binding cache is on unless the caller turned it
-/// off. The command-line crate sets it from `CAMDL_NO_BINDING_CACHE`, which it
-/// reads (`cli::env`); this library reads no environment variable.
-static CACHE_OFF_BY_DEFAULT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Escape hatch (A/B gate / debugging): turn the binding cache off for the
-/// process, forcing the on-demand path and making a run comparable to the
-/// pre-cache evaluator. Called once, before any model runs.
-pub fn set_binding_cache_off_by_default(off: bool) {
-    CACHE_OFF_BY_DEFAULT.store(off, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// Whether the binding cache is off: the per-thread override (set by the A/B
-/// gate) when there is one, so cache-on and cache-off can be compared in one
-/// process; otherwise the process default.
-pub(crate) fn binding_cache_disabled() -> bool {
+/// Whether the binding cache is off for an evaluation of `model`: the
+/// per-thread override (set by the A/B gate) when there is one, so cache-on and
+/// cache-off can be compared in one process; otherwise the model's own
+/// `EvalSettings::no_binding_cache` (`CAMDL_NO_BINDING_CACHE`, which the
+/// command-line crate reads; this library reads no environment variable).
+pub(crate) fn binding_cache_disabled(model: &crate::CompiledModel) -> bool {
     if let Some(off) = CACHE_OVERRIDE.with(|c| c.get()) {
         return off;
     }
-    CACHE_OFF_BY_DEFAULT.load(std::sync::atomic::Ordering::Relaxed)
+    model.eval.no_binding_cache
 }
 
 /// Test/bench hook: force the binding cache off (`true`) or on (`false`) for the
@@ -551,15 +541,21 @@ pub fn take_binding_cache_hits() -> u64 {
 }
 
 /// RAII scope that activates the binding cache for one propensity-vector
-/// evaluation. `enter` bumps the generation (invalidating the prior state's
-/// values) and marks the cache active; `Drop` deactivates it so any eval
-/// outside the propensity loop never reads a stale value.
-pub struct CacheScope;
+/// evaluation of a model. `enter` bumps the generation (invalidating the prior
+/// state's values) and marks the cache active, unless the cache is off for
+/// that model ([`binding_cache_disabled`]); `Drop` deactivates what `enter`
+/// activated, so any eval outside the propensity loop never reads a stale
+/// value.
+pub struct CacheScope {
+    active: bool,
+}
 
 impl CacheScope {
     #[inline]
-    pub fn enter(n_bindings: usize) -> Self {
-        if !binding_cache_disabled() {
+    pub fn enter(model: &crate::CompiledModel) -> Self {
+        let n_bindings = model.resolved.bindings.len();
+        let active = !binding_cache_disabled(model);
+        if active {
             BINDING_CACHE.with(|c| {
                 let mut c = c.borrow_mut();
                 if c.val.len() != n_bindings {
@@ -576,14 +572,14 @@ impl CacheScope {
                 c.active = true;
             });
         }
-        CacheScope
+        CacheScope { active }
     }
 }
 
 impl Drop for CacheScope {
     #[inline]
     fn drop(&mut self) {
-        if !binding_cache_disabled() {
+        if self.active {
             BINDING_CACHE.with(|c| c.borrow_mut().active = false);
         }
     }

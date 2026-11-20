@@ -1822,7 +1822,7 @@ fn run_predict(
     // failing the replay of a model the fit ran. Carried on every model this
     // command compiles: `compiled` below and the models derived from it, and
     // the free-forward job's cells (`SimulateJob::eval`).
-    let eval = sim::EvalSettings { allow_degenerate_rates: config.config.allow_degenerate_rates };
+    let eval = crate::env::eval_settings(config.config.allow_degenerate_rates);
     // One calendar block for every sidecar manifest this run writes
     // (predictive / observed / quantities), read once off the model.
     let calendar = ir::caltime::CalendarAxis::from_model(&model).map_err(|e| e.to_string())?;

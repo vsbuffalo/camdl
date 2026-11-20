@@ -23,7 +23,7 @@ fn load_model(path: &str) -> ir::Model {
 /// should be finite at its own params.
 #[test]
 fn test_density_matches_step_one_sir() {
-    env_switches::from_env();
+    let switches = env_switches::from_env();
     let model = load_model("../../../ocaml/golden/sir_basic.ir.json");
     let mut model = model;
     for p in &mut model.parameters {
@@ -33,7 +33,7 @@ fn test_density_matches_step_one_sir() {
             });
         }
     }
-    let compiled = Arc::new(CompiledModel::new(model).unwrap());
+    let compiled = Arc::new(CompiledModel::new(model).unwrap().with_eval_settings(switches));
     let mut params = vec![0.0; compiled.param_index.len()];
     for p in &compiled.model.parameters {
         if let Some(v) = p.value.resolved_value() {
@@ -64,7 +64,7 @@ fn test_density_matches_step_one_sir() {
 /// should be finite at its own params.
 #[test]
 fn test_density_matches_step_one_sir_demography() {
-    env_switches::from_env();
+    let switches = env_switches::from_env();
     // gh#audit-C6 / S1: model contains rate expressions with stratum-
     // empty divisors (legacy silent-zero); test asserts density-vs-
     // step_one parity, not numerical-collapse semantics — keep
@@ -80,7 +80,7 @@ fn test_density_matches_step_one_sir_demography() {
         }
     }
     let compiled = Arc::new(CompiledModel::new(model).unwrap()
-        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true }));
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true, ..switches }));
     let mut params = vec![0.0; compiled.param_index.len()];
     for p in &compiled.model.parameters {
         if let Some(v) = p.value.resolved_value() {
@@ -110,7 +110,7 @@ fn test_density_matches_step_one_sir_demography() {
 /// Test: complete_data_loglik on a 2-patch model.
 #[test]
 fn test_density_matches_step_one_two_patch() {
-    env_switches::from_env();
+    let switches = env_switches::from_env();
     let path = "../../../ocaml/golden/sir_two_patch.ir.json";
     let model = match std::fs::read_to_string(path) {
         Ok(json) => match ir::from_str(&json) {
@@ -120,7 +120,7 @@ fn test_density_matches_step_one_two_patch() {
     };
     let mut model = model;
     for p in &mut model.parameters { if p.value.resolved_value().is_none() { p.value = p.value.with_value(0.1); } }
-    let compiled = Arc::new(CompiledModel::new(model).unwrap());
+    let compiled = Arc::new(CompiledModel::new(model).unwrap().with_eval_settings(switches));
     let mut params = vec![0.0; compiled.param_index.len()];
     for p in &compiled.model.parameters {
         if let Some(v) = p.value.resolved_value() { params[compiled.param_index[p.name.as_str()]] = v; }
@@ -144,7 +144,7 @@ fn test_density_matches_step_one_two_patch() {
 /// This is the exact pattern that caused -inf when testing camdl-vignettes.
 #[test]
 fn test_density_matches_step_one_polio_spatial_5() {
-    env_switches::from_env();
+    let switches = env_switches::from_env();
     // gh#audit-C6 / S1: spatial model with empty patches; legacy
     // silent-zero needed for parity assertion. See companion comment
     // on test_density_matches_step_one_sir_demography.
@@ -164,7 +164,7 @@ fn test_density_matches_step_one_polio_spatial_5() {
         }
     }
     let compiled = Arc::new(CompiledModel::new(model).unwrap()
-        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true }));
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true, ..switches }));
     let mut params = vec![0.0; compiled.param_index.len()];
     for p in &compiled.model.parameters {
         if let Some(v) = p.value.resolved_value() {
@@ -205,7 +205,7 @@ fn test_density_matches_step_one_polio_spatial_5() {
 /// this test fails, the underlying bug has returned.
 #[test]
 fn test_density_seir_spatial_5_vignette_regression() {
-    env_switches::from_env();
+    let switches = env_switches::from_env();
     // Uses the golden model with iota, overdispersion, seasonal forcing,
     // and high R0 — the exact combination that triggers spatial density bugs.
     // See docs/dev/incidents/2026-04-07-spatial-pgas-neg-inf.md.
@@ -226,7 +226,7 @@ fn test_density_seir_spatial_5_vignette_regression() {
             });
         }
     }
-    let compiled = Arc::new(CompiledModel::new(model).unwrap());
+    let compiled = Arc::new(CompiledModel::new(model).unwrap().with_eval_settings(switches));
     let mut params = vec![0.0; compiled.param_index.len()];
     for p in &compiled.model.parameters {
         if let Some(v) = p.value.resolved_value() {
@@ -311,7 +311,7 @@ fn test_density_seir_spatial_5_vignette_regression() {
 /// Runs 100 different seeds to catch rare stochastic edge cases.
 #[test]
 fn test_density_downstream_multi_seed() {
-    env_switches::from_env();
+    let switches = env_switches::from_env();
     let path = "../../../ocaml/golden/seir_spatial_5_inference.ir.json";
     let model = load_model(path);
     let mut model = model;
@@ -328,7 +328,7 @@ fn test_density_downstream_multi_seed() {
             });
         }
     }
-    let compiled = CompiledModel::new(model).unwrap();
+    let compiled = CompiledModel::new(model).unwrap().with_eval_settings(switches);
     let mut params = vec![0.0; compiled.param_index.len()];
     for p in &compiled.model.parameters {
         if let Some(v) = p.value.resolved_value() { params[compiled.param_index[p.name.as_str()]] = v; }
@@ -390,7 +390,7 @@ fn test_density_downstream_multi_seed() {
 /// infection_p5 flow is 0 (not misattributed from importation).
 #[test]
 fn test_step_one_zero_infection_flow() {
-    env_switches::from_env();
+    let switches = env_switches::from_env();
     use sim::chain_binomial::{StepScratch, step_one};
 
     let path = "tests/fixtures/seir_spatial_5.ir.json";
@@ -412,7 +412,7 @@ fn test_step_one_zero_infection_flow() {
             });
         }
     }
-    let compiled = CompiledModel::new(model).unwrap();
+    let compiled = CompiledModel::new(model).unwrap().with_eval_settings(switches);
     let mut params = vec![0.0; compiled.param_index.len()];
     for p in &compiled.model.parameters {
         if let Some(v) = p.value.resolved_value() { params[compiled.param_index[p.name.as_str()]] = v; }

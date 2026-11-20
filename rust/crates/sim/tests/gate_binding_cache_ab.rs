@@ -96,7 +96,7 @@ fn gate_binding_cache_is_byte_identical() {
     );
 
     let compiled = CompiledModel::new(model.clone()).expect("model failed to compile")
-        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true });
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true, ..Default::default() });
     let params = compiled.default_params.clone();
 
     let t_start = model.simulation.t_start;

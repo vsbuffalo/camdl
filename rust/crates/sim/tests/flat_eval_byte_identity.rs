@@ -82,7 +82,7 @@ fn flat_matches_eval_resolved_on_all_goldens() {
         // byte-identity failure — it's a fixture-setup limitation. Skip it
         // VISIBLY (logged below) rather than silently, and hold a floor count.
         let cm = match CompiledModel::new(model) {
-            Ok(cm) => cm.with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true }),
+            Ok(cm) => cm.with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true, ..Default::default() }),
             Err(e) => {
                 eprintln!("SKIP {fname}: compile with midpoint params: {e}");
                 continue;
@@ -162,7 +162,7 @@ fn flat_matches_eval_resolved_on_latent_edge_cases() {
     // a fine carrier even for the mixed-pop-sum case.
     let cm = CompiledModel::new(load_model_filled("../../../ir/golden/sir_basic.ir.json"))
         .expect("compile sir_basic with midpoint params")
-        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true });
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true, ..Default::default() });
     let params = cm.default_params.clone();
 
     // int_s[0]=1 and real_s = [1e16, -1e16] make the MixedPopSum grouping
@@ -297,7 +297,7 @@ fn flat_matches_eval_resolved_on_a_per_eval_model() {
     );
 
     let cm = CompiledModel::new(model).expect("compile licm_ab_on")
-        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true });
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true, ..Default::default() });
 
     // The VM `CompiledModel::new` built for this model — the one
     // `eval_propensities` runs — not a locally built one.

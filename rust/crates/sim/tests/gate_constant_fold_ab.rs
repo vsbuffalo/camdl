@@ -173,10 +173,10 @@ fn check_fold_ab(stem: &str) {
     // produce a byte-identical trajectory.
     let compiled_unfolded = CompiledModel::new(unfolded.clone())
         .expect("unfolded model failed to compile")
-        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true });
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true, ..Default::default() });
     let compiled_folded = CompiledModel::new(folded.clone())
         .expect("folded model failed to compile")
-        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true });
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true, ..Default::default() });
 
     let params_unfolded = compiled_unfolded.default_params.clone();
     let params_folded = compiled_folded.default_params.clone();

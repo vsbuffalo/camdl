@@ -76,7 +76,7 @@ fn test_smoke_all_ocaml_golden() {
 
         let compiled = CompiledModel::new(model.clone())
             .unwrap_or_else(|e| panic!("{}: compile error: {:?}", name, e))
-            .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true });
+            .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true, ..Default::default() });
         let params = compiled.default_params.clone();
         let t_start = model.simulation.t_start;
         let t_end = model.simulation.t_end.min(30.0);

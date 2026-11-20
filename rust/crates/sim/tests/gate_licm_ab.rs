@@ -146,9 +146,9 @@ fn gate_licm_is_byte_identical() {
 
     // ── 2. SOUNDNESS ────────────────────────────────────────────────────────
     let compiled_off = CompiledModel::new(off.clone()).expect("OFF model failed to compile")
-        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true });
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true, ..Default::default() });
     let compiled_on = CompiledModel::new(on.clone()).expect("ON model failed to compile")
-        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true });
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true, ..Default::default() });
 
     let params_off = compiled_off.default_params.clone();
     let params_on = compiled_on.default_params.clone();
@@ -339,9 +339,9 @@ fn gate_licm_inference_producer_byte_identical() {
     let (off, _) = load("licm_ab_off");
     let (on, _) = load("licm_ab_on");
     let compiled_off = Arc::new(CompiledModel::new(off).expect("OFF model failed to compile")
-        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true }));
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true, ..Default::default() }));
     let compiled_on = Arc::new(CompiledModel::new(on).expect("ON model failed to compile")
-        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true }));
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true, ..Default::default() }));
 
     let params_off = compiled_off.default_params.clone();
     let params_on = compiled_on.default_params.clone();
@@ -427,9 +427,9 @@ fn gate_licm_pgas_loglik_byte_identical() {
     let (off, _) = load("licm_ab_off");
     let (on, _) = load("licm_ab_on");
     let compiled_off = Arc::new(CompiledModel::new(off).expect("OFF model failed to compile")
-        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true }));
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true, ..Default::default() }));
     let compiled_on = Arc::new(CompiledModel::new(on).expect("ON model failed to compile")
-        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true }));
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true, ..Default::default() }));
     assert!(
         compiled_off.resolved.per_eval_bindings.is_empty()
             && !compiled_on.resolved.per_eval_bindings.is_empty(),

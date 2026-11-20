@@ -1039,11 +1039,12 @@ fn eval_structural(
     eval_table_expr(expr, param_index, consts, params)
 }
 
-/// How the evaluators treat a numerically collapsed expression, set by the
-/// command that compiles the model and carried with it, so every evaluation of
-/// this model — forward simulation, the particle filters, the samplers, the
-/// observation likelihood — reads the same setting from the model it
-/// evaluates. Two models in one process may carry different settings.
+/// How the evaluators treat a numerically collapsed expression, and which
+/// evaluation path they take, set by the command that compiles the model and
+/// carried with it, so every evaluation of this model — forward simulation,
+/// the particle filters, the samplers, the observation likelihood — reads the
+/// same setting from the model it evaluates. Two models in one process may
+/// carry different settings.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EvalSettings {
     /// `--allow-degenerate-rates` / a fit config's `[config]
@@ -1053,6 +1054,20 @@ pub struct EvalSettings {
     /// of failing the run with [`crate::SimError::NumericalCollapse`]. The
     /// [`crate::eval_stats`] counters increment under either setting.
     pub allow_degenerate_rates: bool,
+    /// `CAMDL_EVAL_UNRESOLVED`: every propensity is evaluated through the
+    /// string-keyed `eval_expr` instead of the flat evaluator. A bench and
+    /// differential-testing switch: the two
+    /// evaluators are required to agree (`tests/resolved_expr.rs`,
+    /// `tests/flat_eval_byte_identity.rs`), so a run under it and the same run
+    /// without it are an oracle for each other on real models at full scale.
+    /// Read once per propensity vector, so the default path pays one branch.
+    pub eval_unresolved: bool,
+    /// `CAMDL_NO_BINDING_CACHE`: model bindings are recomputed on every
+    /// reference instead of memoized once per state, in both the flat
+    /// evaluator's cache and the tree walk's ([`crate::resolved_expr::CacheScope`]).
+    /// The cache is value-preserving (`tests/gate_binding_cache_ab.rs`); this
+    /// is its A/B escape hatch.
+    pub no_binding_cache: bool,
 }
 
 pub struct CompiledModel {

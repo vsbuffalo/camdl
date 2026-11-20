@@ -79,7 +79,8 @@ fn param(name: &str, value: f64) -> Parameter {
 /// The setting a test evaluates degenerate arithmetic under when it checks the
 /// `--allow-degenerate-rates` coercion: carried on the compiled model, so each
 /// test sets it on its own model and the tests share nothing.
-const ALLOW: sim::EvalSettings = sim::EvalSettings { allow_degenerate_rates: true };
+const ALLOW: sim::EvalSettings =
+    sim::EvalSettings { allow_degenerate_rates: true, eval_unresolved: false, no_binding_cache: false };
 
 #[test]
 fn test_runtime_oob_table_lookup_returns_err_not_panic() {

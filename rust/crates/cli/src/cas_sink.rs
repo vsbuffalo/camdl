@@ -1885,7 +1885,7 @@ mod tests {
         };
         assert!(refused(&|r| r.backend = crate::args::types::ForwardBackend::Ode).contains("backend Ode"));
         assert!(refused(&|r| r.dt = 0.5).contains("dt = 0.5"));
-        assert!(refused(&|r| r.eval = sim::EvalSettings { allow_degenerate_rates: true })
+        assert!(refused(&|r| r.eval = sim::EvalSettings { allow_degenerate_rates: true, ..Default::default() })
             .contains("allow_degenerate_rates: true"));
         assert!(refused(&|r| r.binomial = sim::rng::BinomialAlgorithm::Btrs)
             .contains("binomial sampler"));

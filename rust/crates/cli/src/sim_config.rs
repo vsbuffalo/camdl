@@ -249,7 +249,7 @@ impl ResolvedSimConfig {
         EngineSettings {
             backend: forward_backend(*backend),
             dt: dt.get(),
-            eval: sim::EvalSettings { allow_degenerate_rates: *allow_degenerate_rates },
+            eval: crate::env::eval_settings(*allow_degenerate_rates),
             forcing: crate::forcing_extrapolation::ForcingPolicy::new(*allow_forcing_extrapolation),
         }
     }
@@ -456,7 +456,7 @@ mod tests {
         let EngineSettings { backend, dt, eval, forcing } = cfg.engine_settings();
         assert_eq!(backend, ForwardBackend::Ode);
         assert_eq!(dt, 0.25);
-        assert_eq!(eval, sim::EvalSettings { allow_degenerate_rates: true });
+        assert_eq!(eval, crate::env::eval_settings(true));
         assert!(forcing.allowed());
     }
 

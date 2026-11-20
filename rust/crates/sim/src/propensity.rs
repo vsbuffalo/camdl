@@ -3,7 +3,6 @@ use std::cell::RefCell;
 use crate::{
     compiled_model::{CompiledModel, CompiledTimeFuncKind},
     error::{SimError, CollapseKind},
-    trace::eval_unresolved,
     flat_eval::{self, FlatCache},
     resolved_expr::{eval_resolved, ResolvedExpr},
     state::{IntState, RealState},
@@ -24,6 +23,19 @@ struct FlatState {
 thread_local! {
     static FLAT_STATE: RefCell<FlatState> =
         RefCell::new(FlatState { cache: FlatCache::new(0), scratch: Vec::new() });
+}
+
+thread_local! {
+    /// Propensity vectors this thread evaluated through the string-keyed path
+    /// ([`crate::EvalSettings::eval_unresolved`]).
+    static UNRESOLVED_EVALS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Test hook: read and reset how many propensity vectors this thread has
+/// evaluated through the string-keyed path since the last call, so a test can
+/// tell which path a model took.
+pub fn take_unresolved_propensity_evals() -> u64 {
+    UNRESOLVED_EVALS.with(|c| c.replace(0))
 }
 
 /// Read and reset this thread's flat-evaluator binding-cache hit count. Reached
@@ -656,11 +668,14 @@ pub fn eval_propensities(
 
     let ctx = EvalCtx { model, int_s, real_s, params, t, dt, projected: None, aux: None, int_float_override: None, per_eval };
 
-    // Bench/validation switch (trace::eval_unresolved): on → every rate through
-    // the string-keyed `eval_expr` path, under the tree-walk binding cache. Read
-    // once per propensity vector, so the default path pays one branch.
-    if eval_unresolved() {
-        let _cache = crate::resolved_expr::CacheScope::enter(model.resolved.bindings.len());
+    // Bench/validation switch (`EvalSettings::eval_unresolved`): on → every
+    // rate through the string-keyed `eval_expr` path, under the tree-walk
+    // binding cache. Read once per propensity vector, so the default path pays
+    // one branch.
+    if model.eval.eval_unresolved {
+        crate::trace::eval_unresolved_notice();
+        UNRESOLVED_EVALS.with(|c| c.set(c.get() + 1));
+        let _cache = crate::resolved_expr::CacheScope::enter(model);
         out.clear();
         for (i, tr) in model.model.transitions.iter().enumerate() {
             // gh#127 (#12): see the default path below.
@@ -694,7 +709,7 @@ pub fn eval_propensities(
         // the binding cache is switched off (`CAMDL_NO_BINDING_CACHE`, or the
         // A/B gate's per-thread override), which `CacheScope::enter` honours
         // for the tree walk the same way.
-        if crate::resolved_expr::binding_cache_disabled() {
+        if crate::resolved_expr::binding_cache_disabled(model) {
             st.cache.deactivate();
         } else {
             st.cache.activate();

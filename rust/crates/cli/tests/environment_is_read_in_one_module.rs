@@ -6,8 +6,8 @@
 //! This test reads the source of every library crate in the `camdl` binary and
 //! fails naming each `env::var`, `env::var_os`, `env::vars` or `env::vars_os`
 //! call outside that module, in non-test code. `sim` reads none at all: its
-//! switches arrive as values (`sim::trace::configure`,
-//! `sim::resolved_expr::set_binding_cache_off_by_default`).
+//! switches arrive as values (`sim::trace::configure`, and the
+//! `sim::EvalSettings` each compiled model carries).
 //!
 //! One read is exempt by name, with its reason: `runid`'s host name on a
 //! non-Unix platform (`COMPUTERNAME`), recorded on an execution record and in

@@ -95,7 +95,8 @@ fn resolve_ctx_from(model: &CompiledModel) -> ResolveCtx<'_> {
 }
 
 /// The setting the comparison tests compile their models under.
-const ALLOW: sim::EvalSettings = sim::EvalSettings { allow_degenerate_rates: true };
+const ALLOW: sim::EvalSettings =
+    sim::EvalSettings { allow_degenerate_rates: true, eval_unresolved: false, no_binding_cache: false };
 
 /// Assert eval_resolved(resolve(expr)) == eval_expr(expr) for given context.
 ///

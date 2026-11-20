@@ -304,7 +304,7 @@ impl FitBackendConfig {
     /// The evaluator settings every model compiled for this fit carries
     /// (`CompiledModel::with_eval_settings`).
     pub fn eval_settings(&self) -> sim::EvalSettings {
-        sim::EvalSettings { allow_degenerate_rates: self.allow_degenerate_rates }
+        crate::env::eval_settings(self.allow_degenerate_rates)
     }
 }
 

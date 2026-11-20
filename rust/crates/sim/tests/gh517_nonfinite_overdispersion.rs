@@ -163,7 +163,7 @@ fn run(sigma_expr: Expr, seed: u64, eval: sim::EvalSettings) -> Result<u64, sim:
 #[test]
 fn a_nonfinite_overdispersion_is_refused_by_default_and_coerced_under_the_flag() {
     let strict = sim::EvalSettings::default();
-    let allow = sim::EvalSettings { allow_degenerate_rates: true };
+    let allow = sim::EvalSettings { allow_degenerate_rates: true, ..Default::default() };
 
     // ── Negative control: a FINITE sigma^2 is untouched by this change. ──
     // Without this, the test below passes just as well against a guard that

@@ -90,7 +90,7 @@ fn main() {
         }
     }
     let cm = CompiledModel::new(model).unwrap_or_else(|e| panic!("compile {path}: {e}"))
-        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true });
+        .with_eval_settings(sim::EvalSettings { allow_degenerate_rates: true, ..Default::default() });
     let params = cm.default_params.clone();
     let (int_s, real_s) = cm.initial_state_mean(&params).expect("initial_state_mean");
     let n_tr = cm.model.transitions.len();
