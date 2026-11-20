@@ -1323,18 +1323,34 @@ pub fn peek_simulation_dt(path: &str) -> Option<f64> {
     model.simulation.dt
 }
 
+/// The IR JSON text of the model at `path`, the one read every loader below
+/// shares. With `Some(compile)` a `.camdl` is compiled under the command's
+/// settings and a `.ir.json` read; with `None` the path must already be
+/// compiled IR and a `.camdl` is refused ([`require_compiled`]).
+fn ir_text(path: &str, compile: Option<CompileSettings>) -> Result<String, String> {
+    match compile {
+        // Full IR (state-Jacobian emitted). The metadata / identity / docs
+        // loaders that read through here must never withhold the WrtPop
+        // Jacobian: a full IR is a safe superset for every consumer, and run
+        // identity is gradient-independent (runid SV=2), so a full vs lean
+        // compile of the same model share the same digest. The lean opt-out
+        // (`--no-state-grad`) lives on the run-producing path
+        // (`resolve_ir_path`), which knows the method and so can safely drop
+        // the Jacobian.
+        Some(compile) if path.ends_with(".camdl") => run_camdlc_compile(path, None, true, None, compile),
+        Some(_) => std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {}", path, e)),
+        None => {
+            require_compiled(path)?;
+            std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {}", path, e))
+        }
+    }
+}
+
 /// Load a .camdl or .ir.json model, returning the parsed model and raw IR JSON.
 /// The JSON is needed for provenance hashing. A `.camdl` is compiled under
-/// `compile`, the command's settings, to the full IR, as
-/// [`load_model_envelope`] compiles it.
+/// `compile`, the command's settings, to the full IR ([`ir_text`]).
 pub(crate) fn load_model(path: &str, compile: CompileSettings) -> Result<(ir::Model, String), String> {
-    let json = if path.ends_with(".camdl") {
-        run_camdlc_compile(path, None, true, None, compile)?
-    } else {
-        std::fs::read_to_string(path)
-            .map_err(|e| format!("cannot read {}: {}", path, e))?
-    };
-    parse_model(path, json)
+    parse_model(path, ir_text(path, Some(compile))?)
 }
 
 /// Load a model that is already compiled: a `.ir.json` path a command
@@ -1343,9 +1359,7 @@ pub(crate) fn load_model(path: &str, compile: CompileSettings) -> Result<(ir::Mo
 /// it takes no compile settings, and a `.camdl` is refused rather than
 /// compiled under settings the caller does not have.
 pub(crate) fn load_ir(path: &str) -> Result<(ir::Model, String), String> {
-    require_compiled(path)?;
-    let json = std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {}", path, e))?;
-    parse_model(path, json)
+    parse_model(path, ir_text(path, None)?)
 }
 
 /// Refuse a model source path where a compiled model is expected: compiling
@@ -1407,29 +1421,14 @@ fn refuse_unreleased_smooth(model: &ir::Model) -> Result<(), String> {
 /// Load the whole IR envelope — the model plus its `#'` documentation
 /// dictionary — compiling a `.camdl` under `compile` or reading a `.ir.json`.
 pub(crate) fn load_model_envelope(path: &str, compile: CompileSettings) -> Result<ir::IrEnvelope, String> {
-    let json = if path.ends_with(".camdl") {
-        // Full IR (state-Jacobian emitted). The metadata / identity / docs
-        // loaders that read through here must never withhold the WrtPop
-        // Jacobian: a full IR is a safe superset for every consumer, and run
-        // identity is gradient-independent (runid SV=2), so a full vs lean
-        // compile of the same model share the same digest. The lean opt-out
-        // (`--no-state-grad`) lives on the run-producing path
-        // (`resolve_ir_path`), which knows the method and so can safely drop
-        // the Jacobian.
-        run_camdlc_compile(path, None, true, None, compile)?
-    } else {
-        std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {}", path, e))?
-    };
-    ir::envelope_from_str(&json)
+    ir::envelope_from_str(&ir_text(path, Some(compile))?)
         .map_err(|e| format!("IR load error from {}: {}", path, e))
 }
 
 /// [`load_model_envelope`] of a model that is already compiled; a `.camdl`
 /// is refused, as [`load_ir`] refuses it.
 pub(crate) fn load_ir_envelope(path: &str) -> Result<ir::IrEnvelope, String> {
-    require_compiled(path)?;
-    let json = std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {}", path, e))?;
-    ir::envelope_from_str(&json)
+    ir::envelope_from_str(&ir_text(path, None)?)
         .map_err(|e| format!("IR load error from {}: {}", path, e))
 }
 
@@ -3631,9 +3630,7 @@ pub fn load_run_model(run: &SimRun) -> Result<ir::Model, String> {
     // compiles its model once, under its own compile settings, before any run.
     // A source path is refused rather than compiled here without them.
     let ir_path_resolved = &run.ir_path;
-    require_compiled(ir_path_resolved)?;
-    let src = std::fs::read_to_string(ir_path_resolved)
-        .map_err(|e| format!("cannot read {}: {}", ir_path_resolved, e))?;
+    let src = ir_text(ir_path_resolved, None)?;
     // gh#audit-C8. Envelope-aware load (see load_model above).
     let mut model: ir::Model = ir::from_str(&src)
         .map_err(|e| format!("IR load error from {}: {}", ir_path_resolved, e))?;
