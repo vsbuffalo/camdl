@@ -213,7 +213,7 @@ fn trace_json(times: &[f64], streams: &[&str]) -> String {
         })).collect::<Vec<_>>(),
     })).collect();
     serde_json::json!({
-        "schema_version": 4, "t0": 0, "provenance": "plug_in",
+        "schema_version": 7, "t0": 0, "provenance": "plug_in",
         "conditioning": "in_sample", "steps": steps, "warnings": [],
     }).to_string()
 }

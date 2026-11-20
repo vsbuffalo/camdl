@@ -396,12 +396,16 @@ prequential is **auto-derived** by re-filtering at the fit's sealed θ̂.
 `--particles` and `--seed` set the filter used for any auto-derived handle and
 are applied **uniformly** across all derived fits, so `T_score` and the scores
 stay commensurable; they are ignored for an explicit `prequential.json` (read
-as-is). The scores are **plug-in and in-sample-optimistic** — computed at a
-single θ fit to the whole series — so they are not a leave-future-out forecast
-score. The optimism does not cancel when two models are differenced, either: it
-grows with the effective number of parameters each model was free to tune
-against the same observations, so Δelpd tilts toward the more flexible model.
-Read a comparison as indicative, alongside `se(Δ)` and the caveats.
+as-is). An explicit trace below schema 7, written by an older build before held
+forcings were recorded, is refused: it cannot say whether a forcing was held
+outside its range while it was scored. Re-run the fit or the
+`pfilter --save-prequential` that wrote it. The scores are **plug-in and
+in-sample-optimistic** — computed at a single θ fit to the whole series — so
+they are not a leave-future-out forecast score. The optimism does not cancel
+when two models are differenced, either: it grows with the effective number of
+parameters each model was free to tune against the same observations, so Δelpd
+tilts toward the more flexible model. Read a comparison as indicative, alongside
+`se(Δ)` and the caveats.
 
 The evidence column is gated on that standard error: when `|Δelpd| < 2·se(Δ)`
 the cell reads `within noise` and carries no Jeffreys tier, because the tier

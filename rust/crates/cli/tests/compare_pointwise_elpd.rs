@@ -43,7 +43,7 @@ fn trace_json(joint: [f64; 3], north: [f64; 3], south: [f64; 3]) -> String {
         })
         .collect();
     format!(
-        r#"{{"schema_version": 1, "t0": 1, "provenance": "plug_in",
+        r#"{{"schema_version": 7, "t0": 1, "provenance": "plug_in",
              "conditioning": "in_sample", "warnings": [],
              "steps": [{}]}}"#,
         steps.join(",")

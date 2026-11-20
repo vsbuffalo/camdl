@@ -320,7 +320,7 @@ fn compare_auto_derives_prequential_from_two_pgas_fits() {
     // (here an explicit prequential.json, which records a plug-in trace) is
     // refused; --allow-mixed-provenance lifts exactly that refusal.
     std::fs::write(tmp.join("explicit.json"), r#"{
-        "schema_version": 3, "t0": 0, "provenance": "plug_in",
+        "schema_version": 7, "t0": 0, "provenance": "plug_in",
         "conditioning": "in_sample",
         "steps": [{"t": 7.0, "y_obs": 1.0, "y_pred_samples": [],
                    "log_score": -1.0, "crps": 0.5, "pit": 0.5, "ess": 100.0}],

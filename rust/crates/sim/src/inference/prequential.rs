@@ -141,8 +141,8 @@ pub fn build_trace(
         // is a `ForcingHeld` warning (added by the caller, which holds the
         // policy). All additions serde-defaulted, so older traces still
         // read; they read as InSample/PlugIn/Unrecorded/no derivation/Filtered,
-        // which is factually what they are, and a reader of one below 7 cannot
-        // tell from it whether a forcing was held.
+        // which is factually what they are; one below 7 cannot say whether a
+        // forcing was held, and `compare` refuses it.
         schema_version: 7,
         t0,
         // This builder scores a single filter pass at one θ over the full data:
