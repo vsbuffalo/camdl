@@ -509,6 +509,68 @@ fn a_save_whose_data_and_schedule_disagree_is_refused() {
     assert!(!tmp.path().join("state.tsv").exists(), "a refused save writes no state");
 }
 
+/// Rule 2 judges the training rows only, under the fit's `holdout_after`:
+/// window rows [0, 7), [7, 14), [14, 21), [21, 30) against `every 7 'days`
+/// (windows [0, 7), ..., [21, 28)). The row [21, 30) disagrees, so the save
+/// is refused without a holdout; with `holdout_after = 21` it is a held-out
+/// row, the training rows agree, and the state is saved at 21.
+#[test]
+fn the_save_check_judges_only_the_training_rows_under_holdout_after() {
+    let model = window_columns("every 7 'days");
+    let weekly = "ws\twe\tweekly_cases\n0\t7\t10\n7\t14\t40\n14\t21\t90\n21\t30\t150\n";
+    let fit_toml = |holdout: &str| format!(r#"output_dir = "results"
+[model]
+camdl = "model.camdl"
+[data]
+{holdout}
+[data.observations]
+daily_cases = "daily_cases.tsv"
+weekly_cases = "weekly_cases.tsv"
+[estimate.beta]
+bounds = [0.05, 2.0]
+start = 0.5
+[fixed]
+gamma = 0.25
+rho = 0.5
+k = 10.0
+N0 = 1000
+I0 = 5
+[method]
+algorithm = "if2"
+backend = "chain_binomial"
+chains = 1
+particles = 20
+iterations = 1
+cooling = 0.5
+"#);
+    for (holdout, saves) in [("", false), ("holdout_after = 21", true)] {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("model.camdl"), &model).unwrap();
+        std::fs::write(dir.join("daily_cases.tsv"), daily_through(30)).unwrap();
+        std::fs::write(dir.join("weekly_cases.tsv"), weekly).unwrap();
+        std::fs::write(dir.join("fit.toml"), fit_toml(holdout)).unwrap();
+        let out = run(dir, &[
+            "pfilter".into(), "model.camdl".into(), "--fit".into(), "fit.toml".into(),
+            "--params".into(), s(&params()),
+            "--particles".into(), "20".into(), "--seed".into(), "1".into(),
+            "--save-final-state".into(), "state.tsv".into(), "--no-store".into(),
+        ]);
+        let err = stderr(&out);
+        if saves {
+            assert!(out.status.success(), "{holdout}: the training rows agree, so it saves: {err}");
+            let header = std::fs::read_to_string(dir.join("state.tsv")).unwrap();
+            assert!(header.starts_with("# camdl-final-state v1\tt=21\n"), "{header}");
+        } else {
+            assert!(!out.status.success(), "without a holdout the row [21, 30) is judged: {err}");
+            assert!(err.contains("stream 'weekly_cases' is refused --save-final-state: its data \
+                imply the period [21, 30) (training row 3), but its emit_schedule gives [21, 28)"),
+                "{err}");
+            assert!(!dir.join("state.tsv").exists());
+        }
+    }
+}
+
 /// gh#1301 carried into Rule 2: an `ending_on` weekly stream whose data
 /// (labelled 7, 14, 21: [1, 8), [8, 15), [15, 22)) agree with the periods its
 /// schedule's labels give saves, and notes the week [22, 29) under way at 25.
