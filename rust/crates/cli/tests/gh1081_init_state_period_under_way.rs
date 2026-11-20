@@ -43,6 +43,11 @@ fn s(p: &Path) -> String {
 
 /// An SIR whose one stream is described by `stream`, run from day 0 to day 49.
 fn model(stream: &str) -> String {
+    model_from(stream, 0, "")
+}
+
+/// [`model`], starting at day `from` and with `extra` top-level blocks.
+fn model_from(stream: &str, from: u32, extra: &str) -> String {
     format!(
         r#"
 time_unit = 'days
@@ -65,7 +70,9 @@ observations {{
 {stream}
 }}
 
-simulate {{ from = 0 'days  to = 49 'days }}
+{extra}
+
+simulate {{ from = {from} 'days  to = 49 'days }}
 "#
     )
 }
@@ -158,11 +165,18 @@ fn restart(stream: &str, origin: f64) -> Restart {
 
 /// [`restart`], with further command-line arguments.
 fn restart_with(stream: &str, origin: f64, extra: &[&str]) -> Restart {
+    restart_model(&model(stream), origin, extra, true)
+}
+
+/// Restart `model_src` from a saved state at day `origin`. `obs_dir` asks for
+/// one observation file per stream; without it the command is given no
+/// observation flag at all.
+fn restart_model(model_src: &str, origin: f64, extra: &[&str], obs_dir_flag: bool) -> Restart {
     let bin = binary();
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().to_path_buf();
     let model_path = dir.join("sir.camdl");
-    std::fs::write(&model_path, model(stream)).unwrap();
+    std::fs::write(&model_path, model_src).unwrap();
     let state = dir.join("final.tsv");
     write_state(&state, origin);
     let obs_dir = dir.join("obs");
@@ -173,9 +187,11 @@ fn restart_with(stream: &str, origin: f64, extra: &[&str]) -> Restart {
         "--param".into(), "gamma=0.15".into(),
         "--init-state".into(), s(&state),
         "--seed".into(), "3".into(),
-        "--obs-dir".into(), s(&obs_dir),
         "--output-dir".into(), s(&store),
     ];
+    if obs_dir_flag {
+        args.extend(["--obs-dir".to_string(), s(&obs_dir)]);
+    }
     args.extend(extra.iter().map(|a| a.to_string()));
     let out = run(&bin, &args);
     Restart { _tmp: tmp, out, obs_dir, store }
@@ -318,4 +334,47 @@ fn a_period_widened_by_emit_every_is_refused() {
     let err = String::from_utf8_lossy(&r.out.stderr);
     assert!(r.out.status.success(), "a restart on the widened boundary must run: {err}");
     assert_eq!(data_rows(&r).len(), 1, "the fortnight of days 28 to 41");
+}
+
+/// A quantity reduced over an observation stream draws that stream's rows
+/// with no observation flag given, so nothing is checked before the run: the
+/// refusal has to come from the emitter that plans the rows afterwards. That
+/// emitter is handed the cell's model, whose start a restart has moved to the
+/// origin, so it must be told the model's own start separately or it sees no
+/// period beginning before the restart.
+#[test]
+fn an_obs_sourced_quantity_is_refused_where_its_rows_are_planned() {
+    let src = model_from(
+        WEEKLY_CLOSING_AT, 0, "quantities { last_seen = final(observations.weekly) }");
+    let tmp_q = tempfile::tempdir().unwrap();
+    let qdir = tmp_q.path().join("q");
+    let r = restart_model(&src, 25.0, &["--quantities-out", &s(&qdir)], false);
+    let err = String::from_utf8_lossy(&r.out.stderr);
+    assert!(!r.out.status.success(), "the quantity would reduce over a series missing a week: {err}");
+    assert!(err.contains("'weekly'") && err.contains("[21, 28)"), "names the stream and period: {err}");
+
+    // On a week boundary the same quantity is computed.
+    let r = restart_model(&src, 28.0, &["--quantities-out", &s(&qdir)], false);
+    assert!(
+        r.out.status.success(),
+        "a boundary restart computes the quantity: {}",
+        String::from_utf8_lossy(&r.out.stderr)
+    );
+}
+
+/// A model that starts at day 10 has weeks of days 10-16, 17-23, …. The week
+/// labelled 10 (days 3 to 9) begins before the model and is written by no
+/// run; a restart at day 20 is inside days 17 to 23.
+#[test]
+fn periods_are_counted_from_the_models_own_start() {
+    let src = model_from(WEEKLY_CLOSING_AT, 10, "");
+    assert_refused_at(&restart_model(&src, 20.0, &[], true), "[17, 24)", "t = 20");
+    for boundary in [10.0, 17.0, 24.0] {
+        let r = restart_model(&src, boundary, &[], true);
+        assert!(
+            r.out.status.success(),
+            "a restart at day {boundary} is on a boundary: {}",
+            String::from_utf8_lossy(&r.out.stderr)
+        );
+    }
 }

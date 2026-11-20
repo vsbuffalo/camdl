@@ -941,3 +941,49 @@ fn sim_leaf_ids(root: &Path) -> Vec<String> {
     out.dedup();
     out
 }
+
+/// gh#1081: a fit-sourced restart is refused inside a reporting period too.
+///
+/// The fit's origin is its last observation, day 56, a boundary of the weekly
+/// stream. Under `--emit-every 21` the stream reports three-week totals over
+/// days 42 to 62, and day 56 is inside that period, whose count before day 56
+/// the saved paths do not carry. The origin of a fit-sourced restart is known
+/// only once the draws are resolved, so this refusal is made where the rows
+/// are planned, after the cells have run: it is the one test that reaches
+/// that path, which a check made before the run would otherwise mask.
+#[test]
+fn a_fit_sourced_restart_inside_a_reporting_period_is_refused() {
+    let bin = skip_if_missing();
+    let f = fixture();
+    let obs_dir = f.dir.join("obs_under_way");
+    let run = |extra: &[&str]| {
+        let mut args: Vec<String> = vec![
+            "simulate".into(), s(&f.model),
+            "--fit".into(), s(&f.fit),
+            "--draws".into(), "posterior".into(),
+            "--init-state".into(), "fit".into(),
+            "--to".into(), HORIZON.into(),
+            "--seed".into(), "5".into(),
+            "--output-dir".into(), s(&f.dir.join("cas_under_way")),
+        ];
+        args.extend(extra.iter().map(|a| a.to_string()));
+        run_in(&bin, &f.dir, &args)
+    };
+
+    let out = run(&["--emit-every", "21", "--obs-dir", &s(&obs_dir)]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "a restart at day 56 inside days 42-62 must be refused: {err}");
+    assert!(err.contains("[42, 63)"), "the refusal names the period: {err}");
+    assert!(err.contains("t = 56"), "the refusal names the restart time: {err}");
+    assert!(err.contains("fit predict"), "the refusal points at the forecast: {err}");
+
+    // On the declared weekly cadence day 56 is a boundary, and the same
+    // restart writes its observations.
+    let weekly = f.dir.join("obs_weekly");
+    let out = run(&["--obs-dir", &s(&weekly)]);
+    assert!(
+        out.status.success(),
+        "a restart on a week boundary must run: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
