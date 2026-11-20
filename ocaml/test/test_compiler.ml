@@ -15224,6 +15224,35 @@ init { S[child] = 10  S[adult] = 10  I[child] = 1 }
 simulate { from = 0 'days  to = 60 'days }
 |}
 
+(* gh#1327: the E377 report names the transition and points at it, so in a
+   model with many transitions the author need not search for the one that
+   names `I` bare. *)
+let test_gh1327_unindexed_stoich_located () =
+  let src = {|
+time_unit = 'days
+compartments { S, I }
+dimensions { age = [child, adult] }
+stratify(by = age)
+parameters { beta : rate }
+transitions {
+  recovery_like : S[child] --> S[adult] @ beta
+  infection : S[child] --> I @ beta
+}
+init { S[child] = 10  S[adult] = 10  I[child] = 1 }
+simulate { from = 0 'days  to = 60 'days }
+|} in
+  match List.filter (fun (d : Diagnostics.diagnostic) -> d.Diagnostics.code = "E377")
+          (Compiler.collect_diagnostics ~name:"gh1327" src) with
+  | [d] ->
+    if not (contains_substring ~needle:"transition 'infection'" d.Diagnostics.message)
+    then Alcotest.failf "the report does not name the transition: %s"
+        d.Diagnostics.message;
+    if d.Diagnostics.loc = Diagnostics.no_loc then
+      Alcotest.fail "the report has no source location";
+    Alcotest.(check int) "points at the transition's line" 9
+      d.Diagnostics.loc.Diagnostics.line
+  | ds -> Alcotest.failf "expected one E377, got %d" (List.length ds)
+
 (* gh#1321: the E272 hint for a bare `at = [...]` cadence suggested
    `emit_schedule = at [t1, t2, ...] 'unit`, which is itself a syntax error.
    The suggestion the hint quotes must compile when written in place of the
@@ -19210,6 +19239,8 @@ let () =
         `Quick test_gh1326_constant_let_threshold;
       Alcotest.test_case "gh#1321 E377 unindexed stratified stoichiometry"
         `Quick test_gh1321_unindexed_stoich_is_e377;
+      Alcotest.test_case "gh#1327 E377 names and locates the transition"
+        `Quick test_gh1327_unindexed_stoich_located;
       Alcotest.test_case "gh#1321 E272 bare `at` hint suggests a form that compiles"
         `Quick test_gh1321_bare_at_hint_compiles;
       Alcotest.test_case "gh#1101 E321 calendar window/after/cooldown under an origin"

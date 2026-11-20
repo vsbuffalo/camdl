@@ -6136,21 +6136,16 @@ and resolve_ident_name ctx name ~loc =
 
 (* ── Stoichiometry ────────────────────────────────────────────────────────── *)
 
-(** Resolve a stoichiometry reference to a fully-qualified compartment
-    name. When the base has multiple stratified expansions but the
-    reference has no indices, previously returned the bare base name
-    (C3 in the 2026-04-19 review) — producing `("S", 1)` in IR
-    stoichiometry for a model where S was stratified into [S_child,
-    S_adult]. The bare name `S` isn't in the expanded compartments
-    list, so the emitted IR was structurally invalid.
-
-    Now: error out naming the transition's compartment and listing
-    the valid expansions. Still returns `base` as a continuation so
-    the caller can emit additional diagnostics before the compile
-    aborts. *)
-let resolve_stoich_ref ctx env (cname, items) =
+(** Resolves one endpoint of the transition [tr], under the binder values
+    [env], to its expanded compartment name. A stratified compartment named
+    without indices is not one expanded compartment: that is E377, located at
+    the transition and naming it, with the expansions in the hint, and the bare
+    name is returned so the caller can report further mistakes before the
+    compile fails. *)
+let resolve_stoich_ref ctx (tr : transition_decl) env (cname, items) =
+  let loc = diag_loc_of_ast_ctx ctx tr.trloc in
   let base = match List.assoc_opt cname env with Some n -> n | None -> cname in
-  let items = resolve_index_order ctx ~loc:Diagnostics.no_loc
+  let items = resolve_index_order ctx ~loc
                 ~what:(Printf.sprintf "compartment '%s'" base)
                 ~dims:(comp_dims ctx base) items in
   let idx_vals = List.map (index_item_to_str env) items in
@@ -6162,10 +6157,10 @@ let resolve_stoich_ref ctx env (cname, items) =
     | many ->
       Diagnostics.error ctx.diags
         ~code:"E377"
-        ~loc:Diagnostics.no_loc
+        ~loc
         ~message:(Printf.sprintf
-          "compartment '%s' is stratified but used without indices in \
-           stoichiometry" base)
+          "transition '%s': compartment '%s' is stratified but used without \
+           indices in stoichiometry" tr.trname base)
         ~hint:(Printf.sprintf
           "pick an expansion or index the transition: %s"
           (String.concat ", " many))
@@ -6960,7 +6955,7 @@ let expand_transitions_counted ctx =
        [tr] is the family as declared, or one stage copy of a member whose
        source is a staged compartment reached through a compartment binder. *)
     let expand_member ~binder_copy (tr : transition_decl) env =
-        let src_names = List.map (resolve_stoich_ref ctx env) tr.trsrc in
+        let src_names = List.map (resolve_stoich_ref ctx tr env) tr.trsrc in
         (* By here a `via` transition has been desugared by [lower_via_transitions]
            (run before this pass), so the dynamics is always an ordinary `@ rate`.
            A surviving `Via` is a compiler invariant violation, not user error —
@@ -7029,7 +7024,7 @@ let expand_transitions_counted ctx =
            appended to the transition name — used for branches to
            disambiguate `infect` → `infect_symp` / `infect_asym`. *)
         let emit_one dst_refs raw_rate_for_branch name_suffix =
-          let dst_names = List.map (resolve_stoich_ref ctx env) dst_refs in
+          let dst_names = List.map (resolve_stoich_ref ctx tr env) dst_refs in
           (* Fix B: a #[lineage] rate must stay fully inlined so the parent
              decomposition can read its Pop structure (it cannot see through a
              BindingRef). Non-lineage transitions still extract the same let. *)
@@ -7080,7 +7075,7 @@ let expand_transitions_counted ctx =
                        List.rev tr.trindices with
               | Some (r, _), [ src_ref ], IBind (v, d) :: _ when d = r.res_stage_dim ->
                 List.map (fun level ->
-                  resolve_stoich_ref ctx ((v, level) :: List.remove_assoc v env) src_ref)
+                  resolve_stoich_ref ctx tr ((v, level) :: List.remove_assoc v env) src_ref)
                   r.res_stage_levels
               | _ -> src_names
           in
