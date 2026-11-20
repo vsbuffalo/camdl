@@ -596,13 +596,11 @@ let known_reuse : (string * string list) list = [
   (* a syntax error, and an internal error (an exception the front end
      caught, or the expander's unlowered `via`) *)
   "E001", ["compiler.ml"; "doctest.ml"; "expander.ml"; "parser.mly"];
-  (* E270-E274 each name an observation-surface migration (parser.mly) and
-     unrelated expander errors: a list or range in a scalar position, an
-     unindexed stratified compartment in a stoichiometry, a shaped `let`'s
-     index count, and reactive-trigger errors. *)
+  (* E270, E271, E273 and E274 each name an observation-surface migration
+     (parser.mly) and unrelated expander errors: a list or range in a scalar
+     position, a shaped `let`'s index count, and reactive-trigger errors. *)
   "E270", ["expander.ml"; "parser.mly"];
   "E271", ["expander.ml"; "parser.mly"];
-  "E272", ["expander.ml"; "parser.mly"];
   "E273", ["expander.ml"; "parser.mly"];
   "E274", ["expander.ml"; "parser.mly"];
 ]

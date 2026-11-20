@@ -2429,7 +2429,7 @@ let lower_via_transitions ctx =
        well-formed; every problem is reported, including on a transition that
        is then skipped. The chain is synthesized only for a transition that
        passes both the law's validation and this, so a rejected `via` produces
-       its own diagnostic and not a cascade of E100/E272/E277 from a
+       its own diagnostic and not a cascade of E100/E377/E277 from a
        half-applied stratification. *)
     let structurally_ok (tr : transition_decl) (spec : via_spec option) : bool =
       let loc = diag_loc_of_ast_ctx ctx tr.trloc in
@@ -4794,7 +4794,7 @@ let partial_index_hint ctx env ~base ~items ~dropped : string =
 
     Scoped to compartments: the siblings already reject an empty list with
     their own codes (`beta[]` → E299, `C_age[]` → E202, `S[]` in stoichiometry
-    → E272). *)
+    → E377). *)
 let empty_index_error ctx ~loc ~base ~items : bool =
   if items <> [] || not (Hashtbl.mem ctx.comp_tbl base) then false
   else begin
@@ -6158,7 +6158,7 @@ let resolve_stoich_ref ctx env (cname, items) =
     | [] -> base  (* unknown compartment — caught downstream by Validate *)
     | many ->
       Diagnostics.error ctx.diags
-        ~code:"E272"
+        ~code:"E377"
         ~loc:Diagnostics.no_loc
         ~message:(Printf.sprintf
           "compartment '%s' is stratified but used without indices in \
@@ -11651,7 +11651,7 @@ let lower_threshold ctx env ~name ~loc (e : expr) : Ir.trigger_threshold =
      | Some lb -> Ir.TTConst (eval_const_expr ctx lb.lbody)
      | None -> Ir.TTConst 0.0  (* unreachable: ConstRef is emitted only for a let *))
   | _ ->
-    Diagnostics.error ctx.diags ~code:"E272" ~loc
+    Diagnostics.error ctx.diags ~code:"E378" ~loc
       ~message:(Printf.sprintf
         "reactive intervention '%s': trigger threshold must be a constant or \
          a parameter" name)

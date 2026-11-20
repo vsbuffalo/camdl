@@ -1134,7 +1134,7 @@ obs_kv:
           ~msg:"the observation emission cadence is now written `emit_schedule = ...`"
           ~hint:(match s with
             | SchedEvery _ -> "write `emit_schedule = every N 'unit` — see `camdl docs language-changes`"
-            | SchedAt _    -> "write `emit_schedule = at [t1, t2, ...] 'unit` — see `camdl docs language-changes`");
+            | SchedAt _    -> "write `emit_schedule = at [7 'days, 14 'days]`, keeping your entries: the unit goes on each one — see `camdl docs language-changes`");
         `Schedule s }
   | k = IDENT EQ proj = obs_projection
       { `Proj (k, $startpos(k), $endpos(k), proj) }

@@ -15015,6 +15015,68 @@ let test_reactive_negative_window_rejected () =
        \  action = transfer(fraction = cov, from = S, to = V)\n\
        }")
 
+(* gh#1321: E272 named three unrelated errors. A reactive threshold that is
+   neither a constant nor a parameter now has its own code, E378. *)
+let test_gh1321_nonconstant_threshold_is_e378 () =
+  compile_expect_error_code ~code:"E378" ~contains:"trigger threshold"
+    (reactive_model_with
+      "sia : when observed(weekly) >= 2 * thr {\n\
+       \  action = transfer(fraction = cov, from = S, to = V)\n\
+       }")
+
+(* gh#1321: a stratified compartment left unindexed in a stoichiometry now
+   has its own code, E377, rather than sharing E272 with the cadence form. *)
+let test_gh1321_unindexed_stoich_is_e377 () =
+  compile_expect_error_code ~code:"E377"
+    ~contains:"stratified but used without indices"
+    {|
+time_unit = 'days
+compartments { S, I }
+dimensions { age = [child, adult] }
+stratify(by = age)
+parameters { beta : rate }
+transitions { infection : S --> I @ beta }
+init { S[child] = 10  S[adult] = 10  I[child] = 1 }
+simulate { from = 0 'days  to = 60 'days }
+|}
+
+(* gh#1321: the E272 hint for a bare `at = [...]` cadence suggested
+   `emit_schedule = at [t1, t2, ...] 'unit`, which is itself a syntax error.
+   The suggestion the hint quotes must compile when written in place of the
+   bare field. *)
+let test_gh1321_bare_at_hint_compiles () =
+  let model field = Printf.sprintf {|
+time_unit = 'days
+compartments { S, I }
+parameters { beta : rate  N0 : count  I0 : count }
+transitions { infection : S --> I @ beta * S * I / (S + I) }
+observations {
+  weekly {
+    columns       { time : time, weekly : count }
+    covers        = closing_at(time, 7 'days)
+    projected     = incidence(infection)
+    %s
+    weekly        ~ poisson(rate = projected)
+  }
+}
+init { S = N0 - I0  I = I0 }
+simulate { from = 0 'days  to = 60 'days }
+|} field in
+  let diags =
+    Compiler.collect_diagnostics ~name:"gh1321_bare_at"
+      (model "at = [7 'days, 14 'days]") in
+  let hint =
+    match List.find_opt (fun (d : Diagnostics.diagnostic) -> d.code = "E272")
+            diags with
+    | Some { hint = Some h; _ } -> h
+    | _ -> Alcotest.fail "expected an E272 diagnostic with a hint" in
+  (* The first backtick-quoted span of the hint is the suggested field. *)
+  let suggested =
+    match String.split_on_char '`' hint with
+    | _ :: s :: _ -> s
+    | _ -> Alcotest.failf "hint quotes no suggestion: %s" hint in
+  ignore (compile_expect_ok (model suggested))
+
 (* gh#1101: a trigger's `window` is a fixed span and `after`/`cooldown` are
    offsets from a firing instant, all folded to one number at compile time.
    Under an origin a calendar duration there would silently mean the average
@@ -18958,6 +19020,12 @@ let () =
         `Quick test_reactive_negative_after_rejected;
       Alcotest.test_case "E274 negative window is rejected"
         `Quick test_reactive_negative_window_rejected;
+      Alcotest.test_case "gh#1321 E378 non-constant threshold"
+        `Quick test_gh1321_nonconstant_threshold_is_e378;
+      Alcotest.test_case "gh#1321 E377 unindexed stratified stoichiometry"
+        `Quick test_gh1321_unindexed_stoich_is_e377;
+      Alcotest.test_case "gh#1321 E272 bare `at` hint suggests a form that compiles"
+        `Quick test_gh1321_bare_at_hint_compiles;
       Alcotest.test_case "gh#1101 E321 calendar window/after/cooldown under an origin"
         `Quick test_gh1101_calendar_trigger_durations_rejected;
       Alcotest.test_case "gh#1101 fixed trigger durations, or unanchored, still compile"

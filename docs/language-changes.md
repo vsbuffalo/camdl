@@ -13,6 +13,27 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-11-20 — two errors leave E272 for codes of their own
+
+**What.** E272 named three unrelated errors. It now names only the removed
+observation cadence form (a bare `every = ...` or `at = [...]` field in an
+observation block). The other two have their own codes: a stratified compartment
+named without indices in a transition's stoichiometry is **E377**, and a
+reactive trigger threshold that is neither a constant nor a parameter is
+**E378**. The messages are unchanged. The E272 hint for a bare `at` field now
+suggests `emit_schedule = at [7 'days, 14 'days]`, with the unit on each entry;
+it used to suggest a form with one trailing unit, which does not parse.
+
+**Migration.** None for models: what compiled still compiles and what was
+refused is still refused. A script or test that matches on the code E272 for
+either of the two errors must match E377 or E378 instead.
+
+**Diagnostic.**
+`error[E377]: compartment 'S' is stratified but used without
+indices in stoichiometry`;
+`error[E378]: reactive intervention 'sia': trigger
+threshold must be a constant or a parameter`.
+
 ## 2026-11-18 — a `transfer(count = ...)` that is negative when it fires is refused
 
 **What.** A plain `transfer(count = EXPR, from = A, to = B)` whose count

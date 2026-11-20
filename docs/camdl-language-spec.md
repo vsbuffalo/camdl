@@ -2297,7 +2297,7 @@ summed rate per patch; the compiler warns (W105) and points back to the
 An unindexed global formula over a stratified compartment is a **hard error**,
 not silently localized. There is no auto-transform that turns a global rate into
 per-stratum indexed formulas: a bare mixing formula over stratified `S`/`I`
-hard-errors (`E272` — "compartment is stratified but used without indices"), so
+hard-errors (`E377` — "compartment is stratified but used without indices"), so
 what runs is always what the user wrote.
 
 The user writes the per-stratum force of infection explicitly:
@@ -4757,7 +4757,9 @@ These are valid **only** inside a `when` predicate; using `observed(...)` in a
 transition rate or any other model expression is an error (it would read data
 the rate has no business reading). The predicate combines comparisons with
 `and` / `or` / `not`; each comparison has exactly one trigger input on one side
-and a constant or parameter threshold on the other.
+and a constant or parameter threshold on the other. A threshold computed from
+a parameter, such as `>= 2 * thr`, is refused with E378; declare the threshold
+itself as the parameter.
 
 The policy body fields:
 
@@ -7391,6 +7393,8 @@ authoritative list is whatever `ocaml/lib/compiler/` and `ocaml/lib/ir/` emit.
 | E358 | Error   | `prevalence(of = …, among = …)`: the two sides collapse different dimensions (§12.1) |
 | E359 | Error   | `prevalence(of = …, among = …)` reads a flow on one side (§12.1) |
 | E360 | Error   | Arithmetic with no meaning on a definite instant: `Instant + Instant`, a `sum` of instants, `k * Instant`, `Duration − Instant`, `Instant +` a unitless constant, a conditional choosing between an Instant and a duration (§2.1) |
+| E377 | Error   | A stratified compartment is named without indices in a transition's stoichiometry (§8.3) |
+| E378 | Error   | A reactive trigger's threshold is neither a constant nor a parameter (§13.9) |
 | E423 | Error   | A destination split's constant weights are not a probability distribution: a weight is not finite or lies outside [0, 1], or all are constant and do not sum to 1 (within `1e-9`) (§9.1.2) |
 | W103 | Warning | Let binding name shadows a stratum value in some dimension                                |
 
