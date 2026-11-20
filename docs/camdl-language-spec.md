@@ -4609,9 +4609,11 @@ These are valid **only** inside a `when` predicate; using `observed(...)` in a
 transition rate or any other model expression is an error (it would read data
 the rate has no business reading). The predicate combines comparisons with
 `and` / `or` / `not`; each comparison has exactly one trigger input on one side
-and a constant or parameter threshold on the other. A threshold computed from
-a parameter, such as `>= 2 * thr`, is refused with E378; declare the threshold
-itself as the parameter.
+and a constant or parameter threshold on the other. A constant threshold is
+any compile-time constant: a number, arithmetic on numbers, or a `let` of one,
+with or without a declared kind (`let k = 2`, then `>= k`). A threshold
+computed from a parameter, such as `>= 2 * thr`, is refused with E378; declare
+the threshold itself as the parameter.
 
 A trigger input outside a predicate is **E278**. A comparison without exactly
 one trigger input, or a predicate that is not a comparison or a combination of

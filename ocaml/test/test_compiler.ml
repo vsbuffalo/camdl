@@ -15182,6 +15182,32 @@ let test_gh1321_nonconstant_threshold_is_e378 () =
        \  action = transfer(fraction = cov, from = S, to = V)\n\
        }")
 
+(* gh#1326: a threshold that is a compile-time constant is that number,
+   whether written as a literal, as arithmetic on literals, or as a `let`
+   with or without a declared kind. *)
+let test_gh1326_constant_let_threshold () =
+  let threshold_of lets threshold =
+    let src =
+      lets ^ "\n" ^
+        (reactive_model_with (Printf.sprintf
+          "sia : when observed(weekly) >= %s {\n\
+           \  action = transfer(fraction = cov, from = S, to = V)\n\
+           }" threshold)) in
+    let m = compile_expect_ok src in
+    match (List.find (fun (i : Ir.intervention) -> i.Ir.name = "sia")
+             m.Ir.interventions).Ir.fire with
+    | Ir.Reactive { Ir.when_ = Ir.TECmp (_, _, t); _ } -> t
+    | _ -> Alcotest.fail "expected a reactive comparison"
+  in
+  List.iter (fun (lets, threshold) ->
+      Alcotest.(check bool)
+        (Printf.sprintf "%s >= %s is the constant 2" lets threshold) true
+        (threshold_of lets threshold = Ir.TTConst 2.0))
+    [ ("let k2 = 2", "k2");
+      ("let k2 : count = 2", "k2");
+      ("let k1 = 1\nlet k2 = k1 + 1", "k2");
+      ("", "1 + 1") ]
+
 (* gh#1321: a stratified compartment left unindexed in a stoichiometry now
    has its own code, E377, rather than sharing E272 with the cadence form. *)
 let test_gh1321_unindexed_stoich_is_e377 () =
@@ -19180,6 +19206,8 @@ let () =
         `Quick test_reactive_negative_window_rejected;
       Alcotest.test_case "gh#1321 E378 non-constant threshold"
         `Quick test_gh1321_nonconstant_threshold_is_e378;
+      Alcotest.test_case "gh#1326 a constant let threshold is its value"
+        `Quick test_gh1326_constant_let_threshold;
       Alcotest.test_case "gh#1321 E377 unindexed stratified stoichiometry"
         `Quick test_gh1321_unindexed_stoich_is_e377;
       Alcotest.test_case "gh#1321 E272 bare `at` hint suggests a form that compiles"

@@ -11760,23 +11760,32 @@ let lower_obs_quantity ctx env ~name ~loc ~ast_loc (e : expr) : Ir.trigger_quant
      | _ -> assert false (* guarded by is_observed_call *))
   | _ -> assert false (* guarded by is_observed_call *)
 
+(* A reactive trigger's threshold: a number, or one parameter (spec §13.9).
+   A compile-time constant is that number, however it is written: a literal,
+   arithmetic on literals, or a `let` of one with or without a declared kind
+   ([const_value], the evaluator E423 uses). Anything else is E378. *)
 let lower_threshold ctx env ~name ~loc (e : expr) : Ir.trigger_threshold =
   match resolve_expr ctx env e with
   | Ir.Const f -> Ir.TTConst f
   | Ir.Param p -> Ir.TTParam p
-  (* A model constant is a number known now: the threshold is that number. *)
   | Ir.ConstRef c ->
     (match Hashtbl.find_opt ctx.let_tbl c with
      | Some lb -> Ir.TTConst (eval_const_expr ctx lb.lbody)
      | None -> Ir.TTConst 0.0  (* unreachable: ConstRef is emitted only for a let *))
   | _ ->
-    Diagnostics.error ctx.diags ~code:"E378" ~loc
-      ~message:(Printf.sprintf
-        "reactive intervention '%s': trigger threshold must be a constant or \
-         a parameter" name)
-      ~hint:"e.g. >= 2 or >= afp_trigger_threshold"
-      ();
-    Ir.TTConst 0.0
+    match const_value ctx e with
+    | Some v -> Ir.TTConst v
+    | None ->
+      Diagnostics.error ctx.diags ~code:"E378" ~loc
+        ~message:(Printf.sprintf
+          "reactive intervention '%s': trigger threshold must be a constant or \
+           a parameter" name)
+        ~hint:"write a number (`>= 2`), a `let` of one (`let k = 2`, then \
+               `>= k`), or one parameter (`>= afp_trigger_threshold`); a \
+               threshold computed from a parameter, such as `2 * thr`, is \
+               declared as a parameter of its own"
+        ();
+      Ir.TTConst 0.0
 
 let lower_trigger_atom ctx env ~name ~loc ~ast_loc (e : expr) : Ir.trigger_expr =
   match e with

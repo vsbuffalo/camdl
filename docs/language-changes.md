@@ -13,6 +13,22 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-11-20 — a reactive threshold may name an untyped constant `let`
+
+**What.** A reactive trigger threshold that named a `let` without a declared
+kind (`let k2 = 2`, then `when observed(weekly) >= k2`) was refused with E378,
+"trigger threshold must be a constant or a parameter", although its value is a
+constant; the same `let` with a declared kind (`let k2 : count = 2`) compiled.
+Any compile-time constant is now accepted as a threshold: a number, arithmetic
+on numbers, or a `let` of one, typed or not. A threshold computed from a
+parameter is still E378, whose hint now says what is accepted.
+
+**Migration.** None: what compiled still compiles, to the same threshold.
+
+**Diagnostic.** None for the accepted forms.
+
+---
+
 ## 2026-11-20 — a constant probability argument outside [0, 1] is refused in every family
 
 **What.** A distribution argument whose value is a probability or a proportion —
