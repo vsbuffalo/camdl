@@ -1578,13 +1578,11 @@ fn run_profile(
     // profile-base = the inference *problem*, with the focal GRID and the
     // method config EXCLUDED (guardrail 1) — the grid rides `point`, the
     // method config `method`. The base fit's `starts_from` rides the base as a dep.
-    let mut fixed_blob = fixed_for_cas.clone();
-    fixed_blob.sort();
     let mut priors_blob = resolved_priors_kv.clone();
     priors_blob.sort_by(|a, b| a.0.cmp(&b.0));
     let base_config_hash = crate::fit::cas::canonical_config_hash(&ProfileBaseLevel {
         base_params: &base_params_hash,
-        fixed: &fixed_blob,
+        fixed: &fixed_for_cas,
         obs_family: &obs_family_key,
         fit_toml: &fit_toml_hash,
         priors: &priors_blob,
