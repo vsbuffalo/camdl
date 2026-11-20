@@ -99,21 +99,15 @@ pub(crate) struct ResolvedSimConfig {
     pub arms: Vec<ResolvedEntry>,
 }
 
-/// Compile-time settings ([`crate::util::CompileSettings`]): the first thing a
-/// `simulate` resolves, because the compile that produces [`ResolvedModel::ir`]
-/// reads them. They change the IR camdlc emits, so they reach the identity
-/// through [`ResolvedModel::digest`] and are not a field of
-/// [`ResolvedSimConfig`] of their own. `simulate` passes them to every
-/// compile it makes, as every command does.
-pub(crate) use crate::util::CompileSettings;
-
 /// The model the engine starts every cell from, and its identity level.
 pub(crate) struct ResolvedModel {
     /// The base model as `util::load_run_model` loads it for the engine:
     /// observation anchors substituted, `--integrator` applied, no parameter
     /// values or scenario applied (those are per cell).
     pub ir: ir::Model,
-    /// The `model` level, computed once from `ir`.
+    /// The `model` level, computed once from `ir`. The compile settings
+    /// (`util::CompileSettings`) change the IR camdlc emits, so they reach
+    /// the identity here rather than as a configuration field.
     pub digest: ModelDigest,
     /// The engine identity folded into `digest` (the build and the engine
     /// switches simulate keys), also used by the ensemble's model level and

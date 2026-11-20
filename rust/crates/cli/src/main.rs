@@ -791,7 +791,7 @@ fn resolve_paired_posterior(
     )
 }
 
-fn run_simulate(a: &args::SimulateArgs, compile: crate::sim_config::CompileSettings) {
+fn run_simulate(a: &args::SimulateArgs, compile: util::CompileSettings) {
     // simulate has no `--no-color`: its painters follow the environment and
     // whether each stream is a terminal.
     let out = crate::out::Out::new(false);
