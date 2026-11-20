@@ -667,7 +667,9 @@ fn target_design(
 
 /// D82: an interval stream's data-implied periods (its training rows, its
 /// held-out rows and, for a declared tiling, the targets the tiling continues
-/// to) against the periods between consecutive times of its `emit_schedule`.
+/// to) against the periods its `emit_schedule` gives ([`schedule_periods`]:
+/// the emitter's own rule, `covers.period_of(label)` for a uniform form, the
+/// gaps between emit times for window columns, gh#1301).
 /// A data period that overlaps a schedule period without being it is a
 /// conflict. Only the reporting intervals this forecast reaches are judged,
 /// the reach D80 uses: data periods ending at or before `reach` (a held-out
@@ -682,18 +684,7 @@ fn check_schedule_agrees(
     targets: &[Measures],
     reach: f64,
 ) -> Result<(), StreamRefusal> {
-    let Some(mut times) = emit_times(s.obs, reach) else { return Ok(()) };
-    // The schedule period that crosses the reach, so a data period ending at
-    // or before it is compared with every period it overlaps.
-    if let Some(ObservationSchedule::Regular(r)) = s.obs.emit_schedule.as_ref() {
-        if let Some(&last) = times.last() {
-            times.push(last + r.step);
-        }
-    }
-    let schedule: Vec<Measures> = times.windows(2)
-        .filter(|w| w[1] > w[0])
-        .map(|w| Measures::Period(period(w[0], w[1])))
-        .collect();
+    let Some(schedule) = schedule_periods(s.obs, reach) else { return Ok(()) };
     let tiled = match source {
         TargetSource::DeclaredTiling { span } => targets.iter()
             .map(|m| (*m, format!("the declared tiling of `covers` (span {span}) continued past the rows")))
@@ -717,6 +708,53 @@ fn check_schedule_agrees(
         }
     }
     Ok(())
+}
+
+/// The periods `obs`'s `emit_schedule` gives that can overlap a data period
+/// ending at or before `reach`, or `None` when the stream declares no
+/// schedule. They are the periods `simulate --obs` writes (`plan_emission`):
+/// for a uniform `covers` form, the period `covers.period_of(label)` of each
+/// emit label, continued while a period starts before `reach`; for window
+/// columns, the gaps between consecutive emit times, with the one crossing
+/// the reach included. Gaps between emit times are a uniform form's periods
+/// only at offset 0 with a step equal to the span, so they are not used for
+/// one (gh#1301).
+fn schedule_periods(obs: &ObservationModel, reach: f64) -> Option<Vec<Measures>> {
+    let positive = |(start, stop): (f64, f64)| (stop > start).then(|| Measures::Period(period(start, stop)));
+    match &obs.covers {
+        Some(covers @ (Covers::From { .. } | Covers::Until { .. })) => {
+            let of = |label: f64| covers.period_of(label).expect("a uniform form gives every label a period");
+            let labels: Vec<f64> = match obs.emit_schedule.as_ref()? {
+                ObservationSchedule::Regular(r) if r.step > 0.0 => {
+                    let mut out = Vec::new();
+                    let mut k = 0_u64;
+                    loop {
+                        let label = r.start + (k as f64) * r.step;
+                        if of(label).0 >= reach {
+                            break;
+                        }
+                        out.push(label);
+                        k += 1;
+                    }
+                    out
+                }
+                ObservationSchedule::Regular(_) => return None,
+                ObservationSchedule::AtTimes(ts) => ts.clone(),
+            };
+            Some(labels.into_iter().filter_map(|l| positive(of(l))).collect())
+        }
+        _ => {
+            let mut times = emit_times(obs, reach)?;
+            // The schedule period that crosses the reach, so a data period
+            // ending at or before it is compared with every period it overlaps.
+            if let Some(ObservationSchedule::Regular(r)) = obs.emit_schedule.as_ref() {
+                if let Some(&last) = times.last() {
+                    times.push(last + r.step);
+                }
+            }
+            Some(times.windows(2).filter_map(|w| positive((w[0], w[1]))).collect())
+        }
+    }
 }
 
 /// D80: the held-out rows within the reach of a window-column stream with no
@@ -1140,7 +1178,8 @@ mod tests {
 
     /// D82: a uniform weekly `covers` form whose rows close on days 7, 14,
     /// 21 and an `emit_schedule` of every 7 days from day 3 disagree over the
-    /// same reporting interval. The forecast is refused, naming the stream,
+    /// same reporting interval: the emitter writes label 3 over [-4, 3)
+    /// (`period_of`, gh#1301). The forecast is refused, naming the stream,
     /// both periods and the source of each, rather than following the data.
     #[test]
     fn a_tiling_and_an_emit_schedule_that_disagree_are_refused() {
@@ -1155,7 +1194,7 @@ mod tests {
         assert!(matches!(&refusals[..], [StreamRefusal::ScheduleConflict { .. }]), "{refusals:?}");
         let msg = err.to_string();
         assert!(msg.contains("'weekly'") && msg.contains("[0, 7)") && msg.contains("training row 0")
-            && msg.contains("[3, 10)") && msg.contains("emit_schedule"), "{msg}");
+            && msg.contains("[-4, 3)") && msg.contains("emit_schedule"), "{msg}");
         // Agreeing declarations forecast as before.
         wobs.emit_schedule = Some(ObservationSchedule::Regular(RegularSchedule { start: 0.0, step: 7.0, end: 63.0 }));
         let plan = ForecastPlan::new(partition(&rows), 14.0, &[
@@ -1165,7 +1204,8 @@ mod tests {
     }
 
     /// D82 on held-out data and the tiling's continuation: the schedule
-    /// agrees over the training rows but not past them.
+    /// agrees over the training rows but not past them, where the emitter
+    /// writes label 30 over [23, 30) against the tiling's [21, 28).
     #[test]
     fn a_schedule_that_disagrees_only_past_the_training_rows_is_refused() {
         let train: Vec<ObservedRow> = (0..3).map(|i| row(i, 7.0 * i as f64, 7.0 * (i + 1) as f64)).collect();
@@ -1176,7 +1216,7 @@ mod tests {
             PlanStream { obs: &wobs, training: &train, held_out: &[], design: DesignInput::NotSupplied },
         ]).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("[21, 28)") && msg.contains("declared tiling") && msg.contains("[21, 30)"), "{msg}");
+        assert!(msg.contains("[21, 28)") && msg.contains("declared tiling") && msg.contains("[23, 30)"), "{msg}");
     }
 
     /// D82 judges the reporting intervals this forecast reaches, as D80
@@ -1198,6 +1238,47 @@ mod tests {
             PlanStream { obs: &wobs, training: &train, held_out: &held, design: DesignInput::NotSupplied },
         ]).unwrap_err();
         assert!(matches!(&err, PlanError::NoTargets { refusals } if matches!(refusals[..], [StreamRefusal::ScheduleConflict { .. }])), "{err:?}");
+    }
+
+    /// gh#1301: D82 compares the data's periods with the period the emitter
+    /// writes for each emit label, `covers.period_of(label)`. Under
+    /// `ending_on(time, 7 'days)` (stop = label + 1) with data labelled 7,
+    /// 14, 21 and `emit_schedule = every 7 'days`, the emitter writes label 7
+    /// over [1, 8), the data's own period: the declarations agree and the
+    /// stream forecasts.
+    #[test]
+    fn an_ending_on_stream_whose_labels_agree_with_its_data_forecasts() {
+        let train: Vec<ObservedRow> = (0..3).map(|i| row(i, 1.0 + 7.0 * i as f64, 8.0 + 7.0 * i as f64)).collect();
+        let rows = BTreeMap::from([("weekly".to_string(), train.clone())]);
+        let mut wobs = weekly();
+        wobs.covers = Some(Covers::Until { offset: 1.0, span: 7.0 });
+        wobs.emit_schedule = Some(ObservationSchedule::Regular(RegularSchedule { start: 0.0, step: 7.0, end: 63.0 }));
+        let plan = ForecastPlan::new(partition(&rows), 14.0, &[
+            PlanStream { obs: &wobs, training: &train, held_out: &[], design: DesignInput::NotSupplied },
+        ]).unwrap_or_else(|e| panic!("an agreeing ending_on stream must forecast: {e}"));
+        let spans: Vec<(f64, f64)> = plan.targets().iter().map(|t| (t.measures.start(), t.measures.end())).collect();
+        assert_eq!(spans, vec![(22.0, 29.0), (29.0, 36.0)]);
+    }
+
+    /// gh#1301, the reverse: data labelled 6, 13, 20 under `ending_on` cover
+    /// [0, 7), [7, 14), [14, 21), but the emitter writes label 7 over [1, 8).
+    /// The gaps between emit times ([0, 7), ...) agree with the data and hid
+    /// the disagreement; the labels' own periods do not, so it is refused.
+    #[test]
+    fn an_offset_stream_whose_labels_disagree_with_its_data_is_refused() {
+        let train: Vec<ObservedRow> = (0..3).map(|i| row(i, 7.0 * i as f64, 7.0 * (i + 1) as f64)).collect();
+        let rows = BTreeMap::from([("weekly".to_string(), train.clone())]);
+        let mut wobs = weekly();
+        wobs.covers = Some(Covers::Until { offset: 1.0, span: 7.0 });
+        wobs.emit_schedule = Some(ObservationSchedule::Regular(RegularSchedule { start: 0.0, step: 7.0, end: 63.0 }));
+        let err = ForecastPlan::new(partition(&rows), 14.0, &[
+            PlanStream { obs: &wobs, training: &train, held_out: &[], design: DesignInput::NotSupplied },
+        ]).unwrap_err();
+        let PlanError::NoTargets { refusals } = &err else { panic!("{err:?}") };
+        assert_eq!(refusals, &[StreamRefusal::ScheduleConflict {
+            stream: "weekly".into(), data: (0.0, 7.0), data_source: "training row 0".into(),
+            schedule: (-6.0, 1.0),
+        }]);
     }
 
     /// D80: a held-out row of a stream with a declared cadence that is not
