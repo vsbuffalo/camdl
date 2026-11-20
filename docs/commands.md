@@ -366,6 +366,30 @@ an ad-hoc run is labelled from its flags (`(none)` for no flags,
 Use a sweep to explore _forward_ behavior under interventions and parameter
 ranges. To estimate parameters from data, use `fit`.
 
+### Restart from a filtered state: `pfilter --save-final-state` → `simulate --init-state`
+
+```bash
+# filter at fixed parameters; save the particles at the last observation, T
+camdl pfilter model.camdl --data cases.tsv --params mle.toml \
+    --particles 1000 --save-final-state final.tsv
+
+# run forward from those particles, one replicate per particle
+camdl simulate model.camdl --params mle.toml --init-state final.tsv \
+    --replicates 1000 --to "last_obs + 8 weeks" --fit fit.toml --obs-dir forecast
+```
+
+The saved file holds compartment counts at T, nothing else, so a restart cannot
+write a reporting period that began before T and ends after it.
+`simulate --init-state` refuses such a run before writing anything, naming the
+stream and the period, when the stream is one it would write (`--obs`,
+`--obs-dir`, `--obs-only`, `--obs-only-dir`) or one an `observations.<stream>`
+quantity reads; a trajectory-only run is not refused. The filter, under
+`--save-final-state`, refuses to save when a stream's data and its
+`emit_schedule` imply different periods, and notes any period under way at T. To
+restart cleanly, end the data on a boundary of every emitted stream's periods;
+to predict the period under way, use `fit predict --horizon`, which needs a fit.
+Details: [inference.md](inference.md#forecasting-from-the-filtered-state).
+
 ### Model comparison
 
 ```bash

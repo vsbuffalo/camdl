@@ -1971,6 +1971,45 @@ defaulted:
 The origin must coincide with an output-emit time — a time between snapshots is
 an error, never snapped to a neighbour.
 
+**A reporting period under way at the origin is refused.** The file holds
+compartment counts, not the part of a period's total that accrued before the
+origin. A weekly incidence stream filtered with daily data through day 25 has
+the week [21, 28) under way at the saved time t = 25: its first forecast row
+would either be missing or cover only [25, 28) while reading as a full week. So
+`simulate --init-state` refuses, before writing anything, when such a period
+belongs to a stream it would write (`--obs`, `--obs-dir`, `--obs-only`,
+`--obs-only-dir` and the store's `obs/` files) or to a stream an
+`observations.<stream>` quantity reads under `--quantities-out`:
+
+```text
+error: stream 'weekly_cases' cannot be written from this restart: its period [21, 28) is under way at the restart time t = 25, and the saved state does not carry the part of that period before t = 25. The filter's data ends inside the period; data ending at 21 or 28 restarts cleanly. To predict the period under way, use `camdl fit predict --fit <fit.toml> --horizon <DURATION>` (it needs a fit; a fixed-parameter filter has none yet).
+```
+
+The periods judged are the ones the run would write: a uniform `covers` form's
+period for each emit label (after `--emit-every`), and for window columns the
+gaps between emit times, the first opening at the model's own start. A state
+read (a prevalence stream) has no period and is never refused, and neither is a
+run that writes only the trajectory. The same rule applies to an origin from
+`--init-state fit`. To restart cleanly, end the filter's data on a boundary of
+every emitted stream's periods (here 21 or 28); to predict the period under way,
+use `fit predict`, which carries each stream's running total through the origin
+(see
+[Forecasts from the end of the training rows](#forecasts-from-the-end-of-the-training-rows)).
+
+`pfilter --save-final-state` checks the same thing from its side. Before
+filtering, it refuses to save a state when a bound stream's data imply different
+periods from those its `emit_schedule` gives, with the diagnostic `fit predict`
+gives for the same disagreement, naming `--save-final-state`: the filter took
+the stream's periods from the data, and a restart would write them from the
+schedule. That includes a run that will only ever restart the trajectory,
+because the declaration is wrong either way. When the declarations agree but a
+period is under way at the saved time, the state is saved and the run says
+which:
+
+```text
+note: stream 'weekly_cases': its period [21, 28) is under way at the saved time t = 25; `simulate --init-state` will refuse to write that stream, or quantities over it, from this file
+```
+
 An effect scheduled at the origin time is not applied again: the saved state is
 post-effect, because the run that saved it applied every effect due at that time
 before recording it. Effects after the origin fire on the forecast's own grid,

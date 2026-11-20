@@ -1126,6 +1126,27 @@ Recorded in the maintainer's docket; each is reflected in the spec and above.
   converge on the keyed directory later. The forecast's `cloud_row` is the
   draw's row in `draws.tsv` under any chain selection. `address_key` and
   `options.excluded_chains` arrive with #1225.
+- **D100** (2026-11-19). Amends D64 and D71: until the exact restart from a
+  filtered state (#1158) lands, a restart refuses to report a period under way,
+  and a save refuses disagreeing declarations. `simulate --init-state`, from a
+  file or from `fit`, refuses before writing anything when a period of a stream
+  it would write (`--obs`, `--obs-dir`, `--obs-only`, `--obs-only-dir`, the
+  store's `obs/` child) or that an `observations.<stream>` quantity reads starts
+  before the restart time and ends after it. The periods are the effective
+  schedule's (after `--emit-every`): a uniform `covers` form's period of each
+  emit label, and for window columns the gaps between emit times, the first
+  opening at the model's own start. One function, `obs_emit::period_under_way`,
+  decides it, kept apart from the emitter so #1158 can delete it. Before
+  filtering, `pfilter --save-final-state` runs the D82 check over each bound
+  interval stream with an `emit_schedule` (training rows only under
+  `holdout_after`) and refuses a disagreement with the forecast's diagnostic,
+  which also refuses a trajectory-only restart of a misdeclared model; where the
+  declarations agree and a period is under way at the saved time, it saves and
+  notes the stream and the period. The D82 check compares a uniform stream's
+  data with `period_of` of each emit label, the emitter's rule, not with the
+  gaps between emit times (gh#1301). Spec §4.4 "Restarts" and §5.2 already state
+  the restart rule. #1158 needs its §4 and test 7 revised to the refuse-at-save
+  rule; gh#1081 and gh#1085 stay open, retitled to the completion feature.
 
 ## Part 9. Documents this plan changes
 
