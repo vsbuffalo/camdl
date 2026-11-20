@@ -511,14 +511,17 @@ fn a_save_whose_data_and_schedule_disagree_is_refused() {
 }
 
 /// Rule 2 judges the training rows only, under the fit's `holdout_after`:
-/// window rows [0, 7), [7, 14), [14, 21), [21, 30) against `every 7 'days`
-/// (windows [0, 7), ..., [21, 28)). The row [21, 30) disagrees, so the save
-/// is refused without a holdout; with `holdout_after = 21` it is a held-out
-/// row, the training rows agree, and the state is saved at 21.
+/// weekly `closing_at` rows labelled 7, 14, 21 and 28 against
+/// `emit_schedule = at [7, 14, 21, 30]`, whose last label covers [23, 30).
+/// The row [21, 28) disagrees, so the save is refused without a holdout;
+/// with `holdout_after = 21` it is a held-out row, the training rows agree,
+/// and the state is saved at 21. (A uniform stream: window-column rows are
+/// supports and not judged, D106.)
 #[test]
 fn the_save_check_judges_only_the_training_rows_under_holdout_after() {
-    let model = window_columns("every 7 'days");
-    let weekly = "ws\twe\tweekly_cases\n0\t7\t10\n7\t14\t40\n14\t21\t90\n21\t30\t150\n";
+    let model = variant(&[("    emit_schedule = every 7 'days\n",
+        "    emit_schedule = at [7 'days, 14 'days, 21 'days, 30 'days]\n")]);
+    let weekly = "time\tweekly_cases\n7\t10\n14\t40\n21\t90\n28\t150\n";
     let fit_toml = |holdout: &str| format!(r#"output_dir = "results"
 [model]
 camdl = "model.camdl"
@@ -565,7 +568,7 @@ cooling = 0.5
         } else {
             assert!(!out.status.success(), "without a holdout the row [21, 30) is judged: {err}");
             assert!(err.contains("stream 'weekly_cases' is refused --save-final-state: its data \
-                imply the period [21, 30) (training row 3), but its emit_schedule gives [21, 28)"),
+                imply the period [21, 28) (training row 3), but its emit_schedule gives [23, 30)"),
                 "{err}");
             assert!(!dir.join("state.tsv").exists());
         }
