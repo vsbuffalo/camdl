@@ -87,6 +87,9 @@ pub(crate) struct Var {
     pub field: &'static str,
     /// What it may do to a stored result.
     pub class: InputClass,
+    /// How settled it is (the module doc's "Stability"). Documentation the
+    /// table's tests check; nothing at run time branches on it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub stability: Stability,
     pub route: Route,
 }
@@ -255,9 +258,7 @@ impl Environment {
     /// Every experimental input set for this process, by name, with its value:
     /// what `run.json`'s provenance lists.
     pub fn experimental_inputs(&self) -> BTreeMap<String, String> {
-        let experimental = VARS.iter().any(|v| v.stability == Stability::Experimental && v.field == "experimental");
-        debug_assert!(experimental, "the experimental family is in VARS");
-        if experimental { self.vars.experimental.clone() } else { BTreeMap::new() }
+        self.vars.experimental.clone()
     }
 }
 
