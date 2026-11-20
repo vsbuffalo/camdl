@@ -65,7 +65,20 @@ pub fn derive_inputs(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match expand(&input) {
         Ok(ts) => ts.into(),
-        Err(e) => e.to_compile_error().into(),
+        Err(e) => {
+            // The error, and an empty inventory, so that a struct flattening
+            // this one reports this error alone, not also an unimplemented trait.
+            let err = e.to_compile_error();
+            let ident = &input.ident;
+            let stub = input.generics.params.is_empty().then(|| {
+                quote! {
+                    impl crate::input_class::InputFields for #ident {
+                        const FIELDS: crate::input_class::Inventory = &[];
+                    }
+                }
+            });
+            quote!(#err #stub).into()
+        }
     }
 }
 
