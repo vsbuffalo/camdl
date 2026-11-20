@@ -367,23 +367,29 @@ refusal for its claim, and each chain polls the command's policy (held by `Out`
 from `hold_claim` to `take_claim`, apart from the claim itself), so the first
 chain to fail the claim does not hide the refusal from the others.
 
-Two commands still build their policy from their own flag alone, not from the
-fit they replay: `simulate --draws posterior --fit` (`run_simulate`), and
-`compare` when it scores an ODE fit in-process, so an ODE fit made under
-`[config] allow_forcing_extrapolation` is refused by `compare` without the flag.
-`compare`'s `camdl pfilter` child, which scores a chain-binomial fit, is given
-the fit's setting. Both remaining cases are for the commands' conversion in step
-4; the in-process `compare` case cannot be met by installing a policy per fit,
-because of the once-per-process note above.
+A command that replays a stored fit runs under the fit's own settings. The
+simulator a fit ran on,
+[`FittedSimulator`](rust:cli::fit::fitted_model::FittedSimulator), carries its
+`[config] allow_degenerate_rates` and `allow_forcing_extrapolation`, read from
+the stored resolved config; `simulate --draws … --fit` folds its own flags into
+them
+([`FittedSettings::with_flags`](rust:cli::fit::fitted_model::FittedSettings::with_flags):
+a flag can only turn a setting on) and puts the result in its resolved
+configuration, and `compare` scores each fit under them, passing them to its
+`camdl pfilter` child as flags and installing them for its in-process ODE
+scorer. Because of the once-per-process note above, `compare` scores every fit
+without the override before every fit with it, so no fit is scored after a
+policy that held a forcing.
 
 `--no-licm` is a compile setting,
-[`CompileSettings`](rust:cli::util::CompileSettings). `fit run`, `pfilter`,
-`profile` and `survey` resolve it (with `CAMDL_NO_LICM`) and pass it to every
-compile they make ([`load_model_with`](rust:cli::util::load_model_with),
-[`resolve_ir_path_with`](rust:cli::util::resolve_ir_path_with)); `simulate`
-installs its resolved value process-wide, and every other command (`compare`,
-`eval`, `fit predict`, `mre`, the pass-through compiler subcommands) reads the
-process-wide setting, which `main` sets from the flag.
+[`CompileSettings`](rust:cli::util::CompileSettings), with `--no-ir-cache`.
+`main` resolves both once (with `CAMDL_NO_LICM` and `CAMDL_NO_IR_CACHE`) and
+passes the value to each command that compiles, which passes it to every compile
+it makes ([`load_model`](rust:cli::util::load_model),
+[`resolve_ir_path`](rust:cli::util::resolve_ir_path) and the camdlc
+pass-throughs). Nothing reads it process-wide. A load of a model that is already
+compiled ([`load_ir`](rust:cli::util::load_ir)) takes no settings and refuses a
+`.camdl`, so no compile can run without them.
 
 Two kinds of flag reach the identity through the model and the parameters rather
 than `RunConfig`. A flag that rewrites the model before it runs

@@ -604,12 +604,24 @@ and of coverage; the cases themselves are regression evidence.
    `landscape.html` one of the leaf's files (and, on a stored survey, staled the
    leaf), and is now the leaf's child `landscape_html/`, as the event log is;
    the survey progress line named a best that was not the landscape's (gh#1269),
-   and `pfilter --replicates` the same for its mean. **Next:** `compare`'s
-   in-process ODE scorer and `simulate --draws posterior --fit` still build
-   their forcing policy from their own flag (gh#1235); the process-wide LICM
-   setting is still read by `simulate` (installed from its resolved value) and
-   `compare`, `eval`, `fit predict`, `mre` and the pass-through compiler
-   subcommands.
+   and `pfilter --replicates` the same for its mean.
+
+   **Done in this step, the replays and the compile settings:** a replay of a
+   stored fit runs under the fit's `[config] allow_degenerate_rates` and
+   `allow_forcing_extrapolation` (gh#1235). They are part of the simulator the
+   fit ran on (`fit::fitted_model::FittedSimulator::settings`, read from the
+   stored resolved config), so `simulate --draws … --fit` takes them into its
+   resolved configuration, with its own flags folded in as `pfilter`, `profile`
+   and `survey` fold theirs (a flag can only turn a setting on, and one the fit
+   ran without is said once), and `compare` scores each fit under them, in its
+   `camdl pfilter` child and in its in-process ODE scorer; it scores every fit
+   without the forcing override before every fit with it, since a forcing note
+   is said once per process. `--no-licm` and `--no-ir-cache` are one
+   `util::CompileSettings`, resolved once in `main` and passed to every command
+   that compiles and by it to every compile; a load of an already-compiled model
+   (`util::load_ir`) takes none and refuses a `.camdl`. `set_licm_disabled`,
+   `set_ir_cache_disabled` and their statics are gone, and an `mre` bundle's
+   reproduce command carries `--no-licm` when the bundle was made under it.
 
 The unused typed inputs in `runid/src/inputs.rs` (`PfilterEvalInput`,
 `SurveyInput`, `ProjectionInput`, `SyntheticObsInput`, `ProfilePointInput`, no
