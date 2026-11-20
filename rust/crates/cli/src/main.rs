@@ -1738,6 +1738,25 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
             }
         }
 
+        // gh#1081: a restart from a saved-state file inside a stream's reporting
+        // period cannot write that period's row. The emitters refuse it where
+        // they plan their rows; refusing here as well, before any cell runs,
+        // saves the ensemble and leaves no stored leaf whose observations were
+        // never written. (`--init-state fit` resolves its origin later, with
+        // the draws, and is refused by the emitters alone.)
+        if want_obs {
+            if let Some(src) = init_state_source.as_ref() {
+                for o in model_check.observations.iter().filter(|o| o.emit_schedule.is_some()) {
+                    if let Err(e) = obs_emit_schedule_times(
+                        o, Some(src.origin_t), model_check.simulation.t_start,
+                        horizons[0].1, emit_every.as_ref(),
+                    ) {
+                        out.fail(format!("error: {}", e));
+                    }
+                }
+            }
+        }
+
         // Validate schedule compatibility for --obs (single file), at the
         // CELLS' shared horizon (all equal — checked above), not the base
         // model's: two `at`-list schedules can agree when confined to the model
@@ -1752,7 +1771,7 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
             let obs_origin = init_state_source.as_ref().map(|s| s.origin_t);
             let schedules: Vec<_> = model_check.observations.iter()
                 .map(|o| obs_emit_schedule_times(
-                    o, obs_origin, obs_end, emit_every.as_ref(),
+                    o, obs_origin, model_check.simulation.t_start, obs_end, emit_every.as_ref(),
                 ).unwrap_or_else(|e| {
                     out.fail(format!("error: {}", e));
                 }))
@@ -2851,7 +2870,7 @@ fn materialize_obs_for_quantities(
                 if let Some(origin) = restart_origin {
                     crate::obs_emit::refuse_period_under_way(
                         obs_ir, &s, emit.and_then(|e| e.resolve_for(&obs_ir.source)),
-                        origin, model.simulation.t_end,
+                        model.simulation.t_start, origin, model.simulation.t_end,
                     )?;
                 }
                 obs_schedule_times(&s, restart_origin, model.simulation.t_end)
@@ -3878,7 +3897,8 @@ impl StreamSink {
             });
             self.obs_data.push(Vec::new());
             let times = obs_emit_schedule_times(
-                obs_model, init_origin, model.simulation.t_end, self.emit_every.as_ref(),
+                obs_model, init_origin, model.simulation.t_start, model.simulation.t_end,
+                self.emit_every.as_ref(),
             )?;
             // The rows the declaration assigns to those times, within the run
             // (gh#833). A wide file has one `time` column and cannot carry a
@@ -4513,6 +4533,7 @@ pub(crate) fn obs_schedule_times(
 pub(crate) fn obs_emit_schedule_times(
     obs: &ir::observation::ObservationModel,
     restart_origin: Option<f64>,
+    model_start: f64,
     t_end: f64,
     emit: Option<&crate::emit_every::EmitEvery>,
 ) -> Result<Vec<f64>, String> {
@@ -4521,7 +4542,8 @@ pub(crate) fn obs_emit_schedule_times(
             let s = crate::emit_every::apply_override(emit, obs, s)?;
             if let Some(origin) = restart_origin {
                 crate::obs_emit::refuse_period_under_way(
-                    obs, &s, emit.and_then(|e| e.resolve_for(&obs.source)), origin, t_end,
+                    obs, &s, emit.and_then(|e| e.resolve_for(&obs.source)),
+                    model_start, origin, t_end,
                 )?;
             }
             Ok(obs_schedule_times(&s, restart_origin, t_end))

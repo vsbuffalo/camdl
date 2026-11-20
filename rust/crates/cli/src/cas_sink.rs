@@ -1403,7 +1403,9 @@ fn write_obs_into_cas(
         // validates a different set of times than gets written is worse than no
         // preflight (gh#561 + gh#589).
         let times =
-            crate::obs_emit_schedule_times(obs_ir, restart_origin, model.simulation.t_end, emit)?;
+            crate::obs_emit_schedule_times(
+                obs_ir, restart_origin, model.simulation.t_start, model.simulation.t_end, emit,
+            )?;
         let plan = crate::obs_emit::plan_emission(
             obs_ir, &times, run_start, model.simulation.t_end,
             emit.and_then(|e| e.resolve_for(&obs_ir.source)),
