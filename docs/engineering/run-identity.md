@@ -362,13 +362,18 @@ note once per process, but reports a forcing note every time it is recorded (the
 engine records one at most once per forcing, side and compiled model), and the
 policy says it once per policy, skipping a forcing already in its `held` list.
 So every policy installed in one process is told of the forcings its own runs
-held. Most commands install one policy. `fit predict` alone nests a second, an
-allowing one, once it has read the stored fit's config; a refusal under the
-first has already ended the command, and the inner guard's drop puts the first
-back. A claim-holding `fit run` keeps a refusal for its claim, and each chain
-polls the command's policy (held by `Out` from `hold_claim` to `take_claim`,
-apart from the claim itself), so the first chain to fail the claim does not hide
-the refusal from the others.
+held, provided its models are compiled after it is installed: the engine's
+set-once flag is on the compiled forcing, shared by the model's clones, so a
+model that already reported a forcing under one policy does not report it under
+the next. Every command installs its policy before compiling, and `compare`
+compiles each in-process fit's model after installing that fit's policy. Most
+commands install one policy. `fit predict` alone nests a second, an allowing
+one, once it has read the stored fit's config; a refusal under the first has
+already ended the command, and the inner guard's drop puts the first back. A
+claim-holding `fit run` keeps a refusal for its claim, and each chain polls the
+command's policy (held by `Out` from `hold_claim` to `take_claim`, apart from
+the claim itself), so the first chain to fail the claim does not hide the
+refusal from the others.
 
 A command that replays a stored fit runs under the fit's own settings. The
 simulator a fit ran on,

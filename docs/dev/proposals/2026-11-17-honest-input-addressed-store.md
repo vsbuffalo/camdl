@@ -616,15 +616,16 @@ and of coverage; the cases themselves are regression evidence.
    ran without is said once), and `compare` scores each fit under them, in its
    `camdl pfilter` child and in its in-process ODE scorer, one policy per fit. A
    forcing note is no longer said once per process: each policy says it once, so
-   every policy in a process is told of what its runs held. A forcing held while
-   a fit was scored is a warning on the trace it affected
-   (`PrequentialWarning::ForcingHeld`), which `compare` reports on that fit's
-   rows. `--no-licm` and `--no-ir-cache` are one `util::CompileSettings`,
-   resolved once in `main` and passed to every command that compiles and by it
-   to every compile; a load of an already-compiled model (`util::load_ir`) takes
-   none and refuses a `.camdl`. `set_licm_disabled`, `set_ir_cache_disabled` and
-   their statics are gone, and an `mre` bundle's reproduce command carries
-   `--no-licm` when the bundle was made under it.
+   every policy in a process is told of what its runs held, provided its models
+   are compiled after it is installed (the engine reports a forcing once per
+   compiled model). A forcing held while a fit was scored is a warning on the
+   trace it affected (`PrequentialWarning::ForcingHeld`), which `compare`
+   reports on that fit's rows. `--no-licm` and `--no-ir-cache` are one
+   `util::CompileSettings`, resolved once in `main` and passed to every command
+   that compiles and by it to every compile; a load of an already-compiled model
+   (`util::load_ir`) takes none and refuses a `.camdl`. `set_licm_disabled`,
+   `set_ir_cache_disabled` and their statics are gone, and an `mre` bundle's
+   reproduce command carries `--no-licm` when the bundle was made under it.
 
 The unused typed inputs in `runid/src/inputs.rs` (`PfilterEvalInput`,
 `SurveyInput`, `ProjectionInput`, `SyntheticObsInput`, `ProfilePointInput`, no

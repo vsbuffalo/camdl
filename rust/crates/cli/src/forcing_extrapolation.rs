@@ -23,6 +23,17 @@
 //! reporter is a function installed once at start-up (`sim::run_notes` is
 //! process-wide by design), so it cannot be handed the command's value and
 //! looks up the installed one instead.
+//!
+//! **A policy is told only by a model compiled after it was installed.** The
+//! engine reports a forcing outside its range once per side per compiled
+//! model: the set-once flag is on the compiled forcing (`DefinedRange` in
+//! `sim::forcing_range`), shared by every clone of the model. A model that
+//! already held a forcing under one policy does not report it again under the
+//! next. So a command installs its policy before it compiles the models it
+//! runs under it, and a command that runs under several policies in turn
+//! (`compare`, one per in-process fit) compiles a model for each after
+//! installing it. Each policy says a forcing once however many of its models
+//! report it.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -119,7 +130,9 @@ impl ForcingPolicy {
     }
 
     /// Route the engine's forcing notes into this policy until the returned
-    /// guard drops. Installed before the command evaluates its model, and
+    /// guard drops. Install it before compiling the models that run under it:
+    /// a model reports a forcing once, so one compiled earlier and already
+    /// past a forcing's range does not tell this policy (see the module doc). Installed before the command evaluates its model, and
     /// held for the rest of the command. An install nests: `fit predict`
     /// installs the stored fit's policy inside its own, and the inner guard's
     /// drop puts back the policy it replaced.
@@ -315,32 +328,56 @@ mod tests {
         assert_eq!(held(&record), Vec::<String>::new(), "the second command held nothing");
     }
 
+    /// A `bspline` forcing defined on t = 0 to 120 days, compiled into a
+    /// fresh model.
+    fn bspline_model() -> sim::compiled_model::CompiledModel {
+        let golden = format!("{}/../../../ocaml/golden/bspline_uniform.ir.json", env!("CARGO_MANIFEST_DIR"));
+        let (mut m, _) = crate::util::load_ir(&golden).unwrap();
+        for p in &mut m.parameters {
+            p.value = p.value.with_value(1.0);
+        }
+        sim::compiled_model::CompiledModel::new(m).unwrap()
+    }
+
+    /// Evaluate the model's forcing at `t`, as a run does.
+    fn evaluate_forcing(model: &sim::compiled_model::CompiledModel, t: f64) {
+        let (int_s, real_s) = model.initial_state_mean(&model.default_params).unwrap();
+        let ctx = sim::propensity::EvalCtx {
+            model, int_s: &int_s, real_s: &real_s, params: &model.default_params,
+            t, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None,
+        };
+        sim::resolved_expr::eval_resolved(&sim::resolved_expr::ResolvedExpr::TimeFunc(0), &ctx);
+    }
+
     /// Two policies installed one after the other in one process (as
-    /// `compare` installs one per fit) are each told of a forcing their runs
-    /// held, through the engine's run notes; each says it once.
+    /// `compare` installs one per fit), each with a model compiled after it
+    /// was installed and evaluated past its forcing's range: each is told of
+    /// the forcing through the engine's run notes, and says it once however
+    /// often its runs met it.
     #[test]
     fn each_policy_in_a_process_is_told_of_what_its_runs_held() {
         let _slot = SLOT.lock().unwrap_or_else(|e| e.into_inner());
         sim::run_notes::set_reporter(crate::util::report_run_note);
-        let note = || sim::run_notes::RunNote::ForcingOutsideRange(past_end("each_policy"));
         let names = |p: &ForcingPolicy| {
             let mut record = serde_json::json!({});
             p.record_in(&mut record);
             held(&record)
         };
-        let first = ForcingPolicy::new(true);
+        let first = ForcingPolicy::recording(true);
         {
             let _route = first.install();
-            sim::run_notes::record(note());
-            sim::run_notes::record(note());
+            for model in [bspline_model(), bspline_model()] {
+                evaluate_forcing(&model, 200.0);
+                evaluate_forcing(&model, 300.0);
+            }
         }
-        let second = ForcingPolicy::new(true);
+        let second = ForcingPolicy::recording(true);
         {
             let _route = second.install();
-            sim::run_notes::record(note());
+            evaluate_forcing(&bspline_model(), 200.0);
         }
-        assert_eq!(names(&first), vec!["each_policy"], "said once by the first");
-        assert_eq!(names(&second), vec!["each_policy"], "and told to the second");
+        assert_eq!(names(&first), vec!["contact"], "said once by the first, though two of its models met it");
+        assert_eq!(names(&second), vec!["contact"], "and told to the second");
     }
 
     /// A held forcing reaches a trace with what bounds its range and whether
