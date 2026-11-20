@@ -266,6 +266,42 @@ fn ratio_of_flows_period_under_way_is_refused() {
     assert_refused(&out, "weekly_share", "[21, 28)", "25");
 }
 
+/// D106 keeps the restart rule: a save inside an irregular window, followed
+/// by a restart, is refused rather than continued. Exact continuation from
+/// mid-window, matching an uninterrupted run, is the exact-restart proposal
+/// (#1158), not approximated here. The weekly stream has window columns
+/// with irregular data windows [0, 7), [7, 10), [10, 21) and an
+/// `emit_schedule = at [7, 10, 21, 30]`; daily data run to 25, so the save
+/// sits inside the nine-day window [21, 30). The filter saves (D106: the
+/// windows are not checked against the schedule) and notes the window; the
+/// restart is refused, naming it.
+#[test]
+fn a_restart_inside_an_irregular_window_is_refused_naming_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    std::fs::write(dir.join("model.camdl"), window_columns("at [7 'days, 10 'days, 21 'days, 30 'days]")).unwrap();
+    std::fs::write(dir.join("daily.tsv"), daily_through(25)).unwrap();
+    std::fs::write(dir.join("weekly.tsv"), "ws\twe\tweekly_cases\n0\t7\t10\n7\t10\t30\n10\t21\t120\n").unwrap();
+    let pf = run(dir, &[
+        "pfilter".into(), "model.camdl".into(), "--params".into(), s(&params()),
+        "--data".into(), "daily_cases=daily.tsv".into(), "--data".into(), "weekly_cases=weekly.tsv".into(),
+        "--particles".into(), "20".into(), "--seed".into(), "1".into(),
+        "--save-final-state".into(), "state.tsv".into(),
+    ]);
+    let err = stderr(&pf);
+    assert!(pf.status.success(), "pfilter: {err}");
+    assert!(err.contains("note: stream 'weekly_cases': its period [21, 30) is under way at the saved time t = 25"),
+        "{err}");
+    let out = run(dir, &[
+        "simulate".into(), "model.camdl".into(), "--params".into(), s(&params()),
+        "--init-state".into(), "state.tsv".into(), "--replicates".into(), "20".into(),
+        "--to".into(), "30".into(), "--obs-dir".into(), "od".into(),
+        "--output-dir".into(), "cas".into(),
+    ]);
+    assert_refused(&out, "weekly_cases", "[21, 30)", "25");
+    assert!(!dir.join("od").exists(), "a refusal writes nothing");
+}
+
 /// Fourteen-day periods on a seven-day schedule overlap, so every restart
 /// time falls inside one: the refusal does not offer a clean restart time.
 #[test]
