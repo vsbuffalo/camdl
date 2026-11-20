@@ -237,7 +237,7 @@ fn patch(fx: &Fx, w: &str, extra: &[&str]) -> Invocation {
 }
 
 fn level(input: &str) -> String {
-    declared_level("pub const PROFILE", input, "profile")
+    declared_level(&["profile"], input, "profile")
 }
 
 fn assert_rekeys(input: &str, a: &Invocation, b: &Invocation) {

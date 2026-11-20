@@ -522,6 +522,12 @@ fn main() {
     if let Some(code) = run_check_args_mode() {
         std::process::exit(code);
     }
+    // Hidden: a classified command's input classes, for the differential
+    // tests (`input_class::print_classes`). Also before any parsing.
+    if std::env::args().nth(1).as_deref() == Some("__input-classes") {
+        let path: Vec<String> = std::env::args().skip(2).collect();
+        std::process::exit(input_class::print_classes(&path));
+    }
 
     let cli = Cli::parse();
     // The environment is read once (`env`), and the engine is told its

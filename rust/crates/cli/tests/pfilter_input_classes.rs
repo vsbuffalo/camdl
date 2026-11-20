@@ -207,7 +207,7 @@ fn pf_fit(fx: &Arc<Fixture>, config: &str, extra: &[&str]) -> Invocation {
 }
 
 fn level(input: &str) -> String {
-    declared_level("pub const PFILTER", input, "model")
+    declared_level(&["pfilter"], input, "model")
 }
 
 fn assert_rekeys(input: &str, a: &Invocation, b: &Invocation) {

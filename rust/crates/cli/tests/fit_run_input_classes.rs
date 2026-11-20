@@ -40,6 +40,9 @@
 //! has structural zeros, which the constant fold drops. The fits run on the
 //! compiled IR except where the compile itself is the input under test.
 
+// For `declared_level` only: this suite runs camdl with its own harness.
+mod input_class_runner;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -458,31 +461,10 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The level the class table declares for a keyed input: `input` is a
-/// `camdl fit run` argument id, or `env:<field>` for an environment variable.
-/// Read from the tables' source (`input_class::FIT_RUN`, `env::VARS`), which
-/// this integration test cannot import. An environment variable keyed at a
-/// simulation's `model` level enters a fit at its `fit` level.
+/// The level the inventory declares for a keyed input: `input` is a `camdl
+/// fit run` argument id, or `env:<field>` for an environment variable.
 fn declared_level(input: &str) -> String {
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let (file, needle, after) = match input.strip_prefix("env:") {
-        Some(f) => ("env.rs", format!("\"{f}\", Keyed("), None),
-        None => ("input_class.rs", format!("(\"{input}\", Keyed("), Some("pub const FIT_RUN")),
-    };
-    let text = std::fs::read_to_string(src.join(file)).unwrap();
-    let text = match after {
-        Some(marker) => &text[text.find(marker).expect("the FIT_RUN table")..],
-        None => text.as_str(),
-    };
-    let line = text
-        .lines()
-        .find(|l| l.contains(&needle))
-        .unwrap_or_else(|| panic!("`{input}` is not keyed in {file}"));
-    let level = line.split(&needle).nth(1).unwrap().split(')').next().unwrap().to_ascii_lowercase();
-    match level.as_str() {
-        "model" if input.starts_with("env:") => "fit".to_string(),
-        _ => level,
-    }
+    input_class_runner::declared_level(&["fit", "run"], input, "fit")
 }
 
 // ─── The assertions, one per class ──────────────────────────────────────────

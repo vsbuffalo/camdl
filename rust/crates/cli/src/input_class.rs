@@ -180,7 +180,7 @@ pub mod derive_support {
         out
     }
 
-    const fn level_name(level: Level) -> &'static str {
+    pub const fn level_name(level: Level) -> &'static str {
         match level {
             Level::Model => "model",
             Level::Config => "config",
@@ -260,6 +260,51 @@ pub mod derive_support {
             i += 1;
         }
     }
+}
+
+/// Every command whose inputs are classified, by its subcommand path, with its
+/// inventory (`#[derive(Inputs)]`).
+pub const COMMANDS: &[(&[&str], Inventory)] = &[
+    (&["simulate"], crate::args::SimulateArgs::INPUTS),
+    (&["fit", "run"], crate::args::FitRunArgs::INPUTS),
+    (&["pfilter"], crate::args::PfilterArgs::INPUTS),
+    (&["profile"], crate::args::ProfileArgs::INPUTS),
+    (&["survey"], crate::args::SurveyArgs::INPUTS),
+    (&["mre", "simulate"], crate::args::MreSimulateArgs::INPUTS),
+];
+
+/// The spelling of a class in `#[input(..)]`: `keyed(config)`, `execution`.
+pub fn spelling(class: InputClass) -> String {
+    match class {
+        InputClass::Keyed(level) => format!("keyed({})", derive_support::level_name(level)),
+        InputClass::Execution => "execution".into(),
+        InputClass::Provenance => "provenance".into(),
+        InputClass::Presentation => "presentation".into(),
+        InputClass::Child => "child".into(),
+        InputClass::Expands => "expands".into(),
+        InputClass::Removed => "removed".into(),
+    }
+}
+
+/// `camdl __input-classes <command...>`, a hidden mode: every input of the
+/// classified command `path` names, then every environment variable, one per
+/// line as `<id>\t<class>` (`env:<field>` for a variable), in the spelling of
+/// `#[input(..)]`. The differential tests in `tests/<command>_input_classes.rs`
+/// read a keyed input's level from it, since an integration test cannot import
+/// this crate. Fails, naming the classified commands, when `path` is none of them.
+pub fn print_classes(path: &[String]) -> i32 {
+    let out = crate::out::detached();
+    let Some((_, inputs)) = COMMANDS.iter().find(|(p, _)| p.iter().copied().eq(path.iter().map(String::as_str))) else {
+        let known: Vec<String> = COMMANDS.iter().map(|(p, _)| p.join(" ")).collect();
+        out.fail(format!("`{}` is not a classified command; one of: {}", path.join(" "), known.join(", ")));
+    };
+    for (id, class) in *inputs {
+        out.data_line(format!("{id}\t{}", spelling(*class)));
+    }
+    for v in crate::env::VARS {
+        out.data_line(format!("env:{}\t{}", v.field, spelling(v.class)));
+    }
+    0
 }
 
 #[cfg(test)]

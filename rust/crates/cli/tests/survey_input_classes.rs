@@ -164,7 +164,7 @@ fn patch(fx: &Arc<Fixture>, extra: &[&str]) -> Invocation {
 }
 
 fn level(input: &str) -> String {
-    declared_level("pub const SURVEY", input, "model")
+    declared_level(&["survey"], input, "model")
 }
 
 fn assert_rekeys(input: &str, a: &Invocation, b: &Invocation) {

@@ -283,37 +283,48 @@ pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The level the class table declares for a keyed input: `input` is an
-/// argument id of the command whose table starts at `table_marker` (`pub const
-/// PFILTER`), or `env:<field>` for an environment variable. Read from the
-/// tables' source (`input_class.rs`, `env.rs`), which an integration test
-/// cannot import. An environment variable keyed at a simulation's `model`
-/// level enters the command at `env_model_level`.
-pub fn declared_level(table_marker: &str, input: &str, env_model_level: &str) -> String {
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let (file, needle, after) = match input.strip_prefix("env:") {
-        Some(f) => ("env.rs", format!("\"{f}\", Keyed("), None),
-        None => ("input_class.rs", format!("(\"{input}\", Keyed("), Some(table_marker)),
-    };
-    let text = std::fs::read_to_string(src.join(file)).unwrap();
-    let text = match after {
-        Some(marker) => {
-            let from = &text[text.find(marker).unwrap_or_else(|| panic!("the table `{marker}`"))..];
-            // The table ends at its closing `];`.
-            &from[..from.find("\n];").expect("the table's end")]
-        }
-        None => text.as_str(),
-    };
-    let line = text
+/// The class of every input of `command` (its subcommand path, `["fit",
+/// "run"]`) and of every environment variable (`env:<field>`), in the spelling
+/// of `#[input(..)]`, as the release `camdl` prints them with its hidden
+/// `__input-classes` mode from the inventory `#[derive(Inputs)]` generates
+/// (`src/input_class.rs`). An integration test cannot import the crate, so it
+/// asks the binary it tests, which [`Fixture::create`] checks is built from
+/// this source.
+pub fn declared_classes(command: &[&str]) -> BTreeMap<String, String> {
+    let camdl = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/release/camdl");
+    let out = Command::new(&camdl).arg("__input-classes").args(command).output().unwrap();
+    assert!(
+        out.status.success(),
+        "camdl __input-classes {}: {}",
+        command.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout)
+        .unwrap()
         .lines()
-        .find(|l| l.contains(&needle))
-        .unwrap_or_else(|| panic!("`{input}` is not keyed in {file} ({table_marker})"));
-    let level = line.split(&needle).nth(1).unwrap().split(')').next().unwrap().to_ascii_lowercase();
-    // `Level::Box` is spelled with its path, so it does not shadow `Box`.
-    let level = level.trim_start_matches("level::").to_string();
-    match level.as_str() {
+        .map(|l| {
+            let (id, class) = l.split_once('\t').unwrap_or_else(|| panic!("not `<id>\\t<class>`: {l}"));
+            (id.to_string(), class.to_string())
+        })
+        .collect()
+}
+
+/// The level the inventory declares for a keyed input: `input` is an argument
+/// id of `command`, or `env:<field>` for an environment variable. An
+/// environment variable keyed at a simulation's `model` level enters the
+/// command at `env_model_level`.
+pub fn declared_level(command: &[&str], input: &str, env_model_level: &str) -> String {
+    let classes = declared_classes(command);
+    let class = classes
+        .get(input)
+        .unwrap_or_else(|| panic!("`{input}` is not an input of `camdl {}`", command.join(" ")));
+    let level = class
+        .strip_prefix("keyed(")
+        .and_then(|l| l.strip_suffix(')'))
+        .unwrap_or_else(|| panic!("`{input}` is classified {class}, not keyed"));
+    match level {
         "model" if input.starts_with("env:") => env_model_level.to_string(),
-        _ => level,
+        _ => level.to_string(),
     }
 }
 

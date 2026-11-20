@@ -45,6 +45,9 @@
 //! structural zeros, which the constant fold drops; and the repository's
 //! reactive-policy fixture.
 
+// For `declared_level` only: this suite runs camdl with its own harness.
+mod input_class_runner;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -517,23 +520,10 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The level the class table declares for a keyed input: `field` is a
-/// `camdl simulate` argument id, or `env:<field>` for an environment variable.
-/// Read from the tables' source (`input_class::SIMULATE`, `env::VARS`), which
-/// this integration test cannot import.
+/// The level the inventory declares for a keyed input: `input` is a `camdl
+/// simulate` argument id, or `env:<field>` for an environment variable.
 fn declared_level(input: &str) -> String {
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let (file, needle) = match input.strip_prefix("env:") {
-        Some(f) => ("env.rs", format!("\"{f}\", Keyed(")),
-        None => ("input_class.rs", format!("(\"{input}\", Keyed(")),
-    };
-    let text = std::fs::read_to_string(src.join(file)).unwrap();
-    let line = text
-        .lines()
-        .find(|l| l.contains(&needle))
-        .unwrap_or_else(|| panic!("`{input}` is not keyed in {file}"));
-    let level = line.split(&needle).nth(1).unwrap().split(')').next().unwrap();
-    level.to_ascii_lowercase()
+    input_class_runner::declared_level(&["simulate"], input, "model")
 }
 
 // ─── The assertions, one per class ──────────────────────────────────────────
