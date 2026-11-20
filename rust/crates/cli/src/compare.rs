@@ -3061,6 +3061,31 @@ fn derive_ode_trace(
     Ok(trace)
 }
 
+/// A row's line for a forcing held while its trace was scored
+/// ([`PrequentialWarning::ForcingHeld`]), in the words of the run's own warning
+/// (`OutsideRange`'s `Display`); `None` for any other warning.
+fn held_forcing_line(row: &str, w: &PrequentialWarning) -> Option<String> {
+    let PrequentialWarning::ForcingHeld { forcing, defined_on: [lo, hi], side, held_value_at, bound, lagged } = w else {
+        return None;
+    };
+    Some(format!(
+        "⚠ {row}: scored with forcing `{forcing}` held outside its range: it is defined on \
+         t = {lo} to t = {hi}{}, and was evaluated {}, where its value at t = {held_value_at} \
+         was held (allow_forcing_extrapolation){}",
+        match bound {
+            Some(score::trace::ForcingBound::Data) => " (its data)",
+            Some(score::trace::ForcingBound::Window) => " (its window)",
+            None => "",
+        },
+        match side {
+            score::trace::ForcingSide::Before => "before it",
+            score::trace::ForcingSide::After => "after it",
+        },
+        // The clause the run's own warning adds (`OutsideRange::lag_clause`).
+        if *lagged == Some(true) { "; the forcing has a lag, so these are times of its argument, t − lag" } else { "" },
+    ))
+}
+
 /// Combine per-draw filter traces into the posterior-mixture predictive
 /// (§3.6 of the 2026-08-29 proposal; Stage 4.1).
 ///
@@ -3895,18 +3920,7 @@ fn warning_lines(rows: &[Row], base_idx: usize, checks: &Preflight, accuracy: &[
     // Propagate trace-level warnings.
     for r in rows {
         for w in &r.trace.warnings {
-            lines.push(match w {
-                PrequentialWarning::ForcingHeld { forcing, defined_on: [lo, hi], side, held_value_at } => format!(
-                    "⚠ {}: scored with forcing `{forcing}` held outside its range: it is defined on \
-                     t = {lo} to t = {hi}, and was evaluated {}, where its value at t = {held_value_at} \
-                     was held (allow_forcing_extrapolation)",
-                    r.name,
-                    match side {
-                        score::trace::ForcingSide::Before => "before it",
-                        score::trace::ForcingSide::After => "after it",
-                    }),
-                other => format!("ⓘ {}: {:?}", r.name, other),
-            });
+            lines.push(held_forcing_line(&r.name, w).unwrap_or_else(|| format!("ⓘ {}: {:?}", r.name, w)));
         }
     }
     // §3.4 remedy 4: print each row's filter-noise MC SE so the reader
@@ -4248,6 +4262,26 @@ fn option_finite(x: f64) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A held forcing's row line says what bounds its range and, for a
+    /// lagged forcing, that the times are of its argument, as the run's own
+    /// warning does; an unrecorded lag adds nothing.
+    #[test]
+    fn a_held_forcing_line_carries_its_bound_and_lag() {
+        let held = |bound, lagged| PrequentialWarning::ForcingHeld {
+            forcing: "mult".into(),
+            defined_on: [0.0, 50.0],
+            side: score::trace::ForcingSide::After,
+            held_value_at: 50.0,
+            bound,
+            lagged,
+        };
+        let line = held_forcing_line("a", &held(Some(score::trace::ForcingBound::Window), Some(true))).unwrap();
+        assert!(line.contains("t = 0 to t = 50 (its window)") && line.contains("t − lag"), "{line}");
+        let line = held_forcing_line("a", &held(None, None)).unwrap();
+        assert!(!line.contains("its window") && !line.contains("lag"), "{line}");
+        assert_eq!(held_forcing_line("a", &PrequentialWarning::StartsAtPrior), None);
+    }
 
     /// What `cmd_compare` would do with `rows` under `waivers`: the outcome
     /// every renderer reads, or every refusal as the command prints them.

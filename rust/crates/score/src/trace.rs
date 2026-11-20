@@ -229,7 +229,25 @@ pub enum PrequentialWarning {
         side: ForcingSide,
         /// The end of the range whose value was held.
         held_value_at: f64,
+        /// What bounds the range; `None` when the source of the warning did
+        /// not record it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bound: Option<ForcingBound>,
+        /// Whether the forcing has a lag, so the range bounds its argument,
+        /// `t − lag`, not the run's time; `None` when not recorded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lagged: Option<bool>,
     },
+}
+
+/// What bounds a held forcing's range ([`PrequentialWarning::ForcingHeld`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForcingBound {
+    /// The first and last time of an `interpolated` forcing's data.
+    Data,
+    /// The window of a `bspline` forcing.
+    Window,
 }
 
 /// Which side of its range a held forcing was evaluated on

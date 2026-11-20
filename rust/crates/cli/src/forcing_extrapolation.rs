@@ -92,6 +92,11 @@ impl ForcingPolicy {
                     sim::forcing_range::Side::After => score::trace::ForcingSide::After,
                 },
                 held_value_at: o.held_end(),
+                bound: Some(match o.kind {
+                    sim::forcing_range::RangeKind::DataTable => score::trace::ForcingBound::Data,
+                    sim::forcing_range::RangeKind::Window => score::trace::ForcingBound::Window,
+                }),
+                lagged: Some(o.lagged),
             })
             .collect()
     }
@@ -316,6 +321,25 @@ mod tests {
         }
         assert_eq!(names(&first), vec!["each_policy"], "said once by the first");
         assert_eq!(names(&second), vec!["each_policy"], "and told to the second");
+    }
+
+    /// A held forcing reaches a trace with what bounds its range and whether
+    /// it is lagged.
+    #[test]
+    fn a_trace_warning_carries_the_bound_and_the_lag() {
+        let policy = ForcingPolicy::new(true);
+        policy.say(&OutsideRange { kind: RangeKind::Window, lagged: true, ..past_end("lagged") });
+        assert_eq!(
+            policy.trace_warnings(),
+            vec![score::trace::PrequentialWarning::ForcingHeld {
+                forcing: "lagged".into(),
+                defined_on: [0.0, 50.0],
+                side: score::trace::ForcingSide::After,
+                held_value_at: 50.0,
+                bound: Some(score::trace::ForcingBound::Window),
+                lagged: Some(true),
+            }]
+        );
     }
 
     /// A refusal kept for one command's claim is not another command's.
