@@ -637,24 +637,15 @@ pub(crate) fn cmd_compare(a: &crate::args::CompareArgs, compile: crate::util::Co
     cohort.warn(&out);
 
     // Load traces, each filtered by its own fit's selection (if any). Each
-    // input is loaded once, however many streams `--streams` selects, in the
-    // order `scoring_order` gives, and the rows keep the order they were named.
-    let allows: Vec<bool> = models.iter().map(|m| {
-        derive.allow_forcing_extrapolation
-            || crate::fit::handle::resolve_fit_run(&m.path)
-                .is_ok_and(|r| r.config.problem.config.allow_forcing_extrapolation)
-    }).collect();
-    let mut slots: Vec<Option<Row>> = (0..models.len()).map(|_| None).collect();
-    for i in scoring_order(&allows) {
-        let m = &models[i];
+    // input is loaded once, however many streams `--streams` selects.
+    let rows: Vec<Row> = models.into_iter().map(|m| {
         let selection = cohort.for_fit(&m.name);
         let Loaded { trace, data, freshness, streams } =
             load_trace(&out, &m.path, derive, selection).unwrap_or_else(|e| {
                 out.fail(format!("error loading trace for '{}' at '{}': {}", m.name, m.path, e));
             });
-        slots[i] = Some(Row { name: m.name.clone(), path: m.path.clone(), trace, data, freshness, streams });
-    }
-    let rows: Vec<Row> = slots.into_iter().map(|r| r.expect("every row is scored")).collect();
+        Row { name: m.name, path: m.path, trace, data, freshness, streams }
+    }).collect();
 
     // #295 Ask 1 — the optimism caveat, the miscalibration flags and the trace
     // warnings are emitted by the RENDERERS (`warning_lines`), not here, so they
@@ -2303,23 +2294,6 @@ fn load_trace(
              or `camdl fit run` with a pfilter method to generate one."
         )),
     }
-}
-
-/// The order compare scores its rows in, given whether each is scored under
-/// a policy that allows forcing extrapolation (its fit's `[config]
-/// allow_forcing_extrapolation`, or compare's flag): every row that does not,
-/// first, then every row that does, each group in the order named.
-///
-/// An ODE fit is scored in this process, under its own policy, installed for
-/// its scoring. The engine says each forcing note once per process
-/// (`sim::run_notes`), so a policy installed after another has held a forcing
-/// is not told when its fit evaluates that forcing outside its range: a fit
-/// made without the override, scored after one that held a forcing, could
-/// hold it too with nothing said. Scored first, it is told, and refused.
-fn scoring_order(allows: &[bool]) -> Vec<usize> {
-    let mut order: Vec<usize> = (0..allows.len()).collect();
-    order.sort_by_key(|&i| allows[i]);
-    order
 }
 
 /// A resolved fit's sealed holdout, checked for the `HoldOutTail` stamp
@@ -4256,16 +4230,6 @@ fn option_finite(x: f64) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    /// Rows scored without the forcing override come before every row
-    /// scored under it, so none is scored after a policy that held a forcing
-    /// (`scoring_order`); within each group, the order named.
-    #[test]
-    fn rows_without_the_forcing_override_are_scored_first() {
-        assert_eq!(super::scoring_order(&[true, false, true, false]), vec![1, 3, 0, 2]);
-        assert_eq!(super::scoring_order(&[false, false]), vec![0, 1]);
-        assert_eq!(super::scoring_order(&[true]), vec![0]);
-    }
-
     use super::*;
 
     /// What `cmd_compare` would do with `rows` under `waivers`: the outcome

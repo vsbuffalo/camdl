@@ -10,6 +10,14 @@
 //! in a queue that [`take`] drains. Later occurrences of the same note are
 //! dropped, as the once-per-process warnings these replace were.
 //!
+//! The exception is a forcing evaluated outside its range
+//! ([`RunNote::ForcingOutsideRange`]): what it means is the command's policy,
+//! and one process can run under several (`compare` installs one per fit it
+//! scores), each of which must be told of every forcing its own runs held. So
+//! it is reported every time it is recorded, and the command's policy says it
+//! once per policy. The engine records it at most once per forcing, side and
+//! compiled model ([`crate::forcing_range`]), so it is recorded rarely.
+//!
 //! A count of how often something happened belongs in
 //! [`crate::eval_stats`] instead; this is for a sentence said once.
 
@@ -37,7 +45,8 @@ pub enum RunNote {
     GammaIndexMismatch { substep: usize, tracked: usize, recorded: usize },
     /// A forcing was evaluated outside the range on which it is defined and
     /// its end value was held ([`crate::forcing_range`]). The command decides
-    /// whether that is an error or a warning.
+    /// whether that is an error or a warning, and says it once per policy:
+    /// it is not deduplicated here (see the module doc).
     ForcingOutsideRange(crate::forcing_range::OutsideRange),
     /// A forward chain-binomial run's step was large against some
     /// compartment's per-capita exit rate ([`crate::chain_binomial::CoarseStep`]).
@@ -130,10 +139,11 @@ pub fn set_reporter(reporter: Reporter) {
 /// Record `note`. Its first occurrence in the process is reported, or queued
 /// when no reporter is installed; a repeat is dropped.
 pub fn record(note: RunNote) {
-    let first = book()
-        .lock()
-        .map(|mut b| b.seen.insert((note.code(), note.key())))
-        .unwrap_or(true);
+    let first = matches!(note, RunNote::ForcingOutsideRange(_))
+        || book()
+            .lock()
+            .map(|mut b| b.seen.insert((note.code(), note.key())))
+            .unwrap_or(true);
     if !first {
         return;
     }
@@ -172,5 +182,23 @@ mod tests {
         assert_eq!(mine, vec![note(usize::MAX - 7), note(usize::MAX - 8)]);
         assert_eq!(mine[0].to_string(),
             format!("gamma index mismatch at substep {}: tracked 1 but trajectory recorded 2 gammas", usize::MAX - 7));
+    }
+
+    /// A forcing note is reported each time it is recorded: the command's
+    /// policy, not the process, says it once (see the module doc).
+    #[test]
+    fn a_forcing_note_is_reported_every_time() {
+        let note = RunNote::ForcingOutsideRange(crate::forcing_range::OutsideRange {
+            forcing: "a_forcing_note_is_reported_every_time".to_string(),
+            kind: crate::forcing_range::RangeKind::DataTable,
+            lo: 0.0,
+            hi: 50.0,
+            side: crate::forcing_range::Side::After,
+            lagged: false,
+        });
+        record(note.clone());
+        record(note.clone());
+        let mine = take().into_iter().filter(|n| *n == note).count();
+        assert_eq!(mine, 2);
     }
 }

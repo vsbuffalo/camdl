@@ -100,7 +100,16 @@ impl ForcingPolicy {
             }
             crate::out::detached().fail(refusal(o));
         }
-        s.held.lock().unwrap_or_else(|e| e.into_inner()).push(o.clone());
+        // Said once per policy: the engine reports a forcing each time a
+        // compiled model first holds it (`sim::run_notes`), and one command
+        // can compile many.
+        {
+            let mut held = s.held.lock().unwrap_or_else(|e| e.into_inner());
+            if held.contains(o) {
+                return;
+            }
+            held.push(o.clone());
+        }
         crate::out::live().notice(&crate::out::notice::Notice {
             severity: crate::out::notice::Severity::Warning,
             code: CODE,
@@ -258,6 +267,34 @@ mod tests {
         let mut record = serde_json::json!({});
         second.record_in(&mut record);
         assert_eq!(held(&record), Vec::<String>::new(), "the second command held nothing");
+    }
+
+    /// Two policies installed one after the other in one process (as
+    /// `compare` installs one per fit) are each told of a forcing their runs
+    /// held, through the engine's run notes; each says it once.
+    #[test]
+    fn each_policy_in_a_process_is_told_of_what_its_runs_held() {
+        let _slot = SLOT.lock().unwrap_or_else(|e| e.into_inner());
+        sim::run_notes::set_reporter(crate::util::report_run_note);
+        let note = || sim::run_notes::RunNote::ForcingOutsideRange(past_end("each_policy"));
+        let names = |p: &ForcingPolicy| {
+            let mut record = serde_json::json!({});
+            p.record_in(&mut record);
+            held(&record)
+        };
+        let first = ForcingPolicy::new(true);
+        {
+            let _route = first.install();
+            sim::run_notes::record(note());
+            sim::run_notes::record(note());
+        }
+        let second = ForcingPolicy::new(true);
+        {
+            let _route = second.install();
+            sim::run_notes::record(note());
+        }
+        assert_eq!(names(&first), vec!["each_policy"], "said once by the first");
+        assert_eq!(names(&second), vec!["each_policy"], "and told to the second");
     }
 
     /// A refusal kept for one command's claim is not another command's.
