@@ -633,15 +633,24 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
     cohort.warn(&out);
 
     // Load traces, each filtered by its own fit's selection (if any). Each
-    // input is loaded once, however many streams `--streams` selects.
-    let rows: Vec<Row> = models.into_iter().map(|m| {
+    // input is loaded once, however many streams `--streams` selects, in the
+    // order `scoring_order` gives, and the rows keep the order they were named.
+    let allows: Vec<bool> = models.iter().map(|m| {
+        derive.allow_forcing_extrapolation
+            || crate::fit::handle::resolve_fit_run(&m.path)
+                .is_ok_and(|r| r.config.problem.config.allow_forcing_extrapolation)
+    }).collect();
+    let mut slots: Vec<Option<Row>> = (0..models.len()).map(|_| None).collect();
+    for i in scoring_order(&allows) {
+        let m = &models[i];
         let selection = cohort.for_fit(&m.name);
         let Loaded { trace, data, freshness, streams } =
             load_trace(&out, &m.path, derive, selection).unwrap_or_else(|e| {
                 out.fail(format!("error loading trace for '{}' at '{}': {}", m.name, m.path, e));
             });
-        Row { name: m.name, path: m.path, trace, data, freshness, streams }
-    }).collect();
+        slots[i] = Some(Row { name: m.name.clone(), path: m.path.clone(), trace, data, freshness, streams });
+    }
+    let rows: Vec<Row> = slots.into_iter().map(|r| r.expect("every row is scored")).collect();
 
     // #295 Ask 1 — the optimism caveat, the miscalibration flags and the trace
     // warnings are emitted by the RENDERERS (`warning_lines`), not here, so they
@@ -2292,6 +2301,23 @@ fn load_trace(
     }
 }
 
+/// The order compare scores its rows in, given whether each is scored under
+/// a policy that allows forcing extrapolation (its fit's `[config]
+/// allow_forcing_extrapolation`, or compare's flag): every row that does not,
+/// first, then every row that does, each group in the order named.
+///
+/// An ODE fit is scored in this process, under its own policy, installed for
+/// its scoring. The engine says each forcing note once per process
+/// (`sim::run_notes`), so a policy installed after another has held a forcing
+/// is not told when its fit evaluates that forcing outside its range: a fit
+/// made without the override, scored after one that held a forcing, could
+/// hold it too with nothing said. Scored first, it is told, and refused.
+fn scoring_order(allows: &[bool]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..allows.len()).collect();
+    order.sort_by_key(|&i| allows[i]);
+    order
+}
+
 /// A resolved fit's sealed holdout, checked for the `HoldOutTail` stamp
 /// (gh#585; §3.7.3 of the 2026-08-29 honest-predictive-evaluation
 /// proposal). Detection enforces (a) and (b) of the non-leakage gate:
@@ -2598,12 +2624,6 @@ fn derive_prequential(
     // The run θ̂ comes from: the leaf the handle named, else the folder's.
     let run_dir = resolved.run_dir();
     let config = &resolved.config.problem;
-    // The fit's `allow_degenerate_rates` (keyed in its identity): a rate that
-    // collapsed to 0 in the fit collapses to 0 when it is scored. The
-    // in-process ODE scorer compiles the fit's model under it
-    // (`FitRunConfig::build` reads the fit's `[config]`), and it is passed to
-    // the `camdl pfilter` child below. Each fit is scored under its own setting.
-    let allow_degenerate_rates = config.config.allow_degenerate_rates;
 
     // gh#729 / gh#312: the score must come from the forward process the fit
     // ran on. The θ̂ below comes from the fit's method leaf (both
@@ -2665,6 +2685,14 @@ fn derive_prequential(
     // declared step or 1.0, which is all `pfilter` would see without it.
     let fitted = crate::fit::fitted_model::stored_fit_simulator(resolved)?;
     let fitted_dt = fitted.dt;
+    // The settings the fit is scored under: its own `[config]`
+    // `allow_degenerate_rates` and `allow_forcing_extrapolation`, which `fit
+    // run` applied to it, with compare's `--allow-forcing-extrapolation` folded
+    // in (compare has no degenerate-rate flag). Each fit is scored under its
+    // own; both scorers read this one value: the `camdl pfilter` child is
+    // passed it as flags, and the in-process ODE scorer runs under it
+    // (gh#1235).
+    let settings = fitted.settings.with_flags(false, derive.allow_forcing_extrapolation);
     let (base_enable, base_disable): (Vec<String>, Vec<String>) = if fit_base.is_empty() {
         (Vec::new(), Vec::new())
     } else {
@@ -2802,13 +2830,11 @@ fn derive_prequential(
         for name in &base_disable {
             cmd.arg("--disable").arg(name);
         }
-        if allow_degenerate_rates {
+        // The child is a separate process and runs under its own flags.
+        if settings.allow_degenerate_rates {
             cmd.arg("--allow-degenerate-rates");
         }
-        // The fit's own `[config] allow_forcing_extrapolation`, which `fit
-        // run` applied to it, or compare's flag: the child is a separate
-        // process and runs under its own policy (gh#1235).
-        if derive.allow_forcing_extrapolation || config.config.allow_forcing_extrapolation {
+        if settings.allow_forcing_extrapolation {
             cmd.arg("--allow-forcing-extrapolation");
         }
         // gh#585 (Stage 3.4): score only past the sealed training boundary,
@@ -2864,7 +2890,7 @@ fn derive_prequential(
                  --replicates does not apply; --draws 1 for the plug-in mode)",
                 seg_slug, n_theta, derive.particles));
         }
-        let scored = derive_ode_trace(resolved, &model_path, &streams, &fitted,
+        let scored = derive_ode_trace(resolved, &model_path, &streams, &fitted, settings,
             score_from, &thetas, derive, &base_enable, &base_disable);
         for p in &merged_paths { let _ = std::fs::remove_file(p); }
         replicate_traces.push(scored?);
@@ -3006,13 +3032,18 @@ fn derive_ode_trace(
     model_path: &Path,
     streams: &indexmap::IndexMap<String, String>,
     fitted: &crate::fit::fitted_model::FittedSimulator,
+    settings: crate::fit::fitted_model::FittedSettings,
     score_from: Option<f64>,
     thetas: &[ScoredTheta],
     derive: DeriveSettings,
     enabled: &[String],
     disabled: &[String],
 ) -> Result<PrequentialTrace, String> {
-    let scorer = crate::compare_ode::OdeScorer::build(resolved, model_path, streams, fitted)?;
+    // This fit's forcing policy, for its scoring only: the guard puts back
+    // compare's own policy when it drops.
+    let _forcing_route =
+        crate::forcing_extrapolation::ForcingPolicy::new(settings.allow_forcing_extrapolation).install();
+    let scorer = crate::compare_ode::OdeScorer::build(resolved, model_path, streams, fitted, settings)?;
     let t0 = score_from
         .map_or(0, |t| crate::fit::runner::first_scored_index(scorer.obs_times(), t));
     let n = thetas.len();
@@ -4218,6 +4249,16 @@ fn option_finite(x: f64) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+    /// Rows scored without the forcing override come before every row
+    /// scored under it, so none is scored after a policy that held a forcing
+    /// (`scoring_order`); within each group, the order named.
+    #[test]
+    fn rows_without_the_forcing_override_are_scored_first() {
+        assert_eq!(super::scoring_order(&[true, false, true, false]), vec![1, 3, 0, 2]);
+        assert_eq!(super::scoring_order(&[false, false]), vec![0, 1]);
+        assert_eq!(super::scoring_order(&[true]), vec![0]);
+    }
+
     use super::*;
 
     /// What `cmd_compare` would do with `rows` under `waivers`: the outcome

@@ -504,6 +504,32 @@ fn method_leaf(dir: &Path, method: &str) -> String {
         .expect("the fit's method leaf")
 }
 
+/// `compare` scores an ODE fit in-process, by the fit's own ODE likelihood
+/// rather than a `camdl pfilter` child. A fit made under `[config]
+/// allow_forcing_extrapolation` is scored under it there too: the scorer holds
+/// the forcing rather than refusing it (gh#1235).
+#[test]
+fn compare_scores_an_ode_fit_under_its_configs_override() {
+    let tmp = tempfile::tempdir().unwrap();
+    let m = model(tmp.path(), "linear", &ROWS_TO_50);
+    let toml = fit_toml(tmp.path(), &m, "allow_forcing_extrapolation = true\n");
+    let text = std::fs::read_to_string(&toml).unwrap().replace(
+        "[method]\nalgorithm = \"pgas\"\nbackend = \"chain_binomial\"\nchains = 1\nparticles = 8\n\
+         sweeps = 4\nburn_in = 2\n",
+        "[method]\nalgorithm = \"mh\"\nbackend = \"ode\"\nchains = 1\niterations = 40\nburn_in = 10\n\
+         starts = \"single\"\n",
+    );
+    assert!(text.contains("algorithm = \"mh\""), "the config is the ODE fit's:\n{text}");
+    std::fs::write(&toml, text).unwrap();
+    let o = camdl(tmp.path(), &["fit", "run", toml.to_str().unwrap()]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let leaf = method_leaf(tmp.path(), "mh");
+    let o = camdl(tmp.path(), &["compare", &leaf, &leaf]);
+    let err = stderr(&o);
+    assert!(!err.contains("camdl does not extend a forcing past its range"), "the scorer must not refuse:\n{err}");
+    assert!(o.status.success(), "{err}");
+}
+
 /// `simulate --draws posterior --fit` replays a fit made under `[config]
 /// allow_forcing_extrapolation` under it: the replay holds the forcing rather
 /// than refusing it, says so once, and is the same computation as the replay
