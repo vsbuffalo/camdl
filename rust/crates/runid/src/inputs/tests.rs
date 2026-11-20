@@ -263,8 +263,6 @@ fn fit_digest_holdout_content_is_keyed() {
          editing it (same path) must change the run_id"
     );
 
-    // No spurious sensitivity: identical holdout content → identical hash.
-
     // A bound external file's content is fit identity too, and so is its
     // absence: binding one where there was none, or changing its bytes,
     // re-keys.

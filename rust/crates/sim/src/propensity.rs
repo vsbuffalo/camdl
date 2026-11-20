@@ -669,9 +669,11 @@ pub fn eval_propensities(
     let ctx = EvalCtx { model, int_s, real_s, params, t, dt, projected: None, aux: None, int_float_override: None, per_eval };
 
     // Bench/validation switch (`EvalSettings::eval_unresolved`): on → every
-    // rate through the string-keyed `eval_expr` path, under the tree-walk
-    // binding cache. Read once per propensity vector, so the default path pays
-    // one branch.
+    // rate through the string-keyed `eval_expr` path. Read once per propensity
+    // vector, so the default path pays one branch. `eval_expr` evaluates a
+    // binding reference on demand, by name, and never reads the binding cache,
+    // so this path serves no cache hits; the scope entered below activates the
+    // tree walk's cache, which nothing on this path reads.
     if model.eval.eval_unresolved {
         crate::trace::eval_unresolved_notice();
         UNRESOLVED_EVALS.with(|c| c.set(c.get() + 1));
