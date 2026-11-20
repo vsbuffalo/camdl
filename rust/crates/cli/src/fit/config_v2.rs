@@ -3980,6 +3980,24 @@ mod tests {
         method(cfg).algorithm
     }
 
+    /// A problem's compiled model: `compiled_ir` when set, a `model.camdl`
+    /// that is already compiled IR, and an error for model source nothing
+    /// compiled, never a compile.
+    #[test]
+    fn the_compiled_model_is_never_uncompiled_source() {
+        let problem = |camdl: &str| {
+            parse(&format!("[model]\ncamdl = \"{camdl}\"\n[estimate]\nbeta = {{ bounds = [0.1, 1.0] }}\n[fixed]\n"))
+                .unwrap()
+                .problem
+        };
+        let mut source = problem("m.camdl");
+        let err = source.compiled_model().unwrap_err();
+        assert!(err.contains("m.camdl") && err.contains("was not compiled"), "{err}");
+        source.compiled_ir = Some("compiled.ir.json".into());
+        assert_eq!(source.compiled_model().unwrap(), "compiled.ir.json");
+        assert_eq!(problem("m.ir.json").compiled_model().unwrap(), "m.ir.json");
+    }
+
     #[test]
     fn parse_simple_mle() {
         let config = parse(r#"

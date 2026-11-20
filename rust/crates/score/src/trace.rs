@@ -930,6 +930,48 @@ impl PredInterval {
 mod tests {
     use super::*;
 
+    fn held(forcing: &str, side: ForcingSide) -> PrequentialWarning {
+        PrequentialWarning::ForcingHeld {
+            forcing: forcing.into(),
+            defined_on: [0.0, 50.0],
+            side,
+            held_value_at: 50.0,
+            bound: Some(ForcingBound::Data),
+            lagged: Some(false),
+        }
+    }
+
+    /// The JSON a trace carries for a held forcing, and for one whose bound
+    /// and lag were not recorded (both omitted, and read back as `None`).
+    #[test]
+    fn a_held_forcing_has_a_stable_json_form() {
+        let w = held("mult", ForcingSide::After);
+        let json = serde_json::to_value(&w).unwrap();
+        assert_eq!(json, serde_json::json!({
+            "kind": "forcing_held", "forcing": "mult", "defined_on": [0.0, 50.0], "side": "after",
+            "held_value_at": 50.0, "bound": "data", "lagged": false,
+        }));
+        assert_eq!(serde_json::from_value::<PrequentialWarning>(json).unwrap(), w);
+        let unrecorded: PrequentialWarning = serde_json::from_value(serde_json::json!({
+            "kind": "forcing_held", "forcing": "mult", "defined_on": [0.0, 50.0], "side": "before",
+            "held_value_at": 0.0,
+        })).unwrap();
+        assert!(matches!(unrecorded, PrequentialWarning::ForcingHeld { bound: None, lagged: None, .. }));
+        assert_eq!(serde_json::to_value(&unrecorded).unwrap().as_object().unwrap().len(), 5);
+    }
+
+    /// Combining traces keeps one warning per kind, but every distinct held
+    /// forcing and side.
+    #[test]
+    fn same_as_keeps_distinct_held_forcings() {
+        assert!(held("a", ForcingSide::After).same_as(&held("a", ForcingSide::After)));
+        assert!(!held("a", ForcingSide::After).same_as(&held("b", ForcingSide::After)));
+        assert!(!held("a", ForcingSide::After).same_as(&held("a", ForcingSide::Before)));
+        assert!(PrequentialWarning::StartsAtPrior.same_as(&PrequentialWarning::StartsAtPrior));
+        assert!(PrequentialWarning::EssCollapse { step_count: 1, threshold: 1.0 }
+            .same_as(&PrequentialWarning::EssCollapse { step_count: 2, threshold: 3.0 }));
+    }
+
     fn approx_eq(a: f64, b: f64, tol: f64) -> bool { (a - b).abs() < tol }
 
     /// Schema 5: the derivation block survives the JSON round trip, with

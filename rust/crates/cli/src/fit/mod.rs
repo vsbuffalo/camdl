@@ -3568,6 +3568,25 @@ mod tests {
 
     /// Deserialize a golden IR envelope into an `ir::Model` (no compile —
     /// only the declared observation names are read here).
+    /// A compiled model that cannot be loaded fails the sidecar rather than
+    /// recording an empty model identity.
+    #[test]
+    fn a_sidecar_whose_compiled_model_does_not_load_is_an_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let toml_src = "[model]\ncamdl = \"m.camdl\"\n[data.observations]\n\
+                        [estimate]\nbeta = { bounds = [0.01, 2.0] }\n[fixed]\nN0 = 1000\n";
+        let fit_path = tmp.path().join("fit.toml");
+        std::fs::write(&fit_path, toml_src).unwrap();
+        let mut config = config_v2::FitConfig::from_toml_str(toml_src).unwrap();
+        config.problem.compiled_ir = Some(tmp.path().join("absent.ir.json").to_string_lossy().into_owned());
+        let model = golden_model("ocaml/golden/seir_observations.ir.json");
+        let err = build_fit_sidecar(&config, toml_src.as_bytes(), &model, &Default::default()).unwrap_err();
+        assert!(err.contains("absent.ir.json"), "{err}");
+        config.problem.compiled_ir = None;
+        let err = build_fit_sidecar(&config, toml_src.as_bytes(), &model, &Default::default()).unwrap_err();
+        assert!(err.contains("was not compiled"), "{err}");
+    }
+
     /// The absolute path of a committed golden IR, as a fit's `compiled_ir`.
     fn golden_path(rel: &str) -> String {
         format!("{}/../../../{}", env!("CARGO_MANIFEST_DIR"), rel)
