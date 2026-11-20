@@ -11,81 +11,74 @@ supplied externally._
 
 ## 1. Design Principles
 
-**Primitives first.** The language defines a small set of composable primitives.
-Convenience sugar is documented as expanding to primitives; users can always
-write the explicit form. All design effort focuses on getting a minimal,
-extensible, composable, non-blocking, flexible set of core primitives right.
-Sugar is never added before the primitives it replaces are solid.
+This section states the rules that hold across the whole language. Each is
+specified in detail in the section it links to.
 
-**Explicit over terse.** Named keywords everywhere. No hidden multiplication, no
-auto-localization, no implicit scope rules. Every rate expression is a total
-propensity — the compiler never silently multiplies by a population count. If a
-rate is per-capita, the user writes the `* Pop` factor explicitly.
+**Primitives and sugar.** The language is a small set of primitives. A
+convenience form is specified by the primitives it expands to (§25), and the
+expanded form can be written by hand.
 
-**Model + layered configuration.** A `.camdl` file is structurally stable across
-all analyses — forward simulation, calibration, scenario comparison, and
-forecasting all use the same file with different layered configuration on top.
-Two shapes are both first-class:
+**Rates are total propensities.** Every rate expression after `@` is the total
+rate of the transition in the whole source population, in individuals per unit
+time. The compiler never multiplies a rate by a population: a per-capita rate is
+written with its population factor, `gamma * I`. Dimensional analysis refuses a
+rate that is not a population per unit time (**E300**, §2.2.1).
 
-- A **structural skeleton** that declares parameter names, kinds, and dimensions
-  only; values are supplied externally via TOML, CLI flags, or inference
-  engines. Useful for "model under inference" / library-style work.
-- A **self-contained reproducible model** that, on top of that skeleton, bundles
-  the rest of what it takes to read and run the file: `~` prior declarations, an
-  `init { ... }` block for initial states, and a `baseline` scenario whose
-  `set = { ... }` block supplies concrete parameter values — the one in-file way
-  to give a parameter a value. So the file can be handed to a colleague (or
-  shipped in a paper supplement) and run end-to-end. This is the preferred form
-  for distribution and for the canonical examples shipped with camdl.
+**One model file, values supplied around it.** A `.camdl` file is the same file
+for simulation, calibration, scenario comparison and forecasting; what changes
+between analyses is the configuration layered on top. A file takes one of two
+shapes:
 
-**Parameter values are never declared in the `parameters { ... }` block** — it
-carries names, kinds, dimensions, and optional priors only (§4, §4.2). Concrete
-values live elsewhere: a `params.toml` / `[fixed]` block, a CLI override
-(`--param`, `--set`), or — the only in-file form — a named scenario's
-`set = { ... }`. The precedence chain is fixed (see `camdl-run-spec.md` §1.3 for
-forward simulation and `docs/inference.md` for inference), and it is **not** a
-blanket "external beats in-file": an in-file scenario's `set`/`scale` overrides
-the external `params.toml` base and any sweep point, and only an explicit CLI
-`--param` / `--fixed` outranks the scenario — on parameters the scenario does
-not set or scale; a `--param` / `--fixed` on a parameter a selected scenario
-sets or scales is refused. For a simulation's parameters, highest precedence
-first: `--param` CLI flags, then scenario `set = { ... }`, then sweep points,
-then the `params.toml` base values. The seed is always a CLI argument.
+- a **structural skeleton**, which declares parameter names, kinds and
+  dimensions only, and is given values by a `--params` TOML file, CLI flags or
+  an inference method;
+- a **self-contained model**, which adds `~` priors (§20.2), an `init { }`
+  block (§15) and a `baseline` scenario whose `set = { … }` gives every
+  parameter a value (§17), so that the file runs end to end on its own. The
+  examples shipped with camdl take this shape.
 
-What this design preserves — and what the IR's hash discipline enforces — is
-that _structural_ model identity (compartments, transitions, observation
-projections, intervention semantics) is captured by the **model** level of a
-run's factored identity, while _value-bearing_ content lives in later levels:
-base params in the **params** level, backend and `dt` in the **config** level,
-the scenario delta in the **scenario** level, and inference inputs (priors,
-transforms, data, fit config) in the **fit** level (§19). So two analyses that
-share a structural model share the same model-level hash even if one bakes in
-calibrated values and the other supplies them externally; changing a value is
-visible in the params or config level even when the underlying structure didn't
-change. The reviewer trying to tell "is this a structural change or a parameter
-sweep" reads the level hashes, not the file shape.
+The `parameters { }` block never holds a value: it declares names, kinds,
+dimensions, bounds and priors (§4). A value comes from a `--params` file or a
+fit's `[fixed]` table, from a CLI flag (`--param`, `--fixed`), or, as the only
+in-file form, from a scenario's `set = { … }`. The order in which these sources
+override each other is specified in the run spec (§1.3). It is not "external
+beats in-file": a selected scenario's `set` and `scale` override the
+`--params` base and any sweep point, `--param` and `--fixed` override every
+parameter the scenario does not set or scale, and a `--param` or `--fixed` on a
+parameter the scenario sets or scales is refused. The seed is always a CLI
+argument.
 
-**Typed and checked.** Index dimensions, table shapes, compartment arities,
-parameter domains, and unit dimensions are compiler-checked with clear error
-messages, at compile time rather than simulation time. A **named** index is
-resolved by the dimension it names, and a label that is not a dimension of the
-thing indexed is rejected (`E332`); a **positional** index is checked against
-the levels of whichever dimension holds that slot, so a level from the wrong
-dimension is rejected (`E263`).
+A run's identity is factored into levels (§19.1). The `model` level hashes the
+structure (compartments, transitions, observations, ODE equations, tables,
+`init`, `time_unit`); parameter values, the backend and `dt`, and the scenario
+delta are hashed in their own levels. Two runs of one structural model
+therefore share the `model` hash whether the values were written in a scenario
+or supplied from outside, and a change of value re-keys only the level that
+holds it.
 
-What the compiler does **not** do is track which dimension an index _variable_
-was bound to. With `age = [low, high]` and `risk = [low, high]`, writing
-`I[r, a]` where `a` is bound to `age` and `r` to `risk` names an existing cell
-and compiles silently. Positional indexing is safe only while the dimensions'
-level names are disjoint — which is the concrete reason to prefer named
-indexing (§12.1) whenever two axes could ever share a level name.
+**Compile-time checks.** Index dimensions, table shapes, compartment arities,
+parameter domains and dimensions are checked when the model is compiled, with
+a diagnostic code for each failure (§26). A **named** index
+(`I[age = child]`) is resolved by the dimension it names, and a name that is not
+a dimension of the indexed family is **E332**. A **positional** index
+(`I[child]`) is checked against the levels of the dimension in that slot, and a
+level that is not one of them names no cell and is refused: **E100** on a
+compartment, **E504** on a parameter.
 
-**No auto-localization.** After stratification, bare compartment names always
-refer to the global total (sum over all strata). `S` means "all susceptibles."
-`S[child]` means "susceptible children." The compiler never guesses which
-stratum you meant. Stratification rules (coupling sugar) handle the
-transformation from global to per-stratum formulas mechanically; the user writes
-the base model with global names and specifies how dimensions interact.
+The compiler does not record which dimension an index _variable_ was bound to.
+With `age = [low, high]` and `risk = [low, high]`, `I[r, a]` with `a` bound to
+`age` and `r` to `risk` names an existing cell and compiles without a
+diagnostic. Positional indexing is therefore checked only while the dimensions'
+level names are disjoint; where two dimensions could share a level name, use
+named indexing (§12.1).
+
+**No auto-localization.** In model dynamics a bare compartment name of a
+stratified compartment is its total over all strata: `S` is all susceptibles
+and `S[child]` the susceptible children. The compiler never chooses a stratum.
+Stratified dynamics are written with explicit indexed transitions and sums
+(§9.2, §10). In an observation's projection an unindexed name over a population
+stratum is refused instead (**E280**, §12.1), so that pooling across strata is
+written out.
 
 ### 1.1 Syntax Conventions
 
@@ -103,11 +96,10 @@ the base model with global names and specifies how dimensions interact.
 '    unit literal prefix ('days, 'years)
 ```
 
-**Arrow: `-->` or `→`.** The flow arrow is written `-->` in committed models;
-the Unicode rightwards arrow `→` (U+2192) is accepted as an exact alias, so a
-transition pasted from prose, or typed in an editor that autocorrects `->`,
-compiles as written. The arrow is purely syntactic — it separates sources from
-destinations — and the two spellings produce identical IR:
+**Arrow.** The flow arrow is `-->`. The Unicode rightwards arrow `→` (U+2192) is
+an exact alias, so a transition pasted from prose, or typed in an editor that
+turns `->` into `→`, compiles as written. The arrow separates sources from
+destinations and has no other meaning; the two spellings produce identical IR.
 
 ```camdl
 compartments { S, I, R }
@@ -131,13 +123,13 @@ simulate { from = 0 'days  to = 120 'days }
 
 #### Doc comments (`#'`)
 
-A line starting `#'` documents the declaration **immediately below it**. Plain
-`#` is an ordinary comment that no tool reads; `#'` prose is carried through
-compilation and shown by `camdlc inspect`, `camdlc render`, and the parameter
-legend in `camdl fit summary`.
+A line starting `#'` documents the declaration immediately below it. A plain `#`
+comment is read by no tool; `#'` prose is carried through compilation and shown
+by `camdlc inspect`, `camdlc render` and the parameter legend of
+`camdl fit summary`.
 
-A doc comment attaches to a **declaration**, never to a block keyword. Inside a
-block that means the member, not the `{`:
+A doc comment attaches to a declaration, never to a block keyword. Inside a
+block it documents the member below it:
 
 ```camdl
 compartments {
@@ -148,13 +140,14 @@ compartments {
 }
 ```
 
-Writing `#'` above `compartments {` is a syntax error, because a block has no
-declaration for it to describe. The sites that take one are: `compartments`
-members, `parameters` members, `dimensions` entries, `transitions`,
-`observations` streams, `quantities`, and top-level `let` bindings.
+The declarations that take a doc comment are `compartments` members,
+`parameters` members, `dimensions` entries, `transitions`, `observations`
+streams, `quantities`, and top-level `let` bindings. A `#'` line above a block
+keyword (`compartments {`, `transitions {`), or with no declaration below it, is
+a syntax error, **E001**.
 
-The one place a `#'` block attaches to no declaration is the **top of the
-file**, where it documents the model itself:
+**The model's doc comment.** A `#'` block at the top of the file, where every
+line above it is blank or a comment, documents the model itself:
 
 ```camdl
 #' National SEIR with a facility-death delay: cases and deaths come from one
@@ -166,33 +159,12 @@ file**, where it documents the model itself:
 time_unit = 'days
 ```
 
-The rule is positional: a `#'` block is the model's iff every line above it is
-blank or a comment — that is, no declaration has started. Everywhere else a
-`#'` block must be followed by a declaration, and a stray one is still `E001`.
-(Consequence: in a file whose first declaration is a top-level `let`, the header
-block documents the model and the `let` is undocumented. Put the `let` after
-another declaration if you want a doc on it.)
+The rule is positional, so in a file whose first declaration is a top-level
+`let`, a `#'` block above it documents the model and the `let` has no doc
+comment; to document that `let`, place it after another declaration.
 
-Inside the model block the tag vocabulary is **open**: `@symbol` and `@ref`
-behave as they do on a declaration, and any other `@tag` line is kept verbatim
-as free text. `@base` / `@adds` / `@changes` above are a house convention for
-recording where a model variant came from — the compiler stores them as prose,
-validates nothing about them, and does not check that the parent file exists.
-On a *declaration* the vocabulary stays closed (`@default 0.3` is still `E111`),
-because there a tag reads as though it sets something.
-
-A model's `#'` block and its `description = "…"` are not the same thing.
-`description` is a short string **inside** the model, so it is part of run
-identity: editing it re-keys every fit. The `#'` block rides the IR envelope, so
-it can be corrected freely — which is what makes it the right home for a real
-description (see §16.4).
-
-Whether `C` means "confirmed and still transmitting" or "confirmed, isolated,
-terminal" decides whether the `I` dwell is the effective infectious period, and
-so the generation interval, and so the R0 you infer from a given growth rate.
-That is a scientific fact about the model, and `#'` is where it lives.
-
-Two tags are recognised inside a doc comment; anything else is `E111`.
+**Tags.** On a declaration, two tags are recognized, and any other `@tag` line
+is **E111**:
 
 ```camdl
 #' basic reproduction number
@@ -201,53 +173,63 @@ Two tags are recognised inside a doc comment; anything else is `E111`.
 R0 : positive in [0.5, 20]
 ```
 
-`@symbol` overrides the symbol `camdlc render` prints for that name in the
-LaTeX and JSON projections — useful when the model identifier is spelled for
-code (`Conf`) and the paper spells it `C`. `@ref` records a citation or case
-definition. Both are optional, and either may appear without prose.
+`@symbol` sets the symbol `camdlc render` prints for the name in its LaTeX and
+JSON output, wherever the name is typeset, so a model identifier spelled for
+code (`Conf`) can be printed as the paper spells it (`C`). `@ref` records a
+citation or a case definition. Both are optional, and either may appear without
+prose. In the model's doc comment the vocabulary is open: `@symbol` and `@ref`
+behave as on a declaration, and any other `@tag` line (such as `@base`, `@adds`
+and `@changes` above) is kept verbatim as prose. The compiler checks nothing
+about these lines, including whether a file they name exists.
 
-A `let` binding is the highest-value site: a derived quantity is where a
-modelling assumption hides. `let N[p] = S[p] + E[p] + I[p] + C[p]` shows its
-arithmetic but not whether it is the total population or the
-force-of-infection denominator, and those are different models.
+**Doc comments and run identity.** A model's doc comment is stored outside the
+model's IR and is not part of run identity, so it can be edited without
+re-keying any run. A `description = "…"` declaration is part of the model's IR
+and of its `model` hash (§19.1), so editing it re-keys every run and fit of the
+model (§16.4).
+
+**Doc comments on `let` bindings.** A doc comment on a `let` states what a
+derived quantity is, which its arithmetic does not: `S[p] + E[p] + I[p] + C[p]`
+may be the total population or the force-of-infection denominator.
 
 ```camdl
 #' total population per patch — the FOI denominator
 let N[p in patch] = S[p] + E[p] + I[p] + C[p]
 ```
 
-Which surfaces a `let`'s prose reaches depends on whether the binding becomes a
-model entity. A **typed** `let` with a **constant** body is a **model
-constant**: `let omega : rate = 0.01` compiles to an entry of the IR's
-`constants` section, with its value and its declared kind, and is not a
-parameter. It holds its declared value in every run — no `--fixed`, `[fixed]`,
-`[estimate]`, `--sweep` or scenario `set` can name it, and one that tries is
-refused as an unknown parameter whose hint says to declare it in
-`parameters { }` to set it from outside. `camdl fit summary --parameters` lists
-the model's constants under their own `constants` heading after the parameter
-legend, each with its value and its prose. Every other `let` is inlined and has
-no entity of its own; its prose lives in `camdlc inspect --let <name>`.
-`@symbol` applies either way, and applies everywhere the name is typeset, not
-only in the definition itself.
+A **typed** `let` with a constant body is a **model constant**:
+`let omega : rate = 0.01` compiles to an entry of the IR's `constants` section,
+with its value and its declared kind, and is not a parameter. It holds its value
+in every run. `--fixed`, `[fixed]`, `[estimate]`, `--sweep` and a scenario's
+`set` cannot name it; one that tries is refused as an unknown parameter, with a
+hint to declare it in `parameters { }` to set it from outside.
+`camdl fit summary --parameters` lists the constants under their own
+`constants` heading after the parameter legend, each with its value and its
+prose. Every other `let` is inlined into the expressions that use it; its prose
+is shown by `camdlc inspect --let <name>`. `@symbol` applies to both.
+
+Related sections: §8 (let bindings), §8.4 (typed let bindings), §16.4
+(quantities), §24.1 (the file-level grammar).
 
 ---
 
 ## 2. Time Unit and Dimensional Types
 
+`time_unit` sets the unit of model time. Every rate and duration in the model is
+converted to it when the model is compiled.
+
 ```camdl
 time_unit = 'days
 ```
 
-All rates and durations are normalized to this unit at compile time.
-
-`time_unit` must be a **duration** unit: `'days`, `'weeks`, `'months` or
-`'years`. A rate (`'per_day`), `'count` or `'ratio` has no mapping to a length
-of time and is rejected with **E228** at the declaration. (`'months` and
-`'years` carry the additional anchored-mode restriction described in §2.2.)
+`time_unit` must be a duration unit: `'days`, `'weeks`, `'months` or `'years`.
+A rate (`'per_day`), `'count` or `'ratio` is not a length of time and is
+**E228**. `'months` and `'years` cannot be combined with `origin = date(…)`
+(**E320**), because a calendar month is not a constant number of days (§2.1).
 
 ### 2.1 Unit Literals
 
-Unit literals are distinguished from identifiers by the `'` prefix:
+A unit literal is a number followed by a unit name with a `'` prefix:
 
 ```camdl
 # Duration (dimension: time)
@@ -261,134 +243,128 @@ Unit literals are distinguished from identifiers by the `'` prefix:
 0.02 'per_year
 ```
 
-Supported units: `'days`, `'weeks`, `'months`, `'years`, `'per_day`,
-`'per_week`, `'per_month`, `'per_year`, `'count`, `'ratio`. `'count` carries
-dimension P (population); `'ratio` is dimensionless. Both are used on table
-cells (§2.5) and forcing declarations (§7) where a value's dimension does not
-fit the time-or-rate axis. A parameter's dimension is written with a `dim`
-clause instead (§4.1.1).
+The units are `'days`, `'weeks`, `'months` and `'years` (time, T);
+`'per_day`, `'per_week`, `'per_month` and `'per_year` (T⁻¹); `'count`
+(population, P); and `'ratio` (dimensionless). `'count` and `'ratio` give a
+dimension to a value outside the time-or-rate axis, on table cells (§2.5) and
+forcing declarations (§7). A parameter's dimension is written with a `dim`
+clause, never a unit literal (§4.1.1).
 
-Conversions: 1 'week = 7 'days, 1 'month = 365.2425/12 'days ≈ 30.4369, 1 'year
-= 365.2425 'days. Proleptic-Gregorian throughout; matches `rata_die` and
-`rust/crates/ir/src/caltime.rs::days_per_unit` (the shared conversion
-authority).
+The conversions are 1 'weeks = 7 'days, 1 'years = 365.2425 'days (the mean
+year of the proleptic Gregorian calendar), and 1 'months = 365.2425/12 'days ≈
+30.4369 'days.
 
-#### Exact vs Calendar duration kinds
+#### Exact and calendar durations
 
-Duration unit literals split into two kinds, distinguished by whether their
-magnitude is a constant or an affine average over the calendar:
+A duration is either **exact** or **calendar**:
 
-| Unit literal        | Kind     | Why                                             |
-| ------------------- | -------- | ----------------------------------------------- |
-| `'days`, `'weeks`   | Exact    | constant day count (1, 7) — invertible          |
-| `'months`, `'years` | Calendar | average-length (≈ 30.4369, ≈ 365.2425) — affine |
+| Unit literal        | Kind     | Length                                           |
+| ------------------- | -------- | ------------------------------------------------ |
+| `'days`, `'weeks`   | Exact    | a constant number of days (1, 7)                 |
+| `'months`, `'years` | Calendar | the calendar's mean month or year (≈ 30.4369, ≈ 365.2425 days) |
 
-The dimensional checker tracks this as a **one-bit refinement on `[T]`**
-(`Exact <: Calendar` on the subtype lattice). The refinement propagates through
-arithmetic by least upper bound — `Exact ± Exact` stays Exact; any expression
-touching a `'months`/`'years` literal becomes Calendar.
+The kind is a refinement of the time dimension T, with Exact a subtype of
+Calendar. It propagates through arithmetic by least upper bound: `Exact ± Exact`
+is Exact, and an expression containing a `'months` or `'years` literal is
+Calendar.
 
-The refinement is load-bearing in **anchored mode** (when `origin =
-date(...)`
-is declared): inside an ordinary expression (a `let`, a rate, a quantity's
-body) a `Calendar`-classified duration cannot be added to or subtracted from an
-`Instant` (**E321**), because calendar months/years are non-invertible relative
-to a date. Use `add_calendar_months` / `add_calendar_years` (§2.3) for
-calendar-exact stepping, or an explicit `'days` literal for an affine offset.
-In a date position, below, a single step is resolved by the one-step calendar
-rule.
+The distinction applies only in **anchored mode**, when the model declares
+`origin = date(…)` (§2.3). A calendar month has no fixed length relative to a
+date, so inside an ordinary expression (a `let`, a rate, a quantity's body) a
+Calendar duration added to or subtracted from an instant is **E321**. Step a
+date by calendar months or years with `add_calendar_months` or
+`add_calendar_years` (§2.3), or offset it by a number of days.
 
-**Date positions.** A position that holds a date is an _instant position_:
-`simulate { from, to }`, a scenario's `simulate { to }`, an `at [...]` entry of
-an intervention or event, a recurring schedule's `from` and `to`, an output's
-`trajectories { at }` and an observation's `emit_schedule = at [...]` entries,
-`value_at`'s time argument, a forcing's `breakpoints`, a bspline `window` and an
-interpolated forcing's `times`, the bounds of an `instant`-kind parameter and
-a value given to one (a scenario's `set`, a prior's `mu`, `mean`, `lower` or
-`upper`; a prior's scale such as `sigma` is a length), and the operand compared
-with model time `t`, or with `t ± d`, in any expression. In anchored mode a
-bare duration there denotes `origin + D`; a comparison of the time since or
-until an instant `X` with a duration (`t - X ⋈ D`, `X - t ⋈ D`, `-(X - t) ⋈ D`)
-compares `t` with the date `X + D` (or `X - D`). A calendar duration there,
-directly or through a `let`, follows **the one-step calendar rule**: one
-calendar step of a whole number of months (or years, as twelve months) from a
-date the compiler knows (`origin`, a `date(...)` literal, or a `let` of one) is
-that calendar date, as `add_calendar_months` computes it. So
-`simulate { to = 2 'years }` from `origin = date("2020-01-01")` is
-`add_calendar_years(origin, 2)`, 2022-01-01 (`t = 731`), `at [6 'months]` is
+**Instant positions.** A position that holds a date is an _instant position_:
+
+- `simulate { from, to }` and a scenario's `simulate { to }`;
+- an `at [...]` entry of an intervention or event, and a recurring schedule's
+  `from` and `to`;
+- an output's `trajectories { at }` and an observation's
+  `emit_schedule = at [...]` entries;
+- `value_at`'s time argument, a forcing's `breakpoints`, a bspline `window`, an
+  interpolated forcing's `times`;
+- the bounds of an `instant`-kind parameter, and a value given to one: a
+  scenario's `set`, and a prior's `mu`, `mean`, `lower` or `upper` (a prior's
+  scale, such as `sigma`, is a length);
+- the operand compared with model time `t`, or with `t ± d`, in any expression.
+
+In anchored mode a bare duration `D` in an instant position denotes
+`origin + D`, and a comparison of the time since or until an instant `X` with a
+duration (`t - X ⋈ D`, `X - t ⋈ D`, `-(X - t) ⋈ D`) compares `t` with the date
+`X + D` (or `X - D`). Instant positions accept instant arithmetic
+(`to = origin + 90 'days`, `at = [date("2020-03-01") + 7 'days]`), folded when
+the model is compiled, and every `at` list accepts `date_range(...)`.
+
+**The one-step calendar rule.** A calendar duration in an instant position,
+written directly or through a `let`, is resolved as one calendar step: a whole
+number of months (a year is twelve months) from a date known when the model is
+compiled (`origin`, a `date(...)` literal, or a `let` of one) is the calendar
+date `add_calendar_months` gives. From `origin = date("2020-01-01")`,
+`simulate { to = 2 'years }` is 2022-01-01 (`t = 731`), `at [6 'months]` is
 2020-07-01 (`t = 182`), and `1.5 'years` and `1 'years + 6 'months` are each one
 step of 18 months. Any other calendar duration in an instant position is
-**E321**, with a hint naming the explicit form: a fractional month
-(`0.5 'months`); a calendar step mixed with days
-(`date("2020-02-26") + 1 'years + 3 'days`, whose two orders give 2021-03-01 and
-2021-02-28); two calendar steps (`origin + 6 'months + 6 'months`, or a step on
-an `add_calendar_*` result); and a step from a date known only when the model
-runs (model time `t`, as in `t - 1 'months`, an `instant` parameter, or an
-observation anchor). A calendar duration as a cadence (a recurring `every`, an
-output or emit `every`) is **E322**, whose hint names
-`date_range(<start>, <end>, calendar_months = k)` in an `at` list. A
-_length_ keeps the average: `dt`, a forcing's `period`, `step` and `lag`, a
-sinusoidal `phase`, a `via` mean, a `duration` parameter's bounds, and a unit
-literal in an ordinary expression. Instant positions accept instant arithmetic
-(`to = origin + 90 'days`, `at = [date("2020-03-01") + 7 'days]`), folded at
-compile time, and every `at` list splices `date_range(...)`.
+**E321**, with a hint naming the explicit form:
 
-An `Instant` moves by a duration, and the difference of two Instants is an
-Exact duration. In anchored mode the compiler refuses six forms on a
-**definite** Instant — one built from `date(...)`, `origin`, `add_calendar_*`,
-`instant`-kind parameters and `let`s of those, moved by durations. Each is
+- a fractional month (`0.5 'months`);
+- a calendar step mixed with days, `date("2020-02-26") + 1 'years + 3 'days`,
+  whose two orders of application give 2021-03-01 and 2021-02-28;
+- two calendar steps (`origin + 6 'months + 6 'months`, or a step applied to an
+  `add_calendar_*` result);
+- a step from a date known only when the model runs: model time `t`
+  (`t - 1 'months`), an `instant` parameter, or an observation anchor.
+
+A calendar duration as a cadence (a recurring `every`, an output or emit
+`every`) is **E322**; its hint names
+`date_range(<start>, <end>, calendar_months = k)` in an `at` list. A _length_
+keeps the mean month or year: `dt`, a forcing's `period`, `step` and `lag`, a
+sinusoidal `phase`, a `via` mean, the bounds of a `duration` parameter, and a
+unit literal in an ordinary expression.
+
+**Instant arithmetic.** An instant moves by a duration, and the difference of two
+instants is an exact duration. A **definite** instant is one built from
+`date(...)`, `origin`, `add_calendar_*`, `instant`-kind parameters and `let`s of
+these, moved by durations. In anchored mode six forms on a definite instant are
 **E360**:
 
-- `Instant + Instant`;
-- a `sum(...)` whose body is an Instant;
-- `k * Instant`, and likewise `/`, `^` and negation;
-- `Duration − Instant`;
-- an Instant moved by a constant with no unit: `date("2020-03-01") + 5`, or
-  `+ 5 * 2`. The offset is judged by its dimension, not its spelling, and would
-  otherwise be read silently in `time_unit`; write `5 'days`;
-- a conditional whose one branch is an Instant and the other a duration:
-  `if c then date(a) else 5 'days`. Put the conditional on the duration
-  instead, `origin + (if c then 5 'days else 7 'days)`.
+| Expression                                              | Result                   |
+| ------------------------------------------------------- | ------------------------ |
+| `date(b) - date(a)`                                     | Exact duration           |
+| `date(a) + 30 'days`, `origin - d`                      | Instant (`d` a duration) |
+| `date(a) + date(b)`                                     | **E360**                 |
+| `sum(i in d, t0[i])`, with `t0` an instant              | **E360**                 |
+| `2 * date(a)`, `date(a) / 2`, `date(a)^2`, `-date(a)`   | **E360**                 |
+| `7 'days - date(a)`                                     | **E360**                 |
+| `date(a) + 5`, `date(a) + 5 * 2`                        | **E360**                 |
+| `if c then date(a) else 5 'days`                        | **E360**                 |
 
-An expression that is not a definite Instant is not checked. Model time `t` is
-not one, so a rate term such as `k * (t0 - t)` is not refused, and neither is a
+An offset is judged by its dimension, not its spelling: a constant with no unit
+would be read in `time_unit`, so it is refused and written `5 'days`. A
+conditional is written on the duration, `origin + (if c then 5 'days else 7
+'days)`. An expression that is not a definite instant is not checked: model time
+`t` is not one, so a rate term such as `k * (t0 - t)` is accepted, and so is a
 function call other than `date(...)` and `add_calendar_*`, such as
 `max(date(a), date(b))`.
 
-| Expression                            | Result                     |
-| ------------------------------------- | -------------------------- |
-| `date(b) - date(a)`                   | Exact duration             |
-| `date(a) + 30 'days`, `origin - d`    | Instant (`d` a duration)   |
-| `date(a) + date(b)`                   | **E360**                   |
-| `2 * date(a)`, `date(a) / 2`          | **E360**                   |
-| `7 'days - date(a)`                   | **E360**                   |
-| `date(a) + 5`, `date(a) + 5 * 2`      | **E360**                   |
-| `sum(i in d, t0[i])` (`t0` an instant)| **E360**                   |
-| `if c then date(a) else 5 'days`      | **E360**                   |
+In **unanchored mode** (no `origin`) there is no calendar, the refinement is
+inactive, and a calendar duration is its mean length everywhere, including rate
+expressions, table values and parameter bounds. Under `time_unit = 'months`, a
+`let` of `6 'months` or `1 / (6 'months)` is six months, or its reciprocal, of
+the mean length.
 
-In **unanchored mode** (no `origin`) the refinement is inactive: no calendar
-reference exists, so `5 'months` as an affine span is fine, including in rate
-expressions, table values, and parameter bounds. The dacca SIRS configuration
-(`time_unit = 'months`, `beta : rate
-'per_month`, `6 'months` durations) is
-entirely composed of calendar-named _affine_ constructs and works unchanged.
-
-See [`docs/dates.md`](dates.md) and the typed-time proposal
-([`docs/dev/proposals/archive/post-alpha/2026-05-22-typed-time-and-dsl-ergonomics.md`](dev/proposals/archive/post-alpha/2026-05-22-typed-time-and-dsl-ergonomics.md))
-§3 for the full statement of the rule, the LUB propagation table, and the
-classifier-from-leaves invariant.
+The treatment of dates across the language, data files and output is specified
+in [`docs/dates.md`](dates.md).
 
 ### 2.2 Dimensional Type System
 
-Durations and rates are **distinct types**. The compiler tracks dimensions
-through expressions and rejects mismatches:
+Every expression has a dimension, a product of powers of population P and time
+T. Durations and rates are distinct dimensions, and the compiler refuses an
+expression that combines them inconsistently:
 
 ```camdl
 'days     — dimension: time
 'per_day  — dimension: 1/time (rate)
 ```
-
-Valid operations:
 
 ```camdl
 5 'days + 3 'days         → 8 'days (time + time = time)
@@ -397,28 +373,18 @@ Valid operations:
 0.1 'per_day * 5 'days    → 0.5 (rate × time = dimensionless) ✓
 ```
 
-Invalid operations:
-
 ```camdl
 5 'days + 0.1 'per_day    → ERROR: cannot add time and rate
 ```
 
-Mixed-unit values in tables that aren't compatible are compile errors.
-Dimensionless zero (`0.0`) is compatible with any unit context.
+A sum whose operands have different dimensions is **E302**. A zero (`0`, `0.0`)
+takes any dimension (§2.2.1).
 
 ### 2.2.1 Transition Rate Dimensional Analysis
 
-The compiler checks that every transition rate expression has dimension
-**P·T⁻¹** (population per unit time). This catches the most common modeling bug:
-writing a per-capita rate where a total propensity is needed.
-
-The checker infers dimensions from:
-
-- Compartment references (`Pop`, `PopSum`) → dimension **P**
-- `Time` → dimension **T**
-- Parameter types: `rate` → **T⁻¹**, `probability` → **1**, `count` → **P**
-- Unit literals: `'days` → **T**, `'per_day` → **T⁻¹**, `'count` → **P**
-- Arithmetic rules: multiplication adds exponents, division subtracts
+Every transition rate must have dimension **P·T⁻¹**, a population per unit time
+(§1). A per-capita rate written where a total propensity belongs has dimension
+T⁻¹ and is refused:
 
 ```camdl
 # ✓ Correct: beta:T⁻¹ * S:P * I:P / N:P = P·T⁻¹
@@ -431,21 +397,27 @@ infection : S --> I @ beta * I / N
 #     got:      T⁻¹ (per-capita rate)
 ```
 
-**How dimensions are inferred.** Every expression-bearing position of the
-model is part of one system of equations over the exponents of P and T: a
-product's dimension is the sum of its factors', the operands of `+`, `min` or a
-comparison have one dimension, the argument of `exp`, `log` or a trigonometric
-function is dimensionless, and each position contributes the dimension it
-requires. The system is solved at once (Kennedy, "Dimension types", ESOP 1994),
-so a parameter whose dimension follows from several uses jointly (`a * b` in
-one rate, `a / b` in another) is resolved even when no single use fixes it, and
-an operator means the same thing wherever it appears. Parameters of kind
-`positive` or `real` get their dimension this way; when the model leaves one
-free, write a `dim` clause (§4.1.1). A parameter used as a rate in one place and
-a count in another is a contradiction, reported where it surfaces with the
-conflicting use named. A system that has rational but no integer solution
-(`(kappa * w)^2 * I` as a rate needs `kappa · w = T^-1/2`) is an error, never a
-silent guess.
+The dimension of a leaf is fixed by what it is: a compartment reference is P;
+model time `t` is T; a parameter of kind `rate` is T⁻¹, `probability` is 1,
+`count` is P, `instant` and `duration` are T; a unit literal has its unit's
+dimension (`'days` T, `'per_day` T⁻¹, `'count` P). Multiplication adds
+exponents and division subtracts them.
+
+**Inference.** Every expression-bearing position of the model contributes to one
+system of equations over the exponents of P and T: a product's dimension is the
+sum of its factors', the operands of `+`, `min` or a comparison have one
+dimension, the argument of `exp`, `log` or a trigonometric function is
+dimensionless, and each position contributes the dimension it requires. The
+system is solved as a whole, following Kennedy ("Dimension types", ESOP 1994),
+so a parameter whose dimension follows only from several uses jointly (`a * b`
+in one rate, `a / b` in another) is resolved, and an operator has one meaning
+wherever it appears. A `positive` or `real` parameter takes its dimension from
+this system; when the system leaves it undetermined, the compiler reports
+**I300**, and a `dim` clause states it (§4.1.1). A parameter used as a rate in
+one place and as a count in another is a contradiction, reported where it
+surfaces, with the conflicting use named. A system with a rational but no
+integer solution (`(kappa * w)^2 * I` as a rate needs `kappa · w = T^-1/2`) is an
+error.
 
 **What each position requires.**
 
@@ -478,81 +450,77 @@ silent guess.
 | parameter bounds `in [lo, hi]`                                                        | unit literals only, in θ's dimension          | E316 |
 | a table value, in a table with a unit annotation (`mu : age 'per_day = [...]`)        | the annotation's dimension                    | E302 |
 
-Additional checks: a sum whose operands differ is **E302**; the argument of
-`exp()`/`log()`, a power's exponent, and a base under a non-constant exponent
-are dimensionless (**E301**); a square root, or a power `x^(p/q)`, needs
-dimension exponents that 2, or q, divides (**E304**).
+Beyond the positions: a sum whose operands differ is **E302**; the argument of
+`exp()` or `log()`, a power's exponent, and a base under a non-constant exponent
+must be dimensionless (**E301**); and a square root, or a power `x^(p/q)`,
+needs dimension exponents that 2, or q, divides (**E304**).
 
-**Literals.** A numeric literal is dimensionless, with two exceptions. Zero
-takes any dimension, and so does a product with a zero factor or a quotient
-with a zero numerator (`0 * I`, `0 / I`). A literal, or a constant expression of literals
-(arithmetic, `min`/`max`, `sqrt`, and the other functions of numbers), that is an entire
-additive term of a rate, derivative, balance, initial value, count-valued
-likelihood argument, intervention count or quantity threshold takes that
-position's dimension: `I = 10`, `S = N0 - 50`, `S = 0.95 * 10000`, `rate =
-100`, a constant importation `beta * S * I / N + 0.5`. Inside a product, a
-quotient, or a function of something that is not a constant, a literal is a
-pure number, so `(1/730) * R` is not a
-rate, and in `(1000 - S) / 1000` the 1000 is not a count (E302).
+**Literals.** A numeric literal is dimensionless, with two exceptions. A zero
+takes any dimension, and so does a product with a zero factor or a quotient with
+a zero numerator (`0 * I`, `0 / I`). And a literal, or a constant expression of
+literals (arithmetic, `min`/`max`, `sqrt` and the other functions of numbers),
+that is a whole additive term of a rate, derivative, balance, initial value,
+count-valued likelihood argument, intervention count or quantity threshold takes
+that position's dimension: `I = 10`, `S = N0 - 50`, `S = 0.95 * 10000`,
+`rate = 100`, and a constant importation `beta * S * I / N + 0.5`. Inside a
+product, a quotient, or a function of anything that is not constant, a literal
+is a pure number: `(1/730) * R` is not a rate (**E300**), and in
+`(1000 - S) / 1000` the 1000 is not a count (**E302**).
 
-A number's dimension comes from where it stands, never from what it is
-combined with. Guessing it from a neighbour would make `(1000 - S) / 1000`
-compile, but the same guess would also accept `I + 1e-6` in a rate, a
-dimensionless constant added to a count by mistake, and could not say
-whether the second 1000 counts people too. So a number that is a quantity is
-said to be one, in one of two ways:
+A literal takes its dimension from its position and never from the expression it
+is combined with. Inferring it from a neighbour would accept
+`(1000 - S) / 1000`, but would equally accept `I + 1e-6` in a rate, a
+dimensionless constant added to a count by mistake. A number that is a quantity
+is therefore written as one, in one of two forms:
 
-- **A typed constant**, for a quantity with a name, written once and reused:
+- a **typed constant**, for a named quantity used more than once:
   `let N0 : count = 1000`, then `final((N0 - S) / N0)`;
-  `let waning : rate = 1 / (730 'days)`, then `waning * R`. This is the form
-  to prefer: it keeps the scientific formulation and states the value once.
-- **A unit literal**, for a one-off value: `final(1 - S / (1000 'count))`,
+  `let waning : rate = 1 / (730 'days)`, then `waning * R`;
+- a **unit literal**, for a single value: `final(1 - S / (1000 'count))`,
   `R / (730 'days)`.
 
-A literal coefficient whose dimension has no unit literal is a typed constant
-with a `dim` clause: `let b : positive dim P^-1*T^-1 = 0.0001`. The E302 hint for
-a bare number names both forms with the right kind and unit.
+A coefficient whose dimension has no unit literal is a typed constant with a
+`dim` clause: `let b : positive dim P^-1*T^-1 = 0.0001`. The E302 hint for a bare
+number names both forms with the kind and unit that fit.
 
-**Powers.** `a^n` with `n` known at compile time as an integer (a literal, a
-typed constant, or arithmetic of them) has `n` times `a`'s dimension. A
-compile-time fraction `p/q` requires `q · dim(result) = p · dim(a)`, which has
-no integer solution unless the exponents divide (`(I / N)^0.5` is fine,
-`I^0.5` in a rate is not). Any other exponent makes the base dimensionless,
-since `d^y` with `y` changing during a fit is not a dimension; `unchecked_dim`
-(§2.2.2) is the escape for a deliberate exception.
+**Powers.** In `a^n` with `n` an integer known when the model is compiled (a
+literal, a typed constant, or arithmetic of them), the result has `n` times
+`a`'s dimension. A compile-time fraction `p/q` requires
+`q · dim(result) = p · dim(a)` to have an integer solution: `(I / N)^0.5` is
+accepted, and `I^0.5` in a rate is not. Under any other exponent the base must
+be dimensionless, since `d^y` with `y` varying during a fit has no dimension;
+`unchecked_dim` (§2.2.2) asserts a dimension for a deliberate exception.
 
-**Count noise.** The `sd` of a `normal` likelihood on a `count` column must
-match the mean's T exponent, but its P exponent is free: variance formulas for
-counts add a term in the count to one in its square (He et al. 2010,
-ρ(1−ρ)C + ρ²ψ²C²), which is consistent because a count is a number of
-individuals rather than a quantity whose unit can be rescaled. The exemption
-covers the sd's sums, products, powers and roots; the argument of `exp`, `log`
-or a trigonometric function stays dimensionless, so `sd = exp(projected)` is
-E301. On a `real` column the `sd` has the mean's dimension exactly, and the
+**Count noise.** The `sd` of a `normal` likelihood on a `count` column must have
+the mean's T exponent, and its P exponent is free. A variance model for counts
+adds a term in the count to a term in its square (He et al. 2010,
+ρ(1−ρ)C + ρ²ψ²C²); the sum is consistent because a count is a number of
+individuals, not a quantity whose unit can be rescaled. The exemption covers the
+`sd`'s sums, products, powers and roots. The argument of `exp`, `log` or a
+trigonometric function stays dimensionless, so `sd = exp(projected)` is
+**E301**. On a `real` column the `sd` has exactly the mean's dimension, and the
 column's dimension is inferred from the two.
 
-**What a compile guarantees.** Every expression that reaches the dynamics,
-observations, interventions, initial conditions and quantities has been
-dimension-checked against its position. A compile does not check what the
-compiler cannot see: the scale of a parameter value supplied at run time (always
-in `time_unit`), the inside of an `unchecked_dim`, or the physical meaning of a
-prior (§2.2.3).
+**Scope of the check.** Every expression that reaches the dynamics,
+observations, interventions, initial conditions and quantities is checked
+against its position. The check does not cover the scale of a parameter value
+supplied at run time (always in `time_unit`), the inside of an `unchecked_dim`,
+or the physical meaning of a prior (§2.2.3).
 
-Disable with `--no-dim-check` if a false positive is encountered (and file a
-bug).
+`camdlc check --no-dim-check`, and the same flag on a compile, disables the
+analysis; it is for a confirmed false positive, which is a compiler defect to
+report.
 
-### 2.2.2 Phenomenological dimensional escape: `unchecked_dim`
+### 2.2.2 Asserted dimensions: `unchecked_dim`
 
-Some formulations intentionally break dimensional homogeneity. The canonical
-case is the He et al. (2010) α-mixing term `(I + ι)^α` with non-integer `α`:
-`P^0.976` has no well-defined dimension, but the formulation is empirically
-validated and widely used. These are legitimate modelling choices, not bugs.
+`unchecked_dim` asserts the dimension of an expression that dimensional analysis
+cannot type. The case it exists for is the α-mixing term `(I + ι)^α` of He et
+al. (2010), with a non-integer `α`: `P^0.976` is not a dimension, and the
+formulation is established in the literature.
 
-`unchecked_dim(expr, dim = NAME, reason = "…")` asserts that the wrapped
-expression has the named dimension without the dim-checker verifying the
-assertion. Surrounding rate expressions continue to dim-check normally — the
-escape is narrow and visible. The wrapped expression itself is not inferred:
-its point is a term, like `(I + ι)^α`, that the rules of §2.2.1 refuse.
+```
+unchecked_dim(EXPR, dim = NAME, reason = "…")
+```
 
 ```camdl-doctest-preamble unchecked-dim
 compartments { S, E, I, R }
@@ -587,23 +555,21 @@ transitions {
 }
 ```
 
-Valid `dim` names: `dimensionless`, `population`, `time`, `rate`,
-`population_rate`, `per_population`. `reason` is required — a string documenting
-the assertion's legitimacy. The wrapper compiles to `Ir::UncheckedDim` and is
-transparent at runtime (identity over `inner`).
+**Meaning.** The call has dimension `NAME`, and the expressions around it are
+checked as usual. The wrapped expression is not checked. When the model runs,
+the call is the value of `EXPR`.
 
-**Choosing the asserted dimension.** The assertion must make the _surrounding_
-expression typecheck. For the He case above: `β(t)` is rate (T⁻¹), `S / pop(t)`
-is dimensionless, so `unchecked_dim(…)` must absorb the population-exponent for
-the full rate to be P·T⁻¹. Hence `dim = population`. A common mistake is
-asserting `dimensionless`, which leaves the full rate at T⁻¹ and triggers
-downstream dim errors.
+`dim` is one of `dimensionless`, `population`, `time`, `rate`,
+`population_rate` and `per_population`. The asserted dimension is the one that
+makes the surrounding expression correct. Above, `beta(t)` is T⁻¹ and
+`S / pop(t)` is dimensionless, so the call must be P for the rate to be P·T⁻¹:
+`dim = population`. Asserting `dimensionless` there leaves the rate at T⁻¹ and
+is **E300**.
 
-Use sparingly — `unchecked_dim` should feel like an escape hatch, not a normal
-tool. When a build has `unchecked_dim` sites, each should be reviewed in code
-review for legitimacy.
+**Refused.** A call without a `reason` string, or with a `dim` name not in the
+list, is **E240**.
 
-References for the canonical case:
+References:
 
 - He, Ionides, & King (2010). _J. R. Soc. Interface_ 7(43): 271–283.
   doi:10.1098/rsif.2009.0151.
@@ -612,66 +578,65 @@ References for the canonical case:
 
 ### 2.2.3 Dimensions and priors
 
-Dimensional analysis has two jobs in camdl. In model dynamics it is a type
-system: a transition rate that is not P·T⁻¹, or a duration added to a rate, is
-wrong epidemic mathematics and does not compile. In prior specification it is
-closer to a modelling linter.
+A prior is a probability distribution over the number a parameter takes in the
+model's units. Dimensional analysis checks priors only for unit conversions; it
+never derives a parameter's dimension from a prior.
 
-1. A parameter's dimension comes from its declaration and its use in the model.
-2. A prior is a probability distribution over the number the parameter takes
-   in the model's units. Choosing a prior family neither establishes nor
-   restricts the parameter's dimension: `gamma : rate ~ beta(alpha = 2, beta =
-   2)` is a valid prior on a recovery rate whose value lies in (0, 1) per
-   `time_unit`.
-3. A bare number in a prior is a number in model units: `normal(mu = 0.2,
-   sigma = 0.1)` on a rate means 0.2 per day under `'days` and 0.2 per week under
-   `'weeks`.
-4. A parameter inside a prior argument is a number too, so arithmetic on
-   hyperparameters is free: `log_normal(mu = log(m_h), ...)` with `m_h : rate`
-   takes the logarithm of `m_h`'s value.
-5. A unit literal is a request for a conversion, and the compiler honours it:
-   `normal(mu = 0.2 'per_day)` under weeks is 1.4, and `log_normal(mu =
-   log(0.2 'per_day))` under weeks converts the rate before taking its log. A
-   conversion is right only in the argument's own dimension, so a unit literal
-   whose dimension disagrees with the argument is **E316**. Each whole term of
-   an argument is read on its own: in `mu = m_h + 1 'days` the literal still
-   asserts a duration, whatever `m_h` is. The arguments' dimensions:
+**Values in a prior.** A parameter's dimension comes from its declaration and its
+uses in the model. Choosing a prior family neither establishes nor restricts it:
+`gamma : rate ~ beta(alpha = 2, beta = 2)` is a valid prior on a recovery rate
+whose value lies in (0, 1) per `time_unit`. A bare number in a prior is a number
+in model units: `normal(mu = 0.2, sigma = 0.1)` on a rate is 0.2 per day under
+`'days` and 0.2 per week under `'weeks`. A parameter inside a prior argument is
+also a number, so arithmetic on hyperparameters is unrestricted:
+`log_normal(mu = log(m_h), ...)` with `m_h : rate` takes the logarithm of
+`m_h`'s value.
 
-   | Family                        | Argument                    | Dimension |
-   | ----------------------------- | --------------------------- | --------- |
-   | normal, uniform, half-normal, log-uniform, truncated normal | location, scale, bounds | θ's |
-   | exponential; gamma            | `rate`                      | θ's inverse |
-   | gamma; beta                   | `shape`; `alpha`, `beta`    | 1 |
-   | log-normal                    | `mu`, `sigma`               | 1 (they are the mean and sd of ln θ) |
+**Unit literals in a prior.** A unit literal requests a conversion, which the
+compiler applies: under `'weeks`, `normal(mu = 0.2 'per_day)` has mean 1.4, and
+`log_normal(mu = log(0.2 'per_day))` converts the rate before taking its
+logarithm. A conversion is correct only in the argument's own dimension, so a
+unit literal whose dimension disagrees with the argument is **E316**. Each whole
+term of an argument is read on its own: in `mu = m_h + 1 'days` the literal
+asserts a duration, whatever `m_h` is. The arguments' dimensions are:
 
-   `log_normal(mu = -2 'per_day, ...)` passes a rate directly as a
-   log-coordinate and is E316; so is `normal(mu = 0.2 'days)` on a rate, and two
-   unit literals that disagree inside one argument. When θ's dimension is not
-   determined by the model, a literal is converted by its own unit and accepted.
-6. These conventional dimensions support that check and one lint, **I316**
-   (Info): a log-normal `mu` or `sigma` that is directly a parameter with a
-   dimension, probably a rate meant as `log(m)` or a log-coordinate that should
-   be declared `real dim 1`. They never constrain a parameter's dimension, and
-   a parameter used only in priors needs none (no I300).
-7. Changing `time_unit` does not preserve an arbitrary prior. A prior written
-   with unit literals in the positions of the table describes the same belief
-   under either unit; a bare-number prior does not, and moving a model to a new
-   unit means rewriting it. For a log-normal, μ shifts by the log of the
-   conversion factor (+ln 7 from days to weeks) and σ is unchanged.
+| Family                        | Argument                    | Dimension |
+| ----------------------------- | --------------------------- | --------- |
+| normal, uniform, half-normal, log-uniform, truncated normal | location, scale, bounds | θ's |
+| exponential; gamma            | `rate`                      | θ's inverse |
+| gamma; beta                   | `shape`; `alpha`, `beta`    | 1 |
+| log-normal                    | `mu`, `sigma`               | 1 (they are the mean and sd of ln θ) |
 
-A prior is a measure on θ, which is dimensionless, while its density has units
-of 1/[θ]; under a change of unit the measure is carried by the Jacobian of the
-change of coordinates, and the density's functional form need not survive it.
-That is why a family's form is not a statement about θ's dimension. The Jeffreys
-prior for a scale parameter, p(θ) ∝ 1/θ, is the form that does survive
-rescaling (Jeffreys, H. 1946, "An invariant form for the prior probability in
-estimation problems", _Proc. R. Soc. Lond. A_ 186:453–461); camdl requires
-nothing of the kind.
+`log_normal(mu = -2 'per_day, ...)` passes a rate as a log-coordinate and is
+E316; so is `normal(mu = 0.2 'days)` on a rate, and so are two unit literals
+that disagree within one argument. When the model does not determine θ's
+dimension, a literal is converted by its own unit and accepted.
+
+**I316.** These dimensions also drive one lint, **I316** (Info): a log-normal
+`mu` or `sigma` that is directly a parameter with a dimension, which is probably
+a rate meant as `log(m)` or a log-coordinate that should be declared
+`real dim 1`. The prior arguments' dimensions never constrain a parameter's
+dimension, and a parameter used only in priors needs none (it raises no I300).
+
+**Changing `time_unit`.** A prior written with unit literals in the positions of
+the table describes the same belief under any `time_unit`; a prior written with
+bare numbers does not, and must be rewritten when the unit changes. For a
+log-normal, μ shifts by the logarithm of the conversion factor (+ln 7 from days
+to weeks) and σ is unchanged.
+
+A prior is a measure on θ; its density has units of 1/[θ]. Under a change of
+unit the measure is carried through by the Jacobian of the change of
+coordinates, and the density's functional form need not survive, so a family's
+form says nothing about θ's dimension. The Jeffreys prior for a scale
+parameter, p(θ) ∝ 1/θ, is the form that is invariant under rescaling (Jeffreys,
+H. 1946, "An invariant form for the prior probability in estimation problems",
+_Proc. R. Soc. Lond. A_ 186:453–461); camdl does not require it.
 
 ### 2.3 Date Literals
 
-The `date("YYYY-MM-DD")` expression converts an ISO 8601 date to a float offset
-from the model's declared `origin` date, in the model's `time_unit`:
+`date("YYYY-MM-DD")` is an ISO 8601 date, read as its offset from the model's
+`origin` in `time_unit`. The calendar is proleptic Gregorian. Dates across the
+language, data files and output are specified in [`docs/dates.md`](dates.md).
 
 ```camdl preamble=sir-basic
 origin = date("2019-01-01")   # top-level declaration (optional)
@@ -681,134 +646,98 @@ simulate {
 }
 ```
 
-`date(...)` uses proleptic Gregorian calendar arithmetic. The result is exact
-(integer day count) when `time_unit = 'days`, and divided by the appropriate
-factor for other units (e.g., 365.2425 for years — the Gregorian average year,
-matching §2.1).
+**Meaning.** Under `time_unit = 'days` the offset is the whole number of days
+from `origin`; under another unit it is that number divided by the unit's length
+in days (§2.1). `origin` sets the coordinate between dates and model time and has
+no effect on the dynamics. The IR stores it as the ISO string (`"origin"`) and
+as an integer day number (`"origin_rata_die"`).
 
-**E220.** Using `date(...)` without a top-level `origin = date(...)` declaration
-is a compile error:
+Dates also appear outside `date()` literals: an observation data file may have
+an ISO-date time column, converted through `origin` and `time_unit`;
+`camdl simulate --dates` adds a calendar date column to its output; `camdl fit
+summary` prints `instant`-kind estimates as dates; and the `instant` and
+`duration` parameter kinds have dimension T (§4.1).
+
+**Refused.** `date(...)` in a model with no `origin = date(...)` is **E220**:
 
 ```camdl
 # ERROR E220: date("2021-06-30") used but no 'origin' declared
 simulate { to = date("2021-06-30") }
 ```
 
-The `origin` value is stored in the IR as both the ISO string
-(`"origin": "2019-01-01"`) and a compiler-derived integer day number
-(`"origin_rata_die": …`) that the runtime reads without re-parsing. It does not
-affect simulation dynamics — it is purely a coordinate reference for converting
-calendar dates to simulation time.
+#### Calendar arithmetic and `origin`
 
-Calendar support extends beyond `date()` literals: **observation data may use an
-ISO-date time column** (auto-converted via `origin` + `time_unit`), output can
-be rendered back as dates (`simulate --dates`, and `instant`-kind estimands in
-`fit
-summary`), and the **`instant` / `duration` parameter kinds** carry
-dimension `[T]`. **See [`docs/dates.md`](dates.md) for the complete, canonical
-treatment** of dates across the DSL, data loading, and output.
-
-#### Calendar-arithmetic primitives and `origin` as a referenceable Instant
-
-In **anchored mode** (when `origin` is declared), two compile-time primitives
-step a date by calendar months or years, available in DSL constant positions
-only:
+In anchored mode two functions step a date by calendar months or years. They
+are evaluated when the model is compiled and are accepted only where a constant
+instant is:
 
 ```camdl
 add_calendar_months(d, n)   # Instant × Int → Instant
 add_calendar_years(d, n)    # Instant × Int → Instant
 ```
 
-`d` is any compile-time-constant Instant — a `date(...)` literal, the reserved
-`origin` identifier, or a nested `add_calendar_*` call. `n` is a compile-time
-integer. The algorithm is proleptic-Gregorian `(year, month, day)` arithmetic
-with **month-end clamping**:
-`add_calendar_months(date("2020-01-31"), 1) = date("2020-02-29")` (leap),
-`add_calendar_months(date("2021-01-31"), 1) = date("2021-02-28")`. These
-functions never touch the `30.4369` average-month factor — they're the only
-correct way to step a date by calendar months/years. In unanchored mode, a call
-to either primitive is **E327**.
+`d` is a constant instant: a `date(...)` literal, `origin`, or a nested
+`add_calendar_*` call. `n` is a constant integer. The step is proleptic
+Gregorian `(year, month, day)` arithmetic with **month-end clamping**:
+`add_calendar_months(date("2020-01-31"), 1)` is `date("2020-02-29")` (a leap
+year), and `add_calendar_months(date("2021-01-31"), 1)` is `date("2021-02-28")`.
+Neither function uses the mean month length.
 
-`origin` is **reserved in anchored mode as a referenceable compile-time-constant
-`Instant`**, usable wherever a constant Instant is accepted —
-`simulate { from = origin }`, `at [origin, ...]` schedules,
-`add_calendar_months(origin, 6)`, `origin + 90 'days`,
-`let landmark = origin + 90 'days`. Not usable inside rate expressions or any
-compartment-state context (it's a compile-time constant, not a runtime value).
-In unanchored mode, a reference to `origin` is **E327**.
+In anchored mode `origin` is a reserved name for the origin as a constant
+instant, accepted wherever a constant instant is: `simulate { from = origin }`,
+`at [origin, ...]`, `add_calendar_months(origin, 6)`, `origin + 90 'days`,
+`let landmark = origin + 90 'days`, and the operand compared with `t`
+(`t > origin + 30 'days`). It is not model state and is not a parameter.
 
-A `date_range(...)` compile-time generator produces a list of Instants from a
-start, an end-or-count, and a cadence — see [`docs/dates.md`](dates.md) for the
-surface and
-[`docs/dev/proposals/archive/post-alpha/2026-05-22-typed-time-and-dsl-ergonomics.md`](dev/proposals/archive/post-alpha/2026-05-22-typed-time-and-dsl-ergonomics.md)
-§4 for the full signature and diagnostics.
+`date_range(...)` generates a list of instants from a start, an end or a count,
+and a cadence, for use in an `at` list; its forms are specified in
+[`docs/dates.md`](dates.md).
+
+**Refused.** In unanchored mode, a reference to `origin` and a call to
+`add_calendar_months` or `add_calendar_years` are **E327**.
 
 ### 2.4 Three tiers of dimensional information
 
-Dimensional information in a model can be declared at three levels of
-specificity. Each tier carries strictly more information than the next, and each
-is the right tool for a distinct class of declaration. Understanding the
-hierarchy makes the rest of §2 and §4–7 fit together.
+A declaration states dimensional information at one of three levels of detail:
 
-| Tier                  | Syntax                                                                    | Carries                        | Use when                                                                                                          |
+| Tier                  | Syntax                                                                    | Carries                        | Used for                                                                                                          |
 | --------------------- | ------------------------------------------------------------------------- | ------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
-| 1. **Kind keyword**   | `rate`, `probability`, `count`, `positive`, `real`, `instant`, `duration` | Dimension (inferred from kind) | Common parameter cases (the 99% case). `instant`/`duration` are time-typed (`T`) — see [`dates.md`](dates.md).    |
-| 2. **`dim` clause**   | `dim T`, `dim T^-1`, `dim P`, `dim P/T`, `dim 1`                          | Dimension only                 | The kind is `real` or `positive` and the parameter's use does not determine its dimension (§4.1.1).              |
-| 3. **Unit literal**   | `'days`, `'years`, `'per_day`, `'per_year`, `'count`, `'ratio`            | Dimension **+ scale**          | Concrete numeric data with a known real-world scale. Never on a parameter declaration.                            |
+| 1. **Kind keyword**   | `rate`, `probability`, `count`, `positive`, `real`, `instant`, `duration` | a dimension, from the kind     | parameters; `instant` and `duration` are time-typed (T), see [`dates.md`](dates.md)                               |
+| 2. **`dim` clause**   | `dim T`, `dim T^-1`, `dim P`, `dim P/T`, `dim 1`                          | a dimension only               | a `real` or `positive` parameter whose uses do not determine its dimension (§4.1.1)                               |
+| 3. **Unit literal**   | `'days`, `'years`, `'per_day`, `'per_year`, `'count`, `'ratio`            | a dimension and a scale        | concrete values: `time_unit`, duration literals, table entries, forcing declarations; never a parameter           |
 
-**The tiers are complementary, not redundant.** They answer different questions
-about a value:
+A `dim` clause states a dimension for a value supplied later (from `--params`,
+a prior or a fit), which is always in the model's `time_unit`, so it carries no
+scale: `dim T` is a time, not days or years. A unit literal states the
+dimension and the scale of a value written in the model, and the compiler
+converts it to `time_unit`. The two cannot be merged into one syntax: a
+parameter's value has no scale of its own for a unit literal to convert, so
+`beta : positive 'per_day` is **E117**, with the fix `beta : positive dim 1/T`
+(§4.1.1).
 
-- **`dim` clauses** answer _"what dimension does this parameter have?"_ —
-  for values supplied later (at fit time via `--params`, from priors, from
-  inference). The compiler type-checks dimensions without knowing scales. Scale
-  is implicit: everything is in the model's `time_unit`.
-
-- **Unit literals** answer _"what dimension AND what real-world scale does this
-  value have?"_ — for concrete data (`time_unit` declaration, duration literals
-  like `5 'years`, table entries, data loaded via `read()`). The compiler
-  type-checks dimensions AND normalises scale to the model's `time_unit`.
-
-You can't collapse tiers 2 and 3 into one syntax. A `dim` clause can't carry
-scale: `dim T` says "time-dimension," not "days" vs. "years." A user supplying
-`beta = 0.3` via `--params` has agreed to provide it in model time units — the
-compiler doesn't need to convert. Unit literals can't be applied to unknowns: a
-parameter's value is drawn from a prior or supplied at run time, always in model
-time units, so `beta : positive 'per_day` is refused (E117) with the fix
-`beta : positive dim 1/T` — a scale written there would have nothing to act
-on.
-
-**Subtyping.** Every unit literal decomposes to (dimension, scale). The
-dimension half plays the same type-checking role as a `dim` clause; the scale
-half drives scale normalisation. A unit literal is strictly more informative
-than a `dim` clause of the same dimension:
+Every unit literal decomposes into a dimension and a scale. Its dimension plays
+the role of a `dim` clause, and its scale drives the conversion, so a unit
+literal carries strictly more than the `dim` clause of the same dimension:
 
 ```
 'years       ⊂    dim T   ⊂   (any time-dimensioned value)
 (dim+scale)       (dim)         (unconstrained)
 ```
 
-**Kind keywords are a fourth, convenience layer on top** of the three tiers.
-They name common dimension patterns (`rate` ≡ `dim T^-1`, `probability` ≡
-`dim 1` with `[0,1]` domain, `count` ≡ `dim P`) so 99% of parameter declarations
-need no `dim` clause. Write one only on `real` or `positive`, and only where the
-model's use of the parameter does not determine its dimension; use unit literals
-only where concrete numeric values are attached. This section (§2.4, §6.1) shows
-tier-3 use on table values; §4.1.1 shows tier 2 on parameter declarations; §7
-(Forcing) requires tier 3 on every forcing declaration.
+A kind keyword names a common dimension (`rate` is `dim T^-1`, `probability` is
+`dim 1` with domain [0, 1], `count` is `dim P`), so most parameters need no `dim`
+clause. §2.5 and §6.1 show unit literals on table values, §4.1.1 the `dim`
+clause on parameters, and §7 the unit literal every forcing declaration
+requires.
 
-**`'ratio` vs `probability`**: both are dimensionless, but they're not synonyms.
-`'ratio` (tier 3) is the **unbounded** dimensionless case — a multiplier that
-could be 0.7, 1.3, 50, used for seasonal forcings, school-term indicators,
-reporting multipliers. `probability` (tier 1, parameter kind) is the **bounded**
-dimensionless case — values constrained to [0, 1] with an automatic logit
-transform for inference. Reach for `'ratio` when you want an arbitrary
-multiplier; reach for `probability` when you want a bounded probability
-parameter.
+**`'ratio` and `probability`.** Both are dimensionless. `'ratio` is a tier-3
+annotation on a value with no bound, such as a seasonal multiplier of 0.7, 1.3 or
+50. `probability` is a parameter kind with domain [0, 1] and a logit transform
+under inference (§4.1).
 
 ### 2.5 Table Unit Annotations
 
-Tables carry a single unit for all values:
+A table carries one unit for all its values:
 
 ```camdl
 tables {
@@ -818,19 +747,25 @@ tables {
 }
 ```
 
-`fertility : age 'per_day` means "every value in this table is in units of
-'per_day." The compiler normalizes to the model time unit. Dimensionless tables
-(contact matrices, weights) have no unit annotation.
+`fertility : age 'per_day` declares every value of the table in `'per_day`; the
+compiler converts the values to `time_unit` (under `'days`, `age_dur` is stored
+as 1826.2125 and 21914.55). A dimensionless table, such as a contact matrix or
+a set of weights, has no annotation. A table value whose dimension disagrees
+with the annotation is **E302** (§2.2.1). Tables are specified in §6.
 
 ---
 
 ## 3. Compartments
 
+A compartment is a population state of the model.
+
 ```camdl
 compartments { S, E, I, R }
 ```
 
-Each is an integer-valued population count. For continuous state:
+A compartment is an integer-valued count unless declared `: real`, which makes
+it a continuous-valued state whose dynamics are written in the `ode { }` block
+(§11):
 
 ```camdl-doctest-preamble comp-real
 parameters {
@@ -856,13 +791,19 @@ compartments {
 }
 ```
 
-After stratification, compartments gain index dimensions (see §5). Access is
-always via explicit indexing: `S[child]`, `S[child, female]`, or bare `S` (= sum
-over all strata).
+A stratified compartment has one cell per combination of its dimensions' levels
+(§5). A cell is read by indexing, `S[child]` or `S[child, female]`; a bare `S` in
+model dynamics is the total over all cells (§1).
+
+Related sections: §5 (stratification), §9 (transitions), §11 (ODE block), §15
+(initial conditions).
 
 ---
 
 ## 4. Parameters
+
+A parameter is a named model input whose value is supplied when the model is
+run or fitted.
 
 ```camdl
 parameters {
@@ -877,9 +818,10 @@ parameters {
 }
 ```
 
-Parameters are **declared** here — names, kinds, and dimensions only. Concrete
-values are **never** specified in the model file; they are supplied externally
-via CLI flags, a `--params` TOML, or inference engines (§4.2).
+A declaration is, in order: the name (with its index dimensions, §4.3), the kind
+(§4.1), an optional `dim` clause (§4.1.1), optional bounds (§4.4) and an
+optional prior (§20.2). It never holds a value; values are supplied as described
+in §4.2.
 
 ### 4.1 Parameter Types
 
@@ -893,7 +835,7 @@ probability : ∈ [0, 1], dimensionless. Default transform: logit. The [0, 1] is
               is searched over [0, 1] by inference, and a supplied value outside
               [0, 1] is rejected. It is the only kind whose type pins a finite
               interval — see §4.4.
-positive    : > 0. The kind fixes no dimension: it is inferred from the
+positive    : > 0 under inference (θ = eᶻ). The kind fixes no dimension: it is inferred from the
               parameter's uses unless a `dim` clause states it (§4.1.1).
               Default transform: as `rate` — θ = eᶻ on [0, ∞), θ = lo + eᶻ on
               [lo, ∞), log-interval on [lo, hi] with lo > 0, interval on
@@ -907,35 +849,36 @@ instant     : dimension [T], absolute time. Renders as a date in anchored
 duration    : dimension [T], a span. Renders as a span.
 ```
 
-There is no `ivp` ("initial-value parameter") kind. Stochastic initial states
-are expressed through the `init {}` block (§15) and made estimable by the
-inference engine's `ic_free` setting — not a parameter kind.
+A kind fixes the parameter's dimension, its search range under inference when it
+declares no bounds, and the transform inference uses (§4.4). `count` and
+`duration` take the same transforms as `rate`, and `real` and `instant` the
+identity, or a one- or two-sided map when bounded. σ is the logistic function.
 
-Types enable: validation of supplied values, default inference transforms, and
-dimensional analysis of rate expressions.
+The search range of `rate`, `positive`, `count` and `duration` is [0, ∞). A
+value supplied for a parameter of these kinds is checked against declared
+bounds only; with no `in [lo, hi]`, a negative value is not refused when
+parameter values are resolved, and a negative rate fails only when it makes a
+transition's propensity negative.
 
-**On `instant` vs `duration` in dimensional checking.** Both carry dimension
-`[T]`. In **anchored mode** (top-level `origin` declared), `instant` is the
-Instant side of the typed-time torsor: it can be added to / subtracted from an
-`Exact` duration (§2.1), and an `Instant − Instant` is itself an Exact duration.
-Adding two instants, scaling one, or subtracting one from a duration is
-**E360** (§2.1). In **unanchored mode** the torsor refinement is inactive — both kinds behave as
-plain `[T]`-dimensioned scalars and are interchangeable in expression
-arithmetic. See the typed-time proposal §1.1 for the formal "classification
-synthesised per occurrence from its leaves" invariant: a **reference** to a
-`duration`-kind parameter is always classified `Exact`, even when the
-parameter's _bound_ is spelled in `'months` (e.g.
-`delay : duration in [1 'months, 6 'months]`). The bound's month-spelling is a
-compile-time-evaluable length, not a step-from-a- date, and never leaks
-`Calendar` to uses of the parameter.
+An initial state is given in the `init { }` block (§15), and is estimated with
+the fit setting `ic_free`; there is no parameter kind for it.
+
+**`instant` and `duration`.** Both have dimension T. In anchored mode an
+`instant` is an instant (§2.1): it moves by an exact duration, the difference of
+two instants is an exact duration, and adding two instants, scaling one, or
+subtracting one from a duration is **E360**. A reference to a `duration`
+parameter is always Exact, even when its bounds are written in `'months`
+(`delay : duration in [1 'months, 6 'months]`): the bounds are lengths, and do
+not make the parameter's uses Calendar. In unanchored mode both kinds are plain
+T-dimensioned values.
 
 ### 4.1.1 The `dim` clause
 
-`positive` and `real` say nothing about a parameter's dimension. Usually the
-model's use of the parameter determines it: in `beta * S * I / N` the rate must
-be P·T⁻¹, so a `positive` `beta` is T⁻¹. When the use does not determine it, or
-when you want the dimension stated and checked, write a `dim` clause after the
-kind:
+A `dim` clause states the dimension of a `positive` or `real` parameter, whose
+kind does not fix one. Usually the parameter's uses determine it: in
+`beta * S * I / N` the rate is P·T⁻¹, so a `positive` `beta` is T⁻¹. When the uses
+leave it undetermined (**I300**), or to have the dimension stated and checked,
+write the clause after the kind:
 
 ```camdl
 parameters {
@@ -948,9 +891,8 @@ parameters {
 }
 ```
 
-The order of a declaration is: name (and named axes), kind, `dim` clause,
-bounds, prior. A dimension is a product of powers of the two base dimensions,
-`P` (population) and `T` (time), written with `*`, `/` and integer exponents:
+A dimension is a product of powers of `P` (population) and `T` (time), written
+with `*`, `/` and integer exponents:
 
 | Clause                  | Dimension     | Domain name            |
 | ----------------------- | ------------- | ---------------------- |
@@ -961,38 +903,33 @@ bounds, prior. A dimension is a product of powers of the two base dimensions,
 | `dim P/T`, `dim P*T^-1` | P·T⁻¹         | population-level rate  |
 | `dim P^2/T`, …          | P²·T⁻¹, …     | (any other product)    |
 
-The clause fixes the parameter's dimension: it resolves the I300 a bare
-`positive`/`real` would get where its use leaves the dimension open, and it
-turns a dimensional misuse into an error. A `tau : positive dim 1` added to a
-population (`I + tau`) is E302.
+**Meaning.** The clause fixes the parameter's dimension, so a use that
+contradicts it is an error: `tau : positive dim 1` added to a population
+(`I + tau`) is **E302**. The clause carries no scale; the parameter's value is
+in `time_unit` (§2.4).
 
-A `dim` clause carries a dimension and no scale. A parameter's value — from a
-prior, `--params`, or a scenario's `set` — is always in the model's
-`time_unit`, so there is no scale for it to carry.
+**Refused.**
 
-Three rules keep the surface unambiguous:
+- A `dim` clause on any kind other than `positive` and `real` is **E281**,
+  whether it repeats the kind's dimension (`rate dim T^-1`) or contradicts it
+  (`rate dim 1`).
+- Brackets after a kind give a parameter family's size, never a dimension. A
+  dimension in brackets (`real [1/T]`, `positive [P*T^-1]`) is
+  **E116**, with the fix `real dim 1/T`. A size below two (`real[1]`) is
+  **E417**: one cell is a scalar, written `real`, and `[1]` meant as a
+  dimension is `real dim 1`.
+- A unit literal on a parameter (`gamma : positive 'per_year`) is **E117**, with
+  the fix `positive dim 1/T`, because a parameter's value has no scale for the
+  literal to convert.
 
-- **`dim` is only for `positive` and `real`.** Every other kind fixes its
-  dimension. A clause that repeats it (`rate dim T^-1`) or contradicts it
-  (`rate dim 1`) is **E281**.
-- **Brackets after a kind give a parameter family's size, never a dimension.**
-  A dimension in brackets (`real [1/T]`, `positive [P*T^-1]`) is **E116**, with
-  the fix `real dim 1/T`. A size below two (`real[1]`) is **E417**: a single
-  cell is a scalar, written `real`; if `[1]` was meant as a dimension, write
-  `real dim 1`. No old annotation compiles with a new meaning.
-- **A unit literal is never a parameter annotation.** `gamma : positive
-  'per_year` is **E117**, with the fix `positive dim 1/T`: a unit literal
-  carries a scale, and on a parameter that scale would be silently dropped.
-
-Under `--json-errors`, each of these refusals carries a machine-applicable
-fix-it (`"fixes": [{"loc": …, "replacement": …}]`), so an editor or agent can
-apply it without reading the hint.
+Under `--json-errors` each of these diagnostics carries a machine-applicable
+fix-it (`"fixes": [{"loc": …, "replacement": …}]`).
 
 ### 4.2 External parameter values
 
-Parameter values are **never** specified in the `parameters { ... }` block. The
-block declares names and types only; concrete values are supplied at runtime — a
-named scenario's `set = { ... }` block is the one in-file exception:
+A parameter's value is supplied when the model is run, from outside the model
+file, or from a scenario's `set = { … }` inside it (§17). The order in which the
+sources override each other is specified in the run spec (§1.3).
 
 ```bash
 # Single flat TOML file
@@ -1008,21 +945,17 @@ camdl simulate model.ir.json --param gamma=0.1
 camdl simulate model.ir.json --param-vec R0=r0_posterior.tsv
 ```
 
-The TOML format supports both flat and sectioned forms (see §21).
-
-Because values live outside the model, a `--params` TOML is the right home for
-any externally-computed scalar — a demographic rate from a pipeline, a fixed
-constant from the literature. Have preprocessing **generate** that TOML so the
-model consumes the pipeline output directly (single source of truth); do not
-reach for a `tables {}` entry to read a scalar. Tables are indexed data
-(covariates or feature, not observation data which would be in an `observation`
-block) and require at least one dimension (§6).
+The TOML format is specified in §20. A scalar computed outside the model (a
+demographic rate from a pipeline, a constant from the literature) belongs in a
+generated `--params` file, which the model then reads directly. A table (§6)
+holds indexed covariate data and has at least one dimension; it does not hold a
+scalar.
 
 ### 4.3 Indexed Parameters
 
-Parameters may be declared with one or more dimension indices, creating one
-scalar parameter per stratum (or, for several indices, per cell of the cartesian
-product):
+A parameter declared with one or more dimensions is a family of scalar
+parameters, one per level, or per cell of the cartesian product of several
+dimensions:
 
 ```camdl
 parameters {
@@ -1033,68 +966,49 @@ parameters {
 }
 ```
 
-A multi-index parameter is a design matrix: `mu[village, season]` over
-`village = [kwaru, ajura]`, `season = [wet, dry]` expands to the four cells
-`mu_kwaru_wet`, `mu_kwaru_dry`, `mu_ajura_wet`, `mu_ajura_dry`, each an
-independent scalar with the declared kind, bounds, and prior. Names mangle
-`<base>_<level1>_<level2>_…` in declaration-dim order. A repeated axis
-(`mu[village, village]`) is an error (E331); an unknown or empty index dimension
-is E330.
+**Meaning.** Over `village = [kwaru, ajura]` and `season = [wet, dry]`,
+`mu[village, season]` is the four scalar parameters `mu_kwaru_wet`,
+`mu_kwaru_dry`, `mu_ajura_wet` and `mu_ajura_dry`, each with the declared kind,
+bounds and prior. A cell's name is `<base>_<level1>_<level2>_…`, in the order
+the dimensions are written. Each index names a dimension declared in
+`dimensions { }` (§5); the parameter's dimensions need not be stratification
+dimensions of any compartment. In the IR the family is its scalar parameters.
 
-Each index must refer to a declared `stratify` dimension. In expressions,
-indexed parameters are accessed with `[index]` (all axes, in declaration order):
+**Indexing.** A reference gives every dimension, in declaration order:
 
 ```camdl
 let C[v in village, s in season] = mu[v, s] * gamma   # mu[v,s] → Param("mu_kwaru_wet") etc.
 ```
 
-For a single index:
-
 ```camdl
 let beta[p in patch] = R0[p] * gamma   # R0[p] → Param("R0_urban") etc.
 ```
 
-**Index namespace rule.** Inside `[...]` on a parameter reference, the compiler
-checks only:
+Inside `[...]` on a parameter reference a name is resolved as a bound index
+variable (such as `p`) or as a level of the dimension (`R0[urban]` is
+`R0_urban`), and never as a `let` binding or another parameter: `R0[urban]` is
+the level `urban` even when a `let` named `urban` exists. The indexed form is
+accepted wherever a parameter name is: in expressions (§9.6), `init` blocks
+(§15.2), and a scenario's `set` and `scale` (§17.1). At run time,
+`--param-vec PREFIX=FILE` supplies a family's values from a two-column
+`name<TAB>value` file, each row naming `PREFIX_<key>` (§21):
 
-1. The current substitution environment (bound index variables like `p`)
-2. The literal dimension values (e.g., `R0[urban]` → `Param("R0_urban")`)
+```bash
+camdl simulate model.ir.json --param-vec R0=/tmp/r0_posterior.tsv
+```
 
-Let bindings and other parameters are never checked in index position.
-`R0[urban]` always means the stratum value `urban`, even if a let binding named
-`urban` exists.
-
-**Shadowing warning W103.** The compiler emits W103 when a let binding name
-matches a stratum value in any dimension:
+**Refused.** An unknown index dimension is **E330**, and a repeated one
+(`mu[village, village]`) is **E331**. A `let` binding whose name is a level of
+any dimension raises the warning **W103**:
 
 ```camdl
 let urban = 1.0   # W103: let binding 'urban' shadows stratum value 'urban'
                   #   in dimension 'patch'. This is allowed but consider renaming.
 ```
 
-**Consistent indexed syntax everywhere.** The `N0[urban]` form works in all
-contexts where a parameter name can appear: expressions (§9.6), init blocks
-(§15.2), and scenario set/scale blocks (§17.1). The compiler always mangles to
-`N0_urban` in the IR.
-
-**IR representation.** Indexed parameter declarations expand to flat scalar
-parameters:
-
-```
-N[patch] : positive  →  { name: "N_urban",  value: null }
-                         { name: "N_rural",  value: null }
-```
-
-**Runtime override.** Use `--param-vec PREFIX=FILE` to supply per-stratum values
-at runtime (see §21):
-
-```bash
-camdl simulate model.ir.json --param-vec R0=/tmp/r0_posterior.tsv
-```
-
 ### 4.4 Parameter Bounds
 
-An optional `in [lo, hi]` clause constrains the parameter's valid range:
+An `in [lo, hi]` clause states the range of a parameter's values:
 
 ```camdl
 parameters {
@@ -1105,27 +1019,22 @@ parameters {
 }
 ```
 
-Bounds are **optional** and apply to all expanded scalar parameters for indexed
-declarations. They are stored in the IR:
+**Meaning.** The bounds apply to every scalar of an indexed family and are
+stored in the IR. Inference searches within them and chooses its transform from
+them (§4.1). A supplied value outside them is refused when parameter values are
+resolved; the compiler never sees values, so the check is made by the runtime,
+and a simulation does not clamp a value during a run.
 
-```json
-{ "name": "R0", "value": null, "bounds": [1.0, 20.0], ... }
-```
+A parameter with no `in [lo, hi]` takes the range its kind carries.
+`probability` carries [0, 1], so the `rho` line above declares what its kind
+already does, with the same search range and the same logit transform. No other
+kind carries a finite range (`rate`, `positive`, `count` and `duration` are
+[0, ∞), `real` and `instant` unbounded), so for those kinds `in [lo, hi]` is
+the only way to give inference a finite search range. The bounds of an
+`instant` parameter are an instant position (§2.1).
 
-Bounds are used by inference engines to constrain sampling or optimization, and
-a supplied value outside them is rejected when parameter values are resolved.
-`camdlc` never sees parameter values (§4.2), so it cannot check them — the check
-belongs to the runtime, and the forward simulator does not re-clamp mid-run.
-
-**A parameter with no `in [lo, hi]` still gets whatever range its type carries.**
-`probability` is `[0, 1]` (§4.1), so the `rho` line above really is redundant —
-declaring it and omitting it give the same search box and the same logit
-transform. Every other kind's type constraint is one-sided (`rate`, `positive`,
-`count`) or absent (`real`, `instant`), so for those the `in [lo, hi]` clause is
-the only way to hand inference a finite search box.
-
-Type constraints still apply independently of bounds: a `positive` parameter
-with `in [1.0, 20.0]` is implicitly also constrained to `> 0`.
+Related sections: §17 (scenarios), §20 (parameter files and priors), §21.5
+(inference).
 
 ---
 
