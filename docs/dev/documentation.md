@@ -260,13 +260,14 @@ command's output changes, reread the paragraph that describes it.
 | `make docs-site`                       | every tutorial command exits as marked, and every figure marker names an SVG                                                            | the published pages              | `docs-site.yml`                                  |
 
 A `` ```camdl `` example that only makes sense after declarations elsewhere in
-the section borrows them from a hidden preamble, itself an HTML comment:
+the section borrows them from a preamble, a fence that the site does not show
+(`docs/_web/doctest-preamble.lua` drops it):
 
 ````markdown
-<!-- camdl-doctest-preamble: sir
+```camdl-doctest-preamble sir
 compartments { S, I, R }
 parameters { gamma : rate }
--->
+```
 
 ```camdl preamble=sir
 transitions { recovery : I --> R @ gamma * I }
@@ -274,10 +275,13 @@ transitions { recovery : I --> R @ gamma * I }
 ````
 
 A block with `preamble=` is asserted to compile, so any error in it is a failure
-rather than a skip. The closing `-->` must be on a line of its own, because
-camdl's own `-->` arrow would otherwise end the comment early. Data a block
-reads can travel the same way, as `<!-- camdl-doctest-data: data/pop.tsv`. The
-full rules are in the header comment of `ocaml/lib/compiler/doctest.ml`.
+rather than a skip. A preamble is a fence and not an HTML comment because its
+model text has arrows: a comment ends at the first `-->`, and the rest of the
+model would show on the page. `camdlc doctest` fails on a preamble written as a
+comment. Data a block reads travels in an HTML comment,
+`<!-- camdl-doctest-data: data/pop.tsv`, which ends at a line that is exactly
+`-->`. The full rules are in the header comment of
+`ocaml/lib/compiler/doctest.ml`.
 
 A printed `simulate` table in `docs/dates.md` names the model and command that
 produce it in its fence's info string, as

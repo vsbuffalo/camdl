@@ -201,8 +201,10 @@ camdl-published: *published
 # that camdl-run.lua attaches to an included file still gets Quarto's
 # filename header, and the spec banner's callout and the boxes are rendered
 # by Quarto. boxes.lua runs last of ours, after the code blocks inside a box
-# have been run and the figures placed.
+# have been run and the figures placed. doctest-preamble.lua runs first, so
+# no other filter sees the doc-test preambles it drops.
 filters:
+  - _web/doctest-preamble.lua
   - _web/unpublished-links.lua
   - _web/page-title.lua
   - _web/spec-banner.lua

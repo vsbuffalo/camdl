@@ -85,6 +85,15 @@ jobs:
             echo "unpublished markdown copied into the site:"; echo "$stray"; exit 1
           fi
 
+      - name: Refuse doc-test preambles in the site
+        # A ```camdl-doctest-preamble fence is for `make test-docs`, not the
+        # reader; docs/_web/doctest-preamble.lua drops it (gh#1324).
+        run: |
+          leaked=$(grep -rl 'camdl-doctest-preamble' docs/_site --include='*.html' || true)
+          if [ -n "$leaked" ]; then
+            echo "doc-test preambles rendered into:"; echo "$leaked"; exit 1
+          fi
+
       - uses: actions/upload-pages-artifact@v3
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         with:

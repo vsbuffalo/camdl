@@ -1,9 +1,9 @@
 # Doctest self-test fixture
 
-Block order is load-bearing: `test_doctest.ml` asserts the verdict of each
-block by position. Do not reorder without updating the test.
+Block order is load-bearing: `test_doctest.ml` asserts the verdict of each block
+by position. Do not reorder without updating the test.
 
-<!-- camdl-doctest-preamble: demo
+```camdl-doctest-preamble demo
 compartments { S, I, R }
 parameters {
   N0    : positive
@@ -13,7 +13,7 @@ parameters {
 transitions {
   recovery : I --> R @ gamma * I
 }
--->
+```
 
 <!-- camdl-doctest-data: data/pop.tsv
 patch	pop

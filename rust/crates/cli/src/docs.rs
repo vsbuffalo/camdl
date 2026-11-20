@@ -570,8 +570,8 @@ mod tests {
 
     #[test]
     fn other_comments_are_printed_unchanged() {
-        // The doc-test preamble markers are read by agents through `camdl docs`.
-        let doc = "<!-- camdl-doctest-preamble -->\n```camdl\nx\n```\n";
+        // The doc-test data markers are read by agents through `camdl docs`.
+        let doc = "<!-- camdl-doctest-data: data/x.tsv -->\n```camdl\nx\n```\n";
         assert_eq!(terminal_text(&topic(doc, Some("p.md"))), doc);
     }
 

@@ -5,20 +5,23 @@
     {!main} takes [--gate], [--verbose] and the files; [make test-docs] runs
     it with [--gate] over the language specification and the user guides.
     {!parse_doc} reads a file in one pass into a {!doc}: every fenced block
-    whose info string begins with [camdl], and two kinds of HTML comment
-    that the rendered page does not show. A preamble comment holds
-    declarations a block may borrow, so a fragment can be shown alone and
-    still compile; a data comment holds a file a block reads. Each comment
-    ends at a line that is exactly [-->], because a transition's arrow
-    [S --> I] contains that text:
+    whose info string begins with [camdl], every preamble fence, and every
+    data comment. A preamble fence, whose info string is
+    [camdl-doctest-preamble LABEL], holds declarations a block may borrow,
+    so a fragment can be shown alone and still compile; it is not itself a
+    block, and the site drops it ([docs/_web/doctest-preamble.lua]). It is a
+    fence rather than an HTML comment because the model text inside it has
+    arrows: a comment ends at the first [-->], so the rest of the model
+    would show on the page (gh#1324). A data comment holds a file a block
+    reads, and ends at a line that is exactly [-->]:
 
     {v
-    <!-- camdl-doctest-preamble: sir
+    ```camdl-doctest-preamble sir
     compartments { S, I, R }
     parameters {
       gamma : rate
     }
-    -->
+    ```
 
     <!-- camdl-doctest-data: data/pop.tsv
     patch	pop
@@ -50,7 +53,11 @@
 
     A data comment's path must be relative and must not contain a [..]
     segment, so every file is written inside the temporary directory; a
-    document with any other path fails ({!bad_data_paths}). *)
+    document with any other path fails ({!bad_data_paths}). So does a data
+    comment whose contents have [-->], and a preamble written as an HTML
+    comment ([<!-- camdl-doctest-preamble: LABEL]): the rendered page would
+    end either at that text and show the rest
+    ({!data_comments_ended_early}, [doc.comment_preambles]). *)
 
 (* ── string helpers (no Str dependency) ──────────────────────────────────── *)
 
@@ -126,8 +133,9 @@ type block = {
 (** What {!parse_doc} found in one document. *)
 type doc = {
   blocks    : block list;  (** The camdl blocks, in document order. *)
-  preambles : (string * string) list;  (** Each preamble comment's label and text. Every block of the document can use every preamble, wherever it appears; when a label is defined twice, the first definition is used. *)
+  preambles : (string * string) list;  (** Each preamble fence's label and text. Every block of the document can use every preamble, wherever it appears; when a label is defined twice, the first definition is used. *)
   datas     : (string * string) list;  (** Each data comment's path, relative to the block's directory, and its contents. A path {!bad_data_paths} rejects is never written. *)
+  comment_preambles : int list;  (** The 1-based line of each [<!-- camdl-doctest-preamble:] comment. That form is not read as a preamble: on the rendered page the first [-->] of a transition ends the comment and the rest of the model shows as text (gh#1324). {!run} reports each as a failure. *)
 }
 
 let parse_preamble toks =
@@ -157,19 +165,22 @@ let comment_open line =
     | None -> None
   else None
 
-(* Single pass: fenced ```camdl blocks + HTML-comment preamble/data chunks.
-   Code-fence bodies and comment bodies are kept verbatim. *)
+(* Single pass: fenced ```camdl blocks, ```camdl-doctest-preamble fences and
+   HTML-comment data chunks. Fence bodies and comment bodies are kept
+   verbatim. *)
 let parse_doc file : doc =
   let ic = open_in file in
   let blocks = ref [] and preambles = ref [] and datas = ref [] in
+  let comment_preambles = ref [] in
   let in_block = ref false and capturing = ref false in
+  (* [Some label] while inside a preamble fence *)
+  let defining = ref None in
   let buf = Buffer.create 256 and start = ref 0 and ign = ref false and pre = ref None in
   let in_comment = ref false and ckind = ref "" and carg = ref "" in
   let cbuf = Buffer.create 256 in
   let lineno = ref 0 in
   let flush_comment () =
     (match !ckind with
-     | "preamble" -> preambles := (!carg, Buffer.contents cbuf) :: !preambles
      | "data"     -> datas := (!carg, Buffer.contents cbuf) :: !datas
      | _ -> ());
     in_comment := false;
@@ -181,9 +192,9 @@ let parse_doc file : doc =
        incr lineno;
        let t = lstrip line in
        if !in_comment then begin
-         (* The closing `-->` must be on its own line. CAMDL transition syntax
-            (`S --> I`) contains `-->`, so matching it mid-line would truncate
-            a preamble at its first transition. *)
+         (* The closing `-->` must be on its own line, so that a comment
+            preamble's transitions (`S --> I`) are skipped with it rather
+            than read as the document. *)
          if String.trim line = "-->" then flush_comment ()
          else begin
            Buffer.add_string cbuf line;
@@ -192,12 +203,15 @@ let parse_doc file : doc =
        end
        else if !in_block then begin
          if starts_with ~prefix:"```" t then begin
-           if !capturing then
-             blocks :=
-               { file; line = !start; ignore_ = !ign; preamble = !pre;
-                 source = Buffer.contents buf }
-               :: !blocks;
-           in_block := false; capturing := false
+           (match !defining with
+            | Some label -> preambles := (label, Buffer.contents buf) :: !preambles
+            | None ->
+              if !capturing then
+                blocks :=
+                  { file; line = !start; ignore_ = !ign; preamble = !pre;
+                    source = Buffer.contents buf }
+                  :: !blocks);
+           in_block := false; capturing := false; defining := None
          end
          else if !capturing then begin
            Buffer.add_string buf line;
@@ -207,6 +221,7 @@ let parse_doc file : doc =
        else begin
          match comment_open line with
          | Some (kind, arg) ->
+           if kind = "preamble" then comment_preambles := !lineno :: !comment_preambles;
            in_comment := true; ckind := kind; carg := arg; Buffer.clear cbuf;
            (* a single-line `<!-- … --> ` closes immediately with empty body *)
            if contains ~sub:"-->" line then flush_comment ()
@@ -219,6 +234,9 @@ let parse_doc file : doc =
                start := !lineno; ign := List.mem "ignore" rest;
                pre := parse_preamble rest;
                Buffer.clear buf
+             | "camdl-doctest-preamble" :: label :: _ ->
+               in_block := true; capturing := true; defining := Some label;
+               Buffer.clear buf
              | _ ->
                in_block := true; capturing := false
            end
@@ -228,7 +246,8 @@ let parse_doc file : doc =
   close_in ic;
   { blocks = List.rev !blocks;
     preambles = List.rev !preambles;
-    datas = List.rev !datas }
+    datas = List.rev !datas;
+    comment_preambles = List.rev !comment_preambles }
 
 (** The data-comment paths that would be written outside the temporary
     directory: an absolute path, or one with a [..] segment. *)
@@ -238,6 +257,15 @@ let bad_data_paths (datas : (string * string) list) : string list =
     || List.mem ".." (String.split_on_char '/' path)
   in
   List.filter_map (fun (path, _) -> if escapes path then Some path else None) datas
+
+(** The data-comment paths whose contents have [-->]. The doctest reads such
+    a comment to its closing line, but the rendered page ends it at that
+    text and shows the rest, as a preamble comment's transitions did
+    (gh#1324). *)
+let data_comments_ended_early (datas : (string * string) list) : string list =
+  List.filter_map
+    (fun (path, content) -> if contains ~sub:"-->" content then Some path else None)
+    datas
 
 (* Materialise inline data chunks into a fresh temp dir; returns its path.
    Block `read("data/x.tsv")` paths resolve against this dir. A path
@@ -365,6 +393,24 @@ let run ~gate ~verbose files =
               path)
          (bad_data_paths doc.datas);
        List.iter
+         (fun line ->
+            incr nfail;
+            Printf.printf
+              "  FAIL   L%d  a preamble written as an HTML comment is not read: the \
+               first `-->` of its model text ends the comment on the rendered page \
+               and shows the rest; write it as a ```camdl-doctest-preamble LABEL \
+               fence\n"
+              line)
+         doc.comment_preambles;
+       List.iter
+         (fun path ->
+            incr nfail;
+            Printf.printf
+              "  FAIL   data comment '%s': its contents have `-->`, which ends the \
+               comment on the rendered page and shows the rest\n"
+              path)
+         (data_comments_ended_early doc.datas);
+       List.iter
          (fun b ->
             incr total;
             match classify ~preambles:doc.preambles ~basedir b with
@@ -417,11 +463,16 @@ A block's verdict:
   FAIL            anything else: a block that declares compartments, or names
                   a preamble (```camdl preamble=LABEL), must compile
 
-Two HTML comments, which the rendered page does not show, supply what a
-block needs; each ends at a line that is exactly `-->`:
-  <!-- camdl-doctest-preamble: LABEL   declarations a block may borrow
-  <!-- camdl-doctest-data: PATH        a file a block reads; PATH must be
-                                       relative, without `..`
+Two markers, which the rendered page does not show, supply what a block needs:
+  ```camdl-doctest-preamble LABEL      a fence of declarations a block may
+                                       borrow; not itself a block
+  <!-- camdl-doctest-data: PATH        a comment holding a file a block reads,
+                                       ending at a line that is exactly `-->`;
+                                       PATH must be relative, without `..`, and
+                                       the contents must not have `-->`
+A preamble written as an HTML comment (<!-- camdl-doctest-preamble: LABEL)
+is not read and fails: the first `-->` of its model text ends the comment on
+the rendered page.
 |}
 
 let main args =

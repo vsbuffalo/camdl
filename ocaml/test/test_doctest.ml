@@ -2,8 +2,8 @@
 
    Drives the real parser + classifier over a fixture Markdown file whose blocks
    are ordered to exercise every verdict bucket, including a `preamble=` block
-   (hidden HTML-comment preamble) and a `read()` block resolved by inline
-   `camdl-doctest-data`. Non-vacuous: it asserts the FAIL block really reports
+   (whose preamble is a ```camdl-doctest-preamble fence) and a `read()` block
+   resolved by inline `camdl-doctest-data`. Non-vacuous: it asserts the FAIL block really reports
    E300, that the preamble block fails when its preamble is stripped, and that
    the data block needs its inline data. *)
 
@@ -83,10 +83,53 @@ let test_bad_data_paths () =
   Doctest.rm_rf dir;
   Alcotest.(check bool) "a '..' path is not written" false escaped
 
+(* gh#1324: a preamble written as an HTML comment leaks onto the rendered
+   page, because the first `-->` of a transition ends the comment there. The
+   comment form is not read as a preamble any more, and is reported. *)
+let test_comment_preamble_is_refused () =
+  let file = Filename.temp_file "camdl-doctest-gh1324-" ".md" in
+  let oc = open_out file in
+  output_string oc
+    "Text.\n\n\
+     <!-- camdl-doctest-preamble: old\n\
+     compartments { S, I }\n\
+     transitions { infection : S --> I @ S }\n\
+     -->\n\n\
+     ```camdl preamble=old\n\
+     parameters { beta : rate }\n\
+     ```\n";
+  close_out oc;
+  let doc = Doctest.parse_doc file in
+  Sys.remove file;
+  Alcotest.(check (list int)) "the comment preamble's line is reported" [ 3 ]
+    doc.Doctest.comment_preambles;
+  Alcotest.(check (list string)) "and it defines no preamble" []
+    (List.map fst doc.Doctest.preambles);
+  Alcotest.(check int) "the camdl block is still read" 1 (List.length doc.Doctest.blocks)
+
+(* gh#1324: a data comment whose body has `-->` would end on the rendered page
+   at that text, as a comment preamble did. *)
+let test_data_comment_with_arrow () =
+  Alcotest.(check (list string)) "the data comment that has -->" [ "b.tsv" ]
+    (Doctest.data_comments_ended_early
+       [ ("a.tsv", "x\ty\n1\t2\n"); ("b.tsv", "edge\nS --> I\n") ])
+
+(* gh#1324: a preamble fence defines a preamble and is not itself a block. *)
+let test_preamble_fence () =
+  let doc = Doctest.parse_doc spec in
+  Alcotest.(check (list string)) "the fence defines preamble demo" [ "demo" ]
+    (List.map fst doc.Doctest.preambles);
+  Alcotest.(check bool) "its text is the model text, arrows included" true
+    (Doctest.contains ~sub:"recovery : I --> R @ gamma * I\n}\n"
+       (List.assoc "demo" doc.Doctest.preambles))
+
 let () =
   Alcotest.run "doctest"
     [ ("classify",
        [ Alcotest.test_case "every verdict bucket" `Quick test_classifications
        ; Alcotest.test_case "fail / preamble / data are non-vacuous" `Quick test_non_vacuous
        ; Alcotest.test_case "data paths stay in the temporary directory" `Quick test_bad_data_paths
+       ; Alcotest.test_case "a preamble fence defines a preamble" `Quick test_preamble_fence
+       ; Alcotest.test_case "a comment preamble is refused" `Quick test_comment_preamble_is_refused
+       ; Alcotest.test_case "a data comment with --> is refused" `Quick test_data_comment_with_arrow
        ]) ]

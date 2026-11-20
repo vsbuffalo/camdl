@@ -554,7 +554,7 @@ assertion. Surrounding rate expressions continue to dim-check normally — the
 escape is narrow and visible. The wrapped expression itself is not inferred:
 its point is a term, like `(I + ι)^α`, that the rules of §2.2.1 refuse.
 
-<!-- camdl-doctest-preamble: unchecked-dim
+```camdl-doctest-preamble unchecked-dim
 compartments { S, E, I, R }
 parameters {
   gamma : rate
@@ -575,7 +575,7 @@ forcing {
     phase     = 0 'days
   }
 }
--->
+```
 
 ```camdl preamble=unchecked-dim
 transitions {
@@ -832,7 +832,7 @@ compartments { S, E, I, R }
 
 Each is an integer-valued population count. For continuous state:
 
-<!-- camdl-doctest-preamble: comp-real
+```camdl-doctest-preamble comp-real
 parameters {
   beta  : rate
   gamma : rate
@@ -847,7 +847,7 @@ transitions {
 ode {
   W = xi * I - delta * W
 }
--->
+```
 
 ```camdl preamble=comp-real
 compartments {
@@ -1148,7 +1148,7 @@ stratify(by = patch)
 Each `stratify` declaration applies a dimension to **all** compartments by
 default. Partial stratification restricts to specific compartments:
 
-<!-- camdl-doctest-preamble: partial-strat
+```camdl-doctest-preamble partial-strat
 compartments { S, E, I, R }
 parameters {
   beta  : rate
@@ -1161,7 +1161,7 @@ transitions {
   progress  : E --> I @ sigma * E
   recovery  : I --> R[natural] @ gamma * I
 }
--->
+```
 
 ```camdl preamble=partial-strat
 dimensions { immunity = [natural, vaccine] }
@@ -1481,7 +1481,7 @@ All tables referencing `patch` validate against these derived levels.
 When a file has more columns than `n_dims + 1`, list multiple table names on the
 left of `:`:
 
-<!-- camdl-doctest-preamble: tables-demo
+```camdl-doctest-preamble tables-demo
 compartments { S, I, R }
 dimensions {
   patch = [kano_dala, borno_maiduguri, borno_gwoza]
@@ -1496,7 +1496,7 @@ transitions {
   infection[p in patch] : S[p] --> I[p] @ beta * S[p] * I[p] / N[p]
   recovery[p in patch]  : I[p] --> R[p] @ gamma * I[p]
 }
--->
+```
 
 <!-- camdl-doctest-data: data/demographics.tsv
 patch	pop	init_sus
@@ -1558,7 +1558,7 @@ the model does not declare, is refused.
 Inline table values can be parameter names or arithmetic expressions, not just
 numeric literals:
 
-<!-- camdl-doctest-preamble: table-bsex
+```camdl-doctest-preamble table-bsex
 compartments { S, I, R }
 dimensions { sex = [female, male] }
 stratify(by = sex)
@@ -1572,7 +1572,7 @@ transitions {
   infection[s in sex] : S[s] --> I[s] @ S[s] * sum(t in sex, B_sex[s,t] * I[t] / N_local[t])
   recovery[s in sex]  : I[s] --> R[s] @ gamma * I[s]
 }
--->
+```
 
 ```camdl preamble=table-bsex
 tables {
@@ -1614,7 +1614,7 @@ built-in types cover real-world needs:
   repeating; see
   [B-spline forcing](#b-spline-forcing-bspline) below
 
-<!-- camdl-doctest-preamble: forcing-demo
+```camdl-doctest-preamble forcing-demo
 compartments { S, I, R }
 parameters {
   beta       : rate
@@ -1627,7 +1627,7 @@ transitions {
   infection : S --> I @ beta * S * I / N
   recovery  : I --> R @ gamma * I
 }
--->
+```
 
 <!-- camdl-doctest-data: data/nga_pop.csv
 year,total_pop
@@ -1744,7 +1744,7 @@ accept the drift, which is at most `step / 2` within a period.
 
 Forcing functions are used in rate expressions by name or with explicit `(t)`:
 
-<!-- camdl-doctest-preamble: forcing-school
+```camdl-doctest-preamble forcing-school
 compartments { S, I, R }
 parameters {
   beta  : rate
@@ -1757,7 +1757,7 @@ forcing {
     values = [0.7, 1.3, 0.7, 1.0]
   }
 }
--->
+```
 
 ```camdl preamble=forcing-school
 transitions {
@@ -1782,7 +1782,7 @@ curve's coefficients. Each basis function is a piecewise polynomial of `degree`
 p (default 3, cubic; at most 5) that is nonzero over at most p + 1 adjacent
 knot intervals, so a coefficient moves the curve only near its own knots.
 
-<!-- camdl-doctest-preamble: forcing-bspline
+```camdl-doctest-preamble forcing-bspline
 compartments { S, I, R }
 parameters {
   gamma : rate
@@ -1792,7 +1792,7 @@ transitions {
   infection : S --> I @ beta_t * S * I / N
   recovery  : I --> R @ gamma * I
 }
--->
+```
 
 ```camdl preamble=forcing-bspline
 forcing {
@@ -1877,7 +1877,7 @@ curve says how much it may bend rather than where each coefficient sits.
 measured. Until then write explicit coefficients and keep `n_basis` small (5 or
 6), since nothing else ties neighbouring coefficients together.
 
-<!-- camdl-doctest-preamble: forcing-bspline-smooth
+```camdl-doctest-preamble forcing-bspline-smooth
 dimensions { mode = [m1, m2, m3, m4, m5, m6, m7, m8, m9, m10] }
 compartments { S, I, R }
 parameters {
@@ -1892,7 +1892,7 @@ transitions {
   infection : S --> I @ beta_t * S * I / N
   recovery  : I --> R @ gamma * I
 }
--->
+```
 
 ```camdl preamble=forcing-bspline-smooth
 forcing {
@@ -2391,7 +2391,7 @@ typically at a constant or data-driven rate unrelated to the model's own state.
 Unlike births (which depend on the existing population), importation represents
 exogenous exposure — cases entering the modeled region from elsewhere:
 
-<!-- camdl-doctest-preamble: importation
+```camdl-doctest-preamble importation
 compartments { S, I, R }
 parameters {
   beta        : rate
@@ -2414,7 +2414,7 @@ transitions {
     @ beta * S[a,p] * I[a,p] / N_local[a,p]
   recovery[a in age, p in patch] : I[a,p] --> R[a,p] @ gamma * I[a,p]
 }
--->
+```
 
 ```camdl preamble=importation
 transitions {
@@ -2428,14 +2428,14 @@ transitions {
 transition's name, conventionally on its own line. `#[lineage]` is the only
 attribute the language defines; anything else is **E110**.
 
-<!-- camdl-doctest-preamble: lineage-sir
+```camdl-doctest-preamble lineage-sir
 compartments { S, I, R }
 parameters {
   beta  : rate
   gamma : rate
 }
 let N = S + I + R
--->
+```
 
 ```camdl preamble=lineage-sir
 transitions {
@@ -2729,7 +2729,7 @@ and `c in compartments`.
 
 The `consecutive(dim)` binding yields adjacent pairs from an ordered dimension:
 
-<!-- camdl-doctest-preamble: consecutive-aging
+```camdl-doctest-preamble consecutive-aging
 compartments { S, I, R }
 dimensions {
   age   = [a0_5, a5_15, a15_50, a50_65, a65p]
@@ -2738,7 +2738,7 @@ dimensions {
 tables { age_dur : age = [5.0, 10.0, 35.0, 15.0, 20.0] }
 stratify(by = age)
 stratify(by = patch)
--->
+```
 
 ```camdl preamble=consecutive-aging
 transitions {
@@ -2757,10 +2757,10 @@ This is a general-purpose primitive for any sequential transfer along an ordered
 dimension. It also handles **Erlang sub-staging** for non-exponential waiting
 times:
 
-<!-- camdl-doctest-preamble: erlang-E
+```camdl-doctest-preamble erlang-E
 compartments { E, I }
 parameters { sigma : rate }
--->
+```
 
 ```camdl preamble=erlang-E
 # Erlang-3 latent period: E passes through 3 sub-stages
@@ -2804,14 +2804,14 @@ A transition that **drains** a compartment can carry that residence law
 directly. In place of a rate it takes a `via` clause naming the law, which
 stages the **source** compartment and supplies the per-stage rate for you:
 
-<!-- camdl-doctest-preamble: via-erlang
+```camdl-doctest-preamble via-erlang
 compartments { S, E, I, R }
 parameters {
   beta  : rate
   sigma : rate
   gamma : rate
 }
--->
+```
 
 ```camdl preamble=via-erlang
 transitions {
@@ -2853,7 +2853,7 @@ When the branches share an endpoint, write it once on the arrow and give each
 branch a `weight`; the last branch's weight is implicit (`1 −` the sum of the
 others), so the mixture is normalized by construction:
 
-<!-- camdl-doctest-preamble: via-hyper-shared
+```camdl-doctest-preamble via-hyper-shared
 time_unit = 'weeks
 compartments { S, I, R }
 parameters {
@@ -2862,7 +2862,7 @@ parameters {
   tau_typ : positive
   tau_pro : positive
 }
--->
+```
 
 ```camdl preamble=via-hyper-shared
 transitions {
@@ -2879,7 +2879,7 @@ the fatal and recovering arms have different durations *and* destinations — ea
 branch carries its own `to` and the transition needs no arrow target (a branch
 with neither a `to` nor a transition target is an error):
 
-<!-- camdl-doctest-preamble: via-hyper-dest
+```camdl-doctest-preamble via-hyper-dest
 time_unit = 'days
 compartments { S, E, I, R, D }
 parameters {
@@ -2887,7 +2887,7 @@ parameters {
   sigma : rate
   cfr   : probability
 }
--->
+```
 
 ```camdl preamble=via-hyper-dest
 transitions {
@@ -2920,7 +2920,7 @@ the staged compartment, indexed exactly as it was declared and with no stage
 *competing exit*: a hazard that acts throughout the dwell and does not depend on
 the stage.
 
-<!-- camdl-doctest-preamble: via-competing
+```camdl-doctest-preamble via-competing
 dimensions { age = [pre, sch] }
 compartments { S, E, I, T }
 stratify(by = age)
@@ -2932,7 +2932,7 @@ parameters {
   cmax  : rate
   K     : count
 }
--->
+```
 
 ```camdl preamble=via-competing
 transitions {
@@ -3244,7 +3244,7 @@ hand-enumerated transitions, you want this primitive.
 
 The `c in compartments` binding iterates over compartment names:
 
-<!-- camdl-doctest-preamble: compartment-iter
+```camdl-doctest-preamble compartment-iter
 compartments { S, I, R }
 parameters { mu : rate }
 dimensions {
@@ -3257,7 +3257,7 @@ tables {
 }
 stratify(by = age)
 stratify(by = patch)
--->
+```
 
 ```camdl preamble=compartment-iter
 transitions {
@@ -3518,7 +3518,7 @@ All coupling structures are expressed through the same mechanism — a rate matr
 | Identity          | Within-stratum only                     | Same as no coupling |
 | All ones          | Homogeneous mixing                      | No structure        |
 
-<!-- camdl-doctest-preamble: table-matrices
+```camdl-doctest-preamble table-matrices
 compartments { S, I, R }
 dimensions {
   age = [child, adult]
@@ -3537,7 +3537,7 @@ transitions {
     @ S[a,s] * sum(b in age, sum(t in sex, C_age[a,b] * B_sex[s,t] * I[b,t] / N_local[b,t]))
   recovery[a in age, s in sex] : I[a,s] --> R[a,s] @ gamma * I[a,s]
 }
--->
+```
 
 ```camdl preamble=table-matrices
 tables {
@@ -3633,7 +3633,7 @@ equation; one without is a compile error.
 
 For real-valued compartments:
 
-<!-- camdl-doctest-preamble: ode-demo
+```camdl-doctest-preamble ode-demo
 compartments { S, I, R, W : real }
 parameters {
   beta  : rate
@@ -3646,7 +3646,7 @@ transitions {
   infection : S --> I @ beta * S * I / N
   recovery  : I --> R @ gamma * I
 }
--->
+```
 
 ```camdl preamble=ode-demo
 ode {
@@ -3681,7 +3681,7 @@ distribution and inference scores data under it (§12.4). The data-file format
 is specified in `camdl docs data`; fitting is described in
 `camdl docs inference`.
 
-<!-- camdl-doctest-preamble: obs-sir
+```camdl-doctest-preamble obs-sir
 compartments { S, I, R }
 parameters {
   beta     : rate
@@ -3700,7 +3700,7 @@ transitions {
   infection : S --> I @ beta * S * I / Ntot
   recovery  : I --> R @ gamma * I
 }
--->
+```
 
 ```camdl preamble=obs-sir
 observations {
@@ -3858,7 +3858,7 @@ is dimensionless, so it fits a probability argument
 state, parameters and time. A count over several compartments is their sum,
 `projected = x3 + y3`, and a proportion may be written as a plain division:
 
-<!-- camdl-doctest-preamble: obs-derived
+```camdl-doctest-preamble obs-derived
 compartments { S, I_m, I_s, R, x3, y3 }
 parameters {
   beta     : rate
@@ -3872,7 +3872,7 @@ transitions {
   infection : S --> I_m @ beta * S * (I_m + I_s) / Ntot
   recovery  : I_m --> R @ gamma * I_m
 }
--->
+```
 
 ```camdl preamble=obs-derived
 observations {
@@ -4230,7 +4230,7 @@ An indexed stream observes each stratum of a dimension in its own stream. The
 header `name[p in dim]` binds `p` to each level of `dim` in turn, and `p` may
 index both the projection and the measurement's arguments.
 
-<!-- camdl-doctest-preamble: obs-patch
+```camdl-doctest-preamble obs-patch
 compartments { S, I, R }
 dimensions {
   patch = [north, south, east]
@@ -4247,7 +4247,7 @@ transitions {
   infection[p in patch] : S[p] --> I[p] @ beta * S[p] * I[p] / N[p]
   recovery[p in patch]  : I[p] --> R[p] @ gamma * I[p]
 }
--->
+```
 
 ```camdl preamble=obs-patch
 observations {
@@ -4450,7 +4450,7 @@ fit on the same backend define the same model:
 An intervention can be declared with an **index binder**, creating a **family**
 of interventions — one per stratum — in a single line:
 
-<!-- camdl-doctest-preamble: iv-patch
+```camdl-doctest-preamble iv-patch
 compartments { S, V, I, R }
 dimensions {
   patch = [north, south, east]
@@ -4467,7 +4467,7 @@ transitions {
   infection[p in patch] : S[p] --> I[p] @ beta * S[p] * I[p] / N[p]
   recovery[p in patch]  : I[p] --> R[p] @ gamma * I[p]
 }
--->
+```
 
 ```camdl preamble=iv-patch
 interventions {
@@ -4564,7 +4564,7 @@ Use events for structural demographic processes (cohort entry, seasonal
 migration, importation seeding). Use interventions for policy choices (SIA
 campaigns, school closures).
 
-<!-- camdl-doctest-preamble: events-demo
+```camdl-doctest-preamble events-demo
 compartments { S, I, R }
 parameters {
   beta   : rate
@@ -4590,7 +4590,7 @@ transitions {
   infection : S --> I @ beta * S * I / N
   recovery  : I --> R @ gamma * I
 }
--->
+```
 
 ```camdl preamble=events-demo
 events {
@@ -4658,7 +4658,7 @@ Forces one compartment to satisfy a population conservation constraint at every
 substep. After all transitions, clamps, events, and interventions apply, the
 target compartment is overwritten:
 
-<!-- camdl-doctest-preamble: balance-demo
+```camdl-doctest-preamble balance-demo
 compartments { S, E, I, R }
 parameters {
   beta  : rate
@@ -4679,7 +4679,7 @@ transitions {
   progress  : E --> I @ sigma * E
   recovery  : I --> R @ gamma * I
 }
--->
+```
 
 ```camdl preamble=balance-demo
 balance {
@@ -4705,7 +4705,7 @@ discovers at run time. The motivating case is outbreak response — "run an SIA
 after AFP/ES detection crosses a threshold" — where a fixed schedule cannot
 express the dependence on observed data.
 
-<!-- camdl-doctest-preamble: reactive-demo
+```camdl-doctest-preamble reactive-demo
 compartments { S, E, I, R, V }
 parameters {
   beta                  : rate
@@ -4730,7 +4730,7 @@ observations {
     weekly_afp    ~ poisson(rate = rho * projected)
   }
 }
--->
+```
 
 ```camdl preamble=reactive-demo
 reactive_interventions {
@@ -4992,7 +4992,7 @@ ERROR E100: parameter name 't_end' is reserved for simulation time
 
 ### 15.1 Un-Stratified Models
 
-<!-- camdl-doctest-preamble: init-sir
+```camdl-doctest-preamble init-sir
 compartments { S, I, R }
 parameters {
   beta  : rate
@@ -5005,7 +5005,7 @@ transitions {
   infection : S --> I @ beta * S * I / N
   recovery  : I --> R @ gamma * I
 }
--->
+```
 
 ```camdl preamble=init-sir
 init {
@@ -5045,7 +5045,7 @@ init {
 **Indexed parameter references** work in init RHS expressions. If `N0[patch]` is
 an indexed parameter, both the mangled form and the indexed form are accepted:
 
-<!-- camdl-doctest-preamble: init-region
+```camdl-doctest-preamble init-region
 compartments { S, I, R }
 dimensions {
   patch = [urban, rural]
@@ -5062,7 +5062,7 @@ transitions {
   infection[p in patch] : S[p] --> I[p] @ beta * S[p] * I[p] / N[p]
   recovery[p in patch]  : I[p] --> R[p] @ gamma * I[p]
 }
--->
+```
 
 ```camdl preamble=init-region
 init {
@@ -5073,7 +5073,7 @@ init {
 
 Named indexing works in init:
 
-<!-- camdl-doctest-preamble: init-strat
+```camdl-doctest-preamble init-strat
 compartments { S, I, R }
 dimensions {
   age   = [child, adult]
@@ -5090,7 +5090,7 @@ transitions {
   infection[a in age, p in patch] : S[a,p] --> I[a,p] @ beta * S[a,p] * I[a,p] / N[a,p]
   recovery[a in age, p in patch]  : I[a,p] --> R[a,p] @ gamma * I[a,p]
 }
--->
+```
 
 ```camdl preamble=init-strat
 init {
@@ -5107,7 +5107,7 @@ initialization from a single-patch seeding event.
 For large spatial models where per-stratum populations come from a CSV, declare
 a table (§6) and reference it directly in init expressions:
 
-<!-- camdl-doctest-preamble: init-table
+```camdl-doctest-preamble init-table
 compartments { S, I, R }
 dimensions {
   patch = [north, south]
@@ -5122,7 +5122,7 @@ transitions {
   infection[p in patch] : S[p] --> I[p] @ beta * S[p] * I[p] / N[p]
   recovery[p in patch]  : I[p] --> R[p] @ gamma * I[p]
 }
--->
+```
 
 <!-- camdl-doctest-data: data/population.tsv
 patch	N0
@@ -5160,7 +5160,7 @@ compartment starts at this value", `~` says "this compartment starts at a draw
 from this distribution" — the same reading `~` has for a parameter prior (§4)
 and for an observation likelihood (§9).
 
-<!-- camdl-doctest-preamble: init-drawn
+```camdl-doctest-preamble init-drawn
 compartments { S, I, R }
 parameters {
   beta  : rate
@@ -5173,7 +5173,7 @@ transitions {
   infection : S --> I @ beta * S * I / N
   recovery  : I --> R @ gamma * I
 }
--->
+```
 
 ```camdl preamble=init-drawn
 init {
@@ -5362,7 +5362,7 @@ what you want _read back_ — a peak size, an attack rate, the time an outbreak
 takes off — so a summary no longer has to be smuggled through a fake scored
 stream.
 
-<!-- camdl-doctest-preamble: quantities-demo
+```camdl-doctest-preamble quantities-demo
 compartments { S, I, R }
 parameters {
   beta  : rate
@@ -5386,7 +5386,7 @@ observations {
     cases ~ neg_binomial(mean = rho * projected, r = k)
   }
 }
--->
+```
 
 ```camdl preamble=quantities-demo
 quantities {
@@ -5542,7 +5542,7 @@ Each entry is arithmetic over *run-rooted* operands of the form
 `scenarios {}` (§17) or the reserved name `fitted` (the fitted model with no
 scenario overlay), and `<namespace>` is `quantities` or `observations`.
 
-<!-- camdl-doctest-preamble: contrast-sir
+```camdl-doctest-preamble contrast-sir
 compartments { S, I, R }
 parameters {
   beta  : rate
@@ -5567,7 +5567,7 @@ scenarios {
   with_sia { set = { beta = 0.4  gamma = 0.15  N0 = 10000  I0 = 10 }
              enable  = [sia_campaign] }
 }
--->
+```
 
 ```camdl preamble=contrast-sir
 quantities {
@@ -5644,7 +5644,7 @@ input to the dynamics, so adding or changing one never re-keys a model's
 Patch-based modifications to the baseline. Baseline is the identity patch — the
 model as defined, no modifications.
 
-<!-- camdl-doctest-preamble: scenario-sia
+```camdl-doctest-preamble scenario-sia
 compartments { S, V, I, R }
 parameters {
   beta    : rate
@@ -5659,7 +5659,7 @@ transitions {
 interventions {
   sia : transfer(fraction = sia_cov, from = S, to = V) at [180]
 }
--->
+```
 
 ```camdl preamble=scenario-sia
 scenarios {
@@ -5763,7 +5763,7 @@ A scenario can inherit from another via `extends = <parent_name>`, which is
 fields layered on top. The IR keeps its flat preset shape — downstream consumers
 see no trace of inheritance.
 
-<!-- camdl-doctest-preamble: scenario-vacc
+```camdl-doctest-preamble scenario-vacc
 compartments { S, V, I, R }
 parameters {
   beta  : rate
@@ -5779,7 +5779,7 @@ transitions {
 interventions {
   vaccination : transfer(fraction = 0.5, from = S, to = V) at [15]
 }
--->
+```
 
 ```camdl preamble=scenario-vacc
 scenarios {
@@ -5852,7 +5852,7 @@ operations.
 
 ## 18. Simulation Configuration
 
-<!-- camdl-doctest-preamble: sir-basic
+```camdl-doctest-preamble sir-basic
 compartments { S, I, R }
 parameters {
   beta  : rate
@@ -5863,7 +5863,7 @@ transitions {
   infection : S --> I @ beta * S * I / N
   recovery  : I --> R @ gamma * I
 }
--->
+```
 
 ```camdl preamble=sir-basic
 simulate {

@@ -35,8 +35,8 @@
 //! The markers live in the fence info string rather than in HTML comments
 //! before the fence, which is what makes `dprint fmt` safe on this file: the
 //! formatter reflows prose and leaves an info string and a fenced body
-//! untouched. (The language spec's `<!-- camdl-doctest-preamble -->` markers
-//! are the opposite case, and why that file is on the no-format list.)
+//! untouched. (The language spec's `<!-- camdl-doctest-data -->` comments
+//! are the opposite case; that file is on the no-format list.)
 //!
 //! ## Fail-closed
 //!
