@@ -3674,6 +3674,13 @@ ODE fails at dispatch with a capability error naming the limitation.
 
 ## 12. Observations
 
+An observation stream states how one column of data relates to the model: the
+model quantity the column measures, called the projection, and the
+distribution of a recorded value around it. Simulation draws from that
+distribution and inference scores data under it (§12.4). The data-file format
+is specified in `camdl docs data`; fitting is described in
+`camdl docs inference`.
+
 <!-- camdl-doctest-preamble: obs-sir
 compartments { S, I, R }
 parameters {
@@ -3714,120 +3721,142 @@ observations {
 }
 ```
 
-Syntax notes: the observation header is `name { … }` (no colon), optionally
-`name from <source> { … }`. `columns { }` declares the file schema by name
-(exactly one set of temporal columns: a `: time` column, or a
-`window_start`/`window_stop` pair — §12.1.1). An incidence stream also states what period each row covers
-(`covers = …`, §12.1.1). The measurement model uses `<value_col> ~
-KIND(...)` (the `~` operator, function-call form with named arguments).
-`emit_schedule` is the simulate-only emission cadence; a fit-only model omits
-it (the data file's `time` column drives the fit).
+A stream is written `name { … }`, or `name from <source> { … }` to name its
+data source; without `from`, the source is the stream's own name. The block
+takes five keys, each at most once:
 
-These are the only keys an observation block takes — `columns`, `covers`,
-`projected`, `emit_schedule` and the `~` measurement — and each appears at most
-once. The projected value is written under the key `projected` and read by that
-name in the `~` line; any other key assigned a value (`foo = incidence(…)`,
-`projeted = …`) is an error (**E121**) — with a fix-it to `projected` when the
-block has no `projected` line, and otherwise a hint listing the accepted keys —
-and a key given twice is an error (**E122**).
+| key                       | states                                                                                                                                                   |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `columns { … }`           | the data file's columns, by name and role: exactly one set of temporal columns (a `: time` column, or a `window_start`/`window_stop` pair, §12.1.1) and the value column |
+| `covers = …`              | the period each row covers, on a stream whose projection accumulates a flow (§12.1.1)                                                                    |
+| `projected = …`           | the projection (§12.1); the measurement line reads its value as `projected`                                                                              |
+| `<value_col> ~ FAMILY(…)` | the measurement: the distribution of the value column, with named arguments (§12.2)                                                                      |
+| `emit_schedule = …`       | the times at which simulation emits an observation (§12.4); a model that is only fitted may omit it                                                     |
+
+Any other key assigned a value (`foo = incidence(…)`, `projeted = …`) is
+**E121**. Its fix-it renames the key to `projected` when the block has no
+`projected` line; otherwise its hint lists the accepted keys. A key given twice
+is **E122**. A colon after the stream name (`name : { … }`) is **E270**;
+`likelihood = FAMILY(…)` is **E273**, written `<value_col> ~ FAMILY(…)`; and a
+prior's `| dim` pooling suffix on the measurement line is **E271**, since a
+stream is stratified by indexing its header (§12.3).
+
+Related sections: §25.4 (how projections lower to the IR), §26 (the error
+table), §21 (the CLI that simulates and fits).
 
 ### 12.1 Projections
 
+A projection is the model quantity that one row of a stream measures: a flow
+accumulated over the period the row covers, or a stock read at the row's time.
+
 ```camdl
-incidence(transition)                    flow accumulated over the period the row covers (§12.1.1)
-incidence(transition[north])             positional index, by declaration order
-incidence(transition[patch = north])     named index (order-independent)
-compartment                              current population, as a count
-compartment[age = child]                 named index on compartment
-prevalence(of = I[a], among = N_local[a])  a proportion: of / among, checked
+incidence(transition)                      flow accumulated over the period the row covers (§12.1.1)
+incidence(transition[north])               positional index, in declaration order
+incidence(transition[patch = north])       named index, in any order
+compartment                                current population, as a count
+compartment[age = child]                   named index on a compartment
+prevalence(of = I[a], among = N_local[a])  a proportion, of / among, with checks
 ```
 
-An index on a projection **selects one cell of a stratified family; it never
-marginalizes.** Every declared dimension must be given, positionally or by name
-(the two forms may be mixed). Dropping a dimension is an error, not a silent sum
-— see "A partial index does not marginalize" below for the explicit forms to
-write instead. On a `[patch, age]` family, `infection[patch = north]` names no
-cell; `infection[patch = north, age = child]` names `infection_north_child`.
+**Indexing.** An index on a projection selects one cell of a stratified family;
+it does not sum over the dimensions it leaves out. Every declared dimension is
+given, either all by position in declaration order or all by name in any
+order; mixing the two styles in one reference is **E326**. On a `[patch, age]`
+family, `infection[patch = north, age = child]` names `infection_north_child`.
+A partial index names no cell and is refused: `incidence(infection[patch =
+north])` is **E507**, an unknown transition (there is no `infection_north`),
+and `I[child]` on an `I` stratified by age and patch is **E287**. A sum over a
+dimension is written out (see "Pooling strata" below).
 
-`incidence(...)` takes **exactly one** transition: several arguments is `E203`
-and none is `E250`. To observe two flows as one column, **add the terms** —
-`incidence(a) + incidence(b)` lowers to a single `CumulativeFlowSum` over both
-— or pool strata of a single family with `sum(a in dim, incidence(tr[a]))`. The
-two spellings compose and flatten into one flow list; see "Projections" in §25
-for the lowering. A projection admits two operations over incidence terms:
-addition, and **one division of one such sum by another** —
-`incidence(a) / (incidence(a) + incidence(b))` is the fraction of the row's
-events that were of kind `a`, a ratio of two flows accumulated over the same
-window, and lowers to `FlowRatio` (§25.4). The temporal kind of a projection is
-decided by its leaves, not its operator: all-flow leaves accumulate over the
-row's period, all-state leaves are read at an instant, and mixing them is
-`E341`. So is weighting a term, subtracting one, dividing by a constant or a
-state, or dividing twice; a per-stream reporting rate belongs in the likelihood
-(`cases ~ poisson(rate = rho * projected)`). A side of a ratio whose `where`
-guard prunes every level is `E351`.
+A named index whose label is not a dimension of the family is **E332**. A
+positional index is matched to a slot by position and checked only against that
+slot's levels, so when two dimensions share level names, a swapped pair names a
+different existing cell and compiles without a diagnostic (§1). A named index
+does not have this failure and keeps its meaning when the dimension
+declarations are reordered, so it is the form to use wherever two dimensions
+could share a level name.
 
-**A stock is a count by default; a proportion names its denominator.**
-`projected = I[child]` reports the number of infected children. For the share of
-children who are infected, write `prevalence(of = I[child], among =
-N_local[child])`. It is exactly `I[child] / N_local[child]` — the same value and
-the same IR — plus three checks that plain division, which stays legal and
-unchecked, does not get:
+**Flows.** `incidence(tr)` is the number of `tr` events in the period the row
+covers (§12.1.1). It takes exactly one transition: several is **E203** and none
+is **E250**. It may appear only as the whole right-hand side of
+`projected = …`, under `sum(…)`, and as a term of a sum of such terms; it is not
+an expression function. Two flows observed as one column are added,
+`incidence(a) + incidence(b)`, and the strata of one family are pooled with
+`sum(a in age, incidence(tr[a]))`. The two forms combine into one list of
+flows (§25.4). A `where` guard on the sum prunes its domain as it does in a rate
+expression: `sum(p in patch where p != north, incidence(infection[p]))` pools
+the remaining levels.
 
-- every compartment cell `of` reads must be one `among` reads (`E357`):
-  `of = I[child], among = S[child] + R[child]` and `of = I[child], among =
-  N_local[adult]` are refused. The check is vacuous when `among` reads no cell
-  (a parameter, a constant or a table, all legitimate denominators), it does not
-  bound the ratio by one (`of = I[child] + I[child]` passes), and it is defeated
-  by a denominator written as an explicit cell enumeration rather than an
-  indexed family;
-- both sides must collapse the same dimensions (`E358`): `of = sum(a in age,
-  I[a, p])` against `among = sum(a in age, sum(q in patch, N[a, q]))` pools age
-  on top and age and patch below, and is wrong by roughly the number of patches;
-- neither side may read a flow (`E359`): a proportion of a stock is read at the
-  row's instant, and `incidence(...)` accumulates over the window.
+A projection whose leaves are all flows accumulates over the row's period; one
+whose leaves are all states is read at an instant. Mixing the two is **E341**,
+and so is any operation on flows other than addition and the one ratio below:
+weighting a term (`rho * incidence(a)`, `rho * sum(p in patch,
+incidence(infection[p]))`), subtracting one, dividing by a constant or a state,
+or dividing twice. A per-stream reporting rate belongs in the measurement:
+`cases ~ poisson(rate = rho * projected)`.
 
-`prevalence` has no collapsing argument of its own — `sum` does the pooling, on
-each side — and it is valid only as the whole of a `projected = …` right-hand
-side. A proportion nested in arithmetic is written as the division
-(`sum(a in age, w[a] * (I[a] / N_local[a]))`). The one-argument form
-`prevalence(X)` and the multi-argument form `prevalence(X1, X2)` are removed
-(`E356`): they returned the count `X` (or `X1 + X2`) under a name that promised
-a proportion. A proportion is dimensionless, so it belongs in a probability
-slot (`binomial(n = tested, p = projected)`) and a count family refuses it
-(`E304`).
+**Ratios of flows.** One sum of flows may be divided by another:
+`incidence(a) / (incidence(a) + incidence(b))` is the fraction of the period's
+events that were `a` events, both sums accumulating over the same period. A
+side whose `where` guard prunes every level is **E351**. The ratio is
+dimensionless, so it fits a probability argument (`binomial`'s `p`,
+`beta_binomial`'s `mean`, `beta`'s `mean`, `bernoulli`'s `p`), and a count
+family (`poisson`, `neg_binomial`) refuses it with **E304**.
 
-A ratio of two accumulated counts is dimensionless, so a `FlowRatio` stream
-pairs with `binomial`'s `p`, `beta_binomial`'s mean, `beta`'s `mean` and
-`bernoulli`'s `p`, and a count family (`poisson`, `neg_binomial`) refuses it
-(`E304`). When no denominator event occurred in a window the fraction is
-undefined and the projection is `NaN`: under `binomial`/`beta_binomial` a row
-with `n = 0` scores exactly `0` and a row with `n > 0` is refused with the
-argument named; under `beta` and `bernoulli` the row is refused. A ratio is not
-required to be a subset: `incidence(die) / incidence(onset)` is case fatality
-within a window and may exceed 1 for a trajectory whose deaths outrun its
-cases, which a binomial then scores as impossible — the truthful answer.
+When no denominator event occurs in a period the ratio is undefined and the
+projection is `NaN`. Under `binomial` and `beta_binomial` a row with `n = 0`
+then scores exactly 0 and a row with `n > 0` is refused, with the argument
+named; under `beta` and `bernoulli` the row is refused. The numerator need not
+count a subset of the denominator's events: `incidence(die) /
+incidence(onset)` is the case fatality within a period and exceeds 1 on a
+trajectory whose deaths outnumber its onsets, which a binomial scores as
+impossible.
 
-**A ratio of rates is an instant reading, and is refused.** Before this rule
-the only spelling of a proportion that compiled was the ratio of the two
-transitions' rates, `mu_c * I / (mu_c * I + mu_f * H)`. That is a state
-expression: it is read at the row's time label and says what fraction of the
-_hazard_ is of kind `a` at that moment, not what fraction of the window's
-_events_ were. The two agree only when both flows are constant across the
-window; on a simulated epidemic the instant form sat 7–27 % below the window
-fraction, worst at the peak, and nothing at fit time said so. A projection
-that divides an expression at least one of whose additive terms is
-structurally a lowered transition's rate is therefore `E352`, whose hint
-writes out both spellings: the flows, if the column is the fraction of the
-window's events, and `prevalence(of = <numerator>, among = <denominator>)` if
-the instantaneous hazard ratio is meant. The comparison is structural, so a rate written
-differently in the two places is not matched — the check has no false
-positives and a documented residue of false negatives.
+**Ratios of rates.** A projection that divides an expression at least one of
+whose additive terms is structurally equal to a transition's rate, such as
+`mu_c * I / (mu_c * I + mu_f * H)`, is **E352**. That expression is read at the
+row's time and gives the share of the hazard at that instant, which equals the
+share of the period's events only when both flows are constant over the
+period. The hint writes both alternatives: the ratio of flows, for the share of
+the period's events, and `prevalence(of = <numerator>, among = <denominator>)`,
+for the instantaneous ratio of hazards. The comparison is structural, so a rate
+written differently in the projection and in the transition is not matched: the
+check has no false positives and misses some cases.
 
-**Arithmetic projections** (the general form). Beyond `incidence()` and the
-checked proportion `prevalence(of = …, among = …)`, `projected` accepts any
-expression over compartment state,
-parameters, and time. Pooled-group prevalence, prevalence-as-proportion, and
-arbitrary derived observables compose naturally:
+**Stocks and proportions.** A compartment expression in `projected` is a count:
+on an age-stratified model, `projected = I[child]` is the number of infected
+children. A proportion names its denominator: `prevalence(of = I[child], among
+= N_local[child])` is the share of children who are infected. It has the same
+value and the same IR as `I[child] / N_local[child]`, and adds three checks that
+the plain division, which remains legal, does not have:
+
+- every compartment cell `of` reads is also read by `among` (**E357**), so
+  `among = S[child] + R[child]` and `among = N_local[adult]` are refused against
+  `of = I[child]`. The check passes trivially when `among` reads no cell (a
+  parameter, a constant or a table, all valid denominators). It does not bound
+  the ratio by 1 (`of = I[child] + I[child]` passes), and it does not apply to a
+  denominator written as an explicit list of cells instead of an indexed family;
+- both sides collapse the same dimensions (**E358**): `of = sum(a in age, I[a,
+  p])` against `among = sum(a in age, sum(q in patch, N[a, q]))` pools age in
+  the numerator and age and patch in the denominator, and is wrong by about the
+  number of patches;
+- neither side reads a flow (**E359**), since a proportion of a stock is read at
+  an instant and `incidence(…)` accumulates over a period.
+
+`prevalence` has no pooling argument of its own; pooling is written with `sum`
+on each side. It is valid only as the whole right-hand side of
+`projected = …`. Inside arithmetic it is refused with **E100**, as an undeclared
+function, and a proportion inside arithmetic is written as the division,
+`sum(a in age, w[a] * (I[a] / N_local[a]))`. A missing `of` or `among` is
+**E250**. `prevalence(X)` and `prevalence(X1, X2)` are **E356**: write `X` for
+the count, or `prevalence(of = X, among = N)` for the proportion. A proportion
+is dimensionless, so it fits a probability argument
+(`binomial(n = tested, p = projected)`), and a count family refuses it with
+**E304**.
+
+**Other expressions.** `projected` accepts any expression over compartment
+state, parameters and time. A count over several compartments is their sum,
+`projected = x3 + y3`, and a proportion may be written as a plain division:
 
 <!-- camdl-doctest-preamble: obs-derived
 compartments { S, I_m, I_s, R, x3, y3 }
@@ -3868,112 +3897,73 @@ observations {
 }
 ```
 
-Arithmetic projections emit `Ir::Projection::DerivedExpr`. Both the
-forward-simulation emission path (`camdl simulate --obs`) and the
-likelihood-scoring path (pfilter / PGAS / IF2) share a single evaluator
-(`sim::inference::multi_stream_obs::eval_stream_projection`), so they agree on
-semantics by construction. A count over several compartments is the sum written
-directly: `projected = x + y`.
+Simulation and inference evaluate a projection identically.
 
-**A partial index does not marginalize; state cross-strata aggregation
-explicitly.** Dropping *some* of a stratified family's dimensions is an error,
-not a silent sum: `incidence(infection[patch = north])` over a `[patch, age]`
-family resolves to a single expanded transition and fails if none matches
-(there is no `infection_north` — only `infection_north_child`, …). To sum a
-projection across a dimension, write the sum out:
+**Pooling strata.** On a stratified family, an unindexed `incidence(infection)`
+is **E280**, so that pooling across strata is always written out; the
+diagnostic prints the two forms below with the family's own dimensions. A
+pooled column with one reporting rate sums the family:
 
-`incidence(...)` is **head-position sugar**: it is valid as the whole of a
-`projected = …` right-hand side, under `sum(...)`, and as terms added together,
-but it is not an expression function and cannot be weighted or otherwise
-wrapped in arithmetic
-(`rho * sum(p in patch, incidence(infection[p]))` is `E341`). The reporting rate
-therefore goes in the *likelihood*, not the projection:
+```camdl
+projected = sum(p in patch, incidence(infection[p]))
+cases ~ poisson(rate = rho * projected)
+```
 
-- one pooled column, one reporting rate:
+A family stratified over several dimensions takes one `sum` per dimension:
+`sum(a in age, sum(p in patch, incidence(infection[a, p])))`. One row per
+stratum, each with its own reporting rate, is an indexed stream (§12.3):
 
-  ```camdl
-  projected = sum(p in patch, incidence(infection[p]))
-  cases ~ poisson(rate = rho * projected)
-  ```
+```camdl
+cases[p in patch] {
+  columns   { time : time, patch : dim, cases : count }
+  covers    = closing_at(time, 7 'days)
+  projected = incidence(infection[p])
+  cases ~ poisson(rate = rho[p] * projected)
+}
+```
 
-  A family stratified over several dimensions needs one `sum` per dimension:
-  `sum(a in age, sum(p in patch, incidence(infection[a, p])))`.
+On an indexed stream an unindexed `incidence(infection)` would score every row
+against the pooled total; it is **E280** there too, and the hint names the
+stream's binder (`incidence(infection[p])`).
 
-- one row per stratum, each with its own reporting rate — index the stream:
+The same rule applies to state. A compartment written unindexed in `projected`
+over a population stratum is **E280**: `projected = I` on an age-stratified `I`
+assumes one reporting rate across age groups, and a rate per stratum is a
+different model. The pooling is stated with `sum(I)` for the total,
+`sum(a in age, I[a])` to reduce each dimension by name, or an indexed stream
+(`prev[a in age] { … projected = I[a] … }`). An unindexed name inside a binder
+`sum` is not stated: `sum(a in age, I[a] + R)` still pools `R`, and is
+**E280**. A `let` carries the same rule: `let N = S + I + R` read by a
+projection is **E280** at the use, and `let N = sum(S + I + R)`, or `sum(N)` at
+the use, states the pooling.
 
-  ```camdl
-  cases[p in patch] {
-    columns   { time : time, patch : dim, cases : count }
-    covers    = closing_at(time, 7 'days)
-    projected = incidence(infection[p])
-    cases ~ poisson(rate = rho[p] * projected)
-  }
-  ```
+Residence structure is exempt. On a compartment staged by `via erlang`, `I`
+pools only its stages; `I[child]` on an age-stratified staged `I` pools that
+stratum's stages; and `incidence(death[child])` on a transition out of a staged
+compartment reads that stratum's stage copies (§9.4.1). Staging declared by
+hand in `dimensions {}` is a population stratum and is not exempt. The rule
+applies only to observations: in model dynamics, such as a force of infection,
+an unindexed `I` is the total by definition.
 
-A `where` predicate on an aggregation sum prunes the domain, exactly as it does
-in a rate expression: `sum(p in patch where p != north, incidence(infection[p]))`
-pools only the surviving levels.
-
-A **bare, un-indexed** `incidence(infection)` over a stratified family is
-rejected (`E280`) precisely so this aggregation decision is never made
-silently; the diagnostic prints the explicit forms above, naming the family's
-actual dimensions. This holds on an **indexed** stream too: inside
-`cases[p in patch] { … }` a bare `incidence(infection)` would score every row
-against the pooled total, so E280 names the stream's own binder as the fix
-(`incidence(infection[p])`).
-
-**The same rule covers state.** In an observation's `projected`, a compartment
-written bare over a population stratum is also `E280`: `projected = I` on an
-age-stratified `I` asserts one reporting rate across age groups, and the
-alternative — a rate per stratum — is a different model with different
-posteriors. State the pooling: `sum(I)` for the total, `sum(a in age, I[a])` to
-reduce each axis by name, or index the stream and the reference
-(`prev[a in age] { … projected = I[a] … }`). A bare name inside a binder `sum`
-is not stated — `sum(a in age, I[a] + R)` still pools `R`. A `let` carries the
-same tag: `let N = S + I + R` read by a projection is `E280` at the use, and
-`let N = sum(S + I + R)` (or `sum(N)` at the use) states it. Residence
-structure is exempt: on a `via erlang` compartment `I` pools only its stages,
-and `I[child]` on an age-stratified staged `I` pools that stratum's stages;
-likewise `incidence(death[child])` on a transition out of a staged compartment
-reads that stratum's stage copies (§9.4.1);
-hand-rolled staging declared in `dimensions {}` is a population stratum and is
-not. Model dynamics are untouched — in a force of infection a bare `I` _is_ the
-definition, and no second reading exists.
-
-Where you *do* fully index, prefer **named** indexing
-(`infection[patch = north, age = child]`) over **positional**
-(`infection[north, child]`): named binding is order-independent and survives a
-later reordering of the dimension declarations, whereas positional binding
-silently re-interprets against the new order.
-
-Named indices resolve by the dimension they name, in any order (gh#459), and a
-label that is not a dimension of the family is `E332`. Positional indices carry
-no such protection: they are matched to slots by position and checked only
-against that slot's levels, so when two dimensions share level names a swapped
-pair names a *different existing cell* and binds silently, with no diagnostic
-(§1).
-
-Inside a likelihood expression, the keyword `projected` refers to the evaluated
-projection value for that observation.
+Within the measurement line, `projected` is the stream's evaluated projection.
 
 ### 12.1.1 What a row covers: `covers` and the window columns
 
 An `incidence(...)` projection accumulates a flow over an interval, and a row's
-time label alone does not say which interval. `2026-07-08` is the day 8 July in
-a daily file labelled by the day the count describes, the week 8–14 July in a
-week-starting file, the week 2–8 July in a week-ending one, and the week 1–7
-July in a file whose label is the boundary its window closes at — the convention
-of pomp's accumulator variables and of camdl's own `simulate --obs` output. No
-rule gets all four right, so **an incidence stream must state what each of its
-rows covers.** A stream whose `projected` accumulates a flow — `incidence(...)`,
-`sum(..., incidence(...))`, added incidence terms, or a ratio of two such sums
-(§12.1) — and declares neither `covers = …` nor `window_start`/`window_stop`
-columns is **E350**; there is no default. A stream whose `projected` reads
-state at an instant —
-a compartment expression, or `prevalence(of = …, among = …)` — has no window to state, and
-declaring one by either means is **E348**.
+time label alone does not determine the interval. `2026-07-08` is the day 8 July
+in a daily file labelled by the day the count describes, the week 8–14 July in
+a week-starting file, the week 2–8 July in a week-ending one, and the week 1–7
+July in a file whose label is the boundary at which its window closes, which is
+the convention of pomp's accumulator variables and of `camdl simulate --obs`
+output. A stream whose `projected` accumulates a flow (`incidence(...)`,
+`sum(..., incidence(...))`, added incidence terms, or a ratio of two such sums,
+§12.1) therefore states what each of its rows covers. Declaring neither
+`covers = …` nor `window_start`/`window_stop` columns is **E350**; there is no
+default. A stream whose `projected` reads state at an instant (a compartment
+expression, or `prevalence(of = …, among = …)`) has no window, and declaring one
+by either means is **E348**.
 
-**The five forms.** Four take the stream's own `: time` column and a rule; the
+**Forms.** Four forms take the stream's own `: time` column and a rule; the
 fifth puts both boundaries in the file. With `D` the label in a row's time
 column, resolved for `D = 11 July` and a seven-day width:
 
@@ -3985,38 +3975,36 @@ column, resolved for `D = 11 July` and a seven-day width:
 | `covers = closing_at(time, 7 'days)`   | `[D−7 days, D)`         | `[4 Jul, 11 Jul)` — 11th **excluded** |
 | `window_start` + `window_stop` columns | exactly `[start, stop)` | as written                            |
 
-`ending_on` and `closing_at` are near-synonyms in English and differ by a whole
-day, which is why they sit as adjacent rows with the intervals written out.
-"Week ending 11 July" means 11 July is the **last included day**: the span opens
-six days before the label and closes one day after it, and that off-by-one is
-what `ending_on` exists to hide. `closing_at` is for a file whose label is the
-instant at which the window **closes**, the label itself belonging to the next
-row's window. That is the reading of pomp's accumulator variables (the value
-reported at `t[k+1]` is the flow since `t[k]`) and of every file
-`simulate --obs` writes, so synthetic data round-trips under
+`ending_on` and `closing_at` differ by a whole day. "Week ending 11 July" means
+11 July is the **last included day**: under `ending_on` the span opens six days
+before the label and closes one day after it. Under `closing_at` the label is
+the instant at which the window **closes**, and the label itself belongs to the
+next row's window. That is the reading of pomp's accumulator variables (the
+value reported at `t[k+1]` is the flow since `t[k]`) and of every file
+`simulate --obs` writes, so synthetic data is read back correctly under
 `closing_at(time, <cadence>)` with the cadence of the stream's `emit_schedule`.
 A file typed from a surveillance bulletin is labelled by the day or week it
-reports on and takes `day`, `starting_on` or `ending_on`. The width is a
-compile-time constant duration; `day(...)` takes none. A width given to `day`, a
-width missing from the other three, an unknown form name, or a width naming a
-data column is **E349** — a width that varies row to row is stated with the
-window columns, not with a duration column. Under `origin = date(...)` a
-calendar width (`1 'months`, `1 'years`) is **E321**: the width is one fixed
-span for every row, and a calendar month is 28 to 31 days, so monthly or yearly
-periods are stated with the window columns. `covers` must name the stream's own
-`: time` column (**E347** otherwise).
+reports on and takes `day`, `starting_on` or `ending_on`.
+
+The width is a compile-time constant duration; `day(...)` takes none. A width
+given to `day`, a width missing from the other three, an unknown form name, or a
+width naming a data column is **E349**; a width that varies from row to row is
+stated with the window columns. Under `origin = date(...)` a calendar width
+(`1 'months`, `1 'years`) is **E321**: the width is one fixed span for every
+row and a calendar month is 28 to 31 days, so monthly or yearly periods are
+stated with the window columns. `covers` names the stream's own `: time`
+column; any other name is **E347**.
 
 **Window columns.** `window_start` and `window_stop` are `columns { }` roles
 alongside `time`, `dim` and `count`. They replace the `: time` column and are
-the declaration on their own — a stream carrying them writes no `covers` line.
-`columns { }` names exactly one set of temporal columns: a `: time` column, or
-a `window_start`/`window_stop` pair. Both, half a pair, or a pair together with
-`covers` is **E347**. Each row covers exactly `[start, stop)` as written, so this
-is the only form that can state a width that changes row to row (a fortnightly
-row in a weekly file, because publication was suspended) or a span no row
-covers. The **stop** is the stream's fit time source: output rows,
-`--score-from` and a forecast grid all read the closing boundary, so a windowed
-stream sits on the time axis exactly where a `: time`-column stream does.
+the whole declaration: a stream carrying them has no `covers` line. Both a
+`: time` column and a window pair, half a pair, or a pair together with `covers`
+is **E347**. Each row covers exactly `[start, stop)` as written, so this is the
+only form that can state a width that changes from row to row (a fortnightly
+row in a weekly file, after a suspended publication) or a span that no row
+covers. The stop is the stream's time in a fit: output rows, `--score-from` and
+a forecast grid all read the closing boundary, so a windowed stream sits on the
+time axis where a `: time`-column stream with the same closing boundary does.
 
 ```camdl preamble=obs-sir
 observations {
@@ -4029,29 +4017,30 @@ observations {
 }
 ```
 
-**A gap between rows.** Under the four uniform forms every row's window follows
-from its label, so consecutive rows whose windows do not touch can only mean a
-row is **missing** — the shape that, with the window inferred from row spacing,
-used to widen the next row's bin silently. It is refused when the data is bound,
-with an error naming both windows and the uncovered span between them; keep
-every scheduled row and write the unobserved one as `NA`, which is a hole (no
-likelihood term) whose window is kept. Under the window columns a gap is a
-statement and is legal: the flow over the uncovered span belongs to no row and
-is discarded, and the next row's bin opens at its own `window_start`.
-Overlapping windows are refused.
+**Gaps and overlaps.** Under the four uniform forms every row's window follows
+from its label, so consecutive rows whose windows do not touch mean a row is
+missing. That is refused when the data is bound, with an error naming both
+windows and the uncovered span between them. Every scheduled row is kept, and an
+unobserved one is written as `NA`: a hole, with no likelihood term, whose window
+is kept. Under the window columns a gap is legal: the flow over the uncovered
+span belongs to no row and is discarded, and the next row's accumulation opens
+at its own `window_start`. Overlapping windows are refused under every form.
 
-**Where scoring begins.** A declared first period opens where it says. The
-process is simulated from `simulate.from`, and nothing before the first period's
-start is scored, so the declaration is the warm-up boundary and no separate
-warm-up knob is needed. A first period that opens before `simulate.from` is an
-error naming both times: that time is never simulated, so the row would be
-scored against flow that does not exist. Opening exactly at `simulate.from` is
-fine.
+**Where scoring begins.** The process is simulated from `simulate.from`, and
+nothing before the first period's start is scored, so the first declared period
+is the end of the warm-up. A first period that opens before `simulate.from` is
+an error naming both times, because that time is never simulated and the row
+would be scored against flow that does not exist. A first period opening
+exactly at `simulate.from` is accepted.
 
-The data-file side — file layouts, `NA` holes, and what the declaration changes
-for an existing file — is specified in `camdl docs data` ("What a row covers").
+The data-file side (file layouts, `NA` holes, and what the declaration changes
+for an existing file) is specified in `camdl docs data` ("What a row covers").
 
 ### 12.2 Likelihood Families
+
+The measurement line `<value_col> ~ FAMILY(…)` gives the distribution of the
+value column around the projection. Each family takes named arguments, in which
+`projected` is the stream's projection.
 
 ```camdl
 neg_binomial(mean = EXPR, r = EXPR)            overdispersed counts
@@ -4069,11 +4058,11 @@ zero_inflated(base = neg_binomial(mean = EXPR, r = EXPR), pi = EXPR)
 `neg_binomial(mean = μ, r = k)` is the **NB2** (mean–dispersion)
 parameterization: the mean is `μ` and the variance is `μ + μ²/r`, so a smaller
 `r` means more overdispersion and `r → ∞` recovers `poisson(μ)`. A prior on `r`
-is therefore a prior on the quadratic excess variance — pin it deliberately.
+is therefore a prior on the quadratic excess variance `μ²/r`.
 
 `normal(mean = μ, sd = σ)` is a **discretized normal for counts** (He et al.
-2010), not a continuous density. A filter or fit scores an observed count `y`
-as the probability that a normal variable rounds to it,
+2010), not a continuous density. Inference scores an observed count `y` as the
+probability that a normal variable rounds to it,
 `P(y − 0.5 < X < y + 0.5)` with `X ~ Normal(μ, σ²)`, and `y = 0` as
 `P(X < 0.5)`; an observation is rounded to the nearest non-negative integer
 before scoring, and the probability is floored at `1e-18`. Simulated
@@ -4081,43 +4070,41 @@ observations are a normal draw rounded to the nearest integer and floored at
 0. A non-integer observation is scored as its rounded value, with a run note
 saying so once.
 
-**Count arguments carry the count dimension `[P]`.** `neg_binomial`'s `mean`,
-`poisson`'s `rate`, and `binomial`/`beta_binomial`'s `n` are all *expected
-counts over the reporting interval*, not per-time rates. Writing a transition
-rate there (`projected = gamma * I`, dimension `P·T⁻¹`) is **E304**. The
-distinction is invisible at a one-day reporting step, where a per-day rate and a
-one-day accumulated count coincide numerically; at a weekly step the likelihood
-is wrong by roughly the window length. Use `incidence(<transition>)`, which
-accumulates the flow over the interval. A bare numeric literal (`mean = 100`) is
-a count by context and is exempt.
+**Count arguments.** `neg_binomial`'s `mean`, `poisson`'s `rate`, and
+`binomial`'s and `beta_binomial`'s `n` carry the count dimension `[P]`: each is
+an expected count over the reporting interval, not a per-time rate. A
+transition rate there (`projected = gamma * I`, dimension `P·T⁻¹`) is
+**E304**. At a one-day reporting step a per-day rate and a one-day accumulated
+count coincide numerically; at a weekly step the likelihood would be wrong by
+about the window length. `incidence(<transition>)` accumulates the flow over the
+interval. A bare numeric literal (`mean = 100`) is a count by context and is
+exempt.
 
-**Proportion arguments are dimensionless.** `binomial`'s `p`, `beta`'s `mean`,
-`bernoulli`'s `p` and the `beta_binomial` mean are fractions, and the
-projections that feed them are a prevalence proportion (`I / N`) or a ratio of
-two accumulated flows (`incidence(a) / (incidence(a) + incidence(b))`, §12.1).
-A count there (`p = projected` over a bare `incidence(a)`) is **E304** — the
-missing-`/N` bug — and a fraction fed to a count family is **E304** the other
-way round.
+**Proportion arguments.** `binomial`'s `p`, `beta`'s `mean`, `bernoulli`'s `p`
+and `beta_binomial`'s `mean` are dimensionless fractions, fed by a proportion
+(`I / N`, `prevalence(of = …, among = …)`) or a ratio of two accumulated flows
+(`incidence(a) / (incidence(a) + incidence(b))`, §12.1). A count there
+(`p = projected` over a bare `incidence(a)`, a missing division by `N`) is
+**E304**, and so is a fraction given to a count argument.
 
-The two `beta_binomial` spellings are equivalent: `mean`/`concentration` lowers to
-`alpha = mean · concentration`, `beta = (1 − mean) · concentration`. Use whichever
-reads better; mixing the two forms in one call is an error (E252). For a
-sampler-friendly parameterization of the `concentration` (overdispersion) parameter,
-see the reparameterization guidance in `camdl docs inference`.
+The two `beta_binomial` forms are equivalent: `mean`/`concentration` lowers to
+`alpha = mean · concentration`, `beta = (1 − mean) · concentration`. Mixing the
+two forms in one call is **E252**. A parameterization of `concentration` that
+samples well is described in `camdl docs inference` (reparameterization).
 
-Use `beta(...)` when the observed value is itself a **continuous proportion** in the
-open interval (0, 1) — a rate, coverage, or positivity given directly as a fraction —
-rather than a `k`-of-`n` count (which is `beta_binomial`). It is mean-linked with the
-same shape mapping (`alpha = mean · concentration`, `beta = (1 − mean) · concentration`);
-`mean` and `concentration` are both differentiable, so `beta` is usable under
-gradient-based inference (PGAS's NUTS move, `nl-lbfgs`) as well as the gradient-free methods.
+`beta(...)` is for an observed value that is itself a **continuous
+proportion** in the open interval (0, 1), such as a coverage or a positivity
+reported as a fraction; a `k`-of-`n` count is `beta_binomial`. It uses the same
+mapping, `alpha = mean · concentration`, `beta = (1 − mean) · concentration`.
+`mean` and `concentration` are both differentiable, so `beta` is accepted by
+the gradient-based methods as well as the others.
 
-### 12.2.1 Diagnostic-test likelihood sugar
+### 12.2.1 Imperfect tests: `diagnostic_test`
 
-Surveillance data is almost never perfectly observed — slide microscopy, RDTs,
-and PCR all have sensitivity < 1 and specificity < 1. The `diagnostic_test`
-sugar absorbs the measurement-model correction so the DSL reads like the
-biology:
+`diagnostic_test` scores the positives of an imperfect test, such as slide
+microscopy, a rapid diagnostic test (RDT) or PCR, whose sensitivity and
+specificity are below 1. It wraps a probability family and rewrites its
+probability argument:
 
 ```camdl preamble=obs-sir
 observations {
@@ -4134,68 +4121,61 @@ observations {
 }
 ```
 
-**Semantics.** Pure compile-time rewrite. If true positive fraction is π, the
-probability of a positive test outcome is
+**Meaning.** The rewrite happens at compile time. With true positive fraction
+π, the probability of a positive test result is
 
 ```
 p_observed  =  sens · π  +  (1 − spec) · (1 − π)
 ```
 
-— the first term is a true-positive (infected and detected), the second is a
-false-positive (uninfected but mistakenly positive). The compiler rewrites the
-inner likelihood's `p = π` to this expression, producing IR byte-identical to a
-hand-inlined
+The first term is the true positives (infected and detected), the second the
+false positives (uninfected and reported positive). The compiler replaces the
+base's `p = π` with this expression, and the IR is identical to that of the
+measurement written out by hand:
 
 ```camdl
-likelihood = binomial(
+slide_positivity ~ binomial(
   n = N_tested,
-  p = rho_sens * projected / N + (1 - rho_spec) * (1 - projected / N)
+  p = rho_sens * (projected / N) + (1 - rho_spec) * (1 - projected / N)
 )
 ```
 
-**Supported bases.**
+**Bases.** The base is one of two families:
 
-- `binomial(n = …, p = …)` — survey of `n` individuals, count positives.
-- `bernoulli(p = …)` — single test per individual, 0/1 outcome.
+- `binomial(n = …, p = …)`, a survey of `n` individuals counting positives;
+- `bernoulli(p = …)`, one test with a 0/1 result.
 
-Other likelihood families (`poisson`, `neg_binomial`, `normal`, `beta_binomial`)
-aren't meaningful as diagnostic-test bases (sens/spec correct a probability, not
-a count-mean or variance) and produce `E253` when used.
+Sensitivity and specificity correct a probability, so any other base
+(`poisson`, `neg_binomial`, `normal`, `beta_binomial`) is **E253**. A call
+missing `base`, `sens` or `spec` is **E254**.
 
-**Parameters.** `sens` and `spec` can be anything in `[0, 1]`: fixed constants,
-parameters with priors (for joint estimation of test characteristics with the
-transmission model), or expressions. Dimensional type is `probability`; the
-compiler checks domain.
-
-**Diagnostics.**
-
-- `E253` — base must be `binomial(...)` or `bernoulli(...)`; other likelihood
-  families rejected.
-- `E254` — missing one of the required keyword arguments `base`, `sens`, `spec`.
+**Arguments.** `sens` and `spec` may be constants, parameters with priors
+(estimating the test characteristics jointly with the transmission model), or
+expressions. The compiler checks that each is dimensionless (**E304**
+otherwise); it does not check that a constant lies in `[0, 1]`, so a value such
+as `sens = 1.5` compiles. Declaring the parameters as `probability` keeps their
+values in `[0, 1]` (§4.4).
 
 ### 12.2.2 Counts with excess zeros: `zero_inflated`
 
-Surveillance counts often contain more zeros than any single count distribution
-can produce. A vector-trapping site where the mosquito is simply absent, a
-health zone that reported nothing because no one was looking, a week with no
-sampling effort — these zeros come from a process *separate* from the
-transmission dynamics, so they are called **structural zeros**. Scoring them
-with a plain `neg_binomial` forces one dispersion parameter `r` to explain both
-the pile of zeros and the spread of the positive counts at once; `r` is pulled
-down to cover the zeros, which overstates the overdispersion of the positive
-counts and biases the fitted reporting rate.
-
-`zero_inflated` gives the structural zeros their own parameter. It mixes a point
-mass at zero over a NegBinomial base:
+`zero_inflated` scores counts with more zeros than a negative binomial
+produces, where the extra zeros come from a process separate from the
+transmission dynamics (a trapping site where the vector is absent, a week with
+no sampling effort). These are called **structural zeros**. Under a plain
+`neg_binomial` the one dispersion parameter `r` has to account for both the
+zeros and the spread of the positive counts, which lowers `r`, overstates the
+overdispersion of the positive counts and biases the fitted reporting rate.
+`zero_inflated` gives the structural zeros their own probability `pi`, mixing a
+point mass at zero with a negative binomial base:
 
 ```
 P(y = 0)  =  pi  +  (1 - pi) * f_NB(0 | mean, r)
 P(y = k)  =        (1 - pi) * f_NB(k | mean, r)      for k > 0
 ```
 
-`pi` is the probability that a cell is a structural zero. At `pi = 0` the family
-reduces to the plain `neg_binomial` exactly, so `pi`'s posterior is directly
-readable as "how much of the zero mass the dynamics could not explain".
+`pi` is the probability that a row is a structural zero. At `pi = 0` the family
+is exactly the plain `neg_binomial`, so the posterior of `pi` measures the share
+of zeros that the dynamics do not account for.
 
 ```camdl preamble=obs-sir
 observations {
@@ -4212,39 +4192,43 @@ observations {
 }
 ```
 
-**Base and arguments.** `base` must be `neg_binomial(...)`; no other family is
-accepted (**E324**). Both `base` and `pi` are required (**E325**), and any other
-keyword is rejected rather than silently dropped (**E251**).
+**Arguments.** `base` is `neg_binomial(...)`; any other family is **E324**.
+Both `base` and `pi` are required (**E325**), and any other keyword is
+**E251**.
 
-**Dimensions.** `mean` carries the count dimension `[P]` — an expected count
-over the reporting interval, the same contract as the plain `neg_binomial`, so a
-per-time transition rate there is **E304**. `r` and `pi` are dimensionless.
-Declare `pi`'s parameter as `probability` so its `[0, 1]` domain is checked when
-parameter values are resolved — and so inference searches `[0, 1]` (§4.4) —
-rather than only being clamped at scoring time.
+**Dimensions.** `mean` carries the count dimension `[P]`, an expected count over
+the reporting interval as in the plain `neg_binomial`, so a per-time transition
+rate there is **E304**. `r` and `pi` are dimensionless. A `pi` outside
+`[0, 1]` scores the row as impossible (log-likelihood −∞). Declaring `pi`'s
+parameter as `probability` checks its `[0, 1]` domain when parameter values are
+resolved and restricts inference to `[0, 1]` (§4.4).
 
-**Every method works, gradient-based included.** All three arguments are
-differentiable, so the compiler emits a gradient for each and no method is
-refused. Writing `f₀ = f_NB(0 | mean, r)` and `S = pi + (1 − pi)·f₀`, and letting
-`w = pi/S` be the posterior probability that an observed zero is structural
-(`w = 0` whenever the count is positive), the derivatives are `(1 − w)` times the
-NegBinomial ones in `mean` and `r`, and `(1 − f₀)/S` at zero — `−1/(1 − pi)`
-above it — in `pi`.
+**Gradients.** All three arguments are differentiable, so the compiler emits a
+gradient for each and every inference method accepts the family. Write
+`f₀ = f_NB(0 | mean, r)` and `S = pi + (1 − pi)·f₀`, and let `w = pi/S` be the
+posterior probability that an observed zero is structural (`w = 0` whenever the
+count is positive). The derivatives in `mean` and `r` are `(1 − w)` times the
+negative binomial ones. The derivative in `pi` is `(1 − f₀)/S` at zero and
+`−1/(1 − pi)` above it.
 
-**Declare `pi` as a `probability` and the boundary takes care of itself.** At
-`pi → 0` the derivative with respect to `pi` grows like `1/f₀`, which sounds
-alarming and is not: a `probability` parameter is sampled on the logit scale, so
-`pi = 0` sits at −∞ in the sampling space and is never evaluated. The chain rule
-multiplies that derivative by `pi·(1 − pi)`, which vanishes as the boundary is
-approached. This is the same mechanism Stan uses — it has no built-in
-zero-inflated family either, and its documented idiom declares the mixing
-probability `real<lower=0, upper=1>` and scores the zero case with
-`log_sum_exp`, leaning on the automatic constraint transform rather than on
-anything in the density (Stan Development Team, *Stan User's Guide* v2.39,
-["Zero-inflated and hurdle
+As `pi → 0` the derivative in `pi` at an observed zero grows like `1/f₀`. A
+`probability` parameter is sampled on the logit scale, where `pi = 0` lies at
+−∞ and is never evaluated, and the chain rule multiplies that derivative by
+`pi·(1 − pi)`, which goes to 0 at the boundary. Declaring `pi` as `probability`
+is therefore enough to keep the gradient bounded near `pi = 0`.
+
+Stan handles the boundary the same way. It has no built-in zero-inflated family
+either; its documented idiom declares the mixing probability
+`real<lower=0, upper=1>` and scores the zero case with `log_sum_exp`, relying on
+the automatic constraint transform rather than on anything in the density (Stan
+Development Team, _Stan User's Guide_ v2.39, ["Zero-inflated and hurdle
 models"](https://mc-stan.org/docs/stan-users-guide/finite-mixtures.html#zero-inflated)).
 
 ### 12.3 Indexed Observations
+
+An indexed stream observes each stratum of a dimension in its own stream. The
+header `name[p in dim]` binds `p` to each level of `dim` in turn, and `p` may
+index both the projection and the measurement's arguments.
 
 <!-- camdl-doctest-preamble: obs-patch
 compartments { S, I, R }
@@ -4277,35 +4261,36 @@ observations {
 }
 ```
 
-Generates one observation stream per patch.
+This declares three streams, `cases_by_patch_north`, `cases_by_patch_south`
+and `cases_by_patch_east`, each with its own projection
+`incidence(infection[patch = north])` and so on. A parameter indexed by the
+same dimension is read per stream: `rho[p]` in the measurement line is `rho_north`
+in the first stream.
 
-### 12.4 Sampling vs Scoring
+### 12.4 Simulation and inference
 
-The `observations {}` block is evaluated at runtime in both directions.
+Each observation stream is read by both simulation and inference.
 
-- **Forward simulation** (`camdl simulate`): the runtime evaluates each stream's
-  projection on its `emit_schedule` and **samples** from the declared likelihood
-  family to produce synthetic observations. Synthetic-observation files are
-  written when `--obs`, `--obs-dir`, or `--obs-only` is passed (see §21); no
-  observation file is emitted by default. Trajectories are written independently
-  via `--output` / stdout.
-- **Inference** (`camdl fit` and friends): the runtime **scores** observed data
-  against the same likelihood family, producing log p(y | θ). PGAS, IF2,
-  particle filtering, and PMMH all consume the `observations {}` declarations
-  via the compiled `dmeasure` / `rmeasure` paths. When fitting with `--data`,
-  the data file's time column (the `window_stop` column, for a stream that
-  declares its windows per row — §12.1.1) supplies the observation times and
-  the declared `emit_schedule` is not consulted; the schedule is used only for
-  forward synthetic-data generation under `simulate`.
+- **Simulation** (`camdl simulate`). At each time in the stream's
+  `emit_schedule`, the runtime evaluates the stream's projection and draws an
+  observation from the declared distribution at that value. The draws are
+  written only when `--obs`, `--obs-dir` or `--obs-only` is passed (§21). To
+  simulate on the times of a data set instead, pass `--design-from fit.toml`
+  (run spec §4.6).
+- **Inference** (`camdl fit`). At each time in the data, the runtime evaluates
+  the same projection and adds the log density of the observed value under the
+  same distribution to the log-likelihood, log p(y | θ). The data's times
+  replace the `emit_schedule` (§12.1.1).
 
-The emission cadence is written `emit_schedule = every N 'unit` or
-`emit_schedule = at [t1 'unit, t2 'unit, ...]` — the unit rides on each list
-element (e.g. `at [7 'days, 14 'days]`), not after the bracket (§12 examples).
-A bare `every`/`at`
-field at the top of an observation block is the removed pre-gh#171 form and is
-rejected with **E272** pointing at the `emit_schedule = ...` rewrite. Monthly
-incidence can be obtained natively by setting `emit_schedule = every 30 'days`
-(or `every 1 'months` once time-unit arithmetic is implemented).
+Because only simulation uses the emission times, they are set by
+`emit_schedule`, in one of two forms:
+
+```
+emit_schedule = every 7 'days                       # a recurring cadence
+emit_schedule = at [7 'days, 14 'days, 28 'days]    # listed times, with the unit on each entry
+```
+
+A bare `every` or `at` field is refused with E272.
 
 ---
 
