@@ -141,12 +141,24 @@ pub struct InitStateSource {
     /// a state file; the terminal snapshot of the saved latent paths for a
     /// fit). Becomes each cell's `simulation.t_start`.
     pub origin_t: f64,
+    /// The model's own `simulate.from`, read before any cell's start is moved
+    /// to `origin_t`. The observation emitters need it to tell a reporting
+    /// period that was under way at the origin from one that began before the
+    /// model did (gh#1081).
+    pub model_start: f64,
     /// The ensemble, in the order the row axis indexes.
     pub states: Vec<OriginState>,
     pub axis: InitStateRowAxis,
     /// Content digest of the ensemble — the identity input (see
     /// [`runid::inputs::InitStateDigest`]).
     pub ensemble_digest: runid::ContentHash,
+}
+
+impl InitStateSource {
+    /// This restart as the observation emitters take it.
+    pub(crate) fn restart(&self) -> crate::obs_emit::Restart {
+        crate::obs_emit::Restart { origin: self.origin_t, model_start: self.model_start }
+    }
 }
 
 /// Where parameter vectors come from — run-spec §3.2. Exactly one variant

@@ -808,6 +808,7 @@ fn resolve_paired_posterior(
         params,
         crate::sim_job::InitStateSource {
             origin_t: ens.origin_t,
+            model_start: model.simulation.t_start,
             states,
             axis: crate::sim_job::InitStateRowAxis::Draw,
             ensemble_digest: digest,
@@ -1624,6 +1625,7 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
             let digest = runid::ContentHash::digest_bytes(&bytes);
             init_state_source = Some(std::sync::Arc::new(crate::sim_job::InitStateSource {
                 origin_t: states.origin_t,
+                model_start: model_is.simulation.t_start,
                 states: states.counts.into_iter()
                     .map(|counts| crate::sim_job::OriginState { counts, reals: Vec::new() })
                     .collect(),
@@ -1735,8 +1737,7 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
             if let Some(src) = init_state_source.as_ref() {
                 for o in model_check.observations.iter().filter(|o| o.emit_schedule.is_some()) {
                     if let Err(e) = obs_emit_schedule_times(
-                        o, Some(src.origin_t), model_check.simulation.t_start,
-                        horizons[0].1, emit_every.as_ref(),
+                        o, Some(src.restart()), horizons[0].1, emit_every.as_ref(),
                     ) {
                         out.fail(format!("error: {}", e));
                     }
@@ -1755,10 +1756,10 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
             // restarts them. Two `at`-list schedules can agree over the model
             // window and diverge over the forecast one at either end. `None`
             // for every ordinary run, which keeps this check exactly as it was.
-            let obs_origin = init_state_source.as_ref().map(|s| s.origin_t);
+            let obs_origin = init_state_source.as_ref().map(|s| s.restart());
             let schedules: Vec<_> = model_check.observations.iter()
                 .map(|o| obs_emit_schedule_times(
-                    o, obs_origin, model_check.simulation.t_start, obs_end, emit_every.as_ref(),
+                    o, obs_origin, obs_end, emit_every.as_ref(),
                 ).unwrap_or_else(|e| {
                     out.fail(format!("error: {}", e));
                 }))
@@ -2826,7 +2827,7 @@ fn materialize_obs_for_quantities(
     // gh#641: `Some(T)` when the cell was restarted from a filtered state at
     // `T`. Threaded rather than defaulted so an obs-sourced quantity reduces
     // over exactly the series `--obs` emits for the same cell.
-    restart_origin: Option<f64>,
+    restart: Option<crate::obs_emit::Restart>,
     // gh#656: the `--emit-every` override, for the same reason — the quantity
     // must reduce over the series `--obs` would emit under the same flags.
     emit: Option<&crate::emit_every::EmitEvery>,
@@ -2849,13 +2850,13 @@ fn materialize_obs_for_quantities(
             // over fabricated tail values (gh#561).
             Some(s) => {
                 let s = crate::emit_every::apply_override(emit, obs_ir, s)?;
-                if let Some(origin) = restart_origin {
+                if let Some(restart) = restart {
                     crate::obs_emit::refuse_period_under_way(
                         obs_ir, &s, emit.and_then(|e| e.resolve_for(&obs_ir.source)),
-                        model.simulation.t_start, origin, model.simulation.t_end,
+                        restart, model.simulation.t_end,
                     )?;
                 }
-                obs_schedule_times(&s, restart_origin, model.simulation.t_end)
+                obs_schedule_times(&s, restart.map(|r| r.origin), model.simulation.t_end)
             }
             None => continue, // fit-only — consumes no RNG, mirroring `--obs`
         };
@@ -2958,7 +2959,7 @@ impl SimQuantities {
                 compiled,
                 &params,
                 cell.spec.obs_seed,
-                cell.spec.sim_run.init_state.as_ref().map(|i| i.origin_t),
+                cell.spec.sim_run.init_state.as_ref().map(|i| i.restart()),
                 self.emit_every.as_ref(),
             )?)
         };
@@ -3823,7 +3824,7 @@ impl engine::RunSink for StreamSink {
                 self.ensure_obs_streams(
                     model,
                     run_start_of(traj, model),
-                    cell.spec.sim_run.init_state.as_ref().map(|i| i.origin_t),
+                    cell.spec.sim_run.init_state.as_ref().map(|i| i.restart()),
                 )?;
             }
 
@@ -3869,7 +3870,7 @@ impl StreamSink {
         &mut self,
         model: &ir::Model,
         run_start: f64,
-        init_origin: Option<f64>,
+        restart: Option<crate::obs_emit::Restart>,
     ) -> Result<(), String> {
         for obs_model in &model.observations {
             self.obs_stream_names.push(obs_model.name.clone());
@@ -3879,8 +3880,7 @@ impl StreamSink {
             });
             self.obs_data.push(Vec::new());
             let times = obs_emit_schedule_times(
-                obs_model, init_origin, model.simulation.t_start, model.simulation.t_end,
-                self.emit_every.as_ref(),
+                obs_model, restart, model.simulation.t_end, self.emit_every.as_ref(),
             )?;
             // The rows the declaration assigns to those times, within the run
             // (gh#833). A wide file has one `time` column and cannot carry a
@@ -4002,8 +4002,8 @@ impl StreamSink {
                 }
             }
             if self.obs_plans.is_empty() {
-                let init_origin = cell.spec.sim_run.init_state.as_ref().map(|i| i.origin_t);
-                self.ensure_obs_streams(model, run_start, init_origin)?;
+                let restart = cell.spec.sim_run.init_state.as_ref().map(|i| i.restart());
+                self.ensure_obs_streams(model, run_start, restart)?;
             }
             for si in 0..self.obs_plans.len() {
                 let rows: Vec<(f64, score::trace::Coverage)> = self.obs_plans[si].rows.iter()
@@ -4497,21 +4497,19 @@ pub(crate) fn obs_schedule_times(
 /// exactly as they were.
 pub(crate) fn obs_emit_schedule_times(
     obs: &ir::observation::ObservationModel,
-    restart_origin: Option<f64>,
-    model_start: f64,
+    restart: Option<crate::obs_emit::Restart>,
     t_end: f64,
     emit: Option<&crate::emit_every::EmitEvery>,
 ) -> Result<Vec<f64>, String> {
     match &obs.emit_schedule {
         Some(s) => {
             let s = crate::emit_every::apply_override(emit, obs, s)?;
-            if let Some(origin) = restart_origin {
+            if let Some(restart) = restart {
                 crate::obs_emit::refuse_period_under_way(
-                    obs, &s, emit.and_then(|e| e.resolve_for(&obs.source)),
-                    model_start, origin, t_end,
+                    obs, &s, emit.and_then(|e| e.resolve_for(&obs.source)), restart, t_end,
                 )?;
             }
-            Ok(obs_schedule_times(&s, restart_origin, t_end))
+            Ok(obs_schedule_times(&s, restart.map(|r| r.origin), t_end))
         }
         None => Err(format!(
             "observation stream '{}' has no `emit_schedule` — it is fit-only \

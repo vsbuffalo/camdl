@@ -809,9 +809,9 @@ impl crate::engine::RunSink for CasSink {
             // gh#641: a restarted cell's obs axis begins at the forecast
             // origin, exactly as the `-o`/`--obs` mirror's does. `None` for
             // every ordinary cell.
-            let restart_origin = spec.sim_run.init_state.as_ref().map(|i| i.origin_t);
+            let restart = spec.sim_run.init_state.as_ref().map(|i| i.restart());
             if let Err(e) = write_obs_into_cas(
-                &dest, cell.model(), &cell.traj, spec.process_seed, restart_origin,
+                &dest, cell.model(), &cell.traj, spec.process_seed, restart,
                 self.emit_every.as_ref(), spec.sim_run.eval,
             ) {
                 self.errors.push(format!("scenario={} seed={}: obs ensemble: {}",
@@ -1362,7 +1362,7 @@ fn write_obs_into_cas(
     // gh#641: `Some(T)` when this cell was restarted from a filtered state at
     // `T`; the obs axis then begins there, because the trajectory does. `None`
     // for every ordinary cell.
-    restart_origin: Option<f64>,
+    restart: Option<crate::obs_emit::Restart>,
     // gh#656: the `--emit-every` override — it sets the emitted times AND names
     // the subtree (via `obs_subtree_hash`), so the two cadences coexist under one
     // trajectory leaf instead of one overwriting the other.
@@ -1403,9 +1403,7 @@ fn write_obs_into_cas(
         // validates a different set of times than gets written is worse than no
         // preflight (gh#561 + gh#589).
         let times =
-            crate::obs_emit_schedule_times(
-                obs_ir, restart_origin, model.simulation.t_start, model.simulation.t_end, emit,
-            )?;
+            crate::obs_emit_schedule_times(obs_ir, restart, model.simulation.t_end, emit)?;
         let plan = crate::obs_emit::plan_emission(
             obs_ir, &times, run_start, model.simulation.t_end,
             emit.and_then(|e| e.resolve_for(&obs_ir.source)),

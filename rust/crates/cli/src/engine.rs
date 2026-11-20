@@ -534,6 +534,7 @@ pub fn build_cell_sim_run(
         };
         src.states.get(row).map(|state| crate::util::CellInitState {
             origin_t: src.origin_t,
+            model_start: src.model_start,
             state: state.clone(),
             row: row as u64,
             ensemble_digest: src.ensemble_digest,

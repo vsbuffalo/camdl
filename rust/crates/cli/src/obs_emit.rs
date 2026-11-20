@@ -241,6 +241,21 @@ pub(crate) fn plan_emission(
     Ok(EmitPlan { columns, format: TemporalFormat::Numeric, scored, rows })
 }
 
+/// A restart (`simulate --init-state`), as the observation emitters need it.
+///
+/// `model_start` is the model's own `simulate.from`. It has to travel with the
+/// origin: the model a restarted cell runs with has its `simulation.t_start`
+/// rewritten to the origin (`util::resolve_loaded_run`, gh#641), so an emitter
+/// that read the start off that model would see the restart time and conclude
+/// that no period began before it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Restart {
+    /// The time the restored state sits at; where the restarted run begins.
+    pub origin: f64,
+    /// Where the model itself starts, before the restart moved the run's start.
+    pub model_start: f64,
+}
+
 /// The uniform `covers` form a stream's rows are emitted under: the declared
 /// one, re-widened to `override_step` when `--emit-every` names the stream
 /// (gh#656). `None` for a stream with no declaration; `WindowColumns` is
@@ -281,10 +296,10 @@ pub(crate) fn refuse_period_under_way(
     obs: &ObservationModel,
     schedule: &ir::observation::ObservationSchedule,
     override_step: Option<f64>,
-    model_start: f64,
-    origin: f64,
+    restart: Restart,
     t_end: f64,
 ) -> Result<(), String> {
+    let Restart { origin, model_start } = restart;
     let eps = crate::OBS_SNAP_EPS;
     let all = crate::obs_schedule_times(schedule, None, t_end);
     let written = |start: f64, stop: f64| start >= model_start - eps && stop <= t_end + eps;
@@ -662,7 +677,7 @@ pub(crate) fn simulate_dataset(
             model.observations.iter()
                 .map(|obs| {
                     let times = crate::obs_emit_schedule_times(
-                        obs, None, model.simulation.t_start, model.simulation.t_end, emit)?;
+                        obs, None, model.simulation.t_end, emit)?;
                     let plan = plan_emission(
                         obs, &times, run_start, model.simulation.t_end,
                         emit.and_then(|e| e.resolve_for(&obs.source)),
