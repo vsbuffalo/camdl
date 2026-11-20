@@ -270,16 +270,23 @@ The derive guarantees that every field of `SimConfig` reaches the hash. For
 `simulate`, four more things guarantee that every input reaches it, or is
 declared not to:
 
-1. **Every input is classified.** A class belongs to a (command, input) pair:
-   the test-only table `SIMULATE` in [`input_class`](rust:cli::input_class)
-   gives one of `keyed(level)`, `execution`, `provenance`, `presentation`,
-   `child`, `expands` or `removed` (the module's table says what each means) to
-   every field of [`SimulateArgs`](rust:cli::args::SimulateArgs), of the groups
-   it flattens ([`OutputView`](rust:cli::args::OutputView) and the rest) and of
-   the global options. `every_simulate_flag_is_classified` checks the table
-   against every argument clap accepts, both ways. Environment variables have a
-   class column in [`env::VARS`](rust:cli::env::VARS), and are read nowhere but
-   in that module
+1. **Every input is classified.** Every field of
+   [`SimulateArgs`](rust:cli::args::SimulateArgs), of the groups it flattens
+   ([`OutputView`](rust:cli::args::OutputView) and the rest) and of the global
+   options carries one of `keyed(level)`, `execution`, `provenance`,
+   `presentation`, `child`, `expands` or `removed` (the table in
+   [`input_class`](rust:cli::input_class) says what each means), declared on the
+   field as `#[input(keyed(config))]` and collected by `#[derive(Inputs)]`
+   (`rust/crates/input-class-derive`); a field without a class does not compile.
+   A class belongs to a (command, input) pair: a group several commands flatten
+   declares a class per field, and a command that needs another overrides it
+   where it flattens the group, as `fit run` does with
+   `#[input(override(allow_forcing_extrapolation = keyed(fit)))]`. A `keyed`
+   class naming a level the command's leaf does not have does not compile.
+   `every_classified_command_matches_its_clap_arguments` checks each command's
+   generated inventory (`SimulateArgs::INPUTS`) against every argument clap
+   accepts, both ways. Environment variables have a class column in
+   [`env::VARS`](rust:cli::env::VARS), and are read nowhere but in that module
    (`rust/crates/cli/tests/environment_is_read_in_one_module.rs`).
 2. **Identity and engine settings come from one value.** After its precedence
    rules (an explicit flag, a fit's provenance, a replayed fit's simulator, the
@@ -470,7 +477,7 @@ layout 0, and every such reader refuses it naming `camdl dev migrate`
 which derives the file from what the folder records; no reader falls back to
 `fit.toml.original`. A `fit.toml` handle names only the run the file alone
 makes, so it refuses a flag-made fit and names its leaf. Every `fit run` input
-is classified in `input_class::FIT_RUN` and has a case in
+is classified on `FitRunArgs` and has a case in
 `rust/crates/cli/tests/fit_run_input_classes.rs`.
 
 `pfilter`, `profile` and `survey` resolve their configurations the same way:
@@ -494,8 +501,8 @@ flag-made fit's; any other existing file is a config too. The resolved config's
 pair a fit folder does: the user's text as `fit.toml.original` and the resolved
 config as `fit.resolved.toml`. The fit is read once, and its
 `[config] allow_degenerate_rates` and `allow_forcing_extrapolation` are folded
-with the flags in resolution. Every input of each is classified
-(`input_class::PFILTER`, `PROFILE`, `SURVEY`) and has a case in
+with the flags in resolution. Every input of each is classified (on
+`PfilterArgs`, `ProfileArgs` and `SurveyArgs`) and has a case in
 `rust/crates/cli/tests/<command>_input_classes.rs`, which share one runner
 (`tests/input_class_runner/mod.rs`). A profile keys the user's config text
 (`fit.toml.original`, or the file) in its base, as `fit run`'s `fit_toml_hash`
@@ -649,15 +656,15 @@ the field set or to the bytes a leaf holds.
 
 ## Where a change lands
 
-| The change                                               | Edit                                                                                                                           | Version                                                                      | Pinned by                                                                                                                             |
-| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| A `simulate` flag that changes the stored trajectory     | a `keyed(config)` row in `input_class::SIMULATE`, a field of `RunConfig` and of `SimConfig` (or lower the flag into the model) | `SimConfig`'s `schema_version`                                               | a `keyed_<flag>` case in `simulate_input_classes.rs`; the moved hexes in `cas_identity_pins` and `tests/fixtures/golden_run_ids.tsv`  |
-| A key in the fit configuration                           | a field on the serde struct, with `skip_serializing_if` at its default if existing fits should keep their keys                 | none when skipped at its default                                             | a `fit/cas.rs` test that the default hashes as the absent key and another value re-keys                                               |
-| A `fit run` flag that changes a method's output          | `CliMethodOverrides`, an `OverrideFlag` row, the method's arm of `write_cli_overrides`, and the copy in `cmd_fit_run_v2`       | none: the method level hashes the method as written                          | `every_cli_sampler_flag_changes_the_method_identity`                                                                                  |
-| A field that is displayed but does not change the output | `#[run_input(provenance)]` on the field, or record it only in `run.json` (`Provenance`, `RecordMeta`)                          | none                                                                         | a case in `differential_presentation_inputs_are_inert`                                                                                |
-| A model field that only changes how a result is rendered | blank it in `normalize_for_hash`                                                                                               | none if the field is new; otherwise the move is a re-key and needs a version | `presentation_fields_are_inert_on_every_cas_kind`; `normalization_is_idempotent_and_sim_fit_bytes_unchanged`                          |
-| A float policy, or any other rule of the encoding        | `runid::hash` or `runid::float`, and the hand impls in `runid::ir_hash`                                                        | `HASH_VERSION`, with an entry in its doc                                     | the property tests in `rust/crates/runid/src/tests.rs`; `macro_eq.rs`; both golden tables                                             |
-| The IR schema                                            | the atomic OCaml, Rust and golden update (`.claude/skills/golden-update`)                                                      | `ir/VERSION`                                                                 | `rust/crates/runid/tests/golden_model_hashes.rs`, regenerated by `make update-golden-model-hashes` only when the re-key is the change |
+| The change                                               | Edit                                                                                                                                | Version                                                                      | Pinned by                                                                                                                             |
+| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| A `simulate` flag that changes the stored trajectory     | `#[input(keyed(config))]` on its `SimulateArgs` field, a field of `RunConfig` and of `SimConfig` (or lower the flag into the model) | `SimConfig`'s `schema_version`                                               | a `keyed_<flag>` case in `simulate_input_classes.rs`; the moved hexes in `cas_identity_pins` and `tests/fixtures/golden_run_ids.tsv`  |
+| A key in the fit configuration                           | a field on the serde struct, with `skip_serializing_if` at its default if existing fits should keep their keys                      | none when skipped at its default                                             | a `fit/cas.rs` test that the default hashes as the absent key and another value re-keys                                               |
+| A `fit run` flag that changes a method's output          | `CliMethodOverrides`, an `OverrideFlag` row, the method's arm of `write_cli_overrides`, and the copy in `cmd_fit_run_v2`            | none: the method level hashes the method as written                          | `every_cli_sampler_flag_changes_the_method_identity`                                                                                  |
+| A field that is displayed but does not change the output | `#[run_input(provenance)]` on the field, or record it only in `run.json` (`Provenance`, `RecordMeta`)                               | none                                                                         | a case in `differential_presentation_inputs_are_inert`                                                                                |
+| A model field that only changes how a result is rendered | blank it in `normalize_for_hash`                                                                                                    | none if the field is new; otherwise the move is a re-key and needs a version | `presentation_fields_are_inert_on_every_cas_kind`; `normalization_is_idempotent_and_sim_fit_bytes_unchanged`                          |
+| A float policy, or any other rule of the encoding        | `runid::hash` or `runid::float`, and the hand impls in `runid::ir_hash`                                                             | `HASH_VERSION`, with an entry in its doc                                     | the property tests in `rust/crates/runid/src/tests.rs`; `macro_eq.rs`; both golden tables                                             |
+| The IR schema                                            | the atomic OCaml, Rust and golden update (`.claude/skills/golden-update`)                                                           | `ir/VERSION`                                                                 | `rust/crates/runid/tests/golden_model_hashes.rs`, regenerated by `make update-golden-model-hashes` only when the re-key is the change |
 
 The two golden tables pin absolute values.
 `rust/crates/cli/tests/fixtures/golden_run_ids.tsv`, read by

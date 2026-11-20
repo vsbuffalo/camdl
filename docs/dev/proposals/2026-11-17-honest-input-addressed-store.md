@@ -761,7 +761,10 @@ and start from a fresh `origin/main` once that work settles.
   against clap's `CommandFactory` both ways, with a class column in the
   environment table; tests are ordinary Rust. The derive tried in step 1 was
   dropped: a shared flattened group needs a class per command, which a derive on
-  the group cannot express.
+  the group cannot express. Amended 2026-11-20: the tables were replaced by a
+  derive that expresses it, a class on each group field with a per-command
+  override at the flatten site (`#[input(override(..))]`,
+  `rust/crates/cli/src/input_class.rs`).
 - Six classes, verified differently: `keyed`, `execution` and `expands` by
   differential tests; `provenance` and `presentation` structurally; `removed` by
   its message.
