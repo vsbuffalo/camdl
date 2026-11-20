@@ -446,10 +446,7 @@ impl ContentAddressed for Deps {
 /// enumerated subset) is the include-by-default posture — dropping a field
 /// like `ic_free`/`holdout`/fit-level `dt` would under-invalidate θ̂.
 ///
-/// `schema_version = 2`: added `tables`, the content digests of the files
-/// `[data.tables]` binds to the model's external inputs. Every fit re-keys
-/// once, empty `tables` included, in the same change as `ir/VERSION` 0.47,
-/// which re-keys every run anyway.
+/// `schema_version = 2`: the encoding that carries `tables`.
 #[derive(Debug, Clone, PartialEq, Eq, RunInput)]
 #[run_input(schema_version = 2)]
 pub struct FitDigest {
@@ -482,9 +479,9 @@ pub struct FitDigest {
 
 /// One method's config (the `method` level): the whole canonicalized `Method`
 /// config + the resolved obs-block + flow indices + `target_length`; its
-/// `deps` ride beside it in the method level. Hashing the whole struct (not a subset) mirrors fit-wide:
-/// enumerating a subset is the hash-a-recipe antipattern. M1 sketches the
-/// load-bearing fields; M3 binds it to the real `Method`.
+/// `deps` ride beside it in the method level ([`MethodLevel`]). The whole
+/// config is hashed, not a chosen subset, as at the fit level: an enumerated
+/// subset misses the field nobody listed.
 #[derive(Debug, Clone, PartialEq, Eq, RunInput)]
 pub struct MethodConfig {
     /// Content digest of the whole canonicalized method config block.
@@ -512,25 +509,19 @@ pub struct MethodLevel {
     pub deps: Deps,
 }
 
-// ── profile leaves (M3.3) ──────────────────────────────────────────────────
+// ── profile levels ─────────────────────────────────────────────────────────
 //
 // A profile pins a focal parameter at each value of a grid and sub-fits the
-// rest at that pin. The factored levels are
-// `[base, point, method, seed, start]`:
+// rest at that pin. Its levels are `[base, point, method, seed, start]`:
 //
-//   profile-base  — the inference *problem* (model, data, the canonical base
-//                   config: base params + fixed + obs + priors + fit.toml),
-//                   the engine, and the base fit's `starts_from` lineage as a
-//                   dep. The focal *grid* and the method config are
-//                   deliberately EXCLUDED (so refining the grid reuses points,
-//                   and a point is reusable across profiles sharing the base).
-//                   A path segment only — no base-level record (mirrors the
-//                   fit level).
-//   point         — the single pinned focal value(s) for this grid point.
-//   method         — the sub-fit method + hyperparams (algorithm, particles,
-//                   iterations, cooling, pmmh_*), shared across the grid.
-//   seed / start  — the resolved RNG seed and the multi-start index; the
-//                   (seed, start) pair pins the sub-fit's init deterministically.
+//   base          — the inference problem (model, data, the canonical base
+//                   config), the sweep grid, the engine, and the chain-start
+//                   source as a dep. A path segment only, with no record of
+//                   its own (as the fit level).
+//   point         — the pinned focal value(s) of one grid point.
+//   method        — the sub-fit method and its settings, shared across the grid.
+//   seed / start  — the resolved RNG seed and the multi-start index; the pair
+//                   pins the sub-fit's start deterministically.
 
 /// The shared `profile`-level digest: the inference problem being profiled,
 /// including the sweep grid so a distinct grid is a distinct run. `deps`
@@ -560,7 +551,7 @@ pub struct ProfileBase {
 }
 
 /// The `point` level: the focal parameter(s) pinned at this grid value. Only
-/// the single value lives here — the grid spec is NOT in [`ProfileBase`].
+/// the single value lives here; the whole grid is in [`ProfileBase`].
 #[derive(Debug, Clone, PartialEq, RunInput)]
 pub struct ProfilePointConfig {
     pub focal: Vec<(ParamId, FiniteF64)>,

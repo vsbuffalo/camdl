@@ -1572,12 +1572,12 @@ fn run_profile(
     // method `method` and the `method`-segment display label.
     let algorithm = format!("{:?}", profile_algo).to_lowercase();
 
-    // ── gh#147 (M3.3): content-addressed profile-point identity inputs ──
-    // A profile point is a CAS leaf at `profiles/<base>/<point>/<method>/
-    // <seed>/<start>/`. The base is a path segment (no base-level record).
-    // profile-base = the inference *problem*, with the focal GRID and the
-    // method config EXCLUDED (guardrail 1) — the grid rides `point`, the
-    // method config `method`. The base fit's `starts_from` rides the base as a dep.
+    // ── The profile point's identity ──
+    // A profile point is a store leaf at `profiles/<base>/<point>/<method>/
+    // <seed>/<start>/`; the base is a path segment with no record of its own.
+    // `base_config` below is the inference problem without the method config,
+    // which keys the `method` level; the sweep grid and the chain-start source
+    // join it in the base (`profile_cas::resolve_profile_point`).
     let mut priors_blob = resolved_priors_kv.clone();
     priors_blob.sort_by(|a, b| a.0.cmp(&b.0));
     let base_config_hash = crate::fit::cas::canonical_config_hash(&ProfileBaseLevel {
@@ -1593,33 +1593,24 @@ fn run_profile(
     }, &[]).unwrap_or_else(|e| {
         out.fail(format!("error: profile base identity: {e}"));
     });
-    // Gate the RAW floats before `json!` sees them: the macro collapses
-    // NaN/Inf to `Null`, so `resolve_profile_point`'s gate on the built blob
-    // could never fire and NaN vs Inf would hash alike (2026-08-23 audit).
-    // No hand-enumerated finiteness tuple here: `canonical_config_hash` gates
-    // the WHOLE struct before serializing, so a float field added to either
-    // level is covered automatically. The tuple this replaced listed
-    // (cooling, dt, rw_sd) by hand — exclude-by-default applied to
-    // finiteness, and the same forget-me shape as the literals themselves.
-    // 2026-08-23 audit: three per-cell knobs reached the computation but not
-    // the key, so a rerun that changed any of them was served the previous
-    // run's landscape, cell for cell, under a "cached — resuming" line.
+    // `canonical_config_hash` refuses a non-finite float anywhere in the level
+    // before serializing it (`json!` would write NaN and Inf alike as `null`),
+    // so every float field of either level is covered without a list.
     //
-    //  - rw_sd: the RESOLVED per-parameter IF2 perturbation magnitudes (CLI
-    //    over fit-toml), sorted by name. `--rw-sd` is a REQUIRED flag whose
-    //    values drive the sampler, and only the estimated *set* was keyed
-    //    (incidentally, through the priors blob) — never the magnitudes.
-    //    `auto` rides as its own discriminator since it derives the values
-    //    from the model rather than the flag.
-    //  - init: which starting points seed each start (the gh#514 class, still
-    //    open on this command). A sourced rule is keyed by its kind; the source
-    //    it read rides in `profile_deps` (run id + content digest), not the
-    //    handle as typed (gh#896).
-    //  - pf_max_substeps: a degeneracy budget whose trip is swallowed here as
-    //    `-inf` (unlike pfilter, which aborts), so a tripped budget could bake
-    //    an -inf loglik into a cached cell that a later default-budget run was
-    //    then served.
-    // An nl-* cell reads the estimated set, not the step sizes.
+    // Each method setting below changes what a cell computes, so each is in
+    // the key:
+    //
+    //  - rw_sd: the resolved per-parameter IF2 perturbation magnitudes (the
+    //    flag over the fit config), sorted by name; they drive the sampler.
+    //    `auto` is its own discriminator, since it derives the values from the
+    //    model rather than from the flag. An nl-* cell reads the estimated
+    //    set, not the step sizes, so it keys none.
+    //  - init: which starting points seed each start. A sourced rule is keyed
+    //    by its kind; the source it read is the dep `profile_deps` (run id and
+    //    content digest), not the handle as typed.
+    //  - pf_max_substeps: a degeneracy budget whose trip a cell records as a
+    //    log-likelihood of -inf, so a cell under one budget is not a cell
+    //    under another.
     let mut rw_sd_blob: Vec<(&str, Option<f64>)> = specs.iter()
         .map(|s| (s.name.as_str(),
                   if matches!(profile_algo, ProfileAlgo::If2) { s.rw_sd } else { None }))
@@ -1646,15 +1637,10 @@ fn run_profile(
     }, &[]).unwrap_or_else(|e| {
         out.fail(format!("error: profile method identity: {e}"));
     });
-    // The base fit's `starts_from` lineage would fold into the base as
-    // a dep (guardrail 3-base). `camdl profile` does not currently
-    // thread a base-fit lineage, so the dep list is empty; when it
-    // does, push the resolved `FitMethod` ArtifactRef here.
-    // 2026-08-23 audit: fold the chain-start file's content into the identity,
-    // the same treatment `fit run` got in gh#541. The resolved `init` in the
-    // method blob names which source; the dep digests what is in it, so
-    // rewriting a draws.tsv or params.toml in place, or re-running the fit a
-    // `from_mle` names, re-keys instead of serving the previous landscape.
+    // The chain-start source's content is a dep of the base, as in `fit run`:
+    // the resolved `init` in the method level names which source, and the dep
+    // digests what is in it, so rewriting a draws.tsv or params.toml in place,
+    // or re-running the fit a `from_mle` names, re-keys the profile.
     let profile_deps: Vec<runid::inputs::ArtifactRef> = resolved_starts
         .source
         .as_ref()
