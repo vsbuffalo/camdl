@@ -298,10 +298,11 @@ pub fn check_fit_config(
 // ── The simulator a fit ran on ──────────────────────────────────────────────
 //
 // The model is half of what a fit's parameters were estimated under; the
-// simulator is the other half — the forward backend, its integration step, and
-// (ODE) the integrator. A replay of the parameters (`simulate --draws
-// posterior|prior|<file> --fit`) runs on that simulator by default, as it runs
-// on the fitted model, and an explicit flag that differs runs with a notice.
+// simulator is the other half — the forward backend, its integration step,
+// (ODE) the integrator, and the evaluator settings of its `[config]`. A replay
+// of the parameters (`simulate --draws posterior|prior|<file> --fit`) runs on
+// that simulator by default, as it runs on the fitted model, and an explicit
+// flag that differs runs with a notice.
 
 use crate::args::types::{ForwardBackend, IntegratorArg};
 use ir::model::Integrator;
@@ -316,6 +317,40 @@ pub struct FittedSimulator {
     pub dt: f64,
     /// The ODE integrator the model declares; what the ODE backend uses.
     pub integrator: Integrator,
+    /// The evaluator settings of the fit's `[config]`.
+    pub settings: FittedSettings,
+}
+
+/// The two `[config]` settings a fit ran under that change what its model
+/// evaluates to: `allow_degenerate_rates` (a collapsed rate is 0 rather than
+/// an error) and `allow_forcing_extrapolation` (a forcing holds its end value
+/// outside its range rather than refusing the run). A replay of the fit runs
+/// under them (gh#1235).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FittedSettings {
+    pub allow_degenerate_rates: bool,
+    pub allow_forcing_extrapolation: bool,
+}
+
+impl FittedSettings {
+    /// The settings of a fit config's `[config]`.
+    pub fn of(config: &crate::fit::config_v2::FitBackendConfig) -> Self {
+        FittedSettings {
+            allow_degenerate_rates: config.allow_degenerate_rates,
+            allow_forcing_extrapolation: config.allow_forcing_extrapolation,
+        }
+    }
+
+    /// The settings a replay of the fit runs under, given the replaying
+    /// command's flags: each is on when the fit ran under it or the flag is
+    /// given, the fold `pfilter`, `profile` and `survey` apply to a `--fit`.
+    /// A flag can only turn a setting on, so a replay never drops the fit's.
+    pub fn with_flags(self, allow_degenerate_rates: bool, allow_forcing_extrapolation: bool) -> Self {
+        FittedSettings {
+            allow_degenerate_rates: self.allow_degenerate_rates || allow_degenerate_rates,
+            allow_forcing_extrapolation: self.allow_forcing_extrapolation || allow_forcing_extrapolation,
+        }
+    }
 }
 
 fn integrator_name(i: &Integrator) -> &'static str {
@@ -350,6 +385,8 @@ impl FittedSimulator {
 ///   archived config's `[config] dt` — the two inputs `fit run` resolved it
 ///   from.
 /// - **integrator**: `fit.meta.json`'s, else the archived model's.
+/// - **settings**: the stored config's `[config]` (`fit.resolved.toml`, the
+///   configuration the fit ran under, with a flag it was given written in).
 ///
 /// Read by every replay of a stored fit on a simulator the replaying command
 /// chooses: `simulate --draws … --fit` and `compare`'s derived filter.
@@ -383,14 +420,16 @@ pub fn stored_fit_simulator(
     let integrator = sidecar
         .and_then(|s| s.integrator)
         .unwrap_or_else(|| model.simulation.integrator.clone());
-    Ok(FittedSimulator { backend, dt, integrator })
+    let settings = FittedSettings::of(&resolved.config.problem.config);
+    Ok(FittedSimulator { backend, dt, integrator, settings })
 }
 
 /// The simulator a fit CONFIG describes, for a replay of its priors or
 /// `[fixed]` beside `model` (checked to be the model its `[model]` names,
 /// [`check_fit_config`]): its `[method]` backend, the dt rule over the model's
 /// step and the config's written `[config] dt` (a disagreeing one is refused,
-/// as `fit run` refuses it), and the model's integrator.
+/// as `fit run` refuses it), the model's integrator, and the config's
+/// `[config]` settings.
 pub fn fit_config_simulator(fit_toml: &str, model: &ir::Model) -> Result<FittedSimulator, String> {
     let config = crate::fit::config_v2::FitConfig::load(fit_toml)?;
     let raw = std::fs::read_to_string(fit_toml).map_err(|e| format!("cannot read {fit_toml}: {e}"))?;
@@ -402,6 +441,7 @@ pub fn fit_config_simulator(fit_toml: &str, model: &ir::Model) -> Result<FittedS
         backend: config.inference.method.as_ref().map(|m| ForwardBackend::from(m.algorithm.backend())),
         dt,
         integrator: model.simulation.integrator.clone(),
+        settings: FittedSettings::of(&config.problem.config),
     })
 }
 
@@ -411,6 +451,10 @@ pub struct SimulatorFlags {
     pub backend: Option<ForwardBackend>,
     pub dt: Option<f64>,
     pub integrator: Option<IntegratorArg>,
+    /// `--allow-degenerate-rates`.
+    pub allow_degenerate_rates: bool,
+    /// `--allow-forcing-extrapolation`.
+    pub allow_forcing_extrapolation: bool,
 }
 
 /// What a replay runs on: the fit's simulator, with each explicit flag applied.
@@ -421,6 +465,9 @@ pub struct ReplaySimulator {
     /// The `--integrator` override to apply; `None` runs the model's own,
     /// which is the fit's (the model was checked to be the fitted one).
     pub integrator: Option<IntegratorArg>,
+    /// The evaluator settings: the fit's, with the flags folded in
+    /// ([`FittedSettings::with_flags`]).
+    pub settings: FittedSettings,
     /// The one notice when a flag moved the replay off the fit's simulator.
     pub notice: Option<String>,
 }
@@ -463,7 +510,7 @@ pub fn replay_simulator(
         .iter()
         .filter_map(|(on, flag)| on.then_some(*flag))
         .collect();
-    let notice = (!moved.is_empty()).then(|| {
+    let simulator_notice = (!moved.is_empty()).then(|| {
         format!(
             "note: {fit_name} was fitted on {}; this replay runs on {} ({} as given), so the \
              parameters drive a different simulator from the one they were estimated on",
@@ -472,7 +519,25 @@ pub fn replay_simulator(
             moved.join(", ")
         )
     });
-    Ok(ReplaySimulator { backend, dt, integrator: flags.integrator, notice })
+    let settings = fit.settings.with_flags(flags.allow_degenerate_rates, flags.allow_forcing_extrapolation);
+    let turned_on: Vec<&str> = [
+        (settings.allow_degenerate_rates && !fit.settings.allow_degenerate_rates, "--allow-degenerate-rates"),
+        (
+            settings.allow_forcing_extrapolation && !fit.settings.allow_forcing_extrapolation,
+            "--allow-forcing-extrapolation",
+        ),
+    ]
+    .iter()
+    .filter_map(|(on, flag)| on.then_some(*flag))
+    .collect();
+    let settings_notice = (!turned_on.is_empty()).then(|| {
+        format!("note: {fit_name} was fitted without {}; this replay runs under it, as given", turned_on.join(" or "))
+    });
+    let notice = match (simulator_notice, settings_notice) {
+        (Some(a), Some(b)) => Some(format!("{a}\n{b}")),
+        (a, b) => a.or(b),
+    };
+    Ok(ReplaySimulator { backend, dt, integrator: flags.integrator, settings, notice })
 }
 
 #[cfg(test)]
@@ -480,7 +545,12 @@ mod simulator_tests {
     use super::*;
 
     fn cb(dt: f64) -> FittedSimulator {
-        FittedSimulator { backend: Some(ForwardBackend::ChainBinomial), dt, integrator: Integrator::Rk4 }
+        FittedSimulator {
+            backend: Some(ForwardBackend::ChainBinomial),
+            dt,
+            integrator: Integrator::Rk4,
+            settings: FittedSettings::default(),
+        }
     }
 
     fn ode() -> FittedSimulator {
@@ -506,6 +576,7 @@ mod simulator_tests {
             backend: Some(ForwardBackend::ChainBinomial),
             dt: Some(0.5),
             integrator: None,
+            ..Default::default()
         };
         let r = replay_simulator("F", &cb(0.5), flags, ForwardBackend::ChainBinomial).unwrap();
         assert!(r.notice.is_none());
@@ -556,5 +627,21 @@ mod simulator_tests {
         let none = FittedSimulator { backend: None, ..cb(0.25) };
         let r = replay_simulator("F", &none, SimulatorFlags::default(), ForwardBackend::Gillespie).unwrap();
         assert_eq!((r.backend, r.dt, r.notice), (ForwardBackend::Gillespie, 0.25, None));
+    }
+
+    /// A replay runs under the fit's `[config]` settings without being given
+    /// the flags; a flag the fit did not run under is applied with a notice.
+    #[test]
+    fn a_replay_runs_under_the_fits_settings_and_a_flag_adds_to_them() {
+        let both = FittedSettings { allow_degenerate_rates: true, allow_forcing_extrapolation: true };
+        let fit = FittedSimulator { settings: both, ..cb(1.0) };
+        let r = replay_simulator("F", &fit, SimulatorFlags::default(), ForwardBackend::ChainBinomial).unwrap();
+        assert_eq!((r.settings, r.notice), (both, None));
+
+        let flags = SimulatorFlags { allow_degenerate_rates: true, ..Default::default() };
+        let r = replay_simulator("F", &cb(1.0), flags, ForwardBackend::ChainBinomial).unwrap();
+        assert_eq!(r.settings, FittedSettings { allow_degenerate_rates: true, allow_forcing_extrapolation: false });
+        let n = r.notice.unwrap();
+        assert!(n.contains("fitted without --allow-degenerate-rates"), "{n}");
     }
 }
