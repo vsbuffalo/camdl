@@ -337,15 +337,9 @@ pub(crate) fn run_forecast(
         model, job.compiled, bindings.training_by_source(), &time_opts)?;
 
     // The parameter set: the rows the fit recorded, verified against the data.
-    let record = crate::run_meta::read_fit_sidecar(job.segment)?
-        .and_then(|s| s.training_partition)
-        .ok_or_else(|| format!(
-            "the fit at {} records no training partition, so which rows its parameters \
-             were fitted to cannot be read; re-run the fit with `camdl fit run`.",
-            job.segment.display()))?;
     let rows: BTreeMap<String, Vec<ObservedRow>> =
         streams.iter().map(|s| (s.name.clone(), s.rows.clone())).collect();
-    let partition = TrainingPartition::from_record(&record, &rows)?;
+    let (record, partition) = TrainingPartition::read_recorded(job.segment, &rows)?;
 
     // Rows after each stream's prefix, in its own file or a holdout file:
     // they only name a target's held-out row, and are never filtered.

@@ -56,6 +56,109 @@ impl Horizon {
     }
 }
 
+/// The part a predictive row played in the fit — the `role` artifact column
+/// (`docs/dev/temporal-architecture.md` §5.3). A one-step band covers every
+/// data row, and the parameters behind it were fitted to the `Trained` ones
+/// alone, so a `HeldOut` row's band is out of sample in its parameters while
+/// its state has been filtered through every earlier row (gh#1079).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowRole {
+    /// A data row in the fit's training prefix of its stream: the parameters
+    /// were fitted to it.
+    Trained,
+    /// A data row after that prefix: the fit held it out.
+    HeldOut,
+    /// A free-forward row past the stream's last data row: nothing was
+    /// observed there.
+    Target,
+}
+
+impl RowRole {
+    /// The legible value written into the `role` artifact column.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RowRole::Trained => "trained",
+            RowRole::HeldOut => "held_out",
+            RowRole::Target => "target",
+        }
+    }
+
+    /// The role of the data row at `position` in a stream whose first
+    /// `trained` rows are the fit's training prefix. Membership is the row's
+    /// position, as the partition records it; no time is compared with a
+    /// cutoff here.
+    pub fn of_data_row(position: usize, trained: usize) -> Self {
+        if position < trained { RowRole::Trained } else { RowRole::HeldOut }
+    }
+}
+
+/// The fit's parameter set as `fit predict` reads it: the training partition
+/// the fit recorded, verified against the bound files as they are now.
+struct ParameterSet {
+    /// The record as the fit wrote it; `predictive.json` carries it as
+    /// `forecast.json` does.
+    record: crate::run_meta::TrainingPartitionRecord,
+    partition: crate::fit::training_partition::TrainingPartition,
+    /// The sources with a `[data.holdout]` file, sorted. Those files are not
+    /// read here, so none of their rows is predicted.
+    holdout_sources: Vec<String>,
+}
+
+impl ParameterSet {
+    /// Read the partition the fit at `segment` recorded and check it against
+    /// the rows of every stream the fit bound (not only the streams this
+    /// predict covers: the recorded training extent spans them all).
+    fn read(
+        model: &ir::Model,
+        compiled: &sim::CompiledModel,
+        config: &crate::fit::config_v2::Problem,
+        dt: f64,
+        segment: &Path,
+    ) -> Result<Self, String> {
+        let data = config.data_spec().map_err(|e| {
+            format!("this fit has no [data] block to read its training rows from: {e}")
+        })?;
+        let bindings = crate::fit::stream_bindings::StreamBindings::resolve(model, data)
+            .map_err(|e| format!("resolving [data]: {e}"))?;
+        let time_opts = crate::caltime_load::TimeOpts {
+            origin: model.origin.as_deref(),
+            time_unit: &model.time_unit,
+            dt,
+            t_start: model.simulation.t_start,
+            format: crate::caltime_load::TimeFormat::Auto,
+        };
+        let rows: BTreeMap<String, Vec<crate::fit::observed_rows::ObservedRow>> =
+            crate::fit::runner::resolve_and_load_obs_streams(
+                model, compiled, bindings.training_by_source(), &time_opts)?
+            .into_iter()
+            .map(|s| (s.name, s.rows))
+            .collect();
+        let (record, partition) =
+            crate::fit::training_partition::TrainingPartition::read_recorded(segment, &rows)?;
+        let mut holdout_sources: Vec<String> = bindings.holdout_by_source().keys().cloned().collect();
+        holdout_sources.sort();
+        Ok(ParameterSet { record, partition, holdout_sources })
+    }
+
+    /// The role of the data row at `position` of the leaf stream `stream`.
+    fn role(&self, stream: &str, position: usize) -> RowRole {
+        RowRole::of_data_row(position, self.partition.rows(stream))
+    }
+}
+
+/// One stream's part of the one-step state set: the rows the filter walked,
+/// and how many of them the fit held out.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+struct FilteredStream {
+    stream: String,
+    /// Every row of the stream's bound file; an `NA` row is a row.
+    rows: usize,
+    /// The rows after the fit's training prefix.
+    held_out_rows: usize,
+    /// The row digest of `rows`, as a partition records a prefix's.
+    digest: String,
+}
+
 /// Whether a band carries its full parameter uncertainty or pretends the
 /// parameters are known. The safety-critical axis: the band-building path only
 /// accepts [`ParamTreatment::Posterior`], which can only be constructed from a
@@ -462,6 +565,8 @@ struct FreeForwardCell {
 #[derive(Debug, Clone)]
 pub struct BandRow {
     pub time: f64,
+    /// The part this row played in the fit (the `role` column).
+    pub role: RowRole,
     /// `(dim, level)` pairs, aligned to the stream's `index_dims`.
     pub stratum: Vec<(String, String)>,
     /// Quantile values, aligned to [`QUANTILE_LEVELS`].
@@ -522,7 +627,7 @@ pub struct PredictiveSection<'a> {
 }
 
 /// Render `predictive/<stream>.tsv`: `scenario | time | <dims…> | horizon |
-/// treatment | fit_rhat_max | fit_ess_min | rhat_mean | ess_mean | rhat_pred |
+/// treatment | role | fit_rhat_max | fit_ess_min | rhat_mean | ess_mean | rhat_pred |
 /// ess_pred |
 /// n_draws | q05 … q95`. Tidy, plot-ready; the axes and the convergence channels
 /// are columns so a new predictive cell — a new scenario, a new horizon, a new
@@ -572,7 +677,7 @@ pub fn render_predictive_tsv_sections(
         out.push_str(d);
     }
     out.push_str(
-        "\thorizon\ttreatment\tfit_rhat_max\tfit_ess_min\
+        "\thorizon\ttreatment\trole\tfit_rhat_max\tfit_ess_min\
          \trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws",
     );
     for (_, label) in QUANTILE_LEVELS {
@@ -610,6 +715,8 @@ pub fn render_predictive_tsv_sections(
             out.push_str(section.horizon.as_str());
             out.push('\t');
             out.push_str(section.treatment.label());
+            out.push('\t');
+            out.push_str(row.role.as_str());
             out.push('\t');
             out.push_str(&rhat);
             out.push('\t');
@@ -1955,6 +2062,11 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     // what each row covers — resolved against the compiled model's projections).
     // Every eligible leaf is bound, so none is empty here.
     let leaves = load_leaf_obs(&model, &compiled, &config, dt, &streams_in)?;
+    // The parameter set (gh#1079): which rows the fit's parameters were fitted
+    // to, read from the fit's record and checked against the files. Every
+    // predictive row's `role` is read off it, and a fit that recorded none is
+    // refused here, before anything is computed.
+    let parameter_set = ParameterSet::read(&model, &compiled, &config, dt, &segment)?;
 
     let schema = crate::run_meta::read_fit_sidecar(&segment)?.and_then(|s| s.schema);
     let seed = args.seed.unwrap_or(1);
@@ -2666,8 +2778,8 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
                         sweep: sweep_pt.clone(),
                         scenario: scenario_name.clone(),
                         bands: assemble_predictive(
-                            &model, accum, &ff_emit_times, &leaves, schema.as_ref(),
-                            args.by_chain,
+                            &model, accum, &ff_emit_times, &leaves, &parameter_set,
+                            schema.as_ref(), args.by_chain,
                         )?,
                     });
                 }
@@ -2747,6 +2859,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
             seed,
             schema.as_ref(),
             args.by_chain,
+            &parameter_set,
         )?),
         None => None,
     };
@@ -2901,7 +3014,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
         // Record this stream's join contract for `predictive.json`. Coordinate
         // columns (the group-by keys) in header order: the `chain` column when
         // `--by-chain` wrote one, `scenario`, the `sweep:<param>` columns,
-        // `time`, the stratum dims, `horizon`, `treatment`. The band columns are
+        // `time`, the stratum dims, `horizon`, `treatment`, `role`. The band columns are
         // the quantile labels; the diagnostics
         // are the method-provenance pair (`fit_rhat_max` / `fit_ess_min`, constant down
         // the file), the per-row pairs (`rhat_mean` / `ess_mean` over the latent
@@ -2918,6 +3031,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
         coordinates.extend(index_dims.iter().cloned());
         coordinates.push("horizon".to_string());
         coordinates.push("treatment".to_string());
+        coordinates.push("role".to_string());
         let value_kind = model
             .observations
             .iter()
@@ -2948,6 +3062,34 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
     // (regenerated, overwritten in place). Written whenever any predictive
     // stream was emitted.
     if !predictive_manifest_entries.is_empty() {
+        let mut state_sets = serde_json::Map::new();
+        if free_forward.is_some() {
+            // A free-forward band runs the fitted model from its start and is
+            // never conditioned on a row.
+            state_sets.insert(
+                Horizon::FreeForward.as_str().to_string(),
+                serde_json::json!({ "conditioning": "none", "streams": [] }),
+            );
+        }
+        if let Some(o) = &one_step {
+            // A one-step band at a row is drawn from a state filtered through
+            // every earlier row of every stream in `streams`, held-out rows
+            // included: per stream, `rows` walked, of which `held_out_rows`
+            // lie after the fit's training prefix.
+            let mut set = serde_json::json!({
+                "conditioning": "filtered",
+                "through": "every earlier row of every stream, held-out rows included",
+                "streams": &o.filtered,
+            });
+            // `[data.holdout]` files are not read: their rows are neither
+            // filtered through nor predicted.
+            if !parameter_set.holdout_sources.is_empty() {
+                set["holdout_files"] = serde_json::json!({
+                    "read": false, "sources": &parameter_set.holdout_sources,
+                });
+            }
+            state_sets.insert(Horizon::OneStepAhead.as_str().to_string(), set);
+        }
         let mut manifest = serde_json::json!({
             // The tag is the only thing telling a consumer which column
             // contract a stored artifact was written under, so every change to
@@ -2965,7 +3107,10 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
             //     because they describe the *fit* and not the row they sit on,
             //     and the per-row `rhat_mean`/`ess_mean`/`rhat_pred`/`ess_pred`
             //     channels join them.
-            "schema": "camdl.predictive/v3",
+            // v4 (gh#1079): the `role` coordinate joins `horizon` and
+            //     `treatment`, and the manifest gains `parameter_set` and
+            //     `state_sets`.
+            "schema": "camdl.predictive/v4",
             // gh#896: the run whose draws these bands replay, and the options
             // that shaped them (they also key this directory's address).
             "run_id": run_id,
@@ -2978,6 +3123,16 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
             // D85: the one-step band's particle count per draw and where it
             // came from; absent when no filter ran.
             "particles": one_step_fit.is_some().then_some(particles),
+            // The two information sets (`docs/dev/temporal-architecture.md`
+            // §2.4). The parameter set is the fit's recorded training
+            // partition, as `forecast.json` carries it: the rule, the training
+            // extent and each stream's training rows. A row's `role` is its
+            // position against that stream's `rows`.
+            "parameter_set": &parameter_set.record,
+            // The state set of each section written, keyed by its `horizon`
+            // value: the rows the latent state behind a band was conditioned
+            // on.
+            "state_sets": state_sets,
             "streams": predictive_manifest_entries,
             // D76: which declared streams (leaves) this artifact holds, which it
             // left out and why, and which failed, so a reader need not infer
@@ -3105,6 +3260,21 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
         &failures,
         &streams_in.skipped,
     )?);
+
+    // gh#1079: a one-step band at a held-out row is not a forecast of it.
+    if let Some(o) = &one_step {
+        let held: Vec<String> = o.filtered.iter()
+            .filter(|f| f.held_out_rows > 0)
+            .map(|f| format!("{} of {} in '{}'", f.held_out_rows, f.rows, f.stream))
+            .collect();
+        if !held.is_empty() {
+            out.say(format_args!(
+                "fit predict: the one_step rows include held-out rows ({}): their bands use \
+                 parameters fitted without them and a state filtered through every earlier \
+                 row, held-out rows included (the `role` column marks them).",
+                held.join(", ")));
+        }
+    }
 
     let method_label = posterior.method.map(|m| m.as_str()).unwrap_or("posterior");
     let mut horizons: Vec<String> = Vec::new();
@@ -3423,6 +3593,7 @@ fn assemble_predictive(
     accum: &ScenarioAccum,
     emit_times: &[Vec<f64>],
     leaves: &[LeafObs],
+    parameter_set: &ParameterSet,
     schema: Option<&ObsSchema>,
     by_chain: bool,
 ) -> Result<Vec<StreamBands>, String> {
@@ -3452,11 +3623,26 @@ fn assemble_predictive(
         for &si in leaf_idxs {
             let stratum: Vec<(String, String)> = model.observations[si]
                 .stratum.iter().map(|k| (k.dim.clone(), k.level.clone())).collect();
+            // A leaf's emitted times are its data rows, in file order, then
+            // the forecast tail (`run_predict`'s `ff_emit_times`): a row's
+            // index among them is its position in the stream until the data
+            // runs out.
+            let leaf_name = &model.observations[si].name;
+            let n_data_rows = leaves
+                .iter()
+                .find(|l| leaf_matches(&model.observations[si], l))
+                .map_or(0, |l| l.times.len());
             for (ti, draws_at_t) in accum.samples[si].iter().enumerate() {
                 let t = emit_times[si][ti];
+                let role = if ti < n_data_rows {
+                    parameter_set.role(leaf_name, ti)
+                } else {
+                    RowRole::Target
+                };
                 rows.push(
                     band_row(
                         t,
+                        role,
                         stratum.clone(),
                         CellDraws {
                             predictive: draws_at_t,
@@ -3481,6 +3667,7 @@ fn assemble_predictive(
                 for (chain, chain_draws) in split {
                     per_chain.entry(chain).or_default().push(BandRow {
                         time: t,
+                        role,
                         stratum: stratum.clone(),
                         quantiles: band(&chain_draws).map_err(|e| {
                             format!("stream '{source}' at t={t}, chain {}: {e}", ChainIndex(chain))
@@ -3526,6 +3713,7 @@ struct CellDraws<'a> {
 /// sound.
 fn band_row(
     time: f64,
+    role: RowRole,
     stratum: Vec<(String, String)>,
     draws: CellDraws<'_>,
     chains: &crate::fit::row_convergence::ChainOfDraw,
@@ -3534,6 +3722,7 @@ fn band_row(
     let quantiles = band(draws.predictive)?;
     Ok(BandRow {
         time,
+        role,
         stratum,
         quantiles,
         mean_conv: row_convergence(draws.mean, chains),
@@ -3940,6 +4129,9 @@ struct OneStepBands {
     /// appears here with what it actually pooled, so its `n_draws` cell never
     /// claims a full band; a chain that lost all of them is absent.
     n_pooled_by_chain: BTreeMap<usize, usize>,
+    /// The state set: per leaf stream, sorted by name, the rows every band's
+    /// filter walked and how many of them the fit held out.
+    filtered: Vec<FilteredStream>,
 }
 
 /// Filter every posterior draw and pool the per-(stream, time) one-step
@@ -4167,6 +4359,7 @@ fn one_step_bands(
     base_seed: u64,
     schema: Option<&ObsSchema>,
     by_chain: bool,
+    parameter_set: &ParameterSet,
 ) -> Result<OneStepBands, String> {
     use sim::inference::{
         bootstrap_filter, multi_stream_obs::StreamProjection,
@@ -4229,6 +4422,27 @@ fn one_step_bands(
                     --stream (if given) names a real stream"
             .into());
     }
+
+    // The state set (gh#1079): the filter below walks every row of every
+    // stream here, the held-out ones included, so that is what each band's
+    // state was conditioned on. And where each row's value is assimilated
+    // (the end of what it measures), to find a filter stop's row again.
+    let mut filtered: Vec<FilteredStream> = obs_streams
+        .iter()
+        .map(|s| {
+            Ok(FilteredStream {
+                stream: s.name.clone(),
+                rows: s.rows.len(),
+                held_out_rows: s.rows.len().saturating_sub(parameter_set.partition.rows(&s.name)),
+                digest: crate::fit::training_partition::row_digest(&s.rows)?.to_hex(),
+            })
+        })
+        .collect::<Result<_, String>>()?;
+    filtered.sort_by(|a, b| a.stream.cmp(&b.stream));
+    let row_ends: std::collections::HashMap<&str, Vec<f64>> = obs_streams
+        .iter()
+        .map(|s| (s.name.as_str(), s.rows.iter().map(|r| r.measures.end()).collect()))
+        .collect();
 
     // The one-step band is `p(y_t | y_{1:t-1})`, drawn from the filter's own
     // accumulator. Each stream's `times` carries its declared periods, so the
@@ -4371,6 +4585,17 @@ fn one_step_bands(
                 }
                 let quantiles = band(&cell)
                     .map_err(|e| format!("stream '{source}' (one_step) at t={t}: {e}"))?;
+                // The row this stop assimilates, by its position in the
+                // stream: the filter stops for a row at the end of what the
+                // row measures, and a stream's ends strictly increase.
+                let position = row_ends[stream_names[si].as_str()]
+                    .iter()
+                    .position(|end| (end - t).abs() <= crate::OBS_SNAP_EPS)
+                    .ok_or_else(|| format!(
+                        "internal error: the one-step filter predicted stream '{}' at t = {t}, \
+                         where none of its rows ends, so the row's role cannot be read",
+                        stream_names[si]))?;
+                let role = parameter_set.role(&stream_names[si], position);
                 // No per-row R̂ on the one-step horizon (gh#794). Its cell is a
                 // pool over (posterior draws × filter particles), so the
                 // sequence a chain contributes is not the posterior chain and an
@@ -4380,6 +4605,7 @@ fn one_step_bands(
                 // accident. Follow-up: gh#798.
                 rows.push(BandRow {
                     time: t,
+                    role,
                     stratum: stratum.clone(),
                     quantiles,
                     mean_conv: None,
@@ -4398,6 +4624,7 @@ fn one_step_bands(
                     }
                     per_chain.entry(c).or_default().push(BandRow {
                         time: t,
+                        role,
                         stratum: stratum.clone(),
                         quantiles: band(cc).map_err(|e| {
                             format!("stream '{source}' (one_step) at t={t}, chain {}: {e}", ChainIndex(c))
@@ -4416,7 +4643,7 @@ fn one_step_bands(
         });
     }
 
-    Ok(OneStepBands { streams, n_pooled, n_pooled_by_chain })
+    Ok(OneStepBands { streams, n_pooled, n_pooled_by_chain, filtered })
 }
 
 /// Group the observed leaves into `(source, index_dims, rows)` for the observed
@@ -5153,7 +5380,7 @@ mod tests {
     /// A band row with no per-row convergence — the layout tests assert the
     /// column POSITIONS, and an unassessed row renders those four cells empty.
     fn bare_row(time: f64, stratum: Vec<(String, String)>, quantiles: Vec<f64>) -> BandRow {
-        BandRow { time, stratum, quantiles, mean_conv: None, pred_conv: None }
+        BandRow { time, role: RowRole::Trained, stratum, quantiles, mean_conv: None, pred_conv: None }
     }
 
     /// A one-draw posterior cloud on the given backend, for the witness tests.
@@ -5172,6 +5399,20 @@ mod tests {
     fn one_step_horizon_label_is_legible() {
         assert_eq!(Horizon::OneStepAhead.as_str(), "one_step");
         assert_eq!(Horizon::FreeForward.as_str(), "free_forward");
+    }
+
+    /// gh#1079: a data row's role is its position against the stream's
+    /// training prefix, and the three roles are written as the spec names them.
+    #[test]
+    fn a_data_rows_role_is_its_position_against_the_training_prefix() {
+        assert_eq!(RowRole::of_data_row(0, 3), RowRole::Trained);
+        assert_eq!(RowRole::of_data_row(2, 3), RowRole::Trained);
+        assert_eq!(RowRole::of_data_row(3, 3), RowRole::HeldOut);
+        assert_eq!(RowRole::of_data_row(0, 0), RowRole::HeldOut);
+        assert_eq!(
+            [RowRole::Trained, RowRole::HeldOut, RowRole::Target].map(|r| r.as_str()),
+            ["trained", "held_out", "target"],
+        );
     }
 
     #[test]
@@ -5312,6 +5553,7 @@ mod tests {
         let (means, preds, chains) = diluted_forecast_cell(12.0, 230.0);
         let row = band_row(
             56.0,
+            RowRole::Trained,
             vec![],
             CellDraws { predictive: &preds, mean: &means },
             &chains,
@@ -5359,7 +5601,7 @@ mod tests {
     #[test]
     fn the_two_channels_agree_when_the_observation_model_adds_no_noise() {
         let (means, preds, chains) = diluted_forecast_cell(12.0, 0.0);
-        let row = band_row(56.0, vec![], CellDraws { predictive: &preds, mean: &means }, &chains)
+        let row = band_row(56.0, RowRole::Trained, vec![], CellDraws { predictive: &preds, mean: &means }, &chains)
             .expect("the cell bands");
         let rhat_mean = row.mean_conv.expect("assessable").rhat;
         let rhat_pred = row.pred_conv.expect("assessable").rhat;
@@ -5375,7 +5617,7 @@ mod tests {
     #[test]
     fn per_row_convergence_columns_render_between_the_method_stamp_and_n_draws() {
         let (means, preds, chains) = diluted_forecast_cell(12.0, 230.0);
-        let row = band_row(56.0, vec![], CellDraws { predictive: &preds, mean: &means }, &chains)
+        let row = band_row(56.0, RowRole::Trained, vec![], CellDraws { predictive: &preds, mean: &means }, &chains)
             .expect("the cell bands");
         let rows = vec![row];
         let tsv = render_predictive_tsv_sections(
@@ -5415,7 +5657,7 @@ mod tests {
     fn a_cloud_with_no_chain_keys_leaves_the_per_row_columns_empty() {
         let (means, preds, _) = diluted_forecast_cell(12.0, 230.0);
         let unkeyed = ChainOfDraw(vec![None; means.len()]);
-        let row = band_row(56.0, vec![], CellDraws { predictive: &preds, mean: &means }, &unkeyed)
+        let row = band_row(56.0, RowRole::Trained, vec![], CellDraws { predictive: &preds, mean: &means }, &unkeyed)
             .expect("the cell still bands");
         assert!(row.mean_conv.is_none(), "no chain column ⇒ no between-chain statistic");
         assert!(row.pred_conv.is_none());
@@ -5518,13 +5760,14 @@ mod tests {
     fn a_per_chain_row_reports_no_between_chain_statistic() {
         let (means, preds, chains) = diluted_forecast_cell(12.0, 230.0);
         let pooled =
-            band_row(56.0, vec![], CellDraws { predictive: &preds, mean: &means }, &chains)
+            band_row(56.0, RowRole::Trained, vec![], CellDraws { predictive: &preds, mean: &means }, &chains)
                 .expect("the pooled cell bands");
         assert!(pooled.mean_conv.is_some(), "the pooled row does carry one");
 
         // What `assemble_predictive` builds for a per-chain row.
         let one_chain = BandRow {
             time: 56.0,
+            role: RowRole::Trained,
             stratum: vec![],
             quantiles: pooled.quantiles.clone(),
             mean_conv: None,
@@ -5586,12 +5829,12 @@ mod tests {
         );
         let lines: Vec<&str> = tsv.trim_end().lines().collect();
         assert_eq!(lines[0],
-            "scenario\ttime\tpatch\thorizon\ttreatment\tfit_rhat_max\tfit_ess_min\
+            "scenario\ttime\tpatch\thorizon\ttreatment\trole\tfit_rhat_max\tfit_ess_min\
              \trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95");
         assert_eq!(lines[1],
-            "fitted\t7\tBo\tfree_forward\tposterior\t1.0100\t420\t\t\t\t\t40\t0\t1\t3\t6\t12");
+            "fitted\t7\tBo\tfree_forward\tposterior\ttrained\t1.0100\t420\t\t\t\t\t40\t0\t1\t3\t6\t12");
         assert_eq!(lines[2],
-            "fitted\t7\tBombali\tfree_forward\tposterior\t1.0100\t420\t\t\t\t\t40\t0\t0\t1\t3\t7");
+            "fitted\t7\tBombali\tfree_forward\tposterior\ttrained\t1.0100\t420\t\t\t\t\t40\t0\t0\t1\t3\t7");
         assert_eq!(lines.len(), 3, "header + one row per (time, stratum)");
     }
 
@@ -5620,9 +5863,9 @@ mod tests {
         // No dim column; not-assessed rhat/ess are empty cells, not fabricated
         // values; n_draws is still carried. Scenario leads.
         assert_eq!(lines[0],
-            "scenario\ttime\thorizon\ttreatment\tfit_rhat_max\tfit_ess_min\
+            "scenario\ttime\thorizon\ttreatment\trole\tfit_rhat_max\tfit_ess_min\
              \trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95");
-        assert_eq!(lines[1], "fitted\t1\tfree_forward\tposterior\t\t\t\t\t\t\t12\t1\t2\t3\t4\t5");
+        assert_eq!(lines[1], "fitted\t1\tfree_forward\tposterior\ttrained\t\t\t\t\t\t\t12\t1\t2\t3\t4\t5");
     }
 
     #[test]
@@ -5670,17 +5913,17 @@ mod tests {
         let lines: Vec<&str> = tsv.trim_end().lines().collect();
         assert_eq!(
             lines[0],
-            "scenario\tsweep:k\ttime\thorizon\ttreatment\tfit_rhat_max\tfit_ess_min\
+            "scenario\tsweep:k\ttime\thorizon\ttreatment\trole\tfit_rhat_max\tfit_ess_min\
              \trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95",
             "sweep:k column follows scenario"
         );
         assert_eq!(lines[1],
-            "fitted\t8\t7\tfree_forward\tposterior\t1.0000\t100\t\t\t\t\t10\t1\t2\t3\t4\t5");
+            "fitted\t8\t7\tfree_forward\tposterior\ttrained\t1.0000\t100\t\t\t\t\t10\t1\t2\t3\t4\t5");
         assert_eq!(lines[2],
-            "fitted\t12\t7\tfree_forward\tposterior\t1.0000\t100\t\t\t\t\t10\t1\t2\t3\t4\t5");
+            "fitted\t12\t7\tfree_forward\tposterior\ttrained\t1.0000\t100\t\t\t\t\t10\t1\t2\t3\t4\t5");
         // One-step row: the sweep:k cell is blank (empty), not a fabricated value.
         assert_eq!(lines[3],
-            "fitted\t\t7\tone_step\tposterior\t1.0000\t100\t\t\t\t\t10\t1\t2\t3\t4\t5");
+            "fitted\t\t7\tone_step\tposterior\ttrained\t1.0000\t100\t\t\t\t\t10\t1\t2\t3\t4\t5");
     }
 
     #[test]

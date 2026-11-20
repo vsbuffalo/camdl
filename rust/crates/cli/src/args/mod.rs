@@ -1146,10 +1146,22 @@ Examples:
 
 Outputs, under the run directory:
   predictive/<stream>.tsv   scenario | time | <dims...> | horizon | treatment
-                            | fit_rhat_max | fit_ess_min | rhat_mean | ess_mean
-                            | rhat_pred | ess_pred | n_draws | q05..q95
+                            | role | fit_rhat_max | fit_ess_min | rhat_mean
+                            | ess_mean | rhat_pred | ess_pred | n_draws | q05..q95
   observed/<stream>.tsv     time | <dims...> | value
 Read both, join on (time, <dims>), plot observed over the predictive ribbon.
+
+The role column says what part each row played in the fit:
+  trained    a data row the parameters were fitted to.
+  held_out   a data row the fit held out ([data] holdout_after). A one_step
+             band there uses parameters fitted without the row, and a state
+             filtered through every earlier row, held-out rows included: it
+             is not a forecast from the end of the training rows (that is
+             --horizon).
+  target     a free_forward row past the last data row.
+predictive.json records both sets: parameter_set (the rows the parameters
+were fitted to) and state_sets (the rows each band's state was filtered
+through).
 Under --exclude-chains the bands land in predictive-excl<ids>/ instead, so a
 chain subset never overwrites the pooled artifact; `camdl show <fit>` lists
 every address the fit holds.

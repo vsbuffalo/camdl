@@ -826,7 +826,7 @@ stays on the declared output grid.
 
 ```
 results/fits/<stem>-<hash8>/predict/<run_id12>-<key>/predictive/<stream>.tsv
-  scenario | sweep:<param>… | time | <dims…> | horizon | treatment
+  scenario | sweep:<param>… | time | <dims…> | horizon | treatment | role
            | fit_rhat_max | fit_ess_min
            | rhat_mean | ess_mean | rhat_pred | ess_pred
            | n_draws | q05 | q25 | q50 | q75 | q95
@@ -845,6 +845,29 @@ draw and pooling over particles × draws); both stack under one header. The two
 horizons walk the step the fit ran at — the model's declared `dt` when it has
 one (the one dt rule), else the fit's `[config] dt` — since either horizon on
 another step would replay a different process than the posterior describes.
+
+**Each row carries its role in the fit.** The `role` column is `trained` for a
+data row in the fit's training rows of its stream, `held_out` for a data row
+after them (`[data] holdout_after`), and `target` for a free-forward row past
+the stream's last data row. Membership is the row's position in its stream, read
+from the training partition the fit recorded and checked against the data files;
+a fit that recorded none is refused. A `one_step` band covers every data row,
+held-out rows included. At a `held_out` row its parameters were fitted without
+that row, and its state was filtered through every earlier row of every stream,
+held-out rows included, so it is not a forecast from the end of the training
+rows (`--horizon` writes that one). `predictive.json` records both sets:
+
+- `parameter_set`: the fit's training partition, as `forecast.json` carries it
+  (the `rule`, the training `extent` as `{t, date}`, and each stream's training
+  `rows` and their digest).
+- `state_sets`, keyed by `horizon` value, one per section written.
+  `free_forward` is `{"conditioning": "none", "streams": []}`: the band is never
+  conditioned on a row. `one_step` is `"conditioning": "filtered"` with, per
+  stream, the `rows` the filter walked, how many of them are `held_out_rows`,
+  and the rows' digest. Under `[data.holdout]` the holdout files are not read by
+  these two modes: their rows are neither filtered through nor predicted, every
+  row written is `trained`, and the `one_step` entry says so with
+  `"holdout_files": {"read": false, "sources": […]}`.
 
 **A downstream simulation inherits its fit's stochastic configuration (D78).**
 Unless explicitly overridden, every downstream simulation inherits the
@@ -947,7 +970,7 @@ tidy keys. A hole — a scheduled but unobserved cell — renders as an empty
 per stratum, using `index_dims` from the `fit.meta.json` schema and no
 run-store, DSL, or likelihood knowledge.
 
-`predictive.json` (schema tag `camdl.predictive/v3`) records the `run_id` whose
+`predictive.json` (schema tag `camdl.predictive/v4`) records the `run_id` whose
 draws it replays and declares, per stream, which columns are join coordinates
 versus band versus per-cell diagnostics, the `value_kind`, and the band's
 quantile levels; it also carries a `chain_selection` block when
@@ -960,13 +983,14 @@ observation streams (by leaf name) this artifact holds, leaves out and could not
 produce; they follow the stream contract below.
 
 **The tag is load-bearing, and a stored artifact must be read under its own.**
-The three versions do not carry the same numbers under the same column names:
+The versions do not carry the same numbers under the same column names:
 
-| tag  | the two fit-provenance columns           | what they hold                                                                                                            |
-| ---- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `v1` | `rhat_max`, `ess_min`                    | classic Gelman–Rubin R̂ and a Geyer per-chain sum                                                                          |
-| `v2` | `rhat_max`, `ess_min` — _the same names_ | rank-normalized split R̂ and bulk-ESS (gh#84), `ess_min` withheld rather than minimized when any parameter has none        |
-| `v3` | `fit_rhat_max`, `fit_ess_min`            | the v2 statistics, renamed to say whose they are, plus the per-row `rhat_mean`/`ess_mean`/`rhat_pred`/`ess_pred` channels |
+| tag  | the two fit-provenance columns           | what they hold                                                                                                               |
+| ---- | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `v1` | `rhat_max`, `ess_min`                    | classic Gelman–Rubin R̂ and a Geyer per-chain sum                                                                             |
+| `v2` | `rhat_max`, `ess_min` — _the same names_ | rank-normalized split R̂ and bulk-ESS (gh#84), `ess_min` withheld rather than minimized when any parameter has none           |
+| `v3` | `fit_rhat_max`, `fit_ess_min`            | the v2 statistics, renamed to say whose they are, plus the per-row `rhat_mean`/`ess_mean`/`rhat_pred`/`ess_pred` channels    |
+| `v4` | `fit_rhat_max`, `fit_ess_min`            | the v3 statistics; the `role` coordinate is added after `treatment`, and the manifest gains `parameter_set` and `state_sets` |
 
 The v1 → v2 row is why the tag exists at all: the estimator changed and the
 column names did not, so for those two versions the tag is the _only_ signal
@@ -4749,10 +4773,10 @@ wrote fits/../results/fits/02_posterior-77595169/predict/<run_id12>-<key>/observ
 ```
 
 ```
-$ cut -f1-6 results/fits/02_posterior-77595169/predictive/weekly_cases.tsv | head -3
-scenario	time	horizon	treatment	fit_rhat_max	fit_ess_min
-fitted	0	free_forward	posterior	2.0652	
-fitted	7	free_forward	posterior	2.0652
+$ cut -f1-7 results/fits/02_posterior-77595169/predictive/weekly_cases.tsv | head -3
+scenario	time	horizon	treatment	role	fit_rhat_max	fit_ess_min
+fitted	0	free_forward	posterior	trained	2.0652	
+fitted	7	free_forward	posterior	trained	2.0652
 ```
 
 (`cut` keeps the excerpt narrow; the full row continues with the per-row
@@ -6714,7 +6738,7 @@ camdl fit predict results/fits/fit_pgas-4dadedae
 It emits, under the run directory:
 
 ```
-predictive/<stream>.tsv   time | <dims…> | horizon | treatment | fit_rhat_max | fit_ess_min
+predictive/<stream>.tsv   time | <dims…> | horizon | treatment | role | fit_rhat_max | fit_ess_min
                           | rhat_mean | ess_mean | rhat_pred | ess_pred
                           | n_draws | q05..q95
 observed/<stream>.tsv     time | <dims…> | value
