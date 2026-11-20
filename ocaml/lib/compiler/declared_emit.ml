@@ -174,6 +174,10 @@ let family : likelihood_kind -> D.family = function
   | LikBeta _         -> FBeta
   | LikBernoulli _    -> FBernoulli
   | LikZeroInflatedNegBinomial _ -> FZeroInflatedNegBinomial
+  | LikReported (name, _) ->
+    failwith (Printf.sprintf
+      "internal error: the reported distribution '%s' reached the declared \
+       section of a successful compile" name)
 
 (* ── What a name is ──────────────────────────────────────────────────────── *)
 

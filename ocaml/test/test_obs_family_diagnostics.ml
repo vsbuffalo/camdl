@@ -31,7 +31,8 @@ let contains ~needle s =
 
 (* The model every case below shares, with one stream whose projection and
    likelihood are spliced in. *)
-let model ?(projected = "I") ~likelihood () =
+let model ?(projected = "I") ?(columns = "time : time, cases : count")
+    ~likelihood () =
   Printf.sprintf {|
 time_unit = 'days
 compartments { S, I, R }
@@ -46,7 +47,7 @@ transitions {
 }
 observations {
   cases {
-    columns       { time : time, cases : count }
+    columns       { %s }
     projected = %s
     emit_schedule = every 1 'weeks
     %s
@@ -54,7 +55,7 @@ observations {
 }
 init { S = 999  I = 1 }
 simulate { from = 0 'days  to = 14 'days }
-|} projected likelihood
+|} columns projected likelihood
 
 let check_codes name ~likelihood expected =
   Alcotest.(check (list string)) name expected
@@ -115,6 +116,26 @@ let test_base_args_still_checked () =
                  r = r, rr = r))"
     ["E251"; "E325"]
 
+(* A reported call keeps the arguments the author wrote, so a data column
+   named only inside it is still a column the likelihood reads, not a dead one
+   (E277). *)
+let test_reported_call_keeps_its_names () =
+  let columns = "time : time, cases : count, tested : count" in
+  let check name ~likelihood expected =
+    Alcotest.(check (list string)) name expected
+      (List.sort_uniq compare (codes_of (model ~columns ~likelihood ()))) in
+  check "an unknown family naming a data column"
+    ~likelihood:"cases ~ negbin(mean = tested * projected, r = r)"
+    ["E104"];
+  check "diagnostic_test with a poisson base naming a data column"
+    ~likelihood:"cases ~ diagnostic_test(base = poisson(rate = tested * projected), \
+                 sens = sens, spec = spec)"
+    ["E253"];
+  check "zero_inflated with a poisson base naming a data column"
+    ~likelihood:"cases ~ zero_inflated(base = poisson(rate = tested * projected), \
+                 pi = zpi)"
+    ["E324"]
+
 (* ── prevalence inside arithmetic ─────────────────────────────────────────── *)
 
 let prevalence_in_arithmetic =
@@ -166,6 +187,8 @@ let () =
       Alcotest.test_case "E118 alone" `Quick test_e118_alone;
       Alcotest.test_case "base arguments still checked" `Quick
         test_base_args_still_checked;
+      Alcotest.test_case "a reported call keeps its names" `Quick
+        test_reported_call_keeps_its_names;
     ];
     "prevalence inside arithmetic", [
       Alcotest.test_case "projection: names the position, writes it out" `Quick

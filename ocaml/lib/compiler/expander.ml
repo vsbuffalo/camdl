@@ -2241,18 +2241,7 @@ let apply_via_rewrite ctx (rw : expr -> expr) : unit =
       | other -> other
     in
     let omeasurement = Option.map (fun (om : obs_measurement) ->
-      let rw_kwargs = List.map (fun (key, e) -> (key, rw e)) in
-      let om_lik = match om.om_lik with
-        | LikNegBinomial a  -> LikNegBinomial  (rw_kwargs a)
-        | LikPoisson a      -> LikPoisson      (rw_kwargs a)
-        | LikNormal a       -> LikNormal       (rw_kwargs a)
-        | LikBinomial a     -> LikBinomial     (rw_kwargs a)
-        | LikBetaBinomial a -> LikBetaBinomial (rw_kwargs a)
-        | LikBeta a         -> LikBeta         (rw_kwargs a)
-        | LikBernoulli a    -> LikBernoulli    (rw_kwargs a)
-        | LikZeroInflatedNegBinomial a -> LikZeroInflatedNegBinomial (rw_kwargs a)
-      in
-      { om with om_lik }) od.omeasurement
+      { om with om_lik = map_likelihood_kwargs rw om.om_lik }) od.omeasurement
     in
     { od with oprojection; omeasurement }
   ) ctx.obs_decls;
@@ -9279,6 +9268,7 @@ let init_law_spec ctx ~(comp : string) ~(is_real : bool) ~(loc : Diagnostics.loc
      | Some mean, Some sd ->
        Some (Ir.InitReal (Ir.InitNormal { Ir.mean = diff mean; Ir.sd = diff sd }))
      | _ -> None)
+  | LikReported _ -> None
   | LikBetaBinomial _ | LikBeta _ | LikBernoulli _ | LikZeroInflatedNegBinomial _ ->
     (* The observation vocabulary is wider than the initial-state one on
        purpose: these three describe a MEASUREMENT of a compartment, not the
@@ -12650,7 +12640,9 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
     in
     let meas_v = match od.omeasurement with
       | Some m -> m
-      | None -> missing_field "measurement"; { om_scored = od.oname; om_lik = LikPoisson [("rate", EConst 1.0)]; om_accuracy = None }
+      | None ->
+        missing_field "measurement";
+        { om_scored = od.oname; om_lik = LikReported ("", []); om_accuracy = None }
     in
     let lik_v = meas_v.om_lik in
     (* `columns { }` coherence checks (OCaml-side, internal — §2.2/§4.1).
@@ -12736,11 +12728,7 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
           | ERange (a, b) -> names_of a @ names_of b
           | EConst _ | EUnit _ | EObsAccess _ | ERunMember _ -> []
         in
-        match meas_v.om_lik with
-        | LikNegBinomial k | LikPoisson k | LikNormal k
-        | LikBinomial k | LikBetaBinomial k | LikBeta k | LikBernoulli k
-        | LikZeroInflatedNegBinomial k ->
-          List.concat_map (fun (_, e) -> names_of e) k
+        List.concat_map (fun (_, e) -> names_of e) (likelihood_kwargs meas_v.om_lik)
       in
       if has_real_measurement && od.ocolumns <> None then
         List.iter (fun vc ->
@@ -13545,13 +13533,14 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
       | LikBeta _         -> ["mean"; "concentration"]
       | LikBernoulli _    -> ["p"]
       | LikZeroInflatedNegBinomial _ -> ["mean"; "r"; "pi"]
+      | LikReported _ -> []
     in
-    let current_kwargs = match lik_v with
-      | LikNegBinomial k | LikPoisson k | LikNormal k
-      | LikBinomial k | LikBetaBinomial k | LikBeta k | LikBernoulli k
-      | LikZeroInflatedNegBinomial k -> k
+    (* Report unknown kwargs and positional args up front. A reported
+       distribution's arguments belong to no family, so none is checked. *)
+    let checked_kwargs = match lik_v with
+      | LikReported _ -> []
+      | _ -> likelihood_kwargs lik_v
     in
-    (* Report unknown kwargs and positional args up front. *)
     List.iter (fun (k, _) ->
       if k = "" then
         Diagnostics.error ctx.diags
@@ -13573,7 +13562,7 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
           ~hint:(Printf.sprintf "Expected: %s"
             (String.concat ", " required_kwargs))
           ()
-    ) current_kwargs;
+    ) checked_kwargs;
     (* Declared value columns other than the scored outcome are the
        per-observation aux data the likelihood may reference by name (§3): the
        binomial denominator `n = tested`, a person-time offset, a reporting
@@ -13681,6 +13670,12 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
           Ir.dispersion = diff (resolve_kw kwargs "r");
           Ir.pi         = diff (resolve_kw kwargs "pi");
         }
+      | LikReported _ ->
+        (* The stream keeps its compiled entry so that references to it by
+           name (a reactive trigger's `observed(...)`) still resolve; this
+           likelihood is never read, because the reported error has failed
+           the compile. *)
+        Ir.Poisson { Ir.rate = diff (Ir.Const 0.0) }
     in
     ctx.obs_aux_cols <- [];
     let parts = name_parts_from_bindings od.oindices env in
@@ -14767,12 +14762,7 @@ let check_no_shadowing ctx =
      | Some (ProjIncidence _) | None -> ());
     (match od.omeasurement with
      | Some om ->
-       let kwargs = match om.om_lik with
-         | LikNegBinomial a | LikPoisson a | LikNormal a
-         | LikBinomial a | LikBetaBinomial a | LikBeta a | LikBernoulli a
-         | LikZeroInflatedNegBinomial a -> a
-       in
-       List.iter (fun (_, e) -> walk decl seed e) kwargs
+       List.iter (fun (_, e) -> walk decl seed e) (likelihood_kwargs om.om_lik)
      | None -> ())
   ) ctx.obs_decls;
   let walk_action decl seed = function

@@ -787,8 +787,8 @@ type stratify_decl = {
     [diagnostic_test(base = binomial(...), sens = s, spec = c)] becomes a
     [LikBinomial] (or [LikBernoulli]) whose [p] is replaced by
     [s · p + (1 − c)(1 − p)]. [zero_inflated(base = neg_binomial(...), pi = z)]
-    becomes [LikZeroInflatedNegBinomial]. An unknown family is reported and
-    parsed as [LikPoisson].
+    becomes [LikZeroInflatedNegBinomial]. A call the parser reports as
+    malformed becomes [LikReported].
 
     {@camdl[
       cases         ~ neg_binomial(mean = rho * projected, r = r_k)
@@ -806,6 +806,16 @@ type likelihood_kind =
       (** [zero_inflated(base = neg_binomial(mean = m, r = k), pi = z)],
           flattened: the base's arguments followed by [pi], the probability
           that a count is a structural zero. *)
+  | LikReported of string * (string * expr) list
+      (** A distribution the compiler has already reported as malformed or
+          missing, with the family name and the arguments as written: an
+          unknown family, a [diagnostic_test] or [zero_inflated] without a
+          base it accepts, a value that is not a call, or an observation
+          with no measurement. The report has failed the compile, so no
+          check that depends on the family reads the arguments and the
+          distribution is never lowered. The arguments are kept so that a
+          pass reading the names a model uses still sees the ones written
+          here. *)
 
 (** What one entry of the [init] block says its compartment starts at:
     computed, or drawn. An entry is one or the other, never both. *)
@@ -823,12 +833,13 @@ let likelihood_kwargs (l : likelihood_kind) : (string * expr) list =
   match l with
   | LikNegBinomial a | LikPoisson a | LikNormal a | LikBinomial a
   | LikBetaBinomial a | LikBeta a | LikBernoulli a
-  | LikZeroInflatedNegBinomial a -> a
+  | LikZeroInflatedNegBinomial a | LikReported (_, a) -> a
 
 (** The family's name, as diagnostics and the compiled model spell it:
     the keyword written in the model file (["poisson"], ["neg_binomial"]),
     except that the zero-inflated family is ["zero_inflated_neg_binomial"]
-    rather than the [zero_inflated] the model writes. *)
+    rather than the [zero_inflated] the model writes, and a reported
+    distribution is named as written ([""] when it is not a call). *)
 let lik_family_name (l : likelihood_kind) : string =
   match l with
   | LikNegBinomial _  -> "neg_binomial"
@@ -839,6 +850,7 @@ let lik_family_name (l : likelihood_kind) : string =
   | LikBeta _         -> "beta"
   | LikBernoulli _    -> "bernoulli"
   | LikZeroInflatedNegBinomial _ -> "zero_inflated_neg_binomial"
+  | LikReported (name, _) -> name
 
 (** Rewrites every keyword-argument expression, keeping the family. *)
 let map_likelihood_kwargs (f : expr -> expr) (l : likelihood_kind) : likelihood_kind =
@@ -852,6 +864,7 @@ let map_likelihood_kwargs (f : expr -> expr) (l : likelihood_kind) : likelihood_
   | LikBeta a         -> LikBeta         (g a)
   | LikBernoulli a    -> LikBernoulli    (g a)
   | LikZeroInflatedNegBinomial a -> LikZeroInflatedNegBinomial (g a)
+  | LikReported (name, a) -> LikReported (name, g a)
 
 (** Every expression an initial value evaluates: the right-hand side, or
     every argument of the law. Passes over initial values go through this, so
