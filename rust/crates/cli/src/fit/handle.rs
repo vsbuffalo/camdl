@@ -790,24 +790,32 @@ pub(crate) fn resolve_fit_problem(s: &str) -> Result<FitProblem, ResolveError> {
             .ok_or_else(|| ResolveError::NotFound(format!("{} is not inside a fit's directory", l.dir.display())))?,
     };
     let (resolved, anchor, config) = read_segment_config(&segment)?;
-    let archived = segment.join(crate::run_meta::ARCHIVED_CONFIG);
-    let original = std::fs::read_to_string(&archived)
-        .map_err(|e| ResolveError::StoredConfig(format!("cannot read {}: {e}", archived.display())))?;
     // `profile` keys and stores these bytes as the fit's file: they must be
     // the file the fit read, which `fit_toml_hash` records.
     let recorded = crate::run_meta::read_fit_sidecar(&segment)
         .map_err(ResolveError::StoredConfig)?
         .map(|side| side.fit_toml_hash)
         .unwrap_or_default();
-    let found = crate::hashing::sha256_hex(original.as_bytes());
-    if found != recorded {
-        return Err(ResolveError::StoredConfig(format!(
+    let archived = segment.join(crate::run_meta::ARCHIVED_CONFIG);
+    let not_read = |found: &str, recorded: &str| {
+        ResolveError::StoredConfig(format!(
             "{}: fit.toml.original is not the file the fit read: its SHA-256 is {found}, and \
-             fit.meta.json records {} (fit_toml_hash).",
-            segment.display(),
-            if recorded.is_empty() { "none" } else { &recorded }
-        )));
-    }
+             fit.meta.json records {recorded} (fit_toml_hash).",
+            segment.display()
+        ))
+    };
+    let bytes = crate::run_meta::read_verified_original(&segment, &recorded).map_err(|e| match e {
+        crate::run_meta::OriginalError::Unreadable { path, error } => {
+            ResolveError::StoredConfig(format!("cannot read {}: {error}", path.display()))
+        }
+        crate::run_meta::OriginalError::NoRecordedHash { bytes } => {
+            not_read(&crate::hashing::sha256_hex(&bytes), "none")
+        }
+        crate::run_meta::OriginalError::Mismatch { found, recorded, .. } => not_read(&found, &recorded),
+    })?;
+    let original = String::from_utf8(bytes).map_err(|_| {
+        ResolveError::StoredConfig(format!("cannot read {}: stream did not contain valid UTF-8", archived.display()))
+    })?;
     Ok(FitProblem { handle: s.to_string(), original, resolved: Some(resolved), anchor, config })
 }
 

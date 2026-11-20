@@ -892,6 +892,36 @@ impl Default for FitSidecar {
 /// configuration from it; that is [`RESOLVED_CONFIG`].
 pub const ARCHIVED_CONFIG: &str = "fit.toml.original";
 
+/// Why a fit folder's [`ARCHIVED_CONFIG`] could not be read as the file its
+/// fits read ([`read_verified_original`]). Each caller words its own refusal.
+#[derive(Debug)]
+pub enum OriginalError {
+    /// The file cannot be read.
+    Unreadable { path: std::path::PathBuf, error: std::io::Error },
+    /// `fit.meta.json` records no `fit_toml_hash`, so there is nothing to
+    /// check the file against. `bytes` are the file as read.
+    NoRecordedHash { bytes: Vec<u8> },
+    /// The file's SHA-256, `found`, is not the `fit_toml_hash` recorded.
+    /// `bytes` are the file as read.
+    Mismatch { found: String, recorded: String, bytes: Vec<u8> },
+}
+
+/// The bytes of `segment`'s [`ARCHIVED_CONFIG`], checked to be the file the
+/// fit read: their SHA-256 is `recorded`, the `fit_toml_hash` its
+/// `fit.meta.json` records (empty when it records none).
+pub fn read_verified_original(segment: &std::path::Path, recorded: &str) -> Result<Vec<u8>, OriginalError> {
+    let path = segment.join(ARCHIVED_CONFIG);
+    let bytes = std::fs::read(&path).map_err(|error| OriginalError::Unreadable { path, error })?;
+    if recorded.is_empty() {
+        return Err(OriginalError::NoRecordedHash { bytes });
+    }
+    let found = crate::hashing::sha256_hex(&bytes);
+    if found != recorded {
+        return Err(OriginalError::Mismatch { found, recorded: recorded.to_string(), bytes });
+    }
+    Ok(bytes)
+}
+
 /// The configuration a fit folder's fits ran under
 /// ([`crate::fit::run_config::resolved_config_text`]): the archived file with
 /// the command line's problem-half values and the folder's own `[fixed]`

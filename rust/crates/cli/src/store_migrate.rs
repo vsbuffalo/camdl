@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use runid::{ArtifactKind, STORE_LAYOUT};
 
-use crate::run_meta::{FitSidecar, ARCHIVED_CONFIG, RESOLVED_CONFIG};
+use crate::run_meta::{FitSidecar, OriginalError, ARCHIVED_CONFIG, RESOLVED_CONFIG};
 
 /// `Err` naming `folder` when its recorded layout `found` is not the current
 /// one: an older folder with the command that brings it up to date, a newer
@@ -142,27 +142,25 @@ mod step0 {
 
     pub(super) fn check(folder: &Folder) -> Result<(), String> {
         let Kind::Fit { dir, side, .. } = kind(folder)? else { return Ok(()) };
-        let original = dir.join(ARCHIVED_CONFIG);
-        let bytes = std::fs::read(&original).map_err(|e| {
-            format!("fit.meta.json names a fit file (source_config) but {} cannot be read: {e}", original.display())
-        })?;
-        if side.fit_toml_hash.is_empty() {
-            return Err("fit.meta.json records no fit_toml_hash, so fit.toml.original cannot be checked \
-                        to be the file the fit read"
-                .to_string());
-        }
-        let found = crate::hashing::sha256_hex(&bytes);
-        if found != side.fit_toml_hash {
-            if stored_with_the_flag_folded_in(dir, &bytes)? {
-                return refuse_a_folded_original();
+        match crate::run_meta::read_verified_original(dir, &side.fit_toml_hash) {
+            Ok(_) => Ok(()),
+            Err(OriginalError::Unreadable { path, error }) => Err(format!(
+                "fit.meta.json names a fit file (source_config) but {} cannot be read: {error}",
+                path.display()
+            )),
+            Err(OriginalError::NoRecordedHash { .. }) => Err("fit.meta.json records no fit_toml_hash, so \
+                fit.toml.original cannot be checked to be the file the fit read"
+                .to_string()),
+            Err(OriginalError::Mismatch { found, recorded, bytes }) => {
+                if stored_with_the_flag_folded_in(dir, &bytes)? {
+                    return refuse_a_folded_original();
+                }
+                Err(format!(
+                    "fit.toml.original is not the file the fit read: its SHA-256 is {found}, and \
+                     fit.meta.json records {recorded} (fit_toml_hash)"
+                ))
             }
-            return Err(format!(
-                "fit.toml.original is not the file the fit read: its SHA-256 is {found}, and \
-                 fit.meta.json records {} (fit_toml_hash)",
-                side.fit_toml_hash
-            ));
         }
-        Ok(())
     }
 
     /// Whether `original` (a `fit.toml.original` whose hash is not the
