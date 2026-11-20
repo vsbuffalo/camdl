@@ -3916,11 +3916,16 @@ impl PredictOptions {
 
     /// The address key of a prediction of `run_id` with these options by this
     /// engine: the first [`PREDICT_KEY_HEX`] hex digits (128 bits) of the
-    /// SHA-256 of [`PredictAddress`]'s JSON. The engine is the build
-    /// fingerprint [`crate::version::ENGINE_ID`], so a build with uncommitted
-    /// changes never reads or overwrites another build's prediction.
+    /// SHA-256 of [`PredictAddress`]'s JSON. The engine is the identity every
+    /// other command keys ([`crate::env::Environment::engine_identity`]): the
+    /// build fingerprint [`crate::version::ENGINE_ID`] and the engine switches
+    /// that are on, in its hashed spelling. So a build with uncommitted changes
+    /// never reads or overwrites another build's prediction, and neither does a
+    /// prediction made under a switch (`CAMDL_EVAL_UNRESOLVED`, …) one made
+    /// without it. With no switch on the spelling is the build alone.
     pub(crate) fn address_key(&self, run_id: &str) -> String {
-        self.address_key_by(run_id, crate::version::ENGINE_ID)
+        let engine = crate::env::get().engine_identity(crate::version::ENGINE_ID);
+        self.address_key_by(run_id, &engine.hashed_spelling())
     }
 
     fn address_key_by(&self, run_id: &str, engine: &str) -> String {

@@ -1145,3 +1145,68 @@ cooling = 0.7
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// A prediction made under an engine switch (`CAMDL_EVAL_UNRESOLVED`, which
+/// routes every rate through the other evaluator) is a different computation
+/// from one made without it, so it is stored at a different address: the
+/// address key folds the engine identity the other commands key, build and
+/// switches, not the build alone. Under the build alone the two predictions
+/// shared one directory, the second overwrote the first, and a reader of that
+/// address (the `fit table` quantity fast path) could not tell which engine
+/// made what it read.
+#[test]
+fn a_prediction_under_an_engine_switch_has_its_own_address() {
+    let bin = skip_if_missing_binary();
+    let tmp = std::env::temp_dir().join(format!("camdl_predict_switch_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("model.camdl"), MODEL).unwrap();
+    std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
+    let pgas = r#"[method]
+algorithm = "pgas"
+backend = "chain_binomial"
+chains = 2
+particles = 100
+sweeps = 30
+burn_in = 10
+thin = 1
+"#;
+    std::fs::write(tmp.join("fit.toml"), fit_toml(pgas, "results")).unwrap();
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    assert!(out.status.success(), "fit run failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    // The run's leaf, named directly: `--fit fit.toml` resolves only to runs
+    // this engine made, and the switched predict reads the default run.
+    let segment = fit_segment_dir(&tmp.join("results"));
+    let leaf = std::fs::read_dir(&segment).unwrap().flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .flat_map(|m| std::fs::read_dir(m).into_iter().flatten().flatten().map(|e| e.path()))
+        .find(|p| p.join("run.json").is_file())
+        .expect("the fit's leaf");
+    let leaf = leaf.to_string_lossy().into_owned();
+    let addresses = || -> std::collections::BTreeSet<String> {
+        std::fs::read_dir(segment.join("predict")).into_iter().flatten().flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect()
+    };
+
+    let plain = run(&bin, &tmp, &["fit", "predict", "--fit", &leaf]);
+    assert!(plain.status.success(), "fit predict failed:\n{}", String::from_utf8_lossy(&plain.stderr));
+    let first = addresses();
+    assert_eq!(first.len(), 1, "{first:?}");
+
+    let switched = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+        .args(["fit", "predict", "--fit", &leaf])
+        .current_dir(&tmp)
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_EVAL_UNRESOLVED", "1")
+        .output()
+        .expect("spawn camdl");
+    assert!(switched.status.success(), "switched fit predict failed:\n{}", String::from_utf8_lossy(&switched.stderr));
+    let both = addresses();
+    assert_eq!(both.len(), 2, "the switched prediction must not share the default one's address: {both:?}");
+    assert!(both.is_superset(&first), "and the default one's address is where it was");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
