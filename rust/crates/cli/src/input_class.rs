@@ -80,6 +80,188 @@ pub enum InputClass {
     Removed,
 }
 
+/// Inputs by clap argument id (the field name), with their classes.
+pub type Inventory = &'static [(&'static str, InputClass)];
+
+/// A clap `Args` struct whose every argument carries a class, derived with
+/// `#[derive(Inputs)]` (`rust/crates/input-class-derive`).
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is flattened into a classified command, but its fields carry no input classes",
+    label = "`{Self}` does not derive `Inputs`",
+    note = "add `#[derive(Inputs)]` to `{Self}` and an `#[input(..)]` class to each of its fields"
+)]
+pub trait InputFields {
+    /// Every argument of the struct, its own and its flattened groups', with
+    /// its class: the class the group declares, unless the flatten site
+    /// overrides it.
+    const FIELDS: Inventory;
+}
+
+/// The constant functions `#[derive(Inputs)]` expands to. Each runs at
+/// compile time; a failed check is a compile error.
+pub mod derive_support {
+    use super::{InputClass, Inventory, Level};
+
+    type Entry = (&'static str, InputClass);
+
+    pub const fn total_len(parts: &[Inventory]) -> usize {
+        let (mut n, mut i) = (0, 0);
+        while i < parts.len() {
+            n += parts[i].len();
+            i += 1;
+        }
+        n
+    }
+
+    /// `parts`, end to end. `N` is [`total_len`] of `parts`.
+    pub const fn concat<const N: usize>(parts: &[Inventory]) -> [Entry; N] {
+        let mut out = [("", InputClass::Removed); N];
+        let (mut k, mut i) = (0, 0);
+        while i < parts.len() {
+            let mut j = 0;
+            while j < parts[i].len() {
+                out[k] = parts[i][j];
+                k += 1;
+                j += 1;
+            }
+            i += 1;
+        }
+        assert!(k == N, "concat: N is not the parts' total length");
+        out
+    }
+
+    const fn str_eq(a: &str, b: &str) -> bool {
+        let (a, b) = (a.as_bytes(), b.as_bytes());
+        if a.len() != b.len() {
+            return false;
+        }
+        let mut i = 0;
+        while i < a.len() {
+            if a[i] != b[i] {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+
+    const fn position(inv: &[Entry], name: &str) -> Option<usize> {
+        let mut i = 0;
+        while i < inv.len() {
+            if str_eq(inv[i].0, name) {
+                return Some(i);
+            }
+            i += 1;
+        }
+        None
+    }
+
+    pub const fn has_field(inv: Inventory, name: &str) -> bool {
+        position(inv, name).is_some()
+    }
+
+    /// `base` with each `overrides` entry's class in place of the class its
+    /// field has in `base`. `N` is `base.len()`.
+    pub const fn overridden<const N: usize>(base: Inventory, overrides: &[Entry]) -> [Entry; N] {
+        let mut out = [("", InputClass::Removed); N];
+        let mut i = 0;
+        while i < N {
+            out[i] = base[i];
+            i += 1;
+        }
+        let mut o = 0;
+        while o < overrides.len() {
+            match position(base, overrides[o].0) {
+                Some(at) => out[at].1 = overrides[o].1,
+                None => panic!("#[input(override)] names a field the group does not have"),
+            }
+            o += 1;
+        }
+        out
+    }
+
+    const fn level_name(level: Level) -> &'static str {
+        match level {
+            Level::Model => "model",
+            Level::Config => "config",
+            Level::Params => "params",
+            Level::Scenario => "scenario",
+            Level::Seed => "seed",
+            Level::Obs => "obs",
+            Level::Fit => "fit",
+            Level::Method => "method",
+            Level::Profile => "profile",
+            Level::Box => "box",
+        }
+    }
+
+    /// A compile-time message: string pieces copied into a fixed buffer.
+    struct Message {
+        buf: [u8; 512],
+        len: usize,
+    }
+
+    impl Message {
+        const fn new() -> Self {
+            Message { buf: [0; 512], len: 0 }
+        }
+        const fn push(mut self, s: &str) -> Self {
+            let b = s.as_bytes();
+            let mut i = 0;
+            while i < b.len() && self.len < self.buf.len() {
+                self.buf[self.len] = b[i];
+                self.len += 1;
+                i += 1;
+            }
+            self
+        }
+        const fn as_str(&self) -> &str {
+            match core::str::from_utf8(self.buf.split_at(self.len).0) {
+                Ok(s) => s,
+                Err(_) => "an input-class check failed (the message was cut inside a character)",
+            }
+        }
+    }
+
+    /// No argument id occurs twice in `command`'s inventory, and every `keyed`
+    /// class names one of its levels.
+    pub const fn check_command(command: &str, inputs: Inventory, levels: &[Level]) {
+        let mut i = 0;
+        while i < inputs.len() {
+            let (field, class) = inputs[i];
+            if position(inputs.split_at(i + 1).1, field).is_some() {
+                let m = Message::new().push("`").push(command).push("`: the input `").push(field).push(
+                    "` is classified twice (a field and a flattened group, or two groups, share a clap id)",
+                );
+                panic!("{}", m.as_str());
+            }
+            if let InputClass::Keyed(level) = class {
+                let mut found = false;
+                let mut l = 0;
+                while l < levels.len() {
+                    if level as u8 == levels[l] as u8 {
+                        found = true;
+                    }
+                    l += 1;
+                }
+                if !found {
+                    let m = Message::new()
+                        .push("`")
+                        .push(command)
+                        .push("`: the input `")
+                        .push(field)
+                        .push("` is keyed(")
+                        .push(level_name(level))
+                        .push("), a level this command's leaf does not have (its #[input(command(levels(..)))]); ")
+                        .push("override the class where the command flattens the group that declares it");
+                    panic!("{}", m.as_str());
+                }
+            }
+            i += 1;
+        }
+    }
+}
+
 #[cfg(test)]
 use InputClass::{Child, Execution, Expands, Keyed, Presentation, Provenance, Removed};
 #[cfg(test)]
@@ -432,6 +614,35 @@ mod tests {
              accepted by clap, not classified: {missing:?}\n  \
              classified, not accepted by clap: {stale:?}"
         );
+    }
+
+    /// The inventory `#[derive(Inputs)]` generates for each command is its
+    /// hand-written table, row for row, as a set.
+    #[test]
+    fn the_derived_inventory_is_each_commands_table() {
+        use crate::args::{FitRunArgs, MreSimulateArgs, PfilterArgs, ProfileArgs, SimulateArgs, SurveyArgs};
+        fn set<'a>(rows: impl IntoIterator<Item = &'a (&'a str, InputClass)>) -> BTreeSet<(String, InputClass)> {
+            rows.into_iter().map(|(f, c)| (f.to_string(), *c)).collect()
+        }
+        let mre_table: Vec<(&str, InputClass)> = SIMULATE.iter().chain(MRE_SIMULATE_OWN).copied().collect();
+        for (what, derived, table) in [
+            ("simulate", SimulateArgs::INPUTS, SIMULATE),
+            ("fit run", FitRunArgs::INPUTS, FIT_RUN),
+            ("pfilter", PfilterArgs::INPUTS, PFILTER),
+            ("profile", ProfileArgs::INPUTS, PROFILE),
+            ("survey", SurveyArgs::INPUTS, SURVEY),
+            ("mre simulate", MreSimulateArgs::INPUTS, &mre_table[..]),
+        ] {
+            assert_eq!(derived.len(), table.len(), "{what}: as many derived inputs as table rows");
+            let (d, t) = (set(derived), set(table));
+            let only_derived: Vec<_> = d.difference(&t).collect();
+            let only_table: Vec<_> = t.difference(&d).collect();
+            assert!(
+                only_derived.is_empty() && only_table.is_empty(),
+                "{what}: the derived inventory and the table disagree.\n  \
+                 derived only: {only_derived:?}\n  table only: {only_table:?}"
+            );
+        }
     }
 
     #[test]

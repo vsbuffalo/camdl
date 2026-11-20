@@ -52,6 +52,9 @@ numerics = { path = "../numerics" }
 rand = "0.8"
 rand_distr = "0.4"
 rayon = "1"
+# `#[derive(Inputs)]`: each argument's input class, declared on its clap field
+# (`src/input_class.rs`).
+input-class-derive = { path = "../input-class-derive" }
 runid = { path = "../runid" }
 score = { path = "../score" }
 # Semver parse + compare for `camdl check-update` (release tag vs this binary).

@@ -520,6 +520,7 @@ dependencies = [
  "hex",
  "indexmap",
  "indicatif",
+ "input-class-derive",
  "io",
  "ir",
  "libc",
@@ -1161,6 +1162,15 @@ dependencies = [
  "portable-atomic",
  "unicode-width",
  "web-time",
+]
+
+[[package]]
+name = "input-class-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

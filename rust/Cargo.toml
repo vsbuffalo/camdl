@@ -15,6 +15,7 @@ members = [
   "crates/diff",
   "crates/differentiate-derive",
   "crates/external-harness",
+  "crates/input-class-derive",
   "crates/io",
   "crates/ir",
   "crates/numerics",

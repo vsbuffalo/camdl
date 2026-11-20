@@ -9,6 +9,7 @@ pub mod types;
 
 use std::path::PathBuf;
 use clap::{Args, ArgGroup};
+use input_class_derive::Inputs;
 use crate::colored_help;
 use types::{ForwardBackend, DataSpec, ListDuration, ParamOverride, ParamVecSpec, RwSd, SeedSpec, SweepSpec, TableSpec};
 
@@ -66,18 +67,21 @@ PRECEDENCE (last wins, per docs/camdl-run-spec.md §1.3)
 /// Inference subcommands use [`InferenceModelOverrides`] instead;
 /// `--params` / `--param` were removed there (M-1 break per
 /// 2026-05-25 CLI UX rev 2).
-#[derive(Args, Clone, Default)]
+#[derive(Args, Clone, Default, Inputs)]
 pub struct ModelOverrides {
     /// Parameter TOML file (may be repeated)
     #[arg(long, value_name = "FILE")]
+    #[input(keyed(params))]
     pub params: Vec<PathBuf>,
 
     /// Single parameter override, e.g. --param R0=2.5 (may be repeated)
     #[arg(long, value_name = "NAME=VALUE")]
+    #[input(keyed(params))]
     pub param: Vec<ParamOverride>,
 
     /// External table for table-lookup expressions, e.g. --table contact=matrix.tsv
     #[arg(long, value_name = "NAME=FILE")]
+    #[input(keyed(params))]
     pub table: Vec<TableSpec>,
 }
 
@@ -90,13 +94,14 @@ pub struct ModelOverrides {
 /// produce an actionable error at dispatch time (per CLAUDE.md alpha
 /// posture: no backwards-compat shims, hard break with replacement
 /// spelled out).
-#[derive(Args, Clone, Default)]
+#[derive(Args, Clone, Default, Inputs)]
 pub struct InferenceModelOverrides {
     /// Pin NAME to VALUE (repeatable; sets value and removes the
     /// parameter from `[estimate]` if present). See `--help-fixed` for
     /// the full precedence / semantics block.
     #[arg(long = "fixed", value_name = "NAME=VALUE",
           long_help = FIXED_LONG_ABOUT)]
+    #[input(keyed(profile))]
     pub fixed_cli: Vec<ParamOverride>,
 
     /// Load fixed values from a flat params TOML (repeatable, layered).
@@ -105,10 +110,12 @@ pub struct InferenceModelOverrides {
     /// if present.
     #[arg(long = "fixed-file", value_name = "TOML",
           long_help = FIXED_LONG_ABOUT)]
+    #[input(keyed(profile))]
     pub fixed_files: Vec<PathBuf>,
 
     /// External table for table-lookup expressions, e.g. --table contact=matrix.tsv
     #[arg(long, value_name = "NAME=FILE")]
+    #[input(keyed(profile))]
     pub table: Vec<TableSpec>,
 
     // ── Removed-flag traps (M-1 break per proposal §"Migration") ──
@@ -127,6 +134,7 @@ pub struct InferenceModelOverrides {
     // these traps exist purely so the error message is actionable.
     // They have no other effect.
     #[arg(long = "param", value_name = "NAME=VALUE", hide = true)]
+    #[input(removed)]
     pub _removed_param: Vec<ParamOverride>,
 }
 
@@ -148,36 +156,42 @@ impl InferenceModelOverrides {
 }
 
 /// `--scenario` XOR `--enable`/`--disable`
-#[derive(Args, Clone, Default)]
+#[derive(Args, Clone, Default, Inputs)]
 pub struct ScenarioArgs {
     /// Named scenario defined in the model (conflicts with --enable/--disable)
     #[arg(long, conflicts_with_all = ["enable", "disable"])]
+    #[input(keyed(model))]
     pub scenario: Option<String>,
 
     /// Enable an intervention (may be repeated; conflicts with --scenario)
     #[arg(long, conflicts_with = "scenario")]
+    #[input(keyed(model))]
     pub enable: Vec<String>,
 
     /// Disable an intervention (may be repeated; conflicts with --scenario)
     #[arg(long, conflicts_with = "scenario")]
+    #[input(keyed(model))]
     pub disable: Vec<String>,
 }
 
 /// `--backend` + `--dt`
-#[derive(Args, Clone)]
+#[derive(Args, Clone, Inputs)]
 pub struct SimBackend {
     /// Simulation backend (default: chain_binomial)
     #[arg(long)]
+    #[input(keyed(config))]
     pub backend: Option<ForwardBackend>,
 
     /// Step size for discrete-time backends (default: 1.0)
     #[arg(long)]
+    #[input(keyed(config))]
     pub dt: Option<f64>,
 
     /// ODE integrator method override: rk4 (fixed) or rk45 (adaptive). gh#166.
     /// Tolerances are a model property — set them in
     /// `simulate { integrator = rk45 { atol = .., rtol = .. } }`.
     #[arg(long)]
+    #[input(keyed(model))]
     pub integrator: Option<crate::args::types::IntegratorArg>,
 }
 
@@ -191,29 +205,32 @@ pub struct SimBackend {
 /// change which columns are written to the content-addressed leaf, so they ride
 /// the `config`-level identity (`runid::inputs::SimConfig`): a non-default view
 /// is a distinct, reproducible artifact.
-#[derive(Args, Clone, Debug, Default)]
+#[derive(Args, Clone, Debug, Default, Inputs)]
 pub struct OutputView {
     /// Emit one trajectory row every N time-units, overriding the model's
     /// `output { every }`. A plain number in the model's `time_unit` (like
     /// `--dt`); e.g. `--output-every 7` on a daily model writes weekly rows.
     #[arg(long = "output-every", value_name = "N")]
+    #[input(keyed(model))]
     pub every: Option<f64>,
 
     /// Drop every `flow_*` column from the trajectory output — most useful for
     /// stratified/spatial models where inter-stratum flow columns dominate.
     #[arg(long = "no-flows", default_value_t = false)]
+    #[input(keyed(config))]
     pub no_flows: bool,
 
     /// Restrict trajectory columns to this comma-separated allow-list of output
     /// column names (compartments and/or `flow_<name>`). Empty = all columns;
     /// emitted order follows the model, not this list.
     #[arg(long = "columns", value_delimiter = ',', value_name = "COL,...")]
+    #[input(keyed(config))]
     pub columns: Vec<String>,
 }
 
 /// The override for a forcing evaluated outside the range it is defined on,
 /// shared by every command that runs a model.
-#[derive(Args, Clone, Default)]
+#[derive(Args, Clone, Default, Inputs)]
 pub struct ForcingExtrapolationArg {
     /// Let the run evaluate a forcing outside the range it is defined on —
     /// an `interpolated` forcing before its first or after its last data
@@ -223,22 +240,26 @@ pub struct ForcingExtrapolationArg {
     /// error. A fit config sets it as `[config] allow_forcing_extrapolation =
     /// true`.
     #[arg(long, default_value_t = false)]
+    #[input(keyed(config))]
     pub allow_forcing_extrapolation: bool,
 }
 
 /// Core inference knobs shared by pfilter / profile
-#[derive(Args, Clone)]
+#[derive(Args, Clone, Inputs)]
 pub struct InferenceCore {
     /// Step size (default 1.0).
     #[arg(long)]
+    #[input(keyed(config))]
     pub dt: Option<f64>,
 
     /// RNG seed
     #[arg(long, default_value_t = 1)]
+    #[input(keyed(seed))]
     pub seed: u64,
 
     /// Rayon thread count (0 = all available cores)
     #[arg(long, default_value_t = 0, env = "CAMDL_PARALLEL")]
+    #[input(execution)]
     pub parallel: usize,
 
     /// gh#audit-C6 / S1. Restore the legacy silent-zero behaviour for
@@ -250,6 +271,7 @@ pub struct InferenceCore {
     /// zero rate. Counters under EvalStats still increment under
     /// either mode so you can see how often the path fired.
     #[arg(long, default_value_t = false)]
+    #[input(keyed(config))]
     pub allow_degenerate_rates: bool,
 
     #[command(flatten)]
@@ -260,6 +282,7 @@ pub struct InferenceCore {
     /// dates, requires the model's `origin`). Dated columns convert via
     /// the model `origin` + `time_unit` (2026-05-22 calendar-time).
     #[arg(long, default_value = "auto")]
+    #[input(execution)]
     pub time_format: crate::caltime_load::TimeFormat,
 
     /// gh#241. Deterministic per-call compute budget: the maximum cumulative
@@ -269,6 +292,7 @@ pub struct InferenceCore {
     /// budget — it replaced `--pf-wallclock-timeout`, a wall-clock timeout that
     /// set a process env var and made a fit's log-likelihood depend on hardware.
     #[arg(long, value_name = "N")]
+    #[input(execution)]
     pub pf_max_substeps: Option<u64>,
 
     /// Binomial sampler for the chain-binomial draws: `btpe` (default) or
@@ -276,6 +300,7 @@ pub struct InferenceCore {
     /// so a `btrs` run gets its own stored address.
     #[arg(long, value_name = "SAMPLER",
           value_parser = |v: &str| v.parse::<sim::rng::BinomialAlgorithm>())]
+    #[input(keyed(config))]
     pub binomial: Option<sim::rng::BinomialAlgorithm>,
 }
 
@@ -284,17 +309,19 @@ pub struct InferenceCore {
 /// (the modern observation system, as `fit run` uses) — there is no `--flow` /
 /// `--obs-model` projection override. `--obs` only selects WHICH declared
 /// stream (family) a single positional `--data FILE` binds to.
-#[derive(Args, Clone, Default)]
+#[derive(Args, Clone, Default, Inputs)]
 pub struct StreamSelection {
     /// Observation stream/family name a bare `--data FILE` binds to
     /// (required when the model declares more than one).
     #[arg(long)]
+    #[input(keyed(config))]
     pub obs: Option<String>,
 }
 
 // ─── simulate ─────────────────────────────────────────────────────────────────
 
-#[derive(Args)]
+#[derive(Args, Inputs)]
+#[input(command(levels(model, config, params, scenario, seed, obs), global(crate::GlobalArgs)))]
 #[command(after_help = colored_help!("\
 Examples:
   # Basic simulation. The run is written to the content-addressed store
@@ -323,6 +350,7 @@ Examples:
 "))]
 pub struct SimulateArgs {
     /// IR JSON or .camdl model file
+    #[input(keyed(model))]
     pub model: PathBuf,
 
     /// Override the run's horizon (`simulation.t_end`), gh#626. SPEC is a
@@ -338,6 +366,7 @@ pub struct SimulateArgs {
     /// calendar rule): write the offset in days. A scenario
     /// that declares its own different horizon is a hard error.
     #[arg(long, value_name = "SPEC")]
+    #[input(keyed(config))]
     pub to: Option<String>,
 
     /// Override the run's start (the model's `simulate { from }`), so one
@@ -351,6 +380,7 @@ pub struct SimulateArgs {
     /// schedule with no `from`), and enters the run's identity through the
     /// model. Refused with --init-state, which sets the start itself.
     #[arg(long, value_name = "SPEC", allow_hyphen_values = true)]
+    #[input(keyed(model))]
     pub from: Option<String>,
 
     /// Start the run from an inferred state at the last observation time
@@ -368,6 +398,7 @@ pub struct SimulateArgs {
     ///     Requires `--draws posterior`; forecasts over the subset of draws
     ///     that have a saved latent path, and reports that count.
     #[arg(long, value_name = "FILE|fit")]
+    #[input(keyed(config))]
     pub init_state: Option<String>,
 
     /// gh#audit-C6 / S1. See InferenceCore.allow_degenerate_rates.
@@ -375,6 +406,7 @@ pub struct SimulateArgs {
     /// has a known empty-stratum-divisor and the user wants to keep
     /// the legacy zero-rate behaviour rather than fix the model.
     #[arg(long, default_value_t = false)]
+    #[input(keyed(config))]
     pub allow_degenerate_rates: bool,
 
     #[command(flatten)]
@@ -385,18 +417,22 @@ pub struct SimulateArgs {
 
     /// Parameter vector file (may be repeated), e.g. --param-vec beta=FILE
     #[arg(long, value_name = "PREFIX=FILE")]
+    #[input(keyed(params))]
     pub param_vec: Vec<ParamVecSpec>,
 
     /// Named scenarios (may be repeated; conflicts with --enable/--disable)
     #[arg(long = "scenario", conflicts_with_all = ["enable", "disable"])]
+    #[input(expands)]
     pub scenarios: Vec<String>,
 
     /// Enable an intervention (may be repeated; conflicts with --scenario)
     #[arg(long, conflicts_with = "scenarios")]
+    #[input(keyed(scenario))]
     pub enable: Vec<String>,
 
     /// Disable an intervention (may be repeated; conflicts with --scenario)
     #[arg(long, conflicts_with = "scenarios")]
+    #[input(keyed(scenario))]
     pub disable: Vec<String>,
 
     #[command(flatten)]
@@ -409,14 +445,17 @@ pub struct SimulateArgs {
     /// RNG seed for a single run (conflicts with --seeds)
     #[arg(long, default_value_t = 1, conflicts_with = "seeds",
           env = "CAMDL_SEED")]
+    #[input(keyed(seed))]
     pub seed: u64,
 
     /// Multiple seeds: range (1:100) or list (1,2,42); conflicts with --replicates
     #[arg(long, conflicts_with_all = ["replicates"])]
+    #[input(expands)]
     pub seeds: Option<SeedSpec>,
 
     /// Stochastic replicates per parameter point (conflicts with --seeds)
     #[arg(long, conflicts_with = "seeds")]
+    #[input(expands)]
     pub replicates: Option<usize>,
 
     /// Parameter draw source: path to a params TSV, "uniform", "prior", or
@@ -427,6 +466,7 @@ pub struct SimulateArgs {
     /// scenario or `--param`. A draw is a SAMPLE from a measure; a value you
     /// choose is a design point — use --sweep / --sweep-file for those.
     #[arg(long)]
+    #[input(expands)]
     pub draws: Option<String>,
 
     /// Deterministic grid over a parameter (repeatable): the DESIGN axis.
@@ -445,6 +485,7 @@ pub struct SimulateArgs {
     /// re-simulated (--force recomputes; --dry-run shows hits and misses).
     #[arg(long, value_name = "PARAM=GRID",
           conflicts_with_all = ["draws", "design_from", "sweep_file"])]
+    #[input(expands)]
     pub sweep: Vec<SweepSpec>,
 
     /// Design points from a TSV: the header names model parameters, each row
@@ -457,6 +498,7 @@ pub struct SimulateArgs {
     /// ensemble's record by content digest.
     #[arg(long, value_name = "FILE",
           conflicts_with_all = ["draws", "design_from", "sweep"])]
+    #[input(expands)]
     pub sweep_file: Option<PathBuf>,
 
     /// Companion for `--draws`. With `--draws prior`, a fit.toml supplying
@@ -472,6 +514,7 @@ pub struct SimulateArgs {
     /// against — a manual check requires --fit to come with --draws and/or
     /// an anchored --to (gh#626).
     #[arg(long)]
+    #[input(keyed(params))]
     pub fit: Option<PathBuf>,
 
     /// Number of parameter draws. For --draws uniform/prior: how many to
@@ -479,6 +522,7 @@ pub struct SimulateArgs {
     /// whole cloud (default 200, matching `fit predict` — never silently
     /// replay a full 60k-draw posterior; gh#630).
     #[arg(short = 'n', long)]
+    #[input(expands)]
     pub n_draws: Option<usize>,
 
     /// With `--draws posterior`: replay ONLY the named chains of the fit's
@@ -486,6 +530,7 @@ pub struct SimulateArgs {
     /// `--chains 3,5`). Cannot be given with `--exclude-chains`. Always warns;
     /// a chain id not in the fit, or naming every chain, is a hard error.
     #[arg(long, value_name = "IDS", conflicts_with = "exclude_chains")]
+    #[input(expands)]
     pub chains: Option<String>,
 
     /// With `--draws posterior`: drop the named chains of the fit's posterior
@@ -493,6 +538,7 @@ pub struct SimulateArgs {
     /// Post-hoc exclusion biases the posterior toward the retained mode and
     /// always prints a warning.
     #[arg(long, value_name = "IDS")]
+    #[input(expands)]
     pub exclude_chains: Option<String>,
 
     /// Write the sampled per-draw parameter vectors to this TSV (gh#157).
@@ -502,6 +548,7 @@ pub struct SimulateArgs {
     /// Only written when given; the content-addressed store leaves are
     /// unaffected.
     #[arg(long, value_name = "PATH", requires = "draws")]
+    #[input(presentation)]
     pub draws_out: Option<PathBuf>,
 
     /// Write a plain-TSV trajectory mirror to this file, IN ADDITION to the
@@ -509,6 +556,7 @@ pub struct SimulateArgs {
     /// `-o` the trajectory is not written to a loose file — read it back with
     /// `camdl cat <id>`. Use `--stdout` to stream instead of storing.
     #[arg(short, long, env = "CAMDL_OUTPUT")]
+    #[input(presentation)]
     pub output: Option<PathBuf>,
 
     /// Stream the trajectory TSV to stdout and DO NOT write the store leaf or
@@ -520,6 +568,7 @@ pub struct SimulateArgs {
         "output", "obs", "obs_dir", "obs_only", "obs_only_dir",
         "seeds", "replicates", "draws", "sweep", "sweep_file",
     ])]
+    #[input(presentation)]
     pub stdout: bool,
 
     /// Override the cadence at which synthetic observations are EMITTED
@@ -533,24 +582,29 @@ pub struct SimulateArgs {
     /// `emit_schedule = at [...]` is refused by name. This changes emitted
     /// output only; it never enters a likelihood.
     #[arg(long = "emit-every", value_name = "N | NAME=N")]
+    #[input(keyed(obs))]
     pub emit_every: Vec<String>,
 
     /// Write synthetic observations to a single TSV (all streams)
     #[arg(long, conflicts_with_all = ["obs_dir", "obs_only"])]
+    #[input(child)]
     pub obs: Option<PathBuf>,
 
     /// Write one TSV per observation stream to a directory
     #[arg(long, conflicts_with_all = ["obs", "obs_only"])]
+    #[input(child)]
     pub obs_dir: Option<PathBuf>,
 
     /// Like --obs but suppress trajectory output
     #[arg(long, conflicts_with_all = ["obs", "obs_dir", "output", "obs_only_dir"])]
+    #[input(child)]
     pub obs_only: Option<PathBuf>,
 
     /// Like --obs-dir (one TSV per stream) but suppress trajectory output.
     /// The multi-cadence-safe sibling of --obs-only (run-spec §3.1.1,
     /// ObsOutput::OnlyDir).
     #[arg(long, conflicts_with_all = ["obs", "obs_dir", "obs_only", "output"])]
+    #[input(child)]
     pub obs_only_dir: Option<PathBuf>,
 
     /// Simulate on the observation design a fit config binds, instead of on
@@ -577,6 +631,7 @@ pub struct SimulateArgs {
         "emit_every", "dates", "init_state", "quantities_out", "event_log",
         "scenarios",
     ])]
+    #[input(presentation)]
     pub design_from: Option<PathBuf>,
 
     /// Write each observation stream's projected value on the design that
@@ -593,6 +648,7 @@ pub struct SimulateArgs {
     /// --quantities-out, a sidecar outside run identity. Usable with or
     /// without --obs-dir / --obs-only-dir.
     #[arg(long, value_name = "DIR", requires = "design_from")]
+    #[input(presentation)]
     pub projected_out: Option<PathBuf>,
 
     /// Add a calendar `date` column (rendered from the model `origin` +
@@ -601,6 +657,7 @@ pub struct SimulateArgs {
     /// default; `--dates` is purely additive (2026-05-22 calendar-time §6.7).
     /// No-op with a clear error if the model declares no `origin`.
     #[arg(long)]
+    #[input(presentation)]
     pub dates: bool,
 
     /// Emit the model's `quantities {}` block to this directory as
@@ -611,6 +668,7 @@ pub struct SimulateArgs {
     /// identity. Without this flag, a model that declares quantities prints a
     /// note and skips them (not a hard error).
     #[arg(long, value_name = "DIR")]
+    #[input(presentation)]
     pub quantities_out: Option<PathBuf>,
 
     /// Report with the `quantities {}` block in FILE instead of the model's own.
@@ -623,24 +681,29 @@ pub struct SimulateArgs {
     /// The trajectory and the run's identity are unaffected (proposal
     /// 2026-08-19).
     #[arg(long, value_name = "FILE", requires = "quantities_out")]
+    #[input(presentation)]
     pub quantities: Option<PathBuf>,
 
     /// Print resolved run plan without simulating
     #[arg(long)]
+    #[input(presentation)]
     pub dry_run: bool,
 
     /// Root directory of the run store
     #[arg(long, default_value = "./results", env = "CAMDL_OUTPUT_DIR")]
+    #[input(execution)]
     pub output_dir: PathBuf,
 
     /// Rayon threads for the simulation phase of a multi-cell run (absent:
     /// sequential; 0 = all cores). Output is byte-identical whatever the
     /// value: cells are seeded by grid position and merged in canonical order.
     #[arg(long, env = "CAMDL_PARALLEL")]
+    #[input(execution)]
     pub parallel: Option<usize>,
 
     /// Re-run even if cached output already exists
     #[arg(long)]
+    #[input(execution)]
     pub force: bool,
 
     /// User-supplied display label for this simulate run. Validated
@@ -648,6 +711,7 @@ pub struct SimulateArgs {
     /// `camdl list` and `camdl show`. With `--seeds`, the label
     /// applies to each per-seed run.
     #[arg(long, value_name = "TEXT")]
+    #[input(provenance)]
     pub label: Option<String>,
 
     /// Record the Layer-1 lineage **event log** (2026-05-20 three-layer
@@ -664,15 +728,18 @@ pub struct SimulateArgs {
     /// which writes no leaf for the log to be a child of.
     #[arg(long, value_name = "FILE", num_args = 0..=1, default_missing_value = "auto",
           conflicts_with_all = ["seeds", "replicates", "draws", "sweep", "sweep_file", "stdout"])]
+    #[input(child)]
     pub event_log: Option<PathBuf>,
 
     /// Event-log format: `parquet` (default, production) or `tsv`
     /// (dependency-free, debug). With --event-log.
     #[arg(long, value_name = "FMT", requires = "event_log", conflicts_with = "tsv")]
+    #[input(presentation)]
     pub format: Option<String>,
 
     /// Shorthand for `--format tsv` (with --event-log).
     #[arg(long, requires = "event_log")]
+    #[input(presentation)]
     pub tsv: bool,
 
     /// Mirror the reactive firing log to this file, IN ADDITION to the
@@ -683,12 +750,14 @@ pub struct SimulateArgs {
     /// system of record. Single-run only.
     #[arg(long, value_name = "PATH",
           conflicts_with_all = ["seeds", "replicates", "draws", "sweep", "sweep_file"])]
+    #[input(presentation)]
     pub reactive_log: Option<PathBuf>,
 }
 
 // ─── fit ──────────────────────────────────────────────────────────────────────
 
-#[derive(Args)]
+#[derive(Args, Inputs)]
+#[input(command(levels(fit, method, seed), global(crate::GlobalArgs, override(no_licm = keyed(fit)))))]
 #[command(after_help = colored_help!("\
 Examples:
   # Run the full inference pipeline declared in fit.toml
@@ -742,11 +811,13 @@ Priors (Bayesian methods: PGAS, PMMH):
 "))]
 pub struct FitRunArgs {
     /// Fit configuration file (v2 TOML)
+    #[input(keyed(fit))]
     pub config: PathBuf,
 
     // Sets the config's `[config] allow_forcing_extrapolation = true`, so it
     // keys the fit as the config line does.
     #[command(flatten)]
+    #[input(override(allow_forcing_extrapolation = keyed(fit)))]
     pub forcing_extrapolation: ForcingExtrapolationArg,
 
     /// Where the method's chains begin, overriding the file's `starts`. A
@@ -758,6 +829,7 @@ pub struct FitRunArgs {
     /// declares a prior, `uniform_unconstrained` otherwise. Keyed into the
     /// run's identity, like the file's own `starts`.
     #[arg(long, value_name = "SPEC")]
+    #[input(keyed(method))]
     pub starts: Option<crate::fit::starts::ChainStarts>,
 
     /// Restrict a `from_posterior` rule to these chains of its source,
@@ -767,12 +839,14 @@ pub struct FitRunArgs {
     /// source's whole-run verdict), and the subset is keyed into the run's
     /// identity (gh#1056).
     #[arg(long, value_name = "IDS", value_parser = crate::fit::starts::parse_starts_chains)]
+    #[input(keyed(method))]
     pub starts_chains: Option<crate::chain_selection::ChainSelection>,
 
     /// Start from a `from_mle` / `from_posterior` source whose stored verdict
     /// is not converged. Without this the source is refused, since starting
     /// from an unconverged fit launders its multi-modality into this one.
     #[arg(long)]
+    #[input(execution)]
     pub allow_nonconverged_source: bool,
 
     /// Max worker threads for the Rayon pool that runs the chains and, within
@@ -781,16 +855,19 @@ pub struct FitRunArgs {
     /// thread budget / CPU footprint, not the numerics. Mirrors `--parallel`
     /// on pfilter/profile/survey; also honored via `CAMDL_PARALLEL`.
     #[arg(long, default_value_t = 0, env = "CAMDL_PARALLEL")]
+    #[input(execution)]
     pub parallel: usize,
 
     /// RNG seed (default: 1)
     #[arg(long)]
+    #[input(keyed(seed))]
     pub seed: Option<u64>,
 
     /// Re-run even if the run is stored: the stored leaf moves to the
     /// store's .quarantine/. Also clears a leaf held by a run on another
     /// host, which camdl cannot check and never reclaims on its own.
     #[arg(long)]
+    #[input(execution)]
     pub force: bool,
 
     /// Resume a previously-completed PGAS or PMMH run from a base run
@@ -801,11 +878,13 @@ pub struct FitRunArgs {
     /// deterministic artifact, not bit-identical to an uninterrupted fit of
     /// the same length. Conflicts with --force.
     #[arg(long, value_name = "BASE_REF", conflicts_with = "force")]
+    #[input(keyed(method))]
     pub resume: Option<String>,
 
     /// Cartesian sweep over a fixed parameter (may repeat).
     /// SPEC is `V1,V2,...` | `lin(min,max,n)` | `log10(min,max,n)`.
     #[arg(long, value_name = "NAME=SPEC")]
+    #[input(expands)]
     pub sweep: Vec<SweepSpec>,
 
     /// Override the cadence at which `[synthetic]` data is GENERATED
@@ -818,11 +897,13 @@ pub struct FitRunArgs {
     /// with no `[synthetic]` block rather than silently doing nothing. It
     /// changes the generated data, so the fit re-keys.
     #[arg(long = "emit-every", value_name = "N | NAME=N")]
+    #[input(keyed(fit))]
     pub emit_every: Vec<String>,
 
     /// Override [method.gate] decibans_thresh (the inter-chain
     /// log-likelihood-spread floor, in decibans).
     #[arg(long, value_name = "DB")]
+    #[input(keyed(method))]
     pub decibans_thresh: Option<f64>,
 
     // ── Removed-flag traps ───────────────────────────────────────────
@@ -833,32 +914,44 @@ pub struct FitRunArgs {
     // no back-compat shims — they exist purely so the error names the right
     // replacement.
     #[arg(long = "stage", value_name = "STAGE", hide = true)]
+    #[input(removed)]
     pub _removed_stage: Option<String>,
     #[arg(long = "init", value_name = "MODE", hide = true)]
+    #[input(removed)]
     pub _removed_init: Option<String>,
     #[arg(long = "posterior", value_name = "PATH", hide = true)]
+    #[input(removed)]
     pub _removed_posterior: Option<String>,
     #[arg(long = "mle", value_name = "PATH", hide = true)]
+    #[input(removed)]
     pub _removed_mle: Option<String>,
     #[arg(long = "params", value_name = "TOML", hide = true)]
+    #[input(removed)]
     pub _removed_params: Option<String>,
     #[arg(long = "survey-path", value_name = "DIR", hide = true)]
+    #[input(removed)]
     pub _removed_survey_path: Option<String>,
     #[arg(long = "survey-top-k", value_name = "N", hide = true)]
+    #[input(removed)]
     pub _removed_survey_top_k: Option<String>,
     #[arg(long = "allow-nonconverged-scout", hide = true)]
+    #[input(removed)]
     pub _removed_allow_nonconverged_scout: bool,
     #[arg(long = "init-method", value_name = "MODE", hide = true)]
+    #[input(removed)]
     pub _removed_init_method: Option<String>,
     #[arg(long = "starts-from", value_name = "DIR_OR_HASH", hide = true)]
+    #[input(removed)]
     pub _removed_starts_from: Option<String>,
     // `--tempering` went with PGAS parallel tempering (gh#789); same shape,
     // its own message.
     #[arg(long = "tempering", value_name = "B1,B2,...", hide = true)]
+    #[input(removed)]
     pub _removed_tempering: Option<String>,
     // `--rho` went with correlated pseudo-marginal PMMH; same shape, its own
     // message.
     #[arg(long = "rho", value_name = "F", hide = true)]
+    #[input(removed)]
     pub _removed_rho: Option<String>,
 
     /// The run's label (1–64 chars after trim; allowed: letters, digits,
@@ -871,6 +964,7 @@ pub struct FitRunArgs {
     /// Surfaced in `camdl list` and `camdl fit table`.
     /// Examples: --label "narrow R0, take 1", --label "iota free".
     #[arg(long, value_name = "TEXT")]
+    #[input(provenance)]
     pub label: Option<String>,
 
     // ── Richardson dt-convergence check (gh#52) ─────────────────────
@@ -884,6 +978,7 @@ pub struct FitRunArgs {
     /// the override is keyed into that method's identity (gh#540 seam;
     /// gh#726 for the mh/nl-* dt_check field).
     #[arg(long)]
+    #[input(keyed(method))]
     pub no_dt_check: bool,
 
     /// Drop the dt-check warning threshold to the strict default
@@ -896,6 +991,7 @@ pub struct FitRunArgs {
     /// dt_check.threshold_nats and keyed into its identity (gh#730). A method
     /// that declares its own threshold_nats is unaffected.
     #[arg(long)]
+    #[input(keyed(method))]
     pub dt_check_strict: bool,
 
     /// Binomial sampler for the chain-binomial draws of a `pgas`, `pmmh`,
@@ -912,6 +1008,7 @@ pub struct FitRunArgs {
     /// hash it).
     #[arg(long, value_name = "SAMPLER",
           value_parser = |v: &str| v.parse::<sim::rng::BinomialAlgorithm>())]
+    #[input(keyed(method))]
     pub binomial: Option<sim::rng::BinomialAlgorithm>,
 
     /// Override `n_halvings` on the dt-check (gh#52). Default 2
@@ -921,6 +1018,7 @@ pub struct FitRunArgs {
     /// the override is keyed into that method's identity (gh#540 seam;
     /// gh#726 for the mh/nl-* dt_check field).
     #[arg(long, value_name = "N")]
+    #[input(keyed(method))]
     pub dt_check_halvings: Option<usize>,
 
     // ── IF2-specific algorithm overrides ────────────────────────────
@@ -929,6 +1027,7 @@ pub struct FitRunArgs {
     /// over which the cooling fraction is reached (pomp's
     /// cooling.fraction.50 default).
     #[arg(long, value_name = "N")]
+    #[input(keyed(method))]
     pub cooling_target_iters: Option<usize>,
 
     // ── PGAS-specific algorithm overrides  ──────────
@@ -936,32 +1035,38 @@ pub struct FitRunArgs {
     /// Override [method.max_tree_depth] (NUTS depth ceiling).
     ///
     #[arg(long, value_name = "N")]
+    #[input(keyed(method))]
     pub max_tree_depth: Option<usize>,
 
     /// Override [method.trajectory_warmup] (CSMC-only sweeps
     /// before parameter updates begin).
     #[arg(long, value_name = "N")]
+    #[input(keyed(method))]
     pub trajectory_warmup: Option<usize>,
 
     /// Override [method.csmc_sweeps_per_nuts] (CSMC trajectory
     /// updates per parameter update).
     #[arg(long, value_name = "N")]
+    #[input(keyed(method))]
     pub csmc_sweeps_per_nuts: Option<usize>,
 
     /// Override [method.n_trajectories] (posterior trajectories
     /// saved).
     #[arg(long, value_name = "N")]
+    #[input(keyed(method))]
     pub n_trajectories: Option<usize>,
 
     /// Override [method.dense_mass] to false (use diagonal NUTS
     /// mass matrix). One-way: edit TOML to flip back.
     #[arg(long)]
+    #[input(keyed(method))]
     pub diagonal_mass: bool,
 
     /// Override [method.use_nuts] to false (fall back to
     /// MH-within-Gibbs for the θ|X update). One-way: edit TOML to
     /// flip back.
     #[arg(long)]
+    #[input(keyed(method))]
     pub no_nuts: bool,
 
     /// Override [method.ancestor_sampling] to false: run the CSMC
@@ -970,6 +1075,7 @@ pub struct FitRunArgs {
     /// density pass cost?); changes the sampled draws, so the run stores
     /// under its own address. One-way: edit TOML to flip back.
     #[arg(long)]
+    #[input(keyed(method))]
     pub no_ancestor_sampling: bool,
 
     // ── PMMH-specific algorithm overrides  ──────────
@@ -978,11 +1084,13 @@ pub struct FitRunArgs {
     /// disables Haario-style adaptation). One-way: edit TOML to flip
     /// back.
     #[arg(long)]
+    #[input(keyed(method))]
     pub no_adapt: bool,
 
     /// Override [method.adapt_start] (MCMC step at which
     /// proposal-SD adaptation begins).
     #[arg(long, value_name = "N")]
+    #[input(keyed(method))]
     pub adapt_start: Option<usize>,
 
     // ── PFilter-specific algorithm overrides  ───────
@@ -990,11 +1098,13 @@ pub struct FitRunArgs {
     /// Override [method.record_ancestry] to true (record
     /// ancestor indices for smoothing-path reconstruction).
     #[arg(long)]
+    #[input(keyed(method))]
     pub record_ancestry: bool,
 
     /// Override [method.record_prequential] to true (record
     /// per-step predictive samples for `camdl compare`).
     #[arg(long)]
+    #[input(keyed(method))]
     pub record_prequential: bool,
 }
 
@@ -1742,7 +1852,8 @@ pub struct LabelArgs {
 
 // ─── pfilter ──────────────────────────────────────────────────────────────────
 
-#[derive(Args)]
+#[derive(Args, Inputs)]
+#[input(command(levels(model, config, params, seed), global(crate::GlobalArgs)))]
 #[command(after_help = colored_help!("\
 Examples:
   # Loglik at fixed parameters
@@ -1778,9 +1889,11 @@ Examples:
     .args(["params", "param"]).multiple(true).conflicts_with("scenario")))]
 pub struct PfilterArgs {
     /// IR JSON or .camdl model file
+    #[input(keyed(model))]
     pub model: PathBuf,
 
     #[command(flatten)]
+    #[input(override(table = keyed(model)))]
     pub model_overrides: ModelOverrides,
 
     #[command(flatten)]
@@ -1788,6 +1901,7 @@ pub struct PfilterArgs {
 
     /// Number of particles
     #[arg(long)]
+    #[input(keyed(config))]
     pub particles: usize,
 
     #[command(flatten)]
@@ -1808,6 +1922,7 @@ pub struct PfilterArgs {
     /// Mixing the two forms is a hard error. Multi-stream models must
     /// bind every block (warning fires when only a subset is bound).
     #[arg(long, value_name = "[NAME=]PATH")]
+    #[input(keyed(config))]
     pub data: Vec<DataSpec>,
 
     /// Optional fit toml. Supplies the multi-stream binding via its
@@ -1816,24 +1931,29 @@ pub struct PfilterArgs {
     /// objective: under `ic_free = true` the first observation's term is
     /// left out, as `fit run` scores it. Omit `--fit` for the full likelihood.
     #[arg(long, value_name = "PATH")]
+    #[input(keyed(config))]
     pub fit: Option<PathBuf>,
 
     /// Number of independent filter runs
     #[arg(long, default_value_t = 1)]
+    #[input(keyed(config))]
     pub replicates: usize,
 
     /// Write per-observation diagnostics TSV; use "-" for stdout
     #[arg(long)]
+    #[input(presentation)]
     pub trace: Option<String>,
 
     /// Write a particle-filter health report: per-observation ESS and Snyder
     /// τ² (log-weight variance), plus a printed summary with the implied
     /// particles-to-avoid-collapse estimate exp(τ²/2). Use "-" for stdout.
     #[arg(long)]
+    #[input(presentation)]
     pub pf_health: Option<String>,
 
     /// Output file (default: stdout)
     #[arg(short, long)]
+    #[input(presentation)]
     pub output: Option<PathBuf>,
 
     /// Write final particle states to this TSV. Under a `--fit` config's
@@ -1843,18 +1963,22 @@ pub struct PfilterArgs {
     /// only, and `--score-from` is refused beside a cut that dropped rows
     /// (gh#1138).
     #[arg(long)]
+    #[input(keyed(config))]
     pub save_final_state: Option<PathBuf>,
 
     /// Write N trajectory samples from smoothing distribution to this path
     #[arg(long)]
+    #[input(presentation)]
     pub save_paths: Option<PathBuf>,
 
     /// Number of trajectories for --save-paths
     #[arg(long, default_value_t = 1)]
+    #[input(presentation)]
     pub n_paths: usize,
 
     /// Write per-step particle states and log-weights to this TSV
     #[arg(long)]
+    #[input(presentation)]
     pub save_filtering: Option<PathBuf>,
 
     /// Write, per observation step and stream, the weighted mean and
@@ -1864,6 +1988,7 @@ pub struct PfilterArgs {
     /// before) and `filtered` (after, given the data through t). Columns:
     /// time, stream, phase, mean, q05, q25, q50, q75, q95.
     #[arg(long)]
+    #[input(presentation)]
     pub save_filtered_streams: Option<PathBuf>,
 
     /// Write {STEM}.tsv (the joint log score and ESS per step),
@@ -1873,6 +1998,7 @@ pub struct PfilterArgs {
     /// fixed parameters. See
     /// docs/dev/proposals/2026-04-20-prequential-evaluation.md.
     #[arg(long)]
+    #[input(presentation)]
     pub save_prequential: Option<String>,
 
     /// With --save-prequential, score the trace only at observations
@@ -1886,11 +2012,13 @@ pub struct PfilterArgs {
     /// unchanged; only the trace is windowed, and it records the
     /// boundary (`score_from`).
     #[arg(long, value_name = "TIME", requires = "save_prequential")]
+    #[input(presentation)]
     pub score_from: Option<String>,
 
     /// With --save-prequential, drop per-particle predictive samples
     /// from {STEM}.json. Keeps scalar scores, shrinks the file.
     #[arg(long)]
+    #[input(presentation)]
     pub no_save_samples: bool,
 
     /// Do not record this evaluation as a `pfilters/` leaf in the run
@@ -1899,6 +2027,7 @@ pub struct PfilterArgs {
     /// output root is skipped. `camdl compare` passes it to the filter runs
     /// it derives a trace from.
     #[arg(long)]
+    #[input(presentation)]
     pub no_store: bool,
 }
 
@@ -1918,7 +2047,8 @@ pub struct If2Args {
 
 // ─── profile ──────────────────────────────────────────────────────────────────
 
-#[derive(Args)]
+#[derive(Args, Inputs)]
+#[input(command(levels(profile, method, seed), global(crate::GlobalArgs, override(no_licm = keyed(profile)))))]
 #[command(after_help = colored_help!("\
 Examples:
   # 1D profile likelihood for R0, IF2 in each cell
@@ -1990,18 +2120,28 @@ OUTPUT
 "))]
 pub struct ProfileArgs {
     /// IR JSON or .camdl model file
+    #[input(keyed(profile))]
     pub model: PathBuf,
 
     #[command(flatten)]
     pub model_overrides: InferenceModelOverrides,
 
     #[command(flatten)]
+    #[input(override(scenario = keyed(profile), enable = keyed(profile), disable = keyed(profile)))]
     pub scenario: ScenarioArgs,
 
     #[command(flatten)]
+    #[input(override(
+        dt = keyed(method),
+        allow_degenerate_rates = keyed(profile),
+        pf_max_substeps = keyed(method),
+        binomial = keyed(method),
+        allow_forcing_extrapolation = keyed(profile),
+    ))]
     pub inference: InferenceCore,
 
     #[command(flatten)]
+    #[input(override(obs = keyed(profile)))]
     pub stream: StreamSelection,
 
     /// Observation data TSV.
@@ -2016,6 +2156,7 @@ pub struct ProfileArgs {
     /// Mixing the two forms is a hard error. Multi-stream models must
     /// bind every block (warning fires when only a subset is bound).
     #[arg(long, value_name = "[NAME=]PATH")]
+    #[input(keyed(profile))]
     pub data: Vec<DataSpec>,
 
     /// Optional fit toml supplying the estimated set, bounds, starting
@@ -2030,26 +2171,31 @@ pub struct ProfileArgs {
     /// removes every row ending after the cutoff from every cell's likelihood, and
     /// `[data.holdout]` files must lie after the training rows.
     #[arg(long, value_name = "PATH")]
+    #[input(keyed(profile))]
     pub fit: Option<PathBuf>,
 
     /// Profile grid (repeat for 2D+).
     /// SPEC is `V1,V2,...` | `lin(min,max,n)` | `log10(min,max,n)`.
     #[arg(long, value_name = "NAME=SPEC", required = true)]
+    #[input(keyed(profile))]
     pub sweep: Vec<SweepSpec>,
 
     /// Particles per IF2 cell. Required for `--algorithm if2`; refused for
     /// an nl-* cell, which runs no particle filter.
     #[arg(long)]
+    #[input(keyed(method))]
     pub particles: Option<usize>,
 
     /// IF2 iterations per grid point (default 50). Refused for an nl-* cell.
     #[arg(long)]
+    #[input(keyed(method))]
     pub iterations: Option<usize>,
 
     /// Independent IF2 starts per grid point — a count, not a rule.
     /// `--starts` is the rule the chains are drawn from; this is how
     /// many are drawn in each cell.
     #[arg(long = "n-starts", value_name = "N", default_value_t = 3)]
+    #[input(keyed(method))]
     pub n_starts: usize,
 
     /// Where each cell's chains begin — the same rule grammar
@@ -2068,6 +2214,7 @@ pub struct ProfileArgs {
     /// run's identity. How many chains:
     /// `--n-starts`.
     #[arg(long, value_name = "SPEC")]
+    #[input(keyed(method))]
     pub starts: Option<crate::fit::starts::ChainStarts>,
 
     /// Restrict the `from_posterior` rule in force (`--starts`, or the `--fit`
@@ -2077,6 +2224,7 @@ pub struct ProfileArgs {
     /// (their own R̂ is checked in place of the source's whole-run verdict),
     /// and the subset is keyed into the run's identity (gh#1056).
     #[arg(long, value_name = "IDS", value_parser = crate::fit::starts::parse_starts_chains)]
+    #[input(keyed(method))]
     pub starts_chains: Option<crate::chain_selection::ChainSelection>,
 
     /// Start from a `from_mle` / `from_posterior` source whose stored verdict
@@ -2085,6 +2233,7 @@ pub struct ProfileArgs {
     /// starting from an unconverged fit launders its multi-modality into
     /// every cell. Refused on any other rule, which has no verdict to lift.
     #[arg(long)]
+    #[input(execution)]
     pub allow_nonconverged_source: bool,
 
     // The `--init` family the `[stages]` -> `[method]` split removed on
@@ -2093,20 +2242,27 @@ pub struct ProfileArgs {
     // alpha posture these are not back-compat shims — nothing behind them
     // works — they exist so one message corrects a habitual invocation.
     #[arg(long = "init", value_name = "MODE", hide = true)]
+    #[input(removed)]
     pub _removed_init: Option<String>,
     #[arg(long = "posterior", value_name = "PATH", hide = true)]
+    #[input(removed)]
     pub _removed_posterior: Option<String>,
     #[arg(long = "mle", value_name = "PATH", hide = true)]
+    #[input(removed)]
     pub _removed_mle: Option<String>,
     #[arg(long = "params", value_name = "TOML", hide = true)]
+    #[input(removed)]
     pub _removed_params: Option<String>,
     // The `--pmmh-*` flags went with per-cell PMMH; same shape, one message
     // (answered in `cmd_profile` before any file is read).
     #[arg(long = "pmmh-steps", value_name = "N", hide = true)]
+    #[input(removed)]
     pub _removed_pmmh_steps: Option<String>,
     #[arg(long = "pmmh-particles", value_name = "N", hide = true)]
+    #[input(removed)]
     pub _removed_pmmh_particles: Option<String>,
     #[arg(long = "pmmh-rho", value_name = "F", hide = true)]
+    #[input(removed)]
     pub _removed_pmmh_rho: Option<String>,
 
     /// IF2 cooling fraction (default 0.95): the perturbation SD reaches this
@@ -2114,12 +2270,14 @@ pub struct ProfileArgs {
     /// then keeps cooling (pomp's `cooling.fraction.50`, the same schedule
     /// `fit run`'s `cooling` means). Refused for an nl-* cell.
     #[arg(long)]
+    #[input(keyed(method))]
     pub cooling: Option<f64>,
 
     /// The iteration at which `--cooling` is reached (default 50, pomp's
     /// `cooling.fraction.50`; `fit run`'s `cooling_target_iters`). Refused
     /// for an nl-* cell.
     #[arg(long, value_name = "N")]
+    #[input(keyed(method))]
     pub cooling_target_iters: Option<usize>,
 
     /// Optional with `--fit`: without it each cell estimates the fit
@@ -2132,6 +2290,7 @@ pub struct ProfileArgs {
     /// pinned. Required without `--fit`. An nl-* cell perturbs nothing, so it
     /// takes names only (`NAME=auto` or `auto`) and refuses an SD.
     #[arg(long)]
+    #[input(keyed(method))]
     pub rw_sd: Option<RwSd>,
 
     /// Where the collected table goes (default: stdout): one row per grid
@@ -2140,10 +2299,12 @@ pub struct ProfileArgs {
     /// finite starts, how many completed out of how many ran, and the best
     /// start's run id. Written on a rerun served from the store too.
     #[arg(short, long)]
+    #[input(presentation)]
     pub output: Option<PathBuf>,
 
     /// Format of the collected table: `tsv` (default) or `json`.
     #[arg(long, value_enum, default_value_t = ProfileTableFormat::Tsv)]
+    #[input(presentation)]
     pub format: ProfileTableFormat,
 
     /// Multi-seed sensitivity: run the entire profile grid at each
@@ -2153,6 +2314,7 @@ pub struct ProfileArgs {
     /// `--seed` for a single-seed run. Accepts comma list `1,2,3` or
     /// inclusive range `1:5`.
     #[arg(long, value_name = "SPEC")]
+    #[input(expands)]
     pub seeds: Option<SeedSpec>,
 
     /// User-supplied display label for this profile run. Validated
@@ -2160,6 +2322,7 @@ pub struct ProfileArgs {
     /// `camdl list` and `camdl show`. For multi-seed runs the label
     /// applies to the umbrella; per-seed children remain unlabelled.
     #[arg(long, value_name = "TEXT")]
+    #[input(provenance)]
     pub label: Option<String>,
 
     /// Per-cell inference algorithm. When omitted the per-cell runner
@@ -2171,18 +2334,21 @@ pub struct ProfileArgs {
     /// Validated against the methods registry at startup; invalid pairs
     /// error with an actionable suggestion.
     #[arg(long, value_name = "NAME")]
+    #[input(keyed(method))]
     pub algorithm: Option<String>,
 
     /// Simulation backend. Defaults to `chain_binomial`; pass
     /// `--backend ode` together with an ODE-compatible algorithm
     /// (`nl-sbplx`, `nl-bobyqa`, `nl-lbfgs`) for deterministic per-cell MLE.
     #[arg(long, value_name = "NAME")]
+    #[input(execution)]
     pub backend: Option<String>,
 }
 
 // ─── survey ───────────────────────────────────────────────────────────────────
 
-#[derive(Args)]
+#[derive(Args, Inputs)]
+#[input(command(levels(model, config, box, seed), global(crate::GlobalArgs)))]
 #[command(after_help = colored_help!("\
 EXAMPLES
 
@@ -2295,6 +2461,7 @@ CITED REFERENCES
 "))]
 pub struct SurveyArgs {
     /// IR JSON or .camdl model file
+    #[input(keyed(model))]
     pub model: PathBuf,
 
     #[command(flatten)]
@@ -2307,6 +2474,7 @@ pub struct SurveyArgs {
     /// changes every point's log-likelihood, so it is part of the survey's
     /// run identity.
     #[arg(long, default_value_t = false)]
+    #[input(keyed(config))]
     pub allow_degenerate_rates: bool,
 
     /// fit.toml supplying [estimate] bounds and [data] (fit-aware mode).
@@ -2316,15 +2484,18 @@ pub struct SurveyArgs {
     /// `[data.holdout]` files must lie after the training rows.
     /// Mutually exclusive with --estimate / --data; pass exactly one.
     #[arg(long, conflicts_with_all = ["estimate", "data"])]
+    #[input(keyed(config))]
     pub fit: Option<PathBuf>,
 
     /// Inline LHS bounds, e.g. --estimate "beta=0.001:1.0" (repeat).
     /// Required when --fit is not given.
     #[arg(long, value_name = "NAME=LO:HI")]
+    #[input(keyed(box))]
     pub estimate: Vec<types::EstimateBoundsSpec>,
 
     /// Inline observation data TSV. Required when --fit is not given.
     #[arg(long)]
+    #[input(keyed(config))]
     pub data: Option<PathBuf>,
 
     /// Fixed parameters (NAME=VALUE), repeat. Pins the parameter at the
@@ -2332,11 +2503,13 @@ pub struct SurveyArgs {
     /// config lists in `[estimate]` is held at the value and not sampled
     /// (reported at info).
     #[arg(long, value_name = "NAME=VALUE")]
+    #[input(keyed(config))]
     pub fixed: Vec<types::ParamOverride>,
 
     /// Named scenario from the model. Applies the scenario's
     /// enable/disable lists and param overrides before survey.
     #[arg(long)]
+    #[input(keyed(config))]
     pub scenario: Option<String>,
 
     /// Number of Latin-hypercube points to evaluate.
@@ -2349,6 +2522,7 @@ pub struct SurveyArgs {
     /// or higher for sparse-basin models). Set 0 to use the auto rule
     /// regardless.
     #[arg(long, default_value_t = 0)]
+    #[input(keyed(box))]
     pub n_points: usize,
 
     /// Likelihood evaluation method:
@@ -2365,12 +2539,14 @@ pub struct SurveyArgs {
     ///     cheaper but biased toward "lucky outliers" when process noise
     ///     is non-trivial. Safe only for known-deterministic models.
     #[arg(long, default_value_t = crate::run_meta::SurveyEvalMethod::Auto)]
+    #[input(keyed(config))]
     pub eval: crate::run_meta::SurveyEvalMethod,
 
     /// Particle count for `--eval pfilter`. 200 is adequate for
     /// `sigma_se <= 1` on weekly data per the proposal's per-point
     /// cost table.
     #[arg(long, default_value_t = 200)]
+    #[input(keyed(config))]
     pub eval_particles: usize,
 
     /// PF replicates per LHS point (logmeanexp combiner). The
@@ -2381,10 +2557,12 @@ pub struct SurveyArgs {
     /// pseudo-marginal MCMC and gives a tighter SE estimate at
     /// 5/3× the compute. Always 1 with `--eval simulate`.
     #[arg(long, default_value_t = 5)]
+    #[input(keyed(config))]
     pub eval_replicates: usize,
 
     /// LHS / PF base seed.
     #[arg(long, default_value_t = 42)]
+    #[input(keyed(seed))]
     pub seed: u64,
 
     /// Render an interactive HTML pair-plot (`landscape.html`) of the
@@ -2393,17 +2571,20 @@ pub struct SurveyArgs {
     /// rendered from the stored landscape. Off by default — TSV is the
     /// canonical artifact, HTML is opt-in (proposal §"Default behaviour").
     #[arg(long)]
+    #[input(child)]
     pub render: bool,
 
     /// Output root directory (default: ./results, matches the rest
     /// of camdl).
     #[arg(long)]
+    #[input(execution)]
     pub output: Option<PathBuf>,
 
     /// User-supplied display label for this survey run. Validated
     /// against `^[a-zA-Z0-9 ,._-]{1,64}$` after trim. Surfaced in
     /// `camdl list` and `camdl show`.
     #[arg(long, value_name = "TEXT")]
+    #[input(provenance)]
     pub label: Option<String>,
 
     /// Force re-evaluation of all LHS points; bypass the cache (the
@@ -2411,10 +2592,12 @@ pub struct SurveyArgs {
     /// leaf held by a survey on another host, which camdl never reclaims on
     /// its own.
     #[arg(long)]
+    #[input(execution)]
     pub force: bool,
 
     /// Rayon thread count (0 = all available cores).
     #[arg(long, default_value_t = 0, env = "CAMDL_PARALLEL")]
+    #[input(execution)]
     pub parallel: usize,
 }
 
@@ -3156,7 +3339,8 @@ pub struct MreFitArgs {
 /// parses identically; the bundle output is `-b` (simulate's own `-o` keeps
 /// its trajectory-output meaning). No `--no-data`: a forward sim has no observed
 /// data, and its tables/params can't be dropped without breaking the run.
-#[derive(Args)]
+#[derive(Args, Inputs)]
+#[input(command(levels(model, config, params, scenario, seed, obs), global(crate::GlobalArgs)))]
 #[command(after_help = colored_help!("\
 Bundles a model + its read() tables + params into a shareable `.tar.gz` that
 reproduces a forward simulation. Takes every `camdl simulate` flag; `-b/--bundle`
@@ -3175,6 +3359,7 @@ pub struct MreSimulateArgs {
 
     /// Output bundle path. Defaults to `<model-stem>.mre.tar.gz`.
     #[arg(short = 'b', long = "bundle", value_name = "FILE")]
+    #[input(presentation)]
     pub bundle: Option<PathBuf>,
 }
 

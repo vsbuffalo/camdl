@@ -15,7 +15,7 @@ description: Rust code conventions — crate layout, dead code, existing seams, 
 Intra-workspace dependencies, read from the `Cargo.toml` files:
 
 ```
-cli  → declared, diff, io, ir, numerics, runid, score, sim
+cli  → declared, diff, input-class-derive, io, ir, numerics, runid, score, sim
 io   → ir, sim
 sim  → ir, numerics, score
 runid → ir, runid-derive
@@ -23,7 +23,7 @@ ir   → declared, differentiate-derive
 score → numerics
 diff → declared
 external-harness → numerics
-declared, numerics, differentiate-derive, runid-derive  → (leaves)
+declared, numerics, differentiate-derive, input-class-derive, runid-derive  → (leaves)
 ```
 
 `declared` holds the types of the declared-model section of the IR envelope (the
