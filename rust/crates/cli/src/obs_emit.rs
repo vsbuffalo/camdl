@@ -45,10 +45,11 @@
 //! [`simulate_dataset`] runs the forward model once and writes the dataset
 //! either way.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use ir::observation::{ColumnRole, Covers, ObservationModel, TemporalKind};
+use ir::observation::{ColumnRole, Covers, ObservationModel, ObservationSchedule, TemporalKind};
 use sim::compiled_model::CompiledModel;
 use score::trace::Coverage;
 use sim::inference::{ObsCell, StreamTimes};
@@ -182,11 +183,7 @@ pub(crate) fn plan_emission(
     // an end of it, is quietly not written.
     let label_in_run = |t: f64| t >= t_start - eps && t <= t_end + eps;
 
-    let covers: Option<Covers> = match (&obs.covers, override_step) {
-        (Some(Covers::From { offset, .. }), Some(step)) => Some(Covers::From { offset: *offset, span: step }),
-        (Some(Covers::Until { offset, .. }), Some(step)) => Some(Covers::Until { offset: *offset, span: step }),
-        (c, _) => c.clone(),
-    };
+    let covers = effective_covers(obs, override_step);
 
     let rows: Vec<EmitRow> = match (obs.projection.temporal_kind(), &covers) {
         // A state read at each instant; a declaration on it does not compile.
@@ -243,6 +240,206 @@ pub(crate) fn plan_emission(
         }
     };
     Ok(EmitPlan { columns, format: TemporalFormat::Numeric, scored, rows })
+}
+
+/// The `covers` a stream emits under: its declaration, with a uniform form's
+/// span re-widened to the `--emit-every` cadence when the flag names the
+/// stream (gh#656). Where the label sits on its window is kept.
+fn effective_covers(obs: &ObservationModel, override_step: Option<f64>) -> Option<Covers> {
+    match (&obs.covers, override_step) {
+        (Some(Covers::From { offset, .. }), Some(step)) => Some(Covers::From { offset: *offset, span: step }),
+        (Some(Covers::Until { offset, .. }), Some(step)) => Some(Covers::Until { offset: *offset, span: step }),
+        (c, _) => c.clone(),
+    }
+}
+
+/// Every label of `schedule` in order, unbounded for a regular schedule. A
+/// regular schedule accumulates (`t += step` from its `start`), so every
+/// caller that enumerates a schedule sees the same floats: the emitter's
+/// times ([`crate::obs_schedule_times`]) and [`period_under_way`].
+pub(crate) fn schedule_labels(schedule: &ObservationSchedule) -> Box<dyn Iterator<Item = f64> + '_> {
+    match schedule {
+        ObservationSchedule::Regular(reg) => {
+            let step = reg.step;
+            Box::new(std::iter::successors(Some(reg.start), move |t| Some(t + step)))
+        }
+        ObservationSchedule::AtTimes(times) => Box::new(times.iter().copied()),
+    }
+}
+
+/// The schedule a stream emits on once `--emit-every` is applied, with the
+/// cadence that re-widens a uniform form's span: everything that fixes the
+/// periods `simulate --obs` writes for the stream, apart from the run.
+pub(crate) struct EffectiveSchedule<'a> {
+    pub schedule: Cow<'a, ObservationSchedule>,
+    pub override_step: Option<f64>,
+}
+
+impl<'a> EffectiveSchedule<'a> {
+    /// `None` for a fit-only stream (no `emit_schedule`), which is never
+    /// written.
+    pub(crate) fn of(
+        obs: &'a ObservationModel,
+        emit: Option<&crate::emit_every::EmitEvery>,
+    ) -> Result<Option<Self>, String> {
+        let Some(declared) = obs.emit_schedule.as_ref() else { return Ok(None) };
+        Ok(Some(EffectiveSchedule {
+            schedule: crate::emit_every::apply_override(emit, obs, declared)?,
+            override_step: emit.and_then(|e| e.resolve_for(&obs.source)),
+        }))
+    }
+}
+
+/// The reporting period of `obs` under way at `t`: one that starts before `t`
+/// and ends after it, both by more than `OBS_SNAP_EPS`. `None` if `t` is a
+/// boundary of every period of the stream's effective schedule.
+///
+/// The single authority for the restart rule (D100): a state saved at `t`
+/// holds compartment counts only, not the part of such a period's total that
+/// accrued before `t`, so a restart cannot write that period. Kept apart from
+/// [`plan_emission`] so the exact restart (#1158) can delete it.
+///
+/// - A uniform form: each label of the schedule, with no origin filter, under
+///   the effective `covers` (any offset, span or time unit, a ratio of flows
+///   included). Periods that overlap are always refused at some `t`.
+/// - Window columns: the periods are consecutive emit times, the first
+///   opening at the model's own start `model_t_start`. Under way unless `t`
+///   is an emit time or `model_t_start`, or no emit time follows `t` (then
+///   no window closes after it, and the writer writes none).
+/// - A state read (an instant stream): never.
+pub(crate) fn period_under_way(
+    obs: &ObservationModel,
+    schedule: &EffectiveSchedule,
+    model_t_start: f64,
+    t: f64,
+) -> Option<(f64, f64)> {
+    let eps = crate::OBS_SNAP_EPS;
+    let regular = matches!(*schedule.schedule, ObservationSchedule::Regular(_));
+    // The loops below end a regular schedule by comparing its labels with
+    // `t`; a NaN start compares false with everything and would not end.
+    if let ObservationSchedule::Regular(r) = &*schedule.schedule {
+        debug_assert!(r.start.is_finite(), "stream '{}': emit schedule start {}", obs.name, r.start);
+    }
+    // A regular schedule that does not advance has one label.
+    let n = match &*schedule.schedule {
+        ObservationSchedule::Regular(r) if r.step.is_nan() || r.step <= 0.0 => 1,
+        _ => usize::MAX,
+    };
+    match (obs.projection.temporal_kind(), effective_covers(obs, schedule.override_step)) {
+        (TemporalKind::Instant, _) | (TemporalKind::Interval, None) => None,
+        (TemporalKind::Interval, Some(covers @ (Covers::From { .. } | Covers::Until { .. }))) => {
+            for label in schedule_labels(&schedule.schedule).take(n) {
+                let (start, stop) = covers.period_of(label)?;
+                if start < t - eps && stop > t + eps {
+                    return Some((start, stop));
+                }
+                // A regular schedule's periods start later with each label,
+                // so none after this one starts before `t`.
+                if regular && start >= t - eps {
+                    return None;
+                }
+            }
+            None
+        }
+        (TemporalKind::Interval, Some(Covers::WindowColumns)) => {
+            if (t - model_t_start).abs() <= eps {
+                return None;
+            }
+            let mut open = model_t_start;
+            let mut close: Option<f64> = None;
+            for label in schedule_labels(&schedule.schedule).take(n) {
+                if (label - t).abs() <= eps {
+                    return None;
+                }
+                if label < t {
+                    open = open.max(label);
+                } else if close.is_none_or(|c| label < c) {
+                    close = Some(label);
+                }
+                if regular && label > t + eps {
+                    break;
+                }
+            }
+            // No emit time after `t`: no window closes after it, so the
+            // writer writes none there and none is under way.
+            close.map(|c| (open, c))
+        }
+    }
+}
+
+/// Whether two of `obs`'s periods under `schedule` overlap (a uniform span
+/// longer than the step between labels), so that every time falls inside
+/// some period and no restart time writes the stream cleanly. Window
+/// columns never overlap.
+pub(crate) fn periods_overlap(obs: &ObservationModel, schedule: &EffectiveSchedule) -> bool {
+    let eps = crate::OBS_SNAP_EPS;
+    let Some(covers @ (Covers::From { span, .. } | Covers::Until { span, .. })) =
+        effective_covers(obs, schedule.override_step)
+    else {
+        return false;
+    };
+    match &*schedule.schedule {
+        ObservationSchedule::Regular(r) => span > r.step + eps,
+        ObservationSchedule::AtTimes(ts) => {
+            let mut periods: Vec<(f64, f64)> = ts.iter().filter_map(|&l| covers.period_of(l)).collect();
+            periods.sort_by(|a, b| a.0.total_cmp(&b.0));
+            periods.windows(2).any(|w| w[1].0 < w[0].1 - eps)
+        }
+    }
+}
+
+/// The refusal of a restart at `t` that would write `stream`'s period
+/// `[start, stop)`, which `t` falls inside (D100). The restart time may come
+/// from a filter's data, a hand-made state or a PGAS fit's saved paths, so
+/// the message names the time, not its source. `overlapping`
+/// ([`periods_overlap`]) says no restart time writes the stream cleanly.
+pub(crate) fn restart_inside_period_refusal(
+    stream: &str,
+    (start, stop): (f64, f64),
+    t: f64,
+    overlapping: bool,
+) -> String {
+    let way_out = if overlapping {
+        "Its periods overlap (each is longer than the step between them), so every time falls \
+         inside one of them and no restart writes this stream cleanly.".to_string()
+    } else {
+        format!("A restart at either end of the period, t = {start} or t = {stop}, writes it cleanly.")
+    };
+    format!(
+        "stream '{stream}' cannot be written from this restart: the restart time t = {t} falls \
+         inside its period [{start}, {stop}), and the saved state does not carry the part of \
+         that period before t = {t}. {way_out} To predict the period under way, use `camdl fit \
+         predict --fit <fit.toml> --horizon <DURATION>` (it needs a fit; a fixed-parameter \
+         filter has none yet)."
+    )
+}
+
+/// The simulate pre-flight of D100: a run restarted at `t` refuses, before
+/// it writes anything, when a period is under way at `t` for a stream it
+/// would write (`write_all`, every stream with an `emit_schedule`: `--obs`,
+/// `--obs-dir`, `--obs-only`, `--obs-only-dir` and the store's `obs/` child)
+/// or that a quantity reads (`quantity_streams`). Streams are judged in
+/// declaration order; the first refusal is returned. `model_t_start` is the
+/// model's declared start, before the restart moves it.
+pub(crate) fn refuse_restart_inside_a_period(
+    model: &ir::Model,
+    model_t_start: f64,
+    t: f64,
+    write_all: bool,
+    quantity_streams: &[&str],
+    emit: Option<&crate::emit_every::EmitEvery>,
+) -> Result<(), String> {
+    for obs in &model.observations {
+        if !(write_all || quantity_streams.contains(&obs.name.as_str())) {
+            continue;
+        }
+        let Some(schedule) = EffectiveSchedule::of(obs, emit)? else { continue };
+        if let Some(period) = period_under_way(obs, &schedule, model_t_start, t) {
+            return Err(restart_inside_period_refusal(
+                &obs.name, period, t, periods_overlap(obs, &schedule)));
+        }
+    }
+    Ok(())
 }
 
 /// Plan the rows a stream's **bound data** occupies — the design-preserving
@@ -1350,5 +1547,137 @@ mod tests {
             "the instant ratio sits below the window fraction every week: {gaps:?}");
         let worst = gaps.iter().cloned().fold(0.0_f64, f64::min);
         assert!(worst < -0.10, "the worst week's gap exceeds a tenth: {worst:.3} ({gaps:?})");
+    }
+
+    // ── period_under_way (D100) ──────────────────────────────────────────────
+
+    fn every(start: f64, step: f64) -> ObservationSchedule {
+        ObservationSchedule::Regular(ir::observation::RegularSchedule { start, step, end: 63.0 })
+    }
+
+    fn declared(s: ObservationSchedule) -> EffectiveSchedule<'static> {
+        EffectiveSchedule { schedule: Cow::Owned(s), override_step: None }
+    }
+
+    fn window_cols() -> Vec<ObsColumn> {
+        vec![
+            ObsColumn { name: "from".into(), role: ColumnRole::WindowStart },
+            ObsColumn { name: "until".into(), role: ColumnRole::WindowStop },
+            ObsColumn { name: "n_cases".into(), role: ColumnRole::Value(ir::parameter::ParamKind::Count) },
+        ]
+    }
+
+    /// Each uniform form, at any offset and span: the label's own period
+    /// (`period_of`), with no origin filter.
+    #[test]
+    fn a_uniform_period_under_way_is_found_for_every_offset_and_span() {
+        let weekly = every(0.0, 7.0);
+        let closing = stream(incidence(), Some(Covers::Until { offset: 0.0, span: 7.0 }), time_cols());
+        assert_eq!(period_under_way(&closing, &declared(weekly.clone()), 0.0, 25.0), Some((21.0, 28.0)));
+        assert_eq!(period_under_way(&closing, &declared(weekly.clone()), 0.0, 21.0), None);
+        let starting = stream(incidence(), Some(Covers::From { offset: 0.0, span: 7.0 }), time_cols());
+        assert_eq!(period_under_way(&starting, &declared(weekly.clone()), 0.0, 25.0), Some((21.0, 28.0)));
+        // ending_on: stop = label + 1, so the boundaries are 1, 8, ..., 22, 29.
+        let ending = stream(incidence(), Some(Covers::Until { offset: 1.0, span: 7.0 }), time_cols());
+        assert_eq!(period_under_way(&ending, &declared(weekly.clone()), 0.0, 25.0), Some((22.0, 29.0)));
+        assert_eq!(period_under_way(&ending, &declared(weekly.clone()), 0.0, 22.0), None);
+        assert_eq!(period_under_way(&ending, &declared(weekly.clone()), 0.0, 21.0), Some((15.0, 22.0)));
+        // Periods wider than the step overlap, so no time is a boundary of
+        // all of them.
+        let overlapping = stream(incidence(), Some(Covers::Until { offset: 0.0, span: 14.0 }), time_cols());
+        assert_eq!(period_under_way(&overlapping, &declared(weekly.clone()), 0.0, 21.0), Some((14.0, 28.0)));
+        // An `at [...]` list.
+        let listed = declared(ObservationSchedule::AtTimes(vec![10.0, 30.0]));
+        let s = stream(incidence(), Some(Covers::Until { offset: 0.0, span: 20.0 }), time_cols());
+        assert_eq!(period_under_way(&s, &listed, 0.0, 25.0), Some((10.0, 30.0)));
+        assert_eq!(period_under_way(&s, &listed, 0.0, 10.0), None);
+    }
+
+    /// `--emit-every` re-widens a uniform form's span to the cadence, so the
+    /// periods judged are the ones the emitter writes.
+    #[test]
+    fn emit_every_re_widens_the_periods_judged() {
+        let daily = stream(incidence(), Some(Covers::Until { offset: 0.0, span: 1.0 }), time_cols());
+        let declared_daily = declared(every(0.0, 1.0));
+        assert_eq!(period_under_way(&daily, &declared_daily, 0.0, 25.0), None);
+        let weekly = EffectiveSchedule { schedule: Cow::Owned(every(0.0, 7.0)), override_step: Some(7.0) };
+        assert_eq!(period_under_way(&daily, &weekly, 0.0, 25.0), Some((21.0, 28.0)));
+        let fives = EffectiveSchedule { schedule: Cow::Owned(every(0.0, 5.0)), override_step: Some(5.0) };
+        assert_eq!(period_under_way(&daily, &fives, 0.0, 25.0), None);
+    }
+
+    /// Window columns: consecutive emit times, the first window opening at the
+    /// model's start, so only an emit time or the start is not under way.
+    #[test]
+    fn a_window_column_period_under_way_opens_at_the_model_start() {
+        let s = stream(incidence(), Some(Covers::WindowColumns), window_cols());
+        let weekly = declared(every(0.0, 7.0));
+        assert_eq!(period_under_way(&s, &weekly, 0.0, 25.0), Some((21.0, 28.0)));
+        assert_eq!(period_under_way(&s, &weekly, 0.0, 28.0), None);
+        let listed = declared(ObservationSchedule::AtTimes(vec![30.0, 45.0]));
+        assert_eq!(period_under_way(&s, &listed, 0.0, 25.0), Some((0.0, 30.0)));
+        assert_eq!(period_under_way(&s, &listed, 0.0, 0.0), None, "the model's start");
+        assert_eq!(period_under_way(&s, &listed, 0.0, 30.0), None);
+        assert_eq!(period_under_way(&s, &listed, 0.0, 35.0), Some((30.0, 45.0)));
+        // No emit time after `t`: no window closes after it, none is written.
+        assert_eq!(period_under_way(&s, &listed, 0.0, 50.0), None);
+    }
+
+    /// The refusal says the restart time falls inside the period, whatever
+    /// produced that time, and offers a clean restart time only when the
+    /// periods do not overlap.
+    #[test]
+    fn the_refusal_names_a_clean_restart_time_only_when_periods_do_not_overlap() {
+        let weekly = declared(every(0.0, 7.0));
+        let tiled = stream(incidence(), Some(Covers::Until { offset: 0.0, span: 7.0 }), time_cols());
+        let wide = stream(incidence(), Some(Covers::Until { offset: 0.0, span: 14.0 }), time_cols());
+        assert!(!periods_overlap(&tiled, &weekly));
+        assert!(periods_overlap(&wide, &weekly));
+        let listed = declared(ObservationSchedule::AtTimes(vec![14.0, 7.0, 21.0]));
+        assert!(periods_overlap(&wide, &listed), "an at-list is judged in time order");
+        assert!(!periods_overlap(&tiled, &listed));
+        let windows = stream(incidence(), Some(Covers::WindowColumns), window_cols());
+        assert!(!periods_overlap(&windows, &weekly));
+
+        let msg = restart_inside_period_refusal("weekly", (21.0, 28.0), 25.0, false);
+        assert!(msg.contains("the restart time t = 25 falls inside its period [21, 28)"), "{msg}");
+        assert!(msg.contains("t = 21 or t = 28, writes it cleanly"), "{msg}");
+        assert!(!msg.contains("data ends"), "the time may not come from a filter's data: {msg}");
+        let msg = restart_inside_period_refusal("weekly", (14.0, 28.0), 21.0, true);
+        assert!(msg.contains("every time falls inside one of them"), "{msg}");
+        assert!(!msg.contains("writes it cleanly"), "{msg}");
+    }
+
+    /// A NaN schedule start is caught in debug builds rather than looping.
+    #[test]
+    #[should_panic(expected = "emit schedule start NaN")]
+    fn a_nan_schedule_start_is_asserted_not_looped_on() {
+        let s = stream(incidence(), Some(Covers::Until { offset: 0.0, span: 7.0 }), time_cols());
+        period_under_way(&s, &declared(every(f64::NAN, 7.0)), 0.0, 25.0);
+    }
+
+    /// A state read has no period.
+    #[test]
+    fn an_instant_stream_never_has_a_period_under_way() {
+        let s = stream(Projection::CurrentPop("I".into()), None, time_cols());
+        assert_eq!(period_under_way(&s, &declared(every(0.0, 7.0)), 0.0, 25.0), None);
+    }
+
+    /// Test 12 of the design: a period starting within `OBS_SNAP_EPS` of the
+    /// restart time is neither refused nor dropped. The guard sees `t` as its
+    /// boundary, and the emitter, given the restart's times, writes the row.
+    #[test]
+    fn a_period_starting_within_the_snap_tolerance_of_t_is_neither_refused_nor_dropped() {
+        let eps = crate::OBS_SNAP_EPS;
+        let t = 21.0 + 0.5 * eps;
+        let weekly = every(0.0, 7.0);
+        for covers in [Covers::Until { offset: 0.0, span: 7.0 }, Covers::From { offset: 0.0, span: 7.0 }] {
+            let s = stream(incidence(), Some(covers.clone()), time_cols());
+            assert_eq!(period_under_way(&s, &declared(weekly.clone()), 0.0, t), None, "{covers:?}");
+            let times = crate::obs_schedule_times(&weekly, Some(t), 49.0);
+            let plan = plan_emission(&s, &times, t, 49.0, None).unwrap();
+            let first = plan.rows.first().map(|r| r.coverage);
+            assert_eq!(first, Some(iv(21.0, 28.0)), "{covers:?}: the week [21, 28) is written");
+        }
     }
 }

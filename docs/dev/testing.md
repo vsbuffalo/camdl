@@ -534,6 +534,27 @@ to `[1826.2, 3652.4, …]`):
    that's working as designed.
 3. Commit the compiler change and the golden update together.
 
+### Restart baselines recorded from main
+
+`rust/crates/cli/tests/restart_period_guard.rs` compares some restarted runs
+(`simulate --init-state`) byte for byte with output recorded from a build of
+`main` before the restart rule (D100), kept in
+`rust/crates/cli/tests/fixtures/restart_guard/<case>/`. The comparison skips a
+file's first line when it is the build-version comment (`# 0.1.0+<hash>`).
+
+Setting `CAMDL_RECORD_RESTART_BASELINE=1` makes the `baseline_` tests write
+those files instead of comparing; any other value, or none, compares. The point
+of the files is that they come from code without the rule, so record them only
+with `rust/target/release/camdl` built from `main` (check `camdl --version`),
+never from the branch under test, which would compare the branch with itself:
+
+```bash
+cd rust && PATH="$PWD/target/_camdlc_bin:$PATH" CAMDL_SKIP_VERSION_CHECK=1 \
+  CAMDL_RECORD_RESTART_BASELINE=1 cargo test -p cli --test restart_period_guard baseline_
+```
+
+Review the diff of the recorded files before committing them.
+
 ## Gotchas
 
 - **`#[ignore]`** on Rust tests means opt-in. Always run with `-- --ignored`

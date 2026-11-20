@@ -1777,13 +1777,6 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
         }
     }
 
-    // ── Prepare obs-dir output directory ────────────────────────────────────
-    if let Some(ref dir) = obs_dir {
-        std::fs::create_dir_all(dir).unwrap_or_else(|e| {
-            out.fail(format!("error: cannot create obs directory '{}': {}", dir, e));
-        });
-    }
-
     // The display label rides on every leaf's `RunRecord.provenance.label`.
     let label_arg: Option<String> = match a.label.as_deref() {
         Some(raw) => match crate::fit::validate_label(raw) {
@@ -2022,6 +2015,39 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
         vec![HashMap::new()]
     };
     let n_draws = draws.len();
+
+    // ── Pre-flight: a restart never writes a period under way at its origin
+    //
+    // D100. Both origin sources have resolved here (`--init-state FILE`
+    // above, `--init-state fit` with the posterior draws). The saved state
+    // holds compartment counts only, not the part of a period's total that
+    // accrued before the origin, so a period under way there cannot be
+    // written, by an `--obs*` writer, the store's `obs/` child or a quantity
+    // over the stream. Refused before anything is written; replicates,
+    // sweeps and scenarios share the one origin.
+    if let Some(origin) = init_state_source.as_ref().map(|s| s.origin_t) {
+        // The streams `materialize_obs_for_quantities` draws for the
+        // quantities: only under `--quantities-out`, which is what evaluates them.
+        let quantity_streams: Vec<&str> = if a.quantities_out.is_some() {
+            sim::quantity::QuantityEvaluator::obs_streams_of(&model_to.quantities)
+        } else {
+            Vec::new()
+        };
+        if let Err(e) = crate::obs_emit::refuse_restart_inside_a_period(
+            &model_to, model_to.simulation.t_start, origin, want_obs, &quantity_streams,
+            emit_every.as_ref(),
+        ) {
+            out.fail(format!("error: {e}"));
+        }
+    }
+
+    // ── Prepare obs-dir output directory ────────────────────────────────────
+    // After every pre-flight, so a refused run leaves no directory behind.
+    if let Some(ref dir) = obs_dir {
+        std::fs::create_dir_all(dir).unwrap_or_else(|e| {
+            out.fail(format!("error: cannot create obs directory '{}': {}", dir, e));
+        });
+    }
 
     let n_scenarios = scenario_list.len();
     // The parameter-point axis is EITHER the design (sweep points) OR the
@@ -4454,17 +4480,12 @@ pub(crate) fn obs_schedule_times(
     // axis, so both axes agree on whether the terminal point is in (gh#606).
     let in_horizon = |t: f64| t <= t_end + sim::schedule::output_tol(t_end);
     match schedule {
-        ir::observation::ObservationSchedule::Regular(reg) => {
-            let mut times = Vec::new();
-            let mut t = reg.start;
-            while in_horizon(t) {
-                if after_origin(t) {
-                    times.push(t);
-                }
-                t += reg.step;
-            }
-            times
-        }
+        // The labels as `period_under_way` enumerates them, so the restart
+        // check and the emitter see the same floats.
+        ir::observation::ObservationSchedule::Regular(_) => crate::obs_emit::schedule_labels(schedule)
+            .take_while(|&t| in_horizon(t))
+            .filter(|&t| after_origin(t))
+            .collect(),
         ir::observation::ObservationSchedule::AtTimes(times) => {
             times.iter().copied().filter(|&t| in_horizon(t) && after_origin(t)).collect()
         }

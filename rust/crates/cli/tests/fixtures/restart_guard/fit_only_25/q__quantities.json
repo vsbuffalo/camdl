@@ -1,0 +1,19 @@
+{
+  "calendar": {
+    "days_per_unit": 1.0,
+    "origin": null,
+    "time_unit": "days"
+  },
+  "quantities": [
+    {
+      "censoring": null,
+      "index_dims": [],
+      "name": "peak_daily",
+      "reduce": "max",
+      "shape": "scalar",
+      "source": "observations",
+      "unit": null
+    }
+  ],
+  "schema": "camdl.quantities/v1"
+}

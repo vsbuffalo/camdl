@@ -116,13 +116,18 @@ pub(crate) enum TargetSource {
     /// A uniform `covers` form: the stream's tiling continued at its width.
     DeclaredTiling { span: f64 },
     /// The stream's `emit_schedule`: the periods between consecutive schedule
-    /// times (window columns) or the schedule's instants (a state read).
+    /// times (window columns, past the last known window, D106) or the
+    /// schedule's instants (a state read).
     EmitSchedule,
-    /// A window-column stream with no `emit_schedule`, scored: the periods of
-    /// its held-out rows within the reach (D80). Nothing is extrapolated, and
-    /// a target's ordinal counts only the held-out rows, so it is not a
-    /// horizon comparable with a tiled stream's; compare such targets by lead.
+    /// A window-column stream's held-out windows within the reach, exactly as
+    /// observed (D80, D106). Nothing is extrapolated, and a target's ordinal
+    /// counts only the held-out rows, so it is not a horizon comparable with a
+    /// tiled stream's; compare such targets by lead.
     HeldOutRows,
+    /// A window-column stream's held-out windows within the reach, then its
+    /// `emit_schedule`'s periods from the last known window's stop (D106).
+    /// Ordinals are positions in that list; compare by lead.
+    HeldOutRowsThenEmitSchedule,
 }
 
 impl TargetSource {
@@ -133,6 +138,10 @@ impl TargetSource {
             TargetSource::HeldOutRows => "held_out_rows (each target's horizon is its position \
                 among the held-out rows, not a count of declared periods; compare by lead)"
                 .to_string(),
+            TargetSource::HeldOutRowsThenEmitSchedule => "held_out_rows then emit_schedule \
+                (the held-out windows as observed, then the schedule's periods from the last \
+                known window's stop; each target's horizon is its position in that list; \
+                compare by lead)".to_string(),
         }
     }
 
@@ -141,7 +150,7 @@ impl TargetSource {
     fn is_declared_cadence(&self) -> bool {
         match self {
             TargetSource::DeclaredTiling { .. } | TargetSource::EmitSchedule => true,
-            TargetSource::HeldOutRows => false,
+            TargetSource::HeldOutRows | TargetSource::HeldOutRowsThenEmitSchedule => false,
         }
     }
 }
@@ -195,6 +204,17 @@ pub(crate) enum StreamRefusal {
         data_source: String,
         schedule: (f64, f64),
     },
+    /// A window-column stream's `emit_schedule` period starts before the
+    /// stop of its last known window and ends after it (D106): past the known
+    /// windows the targets are the schedule's periods from that stop, and one
+    /// across it is neither trimmed nor merged.
+    ScheduleStraddlesWindow {
+        stream: String,
+        window: (f64, f64),
+        /// The row the window is: a training row or a held-out row.
+        window_source: String,
+        schedule: (f64, f64),
+    },
     /// A target of a design-reading stream has no value of a design column
     /// in the supplied design (D81): refused, never filled in.
     MissingDesign { stream: String, column: String, start: f64, end: f64, mode: DesignMode, why: String },
@@ -212,6 +232,7 @@ impl StreamRefusal {
             | StreamRefusal::OffCadenceHeldOut { stream, .. }
             | StreamRefusal::InvalidHeldOut { stream, .. }
             | StreamRefusal::ScheduleConflict { stream, .. }
+            | StreamRefusal::ScheduleStraddlesWindow { stream, .. }
             | StreamRefusal::MissingDesign { stream, .. }
             | StreamRefusal::DesignOffTarget { stream, .. } => stream,
         }
@@ -272,15 +293,71 @@ impl std::fmt::Display for StreamRefusal {
                 row.describe(), source.describe()),
             StreamRefusal::InvalidHeldOut { stream, row, why } => write!(f,
                 "stream '{stream}' is refused a forecast: its {} {why}.", row.describe()),
-            StreamRefusal::ScheduleConflict { stream, data, data_source, schedule } => write!(f,
-                "stream '{stream}' is refused a forecast: its data imply the period [{}, {}) \
-                 ({data_source}), but its emit_schedule gives [{}, {}) over the same \
-                 reporting interval. Neither takes precedence; make the declarations agree \
-                 (or remove the emit_schedule). A deliberately different prospective \
-                 schedule would need its own declaration, which camdl does not have.",
-                data.0, data.1, schedule.0, schedule.1),
+            StreamRefusal::ScheduleConflict { stream, data, data_source, schedule } => f.write_str(
+                &schedule_conflict_text("a forecast", stream, *data, data_source, *schedule)),
+            StreamRefusal::ScheduleStraddlesWindow { stream, window, window_source, schedule } => write!(f,
+                "stream '{stream}' is refused a forecast: its emit_schedule period [{}, {}) starts \
+                 before the end of its last known window [{}, {}) ({window_source}) and ends after \
+                 it. Past the known windows the targets are the schedule's periods that start at \
+                 or after {}; a period across that time is neither trimmed nor merged. Make the \
+                 emit_schedule start a period at {}.",
+                schedule.0, schedule.1, window.0, window.1, window.1, window.1),
         }
     }
+}
+
+/// The D82 diagnostic for `stream`, refused `what` (`a forecast`, or
+/// `--save-final-state` for a restart state): one text for both, so they
+/// differ only in the command refused.
+fn schedule_conflict_text(
+    what: &str,
+    stream: &str,
+    data: (f64, f64),
+    data_source: &str,
+    schedule: (f64, f64),
+) -> String {
+    format!(
+        "stream '{stream}' is refused {what}: its data imply the period [{}, {}) \
+         ({data_source}), but its emit_schedule gives [{}, {}) over the same \
+         reporting interval. Neither takes precedence; make the declarations agree \
+         (or remove the emit_schedule). A deliberately different prospective \
+         schedule would need its own declaration, which camdl does not have.",
+        data.0, data.1, schedule.0, schedule.1)
+}
+
+/// A D82 disagreement found when saving a restart state: the forecast's
+/// diagnostic, naming `--save-final-state` as the command refused.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SaveScheduleConflict(StreamRefusal);
+
+impl std::fmt::Display for SaveScheduleConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            StreamRefusal::ScheduleConflict { stream, data, data_source, schedule } => f.write_str(
+                &schedule_conflict_text("--save-final-state", stream, *data, data_source, *schedule)),
+            other => unreachable!("check_schedule_agrees refuses only a schedule conflict: {other:?}"),
+        }
+    }
+}
+
+/// D82 at `pfilter --save-final-state` (D100): `obs`'s bound `rows` (its
+/// training rows under `holdout_after`) against the periods its
+/// `emit_schedule` gives, over the reporting intervals up to `reach` (the
+/// saved time plus `TIME_TIE_EPS`), with no held-out rows and no targets. The
+/// filter's periods come from the data and a restart's from the schedule, so
+/// a disagreement is refused rather than saved. A stream with no
+/// `emit_schedule`, or an instant stream, has nothing to disagree with.
+pub(crate) fn check_restart_schedule_agrees(
+    obs: &ObservationModel,
+    rows: &[ObservedRow],
+    reach: f64,
+) -> Result<(), SaveScheduleConflict> {
+    if obs.projection.temporal_kind() != TemporalKind::Interval {
+        return Ok(());
+    }
+    let s = PlanStream { obs, training: rows, held_out: &[], design: DesignInput::NotSupplied };
+    check_schedule_agrees(&s, &obs.name, TargetSource::EmitSchedule, &[], reach)
+        .map_err(SaveScheduleConflict)
 }
 
 /// Why no plan can be built at all.
@@ -508,18 +585,8 @@ fn stream_targets(
             }
             (TargetSource::DeclaredTiling { span }, out)
         }
-        // §4.3 (3): a window-column stream with no emit schedule, scored,
-        // takes its held-out rows' periods as targets; with no held-out row it
-        // declares no rhythm and falls to the refusal below.
-        (TemporalKind::Interval, Some(Covers::WindowColumns))
-            if s.obs.emit_schedule.is_none() && !s.held_out.is_empty() =>
-        {
-            let in_reach: Vec<&HeldOut> = s.held_out.iter()
-                .filter(|h| after_origin(h.row.measures.end()) && h.row.measures.end() <= reach)
-                .collect();
-            validate_held_out_periods(&stream, s.training, &in_reach)?;
-            (TargetSource::HeldOutRows, in_reach.iter().map(|h| h.row.measures).collect())
-        }
+        // D106: a window-column stream's rows are observation supports.
+        (TemporalKind::Interval, Some(Covers::WindowColumns)) => window_targets(s, &stream, origin, reach)?,
         (TemporalKind::Interval, _) => {
             let Some(times) = emit_times(s.obs, reach) else {
                 return Err(StreamRefusal::NoRhythm { stream, kind });
@@ -590,6 +657,90 @@ fn stream_targets(
         })
         .collect();
     Ok((source, targets))
+}
+
+/// D106 (amending D80): a window-column stream's targets. Its rows state
+/// observation supports, exact `[start, stop)` windows that may leave gaps
+/// and vary in width, never a cadence to continue:
+///
+/// - its held-out rows' windows within the reach are targets exactly as
+///   observed, whether or not the stream has an `emit_schedule`;
+/// - past the last known window (the latest end among its training and
+///   held-out rows), targets come only from the `emit_schedule`: its periods
+///   (the gaps between consecutive emit times) that start at or after that
+///   window's stop. A schedule period that starts before the stop and ends
+///   after it is refused, naming both, never trimmed or merged;
+/// - with no `emit_schedule` there is nothing past the known windows; a
+///   stream with neither held-out rows nor a schedule declares no targets and
+///   is refused (D42).
+///
+/// Nothing is read from the spacing, widths or modal gap of the rows.
+fn window_targets(
+    s: &PlanStream,
+    stream: &str,
+    origin: f64,
+    reach: f64,
+) -> Result<(TargetSource, Vec<Measures>), StreamRefusal> {
+    let after_origin = |end: f64| end > origin + TIME_TIE_EPS;
+    let in_reach: Vec<&HeldOut> = s.held_out.iter()
+        .filter(|h| after_origin(h.row.measures.end()) && h.row.measures.end() <= reach)
+        .collect();
+    validate_held_out_periods(stream, s.training, &in_reach)?;
+    let observed: Vec<Measures> = in_reach.iter().map(|h| h.row.measures).collect();
+    // The last known window and where it comes from.
+    let last: Option<(Measures, String)> = s.training.iter()
+        .map(|r| (r.measures, format!("training row {}", r.position)))
+        .chain(s.held_out.iter()
+            .map(|h| (h.row.measures, HeldOutRow { file: h.file, position: h.row.position }.describe())))
+        .max_by(|a, b| a.0.end().total_cmp(&b.0.end()));
+    let scheduled: Vec<Measures> = match emit_times(s.obs, reach) {
+        None if s.held_out.is_empty() => {
+            return Err(StreamRefusal::NoRhythm { stream: stream.to_string(), kind: TemporalKind::Interval });
+        }
+        None => Vec::new(),
+        Some(mut times) => {
+            // The period crossing the reach, so one straddling a last stop
+            // inside the reach is seen.
+            if let Some(ObservationSchedule::Regular(r)) = s.obs.emit_schedule.as_ref() {
+                if let Some(&t) = times.last() {
+                    times.push(t + r.step);
+                }
+            }
+            let periods: Vec<Measures> = times.windows(2)
+                .filter(|w| w[1] > w[0])
+                .map(|w| Measures::Period(period(w[0], w[1])))
+                .collect();
+            let stop = match &last {
+                Some((window, from)) => {
+                    let stop = window.end();
+                    if stop <= reach {
+                        if let Some(q) = periods.iter()
+                            .find(|q| q.start() < stop - TIME_TIE_EPS && q.end() > stop + TIME_TIE_EPS)
+                        {
+                            return Err(StreamRefusal::ScheduleStraddlesWindow {
+                                stream: stream.to_string(),
+                                window: (window.start(), window.end()),
+                                window_source: from.clone(),
+                                schedule: (q.start(), q.end()),
+                            });
+                        }
+                    }
+                    stop
+                }
+                None => f64::NEG_INFINITY,
+            };
+            periods.into_iter()
+                .filter(|q| q.start() >= stop - TIME_TIE_EPS && after_origin(q.end()) && q.end() <= reach)
+                .collect()
+        }
+    };
+    let source = match (observed.is_empty(), scheduled.is_empty()) {
+        (false, false) => TargetSource::HeldOutRowsThenEmitSchedule,
+        (false, true) => TargetSource::HeldOutRows,
+        (true, _) if s.obs.emit_schedule.is_some() => TargetSource::EmitSchedule,
+        (true, _) => TargetSource::HeldOutRows,
+    };
+    Ok((source, observed.into_iter().chain(scheduled).collect()))
 }
 
 /// D81: each target's design values, `columns` of the stream's likelihood,
@@ -665,9 +816,12 @@ fn target_design(
     }
 }
 
-/// D82: an interval stream's data-implied periods (its training rows, its
-/// held-out rows and, for a declared tiling, the targets the tiling continues
-/// to) against the periods between consecutive times of its `emit_schedule`.
+/// D82: a uniform stream's data-implied periods (its training rows, its
+/// held-out rows and the targets its tiling continues to) against the periods
+/// its `emit_schedule` gives ([`schedule_periods`]: the emitter's own rule,
+/// `covers.period_of(label)`, gh#1301). A window-column stream is not judged
+/// (D106): its rows state observation supports, exact windows that may leave
+/// gaps and vary in width, not a rhythm for the schedule to agree with.
 /// A data period that overlaps a schedule period without being it is a
 /// conflict. Only the reporting intervals this forecast reaches are judged,
 /// the reach D80 uses: data periods ending at or before `reach` (a held-out
@@ -682,23 +836,14 @@ fn check_schedule_agrees(
     targets: &[Measures],
     reach: f64,
 ) -> Result<(), StreamRefusal> {
-    let Some(mut times) = emit_times(s.obs, reach) else { return Ok(()) };
-    // The schedule period that crosses the reach, so a data period ending at
-    // or before it is compared with every period it overlaps.
-    if let Some(ObservationSchedule::Regular(r)) = s.obs.emit_schedule.as_ref() {
-        if let Some(&last) = times.last() {
-            times.push(last + r.step);
-        }
-    }
-    let schedule: Vec<Measures> = times.windows(2)
-        .filter(|w| w[1] > w[0])
-        .map(|w| Measures::Period(period(w[0], w[1])))
-        .collect();
+    let Some(schedule) = schedule_periods(s.obs, reach) else { return Ok(()) };
     let tiled = match source {
         TargetSource::DeclaredTiling { span } => targets.iter()
             .map(|m| (*m, format!("the declared tiling of `covers` (span {span}) continued past the rows")))
             .collect(),
-        TargetSource::EmitSchedule | TargetSource::HeldOutRows => Vec::new(),
+        TargetSource::EmitSchedule
+        | TargetSource::HeldOutRows
+        | TargetSource::HeldOutRowsThenEmitSchedule => Vec::new(),
     };
     let data = s.training.iter()
         .map(|r| (r.measures, format!("training row {}", r.position)))
@@ -717,6 +862,53 @@ fn check_schedule_agrees(
         }
     }
     Ok(())
+}
+
+/// The periods a uniform stream's `emit_schedule` gives that can overlap a
+/// data period ending at or before `reach`, or `None` when the stream
+/// declares no schedule or is not a uniform `covers` form (window columns are
+/// not judged by D82, D106). They are the periods `simulate --obs` writes
+/// (`plan_emission`): the period `covers.period_of(label)` of each emit label,
+/// continued while a period starts before `reach`, leaving out a period that
+/// starts before the schedule's first time. Gaps between emit times are a
+/// uniform form's periods only at offset 0 with a step equal to the span, so
+/// they are not used (gh#1301).
+fn schedule_periods(obs: &ObservationModel, reach: f64) -> Option<Vec<Measures>> {
+    let positive = |(start, stop): (f64, f64)| (stop > start).then(|| Measures::Period(period(start, stop)));
+    match &obs.covers {
+        Some(covers @ (Covers::From { .. } | Covers::Until { .. })) => {
+            let of = |label: f64| covers.period_of(label).expect("a uniform form gives every label a period");
+            let labels: Vec<f64> = match obs.emit_schedule.as_ref()? {
+                ObservationSchedule::Regular(r) if r.step > 0.0 => {
+                    // A NaN start compares false with the reach and would not end.
+                    debug_assert!(r.start.is_finite(), "stream '{}': emit schedule start {}", obs.name, r.start);
+                    let mut out = Vec::new();
+                    let mut k = 0_u64;
+                    loop {
+                        let label = r.start + (k as f64) * r.step;
+                        if of(label).0 >= reach {
+                            break;
+                        }
+                        out.push(label);
+                        k += 1;
+                    }
+                    out
+                }
+                ObservationSchedule::Regular(_) => return None,
+                ObservationSchedule::AtTimes(ts) => ts.clone(),
+            };
+            // A period that starts before the schedule's first time (label 3
+            // under `closing_at` covers [-4, 3)) is one no run from the
+            // schedule's start writes, so it is not one to disagree with.
+            let first = labels.iter().copied().fold(f64::INFINITY, f64::min);
+            Some(labels.into_iter()
+                .map(of)
+                .filter(|&(start, _)| start >= first - TIME_TIE_EPS)
+                .filter_map(positive)
+                .collect())
+        }
+        _ => None,
+    }
 }
 
 /// D80: the held-out rows within the reach of a window-column stream with no
@@ -764,6 +956,8 @@ fn validate_held_out_periods(
 fn emit_times(obs: &ObservationModel, reach: f64) -> Option<Vec<f64>> {
     match obs.emit_schedule.as_ref()? {
         ObservationSchedule::Regular(r) if r.step > 0.0 => {
+            // A NaN start compares false with the reach and would not end.
+            debug_assert!(r.start.is_finite(), "stream '{}': emit schedule start {}", obs.name, r.start);
             let mut out = Vec::new();
             let mut k = 0_u64;
             loop {
@@ -992,11 +1186,86 @@ mod tests {
         assert_eq!(plan.sources()[0].1, TargetSource::EmitSchedule);
     }
 
-    /// An emit schedule whose periods cut across the training rows is
-    /// refused, at the first row it disagrees with (D82): here [0, 30) against
-    /// the schedule's [0, 45), before the target [45, 75) that overlaps row 1.
+    fn daily_windows() -> ObservationModel {
+        obs("cases", Some(Covers::WindowColumns), Projection::CumulativeFlow("infection".into()),
+            Some(ObservationSchedule::Regular(RegularSchedule { start: 0.0, step: 1.0, end: 63.0 })))
+    }
+
+    fn spans(plan: &ForecastPlan) -> Vec<(f64, f64)> {
+        plan.targets().iter().map(|t| (t.measures.start(), t.measures.end())).collect()
+    }
+
+    /// D106: irregular held-out windows (widths 1, 3 and 1, a gap from 11
+    /// to 13) are targets exactly as observed, though the stream has a daily
+    /// `emit_schedule` they do not follow; past the last one (stop 14) the
+    /// targets are the schedule's periods. Each held-out row names its own
+    /// target, so the scored supports equal the rows.
     #[test]
-    fn an_emit_schedule_that_overlaps_a_training_row_is_refused() {
+    fn irregular_held_out_windows_are_targets_as_observed_then_the_schedule() {
+        let train: Vec<ObservedRow> = vec![row(0, 0.0, 1.0), row(1, 1.0, 4.0), row(2, 6.0, 7.0)];
+        let rows = BTreeMap::from([("cases".to_string(), train.clone())]);
+        let held = vec![
+            HeldOut { file: RowFile::Holdout, row: row(0, 7.0, 8.0) },
+            HeldOut { file: RowFile::Holdout, row: row(1, 8.0, 11.0) },
+            HeldOut { file: RowFile::Holdout, row: row(2, 13.0, 14.0) },
+        ];
+        let o = daily_windows();
+        let plan = ForecastPlan::new(partition(&rows), 10.0, &[
+            PlanStream { obs: &o, training: &train, held_out: &held, design: DesignInput::NotSupplied },
+        ]).unwrap_or_else(|e| panic!("irregular windows are supports, not a cadence to check: {e}"));
+        assert_eq!(spans(&plan), vec![(7.0, 8.0), (8.0, 11.0), (13.0, 14.0), (14.0, 15.0), (15.0, 16.0), (16.0, 17.0)]);
+        let observed: Vec<Option<HeldOutRow>> = plan.targets().iter().map(|t| t.observed).collect();
+        let at = |p| Some(HeldOutRow { file: RowFile::Holdout, position: p });
+        assert_eq!(observed, vec![at(0), at(1), at(2), None, None, None]);
+        assert_eq!(plan.sources()[0].1, TargetSource::HeldOutRowsThenEmitSchedule);
+    }
+
+    /// D106: with no held-out rows, a window-column stream's targets are the
+    /// schedule's periods from the last training window's stop; the irregular
+    /// training windows (a three-day window, a gap from 4 to 6) are not read
+    /// as a cadence and not judged against the schedule.
+    #[test]
+    fn past_the_known_windows_the_targets_are_the_schedule_periods_after_the_last_stop() {
+        let train: Vec<ObservedRow> = vec![row(0, 0.0, 1.0), row(1, 1.0, 4.0), row(2, 6.0, 7.0)];
+        let rows = BTreeMap::from([("cases".to_string(), train.clone())]);
+        let o = daily_windows();
+        let plan = ForecastPlan::new(partition(&rows), 3.0, &[
+            PlanStream { obs: &o, training: &train, held_out: &[], design: DesignInput::NotSupplied },
+        ]).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(spans(&plan), vec![(7.0, 8.0), (8.0, 9.0), (9.0, 10.0)]);
+        assert_eq!(plan.sources()[0].1, TargetSource::EmitSchedule);
+    }
+
+    /// D106: with no `emit_schedule` nothing follows the known windows: the
+    /// held-out windows within the reach are the only targets, and with none
+    /// the stream is refused (D42), its message naming the ways to declare
+    /// targets.
+    #[test]
+    fn without_a_schedule_nothing_follows_the_known_windows() {
+        let train: Vec<ObservedRow> = vec![row(0, 0.0, 1.0), row(1, 1.0, 4.0)];
+        let rows = BTreeMap::from([("cases".to_string(), train.clone())]);
+        let mut o = daily_windows();
+        o.emit_schedule = None;
+        let held = vec![HeldOut { file: RowFile::Holdout, row: row(0, 4.0, 6.0) }];
+        let plan = ForecastPlan::new(partition(&rows), 20.0, &[
+            PlanStream { obs: &o, training: &train, held_out: &held, design: DesignInput::NotSupplied },
+        ]).unwrap();
+        assert_eq!(spans(&plan), vec![(4.0, 6.0)], "nothing past the last known window");
+        let err = ForecastPlan::new(partition(&rows), 20.0, &[
+            PlanStream { obs: &o, training: &train, held_out: &[], design: DesignInput::NotSupplied },
+        ]).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("stream 'cases' is refused a forecast") && msg.contains("emit_schedule")
+            && msg.contains("covers"), "{msg}");
+    }
+
+    /// D106: a window-column stream's schedule period that straddles the
+    /// stop of its last known window is refused, naming both, never trimmed
+    /// or merged: here the schedule's [45, 75) across the window [30, 60).
+    /// The windows themselves are supports and are not judged against the
+    /// schedule ([0, 30) against [0, 45) is not a conflict).
+    #[test]
+    fn a_schedule_period_straddling_the_last_known_window_is_refused() {
         let w: Vec<ObservedRow> = vec![row(0, 0.0, 30.0), row(1, 30.0, 60.0)];
         let rows = BTreeMap::from([("monthly".to_string(), w.clone())]);
         let o = obs("monthly", Some(Covers::WindowColumns),
@@ -1006,10 +1275,12 @@ mod tests {
             PlanStream { obs: &o, training: &w, held_out: &[], design: DesignInput::NotSupplied },
         ]).unwrap_err();
         let PlanError::NoTargets { refusals } = &err else { panic!("{err:?}") };
-        assert_eq!(refusals, &[StreamRefusal::ScheduleConflict {
-            stream: "monthly".into(), data: (0.0, 30.0), data_source: "training row 0".into(),
-            schedule: (0.0, 45.0),
+        assert_eq!(refusals, &[StreamRefusal::ScheduleStraddlesWindow {
+            stream: "monthly".into(), window: (30.0, 60.0), window_source: "training row 1".into(),
+            schedule: (45.0, 75.0),
         }]);
+        let msg = err.to_string();
+        assert!(msg.contains("[45, 75)") && msg.contains("[30, 60)") && msg.contains("training row 1"), "{msg}");
     }
 
     /// A state read takes the schedule's instants after the origin, or is
@@ -1140,7 +1411,9 @@ mod tests {
 
     /// D82: a uniform weekly `covers` form whose rows close on days 7, 14,
     /// 21 and an `emit_schedule` of every 7 days from day 3 disagree over the
-    /// same reporting interval. The forecast is refused, naming the stream,
+    /// same reporting interval: the emitter writes label 10 over [3, 10)
+    /// (`period_of`, gh#1301; label 3's [-4, 3) starts before the schedule
+    /// and is not judged). The forecast is refused, naming the stream,
     /// both periods and the source of each, rather than following the data.
     #[test]
     fn a_tiling_and_an_emit_schedule_that_disagree_are_refused() {
@@ -1165,7 +1438,8 @@ mod tests {
     }
 
     /// D82 on held-out data and the tiling's continuation: the schedule
-    /// agrees over the training rows but not past them.
+    /// agrees over the training rows but not past them, where the emitter
+    /// writes label 30 over [23, 30) against the tiling's [21, 28).
     #[test]
     fn a_schedule_that_disagrees_only_past_the_training_rows_is_refused() {
         let train: Vec<ObservedRow> = (0..3).map(|i| row(i, 7.0 * i as f64, 7.0 * (i + 1) as f64)).collect();
@@ -1176,7 +1450,7 @@ mod tests {
             PlanStream { obs: &wobs, training: &train, held_out: &[], design: DesignInput::NotSupplied },
         ]).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("[21, 28)") && msg.contains("declared tiling") && msg.contains("[21, 30)"), "{msg}");
+        assert!(msg.contains("[21, 28)") && msg.contains("declared tiling") && msg.contains("[23, 30)"), "{msg}");
     }
 
     /// D82 judges the reporting intervals this forecast reaches, as D80
@@ -1198,6 +1472,89 @@ mod tests {
             PlanStream { obs: &wobs, training: &train, held_out: &held, design: DesignInput::NotSupplied },
         ]).unwrap_err();
         assert!(matches!(&err, PlanError::NoTargets { refusals } if matches!(refusals[..], [StreamRefusal::ScheduleConflict { .. }])), "{err:?}");
+    }
+
+    /// gh#1301: D82 compares the data's periods with the period the emitter
+    /// writes for each emit label, `covers.period_of(label)`. Under
+    /// `ending_on(time, 7 'days)` (stop = label + 1) with data labelled 7,
+    /// 14, 21 and `emit_schedule = every 7 'days`, the emitter writes label 7
+    /// over [1, 8), the data's own period: the declarations agree and the
+    /// stream forecasts.
+    #[test]
+    fn an_ending_on_stream_whose_labels_agree_with_its_data_forecasts() {
+        let train: Vec<ObservedRow> = (0..3).map(|i| row(i, 1.0 + 7.0 * i as f64, 8.0 + 7.0 * i as f64)).collect();
+        let rows = BTreeMap::from([("weekly".to_string(), train.clone())]);
+        let mut wobs = weekly();
+        wobs.covers = Some(Covers::Until { offset: 1.0, span: 7.0 });
+        wobs.emit_schedule = Some(ObservationSchedule::Regular(RegularSchedule { start: 0.0, step: 7.0, end: 63.0 }));
+        let plan = ForecastPlan::new(partition(&rows), 14.0, &[
+            PlanStream { obs: &wobs, training: &train, held_out: &[], design: DesignInput::NotSupplied },
+        ]).unwrap_or_else(|e| panic!("an agreeing ending_on stream must forecast: {e}"));
+        let spans: Vec<(f64, f64)> = plan.targets().iter().map(|t| (t.measures.start(), t.measures.end())).collect();
+        assert_eq!(spans, vec![(22.0, 29.0), (29.0, 36.0)]);
+    }
+
+    /// gh#1301, the reverse: data labelled 6, 13, 20 under `ending_on` cover
+    /// [0, 7), [7, 14), [14, 21), but the emitter writes label 7 over [1, 8).
+    /// The gaps between emit times ([0, 7), ...) agree with the data and hid
+    /// the disagreement; the labels' own periods do not, so it is refused.
+    #[test]
+    fn an_offset_stream_whose_labels_disagree_with_its_data_is_refused() {
+        let train: Vec<ObservedRow> = (0..3).map(|i| row(i, 7.0 * i as f64, 7.0 * (i + 1) as f64)).collect();
+        let rows = BTreeMap::from([("weekly".to_string(), train.clone())]);
+        let mut wobs = weekly();
+        wobs.covers = Some(Covers::Until { offset: 1.0, span: 7.0 });
+        wobs.emit_schedule = Some(ObservationSchedule::Regular(RegularSchedule { start: 0.0, step: 7.0, end: 63.0 }));
+        let err = ForecastPlan::new(partition(&rows), 14.0, &[
+            PlanStream { obs: &wobs, training: &train, held_out: &[], design: DesignInput::NotSupplied },
+        ]).unwrap_err();
+        let PlanError::NoTargets { refusals } = &err else { panic!("{err:?}") };
+        assert_eq!(refusals, &[StreamRefusal::ScheduleConflict {
+            stream: "weekly".into(), data: (0.0, 7.0), data_source: "training row 0".into(),
+            schedule: (1.0, 8.0),
+        }]);
+    }
+
+    /// A NaN schedule start is caught in debug builds rather than looping,
+    /// by a uniform stream's schedule periods and by the emit times.
+    #[test]
+    fn a_nan_schedule_start_is_asserted_not_looped_on() {
+        let mut o = weekly();
+        o.emit_schedule = Some(ObservationSchedule::Regular(RegularSchedule { start: f64::NAN, step: 7.0, end: 63.0 }));
+        assert!(std::panic::catch_unwind(|| schedule_periods(&o, 21.0)).is_err(), "schedule_periods");
+        assert!(std::panic::catch_unwind(|| emit_times(&o, 21.0)).is_err(), "emit_times");
+    }
+
+    /// D100 (Rule 2): the save-state check is D82 over the bound rows, and
+    /// its diagnostic is the forecast's with only the command refused
+    /// changed. F6: weekly data closing on 11, 18, 25 against a schedule
+    /// giving [0, 7), [7, 14), [14, 21).
+    #[test]
+    fn the_save_state_check_is_d82_and_its_text_differs_only_in_the_command() {
+        let train: Vec<ObservedRow> = (0..3).map(|i| row(i, 4.0 + 7.0 * i as f64, 11.0 + 7.0 * i as f64)).collect();
+        let rows = BTreeMap::from([("weekly".to_string(), train.clone())]);
+        let mut wobs = weekly();
+        wobs.emit_schedule = Some(ObservationSchedule::Regular(RegularSchedule { start: 0.0, step: 7.0, end: 63.0 }));
+        let save = check_restart_schedule_agrees(&wobs, &train, 25.0 + TIME_TIE_EPS).unwrap_err();
+        assert_eq!(save, SaveScheduleConflict(StreamRefusal::ScheduleConflict {
+            stream: "weekly".into(), data: (4.0, 11.0), data_source: "training row 0".into(),
+            schedule: (0.0, 7.0),
+        }));
+        let forecast = ForecastPlan::new(partition(&rows), 14.0, &[
+            PlanStream { obs: &wobs, training: &train, held_out: &[], design: DesignInput::NotSupplied },
+        ]).unwrap_err();
+        let PlanError::NoTargets { refusals } = &forecast else { panic!("{forecast:?}") };
+        let forecast_text = refusals[0].to_string();
+        let save_text = save.to_string();
+        assert!(save_text.starts_with("stream 'weekly' is refused --save-final-state: "), "{save_text}");
+        assert_eq!(forecast_text.replacen("refused a forecast", "refused --save-final-state", 1), save_text);
+        // Agreeing declarations save; an instant stream is not judged.
+        let agree: Vec<ObservedRow> = (0..3).map(|i| row(i, 7.0 * i as f64, 7.0 * (i + 1) as f64)).collect();
+        assert_eq!(check_restart_schedule_agrees(&wobs, &agree, 21.0 + TIME_TIE_EPS), Ok(()));
+        let mut prev = obs("prev", None, Projection::CurrentPop("I".into()), wobs.emit_schedule.clone());
+        prev.covers = None;
+        let p: Vec<ObservedRow> = (0..3).map(|i| instant_row(i, 3.0 + 7.0 * i as f64)).collect();
+        assert_eq!(check_restart_schedule_agrees(&prev, &p, 17.0 + TIME_TIE_EPS), Ok(()));
     }
 
     /// D80: a held-out row of a stream with a declared cadence that is not
