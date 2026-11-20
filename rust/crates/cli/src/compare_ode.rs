@@ -54,8 +54,13 @@ impl OdeScorer {
         model_path: &Path,
         streams: &indexmap::IndexMap<String, String>,
         fitted: &crate::fit::fitted_model::FittedSimulator,
+        settings: crate::fit::fitted_model::FittedSettings,
     ) -> Result<Self, String> {
         let mut problem = resolved.config.problem.clone();
+        // The settings the fit is scored under (the fit's, with compare's
+        // flag folded in): the model is compiled under them.
+        problem.config.allow_degenerate_rates = settings.allow_degenerate_rates;
+        problem.config.allow_forcing_extrapolation = settings.allow_forcing_extrapolation;
         problem.compiled_ir = Some(model_path.to_string_lossy().into_owned());
         let data = problem.data.as_mut().ok_or_else(|| format!(
             "fit at {} has no [data] block — nothing to score",
