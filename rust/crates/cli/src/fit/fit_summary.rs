@@ -3348,7 +3348,7 @@ mod tests {
         let params = [("R0", 56.0_f64), ("sigma", 0.08), ("gamma", 0.08)];
         let dir = make_fit_dir("if2", &state, &params);
         let methods = discover_methods(&dir);
-        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None, crate::util::CompileSettings { licm_disabled: false, ir_cache_disabled: false });
+        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None, crate::util::CompileSettings::default());
         let with = |v: Option<f64>| {
             let mut d = doc.clone();
             d.methods[0].initial_loglik = v;
@@ -3371,7 +3371,7 @@ mod tests {
         let dir = make_fit_dir("if2", &state, &params);
 
         let methods = discover_methods(&dir);
-        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None, crate::util::CompileSettings { licm_disabled: false, ir_cache_disabled: false });
+        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None, crate::util::CompileSettings::default());
         let json = serde_json::to_string_pretty(&doc).unwrap();
         assert!(json.contains("\"version\": 5"),
             "schema.version must be present and = 5: {}", json);
@@ -3403,7 +3403,7 @@ mod tests {
         let dir = make_fit_dir("if2", &state, &params);
 
         let methods = discover_methods(&dir);
-        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None, crate::util::CompileSettings { licm_disabled: false, ir_cache_disabled: false });
+        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None, crate::util::CompileSettings::default());
         let md = render_markdown(&doc);
         assert!(md.contains("# Fit summary:"));
         assert!(md.contains("## `if2`"));
@@ -3424,7 +3424,7 @@ mod tests {
         let dir = make_fit_dir("if2", &state, &params);
 
         let methods = discover_methods(&dir);
-        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None, crate::util::CompileSettings { licm_disabled: false, ir_cache_disabled: false });
+        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None, crate::util::CompileSettings::default());
         let tex = render_latex(&doc);
         // No preamble, but tabular blocks per method.
         assert!(tex.contains("\\subsection*{Method:"));

@@ -165,8 +165,8 @@ struct DeriveSettings {
     /// `--allow-forcing-extrapolation`: passed to each `camdl pfilter` child,
     /// as is a fit's own `[config] allow_forcing_extrapolation`.
     allow_forcing_extrapolation: bool,
-    /// `--no-licm`: the settings a fit's model source is compiled under, when
-    /// the fit archived no compiled model.
+    /// `--no-licm` and `--no-ir-cache`: the settings a fit's model source is
+    /// compiled under, when the fit archived no compiled model.
     compile: crate::util::CompileSettings,
 }
 

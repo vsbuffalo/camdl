@@ -604,7 +604,8 @@ pub fn resolve_relative_to_toml(toml_path: &std::path::Path, path: &str) -> Stri
 /// [`run_camdlc`], [`load_model_envelope`], [`delegate_to_camdlc`],
 /// [`camdlc_emit_deps`]). Nothing reads them process-wide (proposal
 /// 2026-11-17, phase 3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The default (LICM on, cache on) is for tests; a command resolves its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct CompileSettings {
     /// `--no-licm`, or `CAMDL_NO_LICM`: compile without loop-invariant code
     /// motion (gh#272). LICM hoists param/table-only subexpressions out of the
@@ -1473,6 +1474,9 @@ pub fn model_is_camdl_source(model_path: &str) -> bool {
 }
 
 pub fn render_model_json(model_camdl: &std::path::Path) -> Result<Vec<u8>, String> {
+    // No compile settings: `camdlc render` renders the parsed, pre-expansion
+    // declarations (`Latex.run`), which LICM, a pass over the compiled IR,
+    // never touches.
     let camdlc = find_camdlc()?;
     let out = std::process::Command::new(&camdlc)
         .args(["render", "--format", "json"])
@@ -1494,6 +1498,7 @@ pub fn render_model_json(model_camdl: &std::path::Path) -> Result<Vec<u8>, Strin
 /// model's compartmental flow diagram without recompiling. Best-effort — the
 /// caller treats an `Err` as "skip the archive", never a hard failure.
 pub fn render_model_graph_json(model_camdl: &std::path::Path) -> Result<Vec<u8>, String> {
+    // No compile settings, as for `render_model_json`.
     let camdlc = find_camdlc()?;
     let out = std::process::Command::new(&camdlc)
         .args(["render", "--format", "graph"])
