@@ -427,12 +427,19 @@ It is hashed as one string, the build followed by each switch length-prefixed
 value can pass for another switch; with no switch on it is the build alone, so a
 default run's identity is unchanged. `run.json` keeps the build in
 `engine_version` and lists the switches in `engine_switches`, so a run this
-build made with a switch is this build's run. `simulate`, `fit run`, `pfilter`,
-`profile` and `survey` key the switches (a fit at its `fit` level, a pfilter or
-survey at its `model` level, a profile point in its base); the other commands
-key them as they are converted. `CAMDL_NO_CONSTANT_FOLD` and `CAMDL_NO_LICM`
-change the compiled IR. An experimental input is also listed in the
-`provenance.experimental` field of `run.json`.
+build made with a switch is this build's run. The commands that store a result
+under an address key the switches: `simulate` (its trajectories, their
+observation subtrees and its ensembles), `fit run` (at the `fit` level),
+`fit predict` (its output directory, whose manifests also record
+`engine_version` and `engine_switches`), `pfilter` and `survey` (at the `model`
+level) and `profile` (a point's base). `compare` scores a chain-binomial fit
+through a `camdl pfilter` child, which keys them; its in-process ODE scoring and
+`dev eval` store nothing under an address. The switches themselves are fields of
+the evaluator settings each compiled model carries
+([`EvalSettings`](rust:sim::compiled_model::EvalSettings)), set by
+[`eval_settings`](rust:cli::env::eval_settings). `CAMDL_NO_CONSTANT_FOLD` and
+`CAMDL_NO_LICM` change the compiled IR. An experimental input is also listed in
+the `provenance.experimental` field of `run.json`.
 
 `fit run` resolves its configuration once, before anything runs, into
 [`ResolvedFitConfig`](rust:cli::fit::run_config::ResolvedFitConfig): the file
