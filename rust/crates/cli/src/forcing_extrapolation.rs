@@ -43,6 +43,9 @@ pub struct ForcingPolicy(Arc<State>);
 struct State {
     /// Whether this run may hold a forcing's end value.
     allowed: bool,
+    /// Under the override, a held forcing is recorded but not said as it is
+    /// met: the command reports it itself, from [`ForcingPolicy::trace_warnings`].
+    quiet: bool,
     held: Mutex<Vec<OutsideRange>>,
     /// The command holds a store claim and fails it itself on a refusal.
     deferred: AtomicBool,
@@ -61,8 +64,22 @@ static ROUTE: Mutex<Option<ForcingPolicy>> = Mutex::new(None);
 impl ForcingPolicy {
     /// The policy of a command given (`true`) or not given the override.
     pub fn new(allowed: bool) -> Self {
+        Self::with_quiet(allowed, false)
+    }
+
+    /// A policy that, under the override, records each held forcing without
+    /// saying it as it is met; the command reports what it held itself.
+    /// `compare` scores each in-process fit under one and prints the holds on
+    /// the fit's rows, as it does for a fit its `camdl pfilter` child scores.
+    /// A refusal is said as under [`ForcingPolicy::new`].
+    pub fn recording(allowed: bool) -> Self {
+        Self::with_quiet(allowed, true)
+    }
+
+    fn with_quiet(allowed: bool, quiet: bool) -> Self {
         ForcingPolicy(Arc::new(State {
             allowed,
+            quiet,
             held: Mutex::new(Vec::new()),
             deferred: AtomicBool::new(false),
             refused: AtomicBool::new(false),
@@ -135,6 +152,9 @@ impl ForcingPolicy {
                 return;
             }
             held.push(o.clone());
+        }
+        if s.quiet {
+            return;
         }
         crate::out::live().notice(&crate::out::notice::Notice {
             severity: crate::out::notice::Severity::Warning,

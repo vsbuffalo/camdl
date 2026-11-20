@@ -637,6 +637,9 @@ fn compare_reports_each_ode_fits_hold() {
     let lines = held_lines(&o);
     assert_eq!(lines.len(), 2, "{lines:?}\n{}\n{}", String::from_utf8_lossy(&o.stdout), stderr(&o));
     assert_ne!(lines[0].split(':').next(), lines[1].split(':').next(), "each names its own row: {lines:?}");
+    // Reported on the rows only, as for a fit a `camdl pfilter` child
+    // scores: not also as an anonymous warning when each fit met it.
+    assert!(!stderr(&o).contains("the run evaluated it"), "{}", stderr(&o));
 }
 
 /// `simulate --draws posterior --fit` replays a fit made under `[config]

@@ -3076,7 +3076,9 @@ fn derive_ode_trace(
 ) -> Result<PrequentialTrace, String> {
     // This fit's forcing policy, for its scoring only: the guard puts back
     // compare's own policy when it drops. What it held goes into the trace.
-    let forcing = crate::forcing_extrapolation::ForcingPolicy::new(settings.allow_forcing_extrapolation);
+    // Recording only: the holds are printed on the fit's rows, as a
+    // `camdl pfilter` child's are, not also as a warning when met.
+    let forcing = crate::forcing_extrapolation::ForcingPolicy::recording(settings.allow_forcing_extrapolation);
     let _forcing_route = forcing.install();
     let scorer = crate::compare_ode::OdeScorer::build(resolved, model_path, streams, fitted, settings)?;
     let t0 = score_from
