@@ -209,7 +209,8 @@ fn rows_past_the_training_prefix_are_held_out_and_the_manifest_names_both_sets()
     assert_eq!(filtered, [("daily_cases", 63, 39), ("weekly_cases", 9, 6)]);
     assert!(os.get("through").is_none(), "the counts say what was filtered through: {os}");
     assert_eq!(m["state_sets"]["free_forward"], json!({"conditioning": "none", "streams": []}));
-    assert!(m["holdout_files"].is_null(), "no [data.holdout]: {}", m["holdout_files"]);
+    // Written, as `null`, without a `[data.holdout]`: the key is not missing.
+    assert_eq!(m.as_object().unwrap().get("holdout_files"), Some(&serde_json::Value::Null));
 
     // Said once, in one sentence.
     let line = "fit predict: the one_step rows include held-out rows (39 of 63 rows in 'daily_cases', \
