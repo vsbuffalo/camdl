@@ -57,6 +57,13 @@ Explain why a design choice matters when the reason is not obvious. Keep genuine
 qualifications, uncertainty and important contrasts. Do not remove useful
 technical detail in pursuit of brevity.
 
+Credit the work camdl builds on. When camdl follows another project's design or
+borrows its idea (such as the transform Stan applies to a bounded parameter),
+name the project and cite a primary source: its documentation, with the version
+and section, or its paper. A comparison of this kind tells the reader where
+camdl follows established practice and where to read more. Describe the other
+project accurately and specifically.
+
 ### Testing prose
 
 A language model asked to review prose is reliable at finding factual errors,

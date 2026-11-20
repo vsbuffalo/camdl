@@ -35,7 +35,9 @@ the next stays in paragraphs.
   is implemented" goes stale without anyone noticing.
 - **Internal names.** Function names, code paths and lists of the algorithms
   that consume a construct describe the implementation, not the language. Name
-  only what a user can write, run or observe.
+  only what a user can write, run or observe. A comparison with another
+  project's design is different: it stays, cited, where it shows that camdl
+  follows established practice (section 2).
 - **Rules owned by another section.** Link to the section that states a rule
   rather than restating it, so the two copies cannot disagree.
 
