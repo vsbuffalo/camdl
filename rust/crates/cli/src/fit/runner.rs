@@ -262,13 +262,14 @@ pub(crate) fn resolve_fit_parameters(
     fit: &super::config_v2::Problem,
     seed: u64,
 ) -> Result<FitParameters, String> {
-    // Load model. Prefer the pre-compiled IR threaded in by
-    // `cmd_fit_run_v2` (compiled once up front) so a swept or replicated
-    // fit doesn't re-invoke camdlc per (cell × sweep point); fall
-    // back to `model.camdl` (recompiles) when no compiled IR was provided
-    // — the identity path is always `model.camdl`, not this.
+    // Load the model: the IR `cmd_fit_run_v2` compiled once up front, under
+    // its compile settings (`compiled_ir`), so a swept or replicated fit
+    // doesn't re-invoke camdlc per (cell × sweep point). Without it,
+    // `model.camdl` must itself be compiled IR: a source is refused rather
+    // than compiled here without the command's compile settings. The
+    // identity path is always `model.camdl`, not this.
     let model_path = fit.compiled_ir.as_deref().unwrap_or(&fit.model.camdl);
-    let (mut model_pre, model_ir_json) = crate::util::load_model(model_path)?;
+    let (mut model_pre, model_ir_json) = crate::util::load_ir(model_path)?;
     // gh#616: resolve the model's observation anchors from THIS fit's bound
     // data, before anything compiles. Not optional: `ode_grad.rs` takes the
     // integration window from `simulation.t_end`, so an unresolved horizon
@@ -4987,7 +4988,7 @@ dt = 1.0
         use indexmap::IndexMap;
         let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
         let ir_path = format!("{}/../../../ocaml/golden/sir_priors.ir.json", manifest);
-        let (model, _) = crate::util::load_model(&ir_path).expect("load golden");
+        let (model, _) = crate::util::load_ir(&ir_path).expect("load golden");
 
         let empty: IndexMap<String, EstimateSpecV2> = IndexMap::new();
 
@@ -5034,7 +5035,7 @@ dt = 1.0
         use indexmap::IndexMap;
         let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
         let ir_path = format!("{}/../../../ocaml/golden/sir_priors.ir.json", manifest);
-        let (model, _) = crate::util::load_model(&ir_path).expect("load golden");
+        let (model, _) = crate::util::load_ir(&ir_path).expect("load golden");
 
         // Override beta with a much narrower normal prior; leave gamma alone.
         let mut estimate: IndexMap<String, EstimateSpecV2> = IndexMap::new();

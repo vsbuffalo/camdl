@@ -102,9 +102,8 @@ pub(crate) struct ResolvedSimConfig {
 /// `simulate` resolves, because the compile that produces [`ResolvedModel::ir`]
 /// reads them. They change the IR camdlc emits, so they reach the identity
 /// through [`ResolvedModel::digest`] and are not a field of
-/// [`ResolvedSimConfig`] of their own. `simulate` still installs them
-/// process-wide ([`crate::util::CompileSettings::install`]); `fit run` passes
-/// its own to every compile it makes.
+/// [`ResolvedSimConfig`] of their own. `simulate` passes them to every
+/// compile it makes, as every command does.
 pub(crate) use crate::util::CompileSettings;
 
 /// The model the engine starts every cell from, and its identity level.

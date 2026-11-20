@@ -247,7 +247,7 @@ fn run_pfilter(
     } = scenario_flags;
 
     // Load model (supports .camdl via camdlc)
-    let (mut model_in, _model_json) = crate::util::load_model_with(&ir_path, compile)
+    let (mut model_in, _model_json) = crate::util::load_model(&ir_path, compile)
         .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
     if let Some(base) = &scored_fit_base {
         let (enable, disable) = base.lists(&model_in).unwrap_or_else(|e| {

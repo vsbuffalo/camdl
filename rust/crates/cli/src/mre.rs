@@ -121,25 +121,25 @@ struct BundlePlan {
 
 // ── entry points ─────────────────────────────────────────────────────────────
 
-pub(crate) fn cmd_mre_fit(args: &MreFitArgs) {
+pub(crate) fn cmd_mre_fit(args: &MreFitArgs, compile: crate::util::CompileSettings) {
     let out = crate::out::Out::new(false);
     let bundle = args
         .bundle
         .clone()
         .unwrap_or_else(|| default_bundle_path(&args.config));
-    if let Err(e) = collect_fit(args).and_then(|plan| write_bundle(&out, &plan, &bundle)) {
+    if let Err(e) = collect_fit(args, compile).and_then(|plan| write_bundle(&out, &plan, &bundle)) {
         out.fail(format!("error: {e}"));
     }
 }
 
-pub(crate) fn cmd_mre_simulate(args: &MreSimulateArgs) {
+pub(crate) fn cmd_mre_simulate(args: &MreSimulateArgs, compile: crate::util::CompileSettings) {
     let argv: Vec<String> = std::env::args().collect();
     let out = crate::out::Out::new(false);
     let bundle = args
         .bundle
         .clone()
         .unwrap_or_else(|| default_bundle_path(&args.sim.model));
-    if let Err(e) = collect_simulate(args, &argv).and_then(|plan| write_bundle(&out, &plan, &bundle)) {
+    if let Err(e) = collect_simulate(args, &argv, compile).and_then(|plan| write_bundle(&out, &plan, &bundle)) {
         out.fail(format!("error: {e}"));
     }
 }
@@ -161,7 +161,7 @@ fn default_bundle_path(from: &Path) -> PathBuf {
 /// comes from the resolved `FitConfig` plus the model's compile-time `read()`
 /// closure. The fit.toml's directory is the root, so the config's own dest is
 /// its bare name and the reproduce command points at that.
-fn collect_fit(args: &MreFitArgs) -> Result<BundlePlan, String> {
+fn collect_fit(args: &MreFitArgs, compile: crate::util::CompileSettings) -> Result<BundlePlan, String> {
     let config = args.config.as_path();
     if !config.exists() {
         return Err(format!("fit config not found: {}", config.display()));
@@ -196,7 +196,7 @@ fn collect_fit(args: &MreFitArgs) -> Result<BundlePlan, String> {
             model_path.display(), cfg.model.camdl));
     }
     inputs.push(input_ref(InputRole::Model, &model_path, &root)?);
-    for resolved in read_closure(&model_path)? {
+    for resolved in read_closure(&model_path, compile)? {
         inputs.push(input_ref(InputRole::ReadClosure, Path::new(&resolved), &root)?);
     }
 
@@ -231,7 +231,7 @@ fn collect_fit(args: &MreFitArgs) -> Result<BundlePlan, String> {
 /// relative-and-contained under it, enforced by `rel_to_root`. A forward sim has
 /// no observed data, so there is nothing to exclude (`mre simulate` has no
 /// `--no-data`).
-fn collect_simulate(args: &MreSimulateArgs, argv: &[String]) -> Result<BundlePlan, String> {
+fn collect_simulate(args: &MreSimulateArgs, argv: &[String], compile: crate::util::CompileSettings) -> Result<BundlePlan, String> {
     let a = &args.sim;
     let root = std::env::current_dir()
         .map_err(|e| format!("cannot resolve current directory: {e}"))?;
@@ -245,7 +245,7 @@ fn collect_simulate(args: &MreSimulateArgs, argv: &[String]) -> Result<BundlePla
     // A `.camdl` source has a compile-time read() closure; a pre-compiled
     // `.ir.json` has its tables already baked in (nothing to recompile).
     if a.model.extension().and_then(|e| e.to_str()) == Some("camdl") {
-        for resolved in read_closure(&a.model)? {
+        for resolved in read_closure(&a.model, compile)? {
             inputs.push(input_ref(InputRole::ReadClosure, Path::new(&resolved), &root)?);
         }
     }
@@ -405,7 +405,7 @@ fn write_bundle(out: &crate::out::Out, plan: &BundlePlan, bundle: &Path) -> Resu
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 /// Compile the model and parse its read-closure depfile → resolved paths.
-fn read_closure(model_path: &Path) -> Result<Vec<String>, String> {
+fn read_closure(model_path: &Path, compile: crate::util::CompileSettings) -> Result<Vec<String>, String> {
     let tmp = tempfile::Builder::new()
         .suffix(".deps.json")
         .tempfile()
@@ -413,7 +413,7 @@ fn read_closure(model_path: &Path) -> Result<Vec<String>, String> {
     let model_str = model_path
         .to_str()
         .ok_or_else(|| format!("non-UTF8 model path: {}", model_path.display()))?;
-    crate::util::camdlc_emit_deps(model_str, tmp.path())
+    crate::util::camdlc_emit_deps(model_str, tmp.path(), compile)
         .map_err(|e| format!("compiling {} failed:\n{e}", model_path.display()))?;
     let text = fs::read_to_string(tmp.path())
         .map_err(|e| format!("cannot read depfile: {e}"))?;

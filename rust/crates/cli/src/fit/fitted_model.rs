@@ -173,7 +173,7 @@ pub fn check_stored_fit(
             archive.display()
         ));
     }
-    let (fitted, _) = crate::util::load_model(&archive.to_string_lossy())?;
+    let (fitted, _) = crate::util::load_ir(&archive.to_string_lossy())?;
     let (given_resolved, resolved) = as_fitted(given, problem).map_err(|e| {
         format!(
             "--fit {fit}: {given_path} is anchored to observed data, and resolving its \
@@ -270,16 +270,18 @@ pub fn check_stored_fit(
 /// model other than the one its `[model]` names. No fit has run, so the
 /// reference is the config's model compiled now (lean — identity is
 /// gradient-independent). `config_model` is the config's resolved
-/// `[model] camdl` path.
-pub fn check_fit_config(
+/// `[model] camdl` path, compiled under `compile`, the settings `given` was
+/// compiled under, so the two differ only if the models do.
+pub(crate) fn check_fit_config(
     fit_toml: &str,
     config_model: &str,
     given: &ir::Model,
     given_path: &str,
+    compile: crate::util::CompileSettings,
 ) -> Result<Option<String>, String> {
-    let (ir_path, _tmp) = crate::util::resolve_ir_path(config_model, false)
+    let (ir_path, _tmp) = crate::util::resolve_ir_path(config_model, false, None, compile)
         .map_err(|e| format!("--fit {fit_toml}: compiling its [model] {config_model}: {e}"))?;
-    let (named, _) = crate::util::load_model(&ir_path)?;
+    let (named, _) = crate::util::load_ir(&ir_path)?;
     match compare_to_fitted(&named, given) {
         ModelAgreement::Same => Ok(None),
         ModelAgreement::ReportingDiffers => Ok(Some(reporting_notice(fit_toml, "names", given_path))),
@@ -391,9 +393,11 @@ impl FittedSimulator {
 /// Read by every replay of a stored fit on a simulator the replaying command
 /// chooses: `simulate --draws … --fit` and `compare`'s derived filter.
 /// `fit predict` and the contrasts read the same two dt inputs through
-/// `dt_rule::resolved_dt` and the run's recorded backend.
-pub fn stored_fit_simulator(
+/// `dt_rule::resolved_dt` and the run's recorded backend. A fit that archived
+/// no model is read from its config's source, compiled under `compile`.
+pub(crate) fn stored_fit_simulator(
     resolved: &crate::fit::handle::ResolvedFit,
+    compile: crate::util::CompileSettings,
 ) -> Result<FittedSimulator, String> {
     // The model the fit ran on: its archive, else (a fit that archived none)
     // the source its config names, as `compare` reads it.
@@ -403,7 +407,7 @@ pub fn stored_fit_simulator(
     } else {
         resolved.config.problem.model.camdl.clone()
     };
-    let (model, _) = crate::util::load_model(&model_src)
+    let (model, _) = crate::util::load_model(&model_src, compile)
         .map_err(|e| format!("reading the model the fit ran on, {model_src}: {e}"))?;
     let sidecar = crate::run_meta::read_fit_sidecar(&resolved.segment)?;
     let backend = resolved

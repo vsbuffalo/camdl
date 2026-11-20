@@ -114,7 +114,7 @@ pub mod table_row;
 pub mod fit_table;
 pub use fit_table::cmd_fit_table;
 pub mod fit_summary;
-pub use fit_summary::cmd_fit_summary;
+pub(crate) use fit_summary::cmd_fit_summary;
 pub mod pmmh;
 // The fit report: what a method run shows (proposal 2026-11-08).
 pub mod report;
@@ -800,7 +800,7 @@ fn run_fit(
             let datasets = synthetic::generate_synthetic_datasets(
                 spec,
                 // Pre-compiled IR (compiled once above) so per-dataset generation
-                // doesn't re-invoke camdlc; falls back to the source path.
+                // doesn't re-invoke camdlc.
                 config.problem.compiled_ir.as_deref().unwrap_or(&config.problem.model.camdl),
                 &fit_dir,
                 config.problem.config.dt,
@@ -1942,7 +1942,7 @@ fn run_fit(
                     // provenance read doesn't re-invoke camdlc.
                     let model_src = sweep_config.compiled_ir.as_deref()
                         .unwrap_or(&sweep_config.model.camdl);
-                    let model_ir_json = crate::util::load_model(model_src)
+                    let model_ir_json = crate::util::load_ir(model_src)
                         .ok()
                         .map(|(_, ir_json)| ir_json)
                         .unwrap_or_default();
@@ -2634,11 +2634,10 @@ fn build_fit_sidecar(
     data: &stream_bindings::BoundDataDigests,
 ) -> Result<crate::run_meta::FitSidecar, String> {
     let problem = &config.problem;
-    // Prefer the pre-compiled IR (set by `cmd_fit_run_v2`); `load_model`
-    // re-invokes camdlc when handed a raw `.camdl`. The resolved model identity
-    // is byte-identical either way; empty string if the IR can't be loaded.
+    // The pre-compiled IR (set by `cmd_fit_run_v2`, under its compile
+    // settings); empty string if the IR can't be loaded.
     let model_src = problem.compiled_ir.as_deref().unwrap_or(&problem.model.camdl);
-    let model_identity = crate::util::load_model(model_src)
+    let model_identity = crate::util::load_ir(model_src)
         .ok()
         .map(|(_, ir_json)| crate::resolve::model_identity_from_ir(&ir_json))
         .unwrap_or_default();
@@ -2727,7 +2726,7 @@ fn build_fit_sidecar(
         calendar,
         // The `#'` doc dictionary (presentation metadata), loaded from the same
         // compiled IR. Empty when the model documents nothing.
-        docs: crate::util::load_model_docs(model_src).unwrap_or_default(),
+        docs: crate::util::load_ir_envelope(model_src).map(|e| e.docs).unwrap_or_default(),
     })
 }
 
@@ -2741,10 +2740,10 @@ struct DiffSide {
 }
 
 impl DiffSide {
-    fn resolve(config: &config_v2::FitConfig) -> Self {
+    fn resolve(config: &config_v2::FitConfig, compile: crate::util::CompileSettings) -> Self {
         let problem = &config.problem;
         let model_src = problem.compiled_ir.as_deref().unwrap_or(&problem.model.camdl);
-        match crate::util::load_model(model_src) {
+        match crate::util::load_model(model_src, compile) {
             Ok((model, ir_json)) => DiffSide {
                 model_identity: Ok(crate::resolve::model_identity_from_ir(&ir_json)),
                 data_hashes: resolved_data_hashes(problem, Some(&model)),
@@ -2758,7 +2757,7 @@ impl DiffSide {
 }
 
 /// `camdl fit diff A.toml B.toml`
-pub fn cmd_fit_diff(args: &crate::args::FitDiffArgs) {
+pub fn cmd_fit_diff(args: &crate::args::FitDiffArgs, compile: crate::util::CompileSettings) {
     use config_v2::FitConfig;
     // fit diff has no `--no-color`: its painters follow the environment and
     // whether each stream is a terminal.
@@ -2776,8 +2775,8 @@ pub fn cmd_fit_diff(args: &crate::args::FitDiffArgs) {
     // a comparison of its own. The model and data are resolved here the way a
     // run resolves them (`build_fit_sidecar`): the compiled model's identity
     // and each resolved stream's content hash.
-    let a_side = DiffSide::resolve(&a_cfg);
-    let b_side = DiffSide::resolve(&b_cfg);
+    let a_side = DiffSide::resolve(&a_cfg, compile);
+    let b_side = DiffSide::resolve(&b_cfg, compile);
     let unresolved = a_side.model_identity.is_err() || b_side.model_identity.is_err();
     // A side whose model did not load is reported below, not compared: equal
     // placeholders keep `model_changed` from asserting a change it cannot know.
@@ -2863,7 +2862,7 @@ pub fn cmd_fit_diff(args: &crate::args::FitDiffArgs) {
 
 // ─── camdl fit new ──────────────────────────────────────────────────────────
 
-pub fn cmd_fit_new(a: &crate::args::FitNewArgs) {
+pub fn cmd_fit_new(a: &crate::args::FitNewArgs, compile: crate::util::CompileSettings) {
     let out = crate::out::Out::new(false);
     let from = a.from.to_string_lossy().into_owned();
     let to   = a.dest.to_string_lossy().into_owned();
@@ -2901,7 +2900,7 @@ pub fn cmd_fit_new(a: &crate::args::FitNewArgs) {
     // (`{method}-{h8}/seed_N-{h8}`) needs the method + seed hashes, so we name
     // the segment and defer the leaf to `camdl list`.
     if let Ok(cfg) = config_v2::Problem::load(&from) {
-        let seg = crate::util::load_model(&cfg.model.camdl).ok().and_then(|(mut m, _)| {
+        let seg = crate::util::load_model(&cfg.model.camdl, compile).ok().and_then(|(mut m, _)| {
             let ir_version = ir::IR_VERSION.trim().to_string();
             // The model the fit hashed is the bound one, with the bound files'
             // digests beside it.

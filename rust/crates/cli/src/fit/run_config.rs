@@ -550,7 +550,7 @@ pub(crate) fn resolve(
     // never reused for an nl-lbfgs+ode fit (and run identity is gradient-independent,
     // so lean vs full share the same model digest).
     let needs_state_grad = config.needs_state_grad();
-    let (compiled_ir, _ir_tmp) = crate::util::resolve_ir_path_with(
+    let (compiled_ir, _ir_tmp) = crate::util::resolve_ir_path(
         &config.problem.model.camdl, needs_state_grad, None, compile)
         .unwrap_or_else(|e| {
             out.fail(format!("error: {}", e));
@@ -589,7 +589,7 @@ pub(crate) fn resolve(
     config.problem.compiled_ir = Some(compiled_ir.clone());
 
     // Load model and validate completeness (from the pre-compiled IR).
-    let (model, _) = crate::util::load_model(&compiled_ir).unwrap_or_else(|e| {
+    let (model, _) = crate::util::load_ir(&compiled_ir).unwrap_or_else(|e| {
         out.fail(format!("error: {}", e));
     });
     // The one dt rule (`crate::dt_rule`): the model's declared step is the

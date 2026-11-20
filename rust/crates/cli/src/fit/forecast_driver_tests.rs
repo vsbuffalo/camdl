@@ -27,7 +27,7 @@ fn compile(src: &str, tag: &str) -> ir::Model {
     assert!(out.status.success(), "camdlc: {}", String::from_utf8_lossy(&out.stderr));
     let ir_path = dir.join("model.ir.json");
     std::fs::write(&ir_path, &out.stdout).unwrap();
-    crate::util::load_model(ir_path.to_str().unwrap()).unwrap().0
+    crate::util::load_ir(ir_path.to_str().unwrap()).unwrap().0
 }
 
 pub(super) fn fixture_source() -> String {

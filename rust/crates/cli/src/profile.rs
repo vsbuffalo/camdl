@@ -496,7 +496,7 @@ fn run_profile(
     // `[estimate].start` fall-back below seeds values into
     // `model_pre.parameters[i].value` before the resolver call —
     // same pattern as `fit/runner.rs:144-180`.
-    let (mut model_pre, model_json) = crate::util::load_model_with(&ir_path, compile)
+    let (mut model_pre, model_json) = crate::util::load_model(&ir_path, compile)
         .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
     // The model before any value is written into it, for the partition.
     let model_declared = model_pre.clone();

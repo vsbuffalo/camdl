@@ -415,7 +415,7 @@ pub fn check_scenario_coordinate_collision(job: &SimulateJob) -> Result<(), Stri
     if (!job.cli_overrides.is_empty() || !job.set_vec_entries.is_empty())
         && !job.scenarios.is_empty()
     {
-        let (model, _) = crate::util::load_model(&job.model)?;
+        let (model, _) = crate::util::load_ir(&job.model)?;
         let mut refusals: Vec<String> = Vec::new();
         refusals.extend(scenario_param_flag_collision(
             &model, &job.scenarios, TierFiveFlag::Param, &job.cli_overrides,
@@ -457,7 +457,7 @@ pub fn check_scenario_coordinate_collision(job: &SimulateJob) -> Result<(), Stri
         return Ok(());
     }
     // Loaded once, now that there is a coordinate to check against.
-    let (model, _) = crate::util::load_model(&job.model)?;
+    let (model, _) = crate::util::load_ir(&job.model)?;
     let mut refusals: Vec<String> = Vec::new();
     for scenario in &effective_scenarios(job) {
         if let Some(msg) = scenario_coordinate_collision(&model, scenario, coordinate, &varied)? {

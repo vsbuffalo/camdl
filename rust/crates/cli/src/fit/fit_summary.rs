@@ -187,7 +187,7 @@ pub(crate) fn recorded_chain_logliks(
 ///
 /// A handle whose directory holds no completed method leaf has nothing to
 /// summarise and exits 1 (gh#896); a leaf directory summarises that one run.
-pub fn cmd_fit_summary(args: &FitSummaryArgs) {
+pub(crate) fn cmd_fit_summary(args: &FitSummaryArgs, compile: crate::util::CompileSettings) {
     // Resolve the fit handle (@label / hash prefix / run-dir / fit.toml) to
     // what it names. A run handle summarises that run; a problem folder in
     // which one method has several runs is refused with the runs listed,
@@ -243,7 +243,7 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
     // calendar-date parameters but the model declares no `origin` — the
     // dates can't be rendered and the omission is otherwise silent.
     // stderr keeps the warning out of the JSON/stdout payload.
-    if let Some(msg) = load_calendar_context(Path::new(&dir)).missing_origin_warning() {
+    if let Some(msg) = load_calendar_context(Path::new(&dir), compile).missing_origin_warning() {
         out.say(format_args!("{} {}", stderr.paint("warning:", Style::Warn), msg));
     }
 
@@ -282,10 +282,10 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
         };
 
     let failures = match args.format {
-        FitSummaryFormat::Text => format_text(&mut out, &dir, args, &selected, strict, selection.as_ref()),
-        FitSummaryFormat::Json => format_json(&mut out, &dir, &selected, strict, selection.as_ref()),
-        FitSummaryFormat::Md => format_md(&mut out, &dir, &selected, strict, selection.as_ref()),
-        FitSummaryFormat::Latex => format_latex(&mut out, &dir, &selected, strict, selection.as_ref()),
+        FitSummaryFormat::Text => format_text(&mut out, &dir, args, &selected, strict, selection.as_ref(), compile),
+        FitSummaryFormat::Json => format_json(&mut out, &dir, &selected, strict, selection.as_ref(), compile),
+        FitSummaryFormat::Md => format_md(&mut out, &dir, &selected, strict, selection.as_ref(), compile),
+        FitSummaryFormat::Latex => format_latex(&mut out, &dir, &selected, strict, selection.as_ref(), compile),
     };
 
     // One exit decision for all four formats: an unreadable leaf is reported
@@ -299,7 +299,7 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
 /// `time_unit`, and the `instant`-kind parameter set. Any failure (no fit view,
 /// model moved/unparseable) degrades to an empty context (numeric-only
 /// rendering) — never panics.
-pub(crate) fn load_calendar_context(fit_dir: &Path) -> CalendarContext {
+pub(crate) fn load_calendar_context(fit_dir: &Path, compile: crate::util::CompileSettings) -> CalendarContext {
     // Legacy fits carried the model path on the top-level `Fit` run.json. A
     // content-addressed fit (gh#147 M3.2) has no fit-wide record — the fit
     // level is a path segment — so recover the model path from any method
@@ -315,14 +315,14 @@ pub(crate) fn load_calendar_context(fit_dir: &Path) -> CalendarContext {
     let Some(model_path) = model_path else {
         return CalendarContext::default();
     };
-    match crate::util::load_model(&model_path) {
+    match crate::util::load_model(&model_path, compile) {
         Ok((model, _)) => CalendarContext::of_model(&model),
         Err(_) => CalendarContext::default(),
     }
 }
 
 /// The fit's model, compiled from the source path its records name.
-fn load_fit_envelope(fit_dir: &Path) -> Option<ir::IrEnvelope> {
+fn load_fit_envelope(fit_dir: &Path, compile: crate::util::CompileSettings) -> Option<ir::IrEnvelope> {
     let model_path = FitView::read(fit_dir)
         .and_then(|v| v.model_path())
         .map(|p| p.to_string_lossy().into_owned())
@@ -331,7 +331,7 @@ fn load_fit_envelope(fit_dir: &Path) -> Option<ir::IrEnvelope> {
                 .into_iter()
                 .find_map(|(_, rec)| rec.provenance.source_paths.first().cloned())
         });
-    crate::util::load_model_envelope(&model_path?).ok()
+    crate::util::load_model_envelope(&model_path?, compile).ok()
 }
 
 /// One fit-method leaf to report: its name, on-disk directory, method (so
@@ -610,10 +610,11 @@ fn format_text(
     methods: &[ResolvedMethod],
     strict: bool,
     selection: Option<&ChainSelection>,
+    compile: crate::util::CompileSettings,
 ) -> Vec<LoadFailure> {
     let mut failures: Vec<LoadFailure> = Vec::new();
     let stderr = out.stderr_painter();
-    let cal = load_calendar_context(Path::new(dir));
+    let cal = load_calendar_context(Path::new(dir), compile);
     let mut had_provenance_failure = false;
     // Emit the loud selection advisory (nudge + warning) once, from the first
     // Bayesian method that recomputes.
@@ -621,7 +622,7 @@ fn format_text(
 
     // One compile of the fit's model: its `#'` docs and constants for the
     // legends, its observation streams for the method reports' checks.
-    let envelope = load_fit_envelope(Path::new(dir));
+    let envelope = load_fit_envelope(Path::new(dir), compile);
     let model = envelope.as_ref().map(|env| &env.model);
     let (docs, constants) = envelope.as_ref()
         .map(|env| (env.docs.clone(), env.model.constants.clone()))
@@ -784,8 +785,9 @@ pub(crate) fn forkability(
 /// [`exact_json`]: crate::fit::report::exact::exact_json
 fn format_json(
     out: &mut Out, dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>,
+    compile: crate::util::CompileSettings,
 ) -> Vec<LoadFailure> {
-    let doc = build_summary_doc(out, dir, methods, selection);
+    let doc = build_summary_doc(out, dir, methods, selection, compile);
     let any_failed = doc.methods.iter().any(|s| s.provenance_failed());
     write_data(out, &format!("{}\n", summary_json(&doc)));
     if strict && any_failed {
@@ -801,8 +803,8 @@ fn summary_json(doc: &FitSummaryDoc) -> String {
         .expect("FitSummaryDoc must serialize")
 }
 
-fn format_md(out: &mut Out, dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>) -> Vec<LoadFailure> {
-    let doc = build_summary_doc(out, dir, methods, selection);
+fn format_md(out: &mut Out, dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>, compile: crate::util::CompileSettings) -> Vec<LoadFailure> {
+    let doc = build_summary_doc(out, dir, methods, selection, compile);
     let any_failed = doc.methods.iter().any(|s| s.provenance_failed());
     write_data(out, &render_markdown(&doc));
     if strict && any_failed {
@@ -811,8 +813,8 @@ fn format_md(out: &mut Out, dir: &str, methods: &[ResolvedMethod], strict: bool,
     doc.failures
 }
 
-fn format_latex(out: &mut Out, dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>) -> Vec<LoadFailure> {
-    let doc = build_summary_doc(out, dir, methods, selection);
+fn format_latex(out: &mut Out, dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>, compile: crate::util::CompileSettings) -> Vec<LoadFailure> {
+    let doc = build_summary_doc(out, dir, methods, selection, compile);
     let any_failed = doc.methods.iter().any(|s| s.provenance_failed());
     write_data(out, &render_latex(&doc));
     if strict && any_failed {
@@ -884,10 +886,11 @@ fn build_summary_doc(
     dir: &str,
     methods: &[ResolvedMethod],
     selection: Option<&ChainSelection>,
+    compile: crate::util::CompileSettings,
 ) -> FitSummaryDoc {
     let stderr = out.stderr_painter();
-    let cal = load_calendar_context(Path::new(dir));
-    let model = load_fit_envelope(Path::new(dir)).map(|env| env.model);
+    let cal = load_calendar_context(Path::new(dir), compile);
+    let model = load_fit_envelope(Path::new(dir), compile).map(|env| env.model);
     let mut method_reports: Vec<MethodReport> = Vec::new();
     // The chain-selection provenance (stamped on the doc) + one-shot advisory.
     let mut chain_selection_json: Option<serde_json::Value> = None;
@@ -3345,7 +3348,7 @@ mod tests {
         let params = [("R0", 56.0_f64), ("sigma", 0.08), ("gamma", 0.08)];
         let dir = make_fit_dir("if2", &state, &params);
         let methods = discover_methods(&dir);
-        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None);
+        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None, crate::util::CompileSettings { licm_disabled: false, ir_cache_disabled: false });
         let with = |v: Option<f64>| {
             let mut d = doc.clone();
             d.methods[0].initial_loglik = v;
@@ -3368,7 +3371,7 @@ mod tests {
         let dir = make_fit_dir("if2", &state, &params);
 
         let methods = discover_methods(&dir);
-        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None);
+        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None, crate::util::CompileSettings { licm_disabled: false, ir_cache_disabled: false });
         let json = serde_json::to_string_pretty(&doc).unwrap();
         assert!(json.contains("\"version\": 5"),
             "schema.version must be present and = 5: {}", json);
@@ -3400,7 +3403,7 @@ mod tests {
         let dir = make_fit_dir("if2", &state, &params);
 
         let methods = discover_methods(&dir);
-        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None);
+        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None, crate::util::CompileSettings { licm_disabled: false, ir_cache_disabled: false });
         let md = render_markdown(&doc);
         assert!(md.contains("# Fit summary:"));
         assert!(md.contains("## `if2`"));
@@ -3421,7 +3424,7 @@ mod tests {
         let dir = make_fit_dir("if2", &state, &params);
 
         let methods = discover_methods(&dir);
-        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None);
+        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None, crate::util::CompileSettings { licm_disabled: false, ir_cache_disabled: false });
         let tex = render_latex(&doc);
         // No preamble, but tabular blocks per method.
         assert!(tex.contains("\\subsection*{Method:"));
