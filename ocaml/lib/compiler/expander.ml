@@ -12581,6 +12581,44 @@ let lower_covers ctx (od : obs_decl) (columns : obs_column list)
         None
     end
 
+(* A `diagnostic_test`'s `sens` and `spec` are probabilities: E379 refuses
+   one that is a compile-time constant ([const_value], the evaluator E423
+   uses) and either is not a finite number or lies outside [0, 1]. A
+   parameter is not a constant and is not checked here; one declared
+   `probability` is bounded by its kind (spec §12.2.1). The arguments are read
+   as written, because the parser has already folded them into the base's
+   `p`, where no rule can tell them apart from the rest of it. *)
+let check_test_accuracy ctx (od : obs_decl) (ta : test_accuracy) =
+  let check arg role e =
+    let err message =
+      Diagnostics.error ctx.diags ~code:"E379"
+        ~loc:(diag_loc_of_ast_ctx ctx ta.ta_loc)
+        ~message:(Printf.sprintf
+          "observation '%s': the `diagnostic_test` %s is not a probability: %s"
+          od.oname role message)
+        ~detail:(Printf.sprintf
+          "`%s` is the probability that %s, and the test's probability of a \
+           positive result, `sens * p + (1 - spec) * (1 - p)`, is a \
+           probability only when `sens` and `spec` lie in [0, 1]"
+          arg (if arg = "sens"
+               then "an infected individual tests positive"
+               else "an uninfected individual tests negative"))
+        ~hint:(Printf.sprintf
+          "write `%s` as a probability, such as `%s = 0.95`, or estimate it \
+           as a parameter declared `probability`"
+          arg arg)
+        ()
+    in
+    match const_value ctx e with
+    | Some v when not (Float.is_finite v) ->
+      err (Printf.sprintf "`%s` is not a finite number (%g)" arg v)
+    | Some v when v < 0.0 || v > 1.0 ->
+      err (Printf.sprintf "`%s` is %.12g, outside [0, 1]" arg v)
+    | Some _ | None -> ()
+  in
+  check "sens" "sensitivity" ta.ta_sens;
+  check "spec" "specificity" ta.ta_spec
+
 (* [transitions] is the lowered transition list, already expanded, so the
    rate-ratio check (E352) can compare a projection's terms against every
    transition's lowered rate. *)
@@ -12612,7 +12650,7 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
     in
     let meas_v = match od.omeasurement with
       | Some m -> m
-      | None -> missing_field "measurement"; { om_scored = od.oname; om_lik = LikPoisson [("rate", EConst 1.0)] }
+      | None -> missing_field "measurement"; { om_scored = od.oname; om_lik = LikPoisson [("rate", EConst 1.0)]; om_accuracy = None }
     in
     let lik_v = meas_v.om_lik in
     (* `columns { }` coherence checks (OCaml-side, internal — §2.2/§4.1).
@@ -12626,6 +12664,7 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
        its E273 already fired, so we don't pile on the scored/dead-column
        coherence checks (E276/E277), which would be spurious noise. *)
     let has_real_measurement = od.omeasurement <> None && meas_v.om_scored <> "" in
+    Option.iter (check_test_accuracy ctx od) meas_v.om_accuracy;
     let () =
       (* Exactly one set of temporal columns — either a `: time` column or a
          complete `window_start`/`window_stop` pair, never both and never half

@@ -10407,6 +10407,64 @@ let test_diagnostic_test_missing_kwargs () =
   |} in
   compile_expect_error_code ~code:"E254" ~contains:"diagnostic_test" src
 
+(* gh#1323: a `diagnostic_test` whose `sens` and `spec` are [sens] and [spec],
+   with `rho_sens`, `rho_spec` (declared `probability`) and the unindexed let
+   `lab = 0.9` in scope. *)
+let diagnostic_test_accuracy_src ~sens ~spec = Printf.sprintf {|
+    time_unit = 'days
+    compartments { S, I, R }
+    parameters {
+      beta     : rate        in [0.001, 5.0]
+      gamma    : rate        in [0.01, 1.0]
+      rho_sens : probability in [0.5, 1.0]
+      rho_spec : probability in [0.5, 1.0]
+      N_tested : count       in [10, 10000]
+    }
+    let lab = 0.9
+    transitions {
+      infection : S --> I @ beta * S * I / (S + I + R)
+      recovery  : I --> R @ gamma * I
+    }
+    observations {
+      slide_positivity {
+        columns       { time : time, slide_positivity : count }
+        projected = I / (S + I + R)
+        emit_schedule = every 1 'weeks
+        slide_positivity ~ diagnostic_test(
+          base = binomial(n = N_tested, p = projected),
+          sens = %s,
+          spec = %s
+        )
+      }
+    }
+    init { S = 999  I = 1 }
+    simulate { from = 0 'days  to = 14 'days }
+  |} sens spec
+
+(** A constant `sens` or `spec` outside [0, 1] is E379, whichever way the
+    constant is spelled: a literal, a negative literal, arithmetic, or an
+    unindexed let. The message names the argument and its value. *)
+let test_diagnostic_test_accuracy_out_of_range_rejected () =
+  List.iter (fun (sens, spec, contains) ->
+      compile_expect_error_code ~code:"E379" ~contains
+        (diagnostic_test_accuracy_src ~sens ~spec))
+    [ ("1.5",      "rho_spec", "`sens` is 1.5");
+      ("-0.1",     "rho_spec", "`sens` is -0.1");
+      ("rho_sens", "1 + 0.2",  "`spec` is 1.2");
+      ("rho_sens", "lab * 2",  "`spec` is 1.8") ]
+
+(** A constant `sens` or `spec` that is not a finite number is E379. *)
+let test_diagnostic_test_accuracy_non_finite_rejected () =
+  compile_expect_error_code ~code:"E379" ~contains:"not a finite number"
+    (diagnostic_test_accuracy_src ~sens:"0 / 0" ~spec:"rho_spec")
+
+(** Constants in [0, 1], both endpoints included, compile, as do parameters
+    and lets that are in range. *)
+let test_diagnostic_test_accuracy_in_range_ok () =
+  List.iter (fun (sens, spec) ->
+      ignore (compile_expect_ok (diagnostic_test_accuracy_src ~sens ~spec)))
+    [ ("1", "0"); ("0.95", "0.99"); ("rho_sens", "rho_spec"); ("lab", "1 - 0.01") ]
+
 (* ── #[lineage] individual-sampling layer (2026-05-19 proposal) ──────────────
    Foundation slice: lexer attribute opener, `#[lineage]` parse (both
    forms), linear-in-parents classifier (accept/reject with E601),
@@ -19445,6 +19503,9 @@ let () =
       Alcotest.test_case "bernoulli base supported"                        `Quick test_diagnostic_test_bernoulli;
       Alcotest.test_case "E253 rejects unsupported base (poisson)"        `Quick test_diagnostic_test_bad_base;
       Alcotest.test_case "E254 rejects missing kwargs"                    `Quick test_diagnostic_test_missing_kwargs;
+      Alcotest.test_case "gh#1323: E379 constant sens/spec outside [0,1]" `Quick test_diagnostic_test_accuracy_out_of_range_rejected;
+      Alcotest.test_case "gh#1323: E379 non-finite constant sens/spec"    `Quick test_diagnostic_test_accuracy_non_finite_rejected;
+      Alcotest.test_case "gh#1323: sens/spec in [0,1] accepted"           `Quick test_diagnostic_test_accuracy_in_range_ok;
     ];
     "lineage_individual_sampling", [
       Alcotest.test_case "#[lineage] parses (both forms) → identical IR"   `Quick test_lineage_parses_both_forms;

@@ -13,6 +13,27 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-11-20 — a constant `diagnostic_test` sensitivity or specificity outside [0, 1] is refused
+
+**What.** `diagnostic_test(base = ..., sens = S, spec = P)` rewrites the base's
+`p` into the probability of a positive result, `S · p + (1 − P) · (1 − p)` (spec
+§12.2.1). A constant `S` or `P` above 1 or below 0 used to compile, and the
+rewritten `p` then left `[0, 1]` for some true prevalences, so the likelihood
+scored the data under a value that is not a probability. A constant `sens` or
+`spec` (a number, arithmetic on numbers, or an unindexed `let` of one) must now
+be a finite number in `[0, 1]`. A parameter is not checked when the model is
+compiled; one declared `probability` stays in `[0, 1]`.
+
+**Migration.** Write the test's sensitivity and specificity as probabilities:
+`sens = 0.95` rather than `sens = 95` or `sens = 1.5`. To estimate them, declare
+parameters of kind `probability` and pass those.
+
+**Diagnostic.** E379, "observation 'slide_positivity': the `diagnostic_test`
+sensitivity is not a probability: `sens` is 1.5, outside [0, 1]"; for `0 / 0`,
+"… is not a finite number".
+
+---
+
 ## 2026-11-20 — two errors leave E272 for codes of their own
 
 **What.** E272 named three unrelated errors. It now names only the removed
@@ -33,6 +54,8 @@ either of the two errors must match E377 or E378 instead.
 indices in stoichiometry`;
 `error[E378]: reactive intervention 'sia': trigger
 threshold must be a constant or a parameter`.
+
+---
 
 ## 2026-11-18 — a `transfer(count = ...)` that is negative when it fires is refused
 

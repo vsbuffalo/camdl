@@ -79,19 +79,23 @@
      `likelihood = D(...)` on the (rejected) migration path arrives as a
      `Lik`; we wrap it into a measurement with an empty scored column so the
      parse completes — the E273 diagnostic already fired. *)
-  (* Desugar a distribution call `D(kw = ..., ...)` into a [likelihood_kind].
-     Shared by the `~` measurement form and the (rejected) migration
-     `likelihood = D(...)` path. `diagnostic_test(...)` is compile-time sugar
-     that reparameterizes a binomial/bernoulli `p` by sensitivity/specificity. *)
+  (* Desugar a distribution call `D(kw = ..., ...)` into a [likelihood_kind],
+     paired with the `sens` and `spec` of a `diagnostic_test(...)` as written
+     ([None] for any other family). Shared by the `~` measurement form, the
+     `~` init law and the (rejected) migration `likelihood = D(...)` path;
+     only the measurement form keeps the pair's second half, for E379.
+     `diagnostic_test(...)` is compile-time sugar that reparameterizes a
+     binomial/bernoulli `p` by sensitivity/specificity. *)
   let lik_of_funcall kind args ~sp ~ep =
+    let plain l = (l, None) in
     match kind with
-    | "neg_binomial"  -> LikNegBinomial  args
-    | "poisson"       -> LikPoisson      args
-    | "normal"        -> LikNormal       args
-    | "binomial"      -> LikBinomial     args
-    | "beta_binomial" -> LikBetaBinomial args
-    | "beta"          -> LikBeta         args
-    | "bernoulli"     -> LikBernoulli    args
+    | "neg_binomial"  -> plain (LikNegBinomial  args)
+    | "poisson"       -> plain (LikPoisson      args)
+    | "normal"        -> plain (LikNormal       args)
+    | "binomial"      -> plain (LikBinomial     args)
+    | "beta_binomial" -> plain (LikBetaBinomial args)
+    | "beta"          -> plain (LikBeta         args)
+    | "bernoulli"     -> plain (LikBernoulli    args)
     | "diagnostic_test" ->
       let find k = List.assoc_opt k args in
       (match find "base", find "sens", find "spec" with
@@ -107,16 +111,18 @@
                in (k, p_adj)
              else (k, v))
          in
+         let accuracy = Some { ta_sens = sens_e; ta_spec = spec_e;
+                               ta_loc = Parser_errors.ast_loc_of ~sp ~ep } in
          (match base_kind with
-          | "binomial"  -> LikBinomial  (rewrite_p base_args)
-          | "bernoulli" -> LikBernoulli (rewrite_p base_args)
+          | "binomial"  -> (LikBinomial  (rewrite_p base_args), accuracy)
+          | "bernoulli" -> (LikBernoulli (rewrite_p base_args), accuracy)
           | other ->
             Parser_errors.push_error ~sp ~ep
               ~code:"E253"
               ~msg:(Printf.sprintf
                 "diagnostic_test base must be binomial(...) or bernoulli(...); got %s(...)"
                 other);
-            LikBinomial (rewrite_p (placeholders ["n"; "p"])))
+            plain (LikBinomial (rewrite_p (placeholders ["n"; "p"]))))
        | base, _, _ ->
          Parser_errors.push_error ~sp ~ep
            ~code:"E254"
@@ -124,9 +130,9 @@
          (* A base the wrapper accepts keeps its own arguments, so a mistake
             inside it is still reported. *)
          (match base with
-          | Some (EFuncCall ("binomial", base_args))  -> LikBinomial base_args
-          | Some (EFuncCall ("bernoulli", base_args)) -> LikBernoulli base_args
-          | _ -> LikBinomial (placeholders ["n"; "p"])))
+          | Some (EFuncCall ("binomial", base_args))  -> plain (LikBinomial base_args)
+          | Some (EFuncCall ("bernoulli", base_args)) -> plain (LikBernoulli base_args)
+          | _ -> plain (LikBinomial (placeholders ["n"; "p"]))))
     | "zero_inflated" ->
       (* Zero-inflation wrapper: `zero_inflated(base = neg_binomial(mean=, r=),
          pi = )`. Desugar to the flat [LikZeroInflatedNegBinomial] by flattening
@@ -147,13 +153,13 @@
        | Some (EFuncCall (base_kind, base_args)), Some pi_e ->
          (match base_kind with
           | "neg_binomial" ->
-            LikZeroInflatedNegBinomial (base_args @ [("pi", pi_e)])
+            plain (LikZeroInflatedNegBinomial (base_args @ [("pi", pi_e)]))
           | other ->
             Parser_errors.push_error ~sp ~ep
               ~code:"E324"
               ~msg:(Printf.sprintf
                 "zero_inflated base must be neg_binomial(...); got %s(...)" other);
-            LikZeroInflatedNegBinomial (placeholders ["mean"; "r"] @ [("pi", pi_e)]))
+            plain (LikZeroInflatedNegBinomial (placeholders ["mean"; "r"] @ [("pi", pi_e)])))
        | base, pi ->
          Parser_errors.push_error ~sp ~ep
            ~code:"E325"
@@ -166,14 +172,14 @@
          let pi_arg = match pi with
            | Some pi_e -> [("pi", pi_e)]
            | None -> placeholders ["pi"] in
-         LikZeroInflatedNegBinomial (base_args @ pi_arg))
+         plain (LikZeroInflatedNegBinomial (base_args @ pi_arg)))
     | s ->
       Parser_errors.push_error ~sp ~ep
         ~code:"E104"
         ~msg:(Printf.sprintf "unknown likelihood '%s': expected one of neg_binomial, poisson, normal, binomial, beta_binomial, beta, bernoulli, diagnostic_test, zero_inflated" s);
       (* The arguments belong to a family that does not exist; checking them
          against Poisson's would report them as mistakes they are not. *)
-      LikPoisson (placeholders ["rate"])
+      plain (LikPoisson (placeholders ["rate"]))
 
   (* Destructure `covers = <form>(<time column>[, <span>])` (gh#833) out of a
      parsed expression. Shape only — whether the form NAME is one of the three,
@@ -262,7 +268,7 @@
         proj := Some p
       | `Covers c      -> once "`covers`" ~sp ~ep; covers := Some c
       | `Measurement m -> once "a `~` measurement line" ~sp ~ep; meas := Some m
-      | `Lik l         -> meas := Some { om_scored = ""; om_lik = l }
+      | `Lik l         -> meas := Some { om_scored = ""; om_lik = l; om_accuracy = None }
     ) kvs;
     { oname = name; oindices = ibs;
       osource = src; ocolumns = !cols;
@@ -1134,11 +1140,12 @@ obs_kv:
   (* `<scored_col> ~ Dist(kw = ..., ...)` — the measurement model (§2.1).
      The `| dim` pooling suffix (legal on a prior `~`) is meaningless here and
      is rejected by [obs_measurement_pooled] below. *)
-  | scored = IDENT TILDE lik = obs_likelihood
-      { `Measurement { om_scored = scored; om_lik = lik } }
+  | scored = IDENT TILDE m = obs_likelihood
+      { let (lik, accuracy) = m in
+        `Measurement { om_scored = scored; om_lik = lik; om_accuracy = accuracy } }
   (* Migration: a likelihood `~` does NOT carry the prior's `| dim` pooling
      suffix (§2.1). Point the author at the bracket-index form. *)
-  | scored = IDENT TILDE lik = obs_likelihood PIPE dim = IDENT
+  | scored = IDENT TILDE m = obs_likelihood PIPE dim = IDENT
       { Parser_errors.push_error_hint ~sp:$startpos ~ep:$endpos
           ~code:"E271"
           ~msg:(Printf.sprintf
@@ -1147,7 +1154,7 @@ obs_kv:
           ~hint:(Printf.sprintf
             "to stratify the observation, index the stream header: \
              `%s[a in %s] from <source> { ... }`" scored dim);
-        `Measurement { om_scored = scored; om_lik = lik } }
+        `Measurement { om_scored = scored; om_lik = fst m; om_accuracy = None } }
   (* Migration: `every`/`at` at the top of an observation block was the old
      emission cadence; it is now `emit_schedule = ...` (§2.5). Reject the bare
      form with the rewrite. *)
@@ -1170,7 +1177,7 @@ obs_kv:
           ~hint:"write `<value_col> ~ D(...)` where <value_col> is a declared \
                  column — see `camdl docs language-changes`";
         `Lik (match e with
-        | EFuncCall (kind, args) -> lik_of_funcall kind args ~sp:$startpos ~ep:$endpos
+        | EFuncCall (kind, args) -> fst (lik_of_funcall kind args ~sp:$startpos ~ep:$endpos)
         | _ ->
           Parser_errors.push_error ~sp:$startpos ~ep:$endpos
             ~code:"E118"
@@ -1192,7 +1199,8 @@ instant_entry:
   | e = expr { tpos Time_pos.Instant e ~sp:$startpos ~ep:$endpos }
 
 (* The `~` RHS distribution: `D(kw = ..., ...)` — keyword-only (the positional
-   case is rejected downstream in the expander as E250). *)
+   case is rejected downstream in the expander as E250), with the `sens` and
+   `spec` of a `diagnostic_test(...)` ([lik_of_funcall]). *)
 obs_likelihood:
   | name = IDENT LPAREN args = separated_list(COMMA, kw_expr) RPAREN
       { lik_of_funcall name args ~sp:$startpos ~ep:$endpos }
@@ -1648,17 +1656,17 @@ init_entry:
   | f = IDENT LPAREN r = stoich_ref_item COMMA location = expr RPAREN TILDE l = obs_likelihood
       { let (comp, idxs) = stage_endpoint ~sp:$startpos ~ep:$endpos(location) f r location in
         { icomp = comp; iindices = idxs; ibindings = [];
-          ivalue = IVLaw (l, Parser_errors.ast_loc_of ~sp:$startpos(l) ~ep:$endpos(l));
+          ivalue = IVLaw (fst l, Parser_errors.ast_loc_of ~sp:$startpos(l) ~ep:$endpos(l));
           iloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos;
           ispan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   | comp = IDENT LBRACKET ibs = separated_nonempty_list(COMMA, index_binding) RBRACKET TILDE l = obs_likelihood
       { { icomp = comp; iindices = []; ibindings = ibs;
-          ivalue = IVLaw (l, Parser_errors.ast_loc_of ~sp:$startpos(l) ~ep:$endpos(l));
+          ivalue = IVLaw (fst l, Parser_errors.ast_loc_of ~sp:$startpos(l) ~ep:$endpos(l));
           iloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos;
           ispan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   | comp = IDENT idxs = index_items_opt TILDE l = obs_likelihood
       { { icomp = comp; iindices = idxs; ibindings = [];
-          ivalue = IVLaw (l, Parser_errors.ast_loc_of ~sp:$startpos(l) ~ep:$endpos(l));
+          ivalue = IVLaw (fst l, Parser_errors.ast_loc_of ~sp:$startpos(l) ~ep:$endpos(l));
           iloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos;
           ispan = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
 

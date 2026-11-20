@@ -914,6 +914,17 @@ type obs_projection =
             projected = I / N
           ]} *)
 
+(** The [sens] and [spec] of a [diagnostic_test(...)], as written. The parser
+    has already folded them into the base's [p]; they are kept so the
+    expander can refuse a constant outside [0, 1] (E379), and nothing else
+    reads them. *)
+type test_accuracy = {
+  ta_sens : expr;
+  ta_spec : expr;
+  ta_loc  : loc;
+      (** The span of the [diagnostic_test(...)] call. *)
+}
+
 (** An observation stream's measurement model, [npos ~ binomial(...)]: the
     data column scored, and the distribution it is scored under.
 
@@ -925,6 +936,9 @@ type obs_measurement = {
       (** The scored column, which must be a declared value column; [""]
           only after a parse error. *)
   om_lik    : likelihood_kind;
+  om_accuracy : test_accuracy option;
+      (** [Some] when the measurement was written as [diagnostic_test(...)];
+          [None] for any other family. *)
 }
 
 (** What one column of an observation's data file holds, from its entry in

@@ -4154,9 +4154,11 @@ missing `base`, `sens` or `spec` is **E254**.
 **Arguments.** `sens` and `spec` may be constants, parameters with priors
 (estimating the test characteristics jointly with the transmission model), or
 expressions. The compiler checks that each is dimensionless (**E304**
-otherwise); it does not check that a constant lies in `[0, 1]`, so a value such
-as `sens = 1.5` compiles. Declaring the parameters as `probability` keeps their
-values in `[0, 1]` (§4.4).
+otherwise). A `sens` or `spec` that is a compile-time constant (a number,
+arithmetic on numbers, or an unindexed `let` of one, as for the weights of a
+destination split, §9.1.2) must be a finite number in `[0, 1]`: `sens = 1.5`
+or `spec = 1 - 1.2` is **E379**. A parameter is not checked when the model is
+compiled; declaring it `probability` keeps its values in `[0, 1]` (§4.4).
 
 ### 12.2.2 Counts with excess zeros: `zero_inflated`
 
@@ -7397,6 +7399,7 @@ authoritative list is whatever `ocaml/lib/compiler/` and `ocaml/lib/ir/` emit.
 | E360 | Error   | Arithmetic with no meaning on a definite instant: `Instant + Instant`, a `sum` of instants, `k * Instant`, `Duration − Instant`, `Instant +` a unitless constant, a conditional choosing between an Instant and a duration (§2.1) |
 | E377 | Error   | A stratified compartment is named without indices in a transition's stoichiometry (§8.3) |
 | E378 | Error   | A reactive trigger's threshold is neither a constant nor a parameter (§13.9) |
+| E379 | Error   | A `diagnostic_test` `sens` or `spec` that is a constant outside `[0, 1]` or not a finite number (§12.2.1) |
 | E423 | Error   | A destination split's constant weights are not a probability distribution: a weight is not finite or lies outside [0, 1], or all are constant and do not sum to 1 (within `1e-9`) (§9.1.2) |
 | W103 | Warning | Let binding name shadows a stratum value in some dimension                                |
 
