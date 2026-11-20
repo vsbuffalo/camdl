@@ -400,10 +400,11 @@ the run directory:
   make the two predictive axes explicit (so an honestly-wide posterior band is
   never confused with a narrow plug-in one), and `fit_rhat_max`/`fit_ess_min`
   carry the fit's own convergence numbers alongside every band. The `role`
-  column says what part the row played in the fit: `trained`, `held_out` (a data
-  row after the fit's training rows), or `target` (a free-forward row past the
-  last data row). **`fit_rhat_max` is the rank-normalized split R̂ and
-  `fit_ess_min` the bulk-ESS** (see
+  column says what part the row played in the fit: `trained` (a row of the fit's
+  training prefix), `held_out` (a row of the bound file after it), or `future`
+  (a free-forward row past the last row of the bound file: the prediction read
+  no data row for that period). **`fit_rhat_max` is the rank-normalized split R̂
+  and `fit_ess_min` the bulk-ESS** (see
   [Which R̂, and which ESS](#which-r-and-which-ess)); `fit_ess_min` is left empty
   when any assessed parameter has no pooled ESS, rather than minimizing over the
   ones that do. The sibling `predictive.json` tags this contract

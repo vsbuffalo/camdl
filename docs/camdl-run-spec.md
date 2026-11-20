@@ -847,15 +847,23 @@ one (the one dt rule), else the fit's `[config] dt` — since either horizon on
 another step would replay a different process than the posterior describes.
 
 **Each row carries its role in the fit.** The `role` column is `trained` for a
-data row in the fit's training rows of its stream, `held_out` for a data row
-after them (`[data] holdout_after`), and `target` for a free-forward row past
-the stream's last data row. Membership is the row's position in its stream, read
-from the training partition the fit recorded and checked against the data files;
-a fit that recorded none is refused. A `one_step` band covers every data row,
-held-out rows included. At a `held_out` row its parameters were fitted without
-that row, and its state was filtered through every earlier row of every stream,
-held-out rows included, so it is not a forecast from the end of the training
-rows (`--horizon` writes that one). `predictive.json` records both sets:
+row of the fit's training prefix of its stream (an `NA` row included),
+`held_out` for a row of the bound file after that prefix
+(`[data] holdout_after`), and `future` for a free-forward row past the last row
+of the bound file: this prediction read no data row for this period. (`target`
+is reserved for a forecast's targets, which carry a horizon and a lead; these
+two modes write none.) Membership is the row's position in its stream, read from
+the training partition the fit recorded and checked against the data files; a
+fit that recorded none is refused. A `one_step` band covers every row of the
+bound files. At a `held_out` row its parameters were fitted without that row,
+and its state was filtered through every earlier row of every stream this
+predict covers (all bound streams, or those `--stream` names), earlier held-out
+rows among them, so it is not a forecast from the end of the training rows
+(`--horizon` writes that one). For a stream labelled by each period's start, the
+`one_step` rows' `time` is the period's end while `free_forward` rows and
+`observed/` carry the label (gh#1152), and the `free_forward` rows past the data
+are mis-timed (gh#1151); `role` is read by row position and is right on both.
+`predictive.json` records both sets:
 
 - `parameter_set`: the fit's training partition, as `forecast.json` carries it
   (the `rule`, the training `extent` as `{t, date}`, and each stream's training
@@ -864,10 +872,15 @@ rows (`--horizon` writes that one). `predictive.json` records both sets:
   `free_forward` is `{"conditioning": "none", "streams": []}`: the band is never
   conditioned on a row. `one_step` is `"conditioning": "filtered"` with, per
   stream, the `rows` the filter walked, how many of them are `held_out_rows`,
-  and the rows' digest. Under `[data.holdout]` the holdout files are not read by
-  these two modes: their rows are neither filtered through nor predicted, every
-  row written is `trained`, and the `one_step` entry says so with
-  `"holdout_files": {"read": false, "sources": […]}`.
+  and the rows' digest. Whether held-out rows were filtered through is read from
+  `held_out_rows`; under `--stream` only the selected streams are listed.
+- `holdout_files`, at the top level, present under `[data.holdout]`:
+  `{"read": false, "sources": […]}`. These two modes do not read the holdout
+  files, so their rows are neither filtered through nor predicted as data rows.
+  Every `one_step` row is then `trained`, and a `free_forward` row in a period a
+  holdout file covers is `future`, not `held_out`. `holdout_after` and
+  `[data.holdout]` describing the same split therefore do not yet give the same
+  record (gh#1309).
 
 **A downstream simulation inherits its fit's stochastic configuration (D78).**
 Unless explicitly overridden, every downstream simulation inherits the
