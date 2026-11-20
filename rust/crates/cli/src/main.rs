@@ -1415,7 +1415,10 @@ fn run_simulate(a: &args::SimulateArgs, compile: crate::sim_config::CompileSetti
                     }
                     Err(_) => None,
                 }
-                    .map(|r| crate::fit::fitted_model::stored_fit_simulator(&r, compile))
+                    .map(|r| {
+                        crate::fit::fitted_model::stored_fit_model(&r, compile)
+                            .and_then(|m| crate::fit::fitted_model::stored_fit_simulator(&r, &m))
+                    })
                     .transpose()
                     .unwrap_or_else(|e| {
                         out.fail(format!("error: --fit {fit_handle}: {e}"));
@@ -1430,7 +1433,10 @@ fn run_simulate(a: &args::SimulateArgs, compile: crate::sim_config::CompileSetti
                 } else {
                     crate::fit::handle::resolve_fit(fit_ref)
                         .map_err(|e| e.to_string())
-                        .and_then(|r| crate::fit::fitted_model::stored_fit_simulator(&r, compile))
+                        .and_then(|r| {
+                            crate::fit::fitted_model::stored_fit_model(&r, compile)
+                                .and_then(|m| crate::fit::fitted_model::stored_fit_simulator(&r, &m))
+                        })
                 };
                 Some((
                     fit_ref.clone(),

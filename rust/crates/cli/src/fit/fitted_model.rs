@@ -411,22 +411,12 @@ impl FittedSimulator {
 /// Read by every replay of a stored fit on a simulator the replaying command
 /// chooses: `simulate --draws … --fit` and `compare`'s derived filter.
 /// `fit predict` and the contrasts read the same two dt inputs through
-/// `dt_rule::resolved_dt` and the run's recorded backend. A fit that archived
-/// no model is read from its config's source, compiled under `compile`.
+/// `dt_rule::resolved_dt` and the run's recorded backend. `model` is the
+/// model the fit ran on, as the caller loaded it ([`stored_fit_model`]).
 pub(crate) fn stored_fit_simulator(
     resolved: &crate::fit::handle::ResolvedFit,
-    compile: crate::util::CompileSettings,
+    model: &ir::Model,
 ) -> Result<FittedSimulator, String> {
-    // The model the fit ran on: its archive, else (a fit that archived none)
-    // the source its config names, as `compare` reads it.
-    let archive = resolved.segment.join("model.ir.json");
-    let model_src = if archive.is_file() {
-        archive.to_string_lossy().into_owned()
-    } else {
-        resolved.config.problem.model.camdl.clone()
-    };
-    let (model, _) = crate::util::load_model(&model_src, compile)
-        .map_err(|e| format!("reading the model the fit ran on, {model_src}: {e}"))?;
     let sidecar = crate::run_meta::read_fit_sidecar(&resolved.segment)?;
     let backend = resolved
         .leaf
@@ -444,6 +434,24 @@ pub(crate) fn stored_fit_simulator(
         .unwrap_or_else(|| model.simulation.integrator.clone());
     let settings = FittedSettings::of(&resolved.config.problem.config);
     Ok(FittedSimulator { backend, dt, integrator, settings })
+}
+
+/// The model a stored fit ran on: its archive, else (a fit that archived
+/// none) the source its config names, compiled under `compile`, as `compare`
+/// reads it.
+pub(crate) fn stored_fit_model(
+    resolved: &crate::fit::handle::ResolvedFit,
+    compile: crate::util::CompileSettings,
+) -> Result<ir::Model, String> {
+    let archive = resolved.segment.join("model.ir.json");
+    let model_src = if archive.is_file() {
+        archive.to_string_lossy().into_owned()
+    } else {
+        resolved.config.problem.model.camdl.clone()
+    };
+    crate::util::load_model(&model_src, compile)
+        .map(|(m, _)| m)
+        .map_err(|e| format!("reading the model the fit ran on, {model_src}: {e}"))
 }
 
 /// The simulator a fit CONFIG describes, for a replay of its priors or

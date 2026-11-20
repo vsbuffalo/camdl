@@ -2665,7 +2665,7 @@ fn derive_prequential(
     // The step the fit ran at: the filter re-scores the data through the
     // fitted process, so it integrates at the fit's dt — not the model's
     // declared step or 1.0, which is all `pfilter` would see without it.
-    let fitted = crate::fit::fitted_model::stored_fit_simulator(resolved, derive.compile)?;
+    let fitted = crate::fit::fitted_model::stored_fit_simulator(resolved, &model)?;
     let fitted_dt = fitted.dt;
     // The settings the fit is scored under: its own `[config]`
     // `allow_degenerate_rates` and `allow_forcing_extrapolation`, which `fit
