@@ -362,14 +362,48 @@ pub(crate) fn period_under_way(
     }
 }
 
+/// Whether two of `obs`'s periods under `schedule` overlap (a uniform span
+/// longer than the step between labels), so that every time falls inside
+/// some period and no restart time writes the stream cleanly. Window
+/// columns never overlap.
+pub(crate) fn periods_overlap(obs: &ObservationModel, schedule: &EffectiveSchedule) -> bool {
+    let eps = crate::OBS_SNAP_EPS;
+    let Some(covers @ (Covers::From { span, .. } | Covers::Until { span, .. })) =
+        effective_covers(obs, schedule.override_step)
+    else {
+        return false;
+    };
+    match &*schedule.schedule {
+        ObservationSchedule::Regular(r) => span > r.step + eps,
+        ObservationSchedule::AtTimes(ts) => {
+            let mut periods: Vec<(f64, f64)> = ts.iter().filter_map(|&l| covers.period_of(l)).collect();
+            periods.sort_by(|a, b| a.0.total_cmp(&b.0));
+            periods.windows(2).any(|w| w[1].0 < w[0].1 - eps)
+        }
+    }
+}
+
 /// The refusal of a restart at `t` that would write `stream`'s period
-/// `[start, stop)`, under way at `t` (D100).
-pub(crate) fn restart_inside_period_refusal(stream: &str, (start, stop): (f64, f64), t: f64) -> String {
+/// `[start, stop)`, which `t` falls inside (D100). The restart time may come
+/// from a filter's data, a hand-made state or a PGAS fit's saved paths, so
+/// the message names the time, not its source. `overlapping`
+/// ([`periods_overlap`]) says no restart time writes the stream cleanly.
+pub(crate) fn restart_inside_period_refusal(
+    stream: &str,
+    (start, stop): (f64, f64),
+    t: f64,
+    overlapping: bool,
+) -> String {
+    let way_out = if overlapping {
+        "Its periods overlap (each is longer than the step between them), so every time falls \
+         inside one of them and no restart writes this stream cleanly.".to_string()
+    } else {
+        format!("A restart at either end of the period, t = {start} or t = {stop}, writes it cleanly.")
+    };
     format!(
-        "stream '{stream}' cannot be written from this restart: its period [{start}, {stop}) is \
-         under way at the restart time t = {t}, and the saved state does not carry the part of \
-         that period before t = {t}. The filter's data ends inside the period; data ending at \
-         {start} or {stop} restarts cleanly. To predict the period under way, use `camdl fit \
+        "stream '{stream}' cannot be written from this restart: the restart time t = {t} falls \
+         inside its period [{start}, {stop}), and the saved state does not carry the part of \
+         that period before t = {t}. {way_out} To predict the period under way, use `camdl fit \
          predict --fit <fit.toml> --horizon <DURATION>` (it needs a fit; a fixed-parameter \
          filter has none yet)."
     )
@@ -396,7 +430,8 @@ pub(crate) fn refuse_restart_inside_a_period(
         }
         let Some(schedule) = EffectiveSchedule::of(obs, emit)? else { continue };
         if let Some(period) = period_under_way(obs, &schedule, model_t_start, t) {
-            return Err(restart_inside_period_refusal(&obs.name, period, t));
+            return Err(restart_inside_period_refusal(
+                &obs.name, period, t, periods_overlap(obs, &schedule)));
         }
     }
     Ok(())
@@ -1581,6 +1616,31 @@ mod tests {
         assert_eq!(period_under_way(&s, &listed, 0.0, 35.0), Some((30.0, 45.0)));
         // No emit time after `t`: no window closes after it, none is written.
         assert_eq!(period_under_way(&s, &listed, 0.0, 50.0), None);
+    }
+
+    /// The refusal says the restart time falls inside the period, whatever
+    /// produced that time, and offers a clean restart time only when the
+    /// periods do not overlap.
+    #[test]
+    fn the_refusal_names_a_clean_restart_time_only_when_periods_do_not_overlap() {
+        let weekly = declared(every(0.0, 7.0));
+        let tiled = stream(incidence(), Some(Covers::Until { offset: 0.0, span: 7.0 }), time_cols());
+        let wide = stream(incidence(), Some(Covers::Until { offset: 0.0, span: 14.0 }), time_cols());
+        assert!(!periods_overlap(&tiled, &weekly));
+        assert!(periods_overlap(&wide, &weekly));
+        let listed = declared(ObservationSchedule::AtTimes(vec![14.0, 7.0, 21.0]));
+        assert!(periods_overlap(&wide, &listed), "an at-list is judged in time order");
+        assert!(!periods_overlap(&tiled, &listed));
+        let windows = stream(incidence(), Some(Covers::WindowColumns), window_cols());
+        assert!(!periods_overlap(&windows, &weekly));
+
+        let msg = restart_inside_period_refusal("weekly", (21.0, 28.0), 25.0, false);
+        assert!(msg.contains("the restart time t = 25 falls inside its period [21, 28)"), "{msg}");
+        assert!(msg.contains("t = 21 or t = 28, writes it cleanly"), "{msg}");
+        assert!(!msg.contains("data ends"), "the time may not come from a filter's data: {msg}");
+        let msg = restart_inside_period_refusal("weekly", (14.0, 28.0), 21.0, true);
+        assert!(msg.contains("every time falls inside one of them"), "{msg}");
+        assert!(!msg.contains("writes it cleanly"), "{msg}");
     }
 
     /// A state read has no period.

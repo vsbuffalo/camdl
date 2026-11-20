@@ -223,7 +223,7 @@ fn assert_refused(out: &Output, stream: &str, period: &str, t: &str) {
     let err = stderr(out);
     assert!(!out.status.success(), "the restart must be refused; stderr:\n{err}");
     assert!(err.contains(&format!("stream '{stream}' cannot be written from this restart: \
-        its period {period} is under way at the restart time t = {t}")),
+        the restart time t = {t} falls inside its period {period}")),
         "the refusal must name the stream, the period and t; stderr:\n{err}");
     assert!(err.contains("camdl fit predict"), "and name the alternative; stderr:\n{err}");
 }
@@ -263,6 +263,18 @@ fn ratio_of_flows_period_under_way_is_refused() {
     let r = restart(&ratio_of_flows(), 25.0);
     let out = r.simulate(&["--to", "49", "--obs-dir", &r.path("od")]);
     assert_refused(&out, "weekly_share", "[21, 28)", "25");
+}
+
+/// Fourteen-day periods on a seven-day schedule overlap, so every restart
+/// time falls inside one: the refusal does not offer a clean restart time.
+#[test]
+fn overlapping_periods_are_refused_without_a_clean_restart_time() {
+    let r = restart(&variant(&[(WEEKLY_BLOCK_COVERS, "    covers        = closing_at(time, 14 'days)")]), 21.0);
+    let out = r.simulate(&["--to", "49", "--obs-dir", &r.path("od")]);
+    assert_refused(&out, "weekly_cases", "[14, 28)", "21");
+    let err = stderr(&out);
+    assert!(err.contains("every time falls inside one of them"), "{err}");
+    assert!(!err.contains("writes it cleanly"), "{err}");
 }
 
 /// A four-week period in a model whose time unit is weeks: week 6 is inside
