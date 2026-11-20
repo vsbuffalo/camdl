@@ -185,9 +185,11 @@ in its own commit first.
   `rate_<name>`), and one line per intervention or event action that fires.
   Redirect stderr to a file; stdout carries the normal output.
   `CAMDL_EVAL_UNRESOLVED` routes propensities through the slow string-keyed
-  evaluator. Both live in `sim::trace` (`rust/crates/sim/src/trace.rs`), the one
-  module of `sim` allowed to write to stderr
-  (`rust/crates/sim/tests/sim_prints_nothing.rs`).
+  evaluator. It and `CAMDL_NO_BINDING_CACHE` are fields of `sim::EvalSettings`,
+  set on each compiled model by `cli::env::eval_settings`. `sim::trace`
+  (`rust/crates/sim/src/trace.rs`) keeps `CAMDL_TRACE_STEPS` and the one-time
+  eval-unresolved notice, and is the one module of `sim` allowed to write to
+  stderr (`rust/crates/sim/tests/sim_prints_nothing.rs`).
 - `RUST_LOG=sim=debug` — the `log::debug!` inference diagnostics in `pgas.rs`
   and `if2.rs` (-inf logliks, density mismatches, refused proposals). The log
   target is the crate name, `sim`; `camdl_sim` matches nothing.
