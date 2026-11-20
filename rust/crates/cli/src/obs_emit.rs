@@ -304,7 +304,8 @@ impl<'a> EffectiveSchedule<'a> {
 ///   included). Periods that overlap are always refused at some `t`.
 /// - Window columns: the periods are consecutive emit times, the first
 ///   opening at the model's own start `model_t_start`. Under way unless `t`
-///   is an emit time or `model_t_start`.
+///   is an emit time or `model_t_start`, or no emit time follows `t` (then
+///   no window closes after it, and the writer writes none).
 /// - A state read (an instant stream): never.
 pub(crate) fn period_under_way(
     obs: &ObservationModel,
@@ -354,7 +355,9 @@ pub(crate) fn period_under_way(
                     break;
                 }
             }
-            Some((open, close.unwrap_or(f64::INFINITY)))
+            // No emit time after `t`: no window closes after it, so the
+            // writer writes none there and none is under way.
+            close.map(|c| (open, c))
         }
     }
 }
@@ -1576,6 +1579,8 @@ mod tests {
         assert_eq!(period_under_way(&s, &listed, 0.0, 0.0), None, "the model's start");
         assert_eq!(period_under_way(&s, &listed, 0.0, 30.0), None);
         assert_eq!(period_under_way(&s, &listed, 0.0, 35.0), Some((30.0, 45.0)));
+        // No emit time after `t`: no window closes after it, none is written.
+        assert_eq!(period_under_way(&s, &listed, 0.0, 50.0), None);
     }
 
     /// A state read has no period.

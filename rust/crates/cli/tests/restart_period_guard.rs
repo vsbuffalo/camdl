@@ -603,6 +603,18 @@ fn baseline_an_instant_stream_is_unaffected() {
     compare_with_main("instant_25", &r.dir, &["traj.tsv", "od/daily_cases.tsv", "od/prevalence.tsv"]);
 }
 
+/// Window columns with `emit_schedule = at [10, 20]`: no emit time follows
+/// T = 25, so no window closes after it and the writer writes none; the
+/// restart is not refused and writes what main wrote.
+#[test]
+fn baseline_a_window_stream_with_no_emit_time_after_t_is_unaffected() {
+    let r = restart(&window_columns("at [10 'days, 20 'days]"), 25.0);
+    let out = r.simulate(&["-o", &r.path("traj.tsv"), "--obs-dir", &r.path("od")]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    compare_with_main("window_at_list_25", &r.dir,
+        &["traj.tsv", "od/daily_cases.tsv", "od/weekly_cases.tsv"]);
+}
+
 /// A fit-only stream (no `emit_schedule`) is never written, so its week
 /// under way does not refuse a run that writes a quantity over another
 /// stream.
