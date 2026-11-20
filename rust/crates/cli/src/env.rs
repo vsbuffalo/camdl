@@ -12,8 +12,10 @@
 //! trace switch to `sim` once, at start-up, and [`eval_settings`] puts the
 //! evaluation-path switches on each model a command compiles.
 //!
-//! **Stability.** `stable` is a supported setting; `debug` is a diagnostic or an
-//! alternative evaluation path meant to agree with the default one;
+//! **Stability.** Each [`Env`] field's doc says how settled its variable is;
+//! one that says nothing is stable. `stable` is a supported setting; `debug` is
+//! a diagnostic or an alternative evaluation path meant to agree with the
+//! default one;
 //! `experimental` is an unreleased feature, enabled by a variable named
 //! `CAMDL_EXPERIMENTAL_<NAME>`. Every such variable that is set is an
 //! experimental input of the run, whether or not a feature reads it yet: it is
@@ -62,14 +64,6 @@ use std::sync::OnceLock;
 /// The prefix that names an experimental input.
 pub(crate) const EXPERIMENTAL_PREFIX: &str = "CAMDL_EXPERIMENTAL_";
 
-/// How settled a variable is. See the module doc.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Stability {
-    Stable,
-    Experimental,
-    Debug,
-}
-
 /// How a variable that can change a result enters the run identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Route {
@@ -91,15 +85,11 @@ pub(crate) struct Var {
     pub field: &'static str,
     /// What it may do to a stored result.
     pub class: InputClass,
-    /// How settled it is (the module doc's "Stability"). Documentation the
-    /// table's tests check; nothing at run time branches on it.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub stability: Stability,
     pub route: Route,
 }
 
-const fn var(name: &'static str, field: &'static str, class: InputClass, stability: Stability, route: Route) -> Var {
-    Var { name, field, class, stability, route }
+const fn var(name: &'static str, field: &'static str, class: InputClass, route: Route) -> Var {
+    Var { name, field, class, route }
 }
 
 use crate::input_class::InputClass::{self, Execution, Keyed, Presentation};
@@ -107,53 +97,56 @@ use crate::input_class::Level::Model;
 
 /// Every variable, in [`Env`] field order.
 pub(crate) const VARS: &[Var] = &[
-    var("CAMDL_TRACE_STEPS", "trace_steps", Presentation, Stability::Debug, Route::None),
-    var("CAMDL_EVAL_UNRESOLVED", "eval_unresolved", Keyed(Model), Stability::Debug, Route::Engine),
-    var("CAMDL_NO_BINDING_CACHE", "no_binding_cache", Keyed(Model), Stability::Debug, Route::Engine),
-    var(EXPERIMENTAL_PREFIX, "experimental", Keyed(Model), Stability::Experimental, Route::Engine),
-    var("CAMDL_NO_CONSTANT_FOLD", "no_constant_fold", Keyed(Model), Stability::Debug, Route::CompiledModel),
-    var("CAMDL_NO_LICM", "no_licm", Keyed(Model), Stability::Debug, Route::CompiledModel),
-    var("CAMDL_NO_IR_CACHE", "no_ir_cache", Execution, Stability::Stable, Route::None),
-    var("CAMDL_IR_CACHE_DIR", "ir_cache_dir", Execution, Stability::Stable, Route::None),
-    var("CAMDL_SKIP_VERSION_CHECK", "skip_version_check", Execution, Stability::Debug, Route::None),
-    var("CAMDLC_PATH", "camdlc_path", Execution, Stability::Stable, Route::None),
-    var("CAMDLC", "camdlc", Execution, Stability::Stable, Route::None),
-    var("CAMDL_OUTPUT_DIR", "output_dir", Execution, Stability::Stable, Route::None),
-    var("CAMDL_UNLABELED_THRESHOLD", "unlabeled_threshold", Presentation, Stability::Stable, Route::None),
-    var("PATH", "path", Execution, Stability::Stable, Route::None),
-    var("XDG_CACHE_HOME", "xdg_cache_home", Execution, Stability::Stable, Route::None),
-    var("HOME", "home", Execution, Stability::Stable, Route::None),
-    var("NO_COLOR", "no_color", Presentation, Stability::Stable, Route::None),
-    var("CLICOLOR_FORCE", "clicolor_force", Presentation, Stability::Stable, Route::None),
-    var("CI", "ci", Presentation, Stability::Stable, Route::None),
+    var("CAMDL_TRACE_STEPS", "trace_steps", Presentation, Route::None),
+    var("CAMDL_EVAL_UNRESOLVED", "eval_unresolved", Keyed(Model), Route::Engine),
+    var("CAMDL_NO_BINDING_CACHE", "no_binding_cache", Keyed(Model), Route::Engine),
+    var(EXPERIMENTAL_PREFIX, "experimental", Keyed(Model), Route::Engine),
+    var("CAMDL_NO_CONSTANT_FOLD", "no_constant_fold", Keyed(Model), Route::CompiledModel),
+    var("CAMDL_NO_LICM", "no_licm", Keyed(Model), Route::CompiledModel),
+    var("CAMDL_NO_IR_CACHE", "no_ir_cache", Execution, Route::None),
+    var("CAMDL_IR_CACHE_DIR", "ir_cache_dir", Execution, Route::None),
+    var("CAMDL_SKIP_VERSION_CHECK", "skip_version_check", Execution, Route::None),
+    var("CAMDLC_PATH", "camdlc_path", Execution, Route::None),
+    var("CAMDLC", "camdlc", Execution, Route::None),
+    var("CAMDL_OUTPUT_DIR", "output_dir", Execution, Route::None),
+    var("CAMDL_UNLABELED_THRESHOLD", "unlabeled_threshold", Presentation, Route::None),
+    var("PATH", "path", Execution, Route::None),
+    var("XDG_CACHE_HOME", "xdg_cache_home", Execution, Route::None),
+    var("HOME", "home", Execution, Route::None),
+    var("NO_COLOR", "no_color", Presentation, Route::None),
+    var("CLICOLOR_FORCE", "clicolor_force", Presentation, Route::None),
+    var("CI", "ci", Presentation, Route::None),
 ];
 
 /// The value of every variable in [`VARS`], typed.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Env {
-    /// `CAMDL_TRACE_STEPS=1`: one stderr row per chain-binomial substep and one
-    /// line per effect action (`sim::trace`). A diagnostic; writes nothing kept.
+    /// `CAMDL_TRACE_STEPS=1` (debug): one stderr row per chain-binomial substep
+    /// and one line per effect action (`sim::trace`). Writes nothing kept.
     pub trace_steps: bool,
-    /// `CAMDL_EVAL_UNRESOLVED` (any value): propensities through the slow
-    /// string-keyed evaluator, an alternative path meant to agree with the
+    /// `CAMDL_EVAL_UNRESOLVED` (any value; debug): propensities through the
+    /// slow string-keyed evaluator, an alternative path meant to agree with the
     /// default.
     pub eval_unresolved: bool,
-    /// `CAMDL_NO_BINDING_CACHE` (any value): bindings recomputed on demand
-    /// instead of cached, an alternative path meant to agree with the default.
+    /// `CAMDL_NO_BINDING_CACHE` (any value; debug): bindings recomputed on
+    /// demand instead of cached, an alternative path meant to agree with the
+    /// default.
     pub no_binding_cache: bool,
-    /// Every set `CAMDL_EXPERIMENTAL_<NAME>`, by full name, with its value.
+    /// Every set `CAMDL_EXPERIMENTAL_<NAME>` (experimental: an unreleased
+    /// feature), by full name, with its value.
     pub experimental: BTreeMap<String, String>,
-    /// `CAMDL_NO_CONSTANT_FOLD` (any value): camdlc skips constant folding. It
+    /// `CAMDL_NO_CONSTANT_FOLD` (any value; debug): camdlc skips constant
+    /// folding. It
     /// reads the variable itself; camdl reads it to key the IR cache.
     pub no_constant_fold: bool,
-    /// `CAMDL_NO_LICM` (any value): the equivalent of `--no-licm`.
+    /// `CAMDL_NO_LICM` (any value; debug): the equivalent of `--no-licm`.
     pub no_licm: bool,
     /// `CAMDL_NO_IR_CACHE` (any value): the equivalent of `--no-ir-cache`.
     pub no_ir_cache: bool,
     /// `CAMDL_IR_CACHE_DIR`: where the compiled-IR cache lives.
     pub ir_cache_dir: Option<PathBuf>,
-    /// `CAMDL_SKIP_VERSION_CHECK` (any value): skip the camdl/camdlc version
-    /// handshake. The IR the compiler emits is still hashed in the model level.
+    /// `CAMDL_SKIP_VERSION_CHECK` (any value; debug): skip the camdl/camdlc
+    /// version handshake. The IR the compiler emits is still hashed in the model level.
     pub skip_version_check: bool,
     /// `CAMDLC_PATH`, then `CAMDLC`: the compiler to run, when it is not beside
     /// the camdl binary.
@@ -347,12 +340,6 @@ mod tests {
             if keyed {
                 assert_eq!(class, InputClass::Keyed(Level::Model), "{} enters at the model level", v.name);
             }
-            assert_eq!(
-                v.stability == Stability::Experimental,
-                v.name == EXPERIMENTAL_PREFIX,
-                "{}: the experimental family is the one experimental entry",
-                v.name
-            );
         }
     }
 
