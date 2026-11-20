@@ -186,7 +186,7 @@ fn collect_fit(args: &MreFitArgs, compile: crate::util::CompileSettings) -> Resu
 
     // The fit.toml itself. root == its directory, so its dest is the bare name.
     let cfg_ref = input_ref(InputRole::FitConfig, config, &root)?;
-    let reproduce = format!("camdl fit run {}", cfg_ref.dest);
+    let reproduce = format!("camdl {}fit run {}", global_flags(compile), cfg_ref.dest);
     inputs.push(cfg_ref);
 
     // Model + its compile-time read() closure (asked of the compiler).
@@ -273,7 +273,7 @@ fn collect_simulate(args: &MreSimulateArgs, argv: &[String], compile: crate::uti
     inputs.sort_by(|x, y| x.dest.cmp(&y.dest));
     inputs.dedup_by(|x, y| x.dest == y.dest);
 
-    Ok(BundlePlan { inputs, kind: "simulate", reproduce: simulate_reproduce(argv)? })
+    Ok(BundlePlan { inputs, kind: "simulate", reproduce: simulate_reproduce(argv, compile)? })
 }
 
 /// Flags whose VALUE is a write-destination path, dropped from the reproduce
@@ -291,19 +291,35 @@ const SIM_DROP_WITH_VALUE: &[&str] = &[
     "--draws-out", "--output-dir",
 ];
 
+/// The global flags a reproduce command carries: the compile settings the
+/// bundle was made under, which change the IR the bundled run compiles to
+/// (`--no-licm`, or `CAMDL_NO_LICM`), whether given before or after the
+/// subcommand. Empty, or the flags followed by a space.
+fn global_flags(compile: crate::util::CompileSettings) -> &'static str {
+    if compile.licm_disabled { "--no-licm " } else { "" }
+}
+
 /// Reconstruct the `camdl simulate …` reproduce command from the captured argv,
-/// dropping the write-destination flags above. Because `mre simulate` flattens
+/// dropping the write-destination flags above. A `--no-licm` among the
+/// simulate tokens is said once, as a global flag ([`global_flags`]). Because `mre simulate` flattens
 /// the real `SimulateArgs`, every other token after `simulate` is a genuine
 /// simulate flag; the contained-relative layout makes the (relative) input paths
 /// resolve unchanged inside the bundle, so no rewriting is needed.
-fn simulate_reproduce(argv: &[String]) -> Result<String, String> {
+fn simulate_reproduce(argv: &[String], compile: crate::util::CompileSettings) -> Result<String, String> {
     let start = argv
         .iter()
         .position(|t| t == "simulate")
         .ok_or("internal: no `simulate` token in argv")?;
-    let mut out = vec!["camdl".to_string(), "simulate".to_string()];
+    let mut out = vec!["camdl".to_string()];
+    if compile.licm_disabled {
+        out.push("--no-licm".to_string());
+    }
+    out.push("simulate".to_string());
     let mut it = argv[start + 1..].iter();
     while let Some(tok) = it.next() {
+        if tok == "--no-licm" {
+            continue;
+        }
         if SIM_DROP_WITH_VALUE.contains(&tok.as_str()) {
             it.next(); // drop the flag's value too (space form)
         } else if let Some(eq) = tok.find('=') {
@@ -624,7 +640,7 @@ cooling = 0.7
         .iter()
         .map(|s| s.to_string())
         .collect();
-        let repro = simulate_reproduce(&argv).unwrap();
+        let repro = simulate_reproduce(&argv, crate::util::CompileSettings { licm_disabled: false, ir_cache_disabled: false }).unwrap();
         assert_eq!(repro, "camdl simulate model/m.camdl --params p.toml --seed 7");
     }
 }

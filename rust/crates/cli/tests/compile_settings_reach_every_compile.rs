@@ -346,3 +346,31 @@ fn mre_simulate_and_fit() {
     );
     assert_every_compile_follows_the_flag("mre fit", &["mre", "fit", "fit.toml", "-b", "f.mre.tar.gz"]);
 }
+
+/// The reproduce command an `mre` bundle carries runs the bundled command
+/// under the compile settings the bundle was made under: `--no-licm` once, as
+/// a global flag, wherever on the command line it was given.
+#[test]
+fn mre_reproduce_carries_no_licm() {
+    let c = case();
+    let reproduce = |args: &[&str]| -> String {
+        let (o, _) = c.run(args);
+        assert!(o.status.success(), "{}", text(&o));
+        let all = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+        all.lines()
+            .find_map(|l| l.trim().strip_prefix("reproduce: ").map(str::to_string))
+            .unwrap_or_else(|| panic!("no reproduce line:\n{}", text(&o)))
+    };
+    assert_eq!(reproduce(&["mre", "fit", "fit.toml", "-b", "f1.tgz"]), "camdl fit run fit.toml");
+    assert_eq!(reproduce(&["--no-licm", "mre", "fit", "fit.toml", "-b", "f2.tgz"]), "camdl --no-licm fit run fit.toml");
+    assert_eq!(
+        reproduce(&["mre", "simulate", "model.camdl", "--params", "p.toml", "-b", "s1.tgz"]),
+        "camdl simulate model.camdl --params p.toml"
+    );
+    for args in [
+        &["--no-licm", "mre", "simulate", "model.camdl", "--params", "p.toml", "-b", "s2.tgz"][..],
+        &["mre", "simulate", "model.camdl", "--no-licm", "--params", "p.toml", "-b", "s3.tgz"][..],
+    ] {
+        assert_eq!(reproduce(args), "camdl --no-licm simulate model.camdl --params p.toml", "{args:?}");
+    }
+}
