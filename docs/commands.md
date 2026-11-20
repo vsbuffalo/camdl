@@ -383,12 +383,13 @@ write a reporting period that began before T and ends after it.
 `simulate --init-state` refuses such a run before writing anything, naming the
 stream and the period, when the stream is one it would write (`--obs`,
 `--obs-dir`, `--obs-only`, `--obs-only-dir`) or one an `observations.<stream>`
-quantity reads; a trajectory-only run is not refused. The filter, under
-`--save-final-state`, refuses to save when a stream's data and its
-`emit_schedule` imply different periods, and notes any period under way at T. To
-restart cleanly, end the data on a boundary of every emitted stream's periods;
-to predict the period under way, use `fit predict --horizon`, which needs a fit.
-Details: [inference.md](inference.md#forecasting-from-the-filtered-state).
+quantity reads, whether or not the run reaches the period's end; a
+trajectory-only run is not refused. The filter, under `--save-final-state`,
+refuses to save when a stream's data and its `emit_schedule` imply different
+periods, and notes any period under way at T. To restart cleanly, end the data
+on a boundary of every emitted stream's periods; to predict the period under
+way, use `fit predict --horizon`, which needs a fit. Details:
+[inference.md](inference.md#forecasting-from-the-filtered-state).
 
 ### Model comparison
 

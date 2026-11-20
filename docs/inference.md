@@ -1982,14 +1982,20 @@ belongs to a stream it would write (`--obs`, `--obs-dir`, `--obs-only`,
 `observations.<stream>` quantity reads under `--quantities-out`:
 
 ```text
-error: stream 'weekly_cases' cannot be written from this restart: its period [21, 28) is under way at the restart time t = 25, and the saved state does not carry the part of that period before t = 25. The filter's data ends inside the period; data ending at 21 or 28 restarts cleanly. To predict the period under way, use `camdl fit predict --fit <fit.toml> --horizon <DURATION>` (it needs a fit; a fixed-parameter filter has none yet).
+error: stream 'weekly_cases' cannot be written from this restart: the restart time t = 25 falls inside its period [21, 28), and the saved state does not carry the part of that period before t = 25. A restart at either end of the period, t = 21 or t = 28, writes it cleanly. To predict the period under way, use `camdl fit predict --fit <fit.toml> --horizon <DURATION>` (it needs a fit; a fixed-parameter filter has none yet).
 ```
 
-The periods judged are the ones the run would write: a uniform `covers` form's
-period for each emit label (after `--emit-every`), and for window columns the
-gaps between emit times, the first opening at the model's own start. A state
-read (a prevalence stream) has no period and is never refused, and neither is a
-run that writes only the trajectory. The same rule applies to an origin from
+A period under way is refused whether or not the run reaches its end: a
+`--to 27` that stops before the week closes is refused as well, rather than
+writing nothing for the stream. The periods judged are the stream's declared
+ones: a uniform `covers` form's period for each emit label (after
+`--emit-every`), and for window columns the gaps between emit times, the first
+opening at the model's own start. A window-column stream with no emit time after
+the origin has no window under way. When a stream's periods overlap (a `covers`
+span longer than its emit step), every time falls inside one of them, and the
+refusal says that no restart writes the stream cleanly. A state read (a
+prevalence stream) has no period and is never refused, and neither is a run that
+writes only the trajectory. The same rule applies to an origin from
 `--init-state fit`. To restart cleanly, end the filter's data on a boundary of
 every emitted stream's periods (here 21 or 28); to predict the period under way,
 use `fit predict`, which carries each stream's running total through the origin

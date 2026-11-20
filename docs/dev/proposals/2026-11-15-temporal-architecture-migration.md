@@ -1132,21 +1132,25 @@ Recorded in the maintainer's docket; each is reflected in the spec and above.
   file or from `fit`, refuses before writing anything when a period of a stream
   it would write (`--obs`, `--obs-dir`, `--obs-only`, `--obs-only-dir`, the
   store's `obs/` child) or that an `observations.<stream>` quantity reads starts
-  before the restart time and ends after it. The periods are the effective
-  schedule's (after `--emit-every`): a uniform `covers` form's period of each
-  emit label, and for window columns the gaps between emit times, the first
-  opening at the model's own start. One function, `obs_emit::period_under_way`,
-  decides it, kept apart from the emitter so #1158 can delete it. Before
-  filtering, `pfilter --save-final-state` runs the D82 check over each bound
-  interval stream with an `emit_schedule` (training rows only under
-  `holdout_after`) and refuses a disagreement with the forecast's diagnostic,
-  which also refuses a trajectory-only restart of a misdeclared model; where the
-  declarations agree and a period is under way at the saved time, it saves and
-  notes the stream and the period. The D82 check compares a uniform stream's
-  data with `period_of` of each emit label, the emitter's rule, not with the
-  gaps between emit times (gh#1301). Spec §4.4 "Restarts" and §5.2 already state
-  the restart rule. #1158 needs its §4 and test 7 revised to the refuse-at-save
-  rule; gh#1081 and gh#1085 stay open, retitled to the completion feature.
+  before the restart time and ends after it, whether or not the run reaches the
+  period's end. The periods are the effective schedule's (after `--emit-every`):
+  a uniform `covers` form's period of each emit label, and for window columns
+  the gaps between emit times, the first opening at the model's own start (none
+  is under way when no emit time follows the restart). Where a stream's periods
+  overlap, the refusal says no restart time writes it cleanly. One function,
+  `obs_emit::period_under_way`, decides it, kept apart from the emitter so #1158
+  can delete it. Before filtering, `pfilter --save-final-state` runs the D82
+  check over each bound interval stream with an `emit_schedule` (training rows
+  only under `holdout_after`) and refuses a disagreement with the forecast's
+  diagnostic, which also refuses a trajectory-only restart of a misdeclared
+  model; where the declarations agree and a period is under way at the saved
+  time, it saves and notes the stream and the period. The D82 check compares a
+  uniform stream's data with `period_of` of each emit label, the emitter's rule,
+  not with the gaps between emit times, leaving out a period that starts before
+  the schedule's first time (gh#1301). Spec §4.4 "Restarts" and §5.2 already
+  state the restart rule. #1158 needs its §4 and test 7 revised to the
+  refuse-at-save rule; gh#1081 and gh#1085 stay open, retitled to the completion
+  feature.
 
 ## Part 9. Documents this plan changes
 
