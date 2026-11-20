@@ -189,13 +189,18 @@ camdl fit predict --fit fit.toml --stream onset     # predicted-vs-observed arti
 
 `fit predict` resolves the fit's posterior draws and writes
 `predictive/<stream>.tsv` (the `q05…q95` ribbon, with typed
-`horizon`/`treatment` columns, the fit's `fit_rhat_max`/`fit_ess_min` stamp, and
-the per-row `rhat_mean`/`rhat_pred` convergence channels) and
-`observed/<stream>.tsv` under the run directory. Join the two on
-`(time, <dims>)` and plot, one facet per stratum. Omit `--mode` for all
-applicable horizons (chain-binomial → `free_forward` + `one_step`; ODE →
-`free_forward` only); an optimizer fit (IF2 / NLopt) is refused since it has no
-posterior cloud.
+`horizon`/`treatment` columns, a `role` column, the fit's
+`fit_rhat_max`/`fit_ess_min` stamp, and the per-row `rhat_mean`/`rhat_pred`
+convergence channels) and `observed/<stream>.tsv` under the run directory. Join
+the two on `(time, <dims>)` and plot, one facet per stratum. `role` is `trained`
+for a data row the parameters were fitted to, `held_out` for a data row the fit
+held out (`[data] holdout_after`), and `target` for a free-forward row past the
+last data row. A `one_step` band at a `held_out` row uses parameters fitted
+without that row and a state filtered through every earlier row, held-out rows
+included, so it is not a forecast from the end of the training rows; `--horizon`
+is. Omit `--mode` for all applicable horizons (chain-binomial → `free_forward` +
+`one_step`; ODE → `free_forward` only); an optimizer fit (IF2 / NLopt) is
+refused since it has no posterior cloud.
 
 Every mode predicts each stream the fit bound data to. A stream the model
 declares but the fit bound no data to is _skipped_: it is named on stderr and in

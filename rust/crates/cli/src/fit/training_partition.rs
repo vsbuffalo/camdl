@@ -303,6 +303,26 @@ impl TrainingPartition {
         Ok(partition)
     }
 
+    /// The partition the fit at `segment` recorded in its `fit.meta.json`,
+    /// with the record as written, checked against `rows`
+    /// ([`Self::from_record`]). `rows` must hold every stream the fit bound:
+    /// the recorded extent is checked against them. A fit that recorded none
+    /// is refused, so no command guesses which rows trained; `fit predict`
+    /// reads its parameter set through this in every mode.
+    pub(crate) fn read_recorded(
+        segment: &std::path::Path,
+        rows: &BTreeMap<String, Vec<ObservedRow>>,
+    ) -> Result<(crate::run_meta::TrainingPartitionRecord, Self), String> {
+        let record = crate::run_meta::read_fit_sidecar(segment)?
+            .and_then(|s| s.training_partition)
+            .ok_or_else(|| format!(
+                "the fit at {} records no training partition, so which rows its parameters \
+                 were fitted to cannot be read; re-run the fit with `camdl fit run`.",
+                segment.display()))?;
+        let partition = Self::from_record(&record, rows)?;
+        Ok((record, partition))
+    }
+
     pub(crate) fn rule(&self) -> PartitionRule {
         self.rule
     }

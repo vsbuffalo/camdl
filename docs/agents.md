@@ -63,7 +63,8 @@ check -> simulate (sanity) -> synthetic recovery -> choose a method
 The predicted-vs-observed step is **one verb, not a hand-rolled pipeline**:
 `camdl fit predict --fit fit.toml --stream <name>` resolves the fit's posterior
 draws and writes a tidy `predictive/<stream>.tsv` (`q05…q95` ribbon + typed
-`horizon`/`treatment` columns, the fit's `fit_rhat_max`/`fit_ess_min` stamp, and
+`horizon`/`treatment` columns, a `role` column saying whether the fit `trained`
+on each row or `held_out` it, the fit's `fit_rhat_max`/`fit_ess_min` stamp, and
 the per-row `rhat_mean`/`rhat_pred` convergence channels — act on `rhat_mean`,
 which observation noise cannot dilute) and `observed/<stream>.tsv` under the run
 directory. Join the two on `(time, <dims>)` and plot — do not glob the run store

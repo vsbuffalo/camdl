@@ -395,20 +395,23 @@ integrates over the cloud by pooling and quantiling, and writes two files under
 the run directory:
 
 - `predictive/<stream>.tsv` —
-  `time | <dims…> | horizon | treatment | fit_rhat_max | fit_ess_min | rhat_mean | ess_mean | rhat_pred | ess_pred | n_draws | q05 q25 q50 q75 q95`.
+  `time | <dims…> | horizon | treatment | role | fit_rhat_max | fit_ess_min | rhat_mean | ess_mean | rhat_pred | ess_pred | n_draws | q05 q25 q50 q75 q95`.
   The `q05…q95` columns are the ribbon; the `horizon` and `treatment` columns
   make the two predictive axes explicit (so an honestly-wide posterior band is
   never confused with a narrow plug-in one), and `fit_rhat_max`/`fit_ess_min`
-  carry the fit's own convergence numbers alongside every band. **`fit_rhat_max`
-  is the rank-normalized split R̂ and `fit_ess_min` the bulk-ESS** (see
+  carry the fit's own convergence numbers alongside every band. The `role`
+  column says what part the row played in the fit: `trained`, `held_out` (a data
+  row after the fit's training rows), or `target` (a free-forward row past the
+  last data row). **`fit_rhat_max` is the rank-normalized split R̂ and
+  `fit_ess_min` the bulk-ESS** (see
   [Which R̂, and which ESS](#which-r-and-which-ess)); `fit_ess_min` is left empty
   when any assessed parameter has no pooled ESS, rather than minimizing over the
   ones that do. The sibling `predictive.json` tags this contract
-  `camdl.predictive/v3`. Earlier tags are not join-compatible with it and **must
-  not be joined without keying on the tag**: `/v2` spelled these two columns
-  `rhat_max`/`ess_min` and had no per-row channels, and `/v1` carried classic
-  Gelman–Rubin R̂ and a per-chain Geyer sum under those same two names — the same
-  header, a different statistic.
+  `camdl.predictive/v4`. Earlier tags are not join-compatible with it and **must
+  not be joined without keying on the tag**: `/v3` had no `role` column, `/v2`
+  spelled these two columns `rhat_max`/`ess_min` and had no per-row channels,
+  and `/v1` carried classic Gelman–Rubin R̂ and a per-chain Geyer sum under those
+  same two names — the same header, a different statistic.
 
   `fit_rhat_max`/`fit_ess_min` describe **the fit**, not the row — which is what
   their names say. They are the worst parameter's numbers, repeated identically
