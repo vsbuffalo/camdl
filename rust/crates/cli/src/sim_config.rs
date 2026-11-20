@@ -286,6 +286,10 @@ pub(crate) struct ResolvedCell {
     pub seed: u64,
     /// The forecast-origin state the cell restores (`--init-state`).
     pub init_state: Option<crate::util::CellInitState>,
+    /// The restart as the observation emitters take it: the origin, with the
+    /// model's own start as it stood before the restart moved `run.model`'s
+    /// (gh#1081). `None` for a cell that does not restart.
+    pub restart: Option<crate::obs_emit::Restart>,
     pub backend: ForwardBackend,
     pub dt: f64,
     pub binomial: sim::rng::BinomialAlgorithm,
@@ -335,11 +339,19 @@ impl ResolvedCell {
             eval,
             required_output_times,
         } = run;
+        // Read before `resolve_loaded_run` moves the start to the origin.
+        // `base` is the model `util::load_run_model` returned, so a
+        // `simulate { from = first_obs }` anchor is already a number here.
+        let restart = init_state.as_ref().map(|init| crate::obs_emit::Restart {
+            origin: init.origin_t,
+            model_start: base.simulation.t_start,
+        });
         Ok(ResolvedCell {
             run: crate::util::resolve_loaded_run(base, run)?,
             tables: table_digests(table_files)?,
             seed: *seed,
             init_state: init_state.clone(),
+            restart,
             backend: *backend,
             dt: *dt,
             binomial: *binomial,

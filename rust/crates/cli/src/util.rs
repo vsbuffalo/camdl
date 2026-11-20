@@ -2941,9 +2941,6 @@ pub struct SimRun {
 pub struct CellInitState {
     /// The model time the state sits at; becomes `simulation.t_start`.
     pub origin_t: f64,
-    /// The model's own `simulate.from`, before the restart moved the run's
-    /// start to `origin_t`. Not identity: it is a function of the model.
-    pub model_start: f64,
     /// The compartment values this cell restores.
     pub state: crate::sim_job::OriginState,
     /// Which row of the ensemble this is. Identity, not provenance — two cells
@@ -2951,13 +2948,6 @@ pub struct CellInitState {
     pub row: u64,
     /// Content digest of the whole origin ensemble. Identity.
     pub ensemble_digest: runid::ContentHash,
-}
-
-impl CellInitState {
-    /// This restart as the observation emitters take it.
-    pub(crate) fn restart(&self) -> crate::obs_emit::Restart {
-        crate::obs_emit::Restart { origin: self.origin_t, model_start: self.model_start }
-    }
 }
 
 /// Apply a CLI integrator-method override (gh#166) to the model in place.
@@ -3982,6 +3972,8 @@ pub fn simulate_compiled(
         tables: _,
         seed,
         init_state,
+        // For the observation emitters; the run itself starts from `init_state`.
+        restart: _,
         backend,
         dt,
         binomial,

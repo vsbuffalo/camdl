@@ -813,7 +813,6 @@ fn resolve_paired_posterior(
         params,
         crate::sim_job::InitStateSource {
             origin_t: ens.origin_t,
-            model_start: model.simulation.t_start,
             states,
             axis: crate::sim_job::InitStateRowAxis::Draw,
             ensemble_digest: digest,
@@ -1638,7 +1637,6 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
             let digest = runid::ContentHash::digest_bytes(&bytes);
             init_state_source = Some(std::sync::Arc::new(crate::sim_job::InitStateSource {
                 origin_t: states.origin_t,
-                model_start: model_is.simulation.t_start,
                 states: states.counts.into_iter()
                     .map(|counts| crate::sim_job::OriginState { counts, reals: Vec::new() })
                     .collect(),
@@ -1750,7 +1748,13 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
             if let Some(src) = init_state_source.as_ref() {
                 for o in model_check.observations.iter().filter(|o| o.emit_schedule.is_some()) {
                     if let Err(e) = obs_emit_schedule_times(
-                        o, Some(src.restart()), horizons[0].1, emit_every.as_ref(),
+                        o,
+                        Some(crate::obs_emit::Restart {
+                            origin: src.origin_t,
+                            // `model_check` has its anchors substituted.
+                            model_start: model_check.simulation.t_start,
+                        }),
+                        horizons[0].1, emit_every.as_ref(),
                     ) {
                         out.fail(format!("error: {}", e));
                     }
@@ -1769,7 +1773,10 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
             // restarts them. Two `at`-list schedules can agree over the model
             // window and diverge over the forecast one at either end. `None`
             // for every ordinary run, which keeps this check exactly as it was.
-            let obs_origin = init_state_source.as_ref().map(|s| s.restart());
+            let obs_origin = init_state_source.as_ref().map(|s| crate::obs_emit::Restart {
+                origin: s.origin_t,
+                model_start: model_check.simulation.t_start,
+            });
             let schedules: Vec<_> = model_check.observations.iter()
                 .map(|o| obs_emit_schedule_times(
                     o, obs_origin, obs_end, emit_every.as_ref(),
@@ -2977,7 +2984,7 @@ impl SimQuantities {
                 compiled,
                 &params,
                 cell.spec.obs_seed,
-                cell.spec.sim_run.init_state.as_ref().map(|i| i.restart()),
+                cell.cell.restart,
                 self.emit_every.as_ref(),
             )?)
         };
@@ -3037,6 +3044,9 @@ struct StoredCell {
     spec: engine::CellSpec,
     traj_tsv: String,
     model: ir::Model,
+    /// The cell's restart, as its resolution gave it (gh#1081): `model` has had
+    /// its start moved to the origin, so the model's own start is carried here.
+    restart: Option<crate::obs_emit::Restart>,
     /// Per stream, the stored values as the leaf wrote them (validated as
     /// numbers, kept as text so the mirror renders them unchanged).
     obs: Vec<Vec<String>>,
@@ -3047,6 +3057,7 @@ impl SimSink {
     /// `traj.tsv`, and the observation subtree the exact rule required.
     fn read_stored(&self, spec: &engine::CellSpec) -> Result<StoredCell, String> {
         let (cell, rt) = self.cas.resolved_cell(spec)?;
+        let restart = cell.restart;
         let (dir, _) = self.cas.stored_leaf(&rt);
         let traj_path = dir.join("traj.tsv");
         let traj_tsv = std::fs::read_to_string(&traj_path)
@@ -3082,7 +3093,7 @@ impl SimSink {
         } else {
             Vec::new()
         };
-        Ok(StoredCell { spec: spec.clone(), traj_tsv, model, obs })
+        Ok(StoredCell { spec: spec.clone(), traj_tsv, model, restart, obs })
     }
 
     /// Splice every pending stored cell with `run_idx < before` into the
@@ -3842,7 +3853,7 @@ impl engine::RunSink for StreamSink {
                 self.ensure_obs_streams(
                     model,
                     run_start_of(traj, model),
-                    cell.spec.sim_run.init_state.as_ref().map(|i| i.restart()),
+                    cell.cell.restart,
                 )?;
             }
 
@@ -4020,8 +4031,7 @@ impl StreamSink {
                 }
             }
             if self.obs_plans.is_empty() {
-                let restart = cell.spec.sim_run.init_state.as_ref().map(|i| i.restart());
-                self.ensure_obs_streams(model, run_start, restart)?;
+                self.ensure_obs_streams(model, run_start, cell.restart)?;
             }
             for si in 0..self.obs_plans.len() {
                 let rows: Vec<(f64, score::trace::Coverage)> = self.obs_plans[si].rows.iter()
