@@ -788,32 +788,37 @@ problem keep separate predictives, and each file is attributable to the run it
 replays.
 
 `<key>` is the first 32 hex digits (128 bits) of the SHA-256 of the full
-`run_id`, the engine version, and every predict option that changes the output,
-resolved to the values used: `--mode`, `--horizon`, `--n-draws`, `--seed`,
-`--stream`, `--scenario`/`--enable`/`--disable`, `--sweep`, `--by-chain`, the
-chains `--exclude-chains`/`--chains` drop from the fit's cloud (so the two
-spellings of one selection are one key), the SHA-256 of a `--quantities` file,
-and `--allow-forcing-extrapolation`, and, for a forecast, `options.forecast`:
-the SHA-256 of its target set (each target's stream, period or instant, and
-design values where it reads any; D80, D81) and, when a target reads a design,
-the design mode (`prospective` or `ex_post`). Two predictions that differ in the
-run, the engine or any of those options therefore never share a directory. The
-held-out outcomes are not in the key: they change no prediction (D79), and a
-forecast whose held-out values change writes the same tables to the same
-directory. The key does not cover the observation data: `fit predict` reads the
-fit's data files from their paths as they are now, and the fit's recorded data
-digests are used only to name a file that has gone missing, so a data file
+`run_id`, the engine (the build fingerprint and the engine switches that are on,
+as every stored run keys them), and every predict option that changes the
+output, resolved to the values used: `--mode`, `--horizon`, `--n-draws`,
+`--seed`, `--stream`, `--scenario`/`--enable`/`--disable`, `--sweep`,
+`--by-chain`, the chains `--exclude-chains`/`--chains` drop from the fit's cloud
+(so the two spellings of one selection are one key), the SHA-256 of a
+`--quantities` file, and `--allow-forcing-extrapolation`, and, for a forecast,
+`options.forecast`: the SHA-256 of its target set (each target's stream, period
+or instant, and design values where it reads any; D80, D81) and, when a target
+reads a design, the design mode (`prospective` or `ex_post`). Two predictions
+that differ in the run, the engine or any of those options therefore never share
+a directory. The held-out outcomes are not in the key: they change no prediction
+(D79), and a forecast whose held-out values change writes the same tables to the
+same directory. The key does not cover the observation data: `fit predict` reads
+the fit's data files from their paths as they are now, and the fit's recorded
+data digests are used only to name a file that has gone missing, so a data file
 changed in place under the same path is not detected and its prediction is
 written to the same directory. `predictive.json`, `observed.json` and
 `forecast.json` record the key under `address_key` and the options under
-`options`; `run_id12` is a label for a person listing the folder.
-`fit table --quantity` reads the address its own free-forward derivation writes.
-Inside the directory, `--exclude-chains` and `--quantities` also name the files
-(`predictive-excl3/`, `quantities-<key8>/`), so a chain-subset or
-other-vocabulary table says so in its name. A forecast's files carry no such
-suffix (D86): `forecast.json`, `forecast-samples.tsv`, `forecast/` and
-`report.json` keep their names, the directory alone is keyed by the selection,
-and `forecast.json` states `options.excluded_chains` (`[]` for the full cloud).
+`options`; `run_id12` is a label for a person listing the folder. Every manifest
+of a prediction (`predictive.json`, `observed.json`, the quantities manifest,
+`report.json`, `forecast.json`) records the engine that made it as `run.json`
+does: `engine_version`, the build fingerprint, and `engine_switches`, absent
+when no switch was on. `fit table --quantity` reads the address its own
+free-forward derivation writes. Inside the directory, `--exclude-chains` and
+`--quantities` also name the files (`predictive-excl3/`, `quantities-<key8>/`),
+so a chain-subset or other-vocabulary table says so in its name. A forecast's
+files carry no such suffix (D86): `forecast.json`, `forecast-samples.tsv`,
+`forecast/` and `report.json` keep their names, the directory alone is keyed by
+the selection, and `forecast.json` states `options.excluded_chains` (`[]` for
+the full cloud).
 
 The free-forward replay projects each row off its own recorded trajectories, so
 it records a snapshot at every time a row reads — each data time and each

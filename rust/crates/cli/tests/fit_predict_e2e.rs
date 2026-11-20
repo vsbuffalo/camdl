@@ -1208,5 +1208,26 @@ thin = 1
     assert_eq!(both.len(), 2, "the switched prediction must not share the default one's address: {both:?}");
     assert!(both.is_superset(&first), "and the default one's address is where it was");
 
+    // Each manifest of a prediction names the engine that made it, as
+    // `run.json` spells it: the switched prediction's name its switch, the
+    // default one's name none, and both name this build.
+    let leaf_run: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(Path::new(&leaf).join("run.json")).unwrap()).unwrap();
+    let switched_dir = both.difference(&first).next().expect("the switched address");
+    let default_dir = first.iter().next().unwrap();
+    for file in ["predictive.json", "observed.json", "quantities.json", "report.json"] {
+        let read = |dir: &str| -> serde_json::Value {
+            let p = segment.join("predict").join(dir).join(file);
+            serde_json::from_str(&std::fs::read_to_string(&p)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", p.display()))).unwrap()
+        };
+        let (on, off) = (read(switched_dir), read(default_dir));
+        assert_eq!(on["engine_switches"], serde_json::json!([{ "name": "CAMDL_EVAL_UNRESOLVED" }]),
+            "{file} of the switched prediction names its switch: {on}");
+        assert!(off.get("engine_switches").is_none(), "{file} of the default prediction names none: {off}");
+        assert_eq!(on["engine_version"], leaf_run["engine_version"], "{file}: the build, as run.json spells it");
+        assert_eq!(off["engine_version"], leaf_run["engine_version"], "{file}");
+    }
+
     let _ = std::fs::remove_dir_all(&tmp);
 }

@@ -775,8 +775,6 @@ fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) ->
     let per_draw = FORECAST_SAMPLES_PER_DRAW.min(fc.n_particles);
     let mut doc = serde_json::json!({
         "schema": FORECAST_SCHEMA,
-        // The binary that wrote this forecast, as `run.json` records it.
-        "engine_version": crate::version::VERSION_SHORT,
         "run_id": job.run_id,
         "address_key": address_key,
         "options": options,
@@ -893,6 +891,8 @@ fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) ->
     // in that case, so the full cloud's key is unchanged.
     doc["options"]["excluded_chains"] =
         serde_json::json!(options.excluded_chains.clone().unwrap_or_default());
+    // The engine that made the forecast, as `run.json` records it.
+    crate::fit::predict::stamp_engine(&mut doc);
     // D83: with more than one arm, how the arms' random numbers are coupled
     // and what `forecast-contrasts.tsv` holds.
     if arms.len() > 1 {

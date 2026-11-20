@@ -130,8 +130,11 @@ fn a_forecast_starts_at_the_training_extent_and_counts_each_streams_own_periods(
     let leaf_run: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
         walk(&dir.join("results")).into_iter().find(|p| p.file_name().is_some_and(|n| n == "run.json")).unwrap(),
     ).unwrap()).unwrap();
-    assert!(manifest["engine_version"].as_str().is_some_and(|v| v.contains('+')),
-        "the engine stamp is the version with its git hash: {}", manifest["engine_version"]);
+    // The engine stamp is spelled as `run.json` spells it: the build
+    // fingerprint the fit's own record names (one binary made both), and no
+    // `engine_switches` for a prediction made with none.
+    assert_eq!(manifest["engine_version"], leaf_run["engine_version"]);
+    assert!(manifest.get("engine_switches").is_none(), "{manifest}");
     assert_eq!(manifest["run_id"], leaf_run["run_id"]);
     assert_eq!((&manifest["samples"]["per_draw"], &manifest["samples"]["of_particles"]),
         (&serde_json::json!(5), &serde_json::json!(100)));

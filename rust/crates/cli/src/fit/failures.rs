@@ -192,11 +192,12 @@ pub fn write_report(
     failures: &[DeterministicFailure],
     skipped: &[SkippedStream],
 ) -> Result<PathBuf, String> {
-    let doc = serde_json::json!({
+    let mut doc = serde_json::json!({
         "schema": REPORT_SCHEMA,
         "failures": failures,
         "skipped": skipped,
     });
+    crate::fit::predict::stamp_engine(&mut doc);
     let path = segment.join(format!("{name}.json"));
     let text = serde_json::to_string_pretty(&doc)
         .map_err(|e| format!("serializing the predictive report: {e}"))?;

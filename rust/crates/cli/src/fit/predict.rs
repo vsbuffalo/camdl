@@ -3161,6 +3161,7 @@ fn run_predict(
         if let Some(info) = posterior.selection() {
             manifest["chain_selection"] = info.to_json();
         }
+        stamp_engine(&mut manifest);
         let path = out_dir.join(format!("{predictive_sub}.json"));
         let text = serde_json::to_string_pretty(&manifest)
             .map_err(|e| format!("serializing predictive manifest: {e}"))?;
@@ -3187,7 +3188,7 @@ fn run_predict(
         }));
     }
     if !observed_manifest_entries.is_empty() {
-        let manifest = serde_json::json!({
+        let mut manifest = serde_json::json!({
             "schema": "camdl.observed/v1",
             "run_id": run_id,
             "address_key": address_key,
@@ -3195,6 +3196,7 @@ fn run_predict(
             "calendar": calendar.to_json(),
             "streams": observed_manifest_entries,
         });
+        stamp_engine(&mut manifest);
         let path = out_dir.join("observed.json");
         let text = serde_json::to_string_pretty(&manifest)
             .map_err(|e| format!("serializing observed manifest: {e}"))?;
@@ -3227,6 +3229,11 @@ fn run_predict(
     if let Some(manifest) = &quantity_manifest {
         let manifest =
             crate::quantities_file::stamp_provenance(manifest, vocabulary.as_ref())?;
+        let mut manifest: serde_json::Value = serde_json::from_str(&manifest)
+            .map_err(|e| format!("parsing the quantities manifest: {e}"))?;
+        stamp_engine(&mut manifest);
+        let manifest = serde_json::to_string_pretty(&manifest)
+            .map_err(|e| format!("serializing the quantities manifest: {e}"))?;
         let path = out_dir.join(format!("{quantities_sub}.json"));
         std::fs::write(&path, &manifest)
             .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
@@ -3924,14 +3931,35 @@ impl PredictOptions {
     /// prediction made under a switch (`CAMDL_EVAL_UNRESOLVED`, …) one made
     /// without it. With no switch on the spelling is the build alone.
     pub(crate) fn address_key(&self, run_id: &str) -> String {
-        let engine = crate::env::get().engine_identity(crate::version::ENGINE_ID);
-        self.address_key_by(run_id, &engine.hashed_spelling())
+        self.address_key_by(run_id, &prediction_engine().hashed_spelling())
     }
 
     fn address_key_by(&self, run_id: &str, engine: &str) -> String {
         let json = serde_json::to_string(&PredictAddress { run_id, engine, options: self })
             .expect("PredictOptions serializes");
         crate::hashing::sha256_hex(json.as_bytes())[..PREDICT_KEY_HEX].to_string()
+    }
+}
+
+/// The engine a prediction is made by: this build and the engine switches that
+/// are on, the identity every other command keys
+/// ([`crate::env::Environment::engine_identity`]).
+fn prediction_engine() -> runid::inputs::EngineIdentity {
+    crate::env::get().engine_identity(crate::version::ENGINE_ID)
+}
+
+/// Record on a prediction's manifest `doc` the engine that made it, spelled as
+/// `run.json` spells it: `engine_version`, the build fingerprint, and
+/// `engine_switches`, the switches that were on (absent when none was). The
+/// address key folds the same identity, so two predictions that differ only in
+/// the engine are told apart inside their files as well as by their
+/// directories.
+pub(crate) fn stamp_engine(doc: &mut serde_json::Value) {
+    let engine = prediction_engine();
+    doc["engine_version"] = serde_json::Value::String(engine.build);
+    if !engine.switches.is_empty() {
+        doc["engine_switches"] =
+            serde_json::to_value(&engine.switches).expect("an engine switch serializes");
     }
 }
 
