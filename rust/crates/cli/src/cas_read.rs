@@ -23,6 +23,15 @@ use crate::cas_index;
 // `ResolvedPriorEntry`, `ParameterProvenance`), with `write_fit_sidecar` /
 // `read_fit_sidecar` beside it there.
 
+/// The kinds of the readable leaves under `dir`, at any depth. An unreadable
+/// leaf contributes no kind.
+pub fn kinds_under(dir: &Path) -> HashSet<ArtifactKind> {
+    runid::discover_in_walk_order(dir, Scope::default())
+        .into_iter()
+        .filter_map(|l| l.ok().map(|l| l.record.kind))
+        .collect()
+}
+
 /// Bounds a caller can put on a per-kind walk, decided from the leaf's cheap
 /// header and its directory mtime — before the full `RunRecord` parse. The
 /// kind-free part of [`runid::Scope`], whose docs give the rules.

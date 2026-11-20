@@ -313,11 +313,7 @@ fn leaf_at(dir: &Path) -> Result<Option<crate::cas_read::Leaf>, ResolveError> {
 /// a fit run. A profile's folder records the config of the fit it profiles,
 /// which the refusal names; it is never read as a fit folder.
 fn refuse_a_profile_folder(dir: &Path) -> Result<(), ResolveError> {
-    let kinds: std::collections::HashSet<runid::ArtifactKind> =
-        runid::discover_in_walk_order(dir, runid::Scope::default())
-            .into_iter()
-            .filter_map(|l| l.ok().map(|l| l.record.kind))
-            .collect();
+    let kinds = crate::cas_read::kinds_under(dir);
     if !kinds.contains(&runid::ArtifactKind::ProfilePoint) || kinds.contains(&runid::ArtifactKind::FitMethod) {
         return Ok(());
     }

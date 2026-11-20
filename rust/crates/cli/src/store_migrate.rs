@@ -128,10 +128,7 @@ mod step0 {
             Folder::Record { dir, side } => (dir.as_path(), side),
         };
         let Some(source_config) = side.source_config.as_deref() else { return Ok(Kind::RaiseOnly) };
-        let kinds: std::collections::HashSet<ArtifactKind> = runid::discover_in_walk_order(dir, runid::Scope::default())
-            .into_iter()
-            .filter_map(|l| l.ok().map(|l| l.record.kind))
-            .collect();
+        let kinds = crate::cas_read::kinds_under(dir);
         let profile = kinds.contains(&ArtifactKind::ProfilePoint);
         let fit = kinds.contains(&ArtifactKind::FitMethod);
         match (fit, profile) {
