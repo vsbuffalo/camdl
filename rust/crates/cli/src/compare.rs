@@ -34,7 +34,8 @@ use crate::fit::stream_bindings::StreamBindings;
 use crate::posterior_draws::PosteriorDrawsRef;
 use serde::Deserialize;
 use score::trace::{
-    Conditioning, PredictiveBasis, PrequentialTrace, StreamMean, ThetaSource, TraceOverride,
+    Conditioning, PredictiveBasis, PrequentialTrace, PrequentialWarning, StreamMean, ThetaSource,
+    TraceOverride,
 };
 use score::combine::ReplicateTotals;
 use score::evidence::{paired_delta, paired_diffs};
@@ -2674,6 +2675,9 @@ fn derive_prequential(
     // passed it as flags, and the in-process ODE scorer runs under it
     // (gh#1235).
     let settings = fitted.settings.with_flags(false, derive.allow_forcing_extrapolation);
+    if let Some(note) = fitted.settings.turned_on_note(settings, &segment.display().to_string(), "compare scores it") {
+        out.say(format_args!("{note}"));
+    }
     let (base_enable, base_disable): (Vec<String>, Vec<String>) = if fit_base.is_empty() {
         (Vec::new(), Vec::new())
     } else {
@@ -3021,9 +3025,9 @@ fn derive_ode_trace(
     disabled: &[String],
 ) -> Result<PrequentialTrace, String> {
     // This fit's forcing policy, for its scoring only: the guard puts back
-    // compare's own policy when it drops.
-    let _forcing_route =
-        crate::forcing_extrapolation::ForcingPolicy::new(settings.allow_forcing_extrapolation).install();
+    // compare's own policy when it drops. What it held goes into the trace.
+    let forcing = crate::forcing_extrapolation::ForcingPolicy::new(settings.allow_forcing_extrapolation);
+    let _forcing_route = forcing.install();
     let scorer = crate::compare_ode::OdeScorer::build(resolved, model_path, streams, fitted, settings)?;
     let t0 = score_from
         .map_or(0, |t| crate::fit::runner::first_scored_index(scorer.obs_times(), t));
@@ -3048,11 +3052,13 @@ fn derive_ode_trace(
             })?;
         components.push(trace);
     }
-    if n >= 2 {
-        combine_mixture(components, derive.seed)
+    let mut trace = if n >= 2 {
+        combine_mixture(components, derive.seed)?
     } else {
-        Ok(components.pop().expect("one θ was scored"))
-    }
+        components.pop().expect("one θ was scored")
+    };
+    trace.warnings.extend(forcing.trace_warnings());
+    Ok(trace)
 }
 
 /// Combine per-draw filter traces into the posterior-mixture predictive
@@ -3163,12 +3169,12 @@ fn combine_scored_traces(
     }
 
     // Union of warnings, one per kind (the counts differ per component;
-    // the first instance is representative).
-    let mut warnings = Vec::new();
+    // the first instance is representative), and one per forcing and side
+    // for a held forcing (`PrequentialWarning::same_as`).
+    let mut warnings: Vec<PrequentialWarning> = Vec::new();
     for t in &traces {
         for w in &t.warnings {
-            if !warnings.iter().any(|have|
-                std::mem::discriminant(have) == std::mem::discriminant(w)) {
+            if !warnings.iter().any(|have| have.same_as(w)) {
                 warnings.push(w.clone());
             }
         }
@@ -3889,7 +3895,18 @@ fn warning_lines(rows: &[Row], base_idx: usize, checks: &Preflight, accuracy: &[
     // Propagate trace-level warnings.
     for r in rows {
         for w in &r.trace.warnings {
-            lines.push(format!("ⓘ {}: {:?}", r.name, w));
+            lines.push(match w {
+                PrequentialWarning::ForcingHeld { forcing, defined_on: [lo, hi], side, held_value_at } => format!(
+                    "⚠ {}: scored with forcing `{forcing}` held outside its range: it is defined on \
+                     t = {lo} to t = {hi}, and was evaluated {}, where its value at t = {held_value_at} \
+                     was held (allow_forcing_extrapolation)",
+                    r.name,
+                    match side {
+                        score::trace::ForcingSide::Before => "before it",
+                        score::trace::ForcingSide::After => "after it",
+                    }),
+                other => format!("ⓘ {}: {:?}", r.name, other),
+            });
         }
     }
     // §3.4 remedy 4: print each row's filter-noise MC SE so the reader

@@ -75,6 +75,27 @@ impl ForcingPolicy {
         self.0.allowed
     }
 
+    /// The forcings held so far, as the warnings a prequential trace scored
+    /// under this policy carries, so a reader of the trace (`compare`'s rows)
+    /// sees them with the scores they affected.
+    pub fn trace_warnings(&self) -> Vec<score::trace::PrequentialWarning> {
+        self.0
+            .held
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|o| score::trace::PrequentialWarning::ForcingHeld {
+                forcing: o.forcing.clone(),
+                defined_on: [o.lo, o.hi],
+                side: match o.side {
+                    sim::forcing_range::Side::Before => score::trace::ForcingSide::Before,
+                    sim::forcing_range::Side::After => score::trace::ForcingSide::After,
+                },
+                held_value_at: o.held_end(),
+            })
+            .collect()
+    }
+
     /// Route the engine's forcing notes into this policy until the returned
     /// guard drops. Installed before the command evaluates its model, and
     /// held for the rest of the command. An install nests: `fit predict`

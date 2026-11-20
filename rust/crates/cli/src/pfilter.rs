@@ -1182,6 +1182,9 @@ fn run_pfilter(
             recorded, &per_stream_obs, &per_stream_cov, &result.ess_trace, t0, seed,
             obs_model.first_observation_opens_after_run_start(smc_config.t_start),
             score_from_time);
+        // The forcings the filter held outside their ranges, with the scores
+        // they affected (`compare` reports them per row).
+        trace.warnings.extend(forcing.trace_warnings());
         // Schema 5: how this trace was computed. One pass (`--replicates N`
         // is refused beside `--save-prequential`), at the parameters this
         // invocation was given.

@@ -530,6 +530,85 @@ fn compare_scores_an_ode_fit_under_its_configs_override() {
     assert!(o.status.success(), "{err}");
 }
 
+/// A fit of the linear-forcing model in `dir` held out after day 49, with
+/// `config_extra` appended to `[config]`, by the method `fit_toml` writes
+/// (PGAS on the chain-binomial backend) or, with `ode`, MH on the ODE
+/// backend; returns its method leaf. The held-out score reaches day 70, past
+/// the forcing's range.
+fn held_out_fit(dir: &Path, config_extra: &str, ode: bool) -> String {
+    let m = model(dir, "linear", &ROWS_TO_50);
+    let toml = fit_toml(dir, &m, config_extra);
+    let mut text = std::fs::read_to_string(&toml)
+        .unwrap()
+        .replace("[data.observations]", "[data]\nholdout_after = 49\n[data.observations]");
+    if ode {
+        text = text.replace(
+            "[method]\nalgorithm = \"pgas\"\nbackend = \"chain_binomial\"\nchains = 1\nparticles = 8\n\
+             sweeps = 4\nburn_in = 2\n",
+            "[method]\nalgorithm = \"mh\"\nbackend = \"ode\"\nchains = 1\niterations = 40\nburn_in = 10\n\
+             starts = \"single\"\n",
+        );
+    }
+    assert!(text.contains("holdout_after") && (!ode || text.contains("algorithm = \"mh\"")), "{text}");
+    std::fs::write(&toml, text).unwrap();
+    let o = camdl(dir, &["fit", "run", toml.to_str().unwrap()]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    method_leaf(dir, if ode { "mh" } else { "pgas" })
+}
+
+/// The lines of `compare`'s report that say a row was scored with `mult`
+/// held outside its range.
+fn held_lines(o: &Output) -> Vec<String> {
+    let all = format!("{}{}", String::from_utf8_lossy(&o.stdout), stderr(o));
+    all.lines().filter(|l| l.contains("scored with forcing `mult` held outside its range")).map(str::to_string).collect()
+}
+
+/// `compare` reports, per row, every forcing held while that row was
+/// scored. A chain-binomial fit is scored by a `camdl pfilter` child, which
+/// records what it held in the trace it writes; a fit made under the
+/// override, held out after day 49, holds the forcing only when its held-out
+/// days are scored, so its fit never said so (gh#1235).
+#[test]
+fn compare_reports_a_hold_made_while_scoring_each_row() {
+    let tmp = tempfile::tempdir().unwrap();
+    let leaf = held_out_fit(tmp.path(), "allow_forcing_extrapolation = true\n", false);
+    let o = camdl(tmp.path(), &["compare", &leaf, &leaf]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(held_lines(&o).len(), 2, "one line per row:\n{}\n{}", String::from_utf8_lossy(&o.stdout), stderr(&o));
+}
+
+/// A fit made without the override, scored under compare's
+/// `--allow-forcing-extrapolation`: compare says the flag turned the setting
+/// on for it, and reports the hold on its rows.
+#[test]
+fn compare_says_when_its_flag_scores_a_fit_under_the_override() {
+    let tmp = tempfile::tempdir().unwrap();
+    let leaf = held_out_fit(tmp.path(), "", false);
+    let o = camdl(tmp.path(), &["compare", &leaf, &leaf, "--allow-forcing-extrapolation"]);
+    let err = stderr(&o);
+    assert!(o.status.success(), "{err}");
+    assert!(err.contains("was fitted without --allow-forcing-extrapolation; compare scores it under it, as given"),
+        "{err}");
+    assert_eq!(held_lines(&o).len(), 2, "{}\n{err}", String::from_utf8_lossy(&o.stdout));
+}
+
+/// Two ODE fits, each made under the override and each holding the forcing
+/// when scored in compare's process: each row reports its own hold.
+#[test]
+fn compare_reports_each_ode_fits_hold() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (a_dir, c_dir) = (tmp.path().join("a"), tmp.path().join("c"));
+    std::fs::create_dir_all(&a_dir).unwrap();
+    std::fs::create_dir_all(&c_dir).unwrap();
+    let a = held_out_fit(&a_dir, "allow_forcing_extrapolation = true\n", true);
+    let c = held_out_fit(&c_dir, "allow_forcing_extrapolation = true\n", true);
+    let o = camdl(tmp.path(), &["compare", &a, &c]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let lines = held_lines(&o);
+    assert_eq!(lines.len(), 2, "{lines:?}\n{}\n{}", String::from_utf8_lossy(&o.stdout), stderr(&o));
+    assert_ne!(lines[0].split(':').next(), lines[1].split(':').next(), "each names its own row: {lines:?}");
+}
+
 /// `simulate --draws posterior --fit` replays a fit made under `[config]
 /// allow_forcing_extrapolation` under it: the replay holds the forcing rather
 /// than refusing it, says so once, and is the same computation as the replay

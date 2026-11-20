@@ -198,7 +198,7 @@ pub struct PrequentialStep {
 
 /// Warning attached to a prequential trace — things a reader needs
 /// to see before interpreting the summary statistics.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PrequentialWarning {
     /// ESS dropped below `threshold` at `step_count` scored steps.
@@ -217,6 +217,40 @@ pub enum PrequentialWarning {
     /// (user passed `--no-save-samples`); CRPS recomputed from
     /// log_score+pit cannot be done on these traces.
     SamplesNotSaved,
+    /// A forcing was evaluated outside the range on which it is defined
+    /// while the trace was scored, and its end value was held: the run was
+    /// given, or its fit was made under, `allow_forcing_extrapolation`. The
+    /// steps scored past that point are the model's with the forcing frozen
+    /// at `held_value_at`. One per forcing and side.
+    ForcingHeld {
+        forcing: String,
+        /// `[lo, hi]`, the range on which the forcing is defined.
+        defined_on: [f64; 2],
+        side: ForcingSide,
+        /// The end of the range whose value was held.
+        held_value_at: f64,
+    },
+}
+
+/// Which side of its range a held forcing was evaluated on
+/// ([`PrequentialWarning::ForcingHeld`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForcingSide {
+    Before,
+    After,
+}
+
+impl PrequentialWarning {
+    /// Whether `other` says the same thing, so a trace combined from several
+    /// keeps one of them: one per kind, but one per forcing and side for a
+    /// held forcing.
+    pub fn same_as(&self, other: &PrequentialWarning) -> bool {
+        match (self, other) {
+            (PrequentialWarning::ForcingHeld { .. }, PrequentialWarning::ForcingHeld { .. }) => self == other,
+            _ => std::mem::discriminant(self) == std::mem::discriminant(other),
+        }
+    }
 }
 
 /// The full trace: one entry per scored observation, plus metadata.
@@ -591,7 +625,7 @@ pub fn project_onto_stream(
                 step_count, threshold: *threshold,
             })
         }
-        PrequentialWarning::SamplesNotSaved => Some(w.clone()),
+        PrequentialWarning::SamplesNotSaved | PrequentialWarning::ForcingHeld { .. } => Some(w.clone()),
     }).collect();
     let derivation = match &trace.derivation {
         None => None,

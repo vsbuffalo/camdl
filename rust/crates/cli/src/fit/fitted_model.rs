@@ -353,6 +353,24 @@ impl FittedSettings {
             allow_forcing_extrapolation: self.allow_forcing_extrapolation || allow_forcing_extrapolation,
         }
     }
+
+    /// The note a command says when a flag turned on, in `folded`, a setting
+    /// this fit ran without: `{fit_name} was fitted without {flags}; {doing}
+    /// under it, as given`. `None` when the flags added nothing.
+    pub fn turned_on_note(self, folded: FittedSettings, fit_name: &str, doing: &str) -> Option<String> {
+        let turned_on: Vec<&str> = [
+            (folded.allow_degenerate_rates && !self.allow_degenerate_rates, "--allow-degenerate-rates"),
+            (
+                folded.allow_forcing_extrapolation && !self.allow_forcing_extrapolation,
+                "--allow-forcing-extrapolation",
+            ),
+        ]
+        .iter()
+        .filter_map(|(on, flag)| on.then_some(*flag))
+        .collect();
+        (!turned_on.is_empty())
+            .then(|| format!("note: {fit_name} was fitted without {}; {doing} under it, as given", turned_on.join(" or ")))
+    }
 }
 
 fn integrator_name(i: &Integrator) -> &'static str {
@@ -524,19 +542,7 @@ pub fn replay_simulator(
         )
     });
     let settings = fit.settings.with_flags(flags.allow_degenerate_rates, flags.allow_forcing_extrapolation);
-    let turned_on: Vec<&str> = [
-        (settings.allow_degenerate_rates && !fit.settings.allow_degenerate_rates, "--allow-degenerate-rates"),
-        (
-            settings.allow_forcing_extrapolation && !fit.settings.allow_forcing_extrapolation,
-            "--allow-forcing-extrapolation",
-        ),
-    ]
-    .iter()
-    .filter_map(|(on, flag)| on.then_some(*flag))
-    .collect();
-    let settings_notice = (!turned_on.is_empty()).then(|| {
-        format!("note: {fit_name} was fitted without {}; this replay runs under it, as given", turned_on.join(" or "))
-    });
+    let settings_notice = fit.settings.turned_on_note(settings, fit_name, "this replay runs");
     let notice = match (simulator_notice, settings_notice) {
         (Some(a), Some(b)) => Some(format!("{a}\n{b}")),
         (a, b) => a.or(b),
