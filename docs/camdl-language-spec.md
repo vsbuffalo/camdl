@@ -4209,8 +4209,12 @@ A bare `every` or `at` field is refused with E272.
 
 ## 13. Interventions
 
-Deterministic state modifications at scheduled times. **Inactive by default.**
-Enabled via scenarios or CLI.
+An intervention changes the model's state at stated times: it moves a share of
+one compartment into another, adds individuals, or sets a compartment to a
+value. Interventions are inactive unless a run enables them (§13.4), so one
+model holds the baseline and every policy compared against it; `events {}`
+(§13.5) uses the same grammar for changes that always happen. The guide is
+`camdl docs getting-started` ("Interventions: scheduled discrete events").
 
 ```camdl
 interventions {
@@ -4226,11 +4230,19 @@ interventions {
 }
 ```
 
+Each entry is `NAME : ACTION SCHEDULE`. The actions are specified in §13.1 and
+§13.6, the schedules in §13.2 and §13.7, families of interventions in §13.3,
+and the order in which effects due at one time apply in §13.10.
+
+Related sections: §13.9 (interventions triggered by surveillance), §17
+(scenarios, which enable interventions), §25.5 and §25.10 (how interventions
+lower to the IR), §26 (the error table).
+
 ### 13.1 Actions
 
-There are three actions. `transfer` and `add` are written as function-call
-forms; `set` (assign a compartment a value) is written inside the block form as
-`COMP = EXPR` — there is no `set(...)` function:
+There are three actions. `transfer` and `add` are written as calls; a `set`
+is written inside the block form as `COMP = EXPR`, and there is no `set(...)`
+call.
 
 ```camdl
 # transfer and add — function-call action forms
@@ -4242,75 +4254,70 @@ NAME : add(COMP, EXPR) at [...]                                       # add a co
 NAME : { COMP = EXPR  at = [...] }                                    # override value
 ```
 
-`transfer` is atomic: `delta = floor(source * fraction)` computed from
-pre-intervention state, then `source -= delta, dest += delta` applied together.
-When the source is a compartment with an Erlang dwell (`via erlang`, §9.4.1),
-`source` is the compartment's total over its stages: the floor is taken once
-and the stages give up their shares of it.
+**`transfer(fraction = f)`** moves `delta = floor(source · f)` individuals,
+with `delta` computed from the state before the transfer and then subtracted
+from the source and added to the destination together. A fraction outside
+`[0, 1]` is clamped to that interval when the transfer fires. When the source
+has an Erlang dwell (`via erlang`, §9.4.1), `source` is its total over its
+stages: the floor is taken once and each stage gives up its share.
 
-A `transfer(count = EXPR, ...)` moves `min(round(count), source)` individuals,
-so `count` must not be negative: a negative count would move people from the
-destination back to the source. A count that evaluates below zero when the
-transfer fires (a literal, or a parameter or expression that is negative at
-the parameters in use) stops the run with a negative-count error naming the
-source compartment, on every backend, including under inference. A count of
-zero moves nobody. To move people the other way, write the transfer in the
-other direction.
+**`transfer(count = n)`** moves `min(round(n), source)` individuals. A count
+that evaluates below zero when the transfer fires, whether a literal or a
+parameter or expression that is negative at the parameters in use, stops the
+run with a negative-count error naming the source compartment, on every
+backend and under inference; the compiler does not check it. A count of zero
+moves nobody. To move people the other way, write the transfer in the other
+direction.
 
-**Stratified compartments in actions.** `transfer(from = S, to = V)` with bare
-compartment names expands over all strata (see §25.10). `set` and `add` instead
-target a **single compartment by name**. On a stratified compartment the bare
-name (e.g. `I`) is not a single compartment after expansion, so write the
-**expanded stratum name** directly (`I_child_p1 = ...`, `add(I_child_p1, 5)`).
-A compartment with an Erlang dwell is the exception for `add`, which enters its
-first stage (`add(E[pre], 5)`), and is refused for `set` (**E366**). Either
-verb takes one stage written as `stage(E[pre], 2)`; see §9.4.1.
-The compiler verifies both verbs' targets against the expanded compartment
-table and rejects a stratified family or an unknown name with **E265**; the
-family case lists the available cells. A target may also be written indexed,
-`I[child, p1] = ...` or `add(I[child, p1], 5)`, and inside an indexed family
-(§13.3) its indices may be the family's binders, including a
-`c in compartments` binder: `c[a] = ...`. An indexed target must index every
-dimension of its compartment, and names one cell (E265 otherwise; see §13.3).
+**`add(COMP, EXPR)`** and the block form are specified in §13.6.
 
-**Pairing rule for a bare stratified `transfer`.** The two endpoints pair
-cell-for-cell, and may do so only when they are **declared with the same
-dimensions, in the same order**. The compiler compares declared dimension
-vectors, not expanded cell names, so two different dimensions that share level
-names (`age = [low, high]` against `risk = [low, high]`) never pair silently. A
-mismatch — one endpoint stratified and the other not, different dimensions, or
-the same dimensions in a different order — is **E237**, which names both shapes.
-A fully-indexed endpoint denotes one cell and carries no dimensions, so
-`transfer(from = S[child], to = S[adult])` and `transfer(from = S[child], to =
-V)` with `V` unstratified are ordinary single-cell transfers, not fan-outs. An endpoint written as the name of one expanded cell
-(`S_pre`, or a stage cell `I_pre_s3`) is a single cell too, and pairs with an
-indexed single cell: `transfer(from = I_pre_s3, to = Q[pre])`. The
-`fraction` is one expression shared by every cell; for coverage that varies by
-stratum, write the indexed family form (§13.3).
+**Targets of `set` and `add`.** Each names one compartment cell. On a
+stratified compartment the bare name (`I`) is a family of cells, so the target
+is written as the expanded cell name (`I_child_p1 = ...`, `add(I_child_p1, 5)`)
+or indexed on every dimension (`I[child, p1] = ...`, `add(I[child, p1], 5)`).
+Inside an indexed family (§13.3) the indices may be the family's binders,
+including a `c in compartments` binder: `c[a] = ...`. A stratified family, an
+unknown name, or an index that leaves a dimension out is **E265**; for a family
+the hint lists its cells. On a compartment with an Erlang dwell, `add` enters
+the first stage (`add(E[pre], 5)`) and `set` is **E366**; either verb takes one
+stage written as `stage(E[pre], 2)` (§9.4.1).
 
-**A bare endpoint inside an indexed family is an error.** `vacc[a in age] :
-transfer(from = S, to = V)` would fan out over every cell *within each
-instance*, transferring each cell once per instance — with `P` strata the
-realised coverage is `1 − (1 − f)^P`, not `f`. That is **E239**; write
-`from = S[a], to = V[a]`, or drop the `[a in age]` binder to fan out once.
+**Pairing in a bare stratified `transfer`.** `transfer(from = S, to = V)` with
+bare names on stratified compartments expands into one transfer per cell
+(§25.10). The endpoints pair cell for cell, and only when they are declared
+with the same dimensions in the same order. The compiler compares the declared
+dimension lists, not the expanded cell names, so two dimensions that share level
+names (`age = [low, high]` and `risk = [low, high]`) do not pair. Any other
+combination (one endpoint stratified and the other not, different dimensions,
+or the same dimensions in a different order) is **E237**, which names both
+shapes. An endpoint indexed on every dimension, or written as one expanded cell
+name (`S_pre`, or a stage cell `I_pre_s3`), is a single cell and carries no
+dimensions, so `transfer(from = S[child], to = S[adult])`,
+`transfer(from = S[child], to = V)` with `V` unstratified, and
+`transfer(from = I_pre_s3, to = Q[pre])` each move one cell. The `fraction` is
+one expression shared by every cell; coverage that varies by stratum is written
+as an indexed family (§13.3).
 
-**`count` does not fan out.** A fraction is scale-free, so the same value
-applies to every cell. A count is absolute: applying it per cell would move
-`count` individuals out of *each* stratum, multiplying the intended total by the
-number of cells — 1548× on the national example in §25.10. `count` on a bare
-stratified transfer is therefore **E238**. Write `fraction =`, or index the
-transfer so each instance names one cell. `count` is unrestricted wherever the
-transfer resolves to a single cell.
+**A bare endpoint inside an indexed family** is **E239**. In `vacc[a in age] :
+transfer(from = S, to = V)` each instance would fan out over every cell, so
+each cell would receive the transfer once per instance, and with `P` strata the
+realised coverage would be `1 − (1 − f)^P` instead of `f`. Write
+`from = S[a], to = V[a]`, or drop the binder to fan out once.
+
+**`count` on a bare stratified transfer** is **E238**. A fraction is
+scale-free and applies to every cell; a count is absolute, and applied per cell
+it would move `count` individuals out of each stratum, multiplying the intended
+total by the number of cells. Write `fraction =`, or index the transfer so each
+instance names one cell. `count` is accepted wherever the transfer resolves to
+a single cell.
 
 ### 13.2 Scheduling
 
-**Inline `at` form** (specific times, most common):
+A schedule is a list of times or a recurring cadence.
 
 ```
 NAME : ACTION at [TIME, ...]     # times in model time_unit
 ```
-
-**Block form** (recurring or complex schedules):
 
 ```
 NAME : ACTION {
@@ -4320,48 +4327,54 @@ NAME : ACTION {
 }
 ```
 
-**In anchored mode**, `every` (and the `at_day` offset of §13.7) must be
-classified `Exact` (§2.1) — a `Calendar`-classified duration (e.g. `every = 1
-'months`) is
-**E322**, with a hint naming `date_range(<start>, <end>, calendar_months = 1)`
-in an `at` list for month-aligned recurrence, or `every = 30 'days` for a fixed
-cadence. `from` and `to` are instant positions (§2.1): a single calendar step
-there is its calendar date by the one-step calendar rule (`from = 6 'months` is
-`add_calendar_months(origin, 6)`), and any other calendar duration is **E321**.
-In unanchored
-mode the classifier is inactive and `every = 1 'months` is fine.
+A `transfer` or `add` takes either form. A `set` takes only a list, written
+inside its block as `at = [...]`. An `at` list accepts instants and splices
+`date_range(...)` (§2.1), and inside an indexed family it may read a table or
+parameter indexed by the family's binders (§13.3). `every … at_day …` is a
+third form, for `add` only (§13.7).
 
-**When a scheduled time fires.** Every schedule form resolves to a list of
-declared times; each backend fires them on its own clock, so a simulation and a
-fit on the same backend define the same model:
+**Anchored mode.** Under `origin = date(...)`, `every` must be an Exact
+duration (§2.1): a calendar cadence such as `every = 1 'months` is **E322**,
+whose hint names `date_range(<start>, <end>, calendar_months = 1)` in an `at`
+list for month-aligned firings and `every = 30 'days` for a fixed cadence.
+`from`, `to` and the entries of an `at` list are instant positions, under the
+one-step calendar rule of §2.1: `from = 6 'months` is
+`add_calendar_months(origin, 6)`, and a form that rule refuses is **E321**.
+Without an origin a month is a fixed span and `every = 1 'months` is accepted.
 
-- An effect fires only inside the run's window, `t_start ≤ t ≤ t_end` (to within
-  `1e-9 · dt` on a discrete-time backend and `1e-10` on a continuous one). A
-  declared time outside it does not fire.
-- **Discrete-time backends** (chain-binomial, and every fit that runs
-  chain-binomial steps: `pfilter`, PMMH, IF2, PGAS) fire an effect at the end of
-  a step of the run's own grid `t_start + k·dt`, with
-  `k = ⌊(t − t_start)/dt + ½⌋` — the nearest step, a tie going to the later one.
-  `at [2.4]` at `dt = 1` from `t_start = 0` fires at 2; with `from = 0.5` an
-  effect at 1 fires at 1.5. When `t_end` is off the grid, the last step is
-  shortened to end at `t_end`, and an effect inside that step fires at the
-  nearer of its two ends (a tie going to `t_end`), with a warning naming the
-  effect, its time and the end it fires at. One intervention fires once per
-  step: `at [2.3, 2.4]` at `dt = 1` fires once, at 2.
+**When a scheduled time fires.** Every schedule resolves to a list of declared
+times, and each backend fires them on its own clock, so a simulation and a fit
+on the same backend apply the same effects.
+
+- An effect fires only inside the run's window, `t_start ≤ t ≤ t_end`, to
+  within `1e-9 · dt` on a discrete-time backend and `1e-10` on a continuous
+  one. A declared time outside the window does not fire.
+- **Discrete-time backend** (chain-binomial, in simulation and under every
+  inference method that steps it). An effect fires at the end of a step of the
+  run's grid `t_start + k·dt`, with `k = ⌊(t − t_start)/dt + ½⌋`: the nearest
+  step, a tie going to the later one. `at [2.4]` at `dt = 1` from `t_start = 0`
+  fires at 2; from `t_start = 0.5`, an effect at 1 fires at 1.5. When `t_end` is
+  off the grid the last step is shortened to end at `t_end`, and an effect
+  inside that step fires at the nearer of its two ends, a tie going to `t_end`,
+  with a warning naming the effect, its time and the end it fires at. One
+  intervention fires at most once per step: `at [2.3, 2.4]` at `dt = 1` fires
+  once, at 2. A recurring schedule whose period is shorter than `dt` would put
+  two fires on one step; the run is refused at its start (and a fit at its
+  pre-flight) with an error naming the two times, and the fix is a finer `dt`
+  or a longer period.
 - **Continuous-time backends** (ODE, Gillespie) fire an effect at its declared
-  time; `at [2.3, 2.4]` fires twice.
-- An effect at `t_start` (`k = 0` on a discrete-time backend; within `1e-10` of
-  `t_start` on a continuous one) applies to the starting state, before the
+  time, so `at [2.3, 2.4]` fires twice.
+- An effect at `t_start` (`k = 0` on the discrete-time backend; within `1e-10`
+  of `t_start` on a continuous one) applies to the starting state, before the
   `t_start` row is recorded or an observation there is scored (§13.10). A
   recurring schedule's default `from` is `t_start`, so its first fire is such an
   effect. A run resumed from a saved state (a contrast fork, a forecast from
-  `--init-state`) does not apply it again: the saved state is already
-  post-effect.
+  `--init-state`) does not apply it again, because the saved state already
+  includes it.
 
 ### 13.3 Indexed Interventions
 
-An intervention can be declared with an **index binder**, creating a **family**
-of interventions — one per stratum — in a single line:
+An index binder declares a family of interventions, one per level:
 
 ```camdl-doctest-preamble iv-patch
 compartments { S, V, I, R }
@@ -4389,31 +4402,29 @@ interventions {
 }
 ```
 
-Syntax: `NAME[INDEX_VAR in DIMENSION] : ACTION at [TIME, ...]` (or a `{ ... }`
-block for recurring schedules)
+The header is `NAME[VAR in DIMENSION, ...]`, followed by the action and either
+schedule form. A trailing `where` guard restricts the levels, as on a
+transition (§9.3): `x[a in age] : add(I[a], 5) at [10] where a != child`.
 
-The expanded members share a **`base_name`** (the unindexed name, `"sia"`
-above). In scenario `enable`/`disable` lists, passing `"sia"` resolves to all
-members whose `base_name` is `"sia"` — no need to enumerate them individually
-(see §17).
+The members share a base name, the unindexed name (`sia` above). In a
+scenario's `enable` or `disable` list and on the command line, the base name
+selects every member; a member is selected alone by its expanded name
+(`sia_north`). See §17.
 
-Individual members can still be addressed by their expanded name (`"sia_north"`)
-when fine-grained control is needed.
-
-**Every member must differ from the others.** Each member of a family fires, so
-two members with the same actions on the same schedule apply the action twice.
+**Members must differ.** Every member fires, so two members with the same
+actions on the same schedule apply the action twice:
 `sia[r in round] : transfer(count = n, from = S, to = V) at [10]`, whose body
-never mentions `r`, would move `2n` individuals from a model that reads as `n`.
-A family whose expansion yields two such members is **E421**, which names the
-binder that fails to distinguish them. Use the binder in the action
-(`from = S[r]`) or in the schedule (`at [t_start[r]]`), or drop it. The rule
-compares the expanded members, not the source text: a binder used only in the
-schedule gives distinct fire times and is legal, as is a `where` guard that
-leaves a single member. It covers interventions, events (§13.5) and reactive
-families (§13.9), and every action.
+never mentions `r`, moves `2n` individuals where it reads as `n`. A family
+whose expansion yields two such members is **E421**, which names the binder
+that does not distinguish them. Use the binder in the action (`from = S[r]`) or
+in the schedule (an `at` entry indexed by `r`), or drop it. The check compares
+the expanded members: a binder used only in the schedule gives distinct fire
+times and is accepted, and so is a `where` guard that leaves one member. It
+applies to interventions, events (§13.5) and reactive interventions (§13.9),
+with every action.
 
-**Indexed `set` and `add` targets.** Inside a family the target of a `set`, and
-of an `add`, may be indexed by the family's binders. With a `c in compartments`
+**Indexed `set` and `add` targets.** Inside a family the target of a `set` or
+an `add` may be indexed by the family's binders. With a `c in compartments`
 binder, one family covers every compartment:
 
 ```camdl preamble=iv-patch
@@ -4427,20 +4438,20 @@ interventions {
 }
 ```
 
-`halve` expands to one `set` per cell (`S_north = 0.5 * S_north`, …, one for each
-compartment and patch). Every instance due at one instant reads the same
-pre-event state (§13.10), so a family whose right-hand side reads *other* cells,
-such as an age shift `c[a] = … c[b] …`, is a simultaneous map: the result does not
-depend on the order in which the instances are declared or expanded. An indexed
-target must index every dimension of its compartment: a `set` does not fan out
-over an omitted dimension the way a transition does (§9.5), because `c[a]` on its
-right-hand side would then be ambiguous between the cell and the stratum total.
+`halve` expands to one `set` per cell (`S_north = 0.5 * S_north`, and so on for
+each compartment and patch). Every instance due at one instant reads the same
+state from before the effects (§13.10), so a family whose right-hand side reads
+other cells, such as an age shift `c[a] = … c[b] …`, is a simultaneous map
+whose result does not depend on the order of declaration or expansion. The
+target indexes every dimension of its compartment. A `set` does not fan out
+over an omitted dimension as a transition does (§9.5), because `c[a]` on its
+right-hand side would be ambiguous between the cell and the stratum total:
 `S[a]` on a compartment stratified by `[age, vx]` is **E265**, naming the
-unindexed dimension. Named indices (`S[vx = v, age = a]`) are placed in declared
-order, as everywhere else.
+unindexed dimension. Named indices (`S[vx = v, age = a]`) are placed in
+declaration order, as everywhere else.
 
-**Per-patch timing from a table.** When SIA rounds happen on different dates per
-patch, store the schedule in a table and reference it in the `at` list:
+**Per-level times from a table.** The binder is in scope in the schedule, so a
+table holds a schedule that differs by level:
 
 ```camdl
 tables {
@@ -4453,29 +4464,32 @@ interventions {
 }
 ```
 
-The index variable `p` is in scope inside the schedule block, so `sia_day[p, 0]`
-resolves to the correct row at compile time — each expanded intervention gets
-its own concrete timestamp.
+`sia_day[p, 0]` is looked up at compile time, so each member has its own
+constant fire times.
 
 ### 13.4 Activation
 
-Interventions are off by default. Enable via scenarios or CLI:
+An intervention is off unless the run enables it, with a scenario's `enable`
+list (§17) or on the command line:
 
 ```bash
 camdl simulate model.camdl --enable sia_round_1 --seed 42
 ```
 
+`--enable` and `--disable` may be repeated and cannot be combined with
+`--scenario` (§21).
+
 ---
 
 ### 13.5 Events
 
-Events are always-active scheduled state modifications. They share the same
-action grammar and scheduling as interventions but fire unconditionally — they
-cannot be disabled via scenarios.
-
-Use events for structural demographic processes (cohort entry, seasonal
-migration, importation seeding). Use interventions for policy choices (SIA
-campaigns, school closures).
+An event is a scheduled change that every run applies. Events take the action
+grammar and schedules of interventions, indexed families, `where` guards and
+every action included, but they are not toggled: a scenario's `enable` or
+`disable` list naming an event is **E267**, an unknown intervention. They hold
+structural processes (cohort entry, seasonal migration, importation seeding);
+policies compared across runs (vaccination campaigns, school closures) are
+interventions.
 
 ```camdl-doctest-preamble events-demo
 compartments { S, I, R }
@@ -4514,62 +4528,51 @@ events {
 }
 ```
 
-Events support the same features as interventions: indexed events, `where`
-guards, recurring schedules, and all action types.
-
 ### 13.6 The `add` Action
 
 ```
 add(COMPARTMENT, EXPR)
 ```
 
-Adds `round(EXPR)` individuals to COMPARTMENT. Accepts negative values
-(outflow). If the result makes the compartment negative, a warning is emitted
-but the simulation continues — in a particle filter, the particle gets a bad
-trajectory and is resampled away.
+Adds `round(EXPR)` individuals to an integer compartment, or `EXPR` to a real
+one. The amount cannot be negative: an `add` whose amount evaluates below zero
+when it fires stops the run with a negative-count error naming the compartment,
+on every backend and under inference. The compiler does not check it, so
+`add(I, -5)` compiles and fails when it fires. A removal is a `transfer` to
+another compartment.
 
 ### 13.7 The `at_day` Schedule
 
-For `add` events and interventions that recur on a specific day within each
-period. The `every … at_day …` schedule is available only on the `add` action
-(`transfer`/`set` use the `at [...]` or `{ every = …; from = …; to = … }`
-schedule forms instead):
+`every PERIOD at_day DAY` fires an `add` on one day of each period:
 
 ```camdl
 NAME : add(COMP, EXPR) every PERIOD at_day DAY
 ```
 
-`at_day` is the absolute phase within the period, measured from `t = 0`. Fire
-times are `at_day + k * period` for the smallest `k` where `target >= t_start`,
-and each fires as §13.2 states: on the nearest step of the run's grid
-`t_start + k·dt` on a discrete-time backend, at the target itself on a
-continuous one. On a discrete-time backend each period fires exactly once as
-long as `dt` is no coarser than the period (`dt <= period`). A coarser `dt`
-would put two consecutive targets on the same step, silently dropping a fire;
-rather than merge them, the engine rejects such a schedule at simulation start
-(and a fit at its pre-flight) with a hard error (use a finer `dt`, or widen the
-period). The continuous backends fire every target at its own instant and do
-not reject it.
+The form is accepted only on `add`; on `transfer` or a `set` it is a syntax
+error (**E001**), and those actions use the forms of §13.2. `at_day` is the
+phase within the period measured from `t = 0`. The fire times are
+`at_day + k · period` for `k = 0, 1, …`, starting at the smallest `k` whose
+time is at least `t_start`, and each fires as §13.2 states. `every 365.25 'days
+at_day 251` fires on day 251 of each year; a run starting at `t = 100` first
+fires at `t = 251`. The schedule fires once per period, which a hand-written
+`mod(t, period)` condition does not guarantee when `dt` does not divide the
+period; a `dt` coarser than the period is refused as §13.2 states.
 
-Example: `every 365.25 'days at_day 251` fires on day 251 of each year. If
-simulation starts at `t = 100`, the first fire is at `t = 251` (not `t = 351`).
-
-**In anchored mode**, `at_day` must be classified `Exact` (§2.1), as `every`
-must. `at_day` is folded to one number, so a `Calendar`-classified offset such
-as `at_day 1 'months` would mean the average month (30.436875 days) for every
-period; it is **E322**. Write the offset in `'days` or `'weeks`, or list
-calendar-aligned firings with `at [date(...), ...]`.
-
-This replaces manual `mod(t, period)` arithmetic, which silently double-fires
-when `dt` does not evenly divide the period.
+Under `origin = date(...)` the offset must be an Exact duration (§2.1). It is
+folded to one number, so `at_day 1 'months` would mean the average month
+(30.436875 days) in every period; it is **E322**. The offset is written in
+`'days` or `'weeks`, and calendar-aligned firings are listed with
+`at [date(...), ...]`.
 
 ---
 
 ### 13.8 Balance Constraint
 
-Forces one compartment to satisfy a population conservation constraint at every
-substep. After all transitions, clamps, events, and interventions apply, the
-target compartment is overwritten:
+A `balance {}` block keeps one compartment equal to an expression of the
+others, typically a known population size minus the other compartments. After
+transitions, events and interventions have applied in a step, the target is
+overwritten with the expression (§13.10).
 
 ```camdl-doctest-preamble balance-demo
 compartments { S, E, I, R }
@@ -4600,23 +4603,25 @@ balance {
 }
 ```
 
-This matches pomp's `R = nearbyint(pop) - S - E - I` pattern for models where
-the population trajectory is externally specified and the birth/death rates
-don't exactly reproduce it. The balance target is excluded from the
-non-negativity clamp — a negative value signals a broken model.
+This is pomp's `R = nearbyint(pop) - S - E - I` pattern, for a model whose
+population trajectory is given externally and whose birth and death rates do
+not reproduce it exactly. The target is exempt from the non-negativity check: a
+negative value means the expression and the dynamics disagree, and is reported
+separately. An event that adds people without a source (`add(S, 20000)`)
+raises the other compartments, and the target decreases to keep the total.
 
-Events that inject people without a source (e.g., `add(S, 20000)`) will increase
-the compartment total. The balance compartment absorbs this by decreasing to
-maintain the constraint.
+Balance is applied on the chain-binomial backend only. A model with a
+`balance {}` block is refused on the ODE and Gillespie backends with a
+capability error naming the block. A drawn initial condition on the target is
+**E345** (§15.4).
 
 ### 13.9 Reactive Interventions
 
-A reactive intervention fires as a function of what *surveillance has detected*,
-not on a fixed calendar. It is a third fire source alongside scheduled
-interventions (`at [...]`) and events: a policy whose timing the model
-discovers at run time. The motivating case is outbreak response — "run an SIA
-after AFP/ES detection crosses a threshold" — where a fixed schedule cannot
-express the dependence on observed data.
+A reactive intervention fires when surveillance data cross a threshold, instead
+of at a time fixed in advance, as in an outbreak response that runs a
+vaccination campaign after detected cases exceed a count. It is a third kind of
+effect beside interventions and events. The guide is `camdl docs features`
+("Reactive interventions").
 
 ```camdl-doctest-preamble reactive-demo
 compartments { S, E, I, R, V }
@@ -4659,12 +4664,12 @@ reactive_interventions {
 }
 ```
 
-The `when` predicate is a boolean over **trigger inputs** — data visible to
-policy, never latent model state:
+The `when` predicate is a boolean over **trigger inputs**, which read the
+observations a stream emits and never the latent state:
 
-- `observed(stream)` — the most recent observed value of an observation stream.
-- `sum_observed(stream, window = D)` — the sum of `stream` over the trailing
-  window `D`.
+- `observed(stream)`, the most recent observed value of an observation stream;
+- `sum_observed(stream, window = D)`, the sum of the stream's observations in
+  the trailing window `D`.
 
 These are valid **only** inside a `when` predicate; using `observed(...)` in a
 transition rate or any other model expression is an error (it would read data
@@ -4674,7 +4679,12 @@ and a constant or parameter threshold on the other. A threshold computed from
 a parameter, such as `>= 2 * thr`, is refused with E378; declare the threshold
 itself as the parameter.
 
-The policy body fields:
+A trigger input outside a predicate is **E278**. A comparison without exactly
+one trigger input, or a predicate that is not a comparison or a combination of
+comparisons, is **E273**, and a trigger naming an undeclared stream is
+**E279**.
+
+The policy body takes four keys; any other is **E106**.
 
 | Field      | Meaning                                                            |
 | ---------- | ----------------------------------------------------------------- |
@@ -4683,36 +4693,30 @@ The policy body fields:
 | `once`     | `true` (default) fires at most once; `false` allows repeats.      |
 | `cooldown` | Minimum time between firings when `once = false`. Mutually exclusive with `once = true`. |
 
-**Engine semantics.** The trigger predicate is a **level** test evaluated at
-each observation-emission boundary (not continuously), gated by `once` and
-`cooldown`. A windowed reducer `sum_observed(stream, window = D)` folds the
-emissions in the half-open trailing window `(now − D, now]` — open on the left,
-closed on the right, so an emission landing exactly at `now` is included. When a
-policy fires, its effect is enqueued at `trigger_time + after`, and `cooldown`
-is measured from the **trigger time** (when the predicate crossed), not from the
-delayed effect time.
+A negative `after` is **E274**. `cooldown` with `once = true`, or with `once`
+omitted, is **E276**. The action is a `transfer` or an `add`; a `set` block is a
+syntax error (**E001**).
+
+**Meaning.** The predicate is a level test, evaluated at each time a stream
+emits an observation and not between them, and gated by `once` and `cooldown`.
+`sum_observed(stream, window = D)` sums the emissions in the half-open window
+`(now − D, now]`, so an emission at `now` is included. A trigger input over a
+stream that has not yet emitted reads 0. When a policy fires, its effect is
+scheduled at `trigger_time + after`, and `cooldown` is measured from the
+trigger time, not from the delayed effect.
 
 `window`, `after` and `cooldown` are each folded to one fixed span at compile
 time. Under `origin = date(...)` a calendar duration in any of them
 (`after = 1 'months`) is **E321**: a calendar month is 28 to 31 days, so the
 span is stated in `'days` or `'weeks`.
 
-The trigger always reads **reported surveillance** — the realized observation
-draw at each emission boundary — never latent model state. Reactive policies run
-only on the chain-binomial *forward* backend, which has no particle ensemble
-(and never runs in inference; §13.9 Status), so there is nothing "shared across
-particles" today. A future particle-local `scope` reading latent state is
-deferred; until then there is no `scope` key.
+The trigger reads the observation drawn at each emission, the value a
+surveillance system would report, and never the latent state.
 
-A reactive intervention is a **policy** (like `interventions {}`, not `events {}`):
-it is toggled per run, so a run without it and a run with `--enable` of it
-compare the non-responding and responding worlds, as prospective policy
-analysis requires.
-
-**Reactive interventions are policy interventions and are inactive by default.**
-Enable one with `--enable` on the command line. A reactive policy that is not
-enabled is dropped from the run (the same toggle semantics as a scheduled
-intervention), so a plain `simulate` runs the baseline without it.
+**Activation.** A reactive intervention is a policy, toggled per run like an
+intervention, so a run without it and a run with it compare the world without
+a response and the world with one. It is inactive by default and enabled with
+`--enable`; a policy that is not enabled is dropped from the run.
 
 A scenario cannot enable or disable a reactive policy: naming one in a
 scenario's `enable` or `disable` list is **E267** (unknown intervention), as
@@ -4722,120 +4726,113 @@ compiled, ending at the model's `simulate { to }` horizon, so a scenario that
 moved the horizon would run the dynamics past the last time the policy can
 observe.
 
-> **Status (gh#204).** Reactive interventions are parsed, dimension-checked, and
-> represented in the IR. Forward simulation on the **chain-binomial** backend
-> executes the agenda: an enabled policy fires when its trigger crosses, after
-> the `after` lag, honouring `once`/`cooldown`; each firing is recorded in the
-> run's `reactive_log.tsv` artifact. Inference (IF2/PGAS/PMMH) and the
-> Gillespie/ODE forward backends do **not** yet run reactive policies — an active
-> reactive policy there fails with a clear `REACTIVE_INTERVENTIONS` capability
-> error. A dormant (unenabled) reactive policy is inert, so a run that does not
-> enable it is accepted on every backend. The DSL and IR surface are stable.
+**Support.** An enabled reactive policy runs in forward simulation on the
+chain-binomial backend, and each firing is recorded in the run's
+`reactive_log.tsv` artifact (`camdl simulate --reactive-log` also writes a
+copy). On the ODE and Gillespie backends and under inference, a run with an
+enabled reactive policy is refused with a `REACTIVE_INTERVENTIONS` capability
+error. A policy that is not enabled is dropped, so a run without `--enable` is
+accepted on every backend.
 
 ### 13.10 Within-substep effect ordering
 
-When several effects land at the same time step they apply in a fixed,
-backend-shared order, so a modeller can predict the state an observation or a
-later effect sees. For the fixed-step backends (chain-binomial and the
-discrete-time filters) the order is:
+When several effects are due at one time they apply in a fixed order shared by
+the backends, which determines the state an observation or a later effect
+reads. On the discrete-time (chain-binomial) backend, one step runs:
 
-1. **Inflow events** (`add`, source-less `--> D` events) are computed from the
-   **start-of-step snapshot** and fused into the transition draw.
-2. **Transition draws** advance the compartments (Euler-multinomial,
-   independent-Poisson, RK4, or SSA, per backend).
-3. **Residual events** — draining `transfer` events and `set` — apply to the
-   **post-transition** state.
-4. **Scheduled interventions** apply next, on the post-advance state, in
-   declaration order.
-5. **Balance** (chain-binomial only) overwrites its target last.
-6. The **non-negativity check** runs (the balance target is exempt — a negative
-   there signals a broken model, reported separately, not by this check).
-7. The trajectory row for this step is recorded **after** all of the above.
+1. **Inflow events** (`add`, and source-less `--> D` events), computed from
+   the state at the start of the step and combined with the transition draw.
+2. **Transitions**, which advance the compartments.
+3. **Draining events** (`transfer`) and `set`, applied to the state after the
+   transitions.
+4. **Scheduled interventions**, in declaration order, on the state after
+   stage 3.
+5. **Balance**, which overwrites its target (§13.8).
+6. **The non-negativity check**, from which the balance target is exempt.
+7. **The trajectory row** for the step, recorded after all of the above.
 
 The continuous backends (ODE and Gillespie) have no transition stage at an
-effect boundary and apply the same rule there: inflow events are computed from
-the state just before the boundary, draining `transfer` events and `set` then
-apply to the **post-inflow** state, and scheduled interventions follow in
-declaration order. So an `add(X, 10)` event and an `{ X = 5 ... }` event due at
-the same instant leave `X = 5` on every backend, whichever is declared first,
-and a draining `transfer` due beside an inflow into its source moves a share of
-the post-inflow count.
+effect time and apply the same order there: inflow events are computed from
+the state just before the effect time, draining `transfer` events and `set`
+apply to the state after the inflow, and scheduled interventions follow in
+declaration order. An `add(X, 10)` event and an `{ X = 5 ... }` event due at
+the same instant therefore leave `X = 5` on every backend, whichever is
+declared first, and a draining `transfer` due beside an inflow into its source
+moves a share of the count after the inflow.
 
-Within the drain-and-`set` stage every action resolves against the same
-post-inflow state (on the fixed-step backends, the post-transition state of
-stage 3) and their changes add: two draining `transfer`s from `X = 10`, of
-fractions 0.5 and 0.2, move 5 and 2 and leave `X = 3`, in either order. A `set`
-cannot share its compartment with another action of that stage: a second `set`
-on it, or a `transfer` from or into it, at the same instant is an error on
-every backend, since the changes would add to a value neither event names
-(from `X = 10`, `{ X = 5 ... }` beside a half drain of `X` would give `X = 0`).
-Give them different times or merge them into one. An inflow `add` beside a
-`set` is fine — it acts in the earlier inflow stage, and the `set` then
-overwrites the result.
+**Draining events and `set`.** Within stage 3 every action resolves against
+the same state (after the inflow, and on the discrete-time backend after the
+transitions), and their changes add: two draining `transfer`s from `X = 10`,
+of fractions 0.5 and 0.2, move 5 and 2 and leave `X = 3`, in either order. A
+`set` cannot share its compartment with another action of that stage. A second
+`set` on it, or a `transfer` from or into it, at the same instant is an error
+on every backend, since the changes would add to a value neither event names:
+from `X = 10`, `{ X = 5 ... }` beside a half drain of `X` would give `X = 0`.
+The two are given different times or merged into one. An inflow `add` beside a
+`set` is accepted: it acts in stage 1, and the `set` then overwrites the
+result.
 
-Draining `transfer`s from one compartment at the same instant are refused when
-they could take more than it holds, since each is capped only by that shared
-state and the model does not say who goes when there are not enough people for
-all of them: two `transfer(count = 6, from = X, ...)` from `X = 10` would
-leave `X = -2`. So among the events due at one instant it is an error, on
-every backend, to drain one compartment with two or more `transfer`s when at
-least one moves a `count` — whatever the compartment holds, so the error
-fires the first time the events are due together, identically on every run
-and every particle — or with `fraction`s that sum to more than 1. Fractions
-summing to at most 1 (`0.3` and `0.2`, say) never overdraw and are allowed. A
+**Drains that could overdraw.** Each draining `transfer` is capped only by the
+shared state, so two that together take more than the compartment holds leave
+it negative, and the model does not say which one goes short: two
+`transfer(count = 6, from = X, ...)` from `X = 10` would leave `X = -2`. Among
+the events due at one instant it is therefore an error, on every backend, to
+drain one compartment with two or more `transfer`s when at least one moves a
+`count`, whatever the compartment holds, so the error is raised the first time
+the events are due together, identically on every run and every particle. It
+is also an error when the `fraction`s of the drains sum to more than 1. A
 fraction is evaluated at the instant, as the transfer evaluates it, so a sum
-above 1 that comes from the parameters is refused for every particle. Give the
-drains different times or merge them into one transfer. A single
+above 1 that comes from the parameters is refused for every particle.
+Fractions summing to at most 1 (0.3 and 0.2) never overdraw and are accepted.
+The drains are given different times or merged into one transfer. A single
 `transfer(count = n, ...)` moves at most what its source holds: from `X = 10`,
-`count = 50` moves 10. A stage that leaves an integer compartment negative
-(a `set` to a negative value, say) is also an error, on every backend.
+`count = 50` moves 10. A stage that leaves an integer compartment negative (a
+`set` to a negative value) is an error on every backend.
 
-A `transfer` out of a compartment with an Erlang dwell (§9.4.1) takes part in
-these rules as a drain of each of its stages, with its one `fraction` (or
-`count`) on each, and one rule is stricter for it. Two transfers out of the
+**Compartments with an Erlang dwell.** A `transfer` out of a compartment with
+an Erlang dwell (§9.4.1) takes part in these rules as a drain of each of its
+stages, with its one `fraction` (or `count`) on each. Two transfers out of the
 same staged compartment at the same instant are an error on every backend,
 whatever their fractions and whatever the compartment holds: each divides its
-own total among the stages, and both can give the individual left over to the
-same stage (from stages (1, 1), two transfers of 0.5 would each take the person
-in stage 1). The error names both events and the stage they share. Give them
-different times or merge them into one transfer. Scheduled interventions are
-not affected: they apply one after another.
-
+own total among the stages, and both can assign the individual left over by
+the floor to the same stage (from stages holding (1, 1), two transfers of 0.5
+would each take the person in stage 1). The error names both events and the
+stage they share; the transfers are given different times or merged into one.
 A transfer out of a staged compartment beside a `transfer` that names one of
-its stages (`from = stage(E[pre], 2)`) is checked by the sum of their fractions, like
-any two fraction transfers, and cannot overdraw when the sum is at most 1: from
-a stage holding `n`, the staged transfer takes at most `ceil(n * f)` and the
-other `floor(n * f')`, which together never exceed `n`.
+its stages (`from = stage(E[pre], 2)`) is checked by the sum of their
+fractions, like any two fraction transfers, and cannot overdraw when the sum is
+at most 1: from a stage holding `n`, the staged transfer takes at most
+`ceil(n · f)` and the other `floor(n · f')`, which together never exceed `n`.
+Scheduled interventions are not subject to these rules, because they apply one
+after another (stage 4).
 
 **At `t_start`.** The effects due at the start of the run (§13.2) apply to the
 `init {}` state in the same order, without a transition stage, on every
 backend: inflow events from the `init {}` state, then draining events and `set`
-on the post-inflow state, then interventions in declaration order, then
-`balance`, then the non-negativity check; the `t_start` row is recorded, and an
+on the state after the inflow, then interventions in declaration order, then
+`balance`, then the non-negativity check. The `t_start` row is recorded, and an
 observation at `t_start` scored, after all of them. With `init { I = 0 }`,
 `seed : add(I, 10) at [0]` and
 `cull : transfer(fraction = 0.5, from = I, to = R) at [0]`, the `t_start` row
 is `I = 5`, `R = 5` on every backend. When nothing is due at `t_start` the
-`init {}` state is recorded as is (a `balance {}` target is not rewritten). An
-action's amount evaluates at `t = t_start`.
+`init {}` state is recorded as it is, and a `balance {}` target is not
+rewritten. An action's amount is evaluated at `t = t_start`.
 
-The consequence a modeller must know: recorded output is **post-effect**. An
-observation emitted at a time when an intervention fires — a vaccination
-`transfer`, say — sees the **post-vaccination** state, not the pre-vaccination
-state. That includes `t_start`.
+Recorded output is therefore the state after the effects. An observation
+emitted at a time when an intervention fires, such as a vaccination
+`transfer`, reads the state after the vaccination, at `t_start` as at any other
+time.
 
 ---
 
 ## 14. Timepoints and Reserved Identifiers
 
-> **Partially implemented.** The `timepoints { }` block is parsed but the
-> declared timepoint values are currently discarded by the expander and not
-> available in expressions. Full timepoint support is not yet implemented. The
-> built-in reserved identifiers `t_start` and `t_end` are always available
-> regardless. Each entry is an instant position (§2.1) and is checked as one:
-> under an origin `peak = origin + 6 'months` is the calendar date six months
-> after the origin (the one-step calendar rule), and
-> `peak = origin + 6 'months + 6 'months` is **E321**.
+A `timepoints {}` block is accepted and checked, but the names it declares are
+not in scope anywhere in the model. Each entry is an instant position (§2.1)
+and is checked as one: under an origin, `peak = origin + 6 'months` is the
+calendar date six months after the origin, by the one-step calendar rule, and
+`peak = origin + 6 'months + 6 'months` is **E321**. A reference to an entry's
+name in an expression or a schedule is **E100**, an undeclared name.
 
 ```camdl
 timepoints {
@@ -4844,25 +4841,25 @@ timepoints {
 }
 ```
 
+Related sections: §2.1 (instant positions), §18 (the `simulate` block).
+
 ### 14.1 Built-in Timepoints
 
-`t_start` and `t_end` are **reserved identifiers** automatically defined from
-the `simulate` block, holding the simulation's start and end times. They are
-available in any expression — most usefully to anchor intervention or event
-schedule windows relative to the run (e.g. `from` / `to`).
-
-If `simulate` is absent (e.g., during `camdl check`), the expander silently
-defaults `t_start = 0` and `t_end = 100`; expressions referencing them use those
-defaults. There is no warning for a missing `simulate` block.
+`t_start` and `t_end` are the run's start and end times, set by
+`simulate { from, to }` (§18). They are reserved names (§14.2), and they are
+the defaults of a recurring schedule's `from` and `to` (§13.2). They are not in
+scope in an expression: `at [t_start]`, `from = t_start` and a rate that reads
+`t_end` are each **E100**, an undeclared name. A model without a `simulate {}`
+block (as under `camdl check`) is compiled with `t_start = 0` and `t_end = 100`,
+without a warning.
 
 ### 14.2 Reserved Identifiers
 
-Three distinct mechanisms prevent a name from being used as a declaration. They
-fail differently, so they are worth separating.
+A name can be unavailable for a declaration in three ways, each with its own
+diagnostic.
 
-**1. Genuinely reserved names** — checked explicitly by the compiler. Declaring a
-compartment, parameter, or `let` binding with one of these is an **E100** error
-("name '…' is reserved …"):
+**Reserved names.** Declaring a compartment, parameter or `let` binding with
+one of these names is **E100** ("name '…' is reserved …"):
 
 ```
 t          # current simulation time
@@ -4873,37 +4870,37 @@ pi         # the constant π
 e          # Euler's number
 ```
 
-**2. Keywords** — the lexer tokenizes these, so they cannot appear as an
-identifier; using one as a name is a bare **E001** syntax error, not a
-reserved-id diagnostic. This set includes the block keywords (`compartments`,
-`parameters`, `tables`, `forcing`, `transitions`, `observations`,
-`interventions`, `events`, `reactive_interventions`, `ode`, `output`,
-`simulate`, `init`, `scenarios`, …), the type keywords (`rate`, `probability`,
-`positive`, `count`, `real`, `integer`, `instant`, `duration`), and
-operator/iteration keywords (`sum`, `consecutive`, `where`, `let`,
-`if`/`then`/`else`, `and`/`or`/`not`, `in`, `by`, `from`, `to`, `every`,
-`until`, `at`, `when`, `action`, `origin`, `columns`, `emit_schedule`, …).
-
-**3. Function and distribution names** — these are **not** reserved and **not**
-keywords. They are recognized only in call position; used as a parameter name
-they compile fine. This includes the calendar builtins (`add_calendar_months`,
-`add_calendar_years`, `date`, `date_range` — note only the `_months`/`_years`
-calendar adders exist; there is no `add_calendar_days`/`add_calendar_weeks`), the
-rate wrappers (`overdispersed`, `deterministic`), the likelihood distributions
-(`poisson`, `neg_binomial`, `normal`, `binomial`, `beta_binomial`, `beta`,
-`bernoulli`, `diagnostic_test`), the observation projection name (`projected`), and the
-scenario names (`baseline`, `scenario`). Reusing one as an ordinary parameter is
-legal but inadvisable for readability.
-
-A genuinely-reserved name (group 1) produces:
-
 ```
 ERROR E100: parameter name 't_end' is reserved for simulation time
 ```
 
+**Keywords.** The lexer reads these as keywords, so one used as a name is a
+syntax error, **E001**. They include the block keywords (`compartments`,
+`parameters`, `tables`, `forcing`, `transitions`, `observations`,
+`interventions`, `events`, `reactive_interventions`, `ode`, `output`,
+`simulate`, `init`, `scenarios`, …), the type keywords (`rate`, `probability`,
+`positive`, `count`, `real`, `integer`, `instant`, `duration`), and the
+operator, iteration and field keywords (`sum`, `consecutive`, `where`, `let`,
+`if`/`then`/`else`, `and`/`or`/`not`, `in`, `by`, `from`, `to`, `every`,
+`until`, `at`, `when`, `action`, `origin`, `columns`, `emit_schedule`, …).
+
+**Function and distribution names** are neither reserved nor keywords. They are
+read as functions only in call position, so a parameter may take one of these
+names, at a cost to readability. They include the calendar functions
+(`add_calendar_months`, `add_calendar_years`, `date`, `date_range`; there is no
+`add_calendar_days` or `add_calendar_weeks`), the rate wrappers
+(`overdispersed`, `deterministic`), the likelihood families (`poisson`,
+`neg_binomial`, `normal`, `binomial`, `beta_binomial`, `beta`, `bernoulli`,
+`diagnostic_test`), the projection name `projected`, and the scenario names
+`baseline` and `scenario`.
+
 ---
 
 ## 15. Initial Conditions
+
+The `init {}` block gives each compartment's value at the start of the run,
+either as an expression (`=`) or as a draw from a distribution (`~`, §15.4).
+The guide is `camdl docs getting-started` ("Init: starting conditions").
 
 ### 15.1 Un-Stratified Models
 
@@ -4929,19 +4926,21 @@ init {
 }
 ```
 
-Unlisted compartments default to 0. Expressions can reference parameters.
-They are evaluated at the start of the run, `t = t_start` (`simulate { from }`),
-so an entry that reads `t` or a forcing takes its value at that instant, not
-at `t = 0`.
+A compartment without an entry starts at 0. An entry may read parameters,
+tables (§15.3) and other entries (§15.4). Entries are evaluated at the start of
+the run, `t = t_start` (`simulate { from }`), so an entry that reads `t` or a
+forcing takes its value at that instant. An entry has the dimension of a count;
+`S = t` is **E313**.
 
-An entry for a compartment with an Erlang dwell (`via erlang`, §9.4.1) lands
-in its first stage. `stage(E, 2) = 10` places the value in another; there is no
-form that spreads one value over the stages.
+An entry for a compartment with an Erlang dwell (`via erlang`, §9.4.1) places
+its value in the first stage, and `stage(E, 2) = 10` places a value in another.
+No form spreads one value over the stages.
 
 ### 15.2 Stratified Models
 
-When compartments have index dimensions, **bare names are a compile error.** The
-compiler cannot guess how to distribute a total across strata.
+On a stratified compartment, a bare name in `init {}` is **E277**: the
+compiler does not choose how to divide a total among the strata, so each cell
+is named.
 
 ```camdl
 # ERROR: S has dimensions [age, patch], must specify strata
@@ -4957,8 +4956,8 @@ init {
 }
 ```
 
-**Indexed parameter references** work in init RHS expressions. If `N0[patch]` is
-an indexed parameter, both the mangled form and the indexed form are accepted:
+An entry's target and its right-hand side may use indexed names, and an indexed
+parameter may be written indexed or as its expanded name:
 
 ```camdl-doctest-preamble init-region
 compartments { S, I, R }
@@ -4986,7 +4985,7 @@ init {
 }
 ```
 
-Named indexing works in init:
+Named indices are accepted, in any order:
 
 ```camdl-doctest-preamble init-strat
 compartments { S, I, R }
@@ -5013,14 +5012,13 @@ init {
 }
 ```
 
-Unlisted stratum combinations default to 0. For a 774-patch model, only the
-patches mentioned in init are nonzero — the rest start empty. This is common for
-initialization from a single-patch seeding event.
+A cell without an entry starts at 0, so a model seeded in one patch lists only
+that patch's cells.
 
 ### 15.3 Init from Tables
 
-For large spatial models where per-stratum populations come from a CSV, declare
-a table (§6) and reference it directly in init expressions:
+An index binder on an entry declares one entry per level, and a table (§6)
+supplies per-level values:
 
 ```camdl-doctest-preamble init-table
 compartments { S, I, R }
@@ -5060,20 +5058,17 @@ init {
 }
 ```
 
-The index binder `[p in patch]` generates one init entry per patch. `N0[p]`
-performs a table lookup at compile time — each expanded entry gets its own
-concrete value. Parameter references (e.g. `I0`) remain as IR-level expressions
-evaluated at runtime.
-
-This is fully supported. Per-stratum initial values come from index binders and
-compile-time table lookups; there is no `distribute(...)` allocation helper.
+`N0[p]` is looked up when the model is compiled, so each expanded entry holds
+its own constant. A parameter reference (`I0`) stays an expression evaluated
+when the run starts. There is no allocation function that divides a total
+among strata.
 
 ### 15.4 Drawn Initial Conditions
 
-An initial condition may be **drawn** rather than computed. Where `=` says "this
-compartment starts at this value", `~` says "this compartment starts at a draw
-from this distribution" — the same reading `~` has for a parameter prior (§4)
-and for an observation likelihood (§9).
+An entry written with `~` starts the compartment at a draw from a
+distribution, with the reading `~` has for a parameter prior (§4) and an
+observation (§12). The guide is `camdl docs features` ("Uncertain initial
+conditions").
 
 ```camdl-doctest-preamble init-drawn
 compartments { S, I, R }
@@ -5097,76 +5092,72 @@ init {
 }
 ```
 
-The entries are evaluated in **dependency order**, so `S` reads the value `I`
-was drawn as, not the value it was expected to be. The population budget
-therefore holds on every draw with no `balance {}` block.
+Entries are evaluated in dependency order, so `S` reads the value `I` was
+drawn as, and `S + I = N0` holds on every draw without a `balance {}` block.
 
-Which laws are admissible is decided by the compartment's kind:
+The admissible laws depend on the compartment's kind:
 
 | compartment | admissible laws                                                                  |
 | ----------- | -------------------------------------------------------------------------------- |
 | integer     | `poisson(rate = ..)`, `binomial(n = .., p = ..)`, `neg_binomial(mean = .., r = ..)` |
 | `: real`    | `normal(mean = .., sd = ..)`                                                      |
 
-A mismatch is a compile error (E344), as is a law the initial-state vocabulary
-does not have (E343) — `bernoulli`, `beta` and `beta_binomial` describe a
-*measurement* of a compartment, not the compartment itself, so they belong in
-`observations {}` and not here. `binomial`'s `p` must be a `probability`-kinded
-parameter; a `count` there is E344 with the parameter named.
+A law of the wrong kind for its compartment is **E344**. A family that is not
+an initial-state law is **E343**: `bernoulli`, `beta` and `beta_binomial`
+describe a measurement of a compartment, and belong in `observations {}`.
+`binomial`'s `p` given as a parameter declared with a kind other than
+`probability` (a `count`, say) is **E344**, naming the parameter. A law on the
+`balance {}` target is **E345**, because the balance stage overwrites the
+target after every substep, so the draw would be discarded before the first
+step.
 
-`neg_binomial` is the choice when introductions are **clustered** rather than
-independent — the dispersion `r` controls how much more variable the count is
-than a Poisson of the same mean, and large `r` recovers Poisson.
+`neg_binomial` describes introductions that are clustered: its dispersion `r`
+sets how much more variable the count is than a Poisson count of the same mean,
+and a large `r` approaches the Poisson.
 
-**`~` is not merely a stochastic flourish; it changes what the data can tell you
-about the parameter.** On the stochastic backends an integer compartment written
-with `=` is *rounded*, so `I = I0` starts at `round(I0)` and the likelihood is a
-step function of `I0` — flat within each rounding bin, so a fit learns much less
-about the seed than the data contain. (The ODE backend starts from `I0` itself,
-unrounded.) A drawn initial condition is smooth in its parameter and does not
-have this problem. See "Initial-state parameters" in
-[`docs/inference.md`](inference.md) for what that means when reading a
-posterior.
+**What the data can say about the parameter.** On the stochastic backends an
+integer compartment written with `=` is rounded, so `I = I0` starts at
+`round(I0)` and the likelihood is a step function of `I0`, flat within each
+rounding interval; a fit then learns less about the seed than the data contain.
+The ODE backend starts from `I0` unrounded. A drawn initial condition gives a
+likelihood that is smooth in its parameter. `camdl docs inference`
+("Initial-state parameters") describes what this means for a posterior.
 
-A law may not be declared on the `balance {}` target (E345): the balance stage
-recomputes its compartment after every substep, so the draw would be overwritten
-before the first step is taken.
+**Under inference.**
 
-**What a drawn initial condition does at fit time.** Under `pgas` it becomes a
-term of the target — `log p(x₀ | θ)` appears in the complete-data likelihood and
-in the `initial_state_ll` column of each chain's trace — so the law's parameters
-are estimated from the data rather than fixed. Under `if2`, `pfilter` and
-`pmmh` each particle draws its own initial state from its own random stream, so
-the swarm integrates over `p(x₀ | θ)` rather than conditioning on one
-realization of it. That per-particle spread is also what makes `ic_free = true`
-meaningful under `pfilter` / `pmmh`: with a deterministic `init {}` every
-particle starts at the same state, the first reweight cannot discriminate, and
-`ic_free` is refused. The deterministic (ODE) fits start every compartment at
-its law's mean.
+- **`pgas`.** `log p(x₀ | θ)` is a term of the complete-data likelihood and is
+  written to the `initial_state_ll` column of each chain's trace, so the law's
+  parameters are estimated from the data.
+- **`if2`, `pfilter` and `pmmh`.** Each particle draws its own initial state
+  from its own random stream, so the particle filter integrates over
+  `p(x₀ | θ)` instead of conditioning on one draw. That spread is what makes
+  `ic_free = true` meaningful under `pfilter` and `pmmh`; with a deterministic
+  `init {}` every particle starts at the same state, the first reweighting
+  cannot distinguish them, and `ic_free` is refused.
+- **Fits on the ODE backend** start every compartment at its law's mean.
 
-**A negative starting count.** An integer compartment may not start below zero,
-and what happens when one does depends on whether its entry reads a draw:
+**A negative starting count.** An integer compartment cannot start below zero,
+and what happens when one would depends on whether its entry reads a draw.
 
-- **The entry is a function of the parameters alone** — `R = N0 - S0 - I0` with
-  `I0` large enough. Every particle starts at the same negative value, so the
-  parameters are infeasible: under `pfilter`, `pmmh` and `if2` they score a
-  log-likelihood of −∞ and the fit rejects them and continues, as it would a
-  value outside a bound. `simulate` stops with an error
+- **The entry is a function of the parameters alone**, such as
+  `R = N0 - S0 - I0` with `I0` large enough. Every particle starts at the same
+  negative value, so the parameters are infeasible: under `pfilter`, `pmmh` and
+  `if2` they score a log-likelihood of −∞ and the fit rejects them and
+  continues, as for a value outside a bound. `simulate` stops with an error
   (`NegativeCount { cause: InitialState }`) naming the compartment and its
   value.
-- **The entry is drawn, or reads a drawn entry** — `S = N0 - I` above, when `I`
-  is drawn larger than `N0`. Some particles would start negative and others
-  not, and discarding only the negative ones would silently condition the fit
-  on "the draw was feasible", which the model does not declare. This is an
+- **The entry is drawn, or reads a drawn entry**, such as `S = N0 - I` above
+  when `I` is drawn larger than `N0`. Some particles would start negative and
+  others not, and discarding only the negative ones would condition the fit on
+  the draw having been feasible, which the model does not state. This is an
   error on every command, `fit` and `pfilter` included
   (`NegativeCount { cause: InitialStateDrawn }`), raised when the state is
-  drawn. The fix is to write the `init {}` so it cannot go negative — for
-  example `I ~ binomial(n = N0, p = ..)`, which never exceeds `N0`, in place of
-  a `poisson` draw subtracted from `N0`.
+  drawn. The fix is an `init {}` that cannot go negative, such as
+  `I ~ binomial(n = N0, p = ..)`, which never exceeds `N0`, in place of a
+  `poisson` draw subtracted from `N0`.
 
-Which case applies is read off the `init {}` block, per compartment: an entry
-depends on a draw if it is written with `~` or reads, directly or through other
-entries or `let` bindings, a compartment that is.
+An entry depends on a draw when it is written with `~` or reads, directly or
+through other entries or `let` bindings, a compartment that is.
 
 ---
 
