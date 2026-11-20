@@ -716,7 +716,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, cfg: &crate::survey_config::Reso
         // The config's own `[model]` is not read. `mut` because the gh#92
         // [estimate].start fall-back below seeds values into
         // `model_pre.parameters[i].value` before the resolver call.
-        let (mut model_pre, model_ir_json) = crate::util::load_model_with(&model_path, cfg.compile)?;
+        let (mut model_pre, model_ir_json) = crate::util::load_model(&model_path, cfg.compile)?;
 
         // gh#616: survey binds the fit config's `[data.observations]`, so it
         // RESOLVES a model's observation anchors instead of letting
@@ -1070,7 +1070,7 @@ fn resolve_survey_inputs(out: &crate::out::Out, cfg: &crate::survey_config::Reso
     } else {
         // Inline mode: --estimate flags + --data (already validated).
         let data_path = cfg.data.clone().expect("inline mode has --data (checked in resolution)");
-        let (mut model_pre, model_ir_json) = crate::util::load_model_with(&model_path, cfg.compile)?;
+        let (mut model_pre, model_ir_json) = crate::util::load_model(&model_path, cfg.compile)?;
 
         // gh#616, inline counterpart of the fit-toml branch above. Inline mode
         // binds ONE file that carries a column per declared stream, so every

@@ -413,15 +413,15 @@ fn check_emitted_ir_version(
 /// is untouched, so the return value is byte-identical to an un-instrumented
 /// call. The camdlc error path is unchanged: a non-zero exit still surfaces
 /// camdlc's stderr as `Err`.
-pub(crate) fn run_camdlc(camdl_path: &str) -> Result<String, String> {
+pub(crate) fn run_camdlc(camdl_path: &str, compile: CompileSettings) -> Result<String, String> {
     // Full IR (state-Jacobian emitted). The metadata / identity / docs loaders
-    // that route through here (`load_model`, `load_model_docs`) must never
+    // that route through here (`load_model_envelope`) must never
     // withhold the WrtPop Jacobian: a full IR is a safe superset for every
     // consumer, and run identity is gradient-independent (runid SV=2), so a full
     // vs lean compile of the same model share the same digest. The lean opt-out
     // (`--no-state-grad`) lives on the run-producing path (`resolve_ir_path`),
     // which knows the method and so can safely drop the Jacobian.
-    run_camdlc_compile(camdl_path, None, true, None, CompileSettings::process())
+    run_camdlc_compile(camdl_path, None, true, None, compile)
 }
 
 /// Compile `camdl_path` to IR JSON. When `emit_deps` is `Some(path)`, camdlc
@@ -487,14 +487,9 @@ pub(crate) fn run_camdlc_compile(
     if let Some(dp) = emit_deps {
         cmd.arg("--emit-deps").arg(dp);
     }
-    // gh#272: LICM is on by default; `--no-licm` (or `CAMDL_NO_LICM`) turns it OFF
-    // in the camdlc subprocess. Set it explicitly so the CLI FLAG reaches the
-    // subprocess (the env var would inherit on its own, but the flag does not).
     // The IR-cache key folds the same setting, so a flag flip recompiles
     // rather than serving the stale variant.
-    if !compile.licm_enabled() {
-        cmd.env("CAMDL_NO_LICM", "1");
-    }
+    pass_compile_settings(&mut cmd, compile);
     // gh#439 A2: skip the WrtPop state-Jacobian when no downstream consumer reads
     // it. Only nl-lbfgs+ode does; the runtime passes `needs_state_grad = false` for
     // every other path, shrinking the IR (`--no-state-grad` leaves
@@ -530,14 +525,18 @@ pub(crate) fn run_camdlc_compile(
 
 /// Compile `camdl_path` and write its read-closure depfile to `deps_out` (for
 /// `camdl mre`). One compile; the IR on stdout is discarded — mre v1 only needs
-/// the dependency list. Surfaces camdlc's stderr on failure.
+/// the dependency list. Surfaces camdlc's stderr on failure. The compile runs
+/// under the command's settings, as every compile does, though the read
+/// closure does not depend on them.
 pub(crate) fn camdlc_emit_deps(
     camdl_path: &str,
     deps_out: &std::path::Path,
+    compile: CompileSettings,
 ) -> Result<(), String> {
     let camdlc = find_camdlc()?;
     let mut cmd = std::process::Command::new(&camdlc);
     cmd.arg(camdl_path).arg("--emit-deps").arg(deps_out);
+    pass_compile_settings(&mut cmd, compile);
     pass_stderr_color_policy(&mut cmd);
     let output = cmd.output()
         .map_err(|e| format!("cannot run {}: {}", camdlc.display(), e))?;
@@ -545,6 +544,16 @@ pub(crate) fn camdlc_emit_deps(
         return Err(String::from_utf8_lossy(&output.stderr).to_string());
     }
     Ok(())
+}
+
+/// Tell a camdlc subprocess the compile settings it runs under. LICM is on by
+/// default in camdlc; `CAMDL_NO_LICM=1` turns it off (gh#272). Set explicitly,
+/// so the command-line flag reaches the subprocess: the environment variable
+/// would be inherited on its own, the flag would not.
+fn pass_compile_settings(cmd: &mut std::process::Command, compile: CompileSettings) {
+    if !compile.licm_enabled() {
+        cmd.env("CAMDL_NO_LICM", "1");
+    }
 }
 
 /// camdlc's stderr is captured and printed by camdl, so camdlc's own terminal
@@ -589,67 +598,37 @@ pub fn resolve_relative_to_toml(toml_path: &std::path::Path, path: &str) -> Stri
     anchor.join(p).to_string_lossy().into_owned()
 }
 
-/// Process-wide IR-cache disable (set by `--no-ir-cache`).
-static IR_CACHE_DISABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Disable the compiled-IR cache for this process (the `--no-ir-cache` flag).
-pub fn set_ir_cache_disabled(disabled: bool) {
-    IR_CACHE_DISABLED.store(disabled, std::sync::atomic::Ordering::Relaxed);
-}
-
-fn ir_cache_disabled() -> bool {
-    IR_CACHE_DISABLED.load(std::sync::atomic::Ordering::Relaxed)
-        || crate::env::get().vars.no_ir_cache
-}
-
-/// Process-wide LICM disable (gh#272, set by `--no-licm`). LICM is a compile-time
-/// pass that hoists loop-invariant param/table-only subexpressions out of the
-/// rate trees — value-preserving (proven byte-identical by `gate_licm_ab`), so it
-/// is ON by default and only makes a fittable in-model kernel run at
-/// precomputed-kernel speed. It CHANGES the IR camdlc emits (adds
-/// `per_eval_bindings` + `Expr::PerEvalRef`) for models with hoistable structure,
-/// so it is an IR-affecting compiler switch: the resolved on/off state is folded
-/// into the IR-cache key (else flipping it serves the stale variant) AND the
-/// disable is passed to the camdlc subprocess. `--no-licm` / `CAMDL_NO_LICM` is
-/// the escape hatch (debugging / A-B), mirroring constant_fold /
-/// `CAMDL_NO_CONSTANT_FOLD`.
-static LICM_DISABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Disable LICM for this process (the `--no-licm` flag). `CAMDL_NO_LICM` is the
-/// equivalent env escape hatch (either forces the inlined IR). Read only by
-/// [`CompileSettings::process`], for the commands that do not pass their own.
-pub fn set_licm_disabled(disabled: bool) {
-    LICM_DISABLED.store(disabled, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// The settings a compile runs under: what changes the IR camdlc emits, and so
-/// the model identity of every run made from it. A command that has resolved
-/// them passes them to each compile it makes ([`resolve_ir_path_with`],
-/// [`load_model_with`]); the others read the process-wide setting
-/// ([`CompileSettings::process`]), which `main` sets from `--no-licm` for every
-/// command but `simulate`, `fit run`, `pfilter`, `profile` and `survey`
-/// (proposal 2026-11-17, phase 3 step 4).
+/// The settings a compile runs under, resolved once by `main` from the global
+/// flags and the environment ([`CompileSettings::resolve`]) and passed by each
+/// command to every compile it makes ([`load_model`], [`resolve_ir_path`],
+/// [`run_camdlc`], [`load_model_envelope`], [`delegate_to_camdlc`],
+/// [`camdlc_emit_deps`]). Nothing reads them process-wide (proposal
+/// 2026-11-17, phase 3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CompileSettings {
     /// `--no-licm`, or `CAMDL_NO_LICM`: compile without loop-invariant code
-    /// motion.
+    /// motion (gh#272). LICM hoists param/table-only subexpressions out of the
+    /// rate trees; it is value-preserving (`gate_licm_ab`), so it is on by
+    /// default and this is an escape hatch for debugging and A-B comparison.
+    /// It changes the IR camdlc emits (`per_eval_bindings`,
+    /// `Expr::PerEvalRef`) for a model with hoistable structure, so it is
+    /// passed to the camdlc subprocess, folded into the IR-cache key, and
+    /// reaches every run identity through the IR.
     pub licm_disabled: bool,
+    /// `--no-ir-cache`, or `CAMDL_NO_IR_CACHE`: compile every time rather than
+    /// reuse a cached IR. Execution only: the cache key covers every input
+    /// that changes the IR, so a cached IR is the IR a compile would emit.
+    pub ir_cache_disabled: bool,
 }
 
 impl CompileSettings {
-    /// The process-wide setting (`--no-licm` as `main` installed it, or
-    /// `CAMDL_NO_LICM`): for the commands not yet resolving their own.
-    pub fn process() -> Self {
+    /// The settings of an invocation: each flag, or its environment variable.
+    pub fn resolve(no_licm: bool, no_ir_cache: bool) -> Self {
+        let vars = &crate::env::get().vars;
         CompileSettings {
-            licm_disabled: LICM_DISABLED.load(std::sync::atomic::Ordering::Relaxed)
-                || crate::env::get().vars.no_licm,
+            licm_disabled: no_licm || vars.no_licm,
+            ir_cache_disabled: no_ir_cache || vars.no_ir_cache,
         }
-    }
-
-    /// Install the process-wide compile setting [`Self::process`] reads.
-    /// `simulate` calls it once, before its first compile.
-    pub fn install(self) {
-        set_licm_disabled(self.licm_disabled);
     }
 
     /// Whether the compile runs loop-invariant code motion.
@@ -1200,26 +1179,13 @@ mod single_flight {
 /// simulate / predict paths pass `false` (lean IR, `--no-state-grad`) and
 /// the fit path passes `true` iff any method is nuts+ode. The bit is folded into
 /// the cache key, so a lean entry is never reused for a nuts+ode fit.
-pub fn resolve_ir_path(path: &str, needs_state_grad: bool) -> Result<(String, Option<std::path::PathBuf>), String> {
-    resolve_ir_path_with(path, needs_state_grad, None, CompileSettings::process())
-}
-
-/// [`resolve_ir_path`], with an optional reporting vocabulary spliced in
-/// (proposal 2026-08-19). `quantities` replaces the model's own `quantities { }`
-/// block; it reaches camdlc as `--quantities <path>` and its bytes key the cache
-/// entry, so a second vocabulary over the same model compiles rather than being
-/// served the first one's IR.
-pub fn resolve_ir_path_with_quantities(
-    path: &str,
-    needs_state_grad: bool,
-    quantities: Option<&crate::quantities_file::QuantitiesOverride>,
-) -> Result<(String, Option<std::path::PathBuf>), String> {
-    resolve_ir_path_with(path, needs_state_grad, quantities, CompileSettings::process())
-}
-
-/// [`resolve_ir_path_with_quantities`] under the compile settings `compile`,
-/// which the caller resolved, rather than the process-wide setting.
-pub(crate) fn resolve_ir_path_with(
+///
+/// `quantities` is an optional reporting vocabulary spliced in (proposal
+/// 2026-08-19): it replaces the model's own `quantities { }` block, reaches
+/// camdlc as `--quantities <path>`, and its bytes key the cache entry, so a
+/// second vocabulary over the same model compiles rather than being served the
+/// first one's IR. The compile runs under `compile`, the command's settings.
+pub(crate) fn resolve_ir_path(
     path: &str,
     needs_state_grad: bool,
     quantities: Option<&crate::quantities_file::QuantitiesOverride>,
@@ -1243,7 +1209,7 @@ pub(crate) fn resolve_ir_path_with(
 
     // Resolve the cache target (cache_path, key) iff caching is enabled and a
     // cache dir resolves. Reads the model bytes for the key.
-    let cache_target: Option<(std::path::PathBuf, String)> = if ir_cache_disabled() {
+    let cache_target: Option<(std::path::PathBuf, String)> = if compile.ir_cache_disabled {
         None
     } else {
         match (std::fs::read(path), ir_cache_dir(), camdlc_identity()) {
@@ -1369,21 +1335,45 @@ pub fn peek_simulation_dt(path: &str) -> Option<f64> {
 }
 
 /// Load a .camdl or .ir.json model, returning the parsed model and raw IR JSON.
-/// The JSON is needed for provenance hashing. Compiles via camdlc if needed.
-pub fn load_model(path: &str) -> Result<(ir::Model, String), String> {
-    load_model_with(path, CompileSettings::process())
-}
-
-/// [`load_model`] under the compile settings `compile`, which the caller
-/// resolved, rather than the process-wide setting. The full IR, as
-/// [`run_camdlc`] compiles it.
-pub(crate) fn load_model_with(path: &str, compile: CompileSettings) -> Result<(ir::Model, String), String> {
+/// The JSON is needed for provenance hashing. A `.camdl` is compiled under
+/// `compile`, the command's settings, to the full IR, as [`run_camdlc`]
+/// compiles it.
+pub(crate) fn load_model(path: &str, compile: CompileSettings) -> Result<(ir::Model, String), String> {
     let json = if path.ends_with(".camdl") {
         run_camdlc_compile(path, None, true, None, compile)?
     } else {
         std::fs::read_to_string(path)
             .map_err(|e| format!("cannot read {}: {}", path, e))?
     };
+    parse_model(path, json)
+}
+
+/// Load a model that is already compiled: a `.ir.json` path a command
+/// compiled under its own settings (`simulate`'s resolve-once, a fit's
+/// archived `model.ir.json`, `fit run`'s `compiled_ir`). It never compiles, so
+/// it takes no compile settings, and a `.camdl` is refused rather than
+/// compiled under settings the caller does not have.
+pub(crate) fn load_ir(path: &str) -> Result<(ir::Model, String), String> {
+    require_compiled(path)?;
+    let json = std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {}", path, e))?;
+    parse_model(path, json)
+}
+
+/// Refuse a model source path where a compiled model is expected: compiling
+/// it here would compile it without the command's compile settings.
+fn require_compiled(path: &str) -> Result<(), String> {
+    if path.ends_with(".camdl") {
+        return Err(format!(
+            "internal: {path} is model source where a compiled model was expected; \
+             it must be compiled under the command's compile settings first"
+        ));
+    }
+    Ok(())
+}
+
+/// Parse and check IR JSON read from `path`, for [`load_model`] and
+/// [`load_ir`].
+fn parse_model(path: &str, json: String) -> Result<(ir::Model, String), String> {
     // gh#audit-C8. Use envelope-aware from_str so version mismatches
     // surface as a typed IrError rather than a serde shape error
     // somewhere deep in the model tree. Hint text in IrError points
@@ -1425,19 +1415,11 @@ fn refuse_unreleased_smooth(model: &ir::Model) -> Result<(), String> {
     Ok(())
 }
 
-/// Load just the model's `#'` documentation dictionary (the envelope-level
-/// `docs`), compiling a `.camdl` via camdlc or reading a `.ir.json`. Empty when
-/// the model documents nothing. Used to build the fit sidecar and the
-/// fit-summary parameter legend.
-pub fn load_model_docs(path: &str) -> Result<ir::ModelDocs, String> {
-    load_model_envelope(path).map(|env| env.docs)
-}
-
 /// Load the whole IR envelope — the model plus its `#'` documentation
-/// dictionary — compiling a `.camdl` via camdlc or reading a `.ir.json`.
-pub fn load_model_envelope(path: &str) -> Result<ir::IrEnvelope, String> {
+/// dictionary — compiling a `.camdl` under `compile` or reading a `.ir.json`.
+pub(crate) fn load_model_envelope(path: &str, compile: CompileSettings) -> Result<ir::IrEnvelope, String> {
     let json = if path.ends_with(".camdl") {
-        run_camdlc(path)?
+        run_camdlc(path, compile)?
     } else {
         std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {}", path, e))?
     };
@@ -1445,20 +1427,27 @@ pub fn load_model_envelope(path: &str) -> Result<ir::IrEnvelope, String> {
         .map_err(|e| format!("IR load error from {}: {}", path, e))
 }
 
-/// Delegate a subcommand directly to camdlc, passing through all args.
-/// Used for compile, check, inspect which are purely compiler operations.
-pub fn delegate_to_camdlc(args: &[&str]) -> Result<(), String> {
+/// [`load_model_envelope`] of a model that is already compiled; a `.camdl`
+/// is refused, as [`load_ir`] refuses it.
+pub(crate) fn load_ir_envelope(path: &str) -> Result<ir::IrEnvelope, String> {
+    require_compiled(path)?;
+    let json = std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {}", path, e))?;
+    ir::envelope_from_str(&json)
+        .map_err(|e| format!("IR load error from {}: {}", path, e))
+}
+
+/// Delegate a subcommand directly to camdlc, passing through all args, under
+/// the command's compile settings (gh#272: `compile`, `check`, `inspect`
+/// emit and inspect the IR `--no-licm` asks for). Used for the purely
+/// compiler operations.
+pub(crate) fn delegate_to_camdlc(args: &[&str], compile: CompileSettings) -> Result<(), String> {
     let camdlc = find_camdlc()?;
     let mut cmd = std::process::Command::new(&camdlc);
     cmd.args(args)
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
-    // gh#272: honor `--no-licm` on the pass-through compiler subcommands
-    // (`compile`/`check`/`inspect`) too, so they emit/inspect the inlined IR.
-    if !CompileSettings::process().licm_enabled() {
-        cmd.env("CAMDL_NO_LICM", "1");
-    }
+    pass_compile_settings(&mut cmd, compile);
     let status = cmd.status().map_err(|e| format!("cannot run camdlc: {}", e))?;
     std::process::exit(status.code().unwrap_or(1));
 }
@@ -3637,12 +3626,12 @@ impl Default for SimRun {
 /// `run_id` that described a different computation from the one stored under
 /// it (`--integrator`, `--param-vec`, the gh#616 anchors — gh#583 item C).
 pub fn load_run_model(run: &SimRun) -> Result<ir::Model, String> {
-    // Load IR source (handles .camdl compilation via camdlc). This is the forward
-    // simulation path — it never reads the state-Jacobian, so compile lean
-    // (`needs_state_grad = false`, gh#439 A2).
-    let (ir_path_resolved, _tmpfile) = resolve_ir_path(&run.ir_path, false)?;
-
-    let src = std::fs::read_to_string(&ir_path_resolved)
+    // `run.ir_path` is compiled IR: every command that builds a `SimRun`
+    // compiles its model once, under its own compile settings, before any run.
+    // A source path is refused rather than compiled here without them.
+    let ir_path_resolved = &run.ir_path;
+    require_compiled(ir_path_resolved)?;
+    let src = std::fs::read_to_string(ir_path_resolved)
         .map_err(|e| format!("cannot read {}: {}", ir_path_resolved, e))?;
     // gh#audit-C8. Envelope-aware load (see load_model above).
     let mut model: ir::Model = ir::from_str(&src)
@@ -4855,7 +4844,7 @@ mod tests {
     fn integrator_override_method_only_and_preserves_tolerances() {
         use ir::model::Integrator;
         use crate::args::types::IntegratorArg;
-        let (base, _) = load_model(&sir_model()).expect("load golden");
+        let (base, _) = load_ir(&sir_model()).expect("load golden");
         let with = |i: Integrator| { let mut m = base.clone(); m.simulation.integrator = i; m };
 
         // rk4 model + force rk45 → rk45 with DEFAULT (None) tolerances.

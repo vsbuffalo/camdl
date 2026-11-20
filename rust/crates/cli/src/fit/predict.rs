@@ -1417,7 +1417,7 @@ struct PredictOutcome {
 }
 
 /// `camdl fit predict` — write the free-forward posterior predictive artifact.
-pub fn cmd_fit_predict(args: &crate::args::FitPredictArgs) {
+pub(crate) fn cmd_fit_predict(args: &crate::args::FitPredictArgs, compile: crate::util::CompileSettings) {
     // The forcing-extrapolation policy this command's evaluations run under,
     // installed for the rest of the command.
     let forcing =
@@ -1426,7 +1426,7 @@ pub fn cmd_fit_predict(args: &crate::args::FitPredictArgs) {
     // fit predict has no `--no-color`: its painters follow the environment
     // and whether each stream is a terminal.
     let out = crate::out::Out::new(false);
-    match run_predict(&out, args) {
+    match run_predict(&out, args, compile) {
         Ok(outcome) => {
             // What it wrote is the command's account of itself, not data:
             // stderr, like every other command's `wrote` lines.
@@ -1511,7 +1511,11 @@ fn predict_mode(args: &crate::args::FitPredictArgs)
     }
 }
 
-fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, String> {
+fn run_predict(
+    out: &crate::out::Out,
+    args: &crate::args::FitPredictArgs,
+    compile: crate::util::CompileSettings,
+) -> Result<PredictOutcome, String> {
     predict_mode(args)?;
     // 1. Resolve the fit handle (@label / hash prefix / run-dir / fit.toml) →
     //    its segment + config.
@@ -1614,9 +1618,9 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
         // `fit predict` replays forward trajectories from stored draws — it never
         // recomputes an ODE gradient, so compile lean (`needs_state_grad = false`,
         // gh#439 A2).
-        crate::util::resolve_ir_path(&config.model.camdl, false)?
+        crate::util::resolve_ir_path(&config.model.camdl, false, None, compile)?
     };
-    let (mut model, _) = crate::util::load_model(&compiled_ir)?;
+    let (mut model, _) = crate::util::load_ir(&compiled_ir)?;
 
     // 3a. `--quantities FILE` (proposal 2026-08-19): report this fit with a
     //     supplied reporting vocabulary in place of the model's own. This is the
@@ -1655,7 +1659,7 @@ fn run_predict(out: &crate::out::Out, args: &crate::args::FitPredictArgs) -> Res
             if args.realised_design { "--realised-design" } else { "--design" }));
     }
     if let Some(v) = &vocabulary {
-        model.quantities = quantities_from_vocabulary(&model, &config, v)?;
+        model.quantities = quantities_from_vocabulary(&model, &config, v, compile)?;
     }
 
     // gh#616: `fit predict` HAS the fit's data, so it resolves the model's
@@ -3145,6 +3149,7 @@ fn quantities_from_vocabulary(
     archived: &ir::Model,
     config: &crate::fit::config_v2::Problem,
     vocabulary: &crate::quantities_file::QuantitiesOverride,
+    compile: crate::util::CompileSettings,
 ) -> Result<Vec<ir::quantity::Quantity>, String> {
     let model_source: &str = &config.model.camdl;
     if !crate::util::model_is_camdl_source(model_source) {
@@ -3165,9 +3170,8 @@ fn quantities_from_vocabulary(
     // Lean compile: `fit predict` replays forward trajectories and never
     // recomputes an ODE gradient (gh#439 A2). Identity is gradient-independent,
     // so this does not disturb the hash comparison below.
-    let (ir_path, _tmp) = crate::util::resolve_ir_path_with_quantities(
-        model_source, false, Some(vocabulary))?;
-    let (recompiled, _) = crate::util::load_model(&ir_path)?;
+    let (ir_path, _tmp) = crate::util::resolve_ir_path(model_source, false, Some(vocabulary), compile)?;
+    let (recompiled, _) = crate::util::load_ir(&ir_path)?;
     use crate::fit::fitted_model::{as_fitted, compare_to_fitted, short, ModelAgreement};
     // The archived IR is the model AFTER `fit run` resolved its observation
     // anchors; the recompiled source still carries them. Both go through the

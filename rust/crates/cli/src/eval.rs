@@ -117,7 +117,7 @@ fn references_compartments(expr: &Expr) -> Option<String> {
     }
 }
 
-pub fn cmd_eval(a: &crate::args::EvalArgs) {
+pub fn cmd_eval(a: &crate::args::EvalArgs, compile: crate::util::CompileSettings) {
     // The forcing-extrapolation policy this command's evaluations run under,
     // installed for the rest of the command.
     let forcing =
@@ -129,7 +129,7 @@ pub fn cmd_eval(a: &crate::args::EvalArgs) {
     let ir_path = a.model.to_string_lossy();
     let at_points: Option<Vec<f64>> = if a.at.is_empty() { None } else { Some(a.at.clone()) };
 
-    let (model_in, model_json) = crate::util::load_model(&ir_path)
+    let (model_in, model_json) = crate::util::load_model(&ir_path, compile)
         .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
 
     // Unified parameter resolver (2026-05-25 CLI UX rev 2). Maps the

@@ -77,7 +77,7 @@ pub fn generate_synthetic_datasets(
     // A synthetic dataset is fitted by THIS model, so its cadence must be one
     // the model's own declaration reads. Checked once, before any run, so a
     // refused cadence writes nothing.
-    let (model, _) = crate::util::load_model(model_path)?;
+    let (model, _) = crate::util::load_ir(model_path)?;
     check_emit_every_matches_declared_windows(&model, emit)?;
 
     // gh#656: an override changes what is GENERATED, but the fit-level container

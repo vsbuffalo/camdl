@@ -45,7 +45,7 @@ fn refuse(out: &Out, message: String, hint: Option<String>) -> ! {
     out.error(CommandError { code: REFUSED, message, hint }).exit()
 }
 
-fn load(out: &Out, path: &Path) -> Loaded {
+fn load(out: &Out, path: &Path, compile: crate::util::CompileSettings) -> Loaded {
     let name = path.to_string_lossy().into_owned();
     let is_model = name.ends_with(".camdl") || name.ends_with(".json");
     if !is_model {
@@ -55,7 +55,7 @@ fn load(out: &Out, path: &Path) -> Loaded {
             Some("To compare two fit configurations, use `camdl fit diff A.toml B.toml`.".to_string()),
         );
     }
-    let envelope = crate::util::load_model_envelope(&name)
+    let envelope = crate::util::load_model_envelope(&name, compile)
         .unwrap_or_else(|e| refuse(out, format!("error: {e}"), None));
     Loaded {
         name,
@@ -66,12 +66,12 @@ fn load(out: &Out, path: &Path) -> Loaded {
 }
 
 /// `camdl diff A B`
-pub fn cmd_diff(args: &DiffArgs) {
+pub(crate) fn cmd_diff(args: &DiffArgs, compile: crate::util::CompileSettings) {
     // No `--no-color`: the report is plain text, and errors follow the
     // environment and whether stderr is a terminal.
     let out = Out::new(false);
-    let left = load(&out, &args.a);
-    let right = load(&out, &args.b);
+    let left = load(&out, &args.a, compile);
+    let right = load(&out, &args.b, compile);
 
     let report = diff::diff(&left.side(), &right.side())
         .unwrap_or_else(|refusal| refuse(&out, format!("error: {refusal}"), None));

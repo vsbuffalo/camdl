@@ -164,6 +164,9 @@ struct DeriveSettings {
     /// `--allow-forcing-extrapolation`: passed to each `camdl pfilter` child,
     /// as is a fit's own `[config] allow_forcing_extrapolation`.
     allow_forcing_extrapolation: bool,
+    /// `--no-licm`: the settings a fit's model source is compiled under, when
+    /// the fit archived no compiled model.
+    compile: crate::util::CompileSettings,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -548,7 +551,7 @@ fn positional_model_names(paths: &[String]) -> Vec<String> {
     (0..paths.len()).map(|i| name_at(i, depth[i])).collect()
 }
 
-pub fn cmd_compare(a: &crate::args::CompareArgs) {
+pub(crate) fn cmd_compare(a: &crate::args::CompareArgs, compile: crate::util::CompileSettings) {
     // The forcing-extrapolation policy this command's evaluations run under,
     // installed for the rest of the command.
     let forcing =
@@ -579,6 +582,7 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
         draws: a.draws.max(1),
         replicates: a.replicates.max(1),
         allow_forcing_extrapolation: a.forcing_extrapolation.allow_forcing_extrapolation,
+        compile,
     };
     let metrics_cli: Option<Vec<String>> = a.metrics.as_ref().map(|s|
         s.split(',').map(|t| t.trim().to_string()).collect());
@@ -2664,13 +2668,16 @@ fn derive_prequential(
     let is_mixture = thetas.len() >= 2;
 
     // (b) model — prefer the self-contained archived IR (Phase 1a), else the
-    // loose source the config names (recompiled by pfilter). config.model.camdl
-    // is already absolute (resolved against the fit.toml dir at load).
+    // loose source the config names, compiled here once under compare's
+    // compile settings, so both scorers (the in-process ODE scorer and the
+    // `camdl pfilter` child) read one compiled model. config.model.camdl is
+    // already absolute (resolved against the fit.toml dir at load).
     let archived = segment.join("model.ir.json");
-    let model_path: PathBuf = if archived.is_file() {
-        archived
+    let (model_path, _model_tmp): (PathBuf, Option<PathBuf>) = if archived.is_file() {
+        (archived, None)
     } else {
-        PathBuf::from(&config.model.camdl)
+        let (ir, tmp) = crate::util::resolve_ir_path(&config.model.camdl, false, None, derive.compile)?;
+        (PathBuf::from(ir), tmp)
     };
 
     // The fit's own intervention selection: the filter scores the fitted
@@ -2679,11 +2686,11 @@ fn derive_prequential(
     // `pfilter` refuses beside the `--params` θ̂ (gh#194); the lists are the
     // whole of a fit scenario's effect (`util::FitBase`).
     let fit_base = crate::util::FitBase::of(config)?;
-    let (model, _) = crate::util::load_model(&model_path.to_string_lossy())?;
+    let (model, _) = crate::util::load_ir(&model_path.to_string_lossy())?;
     // The step the fit ran at: the filter re-scores the data through the
     // fitted process, so it integrates at the fit's dt — not the model's
     // declared step or 1.0, which is all `pfilter` would see without it.
-    let fitted = crate::fit::fitted_model::stored_fit_simulator(resolved)?;
+    let fitted = crate::fit::fitted_model::stored_fit_simulator(resolved, derive.compile)?;
     let fitted_dt = fitted.dt;
     // The settings the fit is scored under: its own `[config]`
     // `allow_degenerate_rates` and `allow_forcing_extrapolation`, which `fit

@@ -1934,7 +1934,7 @@ mod tests {
     fn a_cell_running_other_interventions_than_its_arm_is_refused() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../ocaml/golden/seir_vaccine.ir.json");
-        let (mut model, _) = crate::util::load_model(path.to_str().unwrap()).unwrap();
+        let (mut model, _) = crate::util::load_ir(path.to_str().unwrap()).unwrap();
         for p in &mut model.parameters {
             if p.value.resolved_value().is_none() {
                 let v = p.value.bounds().map(|(lo, hi)| 0.5 * (lo + hi)).unwrap_or(0.1);

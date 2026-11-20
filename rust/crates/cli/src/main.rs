@@ -540,41 +540,26 @@ fn main() {
     // What the engine meets mid-run and records once (`sim::run_notes`) is
     // said as it is first recorded, as a warning.
     sim::run_notes::set_reporter(util::report_run_note);
-    util::set_ir_cache_disabled(cli.global.no_ir_cache);
-    // `simulate` sets the compile setting from its resolved configuration
-    // (`sim_config::CompileSettings`), and `fit run`, `pfilter`, `profile` and
-    // `survey` pass their own to every compile they make; every other command
-    // reads it process-wide, from the flag (`util::CompileSettings::process`).
-    if !matches!(
-        cli.command,
-        Command::Simulate(_)
-            | Command::Fit(FitCmd::Run(_))
-            | Command::Pfilter(_)
-            | Command::Profile(_)
-            | Command::Survey(_)
-    ) {
-        util::set_licm_disabled(cli.global.no_licm);
-    }
-    // `--no-licm`, or `CAMDL_NO_LICM`: the compile setting `fit run`,
-    // `pfilter`, `profile` and `survey` resolve.
-    let fit_compile = util::CompileSettings {
-        licm_disabled: cli.global.no_licm || crate::env::get().vars.no_licm,
-    };
+    // `--no-licm` / `CAMDL_NO_LICM` and `--no-ir-cache` / `CAMDL_NO_IR_CACHE`:
+    // the settings every compile of this invocation runs under, resolved once
+    // and passed to each command that compiles (`util::CompileSettings`).
+    // Nothing reads them process-wide.
+    let compile = util::CompileSettings::resolve(cli.global.no_licm, cli.global.no_ir_cache);
 
     match cli.command {
-        Command::Simulate(a)            => run_simulate(&a, &cli.global),
-        Command::Fit(FitCmd::Run(a))    => fit::cmd_fit_run_v2(&a, fit_compile),
-        Command::Fit(FitCmd::Summary(a))=> fit::cmd_fit_summary(&a),
-        Command::Fit(FitCmd::Diff(a))   => fit::cmd_fit_diff(&a),
+        Command::Simulate(a)            => run_simulate(&a, compile),
+        Command::Fit(FitCmd::Run(a))    => fit::cmd_fit_run_v2(&a, compile),
+        Command::Fit(FitCmd::Summary(a))=> fit::cmd_fit_summary(&a, compile),
+        Command::Fit(FitCmd::Diff(a))   => fit::cmd_fit_diff(&a, compile),
         Command::Fit(FitCmd::Table(a))  => fit::cmd_fit_table(&a),
-        Command::Fit(FitCmd::New(a))    => fit::cmd_fit_new(&a),
-        Command::Fit(FitCmd::Predict(a)) => fit::predict::cmd_fit_predict(&a),
+        Command::Fit(FitCmd::New(a))    => fit::cmd_fit_new(&a, compile),
+        Command::Fit(FitCmd::Predict(a)) => fit::predict::cmd_fit_predict(&a, compile),
         Command::Fit(FitCmd::Methods)   => fit::cmd_fit_methods(),
         Command::Label(a)               => fit::cmd_label(&a),
-        Command::Pfilter(a)             => pfilter::cmd_pfilter(&a, fit_compile),
+        Command::Pfilter(a)             => pfilter::cmd_pfilter(&a, compile),
         Command::If2(a)                 => if2::cmd_if2(&a),
-        Command::Profile(a)             => profile::cmd_profile(&a, fit_compile),
-        Command::Survey(a)              => survey::cmd_survey(&a, fit_compile),
+        Command::Profile(a)             => profile::cmd_profile(&a, compile),
+        Command::Survey(a)              => survey::cmd_survey(&a, compile),
         Command::Lineage(LineageCmd::Realize(a)) => lineage::cmd_lineage_realize(&a),
         Command::Lineage(LineageCmd::Tree(a)) => lineage::cmd_lineage_tree(&a),
         Command::Lineage(LineageCmd::Sojourn(a)) => lineage::cmd_lineage_sojourn(&a),
@@ -582,50 +567,36 @@ fn main() {
         Command::List(a)                => browse::cmd_list(&a),
         Command::Show(a)                => browse::cmd_show(&a),
         Command::Cat(a)                 => browse::cmd_cat(&a),
-        Command::Compare(a)             => compare::cmd_compare(&a),
-        Command::Diff(a)                => model_diff::cmd_diff(&a),
-        Command::Check(a) => {
-            let mut refs = vec!["check"];
-            refs.extend(a.args.iter().map(String::as_str));
-            util::delegate_to_camdlc(&refs).unwrap_or_else(|e| {
-                out::Out::new(false).fail(format!("error: {}", e));
-            });
-        }
-        Command::Inspect(a) => {
-            let mut refs = vec!["inspect"];
-            refs.extend(a.args.iter().map(String::as_str));
-            util::delegate_to_camdlc(&refs).unwrap_or_else(|e| {
-                out::Out::new(false).fail(format!("error: {}", e));
-            });
-        }
-        Command::Render(a) => {
-            let mut refs = vec!["render"];
-            refs.extend(a.args.iter().map(String::as_str));
-            util::delegate_to_camdlc(&refs).unwrap_or_else(|e| {
-                out::Out::new(false).fail(format!("error: {}", e));
-            });
-        }
+        Command::Compare(a)             => compare::cmd_compare(&a, compile),
+        Command::Diff(a)                => model_diff::cmd_diff(&a, compile),
+        Command::Check(a)               => delegate("check", &a.args, compile),
+        Command::Inspect(a)             => delegate("inspect", &a.args, compile),
+        Command::Render(a)              => delegate("render", &a.args, compile),
         Command::Docs(a)                => docs::cmd_docs(&a),
-        Command::Mre(MreCmd::Fit(a))      => mre::cmd_mre_fit(&a),
-        Command::Mre(MreCmd::Simulate(a)) => mre::cmd_mre_simulate(&a),
+        Command::Mre(MreCmd::Fit(a))      => mre::cmd_mre_fit(&a, compile),
+        Command::Mre(MreCmd::Simulate(a)) => mre::cmd_mre_simulate(&a, compile),
         Command::CheckUpdate            => check_update::cmd_check_update(),
         Command::Dev(DevCmd::Reindex(a)) => cmd_reindex(&a),
         Command::Dev(DevCmd::Migrate(a)) => store_migrate::cmd_migrate(&a),
-        Command::Dev(DevCmd::Eval(a))    => eval::cmd_eval(&a),
+        Command::Dev(DevCmd::Eval(a))    => eval::cmd_eval(&a, compile),
         Command::Dev(DevCmd::Compile(a)) => {
             let refs: Vec<&str> = a.args.iter().map(String::as_str).collect();
-            util::delegate_to_camdlc(&refs).unwrap_or_else(|e| {
+            util::delegate_to_camdlc(&refs, compile).unwrap_or_else(|e| {
                 out::Out::new(false).fail(format!("error: {}", e));
             });
         }
-        Command::Dev(DevCmd::Doctest(a)) => {
-            let mut refs = vec!["doctest"];
-            refs.extend(a.args.iter().map(String::as_str));
-            util::delegate_to_camdlc(&refs).unwrap_or_else(|e| {
-                out::Out::new(false).fail(format!("error: {}", e));
-            });
-        }
+        Command::Dev(DevCmd::Doctest(a)) => delegate("doctest", &a.args, compile),
     }
+}
+
+/// A compiler subcommand passed through to camdlc, under the invocation's
+/// compile settings.
+fn delegate(subcommand: &str, args: &[String], compile: util::CompileSettings) {
+    let mut refs = vec![subcommand];
+    refs.extend(args.iter().map(String::as_str));
+    util::delegate_to_camdlc(&refs, compile).unwrap_or_else(|e| {
+        out::Out::new(false).fail(format!("error: {}", e));
+    });
 }
 
 // Per-(point, replicate) seed derivation lives in one place,
@@ -698,7 +669,7 @@ fn resolve_paired_posterior(
     n_draws: Option<usize>,
     selection: Option<&crate::chain_selection::ChainSelection>,
 ) -> (Vec<HashMap<String, f64>>, crate::sim_job::InitStateSource) {
-    let (model, _) = util::load_model(ir_path_compiled).unwrap_or_else(|e| {
+    let (model, _) = util::load_ir(ir_path_compiled).unwrap_or_else(|e| {
         out.fail(format!("error: {}", e));
     });
     let columns = io::trajectories::TrajColumnSpec::from_model(&model, &[]);
@@ -820,19 +791,17 @@ fn resolve_paired_posterior(
     )
 }
 
-fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
+fn run_simulate(a: &args::SimulateArgs, compile: crate::sim_config::CompileSettings) {
     // simulate has no `--no-color`: its painters follow the environment and
     // whether each stream is a terminal.
     let out = crate::out::Out::new(false);
     let _eval_stats_guard = crate::util::EvalStatsReportGuard::start();
-    // The compile setting is resolved first, because the compile below reads
-    // it, and it reaches the identity through the IR it produces.
-    // `--allow-degenerate-rates` reaches every cell's compiled model through
-    // the resolved configuration's engine settings; the forcing-extrapolation
-    // policy they hold is installed once they exist, before any cell runs
-    // (`EngineSettings::install_forcing_policy`).
-    let compile = crate::sim_config::CompileSettings { licm_disabled: global.no_licm };
-    compile.install();
+    // The compile settings (`--no-licm`) are passed to the one compile below
+    // and to each compile of a replayed fit's config, and reach the identity
+    // through the IR they produce. `--allow-degenerate-rates` reaches every
+    // cell's compiled model through the resolved configuration's engine
+    // settings; the forcing-extrapolation policy they hold is installed once
+    // they exist, before any cell runs (`EngineSettings::install_forcing_policy`).
     // `--parallel`, `--output-dir`, `--force`: how the cells are computed and
     // where they are stored, never what (`sim_config::Execution`).
     let execution = crate::sim_config::Execution {
@@ -883,7 +852,7 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
     // since `--output-every` below changes the output schedule the model
     // identity hashes, and is a property of this run, not of the model.
     let (ir_path_given, _ir_tmp) =
-        util::resolve_ir_path_with_quantities(&ir_path, false, quantities_override.as_ref())
+        util::resolve_ir_path(&ir_path, false, quantities_override.as_ref(), compile)
             .unwrap_or_else(|e| {
                 out.fail(format!("error: {}", e));
             });
@@ -1053,7 +1022,7 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
     // substituted in place, so every up-front check below (the horizon
     // ordering, the `--to` conflict rule) reads resolved numbers rather than the
     // NaN the compiler baked.
-    let (model_raw, _) = util::load_model(&ir_path_compiled).unwrap_or_else(|e| {
+    let (model_raw, _) = util::load_ir(&ir_path_compiled).unwrap_or_else(|e| {
         out.fail(format!("error: {}", e));
     });
     let to_is_anchored = matches!(
@@ -1446,7 +1415,7 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
                     }
                     Err(_) => None,
                 }
-                    .map(|r| crate::fit::fitted_model::stored_fit_simulator(&r))
+                    .map(|r| crate::fit::fitted_model::stored_fit_simulator(&r, compile))
                     .transpose()
                     .unwrap_or_else(|e| {
                         out.fail(format!("error: --fit {fit_handle}: {e}"));
@@ -1455,13 +1424,13 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
             }
             (Some(source), Some(fit_ref)) if source != "uniform" => {
                 let sim = if std::path::Path::new(fit_ref).is_file() {
-                    util::load_model(&ir_path_compiled).and_then(|(m, _)| {
+                    util::load_ir(&ir_path_compiled).and_then(|(m, _)| {
                         crate::fit::fitted_model::fit_config_simulator(fit_ref, &m)
                     })
                 } else {
                     crate::fit::handle::resolve_fit(fit_ref)
                         .map_err(|e| e.to_string())
-                        .and_then(|r| crate::fit::fitted_model::stored_fit_simulator(&r))
+                        .and_then(|r| crate::fit::fitted_model::stored_fit_simulator(&r, compile))
                 };
                 Some((
                     fit_ref.clone(),
@@ -1577,7 +1546,7 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
     // on a fit read.
     let mut init_state_source: Option<std::sync::Arc<crate::sim_job::InitStateSource>> = None;
     if init_state_arg.is_some() {
-        let (model_is, _) = util::load_model(&ir_path_compiled).unwrap_or_else(|e| {
+        let (model_is, _) = util::load_ir(&ir_path_compiled).unwrap_or_else(|e| {
             out.fail(format!("error: {}", e));
         });
         // The seam refuses a reactive model too (`chain_binomial.rs`), but by
@@ -1854,13 +1823,13 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
             });
             match fit_path_for_draws.as_ref() {
                 Some(fit_path) => {
-                    report_replay_check(&out, check_replay_model(fit_path, &ir_path_given, &ir_path));
+                    report_replay_check(&out, check_replay_model(fit_path, &ir_path_given, &ir_path, compile));
                     // fit.toml prior source (overrides or supplements
                     // model priors). gh#86: the model IR is the
                     // tier-2 fallback when the fit toml omits a prior
                     // for a parameter that declares `~ <dist>` in the
                     // model file.
-                    let (draws_model, _) = util::load_model(&ir_path_compiled).unwrap_or_else(|e| {
+                    let (draws_model, _) = util::load_ir(&ir_path_compiled).unwrap_or_else(|e| {
                         out.fail(format!("error loading model for --draws prior: {}", e));
                     });
                     let (rows, fixed) = generate_prior_draws(&out, fit_path, n, seed, &draws_model)
@@ -1903,7 +1872,7 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
                 Ok(resolved) => {
                     // The draws are this fit's model's: refuse a different
                     // model before anything runs.
-                    report_replay_check(&out, util::load_model(&ir_path_given).and_then(|(given, _)| {
+                    report_replay_check(&out, util::load_ir(&ir_path_given).and_then(|(given, _)| {
                         crate::fit::fitted_model::check_stored_fit(
                             fit_handle,
                             &resolved.segment,
@@ -2002,8 +1971,8 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
                 out.fail(format!("error loading draws: {}", e));
             });
             if let Some(fit_ref) = fit_path_for_draws.as_ref() {
-                report_replay_check(&out, check_replay_model(fit_ref, &ir_path_given, &ir_path));
-                let (fixed_model, _) = util::load_model(&ir_path_compiled).unwrap_or_else(|e| {
+                report_replay_check(&out, check_replay_model(fit_ref, &ir_path_given, &ir_path, compile));
+                let (fixed_model, _) = util::load_ir(&ir_path_compiled).unwrap_or_else(|e| {
                     out.fail(format!("error: {e}"));
                 });
                 let fixed = posterior_draws::resolve_fixed_for_backfill(fit_ref, &fixed_model)
@@ -2374,7 +2343,7 @@ fn run_simulate(a: &args::SimulateArgs, global: &GlobalArgs) {
     // band is keyed by the param-source kind (fixed params + single cell → point;
     // a `--draws`/multi-cell run → band), not the cell count alone.
     let quant: Option<SimQuantities> = {
-        let (q_model, _) = util::load_model(&ir_path_compiled).unwrap_or_else(|e| {
+        let (q_model, _) = util::load_ir(&ir_path_compiled).unwrap_or_else(|e| {
             out.fail(format!("error: {}", e));
         });
         if q_model.quantities.is_empty() {
@@ -5000,7 +4969,7 @@ fn generate_uniform_draws(
     n: usize,
     seed: u64,
 ) -> Result<Vec<HashMap<String, f64>>, String> {
-    let (model, _) = util::load_model(ir_path)?;
+    let (model, _) = util::load_ir(ir_path)?;
     let mut rng = sim::rng::StatefulRng::new(seed ^ SEED_MIX_UNIFORM);
 
     // Declared bounds only, deliberately — NOT
@@ -5105,12 +5074,13 @@ fn check_replay_model(
     fit_ref: &str,
     ir_path_given: &str,
     model_path: &str,
+    compile: util::CompileSettings,
 ) -> Result<Option<String>, String> {
-    let (given, _) = util::load_model(ir_path_given)?;
+    let (given, _) = util::load_ir(ir_path_given)?;
     if std::path::Path::new(fit_ref).is_file() {
         let problem = fit::config_v2::Problem::load(fit_ref)
             .map_err(|e| wrap_fit_load_error(fit_ref, e))?;
-        crate::fit::fitted_model::check_fit_config(fit_ref, &problem.model.camdl, &given, model_path)
+        crate::fit::fitted_model::check_fit_config(fit_ref, &problem.model.camdl, &given, model_path, compile)
     } else {
         let resolved = crate::fit::handle::resolve_fit(fit_ref).map_err(|e| e.to_string())?;
         crate::fit::fitted_model::check_stored_fit(
@@ -5333,7 +5303,7 @@ fn generate_prior_draws_from_ir(
     n: usize,
     seed: u64,
 ) -> Result<Vec<HashMap<String, f64>>, String> {
-    let (model, _) = util::load_model(ir_path)?;
+    let (model, _) = util::load_ir(ir_path)?;
 
     // The sampled parameters, in declaration order — the RNG consumption
     // order, so a given seed yields the same values it always has.
@@ -5762,7 +5732,7 @@ fn print_dry_run(
     } else {
         // Point/single mode: show resolved parameter values with provenance.
         // Load the already-compiled IR (display still shows the source path).
-        match util::load_model(ir_path_compiled) {
+        match util::load_ir(ir_path_compiled) {
             Ok((model, _)) => {
                 // Track provenance: (param_name → (value, source, override_chain))
                 struct ParamProv {
@@ -6271,7 +6241,7 @@ mod tests {
         // empty and the cells all run at the [fixed] values.
         let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
         let ir = format!("{}/../../../ocaml/golden/sir_basic.ir.json", manifest);
-        let (model, _) = util::load_model(&ir).unwrap();
+        let (model, _) = util::load_ir(&ir).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let fit = dir.path().join("empty.toml");
         std::fs::write(&fit, format!(
@@ -6625,7 +6595,7 @@ cooling = 0.7
     fn prior_draws_with_fit_toml_return_fixed_outside_the_rows() {
         let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
         let ir_path = format!("{}/../../../ocaml/golden/sir_priors.ir.json", manifest);
-        let (model, _) = util::load_model(&ir_path).unwrap();
+        let (model, _) = util::load_ir(&ir_path).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let estimate = "\
 beta  = { bounds = [0.01, 2.0] }
@@ -6655,7 +6625,7 @@ gamma = { bounds = [0.05, 1.0] }
     fn prior_draws_with_fit_toml_falls_back_to_ir_priors_when_missing() {
         let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
         let ir_path = format!("{}/../../../ocaml/golden/sir_priors.ir.json", manifest);
-        let (model, _) = util::load_model(&ir_path).unwrap();
+        let (model, _) = util::load_ir(&ir_path).unwrap();
 
         let dir = tempfile::tempdir().unwrap();
         // Every param in [estimate] but no `prior = { ... }` block.
@@ -6698,7 +6668,7 @@ I0    = { bounds = [1, 1000] }
     fn simulate_fit_malformed_config_error_carries_hint() {
         let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
         let ir_path = format!("{}/../../../ocaml/golden/sir_priors.ir.json", manifest);
-        let (model, _) = util::load_model(&ir_path).unwrap();
+        let (model, _) = util::load_ir(&ir_path).unwrap();
 
         let dir = tempfile::tempdir().unwrap();
         // A plausible "bare params" file a user might pass by mistake:
@@ -6724,7 +6694,7 @@ I0    = { bounds = [1, 1000] }
     fn simulate_fit_valid_config_no_hint() {
         let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
         let ir_path = format!("{}/../../../ocaml/golden/sir_priors.ir.json", manifest);
-        let (model, _) = util::load_model(&ir_path).unwrap();
+        let (model, _) = util::load_ir(&ir_path).unwrap();
 
         let dir = tempfile::tempdir().unwrap();
         let estimate = "\
@@ -6779,7 +6749,7 @@ I0    = { bounds = [1, 1000] }
           }
         }"#;
         let (_ir_dir, ir_path) = write_ir_fixture(ir_json);
-        let (model, _) = util::load_model(&ir_path).unwrap();
+        let (model, _) = util::load_ir(&ir_path).unwrap();
 
         let dir = tempfile::tempdir().unwrap();
         // Both beta and gamma declared, neither has a prior.
@@ -6831,7 +6801,7 @@ gamma = { bounds = [0.05, 1.0] }
           }
         }"#;
         let (_ir_dir, ir_path) = write_ir_fixture(ir_json);
-        let (model, _) = util::load_model(&ir_path).unwrap();
+        let (model, _) = util::load_ir(&ir_path).unwrap();
 
         let dir = tempfile::tempdir().unwrap();
         // Fit-toml says log_normal(mu=5, sigma=0.01) → exp(5) ≈ 148.41.
