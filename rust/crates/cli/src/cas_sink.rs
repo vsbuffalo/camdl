@@ -256,6 +256,8 @@ impl CasSink {
     ) -> Result<crate::resolve::ResolvedTrajectory, String> {
         let crate::sim_config::ResolvedCell {
             run, tables, seed, init_state, backend, dt, binomial, eval, required_output_times,
+            // Not identity: a function of the origin (in `init_state`) and the model.
+            restart: _,
         } = cell;
         let engine = &self.engine;
         if *backend != engine.backend || dt.to_bits() != engine.dt.to_bits() || *eval != engine.eval {
@@ -809,7 +811,7 @@ impl crate::engine::RunSink for CasSink {
             // gh#641: a restarted cell's obs axis begins at the forecast
             // origin, exactly as the `-o`/`--obs` mirror's does. `None` for
             // every ordinary cell.
-            let restart = spec.sim_run.init_state.as_ref().map(|i| i.restart());
+            let restart = cell.cell.restart;
             if let Err(e) = write_obs_into_cas(
                 &dest, cell.model(), &cell.traj, spec.process_seed, restart,
                 self.emit_every.as_ref(), spec.sim_run.eval,

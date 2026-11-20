@@ -43,11 +43,12 @@ fn s(p: &Path) -> String {
 
 /// An SIR whose one stream is described by `stream`, run from day 0 to day 49.
 fn model(stream: &str) -> String {
-    model_from(stream, 0, "")
+    model_from(stream, "0 'days", "")
 }
 
-/// [`model`], starting at day `from` and with `extra` top-level blocks.
-fn model_from(stream: &str, from: u32, extra: &str) -> String {
+/// [`model`], starting at `from` (a time, or an anchor such as `first_obs`)
+/// and with `extra` top-level blocks.
+fn model_from(stream: &str, from: &str, extra: &str) -> String {
     format!(
         r#"
 time_unit = 'days
@@ -72,7 +73,7 @@ observations {{
 
 {extra}
 
-simulate {{ from = {from} 'days  to = 49 'days }}
+simulate {{ from = {from}  to = 49 'days }}
 "#
     )
 }
@@ -139,6 +140,10 @@ const WINDOW_COLUMNS_AT_LIST: &str = r#"
     emit_schedule = at [7 'days, 14 'days, 21 'days, 28 'days, 35 'days, 42 'days, 49 'days]
     cases         ~ poisson(rate = projected + 0.1)
   }"#;
+
+/// A quantity reduced over the weekly stream, so the stream's rows are drawn
+/// with no observation flag given.
+const QUANTITY: &str = "quantities { last_seen = final(observations.weekly) }";
 
 /// A one-particle saved state at day `t`.
 fn write_state(path: &Path, t: f64) {
@@ -344,8 +349,7 @@ fn a_period_widened_by_emit_every_is_refused() {
 /// period beginning before the restart.
 #[test]
 fn an_obs_sourced_quantity_is_refused_where_its_rows_are_planned() {
-    let src = model_from(
-        WEEKLY_CLOSING_AT, 0, "quantities { last_seen = final(observations.weekly) }");
+    let src = model_from(WEEKLY_CLOSING_AT, "0 'days", QUANTITY);
     let tmp_q = tempfile::tempdir().unwrap();
     let qdir = tmp_q.path().join("q");
     let r = restart_model(&src, 25.0, &["--quantities-out", &s(&qdir)], false);
@@ -367,8 +371,19 @@ fn an_obs_sourced_quantity_is_refused_where_its_rows_are_planned() {
 /// run; a restart at day 20 is inside days 17 to 23.
 #[test]
 fn periods_are_counted_from_the_models_own_start() {
-    let src = model_from(WEEKLY_CLOSING_AT, 10, "");
+    let src = model_from(WEEKLY_CLOSING_AT, "10 'days", QUANTITY);
     assert_refused_at(&restart_model(&src, 20.0, &[], true), "[17, 24)", "t = 20");
+
+    // The same restart with no observation flag, so nothing is checked before
+    // the run and the refusal comes from the emitter that plans the quantity's
+    // rows. That emitter holds a model whose start is the restart time, 20.
+    let tmp_q = tempfile::tempdir().unwrap();
+    let qdir = s(&tmp_q.path().join("q"));
+    let r = restart_model(&src, 20.0, &["--quantities-out", &qdir], false);
+    let err = String::from_utf8_lossy(&r.out.stderr);
+    assert!(!r.out.status.success(), "day 20 is inside days 17 to 23: {err}");
+    assert!(err.contains("[17, 24)"), "the refusal names the period: {err}");
+
     for boundary in [10.0, 17.0, 24.0] {
         let r = restart_model(&src, boundary, &[], true);
         assert!(
@@ -377,4 +392,61 @@ fn periods_are_counted_from_the_models_own_start() {
             String::from_utf8_lossy(&r.out.stderr)
         );
     }
+}
+
+/// A model whose start is an anchor, `simulate { from = first_obs }`, has no
+/// numeric start until the bound data is read. With weekly rows labelled 10 to
+/// 45 the first period is days 3 to 9, so the model starts at day 3 and its
+/// weeks are days 3-9, 10-16, 17-23, …; a restart at day 20 is inside days 17
+/// to 23. Read off an unresolved model the start is not a number, every
+/// comparison against it is false, and the restart is not refused.
+#[test]
+fn an_anchored_model_start_is_resolved_before_periods_are_placed() {
+    let bin = binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let model_path = dir.join("sir.camdl");
+    std::fs::write(&model_path, model_from(WEEKLY_CLOSING_AT, "first_obs", QUANTITY)).unwrap();
+    let data = dir.join("weekly.tsv");
+    std::fs::write(&data, "time\tcases\n10\t12\n17\t30\n24\t61\n31\t40\n38\t22\n45\t9\n").unwrap();
+    // Only `[data.observations]` is read, to resolve the anchor.
+    let fit = dir.join("fit.toml");
+    std::fs::write(
+        &fit,
+        format!(
+            "[model]\ncamdl = \"{}\"\n\n[data.observations]\nweekly = \"{}\"\n\n\
+             [estimate]\nbeta = {{ bounds = [0.05, 1.0], start = 0.4 }}\n\n[fixed]\ngamma = 0.15\n\n\
+             [method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\nchains = 1\n\
+             particles = 50\niterations = 2\ncooling = 0.7\n",
+            s(&model_path), s(&data)
+        ),
+    )
+    .unwrap();
+
+    let restart_at = |origin: f64, name: &str| {
+        let state = dir.join(format!("final_{name}.tsv"));
+        write_state(&state, origin);
+        run(&bin, &[
+            "simulate".into(), s(&model_path),
+            "--param".into(), "beta=0.4".into(),
+            "--param".into(), "gamma=0.15".into(),
+            "--fit".into(), s(&fit),
+            "--init-state".into(), s(&state),
+            "--seed".into(), "3".into(),
+            "--quantities-out".into(), s(&dir.join(format!("q_{name}"))),
+            "--output-dir".into(), s(&dir.join(format!("cas_{name}"))),
+        ])
+    };
+
+    let out = restart_at(20.0, "inside");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "day 20 is inside days 17 to 23 of a model starting at day 3: {err}");
+    assert!(err.contains("'weekly'") && err.contains("[17, 24)"), "names the stream and period: {err}");
+
+    let out = restart_at(24.0, "boundary");
+    assert!(
+        out.status.success(),
+        "day 24 is a week boundary of that model: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }

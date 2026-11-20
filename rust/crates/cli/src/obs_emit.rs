@@ -247,7 +247,10 @@ pub(crate) fn plan_emission(
 /// origin: the model a restarted cell runs with has its `simulation.t_start`
 /// rewritten to the origin (`util::resolve_loaded_run`, gh#641), so an emitter
 /// that read the start off that model would see the restart time and conclude
-/// that no period began before it.
+/// that no period began before it. It is read from the resolved model, after
+/// a `from = first_obs` anchor has been substituted
+/// (`sim_config::ResolvedCell::resolve`): a raw model load carries no number
+/// there until then.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Restart {
     /// The time the restored state sits at; where the restarted run begins.
@@ -300,6 +303,17 @@ pub(crate) fn refuse_period_under_way(
     t_end: f64,
 ) -> Result<(), String> {
     let Restart { origin, model_start } = restart;
+    // Every comparison below is false against a start that is not a number,
+    // which would pass every restart. A start that was never resolved is a
+    // defect in the caller; refuse here so it cannot become a missing row.
+    if !model_start.is_finite() || !origin.is_finite() {
+        return Err(format!(
+            "internal error: cannot place observation stream '{}''s reporting periods for an \
+             --init-state restart: the model's start is {model_start} and the restart time is \
+             {origin}. Please report this; no observations were written.",
+            obs.name
+        ));
+    }
     let eps = crate::OBS_SNAP_EPS;
     let all = crate::obs_schedule_times(schedule, None, t_end);
     let written = |start: f64, stop: f64| start >= model_start - eps && stop <= t_end + eps;
