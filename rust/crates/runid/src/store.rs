@@ -1850,37 +1850,20 @@ fn write_file_synced(path: &Path, bytes: &[u8]) -> Result<(), CasError> {
 }
 
 /// Write `bytes` to `path` so a reader sees the old file or the whole new one,
-/// never a partial one: the bytes go to `<path>.tmp` in the same directory
-/// ([`write_file_synced`]), which is renamed over `path`, and the directory is
-/// synced so the rename is durable. A failure at any step leaves `path` as it
-/// was, removes the temporary file, and names the step and the file in the
-/// error. The same ordering as [`write_record_atomic`], for a file that is
-/// not `run.json`.
+/// never a partial one: the bytes go to a temporary file in the same
+/// directory ([`write_file_synced`]), which is renamed over `path`, and the
+/// directory is synced so the rename is durable. A failure at any step leaves
+/// `path` as it was, removes the temporary file, and names the step and the
+/// file in the error. The same ordering as [`write_record_atomic`], for a
+/// file that is not `run.json`.
+///
+/// The temporary file is this writer's own, `.<name>.<pid>.<n>.<nanos>.tmp`
+/// (`n` counts this process's writes, so two threads never share one either),
+/// because several processes may rewrite one file at once (a fit folder's
+/// `fit.meta.json` and configs): a shared fixed name would let one writer's
+/// rename publish another's half-written bytes, or take away the temporary
+/// another is about to rename.
 pub fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), CasError> {
-    let mut tmp_name = path.as_os_str().to_owned();
-    tmp_name.push(".tmp");
-    let tmp = PathBuf::from(tmp_name);
-    let committed = write_file_synced(&tmp, bytes)
-        .and_then(|()| fs::rename(&tmp, path).at("commit", path));
-    if let Err(e) = committed {
-        // The cause is already in hand; a leftover temporary is only debris.
-        let _ = fs::remove_file(&tmp);
-        return Err(e);
-    }
-    match path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        Some(dir) => fsync_dir(dir),
-        None => fsync_dir(Path::new(".")),
-    }
-}
-
-/// [`write_file_atomic`] through a temporary file of this writer's own,
-/// `.<name>.<pid>.<n>.<nanos>.tmp` in the same directory (`n` counts this
-/// process's writes, so two threads never share one either), for a file that
-/// several processes may rewrite at once (a fit folder's `fit.meta.json` and
-/// configs): a shared fixed name would let one writer's rename publish
-/// another's half-written bytes, or take away the temporary another is about
-/// to rename.
-pub fn write_file_atomic_own_tmp(path: &Path, bytes: &[u8]) -> Result<(), CasError> {
     static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -1892,6 +1875,7 @@ pub fn write_file_atomic_own_tmp(path: &Path, bytes: &[u8]) -> Result<(), CasErr
     let committed = write_file_synced(&tmp, bytes)
         .and_then(|()| fs::rename(&tmp, path).at("commit", path));
     if let Err(e) = committed {
+        // The cause is already in hand; a leftover temporary is only debris.
         let _ = fs::remove_file(&tmp);
         return Err(e);
     }

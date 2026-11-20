@@ -1028,9 +1028,9 @@ fn write_fit_sidecar_archiving(
         // beside a record that names it, and through a temporary of this
         // writer's own: several `fit run`s of one file (one per seed) write
         // one folder's configs at once.
-        runid::write_file_atomic_own_tmp(&fit_segment.join(ARCHIVED_CONFIG), text.as_bytes())
+        runid::write_file_atomic(&fit_segment.join(ARCHIVED_CONFIG), text.as_bytes())
             .map_err(std::io::Error::other)?;
-        runid::write_file_atomic_own_tmp(&fit_segment.join(RESOLVED_CONFIG), resolved.as_bytes())
+        runid::write_file_atomic(&fit_segment.join(RESOLVED_CONFIG), resolved.as_bytes())
             .map_err(std::io::Error::other)?;
         sidecar.source_config = Some(relative_path(fit_segment, path)?);
         // gh#353: archive the model `.camdl` source too, symmetric with
@@ -1079,7 +1079,7 @@ pub fn store_fit_sidecar(fit_segment: &std::path::Path, sidecar: &FitSidecar) ->
     // reader never sees a torn record, and two writers of one folder (a fit
     // recording its training partition, `camdl dev migrate` raising the
     // layout) never share a temporary.
-    runid::write_file_atomic_own_tmp(&fit_segment.join("fit.meta.json"), &bytes).map_err(std::io::Error::other)
+    runid::write_file_atomic(&fit_segment.join("fit.meta.json"), &bytes).map_err(std::io::Error::other)
 }
 
 /// `to` as a path relative to the directory `from`, computed between the two

@@ -310,7 +310,11 @@ mod tests {
         std::fs::create_dir(d.join(RESUME_STATE_FILE)).unwrap();
         let e = write_resume_state(&d, &vec![1.0_f64]).unwrap_err();
         assert!(e.contains(RESUME_STATE_FILE), "names the file: {e}");
-        assert!(!d.join("resume_state.bin.tmp").exists(), "no temporary left");
+        let left: Vec<_> = std::fs::read_dir(&d).unwrap().flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(left.is_empty(), "no temporary left: {left:?}");
     }
 
     #[test]
