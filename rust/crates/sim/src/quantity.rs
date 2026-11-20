@@ -334,6 +334,26 @@ impl QuantityEvaluator {
         v
     }
 
+    /// [`obs_streams`](Self::obs_streams) of the evaluator `quantities` would
+    /// build, read off the IR: [`QuantityEvaluator::new`] maps each
+    /// `observations.<stream>` source to one program, so the set is the same.
+    /// For a caller that needs the streams before a model with resolved
+    /// parameters exists to compile (the `simulate --init-state` pre-flight).
+    pub fn obs_streams_of(quantities: &[Quantity]) -> Vec<&str> {
+        let mut v: Vec<&str> = quantities
+            .iter()
+            .filter_map(|q| match &q.body {
+                QuantityBody::Reduced { source: QuantitySource::Observation { stream }, .. } => {
+                    Some(stream.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
     /// Fold every quantity over ONE draw: `params` is the draw's resolved param
     /// vector, `traj` the finished FREE-FORWARD trajectory, `obs` the
     /// already-drawn `y_sim` series (v1.1; `None` for a state-only model).
@@ -1357,5 +1377,45 @@ mod tests {
             }),
         };
         assert_eq!(eval_scalar(&abs, &results, &params), Value(1.0));
+    }
+
+    /// `obs_streams_of` reads the IR and gives the set the evaluator's
+    /// `obs_streams` gives, sorted and deduplicated, state sources and
+    /// derived quantities excluded.
+    #[test]
+    fn obs_streams_of_the_ir_equals_the_evaluators() {
+        let obs = |name: &str, stream: &str| Quantity {
+            name: name.into(),
+            stratum: vec![],
+            dimension: None,
+            body: QuantityBody::Reduced {
+                source: QuantitySource::Observation { stream: stream.into() },
+                reduce: None,
+            },
+        };
+        let qs = vec![
+            obs("b1", "weekly"),
+            obs("a1", "daily"),
+            obs("b2", "weekly"),
+            Quantity {
+                name: "s".into(),
+                stratum: vec![],
+                dimension: None,
+                body: QuantityBody::Reduced {
+                    source: QuantitySource::State(ir::expr::Expr::pop("S")),
+                    reduce: None,
+                },
+            },
+            Quantity {
+                name: "d".into(),
+                stratum: vec![],
+                dimension: None,
+                body: QuantityBody::Derived(ScalarExpr::Const(1.0)),
+            },
+        ];
+        let compiled = one_compartment_model();
+        let eval = QuantityEvaluator::new(&qs, &compiled).unwrap();
+        assert_eq!(QuantityEvaluator::obs_streams_of(&qs), vec!["daily", "weekly"]);
+        assert_eq!(QuantityEvaluator::obs_streams_of(&qs), eval.obs_streams());
     }
 }
