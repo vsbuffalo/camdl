@@ -775,6 +775,8 @@ fn schedule_periods(obs: &ObservationModel, reach: f64) -> Option<Vec<Measures>>
             let of = |label: f64| covers.period_of(label).expect("a uniform form gives every label a period");
             let labels: Vec<f64> = match obs.emit_schedule.as_ref()? {
                 ObservationSchedule::Regular(r) if r.step > 0.0 => {
+                    // A NaN start compares false with the reach and would not end.
+                    debug_assert!(r.start.is_finite(), "stream '{}': emit schedule start {}", obs.name, r.start);
                     let mut out = Vec::new();
                     let mut k = 0_u64;
                     loop {
@@ -851,6 +853,8 @@ fn validate_held_out_periods(
 fn emit_times(obs: &ObservationModel, reach: f64) -> Option<Vec<f64>> {
     match obs.emit_schedule.as_ref()? {
         ObservationSchedule::Regular(r) if r.step > 0.0 => {
+            // A NaN start compares false with the reach and would not end.
+            debug_assert!(r.start.is_finite(), "stream '{}': emit schedule start {}", obs.name, r.start);
             let mut out = Vec::new();
             let mut k = 0_u64;
             loop {
@@ -1328,6 +1332,20 @@ mod tests {
             stream: "weekly".into(), data: (0.0, 7.0), data_source: "training row 0".into(),
             schedule: (-6.0, 1.0),
         }]);
+    }
+
+    /// A NaN schedule start is caught in debug builds rather than looping,
+    /// for a uniform stream and a window-column one.
+    #[test]
+    fn a_nan_schedule_start_is_asserted_not_looped_on() {
+        let nan = Some(ObservationSchedule::Regular(RegularSchedule { start: f64::NAN, step: 7.0, end: 63.0 }));
+        for covers in [Covers::Until { offset: 0.0, span: 7.0 }, Covers::WindowColumns] {
+            let mut o = weekly();
+            o.covers = Some(covers);
+            o.emit_schedule = nan.clone();
+            let r = std::panic::catch_unwind(|| schedule_periods(&o, 21.0));
+            assert!(r.is_err(), "a NaN start must be asserted on");
+        }
     }
 
     /// D100 (Rule 2): the save-state check is D82 over the bound rows, and

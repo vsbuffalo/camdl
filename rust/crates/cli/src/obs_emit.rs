@@ -315,6 +315,11 @@ pub(crate) fn period_under_way(
 ) -> Option<(f64, f64)> {
     let eps = crate::OBS_SNAP_EPS;
     let regular = matches!(*schedule.schedule, ObservationSchedule::Regular(_));
+    // The loops below end a regular schedule by comparing its labels with
+    // `t`; a NaN start compares false with everything and would not end.
+    if let ObservationSchedule::Regular(r) = &*schedule.schedule {
+        debug_assert!(r.start.is_finite(), "stream '{}': emit schedule start {}", obs.name, r.start);
+    }
     // A regular schedule that does not advance has one label.
     let n = match &*schedule.schedule {
         ObservationSchedule::Regular(r) if r.step.is_nan() || r.step <= 0.0 => 1,
@@ -1641,6 +1646,14 @@ mod tests {
         let msg = restart_inside_period_refusal("weekly", (14.0, 28.0), 21.0, true);
         assert!(msg.contains("every time falls inside one of them"), "{msg}");
         assert!(!msg.contains("writes it cleanly"), "{msg}");
+    }
+
+    /// A NaN schedule start is caught in debug builds rather than looping.
+    #[test]
+    #[should_panic(expected = "emit schedule start NaN")]
+    fn a_nan_schedule_start_is_asserted_not_looped_on() {
+        let s = stream(incidence(), Some(Covers::Until { offset: 0.0, span: 7.0 }), time_cols());
+        period_under_way(&s, &declared(every(f64::NAN, 7.0)), 0.0, 25.0);
     }
 
     /// A state read has no period.
