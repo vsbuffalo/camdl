@@ -238,7 +238,16 @@ pub enum PrequentialWarning {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lagged: Option<bool>,
     },
+    /// The trace predates [`SCHEMA_RECORDING_HELD_FORCINGS`] and nothing
+    /// beside it records the run's held forcings, so whether a forcing was
+    /// held while it was scored is unknown. Added by a reader, never written
+    /// by a producer.
+    HeldForcingsUnrecorded,
 }
+
+/// The first trace schema that records a forcing held while the trace was
+/// scored ([`PrequentialWarning::ForcingHeld`]).
+pub const SCHEMA_RECORDING_HELD_FORCINGS: u32 = 7;
 
 /// What bounds a held forcing's range ([`PrequentialWarning::ForcingHeld`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -643,7 +652,9 @@ pub fn project_onto_stream(
                 step_count, threshold: *threshold,
             })
         }
-        PrequentialWarning::SamplesNotSaved | PrequentialWarning::ForcingHeld { .. } => Some(w.clone()),
+        PrequentialWarning::SamplesNotSaved
+        | PrequentialWarning::ForcingHeld { .. }
+        | PrequentialWarning::HeldForcingsUnrecorded => Some(w.clone()),
     }).collect();
     let derivation = match &trace.derivation {
         None => None,

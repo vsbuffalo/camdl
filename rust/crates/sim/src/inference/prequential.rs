@@ -137,10 +137,13 @@ pub fn build_trace(
         // v3 (gh#585): score_from + pit_randomization_seed + the
         // Conditioning struct variants. v4 (gh#833): per-stream `coverage`.
         // v5: the `derivation` block (filled by the caller). v6 (gh#312): the
-        // `basis` axis. All additions serde-defaulted, so older traces still
+        // `basis` axis. v7 (gh#1235): a forcing held while the trace was scored
+        // is a `ForcingHeld` warning (added by the caller, which holds the
+        // policy). All additions serde-defaulted, so older traces still
         // read; they read as InSample/PlugIn/Unrecorded/no derivation/Filtered,
-        // which is factually what they are.
-        schema_version: 6,
+        // which is factually what they are, and a reader of one below 7 cannot
+        // tell from it whether a forcing was held.
+        schema_version: 7,
         t0,
         // This builder scores a single filter pass at one θ over the full data:
         // plug-in + in-sample. The posterior / LFO producers (#295) stamp their
@@ -256,8 +259,8 @@ mod tests {
         let trace = build_trace(&recorded, &per_stream_observed, &coverage,
                                 &[100.0, 100.0], 0, 7, true, None);
 
-        assert_eq!(trace.schema_version, 6,
-            "build_trace writes the current schema (coverage arrived in 4, basis in 6)");
+        assert_eq!(trace.schema_version, 7,
+            "build_trace writes the current schema (coverage arrived in 4, basis in 6, held forcings in 7)");
         assert_eq!(trace.basis, PredictiveBasis::Filtered, "a filter's record is stamped filtered");
         let s0 = &trace.steps[0].per_stream;
         assert_eq!((s0[0].stream.as_str(), s0[0].coverage), ("inc", inc0));
@@ -515,7 +518,7 @@ mod tests {
 
         // gh#269: one stream, so the single per-stream log score equals the
         // joint (same per-particle log-liks).
-        assert_eq!(trace.schema_version, 6);
+        assert_eq!(trace.schema_version, 7);
         assert_eq!(trace.steps[0].per_stream.len(), 1);
         assert_eq!(s0.stream, "s0");
         assert!(approx_eq(s0.log_score, trace.steps[0].log_score, 1e-12));
